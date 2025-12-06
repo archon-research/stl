@@ -75,6 +75,12 @@ async function handleSyncPrices(
   const startBlock = lastPriceSyncedBlock ? lastPriceSyncedBlock + 1 : oracleStart;
 
   if (startBlock <= currentBlock) {
+    // Batch prices and persist less frequently for better performance
+    const BATCH_COMMIT_SIZE = 20; // Commit every N snapshots
+    let accumulatedPrices: import("./services/prices").TokenPrice[] = [];
+    let lastBlockInBatch = startBlock;
+    let snapshotCount = 0;
+
     await syncHistoricalPrices(
       provider,
       chainId,
@@ -82,10 +88,25 @@ async function handleSyncPrices(
       currentBlock,
       50,
       (prices, blockNumber) => {
-        savePricesToDatabase(db, chainId, prices);
-        updateLastPriceSyncedBlock(db, chainId, blockNumber);
+        accumulatedPrices.push(...prices);
+        lastBlockInBatch = blockNumber;
+        snapshotCount++;
+
+        // Commit batch periodically or if we've accumulated many prices
+        if (snapshotCount >= BATCH_COMMIT_SIZE) {
+          savePricesToDatabase(db, chainId, accumulatedPrices);
+          updateLastPriceSyncedBlock(db, chainId, lastBlockInBatch);
+          accumulatedPrices = [];
+          snapshotCount = 0;
+        }
       }
     );
+
+    // Flush any remaining prices
+    if (accumulatedPrices.length > 0) {
+      savePricesToDatabase(db, chainId, accumulatedPrices);
+      updateLastPriceSyncedBlock(db, chainId, lastBlockInBatch);
+    }
   } else {
     console.log("Prices already synced to current block.");
   }
