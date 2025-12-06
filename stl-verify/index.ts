@@ -438,15 +438,31 @@ async function syncHistoricalPrices(
     const oracleAddress = addressBook.sparklend.oracle;
     const oracle = new ethers.Contract(oracleAddress, aaveOracleAbi, provider);
     
+    // Multicall3 contract (deployed on all major chains at same address)
+    const multicallAddress = "0xcA11bde05977b3631167028862bE2a173976CA11";
+    const multicallAbi = [
+        "function aggregate3(tuple(address target, bool allowFailure, bytes callData)[] calls) view returns (tuple(bool success, bytes returnData)[])"
+    ];
+    const multicall = new ethers.Contract(multicallAddress, multicallAbi, provider);
+    
     // Get BASE_CURRENCY_UNIT once (it doesn't change)
     const baseCurrencyUnit: bigint = await oracle.BASE_CURRENCY_UNIT();
     const decimals = Math.log10(Number(baseCurrencyUnit));
+    
+    // Prepare calldata for each token's getAssetPrice call
+    const oracleInterface = new ethers.Interface(aaveOracleAbi);
+    const calls = sparklendTokens.map(token => ({
+        target: oracleAddress,
+        allowFailure: true,  // Allow individual calls to fail (token not supported yet)
+        callData: oracleInterface.encodeFunctionData("getAssetPrice", [token.address])
+    }));
     
     const totalSnapshots = Math.ceil((endBlock - startBlock + 1) / blockInterval);
     
     console.log(`\nSyncing historical prices from block ${startBlock} to ${endBlock}`);
     console.log(`Interval: every ${blockInterval} blocks (~${Math.round(blockInterval * 12 / 60)} minutes)`);
     console.log(`Total snapshots to fetch: ${totalSnapshots}`);
+    console.log(`Using Multicall3 for faster batch queries`);
     
     let snapshotCount = 0;
     let blockErrorCount = 0;
@@ -463,14 +479,23 @@ async function syncHistoricalPrices(
                 continue;
             }
             
+            // Batch all price queries via multicall
+            const results: { success: boolean; returnData: string }[] = await multicall.aggregate3(calls, { blockTag: blockNumber });
+            
             const tokenPrices: TokenPrice[] = [];
             
-            // Query each token individually to handle tokens that weren't supported yet
-            for (const token of sparklendTokens) {
+            for (let i = 0; i < sparklendTokens.length; i++) {
+                const token = sparklendTokens[i];
+                const result = results[i];
+                
+                // Skip failed calls (token not supported at this block)
+                if (!result.success || result.returnData === "0x") continue;
+                
                 try {
-                    const priceRaw: bigint = await oracle.getAssetPrice(token.address, { blockTag: blockNumber });
+                    const decoded = oracleInterface.decodeFunctionResult("getAssetPrice", result.returnData);
+                    const priceRaw = decoded[0] as bigint;
                     
-                    // Skip tokens with 0 price (not yet supported at this block)
+                    // Skip tokens with 0 price
                     if (priceRaw === 0n) continue;
                     
                     const priceUsd = ethers.formatUnits(priceRaw, decimals);
@@ -483,7 +508,7 @@ async function syncHistoricalPrices(
                         priceUsd
                     });
                 } catch {
-                    // Token not supported in oracle at this block, skip silently
+                    // Decode error, skip this token
                 }
             }
             
