@@ -14,21 +14,30 @@ export function savePricesToDatabase(
   chainId: ChainId,
   prices: TokenPrice[]
 ): void {
-  const insertPrice = db.query(`
-    INSERT OR IGNORE INTO token_prices 
-    (chain_id, block_number, timestamp, token_address, token_symbol, price_usd)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
+  if (prices.length === 0) return;
+
+  // Batch insert for better performance - SQLite supports up to 999 variables
+  // Each row has 6 values, so we can insert up to 166 rows per batch
+  const BATCH_SIZE = 100;
 
   db.transaction(() => {
-    for (const price of prices) {
-      insertPrice.run(
+    for (let i = 0; i < prices.length; i += BATCH_SIZE) {
+      const batch = prices.slice(i, i + BATCH_SIZE);
+      const placeholders = batch.map(() => "(?, ?, ?, ?, ?, ?)").join(", ");
+      const values = batch.flatMap((price) => [
         chainId,
         price.blockNumber,
         price.timestamp,
         price.tokenAddress,
         price.tokenSymbol,
-        price.priceUsd
+        price.priceUsd,
+      ]);
+
+      db.run(
+        `INSERT OR IGNORE INTO token_prices 
+         (chain_id, block_number, timestamp, token_address, token_symbol, price_usd)
+         VALUES ${placeholders}`,
+        values
       );
     }
   })();

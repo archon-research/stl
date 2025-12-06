@@ -80,7 +80,7 @@ async function handleSyncPrices(
       chainId,
       startBlock,
       currentBlock,
-      100,
+      50,
       (prices, blockNumber) => {
         savePricesToDatabase(db, chainId, prices);
         updateLastPriceSyncedBlock(db, chainId, blockNumber);
