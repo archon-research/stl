@@ -1,23 +1,23 @@
 {
   "name": "stl-verify",
   "version": "1.0.0",
-  "description": "Ethereum chain verification scripts",
-  "main": "index.js",
+  "description": "Multi-chain blockchain data fetching and risk calculation service",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "ts-node index.ts"
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch run src/index.ts",
+    "test": "bun test",
+    "build": "mkdir -p dist && cd /tmp && bun build $OLDPWD/src/index.ts --compile --outfile stl-verify && cp stl-verify $OLDPWD/dist/",
+    "build:linux": "mkdir -p dist && cd /tmp && bun build $OLDPWD/src/index.ts --compile --target=bun-linux-x64 --outfile stl-verify-linux && cp stl-verify-linux $OLDPWD/dist/",
+    "build:linux-arm": "mkdir -p dist && cd /tmp && bun build $OLDPWD/src/index.ts --compile --target=bun-linux-arm64 --outfile stl-verify-linux-arm && cp stl-verify-linux-arm $OLDPWD/dist/"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^20.0.0",
-    "ts-node": "^10.9.1",
-    "typescript": "^5.0.0"
+    "@types/bun": "latest"
   },
   "dependencies": {
-    "better-sqlite3": "^12.5.0",
     "ethers": "^6.0.0"
   }
 }
