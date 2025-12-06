@@ -143,7 +143,7 @@ export async function syncHistoricalPrices(
         console.warn(`Could not fetch block ${blockNumber}, skipping...`);
         errors++;
         continue;
-      }˝
+      }
 
       // Batch all price queries via multicall
       const results: { success: boolean; returnData: string }[] = await multicall.aggregate3(calls, { blockTag: blockNumber });
