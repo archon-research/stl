@@ -16,9 +16,22 @@ import { createProvider, testRpcConnection } from "./providers/rpc";
 import { querySparkLendEvents, syncHistoricalEvents } from "./services/events";
 import { fetchSparkLendTokenPrices, syncHistoricalPrices } from "./services/prices";
 
+// Global error handlers to prevent silent crashes
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+  process.exit(1);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught Exception:", error);
+  process.exit(1);
+});
+
 // Parse command line arguments
 const args = process.argv.slice(2);
 const chainArg = args.find(arg => arg.startsWith("--chain="))?.split("=")[1] as ChainId | undefined;
+const concurrencyArg = args.find(arg => arg.startsWith("--concurrency="))?.split("=")[1];
+const concurrency = concurrencyArg ? Math.max(1, Math.min(20, parseInt(concurrencyArg, 10) || 5)) : 5;
 const syncEvents = args.includes("--sync-events");
 const syncPrices = args.includes("--sync-prices");
 const showPrices = args.includes("--show-prices");
@@ -67,7 +80,8 @@ async function handleSyncPrices(
   db: Database,
   provider: JsonRpcProvider,
   chainId: ChainId,
-  currentBlock: number
+  currentBlock: number,
+  concurrency: number = 5
 ): Promise<void> {
   const blockMarkers = getBlockMarkers(chainId);
   const lastPriceSyncedBlock = getLastPriceSyncedBlock(db, chainId);
@@ -99,7 +113,8 @@ async function handleSyncPrices(
           accumulatedPrices = [];
           snapshotCount = 0;
         }
-      }
+      },
+      concurrency
     );
 
     // Flush any remaining prices
@@ -162,13 +177,15 @@ function showUsageHelp(): void {
   console.log("\n=== Usage ===");
   console.log("  bun run src/index.ts [options]");
   console.log("\nOptions:");
-  console.log("  --chain=<chain>    Target chain (ethereum, base, arbitrum, optimism)");
-  console.log("  --sync-events      Sync historical SparkLend events");
-  console.log("  --sync-prices      Sync historical token prices");
-  console.log("  --show-prices      Display current token prices");
-  console.log("  --test             Test RPC connection only");
+  console.log("  --chain=<chain>        Target chain (ethereum, base, arbitrum, optimism)");
+  console.log("  --concurrency=<n>      Number of concurrent RPC requests (1-20, default: 5)");
+  console.log("  --sync-events          Sync historical SparkLend events");
+  console.log("  --sync-prices          Sync historical token prices");
+  console.log("  --show-prices          Display current token prices");
+  console.log("  --test                 Test RPC connection only");
   console.log("\nExamples:");
   console.log("  bun run src/index.ts --chain=ethereum --sync-events");
+  console.log("  bun run src/index.ts --chain=ethereum --sync-prices --concurrency=3");
   console.log("  bun run src/index.ts --chain=base --show-prices");
 }
 
@@ -217,7 +234,7 @@ async function main() {
   }
 
   if (syncPrices) {
-    await handleSyncPrices(db, provider, chainId, currentBlock);
+    await handleSyncPrices(db, provider, chainId, currentBlock, concurrency);
   }
 
   if (showPrices || (!syncEvents && !syncPrices)) {
