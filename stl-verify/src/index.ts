@@ -2,7 +2,6 @@
  * STL-Verify: Multi-chain blockchain data fetching service
  * 
  * This service fetches and stores blockchain data from multiple chains
- * including Ethereum, Base, Arbitrum, and Optimism.
  */
 
 import type { Database } from "bun:sqlite";
@@ -13,8 +12,8 @@ import { initDatabase, getLastSyncedBlock, updateLastSyncedBlock, getLastPriceSy
 import { saveEventsToDatabase } from "./db/events";
 import { savePricesToDatabase, getLatestPrice, getAllLatestPrices } from "./db/prices";
 import { createProvider, testRpcConnection } from "./providers/rpc";
-import { querySparkLendEvents, syncHistoricalEvents } from "./services/events";
-import { fetchSparkLendTokenPrices, syncHistoricalPrices } from "./services/prices";
+import { syncHistoricalEvents } from "./services/events";
+import { syncHistoricalPrices } from "./services/prices";
 
 // Global error handlers to prevent silent crashes
 process.on("unhandledRejection", (reason, promise) => {
@@ -32,15 +31,14 @@ const args = process.argv.slice(2);
 const chainArg = args.find(arg => arg.startsWith("--chain="))?.split("=")[1] as ChainId | undefined;
 const concurrencyArg = args.find(arg => arg.startsWith("--concurrency="))?.split("=")[1];
 const concurrency = concurrencyArg ? Math.max(1, Math.min(20, parseInt(concurrencyArg, 10) || 5)) : 5;
-const syncEvents = args.includes("--sync-events");
-const syncPrices = args.includes("--sync-prices");
-const showPrices = args.includes("--show-prices");
-const testConnection = args.includes("--test");
+const syncEventsFlag = args.includes("--sync-events");
+const syncPricesFlag = args.includes("--sync-prices");
+const testConnectionFlag = args.includes("--test");
 
 /**
  * Handle --sync-events: Sync historical SparkLend events
  */
-async function handleSyncEvents(
+async function syncEvents(
   db: Database,
   provider: JsonRpcProvider,
   chainId: ChainId,
@@ -76,7 +74,7 @@ async function handleSyncEvents(
 /**
  * Handle --sync-prices: Sync historical token prices
  */
-async function handleSyncPrices(
+async function syncPrices(
   db: Database,
   provider: JsonRpcProvider,
   chainId: ChainId,
@@ -127,48 +125,6 @@ async function handleSyncPrices(
   }
 }
 
-/**
- * Handle --show-prices: Display current token prices
- */
-async function handleShowPrices(
-  db: Database,
-  provider: JsonRpcProvider,
-  chainId: ChainId,
-  chainName: string
-): Promise<void> {
-  const tokens = getTokens(chainId);
-  
-  if (tokens.length === 0) {
-    return;
-  }
-
-  console.log(`\n=== Current Token Prices on ${chainName} ===`);
-  console.log("-".repeat(50));
-
-  try {
-    const livePrices = await fetchSparkLendTokenPrices(provider, chainId);
-    for (const price of livePrices) {
-      const formattedPrice = parseFloat(price.priceUsd).toLocaleString('en-US', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 6
-      });
-      console.log(`${price.tokenSymbol.padEnd(8)} $${formattedPrice}`);
-    }
-  } catch (error) {
-    console.log("Could not fetch live prices:", error instanceof Error ? error.message : error);
-    console.log("Showing cached prices:");
-    const cachedPrices = getAllLatestPrices(db, chainId);
-    for (const price of cachedPrices) {
-      const formattedPrice = parseFloat(price.priceUsd).toLocaleString('en-US', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 6
-      });
-      console.log(`${price.tokenSymbol.padEnd(8)} $${formattedPrice}`);
-    }
-  }
-  
-  console.log("-".repeat(50));
-}
 
 /**
  * Show usage help
@@ -181,7 +137,6 @@ function showUsageHelp(): void {
   console.log("  --concurrency=<n>      Number of concurrent RPC requests (1-20, default: 5)");
   console.log("  --sync-events          Sync historical SparkLend events");
   console.log("  --sync-prices          Sync historical token prices");
-  console.log("  --show-prices          Display current token prices");
   console.log("  --test                 Test RPC connection only");
   console.log("\nExamples:");
   console.log("  bun run src/index.ts --chain=ethereum --sync-events");
@@ -207,16 +162,9 @@ async function main() {
     process.exit(1);
   }
 
-  if (testConnection) {
+  if (testConnectionFlag) {
     console.log("\nConnection test successful!");
     return;
-  }
-
-  // Check if SparkLend is available on this chain
-  const sparklendAddresses = getProtocolAddresses(chainId, "sparklend");
-  if (!sparklendAddresses?.pool) {
-    console.warn(`\n⚠ SparkLend is not configured for ${chainConfig.name}`);
-    console.log("Available protocols may be limited.");
   }
 
   // Initialize database
@@ -229,59 +177,22 @@ async function main() {
   console.log(`Current block: ${currentBlock}`);
 
   // Handle CLI commands
-  if (syncEvents) {
-    await handleSyncEvents(db, provider, chainId, currentBlock);
+  if (syncEventsFlag) {
+    await syncEvents(db, provider, chainId, currentBlock);
   }
 
-  if (syncPrices) {
-    await handleSyncPrices(db, provider, chainId, currentBlock, concurrency);
+  if (syncPricesFlag) {
+    await syncPrices(db, provider, chainId, currentBlock, concurrency);
   }
 
-  if (showPrices || (!syncEvents && !syncPrices)) {
-    await handleShowPrices(db, provider, chainId, chainConfig.name);
-  }
-
-  if (!syncEvents && !syncPrices && !showPrices && !testConnection) {
+  if (!syncEventsFlag && !syncPricesFlag && !testConnectionFlag) {
     showUsageHelp();
   }
 
   db.close();
-  console.log("\n✓ Done");
 }
 
 main().catch((error) => {
   console.error("Fatal error:", error);
   process.exit(1);
 });
-
-// Re-export for module usage
-export {
-  // Config
-  type ChainId,
-  getChainConfig,
-  getSupportedChains,
-  getTokens,
-  getBlockMarkers,
-  getProtocolAddresses,
-  
-  // Database
-  initDatabase,
-  getLastSyncedBlock,
-  updateLastSyncedBlock,
-  getLastPriceSyncedBlock,
-  updateLastPriceSyncedBlock,
-  saveEventsToDatabase,
-  savePricesToDatabase,
-  getLatestPrice,
-  getAllLatestPrices,
-  
-  // Providers
-  createProvider,
-  testRpcConnection,
-  
-  // Services
-  querySparkLendEvents,
-  syncHistoricalEvents,
-  fetchSparkLendTokenPrices,
-  syncHistoricalPrices
-};

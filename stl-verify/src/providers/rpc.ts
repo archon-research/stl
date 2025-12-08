@@ -8,9 +8,6 @@ import { type ChainId, getChainConfig } from "../config/chains";
 // Default public RPC endpoints (fallbacks)
 const defaultRpcUrls: Record<ChainId, string> = {
     ethereum: "https://eth.llamarpc.com",
-    base: "https://mainnet.base.org",
-    arbitrum: "https://arb1.arbitrum.io/rpc",
-    optimism: "https://mainnet.optimism.io",
     gnosis: "https://rpc.gnosischain.com"
 };
 

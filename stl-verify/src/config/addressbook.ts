@@ -49,7 +49,7 @@ const addressBooks: Record<ChainId, ChainAddressBook> = {
                 // Add Grove addresses when available
             }
         },
-        tokens: [
+        tokens: [ // TODO: Move this into SparkLend as it is specific to their usage
             { symbol: "DAI", address: "0x6B175474E89094C44Da98b954EedeAC495271d0F", decimals: 18 },
             { symbol: "sDAI", address: "0x83F20F44975D03b1b09e64809B757c47f942BEeA", decimals: 18 },
             { symbol: "USDC", address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", decimals: 6 },
@@ -116,11 +116,7 @@ const addressBooks: Record<ChainId, ChainAddressBook> = {
  * Get address book for a specific chain
  */
 export function getAddressBook(chainId: ChainId): ChainAddressBook {
-    const book = addressBooks[chainId];
-    if (!book) {
-        throw new Error(`No address book for chain: ${chainId}`);
-    }
-    return book;
+    return addressBooks[chainId];
 }
 
 /**

@@ -2,7 +2,7 @@
  * Chain configurations and types for multi-chain support
  */
 
-export type ChainId = "ethereum" | "base" | "arbitrum" | "optimism" | "gnosis";
+export type ChainId = "ethereum" | "gnosis";
 
 export interface ChainConfig {
   chainId: number;
@@ -19,27 +19,6 @@ export const chainConfigs: Record<ChainId, ChainConfig> = {
     rpcEnvVar: "ETHEREUM_RPC_URL",
     blockExplorer: "https://etherscan.io",
     avgBlockTimeSeconds: 12
-  },
-  base: {
-    chainId: 8453,
-    name: "Base",
-    rpcEnvVar: "BASE_RPC_URL",
-    blockExplorer: "https://basescan.org",
-    avgBlockTimeSeconds: 2
-  },
-  arbitrum: {
-    chainId: 42161,
-    name: "Arbitrum One",
-    rpcEnvVar: "ARBITRUM_RPC_URL",
-    blockExplorer: "https://arbiscan.io",
-    avgBlockTimeSeconds: 0.25
-  },
-  optimism: {
-    chainId: 10,
-    name: "Optimism",
-    rpcEnvVar: "OPTIMISM_RPC_URL",
-    blockExplorer: "https://optimistic.etherscan.io",
-    avgBlockTimeSeconds: 2
   },
   gnosis: {
     chainId: 100,
