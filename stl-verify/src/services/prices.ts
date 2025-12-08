@@ -140,12 +140,12 @@ export async function syncHistoricalPrices(
 ): Promise<{ snapshotsProcessed: number; errors: number }> {
   // Mutable provider/multicall - can be recreated on connection issues
   let provider = initialProvider;
-  
+
   // Setup oracle
   const protocolAddresses = getProtocolAddresses(chainId, "sparklend") || getProtocolAddresses(chainId, "aave");
   if (!protocolAddresses?.oracle) {
     throw new Error(`Oracle not configured for chain: ${chainId}`);
-  }  
+  }
   const oracleAddress = protocolAddresses.oracle;
   const oracle = new ethers.Contract(oracleAddress, aaveOracleAbi, provider);
 
@@ -155,11 +155,11 @@ export async function syncHistoricalPrices(
     console.warn(`No tokens configured for chain: ${chainId}`);
     return { snapshotsProcessed: 0, errors: 0 };
   }
-  
+
   // Get BASE_CURRENCY_UNIT once (it doesn't change)
   const baseCurrencyUnit: bigint = await oracle.BASE_CURRENCY_UNIT();
   const decimals = Math.log10(Number(baseCurrencyUnit));
-  
+
   // Prepare calldata for each token's getAssetPrice call (reusable across provider recreations)
   let multicall = createMulticall(provider);
   const oracleInterface = new ethers.Interface(aaveOracleAbi);
@@ -168,13 +168,13 @@ export async function syncHistoricalPrices(
     allowFailure: true,
     callData: oracleInterface.encodeFunctionData("getAssetPrice", [token.address])
   }));
-  
+
   // Build list of blocks to process
   const blockNumbers: number[] = [];
   for (let b = startBlock; b <= endBlock; b += blockInterval) {
     blockNumbers.push(b);
   }
-  
+
   const totalSnapshots = blockNumbers.length;
   console.log(`\nSyncing historical prices on ${chainId} from block ${startBlock} to ${endBlock}`);
   console.log(`Interval: every ${blockInterval} blocks, Concurrency: ${concurrency}`);
@@ -190,7 +190,7 @@ export async function syncHistoricalPrices(
   let i = 0;
   while (i < blockNumbers.length) {
     const batch = blockNumbers.slice(i, i + currentConcurrency);
-    
+
     const results = await Promise.allSettled(
       batch.map(blockNumber =>
         fetchPricesAtBlock(provider, multicall, oracleInterface, calls, tokens, decimals, blockNumber)
@@ -205,7 +205,7 @@ export async function syncHistoricalPrices(
     for (let j = 0; j < results.length; j++) {
       const result = results[j];
       const blockNumber = batch[j];
-      
+
       if (result.status === "rejected") {
         failedBlocks.push(blockNumber);
         const reason = result.reason;
@@ -248,7 +248,7 @@ export async function syncHistoricalPrices(
     if (failedBlocks.length === batch.length) {
       // Entire batch failed - likely RPC is overwhelmed or connection stale
       consecutiveErrorBatches++;
-      
+
       if (currentConcurrency > MIN_CONCURRENCY) {
         currentConcurrency = Math.max(MIN_CONCURRENCY, Math.floor(currentConcurrency / 2));
         console.log(`↓ Reducing concurrency to ${currentConcurrency}, pausing 5s...`);
@@ -266,7 +266,7 @@ export async function syncHistoricalPrices(
         console.log(`⏸ RPC unresponsive, waiting 10s before retry...`);
         await new Promise(resolve => setTimeout(resolve, 10000));
       }
-      
+
       // Don't advance i - retry the same batch
       continue;
     } else if (failedBlocks.length > 0) {

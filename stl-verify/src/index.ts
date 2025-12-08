@@ -6,11 +6,11 @@
 
 import type { Database } from "bun:sqlite";
 import type { JsonRpcProvider } from "ethers";
-import { type ChainId, getChainConfig, getSupportedChains } from "./config/chains";
-import { getTokens, getBlockMarkers, getProtocolAddresses } from "./config/addressbook";
+import { type ChainId, getChainConfig } from "./config/chains";
+import { getBlockMarkers, getProtocolAddresses } from "./config/addressbook";
 import { initDatabase, getLastSyncedBlock, updateLastSyncedBlock, getLastPriceSyncedBlock, updateLastPriceSyncedBlock } from "./db/database";
 import { saveEventsToDatabase } from "./db/events";
-import { savePricesToDatabase, getLatestPrice, getAllLatestPrices } from "./db/prices";
+import { savePricesToDatabase } from "./db/prices";
 import { createProvider, testRpcConnection } from "./providers/rpc";
 import { syncHistoricalEvents } from "./services/events";
 import { syncHistoricalPrices } from "./services/prices";
@@ -30,7 +30,7 @@ process.on("uncaughtException", (error) => {
 const args = process.argv.slice(2);
 const chainArg = args.find(arg => arg.startsWith("--chain="))?.split("=")[1] as ChainId | undefined;
 const concurrencyArg = args.find(arg => arg.startsWith("--concurrency="))?.split("=")[1];
-const concurrency = concurrencyArg ? Math.max(1, Math.min(20, parseInt(concurrencyArg, 10) || 5)) : 5;
+const concurrency = concurrencyArg ? parseInt(concurrencyArg, 10) : 1;
 const syncEventsFlag = args.includes("--sync-events");
 const syncPricesFlag = args.includes("--sync-prices");
 const testConnectionFlag = args.includes("--test");
@@ -152,7 +152,7 @@ async function main() {
   // Determine which chain to use
   const chainId: ChainId = chainArg || "ethereum";
   const chainConfig = getChainConfig(chainId);
-  
+
   console.log(`\nTarget chain: ${chainConfig.name} (Chain ID: ${chainConfig.chainId})`);
 
   // Test RPC connection

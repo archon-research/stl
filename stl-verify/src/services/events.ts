@@ -84,11 +84,11 @@ export async function querySparkLendEvents(
   toBlock: number | string = "latest"
 ): Promise<SparkLendEvents> {
   const protocolAddresses = getProtocolAddresses(chainId, "sparklend");
-  
+
   if (!protocolAddresses?.pool) {
     throw new Error(`SparkLend pool not configured for chain: ${chainId}`);
   }
-  
+
   const poolAddress = protocolAddresses.pool;
   const poolContract = new ethers.Contract(poolAddress, sparkLendPoolAbi, provider);
 

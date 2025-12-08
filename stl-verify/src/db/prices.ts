@@ -7,19 +7,16 @@ import type { ChainId } from "../config/chains";
 import type { TokenPrice } from "../services/prices";
 
 /**
- * Save token prices to the database
+ * Save token prices to the database. ˝
  */
 export function savePricesToDatabase(
   db: Database,
   chainId: ChainId,
   prices: TokenPrice[]
 ): void {
-  if (prices.length === 0) return;
+  if (prices.length === 0) {return;}
 
-  // Batch insert for better performance - SQLite supports up to 999 variables
-  // Each row has 6 values, so we can insert up to 166 rows per batch
   const BATCH_SIZE = 100;
-
   db.transaction(() => {
     for (let i = 0; i < prices.length; i += BATCH_SIZE) {
       const batch = prices.slice(i, i + BATCH_SIZE);
@@ -41,39 +38,6 @@ export function savePricesToDatabase(
       );
     }
   })();
-}
-
-/**
- * Get the latest price for a token from the database
- */
-export function getLatestPrice(
-  db: Database,
-  chainId: ChainId,
-  tokenAddress: string
-): TokenPrice | null {
-  const row = db.query(`
-    SELECT block_number, timestamp, token_address, token_symbol, price_usd
-    FROM token_prices
-    WHERE chain_id = ? AND token_address = ?
-    ORDER BY block_number DESC
-    LIMIT 1
-  `).get(chainId, tokenAddress.toLowerCase()) as {
-    block_number: number;
-    timestamp: number;
-    token_address: string;
-    token_symbol: string;
-    price_usd: string;
-  } | null;
-
-  if (!row) return null;
-
-  return {
-    blockNumber: row.block_number,
-    timestamp: row.timestamp,
-    tokenAddress: row.token_address,
-    tokenSymbol: row.token_symbol,
-    priceUsd: row.price_usd
-  };
 }
 
 /**
@@ -108,35 +72,4 @@ export function getPriceAtBlock(
     tokenSymbol: row.token_symbol,
     priceUsd: row.price_usd
   };
-}
-
-/**
- * Get all latest prices for a chain
- */
-export function getAllLatestPrices(
-  db: Database,
-  chainId: ChainId
-): TokenPrice[] {
-  const rows = db.query(`
-    SELECT DISTINCT token_address, block_number, timestamp, token_symbol, price_usd
-    FROM token_prices t1
-    WHERE chain_id = ? AND block_number = (
-      SELECT MAX(block_number) FROM token_prices t2 
-      WHERE t2.chain_id = t1.chain_id AND t2.token_address = t1.token_address
-    )
-  `).all(chainId) as Array<{
-    block_number: number;
-    timestamp: number;
-    token_address: string;
-    token_symbol: string;
-    price_usd: string;
-  }>;
-
-  return rows.map(row => ({
-    blockNumber: row.block_number,
-    timestamp: row.timestamp,
-    tokenAddress: row.token_address,
-    tokenSymbol: row.token_symbol,
-    priceUsd: row.price_usd
-  }));
 }

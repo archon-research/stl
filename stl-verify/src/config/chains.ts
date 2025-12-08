@@ -39,10 +39,3 @@ export function getChainConfig(chainId: ChainId): ChainConfig {
   }
   return config;
 }
-
-/**
- * Get all supported chain IDs
- */
-export function getSupportedChains(): ChainId[] {
-  return Object.keys(chainConfigs) as ChainId[];
-}
