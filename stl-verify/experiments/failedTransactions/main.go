@@ -36,6 +36,7 @@ func main() {
 	endBlock := flag.Uint64("end", 0, "End block number (0 for latest)")
 	concurrency := flag.Int("concurrency", 500, "Number of concurrent workers for block processing")
 	checkpointInterval := flag.Uint64("checkpoint", 1000, "Save sync state every N blocks")
+	useTracing := flag.Bool("trace", false, "Use debug_traceTransaction for 100% accurate detection (slower, requires archive node)")
 	flag.Parse()
 
 	log.Printf("SparkLend Failed Transaction Scanner")
@@ -51,6 +52,11 @@ func main() {
 	}
 	log.Printf("Concurrency: %d workers", *concurrency)
 	log.Printf("Checkpoint interval: %d blocks", *checkpointInterval)
+	if *useTracing {
+		log.Printf("Detection mode: TRACING (100%% accurate, requires debug API)")
+	} else {
+		log.Printf("Detection mode: HEURISTIC (fast, may miss some indirect calls)")
+	}
 	log.Printf("=====================================")
 
 	// Create context with cancellation
@@ -104,7 +110,7 @@ func main() {
 	}
 
 	// Create and start scanner
-	scanner := NewScanner(client, db, *sparkLendAddress, *startBlock, *endBlock, *concurrency, *checkpointInterval)
+	scanner := NewScanner(client, *rpcEndpoint, db, *sparkLendAddress, *startBlock, *endBlock, *concurrency, *checkpointInterval, *useTracing)
 	if err := scanner.Start(ctx); err != nil {
 		if err == context.Canceled {
 			log.Printf("Scan interrupted by user")

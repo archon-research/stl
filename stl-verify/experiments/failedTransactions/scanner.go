@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,12 +32,14 @@ const (
 // Scanner handles blockchain scanning for failed transactions
 type Scanner struct {
 	client             *ethclient.Client
+	rpcURL             string // Store RPC URL for raw JSON-RPC calls
 	db                 *Database
 	sparkLendContract  common.Address
 	startBlock         uint64
 	endBlock           uint64
 	concurrency        int
 	checkpointInterval uint64
+	useTracing         bool // Use debug_traceTransaction for 100% accuracy
 }
 
 // BlockResult holds the result of processing a block
@@ -43,8 +49,15 @@ type BlockResult struct {
 	Err       error
 }
 
+// ReceiptJSON represents a transaction receipt in JSON-RPC format
+type ReceiptJSON struct {
+	TransactionHash string `json:"transactionHash"`
+	Status          string `json:"status"`
+	GasUsed         string `json:"gasUsed"`
+}
+
 // NewScanner creates a new Scanner instance
-func NewScanner(client *ethclient.Client, db *Database, sparkLendAddress string, startBlock, endBlock uint64, concurrency int, checkpointInterval uint64) *Scanner {
+func NewScanner(client *ethclient.Client, rpcURL string, db *Database, sparkLendAddress string, startBlock, endBlock uint64, concurrency int, checkpointInterval uint64, useTracing bool) *Scanner {
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -53,12 +66,14 @@ func NewScanner(client *ethclient.Client, db *Database, sparkLendAddress string,
 	}
 	return &Scanner{
 		client:             client,
+		rpcURL:             rpcURL,
 		db:                 db,
 		sparkLendContract:  common.HexToAddress(sparkLendAddress),
 		startBlock:         startBlock,
 		endBlock:           endBlock,
 		concurrency:        concurrency,
 		checkpointInterval: checkpointInterval,
+		useTracing:         useTracing,
 	}
 }
 
@@ -112,7 +127,13 @@ func (s *Scanner) Start(ctx context.Context) error {
 		go func(workerID int) {
 			defer wg.Done()
 			for blockNum := range blockChan {
-				failedTxs, err := s.processBlockConcurrent(ctx, blockNum)
+				var failedTxs []*FailedTransaction
+				var err error
+				if s.useTracing {
+					failedTxs, err = s.processBlockWithTracing(ctx, blockNum)
+				} else {
+					failedTxs, err = s.processBlockConcurrent(ctx, blockNum)
+				}
 				resultChan <- BlockResult{
 					BlockNum:  blockNum,
 					FailedTxs: failedTxs,
@@ -203,6 +224,9 @@ func (s *Scanner) Start(ctx context.Context) error {
 	return nil
 }
 
+// LiquidationCallSelector is the function selector for liquidationCall
+const LiquidationCallSelector = "00a718a9"
+
 // processBlockConcurrent processes all transactions in a block and returns failed transactions
 // This version is safe for concurrent use as it doesn't write to the database directly
 func (s *Scanner) processBlockConcurrent(ctx context.Context, blockNum uint64) ([]*FailedTransaction, error) {
@@ -211,36 +235,127 @@ func (s *Scanner) processBlockConcurrent(ctx context.Context, blockNum uint64) (
 		return nil, fmt.Errorf("failed to get block: %w", err)
 	}
 
+	// Fetch all receipts for the block in one call (major performance improvement)
+	receiptMap, err := s.getBlockReceiptsAll(ctx, blockNum)
+	if err != nil {
+		// Fallback to individual receipt fetching if eth_getBlockReceipts not supported
+		return s.processBlockConcurrentFallback(ctx, block)
+	}
+
 	var failedTxs []*FailedTransaction
 	blockTimestamp := block.Time()
+	sparkLendAddrLower := strings.ToLower(s.sparkLendContract.Hex()[2:]) // Remove "0x" prefix
 
 	for _, tx := range block.Transactions() {
-		// Skip if not to SparkLend contract
-		if tx.To() == nil || *tx.To() != s.sparkLendContract {
+		if tx.To() == nil {
 			continue
 		}
 
-		// Check if it's one of the designated SparkLend functions
-		// Ignore all transactions that are not supply, borrow, repay, withdraw, or liquidationCall
-		funcName, isDesignatedFunction := GetFunctionName(tx.Data())
-		if !isDesignatedFunction {
+		var funcName string
+		var isRelevant bool
+		var isIndirectCall bool
+
+		// Case 1: Direct call to SparkLend contract
+		if *tx.To() == s.sparkLendContract {
+			funcName, isRelevant = GetFunctionName(tx.Data())
+			if !isRelevant {
+				continue
+			}
+		} else {
+			// Case 2: Indirect call via MEV bot/aggregator
+			// Check if calldata contains both SparkLend address AND liquidationCall selector
+			calldataHex := strings.ToLower(hex.EncodeToString(tx.Data()))
+
+			containsSparkLend := strings.Contains(calldataHex, sparkLendAddrLower)
+			containsLiquidationSelector := strings.Contains(calldataHex, LiquidationCallSelector)
+
+			if containsSparkLend && containsLiquidationSelector {
+				funcName = "liquidationCall"
+				isRelevant = true
+				isIndirectCall = true
+			} else {
+				continue
+			}
+		}
+
+		// Get receipt from the pre-fetched map
+		receiptJSON, ok := receiptMap[tx.Hash()]
+		if !ok {
 			continue
 		}
 
-		// Get transaction receipt to check status
-		receipt, err := s.getReceiptWithRetry(ctx, tx.Hash())
-		if err != nil {
-			// Log but don't fail the entire block
-			continue
-		}
-
-		// Skip successful transactions (status = 1)
-		if receipt.Status == types.ReceiptStatusSuccessful {
+		// Skip successful transactions (status = 0x1)
+		if receiptJSON.Status == "0x1" {
 			continue
 		}
 
 		// This is a failed transaction - process it
-		failedTx, err := s.processFailedTransaction(ctx, tx, receipt, block, funcName, blockTimestamp)
+		var failedTx *FailedTransaction
+		if isIndirectCall {
+			failedTx, err = s.processFailedIndirectTransactionJSON(ctx, tx, receiptJSON, block, funcName, blockTimestamp)
+		} else {
+			failedTx, err = s.processFailedTransactionJSON(ctx, tx, receiptJSON, block, funcName, blockTimestamp)
+		}
+		if err != nil {
+			continue
+		}
+
+		failedTxs = append(failedTxs, failedTx)
+	}
+
+	return failedTxs, nil
+}
+
+// processBlockConcurrentFallback is the old implementation that fetches receipts one by one
+// Used as fallback when eth_getBlockReceipts is not available
+func (s *Scanner) processBlockConcurrentFallback(ctx context.Context, block *types.Block) ([]*FailedTransaction, error) {
+	var failedTxs []*FailedTransaction
+	blockTimestamp := block.Time()
+	sparkLendAddrLower := strings.ToLower(s.sparkLendContract.Hex()[2:])
+
+	for _, tx := range block.Transactions() {
+		if tx.To() == nil {
+			continue
+		}
+
+		var funcName string
+		var isRelevant bool
+		var isIndirectCall bool
+
+		if *tx.To() == s.sparkLendContract {
+			funcName, isRelevant = GetFunctionName(tx.Data())
+			if !isRelevant {
+				continue
+			}
+		} else {
+			calldataHex := strings.ToLower(hex.EncodeToString(tx.Data()))
+			containsSparkLend := strings.Contains(calldataHex, sparkLendAddrLower)
+			containsLiquidationSelector := strings.Contains(calldataHex, LiquidationCallSelector)
+
+			if containsSparkLend && containsLiquidationSelector {
+				funcName = "liquidationCall"
+				isRelevant = true
+				isIndirectCall = true
+			} else {
+				continue
+			}
+		}
+
+		receipt, err := s.getReceiptWithRetry(ctx, tx.Hash())
+		if err != nil {
+			continue
+		}
+
+		if receipt.Status == types.ReceiptStatusSuccessful {
+			continue
+		}
+
+		var failedTx *FailedTransaction
+		if isIndirectCall {
+			failedTx, err = s.processFailedIndirectTransaction(ctx, tx, receipt, block, funcName, blockTimestamp)
+		} else {
+			failedTx, err = s.processFailedTransaction(ctx, tx, receipt, block, funcName, blockTimestamp)
+		}
 		if err != nil {
 			continue
 		}
@@ -287,6 +402,154 @@ func (s *Scanner) processFailedTransaction(
 		GasUsed:         fmt.Sprintf("%d", receipt.GasUsed),
 		RevertReason:    revertReason,
 	}, nil
+}
+
+// processFailedTransactionJSON processes a failed transaction using JSON receipt data
+func (s *Scanner) processFailedTransactionJSON(
+	ctx context.Context,
+	tx *types.Transaction,
+	receiptJSON *ReceiptJSON,
+	block *types.Block,
+	funcName string,
+	blockTimestamp uint64,
+) (*FailedTransaction, error) {
+	argsJSON, err := DecodeCalldata(funcName, tx.Data())
+	if err != nil {
+		argsJSON = fmt.Sprintf(`{"raw": "0x%s", "error": "%s"}`, hex.EncodeToString(tx.Data()), err.Error())
+	}
+
+	signer := types.LatestSignerForChainID(tx.ChainId())
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sender: %w", err)
+	}
+
+	revertReason := s.getRevertReason(ctx, tx, block.NumberU64())
+
+	return &FailedTransaction{
+		BlockNumber:     block.NumberU64(),
+		BlockTimestamp:  blockTimestamp,
+		TransactionHash: tx.Hash().Hex(),
+		FromAddress:     from.Hex(),
+		ToAddress:       tx.To().Hex(),
+		FunctionName:    funcName,
+		FunctionArgs:    argsJSON,
+		GasUsed:         strings.TrimPrefix(receiptJSON.GasUsed, "0x"),
+		RevertReason:    revertReason,
+	}, nil
+}
+
+// processFailedIndirectTransactionJSON processes a failed indirect transaction using JSON receipt data
+func (s *Scanner) processFailedIndirectTransactionJSON(
+	ctx context.Context,
+	tx *types.Transaction,
+	receiptJSON *ReceiptJSON,
+	block *types.Block,
+	funcName string,
+	blockTimestamp uint64,
+) (*FailedTransaction, error) {
+	signer := types.LatestSignerForChainID(tx.ChainId())
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sender: %w", err)
+	}
+
+	argsJSON := s.extractLiquidationCallArgs(tx.Data())
+	revertReason := s.getRevertReason(ctx, tx, block.NumberU64())
+
+	// Parse hex gas used to decimal
+	gasUsedHex := strings.TrimPrefix(receiptJSON.GasUsed, "0x")
+	gasUsed, _ := new(big.Int).SetString(gasUsedHex, 16)
+
+	return &FailedTransaction{
+		BlockNumber:     block.NumberU64(),
+		BlockTimestamp:  blockTimestamp,
+		TransactionHash: tx.Hash().Hex(),
+		FromAddress:     from.Hex(),
+		ToAddress:       tx.To().Hex(),
+		FunctionName:    funcName + " (via aggregator)",
+		FunctionArgs:    argsJSON,
+		GasUsed:         gasUsed.String(),
+		RevertReason:    revertReason,
+	}, nil
+}
+
+// processFailedIndirectTransaction processes a failed transaction that went through an aggregator/MEV bot
+// It attempts to extract the liquidationCall parameters from the embedded calldata
+func (s *Scanner) processFailedIndirectTransaction(
+	ctx context.Context,
+	tx *types.Transaction,
+	receipt *types.Receipt,
+	block *types.Block,
+	funcName string,
+	blockTimestamp uint64,
+) (*FailedTransaction, error) {
+	// Get the sender address
+	signer := types.LatestSignerForChainID(tx.ChainId())
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sender: %w", err)
+	}
+
+	// Try to extract liquidationCall args from the calldata
+	argsJSON := s.extractLiquidationCallArgs(tx.Data())
+
+	// Get revert reason by re-simulating the call
+	revertReason := s.getRevertReason(ctx, tx, block.NumberU64())
+
+	return &FailedTransaction{
+		BlockNumber:     block.NumberU64(),
+		BlockTimestamp:  blockTimestamp,
+		TransactionHash: tx.Hash().Hex(),
+		FromAddress:     from.Hex(),
+		ToAddress:       tx.To().Hex(),
+		FunctionName:    funcName + " (via aggregator)",
+		FunctionArgs:    argsJSON,
+		GasUsed:         fmt.Sprintf("%d", receipt.GasUsed),
+		RevertReason:    revertReason,
+	}, nil
+}
+
+// extractLiquidationCallArgs attempts to find and decode liquidationCall parameters from embedded calldata
+func (s *Scanner) extractLiquidationCallArgs(data []byte) string {
+	calldataHex := hex.EncodeToString(data)
+
+	// Look for the liquidationCall selector in the calldata
+	idx := strings.Index(calldataHex, LiquidationCallSelector)
+	if idx == -1 {
+		return fmt.Sprintf(`{"raw": "0x%s", "note": "liquidationCall selector found but args not extractable"}`, calldataHex)
+	}
+
+	// The selector is 4 bytes = 8 hex chars
+	// After selector: collateralAsset(32) + debtAsset(32) + user(32) + debtToCover(32) + receiveAToken(32) = 160 bytes = 320 hex chars
+	argsStart := idx + 8 // skip the 4-byte selector
+	argsEnd := argsStart + 320
+
+	if argsEnd > len(calldataHex) {
+		return fmt.Sprintf(`{"raw": "0x%s", "note": "insufficient data after selector"}`, calldataHex)
+	}
+
+	argsHex := calldataHex[argsStart:argsEnd]
+	argsBytes, err := hex.DecodeString(argsHex)
+	if err != nil {
+		return fmt.Sprintf(`{"raw": "0x%s", "error": "failed to decode args hex"}`, calldataHex)
+	}
+
+	// Decode the 5 parameters (each 32 bytes)
+	args := make(map[string]interface{})
+	args["collateralAsset"] = common.BytesToAddress(argsBytes[0:32]).Hex()
+	args["debtAsset"] = common.BytesToAddress(argsBytes[32:64]).Hex()
+	args["user"] = common.BytesToAddress(argsBytes[64:96]).Hex()
+	args["debtToCover"] = new(big.Int).SetBytes(argsBytes[96:128]).String()
+	args["receiveAToken"] = argsBytes[159] != 0 // Last byte of the bool word
+	args["viaAggregator"] = true
+
+	jsonBytes, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Sprintf(`{"raw": "0x%s", "error": "failed to marshal args"}`, calldataHex)
+	}
+
+	return string(jsonBytes)
 }
 
 // getRevertReason simulates the call to get the revert reason
@@ -380,4 +643,503 @@ func (s *Scanner) getReceiptWithRetry(ctx context.Context, txHash common.Hash) (
 	}
 
 	return nil, err
+}
+
+// getBlockReceiptsAll fetches all receipts for a block in a single RPC call
+// This is much more efficient than fetching receipts one by one
+func (s *Scanner) getBlockReceiptsAll(ctx context.Context, blockNum uint64) (map[common.Hash]*ReceiptJSON, error) {
+	blockHex := fmt.Sprintf("0x%x", blockNum)
+
+	req := JSONRPCRequest{
+		JSONRPC: "2.0",
+		Method:  "eth_getBlockReceipts",
+		Params:  []interface{}{blockHex},
+		ID:      1,
+	}
+
+	var lastErr error
+	for i := 0; i < MaxRetries; i++ {
+		reqBody, err := json.Marshal(req)
+		if err != nil {
+			return nil, err
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", s.rpcURL, bytes.NewReader(reqBody))
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(httpReq)
+		if err != nil {
+			lastErr = err
+			if i < MaxRetries-1 {
+				time.Sleep(RetryDelay)
+			}
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			if i < MaxRetries-1 {
+				time.Sleep(RetryDelay)
+			}
+			continue
+		}
+
+		var rpcResp JSONRPCResponse
+		if err := json.Unmarshal(body, &rpcResp); err != nil {
+			lastErr = err
+			if i < MaxRetries-1 {
+				time.Sleep(RetryDelay)
+			}
+			continue
+		}
+
+		if rpcResp.Error != nil {
+			lastErr = fmt.Errorf("RPC error: %s", rpcResp.Error.Message)
+			if i < MaxRetries-1 {
+				time.Sleep(RetryDelay)
+			}
+			continue
+		}
+
+		var receipts []ReceiptJSON
+		if err := json.Unmarshal(rpcResp.Result, &receipts); err != nil {
+			lastErr = err
+			if i < MaxRetries-1 {
+				time.Sleep(RetryDelay)
+			}
+			continue
+		}
+
+		// Build map by transaction hash
+		receiptMap := make(map[common.Hash]*ReceiptJSON, len(receipts))
+		for i := range receipts {
+			txHash := common.HexToHash(receipts[i].TransactionHash)
+			receiptMap[txHash] = &receipts[i]
+		}
+
+		return receiptMap, nil
+	}
+
+	return nil, lastErr
+}
+
+// ============================================================================
+// TRACING-BASED APPROACH (100% accurate but slower)
+// Uses trace_replayTransaction to find ALL internal calls to SparkLend
+// ============================================================================
+
+// TraceAction represents the action in a trace entry (trace_replayTransaction format)
+type TraceAction struct {
+	From     string `json:"from"`
+	To       string `json:"to"`
+	CallType string `json:"callType"`
+	Input    string `json:"input"`
+	Value    string `json:"value"`
+	Gas      string `json:"gas"`
+}
+
+// TraceResultField represents the result field in a trace entry
+type TraceResultField struct {
+	Output  string `json:"output"`
+	GasUsed string `json:"gasUsed"`
+}
+
+// TraceEntry represents a single entry in trace_replayTransaction output
+type TraceEntry struct {
+	Action       TraceAction       `json:"action"`
+	Result       *TraceResultField `json:"result,omitempty"`
+	Error        string            `json:"error,omitempty"`
+	Subtraces    int               `json:"subtraces"`
+	TraceAddress []int             `json:"traceAddress"`
+	Type         string            `json:"type"`
+}
+
+// TraceReplayResult represents the result of trace_replayTransaction
+type TraceReplayResult struct {
+	Trace []TraceEntry `json:"trace"`
+}
+
+// JSONRPCRequest represents a JSON-RPC request
+type JSONRPCRequest struct {
+	JSONRPC string        `json:"jsonrpc"`
+	Method  string        `json:"method"`
+	Params  []interface{} `json:"params"`
+	ID      int           `json:"id"`
+}
+
+// JSONRPCResponse represents a JSON-RPC response
+type JSONRPCResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      int             `json:"id"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *JSONRPCError   `json:"error,omitempty"`
+}
+
+// JSONRPCError represents a JSON-RPC error
+type JSONRPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// processBlockWithTracing processes a block using transaction tracing for 100% accuracy
+func (s *Scanner) processBlockWithTracing(ctx context.Context, blockNum uint64) ([]*FailedTransaction, error) {
+	block, err := s.getBlockWithRetry(ctx, blockNum)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get block: %w", err)
+	}
+
+	// Fetch all receipts for the block in one call
+	receiptMap, err := s.getBlockReceiptsAll(ctx, blockNum)
+	if err != nil {
+		// Fallback to individual receipt fetching
+		return s.processBlockWithTracingFallback(ctx, block)
+	}
+
+	var failedTxs []*FailedTransaction
+	blockTimestamp := block.Time()
+
+	// First pass: identify all failed transactions
+	var failedTxHashes []common.Hash
+	failedTxMap := make(map[common.Hash]*types.Transaction)
+
+	for _, tx := range block.Transactions() {
+		if tx.To() == nil {
+			continue
+		}
+
+		receiptJSON, ok := receiptMap[tx.Hash()]
+		if !ok {
+			continue
+		}
+
+		// Only process failed transactions
+		if receiptJSON.Status == "0x1" {
+			continue
+		}
+
+		failedTxHashes = append(failedTxHashes, tx.Hash())
+		failedTxMap[tx.Hash()] = tx
+	}
+
+	if len(failedTxHashes) == 0 {
+		return nil, nil
+	}
+
+	// Batch trace all failed transactions
+	traceResults := s.batchTraceLiquidationCalls(ctx, failedTxHashes)
+
+	// Process results
+	for txHash, liquidationCall := range traceResults {
+		if liquidationCall == nil {
+			continue
+		}
+
+		tx := failedTxMap[txHash]
+		receiptJSON := receiptMap[txHash]
+
+		failedTx, err := s.processTracedFailedTransactionJSON(ctx, tx, receiptJSON, block, liquidationCall, blockTimestamp)
+		if err != nil {
+			continue
+		}
+
+		failedTxs = append(failedTxs, failedTx)
+	}
+
+	return failedTxs, nil
+}
+
+// processBlockWithTracingFallback is the old implementation for when eth_getBlockReceipts is not available
+func (s *Scanner) processBlockWithTracingFallback(ctx context.Context, block *types.Block) ([]*FailedTransaction, error) {
+	var failedTxs []*FailedTransaction
+	blockTimestamp := block.Time()
+
+	for _, tx := range block.Transactions() {
+		if tx.To() == nil {
+			continue
+		}
+
+		receipt, err := s.getReceiptWithRetry(ctx, tx.Hash())
+		if err != nil {
+			continue
+		}
+
+		if receipt.Status == types.ReceiptStatusSuccessful {
+			continue
+		}
+
+		liquidationCall := s.traceLiquidationCall(ctx, tx.Hash())
+		if liquidationCall == nil {
+			continue
+		}
+
+		failedTx, err := s.processTracedFailedTransaction(ctx, tx, receipt, block, liquidationCall, blockTimestamp)
+		if err != nil {
+			continue
+		}
+
+		failedTxs = append(failedTxs, failedTx)
+	}
+
+	return failedTxs, nil
+}
+
+// batchTraceLiquidationCalls traces multiple transactions in a single batch RPC call
+func (s *Scanner) batchTraceLiquidationCalls(ctx context.Context, txHashes []common.Hash) map[common.Hash]*TracedLiquidationCall {
+	if len(txHashes) == 0 {
+		return nil
+	}
+
+	// Build batch request
+	requests := make([]JSONRPCRequest, len(txHashes))
+	for i, txHash := range txHashes {
+		requests[i] = JSONRPCRequest{
+			JSONRPC: "2.0",
+			Method:  "trace_replayTransaction",
+			Params: []interface{}{
+				txHash.Hex(),
+				[]string{"trace"},
+			},
+			ID: i + 1,
+		}
+	}
+
+	reqBody, err := json.Marshal(requests)
+	if err != nil {
+		return nil
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", s.rpcURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	var responses []JSONRPCResponse
+	if err := json.Unmarshal(body, &responses); err != nil {
+		return nil
+	}
+
+	results := make(map[common.Hash]*TracedLiquidationCall)
+
+	for i, rpcResp := range responses {
+		if rpcResp.Error != nil {
+			continue
+		}
+
+		var traceResult TraceReplayResult
+		if err := json.Unmarshal(rpcResp.Result, &traceResult); err != nil {
+			continue
+		}
+
+		liquidationCall := s.findLiquidationCallInTraceEntries(traceResult.Trace)
+		if liquidationCall != nil {
+			results[txHashes[i]] = liquidationCall
+		}
+	}
+
+	return results
+}
+
+// processTracedFailedTransactionJSON processes a failed transaction found via tracing using JSON receipt
+func (s *Scanner) processTracedFailedTransactionJSON(
+	ctx context.Context,
+	tx *types.Transaction,
+	receiptJSON *ReceiptJSON,
+	block *types.Block,
+	liquidationCall *TracedLiquidationCall,
+	blockTimestamp uint64,
+) (*FailedTransaction, error) {
+	signer := types.LatestSignerForChainID(tx.ChainId())
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sender: %w", err)
+	}
+
+	funcName := liquidationCall.FuncName
+	if !liquidationCall.IsDirect {
+		funcName += " (via internal call)"
+	}
+
+	revertReason := liquidationCall.Error
+	if revertReason == "" {
+		revertReason = s.getRevertReason(ctx, tx, block.NumberU64())
+	}
+
+	// Parse hex gas used to decimal
+	gasUsedHex := strings.TrimPrefix(receiptJSON.GasUsed, "0x")
+	gasUsed, _ := new(big.Int).SetString(gasUsedHex, 16)
+
+	return &FailedTransaction{
+		BlockNumber:     block.NumberU64(),
+		BlockTimestamp:  blockTimestamp,
+		TransactionHash: tx.Hash().Hex(),
+		FromAddress:     from.Hex(),
+		ToAddress:       tx.To().Hex(),
+		FunctionName:    funcName,
+		FunctionArgs:    liquidationCall.ArgsJSON,
+		GasUsed:         gasUsed.String(),
+		RevertReason:    revertReason,
+	}, nil
+}
+
+// TracedLiquidationCall holds info about a liquidation call found via tracing
+type TracedLiquidationCall struct {
+	To       string
+	Input    string
+	Error    string
+	FuncName string
+	ArgsJSON string
+	IsDirect bool // true if top-level call, false if internal call
+}
+
+// traceLiquidationCall traces a transaction to find liquidationCall attempts
+func (s *Scanner) traceLiquidationCall(ctx context.Context, txHash common.Hash) *TracedLiquidationCall {
+	// Call trace_replayTransaction with ["trace"] to get all internal calls
+	req := JSONRPCRequest{
+		JSONRPC: "2.0",
+		Method:  "trace_replayTransaction",
+		Params: []interface{}{
+			txHash.Hex(),
+			[]string{"trace"},
+		},
+		ID: 1,
+	}
+
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		return nil
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", s.rpcURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	var rpcResp JSONRPCResponse
+	if err := json.Unmarshal(body, &rpcResp); err != nil {
+		return nil
+	}
+
+	if rpcResp.Error != nil {
+		return nil
+	}
+
+	var traceResult TraceReplayResult
+	if err := json.Unmarshal(rpcResp.Result, &traceResult); err != nil {
+		return nil
+	}
+
+	// Search the trace entries for calls to SparkLend's liquidationCall
+	return s.findLiquidationCallInTraceEntries(traceResult.Trace)
+}
+
+// findLiquidationCallInTraceEntries searches the flat trace array for liquidationCall
+func (s *Scanner) findLiquidationCallInTraceEntries(entries []TraceEntry) *TracedLiquidationCall {
+	sparkLendAddr := strings.ToLower(s.sparkLendContract.Hex())
+
+	for i, entry := range entries {
+		// Only look at CALL type entries
+		if entry.Type != "call" {
+			continue
+		}
+
+		callTo := strings.ToLower(entry.Action.To)
+
+		// Check if this call is to SparkLend
+		if callTo == sparkLendAddr {
+			input := strings.TrimPrefix(entry.Action.Input, "0x")
+			if len(input) >= 8 {
+				selector := input[:8]
+				// Check if it's liquidationCall (00a718a9)
+				if selector == LiquidationCallSelector {
+					// Decode the arguments
+					inputBytes, _ := hex.DecodeString(input)
+					argsJSON, _ := DecodeCalldata("liquidationCall", inputBytes)
+
+					// traceAddress is empty for top-level call
+					isDirect := len(entry.TraceAddress) == 0
+
+					return &TracedLiquidationCall{
+						To:       entry.Action.To,
+						Input:    entry.Action.Input,
+						Error:    entry.Error,
+						FuncName: "liquidationCall",
+						ArgsJSON: argsJSON,
+						IsDirect: isDirect,
+					}
+				}
+			}
+		}
+		_ = i // suppress unused variable warning
+	}
+
+	return nil
+}
+
+// processTracedFailedTransaction processes a failed transaction found via tracing
+func (s *Scanner) processTracedFailedTransaction(
+	ctx context.Context,
+	tx *types.Transaction,
+	receipt *types.Receipt,
+	block *types.Block,
+	liquidationCall *TracedLiquidationCall,
+	blockTimestamp uint64,
+) (*FailedTransaction, error) {
+	// Get the sender address
+	signer := types.LatestSignerForChainID(tx.ChainId())
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sender: %w", err)
+	}
+
+	funcName := liquidationCall.FuncName
+	if !liquidationCall.IsDirect {
+		funcName += " (via internal call)"
+	}
+
+	// Use the traced error if available, otherwise get revert reason
+	revertReason := liquidationCall.Error
+	if revertReason == "" {
+		revertReason = s.getRevertReason(ctx, tx, block.NumberU64())
+	}
+
+	return &FailedTransaction{
+		BlockNumber:     block.NumberU64(),
+		BlockTimestamp:  blockTimestamp,
+		TransactionHash: tx.Hash().Hex(),
+		FromAddress:     from.Hex(),
+		ToAddress:       tx.To().Hex(),
+		FunctionName:    funcName,
+		FunctionArgs:    liquidationCall.ArgsJSON,
+		GasUsed:         fmt.Sprintf("%d", receipt.GasUsed),
+		RevertReason:    revertReason,
+	}, nil
 }
