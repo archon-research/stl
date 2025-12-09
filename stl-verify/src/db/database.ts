@@ -109,6 +109,12 @@ export function initDatabase(dbPath: string = "./data/sparklend_events.db"): Dat
       last_synced_block INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS uniswap_sync_state (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chain_id TEXT NOT NULL UNIQUE,
+      last_synced_block INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS token_prices (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       chain_id TEXT NOT NULL,
@@ -218,14 +224,14 @@ export function updateLastPriceSyncedBlock(db: Database, chainId: ChainId, block
 
 // Optional: dedicated sync state for Uniswap V3 swaps per chain
 export function getLastUniswapV3SyncedBlock(db: Database, chainId: ChainId): number | null {
-  const row = db.query("SELECT last_synced_block FROM sync_state WHERE chain_id = ?").get(chainId) as { last_synced_block: number } | null;
+  const row = db.query("SELECT last_synced_block FROM uniswap_sync_state WHERE chain_id = ?").get(chainId) as { last_synced_block: number } | null;
   return row?.last_synced_block ?? null;
 }
 
 export function updateLastUniswapV3SyncedBlock(db: Database, chainId: ChainId, blockNumber: number): void {
   db.query(`
-    INSERT INTO sync_state (chain_id, last_synced_block) VALUES (?, ?)
-    ON CONFLICT(chain_id) DO UPDATE SET last_synced_block = MAX(sync_state.last_synced_block, excluded.last_synced_block)
+    INSERT INTO uniswap_sync_state (chain_id, last_synced_block) VALUES (?, ?)
+    ON CONFLICT(chain_id) DO UPDATE SET last_synced_block = MAX(uniswap_sync_state.last_synced_block, excluded.last_synced_block)
   `).run(chainId, blockNumber);
 }
 
