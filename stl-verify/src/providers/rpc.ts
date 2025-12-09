@@ -57,6 +57,8 @@ export async function testRpcConnection(chainId: ChainId): Promise<boolean> {
     }
 }
 
+
+// Experimental:
 /**
  * Multicall3 contract address (same on all major chains)
  */

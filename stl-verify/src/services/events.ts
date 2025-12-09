@@ -4,7 +4,7 @@
 
 import { ethers } from "ethers";
 import type { ChainId } from "../config/chains";
-import { getProtocolAddresses, getBlockMarkers } from "../config/addressbook";
+import { getProtocolAddresses } from "../config/addressbook";
 import sparkLendPoolAbi from "../../abi/sparklendpool.json";
 
 // Event types

@@ -12,7 +12,7 @@ export interface ChainConfig {
   avgBlockTimeSeconds: number;
 }
 
-export const chainConfigs: Record<ChainId, ChainConfig> = {
+const chainConfigs: Record<ChainId, ChainConfig> = {
   ethereum: {
     chainId: 1,
     name: "Ethereum Mainnet",
