@@ -126,6 +126,18 @@ export function initDatabase(dbPath: string = "./data/sparklend_events.db"): Dat
       UNIQUE(chain_id, block_number, token_address)
     );
 
+    -- Uniswap V3 pools discovered from factory events
+    CREATE TABLE IF NOT EXISTS uniswap_v3_pools (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chain_id TEXT NOT NULL,
+      pool_address TEXT NOT NULL,
+      token0 TEXT NOT NULL,
+      token1 TEXT NOT NULL,
+      fee INTEGER NOT NULL,
+      created_block INTEGER NOT NULL,
+      UNIQUE(chain_id, pool_address)
+    );
+
     -- Uniswap V3 raw swaps (one row per Swap log)
     CREATE TABLE IF NOT EXISTS uniswap_v3_swaps (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -174,6 +186,10 @@ export function initDatabase(dbPath: string = "./data/sparklend_events.db"): Dat
     CREATE INDEX IF NOT EXISTS idx_prices_chain_block ON token_prices(chain_id, block_number);
     CREATE INDEX IF NOT EXISTS idx_prices_token ON token_prices(token_address);
     CREATE INDEX IF NOT EXISTS idx_prices_timestamp ON token_prices(timestamp);
+
+    CREATE INDEX IF NOT EXISTS idx_uniswap_v3_pools_chain ON uniswap_v3_pools(chain_id);
+    CREATE INDEX IF NOT EXISTS idx_uniswap_v3_pools_token0 ON uniswap_v3_pools(token0);
+    CREATE INDEX IF NOT EXISTS idx_uniswap_v3_pools_token1 ON uniswap_v3_pools(token1);
 
     CREATE INDEX IF NOT EXISTS idx_uni_swaps_chain_block ON uniswap_v3_swaps(chain_id, block_number);
     CREATE INDEX IF NOT EXISTS idx_uni_swaps_pool ON uniswap_v3_swaps(pool_address);
