@@ -14,6 +14,7 @@ import { savePricesToDatabase } from "./db/prices";
 import { createProvider, testRpcConnection } from "./providers/rpc";
 import { syncHistoricalEvents } from "./services/events";
 import { syncHistoricalPrices } from "./services/prices";
+import { syncUniswapV3SwapsFromCursor } from "./services/uniswapV3";
 
 // Global error handlers to prevent silent crashes
 process.on("unhandledRejection", (reason, promise) => {
@@ -33,6 +34,7 @@ const concurrencyArg = args.find(arg => arg.startsWith("--concurrency="))?.split
 const concurrency = concurrencyArg ? parseInt(concurrencyArg, 10) : 1;
 const syncEventsFlag = args.includes("--sync-events");
 const syncPricesFlag = args.includes("--sync-prices");
+const syncUniswapFlag = args.includes("--sync-uniswap-v3");
 const testConnectionFlag = args.includes("--test");
 
 /**
@@ -125,6 +127,22 @@ async function syncPrices(
   }
 }
 
+/**
+ * Handle --sync-uniswap-v3: Sync Uniswap V3 swap events for tracked tokens
+ */
+async function syncUniswapV3(
+  db: Database,
+  provider: JsonRpcProvider,
+  chainId: ChainId,
+  currentBlock: number
+): Promise<void> {
+  const blockMarkers = getBlockMarkers(chainId);
+  const startBlock = blockMarkers.poolCreation ?? Math.max(currentBlock - 10000, 0);
+
+  console.log(`\nSyncing Uniswap V3 swaps from block ${startBlock} to ${currentBlock}...`);
+  await syncUniswapV3SwapsFromCursor(db, provider, chainId, startBlock, currentBlock);
+  console.log("Uniswap V3 swap sync completed.");
+}
 
 /**
  * Show usage help
@@ -137,10 +155,12 @@ function showUsageHelp(): void {
   console.log("  --concurrency=<n>      Number of concurrent RPC requests (1-20, default: 5)");
   console.log("  --sync-events          Sync historical SparkLend events");
   console.log("  --sync-prices          Sync historical token prices");
+  console.log("  --sync-uniswap-v3      Sync historical Uniswap V3 swaps for tracked tokens");
   console.log("  --test                 Test RPC connection only");
   console.log("\nExamples:");
   console.log("  bun run src/index.ts --chain=ethereum --sync-events");
   console.log("  bun run src/index.ts --chain=ethereum --sync-prices --concurrency=3");
+  console.log("  bun run src/index.ts --chain=ethereum --sync-uniswap-v3");
   console.log("  bun run src/index.ts --chain=base --show-prices");
 }
 
@@ -185,7 +205,11 @@ async function main() {
     await syncPrices(db, provider, chainId, currentBlock, concurrency);
   }
 
-  if (!syncEventsFlag && !syncPricesFlag && !testConnectionFlag) {
+  if (syncUniswapFlag) {
+    await syncUniswapV3(db, provider, chainId, currentBlock);
+  }
+
+  if (!syncEventsFlag && !syncPricesFlag && !syncUniswapFlag && !testConnectionFlag) {
     showUsageHelp();
   }
 
