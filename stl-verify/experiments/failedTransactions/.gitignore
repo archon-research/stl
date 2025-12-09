@@ -1,0 +1,9 @@
+# SQLite database files
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Compiled binary
+failed-tx-scanner
+failed-tx-scanner-*
