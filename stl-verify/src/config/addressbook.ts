@@ -36,6 +36,7 @@ export interface ChainAddressBook {
 
 /**
  * Multi-chain address book
+ * TODO: Expand to Base, Arbitrum, Optimism, etc.
  */
 const addressBooks: Record<ChainId, ChainAddressBook> = {
     ethereum: {
@@ -69,37 +70,10 @@ const addressBooks: Record<ChainId, ChainAddressBook> = {
             { symbol: "rsETH", address: "0xA1290d69c65A6Fe4DF752f95823fae25cB99e5A7", decimals: 18 },
             { symbol: "PYUSD", address: "0x6c3ea9036406852006290770BEdFcAbA0e23A0e8", decimals: 6 }
         ],
+        // TODO: Move this to a protocol
         blocks: {
-            poolCreation: 16776401, // TODO: Move this to a protocol
+            poolCreation: 16776401, 
             oracleOperational: 16776437
-        }
-    },
-
-    base: {
-        protocols: {
-        },
-        tokens: [
-        ],
-        blocks: {
-            // Add relevant block markers when available
-        }
-    },
-
-    arbitrum: {
-        protocols: {
-        },
-        tokens: [
-        ],
-        blocks: {
-        }
-    },
-
-    optimism: {
-        protocols: {
-        },
-        tokens: [
-        ],
-        blocks: {
         }
     },
     gnosis: {
@@ -111,13 +85,6 @@ const addressBooks: Record<ChainId, ChainAddressBook> = {
         }
     }
 };
-
-/**
- * Get address book for a specific chain
- */
-export function getAddressBook(chainId: ChainId): ChainAddressBook {
-    return addressBooks[chainId];
-}
 
 /**
  * Get protocol addresses for a specific chain and protocol
@@ -134,14 +101,6 @@ export function getProtocolAddresses(
  */
 export function getTokens(chainId: ChainId): TokenInfo[] {
     return addressBooks[chainId]?.tokens ?? [];
-}
-
-/**
- * Create a token lookup map by address (lowercase) for a chain
- */
-export function createTokenByAddressMap(chainId: ChainId): Map<string, TokenInfo> {
-    const tokens = getTokens(chainId);
-    return new Map(tokens.map(token => [token.address.toLowerCase(), token]));
 }
 
 /**

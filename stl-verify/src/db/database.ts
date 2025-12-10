@@ -20,10 +20,10 @@ export function initDatabase(dbPath: string = "./data/sparklend_events.db"): Dat
   const db = new Database(dbPath, { create: true });
   
   // Enable WAL mode for better concurrent performance
-  db.exec("PRAGMA journal_mode = WAL");
+  db.run("PRAGMA journal_mode = WAL");
   
   // Create tables
-  db.exec(`
+  db.run(`
     CREATE TABLE IF NOT EXISTS supply_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       chain_id TEXT NOT NULL,
