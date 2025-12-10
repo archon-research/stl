@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 const (
@@ -37,6 +38,8 @@ func main() {
 	concurrency := flag.Int("concurrency", 500, "Number of concurrent workers for block processing")
 	checkpointInterval := flag.Uint64("checkpoint", 1000, "Save sync state every N blocks")
 	useTracing := flag.Bool("trace", false, "Use debug_traceTransaction for 100% accurate detection (slower, requires archive node)")
+	skipRevertReason := flag.Bool("skip-revert-reason", false, "Skip fetching revert reasons (faster scanning)")
+	batchSize := flag.Int("batch-size", 10, "Number of blocks to fetch in each batch")
 	flag.Parse()
 
 	log.Printf("SparkLend Failed Transaction Scanner")
@@ -57,6 +60,12 @@ func main() {
 	} else {
 		log.Printf("Detection mode: HEURISTIC (fast, may miss some indirect calls)")
 	}
+	if *skipRevertReason {
+		log.Printf("Revert reason: SKIPPED (faster)")
+	} else {
+		log.Printf("Revert reason: ENABLED")
+	}
+	log.Printf("Batch size: %d blocks", *batchSize)
 	log.Printf("=====================================")
 
 	// Create context with cancellation
@@ -78,6 +87,13 @@ func main() {
 		log.Fatalf("Failed to connect to Ethereum client: %v", err)
 	}
 	defer client.Close()
+
+	// Create raw RPC client for batch calls
+	rpcClient, err := rpc.Dial(*rpcEndpoint)
+	if err != nil {
+		log.Fatalf("Failed to connect to RPC client: %v", err)
+	}
+	defer rpcClient.Close()
 
 	// Verify connection
 	chainID, err := client.ChainID(ctx)
@@ -110,7 +126,7 @@ func main() {
 	}
 
 	// Create and start scanner
-	scanner := NewScanner(client, *rpcEndpoint, db, *sparkLendAddress, *startBlock, *endBlock, *concurrency, *checkpointInterval, *useTracing)
+	scanner := NewScanner(client, rpcClient, db, *sparkLendAddress, *startBlock, *endBlock, *concurrency, *checkpointInterval, *useTracing, *skipRevertReason, *batchSize)
 	if err := scanner.Start(ctx); err != nil {
 		if err == context.Canceled {
 			log.Printf("Scan interrupted by user")

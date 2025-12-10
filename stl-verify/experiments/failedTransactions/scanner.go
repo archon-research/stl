@@ -1,15 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math/big"
-	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 const (
@@ -32,7 +30,7 @@ const (
 // Scanner handles blockchain scanning for failed transactions
 type Scanner struct {
 	client             *ethclient.Client
-	rpcURL             string // Store RPC URL for raw JSON-RPC calls
+	rpcClient          *rpc.Client // Raw RPC client for batch calls and custom methods
 	db                 *Database
 	sparkLendContract  common.Address
 	startBlock         uint64
@@ -40,6 +38,8 @@ type Scanner struct {
 	concurrency        int
 	checkpointInterval uint64
 	useTracing         bool // Use debug_traceTransaction for 100% accuracy
+	skipRevertReason   bool // Skip fetching revert reason (faster)
+	batchSize          int  // Number of blocks to fetch in a batch
 }
 
 // BlockResult holds the result of processing a block
@@ -47,6 +47,11 @@ type BlockResult struct {
 	BlockNum  uint64
 	FailedTxs []*FailedTransaction
 	Err       error
+}
+
+// BatchBlockResult holds the result of processing a batch of blocks
+type BatchBlockResult struct {
+	Results []BlockResult
 }
 
 // ReceiptJSON represents a transaction receipt in JSON-RPC format
@@ -57,16 +62,19 @@ type ReceiptJSON struct {
 }
 
 // NewScanner creates a new Scanner instance
-func NewScanner(client *ethclient.Client, rpcURL string, db *Database, sparkLendAddress string, startBlock, endBlock uint64, concurrency int, checkpointInterval uint64, useTracing bool) *Scanner {
+func NewScanner(client *ethclient.Client, rpcClient *rpc.Client, db *Database, sparkLendAddress string, startBlock, endBlock uint64, concurrency int, checkpointInterval uint64, useTracing bool, skipRevertReason bool, batchSize int) *Scanner {
 	if concurrency < 1 {
 		concurrency = 1
 	}
 	if checkpointInterval < 1 {
 		checkpointInterval = 1000
 	}
+	if batchSize < 1 {
+		batchSize = 10
+	}
 	return &Scanner{
 		client:             client,
-		rpcURL:             rpcURL,
+		rpcClient:          rpcClient,
 		db:                 db,
 		sparkLendContract:  common.HexToAddress(sparkLendAddress),
 		startBlock:         startBlock,
@@ -74,6 +82,8 @@ func NewScanner(client *ethclient.Client, rpcURL string, db *Database, sparkLend
 		concurrency:        concurrency,
 		checkpointInterval: checkpointInterval,
 		useTracing:         useTracing,
+		skipRevertReason:   skipRevertReason,
+		batchSize:          batchSize,
 	}
 }
 
@@ -106,7 +116,7 @@ func (s *Scanner) Start(ctx context.Context) error {
 
 	log.Printf("Scanning blocks %d to %d for failed SparkLend transactions", startBlock, endBlock)
 	log.Printf("Target contract: %s", s.sparkLendContract.Hex())
-	log.Printf("Using %d concurrent workers", s.concurrency)
+	log.Printf("Using %d concurrent workers with batch size %d", s.concurrency, s.batchSize)
 
 	// Use atomic counter for thread-safe counting
 	var failedTxCount int64
@@ -114,30 +124,64 @@ func (s *Scanner) Start(ctx context.Context) error {
 	lastCheckpoint := startBlock
 	totalBlocks := endBlock - startBlock + 1
 
-	// Create channels for work distribution
-	blockChan := make(chan uint64, s.concurrency*2)
-	resultChan := make(chan BlockResult, s.concurrency*2)
+	// Create channels for work distribution - now sending batches of block numbers
+	batchChan := make(chan []uint64, s.concurrency*2)
+	resultChan := make(chan BlockResult, s.concurrency*s.batchSize*2)
 
 	// Create a WaitGroup for workers
 	var wg sync.WaitGroup
 
-	// Start worker goroutines
+	// Start worker goroutines - each processes a batch of blocks
 	for i := 0; i < s.concurrency; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			for blockNum := range blockChan {
-				var failedTxs []*FailedTransaction
-				var err error
-				if s.useTracing {
-					failedTxs, err = s.processBlockWithTracing(ctx, blockNum)
-				} else {
-					failedTxs, err = s.processBlockConcurrent(ctx, blockNum)
+			for blockNums := range batchChan {
+				// Batch fetch all blocks
+				blocks, err := s.getBatchBlocks(ctx, blockNums)
+				if err != nil {
+					log.Printf("Warning: batch block fetch failed: %v, falling back to individual fetches", err)
+					// Fallback to individual processing
+					for _, blockNum := range blockNums {
+						var failedTxs []*FailedTransaction
+						var err error
+						if s.useTracing {
+							failedTxs, err = s.processBlockWithTracing(ctx, blockNum)
+						} else {
+							failedTxs, err = s.processBlockConcurrent(ctx, blockNum)
+						}
+						resultChan <- BlockResult{
+							BlockNum:  blockNum,
+							FailedTxs: failedTxs,
+							Err:       err,
+						}
+					}
+					continue
 				}
-				resultChan <- BlockResult{
-					BlockNum:  blockNum,
-					FailedTxs: failedTxs,
-					Err:       err,
+
+				// Process each block in the batch
+				for _, blockNum := range blockNums {
+					block, ok := blocks[blockNum]
+					if !ok || block == nil {
+						resultChan <- BlockResult{
+							BlockNum: blockNum,
+							Err:      fmt.Errorf("block %d not found in batch response", blockNum),
+						}
+						continue
+					}
+
+					var failedTxs []*FailedTransaction
+					var err error
+					if s.useTracing {
+						failedTxs, err = s.processBlockWithTracingPreloaded(ctx, block)
+					} else {
+						failedTxs, err = s.processBlockConcurrentPreloaded(ctx, block)
+					}
+					resultChan <- BlockResult{
+						BlockNum:  blockNum,
+						FailedTxs: failedTxs,
+						Err:       err,
+					}
 				}
 			}
 		}(i)
@@ -149,14 +193,27 @@ func (s *Scanner) Start(ctx context.Context) error {
 		close(resultChan)
 	}()
 
-	// Start a goroutine to feed blocks to workers
+	// Start a goroutine to feed block batches to workers
 	go func() {
-		defer close(blockChan)
+		defer close(batchChan)
+		batch := make([]uint64, 0, s.batchSize)
 		for blockNum := startBlock; blockNum <= endBlock; blockNum++ {
+			batch = append(batch, blockNum)
+			if len(batch) >= s.batchSize {
+				select {
+				case <-ctx.Done():
+					return
+				case batchChan <- batch:
+				}
+				batch = make([]uint64, 0, s.batchSize)
+			}
+		}
+		// Send remaining blocks
+		if len(batch) > 0 {
 			select {
 			case <-ctx.Done():
 				return
-			case blockChan <- blockNum:
+			case batchChan <- batch:
 			}
 		}
 	}()
@@ -234,6 +291,12 @@ func (s *Scanner) processBlockConcurrent(ctx context.Context, blockNum uint64) (
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block: %w", err)
 	}
+	return s.processBlockConcurrentPreloaded(ctx, block)
+}
+
+// processBlockConcurrentPreloaded processes a pre-fetched block
+func (s *Scanner) processBlockConcurrentPreloaded(ctx context.Context, block *types.Block) ([]*FailedTransaction, error) {
+	blockNum := block.NumberU64()
 
 	// Fetch all receipts for the block in one call (major performance improvement)
 	receiptMap, err := s.getBlockReceiptsAll(ctx, blockNum)
@@ -281,6 +344,7 @@ func (s *Scanner) processBlockConcurrent(ctx context.Context, blockNum uint64) (
 		// Get receipt from the pre-fetched map
 		receiptJSON, ok := receiptMap[tx.Hash()]
 		if !ok {
+			log.Printf("Warning: receipt not found for tx %s in block %d", tx.Hash().Hex(), blockNum)
 			continue
 		}
 
@@ -297,6 +361,7 @@ func (s *Scanner) processBlockConcurrent(ctx context.Context, blockNum uint64) (
 			failedTx, err = s.processFailedTransactionJSON(ctx, tx, receiptJSON, block, funcName, blockTimestamp)
 		}
 		if err != nil {
+			log.Printf("Warning: failed to process tx %s: %v", tx.Hash().Hex(), err)
 			continue
 		}
 
@@ -343,6 +408,7 @@ func (s *Scanner) processBlockConcurrentFallback(ctx context.Context, block *typ
 
 		receipt, err := s.getReceiptWithRetry(ctx, tx.Hash())
 		if err != nil {
+			log.Printf("Warning: failed to get receipt for tx %s: %v", tx.Hash().Hex(), err)
 			continue
 		}
 
@@ -357,6 +423,7 @@ func (s *Scanner) processBlockConcurrentFallback(ctx context.Context, block *typ
 			failedTx, err = s.processFailedTransaction(ctx, tx, receipt, block, funcName, blockTimestamp)
 		}
 		if err != nil {
+			log.Printf("Warning: failed to process tx %s: %v", tx.Hash().Hex(), err)
 			continue
 		}
 
@@ -388,8 +455,11 @@ func (s *Scanner) processFailedTransaction(
 		return nil, fmt.Errorf("failed to get sender: %w", err)
 	}
 
-	// Get revert reason by re-simulating the call
-	revertReason := s.getRevertReason(ctx, tx, block.NumberU64())
+	// Get revert reason by re-simulating the call (if not skipped)
+	var revertReason string
+	if !s.skipRevertReason {
+		revertReason = s.getRevertReason(ctx, tx, block.NumberU64())
+	}
 
 	return &FailedTransaction{
 		BlockNumber:     block.NumberU64(),
@@ -424,7 +494,10 @@ func (s *Scanner) processFailedTransactionJSON(
 		return nil, fmt.Errorf("failed to get sender: %w", err)
 	}
 
-	revertReason := s.getRevertReason(ctx, tx, block.NumberU64())
+	var revertReason string
+	if !s.skipRevertReason {
+		revertReason = s.getRevertReason(ctx, tx, block.NumberU64())
+	}
 
 	return &FailedTransaction{
 		BlockNumber:     block.NumberU64(),
@@ -455,7 +528,10 @@ func (s *Scanner) processFailedIndirectTransactionJSON(
 	}
 
 	argsJSON := s.extractLiquidationCallArgs(tx.Data())
-	revertReason := s.getRevertReason(ctx, tx, block.NumberU64())
+	var revertReason string
+	if !s.skipRevertReason {
+		revertReason = s.getRevertReason(ctx, tx, block.NumberU64())
+	}
 
 	// Parse hex gas used to decimal
 	gasUsedHex := strings.TrimPrefix(receiptJSON.GasUsed, "0x")
@@ -494,8 +570,11 @@ func (s *Scanner) processFailedIndirectTransaction(
 	// Try to extract liquidationCall args from the calldata
 	argsJSON := s.extractLiquidationCallArgs(tx.Data())
 
-	// Get revert reason by re-simulating the call
-	revertReason := s.getRevertReason(ctx, tx, block.NumberU64())
+	// Get revert reason by re-simulating the call (if not skipped)
+	var revertReason string
+	if !s.skipRevertReason {
+		revertReason = s.getRevertReason(ctx, tx, block.NumberU64())
+	}
 
 	return &FailedTransaction{
 		BlockNumber:     block.NumberU64(),
@@ -645,69 +724,129 @@ func (s *Scanner) getReceiptWithRetry(ctx context.Context, txHash common.Hash) (
 	return nil, err
 }
 
-// getBlockReceiptsAll fetches all receipts for a block in a single RPC call
-// This is much more efficient than fetching receipts one by one
-func (s *Scanner) getBlockReceiptsAll(ctx context.Context, blockNum uint64) (map[common.Hash]*ReceiptJSON, error) {
-	blockHex := fmt.Sprintf("0x%x", blockNum)
+// rpcBlock is used for JSON-RPC block parsing (mirrors go-ethereum's ethclient approach)
+type rpcBlock struct {
+	Hash         *common.Hash        `json:"hash"`
+	Transactions []rpcTransaction    `json:"transactions"`
+	UncleHashes  []common.Hash       `json:"uncles"`
+	Withdrawals  []*types.Withdrawal `json:"withdrawals,omitempty"`
+}
 
-	req := JSONRPCRequest{
-		JSONRPC: "2.0",
-		Method:  "eth_getBlockReceipts",
-		Params:  []interface{}{blockHex},
-		ID:      1,
+// rpcTransaction wraps types.Transaction with extra info from JSON-RPC
+type rpcTransaction struct {
+	tx *types.Transaction
+	txExtraInfo
+}
+
+// txExtraInfo holds extra transaction fields from JSON-RPC that aren't in types.Transaction
+type txExtraInfo struct {
+	BlockNumber *string         `json:"blockNumber,omitempty"`
+	BlockHash   *common.Hash    `json:"blockHash,omitempty"`
+	From        *common.Address `json:"from,omitempty"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler for rpcTransaction
+func (tx *rpcTransaction) UnmarshalJSON(msg []byte) error {
+	if err := json.Unmarshal(msg, &tx.tx); err != nil {
+		return err
+	}
+	return json.Unmarshal(msg, &tx.txExtraInfo)
+}
+
+// getBatchBlocks fetches multiple blocks in a single batch RPC call using rpc.BatchCall
+// Uses json.RawMessage approach from go-ethereum's ethclient to properly unmarshal blocks
+func (s *Scanner) getBatchBlocks(ctx context.Context, blockNums []uint64) (map[uint64]*types.Block, error) {
+	if len(blockNums) == 0 {
+		return nil, nil
+	}
+
+	// Build batch elements using json.RawMessage as result type
+	batch := make([]rpc.BatchElem, len(blockNums))
+	results := make([]json.RawMessage, len(blockNums))
+
+	for i, blockNum := range blockNums {
+		batch[i] = rpc.BatchElem{
+			Method: "eth_getBlockByNumber",
+			Args:   []interface{}{rpc.BlockNumber(blockNum), true}, // true = include full tx objects
+			Result: &results[i],
+		}
 	}
 
 	var lastErr error
+	for retry := 0; retry < MaxRetries; retry++ {
+		err := s.rpcClient.BatchCallContext(ctx, batch)
+		if err != nil {
+			lastErr = err
+			if retry < MaxRetries-1 {
+				time.Sleep(RetryDelay)
+			}
+			continue
+		}
+
+		// Parse blocks from raw JSON responses using go-ethereum's pattern:
+		// 1. Unmarshal into types.Header (has proper JSON support)
+		// 2. Unmarshal into rpcBlock for transactions and other body data
+		// 3. Construct block using NewBlockWithHeader().WithBody()
+		blocks := make(map[uint64]*types.Block)
+		for i, elem := range batch {
+			if elem.Error != nil {
+				log.Printf("Warning: failed to get block %d: %v", blockNums[i], elem.Error)
+				continue
+			}
+
+			raw := results[i]
+			if len(raw) == 0 || string(raw) == "null" {
+				log.Printf("Warning: block %d returned null", blockNums[i])
+				continue
+			}
+
+			// Decode header first
+			var head *types.Header
+			if err := json.Unmarshal(raw, &head); err != nil {
+				log.Printf("Warning: failed to unmarshal header for block %d: %v", blockNums[i], err)
+				continue
+			}
+			if head == nil {
+				log.Printf("Warning: block %d header is nil", blockNums[i])
+				continue
+			}
+
+			// Decode body (transactions, uncles, withdrawals)
+			var body rpcBlock
+			if err := json.Unmarshal(raw, &body); err != nil {
+				log.Printf("Warning: failed to unmarshal body for block %d: %v", blockNums[i], err)
+				continue
+			}
+
+			// Extract transactions
+			txs := make([]*types.Transaction, len(body.Transactions))
+			for j, tx := range body.Transactions {
+				txs[j] = tx.tx
+			}
+
+			// Construct the block
+			block := types.NewBlockWithHeader(head).WithBody(types.Body{
+				Transactions: txs,
+				Withdrawals:  body.Withdrawals,
+			})
+
+			blocks[blockNums[i]] = block
+		}
+
+		return blocks, nil
+	}
+
+	return nil, lastErr
+}
+
+// getBlockReceiptsAll fetches all receipts for a block in a single RPC call
+// This is much more efficient than fetching receipts one by one
+func (s *Scanner) getBlockReceiptsAll(ctx context.Context, blockNum uint64) (map[common.Hash]*ReceiptJSON, error) {
+	var lastErr error
 	for i := 0; i < MaxRetries; i++ {
-		reqBody, err := json.Marshal(req)
-		if err != nil {
-			return nil, err
-		}
-
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", s.rpcURL, bytes.NewReader(reqBody))
-		if err != nil {
-			return nil, err
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(httpReq)
-		if err != nil {
-			lastErr = err
-			if i < MaxRetries-1 {
-				time.Sleep(RetryDelay)
-			}
-			continue
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			lastErr = err
-			if i < MaxRetries-1 {
-				time.Sleep(RetryDelay)
-			}
-			continue
-		}
-
-		var rpcResp JSONRPCResponse
-		if err := json.Unmarshal(body, &rpcResp); err != nil {
-			lastErr = err
-			if i < MaxRetries-1 {
-				time.Sleep(RetryDelay)
-			}
-			continue
-		}
-
-		if rpcResp.Error != nil {
-			lastErr = fmt.Errorf("RPC error: %s", rpcResp.Error.Message)
-			if i < MaxRetries-1 {
-				time.Sleep(RetryDelay)
-			}
-			continue
-		}
-
 		var receipts []ReceiptJSON
-		if err := json.Unmarshal(rpcResp.Result, &receipts); err != nil {
+		err := s.rpcClient.CallContext(ctx, &receipts, "eth_getBlockReceipts", rpc.BlockNumber(blockNum))
+		if err != nil {
 			lastErr = err
 			if i < MaxRetries-1 {
 				time.Sleep(RetryDelay)
@@ -717,9 +856,9 @@ func (s *Scanner) getBlockReceiptsAll(ctx context.Context, blockNum uint64) (map
 
 		// Build map by transaction hash
 		receiptMap := make(map[common.Hash]*ReceiptJSON, len(receipts))
-		for i := range receipts {
-			txHash := common.HexToHash(receipts[i].TransactionHash)
-			receiptMap[txHash] = &receipts[i]
+		for j := range receipts {
+			txHash := common.HexToHash(receipts[j].TransactionHash)
+			receiptMap[txHash] = &receipts[j]
 		}
 
 		return receiptMap, nil
@@ -764,34 +903,18 @@ type TraceReplayResult struct {
 	Trace []TraceEntry `json:"trace"`
 }
 
-// JSONRPCRequest represents a JSON-RPC request
-type JSONRPCRequest struct {
-	JSONRPC string        `json:"jsonrpc"`
-	Method  string        `json:"method"`
-	Params  []interface{} `json:"params"`
-	ID      int           `json:"id"`
-}
-
-// JSONRPCResponse represents a JSON-RPC response
-type JSONRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      int             `json:"id"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *JSONRPCError   `json:"error,omitempty"`
-}
-
-// JSONRPCError represents a JSON-RPC error
-type JSONRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
 // processBlockWithTracing processes a block using transaction tracing for 100% accuracy
 func (s *Scanner) processBlockWithTracing(ctx context.Context, blockNum uint64) ([]*FailedTransaction, error) {
 	block, err := s.getBlockWithRetry(ctx, blockNum)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block: %w", err)
 	}
+	return s.processBlockWithTracingPreloaded(ctx, block)
+}
+
+// processBlockWithTracingPreloaded processes a pre-fetched block using tracing
+func (s *Scanner) processBlockWithTracingPreloaded(ctx context.Context, block *types.Block) ([]*FailedTransaction, error) {
+	blockNum := block.NumberU64()
 
 	// Fetch all receipts for the block in one call
 	receiptMap, err := s.getBlockReceiptsAll(ctx, blockNum)
@@ -844,6 +967,7 @@ func (s *Scanner) processBlockWithTracing(ctx context.Context, blockNum uint64) 
 
 		failedTx, err := s.processTracedFailedTransactionJSON(ctx, tx, receiptJSON, block, liquidationCall, blockTimestamp)
 		if err != nil {
+			log.Printf("Warning: failed to process traced tx %s: %v", txHash.Hex(), err)
 			continue
 		}
 
@@ -865,6 +989,7 @@ func (s *Scanner) processBlockWithTracingFallback(ctx context.Context, block *ty
 
 		receipt, err := s.getReceiptWithRetry(ctx, tx.Hash())
 		if err != nil {
+			log.Printf("Warning: failed to get receipt for tx %s: %v", tx.Hash().Hex(), err)
 			continue
 		}
 
@@ -879,6 +1004,7 @@ func (s *Scanner) processBlockWithTracingFallback(ctx context.Context, block *ty
 
 		failedTx, err := s.processTracedFailedTransaction(ctx, tx, receipt, block, liquidationCall, blockTimestamp)
 		if err != nil {
+			log.Printf("Warning: failed to process traced tx %s: %v", tx.Hash().Hex(), err)
 			continue
 		}
 
@@ -894,60 +1020,32 @@ func (s *Scanner) batchTraceLiquidationCalls(ctx context.Context, txHashes []com
 		return nil
 	}
 
-	// Build batch request
-	requests := make([]JSONRPCRequest, len(txHashes))
+	// Build batch elements
+	batch := make([]rpc.BatchElem, len(txHashes))
+	traceResults := make([]TraceReplayResult, len(txHashes))
+
 	for i, txHash := range txHashes {
-		requests[i] = JSONRPCRequest{
-			JSONRPC: "2.0",
-			Method:  "trace_replayTransaction",
-			Params: []interface{}{
-				txHash.Hex(),
-				[]string{"trace"},
-			},
-			ID: i + 1,
+		batch[i] = rpc.BatchElem{
+			Method: "trace_replayTransaction",
+			Args:   []interface{}{txHash.Hex(), []string{"trace"}},
+			Result: &traceResults[i],
 		}
 	}
 
-	reqBody, err := json.Marshal(requests)
+	err := s.rpcClient.BatchCallContext(ctx, batch)
 	if err != nil {
-		return nil
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", s.rpcURL, bytes.NewReader(reqBody))
-	if err != nil {
-		return nil
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil
-	}
-
-	var responses []JSONRPCResponse
-	if err := json.Unmarshal(body, &responses); err != nil {
+		log.Printf("Warning: batch trace call failed: %v", err)
 		return nil
 	}
 
 	results := make(map[common.Hash]*TracedLiquidationCall)
 
-	for i, rpcResp := range responses {
-		if rpcResp.Error != nil {
+	for i, elem := range batch {
+		if elem.Error != nil {
 			continue
 		}
 
-		var traceResult TraceReplayResult
-		if err := json.Unmarshal(rpcResp.Result, &traceResult); err != nil {
-			continue
-		}
-
-		liquidationCall := s.findLiquidationCallInTraceEntries(traceResult.Trace)
+		liquidationCall := s.findLiquidationCallInTraceEntries(traceResults[i].Trace)
 		if liquidationCall != nil {
 			results[txHashes[i]] = liquidationCall
 		}
@@ -977,7 +1075,7 @@ func (s *Scanner) processTracedFailedTransactionJSON(
 	}
 
 	revertReason := liquidationCall.Error
-	if revertReason == "" {
+	if revertReason == "" && !s.skipRevertReason {
 		revertReason = s.getRevertReason(ctx, tx, block.NumberU64())
 	}
 
@@ -1010,50 +1108,10 @@ type TracedLiquidationCall struct {
 
 // traceLiquidationCall traces a transaction to find liquidationCall attempts
 func (s *Scanner) traceLiquidationCall(ctx context.Context, txHash common.Hash) *TracedLiquidationCall {
-	// Call trace_replayTransaction with ["trace"] to get all internal calls
-	req := JSONRPCRequest{
-		JSONRPC: "2.0",
-		Method:  "trace_replayTransaction",
-		Params: []interface{}{
-			txHash.Hex(),
-			[]string{"trace"},
-		},
-		ID: 1,
-	}
-
-	reqBody, err := json.Marshal(req)
-	if err != nil {
-		return nil
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", s.rpcURL, bytes.NewReader(reqBody))
-	if err != nil {
-		return nil
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil
-	}
-
-	var rpcResp JSONRPCResponse
-	if err := json.Unmarshal(body, &rpcResp); err != nil {
-		return nil
-	}
-
-	if rpcResp.Error != nil {
-		return nil
-	}
-
 	var traceResult TraceReplayResult
-	if err := json.Unmarshal(rpcResp.Result, &traceResult); err != nil {
+	err := s.rpcClient.CallContext(ctx, &traceResult, "trace_replayTransaction", txHash.Hex(), []string{"trace"})
+	if err != nil {
+		log.Printf("Warning: trace call failed for tx %s: %v", txHash.Hex(), err)
 		return nil
 	}
 
@@ -1125,9 +1183,9 @@ func (s *Scanner) processTracedFailedTransaction(
 		funcName += " (via internal call)"
 	}
 
-	// Use the traced error if available, otherwise get revert reason
+	// Use the traced error if available, otherwise get revert reason (if not skipped)
 	revertReason := liquidationCall.Error
-	if revertReason == "" {
+	if revertReason == "" && !s.skipRevertReason {
 		revertReason = s.getRevertReason(ctx, tx, block.NumberU64())
 	}
 
