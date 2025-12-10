@@ -221,5 +221,5 @@ export async function syncUniswapV3SwapsFromCursor(
     pools = await discoverRelevantUniswapV3Pools(db, provider, chainId, fromBlockInclusive, toBlockInclusive);
   }
 
-  await syncUniswapV3Swaps(db, provider, chainId, effectiveStart, toBlockInclusive, chunkSize, pools);
+  // await syncUniswapV3Swaps(db, provider, chainId, effectiveStart, toBlockInclusive, chunkSize, pools);
 }

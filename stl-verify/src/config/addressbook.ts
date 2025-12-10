@@ -21,6 +21,7 @@ export interface ChainProtocols {
     sparklend?: ProtocolAddresses;
     aave?: ProtocolAddresses;
     grove?: ProtocolAddresses;
+    uniswapV3?: ProtocolAddresses;
 }
 
 export interface BlockMarkers {
@@ -48,6 +49,9 @@ const addressBooks: Record<ChainId, ChainAddressBook> = {
             },
             grove: {
                 // Add Grove addresses when available
+            },
+            uniswapV3: {
+                factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
             }
         },
         tokens: [ // TODO: Move this into SparkLend as it is specific to their usage
@@ -77,12 +81,9 @@ const addressBooks: Record<ChainId, ChainAddressBook> = {
         }
     },
     gnosis: {
-        protocols: {
-        },
-        tokens: [
-        ],
-        blocks: {
-        }
+        protocols: {},
+        tokens: [],
+        blocks: {}
     }
 };
 
