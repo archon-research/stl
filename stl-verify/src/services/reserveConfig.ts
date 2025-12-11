@@ -8,6 +8,12 @@ import {
 } from "../config/addressbook";
 import { createMulticall } from "../providers/rpc";
 import { withRetry, withTimeout } from "../utils/retry";
+import type { Database } from "../db/database";
+import {
+  insertReserveConfigSnapshots,
+  getLastReserveConfigSyncedBlock,
+  updateLastReserveConfigSyncedBlock,
+} from "../db/database";
 
 export interface ReserveTokenData {
   symbol: string;
@@ -160,6 +166,60 @@ export async function getReserveConfigTimeSeries(
     series.push(snapshots);
   }
   return series;
+}
+
+// Sync reserve configuration snapshots into SQLite over a block range
+export async function syncReserveConfigs(
+  db: Database,
+  provider: ethers.JsonRpcProvider,
+  chainId: ChainId,
+  startBlock: number,
+  endBlock: number,
+  step: number = 1000
+): Promise<void> {
+  const cursor = getLastReserveConfigSyncedBlock(db, chainId);
+  const effectiveStart = cursor !== null ? Math.max(startBlock, cursor + 1) : startBlock;
+
+  if (effectiveStart > endBlock) {
+    console.log(`[reserveConfig] Nothing to sync for ${chainId}, up to date at block ${cursor}`);
+    return;
+  }
+
+  console.log(`[reserveConfig] Syncing ${chainId} from block ${effectiveStart} to ${endBlock} (step ${step})`);
+
+  for (let block = effectiveStart; block <= endBlock; block += step) {
+    const blockEnd = Math.min(block + step - 1, endBlock);
+
+    for (let b = block; b <= blockEnd; b++) {
+      const snapshots = await getReserveConfigsAtBlock(provider, chainId, b);
+
+      if (snapshots.length > 0) {
+        insertReserveConfigSnapshots(
+          db,
+          chainId,
+          snapshots.map((s) => ({
+            blockNumber: s.blockNumber,
+            tokenAddress: s.asset,
+            tokenSymbol: s.symbol,
+            decimals: s.decimals,
+            ltv: s.ltv,
+            liquidationThreshold: s.liquidationThreshold,
+            liquidationBonus: s.liquidationBonus,
+            reserveFactor: s.reserveFactor,
+            usageAsCollateralEnabled: s.usageAsCollateralEnabled,
+            borrowingEnabled: s.borrowingEnabled,
+            stableBorrowRateEnabled: s.stableBorrowRateEnabled,
+            isActive: s.isActive,
+            isFrozen: s.isFrozen,
+          }))
+        );
+      }
+
+      updateLastReserveConfigSyncedBlock(db, chainId, b);
+    }
+
+    console.log(`[reserveConfig] Synced blocks ${block} - ${blockEnd} for ${chainId}`);
+  }
 }
 
 export async function getAllReservesTokensOnChain(

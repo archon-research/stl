@@ -192,6 +192,33 @@ export function initDatabase(dbPath: string = "./data/sparklend_events.db"): Dat
       last_synced_block INTEGER NOT NULL
     );
 
+    -- Reserve configuration snapshots from Spark data provider
+    CREATE TABLE IF NOT EXISTS reserve_config_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chain_id TEXT NOT NULL,
+      block_number INTEGER NOT NULL,
+      token_address TEXT NOT NULL,
+      token_symbol TEXT NOT NULL,
+      decimals TEXT NOT NULL,
+      ltv TEXT NOT NULL,
+      liquidation_threshold TEXT NOT NULL,
+      liquidation_bonus TEXT NOT NULL,
+      reserve_factor TEXT NOT NULL,
+      usage_as_collateral_enabled INTEGER NOT NULL,
+      borrowing_enabled INTEGER NOT NULL,
+      stable_borrow_rate_enabled INTEGER NOT NULL,
+      is_active INTEGER NOT NULL,
+      is_frozen INTEGER NOT NULL,
+      UNIQUE(chain_id, block_number, token_address)
+    );
+
+    -- Sync cursor for reserve configuration snapshots
+    CREATE TABLE IF NOT EXISTS reserve_config_sync_state (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chain_id TEXT NOT NULL UNIQUE,
+      last_synced_block INTEGER NOT NULL
+    );
+
     -- Indexes for efficient queries
     CREATE INDEX IF NOT EXISTS idx_supply_chain_block ON supply_events(chain_id, block_number);
     CREATE INDEX IF NOT EXISTS idx_supply_user ON supply_events(user);
@@ -221,6 +248,9 @@ export function initDatabase(dbPath: string = "./data/sparklend_events.db"): Dat
     CREATE INDEX IF NOT EXISTS idx_failed_liq_chain_block ON failed_liquidation_calls(chain_id, block_number);
     CREATE INDEX IF NOT EXISTS idx_failed_liq_from ON failed_liquidation_calls(from_address);
     CREATE INDEX IF NOT EXISTS idx_failed_liq_to ON failed_liquidation_calls(to_address);
+
+    CREATE INDEX IF NOT EXISTS idx_reserve_cfg_chain_block ON reserve_config_snapshots(chain_id, block_number);
+    CREATE INDEX IF NOT EXISTS idx_reserve_cfg_token ON reserve_config_snapshots(token_address);
   `);
 
   return db;
@@ -286,6 +316,83 @@ export function updateLastFailedTxSyncedBlock(db: Database, chainId: ChainId, bl
     INSERT INTO failed_transaction_sync_state (chain_id, last_synced_block) VALUES (?, ?)
     ON CONFLICT(chain_id) DO UPDATE SET last_synced_block = MAX(failed_transaction_sync_state.last_synced_block, excluded.last_synced_block)
   `).run(chainId, blockNumber);
+}
+
+// Reserve config sync state helpers
+export function getLastReserveConfigSyncedBlock(db: Database, chainId: ChainId): number | null {
+  const row = db
+    .query("SELECT last_synced_block FROM reserve_config_sync_state WHERE chain_id = ?")
+    .get(chainId) as { last_synced_block: number } | null;
+  return row?.last_synced_block ?? null;
+}
+
+export function updateLastReserveConfigSyncedBlock(db: Database, chainId: ChainId, blockNumber: number): void {
+  db.query(`
+    INSERT INTO reserve_config_sync_state (chain_id, last_synced_block) VALUES (?, ?)
+    ON CONFLICT(chain_id) DO UPDATE SET last_synced_block = MAX(reserve_config_sync_state.last_synced_block, excluded.last_synced_block)
+  `).run(chainId, blockNumber);
+}
+
+// Insert a batch of reserve configuration snapshots
+export function insertReserveConfigSnapshots(
+  db: Database,
+  chainId: ChainId,
+  snapshots: {
+    blockNumber: number;
+    tokenAddress: string;
+    tokenSymbol: string;
+    decimals: bigint;
+    ltv: bigint;
+    liquidationThreshold: bigint;
+    liquidationBonus: bigint;
+    reserveFactor: bigint;
+    usageAsCollateralEnabled: boolean;
+    borrowingEnabled: boolean;
+    stableBorrowRateEnabled: boolean;
+    isActive: boolean;
+    isFrozen: boolean;
+  }[]
+): void {
+  const stmt = db.query(`
+    INSERT INTO reserve_config_snapshots (
+      chain_id,
+      block_number,
+      token_address,
+      token_symbol,
+      decimals,
+      ltv,
+      liquidation_threshold,
+      liquidation_bonus,
+      reserve_factor,
+      usage_as_collateral_enabled,
+      borrowing_enabled,
+      stable_borrow_rate_enabled,
+      is_active,
+      is_frozen
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(chain_id, block_number, token_address) DO NOTHING
+  `);
+
+  db.transaction(() => {
+    for (const s of snapshots) {
+      stmt.run(
+        chainId,
+        s.blockNumber,
+        s.tokenAddress,
+        s.tokenSymbol,
+        s.decimals.toString(),
+        s.ltv.toString(),
+        s.liquidationThreshold.toString(),
+        s.liquidationBonus.toString(),
+        s.reserveFactor.toString(),
+        s.usageAsCollateralEnabled ? 1 : 0,
+        s.borrowingEnabled ? 1 : 0,
+        s.stableBorrowRateEnabled ? 1 : 0,
+        s.isActive ? 1 : 0,
+        s.isFrozen ? 1 : 0
+      );
+    }
+  })();
 }
 
 export type { Database };
