@@ -8,11 +8,13 @@ import {
 } from "../config/addressbook";
 import { createMulticall } from "../providers/rpc";
 import { withRetry, withTimeout } from "../utils/retry";
+import { mapWithConcurrency } from "../utils/concurrency";
 import type { Database } from "../db/database";
 import {
   insertReserveConfigSnapshots,
   getLastReserveConfigSyncedBlock,
   updateLastReserveConfigSyncedBlock,
+  getDistinctPriceBlocks,
 } from "../db/database";
 
 export interface ReserveTokenData {
@@ -168,14 +170,14 @@ export async function getReserveConfigTimeSeries(
   return series;
 }
 
-// Sync reserve configuration snapshots into SQLite over a block range
+// Sync reserve configuration snapshots into SQLite only for blocks with prices
 export async function syncReserveConfigs(
   db: Database,
   provider: ethers.JsonRpcProvider,
   chainId: ChainId,
   startBlock: number,
   endBlock: number,
-  step: number = 1000
+  maxConcurrent: number = 5
 ): Promise<void> {
   const cursor = getLastReserveConfigSyncedBlock(db, chainId);
   const effectiveStart = cursor !== null ? Math.max(startBlock, cursor + 1) : startBlock;
@@ -185,13 +187,21 @@ export async function syncReserveConfigs(
     return;
   }
 
-  console.log(`[reserveConfig] Syncing ${chainId} from block ${effectiveStart} to ${endBlock} (step ${step})`);
+  // Get all distinct price blocks in range, then walk those
+  const priceBlocks = getDistinctPriceBlocks(db, chainId, effectiveStart, endBlock);
 
-  for (let block = effectiveStart; block <= endBlock; block += step) {
-    const blockEnd = Math.min(block + step - 1, endBlock);
+  if (priceBlocks.length === 0) {
+    console.log(`[reserveConfig] No price blocks found for ${chainId} between ${effectiveStart} and ${endBlock}`);
+    return;
+  }
 
-    for (let b = block; b <= blockEnd; b++) {
-      const snapshots = await getReserveConfigsAtBlock(provider, chainId, b);
+  console.log(
+    `[reserveConfig] Syncing ${chainId} for ${priceBlocks.length} price blocks between ${effectiveStart} and ${endBlock} (maxConcurrent=${maxConcurrent})`
+  );
+
+  await mapWithConcurrency(priceBlocks, maxConcurrent, async (block) => {
+    try {
+      const snapshots = await getReserveConfigsAtBlock(provider, chainId, block);
 
       if (snapshots.length > 0) {
         insertReserveConfigSnapshots(
@@ -215,11 +225,12 @@ export async function syncReserveConfigs(
         );
       }
 
-      updateLastReserveConfigSyncedBlock(db, chainId, b);
+      updateLastReserveConfigSyncedBlock(db, chainId, block);
+      console.log(`[reserveConfig] Synced reserve config for block ${block} on ${chainId}`);
+    } catch (e) {
+      console.warn(`[reserveConfig] Error syncing block ${block} on ${chainId}:`, e);
     }
-
-    console.log(`[reserveConfig] Synced blocks ${block} - ${blockEnd} for ${chainId}`);
-  }
+  });
 }
 
 export async function getAllReservesTokensOnChain(

@@ -292,6 +292,31 @@ export function updateLastPriceSyncedBlock(db: Database, chainId: ChainId, block
   `).run(chainId, blockNumber);
 }
 
+// Get distinct price blocks for a chain, optionally filtered by min/max block
+export function getDistinctPriceBlocks(
+  db: Database,
+  chainId: ChainId,
+  minBlock?: number,
+  maxBlock?: number
+): number[] {
+  let sql = "SELECT DISTINCT block_number FROM token_prices WHERE chain_id = ?";
+  const params: (string | number)[] = [chainId];
+
+  if (minBlock !== undefined) {
+    sql += " AND block_number >= ?";
+    params.push(minBlock);
+  }
+  if (maxBlock !== undefined) {
+    sql += " AND block_number <= ?";
+    params.push(maxBlock);
+  }
+
+  sql += " ORDER BY block_number";
+
+  const rows = db.query(sql).all(...params) as { block_number: number }[];
+  return rows.map((r) => r.block_number);
+}
+
 // Optional: dedicated sync state for Uniswap V3 swaps per chain
 export function getLastUniswapV3SyncedBlock(db: Database, chainId: ChainId): number | null {
   const row = db.query("SELECT last_synced_block FROM uniswap_sync_state WHERE chain_id = ?").get(chainId) as { last_synced_block: number } | null;
