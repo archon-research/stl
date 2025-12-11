@@ -7,6 +7,7 @@ import {
   getTokens,
 } from "../config/addressbook";
 import { createMulticall } from "../providers/rpc";
+import { withRetry, withTimeout } from "../utils/retry";
 
 export interface ReserveTokenData {
   symbol: string;
@@ -60,7 +61,15 @@ async function _getReserveConfig(
 
   type Aggregate3Response = { success: boolean; returnData: string };
 
-  const results: Aggregate3Response[] = await multicall.aggregate3.staticCall(calls, { blockTag });
+  const results: Aggregate3Response[] = await withRetry(
+    () =>
+      withTimeout(
+        multicall.aggregate3.staticCall(calls, { blockTag }),
+        30000,
+        `reserveConfig multicall at block ${blockTag}`
+      ),
+    3
+  );
 
   return results.map((res) => {
     if (!res.success || res.returnData === "0x") {
@@ -137,7 +146,6 @@ export async function getReserveConfigsAtBlock(
 
   return snapshots;
 }
-
 
 export async function getReserveConfigTimeSeries(
   provider: ethers.JsonRpcProvider,
