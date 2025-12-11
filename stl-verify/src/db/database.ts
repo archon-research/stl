@@ -172,6 +172,26 @@ export function initDatabase(dbPath: string = "./data/sparklend_events.db"): Dat
       UNIQUE(chain_id, token_address, date)
     );
 
+    -- Failed liquidation call attempts (identified via trace_filter)
+    CREATE TABLE IF NOT EXISTS failed_liquidation_calls (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chain_id TEXT NOT NULL,
+      block_number INTEGER NOT NULL,
+      tx_hash TEXT NOT NULL,
+      from_address TEXT NOT NULL,
+      to_address TEXT NOT NULL,
+      error TEXT NOT NULL,
+      gas_used TEXT NOT NULL,
+      UNIQUE(chain_id, tx_hash)
+    );
+
+    -- Sync cursor for failed liquidation call tracing
+    CREATE TABLE IF NOT EXISTS failed_transaction_sync_state (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chain_id TEXT NOT NULL UNIQUE,
+      last_synced_block INTEGER NOT NULL
+    );
+
     -- Indexes for efficient queries
     CREATE INDEX IF NOT EXISTS idx_supply_chain_block ON supply_events(chain_id, block_number);
     CREATE INDEX IF NOT EXISTS idx_supply_user ON supply_events(user);
@@ -197,6 +217,10 @@ export function initDatabase(dbPath: string = "./data/sparklend_events.db"): Dat
     CREATE INDEX IF NOT EXISTS idx_uni_swaps_token1 ON uniswap_v3_swaps(token1);
 
     CREATE INDEX IF NOT EXISTS idx_token_volume_daily_token_date ON token_volume_daily(chain_id, token_address, date);
+
+    CREATE INDEX IF NOT EXISTS idx_failed_liq_chain_block ON failed_liquidation_calls(chain_id, block_number);
+    CREATE INDEX IF NOT EXISTS idx_failed_liq_from ON failed_liquidation_calls(from_address);
+    CREATE INDEX IF NOT EXISTS idx_failed_liq_to ON failed_liquidation_calls(to_address);
   `);
 
   return db;
@@ -248,6 +272,19 @@ export function updateLastUniswapV3SyncedBlock(db: Database, chainId: ChainId, b
   db.query(`
     INSERT INTO uniswap_sync_state (chain_id, last_synced_block) VALUES (?, ?)
     ON CONFLICT(chain_id) DO UPDATE SET last_synced_block = MAX(uniswap_sync_state.last_synced_block, excluded.last_synced_block)
+  `).run(chainId, blockNumber);
+}
+
+// Sync state helpers for failed liquidation traces
+export function getLastFailedTxSyncedBlock(db: Database, chainId: ChainId): number | null {
+  const row = db.query("SELECT last_synced_block FROM failed_transaction_sync_state WHERE chain_id = ?").get(chainId) as { last_synced_block: number } | null;
+  return row?.last_synced_block ?? null;
+}
+
+export function updateLastFailedTxSyncedBlock(db: Database, chainId: ChainId, blockNumber: number): void {
+  db.query(`
+    INSERT INTO failed_transaction_sync_state (chain_id, last_synced_block) VALUES (?, ?)
+    ON CONFLICT(chain_id) DO UPDATE SET last_synced_block = MAX(failed_transaction_sync_state.last_synced_block, excluded.last_synced_block)
   `).run(chainId, blockNumber);
 }
 

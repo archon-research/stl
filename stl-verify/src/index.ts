@@ -8,12 +8,14 @@ import type { Database } from "bun:sqlite";
 import type { JsonRpcProvider } from "ethers";
 import { type ChainId, getChainConfig } from "./config/chains";
 import { getBlockMarkers, getProtocolAddresses } from "./config/addressbook";
-import { initDatabase, getLastSyncedBlock, updateLastSyncedBlock, getLastPriceSyncedBlock, updateLastPriceSyncedBlock } from "./db/database";
-import { saveEventsToDatabase } from "./db/events";
+import { initDatabase, getLastSyncedBlock, updateLastSyncedBlock, getLastPriceSyncedBlock, updateLastPriceSyncedBlock, getLastFailedTxSyncedBlock, updateLastFailedTxSyncedBlock } from "./db/database";
+import { saveEventsToDatabase, getTopLiquidators } from "./db/events";
+import { saveFailedLiquidations } from "./db/failedTransactions";
 import { savePricesToDatabase } from "./db/prices";
 import { createProvider, testRpcConnection } from "./providers/rpc";
 import { syncHistoricalEvents } from "./services/events";
 import { syncHistoricalPrices } from "./services/prices";
+import { fetchFailedLiquidations } from "./services/failedTransactions";
 import { syncUniswapV3SwapsFromCursor } from "./services/uniswapV3";
 
 // Global error handlers to prevent silent crashes
@@ -35,6 +37,7 @@ const concurrency = concurrencyArg ? parseInt(concurrencyArg, 10) : 1;
 const syncEventsFlag = args.includes("--sync-events");
 const syncPricesFlag = args.includes("--sync-prices");
 const syncUniswapFlag = args.includes("--sync-uniswap-v3");
+const syncFailedLiquidationsFlag = args.includes("--sync-failed-liquidations");
 const testConnectionFlag = args.includes("--test");
 
 /**
@@ -144,6 +147,56 @@ async function syncUniswapV3(
   console.log("Uniswap V3 swap sync completed.");
 }
 
+
+async function syncFailedLiquidations(
+  db: Database,
+  provider: JsonRpcProvider,
+  chainId: ChainId,
+  currentBlock: number
+): Promise<void> {
+    const sparklendAddresses = getProtocolAddresses(chainId, "sparklend");
+    if (!sparklendAddresses?.pool) {
+      console.log("SparkLend not configured, skipping failed liquidations fetch.");
+      return;
+    }
+
+    const blockMarkers = getBlockMarkers(chainId);
+    if (!blockMarkers.poolCreation) {
+      console.log("Pool creation block not set, cannot fetch failed liquidations.");
+      return;
+    }
+    const lastFailedTxSyncedBlock = getLastFailedTxSyncedBlock(db, chainId);
+    const startBlock = lastFailedTxSyncedBlock ? lastFailedTxSyncedBlock + 1 : blockMarkers.poolCreation;
+    if (startBlock >= currentBlock) {
+      console.log("Failed liquidations already synced to current block.");
+      return;
+    }
+
+    const topLiquidators = getTopLiquidators(db, chainId, 20);
+    const liquidatorAddresses = topLiquidators.map(l => l.liquidator);
+    if (liquidatorAddresses.length === 0) {
+      console.log("No liquidator addresses available, skipping failed liquidations fetch.");
+      return;
+    }
+    
+    await fetchFailedLiquidations(
+        provider,
+        sparklendAddresses.pool,
+        liquidatorAddresses,
+        startBlock,
+        currentBlock,
+        5000,
+        concurrency,
+        (rows, chunkEnd) => {
+          console.log(`Fetched ${rows.length} failed liquidations up to block ${chunkEnd}`);
+          if (rows.length > 0) {
+            saveFailedLiquidations(db, chainId, rows);
+          }
+          updateLastFailedTxSyncedBlock(db, chainId, chunkEnd);
+        }
+    );
+}
+
 /**
  * Show usage help
  */
@@ -156,6 +209,7 @@ function showUsageHelp(): void {
   console.log("  --sync-events          Sync historical SparkLend events");
   console.log("  --sync-prices          Sync historical token prices");
   console.log("  --sync-uniswap-v3      Sync historical Uniswap V3 swaps for tracked tokens");
+  console.log("  --sync-failed-liquidations  Sync failed SparkLend liquidation attempts (trace_filter)");
   console.log("  --test                 Test RPC connection only");
   console.log("\nExamples:");
   console.log("  bun run src/index.ts --chain=ethereum --sync-events");
@@ -209,7 +263,11 @@ async function main() {
     await syncUniswapV3(db, provider, chainId, currentBlock);
   }
 
-  if (!syncEventsFlag && !syncPricesFlag && !syncUniswapFlag && !testConnectionFlag) {
+  if (syncFailedLiquidationsFlag) {
+    await syncFailedLiquidations(db, provider, chainId, currentBlock);
+  }
+
+  if (!syncEventsFlag && !syncPricesFlag && !syncUniswapFlag && !testConnectionFlag && !syncFailedLiquidationsFlag) {
     showUsageHelp();
   }
 

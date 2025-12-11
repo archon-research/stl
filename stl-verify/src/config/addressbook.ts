@@ -110,3 +110,12 @@ export function getTokens(chainId: ChainId): TokenInfo[] {
 export function getBlockMarkers(chainId: ChainId): BlockMarkers {
     return addressBooks[chainId]?.blocks ?? {};
 }
+
+export function createTokenByAddressMap(chainId: ChainId): Map<string, TokenInfo> {
+    const tokens = getTokens(chainId);
+    const tokenMap = new Map<string, TokenInfo>();
+    for (const token of tokens) {
+        tokenMap.set(token.address.toLowerCase(), token);
+    }
+    return tokenMap;
+}

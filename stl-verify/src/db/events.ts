@@ -116,3 +116,27 @@ export function saveEventsToDatabase(
     }
   })();
 }
+
+export function getTopLiquidators(
+  db: Database,
+  chainId: ChainId,
+  limit: number = 10
+): Array<{ liquidator: string; totalLiquidated: bigint }> {
+  const query = db.query(`
+    SELECT liquidator, count(*) AS total_liquidated
+    FROM liquidation_call_events
+    WHERE chain_id = ?
+    GROUP BY liquidator
+    ORDER BY total_liquidated DESC
+    LIMIT ?
+  `);
+
+  const results: Array<{ liquidator: string; totalLiquidated: bigint }> = [];
+  for (const row of query.iterate(chainId, limit)) {
+    results.push({
+      liquidator: row.liquidator,
+      totalLiquidated: row.total_liquidated
+    });
+  }
+  return results;
+}
