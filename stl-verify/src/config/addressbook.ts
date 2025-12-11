@@ -8,6 +8,7 @@ export interface ProtocolAddresses {
     pool?: string;
     poolAddressesProvider?: string;
     oracle?: string;
+    dataProvider?: string;
     [key: string]: string | undefined;
 }
 
@@ -27,6 +28,7 @@ export interface ChainProtocols {
 export interface BlockMarkers {
     poolCreation?: number;
     oracleOperational?: number;
+    dataProviderCreation?: number;
 }
 
 export interface ChainAddressBook {
@@ -45,7 +47,8 @@ const addressBooks: Record<ChainId, ChainAddressBook> = {
             sparklend: {
                 pool: "0xC13e21B648A5Ee794902342038FF3aDAB66BE987",
                 poolAddressesProvider: "0x02C3eA4e34C0cBd694D2adFa2c690EECbC1793eE",
-                oracle: "0x8105f69D9C41644c6A0803fDA7D03Aa70996cFD9"
+                oracle: "0x8105f69D9C41644c6A0803fDA7D03Aa70996cFD9",
+                dataProvider: "0x02d16cC94E8CAA0F1C6a9ed7789dCfcF49E542f2"
             },
             grove: {
                 // Add Grove addresses when available
@@ -77,7 +80,8 @@ const addressBooks: Record<ChainId, ChainAddressBook> = {
         // TODO: Move this to a protocol
         blocks: {
             poolCreation: 16776401, 
-            oracleOperational: 16776437
+            oracleOperational: 16776437,
+            dataProviderCreation: 16776391
         }
     },
     gnosis: {
