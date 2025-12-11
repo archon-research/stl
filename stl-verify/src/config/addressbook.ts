@@ -48,7 +48,7 @@ const addressBooks: Record<ChainId, ChainAddressBook> = {
                 pool: "0xC13e21B648A5Ee794902342038FF3aDAB66BE987",
                 poolAddressesProvider: "0x02C3eA4e34C0cBd694D2adFa2c690EECbC1793eE",
                 oracle: "0x8105f69D9C41644c6A0803fDA7D03Aa70996cFD9",
-                dataProvider: "0x02d16cC94E8CAA0F1C6a9ed7789dCfcF49E542f2"
+                dataProvider: "0xfc21d6d146e6086b8359705c8b28512a983db0cb" 
             },
             grove: {
                 // Add Grove addresses when available

@@ -1,7 +1,17 @@
 import { ethers } from "ethers";
 import sparkDataProviderAbi from "../../abi/spark_data_provider.json";
 import type { ChainId } from "../config/chains";
-import { getBlockMarkers, getProtocolAddresses, getTokens } from "../config/addressbook";
+import {
+  getBlockMarkers,
+  getProtocolAddresses,
+  getTokens,
+} from "../config/addressbook";
+import { createMulticall } from "../providers/rpc";
+
+export interface ReserveTokenData {
+  symbol: string;
+  tokenAddress: string;
+}
 
 export interface ReserveConfigSnapshot {
   blockNumber: number;
@@ -19,6 +29,50 @@ export interface ReserveConfigSnapshot {
   isFrozen: boolean;
 }
 
+// Typed tuple for getReserveConfigurationData return value
+type ReserveConfigTuple = [
+  bigint, // decimals
+  bigint, // ltv
+  bigint, // liquidationThreshold
+  bigint, // liquidationBonus
+  bigint, // reserveFactor
+  boolean, // usageAsCollateralEnabled
+  boolean, // borrowingEnabled
+  boolean, // stableBorrowRateEnabled
+  boolean, // isActive
+  boolean // isFrozen
+];
+
+async function _getReserveConfig(
+  dataProviderAddress: string,
+  tokens: string[],
+  blockTag: number,
+  provider: ethers.JsonRpcProvider
+): Promise<(ReserveConfigTuple | null)[]> {
+  const multicall = createMulticall(provider);
+  const iface = new ethers.Interface(sparkDataProviderAbi as any);
+
+  const calls = tokens.map((token) => ({
+    target: dataProviderAddress,
+    allowFailure: true,
+    callData: iface.encodeFunctionData("getReserveConfigurationData", [token]),
+  }));
+
+  type Aggregate3Response = { success: boolean; returnData: string };
+
+  const results: Aggregate3Response[] = await multicall.aggregate3.staticCall(calls, { blockTag });
+
+  return results.map((res) => {
+    if (!res.success || res.returnData === "0x") {
+      return null;
+    }
+    return iface.decodeFunctionResult(
+      "getReserveConfigurationData",
+      res.returnData
+    ) as unknown as ReserveConfigTuple;
+  });
+}
+
 export async function getReserveConfigsAtBlock(
   provider: ethers.JsonRpcProvider,
   chainId: ChainId,
@@ -26,15 +80,29 @@ export async function getReserveConfigsAtBlock(
 ): Promise<ReserveConfigSnapshot[]> {
   const protocol = getProtocolAddresses(chainId, "sparklend");
   if (!protocol?.dataProvider) {
-    throw new Error(`SparkLend data provider not configured for chain: ${chainId}`);
+    throw new Error(
+      `SparkLend data provider not configured for chain: ${chainId}`
+    );
   }
 
-  const dataProvider = new ethers.Contract(protocol.dataProvider, sparkDataProviderAbi, provider);
-  const tokens = getTokens(chainId);
+  const tokensMeta = getTokens(chainId);
+  const tokenAddresses = tokensMeta.map((t) => t.address);
+
+  const decodedResults = await _getReserveConfig(
+    protocol.dataProvider,
+    tokenAddresses,
+    blockNumber,
+    provider
+  );
 
   const snapshots: ReserveConfigSnapshot[] = [];
 
-  for (const token of tokens) {
+  decodedResults.forEach((result, idx) => {
+    if (!result) {
+      // Token not yet listed at this block; skip
+      return;
+    }
+
     const [
       decimals,
       ltv,
@@ -45,39 +113,31 @@ export async function getReserveConfigsAtBlock(
       borrowingEnabled,
       stableBorrowRateEnabled,
       isActive,
-      isFrozen
-    ] = await dataProvider.getReserveConfigurationData(token.address, { blockTag: blockNumber });
+      isFrozen,
+    ] = result as unknown as ReserveConfigTuple;
+
+    const token = tokensMeta[idx];
 
     snapshots.push({
       blockNumber,
       asset: token.address,
       symbol: token.symbol,
-      decimals: decimals as bigint,
-      ltv: ltv as bigint,
-      liquidationThreshold: liquidationThreshold as bigint,
-      liquidationBonus: liquidationBonus as bigint,
-      reserveFactor: reserveFactor as bigint,
-      usageAsCollateralEnabled: usageAsCollateralEnabled as boolean,
-      borrowingEnabled: borrowingEnabled as boolean,
-      stableBorrowRateEnabled: stableBorrowRateEnabled as boolean,
-      isActive: isActive as boolean,
-      isFrozen: isFrozen as boolean
+      decimals,
+      ltv,
+      liquidationThreshold,
+      liquidationBonus,
+      reserveFactor,
+      usageAsCollateralEnabled,
+      borrowingEnabled,
+      stableBorrowRateEnabled,
+      isActive,
+      isFrozen,
     });
-  }
+  });
 
   return snapshots;
 }
 
-export async function getInitialReserveConfigs(
-  provider: ethers.JsonRpcProvider,
-  chainId: ChainId
-): Promise<ReserveConfigSnapshot[]> {
-  const blocks = getBlockMarkers(chainId);
-  if (!blocks.dataProviderCreation) {
-    throw new Error(`dataProviderCreation block not configured for chain: ${chainId}`);
-  }
-  return getReserveConfigsAtBlock(provider, chainId, blocks.dataProviderCreation);
-}
 
 export async function getReserveConfigTimeSeries(
   provider: ethers.JsonRpcProvider,
@@ -92,4 +152,33 @@ export async function getReserveConfigTimeSeries(
     series.push(snapshots);
   }
   return series;
+}
+
+export async function getAllReservesTokensOnChain(
+  provider: ethers.JsonRpcProvider,
+  chainId: ChainId,
+  blockTag?: number
+): Promise<ReserveTokenData[]> {
+  const protocol = getProtocolAddresses(chainId, "sparklend");
+  if (!protocol?.dataProvider) {
+    throw new Error(
+      `SparkLend data provider not configured for chain: ${chainId}`
+    );
+  }
+
+  const dataProvider = new ethers.Contract(
+    protocol.dataProvider,
+    sparkDataProviderAbi,
+    provider
+  );
+
+  const reserves = (await dataProvider.getAllReservesTokens({ blockTag })) as {
+    symbol: string;
+    tokenAddress: string;
+  }[];
+
+  return reserves.map((r) => ({
+    symbol: r.symbol,
+    tokenAddress: r.tokenAddress,
+  }));
 }
