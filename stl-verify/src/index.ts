@@ -17,6 +17,7 @@ import { syncHistoricalEvents } from "./services/events";
 import { syncHistoricalPrices } from "./services/prices";
 import { fetchFailedLiquidations } from "./services/failedTransactions";
 import { syncUniswapV3SwapsFromCursor } from "./services/uniswapV3";
+import { syncReserveConfigs } from "./services/reserveConfig";
 
 // Global error handlers to prevent silent crashes
 process.on("unhandledRejection", (reason, promise) => {
@@ -38,6 +39,7 @@ const syncEventsFlag = args.includes("--sync-events");
 const syncPricesFlag = args.includes("--sync-prices");
 const syncUniswapFlag = args.includes("--sync-uniswap-v3");
 const syncFailedLiquidationsFlag = args.includes("--sync-failed-liquidations");
+const syncReserveConfigFlag = args.includes("--sync-reserve-configs");
 const testConnectionFlag = args.includes("--test");
 
 /**
@@ -210,11 +212,13 @@ function showUsageHelp(): void {
   console.log("  --sync-prices          Sync historical token prices");
   console.log("  --sync-uniswap-v3      Sync historical Uniswap V3 swaps for tracked tokens");
   console.log("  --sync-failed-liquidations  Sync failed SparkLend liquidation attempts (trace_filter)");
+  console.log("  --sync-reserve-configs Sync reserve configuration snapshots (per price block)");
   console.log("  --test                 Test RPC connection only");
   console.log("\nExamples:");
   console.log("  bun run src/index.ts --chain=ethereum --sync-events");
   console.log("  bun run src/index.ts --chain=ethereum --sync-prices --concurrency=3");
   console.log("  bun run src/index.ts --chain=ethereum --sync-uniswap-v3");
+  console.log("  bun run src/index.ts --chain=ethereum --sync-reserve-configs");
   console.log("  bun run src/index.ts --chain=base --show-prices");
 }
 
@@ -267,7 +271,13 @@ async function main() {
     await syncFailedLiquidations(db, provider, chainId, currentBlock);
   }
 
-  if (!syncEventsFlag && !syncPricesFlag && !syncUniswapFlag && !testConnectionFlag && !syncFailedLiquidationsFlag) {
+  if (syncReserveConfigFlag) {
+    const blockMarkers = getBlockMarkers(chainId);
+    const startBlock = blockMarkers.dataProviderCreation ?? blockMarkers.poolCreation ?? Math.max(currentBlock - 10000, 0);
+    await syncReserveConfigs(db, provider, chainId, startBlock, currentBlock, concurrency);
+  }
+
+  if (!syncEventsFlag && !syncPricesFlag && !syncUniswapFlag && !testConnectionFlag && !syncFailedLiquidationsFlag && !syncReserveConfigFlag) {
     showUsageHelp();
   }
 
