@@ -17,7 +17,7 @@ STL is a Go-based modular monolith for blockchain risk analysis and verification
 ### Architecture Pattern
 Each subsystem follows **Ports & Adapters**:
 - `domain/` - Pure business logic, no external dependencies
-- `ports/` - Interfaces defining boundaries (no implementations)
+- `interfaces/` - Interfaces defining boundaries (no implementations)
 - `services/` - Application services implementing business use cases
 - `adapters/primary/` - Driving adapters (HTTP, CLI, gRPC)
 - `adapters/secondary/` - Driven adapters (databases, external APIs)
@@ -34,7 +34,7 @@ Each subsystem follows **Ports & Adapters**:
 ### Naming Conventions
 - Subsystems are prefixed with `stl-` (e.g., `stl-verify`, `stl-trade`)
 - Package names match directory names (use underscores for multi-word: avoid if possible)
-- Interfaces in `ports/` define the contract; implementations live in `adapters/` or `services/`
+- Interfaces in `interfaces/` define the contract; implementations live in `adapters/` or `services/`
 
 ### Testing
 - Unit tests: Next to source files (`*_test.go`)

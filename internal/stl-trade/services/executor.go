@@ -3,14 +3,14 @@ package services
 import (
 	"context"
 
-	"github.com/archon-research/stl/internal/stl-trade/ports"
+	"github.com/archon-research/stl/internal/stl-trade/interfaces"
 )
 
 type Executor struct {
-	repo ports.OrderRepository
+	repo interfaces.OrderRepository
 }
 
-func NewExecutor(repo ports.OrderRepository) *Executor {
+func NewExecutor(repo interfaces.OrderRepository) *Executor {
 	return &Executor{repo: repo}
 }
 

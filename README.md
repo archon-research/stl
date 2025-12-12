@@ -19,27 +19,29 @@ stl/
 │   │
 │   ├── stl-verify/             # === VERIFY SUB-SYSTEM ===
 │   │   ├── domain/             # Core Business Logic
-│   │   ├── ports/              # Interfaces defining the boundaries
+│   │   ├── interfaces/         # Interfaces defining the boundaries
 │   │   ├── services/           # Application Services
 │   │   └── adapters/           # Subsystem-specific adapters
 │   │       ├── primary/        # Driving Adapters
 │   │       │   ├── cli/        # CLI commands
 │   │       │   └── http/       # HTTP handlers
-│   │       └── secondary/      # Driven Adapters
-│   │           └── postgres/   # Verify-specific Repositories & Migrations
-│   │               ├── migrations/
-│   │               └── models/
+│   │       └── secondary/      # Driven Adapters (Repository implementations)
+│   │           ├── postgres/   # PostgreSQL repository implementation
+│   │           │   ├── migrations/
+│   │           │   └── models/
+│   │           └── memory/     # In-memory repository (for testing)
 │   │
 │   ├── stl-trade/              # === TRADE SUB-SYSTEM ===
 │   │   ├── domain/             # Core Business Logic (Orders, Execution)
-│   │   ├── ports/              # Interfaces defining the boundaries
+│   │   ├── interfaces/         # Interfaces defining the boundaries
 │   │   ├── services/           # Application Services
 │   │   └── adapters/           # Subsystem-specific adapters
 │   │       ├── primary/        # Driving Adapters (HTTP handlers)
-│   │       └── secondary/      # Driven Adapters
-│   │           └── postgres/   # Trade-specific Repositories & Migrations
-│   │               ├── migrations/
-│   │               └── models/
+│   │       └── secondary/      # Driven Adapters (Repository implementations)
+│   │           ├── postgres/   # PostgreSQL repository implementation
+│   │           │   ├── migrations/
+│   │           │   └── models/
+│   │           └── memory/     # In-memory repository (for testing)
 │   │
 │   └── gateways/               # === SHARED GATEWAYS (External Systems) ===
 │       ├── ethereum/           # Ethereum Client / Data Access

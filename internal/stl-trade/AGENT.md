@@ -12,7 +12,7 @@ Trade execution and order management subsystem.
 
 ## Key Files
 - `domain/order.go` - Order models and validation
-- `ports/ports.go` - Interface definitions
+- `interfaces/interfaces.go` - Interface definitions
 - `services/executor.go` - Trade execution logic
 - `adapters/primary/handler.go` - HTTP handlers
 - `adapters/secondary/postgres/migrations/` - DB schema

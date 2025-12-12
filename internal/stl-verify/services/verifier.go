@@ -2,14 +2,14 @@ package services
 
 import (
 	"github.com/archon-research/stl/internal/stl-verify/domain"
-	"github.com/archon-research/stl/internal/stl-verify/ports"
+	"github.com/archon-research/stl/internal/stl-verify/interfaces"
 )
 
 type Verifier struct {
-	repo ports.RiskRepository
+	repo interfaces.RiskRepository
 }
 
-func NewVerifier(repo ports.RiskRepository) *Verifier {
+func NewVerifier(repo interfaces.RiskRepository) *Verifier {
 	return &Verifier{repo: repo}
 }
 

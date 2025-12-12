@@ -1,4 +1,4 @@
-package ports
+package interfaces
 
 import "github.com/archon-research/stl/internal/stl-verify/domain"
 
