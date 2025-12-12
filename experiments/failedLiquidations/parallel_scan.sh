@@ -60,7 +60,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -a|--all)
-            FAILED_ONLY=true
+            FAILED_ONLY=false
             shift
             ;;
         -h|--help)

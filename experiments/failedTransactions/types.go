@@ -42,6 +42,8 @@ type ABIInput struct {
 }
 
 // SparkLendABIs contains the ABI definitions for decoding function arguments
+// Note: These definitions are derived from the SparkLend Pool contract ABI.
+// Full ABI JSON can be found at: https://docs.sparkprotocol.io/developers/deployed-contracts/v3-mainnet/ethereum-addresses
 var SparkLendABIs = map[string]FunctionABI{
 	"supply": {
 		Name: "supply",

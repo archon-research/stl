@@ -1,5 +1,7 @@
 package testutil
 
+import "fmt"
+
 // Fixtures provides test data for use across test suites
 
 type TestOrder struct {
@@ -22,7 +24,7 @@ func SampleOrders(count int) []TestOrder {
 	orders := make([]TestOrder, count)
 	for i := 0; i < count; i++ {
 		orders[i] = TestOrder{
-			ID:     "test-order-" + string(rune('0'+i)),
+			ID:     fmt.Sprintf("test-order-%d", i),
 			Symbol: "ETH/USD",
 			Amount: float64(i + 1),
 			Side:   "BUY",
