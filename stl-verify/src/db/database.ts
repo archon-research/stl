@@ -213,7 +213,7 @@ export function initDatabase(dbPath: string = "./data/sparklend_events.db"): Dat
     );
 
     -- Sync cursor for reserve configuration snapshots
-    CREATE TABLE IF NOT EXISTS reserve_config_sync_state (
+    CREATE TABLE IF NOT EXISTS reserve_config_sync_state_1 (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       chain_id TEXT NOT NULL UNIQUE,
       last_synced_block INTEGER NOT NULL
@@ -317,6 +317,49 @@ export function getDistinctPriceBlocks(
   return rows.map((r) => r.block_number);
 }
 
+// Get distinct blocks across all event tables and prices for a chain
+export function getDistinctEventBlocks(
+  db: Database,
+  chainId: ChainId,
+  minBlock?: number,
+  maxBlock?: number
+): number[] {
+  const tables = [
+    "token_prices",
+    "liquidation_call_events",
+    "borrow_events",
+    "repay_events",
+    "supply_events",
+    "withdraw_events",
+  ];
+
+  const conditions = ["chain_id = ?"];
+  const queryParams: (string | number)[] = [chainId];
+
+  if (minBlock !== undefined) {
+    conditions.push("block_number >= ?");
+    queryParams.push(minBlock);
+  }
+  if (maxBlock !== undefined) {
+    conditions.push("block_number <= ?");
+    queryParams.push(maxBlock);
+  }
+
+  const whereClause = conditions.join(" AND ");
+  const queries = tables.map((table) => `SELECT block_number FROM ${table} WHERE ${whereClause}`);
+
+  const sql = queries.join(" UNION ") + " ORDER BY block_number";
+
+  // Flatten params for all queries
+  const allParams: (string | number)[] = [];
+  for (let i = 0; i < tables.length; i++) {
+    allParams.push(...queryParams);
+  }
+
+  const rows = db.query(sql).all(...allParams) as { block_number: number }[];
+  return rows.map((r) => r.block_number);
+}
+
 // Optional: dedicated sync state for Uniswap V3 swaps per chain
 export function getLastUniswapV3SyncedBlock(db: Database, chainId: ChainId): number | null {
   const row = db.query("SELECT last_synced_block FROM uniswap_sync_state WHERE chain_id = ?").get(chainId) as { last_synced_block: number } | null;
@@ -346,15 +389,15 @@ export function updateLastFailedTxSyncedBlock(db: Database, chainId: ChainId, bl
 // Reserve config sync state helpers
 export function getLastReserveConfigSyncedBlock(db: Database, chainId: ChainId): number | null {
   const row = db
-    .query("SELECT last_synced_block FROM reserve_config_sync_state WHERE chain_id = ?")
+    .query("SELECT last_synced_block FROM reserve_config_sync_state_1 WHERE chain_id = ?")
     .get(chainId) as { last_synced_block: number } | null;
   return row?.last_synced_block ?? null;
 }
 
 export function updateLastReserveConfigSyncedBlock(db: Database, chainId: ChainId, blockNumber: number): void {
   db.query(`
-    INSERT INTO reserve_config_sync_state (chain_id, last_synced_block) VALUES (?, ?)
-    ON CONFLICT(chain_id) DO UPDATE SET last_synced_block = MAX(reserve_config_sync_state.last_synced_block, excluded.last_synced_block)
+    INSERT INTO reserve_config_sync_state_1 (chain_id, last_synced_block) VALUES (?, ?)
+    ON CONFLICT(chain_id) DO UPDATE SET last_synced_block = MAX(reserve_config_sync_state_1.last_synced_block, excluded.last_synced_block)
   `).run(chainId, blockNumber);
 }
 

@@ -15,6 +15,7 @@ import {
   getLastReserveConfigSyncedBlock,
   updateLastReserveConfigSyncedBlock,
   getDistinctPriceBlocks,
+  getDistinctEventBlocks,
 } from "../db/database";
 
 export interface ReserveTokenData {
@@ -188,8 +189,8 @@ export async function syncReserveConfigs(
   }
 
   // Get all distinct price blocks in range, then walk those
-  const priceBlocks = getDistinctPriceBlocks(db, chainId, effectiveStart, endBlock);
-
+  const priceBlocks = getDistinctEventBlocks(db, chainId, effectiveStart, endBlock);
+  console.log(`[reserveConfig] Found ${priceBlocks.length} event blocks for ${chainId} between ${effectiveStart} and ${endBlock}`);
   if (priceBlocks.length === 0) {
     console.log(`[reserveConfig] No price blocks found for ${chainId} between ${effectiveStart} and ${endBlock}`);
     return;
