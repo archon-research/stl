@@ -1,0 +1,2 @@
+-- Trade Subsystem Migrations
+-- Place your .sql migration files here (e.g., 001_create_trade_tables.up.sql)
