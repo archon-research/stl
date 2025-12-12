@@ -1,4 +1,4 @@
-module failedTransactions
+module github.com/archon-research/stl/experiments/failed_transactions
 
 go 1.25.4
 

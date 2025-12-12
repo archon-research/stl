@@ -1,4 +1,4 @@
-module github.com/archon-research/stl/stl-verify/experiments/failedLiquidations
+module github.com/archon-research/stl/experiments/failed_liquidations
 
 go 1.24.0
 

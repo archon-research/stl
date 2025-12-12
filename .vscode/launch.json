@@ -16,9 +16,10 @@
             "type": "go",
             "request": "launch",
             "mode": "auto",
-            "program": "${workspaceFolder}/stl-verify/experiments/failedTransactions",
+            "program": "${workspaceFolder}/experiments/failed_transactions",
+            "envFile": "${workspaceFolder}/.env",
             "args": [
-                "-rpc=http://100.87.11.17:8545",
+                "-rpc=${env:ETH_RPC_URL}",
                 "-start=17203646",
                 "-end=0",
                 "-db=failed_txs_heuristic.db",
@@ -27,16 +28,17 @@
                 "-skip-revert-reason",
                 "-batch-size=50"
             ],
-            "cwd": "${workspaceFolder}/stl-verify/experiments/failedTransactions"
+            "cwd": "${workspaceFolder}/experiments/failed_transactions"
         },
         {
             "name": "Failed Tx Scanner: Tracing Mode (100% accurate)",
             "type": "go",
             "request": "launch",
             "mode": "auto",
-            "program": "${workspaceFolder}/stl-verify/experiments/failedTransactions",
+            "program": "${workspaceFolder}/experiments/failed_transactions",
+            "envFile": "${workspaceFolder}/.env",
             "args": [
-                "-rpc=http://100.87.11.17:8545",
+                "-rpc=${env:ETH_RPC_URL}",
                 "-start=17203646",
                 "-end=0",
                 "-db=failed_txs_tracing.db",
@@ -44,22 +46,23 @@
                 "-checkpoint=1000",
                 "-trace"
             ],
-            "cwd": "${workspaceFolder}/stl-verify/experiments/failedTransactions"
+            "cwd": "${workspaceFolder}/experiments/failed_transactions"
         },
         {
             "name": "Failed Tx Scanner: Test Single Block",
             "type": "go",
             "request": "launch",
             "mode": "auto",
-            "program": "${workspaceFolder}/stl-verify/experiments/failedTransactions",
+            "program": "${workspaceFolder}/experiments/failed_transactions",
+            "envFile": "${workspaceFolder}/.env",
             "args": [
-                "-rpc=http://100.87.11.17:8545",
+                "-rpc=${env:ETH_RPC_URL}",
                 "-start=23941690",
                 "-end=23941690",
                 "-db=test_block.db",
                 "-concurrency=1"
             ],
-            "cwd": "${workspaceFolder}/stl-verify/experiments/failedTransactions"
+            "cwd": "${workspaceFolder}/experiments/failed_transactions"
         }
     ]
 }

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Parallel Liquidation Scanner
-# Runs multiple instances of failedLiquidations on different block ranges for faster scanning
+# Runs multiple instances of failed_liquidations on different block ranges for faster scanning
 
 set -e
 
@@ -75,13 +75,13 @@ done
 
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCANNER="$SCRIPT_DIR/failedLiquidations"
+SCANNER="$SCRIPT_DIR/failed_liquidations"
 
 # Check if scanner exists
 if [[ ! -x "$SCANNER" ]]; then
     echo "Building scanner..."
     cd "$SCRIPT_DIR"
-    go build -o failedLiquidations main.go
+    go build -o failed_liquidations main.go
 fi
 
 # Create output directory
