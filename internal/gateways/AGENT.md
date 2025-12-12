@@ -1,29 +1,17 @@
-# Agent Instructions: Gateways
+# Gateways
 
-## Purpose
-Shared infrastructure clients for external systems. These are used by all subsystems.
+Shared infrastructure clients for external systems. Used by all subsystems.
 
-## Structure
-```
-gateways/
-├── ethereum/   # Ethereum JSON-RPC client
-├── arbitrum/   # Arbitrum JSON-RPC client
-└── postgres/   # Shared database connection
-```
+## Contents
+- `ethereum/` - Ethereum JSON-RPC client
+- `arbitrum/` - Arbitrum JSON-RPC client
+- `postgres/` - Shared database connection utilities
 
 ## Guidelines
 - Keep clients generic and reusable
 - Do NOT put business logic here
 - Clients should be stateless or use connection pooling
 - Return raw data; let subsystems transform it
-
-## Ethereum/Arbitrum Clients
-- Wrap JSON-RPC calls
-- Handle retries and rate limiting
-- Return block data, transaction data, etc.
-
-## Postgres
-- Provides `Connect(dsn)` for getting a DB connection
 - Subsystem-specific queries belong in subsystem adapters, not here
 
 ## Usage
