@@ -24,6 +24,7 @@ import (
 
 	"github.com/erigontech/erigon/cmd/hack/tool/fromdb"
 	"github.com/erigontech/erigon/common"
+	"github.com/erigontech/erigon/common/crypto/kzg"
 	erigonlog "github.com/erigontech/erigon/common/log/v3"
 	"github.com/erigontech/erigon/db/datadir"
 	"github.com/erigontech/erigon/db/kv"
@@ -210,7 +211,8 @@ func (t *LiquidationTracer) GetLiquidations() []*LiquidationCall {
 }
 
 func (t *LiquidationTracer) Reset() {
-	t.liquidations = make([]*LiquidationCall, 0)
+	// Reuse the underlying slice capacity to reduce allocations
+	t.liquidations = t.liquidations[:0]
 }
 
 // ScanConfig holds configuration for the liquidation scanner
@@ -247,6 +249,21 @@ type blockTxInfo struct {
 type blockJob struct {
 	blockNum  uint64
 	txIndices []int
+}
+
+// scanContext holds shared resources for scanning strategies
+type scanContext struct {
+	ctx                 context.Context
+	config              ScanConfig
+	historyDb           *temporal.DB
+	historyTx           kv.TemporalTx
+	blockReader         *freezeblocks.BlockReader
+	txNumReader         rawdbv3.TxNumsReader
+	chainConfig         *chain.Config
+	sparkLendContract   common.Address
+	liquidationSelector []byte
+	logger              erigonlog.Logger
+	actualEndBlock      uint64
 }
 
 // StreamingCSVWriter writes liquidation results to a CSV file as they arrive
@@ -475,6 +492,10 @@ func processBlocksFromChannel(
 			tracer := NewLiquidationTracer(sparkLendContract)
 			vmConfig := vm.Config{Tracer: tracer.Tracer()}
 
+			// Create reusable engine and noopWriter per worker (not per block/tx)
+			engine := ethash.NewFullFaker()
+			noopWriter := execState.NewNoopWriter()
+
 			for job := range jobs {
 				select {
 				case <-ctx.Done():
@@ -482,7 +503,7 @@ func processBlocksFromChannel(
 				default:
 				}
 
-				liquidations := processBlock(ctx, job.blockNum, job.txIndices, blockReader, historyTx, txNumReader, chainConfig, tracer, vmConfig, logger, failedOnly)
+				liquidations := processBlock(ctx, job.blockNum, job.txIndices, blockReader, historyTx, txNumReader, chainConfig, tracer, vmConfig, logger, failedOnly, engine, noopWriter)
 				atomic.AddInt64(&processedCount, int64(len(job.txIndices)))
 				results <- liquidations
 			}
@@ -536,6 +557,8 @@ func processBlock(
 	vmConfig vm.Config,
 	logger erigonlog.Logger,
 	failedOnly bool,
+	engine *ethash.FullFakeEthash,
+	noopWriter execState.StateWriter,
 ) []*LiquidationCall {
 	var liquidations []*LiquidationCall
 
@@ -552,7 +575,6 @@ func processBlock(
 	}
 
 	header := block.Header()
-	engine := ethash.NewFullFaker()
 
 	// Create a getHeader function that can read historical headers
 	getHeader := func(hash common.Hash, number uint64) (*types.Header, error) {
@@ -619,8 +641,8 @@ func processBlock(
 			// Transaction failed at execution level
 		}
 
-		// Finalize state changes
-		intraBlockState.FinalizeTx(blockContext.Rules(chainConfig), execState.NewNoopWriter())
+		// Finalize state changes using reused noopWriter
+		intraBlockState.FinalizeTx(blockContext.Rules(chainConfig), noopWriter)
 
 		// Collect liquidations from this transaction if it was traced
 		if shouldTrace {
@@ -635,6 +657,294 @@ func processBlock(
 	}
 
 	return liquidations
+}
+
+// scanWithTraceAll traces ALL transactions in the block range.
+// This is the slowest but most complete method - it will find all liquidation calls
+// including deeply nested internal calls.
+func scanWithTraceAll(sc *scanContext) (ScanResult, error) {
+	result := ScanResult{
+		StartBlock: sc.config.StartBlock,
+		EndBlock:   sc.actualEndBlock,
+	}
+
+	log.Printf("Tracing ALL transactions in blocks %d to %d...", sc.config.StartBlock, sc.actualEndBlock)
+	log.Printf("This is the most complete method but will be slow for large ranges")
+
+	var candidateTxs []blockTxInfo
+	for blockNum := sc.config.StartBlock; blockNum <= sc.actualEndBlock; blockNum++ {
+		if blockNum%1000 == 0 {
+			log.Printf("Collecting transactions from block %d...", blockNum)
+		}
+
+		block, err := sc.blockReader.BlockByNumber(sc.ctx, sc.historyTx, blockNum)
+		if err != nil || block == nil {
+			continue
+		}
+
+		// Add ALL transactions from this block
+		for i := range block.Transactions() {
+			baseTxNum, _ := sc.txNumReader.Min(sc.historyTx, blockNum)
+			candidateTxs = append(candidateTxs, blockTxInfo{blockNum, i, baseTxNum + uint64(i)})
+		}
+	}
+
+	log.Printf("Will trace %d transactions total", len(candidateTxs))
+
+	if len(candidateTxs) == 0 {
+		log.Printf("No transactions found in the specified block range")
+		return result, nil
+	}
+
+	return processCanditateTxs(sc, candidateTxs, result)
+}
+
+// scanWithCalldata scans ALL transactions and uses calldata heuristics to find candidates.
+// This checks if calldata contains the SparkLend address or liquidationCall selector.
+func scanWithCalldata(sc *scanContext) (ScanResult, error) {
+	result := ScanResult{
+		StartBlock: sc.config.StartBlock,
+		EndBlock:   sc.actualEndBlock,
+	}
+
+	log.Printf("Scanning ALL transactions in blocks %d to %d...", sc.config.StartBlock, sc.actualEndBlock)
+	log.Printf("Looking for transactions containing SparkLend address or liquidationCall selector in calldata")
+
+	var candidateTxs []blockTxInfo
+	for blockNum := sc.config.StartBlock; blockNum <= sc.actualEndBlock; blockNum++ {
+		if blockNum%1000 == 0 {
+			log.Printf("Scanning block %d...", blockNum)
+		}
+
+		block, err := sc.blockReader.BlockByNumber(sc.ctx, sc.historyTx, blockNum)
+		if err != nil || block == nil {
+			continue
+		}
+
+		for i, txn := range block.Transactions() {
+			input := txn.GetData()
+
+			// Check if calldata contains SparkLend address
+			containsSparkLend := bytes.Contains(input, sc.sparkLendContract.Bytes())
+
+			// Check if calldata contains liquidationCall selector
+			containsSelector := bytes.Contains(input, sc.liquidationSelector)
+
+			// Also check if it directly calls SparkLend
+			to := txn.GetTo()
+			directCall := to != nil && *to == sc.sparkLendContract
+
+			if containsSparkLend || containsSelector || directCall {
+				baseTxNum, _ := sc.txNumReader.Min(sc.historyTx, blockNum)
+				candidateTxs = append(candidateTxs, blockTxInfo{blockNum, i, baseTxNum + uint64(i)})
+			}
+		}
+	}
+
+	log.Printf("Found %d candidate transactions with SparkLend/liquidation in calldata", len(candidateTxs))
+
+	if len(candidateTxs) == 0 {
+		log.Printf("No candidate transactions found in the specified block range")
+		return result, nil
+	}
+
+	return processCanditateTxs(sc, candidateTxs, result)
+}
+
+// scanWithTracesToIdx uses the TracesToIdx index to find candidate transactions.
+// This is ~50x faster than tracing all transactions but relies on the index being complete.
+func scanWithTracesToIdx(sc *scanContext) (ScanResult, error) {
+	result := ScanResult{
+		StartBlock: sc.config.StartBlock,
+		EndBlock:   sc.actualEndBlock,
+	}
+
+	log.Printf("Finding candidate transactions using TracesToIdx...")
+
+	startTxNum, err := sc.txNumReader.Min(sc.historyTx, sc.config.StartBlock)
+	if err != nil {
+		return result, fmt.Errorf("failed to get start txnum: %w", err)
+	}
+
+	endTxNum, err := sc.txNumReader.Max(sc.historyTx, sc.actualEndBlock)
+	if err != nil {
+		return result, fmt.Errorf("failed to get end txnum: %w", err)
+	}
+
+	log.Printf("TxNum range: %d to %d (~%d million txs to scan)", startTxNum, endTxNum, (endTxNum-startTxNum)/1_000_000)
+
+	// Create streaming CSV writer early so we can stream results
+	var csvWriter *StreamingCSVWriter
+	if sc.config.OutputFile != "" {
+		var err error
+		csvWriter, err = NewStreamingCSVWriter(sc.config.OutputFile, sc.config.AppendMode)
+		if err != nil {
+			return result, fmt.Errorf("failed to create output file: %w", err)
+		}
+		defer csvWriter.Close()
+		log.Printf("Streaming results to %s", sc.config.OutputFile)
+	}
+
+	// Pipeline: scan index and process blocks concurrently
+	// Jobs channel for sending blocks to workers
+	jobs := make(chan blockJob, 1000)
+
+	// Start workers immediately - they'll process as jobs arrive
+	log.Printf("Starting %d workers for parallel processing...", sc.config.NumWorkers)
+	var allLiquidations []*LiquidationCall
+	var liquidationsMu sync.Mutex
+	processingDone := make(chan struct{})
+
+	go func() {
+		results := processBlocksFromChannel(sc.ctx, jobs, sc.historyDb, sc.blockReader, sc.txNumReader, sc.chainConfig, sc.sparkLendContract, sc.logger, 0, sc.config.FailedOnly, sc.config.NumWorkers, csvWriter)
+		liquidationsMu.Lock()
+		allLiquidations = results
+		liquidationsMu.Unlock()
+		close(processingDone)
+	}()
+
+	// Query TracesToIdx and stream jobs to workers
+	timestamps, err := sc.historyTx.IndexRange(kv.TracesToIdx, sc.sparkLendContract.Bytes(), int(startTxNum), int(endTxNum), order.Asc, -1)
+	if err != nil {
+		close(jobs)
+		return result, fmt.Errorf("failed to query TracesToIdx: %w", err)
+	}
+
+	// Batch by block to avoid re-reading blocks
+	currentBlock := uint64(0)
+	currentTxIndices := []int{}
+	candidateCount := 0
+	blocksFound := 0
+	scanStart := time.Now()
+	lastLog := time.Now()
+
+	for timestamps.HasNext() {
+		select {
+		case <-sc.ctx.Done():
+			timestamps.Close()
+			close(jobs)
+			<-processingDone
+			return result, sc.ctx.Err()
+		default:
+		}
+
+		txNum, err := timestamps.Next()
+		if err != nil {
+			log.Printf("Warning: failed to iterate timestamps: %v", err)
+			break
+		}
+
+		blockNum, _, err := sc.txNumReader.FindBlockNum(sc.historyTx, txNum)
+		if err != nil {
+			continue
+		}
+
+		baseTxNum, err := sc.txNumReader.Min(sc.historyTx, blockNum)
+		if err != nil {
+			continue
+		}
+
+		txIndex := int(txNum - baseTxNum)
+		candidateCount++
+
+		// Batch by block
+		if blockNum != currentBlock && currentBlock != 0 {
+			// Send previous block's job
+			select {
+			case <-sc.ctx.Done():
+				timestamps.Close()
+				close(jobs)
+				<-processingDone
+				return result, sc.ctx.Err()
+			case jobs <- blockJob{currentBlock, currentTxIndices}:
+				blocksFound++
+			}
+			currentTxIndices = []int{}
+		}
+		currentBlock = blockNum
+		currentTxIndices = append(currentTxIndices, txIndex)
+
+		// Log progress every 10 seconds
+		if time.Since(lastLog) > 10*time.Second {
+			elapsed := time.Since(scanStart)
+			// Show block number progress (more meaningful than TxNum position)
+			blockProgress := float64(blockNum-sc.config.StartBlock) / float64(sc.actualEndBlock-sc.config.StartBlock) * 100
+			log.Printf("Index scan: block %d (%.1f%%), found %d candidates in %d blocks, %.1f candidates/sec",
+				blockNum, blockProgress, candidateCount, blocksFound, float64(candidateCount)/elapsed.Seconds())
+			lastLog = time.Now()
+		}
+	}
+	timestamps.Close()
+
+	// Send last block if any
+	if len(currentTxIndices) > 0 {
+		jobs <- blockJob{currentBlock, currentTxIndices}
+		blocksFound++
+	}
+	close(jobs)
+
+	log.Printf("Index scan complete: found %d candidates in %d blocks (took %v)", candidateCount, blocksFound, time.Since(scanStart))
+
+	// Wait for processing to complete
+	<-processingDone
+
+	result.CandidateTxs = candidateCount
+	result.BlocksProcessed = blocksFound
+
+	// Sort results by block number and tx index
+	sort.Slice(allLiquidations, func(i, j int) bool {
+		if allLiquidations[i].BlockNumber != allLiquidations[j].BlockNumber {
+			return allLiquidations[i].BlockNumber < allLiquidations[j].BlockNumber
+		}
+		return allLiquidations[i].TxIndex < allLiquidations[j].TxIndex
+	})
+
+	result.Liquidations = allLiquidations
+	log.Printf("Scan complete. Found %d liquidation calls", len(allLiquidations))
+
+	return result, nil
+}
+
+// processCanditateTxs processes a list of candidate transactions and returns the results.
+// This is shared by scanWithTraceAll and scanWithCalldata.
+func processCanditateTxs(sc *scanContext, candidateTxs []blockTxInfo, result ScanResult) (ScanResult, error) {
+	// Group by block to avoid re-reading blocks
+	blockToTxs := make(map[uint64][]int)
+	for _, info := range candidateTxs {
+		blockToTxs[info.blockNum] = append(blockToTxs[info.blockNum], info.txIndex)
+	}
+
+	result.CandidateTxs = len(candidateTxs)
+	result.BlocksProcessed = len(blockToTxs)
+
+	log.Printf("Processing %d blocks with %d workers...", len(blockToTxs), sc.config.NumWorkers)
+
+	// Create streaming CSV writer if output file is specified
+	var csvWriter *StreamingCSVWriter
+	if sc.config.OutputFile != "" {
+		var err error
+		csvWriter, err = NewStreamingCSVWriter(sc.config.OutputFile, sc.config.AppendMode)
+		if err != nil {
+			return result, fmt.Errorf("failed to create output file: %w", err)
+		}
+		defer csvWriter.Close()
+		log.Printf("Streaming results to %s", sc.config.OutputFile)
+	}
+
+	allLiquidations := processBlocksParallel(sc.ctx, blockToTxs, sc.historyDb, sc.blockReader, sc.txNumReader, sc.chainConfig, sc.sparkLendContract, sc.logger, len(candidateTxs), sc.config.FailedOnly, sc.config.NumWorkers, csvWriter)
+
+	// Sort results by block number and tx index
+	sort.Slice(allLiquidations, func(i, j int) bool {
+		if allLiquidations[i].BlockNumber != allLiquidations[j].BlockNumber {
+			return allLiquidations[i].BlockNumber < allLiquidations[j].BlockNumber
+		}
+		return allLiquidations[i].TxIndex < allLiquidations[j].TxIndex
+	})
+
+	result.Liquidations = allLiquidations
+	log.Printf("Scan complete. Found %d liquidation calls", len(allLiquidations))
+
+	return result, nil
 }
 
 // ScanLiquidations scans the blockchain for liquidation calls based on the provided configuration.
@@ -723,6 +1033,10 @@ func ScanLiquidations(ctx context.Context, config ScanConfig) (ScanResult, error
 
 	result.EndBlock = actualEndBlock
 
+	// Pre-initialize KZG trusted setup to avoid contention when multiple workers
+	// hit blob transactions simultaneously. This is a one-time cost.
+	kzg.InitKZGCtx()
+
 	// Parse contract address
 	sparkLendContract := common.HexToAddress(config.SparkLendAddress)
 	liquidationSelector := common.Hex2Bytes(LiquidationCallSelector)
@@ -735,257 +1049,29 @@ func ScanLiquidations(ctx context.Context, config ScanConfig) (ScanResult, error
 
 	txNumReader := blockReader.TxnumReader(ctx)
 
-	var candidateTxs []blockTxInfo
+	// Create scan context with all shared resources
+	sc := &scanContext{
+		ctx:                 ctx,
+		config:              config,
+		historyDb:           historyDb,
+		historyTx:           historyTx,
+		blockReader:         blockReader,
+		txNumReader:         txNumReader,
+		chainConfig:         chainConfig,
+		sparkLendContract:   sparkLendContract,
+		liquidationSelector: liquidationSelector,
+		logger:              logger,
+		actualEndBlock:      actualEndBlock,
+	}
 
+	// Select and execute the appropriate scanning strategy
 	if config.TraceAll {
-		// Trace ALL transactions - most complete but slowest
-		log.Printf("Tracing ALL transactions in blocks %d to %d...", config.StartBlock, actualEndBlock)
-		log.Printf("This is the most complete method but will be slow for large ranges")
-
-		for blockNum := config.StartBlock; blockNum <= actualEndBlock; blockNum++ {
-			if blockNum%1000 == 0 {
-				log.Printf("Collecting transactions from block %d...", blockNum)
-			}
-
-			block, err := blockReader.BlockByNumber(ctx, historyTx, blockNum)
-			if err != nil || block == nil {
-				continue
-			}
-
-			// Add ALL transactions from this block
-			for i := range block.Transactions() {
-				baseTxNum, _ := txNumReader.Min(historyTx, blockNum)
-				candidateTxs = append(candidateTxs, blockTxInfo{blockNum, i, baseTxNum + uint64(i)})
-			}
-		}
-
-		log.Printf("Will trace %d transactions total", len(candidateTxs))
+		return scanWithTraceAll(sc)
 	} else if config.ScanAll {
-		// Scan ALL transactions in the block range and use calldata heuristics
-		log.Printf("Scanning ALL transactions in blocks %d to %d...", config.StartBlock, actualEndBlock)
-		log.Printf("Looking for transactions containing SparkLend address or liquidationCall selector in calldata")
-
-		for blockNum := config.StartBlock; blockNum <= actualEndBlock; blockNum++ {
-			if blockNum%1000 == 0 {
-				log.Printf("Scanning block %d...", blockNum)
-			}
-
-			block, err := blockReader.BlockByNumber(ctx, historyTx, blockNum)
-			if err != nil || block == nil {
-				continue
-			}
-
-			for i, txn := range block.Transactions() {
-				input := txn.GetData()
-
-				// Check if calldata contains SparkLend address
-				containsSparkLend := bytes.Contains(input, sparkLendContract.Bytes())
-
-				// Check if calldata contains liquidationCall selector
-				containsSelector := bytes.Contains(input, liquidationSelector)
-
-				// Also check if it directly calls SparkLend
-				to := txn.GetTo()
-				directCall := to != nil && *to == sparkLendContract
-
-				if containsSparkLend || containsSelector || directCall {
-					baseTxNum, _ := txNumReader.Min(historyTx, blockNum)
-					candidateTxs = append(candidateTxs, blockTxInfo{blockNum, i, baseTxNum + uint64(i)})
-				}
-			}
-		}
-
-		log.Printf("Found %d candidate transactions with SparkLend/liquidation in calldata", len(candidateTxs))
+		return scanWithCalldata(sc)
 	} else {
-		// Use TracesToIdx to find candidate transactions
-		log.Printf("Finding candidate transactions using TracesToIdx...")
-
-		startTxNum, err := txNumReader.Min(historyTx, config.StartBlock)
-		if err != nil {
-			return result, fmt.Errorf("failed to get start txnum: %w", err)
-		}
-
-		endTxNum, err := txNumReader.Max(historyTx, actualEndBlock)
-		if err != nil {
-			return result, fmt.Errorf("failed to get end txnum: %w", err)
-		}
-
-		log.Printf("TxNum range: %d to %d (~%d million txs to scan)", startTxNum, endTxNum, (endTxNum-startTxNum)/1_000_000)
-
-		// Create streaming CSV writer early so we can stream results
-		var csvWriter *StreamingCSVWriter
-		if config.OutputFile != "" {
-			var err error
-			csvWriter, err = NewStreamingCSVWriter(config.OutputFile, config.AppendMode)
-			if err != nil {
-				return ScanResult{}, fmt.Errorf("failed to create output file: %w", err)
-			}
-			defer csvWriter.Close()
-			log.Printf("Streaming results to %s", config.OutputFile)
-		}
-
-		// Pipeline: scan index and process blocks concurrently
-		// Jobs channel for sending blocks to workers
-		jobs := make(chan blockJob, 1000)
-
-		// Start workers immediately - they'll process as jobs arrive
-		log.Printf("Starting %d workers for parallel processing...", config.NumWorkers)
-		var allLiquidations []*LiquidationCall
-		var liquidationsMu sync.Mutex
-		processingDone := make(chan struct{})
-
-		go func() {
-			results := processBlocksFromChannel(ctx, jobs, historyDb, blockReader, txNumReader, chainConfig, sparkLendContract, logger, 0, config.FailedOnly, config.NumWorkers, csvWriter)
-			liquidationsMu.Lock()
-			allLiquidations = results
-			liquidationsMu.Unlock()
-			close(processingDone)
-		}()
-
-		// Query TracesToIdx and stream jobs to workers
-		timestamps, err := historyTx.IndexRange(kv.TracesToIdx, sparkLendContract.Bytes(), int(startTxNum), int(endTxNum), order.Asc, -1)
-		if err != nil {
-			close(jobs)
-			return result, fmt.Errorf("failed to query TracesToIdx: %w", err)
-		}
-
-		// Batch by block to avoid re-reading blocks
-		currentBlock := uint64(0)
-		currentTxIndices := []int{}
-		candidateCount := 0
-		blocksFound := 0
-		scanStart := time.Now()
-		lastLog := time.Now()
-
-		for timestamps.HasNext() {
-			select {
-			case <-ctx.Done():
-				timestamps.Close()
-				close(jobs)
-				<-processingDone
-				return result, ctx.Err()
-			default:
-			}
-
-			txNum, err := timestamps.Next()
-			if err != nil {
-				log.Printf("Warning: failed to iterate timestamps: %v", err)
-				break
-			}
-
-			blockNum, _, err := txNumReader.FindBlockNum(historyTx, txNum)
-			if err != nil {
-				continue
-			}
-
-			baseTxNum, err := txNumReader.Min(historyTx, blockNum)
-			if err != nil {
-				continue
-			}
-
-			txIndex := int(txNum - baseTxNum)
-			candidateCount++
-
-			// Batch by block
-			if blockNum != currentBlock && currentBlock != 0 {
-				// Send previous block's job
-				select {
-				case <-ctx.Done():
-					timestamps.Close()
-					close(jobs)
-					<-processingDone
-					return result, ctx.Err()
-				case jobs <- blockJob{currentBlock, currentTxIndices}:
-					blocksFound++
-				}
-				currentTxIndices = []int{}
-			}
-			currentBlock = blockNum
-			currentTxIndices = append(currentTxIndices, txIndex)
-
-			// Log progress every 10 seconds
-			if time.Since(lastLog) > 10*time.Second {
-				elapsed := time.Since(scanStart)
-				// Show block number progress (more meaningful than TxNum position)
-				blockProgress := float64(blockNum-config.StartBlock) / float64(actualEndBlock-config.StartBlock) * 100
-				log.Printf("Index scan: block %d (%.1f%%), found %d candidates in %d blocks, %.1f candidates/sec",
-					blockNum, blockProgress, candidateCount, blocksFound, float64(candidateCount)/elapsed.Seconds())
-				lastLog = time.Now()
-			}
-		}
-		timestamps.Close()
-
-		// Send last block if any
-		if len(currentTxIndices) > 0 {
-			jobs <- blockJob{currentBlock, currentTxIndices}
-			blocksFound++
-		}
-		close(jobs)
-
-		log.Printf("Index scan complete: found %d candidates in %d blocks (took %v)", candidateCount, blocksFound, time.Since(scanStart))
-
-		// Wait for processing to complete
-		<-processingDone
-
-		result.CandidateTxs = candidateCount
-		result.BlocksProcessed = blocksFound
-
-		// Sort results by block number and tx index
-		sort.Slice(allLiquidations, func(i, j int) bool {
-			if allLiquidations[i].BlockNumber != allLiquidations[j].BlockNumber {
-				return allLiquidations[i].BlockNumber < allLiquidations[j].BlockNumber
-			}
-			return allLiquidations[i].TxIndex < allLiquidations[j].TxIndex
-		})
-
-		result.Liquidations = allLiquidations
-		log.Printf("Scan complete. Found %d liquidation calls", len(allLiquidations))
-
-		return result, nil
+		return scanWithTracesToIdx(sc)
 	}
-
-	if len(candidateTxs) == 0 {
-		log.Printf("No candidate transactions found in the specified block range")
-		return result, nil
-	}
-
-	// Group by block to avoid re-reading blocks
-	blockToTxs := make(map[uint64][]int)
-	for _, info := range candidateTxs {
-		blockToTxs[info.blockNum] = append(blockToTxs[info.blockNum], info.txIndex)
-	}
-
-	result.CandidateTxs = len(candidateTxs)
-	result.BlocksProcessed = len(blockToTxs)
-
-	log.Printf("Processing %d blocks with %d workers...", len(blockToTxs), config.NumWorkers)
-
-	// Create streaming CSV writer if output file is specified
-	var csvWriter *StreamingCSVWriter
-	if config.OutputFile != "" {
-		var err error
-		csvWriter, err = NewStreamingCSVWriter(config.OutputFile, config.AppendMode)
-		if err != nil {
-			return ScanResult{}, fmt.Errorf("failed to create output file: %w", err)
-		}
-		defer csvWriter.Close()
-		log.Printf("Streaming results to %s", config.OutputFile)
-	}
-
-	allLiquidations := processBlocksParallel(ctx, blockToTxs, historyDb, blockReader, txNumReader, chainConfig, sparkLendContract, logger, len(candidateTxs), config.FailedOnly, config.NumWorkers, csvWriter)
-
-	// Sort results by block number and tx index
-	sort.Slice(allLiquidations, func(i, j int) bool {
-		if allLiquidations[i].BlockNumber != allLiquidations[j].BlockNumber {
-			return allLiquidations[i].BlockNumber < allLiquidations[j].BlockNumber
-		}
-		return allLiquidations[i].TxIndex < allLiquidations[j].TxIndex
-	})
-
-	result.Liquidations = allLiquidations
-	log.Printf("Scan complete. Found %d liquidation calls", len(allLiquidations))
-
-	return result, nil
 }
 
 // getLastProcessedBlock reads the output CSV file and returns the highest block number found
@@ -1038,7 +1124,7 @@ func main() {
 	jsonOutput := flag.Bool("json", false, "Also output JSON file")
 	failedOnly := flag.Bool("failed-only", true, "Only output failed liquidations")
 	scanAll := flag.Bool("scan-all", false, "Scan all transactions using calldata heuristics (faster but may miss some)")
-	traceAll := flag.Bool("trace-all", false, "Trace ALL transactions (slow; default uses TracesToIdx which is ~50x faster)")
+	traceAll := flag.Bool("trace-all", true, "Trace ALL transactions (slow but 100% complete; set to false to use TracesToIdx which is ~50x faster)")
 	numWorkers := flag.Int("workers", 1, "Number of parallel workers (default 1; more workers often slower due to DB contention)")
 	resume := flag.Bool("resume", false, "Resume from last processed block (reads from output file)")
 	flag.Parse()
@@ -1067,7 +1153,7 @@ func main() {
 	log.Printf("Output: %s", *outputFile)
 	log.Printf("Failed Only: %v", *failedOnly)
 	log.Printf("Scan All (calldata): %v", *scanAll)
-	log.Printf("Trace All: %v (default uses TracesToIdx for ~50x speedup)", *traceAll)
+	log.Printf("Trace All: %v (100%% complete; use -trace-all=false for ~50x speedup with TracesToIdx)", *traceAll)
 	log.Printf("Workers: %d", *numWorkers)
 	log.Printf("=================================================================")
 
