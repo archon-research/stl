@@ -1,0 +1,15 @@
+# Data
+*.db
+*.log
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store

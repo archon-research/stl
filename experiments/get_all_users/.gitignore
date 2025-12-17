@@ -1,0 +1,9 @@
+# Output files
+*.csv
+*.json
+
+# Build artifacts
+get_all_users
+
+# Logs
+*.log

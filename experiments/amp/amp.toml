@@ -1,0 +1,19 @@
+# Amp Configuration
+# See: https://github.com/edgeandnode/amp/blob/main/docs/config.md
+
+# PostgreSQL metadata database connection
+metadata_db_url = "postgresql://postgres:postgres@localhost:5432/amp"
+
+# Server configuration
+# [server]
+# http_port = 1603
+# grpc_port = 50051
+
+# Logging configuration
+# [logging]
+# level = "info"
+
+# Telemetry configuration (OpenTelemetry)
+# [telemetry]
+# enabled = false
+# otlp_endpoint = "http://localhost:4317"
