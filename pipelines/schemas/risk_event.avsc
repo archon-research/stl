@@ -1,0 +1,9 @@
+{
+  "type": "record",
+  "name": "RiskEvent",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "timestamp", "type": "long"},
+    {"name": "risk_score", "type": "double"}
+  ]
+}

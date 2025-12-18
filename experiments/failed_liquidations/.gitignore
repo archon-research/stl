@@ -1,0 +1,15 @@
+# CSV output files
+*.csv
+
+# Log files
+*.log
+
+# Profiling files
+*.prof
+
+# Compiled binaries
+failed_liquidations
+failed_liquidations.test
+
+# SVG flame graphs
+*.svg

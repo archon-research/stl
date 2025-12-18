@@ -1,0 +1,21 @@
+[
+  {
+    "block_number": 17292242,
+    "block_timestamp": 1684483559,
+    "transaction_hash": "0x052795badb43b920d8ddcb168f1636b46aa72deeccd3540eaa91170c079334ca",
+    "tx_index": 69,
+    "from_address": "0xD050E0A4838D74769228B49dFf97241b4Ef3805d",
+    "to_address": "0xD050E0A4838D74769228B49dFf97241b4Ef3805d",
+    "collateral_asset": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
+    "debt_asset": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+    "user": "0x52A8305f29f85bEc5fa6eE78B87Ddd2218d8E12E",
+    "debt_to_cover": "7956333479610967886336",
+    "receive_atoken": false,
+    "gas_limit": 901408,
+    "value": "0",
+    "call_depth": 5,
+    "failed": true,
+    "revert_reason": "execution reverted",
+    "internal_call_index": 0
+  }
+]

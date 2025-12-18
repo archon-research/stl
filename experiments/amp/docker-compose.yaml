@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: amp-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: amp
+    ports:
+      - "5432:5432"
+    volumes:
+      - amp_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Optional: Grafana LGTM stack for telemetry
+  # Uncomment to enable OpenTelemetry monitoring
+  # otel-lgtm:
+  #   image: grafana/otel-lgtm:latest
+  #   container_name: amp-otel-lgtm
+  #   ports:
+  #     - "3000:3000"   # Grafana
+  #     - "4317:4317"   # OTLP gRPC
+  #     - "4318:4318"   # OTLP HTTP
+
+volumes:
+  amp_postgres_data:

@@ -1,0 +1,1 @@
+The ./experiments folder is for throwaway code used in small poc's / experiments
