@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -24,190 +23,18 @@ import (
 // Compile-time check that Subscriber implements outbound.BlockSubscriber
 var _ outbound.BlockSubscriber = (*Subscriber)(nil)
 
-// Default configuration values for reconnection.
-const (
-	defaultInitialBackoff       = 1 * time.Second
-	defaultMaxBackoff           = 60 * time.Second
-	defaultBackoffFactor        = 2.0
-	defaultPingInterval         = 30 * time.Second
-	defaultPongTimeout          = 10 * time.Second
-	defaultReadTimeout          = 60 * time.Second
-	defaultChannelBufferSize    = 100
-	defaultBlockRetention       = 1000 // Keep last 1000 blocks in state
-	defaultHealthTimeout        = 30 * time.Second
-	defaultFinalityBlockCount   = 64  // Blocks before considered finalized (Ethereum mainnet)
-	defaultMaxUnfinalizedBlocks = 128 // Max unfinalized blocks to keep in memory
-)
-
-// Config holds the configuration for the Alchemy WebSocket subscriber.
-type Config struct {
-	// WebSocketURL is the Alchemy WebSocket endpoint URL.
-	// Example: wss://eth-mainnet.g.alchemy.com/v2/<api-key>
-	WebSocketURL string
-
-	// HTTPURL is the Alchemy HTTP endpoint URL for backfilling blocks.
-	// Example: https://eth-mainnet.g.alchemy.com/v2/<api-key>
-	// If not set, backfilling will be disabled.
-	HTTPURL string
-
-	// InitialBackoff is the initial delay before reconnecting after a disconnect.
-	// Defaults to 1 second if not set.
-	InitialBackoff time.Duration
-
-	// MaxBackoff is the maximum delay between reconnection attempts.
-	// Defaults to 60 seconds if not set.
-	MaxBackoff time.Duration
-
-	// BackoffFactor is the multiplier applied to backoff after each failed attempt.
-	// Defaults to 2.0 if not set.
-	BackoffFactor float64
-
-	// PingInterval is how often to send ping messages to keep the connection alive.
-	// Defaults to 30 seconds if not set.
-	PingInterval time.Duration
-
-	// PongTimeout is how long to wait for a pong response before considering the connection dead.
-	// Defaults to 10 seconds if not set.
-	PongTimeout time.Duration
-
-	// ReadTimeout is the maximum time to wait for a message before considering the connection dead.
-	// Defaults to 60 seconds if not set.
-	ReadTimeout time.Duration
-
-	// ChannelBufferSize is the size of the block header channel buffer.
-	// Defaults to 100 if not set. Helps with backpressure.
-	ChannelBufferSize int
-
-	// BlockRetention is the number of recent blocks to keep in the state repository.
-	// Defaults to 1000 if not set.
-	BlockRetention int
-
-	// HealthTimeout is how long without receiving a block before considering unhealthy.
-	// Defaults to 30 seconds if not set.
-	HealthTimeout time.Duration
-
-	// BlockStateRepo is the repository for tracking block state.
-	// Required for backfill and reorg detection features.
-	BlockStateRepo outbound.BlockStateRepository
-
-	// FinalityBlockCount is how many blocks behind the tip before a block is considered finalized.
-	// Reorgs deeper than this will cause an error. Defaults to 64 (Ethereum mainnet).
-	FinalityBlockCount int
-
-	// MaxUnfinalizedBlocks is the maximum number of unfinalized blocks to keep in memory.
-	// Defaults to 128.
-	MaxUnfinalizedBlocks int
-
-	// Logger is the structured logger for the subscriber.
-	// If not set, a default logger will be used.
-	Logger *slog.Logger
-}
-
-// applyDefaults sets default values for unset configuration fields.
-func (c *Config) applyDefaults() {
-	if c.InitialBackoff == 0 {
-		c.InitialBackoff = defaultInitialBackoff
-	}
-	if c.MaxBackoff == 0 {
-		c.MaxBackoff = defaultMaxBackoff
-	}
-	if c.BackoffFactor == 0 {
-		c.BackoffFactor = defaultBackoffFactor
-	}
-	if c.PingInterval == 0 {
-		c.PingInterval = defaultPingInterval
-	}
-	if c.PongTimeout == 0 {
-		c.PongTimeout = defaultPongTimeout
-	}
-	if c.ReadTimeout == 0 {
-		c.ReadTimeout = defaultReadTimeout
-	}
-	if c.ChannelBufferSize == 0 {
-		c.ChannelBufferSize = defaultChannelBufferSize
-	}
-	if c.BlockRetention == 0 {
-		c.BlockRetention = defaultBlockRetention
-	}
-	if c.HealthTimeout == 0 {
-		c.HealthTimeout = defaultHealthTimeout
-	}
-	if c.FinalityBlockCount == 0 {
-		c.FinalityBlockCount = defaultFinalityBlockCount
-	}
-	if c.MaxUnfinalizedBlocks == 0 {
-		c.MaxUnfinalizedBlocks = defaultMaxUnfinalizedBlocks
-	}
-	if c.Logger == nil {
-		c.Logger = slog.Default()
-	}
-}
-
-// LightBlock represents a minimal block for the in-memory chain.
-// Used for efficient parent hash chain validation.
-type LightBlock struct {
-	Number     int64
-	Hash       string
-	ParentHash string
-}
-
-// Subscriber implements the BlockSubscriber port using Alchemy's WebSocket API.
-// It automatically reconnects when the connection is lost.
-type Subscriber struct {
-	config        Config
-	conn          *websocket.Conn
-	mu            sync.RWMutex
-	done          chan struct{}
-	closed        bool
-	headers       chan outbound.BlockHeader
-	ctx           context.Context
-	cancel        context.CancelFunc
-	lastBlockTime atomic.Int64 // Unix timestamp of last received block
-
-	// In-memory chain state for efficient reorg detection (Ponder-style)
-	chainMu           sync.RWMutex
-	unfinalizedBlocks []LightBlock // Linked chain of blocks waiting to be finalized
-	finalizedBlock    *LightBlock  // Last finalized block (reorgs beyond this are unrecoverable)
-}
-
 // NewSubscriber creates a new Alchemy WebSocket subscriber with automatic reconnection.
-func NewSubscriber(config Config) *Subscriber {
+// Returns an error if required configuration is missing (BlockStateRepo, WebSocketURL, HTTPURL).
+func NewSubscriber(config Config) (*Subscriber, error) {
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
 	config.applyDefaults()
 	return &Subscriber{
 		config:  config,
 		done:    make(chan struct{}),
-		headers: make(chan outbound.BlockHeader, config.ChannelBufferSize), // Fix #3: Buffered channel
-	}
-}
-
-// jsonRPCRequest represents a JSON-RPC 2.0 request.
-type jsonRPCRequest struct {
-	JSONRPC string        `json:"jsonrpc"`
-	ID      int           `json:"id"`
-	Method  string        `json:"method"`
-	Params  []interface{} `json:"params"`
-}
-
-// jsonRPCResponse represents a JSON-RPC 2.0 response.
-type jsonRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      int             `json:"id"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *jsonRPCError   `json:"error,omitempty"`
-	Method  string          `json:"method,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
-}
-
-// jsonRPCError represents a JSON-RPC 2.0 error.
-type jsonRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-// subscriptionParams represents the params field for subscription notifications.
-type subscriptionParams struct {
-	Subscription string               `json:"subscription"`
-	Result       outbound.BlockHeader `json:"result"`
+		headers: make(chan outbound.BlockHeader, config.ChannelBufferSize),
+	}, nil
 }
 
 // Subscribe starts listening for new block headers via Alchemy's eth_newHeads subscription.
@@ -269,14 +96,12 @@ func (s *Subscriber) connectionManager() {
 		logger.Info("connected to Alchemy WebSocket")
 
 		// Restore chain state and backfill missed blocks
-		if s.config.BlockStateRepo != nil && s.config.HTTPURL != "" {
-			if isFirstConnect {
-				// On first connect, just restore chain state from DB
-				s.restoreChainFromDB(logger)
-			} else {
-				// On reconnect, restore and backfill missed blocks
-				s.backfillMissedBlocks(logger)
-			}
+		if isFirstConnect {
+			// On first connect, just restore chain state from DB
+			s.restoreChainFromDB(logger)
+		} else {
+			// On reconnect, restore and backfill missed blocks
+			s.backfillMissedBlocks(logger)
 		}
 		isFirstConnect = false
 
@@ -462,11 +287,6 @@ func (s *Subscriber) readLoop(logger *slog.Logger) {
 // Uses Ponder-style parent hash chain validation for accurate reorg detection.
 // Returns nil if the block should be skipped (duplicate).
 func (s *Subscriber) processBlock(header outbound.BlockHeader, receivedAt time.Time, logger *slog.Logger) (*outbound.BlockHeader, error) {
-	if s.config.BlockStateRepo == nil {
-		// No state repo configured, pass through without processing
-		return &header, nil
-	}
-
 	blockNum, err := parseBlockNumber(header.Number)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse block number: %w", err)
@@ -537,6 +357,9 @@ func (s *Subscriber) processBlock(header outbound.BlockHeader, receivedAt time.T
 			logger.Warn("failed to prune old blocks", "error", err)
 		}
 	}
+
+	// Fetch all data types concurrently, cache, and publish events
+	s.fetchAndPublishBlockData(ctx, header, blockNum, receivedAt, logger)
 
 	return &header, nil
 }
@@ -773,10 +596,6 @@ func (s *Subscriber) getBlockByHash(ctx context.Context, hash string) (*outbound
 // restoreChainFromDB restores the in-memory unfinalized chain from the database.
 // Called on startup/reconnection to resume chain state.
 func (s *Subscriber) restoreChainFromDB(logger *slog.Logger) {
-	if s.config.BlockStateRepo == nil {
-		return
-	}
-
 	ctx := s.ctx
 
 	// Load recent blocks from DB into memory
@@ -831,10 +650,6 @@ func (s *Subscriber) restoreChainFromDB(logger *slog.Logger) {
 
 // backfillMissedBlocks fetches any blocks missed during disconnection.
 func (s *Subscriber) backfillMissedBlocks(logger *slog.Logger) {
-	if s.config.BlockStateRepo == nil || s.config.HTTPURL == "" {
-		return
-	}
-
 	// First restore chain state from DB
 	s.restoreChainFromDB(logger)
 
@@ -984,6 +799,210 @@ func (s *Subscriber) httpRPCCall(ctx context.Context, req jsonRPCRequest) (*json
 	return &rpcResp, nil
 }
 
+// fetchAndPublishBlockData fetches all data types concurrently, writes to cache, and publishes events.
+// Each data type is fetched, cached, and published independently.
+func (s *Subscriber) fetchAndPublishBlockData(ctx context.Context, header outbound.BlockHeader, blockNum int64, receivedAt time.Time, logger *slog.Logger) {
+	if s.config.BlockCache == nil || s.config.EventSink == nil || s.config.HTTPURL == "" {
+		return
+	}
+
+	chainID := s.config.ChainID
+	blockHash := header.Hash
+	parentHash := header.ParentHash
+	isReorg := header.IsReorg
+	isBackfill := header.IsBackfill
+
+	// Parse block timestamp
+	blockTimestamp, _ := parseBlockNumber(header.Timestamp)
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+
+	// Fetch and publish block (full block with transactions)
+	go func() {
+		defer wg.Done()
+		s.fetchCacheAndPublishBlock(ctx, chainID, blockNum, blockHash, parentHash, blockTimestamp, receivedAt, isReorg, isBackfill, logger)
+	}()
+
+	// Fetch and publish receipts
+	go func() {
+		defer wg.Done()
+		s.fetchCacheAndPublishReceipts(ctx, chainID, blockNum, blockHash, receivedAt, isReorg, isBackfill, logger)
+	}()
+
+	// Fetch and publish traces
+	go func() {
+		defer wg.Done()
+		s.fetchCacheAndPublishTraces(ctx, chainID, blockNum, blockHash, receivedAt, isReorg, isBackfill, logger)
+	}()
+
+	// Fetch and publish blobs
+	go func() {
+		defer wg.Done()
+		s.fetchCacheAndPublishBlobs(ctx, chainID, blockNum, blockHash, receivedAt, isReorg, isBackfill, logger)
+	}()
+
+	wg.Wait()
+}
+
+// fetchCacheAndPublishBlock fetches full block, caches it, then publishes event.
+func (s *Subscriber) fetchCacheAndPublishBlock(ctx context.Context, chainID, blockNum int64, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg, isBackfill bool, logger *slog.Logger) {
+	hexNum := fmt.Sprintf("0x%x", blockNum)
+	reqBody := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "eth_getBlockByNumber",
+		Params:  []interface{}{hexNum, true}, // true = include full transactions
+	}
+
+	resp, err := s.httpRPCCall(ctx, reqBody)
+	if err != nil {
+		logger.Warn("failed to fetch block", "block", blockNum, "error", err)
+		return
+	}
+
+	// Write to cache first
+	if err := s.config.BlockCache.SetBlock(ctx, chainID, blockNum, resp.Result); err != nil {
+		logger.Warn("failed to cache block", "block", blockNum, "error", err)
+		return
+	}
+
+	// Then publish event
+	event := outbound.BlockEvent{
+		ChainID:        chainID,
+		BlockNumber:    blockNum,
+		BlockHash:      blockHash,
+		ParentHash:     parentHash,
+		BlockTimestamp: blockTimestamp,
+		ReceivedAt:     receivedAt,
+		IsReorg:        isReorg,
+		IsBackfill:     isBackfill,
+	}
+	if err := s.config.EventSink.Publish(ctx, event); err != nil {
+		logger.Warn("failed to publish block event", "block", blockNum, "error", err)
+		return
+	}
+
+	logger.Debug("block cached and published", "block", blockNum, "hash", truncateHash(blockHash))
+}
+
+// fetchCacheAndPublishReceipts fetches receipts, caches them, then publishes event.
+func (s *Subscriber) fetchCacheAndPublishReceipts(ctx context.Context, chainID, blockNum int64, blockHash string, receivedAt time.Time, isReorg, isBackfill bool, logger *slog.Logger) {
+	hexNum := fmt.Sprintf("0x%x", blockNum)
+	reqBody := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "eth_getBlockReceipts",
+		Params:  []interface{}{hexNum},
+	}
+
+	resp, err := s.httpRPCCall(ctx, reqBody)
+	if err != nil {
+		logger.Warn("failed to fetch receipts", "block", blockNum, "error", err)
+		return
+	}
+
+	// Write to cache first
+	if err := s.config.BlockCache.SetReceipts(ctx, chainID, blockNum, resp.Result); err != nil {
+		logger.Warn("failed to cache receipts", "block", blockNum, "error", err)
+		return
+	}
+
+	// Then publish event
+	event := outbound.ReceiptsEvent{
+		ChainID:     chainID,
+		BlockNumber: blockNum,
+		BlockHash:   blockHash,
+		ReceivedAt:  receivedAt,
+		IsReorg:     isReorg,
+		IsBackfill:  isBackfill,
+	}
+	if err := s.config.EventSink.Publish(ctx, event); err != nil {
+		logger.Warn("failed to publish receipts event", "block", blockNum, "error", err)
+		return
+	}
+
+	logger.Debug("receipts cached and published", "block", blockNum)
+}
+
+// fetchCacheAndPublishTraces fetches traces, caches them, then publishes event.
+func (s *Subscriber) fetchCacheAndPublishTraces(ctx context.Context, chainID, blockNum int64, blockHash string, receivedAt time.Time, isReorg, isBackfill bool, logger *slog.Logger) {
+	hexNum := fmt.Sprintf("0x%x", blockNum)
+	reqBody := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "trace_block",
+		Params:  []interface{}{hexNum},
+	}
+
+	resp, err := s.httpRPCCall(ctx, reqBody)
+	if err != nil {
+		logger.Warn("failed to fetch traces", "block", blockNum, "error", err)
+		return
+	}
+
+	// Write to cache first
+	if err := s.config.BlockCache.SetTraces(ctx, chainID, blockNum, resp.Result); err != nil {
+		logger.Warn("failed to cache traces", "block", blockNum, "error", err)
+		return
+	}
+
+	// Then publish event
+	event := outbound.TracesEvent{
+		ChainID:     chainID,
+		BlockNumber: blockNum,
+		BlockHash:   blockHash,
+		ReceivedAt:  receivedAt,
+		IsReorg:     isReorg,
+		IsBackfill:  isBackfill,
+	}
+	if err := s.config.EventSink.Publish(ctx, event); err != nil {
+		logger.Warn("failed to publish traces event", "block", blockNum, "error", err)
+		return
+	}
+
+	logger.Debug("traces cached and published", "block", blockNum)
+}
+
+// fetchCacheAndPublishBlobs fetches blob sidecars, caches them, then publishes event.
+func (s *Subscriber) fetchCacheAndPublishBlobs(ctx context.Context, chainID, blockNum int64, blockHash string, receivedAt time.Time, isReorg, isBackfill bool, logger *slog.Logger) {
+	hexNum := fmt.Sprintf("0x%x", blockNum)
+	reqBody := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "eth_getBlobSidecars",
+		Params:  []interface{}{hexNum},
+	}
+
+	resp, err := s.httpRPCCall(ctx, reqBody)
+	if err != nil {
+		logger.Warn("failed to fetch blobs", "block", blockNum, "error", err)
+		return
+	}
+
+	// Write to cache first
+	if err := s.config.BlockCache.SetBlobs(ctx, chainID, blockNum, resp.Result); err != nil {
+		logger.Warn("failed to cache blobs", "block", blockNum, "error", err)
+		return
+	}
+
+	// Then publish event
+	event := outbound.BlobsEvent{
+		ChainID:     chainID,
+		BlockNumber: blockNum,
+		BlockHash:   blockHash,
+		ReceivedAt:  receivedAt,
+		IsReorg:     isReorg,
+		IsBackfill:  isBackfill,
+	}
+	if err := s.config.EventSink.Publish(ctx, event); err != nil {
+		logger.Warn("failed to publish blobs event", "block", blockNum, "error", err)
+		return
+	}
+
+	logger.Debug("blobs cached and published", "block", blockNum)
+}
+
 // closeConnection safely closes the current WebSocket connection.
 func (s *Subscriber) closeConnection() {
 	s.mu.Lock()
@@ -1040,7 +1059,7 @@ func (s *Subscriber) HealthCheck(ctx context.Context) error {
 		return errors.New("subscriber is closed")
 	}
 
-	// Fix #7: Check if we've received a block recently
+	// Check if we've received a block recently
 	lastBlockTime := s.lastBlockTime.Load()
 	if lastBlockTime > 0 {
 		timeSinceLastBlock := time.Since(time.Unix(lastBlockTime, 0))

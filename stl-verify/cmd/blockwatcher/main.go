@@ -70,7 +70,11 @@ func main() {
 		Logger:               logger,
 	}
 
-	subscriber := alchemy.NewSubscriber(config)
+	subscriber, err := alchemy.NewSubscriber(config)
+	if err != nil {
+		logger.Error("failed to create subscriber", "error", err)
+		os.Exit(1)
+	}
 
 	// Set up context with cancellation for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())

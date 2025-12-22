@@ -1,4 +1,3 @@
-// Package outbound contains the secondary/outbound ports.
 package outbound
 
 import "context"
