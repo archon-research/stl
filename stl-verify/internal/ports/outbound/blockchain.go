@@ -20,15 +20,6 @@ type BlockHeader struct {
 	GasUsed          string `json:"gasUsed"`
 	Timestamp        string `json:"timestamp"`
 	BaseFeePerGas    string `json:"baseFeePerGas,omitempty"`
-
-	// IsReorg indicates this block is part of a chain reorganization.
-	// When true, a block with this number was previously received but with a different hash.
-	// Consumers should handle reorgs by invalidating any state derived from the old block.
-	IsReorg bool `json:"-"`
-
-	// IsBackfill indicates this block was fetched during reconnection backfill,
-	// not received live from the subscription.
-	IsBackfill bool `json:"-"`
 }
 
 // BlockSubscriber defines the interface for subscribing to new blockchain blocks.
