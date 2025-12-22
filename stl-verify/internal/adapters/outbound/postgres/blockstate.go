@@ -1,0 +1,302 @@
+// Package postgres provides a PostgreSQL implementation of the block state repository.
+package postgres
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+)
+
+// Compile-time check that BlockStateRepository implements outbound.BlockStateRepository
+var _ outbound.BlockStateRepository = (*BlockStateRepository)(nil)
+
+// BlockStateRepository is a PostgreSQL implementation of the outbound.BlockStateRepository port.
+type BlockStateRepository struct {
+	db *sql.DB
+}
+
+// NewBlockStateRepository creates a new PostgreSQL block state repository.
+func NewBlockStateRepository(db *sql.DB) *BlockStateRepository {
+	return &BlockStateRepository{db: db}
+}
+
+// Migrate creates the block_states and reorg_events tables if they don't exist.
+func (r *BlockStateRepository) Migrate(ctx context.Context) error {
+	query := `
+		CREATE TABLE IF NOT EXISTS block_states (
+			number BIGINT NOT NULL,
+			hash TEXT NOT NULL UNIQUE,
+			parent_hash TEXT NOT NULL,
+			received_at BIGINT NOT NULL,
+			is_orphaned BOOLEAN NOT NULL DEFAULT FALSE,
+			PRIMARY KEY (number, hash)
+		);
+		
+		CREATE INDEX IF NOT EXISTS idx_block_states_hash ON block_states(hash);
+		CREATE INDEX IF NOT EXISTS idx_block_states_received_at ON block_states(received_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_block_states_canonical ON block_states(number DESC) WHERE NOT is_orphaned;
+		CREATE INDEX IF NOT EXISTS idx_block_states_orphaned ON block_states(is_orphaned) WHERE is_orphaned;
+
+		CREATE TABLE IF NOT EXISTS reorg_events (
+			id BIGSERIAL PRIMARY KEY,
+			detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			block_number BIGINT NOT NULL,
+			old_hash TEXT NOT NULL,
+			new_hash TEXT NOT NULL,
+			depth INT NOT NULL DEFAULT 1
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_reorg_events_detected_at ON reorg_events(detected_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_reorg_events_block_number ON reorg_events(block_number);
+	`
+	_, err := r.db.ExecContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to migrate tables: %w", err)
+	}
+	return nil
+}
+
+// SaveBlock persists a block's state.
+func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) error {
+	query := `
+		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (number, hash) DO UPDATE SET
+			parent_hash = EXCLUDED.parent_hash,
+			received_at = EXCLUDED.received_at,
+			is_orphaned = EXCLUDED.is_orphaned
+	`
+	_, err := r.db.ExecContext(ctx, query, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned)
+	if err != nil {
+		return fmt.Errorf("failed to save block state: %w", err)
+	}
+	return nil
+}
+
+// GetLastBlock retrieves the most recently saved canonical (non-orphaned) block state.
+func (r *BlockStateRepository) GetLastBlock(ctx context.Context) (*outbound.BlockState, error) {
+	query := `
+		SELECT number, hash, parent_hash, received_at, is_orphaned
+		FROM block_states
+		WHERE NOT is_orphaned
+		ORDER BY number DESC
+		LIMIT 1
+	`
+	var state outbound.BlockState
+	err := r.db.QueryRowContext(ctx, query).Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get last block: %w", err)
+	}
+	return &state, nil
+}
+
+// GetBlockByNumber retrieves a canonical block state by its number.
+func (r *BlockStateRepository) GetBlockByNumber(ctx context.Context, number int64) (*outbound.BlockState, error) {
+	query := `
+		SELECT number, hash, parent_hash, received_at, is_orphaned
+		FROM block_states
+		WHERE number = $1 AND NOT is_orphaned
+	`
+	var state outbound.BlockState
+	err := r.db.QueryRowContext(ctx, query, number).Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get block by number: %w", err)
+	}
+	return &state, nil
+}
+
+// GetBlockByHash retrieves a block state by its hash (includes orphaned blocks).
+func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) (*outbound.BlockState, error) {
+	query := `
+		SELECT number, hash, parent_hash, received_at, is_orphaned
+		FROM block_states
+		WHERE hash = $1
+	`
+	var state outbound.BlockState
+	err := r.db.QueryRowContext(ctx, query, hash).Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get block by hash: %w", err)
+	}
+	return &state, nil
+}
+
+// GetRecentBlocks retrieves the N most recent canonical blocks.
+func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) ([]outbound.BlockState, error) {
+	query := `
+		SELECT number, hash, parent_hash, received_at, is_orphaned
+		FROM block_states
+		WHERE NOT is_orphaned
+		ORDER BY number DESC
+		LIMIT $1
+	`
+	rows, err := r.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get recent blocks: %w", err)
+	}
+	defer rows.Close()
+
+	var states []outbound.BlockState
+	for rows.Next() {
+		var state outbound.BlockState
+		if err := rows.Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned); err != nil {
+			return nil, fmt.Errorf("failed to scan block state: %w", err)
+		}
+		states = append(states, state)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating block states: %w", err)
+	}
+	return states, nil
+}
+
+// MarkBlockOrphaned marks a block as orphaned during a reorg.
+func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash string) error {
+	query := `UPDATE block_states SET is_orphaned = TRUE WHERE hash = $1`
+	_, err := r.db.ExecContext(ctx, query, hash)
+	if err != nil {
+		return fmt.Errorf("failed to mark block orphaned: %w", err)
+	}
+	return nil
+}
+
+// MarkBlocksOrphanedAfter marks all blocks after the given number as orphaned.
+func (r *BlockStateRepository) MarkBlocksOrphanedAfter(ctx context.Context, number int64) error {
+	query := `UPDATE block_states SET is_orphaned = TRUE WHERE number > $1 AND NOT is_orphaned`
+	_, err := r.db.ExecContext(ctx, query, number)
+	if err != nil {
+		return fmt.Errorf("failed to mark blocks orphaned after %d: %w", number, err)
+	}
+	return nil
+}
+
+// SaveReorgEvent records a chain reorganization event.
+func (r *BlockStateRepository) SaveReorgEvent(ctx context.Context, event outbound.ReorgEvent) error {
+	query := `
+		INSERT INTO reorg_events (detected_at, block_number, old_hash, new_hash, depth)
+		VALUES ($1, $2, $3, $4, $5)
+	`
+	_, err := r.db.ExecContext(ctx, query, event.DetectedAt, event.BlockNumber, event.OldHash, event.NewHash, event.Depth)
+	if err != nil {
+		return fmt.Errorf("failed to save reorg event: %w", err)
+	}
+	return nil
+}
+
+// GetReorgEvents retrieves reorg events, ordered by detection time descending.
+func (r *BlockStateRepository) GetReorgEvents(ctx context.Context, limit int) ([]outbound.ReorgEvent, error) {
+	query := `
+		SELECT id, detected_at, block_number, old_hash, new_hash, depth
+		FROM reorg_events
+		ORDER BY detected_at DESC
+		LIMIT $1
+	`
+	rows, err := r.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get reorg events: %w", err)
+	}
+	defer rows.Close()
+
+	var events []outbound.ReorgEvent
+	for rows.Next() {
+		var event outbound.ReorgEvent
+		if err := rows.Scan(&event.ID, &event.DetectedAt, &event.BlockNumber, &event.OldHash, &event.NewHash, &event.Depth); err != nil {
+			return nil, fmt.Errorf("failed to scan reorg event: %w", err)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating reorg events: %w", err)
+	}
+	return events, nil
+}
+
+// GetReorgEventsByBlockRange retrieves reorg events within a block number range.
+func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, fromBlock, toBlock int64) ([]outbound.ReorgEvent, error) {
+	query := `
+		SELECT id, detected_at, block_number, old_hash, new_hash, depth
+		FROM reorg_events
+		WHERE block_number >= $1 AND block_number <= $2
+		ORDER BY block_number DESC, detected_at DESC
+	`
+	rows, err := r.db.QueryContext(ctx, query, fromBlock, toBlock)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get reorg events by block range: %w", err)
+	}
+	defer rows.Close()
+
+	var events []outbound.ReorgEvent
+	for rows.Next() {
+		var event outbound.ReorgEvent
+		if err := rows.Scan(&event.ID, &event.DetectedAt, &event.BlockNumber, &event.OldHash, &event.NewHash, &event.Depth); err != nil {
+			return nil, fmt.Errorf("failed to scan reorg event: %w", err)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating reorg events: %w", err)
+	}
+	return events, nil
+}
+
+// GetOrphanedBlocks retrieves orphaned blocks for analysis.
+func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int) ([]outbound.BlockState, error) {
+	query := `
+		SELECT number, hash, parent_hash, received_at, is_orphaned
+		FROM block_states
+		WHERE is_orphaned
+		ORDER BY received_at DESC
+		LIMIT $1
+	`
+	rows, err := r.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get orphaned blocks: %w", err)
+	}
+	defer rows.Close()
+
+	var states []outbound.BlockState
+	for rows.Next() {
+		var state outbound.BlockState
+		if err := rows.Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned); err != nil {
+			return nil, fmt.Errorf("failed to scan block state: %w", err)
+		}
+		states = append(states, state)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating block states: %w", err)
+	}
+	return states, nil
+}
+
+// PruneOldBlocks deletes canonical blocks older than the given number.
+// Orphaned blocks are kept for historical analysis.
+func (r *BlockStateRepository) PruneOldBlocks(ctx context.Context, keepAfter int64) error {
+	query := `DELETE FROM block_states WHERE number < $1 AND NOT is_orphaned`
+	_, err := r.db.ExecContext(ctx, query, keepAfter)
+	if err != nil {
+		return fmt.Errorf("failed to prune old blocks: %w", err)
+	}
+	return nil
+}
+
+// PruneOldReorgEvents deletes reorg events older than the given time.
+func (r *BlockStateRepository) PruneOldReorgEvents(ctx context.Context, olderThan time.Time) error {
+	query := `DELETE FROM reorg_events WHERE detected_at < $1`
+	_, err := r.db.ExecContext(ctx, query, olderThan)
+	if err != nil {
+		return fmt.Errorf("failed to prune old reorg events: %w", err)
+	}
+	return nil
+}

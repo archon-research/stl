@@ -1,0 +1,97 @@
+// Package outbound contains the secondary/outbound ports.
+package outbound
+
+import (
+	"context"
+	"time"
+)
+
+// BlockState represents the persisted state of a block for tracking and reorg detection.
+type BlockState struct {
+	// Number is the block number (as int64 for easier comparison).
+	Number int64
+
+	// Hash is the block hash.
+	Hash string
+
+	// ParentHash is the parent block's hash (used for reorg detection).
+	ParentHash string
+
+	// ReceivedAt is when we received this block from the subscription.
+	ReceivedAt int64
+
+	// IsOrphaned indicates this block was replaced during a chain reorganization.
+	IsOrphaned bool
+}
+
+// ReorgEvent represents a chain reorganization event.
+type ReorgEvent struct {
+	// ID is the unique identifier for this reorg event.
+	ID int64
+
+	// DetectedAt is when the reorg was detected.
+	DetectedAt time.Time
+
+	// BlockNumber is the block number where the reorg occurred.
+	BlockNumber int64
+
+	// OldHash is the hash of the block that was replaced (orphaned).
+	OldHash string
+
+	// NewHash is the hash of the new canonical block.
+	NewHash string
+
+	// Depth is how many blocks were reorganized (if known).
+	Depth int
+}
+
+// BlockStateRepository defines the interface for persisting block state.
+// Used for tracking the last processed block, detecting reorgs, and deduplication.
+type BlockStateRepository interface {
+	// SaveBlock persists a block's state. Used for tracking and reorg detection.
+	SaveBlock(ctx context.Context, state BlockState) error
+
+	// GetLastBlock retrieves the most recently saved canonical (non-orphaned) block state.
+	// Returns nil if no blocks have been saved yet.
+	GetLastBlock(ctx context.Context) (*BlockState, error)
+
+	// GetBlockByNumber retrieves a canonical block state by its number.
+	// Returns nil if the block is not found.
+	GetBlockByNumber(ctx context.Context, number int64) (*BlockState, error)
+
+	// GetBlockByHash retrieves a block state by its hash.
+	// Returns nil if the block is not found. Used for deduplication.
+	GetBlockByHash(ctx context.Context, hash string) (*BlockState, error)
+
+	// GetRecentBlocks retrieves the N most recent canonical blocks.
+	// Used for reorg detection by checking parent hash chains.
+	GetRecentBlocks(ctx context.Context, limit int) ([]BlockState, error)
+
+	// MarkBlockOrphaned marks a block as orphaned during a reorg.
+	// The block is kept for historical purposes but excluded from canonical queries.
+	MarkBlockOrphaned(ctx context.Context, hash string) error
+
+	// MarkBlocksOrphanedAfter marks all blocks after the given number as orphaned.
+	// Used during reorg handling to mark orphaned blocks.
+	MarkBlocksOrphanedAfter(ctx context.Context, number int64) error
+
+	// SaveReorgEvent records a chain reorganization event.
+	SaveReorgEvent(ctx context.Context, event ReorgEvent) error
+
+	// GetReorgEvents retrieves reorg events, ordered by detection time descending.
+	GetReorgEvents(ctx context.Context, limit int) ([]ReorgEvent, error)
+
+	// GetReorgEventsByBlockRange retrieves reorg events within a block number range.
+	GetReorgEventsByBlockRange(ctx context.Context, fromBlock, toBlock int64) ([]ReorgEvent, error)
+
+	// GetOrphanedBlocks retrieves orphaned blocks for analysis.
+	GetOrphanedBlocks(ctx context.Context, limit int) ([]BlockState, error)
+
+	// PruneOldBlocks deletes blocks older than the given number.
+	// Used to prevent unbounded growth of the block state table.
+	// Only prunes non-orphaned blocks; orphaned blocks are kept for history.
+	PruneOldBlocks(ctx context.Context, keepAfter int64) error
+
+	// PruneOldReorgEvents deletes reorg events older than the given time.
+	PruneOldReorgEvents(ctx context.Context, olderThan time.Time) error
+}
