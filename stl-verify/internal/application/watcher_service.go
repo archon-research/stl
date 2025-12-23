@@ -27,6 +27,9 @@ type WatcherConfig struct {
 	// BlockRetention is how many blocks to keep in the state repository.
 	BlockRetention int
 
+	// BackfillBatchSize is how many blocks to fetch in a single batched RPC call.
+	BackfillBatchSize int
+
 	// Logger is the structured logger.
 	Logger *slog.Logger
 }
@@ -36,8 +39,9 @@ func WatcherConfigDefaults() WatcherConfig {
 	return WatcherConfig{
 		ChainID:              1,
 		FinalityBlockCount:   64,
-		MaxUnfinalizedBlocks: 128,
+		MaxUnfinalizedBlocks: 200,
 		BlockRetention:       1000,
+		BackfillBatchSize:    10,
 		Logger:               slog.Default(),
 	}
 }
@@ -47,6 +51,12 @@ type LightBlock struct {
 	Number     int64
 	Hash       string
 	ParentHash string
+}
+
+// backfillRequest represents a range of blocks to backfill.
+type backfillRequest struct {
+	from int64
+	to   int64
 }
 
 // WatcherService orchestrates block watching, reorg detection, data fetching, and event publishing.
@@ -63,6 +73,10 @@ type WatcherService struct {
 	chainMu           sync.RWMutex
 	unfinalizedBlocks []LightBlock
 	finalizedBlock    *LightBlock
+
+	// Background backfill
+	backfillCh chan backfillRequest
+	backfillWg sync.WaitGroup
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -108,6 +122,9 @@ func NewWatcherService(
 	if config.BlockRetention == 0 {
 		config.BlockRetention = defaults.BlockRetention
 	}
+	if config.BackfillBatchSize == 0 {
+		config.BackfillBatchSize = defaults.BackfillBatchSize
+	}
 	if config.Logger == nil {
 		config.Logger = defaults.Logger
 	}
@@ -119,6 +136,7 @@ func NewWatcherService(
 		stateRepo:  stateRepo,
 		cache:      cache,
 		eventSink:  eventSink,
+		backfillCh: make(chan backfillRequest, 100),
 		logger:     config.Logger.With("component", "watcher-service"),
 	}, nil
 }
@@ -129,6 +147,10 @@ func (w *WatcherService) Start(ctx context.Context) error {
 
 	// Restore chain state from DB
 	w.restoreChainFromDB()
+
+	// Start background backfill worker
+	w.backfillWg.Add(1)
+	go w.backfillWorker()
 
 	// Subscribe to new block headers
 	headers, err := w.subscriber.Subscribe(w.ctx)
@@ -148,13 +170,15 @@ func (w *WatcherService) Stop() error {
 	if w.cancel != nil {
 		w.cancel()
 	}
+	// Wait for backfill worker to finish
+	w.backfillWg.Wait()
 	return w.subscriber.Unsubscribe()
 }
 
-// OnReconnect handles reconnection by backfilling missed blocks.
+// OnReconnect handles reconnection by queuing missed blocks for background backfill.
 // This should be called by the subscriber's reconnect callback.
 func (w *WatcherService) OnReconnect() {
-	w.backfillMissedBlocks()
+	w.queueBackfill()
 }
 
 // processHeaders processes incoming block headers.
@@ -168,7 +192,12 @@ func (w *WatcherService) processHeaders(headers <-chan outbound.BlockHeader) {
 				return
 			}
 			if err := w.processBlock(header, time.Now(), false); err != nil {
-				w.logger.Warn("failed to process block", "error", err)
+				blockNum, _ := parseBlockNumber(header.Number)
+				w.logger.Warn("failed to process live block",
+					"block", blockNum,
+					"hash", header.Hash,
+					"parentHash", header.ParentHash,
+					"error", err)
 			}
 		}
 	}
@@ -183,13 +212,29 @@ func (w *WatcherService) processBlock(header outbound.BlockHeader, receivedAt ti
 
 	ctx := w.ctx
 
-	// Check for duplicate
-	if w.isDuplicate(header.Hash, blockNum) {
+	block := LightBlock{
+		Number:     blockNum,
+		Hash:       header.Hash,
+		ParentHash: header.ParentHash,
+	}
+
+	// First check if duplicate (quick check under read lock)
+	w.chainMu.RLock()
+	isDup := false
+	for _, b := range w.unfinalizedBlocks {
+		if b.Hash == block.Hash {
+			isDup = true
+			break
+		}
+	}
+	w.chainMu.RUnlock()
+
+	if isDup {
 		w.logger.Debug("duplicate block, skipping", "block", blockNum)
 		return nil
 	}
 
-	// Detect reorg
+	// Detect reorg BEFORE adding to chain
 	isReorg, reorgDepth, commonAncestor, err := w.detectReorg(header, blockNum, receivedAt)
 	if err != nil {
 		return fmt.Errorf("reorg detection failed: %w", err)
@@ -198,7 +243,13 @@ func (w *WatcherService) processBlock(header outbound.BlockHeader, receivedAt ti
 		w.logger.Warn("reorg detected", "block", blockNum, "depth", reorgDepth, "commonAncestor", commonAncestor)
 	}
 
-	// Save block state
+	// Now atomically add to chain (may fail if added by backfill in between)
+	if !w.tryAddBlock(block) {
+		w.logger.Debug("block added by concurrent process, skipping", "block", blockNum)
+		return nil
+	}
+
+	// Save block state to DB
 	state := outbound.BlockState{
 		Number:     blockNum,
 		Hash:       header.Hash,
@@ -210,25 +261,10 @@ func (w *WatcherService) processBlock(header outbound.BlockHeader, receivedAt ti
 		return fmt.Errorf("failed to save block state: %w", err)
 	}
 
-	// Update in-memory chain
+	// Update finalized block pointer
 	w.chainMu.Lock()
-	w.addToUnfinalizedChain(LightBlock{
-		Number:     blockNum,
-		Hash:       header.Hash,
-		ParentHash: header.ParentHash,
-	})
 	w.updateFinalizedBlock(blockNum)
 	w.chainMu.Unlock()
-
-	// Prune old blocks periodically
-	if blockNum%100 == 0 {
-		pruneThreshold := blockNum - int64(w.config.BlockRetention)
-		if pruneThreshold > 0 {
-			if err := w.stateRepo.PruneOldBlocks(ctx, pruneThreshold); err != nil {
-				w.logger.Warn("failed to prune old blocks", "error", err)
-			}
-		}
-	}
 
 	// Fetch all data types concurrently, cache, and publish events
 	w.fetchAndPublishBlockData(header, blockNum, receivedAt, isReorg, isBackfill)
@@ -237,6 +273,8 @@ func (w *WatcherService) processBlock(header outbound.BlockHeader, receivedAt ti
 }
 
 // isDuplicate checks if we've already processed this block.
+// Note: This has a TOCTOU race with addToUnfinalizedChain. For full atomicity,
+// use tryAddBlock which combines check and add under a single lock.
 func (w *WatcherService) isDuplicate(hash string, blockNum int64) bool {
 	// Check in-memory chain first
 	w.chainMu.RLock()
@@ -257,8 +295,45 @@ func (w *WatcherService) isDuplicate(hash string, blockNum int64) bool {
 	return existing != nil
 }
 
+// tryAddBlock atomically checks for duplicate and adds to unfinalized chain.
+// Returns false if block already exists (duplicate).
+// Caller must still save to DB and handle reorg detection separately.
+func (w *WatcherService) tryAddBlock(block LightBlock) bool {
+	w.chainMu.Lock()
+	defer w.chainMu.Unlock()
+
+	// Check for duplicate by hash
+	for _, b := range w.unfinalizedBlocks {
+		if b.Hash == block.Hash {
+			return false // Already exists
+		}
+	}
+
+	// Add to chain (sorted insert)
+	insertIdx := len(w.unfinalizedBlocks)
+	for i, b := range w.unfinalizedBlocks {
+		if b.Number > block.Number {
+			insertIdx = i
+			break
+		} else if b.Number == block.Number {
+			insertIdx = i + 1
+			break
+		}
+	}
+
+	w.unfinalizedBlocks = append(w.unfinalizedBlocks, LightBlock{})
+	copy(w.unfinalizedBlocks[insertIdx+1:], w.unfinalizedBlocks[insertIdx:])
+	w.unfinalizedBlocks[insertIdx] = block
+
+	if len(w.unfinalizedBlocks) > w.config.MaxUnfinalizedBlocks {
+		w.unfinalizedBlocks = w.unfinalizedBlocks[1:]
+	}
+
+	return true
+}
+
 // detectReorg detects chain reorganizations using Ponder-style parent hash chain validation.
-func (w *WatcherService) detectReorg(header outbound.BlockHeader, blockNum int64, receivedAt time.Time) (bool, int, int64, error) {
+func (w *WatcherService) detectReorg(header outbound.BlockHeader, incomingBlockNum int64, receivedAt time.Time) (bool, int, int64, error) {
 	w.chainMu.Lock()
 	defer w.chainMu.Unlock()
 
@@ -269,17 +344,17 @@ func (w *WatcherService) detectReorg(header outbound.BlockHeader, blockNum int64
 	latestBlock := w.unfinalizedBlocks[len(w.unfinalizedBlocks)-1]
 
 	// Block number decreased - definite reorg
-	if blockNum <= latestBlock.Number {
-		return w.handleReorg(header, blockNum, receivedAt)
+	if incomingBlockNum <= latestBlock.Number {
+		return w.handleReorg(header, incomingBlockNum, receivedAt)
 	}
 
 	// Block is exactly one ahead - check parent hash
-	if blockNum == latestBlock.Number+1 {
+	if incomingBlockNum == latestBlock.Number+1 {
 		if header.ParentHash == latestBlock.Hash {
 			return false, 0, 0, nil
 		}
 		// Parent hash mismatch - reorg
-		return w.handleReorg(header, blockNum, receivedAt)
+		return w.handleReorg(header, incomingBlockNum, receivedAt)
 	}
 
 	// Gap in blocks - will be backfilled
@@ -320,7 +395,8 @@ func (w *WatcherService) handleReorg(header outbound.BlockHeader, blockNum int64
 
 		// Check finality boundary
 		if w.finalizedBlock != nil && remoteBlock.Number <= w.finalizedBlock.Number {
-			return false, 0, 0, fmt.Errorf("unrecoverable reorg: beyond finalized block %d", w.finalizedBlock.Number)
+			return false, 0, 0, fmt.Errorf("block %d is at or below finalized block %d (likely late arrival after pruning)",
+				remoteBlock.Number, w.finalizedBlock.Number)
 		}
 
 		// Fetch parent from network
@@ -372,9 +448,36 @@ func (w *WatcherService) handleReorg(header outbound.BlockHeader, blockNum int64
 	return true, reorgDepth, commonAncestor, nil
 }
 
-// addToUnfinalizedChain adds a block to the chain.
+// addToUnfinalizedChain adds a block to the chain in sorted order, skipping duplicates.
+// Caller must hold chainMu lock.
 func (w *WatcherService) addToUnfinalizedChain(block LightBlock) {
-	w.unfinalizedBlocks = append(w.unfinalizedBlocks, block)
+	// Check for duplicate by hash
+	for _, b := range w.unfinalizedBlocks {
+		if b.Hash == block.Hash {
+			return // Already exists
+		}
+	}
+
+	// Find insertion point to maintain sorted order by block number
+	insertIdx := len(w.unfinalizedBlocks)
+	for i, b := range w.unfinalizedBlocks {
+		if b.Number > block.Number {
+			insertIdx = i
+			break
+		} else if b.Number == block.Number {
+			// Same block number but different hash - this is a fork/reorg scenario
+			// Keep both for now, reorg handling will clean up
+			insertIdx = i + 1
+			break
+		}
+	}
+
+	// Insert at the correct position
+	w.unfinalizedBlocks = append(w.unfinalizedBlocks, LightBlock{})
+	copy(w.unfinalizedBlocks[insertIdx+1:], w.unfinalizedBlocks[insertIdx:])
+	w.unfinalizedBlocks[insertIdx] = block
+
+	// Trim if too long
 	if len(w.unfinalizedBlocks) > w.config.MaxUnfinalizedBlocks {
 		w.unfinalizedBlocks = w.unfinalizedBlocks[1:]
 	}
@@ -445,8 +548,8 @@ func (w *WatcherService) restoreChainFromDB() {
 	w.logger.Info("restored chain from DB", "blockCount", len(w.unfinalizedBlocks))
 }
 
-// backfillMissedBlocks fetches blocks missed during disconnection.
-func (w *WatcherService) backfillMissedBlocks() {
+// queueBackfill determines missed blocks and queues them for background processing.
+func (w *WatcherService) queueBackfill() {
 	w.restoreChainFromDB()
 
 	lastBlock, err := w.stateRepo.GetLastBlock(w.ctx)
@@ -465,27 +568,251 @@ func (w *WatcherService) backfillMissedBlocks() {
 		return
 	}
 
-	w.logger.Info("backfilling missed blocks", "from", lastBlock.Number+1, "to", currentBlockNum)
+	w.logger.Info("queuing backfill", "from", lastBlock.Number+1, "to", currentBlockNum, "count", missedCount)
 
-	for blockNum := lastBlock.Number + 1; blockNum <= currentBlockNum; blockNum++ {
-		blockData, err := w.client.GetBlockByNumber(w.ctx, blockNum, false)
-		if err != nil {
-			w.logger.Warn("failed to fetch block for backfill", "block", blockNum, "error", err)
-			continue
-		}
+	// Queue the backfill request - non-blocking
+	select {
+	case w.backfillCh <- backfillRequest{from: lastBlock.Number + 1, to: currentBlockNum}:
+	default:
+		w.logger.Warn("backfill queue full, skipping", "from", lastBlock.Number+1, "to", currentBlockNum)
+	}
+}
 
-		var header outbound.BlockHeader
-		if err := parseBlockHeader(blockData, &header); err != nil {
-			w.logger.Warn("failed to parse block header", "block", blockNum, "error", err)
-			continue
-		}
+// backfillWorker processes backfill requests in the background using batched RPC calls.
+func (w *WatcherService) backfillWorker() {
+	defer w.backfillWg.Done()
 
-		if err := w.processBlock(header, time.Now(), true); err != nil {
-			w.logger.Warn("failed to process backfill block", "block", blockNum, "error", err)
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case req, ok := <-w.backfillCh:
+			if !ok {
+				return
+			}
+			w.processBackfillRequest(req)
 		}
 	}
+}
 
-	w.logger.Info("backfill complete", "count", missedCount)
+// processBackfillRequest processes a single backfill request using batched RPC calls.
+func (w *WatcherService) processBackfillRequest(req backfillRequest) {
+	batchSize := w.config.BackfillBatchSize
+	total := req.to - req.from + 1
+
+	w.logger.Info("starting backfill", "from", req.from, "to", req.to, "total", total, "batchSize", batchSize)
+
+	for batchStart := req.from; batchStart <= req.to; batchStart += int64(batchSize) {
+		// Check if context is cancelled
+		select {
+		case <-w.ctx.Done():
+			w.logger.Info("backfill cancelled")
+			return
+		default:
+		}
+
+		batchEnd := batchStart + int64(batchSize) - 1
+		if batchEnd > req.to {
+			batchEnd = req.to
+		}
+
+		// Build block numbers for this batch
+		blockNums := make([]int64, 0, batchEnd-batchStart+1)
+		for blockNum := batchStart; blockNum <= batchEnd; blockNum++ {
+			blockNums = append(blockNums, blockNum)
+		}
+
+		// Fetch all data for this batch in a single RPC call
+		batchFetchStart := time.Now()
+		blockDataList, err := w.client.GetBlocksBatch(w.ctx, blockNums, true)
+		batchFetchDuration := time.Since(batchFetchStart)
+		if err != nil {
+			w.logger.Warn("failed to fetch batch", "from", batchStart, "to", batchEnd, "error", err)
+			continue
+		}
+		w.logger.Debug("backfill batch fetched", "from", batchStart, "to", batchEnd, "fetchMs", batchFetchDuration.Milliseconds())
+
+		// Process each block in the batch
+		for _, bd := range blockDataList {
+			blockStart := time.Now()
+
+			if bd.Block == nil {
+				w.logger.Warn("missing block data in batch", "block", bd.BlockNumber)
+				continue
+			}
+
+			var header outbound.BlockHeader
+			if err := parseBlockHeader(bd.Block, &header); err != nil {
+				w.logger.Warn("failed to parse block header", "block", bd.BlockNumber, "error", err)
+				continue
+			}
+
+			// Update chain state (reorg detection) - skip if already processed by live
+			processed, err := w.processBlockHeader(header, time.Now(), true)
+			if err != nil {
+				w.logger.Warn("failed to process backfill block header", "block", bd.BlockNumber, "error", err)
+				continue
+			}
+			if !processed {
+				w.logger.Debug("backfill block already processed by live, skipping", "block", bd.BlockNumber)
+				continue
+			}
+
+			// Cache and publish the pre-fetched data
+			w.cacheAndPublishBatchData(bd, header, time.Now())
+
+			w.logger.Debug("backfill block complete", "block", bd.BlockNumber, "durationMs", time.Since(blockStart).Milliseconds())
+		}
+
+		w.logger.Debug("backfill batch complete", "from", batchStart, "to", batchEnd, "totalMs", time.Since(batchFetchStart).Milliseconds())
+	}
+
+	w.logger.Info("backfill complete", "from", req.from, "to", req.to, "total", total)
+}
+
+// processBlockHeader processes a block header for chain state (without fetching data).
+// Returns true if the block was processed, false if it was a duplicate.
+// Backfill does NOT do reorg detection since it's just filling gaps.
+func (w *WatcherService) processBlockHeader(header outbound.BlockHeader, receivedAt time.Time, isBackfill bool) (bool, error) {
+	blockNum, err := parseBlockNumber(header.Number)
+	if err != nil {
+		return false, fmt.Errorf("invalid block number: %w", err)
+	}
+
+	// Atomically check duplicate and reserve slot in chain
+	block := LightBlock{
+		Number:     blockNum,
+		Hash:       header.Hash,
+		ParentHash: header.ParentHash,
+	}
+	if !w.tryAddBlock(block) {
+		return false, nil // Duplicate - already processed by live or earlier backfill
+	}
+
+	// Save block state to database
+	state := outbound.BlockState{
+		Number:     blockNum,
+		Hash:       header.Hash,
+		ParentHash: header.ParentHash,
+		ReceivedAt: receivedAt.Unix(),
+	}
+	if err := w.stateRepo.SaveBlock(w.ctx, state); err != nil {
+		return false, fmt.Errorf("failed to save block state: %w", err)
+	}
+
+	// Update finalized block pointer
+	w.chainMu.Lock()
+	w.updateFinalizedBlock(blockNum)
+	w.chainMu.Unlock()
+
+	return true, nil
+}
+
+// cacheAndPublishBatchData caches pre-fetched data and publishes events.
+func (w *WatcherService) cacheAndPublishBatchData(bd outbound.BlockData, header outbound.BlockHeader, receivedAt time.Time) {
+	chainID := w.config.ChainID
+	blockNum := bd.BlockNumber
+	blockHash := header.Hash
+	parentHash := header.ParentHash
+	blockTimestamp, _ := parseBlockNumber(header.Timestamp)
+
+	var wg sync.WaitGroup
+
+	// Cache and publish block
+	if bd.Block != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := w.cache.SetBlock(w.ctx, chainID, blockNum, bd.Block); err != nil {
+				w.logger.Warn("failed to cache block", "block", blockNum, "error", err)
+				return
+			}
+			event := outbound.BlockEvent{
+				ChainID:        chainID,
+				BlockNumber:    blockNum,
+				BlockHash:      blockHash,
+				ParentHash:     parentHash,
+				BlockTimestamp: blockTimestamp,
+				ReceivedAt:     receivedAt,
+				CacheKey:       cacheKey(chainID, blockNum, "block"),
+				IsBackfill:     true,
+			}
+			if err := w.eventSink.Publish(w.ctx, event); err != nil {
+				w.logger.Warn("failed to publish block event", "block", blockNum, "error", err)
+			}
+		}()
+	}
+
+	// Cache and publish receipts
+	if bd.Receipts != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := w.cache.SetReceipts(w.ctx, chainID, blockNum, bd.Receipts); err != nil {
+				w.logger.Warn("failed to cache receipts", "block", blockNum, "error", err)
+				return
+			}
+			event := outbound.ReceiptsEvent{
+				ChainID:     chainID,
+				BlockNumber: blockNum,
+				BlockHash:   blockHash,
+				ReceivedAt:  receivedAt,
+				CacheKey:    cacheKey(chainID, blockNum, "receipts"),
+				IsBackfill:  true,
+			}
+			if err := w.eventSink.Publish(w.ctx, event); err != nil {
+				w.logger.Warn("failed to publish receipts event", "block", blockNum, "error", err)
+			}
+		}()
+	}
+
+	// Cache and publish traces
+	if bd.Traces != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := w.cache.SetTraces(w.ctx, chainID, blockNum, bd.Traces); err != nil {
+				w.logger.Warn("failed to cache traces", "block", blockNum, "error", err)
+				return
+			}
+			event := outbound.TracesEvent{
+				ChainID:     chainID,
+				BlockNumber: blockNum,
+				BlockHash:   blockHash,
+				ReceivedAt:  receivedAt,
+				CacheKey:    cacheKey(chainID, blockNum, "traces"),
+				IsBackfill:  true,
+			}
+			if err := w.eventSink.Publish(w.ctx, event); err != nil {
+				w.logger.Warn("failed to publish traces event", "block", blockNum, "error", err)
+			}
+		}()
+	}
+
+	// Cache and publish blobs
+	if bd.Blobs != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := w.cache.SetBlobs(w.ctx, chainID, blockNum, bd.Blobs); err != nil {
+				w.logger.Warn("failed to cache blobs", "block", blockNum, "error", err)
+				return
+			}
+			event := outbound.BlobsEvent{
+				ChainID:     chainID,
+				BlockNumber: blockNum,
+				BlockHash:   blockHash,
+				ReceivedAt:  receivedAt,
+				CacheKey:    cacheKey(chainID, blockNum, "blobs"),
+				IsBackfill:  true,
+			}
+			if err := w.eventSink.Publish(w.ctx, event); err != nil {
+				w.logger.Warn("failed to publish blobs event", "block", blockNum, "error", err)
+			}
+		}()
+	}
+
+	wg.Wait()
 }
 
 // fetchAndPublishBlockData fetches all data types concurrently and publishes events.
@@ -546,6 +873,7 @@ func (w *WatcherService) fetchCacheAndPublishBlock(chainID, blockNum int64, bloc
 		ParentHash:     parentHash,
 		BlockTimestamp: blockTimestamp,
 		ReceivedAt:     receivedAt,
+		CacheKey:       cacheKey(chainID, blockNum, "block"),
 		IsReorg:        isReorg,
 		IsBackfill:     isBackfill,
 	}
@@ -573,6 +901,7 @@ func (w *WatcherService) fetchCacheAndPublishReceipts(chainID, blockNum int64, b
 		BlockNumber: blockNum,
 		BlockHash:   blockHash,
 		ReceivedAt:  receivedAt,
+		CacheKey:    cacheKey(chainID, blockNum, "receipts"),
 		IsReorg:     isReorg,
 		IsBackfill:  isBackfill,
 	}
@@ -600,6 +929,7 @@ func (w *WatcherService) fetchCacheAndPublishTraces(chainID, blockNum int64, blo
 		BlockNumber: blockNum,
 		BlockHash:   blockHash,
 		ReceivedAt:  receivedAt,
+		CacheKey:    cacheKey(chainID, blockNum, "traces"),
 		IsReorg:     isReorg,
 		IsBackfill:  isBackfill,
 	}
@@ -627,6 +957,7 @@ func (w *WatcherService) fetchCacheAndPublishBlobs(chainID, blockNum int64, bloc
 		BlockNumber: blockNum,
 		BlockHash:   blockHash,
 		ReceivedAt:  receivedAt,
+		CacheKey:    cacheKey(chainID, blockNum, "blobs"),
 		IsReorg:     isReorg,
 		IsBackfill:  isBackfill,
 	}
@@ -642,4 +973,10 @@ func parseBlockNumber(hexNum string) (int64, error) {
 
 func parseBlockHeader(data []byte, header *outbound.BlockHeader) error {
 	return json.Unmarshal(data, header)
+}
+
+// cacheKey generates the cache key for a given data type.
+// Format: {chainID}:{blockNumber}:{dataType}
+func cacheKey(chainID, blockNumber int64, dataType string) string {
+	return fmt.Sprintf("%d:%d:%s", chainID, blockNumber, dataType)
 }

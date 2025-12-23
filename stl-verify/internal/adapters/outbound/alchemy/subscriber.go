@@ -258,6 +258,7 @@ func (s *Subscriber) readLoop(logger *slog.Logger) {
 
 	go func() {
 		for {
+			// Get connection reference under lock
 			s.mu.RLock()
 			conn := s.conn
 			s.mu.RUnlock()
@@ -267,6 +268,9 @@ func (s *Subscriber) readLoop(logger *slog.Logger) {
 				return
 			}
 
+			// SetReadDeadline and ReadJSON may block - don't hold lock
+			// The connection won't be replaced while readLoop is running
+			// (connectionManager waits for readLoop to return before reconnecting)
 			if err := conn.SetReadDeadline(time.Now().Add(s.config.ReadTimeout)); err != nil {
 				readErr <- err
 				return

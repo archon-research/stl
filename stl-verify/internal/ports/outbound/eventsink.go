@@ -24,6 +24,8 @@ type Event interface {
 	GetBlockNumber() int64
 	// GetChainID returns the chain ID.
 	GetChainID() int64
+	// GetCacheKey returns the cache key where the data is stored.
+	GetCacheKey() string
 }
 
 // BlockEvent is published when block data is ready in cache.
@@ -46,6 +48,9 @@ type BlockEvent struct {
 	// ReceivedAt is when we received and cached this data.
 	ReceivedAt time.Time `json:"receivedAt"`
 
+	// CacheKey is the key where the data is stored in cache.
+	CacheKey string `json:"cacheKey"`
+
 	// IsReorg indicates this block is part of a chain reorganization.
 	IsReorg bool `json:"isReorg,omitempty"`
 
@@ -56,6 +61,7 @@ type BlockEvent struct {
 func (e BlockEvent) EventType() EventType  { return EventTypeBlock }
 func (e BlockEvent) GetBlockNumber() int64 { return e.BlockNumber }
 func (e BlockEvent) GetChainID() int64     { return e.ChainID }
+func (e BlockEvent) GetCacheKey() string   { return e.CacheKey }
 
 // ReceiptsEvent is published when receipts data is ready in cache.
 type ReceiptsEvent struct {
@@ -71,6 +77,9 @@ type ReceiptsEvent struct {
 	// ReceivedAt is when we received and cached this data.
 	ReceivedAt time.Time `json:"receivedAt"`
 
+	// CacheKey is the key where the data is stored in cache.
+	CacheKey string `json:"cacheKey"`
+
 	// IsReorg indicates this block is part of a chain reorganization.
 	IsReorg bool `json:"isReorg,omitempty"`
 
@@ -81,6 +90,7 @@ type ReceiptsEvent struct {
 func (e ReceiptsEvent) EventType() EventType  { return EventTypeReceipts }
 func (e ReceiptsEvent) GetBlockNumber() int64 { return e.BlockNumber }
 func (e ReceiptsEvent) GetChainID() int64     { return e.ChainID }
+func (e ReceiptsEvent) GetCacheKey() string   { return e.CacheKey }
 
 // TracesEvent is published when traces data is ready in cache.
 type TracesEvent struct {
@@ -96,6 +106,9 @@ type TracesEvent struct {
 	// ReceivedAt is when we received and cached this data.
 	ReceivedAt time.Time `json:"receivedAt"`
 
+	// CacheKey is the key where the data is stored in cache.
+	CacheKey string `json:"cacheKey"`
+
 	// IsReorg indicates this block is part of a chain reorganization.
 	IsReorg bool `json:"isReorg,omitempty"`
 
@@ -106,6 +119,7 @@ type TracesEvent struct {
 func (e TracesEvent) EventType() EventType  { return EventTypeTraces }
 func (e TracesEvent) GetBlockNumber() int64 { return e.BlockNumber }
 func (e TracesEvent) GetChainID() int64     { return e.ChainID }
+func (e TracesEvent) GetCacheKey() string   { return e.CacheKey }
 
 // BlobsEvent is published when blobs data is ready in cache.
 type BlobsEvent struct {
@@ -121,6 +135,9 @@ type BlobsEvent struct {
 	// ReceivedAt is when we received and cached this data.
 	ReceivedAt time.Time `json:"receivedAt"`
 
+	// CacheKey is the key where the data is stored in cache.
+	CacheKey string `json:"cacheKey"`
+
 	// IsReorg indicates this block is part of a chain reorganization.
 	IsReorg bool `json:"isReorg,omitempty"`
 
@@ -131,6 +148,7 @@ type BlobsEvent struct {
 func (e BlobsEvent) EventType() EventType  { return EventTypeBlobs }
 func (e BlobsEvent) GetBlockNumber() int64 { return e.BlockNumber }
 func (e BlobsEvent) GetChainID() int64     { return e.ChainID }
+func (e BlobsEvent) GetCacheKey() string   { return e.CacheKey }
 
 // EventSink defines the interface for publishing block data events.
 // Events contain only metadata; actual data is in the cache.

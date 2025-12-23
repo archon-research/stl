@@ -151,6 +151,92 @@ func (c *Client) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
 	return parseBlockNumber(result)
 }
 
+// GetBlocksBatch fetches all data for multiple blocks in a single batched RPC call.
+func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx bool) ([]outbound.BlockData, error) {
+	if len(blockNums) == 0 {
+		return nil, nil
+	}
+
+	// Build batch request: 4 calls per block (block, receipts, traces, blobs)
+	requests := make([]jsonRPCRequest, 0, len(blockNums)*4)
+	for i, blockNum := range blockNums {
+		hexNum := fmt.Sprintf("0x%x", blockNum)
+		baseID := i * 4
+
+		requests = append(requests,
+			jsonRPCRequest{JSONRPC: "2.0", ID: baseID, Method: "eth_getBlockByNumber", Params: []interface{}{hexNum, fullTx}},
+			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 1, Method: "eth_getBlockReceipts", Params: []interface{}{hexNum}},
+			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 2, Method: "trace_block", Params: []interface{}{hexNum}},
+			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 3, Method: "eth_getBlobSidecars", Params: []interface{}{hexNum}},
+		)
+	}
+
+	responses, err := c.callBatch(ctx, requests)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build a map of ID -> response for easy lookup
+	respMap := make(map[int]*jsonRPCResponse, len(responses))
+	for i := range responses {
+		respMap[responses[i].ID] = &responses[i]
+	}
+
+	// Assemble results
+	results := make([]outbound.BlockData, len(blockNums))
+	for i, blockNum := range blockNums {
+		baseID := i * 4
+		results[i] = outbound.BlockData{BlockNumber: blockNum}
+
+		if resp := respMap[baseID]; resp != nil && resp.Error == nil {
+			results[i].Block = resp.Result
+		}
+		if resp := respMap[baseID+1]; resp != nil && resp.Error == nil {
+			results[i].Receipts = resp.Result
+		}
+		if resp := respMap[baseID+2]; resp != nil && resp.Error == nil {
+			results[i].Traces = resp.Result
+		}
+		if resp := respMap[baseID+3]; resp != nil && resp.Error == nil {
+			results[i].Blobs = resp.Result
+		}
+	}
+
+	return results, nil
+}
+
+// callBatch makes a batched HTTP JSON-RPC call to the Alchemy API.
+func (c *Client) callBatch(ctx context.Context, requests []jsonRPCRequest) ([]jsonRPCResponse, error) {
+	reqBytes, err := json.Marshal(requests)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal batch request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpURL, bytes.NewReader(reqBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	respBytes, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var rpcResponses []jsonRPCResponse
+	if err := json.Unmarshal(respBytes, &rpcResponses); err != nil {
+		return nil, fmt.Errorf("failed to parse batch response: %w", err)
+	}
+
+	return rpcResponses, nil
+}
+
 // call makes an HTTP JSON-RPC call to the Alchemy API.
 func (c *Client) call(ctx context.Context, req jsonRPCRequest) (*jsonRPCResponse, error) {
 	reqBytes, err := json.Marshal(req)
