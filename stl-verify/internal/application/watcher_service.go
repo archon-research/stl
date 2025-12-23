@@ -145,8 +145,8 @@ func NewWatcherService(
 func (w *WatcherService) Start(ctx context.Context) error {
 	w.ctx, w.cancel = context.WithCancel(ctx)
 
-	// Restore chain state from DB
-	w.restoreChainFromDB()
+	// Restore in-memory chain state from DB
+	w.restoreInMemoryChain()
 
 	// Start background backfill worker
 	w.backfillWg.Add(1)
@@ -510,8 +510,8 @@ func (w *WatcherService) updateFinalizedBlock(currentBlockNum int64) {
 	}
 }
 
-// restoreChainFromDB restores the in-memory chain from the database.
-func (w *WatcherService) restoreChainFromDB() {
+// restoreInMemoryChain restores the in-memory chain state from the database.
+func (w *WatcherService) restoreInMemoryChain() {
 	recentBlocks, err := w.stateRepo.GetRecentBlocks(w.ctx, w.config.MaxUnfinalizedBlocks)
 	if err != nil {
 		w.logger.Warn("failed to restore chain from DB", "error", err)
@@ -549,32 +549,61 @@ func (w *WatcherService) restoreChainFromDB() {
 }
 
 // queueBackfill determines missed blocks and queues them for background processing.
+// It finds gaps in the block sequence (missing blocks below the current tip)
+// rather than backfilling from the last block to current, which avoids
+// overlap with blocks that live processing is already handling.
 func (w *WatcherService) queueBackfill() {
-	w.restoreChainFromDB()
+	w.restoreInMemoryChain()
 
-	lastBlock, err := w.stateRepo.GetLastBlock(w.ctx)
-	if err != nil || lastBlock == nil {
-		return
-	}
-
-	currentBlockNum, err := w.client.GetCurrentBlockNumber(w.ctx)
+	// Get the highest block we've processed (the tip of our chain)
+	maxBlock, err := w.stateRepo.GetMaxBlockNumber(w.ctx)
 	if err != nil {
-		w.logger.Warn("failed to get current block number", "error", err)
+		w.logger.Warn("failed to get max block number", "error", err)
+		return
+	}
+	if maxBlock == 0 {
+		// No blocks yet - nothing to backfill from
 		return
 	}
 
-	missedCount := currentBlockNum - lastBlock.Number
-	if missedCount <= 0 {
+	// Get the lowest block we have
+	minBlock, err := w.stateRepo.GetMinBlockNumber(w.ctx)
+	if err != nil {
+		w.logger.Warn("failed to get min block number", "error", err)
 		return
 	}
 
-	w.logger.Info("queuing backfill", "from", lastBlock.Number+1, "to", currentBlockNum, "count", missedCount)
+	// Find gaps in our block sequence (missing blocks between min and max)
+	gaps, err := w.stateRepo.FindGaps(w.ctx, minBlock, maxBlock)
+	if err != nil {
+		w.logger.Warn("failed to find block gaps", "error", err)
+		return
+	}
 
-	// Queue the backfill request - non-blocking
-	select {
-	case w.backfillCh <- backfillRequest{from: lastBlock.Number + 1, to: currentBlockNum}:
-	default:
-		w.logger.Warn("backfill queue full, skipping", "from", lastBlock.Number+1, "to", currentBlockNum)
+	if len(gaps) == 0 {
+		w.logger.Debug("no gaps to backfill", "minBlock", minBlock, "maxBlock", maxBlock)
+		return
+	}
+
+	// Queue each gap for backfilling
+	totalMissing := int64(0)
+	for _, gap := range gaps {
+		totalMissing += gap.To - gap.From + 1
+	}
+
+	w.logger.Info("queuing gap backfill",
+		"gaps", len(gaps),
+		"totalMissing", totalMissing,
+		"minBlock", minBlock,
+		"maxBlock", maxBlock)
+
+	for _, gap := range gaps {
+		select {
+		case w.backfillCh <- backfillRequest{from: gap.From, to: gap.To}:
+			w.logger.Debug("queued gap backfill", "from", gap.From, "to", gap.To)
+		default:
+			w.logger.Warn("backfill queue full, skipping gap", "from", gap.From, "to", gap.To)
+		}
 	}
 }
 

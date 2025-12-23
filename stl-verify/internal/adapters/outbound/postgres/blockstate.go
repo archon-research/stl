@@ -300,3 +300,86 @@ func (r *BlockStateRepository) PruneOldReorgEvents(ctx context.Context, olderTha
 	}
 	return nil
 }
+
+// GetMinBlockNumber returns the lowest canonical block number.
+func (r *BlockStateRepository) GetMinBlockNumber(ctx context.Context) (int64, error) {
+	query := `SELECT COALESCE(MIN(number), 0) FROM block_states WHERE NOT is_orphaned`
+	var minNum int64
+	err := r.db.QueryRowContext(ctx, query).Scan(&minNum)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get min block number: %w", err)
+	}
+	return minNum, nil
+}
+
+// GetMaxBlockNumber returns the highest canonical block number.
+func (r *BlockStateRepository) GetMaxBlockNumber(ctx context.Context) (int64, error) {
+	query := `SELECT COALESCE(MAX(number), 0) FROM block_states WHERE NOT is_orphaned`
+	var maxNum int64
+	err := r.db.QueryRowContext(ctx, query).Scan(&maxNum)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get max block number: %w", err)
+	}
+	return maxNum, nil
+}
+
+// FindGaps finds missing block ranges between minBlock and maxBlock.
+// Uses a window function to efficiently find gaps in the sequence.
+func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock int64) ([]outbound.BlockRange, error) {
+	if minBlock > maxBlock {
+		return nil, nil
+	}
+
+	// This query finds gaps using window functions:
+	// 1. Get all canonical block numbers in the range
+	// 2. Use LAG to get the previous block number
+	// 3. Where current - previous > 1, we have a gap
+	query := `
+		WITH blocks AS (
+			SELECT number
+			FROM block_states
+			WHERE NOT is_orphaned AND number >= $1 AND number <= $2
+			ORDER BY number
+		),
+		gaps AS (
+			SELECT 
+				LAG(number) OVER (ORDER BY number) + 1 AS gap_start,
+				number - 1 AS gap_end
+			FROM blocks
+		)
+		SELECT gap_start, gap_end
+		FROM gaps
+		WHERE gap_start IS NOT NULL AND gap_end >= gap_start
+		ORDER BY gap_start
+	`
+
+	rows, err := r.db.QueryContext(ctx, query, minBlock, maxBlock)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find gaps: %w", err)
+	}
+	defer rows.Close()
+
+	var gaps []outbound.BlockRange
+	for rows.Next() {
+		var gap outbound.BlockRange
+		if err := rows.Scan(&gap.From, &gap.To); err != nil {
+			return nil, fmt.Errorf("failed to scan gap: %w", err)
+		}
+		gaps = append(gaps, gap)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating gaps: %w", err)
+	}
+
+	// Also check for gap at the beginning (if minBlock is not in the DB)
+	var firstBlock int64
+	checkQuery := `SELECT COALESCE(MIN(number), $2 + 1) FROM block_states WHERE NOT is_orphaned AND number >= $1 AND number <= $2`
+	if err := r.db.QueryRowContext(ctx, checkQuery, minBlock, maxBlock).Scan(&firstBlock); err != nil {
+		return nil, fmt.Errorf("failed to check first block: %w", err)
+	}
+	if firstBlock > minBlock {
+		gaps = append([]outbound.BlockRange{{From: minBlock, To: firstBlock - 1}}, gaps...)
+	}
+
+	return gaps, nil
+}

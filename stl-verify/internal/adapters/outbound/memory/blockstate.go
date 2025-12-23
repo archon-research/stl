@@ -241,3 +241,83 @@ func (r *BlockStateRepository) GetCanonicalBlockCount() int {
 	}
 	return count
 }
+
+// GetMinBlockNumber returns the lowest canonical block number.
+func (r *BlockStateRepository) GetMinBlockNumber(ctx context.Context) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var minNum int64 = 0
+	found := false
+	for _, b := range r.blocks {
+		if b.IsOrphaned {
+			continue
+		}
+		if !found || b.Number < minNum {
+			minNum = b.Number
+			found = true
+		}
+	}
+	return minNum, nil
+}
+
+// GetMaxBlockNumber returns the highest canonical block number.
+func (r *BlockStateRepository) GetMaxBlockNumber(ctx context.Context) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var maxNum int64 = 0
+	for _, b := range r.blocks {
+		if b.IsOrphaned {
+			continue
+		}
+		if b.Number > maxNum {
+			maxNum = b.Number
+		}
+	}
+	return maxNum, nil
+}
+
+// FindGaps finds missing block ranges between minBlock and maxBlock.
+func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock int64) ([]outbound.BlockRange, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if minBlock > maxBlock {
+		return nil, nil
+	}
+
+	// Build a set of existing canonical block numbers
+	existing := make(map[int64]bool)
+	for _, b := range r.blocks {
+		if !b.IsOrphaned {
+			existing[b.Number] = true
+		}
+	}
+
+	// Find gaps
+	gaps := make([]outbound.BlockRange, 0)
+	var gapStart int64 = -1
+
+	for num := minBlock; num <= maxBlock; num++ {
+		if !existing[num] {
+			// Missing block
+			if gapStart < 0 {
+				gapStart = num
+			}
+		} else {
+			// Block exists - close any open gap
+			if gapStart >= 0 {
+				gaps = append(gaps, outbound.BlockRange{From: gapStart, To: num - 1})
+				gapStart = -1
+			}
+		}
+	}
+
+	// Close final gap if it extends to maxBlock
+	if gapStart >= 0 {
+		gaps = append(gaps, outbound.BlockRange{From: gapStart, To: maxBlock})
+	}
+
+	return gaps, nil
+}

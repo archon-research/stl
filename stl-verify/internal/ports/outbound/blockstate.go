@@ -44,6 +44,15 @@ type ReorgEvent struct {
 	Depth int
 }
 
+// BlockRange represents a range of block numbers (inclusive).
+type BlockRange struct {
+	// From is the starting block number (inclusive).
+	From int64
+
+	// To is the ending block number (inclusive).
+	To int64
+}
+
 // BlockStateRepository defines the interface for persisting block state.
 // Used for tracking the last processed block, detecting reorgs, and deduplication.
 type BlockStateRepository interface {
@@ -93,4 +102,17 @@ type BlockStateRepository interface {
 
 	// PruneOldReorgEvents deletes reorg events older than the given time.
 	PruneOldReorgEvents(ctx context.Context, olderThan time.Time) error
+
+	// GetMinBlockNumber returns the lowest canonical block number in the repository.
+	// Returns 0 if no blocks exist.
+	GetMinBlockNumber(ctx context.Context) (int64, error)
+
+	// GetMaxBlockNumber returns the highest canonical block number in the repository.
+	// Returns 0 if no blocks exist.
+	GetMaxBlockNumber(ctx context.Context) (int64, error)
+
+	// FindGaps finds missing block ranges between minBlock and maxBlock.
+	// Only considers canonical (non-orphaned) blocks.
+	// Returns an empty slice if there are no gaps.
+	FindGaps(ctx context.Context, minBlock, maxBlock int64) ([]BlockRange, error)
 }
