@@ -15,9 +15,10 @@ var _ outbound.BlockStateRepository = (*BlockStateRepository)(nil)
 
 // BlockStateRepository is an in-memory implementation for testing.
 type BlockStateRepository struct {
-	mu          sync.RWMutex
-	blocks      map[string]outbound.BlockState // keyed by hash
-	reorgEvents []outbound.ReorgEvent
+	mu                sync.RWMutex
+	blocks            map[string]outbound.BlockState // keyed by hash
+	reorgEvents       []outbound.ReorgEvent
+	backfillWatermark int64
 }
 
 // NewBlockStateRepository creates a new in-memory block state repository.
@@ -278,12 +279,39 @@ func (r *BlockStateRepository) GetMaxBlockNumber(ctx context.Context) (int64, er
 	return maxNum, nil
 }
 
+// GetBackfillWatermark returns the highest block number verified as gap-free.
+func (r *BlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.backfillWatermark, nil
+}
+
+// SetBackfillWatermark updates the watermark to the given block number.
+func (r *BlockStateRepository) SetBackfillWatermark(ctx context.Context, watermark int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.backfillWatermark = watermark
+	return nil
+}
+
 // FindGaps finds missing block ranges between minBlock and maxBlock.
+// Uses the backfill watermark to skip already-verified blocks.
 func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock int64) ([]outbound.BlockRange, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	if minBlock > maxBlock {
+		return nil, nil
+	}
+
+	// Adjust minBlock based on watermark
+	effectiveMin := minBlock
+	if r.backfillWatermark >= minBlock {
+		effectiveMin = r.backfillWatermark + 1
+	}
+
+	// If watermark covers the entire range, no gaps possible
+	if effectiveMin > maxBlock {
 		return nil, nil
 	}
 
@@ -299,7 +327,7 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 	gaps := make([]outbound.BlockRange, 0)
 	var gapStart int64 = -1
 
-	for num := minBlock; num <= maxBlock; num++ {
+	for num := effectiveMin; num <= maxBlock; num++ {
 		if !existing[num] {
 			// Missing block
 			if gapStart < 0 {

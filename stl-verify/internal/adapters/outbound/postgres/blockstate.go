@@ -52,6 +52,14 @@ func (r *BlockStateRepository) Migrate(ctx context.Context) error {
 
 		CREATE INDEX IF NOT EXISTS idx_reorg_events_detected_at ON reorg_events(detected_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_reorg_events_block_number ON reorg_events(block_number);
+
+		-- Backfill watermark tracks the highest block number that has been verified as gap-free.
+		-- FindGaps only needs to scan blocks ABOVE this watermark, avoiding full table scans.
+		CREATE TABLE IF NOT EXISTS backfill_watermark (
+			id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+			watermark BIGINT NOT NULL DEFAULT 0
+		);
+		INSERT INTO backfill_watermark (id, watermark) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
 	`
 	_, err := r.db.ExecContext(ctx, query)
 	if err != nil {
@@ -323,10 +331,49 @@ func (r *BlockStateRepository) GetMaxBlockNumber(ctx context.Context) (int64, er
 	return maxNum, nil
 }
 
+// GetBackfillWatermark returns the highest block number that has been verified as gap-free.
+// Blocks at or below this number are guaranteed to have no gaps.
+func (r *BlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64, error) {
+	var watermark int64
+	err := r.db.QueryRowContext(ctx, `SELECT watermark FROM backfill_watermark WHERE id = 1`).Scan(&watermark)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get backfill watermark: %w", err)
+	}
+	return watermark, nil
+}
+
+// SetBackfillWatermark updates the watermark to the given block number.
+// Should only be called after confirming all blocks up to this number exist.
+func (r *BlockStateRepository) SetBackfillWatermark(ctx context.Context, watermark int64) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE backfill_watermark SET watermark = $1 WHERE id = 1`, watermark)
+	if err != nil {
+		return fmt.Errorf("failed to set backfill watermark: %w", err)
+	}
+	return nil
+}
+
 // FindGaps finds missing block ranges between minBlock and maxBlock.
-// Uses a window function to efficiently find gaps in the sequence.
+// Uses the backfill watermark to skip already-verified blocks, making this O(n) only
+// for blocks above the watermark rather than the entire table.
 func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock int64) ([]outbound.BlockRange, error) {
 	if minBlock > maxBlock {
+		return nil, nil
+	}
+
+	// Get the watermark - we only need to scan above this point
+	watermark, err := r.GetBackfillWatermark(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get watermark: %w", err)
+	}
+
+	// Adjust minBlock to start from watermark+1 if watermark is higher
+	effectiveMin := minBlock
+	if watermark >= minBlock {
+		effectiveMin = watermark + 1
+	}
+
+	// If the watermark already covers the entire range, no gaps possible
+	if effectiveMin > maxBlock {
 		return nil, nil
 	}
 
@@ -353,7 +400,7 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 		ORDER BY gap_start
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, minBlock, maxBlock)
+	rows, err := r.db.QueryContext(ctx, query, effectiveMin, maxBlock)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find gaps: %w", err)
 	}
@@ -371,14 +418,14 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 		return nil, fmt.Errorf("error iterating gaps: %w", err)
 	}
 
-	// Also check for gap at the beginning (if minBlock is not in the DB)
+	// Also check for gap at the beginning (if effectiveMin is not in the DB)
 	var firstBlock int64
 	checkQuery := `SELECT COALESCE(MIN(number), $2 + 1) FROM block_states WHERE NOT is_orphaned AND number >= $1 AND number <= $2`
-	if err := r.db.QueryRowContext(ctx, checkQuery, minBlock, maxBlock).Scan(&firstBlock); err != nil {
+	if err := r.db.QueryRowContext(ctx, checkQuery, effectiveMin, maxBlock).Scan(&firstBlock); err != nil {
 		return nil, fmt.Errorf("failed to check first block: %w", err)
 	}
-	if firstBlock > minBlock {
-		gaps = append([]outbound.BlockRange{{From: minBlock, To: firstBlock - 1}}, gaps...)
+	if firstBlock > effectiveMin {
+		gaps = append([]outbound.BlockRange{{From: effectiveMin, To: firstBlock - 1}}, gaps...)
 	}
 
 	return gaps, nil

@@ -111,8 +111,18 @@ type BlockStateRepository interface {
 	// Returns 0 if no blocks exist.
 	GetMaxBlockNumber(ctx context.Context) (int64, error)
 
+	// GetBackfillWatermark returns the highest block number that has been verified as gap-free.
+	// Blocks at or below this number are guaranteed to have no gaps.
+	// Returns 0 if no watermark has been set.
+	GetBackfillWatermark(ctx context.Context) (int64, error)
+
+	// SetBackfillWatermark updates the watermark to the given block number.
+	// Should only be called after confirming all blocks up to this number exist.
+	SetBackfillWatermark(ctx context.Context, watermark int64) error
+
 	// FindGaps finds missing block ranges between minBlock and maxBlock.
 	// Only considers canonical (non-orphaned) blocks.
+	// Uses the backfill watermark to skip already-verified blocks.
 	// Returns an empty slice if there are no gaps.
 	FindGaps(ctx context.Context, minBlock, maxBlock int64) ([]BlockRange, error)
 }

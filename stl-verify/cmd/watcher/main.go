@@ -16,7 +16,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/application"
+	"github.com/archon-research/stl/stl-verify/internal/application/backfill_gaps"
+	"github.com/archon-research/stl/stl-verify/internal/application/live_data"
 )
 
 func main() {
@@ -78,17 +79,16 @@ func main() {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	// Create WatcherService
-	watcherConfig := application.WatcherConfig{
+	// Create LiveService (handles WebSocket subscription and reorg detection)
+	liveConfig := live_data.LiveConfig{
 		ChainID:              1, // Ethereum mainnet
 		FinalityBlockCount:   64,
 		MaxUnfinalizedBlocks: 128,
-		BlockRetention:       1000,
 		Logger:               logger,
 	}
 
-	watcher, err := application.NewWatcherService(
-		watcherConfig,
+	liveService, err := live_data.NewLiveService(
+		liveConfig,
 		subscriber,
 		client,
 		blockStateRepo,
@@ -96,12 +96,29 @@ func main() {
 		eventSink,
 	)
 	if err != nil {
-		logger.Error("failed to create watcher service", "error", err)
+		logger.Error("failed to create live service", "error", err)
 		os.Exit(1)
 	}
 
-	// Wire up reconnect callback for backfill
-	subscriber.SetOnReconnect(watcher.OnReconnect)
+	// Create BackfillService (handles gap filling from DB state)
+	backfillConfig := backfill_gaps.BackfillConfig{
+		ChainID:      1,
+		BatchSize:    10,
+		PollInterval: 30 * time.Second,
+		Logger:       logger,
+	}
+
+	backfillService, err := backfill_gaps.NewBackfillService(
+		backfillConfig,
+		client,
+		blockStateRepo,
+		cache,
+		eventSink,
+	)
+	if err != nil {
+		logger.Error("failed to create backfill service", "error", err)
+		os.Exit(1)
+	}
 
 	// Set up context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
@@ -111,22 +128,31 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start the watcher service
-	logger.Info("starting watcher service...")
-	if err := watcher.Start(ctx); err != nil {
-		logger.Error("failed to start watcher", "error", err)
+	// Start both services
+	logger.Info("starting live service...")
+	if err := liveService.Start(ctx); err != nil {
+		logger.Error("failed to start live service", "error", err)
 		os.Exit(1)
 	}
 
-	logger.Info("watcher service started, waiting for blocks...")
+	logger.Info("starting backfill service...")
+	if err := backfillService.Start(ctx); err != nil {
+		logger.Error("failed to start backfill service", "error", err)
+		os.Exit(1)
+	}
+
+	logger.Info("services started, waiting for blocks...")
 
 	// Wait for shutdown signal
 	sig := <-sigChan
 	logger.Info("received signal, shutting down...", "signal", sig)
 
-	// Stop and cleanup
-	if err := watcher.Stop(); err != nil {
-		logger.Error("error during shutdown", "error", err)
+	// Stop both services
+	if err := backfillService.Stop(); err != nil {
+		logger.Error("error stopping backfill service", "error", err)
+	}
+	if err := liveService.Stop(); err != nil {
+		logger.Error("error stopping live service", "error", err)
 	}
 
 	logger.Info("shutdown complete")
