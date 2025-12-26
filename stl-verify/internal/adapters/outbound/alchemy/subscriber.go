@@ -320,7 +320,7 @@ func (s *Subscriber) readLoop(logger *slog.Logger) {
 				logger.Debug("block header received", "block", blockNum, "hash", truncateHash(header.Hash))
 			default:
 				blockNum, _ := parseBlockNumber(header.Number)
-				logger.Warn("channel full, dropping block", "block", blockNum)
+				logger.Error("channel full, dropping block", "block", blockNum)
 			}
 		case <-pingTicker.C:
 			s.mu.RLock()
