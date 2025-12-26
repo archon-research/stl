@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -80,6 +81,9 @@ func BenchmarkSubscriber_MessageLatency(b *testing.B) {
 	<-ready
 	conn := <-connChan
 
+	// Collect latencies for statistics
+	latencies := make([]time.Duration, 0, b.N)
+
 	// Reset timer before benchmark loop
 	b.ResetTimer()
 
@@ -108,10 +112,33 @@ func BenchmarkSubscriber_MessageLatency(b *testing.B) {
 		// Wait for header to be received
 		select {
 		case <-headers:
-			b.ReportMetric(float64(time.Since(startTime).Nanoseconds()), "ns/msg")
+			latencies = append(latencies, time.Since(startTime))
 		case <-time.After(5 * time.Second):
 			b.Fatal("timeout waiting for header")
 		}
+	}
+
+	b.StopTimer()
+
+	// Calculate and report statistics
+	if len(latencies) > 0 {
+		sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+
+		var total time.Duration
+		for _, l := range latencies {
+			total += l
+		}
+		avg := total / time.Duration(len(latencies))
+		min := latencies[0]
+		max := latencies[len(latencies)-1]
+		p50 := latencies[len(latencies)*50/100]
+		p99 := latencies[len(latencies)*99/100]
+
+		b.ReportMetric(float64(avg.Microseconds()), "avg_µs")
+		b.ReportMetric(float64(min.Microseconds()), "min_µs")
+		b.ReportMetric(float64(max.Microseconds()), "max_µs")
+		b.ReportMetric(float64(p50.Microseconds()), "p50_µs")
+		b.ReportMetric(float64(p99.Microseconds()), "p99_µs")
 	}
 }
 
@@ -191,6 +218,7 @@ func BenchmarkSubscriber_Throughput(b *testing.B) {
 	}
 
 	b.ResetTimer()
+	startTime := time.Now()
 
 	// Send all messages as fast as possible
 	var wg sync.WaitGroup
@@ -217,15 +245,20 @@ func BenchmarkSubscriber_Throughput(b *testing.B) {
 	}
 
 	wg.Wait()
+	b.StopTimer()
+
+	elapsed := time.Since(startTime)
+	msgsPerSec := float64(b.N) / elapsed.Seconds()
+
+	b.ReportMetric(msgsPerSec, "msgs/sec")
+	b.ReportMetric(float64(elapsed.Milliseconds()), "total_ms")
+	b.ReportMetric(float64(received), "received")
 }
 
 // BenchmarkSubscriber_LatencyPercentiles measures latency distribution
-// by collecting individual message latencies.
+// by collecting individual message latencies and reporting detailed percentiles.
+// Run with -benchtime=1000x or higher for meaningful percentile data.
 func BenchmarkSubscriber_LatencyPercentiles(b *testing.B) {
-	if b.N < 100 {
-		b.Skip("need at least 100 iterations for percentile calculation")
-	}
-
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
@@ -316,19 +349,30 @@ func BenchmarkSubscriber_LatencyPercentiles(b *testing.B) {
 
 	// Calculate and report percentiles
 	if len(latencies) > 0 {
-		// Sort latencies (simple insertion sort for small N)
-		for i := 1; i < len(latencies); i++ {
-			for j := i; j > 0 && latencies[j] < latencies[j-1]; j-- {
-				latencies[j], latencies[j-1] = latencies[j-1], latencies[j]
-			}
+		sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+
+		var total time.Duration
+		for _, l := range latencies {
+			total += l
 		}
 
-		p50 := latencies[len(latencies)*50/100]
-		p90 := latencies[len(latencies)*90/100]
-		p99 := latencies[len(latencies)*99/100]
+		n := len(latencies)
+		avg := total / time.Duration(n)
+		min := latencies[0]
+		max := latencies[n-1]
+		p50 := latencies[n*50/100]
+		p75 := latencies[n*75/100]
+		p90 := latencies[n*90/100]
+		p95 := latencies[n*95/100]
+		p99 := latencies[n*99/100]
 
+		b.ReportMetric(float64(avg.Microseconds()), "avg_µs")
+		b.ReportMetric(float64(min.Microseconds()), "min_µs")
+		b.ReportMetric(float64(max.Microseconds()), "max_µs")
 		b.ReportMetric(float64(p50.Microseconds()), "p50_µs")
+		b.ReportMetric(float64(p75.Microseconds()), "p75_µs")
 		b.ReportMetric(float64(p90.Microseconds()), "p90_µs")
+		b.ReportMetric(float64(p95.Microseconds()), "p95_µs")
 		b.ReportMetric(float64(p99.Microseconds()), "p99_µs")
 	}
 }
