@@ -1312,35 +1312,6 @@ func TestSubscribe_WriteSubscriptionFails(t *testing.T) {
 	}
 }
 
-func TestTruncateHash_ShortHash(t *testing.T) {
-	// Test with short hash (<=14 chars)
-	shortHash := "0x123456"
-	result := truncateHash(shortHash)
-	if result != shortHash {
-		t.Errorf("expected short hash to be unchanged, got %s", result)
-	}
-
-	// Test with exactly 14 chars
-	hash14 := "0x123456789ab"
-	result = truncateHash(hash14)
-	if result != hash14 {
-		t.Errorf("expected 14-char hash to be unchanged, got %s", result)
-	}
-
-	// Test with long hash (>14 chars)
-	longHash := "0x1234567890abcdef1234567890abcdef"
-	result = truncateHash(longHash)
-	if result == longHash {
-		t.Error("expected long hash to be truncated")
-	}
-	if !strings.HasPrefix(result, "0x123456") {
-		t.Errorf("expected truncated hash to start with first 8 chars, got %s", result)
-	}
-	if !strings.Contains(result, "...") {
-		t.Errorf("expected truncated hash to contain '...', got %s", result)
-	}
-}
-
 func TestSubscribe_SubscriptionWithNilParams(t *testing.T) {
 	server := newMockWSServer(func(conn *websocket.Conn) {
 		defer conn.Close()
