@@ -2,12 +2,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,11 +18,14 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/application/backfill_gaps"
-	"github.com/archon-research/stl/stl-verify/internal/application/live_data"
+	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
+	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
 )
 
 func main() {
+	// Load .env file if present
+	loadEnvFile(".env")
+
 	// Set up structured logging
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
@@ -28,8 +33,13 @@ func main() {
 	slog.SetDefault(logger)
 
 	// Get configuration from environment
-	alchemyAPIKey := getEnv("ALCHEMY_API_KEY", "jVXUMPyy9Bp1S7b6h9nbI")
+	alchemyAPIKey := getEnv("ALCHEMY_API_KEY", "")
+	if alchemyAPIKey == "" {
+		logger.Error("ALCHEMY_API_KEY environment variable is required")
+		os.Exit(1)
+	}
 	postgresURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
+	enableBackfill := getEnv("ENABLE_BACKFILL", "false") == "true"
 
 	// Set up PostgreSQL connection for block state tracking
 	db, err := sql.Open("pgx", postgresURL)
@@ -101,23 +111,26 @@ func main() {
 	}
 
 	// Create BackfillService (handles gap filling from DB state)
-	backfillConfig := backfill_gaps.BackfillConfig{
-		ChainID:      1,
-		BatchSize:    10,
-		PollInterval: 30 * time.Second,
-		Logger:       logger,
-	}
+	var backfillService *backfill_gaps.BackfillService
+	if enableBackfill {
+		backfillConfig := backfill_gaps.BackfillConfig{
+			ChainID:      1,
+			BatchSize:    10,
+			PollInterval: 30 * time.Second,
+			Logger:       logger,
+		}
 
-	backfillService, err := backfill_gaps.NewBackfillService(
-		backfillConfig,
-		client,
-		blockStateRepo,
-		cache,
-		eventSink,
-	)
-	if err != nil {
-		logger.Error("failed to create backfill service", "error", err)
-		os.Exit(1)
+		backfillService, err = backfill_gaps.NewBackfillService(
+			backfillConfig,
+			client,
+			blockStateRepo,
+			cache,
+			eventSink,
+		)
+		if err != nil {
+			logger.Error("failed to create backfill service", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// Set up context with cancellation
@@ -135,21 +148,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("starting backfill service...")
-	if err := backfillService.Start(ctx); err != nil {
-		logger.Error("failed to start backfill service", "error", err)
-		os.Exit(1)
+	if enableBackfill && backfillService != nil {
+		logger.Info("starting backfill service...")
+		if err := backfillService.Start(ctx); err != nil {
+			logger.Error("failed to start backfill service", "error", err)
+			os.Exit(1)
+		}
 	}
 
-	logger.Info("services started, waiting for blocks...")
+	logger.Info("services started, waiting for blocks...", "backfill", enableBackfill)
 
 	// Wait for shutdown signal
 	sig := <-sigChan
 	logger.Info("received signal, shutting down...", "signal", sig)
 
-	// Stop both services
-	if err := backfillService.Stop(); err != nil {
-		logger.Error("error stopping backfill service", "error", err)
+	// Stop services
+	if enableBackfill && backfillService != nil {
+		if err := backfillService.Stop(); err != nil {
+			logger.Error("error stopping backfill service", "error", err)
+		}
 	}
 	if err := liveService.Stop(); err != nil {
 		logger.Error("error stopping live service", "error", err)
@@ -164,4 +181,39 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// loadEnvFile loads environment variables from a file.
+// Each line should be in KEY=VALUE format. Lines starting with # are ignored.
+// Does not override existing environment variables.
+func loadEnvFile(filename string) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return // Silently ignore if file doesn't exist
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Split on first = only
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		// Don't override existing env vars
+		if os.Getenv(key) == "" {
+			os.Setenv(key, value)
+		}
+	}
 }

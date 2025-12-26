@@ -44,7 +44,8 @@ type SubscriberConfig struct {
 	// ChannelBufferSize is the size of the block header channel buffer.
 	ChannelBufferSize int
 
-	// HealthTimeout is how long without receiving a block before considering unhealthy.
+	// HealthTimeout is how long without receiving a block
+	// before considering the connection unhealthy.
 	HealthTimeout time.Duration
 
 	// Logger is the structured logger for the subscriber.
@@ -67,8 +68,7 @@ func SubscriberConfigDefaults() SubscriberConfig {
 }
 
 // Subscriber implements BlockSubscriber using Alchemy's WebSocket API.
-// It only handles WebSocket connection, subscription, and emitting raw headers.
-// All business logic (reorg detection, backfill, caching) belongs in the application layer.
+// It handles WebSocket connection, subscription, and emitting raw headers.
 type Subscriber struct {
 	config  SubscriberConfig
 	conn    *websocket.Conn
@@ -186,7 +186,7 @@ func (s *Subscriber) connectionManager() {
 		backoff = s.config.InitialBackoff
 		logger.Info("connected to Alchemy WebSocket")
 
-		// Notify application layer of reconnection (for backfill)
+		// Notify caller of reconnection
 		if !isFirstConnect && s.onReconnect != nil {
 			s.onReconnect()
 		}
