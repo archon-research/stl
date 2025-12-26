@@ -215,8 +215,10 @@ func (s *Subscriber) connectionManager() {
 		}
 		isFirstConnect = false
 
-		s.readLoop(logger)
-		logger.Warn("WebSocket connection lost, reconnecting...")
+		intentionalClose := s.readLoop(logger)
+		if !intentionalClose {
+			logger.Warn("WebSocket connection lost, reconnecting...")
+		}
 	}
 }
 
@@ -272,7 +274,8 @@ func (s *Subscriber) connectAndSubscribe() error {
 }
 
 // readLoop reads block headers from the WebSocket and forwards them.
-func (s *Subscriber) readLoop(logger *slog.Logger) {
+// Returns true if the loop exited due to intentional close (Unsubscribe or context cancellation).
+func (s *Subscriber) readLoop(logger *slog.Logger) bool {
 	pingTicker := time.NewTicker(s.config.PingInterval)
 	defer pingTicker.Stop()
 
@@ -327,14 +330,14 @@ func (s *Subscriber) readLoop(logger *slog.Logger) {
 		select {
 		case <-s.done:
 			s.closeConnection()
-			return
+			return true
 		case <-s.ctx.Done():
 			s.closeConnection()
-			return
+			return true
 		case err := <-readErr:
 			logger.Warn("read error", "error", err)
 			s.closeConnection()
-			return
+			return false
 		case header := <-blockChan:
 			select {
 			case s.headers <- header:
@@ -354,7 +357,7 @@ func (s *Subscriber) readLoop(logger *slog.Logger) {
 				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(s.config.PongTimeout)); err != nil {
 					logger.Warn("ping failed", "error", err)
 					s.closeConnection()
-					return
+					return false
 				}
 			}
 		}
