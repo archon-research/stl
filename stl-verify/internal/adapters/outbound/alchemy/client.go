@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -36,6 +37,9 @@ type ClientConfig struct {
 
 	// BackoffFactor is the multiplier applied to backoff after each retry.
 	BackoffFactor float64
+
+	// Logger is the structured logger for the client.
+	Logger *slog.Logger
 }
 
 // ClientConfigDefaults returns a config with default values.
@@ -46,6 +50,7 @@ func ClientConfigDefaults() ClientConfig {
 		InitialBackoff: 100 * time.Millisecond,
 		MaxBackoff:     5 * time.Second,
 		BackoffFactor:  2.0,
+		Logger:         slog.Default(),
 	}
 }
 
@@ -53,6 +58,7 @@ func ClientConfigDefaults() ClientConfig {
 type Client struct {
 	config     ClientConfig
 	httpClient *http.Client
+	logger     *slog.Logger
 }
 
 // NewClient creates a new Alchemy HTTP RPC client.
@@ -78,12 +84,16 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if config.BackoffFactor == 0 {
 		config.BackoffFactor = defaults.BackoffFactor
 	}
+	if config.Logger == nil {
+		config.Logger = defaults.Logger
+	}
 
 	return &Client{
 		config: config,
 		httpClient: &http.Client{
 			Timeout: config.Timeout,
 		},
+		logger: config.Logger.With("component", "alchemy-client"),
 	}, nil
 }
 
@@ -428,6 +438,12 @@ func (c *Client) doWithRetry(ctx context.Context, fn func() error) error {
 			break
 		}
 
+		c.logger.Warn("request failed, retrying",
+			"attempt", attempt+1,
+			"maxRetries", c.config.MaxRetries,
+			"backoff", backoff,
+			"error", err)
+
 		// Wait before retry, respecting context cancellation
 		select {
 		case <-ctx.Done():
@@ -441,6 +457,10 @@ func (c *Client) doWithRetry(ctx context.Context, fn func() error) error {
 			backoff = c.config.MaxBackoff
 		}
 	}
+
+	c.logger.Error("request failed after all retries",
+		"maxRetries", c.config.MaxRetries,
+		"error", lastErr)
 
 	return fmt.Errorf("after %d retries: %w", c.config.MaxRetries, lastErr)
 }
