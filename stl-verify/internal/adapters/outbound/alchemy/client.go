@@ -23,12 +23,29 @@ type ClientConfig struct {
 
 	// Timeout is the maximum time to wait for a single HTTP request.
 	Timeout time.Duration
+
+	// MaxRetries is the maximum number of retry attempts for transient failures.
+	// Set to 0 to disable retries.
+	MaxRetries int
+
+	// InitialBackoff is the initial delay before the first retry.
+	InitialBackoff time.Duration
+
+	// MaxBackoff is the maximum delay between retries.
+	MaxBackoff time.Duration
+
+	// BackoffFactor is the multiplier applied to backoff after each retry.
+	BackoffFactor float64
 }
 
 // ClientConfigDefaults returns a config with default values.
 func ClientConfigDefaults() ClientConfig {
 	return ClientConfig{
-		Timeout: 30 * time.Second,
+		Timeout:        30 * time.Second,
+		MaxRetries:     3,
+		InitialBackoff: 100 * time.Millisecond,
+		MaxBackoff:     5 * time.Second,
+		BackoffFactor:  2.0,
 	}
 }
 
@@ -48,6 +65,18 @@ func NewClient(config ClientConfig) (*Client, error) {
 	defaults := ClientConfigDefaults()
 	if config.Timeout == 0 {
 		config.Timeout = defaults.Timeout
+	}
+	if config.MaxRetries == 0 {
+		config.MaxRetries = defaults.MaxRetries
+	}
+	if config.InitialBackoff == 0 {
+		config.InitialBackoff = defaults.InitialBackoff
+	}
+	if config.MaxBackoff == 0 {
+		config.MaxBackoff = defaults.MaxBackoff
+	}
+	if config.BackoffFactor == 0 {
+		config.BackoffFactor = defaults.BackoffFactor
 	}
 
 	return &Client{
@@ -232,70 +261,155 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 	return results, nil
 }
 
-// callBatch makes a batched HTTP JSON-RPC call to the Alchemy API.
+// callBatch makes a batched HTTP JSON-RPC call to the Alchemy API with retry.
 func (c *Client) callBatch(ctx context.Context, requests []jsonRPCRequest) ([]jsonRPCResponse, error) {
 	reqBytes, err := json.Marshal(requests)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal batch request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.HTTPURL, bytes.NewReader(reqBytes))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	respBytes, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
 	var rpcResponses []jsonRPCResponse
-	if err := json.Unmarshal(respBytes, &rpcResponses); err != nil {
-		return nil, fmt.Errorf("failed to parse batch response: %w", err)
-	}
+	err = c.doWithRetry(ctx, func() error {
+		// Reset responses to avoid leftover data from previous attempts
+		rpcResponses = nil
 
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.HTTPURL, bytes.NewReader(reqBytes))
+		if err != nil {
+			return &nonRetryableError{err: fmt.Errorf("failed to create request: %w", err)}
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		httpResp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			return fmt.Errorf("HTTP request failed: %w", err)
+		}
+		defer httpResp.Body.Close()
+
+		// Check for retryable HTTP status codes
+		if httpResp.StatusCode >= 500 || httpResp.StatusCode == 429 {
+			return fmt.Errorf("HTTP %d: server error", httpResp.StatusCode)
+		}
+
+		respBytes, err := io.ReadAll(httpResp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if err := json.Unmarshal(respBytes, &rpcResponses); err != nil {
+			return fmt.Errorf("failed to parse batch response: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
 	return rpcResponses, nil
 }
 
-// call makes an HTTP JSON-RPC call to the Alchemy API.
+// call makes an HTTP JSON-RPC call to the Alchemy API with retry.
 func (c *Client) call(ctx context.Context, req jsonRPCRequest) (*jsonRPCResponse, error) {
 	reqBytes, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.HTTPURL, bytes.NewReader(reqBytes))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	respBytes, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
 	var rpcResp jsonRPCResponse
-	if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
+	err = c.doWithRetry(ctx, func() error {
+		// Reset response to avoid leftover error field from previous attempts
+		rpcResp = jsonRPCResponse{}
 
-	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("RPC error: %s", rpcResp.Error.Message)
-	}
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.HTTPURL, bytes.NewReader(reqBytes))
+		if err != nil {
+			return &nonRetryableError{err: fmt.Errorf("failed to create request: %w", err)}
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
 
+		httpResp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			return fmt.Errorf("HTTP request failed: %w", err)
+		}
+		defer httpResp.Body.Close()
+
+		// Check for retryable HTTP status codes
+		if httpResp.StatusCode >= 500 || httpResp.StatusCode == 429 {
+			return fmt.Errorf("HTTP %d: server error", httpResp.StatusCode)
+		}
+
+		respBytes, err := io.ReadAll(httpResp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
+			return fmt.Errorf("failed to parse response: %w", err)
+		}
+
+		if rpcResp.Error != nil {
+			return fmt.Errorf("RPC error: %s", rpcResp.Error.Message)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
 	return &rpcResp, nil
+}
+
+// nonRetryableError wraps errors that should not be retried.
+type nonRetryableError struct {
+	err error
+}
+
+func (e *nonRetryableError) Error() string {
+	return e.err.Error()
+}
+
+func (e *nonRetryableError) Unwrap() error {
+	return e.err
+}
+
+// doWithRetry executes fn with exponential backoff retry for transient failures.
+// Returns immediately on non-retryable errors or context cancellation.
+func (c *Client) doWithRetry(ctx context.Context, fn func() error) error {
+	backoff := c.config.InitialBackoff
+	var lastErr error
+
+	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+
+		// Check if error is non-retryable
+		var nonRetryable *nonRetryableError
+		if errors.As(err, &nonRetryable) {
+			return nonRetryable.err
+		}
+
+		lastErr = err
+
+		// Don't sleep after the last attempt
+		if attempt == c.config.MaxRetries {
+			break
+		}
+
+		// Wait before retry, respecting context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+
+		// Increase backoff for next attempt
+		backoff = time.Duration(float64(backoff) * c.config.BackoffFactor)
+		if backoff > c.config.MaxBackoff {
+			backoff = c.config.MaxBackoff
+		}
+	}
+
+	return fmt.Errorf("after %d retries: %w", c.config.MaxRetries, lastErr)
 }

@@ -614,8 +614,11 @@ func TestClient_ConnectionRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "HTTP request failed") {
-		t.Errorf("expected HTTP request error, got %v", err)
+	// Error could be connection refused, context deadline, or retry exhausted
+	if !strings.Contains(err.Error(), "request failed") &&
+		!strings.Contains(err.Error(), "context") &&
+		!strings.Contains(err.Error(), "retries") {
+		t.Errorf("expected connection/timeout/retry error, got %v", err)
 	}
 }
 
@@ -628,5 +631,276 @@ func TestClient_InvalidURL(t *testing.T) {
 	_, err := client.GetBlockByNumber(ctx, 100, false)
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+}
+
+// --- Test: Retry Logic ---
+
+func TestClient_RetriesOn5xxErrors(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		resp := jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      1,
+			Result:  json.RawMessage(`"0x100"`),
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		HTTPURL:        server.URL,
+		MaxRetries:     3,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     10 * time.Millisecond,
+		BackoffFactor:  2.0,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	_, err = client.GetCurrentBlockNumber(context.Background())
+	if err != nil {
+		t.Fatalf("expected success after retries, got %v", err)
+	}
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+func TestClient_RetriesOn429RateLimitError(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		resp := jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      1,
+			Result:  json.RawMessage(`"0x100"`),
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		HTTPURL:        server.URL,
+		MaxRetries:     3,
+		InitialBackoff: 1 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	_, err = client.GetCurrentBlockNumber(context.Background())
+	if err != nil {
+		t.Fatalf("expected success after retry, got %v", err)
+	}
+	if attempts != 2 {
+		t.Errorf("expected 2 attempts, got %d", attempts)
+	}
+}
+
+func TestClient_RetriesOnRPCError(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts <= 3 {
+			resp := jsonRPCResponse{
+				JSONRPC: "2.0",
+				ID:      1,
+				Error: &jsonRPCError{
+					Code:    -32000,
+					Message: "execution reverted",
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		// Success on 4th attempt
+		resp := jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      1,
+			Result:  json.RawMessage(`"0x100"`),
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		HTTPURL:        server.URL,
+		MaxRetries:     3,
+		InitialBackoff: 1 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	_, err = client.GetCurrentBlockNumber(context.Background())
+	if err != nil {
+		t.Fatalf("expected success after retries, got %v", err)
+	}
+	if attempts != 4 { // 1 initial + 3 retries = 4 total
+		t.Errorf("expected 4 attempts, got %d", attempts)
+	}
+}
+
+func TestClient_RetriesOnParseError(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 2 {
+			w.Write([]byte("invalid json"))
+			return
+		}
+		// Success on 2nd attempt
+		resp := jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      1,
+			Result:  json.RawMessage(`"0x100"`),
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		HTTPURL:        server.URL,
+		MaxRetries:     3,
+		InitialBackoff: 1 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	_, err = client.GetCurrentBlockNumber(context.Background())
+	if err != nil {
+		t.Fatalf("expected success after retry, got %v", err)
+	}
+	if attempts != 2 {
+		t.Errorf("expected 2 attempts, got %d", attempts)
+	}
+}
+
+func TestClient_ExhaustsRetries(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		HTTPURL:        server.URL,
+		MaxRetries:     3,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	_, err = client.GetCurrentBlockNumber(context.Background())
+	if err == nil {
+		t.Fatal("expected error after retries exhausted")
+	}
+	if !strings.Contains(err.Error(), "after 3 retries") {
+		t.Errorf("expected 'after 3 retries' in error, got %v", err)
+	}
+	if attempts != 4 { // 1 initial + 3 retries
+		t.Errorf("expected 4 attempts, got %d", attempts)
+	}
+}
+
+func TestClient_RespectsContextCancellation(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		HTTPURL:        server.URL,
+		MaxRetries:     10,
+		InitialBackoff: 100 * time.Millisecond, // Long backoff
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err = client.GetCurrentBlockNumber(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected context error")
+	}
+	// Should cancel quickly, not wait for all retries
+	if elapsed > 200*time.Millisecond {
+		t.Errorf("expected quick cancellation, took %v", elapsed)
+	}
+}
+
+func TestClient_BatchRetriesOn5xxErrors(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 2 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		// Return batch response
+		responses := []jsonRPCResponse{
+			{JSONRPC: "2.0", ID: 0, Result: json.RawMessage(`{}`)},
+			{JSONRPC: "2.0", ID: 1, Result: json.RawMessage(`{}`)},
+			{JSONRPC: "2.0", ID: 2, Result: json.RawMessage(`{}`)},
+			{JSONRPC: "2.0", ID: 3, Result: json.RawMessage(`{}`)},
+		}
+		json.NewEncoder(w).Encode(responses)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		HTTPURL:        server.URL,
+		MaxRetries:     3,
+		InitialBackoff: 1 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	_, err = client.GetBlocksBatch(context.Background(), []int64{100}, false)
+	if err != nil {
+		t.Fatalf("expected success after retry, got %v", err)
+	}
+	if attempts != 2 {
+		t.Errorf("expected 2 attempts, got %d", attempts)
+	}
+}
+
+func TestClientConfigDefaults_IncludesRetryConfig(t *testing.T) {
+	defaults := ClientConfigDefaults()
+
+	if defaults.MaxRetries != 3 {
+		t.Errorf("expected MaxRetries=3, got %d", defaults.MaxRetries)
+	}
+	if defaults.InitialBackoff != 100*time.Millisecond {
+		t.Errorf("expected InitialBackoff=100ms, got %v", defaults.InitialBackoff)
+	}
+	if defaults.MaxBackoff != 5*time.Second {
+		t.Errorf("expected MaxBackoff=5s, got %v", defaults.MaxBackoff)
+	}
+	if defaults.BackoffFactor != 2.0 {
+		t.Errorf("expected BackoffFactor=2.0, got %v", defaults.BackoffFactor)
 	}
 }
