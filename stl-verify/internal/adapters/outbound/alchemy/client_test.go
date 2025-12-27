@@ -528,7 +528,7 @@ func TestGetBlocksBatch_PartialErrors(t *testing.T) {
 
 		responses := make([]jsonRPCResponse, len(requests))
 		for i, req := range requests {
-			// Make some requests fail
+			// Make receipts (ID 1) and traces (ID 2) fail
 			if req.ID == 1 || req.ID == 2 {
 				responses[i] = jsonRPCResponse{
 					JSONRPC: "2.0",
@@ -559,14 +559,155 @@ func TestGetBlocksBatch_PartialErrors(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Should still return results, but some fields may be nil
 	if len(results) != 1 {
-		t.Errorf("expected 1 result, got %d", len(results))
+		t.Fatalf("expected 1 result, got %d", len(results))
 	}
 
-	// Block data should be present (ID 0), receipts/traces may be nil (IDs 1, 2 had errors)
+	// Block data should be present (ID 0)
 	if results[0].Block == nil {
 		t.Error("expected Block to be present")
+	}
+	if results[0].BlockErr != nil {
+		t.Errorf("expected no BlockErr, got %v", results[0].BlockErr)
+	}
+
+	// Receipts should have error (ID 1)
+	if results[0].Receipts != nil {
+		t.Error("expected Receipts to be nil")
+	}
+	if results[0].ReceiptsErr == nil {
+		t.Error("expected ReceiptsErr to be set")
+	} else if !strings.Contains(results[0].ReceiptsErr.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got %v", results[0].ReceiptsErr)
+	}
+
+	// Traces should have error (ID 2)
+	if results[0].Traces != nil {
+		t.Error("expected Traces to be nil")
+	}
+	if results[0].TracesErr == nil {
+		t.Error("expected TracesErr to be set")
+	}
+
+	// Blobs should be present (ID 3)
+	if results[0].Blobs == nil {
+		t.Error("expected Blobs to be present")
+	}
+	if results[0].BlobsErr != nil {
+		t.Errorf("expected no BlobsErr, got %v", results[0].BlobsErr)
+	}
+
+	// HasErrors should return true
+	if !results[0].HasErrors() {
+		t.Error("expected HasErrors() to return true")
+	}
+}
+
+func TestGetBlocksBatch_AllSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var requests []jsonRPCRequest
+		json.NewDecoder(r.Body).Decode(&requests)
+
+		responses := make([]jsonRPCResponse, len(requests))
+		for i, req := range requests {
+			responses[i] = jsonRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result:  json.RawMessage(`{"data": "test"}`),
+			}
+		}
+
+		json.NewEncoder(w).Encode(responses)
+	}))
+	defer server.Close()
+
+	client := testClient(t, server.URL)
+	ctx := context.Background()
+
+	results, err := client.GetBlocksBatch(ctx, []int64{100}, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+
+	// All data should be present, no errors
+	if results[0].Block == nil {
+		t.Error("expected Block to be present")
+	}
+	if results[0].Receipts == nil {
+		t.Error("expected Receipts to be present")
+	}
+	if results[0].Traces == nil {
+		t.Error("expected Traces to be present")
+	}
+	if results[0].Blobs == nil {
+		t.Error("expected Blobs to be present")
+	}
+
+	// No errors
+	if results[0].HasErrors() {
+		t.Errorf("expected no errors, got Block=%v Receipts=%v Traces=%v Blobs=%v",
+			results[0].BlockErr, results[0].ReceiptsErr, results[0].TracesErr, results[0].BlobsErr)
+	}
+}
+
+func TestGetBlocksBatch_AllErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var requests []jsonRPCRequest
+		json.NewDecoder(r.Body).Decode(&requests)
+
+		responses := make([]jsonRPCResponse, len(requests))
+		for i, req := range requests {
+			responses[i] = jsonRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error: &jsonRPCError{
+					Code:    -32602,
+					Message: "invalid block number",
+				},
+			}
+		}
+
+		json.NewEncoder(w).Encode(responses)
+	}))
+	defer server.Close()
+
+	client := testClient(t, server.URL)
+	ctx := context.Background()
+
+	results, err := client.GetBlocksBatch(ctx, []int64{999999999}, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err) // Batch itself should succeed
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+
+	// All data should have errors
+	if results[0].BlockErr == nil {
+		t.Error("expected BlockErr to be set")
+	}
+	if results[0].ReceiptsErr == nil {
+		t.Error("expected ReceiptsErr to be set")
+	}
+	if results[0].TracesErr == nil {
+		t.Error("expected TracesErr to be set")
+	}
+	if results[0].BlobsErr == nil {
+		t.Error("expected BlobsErr to be set")
+	}
+
+	// Errors should include the error code
+	if !strings.Contains(results[0].BlockErr.Error(), "-32602") {
+		t.Errorf("expected error code in message, got %v", results[0].BlockErr)
+	}
+
+	if !results[0].HasErrors() {
+		t.Error("expected HasErrors() to return true")
 	}
 }
 

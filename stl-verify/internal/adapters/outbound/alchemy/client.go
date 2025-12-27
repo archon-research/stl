@@ -244,17 +244,48 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		baseID := i * 4
 		results[i] = outbound.BlockData{BlockNumber: blockNum}
 
-		if resp := respMap[baseID]; resp != nil && resp.Error == nil {
-			results[i].Block = resp.Result
+		// Block data
+		if resp := respMap[baseID]; resp != nil {
+			if resp.Error != nil {
+				results[i].BlockErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+			} else {
+				results[i].Block = resp.Result
+			}
+		} else {
+			results[i].BlockErr = fmt.Errorf("missing response for block %d", blockNum)
 		}
-		if resp := respMap[baseID+1]; resp != nil && resp.Error == nil {
-			results[i].Receipts = resp.Result
+
+		// Receipts
+		if resp := respMap[baseID+1]; resp != nil {
+			if resp.Error != nil {
+				results[i].ReceiptsErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+			} else {
+				results[i].Receipts = resp.Result
+			}
+		} else {
+			results[i].ReceiptsErr = fmt.Errorf("missing response for receipts of block %d", blockNum)
 		}
-		if resp := respMap[baseID+2]; resp != nil && resp.Error == nil {
-			results[i].Traces = resp.Result
+
+		// Traces
+		if resp := respMap[baseID+2]; resp != nil {
+			if resp.Error != nil {
+				results[i].TracesErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+			} else {
+				results[i].Traces = resp.Result
+			}
+		} else {
+			results[i].TracesErr = fmt.Errorf("missing response for traces of block %d", blockNum)
 		}
-		if resp := respMap[baseID+3]; resp != nil && resp.Error == nil {
-			results[i].Blobs = resp.Result
+
+		// Blobs
+		if resp := respMap[baseID+3]; resp != nil {
+			if resp.Error != nil {
+				results[i].BlobsErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+			} else {
+				results[i].Blobs = resp.Result
+			}
+		} else {
+			results[i].BlobsErr = fmt.Errorf("missing response for blobs of block %d", blockNum)
 		}
 	}
 
