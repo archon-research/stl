@@ -104,6 +104,10 @@ type Subscriber struct {
 
 	lastBlockTime atomic.Int64
 
+	// disconnectedSince tracks when the connection was lost (unix timestamp).
+	// 0 means currently connected.
+	disconnectedSince atomic.Int64
+
 	// wg tracks active goroutines for graceful shutdown
 	wg sync.WaitGroup
 
@@ -214,6 +218,9 @@ func (s *Subscriber) connectionManager() {
 
 		backoff = s.config.InitialBackoff
 		logger.Info("connected to Alchemy WebSocket")
+
+		// Mark as connected
+		s.disconnectedSince.Store(0)
 
 		// Notify caller of reconnection
 		if !isFirstConnect && s.onReconnect != nil {
@@ -376,6 +383,8 @@ func (s *Subscriber) closeConnection() {
 	if s.conn != nil {
 		s.conn.Close()
 		s.conn = nil
+		// Track when we became disconnected
+		s.disconnectedSince.Store(time.Now().Unix())
 	}
 }
 
@@ -409,7 +418,11 @@ func (s *Subscriber) Unsubscribe() error {
 	return connErr
 }
 
-// HealthCheck verifies the connection is operational.
+// HealthCheck verifies the subscription is operational.
+// Returns an error if:
+// - The subscriber is closed
+// - No blocks have been received within HealthTimeout
+// - The connection is currently disconnected (with duration)
 func (s *Subscriber) HealthCheck(ctx context.Context) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -418,20 +431,25 @@ func (s *Subscriber) HealthCheck(ctx context.Context) error {
 		return errors.New("subscriber is closed")
 	}
 
+	// Check if we're currently disconnected
+	disconnectedSince := s.disconnectedSince.Load()
+	if disconnectedSince > 0 {
+		disconnectedFor := time.Since(time.Unix(disconnectedSince, 0))
+		return fmt.Errorf("connection lost %v ago, reconnecting", disconnectedFor.Truncate(time.Second))
+	}
+
+	// Check time since last block
 	lastBlockTime := s.lastBlockTime.Load()
 	if lastBlockTime > 0 {
 		timeSinceLastBlock := time.Since(time.Unix(lastBlockTime, 0))
 		if timeSinceLastBlock > s.config.HealthTimeout {
-			return fmt.Errorf("no blocks received for %v", timeSinceLastBlock)
+			return fmt.Errorf("no blocks received for %v", timeSinceLastBlock.Truncate(time.Second))
 		}
 	}
 
+	// Connection is established but no blocks yet - this is normal during startup
 	if s.conn == nil {
-		conn, _, err := websocket.DefaultDialer.DialContext(ctx, s.config.WebSocketURL, nil)
-		if err != nil {
-			return fmt.Errorf("health check failed: %w", err)
-		}
-		conn.Close()
+		return errors.New("not yet connected")
 	}
 
 	return nil

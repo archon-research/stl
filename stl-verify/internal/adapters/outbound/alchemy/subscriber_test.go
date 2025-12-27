@@ -709,8 +709,24 @@ func TestHealthCheck_ReturnsErrorWhenNoBlocksReceived(t *testing.T) {
 
 func TestHealthCheck_SucceedsWithRecentBlock(t *testing.T) {
 	server := newMockWSServer(func(conn *websocket.Conn) {
-		// Just accept connections for health check
-		<-time.After(time.Second)
+		defer conn.Close()
+
+		// Read subscription request
+		var req jsonRPCRequest
+		if err := conn.ReadJSON(&req); err != nil {
+			return
+		}
+
+		// Send subscription response
+		resp := jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      1,
+			Result:  json.RawMessage(`"0x1234"`),
+		}
+		conn.WriteJSON(resp)
+
+		// Keep connection open
+		<-time.After(5 * time.Second)
 	})
 	defer server.Close()
 
@@ -722,10 +738,20 @@ func TestHealthCheck_SucceedsWithRecentBlock(t *testing.T) {
 		t.Fatalf("failed to create subscriber: %v", err)
 	}
 
+	// Actually subscribe to establish connection
+	ctx := context.Background()
+	_, err = sub.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("failed to subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Wait for connection to establish
+	time.Sleep(100 * time.Millisecond)
+
 	// Simulate recent block
 	sub.lastBlockTime.Store(time.Now().Unix())
 
-	ctx := context.Background()
 	err = sub.HealthCheck(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1400,9 +1426,9 @@ func TestSubscribe_ReadTimeoutTriggersReconnect(t *testing.T) {
 	}
 }
 
-func TestHealthCheck_DialFailsWhenNoConnection(t *testing.T) {
+func TestHealthCheck_NotYetConnected(t *testing.T) {
 	sub, err := NewSubscriber(SubscriberConfig{
-		WebSocketURL:  "ws://localhost:19999", // Invalid port, won't connect
+		WebSocketURL:  "ws://localhost:19999", // Doesn't matter, we won't connect
 		HealthTimeout: time.Minute,
 	})
 	if err != nil {
@@ -1410,16 +1436,73 @@ func TestHealthCheck_DialFailsWhenNoConnection(t *testing.T) {
 	}
 
 	// Don't subscribe, so conn is nil
-	// lastBlockTime is 0, so it won't check that
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
+	ctx := context.Background()
 	err = sub.HealthCheck(ctx)
 	if err == nil {
-		t.Fatal("expected health check to fail when dial fails")
+		t.Fatal("expected health check to fail when not connected")
 	}
-	if !strings.Contains(err.Error(), "health check failed") {
+	if !strings.Contains(err.Error(), "not yet connected") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHealthCheck_ReportsDisconnectedDuration(t *testing.T) {
+	connectCount := atomic.Int32{}
+
+	server := newMockWSServer(func(conn *websocket.Conn) {
+		count := connectCount.Add(1)
+		defer conn.Close()
+
+		if count == 1 {
+			// First connection: complete handshake then close
+			var req jsonRPCRequest
+			if err := conn.ReadJSON(&req); err != nil {
+				return
+			}
+
+			resp := jsonRPCResponse{
+				JSONRPC: "2.0",
+				ID:      1,
+				Result:  json.RawMessage(`"0x1234"`),
+			}
+			conn.WriteJSON(resp)
+
+			// Close after brief moment to trigger disconnect
+			time.Sleep(50 * time.Millisecond)
+			return
+		}
+
+		// Subsequent connections: reject immediately to stay disconnected
+		return
+	})
+	defer server.Close()
+
+	sub, err := NewSubscriber(SubscriberConfig{
+		WebSocketURL:   server.URL(),
+		HealthTimeout:  time.Minute,
+		InitialBackoff: 10 * time.Second, // Long backoff so we stay disconnected for the test
+		MaxBackoff:     10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subscriber: %v", err)
+	}
+
+	ctx := context.Background()
+	_, err = sub.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("failed to subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Wait for first connection to establish and then disconnect
+	time.Sleep(200 * time.Millisecond)
+
+	// Now we should be in disconnected state trying to reconnect
+	err = sub.HealthCheck(ctx)
+	if err == nil {
+		t.Fatal("expected health check to fail when disconnected")
+	}
+	if !strings.Contains(err.Error(), "connection lost") && !strings.Contains(err.Error(), "reconnecting") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
