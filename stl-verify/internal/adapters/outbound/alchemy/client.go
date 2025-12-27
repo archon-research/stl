@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,20 +16,46 @@ import (
 // Compile-time check that Client implements outbound.BlockchainClient
 var _ outbound.BlockchainClient = (*Client)(nil)
 
+// ClientConfig holds configuration for the HTTP RPC client.
+type ClientConfig struct {
+	// HTTPURL is the Alchemy HTTP JSON-RPC endpoint URL.
+	HTTPURL string
+
+	// Timeout is the maximum time to wait for a single HTTP request.
+	Timeout time.Duration
+}
+
+// ClientConfigDefaults returns a config with default values.
+func ClientConfigDefaults() ClientConfig {
+	return ClientConfig{
+		Timeout: 30 * time.Second,
+	}
+}
+
 // Client implements BlockchainClient using Alchemy's HTTP JSON-RPC API.
 type Client struct {
-	httpURL    string
+	config     ClientConfig
 	httpClient *http.Client
 }
 
 // NewClient creates a new Alchemy HTTP RPC client.
-func NewClient(httpURL string) *Client {
-	return &Client{
-		httpURL: httpURL,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+func NewClient(config ClientConfig) (*Client, error) {
+	if config.HTTPURL == "" {
+		return nil, errors.New("HTTPURL is required")
 	}
+
+	// Apply defaults for zero values
+	defaults := ClientConfigDefaults()
+	if config.Timeout == 0 {
+		config.Timeout = defaults.Timeout
+	}
+
+	return &Client{
+		config: config,
+		httpClient: &http.Client{
+			Timeout: config.Timeout,
+		},
+	}, nil
 }
 
 // GetBlockByNumber fetches a block by its number.
@@ -212,7 +239,7 @@ func (c *Client) callBatch(ctx context.Context, requests []jsonRPCRequest) ([]js
 		return nil, fmt.Errorf("failed to marshal batch request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpURL, bytes.NewReader(reqBytes))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.HTTPURL, bytes.NewReader(reqBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -244,7 +271,7 @@ func (c *Client) call(ctx context.Context, req jsonRPCRequest) (*jsonRPCResponse
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpURL, bytes.NewReader(reqBytes))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.HTTPURL, bytes.NewReader(reqBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

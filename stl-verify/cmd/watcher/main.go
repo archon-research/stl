@@ -83,7 +83,11 @@ func main() {
 
 	// Create Alchemy HTTP client
 	httpURL := fmt.Sprintf("https://eth-mainnet.g.alchemy.com/v2/%s", alchemyAPIKey)
-	client := alchemy.NewClient(httpURL)
+	client, err := alchemy.NewClient(alchemy.ClientConfig{HTTPURL: httpURL})
+	if err != nil {
+		logger.Error("failed to create client", "error", err)
+		os.Exit(1)
+	}
 
 	// Create in-memory cache and event sink for testing
 	cache := memory.NewBlockCache()

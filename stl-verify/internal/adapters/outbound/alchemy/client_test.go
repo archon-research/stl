@@ -10,23 +10,68 @@ import (
 	"time"
 )
 
+// testClient creates a client for testing with the given URL.
+func testClient(t *testing.T, url string) *Client {
+	t.Helper()
+	client, err := NewClient(ClientConfig{HTTPURL: url})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	return client
+}
+
 // --- Test: NewClient ---
 
-func TestNewClient_CreatesClientWithURL(t *testing.T) {
+func TestNewClient_CreatesClientWithConfig(t *testing.T) {
 	url := "https://eth-mainnet.g.alchemy.com/v2/demo"
-	client := NewClient(url)
+	client, err := NewClient(ClientConfig{HTTPURL: url})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if client == nil {
 		t.Fatal("expected client, got nil")
 	}
-	if client.httpURL != url {
-		t.Errorf("expected httpURL=%s, got %s", url, client.httpURL)
+	if client.config.HTTPURL != url {
+		t.Errorf("expected HTTPURL=%s, got %s", url, client.config.HTTPURL)
 	}
 	if client.httpClient == nil {
 		t.Fatal("expected httpClient, got nil")
 	}
 	if client.httpClient.Timeout != 30*time.Second {
 		t.Errorf("expected timeout=30s, got %v", client.httpClient.Timeout)
+	}
+}
+
+func TestNewClient_EmptyURLReturnsError(t *testing.T) {
+	_, err := NewClient(ClientConfig{})
+	if err == nil {
+		t.Fatal("expected error for empty URL, got nil")
+	}
+	if !strings.Contains(err.Error(), "HTTPURL is required") {
+		t.Errorf("expected 'HTTPURL is required' error, got %v", err)
+	}
+}
+
+func TestNewClient_CustomTimeout(t *testing.T) {
+	client, err := NewClient(ClientConfig{
+		HTTPURL: "https://example.com",
+		Timeout: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if client.httpClient.Timeout != 10*time.Second {
+		t.Errorf("expected timeout=10s, got %v", client.httpClient.Timeout)
+	}
+}
+
+func TestClientConfigDefaults_ReturnsDefaults(t *testing.T) {
+	defaults := ClientConfigDefaults()
+
+	if defaults.Timeout != 30*time.Second {
+		t.Errorf("expected default timeout=30s, got %v", defaults.Timeout)
 	}
 }
 
@@ -66,7 +111,7 @@ func TestGetBlockByNumber_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	result, err := client.GetBlockByNumber(ctx, 256, false)
@@ -102,7 +147,7 @@ func TestGetBlockByNumber_RPCError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	_, err := client.GetBlockByNumber(ctx, 999999999, false)
@@ -121,7 +166,7 @@ func TestGetBlockByNumber_HTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	_, err := client.GetBlockByNumber(ctx, 256, false)
@@ -136,7 +181,7 @@ func TestGetBlockByNumber_InvalidJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	_, err := client.GetBlockByNumber(ctx, 256, false)
@@ -156,7 +201,7 @@ func TestGetBlockByNumber_ContextCancelled(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
@@ -186,7 +231,7 @@ func TestGetBlockByHash_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	header, err := client.GetBlockByHash(ctx, "0xabc123", false)
@@ -216,7 +261,7 @@ func TestGetBlockByHash_NotFound(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	_, err := client.GetBlockByHash(ctx, "0xnonexistent", false)
@@ -239,7 +284,7 @@ func TestGetBlockByHash_InvalidBlockJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	_, err := client.GetBlockByHash(ctx, "0xabc", false)
@@ -271,7 +316,7 @@ func TestGetBlockReceipts_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	result, err := client.GetBlockReceipts(ctx, 256)
@@ -313,7 +358,7 @@ func TestGetBlockTraces_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	result, err := client.GetBlockTraces(ctx, 256)
@@ -346,7 +391,7 @@ func TestGetBlobSidecars_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	result, err := client.GetBlobSidecars(ctx, 256)
@@ -379,7 +424,7 @@ func TestGetCurrentBlockNumber_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	blockNum, err := client.GetCurrentBlockNumber(ctx)
@@ -404,7 +449,7 @@ func TestGetCurrentBlockNumber_InvalidResult(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	_, err := client.GetCurrentBlockNumber(ctx)
@@ -442,7 +487,7 @@ func TestGetBlocksBatch_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	results, err := client.GetBlocksBatch(ctx, []int64{100, 101}, false)
@@ -463,7 +508,7 @@ func TestGetBlocksBatch_Success(t *testing.T) {
 }
 
 func TestGetBlocksBatch_EmptyInput(t *testing.T) {
-	client := NewClient("http://localhost:8545")
+	client := testClient(t, "http://localhost:8545")
 	ctx := context.Background()
 
 	results, err := client.GetBlocksBatch(ctx, []int64{}, false)
@@ -506,7 +551,7 @@ func TestGetBlocksBatch_PartialErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	results, err := client.GetBlocksBatch(ctx, []int64{100}, false)
@@ -531,7 +576,7 @@ func TestGetBlocksBatch_HTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	_, err := client.GetBlocksBatch(ctx, []int64{100}, false)
@@ -546,7 +591,7 @@ func TestGetBlocksBatch_InvalidJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := testClient(t, server.URL)
 	ctx := context.Background()
 
 	_, err := client.GetBlocksBatch(ctx, []int64{100}, false)
@@ -561,7 +606,7 @@ func TestGetBlocksBatch_InvalidJSON(t *testing.T) {
 // --- Test: Connection failures ---
 
 func TestClient_ConnectionRefused(t *testing.T) {
-	client := NewClient("http://localhost:19999") // Port that's not listening
+	client := testClient(t, "http://localhost:19999") // Port that's not listening
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
@@ -575,7 +620,9 @@ func TestClient_ConnectionRefused(t *testing.T) {
 }
 
 func TestClient_InvalidURL(t *testing.T) {
-	client := NewClient("://invalid-url")
+	// Client still accepts the URL since we only validate non-empty
+	// The error will occur when making the actual request
+	client := testClient(t, "://invalid-url")
 	ctx := context.Background()
 
 	_, err := client.GetBlockByNumber(ctx, 100, false)
