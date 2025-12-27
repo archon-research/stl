@@ -104,6 +104,9 @@ type Subscriber struct {
 
 	lastBlockTime atomic.Int64
 
+	// wg tracks active goroutines for graceful shutdown
+	wg sync.WaitGroup
+
 	// Reconnect callback - called when connection is re-established
 	onReconnect func()
 }
@@ -167,6 +170,7 @@ func (s *Subscriber) Subscribe(ctx context.Context) (<-chan outbound.BlockHeader
 	}
 
 	s.ctx, s.cancel = context.WithCancel(ctx)
+	s.wg.Add(1)
 	go s.connectionManager()
 
 	return s.headers, nil
@@ -174,6 +178,8 @@ func (s *Subscriber) Subscribe(ctx context.Context) (<-chan outbound.BlockHeader
 
 // connectionManager manages the WebSocket connection with automatic reconnection.
 func (s *Subscriber) connectionManager() {
+	defer s.wg.Done()
+
 	backoff := s.config.InitialBackoff
 	logger := s.config.Logger.With("component", "alchemy-subscriber")
 	isFirstConnect := true
@@ -373,12 +379,11 @@ func (s *Subscriber) closeConnection() {
 	}
 }
 
-// Unsubscribe stops the subscription.
+// Unsubscribe stops the subscription and waits for all goroutines to finish.
 func (s *Subscriber) Unsubscribe() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 
@@ -389,12 +394,19 @@ func (s *Subscriber) Unsubscribe() error {
 		s.cancel()
 	}
 
+	var connErr error
+	if s.conn != nil {
+		connErr = s.conn.Close()
+	}
+	s.mu.Unlock()
+
+	// Wait for all goroutines to finish before closing the channel
+	s.wg.Wait()
+
+	// Now safe to close the headers channel - no more writers
 	close(s.headers)
 
-	if s.conn != nil {
-		return s.conn.Close()
-	}
-	return nil
+	return connErr
 }
 
 // HealthCheck verifies the connection is operational.

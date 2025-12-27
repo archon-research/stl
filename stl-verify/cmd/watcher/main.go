@@ -166,17 +166,35 @@ func main() {
 	sig := <-sigChan
 	logger.Info("received signal, shutting down...", "signal", sig)
 
-	// Stop services
-	if enableBackfill && backfillService != nil {
-		if err := backfillService.Stop(); err != nil {
-			logger.Error("error stopping backfill service", "error", err)
-		}
-	}
-	if err := liveService.Stop(); err != nil {
-		logger.Error("error stopping live service", "error", err)
-	}
+	// Cancel context first to signal all goroutines to stop
+	cancel()
 
-	logger.Info("shutdown complete")
+	// Create shutdown timeout context
+	// Fargate default stopTimeout is 30s; we use 25s to ensure clean logging before force-kill
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer shutdownCancel()
+
+	// Stop services with timeout
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		if enableBackfill && backfillService != nil {
+			if err := backfillService.Stop(); err != nil {
+				logger.Error("error stopping backfill service", "error", err)
+			}
+		}
+		if err := liveService.Stop(); err != nil {
+			logger.Error("error stopping live service", "error", err)
+		}
+	}()
+
+	select {
+	case <-shutdownDone:
+		logger.Info("shutdown complete")
+	case <-shutdownCtx.Done():
+		logger.Error("shutdown timed out, forcing exit")
+		os.Exit(1)
+	}
 }
 
 // getEnv returns the value of an environment variable or a default value.

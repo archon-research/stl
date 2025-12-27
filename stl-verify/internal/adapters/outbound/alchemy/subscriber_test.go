@@ -338,6 +338,174 @@ func TestUnsubscribe_Idempotent(t *testing.T) {
 	}
 }
 
+func TestUnsubscribe_WaitsForGoroutines(t *testing.T) {
+	goroutineActive := atomic.Bool{}
+	goroutineExited := make(chan struct{})
+
+	server := newMockWSServer(func(conn *websocket.Conn) {
+		defer conn.Close()
+
+		// Read subscription request
+		var req jsonRPCRequest
+		if err := conn.ReadJSON(&req); err != nil {
+			return
+		}
+
+		// Send subscription response
+		resp := jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      1,
+			Result:  json.RawMessage(`"0x1234"`),
+		}
+		conn.WriteJSON(resp)
+
+		// Track that goroutine is active (the subscriber's readLoop goroutine)
+		goroutineActive.Store(true)
+
+		// Keep reading to detect when connection is closed
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				close(goroutineExited)
+				return
+			}
+		}
+	})
+	defer server.Close()
+
+	sub, err := NewSubscriber(SubscriberConfig{
+		WebSocketURL: server.URL(),
+		ReadTimeout:  5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subscriber: %v", err)
+	}
+
+	ctx := context.Background()
+	_, err = sub.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("failed to subscribe: %v", err)
+	}
+
+	// Wait for connection to establish
+	time.Sleep(100 * time.Millisecond)
+
+	// Unsubscribe should wait for goroutines to finish
+	done := make(chan struct{})
+	go func() {
+		sub.Unsubscribe()
+		close(done)
+	}()
+
+	// Unsubscribe should complete (not hang) and headers channel should be safe to use
+	select {
+	case <-done:
+		// Success - Unsubscribe completed
+	case <-time.After(2 * time.Second):
+		t.Fatal("Unsubscribe timed out - goroutines may not have finished")
+	}
+
+	// After Unsubscribe returns, the headers channel should be closed
+	// and safe to read from (no goroutines writing to it)
+	select {
+	case _, ok := <-sub.headers:
+		if ok {
+			t.Fatal("expected headers channel to be closed")
+		}
+	default:
+		// Channel is closed and empty - this is expected
+	}
+}
+
+func TestUnsubscribe_GracefulWithActiveBlocks(t *testing.T) {
+	server := newMockWSServer(func(conn *websocket.Conn) {
+		defer conn.Close()
+
+		// Read subscription request
+		var req jsonRPCRequest
+		if err := conn.ReadJSON(&req); err != nil {
+			return
+		}
+
+		// Send subscription response
+		resp := jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      1,
+			Result:  json.RawMessage(`"0x1234"`),
+		}
+		conn.WriteJSON(resp)
+
+		// Send blocks continuously until connection closes
+		for i := 0; ; i++ {
+			header := outbound.BlockHeader{
+				Number:     fmt.Sprintf("0x%x", i),
+				Hash:       fmt.Sprintf("0xhash%d", i),
+				ParentHash: fmt.Sprintf("0xparent%d", i),
+			}
+			notification := map[string]interface{}{
+				"jsonrpc": "2.0",
+				"method":  "eth_subscription",
+				"params": map[string]interface{}{
+					"subscription": "0x1234",
+					"result":       header,
+				},
+			}
+			if err := conn.WriteJSON(notification); err != nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+	defer server.Close()
+
+	sub, err := NewSubscriber(SubscriberConfig{
+		WebSocketURL:      server.URL(),
+		ReadTimeout:       5 * time.Second,
+		ChannelBufferSize: 10,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subscriber: %v", err)
+	}
+
+	ctx := context.Background()
+	headers, err := sub.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("failed to subscribe: %v", err)
+	}
+
+	// Wait for some blocks to be received
+	blocksReceived := 0
+	timeout := time.After(500 * time.Millisecond)
+waitLoop:
+	for {
+		select {
+		case <-headers:
+			blocksReceived++
+			if blocksReceived >= 3 {
+				break waitLoop
+			}
+		case <-timeout:
+			break waitLoop
+		}
+	}
+
+	if blocksReceived < 3 {
+		t.Fatalf("expected at least 3 blocks, got %d", blocksReceived)
+	}
+
+	// Unsubscribe while blocks are actively being sent
+	err = sub.Unsubscribe()
+	if err != nil {
+		t.Fatalf("Unsubscribe failed: %v", err)
+	}
+
+	// Verify channel is closed - should not panic
+	_, ok := <-headers
+	if ok {
+		t.Fatal("expected headers channel to be closed after Unsubscribe")
+	}
+}
+
 // --- Test: Reconnection ---
 
 func TestSubscribe_ReconnectsOnConnectionLoss(t *testing.T) {
