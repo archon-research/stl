@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Compile-time check that Client implements outbound.BlockchainClient
@@ -40,6 +41,10 @@ type ClientConfig struct {
 
 	// Logger is the structured logger for the client.
 	Logger *slog.Logger
+
+	// Telemetry is the optional OpenTelemetry instrumentation.
+	// If nil, no metrics or traces are recorded.
+	Telemetry *Telemetry
 }
 
 // ClientConfigDefaults returns a config with default values.
@@ -59,6 +64,7 @@ type Client struct {
 	config     ClientConfig
 	httpClient *http.Client
 	logger     *slog.Logger
+	telemetry  *Telemetry
 }
 
 // NewClient creates a new Alchemy HTTP RPC client.
@@ -93,7 +99,8 @@ func NewClient(config ClientConfig) (*Client, error) {
 		httpClient: &http.Client{
 			Timeout: config.Timeout,
 		},
-		logger: config.Logger.With("component", "alchemy-client"),
+		logger:    config.Logger.With("component", "alchemy-client"),
+		telemetry: config.Telemetry,
 	}, nil
 }
 
@@ -304,13 +311,22 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 
 // callBatch makes a batched HTTP JSON-RPC call to the Alchemy API with retry.
 func (c *Client) callBatch(ctx context.Context, requests []jsonRPCRequest) ([]jsonRPCResponse, error) {
+	// Start span if telemetry is enabled
+	if c.telemetry != nil {
+		var span trace.Span
+		ctx, span = c.telemetry.StartSpan(ctx, "batch")
+		defer span.End()
+		c.telemetry.RecordBatchSize(ctx, len(requests))
+	}
+
+	start := time.Now()
 	reqBytes, err := json.Marshal(requests)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal batch request: %w", err)
 	}
 
 	var rpcResponses []jsonRPCResponse
-	err = c.doWithRetry(ctx, func() error {
+	err = c.doWithRetry(ctx, "batch", func() error {
 		// Reset responses to avoid leftover data from previous attempts
 		rpcResponses = nil
 
@@ -343,6 +359,11 @@ func (c *Client) callBatch(ctx context.Context, requests []jsonRPCRequest) ([]js
 		return nil
 	})
 
+	// Record metrics if telemetry is enabled
+	if c.telemetry != nil {
+		c.telemetry.RecordRequest(ctx, "batch", time.Since(start), err)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -351,13 +372,21 @@ func (c *Client) callBatch(ctx context.Context, requests []jsonRPCRequest) ([]js
 
 // call makes an HTTP JSON-RPC call to the Alchemy API with retry.
 func (c *Client) call(ctx context.Context, req jsonRPCRequest) (*jsonRPCResponse, error) {
+	// Start span if telemetry is enabled
+	if c.telemetry != nil {
+		var span trace.Span
+		ctx, span = c.telemetry.StartSpan(ctx, req.Method)
+		defer span.End()
+	}
+
+	start := time.Now()
 	reqBytes, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	var rpcResp jsonRPCResponse
-	err = c.doWithRetry(ctx, func() error {
+	err = c.doWithRetry(ctx, req.Method, func() error {
 		// Reset response to avoid leftover error field from previous attempts
 		rpcResp = jsonRPCResponse{}
 
@@ -394,6 +423,11 @@ func (c *Client) call(ctx context.Context, req jsonRPCRequest) (*jsonRPCResponse
 		return nil
 	})
 
+	// Record metrics if telemetry is enabled
+	if c.telemetry != nil {
+		c.telemetry.RecordRequest(ctx, req.Method, time.Since(start), err)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -415,7 +449,7 @@ func (e *nonRetryableError) Unwrap() error {
 
 // doWithRetry executes fn with exponential backoff retry for transient failures.
 // Returns immediately on non-retryable errors or context cancellation.
-func (c *Client) doWithRetry(ctx context.Context, fn func() error) error {
+func (c *Client) doWithRetry(ctx context.Context, method string, fn func() error) error {
 	backoff := c.config.InitialBackoff
 	var lastErr error
 
@@ -438,7 +472,13 @@ func (c *Client) doWithRetry(ctx context.Context, fn func() error) error {
 			break
 		}
 
+		// Record retry metric if telemetry is enabled
+		if c.telemetry != nil {
+			c.telemetry.RecordRetry(ctx, method, attempt+1)
+		}
+
 		c.logger.Warn("request failed, retrying",
+			"method", method,
 			"attempt", attempt+1,
 			"maxRetries", c.config.MaxRetries,
 			"backoff", backoff,
@@ -459,6 +499,7 @@ func (c *Client) doWithRetry(ctx context.Context, fn func() error) error {
 	}
 
 	c.logger.Error("request failed after all retries",
+		"method", method,
 		"maxRetries", c.config.MaxRetries,
 		"error", lastErr)
 

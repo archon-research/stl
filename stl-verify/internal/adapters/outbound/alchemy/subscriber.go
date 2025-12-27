@@ -73,6 +73,10 @@ type SubscriberConfig struct {
 
 	// Logger is the structured logger for the subscriber.
 	Logger *slog.Logger
+
+	// Telemetry is the optional OpenTelemetry instrumentation.
+	// If nil, no metrics or traces are recorded.
+	Telemetry *Telemetry
 }
 
 // SubscriberConfigDefaults returns a config with default values.
@@ -93,14 +97,15 @@ func SubscriberConfigDefaults() SubscriberConfig {
 // Subscriber implements BlockSubscriber using Alchemy's WebSocket API.
 // It handles WebSocket connection, subscription, and emitting raw headers.
 type Subscriber struct {
-	config  SubscriberConfig
-	conn    *websocket.Conn
-	mu      sync.RWMutex
-	done    chan struct{}
-	closed  bool
-	headers chan outbound.BlockHeader
-	ctx     context.Context
-	cancel  context.CancelFunc
+	config    SubscriberConfig
+	conn      *websocket.Conn
+	mu        sync.RWMutex
+	done      chan struct{}
+	closed    bool
+	headers   chan outbound.BlockHeader
+	ctx       context.Context
+	cancel    context.CancelFunc
+	telemetry *Telemetry
 
 	lastBlockTime atomic.Int64
 
@@ -152,9 +157,10 @@ func NewSubscriber(config SubscriberConfig) (*Subscriber, error) {
 	}
 
 	return &Subscriber{
-		config:  config,
-		done:    make(chan struct{}),
-		headers: make(chan outbound.BlockHeader, config.ChannelBufferSize),
+		config:    config,
+		done:      make(chan struct{}),
+		headers:   make(chan outbound.BlockHeader, config.ChannelBufferSize),
+		telemetry: config.Telemetry,
 	}, nil
 }
 
@@ -222,9 +228,19 @@ func (s *Subscriber) connectionManager() {
 		// Mark as connected
 		s.disconnectedSince.Store(0)
 
-		// Notify caller of reconnection
-		if !isFirstConnect && s.onReconnect != nil {
-			s.onReconnect()
+		// Record telemetry for connection state
+		if s.telemetry != nil {
+			s.telemetry.RecordConnectionUp(s.ctx)
+		}
+
+		// Notify caller of reconnection and record metric
+		if !isFirstConnect {
+			if s.telemetry != nil {
+				s.telemetry.RecordReconnection(s.ctx)
+			}
+			if s.onReconnect != nil {
+				s.onReconnect()
+			}
 		}
 		isFirstConnect = false
 
@@ -352,14 +368,19 @@ func (s *Subscriber) readLoop(logger *slog.Logger) bool {
 			s.closeConnection()
 			return false
 		case header := <-blockChan:
+			blockNum, _ := parseBlockNumber(header.Number)
 			select {
 			case s.headers <- header:
 				s.lastBlockTime.Store(time.Now().Unix())
-				blockNum, _ := parseBlockNumber(header.Number)
 				logger.Debug("block header received", "block", blockNum, "hash", truncateHash(header.Hash))
+				if s.telemetry != nil {
+					s.telemetry.RecordBlockReceived(s.ctx, blockNum)
+				}
 			default:
-				blockNum, _ := parseBlockNumber(header.Number)
 				logger.Error("channel full, dropping block", "block", blockNum)
+				if s.telemetry != nil {
+					s.telemetry.RecordBlockDropped(s.ctx, blockNum)
+				}
 			}
 		case <-pingTicker.C:
 			s.mu.RLock()
@@ -385,6 +406,10 @@ func (s *Subscriber) closeConnection() {
 		s.conn = nil
 		// Track when we became disconnected
 		s.disconnectedSince.Store(time.Now().Unix())
+		// Record telemetry for connection state
+		if s.telemetry != nil {
+			s.telemetry.RecordConnectionDown(s.ctx)
+		}
 	}
 }
 

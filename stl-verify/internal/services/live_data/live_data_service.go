@@ -26,6 +26,9 @@ type LiveConfig struct {
 
 	// Logger is the structured logger.
 	Logger *slog.Logger
+
+	// Metrics is the metrics recorder for telemetry (optional).
+	Metrics outbound.MetricsRecorder
 }
 
 // LiveConfigDefaults returns default configuration.
@@ -55,6 +58,7 @@ type LiveService struct {
 	stateRepo  outbound.BlockStateRepository
 	cache      outbound.BlockCache
 	eventSink  outbound.EventSink
+	metrics    outbound.MetricsRecorder
 
 	// In-memory chain state for reorg detection
 	chainMu           sync.RWMutex
@@ -113,6 +117,7 @@ func NewLiveService(
 		stateRepo:  stateRepo,
 		cache:      cache,
 		eventSink:  eventSink,
+		metrics:    config.Metrics,
 		logger:     config.Logger.With("component", "live-service"),
 	}, nil
 }
@@ -221,6 +226,9 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 	}
 	if isReorg {
 		s.logger.Warn("reorg detected", "block", blockNum, "depth", reorgDepth, "commonAncestor", commonAncestor)
+		if s.metrics != nil {
+			s.metrics.RecordReorg(ctx, reorgDepth, commonAncestor, blockNum)
+		}
 	}
 
 	// Now atomically add to chain (may fail if added concurrently)
