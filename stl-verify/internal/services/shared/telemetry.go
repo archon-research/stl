@@ -1,4 +1,4 @@
-// Package shared provides shared utilities and instrumentation for application services.
+// Package shared provides shared utilities and instrumentation for services.
 package shared
 
 import (
@@ -10,35 +10,35 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// Compile-time assertion that AppTelemetry implements MetricsRecorder.
-var _ outbound.MetricsRecorder = (*AppTelemetry)(nil)
+// Compile-time assertion that ServiceTelemetry implements MetricsRecorder.
+var _ outbound.MetricsRecorder = (*ServiceTelemetry)(nil)
 
 const (
 	// instrumentationName is the name used for OpenTelemetry instrumentation.
 	instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services"
 )
 
-// AppTelemetry provides OpenTelemetry metrics for application-level domain events.
+// ServiceTelemetry provides OpenTelemetry metrics for service-level domain events.
 // This is separate from adapter-level telemetry (e.g., alchemy.Telemetry) which
 // tracks infrastructure concerns like HTTP requests and WebSocket connections.
-type AppTelemetry struct {
+type ServiceTelemetry struct {
 	meter metric.Meter
 
 	// Chain metrics
 	reorgsTotal metric.Int64Counter
 }
 
-// NewAppTelemetry creates a new AppTelemetry instance with OpenTelemetry instrumentation.
+// NewServiceTelemetry creates a new ServiceTelemetry instance with OpenTelemetry instrumentation.
 // Uses the global meter provider by default.
-func NewAppTelemetry() (*AppTelemetry, error) {
-	return NewAppTelemetryWithProvider(otel.GetMeterProvider())
+func NewServiceTelemetry() (*ServiceTelemetry, error) {
+	return NewServiceTelemetryWithProvider(otel.GetMeterProvider())
 }
 
-// NewAppTelemetryWithProvider creates a new AppTelemetry instance with a custom meter provider.
-func NewAppTelemetryWithProvider(mp metric.MeterProvider) (*AppTelemetry, error) {
+// NewServiceTelemetryWithProvider creates a new ServiceTelemetry instance with a custom meter provider.
+func NewServiceTelemetryWithProvider(mp metric.MeterProvider) (*ServiceTelemetry, error) {
 	meter := mp.Meter(instrumentationName)
 
-	t := &AppTelemetry{
+	t := &ServiceTelemetry{
 		meter: meter,
 	}
 
@@ -58,7 +58,7 @@ func NewAppTelemetryWithProvider(mp metric.MeterProvider) (*AppTelemetry, error)
 // RecordReorg records a chain reorganization event.
 // depth is how many blocks were reorganized, fromBlock is the common ancestor,
 // and toBlock is the new chain head after the reorg.
-func (t *AppTelemetry) RecordReorg(ctx context.Context, depth int, fromBlock, toBlock int64) {
+func (t *ServiceTelemetry) RecordReorg(ctx context.Context, depth int, fromBlock, toBlock int64) {
 	t.reorgsTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.Int("reorg.depth", depth),
 		attribute.Int64("reorg.from_block", fromBlock),
