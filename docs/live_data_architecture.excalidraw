@@ -2591,8 +2591,8 @@
     {
       "id": "arrow-worker-cache",
       "type": "arrow",
-      "x": 770.3048542750731,
-      "y": 407.07236721044154,
+      "x": 770.1343482064348,
+      "y": 407.766075357763,
       "width": 554.8254234383554,
       "height": 147.5436562619356,
       "strokeColor": "#1971c2",
@@ -2615,8 +2615,8 @@
       "startArrowhead": null,
       "endArrowhead": "arrow",
       "lastCommittedPoint": null,
-      "version": 816,
-      "versionNonce": 1727799243,
+      "version": 823,
+      "versionNonce": 141800306,
       "index": "b9",
       "isDeleted": false,
       "fillStyle": "solid",
@@ -2636,34 +2636,34 @@
           "id": "cache-read-label"
         }
       ],
-      "updated": 1766149039032,
+      "updated": 1767604839894,
       "link": null,
       "locked": false,
       "startBinding": {
         "elementId": "raw-box",
-        "focus": 0.04878708376516567,
-        "gap": 29.15512255139463
+        "focus": 0.04579098938657456,
+        "gap": 29.849196040890227
       },
       "endBinding": {
         "elementId": "cache-box",
-        "focus": -0.39033812210213364,
-        "gap": 1.2825227033472402
+        "focus": -0.3804289343111379,
+        "gap": 1.1120166347088798
       }
     },
     {
       "id": "cache-read-label",
       "type": "text",
-      "x": 527.4548645019531,
-      "y": 395.1940234361362,
+      "x": 512.9365888323102,
+      "y": 537.635896169116,
       "width": 180.90521240234375,
       "height": 35.34767090116511,
-      "text": "1. read cache\n(blocks, receipts, traces, blobs)",
+      "text": "read cache\n(blocks, receipts, traces, blobs)",
       "fontSize": 11.782556967055037,
       "fontFamily": 1,
       "textAlign": "center",
       "strokeColor": "#1971c2",
-      "version": 349,
-      "versionNonce": 541789744,
+      "version": 353,
+      "versionNonce": 1208920110,
       "index": "bA",
       "isDeleted": false,
       "fillStyle": "solid",
@@ -2678,12 +2678,12 @@
       "frameId": null,
       "roundness": null,
       "boundElements": [],
-      "updated": 1766134303473,
+      "updated": 1767604838851,
       "link": null,
       "locked": false,
       "verticalAlign": "middle",
       "containerId": "arrow-worker-cache",
-      "originalText": "1. read cache\n(blocks, receipts, traces, blobs)",
+      "originalText": "read cache\n(blocks, receipts, traces, blobs)",
       "autoResize": true,
       "lineHeight": 1.5
     },
