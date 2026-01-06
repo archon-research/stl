@@ -60,22 +60,23 @@ erDiagram
         jsonb metadata "protocol-specific user data"
     }
 
-    ReserveData {
+    SparkLendReserveData {
         bigint id PK
         bigint protocol_id FK "UK1"
         bigint token_id FK "UK1"
         bigint block_number "UK1"
-        numeric liquidity_index "ray 10^27"
-        numeric variable_borrow_index "ray 10^27"
-        numeric ltv
-        numeric liquidation_threshold
-        numeric liquidation_bonus
-        numeric current_liquidity_rate
-        numeric current_variable_rate
-        numeric current_stable_rate
-        boolean is_active
-        boolean is_frozen
-        boolean is_paused
+        numeric unbacked
+        numeric accruedToTreasuryScaled
+        numeric totalAToken
+        numeric totalStableDebt
+        numeric totalVariableDebt
+        numeric liquidityRate
+        numeric variableBorrowRate
+        numeric stableBorrowRate
+        numeric averageStableBorrowRate
+        numeric liquidityIndex
+        numeric variableBorrowIndex
+        bigint lastUpdateTimestamp
     }
 
     Borrowers {
@@ -117,10 +118,10 @@ erDiagram
     Chain ||--o{ Users : ""
     Protocol ||--o{ ReceiptTokens : ""
     Protocol ||--o{ DebtTokens : ""
-    Protocol ||--o{ ReserveData : ""
+    Protocol ||--o{ SparkLendReserveData : ""
     Token ||--o{ ReceiptTokens : ""
     Token ||--o{ DebtTokens : ""
-    Token ||--o{ ReserveData : ""
+    Token ||--o{ SparkLendReserveData : ""
     Users ||--o{ Borrowers : ""
     Users ||--o{ BorrowerCollateral : ""
     Protocol ||--o{ Borrowers : ""
