@@ -100,7 +100,6 @@ erDiagram
         int block_version "UK1"
         numeric amount
         numeric change
-        boolean is_enabled
         timestamptz created_at
     }
 
