@@ -1,4 +1,3 @@
-```mermaid
 erDiagram
     Chain {
         int chain_id PK
@@ -12,6 +11,7 @@ erDiagram
         varchar symbol
         smallint decimals
         bigint created_at_block
+        timestamptz updated_at
         jsonb metadata "protocol-specific fields"
     }
 
@@ -22,6 +22,7 @@ erDiagram
         varchar name
         varchar protocol_type "lending,rwa"
         bigint created_at_block
+        timestamptz updated_at
         jsonb metadata "protocol-specific config"
     }
 
@@ -32,6 +33,7 @@ erDiagram
         bytea receipt_token_address
         varchar symbol "aWETH, spWETH, cWETH"
         bigint created_at_block
+        timestamptz updated_at
         jsonb metadata "protocol-specific fields"
     }
 
@@ -44,6 +46,7 @@ erDiagram
         varchar variable_symbol "variableDebtWETH"
         varchar stable_symbol "stableDebtWETH, nullable"
         bigint created_at_block
+        timestamptz updated_at
         jsonb metadata "protocol-specific fields"
     }
 
@@ -104,6 +107,8 @@ erDiagram
         bigint id PK
         bigint user_id FK "UK1"
         bigint protocol_id FK "UK1"
+        timestamptz created_at
+        timestamptz updated_at
         jsonb metadata "user-protocol specific data"
     }
 
@@ -124,4 +129,3 @@ erDiagram
     Token ||--o{ BorrowerCollateral : ""
     Users ||--o{ UserProtocolMetadata : ""
     Protocol ||--o{ UserProtocolMetadata : ""
-```
