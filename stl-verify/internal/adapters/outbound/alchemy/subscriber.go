@@ -55,6 +55,9 @@ type SubscriberConfig struct {
 	// ReadTimeout is the maximum time to wait for a message.
 	ReadTimeout time.Duration
 
+	// HandshakeTimeout is the maximum time to wait for the WebSocket handshake to complete.
+	HandshakeTimeout time.Duration
+
 	// ChannelBufferSize is the size of the block header channel buffer.
 	ChannelBufferSize int
 
@@ -79,6 +82,7 @@ func SubscriberConfigDefaults() SubscriberConfig {
 		PingInterval:      30 * time.Second,
 		PongTimeout:       10 * time.Second,
 		ReadTimeout:       60 * time.Second,
+		HandshakeTimeout:  10 * time.Second,
 		ChannelBufferSize: 100,
 		HealthTimeout:     30 * time.Second,
 		Logger:            slog.Default(),
@@ -136,6 +140,9 @@ func NewSubscriber(config SubscriberConfig) (*Subscriber, error) {
 	}
 	if config.ReadTimeout == 0 {
 		config.ReadTimeout = defaults.ReadTimeout
+	}
+	if config.HandshakeTimeout == 0 {
+		config.HandshakeTimeout = defaults.HandshakeTimeout
 	}
 	if config.ChannelBufferSize == 0 {
 		config.ChannelBufferSize = defaults.ChannelBufferSize
@@ -246,7 +253,10 @@ func (s *Subscriber) connectAndSubscribe() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	conn, _, err := websocket.DefaultDialer.DialContext(s.ctx, s.config.WebSocketURL, nil)
+	dialer := websocket.Dialer{
+		HandshakeTimeout: s.config.HandshakeTimeout,
+	}
+	conn, _, err := dialer.DialContext(s.ctx, s.config.WebSocketURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
