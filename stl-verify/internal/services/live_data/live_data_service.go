@@ -281,7 +281,7 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 	}
 
 	// Fetch all data types concurrently, cache, and publish events
-	s.fetchAndPublishBlockData(header, blockNum, receivedAt, isReorg)
+	s.fetchAndPublishBlockData(ctx, header, blockNum, receivedAt, isReorg)
 
 	// Update finalized block pointer after successful publishing
 	s.updateFinalizedBlock(blockNum)
@@ -484,7 +484,7 @@ func (s *LiveService) restoreInMemoryChain() {
 }
 
 // fetchAndPublishBlockData fetches all data types concurrently and publishes events.
-func (s *LiveService) fetchAndPublishBlockData(header outbound.BlockHeader, blockNum int64, receivedAt time.Time, isReorg bool) {
+func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbound.BlockHeader, blockNum int64, receivedAt time.Time, isReorg bool) {
 	chainID := s.config.ChainID
 	blockHash := header.Hash
 	parentHash := header.ParentHash
@@ -496,19 +496,19 @@ func (s *LiveService) fetchAndPublishBlockData(header outbound.BlockHeader, bloc
 	// Fetch and publish block
 	go func() {
 		defer wg.Done()
-		s.fetchCacheAndPublishBlock(chainID, blockNum, blockHash, parentHash, blockTimestamp, receivedAt, isReorg)
+		s.fetchCacheAndPublishBlock(ctx, chainID, blockNum, blockHash, parentHash, blockTimestamp, receivedAt, isReorg)
 	}()
 
 	// Fetch and publish receipts
 	go func() {
 		defer wg.Done()
-		s.fetchCacheAndPublishReceipts(chainID, blockNum, blockHash, receivedAt, isReorg)
+		s.fetchCacheAndPublishReceipts(ctx, chainID, blockNum, blockHash, receivedAt, isReorg)
 	}()
 
 	// Fetch and publish traces
 	go func() {
 		defer wg.Done()
-		s.fetchCacheAndPublishTraces(chainID, blockNum, blockHash, receivedAt, isReorg)
+		s.fetchCacheAndPublishTraces(ctx, chainID, blockNum, blockHash, receivedAt, isReorg)
 	}()
 
 	// Fetch and publish blobs (if enabled)
@@ -516,20 +516,18 @@ func (s *LiveService) fetchAndPublishBlockData(header outbound.BlockHeader, bloc
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.fetchCacheAndPublishBlobs(chainID, blockNum, blockHash, receivedAt, isReorg)
+			s.fetchCacheAndPublishBlobs(ctx, chainID, blockNum, blockHash, receivedAt, isReorg)
 		}()
 	}
 
 	wg.Wait()
 }
 
-func (s *LiveService) fetchCacheAndPublishBlock(chainID, blockNum int64, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg bool) {
+func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, blockNum int64, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg bool) {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("fetchCacheAndPublishBlock completed", "block", blockNum, "duration", time.Since(start))
 	}()
-
-	ctx := s.ctx
 
 	data, err := s.client.GetBlockByNumber(ctx, blockNum, true)
 	if err != nil {
@@ -558,13 +556,11 @@ func (s *LiveService) fetchCacheAndPublishBlock(chainID, blockNum int64, blockHa
 	}
 }
 
-func (s *LiveService) fetchCacheAndPublishReceipts(chainID, blockNum int64, blockHash string, receivedAt time.Time, isReorg bool) {
+func (s *LiveService) fetchCacheAndPublishReceipts(ctx context.Context, chainID, blockNum int64, blockHash string, receivedAt time.Time, isReorg bool) {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("fetchCacheAndPublishReceipts completed", "block", blockNum, "duration", time.Since(start))
 	}()
-
-	ctx := s.ctx
 
 	data, err := s.client.GetBlockReceipts(ctx, blockNum)
 	if err != nil {
@@ -591,13 +587,11 @@ func (s *LiveService) fetchCacheAndPublishReceipts(chainID, blockNum int64, bloc
 	}
 }
 
-func (s *LiveService) fetchCacheAndPublishTraces(chainID, blockNum int64, blockHash string, receivedAt time.Time, isReorg bool) {
+func (s *LiveService) fetchCacheAndPublishTraces(ctx context.Context, chainID, blockNum int64, blockHash string, receivedAt time.Time, isReorg bool) {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("fetchCacheAndPublishTraces completed", "block", blockNum, "duration", time.Since(start))
 	}()
-
-	ctx := s.ctx
 
 	data, err := s.client.GetBlockTraces(ctx, blockNum)
 	if err != nil {
@@ -624,13 +618,11 @@ func (s *LiveService) fetchCacheAndPublishTraces(chainID, blockNum int64, blockH
 	}
 }
 
-func (s *LiveService) fetchCacheAndPublishBlobs(chainID, blockNum int64, blockHash string, receivedAt time.Time, isReorg bool) {
+func (s *LiveService) fetchCacheAndPublishBlobs(ctx context.Context, chainID, blockNum int64, blockHash string, receivedAt time.Time, isReorg bool) {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("fetchCacheAndPublishBlobs completed", "block", blockNum, "duration", time.Since(start))
 	}()
-
-	ctx := s.ctx
 
 	data, err := s.client.GetBlobSidecars(ctx, blockNum)
 	if err != nil {
