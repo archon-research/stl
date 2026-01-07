@@ -239,7 +239,9 @@ func TestGetBlockByHash_Success(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`{"number":"0x100","hash":"0xabc123","parentHash":"0xdef456"}`),
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -269,7 +271,9 @@ func TestGetBlockByHash_NotFound(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`null`),
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -292,7 +296,9 @@ func TestGetBlockByHash_InvalidBlockJSON(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`{"number": 123}`), // number should be string
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -326,7 +332,9 @@ func TestGetBlockReceipts_Success(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`[{"transactionHash":"0x123","status":"0x1"}]`),
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -370,7 +378,9 @@ func TestGetBlockTraces_Success(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`[{"action":{"callType":"call"}}]`),
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -392,7 +402,9 @@ func TestGetBlockTraces_Success(t *testing.T) {
 func TestGetBlobSidecars_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req jsonRPCRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("failed to decode request: %v", err)
+		}
 
 		if req.Method != "eth_getBlobSidecars" {
 			t.Errorf("expected method=eth_getBlobSidecars, got %s", req.Method)
@@ -403,7 +415,9 @@ func TestGetBlobSidecars_Success(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`[]`),
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -425,7 +439,9 @@ func TestGetBlobSidecars_Success(t *testing.T) {
 func TestGetCurrentBlockNumber_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req jsonRPCRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("failed to decode request: %v", err)
+		}
 
 		if req.Method != "eth_blockNumber" {
 			t.Errorf("expected method=eth_blockNumber, got %s", req.Method)
@@ -436,7 +452,9 @@ func TestGetCurrentBlockNumber_Success(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -461,7 +479,9 @@ func TestGetCurrentBlockNumber_InvalidResult(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`123`), // Should be string
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -482,7 +502,9 @@ func TestGetCurrentBlockNumber_InvalidResult(t *testing.T) {
 func TestGetBlocksBatch_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var requests []jsonRPCRequest
-		json.NewDecoder(r.Body).Decode(&requests)
+		if err := json.NewDecoder(r.Body).Decode(&requests); err != nil {
+			t.Errorf("failed to decode requests: %v", err)
+		}
 
 		// Should have 8 requests (2 blocks * 4 methods each)
 		if len(requests) != 8 {
@@ -499,7 +521,9 @@ func TestGetBlocksBatch_Success(t *testing.T) {
 			}
 		}
 
-		json.NewEncoder(w).Encode(responses)
+		if err := json.NewEncoder(w).Encode(responses); err != nil {
+			t.Errorf("failed to encode responses: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -540,7 +564,9 @@ func TestGetBlocksBatch_EmptyInput(t *testing.T) {
 func TestGetBlocksBatch_PartialErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var requests []jsonRPCRequest
-		json.NewDecoder(r.Body).Decode(&requests)
+		if err := json.NewDecoder(r.Body).Decode(&requests); err != nil {
+			t.Errorf("failed to decode requests: %v", err)
+		}
 
 		responses := make([]jsonRPCResponse, len(requests))
 		for i, req := range requests {
@@ -563,7 +589,9 @@ func TestGetBlocksBatch_PartialErrors(t *testing.T) {
 			}
 		}
 
-		json.NewEncoder(w).Encode(responses)
+		if err := json.NewEncoder(w).Encode(responses); err != nil {
+			t.Errorf("failed to encode responses: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -622,7 +650,9 @@ func TestGetBlocksBatch_PartialErrors(t *testing.T) {
 func TestGetBlocksBatch_AllSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var requests []jsonRPCRequest
-		json.NewDecoder(r.Body).Decode(&requests)
+		if err := json.NewDecoder(r.Body).Decode(&requests); err != nil {
+			t.Errorf("failed to decode requests: %v", err)
+		}
 
 		responses := make([]jsonRPCResponse, len(requests))
 		for i, req := range requests {
@@ -633,7 +663,9 @@ func TestGetBlocksBatch_AllSuccess(t *testing.T) {
 			}
 		}
 
-		json.NewEncoder(w).Encode(responses)
+		if err := json.NewEncoder(w).Encode(responses); err != nil {
+			t.Errorf("failed to encode responses: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -673,7 +705,9 @@ func TestGetBlocksBatch_AllSuccess(t *testing.T) {
 func TestGetBlocksBatch_AllErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var requests []jsonRPCRequest
-		json.NewDecoder(r.Body).Decode(&requests)
+		if err := json.NewDecoder(r.Body).Decode(&requests); err != nil {
+			t.Errorf("failed to decode requests: %v", err)
+		}
 
 		responses := make([]jsonRPCResponse, len(requests))
 		for i, req := range requests {
@@ -687,7 +721,9 @@ func TestGetBlocksBatch_AllErrors(t *testing.T) {
 			}
 		}
 
-		json.NewEncoder(w).Encode(responses)
+		if err := json.NewEncoder(w).Encode(responses); err != nil {
+			t.Errorf("failed to encode responses: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -808,7 +844,9 @@ func TestClient_RetriesOn5xxErrors(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x100"`),
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -845,7 +883,9 @@ func TestClient_RetriesOn429RateLimitError(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x100"`),
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -880,7 +920,9 @@ func TestClient_RetriesOnRPCError(t *testing.T) {
 					Message: "execution reverted",
 				},
 			}
-			json.NewEncoder(w).Encode(resp)
+			if err := json.NewEncoder(w).Encode(resp); err != nil {
+				t.Errorf("failed to encode response: %v", err)
+			}
 			return
 		}
 		// Success on 4th attempt
@@ -889,7 +931,9 @@ func TestClient_RetriesOnRPCError(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x100"`),
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -916,7 +960,9 @@ func TestClient_RetriesOnParseError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts++
 		if attempts < 2 {
-			w.Write([]byte("invalid json"))
+			if _, err := w.Write([]byte("invalid json")); err != nil {
+				t.Errorf("failed to write response: %v", err)
+			}
 			return
 		}
 		// Success on 2nd attempt
@@ -925,7 +971,9 @@ func TestClient_RetriesOnParseError(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x100"`),
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -1025,7 +1073,9 @@ func TestClient_BatchRetriesOn5xxErrors(t *testing.T) {
 			{JSONRPC: "2.0", ID: 2, Result: json.RawMessage(`{}`)},
 			{JSONRPC: "2.0", ID: 3, Result: json.RawMessage(`{}`)},
 		}
-		json.NewEncoder(w).Encode(responses)
+		if err := json.NewEncoder(w).Encode(responses); err != nil {
+			t.Errorf("failed to encode responses: %v", err)
+		}
 	}))
 	defer server.Close()
 

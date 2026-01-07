@@ -130,7 +130,7 @@ func main() {
 	eventSink := memory.NewEventSink()
 
 	// Create LiveService (handles WebSocket subscription and reorg detection)
-	liveConfig := live_data.LiveConfig{
+	config := live_data.LiveConfig{
 		ChainID:              1, // Ethereum mainnet
 		FinalityBlockCount:   64,
 		MaxUnfinalizedBlocks: 128,
@@ -139,7 +139,7 @@ func main() {
 	}
 
 	liveService, err := live_data.NewLiveService(
-		liveConfig,
+		config,
 		subscriber,
 		client,
 		blockStateRepo,

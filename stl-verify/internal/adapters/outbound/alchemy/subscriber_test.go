@@ -218,7 +218,11 @@ func TestSubscribe_ReceivesBlockHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Wait for blocks to be sent
 	<-blocksSent
@@ -252,7 +256,9 @@ func TestSubscribe_FailsWhenClosed(t *testing.T) {
 	}
 
 	// Close the subscriber before subscribing
-	sub.Unsubscribe()
+	if err := sub.Unsubscribe(); err != nil {
+		t.Logf("unsubscribe returned error: %v", err)
+	}
 
 	_, err = sub.Subscribe(context.Background())
 	if err == nil {
@@ -281,7 +287,9 @@ func TestUnsubscribe_ClosesChannel(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
 
 		// Keep connection open
 		<-time.After(10 * time.Second)
@@ -357,7 +365,9 @@ func TestUnsubscribe_WaitsForGoroutines(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
 
 		// Track that goroutine is active (the subscriber's readLoop goroutine)
 		goroutineActive.Store(true)
@@ -393,7 +403,9 @@ func TestUnsubscribe_WaitsForGoroutines(t *testing.T) {
 	// Unsubscribe should wait for goroutines to finish
 	done := make(chan struct{})
 	go func() {
-		sub.Unsubscribe()
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
 		close(done)
 	}()
 
@@ -433,7 +445,9 @@ func TestUnsubscribe_GracefulWithActiveBlocks(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
 
 		// Send blocks continuously until connection closes
 		for i := 0; ; i++ {
@@ -528,7 +542,9 @@ func TestSubscribe_ReconnectsOnConnectionLoss(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
 
 		if count == 1 {
 			// First connection: close immediately to trigger reconnect
@@ -550,7 +566,9 @@ func TestSubscribe_ReconnectsOnConnectionLoss(t *testing.T) {
 				"result":       header,
 			},
 		}
-		conn.WriteJSON(notification)
+		if err := conn.WriteJSON(notification); err != nil {
+			return
+		}
 
 		select {
 		case blockSent <- struct{}{}:
@@ -582,7 +600,11 @@ func TestSubscribe_ReconnectsOnConnectionLoss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Wait for block from second connection
 	select {
@@ -679,7 +701,9 @@ func TestHealthCheck_ReturnsErrorWhenClosed(t *testing.T) {
 		t.Fatalf("failed to create subscriber: %v", err)
 	}
 
-	sub.Unsubscribe()
+	if err := sub.Unsubscribe(); err != nil {
+		t.Logf("unsubscribe returned error: %v", err)
+	}
 
 	ctx := context.Background()
 	err = sub.HealthCheck(ctx)
@@ -729,7 +753,9 @@ func TestHealthCheck_SucceedsWithRecentBlock(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
 
 		// Keep connection open
 		<-time.After(5 * time.Second)
@@ -750,7 +776,11 @@ func TestHealthCheck_SucceedsWithRecentBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Wait for connection to establish
 	time.Sleep(100 * time.Millisecond)
@@ -788,7 +818,9 @@ func TestSubscribe_HandlesSubscriptionError(t *testing.T) {
 				Message: "subscription limit reached",
 			},
 		}
-		conn.WriteJSON(resp)
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
 	})
 	defer server.Close()
 
@@ -810,7 +842,11 @@ func TestSubscribe_HandlesSubscriptionError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Subscribe should not return error immediately: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Wait for several reconnection attempts
 	time.Sleep(200 * time.Millisecond)
@@ -842,7 +878,9 @@ func TestSubscribe_ChannelBufferFull(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
 
 		// Flood with blocks (more than buffer size)
 		for i := 0; i < totalBlocks; i++ {
@@ -859,7 +897,9 @@ func TestSubscribe_ChannelBufferFull(t *testing.T) {
 					"result":       header,
 				},
 			}
-			conn.WriteJSON(notification)
+			if err := conn.WriteJSON(notification); err != nil {
+				return
+			}
 			blocksSent.Add(1)
 			time.Sleep(5 * time.Millisecond)
 		}
@@ -884,7 +924,11 @@ func TestSubscribe_ChannelBufferFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Don't read from channel - let it fill up
 	// The subscriber should not block or crash, just drop blocks
@@ -942,7 +986,9 @@ func TestSubscribe_ContextCancellation(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
 
 		// Wait for cancellation signal, then try to send more blocks
 		<-cancelledChan
@@ -1012,7 +1058,9 @@ drainLoop:
 	}
 
 	// Clean up
-	sub.Unsubscribe()
+	if err := sub.Unsubscribe(); err != nil {
+		t.Logf("unsubscribe returned error: %v", err)
+	}
 
 	// Verify the connection was closed (blocks sent after cancel should fail or be minimal)
 	t.Logf("blocks sent after cancel: %d, received: %d", blocksSentAfterCancel.Load(), received)
@@ -1034,7 +1082,9 @@ func TestSubscribe_MalformedJSON(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
 
 		// Send malformed params (should be handled gracefully)
 		badNotification := map[string]interface{}{
@@ -1042,7 +1092,9 @@ func TestSubscribe_MalformedJSON(t *testing.T) {
 			"method":  "eth_subscription",
 			"params":  "not an object",
 		}
-		conn.WriteJSON(badNotification)
+		if err := conn.WriteJSON(badNotification); err != nil {
+			return
+		}
 
 		// Send valid notification after
 		header := outbound.BlockHeader{
@@ -1058,7 +1110,9 @@ func TestSubscribe_MalformedJSON(t *testing.T) {
 				"result":       header,
 			},
 		}
-		conn.WriteJSON(notification)
+		if err := conn.WriteJSON(notification); err != nil {
+			return
+		}
 
 		<-time.After(time.Second)
 	})
@@ -1079,7 +1133,11 @@ func TestSubscribe_MalformedJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Should still receive the valid block after the malformed one
 	select {
@@ -1106,7 +1164,7 @@ func TestSubscribe_ConcurrentUnsubscribe(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		_ = conn.WriteJSON(resp)
 
 		<-time.After(10 * time.Second)
 	})
@@ -1134,7 +1192,8 @@ func TestSubscribe_ConcurrentUnsubscribe(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sub.Unsubscribe()
+			// Ignore error - expected on subsequent calls after first unsubscribe
+			_ = sub.Unsubscribe()
 		}()
 	}
 	wg.Wait()
@@ -1182,7 +1241,7 @@ func TestSubscribe_PingKeepsConnectionAlive(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		_ = conn.WriteJSON(resp)
 
 		// Keep reading to handle ping/pong
 		for {
@@ -1214,7 +1273,11 @@ func TestSubscribe_PingKeepsConnectionAlive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Wait for ping to be sent
 	time.Sleep(300 * time.Millisecond)
@@ -1242,7 +1305,7 @@ func TestSetOnReconnect_CallbackNotCalledOnFirstConnect(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		_ = conn.WriteJSON(resp)
 
 		<-time.After(time.Second)
 	})
@@ -1267,7 +1330,11 @@ func TestSetOnReconnect_CallbackNotCalledOnFirstConnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Wait for connection to establish
 	time.Sleep(200 * time.Millisecond)
@@ -1294,7 +1361,7 @@ func TestSubscribe_IgnoresNonSubscriptionMessages(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		_ = conn.WriteJSON(resp)
 
 		// Send a non-subscription message (should be ignored)
 		nonSubMsg := map[string]interface{}{
@@ -1302,7 +1369,7 @@ func TestSubscribe_IgnoresNonSubscriptionMessages(t *testing.T) {
 			"id":      2,
 			"result":  "0x123",
 		}
-		conn.WriteJSON(nonSubMsg)
+		_ = conn.WriteJSON(nonSubMsg)
 
 		// Send another non-subscription message with different method
 		otherMethodMsg := map[string]interface{}{
@@ -1310,7 +1377,7 @@ func TestSubscribe_IgnoresNonSubscriptionMessages(t *testing.T) {
 			"method":  "eth_blockNumber",
 			"params":  []interface{}{},
 		}
-		conn.WriteJSON(otherMethodMsg)
+		_ = conn.WriteJSON(otherMethodMsg)
 
 		// Now send a valid subscription message
 		header := outbound.BlockHeader{
@@ -1326,7 +1393,7 @@ func TestSubscribe_IgnoresNonSubscriptionMessages(t *testing.T) {
 				"result":       header,
 			},
 		}
-		conn.WriteJSON(notification)
+		_ = conn.WriteJSON(notification)
 
 		<-time.After(time.Second)
 	})
@@ -1347,7 +1414,11 @@ func TestSubscribe_IgnoresNonSubscriptionMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Should only receive the valid subscription message
 	select {
@@ -1376,7 +1447,7 @@ func TestSubscribe_ReadTimeoutTriggersReconnect(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		_ = conn.WriteJSON(resp)
 
 		if count == 1 {
 			// First connection: don't send anything, let read timeout trigger
@@ -1396,7 +1467,7 @@ func TestSubscribe_ReadTimeoutTriggersReconnect(t *testing.T) {
 					"result":       header,
 				},
 			}
-			conn.WriteJSON(notification)
+			_ = conn.WriteJSON(notification)
 			<-time.After(time.Second)
 		}
 	})
@@ -1419,7 +1490,11 @@ func TestSubscribe_ReadTimeoutTriggersReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Wait for reconnect and block
 	select {
@@ -1473,7 +1548,7 @@ func TestHealthCheck_ReportsDisconnectedDuration(t *testing.T) {
 				ID:      1,
 				Result:  json.RawMessage(`"0x1234"`),
 			}
-			conn.WriteJSON(resp)
+			_ = conn.WriteJSON(resp)
 
 			// Close after brief moment to trigger disconnect
 			time.Sleep(50 * time.Millisecond)
@@ -1497,7 +1572,11 @@ func TestHealthCheck_ReportsDisconnectedDuration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Wait for first connection to establish and then disconnect
 	time.Sleep(200 * time.Millisecond)
@@ -1536,7 +1615,7 @@ func TestSubscribe_WriteSubscriptionFails(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		_ = conn.WriteJSON(resp)
 		<-time.After(time.Second)
 	})
 	defer server.Close()
@@ -1558,7 +1637,7 @@ func TestSubscribe_WriteSubscriptionFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() { _ = sub.Unsubscribe() }()
 
 	// Wait for reconnect attempts
 	time.Sleep(300 * time.Millisecond)
@@ -1583,7 +1662,7 @@ func TestSubscribe_SubscriptionWithNilParams(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		_ = conn.WriteJSON(resp)
 
 		// Send subscription message with nil params (should be handled gracefully)
 		nilParamsMsg := map[string]interface{}{
@@ -1591,7 +1670,7 @@ func TestSubscribe_SubscriptionWithNilParams(t *testing.T) {
 			"method":  "eth_subscription",
 			// params is missing/nil
 		}
-		conn.WriteJSON(nilParamsMsg)
+		_ = conn.WriteJSON(nilParamsMsg)
 
 		// Send valid message after
 		header := outbound.BlockHeader{
@@ -1607,7 +1686,7 @@ func TestSubscribe_SubscriptionWithNilParams(t *testing.T) {
 				"result":       header,
 			},
 		}
-		conn.WriteJSON(notification)
+		_ = conn.WriteJSON(notification)
 
 		<-time.After(time.Second)
 	})
@@ -1628,7 +1707,7 @@ func TestSubscribe_SubscriptionWithNilParams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() { _ = sub.Unsubscribe() }()
 
 	// Should still receive the valid message
 	select {
@@ -1662,7 +1741,7 @@ func TestSubscribe_SubscriptionErrorResponse(t *testing.T) {
 					Message: "subscription limit exceeded",
 				},
 			}
-			conn.WriteJSON(resp)
+			_ = conn.WriteJSON(resp)
 			conn.Close()
 			return
 		}
@@ -1673,7 +1752,7 @@ func TestSubscribe_SubscriptionErrorResponse(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		_ = conn.WriteJSON(resp)
 		<-time.After(time.Second)
 	})
 	defer server.Close()
@@ -1695,7 +1774,7 @@ func TestSubscribe_SubscriptionErrorResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() { _ = sub.Unsubscribe() }()
 
 	// Wait for reconnect attempts
 	time.Sleep(300 * time.Millisecond)
@@ -1720,7 +1799,7 @@ func TestSubscribe_InvalidParamsJSON(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		_ = conn.WriteJSON(resp)
 
 		// Send subscription message with invalid params JSON structure
 		invalidParamsMsg := map[string]interface{}{
@@ -1728,7 +1807,7 @@ func TestSubscribe_InvalidParamsJSON(t *testing.T) {
 			"method":  "eth_subscription",
 			"params":  "not an object", // Invalid: should be object with result field
 		}
-		conn.WriteJSON(invalidParamsMsg)
+		_ = conn.WriteJSON(invalidParamsMsg)
 
 		// Send valid message after
 		header := outbound.BlockHeader{
@@ -1744,7 +1823,7 @@ func TestSubscribe_InvalidParamsJSON(t *testing.T) {
 				"result":       header,
 			},
 		}
-		conn.WriteJSON(notification)
+		_ = conn.WriteJSON(notification)
 
 		<-time.After(time.Second)
 	})
@@ -1765,7 +1844,7 @@ func TestSubscribe_InvalidParamsJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() { _ = sub.Unsubscribe() }()
 
 	// Should still receive the valid message after the invalid one
 	select {
@@ -1793,7 +1872,7 @@ func TestSubscribe_DoneChannelClosedDuringBlockSend(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		_ = conn.WriteJSON(resp)
 
 		// Send blocks continuously
 		for i := 0; i < 100; i++ {
@@ -1840,7 +1919,10 @@ func TestSubscribe_DoneChannelClosedDuringBlockSend(t *testing.T) {
 	// Unsubscribe while blocks are being sent - should not hang
 	done := make(chan struct{})
 	go func() {
-		sub.Unsubscribe()
+		if err := sub.Unsubscribe(); err != nil {
+			// Error is acceptable during active block send - subscriber may already be closing
+			t.Logf("Unsubscribe returned expected error during active send: %v", err)
+		}
 		close(done)
 	}()
 
@@ -1872,7 +1954,7 @@ func TestSubscribe_ContextCancelledDuringBlockSend(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		_ = conn.WriteJSON(resp)
 
 		// Send blocks continuously
 		for i := 0; i < 100; i++ {
@@ -1911,7 +1993,7 @@ func TestSubscribe_ContextCancelledDuringBlockSend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() { _ = sub.Unsubscribe() }()
 
 	// Wait a bit for some blocks to be sent
 	time.Sleep(50 * time.Millisecond)
@@ -1922,7 +2004,10 @@ func TestSubscribe_ContextCancelledDuringBlockSend(t *testing.T) {
 	// Verify subscriber handles cancellation gracefully - Unsubscribe should not hang
 	done := make(chan struct{})
 	go func() {
-		sub.Unsubscribe()
+		if err := sub.Unsubscribe(); err != nil {
+			// Error is acceptable after context cancellation
+			t.Logf("Unsubscribe returned expected error after cancellation: %v", err)
+		}
 		close(done)
 	}()
 
@@ -1950,7 +2035,7 @@ func TestSubscribe_PingFailureTriggersReconnect(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		_ = conn.WriteJSON(resp)
 
 		if count == 1 {
 			// First connection: close connection during ping interval
@@ -1974,7 +2059,7 @@ func TestSubscribe_PingFailureTriggersReconnect(t *testing.T) {
 				"result":       header,
 			},
 		}
-		conn.WriteJSON(notification)
+		_ = conn.WriteJSON(notification)
 		<-time.After(time.Second)
 	})
 	defer server.Close()
@@ -1998,7 +2083,7 @@ func TestSubscribe_PingFailureTriggersReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() { _ = sub.Unsubscribe() }()
 
 	// Wait for ping failure and reconnect
 	select {
@@ -2025,7 +2110,7 @@ func TestConnectionManager_ContextDoneExitsLoop(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		_ = conn.WriteJSON(resp)
 
 		// Keep connection open
 		<-time.After(5 * time.Second)
@@ -2059,7 +2144,10 @@ func TestConnectionManager_ContextDoneExitsLoop(t *testing.T) {
 	// Unsubscribe should not hang
 	done := make(chan struct{})
 	go func() {
-		sub.Unsubscribe()
+		if err := sub.Unsubscribe(); err != nil {
+			// Error is acceptable after context cancellation
+			t.Logf("Unsubscribe returned expected error: %v", err)
+		}
 		close(done)
 	}()
 

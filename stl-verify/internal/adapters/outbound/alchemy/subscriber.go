@@ -302,6 +302,12 @@ func (s *Subscriber) readLoop(logger *slog.Logger) bool {
 	readErr := make(chan error, 1)
 	blockChan := make(chan outbound.BlockHeader, 10)
 
+	// readerDone signals the reader goroutine to exit when the main loop exits.
+	// This prevents goroutine leaks when the main loop exits while the reader
+	// is blocked trying to send to blockChan.
+	readerDone := make(chan struct{})
+	defer close(readerDone)
+
 	go func() {
 		for {
 			// Get connection reference under lock
@@ -310,7 +316,10 @@ func (s *Subscriber) readLoop(logger *slog.Logger) bool {
 			s.mu.RUnlock()
 
 			if conn == nil {
-				readErr <- errors.New("connection is nil")
+				select {
+				case readErr <- errors.New("connection is nil"):
+				case <-readerDone:
+				}
 				return
 			}
 
@@ -318,13 +327,19 @@ func (s *Subscriber) readLoop(logger *slog.Logger) bool {
 			// The connection won't be replaced while readLoop is running
 			// (connectionManager waits for readLoop to return before reconnecting)
 			if err := conn.SetReadDeadline(time.Now().Add(s.config.ReadTimeout)); err != nil {
-				readErr <- err
+				select {
+				case readErr <- err:
+				case <-readerDone:
+				}
 				return
 			}
 
 			var response jsonRPCResponse
 			if err := conn.ReadJSON(&response); err != nil {
-				readErr <- err
+				select {
+				case readErr <- err:
+				case <-readerDone:
+				}
 				return
 			}
 
@@ -337,6 +352,8 @@ func (s *Subscriber) readLoop(logger *slog.Logger) bool {
 
 				select {
 				case blockChan <- params.Result:
+				case <-readerDone:
+					return
 				case <-s.done:
 					return
 				case <-s.ctx.Done():

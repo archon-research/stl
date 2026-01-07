@@ -176,7 +176,9 @@ func BenchmarkSubscriber_Throughput(b *testing.B) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
 
 		connChan <- conn
 		close(ready)
@@ -294,7 +296,9 @@ func BenchmarkSubscriber_LatencyPercentiles(b *testing.B) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
 
 		connChan <- conn
 		close(ready)
