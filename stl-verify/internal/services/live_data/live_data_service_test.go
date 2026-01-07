@@ -406,78 +406,56 @@ func TestLateBlockAfterPruning(t *testing.T) {
 // NewLiveService validation tests
 // =============================================================================
 
-func TestNewLiveService_NilSubscriber(t *testing.T) {
-	client := newMockClient()
-	stateRepo := memory.NewBlockStateRepository()
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
-
-	_, err := NewLiveService(LiveConfig{}, nil, client, stateRepo, cache, eventSink)
-	if err == nil {
-		t.Fatal("expected error for nil subscriber")
+func TestNewLiveService_NilDependencies(t *testing.T) {
+	tests := []struct {
+		name        string
+		nilField    string
+		expectedErr string
+	}{
+		{"nil subscriber", "subscriber", "subscriber is required"},
+		{"nil client", "client", "client is required"},
+		{"nil stateRepo", "stateRepo", "stateRepo is required"},
+		{"nil cache", "cache", "cache is required"},
+		{"nil eventSink", "eventSink", "eventSink is required"},
 	}
-	if err.Error() != "subscriber is required" {
-		t.Errorf("unexpected error message: %s", err.Error())
-	}
-}
 
-func TestNewLiveService_NilClient(t *testing.T) {
-	subscriber := newMockSubscriber()
-	stateRepo := memory.NewBlockStateRepository()
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create all dependencies
+			subscriber := newMockSubscriber()
+			client := newMockClient()
+			stateRepo := memory.NewBlockStateRepository()
+			cache := memory.NewBlockCache()
+			eventSink := memory.NewEventSink()
 
-	_, err := NewLiveService(LiveConfig{}, subscriber, nil, stateRepo, cache, eventSink)
-	if err == nil {
-		t.Fatal("expected error for nil client")
-	}
-	if err.Error() != "client is required" {
-		t.Errorf("unexpected error message: %s", err.Error())
-	}
-}
+			// Nil out the specific field being tested
+			var sub outbound.BlockSubscriber = subscriber
+			var cli outbound.BlockchainClient = client
+			var repo outbound.BlockStateRepository = stateRepo
+			var c outbound.BlockCache = cache
+			var sink outbound.EventSink = eventSink
 
-func TestNewLiveService_NilStateRepo(t *testing.T) {
-	subscriber := newMockSubscriber()
-	client := newMockClient()
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
+			switch tc.nilField {
+			case "subscriber":
+				sub = nil
+			case "client":
+				cli = nil
+			case "stateRepo":
+				repo = nil
+			case "cache":
+				c = nil
+			case "eventSink":
+				sink = nil
+			}
 
-	_, err := NewLiveService(LiveConfig{}, subscriber, client, nil, cache, eventSink)
-	if err == nil {
-		t.Fatal("expected error for nil stateRepo")
-	}
-	if err.Error() != "stateRepo is required" {
-		t.Errorf("unexpected error message: %s", err.Error())
-	}
-}
-
-func TestNewLiveService_NilCache(t *testing.T) {
-	subscriber := newMockSubscriber()
-	client := newMockClient()
-	stateRepo := memory.NewBlockStateRepository()
-	eventSink := memory.NewEventSink()
-
-	_, err := NewLiveService(LiveConfig{}, subscriber, client, stateRepo, nil, eventSink)
-	if err == nil {
-		t.Fatal("expected error for nil cache")
-	}
-	if err.Error() != "cache is required" {
-		t.Errorf("unexpected error message: %s", err.Error())
-	}
-}
-
-func TestNewLiveService_NilEventSink(t *testing.T) {
-	subscriber := newMockSubscriber()
-	client := newMockClient()
-	stateRepo := memory.NewBlockStateRepository()
-	cache := memory.NewBlockCache()
-
-	_, err := NewLiveService(LiveConfig{}, subscriber, client, stateRepo, cache, nil)
-	if err == nil {
-		t.Fatal("expected error for nil eventSink")
-	}
-	if err.Error() != "eventSink is required" {
-		t.Errorf("unexpected error message: %s", err.Error())
+			_, err := NewLiveService(LiveConfig{}, sub, cli, repo, c, sink)
+			if err == nil {
+				t.Fatalf("expected error for %s", tc.name)
+			}
+			if err.Error() != tc.expectedErr {
+				t.Errorf("expected error %q, got %q", tc.expectedErr, err.Error())
+			}
+		})
 	}
 }
 
