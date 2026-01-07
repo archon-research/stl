@@ -107,7 +107,9 @@ func TestGetBlockByNumber_Success(t *testing.T) {
 			ID:      1,
 			Result:  json.RawMessage(`{"number":"0x100","hash":"0xabc"}`),
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -143,7 +145,9 @@ func TestGetBlockByNumber_RPCError(t *testing.T) {
 				Message: "block not found",
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -162,7 +166,9 @@ func TestGetBlockByNumber_RPCError(t *testing.T) {
 func TestGetBlockByNumber_HTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal server error"))
+		if _, err := w.Write([]byte("internal server error")); err != nil {
+			t.Errorf("failed to write response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -177,7 +183,9 @@ func TestGetBlockByNumber_HTTPError(t *testing.T) {
 
 func TestGetBlockByNumber_InvalidJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("not json"))
+		if _, err := w.Write([]byte("not json")); err != nil {
+			t.Errorf("failed to write response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -197,7 +205,9 @@ func TestGetBlockByNumber_ContextCancelled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(100 * time.Millisecond)
 		resp := jsonRPCResponse{JSONRPC: "2.0", ID: 1}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -216,7 +226,9 @@ func TestGetBlockByNumber_ContextCancelled(t *testing.T) {
 func TestGetBlockByHash_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req jsonRPCRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("failed to decode request: %v", err)
+		}
 
 		if req.Method != "eth_getBlockByHash" {
 			t.Errorf("expected method=eth_getBlockByHash, got %s", req.Method)
@@ -301,7 +313,9 @@ func TestGetBlockByHash_InvalidBlockJSON(t *testing.T) {
 func TestGetBlockReceipts_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req jsonRPCRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("failed to decode request: %v", err)
+		}
 
 		if req.Method != "eth_getBlockReceipts" {
 			t.Errorf("expected method=eth_getBlockReceipts, got %s", req.Method)
@@ -343,7 +357,9 @@ func TestGetBlockReceipts_Success(t *testing.T) {
 func TestGetBlockTraces_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req jsonRPCRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("failed to decode request: %v", err)
+		}
 
 		if req.Method != "trace_block" {
 			t.Errorf("expected method=trace_block, got %s", req.Method)
@@ -728,7 +744,9 @@ func TestGetBlocksBatch_HTTPError(t *testing.T) {
 
 func TestGetBlocksBatch_InvalidJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("not json"))
+		if _, err := w.Write([]byte("not json")); err != nil {
+			t.Errorf("failed to write response: %v", err)
+		}
 	}))
 	defer server.Close()
 

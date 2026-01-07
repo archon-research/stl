@@ -1,4 +1,7 @@
-// Package http contains the HTTP inbound adapter (REST API handlers).
+// handler.go provides HTTP REST API handlers for the verification service.
+//
+// This inbound adapter exposes the service functionality over HTTP:
+//   - GET /health: Health check endpoint for liveness/readiness probes
 package http
 
 import (

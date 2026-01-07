@@ -1,4 +1,12 @@
-// Package memory provides in-memory adapters for testing.
+// blockstate.go provides an in-memory implementation of BlockStateRepository.
+//
+// This adapter is designed for testing and development purposes. It stores:
+//   - Block states keyed by hash with O(1) lookup
+//   - Reorg events for chain reorganization tracking
+//   - Backfill watermark for gap detection
+//
+// All operations are thread-safe using sync.RWMutex. Data is lost on process restart.
+// For production use, see the postgres adapter.
 package memory
 
 import (

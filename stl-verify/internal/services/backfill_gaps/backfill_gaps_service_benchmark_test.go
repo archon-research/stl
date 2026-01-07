@@ -173,7 +173,9 @@ func newResettableBlockStateRepository(blockCount int64, gapBlocks []int64) *res
 			ReceivedAt: time.Now().Unix(),
 		}
 		initialBlocks = append(initialBlocks, block)
-		repo.SaveBlock(ctx, block)
+		if err := repo.SaveBlock(ctx, block); err != nil {
+			panic(fmt.Sprintf("failed to save block in test setup: %v", err))
+		}
 	}
 
 	return &resettableBlockStateRepository{
@@ -188,7 +190,9 @@ func (r *resettableBlockStateRepository) Reset() {
 	r.BlockStateRepository = memory.NewBlockStateRepository()
 	ctx := context.Background()
 	for _, block := range r.initialBlocks {
-		r.SaveBlock(ctx, block)
+		if err := r.SaveBlock(ctx, block); err != nil {
+			panic(fmt.Sprintf("failed to save block in Reset: %v", err))
+		}
 	}
 }
 

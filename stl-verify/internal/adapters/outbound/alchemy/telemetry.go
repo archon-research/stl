@@ -1,4 +1,18 @@
-// Package alchemy provides OpenTelemetry instrumentation for the Alchemy client and subscriber.
+// telemetry.go provides OpenTelemetry instrumentation for the Alchemy adapters.
+//
+// It defines metrics and tracing for both the HTTP client and WebSocket subscriber:
+//
+// HTTP Client metrics:
+//   - alchemy.client.request.duration: Histogram of request latencies
+//   - alchemy.client.requests.total: Counter of total requests by method/status
+//   - alchemy.client.retries.total: Counter of retry attempts
+//   - alchemy.client.batch.size: Histogram of batch request sizes
+//
+// WebSocket Subscriber metrics:
+//   - alchemy.subscriber.reconnections.total: Counter of reconnection events
+//   - alchemy.subscriber.blocks.received.total: Counter of blocks received
+//   - alchemy.subscriber.blocks.dropped.total: Counter of dropped blocks (buffer full)
+//   - alchemy.subscriber.connection.state: Gauge of connection state (1=connected, 0=disconnected)
 package alchemy
 
 import (

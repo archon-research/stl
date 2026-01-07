@@ -1,5 +1,10 @@
-// Package memory provides an in-memory implementation of the repository.
-// Useful for testing and development.
+// repository.go provides an in-memory implementation of the Repository port.
+//
+// This is a minimal adapter for testing and development. It provides
+// a basic health check and can be extended with additional data structures
+// as needed for testing verification workflows.
+//
+// For production persistence, see the postgres adapter.
 package memory
 
 import (

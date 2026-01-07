@@ -1,27 +1,18 @@
+// subscriber.go implements a WebSocket client for Alchemy's newHeads subscription.
+//
+// Key behaviors:
+//   - Automatic reconnection with exponential backoff (configurable via
+//     InitialBackoff, MaxBackoff, BackoffFactor)
+//   - Non-blocking sends to the headers channel; blocks are DROPPED if buffer is full
+//   - Ping/pong keepalive to detect stale connections (PongTimeout configurable)
+//   - Health checks via HealthCheck() to verify blocks are being received
+//   - Thread-safe: All public methods are safe for concurrent use
+//
+// Channel buffer sizing:
+//   - Default ChannelBufferSize is 100 blocks
+//   - If your consumer processes blocks slower than ~12 seconds/block (Ethereum
+//     block time), increase the buffer or optimize consumption to avoid drops
 package alchemy
-
-/*
-Subscriber implements a WebSocket client for Alchemy's newHeads subscription.
-
-Key behaviors:
-  - Automatic reconnection: If the WebSocket connection drops, the subscriber
-    automatically reconnects with exponential backoff (configurable via
-    InitialBackoff, MaxBackoff, BackoffFactor).
-  - Non-blocking sends: Block headers are sent to the headers channel without
-    blocking. If the channel buffer is full, new blocks are DROPPED and logged
-    as errors. Consumers must read from the channel fast enough to avoid this.
-  - Ping/pong keepalive: The subscriber sends periodic pings to detect stale
-    connections. If a pong is not received within PongTimeout, the connection
-    is considered dead and will be reconnected.
-  - Health checks: HealthCheck verifies the connection is alive and blocks are
-    being received within HealthTimeout.
-  - Thread-safe: All public methods are safe for concurrent use.
-
-Channel buffer sizing:
-  - Default ChannelBufferSize is 100 blocks.
-  - If your consumer processes blocks slower than ~12 seconds/block (Ethereum
-    block time), increase the buffer or optimize consumption to avoid drops.
-*/
 
 import (
 	"context"

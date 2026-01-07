@@ -636,8 +636,14 @@ func TestSubscribe_BackoffIncreasesOnRepeatedFailures(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	sub.Subscribe(ctx)
-	defer sub.Unsubscribe()
+	if _, err := sub.Subscribe(ctx); err != nil {
+		t.Logf("subscribe returned error (expected due to failing server): %v", err)
+	}
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Wait for several connection attempts
 	time.Sleep(800 * time.Millisecond)
@@ -1180,7 +1186,9 @@ func TestSubscribe_PingKeepsConnectionAlive(t *testing.T) {
 
 		// Keep reading to handle ping/pong
 		for {
-			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				return
+			}
 			_, _, err := conn.ReadMessage()
 			if err != nil {
 				return
@@ -1471,9 +1479,6 @@ func TestHealthCheck_ReportsDisconnectedDuration(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 			return
 		}
-
-		// Subsequent connections: reject immediately to stay disconnected
-		return
 	})
 	defer server.Close()
 

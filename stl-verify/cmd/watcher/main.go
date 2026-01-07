@@ -49,7 +49,11 @@ func main() {
 	if err != nil {
 		logger.Warn("failed to init tracer, continuing without tracing", "error", err)
 	} else {
-		defer shutdownTracer(context.Background())
+		defer func() {
+			if err := shutdownTracer(context.Background()); err != nil {
+				logger.Warn("failed to shutdown tracer", "error", err)
+			}
+		}()
 		logger.Info("tracer initialized", "endpoint", jaegerEndpoint)
 	}
 

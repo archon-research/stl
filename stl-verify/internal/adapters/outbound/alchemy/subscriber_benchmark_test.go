@@ -48,7 +48,10 @@ func BenchmarkSubscriber_MessageLatency(b *testing.B) {
 			ID:      1,
 			Result:  json.RawMessage(`"0x1234"`),
 		}
-		conn.WriteJSON(resp)
+		if err := conn.WriteJSON(resp); err != nil {
+			b.Errorf("failed to write JSON: %v", err)
+			return
+		}
 
 		// Signal ready and send connection for benchmark to use
 		connChan <- conn
@@ -75,7 +78,11 @@ func BenchmarkSubscriber_MessageLatency(b *testing.B) {
 	if err != nil {
 		b.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			b.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Wait for connection to be ready
 	<-ready
@@ -194,7 +201,11 @@ func BenchmarkSubscriber_Throughput(b *testing.B) {
 	if err != nil {
 		b.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			b.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	<-ready
 	conn := <-connChan
@@ -308,7 +319,11 @@ func BenchmarkSubscriber_LatencyPercentiles(b *testing.B) {
 	if err != nil {
 		b.Fatalf("failed to subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			b.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	<-ready
 	conn := <-connChan

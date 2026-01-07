@@ -1,3 +1,9 @@
+// types.go defines JSON-RPC request/response types for Alchemy API communication.
+//
+// This file contains:
+//   - jsonRPCRequest/jsonRPCResponse: Standard JSON-RPC 2.0 message structures
+//   - subscriptionParams: WebSocket subscription notification parsing
+//   - Utility functions for parsing hex block numbers and truncating hashes
 package alchemy
 
 import (

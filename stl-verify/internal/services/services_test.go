@@ -219,12 +219,14 @@ func TestConcurrentLiveAndBackfill(t *testing.T) {
 	}
 
 	// Seed the state repo with block 1 so backfill knows where to start
-	stateRepo.SaveBlock(ctx, outbound.BlockState{
+	if err := stateRepo.SaveBlock(ctx, outbound.BlockState{
 		Number:     1,
 		Hash:       client.getHeader(1).Hash,
 		ParentHash: client.getHeader(1).ParentHash,
 		ReceivedAt: time.Now().Unix(),
-	})
+	}); err != nil {
+		t.Fatalf("failed to save block: %v", err)
+	}
 
 	liveConfig := live_data.LiveConfig{
 		ChainID:              1,
@@ -350,12 +352,14 @@ func TestBackfillService_FillsGaps(t *testing.T) {
 
 	// Seed the state repo with blocks 1, 50, and 100 (leaving gaps 2-49 and 51-99)
 	for _, num := range []int64{1, 50, 100} {
-		stateRepo.SaveBlock(ctx, outbound.BlockState{
+		if err := stateRepo.SaveBlock(ctx, outbound.BlockState{
 			Number:     num,
 			Hash:       client.getHeader(num).Hash,
 			ParentHash: client.getHeader(num).ParentHash,
 			ReceivedAt: time.Now().Unix(),
-		})
+		}); err != nil {
+			t.Fatalf("failed to save block %d: %v", num, err)
+		}
 	}
 
 	config := backfill_gaps.BackfillConfig{
@@ -424,12 +428,14 @@ func TestLateBlockAfterPruning(t *testing.T) {
 	}
 
 	// Seed the state repo with block 1
-	stateRepo.SaveBlock(ctx, outbound.BlockState{
+	if err := stateRepo.SaveBlock(ctx, outbound.BlockState{
 		Number:     1,
 		Hash:       client.getHeader(1).Hash,
 		ParentHash: client.getHeader(1).ParentHash,
 		ReceivedAt: time.Now().Unix(),
-	})
+	}); err != nil {
+		t.Fatalf("failed to save block: %v", err)
+	}
 
 	// Use a SMALL MaxUnfinalizedBlocks to force pruning
 	liveConfig := live_data.LiveConfig{

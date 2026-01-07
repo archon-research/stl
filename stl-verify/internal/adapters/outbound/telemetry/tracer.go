@@ -1,4 +1,21 @@
-// Package telemetry provides OpenTelemetry tracing initialization.
+// tracer.go provides OpenTelemetry tracing initialization and configuration.
+//
+// This adapter sets up distributed tracing with support for:
+//   - OTLP gRPC export to Jaeger or other collectors
+//   - Stdout export for local development/debugging
+//   - Configurable sampling rates
+//   - Service metadata (name, version, environment)
+//
+// Usage:
+//
+//	shutdown, err := telemetry.InitTracer(ctx, telemetry.TracerConfig{
+//	    ServiceName:    "stl-watcher",
+//	    JaegerEndpoint: "localhost:4317",
+//	})
+//	defer shutdown(ctx)
+//
+// The returned shutdown function should be called on application exit
+// to flush any pending spans.
 package telemetry
 
 import (

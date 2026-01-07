@@ -24,7 +24,7 @@ func TestLiveService_AddToUnfinalizedChain_MaintainsSortedOrder(t *testing.T) {
 	}
 
 	for _, b := range blocks {
-		service.tryAddBlock(b)
+		service.addBlock(b)
 	}
 
 	// Verify sorted order
@@ -41,7 +41,7 @@ func TestLiveService_AddToUnfinalizedChain_MaintainsSortedOrder(t *testing.T) {
 	}
 }
 
-func TestLiveService_TryAddBlock_HandlesForks(t *testing.T) {
+func TestLiveService_AddBlock_HandlesForks(t *testing.T) {
 	service := &LiveService{
 		config: LiveConfig{
 			MaxUnfinalizedBlocks: 100,
@@ -53,8 +53,8 @@ func TestLiveService_TryAddBlock_HandlesForks(t *testing.T) {
 	block1 := LightBlock{Number: 5, Hash: "0x5a", ParentHash: "0x4"}
 	block2 := LightBlock{Number: 5, Hash: "0x5b", ParentHash: "0x4"}
 
-	service.tryAddBlock(block1)
-	service.tryAddBlock(block2)
+	service.addBlock(block1)
+	service.addBlock(block2)
 
 	// Both should be present (reorg handling will clean up later)
 	if len(service.unfinalizedBlocks) != 2 {

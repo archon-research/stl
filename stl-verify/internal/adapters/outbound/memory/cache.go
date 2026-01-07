@@ -1,4 +1,10 @@
-// Package memory provides in-memory adapters for testing.
+// cache.go provides an in-memory implementation of BlockCache.
+//
+// This adapter caches block data (blocks, receipts, traces, blobs) in memory
+// for testing and development. Data is keyed by chainID:blockNumber:dataType.
+//
+// All operations are thread-safe. Data is lost on process restart.
+// For production use, consider a Redis or other persistent cache implementation.
 package memory
 
 import (

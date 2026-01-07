@@ -3,5 +3,8 @@
 .env.local
 .env.*
 
+# Debug binaries
+__debug_*
+
 # OS
 .DS_Store

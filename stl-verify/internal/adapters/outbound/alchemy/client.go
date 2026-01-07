@@ -1,3 +1,9 @@
+// client.go implements the BlockchainClient interface using Alchemy's HTTP JSON-RPC API.
+// It provides methods for fetching blocks, receipts, traces, and blob sidecars with:
+//   - Automatic retry logic with exponential backoff for transient failures
+//   - Configurable timeouts and backoff parameters
+//   - OpenTelemetry instrumentation for metrics and tracing
+//   - Batch request support for efficient bulk data fetching
 package alchemy
 
 import (

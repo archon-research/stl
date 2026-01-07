@@ -1,4 +1,15 @@
-// Package postgres provides a PostgreSQL implementation of the block state repository.
+// blockstate.go provides a PostgreSQL implementation of BlockStateRepository.
+//
+// This adapter persists block states and reorg events to PostgreSQL for
+// durable storage. It supports:
+//   - Block state persistence with upsert semantics (ON CONFLICT UPDATE)
+//   - Canonical and orphaned block tracking
+//   - Reorg event recording for chain reorganization history
+//   - Gap detection queries for backfill operations
+//   - Automatic schema migration via embedded SQL
+//
+// The schema is defined in migrations/001_initial_schema.sql and is
+// automatically applied via the Migrate() method.
 package postgres
 
 import (
