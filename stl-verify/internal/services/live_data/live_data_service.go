@@ -460,9 +460,9 @@ func (s *LiveService) restoreInMemoryChain() {
 		return
 	}
 
+	// GetRecentBlocks returns blocks in ascending order (oldest first)
 	s.unfinalizedBlocks = make([]LightBlock, 0, len(recentBlocks))
-	for i := len(recentBlocks) - 1; i >= 0; i-- {
-		b := recentBlocks[i]
+	for _, b := range recentBlocks {
 		s.unfinalizedBlocks = append(s.unfinalizedBlocks, LightBlock{
 			Number:     b.Number,
 			Hash:       b.Hash,
