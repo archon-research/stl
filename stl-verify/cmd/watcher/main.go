@@ -8,8 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +30,7 @@ import (
 func main() {
 	// Parse command-line flags
 	disableBlobs := flag.Bool("disable-blobs", false, "Disable fetching blob sidecars")
+	pprofAddr := flag.String("pprof", "", "Enable pprof profiling server (e.g., ':6060')")
 	flag.Parse()
 
 	// Load .env file if present
@@ -37,6 +41,20 @@ func main() {
 		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(logger)
+
+	// Start pprof server if enabled
+	if *pprofAddr != "" {
+		// Enable block and mutex profiling
+		runtime.SetBlockProfileRate(1)
+		runtime.SetMutexProfileFraction(1)
+
+		go func() {
+			logger.Info("starting pprof server", "addr", *pprofAddr)
+			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+				logger.Error("pprof server failed", "error", err)
+			}
+		}()
+	}
 
 	// Initialize OpenTelemetry tracer
 	jaegerEndpoint := getEnv("JAEGER_ENDPOINT", "localhost:4317")
