@@ -388,16 +388,10 @@ func TestLateBlockAfterPruning(t *testing.T) {
 			seen[be.BlockNumber]++
 		}
 
-		duplicates := 0
 		for blockNum, count := range seen {
 			if count > 1 {
 				t.Errorf("block %d published %d times", blockNum, count)
-				duplicates++
 			}
-		}
-
-		if duplicates == 0 {
-			t.Logf("SUCCESS: %d block events with no duplicates", len(blockEvents))
 		}
 	})
 }
@@ -762,9 +756,14 @@ func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
 	if !isReorg {
 		t.Error("expected reorg when parent hash mismatches")
 	}
-	// Depth and ancestor depend on common ancestor walk
-	// Since parent doesn't match, we'd need to walk to find common ancestor
-	t.Logf("Reorg detected: depth=%d, ancestor=%d", depth, ancestor)
+	// Parent doesn't match any block in memory, so common ancestor falls back to blockNum-1 = 100
+	// No blocks are reorged (depth=0) because block 101 is ahead of our chain tip (100)
+	if depth != 0 {
+		t.Errorf("expected depth 0 (no existing blocks orphaned), got %d", depth)
+	}
+	if ancestor != 100 {
+		t.Errorf("expected common ancestor 100 (fallback), got %d", ancestor)
+	}
 }
 
 func TestDetectReorg_LowerBlockNumber_Reorg(t *testing.T) {
@@ -808,11 +807,13 @@ func TestDetectReorg_LowerBlockNumber_Reorg(t *testing.T) {
 	if !isReorg {
 		t.Error("expected reorg when block number <= latest")
 	}
-	// Common ancestor should be block 98
+	// Common ancestor should be block 98, orphaning blocks 99 and 100 (depth=2)
 	if ancestor != 98 {
 		t.Errorf("expected common ancestor 98, got %d", ancestor)
 	}
-	t.Logf("Reorg detected: depth=%d, ancestor=%d", depth, ancestor)
+	if depth != 2 {
+		t.Errorf("expected depth 2 (blocks 99, 100 orphaned), got %d", depth)
+	}
 }
 
 func TestDetectReorg_Gap_NoReorg(t *testing.T) {
@@ -954,10 +955,13 @@ func TestHandleReorg_WalksBackViaNetwork(t *testing.T) {
 		t.Error("expected isReorg to be true")
 	}
 	// Common ancestor should be 97 (found after walking 98_alt's parent)
+	// Depth is 2: blocks 99 and 100 are orphaned (blocks at or above incoming block 99)
 	if ancestor != 97 {
 		t.Errorf("expected common ancestor 97, got %d", ancestor)
 	}
-	t.Logf("handleReorg: depth=%d, ancestor=%d", depth, ancestor)
+	if depth != 2 {
+		t.Errorf("expected depth 2 (blocks 99, 100 orphaned), got %d", depth)
+	}
 }
 
 func TestHandleReorg_BelowFinalizedBlock_ReturnsError(t *testing.T) {
