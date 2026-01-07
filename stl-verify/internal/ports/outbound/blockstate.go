@@ -71,6 +71,11 @@ type BlockStateRepository interface {
 	// Returns nil if the block is not found. Used for deduplication.
 	GetBlockByHash(ctx context.Context, hash string) (*BlockState, error)
 
+	// GetBlockVersionCount returns the number of times we've seen a block at this number.
+	// This includes both canonical and orphaned blocks. Used to calculate version numbers
+	// for BlockEvent when publishing - version = count of existing entries.
+	GetBlockVersionCount(ctx context.Context, number int64) (int, error)
+
 	// GetRecentBlocks retrieves the N most recent canonical blocks.
 	// Used for reorg detection by checking parent hash chains.
 	GetRecentBlocks(ctx context.Context, limit int) ([]BlockState, error)

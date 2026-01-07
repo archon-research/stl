@@ -89,6 +89,20 @@ func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) 
 	return nil, nil
 }
 
+// GetBlockVersionCount returns the count of all blocks (including orphaned) at a given number.
+func (r *BlockStateRepository) GetBlockVersionCount(ctx context.Context, number int64) (int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	count := 0
+	for _, b := range r.blocks {
+		if b.Number == number {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // GetRecentBlocks retrieves the N most recent canonical blocks.
 func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) ([]outbound.BlockState, error) {
 	r.mu.RLock()

@@ -36,6 +36,11 @@ type BlockEvent struct {
 	// BlockNumber is the block number.
 	BlockNumber int64 `json:"blockNumber"`
 
+	// Version is incremented each time this block number is reorged.
+	// First occurrence of a block has version 0. After a reorg, the new
+	// canonical block at the same height has version = previous_version + 1.
+	Version int `json:"version"`
+
 	// BlockHash is the block hash.
 	BlockHash string `json:"blockHash"`
 

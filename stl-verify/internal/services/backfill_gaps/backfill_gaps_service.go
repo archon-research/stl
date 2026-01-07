@@ -389,6 +389,13 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 	parentHash := header.ParentHash
 	blockTimestamp, _ := shared.ParseBlockNumber(header.Timestamp)
 
+	// Get version before we save: count of existing blocks at this number
+	version, err := s.stateRepo.GetBlockVersionCount(s.ctx, blockNum)
+	if err != nil {
+		s.logger.Warn("failed to get block version count", "block", blockNum, "error", err)
+		version = 0 // Default to 0 on error
+	}
+
 	var wg sync.WaitGroup
 
 	// Cache and publish block
@@ -403,6 +410,7 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 			event := outbound.BlockEvent{
 				ChainID:        chainID,
 				BlockNumber:    blockNum,
+				Version:        version,
 				BlockHash:      blockHash,
 				ParentHash:     parentHash,
 				BlockTimestamp: blockTimestamp,

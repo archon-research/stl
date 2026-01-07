@@ -121,6 +121,17 @@ func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) 
 	return &state, nil
 }
 
+// GetBlockVersionCount returns the count of all blocks (including orphaned) at a given number.
+func (r *BlockStateRepository) GetBlockVersionCount(ctx context.Context, number int64) (int, error) {
+	query := `SELECT COUNT(*) FROM block_states WHERE number = $1`
+	var count int
+	err := r.db.QueryRowContext(ctx, query, number).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get block version count: %w", err)
+	}
+	return count, nil
+}
+
 // GetRecentBlocks retrieves the N most recent canonical blocks.
 func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) ([]outbound.BlockState, error) {
 	query := `

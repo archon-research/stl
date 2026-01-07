@@ -540,9 +540,17 @@ func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, bl
 		return
 	}
 
+	// Get version: count of existing blocks at this number (before we save the new one)
+	version, err := s.stateRepo.GetBlockVersionCount(ctx, blockNum)
+	if err != nil {
+		s.logger.Warn("failed to get block version count", "block", blockNum, "error", err)
+		version = 0 // Default to 0 on error
+	}
+
 	event := outbound.BlockEvent{
 		ChainID:        chainID,
 		BlockNumber:    blockNum,
+		Version:        version,
 		BlockHash:      blockHash,
 		ParentHash:     parentHash,
 		BlockTimestamp: blockTimestamp,
