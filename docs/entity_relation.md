@@ -1,34 +1,91 @@
-```mermaid
 erDiagram
+    Chain {
+        int chain_id PK
+        varchar name UK
+    }
+
     Token {
         bigint id PK
-        bytea address UK
-        varchar name
+        int chain_id FK "UK1"
+        bytea address "UK1"
+        varchar symbol
+        smallint decimals
         bigint created_at_block
+        timestamptz updated_at
+        jsonb metadata "protocol-specific fields"
     }
 
     Protocol {
         bigint id PK
-        bytea address UK
+        int chain_id FK "UK1"
+        bytea address "UK1"
         varchar name
+        varchar protocol_type "lending,rwa"
         bigint created_at_block
+        timestamptz updated_at
+        jsonb metadata "protocol-specific config"
+    }
+
+    ReceiptTokens {
+        bigint id PK
+        bigint protocol_id FK "UK1"
+        bigint underlying_token_id FK "UK1"
+        bytea receipt_token_address
+        varchar symbol "aWETH, spWETH, cWETH"
+        bigint created_at_block
+        timestamptz updated_at
+        jsonb metadata "protocol-specific fields"
+    }
+
+    DebtTokens {
+        bigint id PK
+        bigint protocol_id FK "UK1"
+        bigint underlying_token_id FK "UK1"
+        bytea variable_debt_address
+        bytea stable_debt_address "nullable, not all protocols"
+        varchar variable_symbol "variableDebtWETH"
+        varchar stable_symbol "stableDebtWETH, nullable"
+        bigint created_at_block
+        timestamptz updated_at
+        jsonb metadata "protocol-specific fields"
     }
 
     Users {
         bigint id PK
-        bytea address UK
+        int chain_id FK "UK1"
+        bytea address "UK1"
         bigint first_seen_block
         timestamptz created_at
         timestamptz updated_at
+        jsonb metadata "protocol-specific user data"
+    }
+
+    SparkLendReserveData {
+        bigint id PK
+        bigint protocol_id FK "UK1"
+        bigint token_id FK "UK1"
+        bigint block_number "UK1"
+        numeric unbacked
+        numeric accruedToTreasuryScaled
+        numeric totalAToken
+        numeric totalStableDebt
+        numeric totalVariableDebt
+        numeric liquidityRate
+        numeric variableBorrowRate
+        numeric stableBorrowRate
+        numeric averageStableBorrowRate
+        numeric liquidityIndex
+        numeric variableBorrowIndex
+        bigint lastUpdateTimestamp
     }
 
     Borrowers {
         bigint id PK
-        bigint user_id FK
-        bigint protocol_id FK
-        bigint token_id FK
-        bigint block_number
-        int block_version
+        bigint user_id FK "UK1"
+        bigint protocol_id FK "UK1"
+        bigint token_id FK "UK1"
+        bigint block_number "UK1"
+        int block_version "UK1"
         numeric amount
         numeric change
         timestamptz created_at
@@ -36,20 +93,39 @@ erDiagram
 
     BorrowerCollateral {
         bigint id PK
-        bigint user_id FK
-        bigint protocol_id FK
-        bigint token_id FK
-        bigint block_number
-        int block_version
+        bigint user_id FK "UK1"
+        bigint protocol_id FK "UK1"
+        bigint token_id FK "UK1"
+        bigint block_number "UK1"
+        int block_version "UK1"
         numeric amount
         numeric change
         timestamptz created_at
     }
 
+    UserProtocolMetadata {
+        bigint id PK
+        bigint user_id FK "UK1"
+        bigint protocol_id FK "UK1"
+        timestamptz created_at
+        timestamptz updated_at
+        jsonb metadata "user-protocol specific data"
+    }
+
+    Chain ||--o{ Token : ""
+    Chain ||--o{ Protocol : ""
+    Chain ||--o{ Users : ""
+    Protocol ||--o{ ReceiptTokens : ""
+    Protocol ||--o{ DebtTokens : ""
+    Protocol ||--o{ SparkLendReserveData : ""
+    Token ||--o{ ReceiptTokens : ""
+    Token ||--o{ DebtTokens : ""
+    Token ||--o{ SparkLendReserveData : ""
     Users ||--o{ Borrowers : ""
     Users ||--o{ BorrowerCollateral : ""
     Protocol ||--o{ Borrowers : ""
     Protocol ||--o{ BorrowerCollateral : ""
     Token ||--o{ Borrowers : ""
     Token ||--o{ BorrowerCollateral : ""
-```
+    Users ||--o{ UserProtocolMetadata : ""
+    Protocol ||--o{ UserProtocolMetadata : ""
