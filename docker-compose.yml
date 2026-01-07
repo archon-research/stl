@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ponder-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ponder
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ponder-indexer
+    environment:
+      # DATABASE_URL: Connection string for PostgreSQL database used by Ponder in Docker/production when deployed to Railway.
+      # When set, Ponder uses PostgreSQL instead of PGlite (the default for local development).
+      # Format: postgresql://[user]:[password]@[host]:[port]/[database]
+      # - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/ponder
+      - PONDER_RPC_URL_1=${PONDER_RPC_URL_1}
+      - PONDER_LOG_LEVEL=${PONDER_LOG_LEVEL:-info}
+    ports:
+      - "42069:42069"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+

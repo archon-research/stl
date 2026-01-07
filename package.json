@@ -1,0 +1,38 @@
+{
+  "name": "sentinel-sparklend-ponder",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "ponder dev",
+    "start": "ponder start",
+    "db": "ponder db",
+    "codegen": "ponder codegen",
+    "lint": "eslint .",
+    "typecheck": "tsc",
+    "job": "tsx src/scripts/run-job.ts",
+    "docker:build": "docker build -t sentinel-sparklend-ponder .",
+    "docker:run": "docker run -p 42069:42069 --env-file .env sentinel-sparklend-ponder",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f app"
+  },
+  "dependencies": {
+    "ponder": "^0.11.34",
+    "hono": "^4.5.0",
+    "viem": "^2.21.3",
+    "pg": "^8.11.3",
+    "drizzle-orm": "^0.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.9.0",
+    "@types/pg": "^8.10.9",
+    "eslint": "^8.53.0",
+    "eslint-config-ponder": "^0.11.34",
+    "typescript": "^5.2.2"
+  },
+  "engines": {
+    "node": ">=18.14"
+  },
+  "packageManager": "pnpm@9.5.0+sha512.140036830124618d624a2187b50d04289d5a087f326c9edfc0ccd733d76c4f52c3a313d4fc148794a2a9d81553016004e6742e8cf850670268a7387fc220c903"
+}
