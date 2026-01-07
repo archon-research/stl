@@ -8,7 +8,7 @@
  * Used by: Aave, Sparklend, and other Aave V3 forks
  */
 
-import { onchainTable } from "ponder";
+import { onchainTable, relations } from "ponder";
 import { Protocol } from "@/schema/common/protocol";
 import { Token } from "@/schema/common/token";
 
@@ -16,11 +16,11 @@ export const ReserveConfig = onchainTable("ReserveConfig", (t) => ({
   // Primary key: protocolId + tokenId + blockNumber (e.g., "sparklend-mainnet-mainnet-0xc02...cc2-19000000")
   id: t.text().primaryKey(),
   
-  // Foreign key to Protocol table
-  protocolId: t.text().notNull().references(() => Protocol.id),
+  // FK to Protocol table (enforced at application level)
+  protocolId: t.text().notNull(),
   
-  // Foreign key to Token table (the reserve/underlying asset)
-  tokenId: t.text().notNull().references(() => Token.id),
+  // FK to Token table - the reserve/underlying asset (enforced at application level)
+  tokenId: t.text().notNull(),
   
   // Block number when this configuration was set
   blockNumber: t.bigint().notNull(),
@@ -37,4 +37,15 @@ export const ReserveConfig = onchainTable("ReserveConfig", (t) => ({
   variableBorrowRate: t.bigint().notNull(),
   liquidityIndex: t.bigint().notNull(),
   variableBorrowIndex: t.bigint().notNull(),
+}));
+
+export const reserveConfigRelations = relations(ReserveConfig, ({ one }) => ({
+  protocol: one(Protocol, {
+    fields: [ReserveConfig.protocolId],
+    references: [Protocol.id],
+  }),
+  token: one(Token, {
+    fields: [ReserveConfig.tokenId],
+    references: [Token.id],
+  }),
 }));

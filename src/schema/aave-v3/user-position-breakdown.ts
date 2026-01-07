@@ -24,10 +24,10 @@ export function createUserPositionBreakdownTable(tableName: string) {
     // Example: "sparklend-mainnet-mainnet-0x1234...abcd-17000000-mainnet-0x5678...ef01-collateral"
     id: t.text().primaryKey(),
     
-    // Foreign Keys
-    protocolId: t.text().notNull().references(() => Protocol.id), // FK to Protocol
-    reserveId: t.text().notNull().references(() => Token.id),     // FK to Token (underlying asset)
-    userId: t.text().notNull().references(() => User.id),         // FK to User
+    // Foreign Keys (enforced at application level)
+    protocolId: t.text().notNull(), // FK to Protocol
+    reserveId: t.text().notNull(),  // FK to Token (underlying asset)
+    userId: t.text().notNull(),     // FK to User
     
     // Raw address for convenience
     user: t.hex().notNull(),

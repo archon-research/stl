@@ -7,7 +7,7 @@
  * Examples: spWETH (Sparklend), aEthWETH (Aave), etc.
  */
 
-import { onchainTable } from "ponder";
+import { onchainTable, relations } from "ponder";
 import { Protocol } from "@/schema/common/protocol";
 import { Token } from "@/schema/common/token";
 
@@ -15,11 +15,11 @@ export const AToken = onchainTable("AToken", (t) => ({
   // Primary key: protocolId + address (e.g., "sparklend-mainnet-0x59cd1c87501baa753d0b5b5ab5d8416a45cd71db")
   id: t.text().primaryKey(),
   
-  // Foreign key to Protocol table
-  protocolId: t.text().notNull().references(() => Protocol.id),
+  // FK to Protocol table (enforced at application level)
+  protocolId: t.text().notNull(),
   
-  // Foreign key to Token table (underlying asset)
-  tokenId: t.text().notNull().references(() => Token.id),
+  // FK to Token table - underlying asset (enforced at application level)
+  tokenId: t.text().notNull(),
   
   // AToken contract address
   address: t.hex().notNull(),
@@ -38,4 +38,15 @@ export const AToken = onchainTable("AToken", (t) => ({
   
   // First seen timestamp
   firstSeenTimestamp: t.bigint().notNull(),
+}));
+
+export const aTokenRelations = relations(AToken, ({ one }) => ({
+  protocol: one(Protocol, {
+    fields: [AToken.protocolId],
+    references: [Protocol.id],
+  }),
+  underlyingToken: one(Token, {
+    fields: [AToken.tokenId],
+    references: [Token.id],
+  }),
 }));

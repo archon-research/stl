@@ -6,9 +6,6 @@
  */
 
 import { onchainTable } from "ponder";
-import { Protocol } from "@/schema/common/protocol";
-import { Token } from "@/schema/common/token";
-import { User } from "@/schema/common/user";
 
 export function createAaveHorizonEventTables(chainName: string) {
   const prefix = `Aave${chainName}Horizon`;
@@ -16,9 +13,9 @@ export function createAaveHorizonEventTables(chainName: string) {
   return {
     BackUnbacked: onchainTable(`${prefix}BackUnbacked`, (t) => ({
       id: t.text().primaryKey(),
-      protocolId: t.text().notNull().references(() => Protocol.id),
-      reserveId: t.text().notNull().references(() => Token.id),
-      backerId: t.text().notNull().references(() => User.id), // FK to User
+      protocolId: t.text().notNull(),
+      reserveId: t.text().notNull(),
+      backerId: t.text().notNull(), // FK to User
       backer: t.hex().notNull(), // Raw address for convenience
       amount: t.bigint().notNull(),
       fee: t.bigint().notNull(),
@@ -30,10 +27,10 @@ export function createAaveHorizonEventTables(chainName: string) {
 
     MintUnbacked: onchainTable(`${prefix}MintUnbacked`, (t) => ({
       id: t.text().primaryKey(),
-      protocolId: t.text().notNull().references(() => Protocol.id),
-      reserveId: t.text().notNull().references(() => Token.id),
-      userId: t.text().notNull().references(() => User.id), // FK to User (initiator)
-      onBehalfOfId: t.text().notNull().references(() => User.id), // FK to User (beneficiary)
+      protocolId: t.text().notNull(),
+      reserveId: t.text().notNull(),
+      userId: t.text().notNull(), // FK to User (initiator)
+      onBehalfOfId: t.text().notNull(), // FK to User (beneficiary)
       user: t.hex().notNull(), // Raw address for convenience
       onBehalfOf: t.hex().notNull(), // Raw address for convenience
       amount: t.bigint().notNull(),

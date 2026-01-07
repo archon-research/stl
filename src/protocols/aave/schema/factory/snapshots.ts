@@ -1,7 +1,4 @@
 import { onchainTable } from "ponder";
-import { Protocol } from "@/schema/common/protocol";
-import { Token } from "@/schema/common/token";
-import { User } from "@/schema/common/user";
 import { createUserPositionBreakdownTable } from "@/schema/aave-v3/user-position-breakdown";
 
 /**
@@ -18,9 +15,9 @@ export function createAaveSnapshotTables(chainName: string, market: "Core" | "Ho
     // User's supply position with SCALED balances for interest calculation
     UserScaledSupplyPosition: onchainTable(`${prefix}UserScaledSupplyPosition`, (t) => ({
       id: t.text().primaryKey(), // `aave-${market}-${chain}-${userId}-${reserveId}-${blockNumber}`
-      protocolId: t.text().notNull().references(() => Protocol.id),
-      reserveId: t.text().notNull().references(() => Token.id),
-      userId: t.text().notNull().references(() => User.id), // FK to User
+      protocolId: t.text().notNull(),
+      reserveId: t.text().notNull(),
+      userId: t.text().notNull(), // FK to User
       user: t.hex().notNull(), // Raw address for convenience
       blockNumber: t.bigint().notNull(),
       timestamp: t.bigint().notNull(),
@@ -32,9 +29,9 @@ export function createAaveSnapshotTables(chainName: string, market: "Core" | "Ho
     // User's borrow position with SCALED balances for interest calculation
     UserScaledBorrowPosition: onchainTable(`${prefix}UserScaledBorrowPosition`, (t) => ({
       id: t.text().primaryKey(), // `aave-${market}-${chain}-${userId}-${reserveId}-${blockNumber}`
-      protocolId: t.text().notNull().references(() => Protocol.id),
-      reserveId: t.text().notNull().references(() => Token.id),
-      userId: t.text().notNull().references(() => User.id), // FK to User
+      protocolId: t.text().notNull(),
+      reserveId: t.text().notNull(),
+      userId: t.text().notNull(), // FK to User
       user: t.hex().notNull(), // Raw address for convenience
       blockNumber: t.bigint().notNull(),
       timestamp: t.bigint().notNull(),
@@ -45,8 +42,8 @@ export function createAaveSnapshotTables(chainName: string, market: "Core" | "Ho
     // User's eMode category
     UserEModeCategory: onchainTable(`${prefix}UserEModeCategory`, (t) => ({
       id: t.text().primaryKey(), // `aave-${market}-${chain}-${userId}-${blockNumber}`
-      protocolId: t.text().notNull().references(() => Protocol.id),
-      userId: t.text().notNull().references(() => User.id), // FK to User
+      protocolId: t.text().notNull(),
+      userId: t.text().notNull(), // FK to User
       user: t.hex().notNull(), // Raw address for convenience
       blockNumber: t.bigint().notNull(),
       timestamp: t.bigint().notNull(),
@@ -56,8 +53,8 @@ export function createAaveSnapshotTables(chainName: string, market: "Core" | "Ho
     // Health factor history for a specific user
     UserHealthFactorHistory: onchainTable(`${prefix}UserHealthFactorHistory`, (t) => ({
       id: t.text().primaryKey(), // `aave-${market}-${chain}-${userId}-${blockNumber}`
-      protocolId: t.text().notNull().references(() => Protocol.id),
-      userId: t.text().notNull().references(() => User.id), // FK to User
+      protocolId: t.text().notNull(),
+      userId: t.text().notNull(), // FK to User
       user: t.hex().notNull(), // Raw address for convenience
       healthFactor: t.bigint().notNull(),
       totalCollateralBase: t.bigint().notNull(),

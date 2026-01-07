@@ -1,9 +1,11 @@
 /**
  * Sparklend Gnosis Handlers
  *
- * Exports all handler registration functions for Gnosis Chain
+ * Registers all handler functions for Gnosis Chain
  */
 
-export { registerSparklendGnosisPoolEventHandlers } from "./pool-events";
+import { registerSparklendGnosisPoolEventHandlers } from "./pool-events";
+
+// Register all handlers
+registerSparklendGnosisPoolEventHandlers();
 // TODO: Add spToken transfer handlers when spToken addresses are configured
-// export { registerSparklendGnosisSpTokenTransferHandlers } from "./sptoken-transfers";

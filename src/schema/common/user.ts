@@ -1,4 +1,4 @@
-import { onchainTable } from "ponder";
+import { onchainTable, relations } from "ponder";
 import { Chain } from "./chain";
 
 /**
@@ -12,11 +12,18 @@ import { Chain } from "./chain";
  */
 export const User = onchainTable("User", (t) => ({
   id: t.text().primaryKey(), // `${chainId}-${address}`
-  chainId: t.text().notNull().references(() => Chain.id), // FK to Chain
+  chainId: t.text().notNull(), // FK to Chain (enforced at application level)
   address: t.hex().notNull(), // User's Ethereum address
   firstSeenBlock: t.bigint().notNull(), // First block where this user appeared
   firstSeenTimestamp: t.bigint().notNull(), // First timestamp where this user appeared
   lastActivityBlock: t.bigint().notNull(), // Last block of any activity
   lastActivityTimestamp: t.bigint().notNull(), // Last timestamp of any activity
+}));
+
+export const userRelations = relations(User, ({ one }) => ({
+  chain: one(Chain, {
+    fields: [User.chainId],
+    references: [Chain.id],
+  }),
 }));
 

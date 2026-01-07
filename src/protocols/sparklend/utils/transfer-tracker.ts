@@ -1,7 +1,7 @@
 import type { Context } from "ponder:registry";
 import { eq, desc, and, lte } from "ponder";
 import { getUnderlyingAsset } from "./sptoken-mapping";
-import { getTokenId } from "@/db/helpers";
+import { getTokenId, ensureUser, extractAddressFromId } from "@/db/helpers";
 import { trackActiveUser } from "./health-factor-snapshot";
 
 const RAY = 10n ** 27n;
@@ -20,8 +20,8 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as `0x${string
  */
 export async function handleSpTokenTransfer(
   context: Context,
-  chainId: string,
-  chainName: string,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
+  protocolId: string, // Already computed protocol ID
   userScaledSupplyPositionTable: any,
   userSupplyPositionTable: any,
   reserveDataUpdatedTable: any,
@@ -60,9 +60,8 @@ export async function handleSpTokenTransfer(
     return;
   }
 
-  // Get reserveId and protocolId
-  const reserveId = getTokenId(chainName, underlyingAsset);
-  const protocolId = `sparklend-${chainId}`;
+  // Get reserveId
+  const reserveId = getTokenId(chainIdentifier, underlyingAsset);
 
   // Get current liquidity index
   const reserveData = await getReserveDataAtBlock(
@@ -82,6 +81,7 @@ export async function handleSpTokenTransfer(
   // Update sender's positions (decrease)
   await updateScaledSupplyPosition(
     context,
+    chainIdentifier,
     protocolId,
     reserveId,
     userScaledSupplyPositionTable,
@@ -94,6 +94,7 @@ export async function handleSpTokenTransfer(
 
   await updateCurrentSupplyPosition(
     context,
+    chainIdentifier,
     protocolId,
     reserveId,
     userSupplyPositionTable,
@@ -106,6 +107,7 @@ export async function handleSpTokenTransfer(
   // Update receiver's positions (increase)
   await updateScaledSupplyPosition(
     context,
+    chainIdentifier,
     protocolId,
     reserveId,
     userScaledSupplyPositionTable,
@@ -118,6 +120,7 @@ export async function handleSpTokenTransfer(
 
   await updateCurrentSupplyPosition(
     context,
+    chainIdentifier,
     protocolId,
     reserveId,
     userSupplyPositionTable,
@@ -128,8 +131,8 @@ export async function handleSpTokenTransfer(
   );
 
   // Track both users as active
-  await trackActiveUser(context, chainId, activeUserTable, normalizedFrom, blockNumber, timestamp);
-  await trackActiveUser(context, chainId, activeUserTable, normalizedTo, blockNumber, timestamp);
+  await trackActiveUser(context, chainIdentifier, protocolId, activeUserTable, normalizedFrom, blockNumber, timestamp);
+  await trackActiveUser(context, chainIdentifier, protocolId, activeUserTable, normalizedTo, blockNumber, timestamp);
 
   console.log(
     `📤 spToken Transfer: ${normalizedFrom.slice(0, 10)}... -> ${normalizedTo.slice(0, 10)}... | ${value} (scaled: ${scaledAmount})`
@@ -199,6 +202,7 @@ async function getPreviousSupplySnapshot(
  */
 async function updateScaledSupplyPosition(
   context: Context,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
   protocolId: string,
   reserveId: string,
   userScaledSupplyPositionTable: any,
@@ -209,7 +213,9 @@ async function updateScaledSupplyPosition(
   timestamp: bigint
 ) {
   const { db } = context;
-  const snapshotId = `${protocolId}-${userAddress}-${reserveId}-${blockNumber}`;
+  // Extract token address to avoid duplicating chain identifier
+  const tokenAddr = extractAddressFromId(reserveId);
+  const snapshotId = `${protocolId}-${userAddress}-${tokenAddr}-${blockNumber}`;
 
   const currentSnapshot = await db.sql
     .select()
@@ -241,10 +247,12 @@ async function updateScaledSupplyPosition(
     const previousIsCollateral = prevSnapshot?.isCollateral ?? true;
     const newScaledBalance = previousBalance + scaledDelta;
 
+    const userId = await ensureUser(context, chainIdentifier, userAddress, blockNumber, timestamp);
     await db.insert(userScaledSupplyPositionTable).values({
       id: snapshotId,
       protocolId,
       reserveId,
+      userId,
       user: userAddress,
       blockNumber,
       timestamp,
@@ -260,6 +268,7 @@ async function updateScaledSupplyPosition(
  */
 async function updateCurrentSupplyPosition(
   context: Context,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
   protocolId: string,
   reserveId: string,
   userSupplyPositionTable: any,
@@ -269,7 +278,9 @@ async function updateCurrentSupplyPosition(
   timestamp: bigint
 ) {
   const { db } = context;
-  const positionId = `${protocolId}-${userAddress}-${reserveId}`;
+  // Extract token address to avoid duplicating chain identifier
+  const tokenAddr = extractAddressFromId(reserveId);
+  const positionId = `${protocolId}-${userAddress}-${tokenAddr}`;
 
   const existing = await db.sql
     .select()
@@ -295,10 +306,12 @@ async function updateCurrentSupplyPosition(
         .where(eq(userSupplyPositionTable.id, positionId));
     }
   } else if (amountDelta > 0n) {
+    const userId = await ensureUser(context, chainIdentifier, userAddress, blockNumber, timestamp);
     await db.insert(userSupplyPositionTable).values({
       id: positionId,
       protocolId,
       reserveId,
+      userId,
       user: userAddress,
       balance: amountDelta,
       isCollateral: true,

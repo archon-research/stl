@@ -78,7 +78,7 @@ Each protocol/chain gets its own tables:
 
 **Contracts**:
 - Core: `0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2` (block 16291127)
-- Horizon: `0x1E4f2Ab406aa9764ff05a9a8c8b6F531f` (block TBD)
+- Horizon: `0x1E4f2Ab406aa9764ff05a9a8c8bf6B1c8B6F531f` (block 23125535)
 
 ## Features
 

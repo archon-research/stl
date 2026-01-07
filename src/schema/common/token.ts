@@ -7,15 +7,15 @@
  * Examples: WETH, USDC, DAI, etc.
  */
 
-import { onchainTable } from "ponder";
+import { onchainTable, relations } from "ponder";
 import { Chain } from "./chain";
 
 export const Token = onchainTable("Token", (t) => ({
   // Primary key: chainId + address (e.g., "mainnet-0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")
   id: t.text().primaryKey(),
   
-  // Foreign key to Chain table
-  chainId: t.text().notNull().references(() => Chain.id),
+  // FK to Chain table (enforced at application level)
+  chainId: t.text().notNull(),
   
   // Token contract address
   address: t.hex().notNull(),
@@ -34,4 +34,11 @@ export const Token = onchainTable("Token", (t) => ({
   
   // First seen timestamp
   firstSeenTimestamp: t.bigint().notNull(),
+}));
+
+export const tokenRelations = relations(Token, ({ one }) => ({
+  chain: one(Chain, {
+    fields: [Token.chainId],
+    references: [Chain.id],
+  }),
 }));

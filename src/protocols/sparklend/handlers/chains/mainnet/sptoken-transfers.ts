@@ -1,13 +1,15 @@
 import { ponder } from "ponder:registry";
 import * as schema from "@sparklend/schema/chains/mainnet";
 import { handleSpTokenTransfer } from "@sparklend/utils/transfer-tracker";
+import { CHAIN_IDS } from "@/constants";
 
 /**
  * Register Sparklend Mainnet SpToken Transfer Handlers
  */
 export function registerSparklendMainnetSpTokenTransferHandlers() {
-  const chainId = "mainnet";
-  const chainName = "Mainnet";
+  const CHAIN_IDENTIFIER = "mainnet"; // Lowercase string used in IDs
+  const CHAIN_ID = CHAIN_IDS.mainnet; // Numeric chain ID (1)
+  const PROTOCOL_ID = "sparklend-mainnet";
 
   ponder.on("SparklendMainnetSpToken:Transfer", async ({ event, context }) => {
     const blockNumber = BigInt(event.block.number);
@@ -15,8 +17,8 @@ export function registerSparklendMainnetSpTokenTransferHandlers() {
 
     await handleSpTokenTransfer(
       context,
-      chainId,
-      chainName,
+      CHAIN_IDENTIFIER,
+      PROTOCOL_ID,
       schema.SparklendMainnetUserScaledSupplyPosition,
       schema.SparklendMainnetUserSupplyPosition,
       schema.SparklendMainnetReserveDataUpdated,

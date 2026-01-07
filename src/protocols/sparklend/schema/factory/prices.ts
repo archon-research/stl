@@ -1,6 +1,4 @@
 import { onchainTable } from "ponder";
-import { Protocol } from "@/schema/common/protocol";
-import { Token } from "@/schema/common/token";
 
 /**
  * Sparklend Price Schema Factory
@@ -16,8 +14,8 @@ export function createSparklendPriceTables(chainName: string) {
     // Asset price snapshot - captured daily via blocks handler
     AssetPriceSnapshot: onchainTable(`${prefix}AssetPriceSnapshot`, (t) => ({
       id: t.text().primaryKey(), // `sparklend-${chain}-${asset}-${blockNumber}`
-      protocolId: t.text().notNull().references(() => Protocol.id),
-      reserveId: t.text().notNull().references(() => Token.id),
+      protocolId: t.text().notNull(),
+      reserveId: t.text().notNull(),
       blockNumber: t.bigint().notNull(),
       timestamp: t.bigint().notNull(),
       priceUSD: t.bigint().notNull(), // Price in USD with 8 decimals (Aave oracle format)

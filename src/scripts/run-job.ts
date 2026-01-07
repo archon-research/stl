@@ -24,30 +24,6 @@ import { runSnapshotCalculationJob } from "../protocols/sparklend/jobs/snapshot-
 import * as mainnetSchema from "../protocols/sparklend/schema/chains/mainnet";
 import * as gnosisSchema from "../protocols/sparklend/schema/chains/gnosis";
 
-// Parse CLI arguments
-const args = process.argv.slice(2);
-const [jobType, chain, startBlock, endBlock, interval] = args;
-
-if (!jobType || !chain || !startBlock || !endBlock) {
-  console.error(`
-Usage: npm run job <job-type> <chain> <startBlock> <endBlock> [interval]
-
-Job Types:
-  - price-capture: Capture asset prices at block intervals
-  - snapshot-calculation: Calculate user health factor snapshots
-
-Chains:
-  - mainnet: Ethereum Mainnet
-  - gnosis: Gnosis Chain
-
-Examples:
-  npm run job price-capture mainnet 16776401 17000000 300
-  npm run job snapshot-calculation mainnet 16776401 17000000 7200
-  npm run job price-capture gnosis 29817457 30000000 300
-`);
-  process.exit(1);
-}
-
 // Create context with real database connection
 async function createJobContext(chainName: string) {
   // Get RPC URL from environment
@@ -92,16 +68,39 @@ async function createJobContext(chainName: string) {
 
 // Run the job
 async function main() {
-  // At this point, these are guaranteed to be defined due to the check above
-  const start = parseInt(startBlock!);
-  const end = parseInt(endBlock!);
+  // Parse CLI arguments
+  const args = process.argv.slice(2);
+  const [jobType, chain, startBlock, endBlock, interval] = args;
+
+  if (!jobType || !chain || !startBlock || !endBlock) {
+    console.error(`
+Usage: npm run job <job-type> <chain> <startBlock> <endBlock> [interval]
+
+Job Types:
+  - price-capture: Capture asset prices at block intervals
+  - snapshot-calculation: Calculate user health factor snapshots
+
+Chains:
+  - mainnet: Ethereum Mainnet
+  - gnosis: Gnosis Chain
+
+Examples:
+  npm run job price-capture mainnet 16776401 17000000 300
+  npm run job snapshot-calculation mainnet 16776401 17000000 7200
+  npm run job price-capture gnosis 29817457 30000000 300
+`);
+    process.exit(1);
+  }
+
+  const start = parseInt(startBlock);
+  const end = parseInt(endBlock);
   const intervalBlocks = interval ? parseInt(interval) : (jobType === "price-capture" ? 300 : 7200);
 
   console.log(`\n🚀 Starting ${jobType} job for ${chain}`);
   console.log(`   Blocks: ${start} → ${end}`);
   console.log(`   Interval: ${intervalBlocks}\n`);
 
-  const context = await createJobContext(chain!);
+  const context = await createJobContext(chain);
 
   try {
     if (jobType === "price-capture") {
@@ -175,8 +174,12 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error("Fatal error:", error);
-  process.exit(1);
-});
+// Only run if this script is executed directly (not imported)
+const isMainModule = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/'));
+if (isMainModule || process.argv[1]?.includes('run-job')) {
+  main().catch((error) => {
+    console.error("Fatal error:", error);
+    process.exit(1);
+  });
+}
 

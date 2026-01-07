@@ -38,25 +38,24 @@ export async function ensureChain(
 export async function ensureProtocol(
   context: Context,
   protocolType: string,
-  chainName: string,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
+  chainNumericId: number, // Actual chain ID integer (1, 100, etc.)
+  chainDisplayName: string, // Display name ("Mainnet", "Gnosis")
   poolAddress: `0x${string}`,
   protocolDisplayName: string
 ): Promise<string> {
-  const chainId = chainName.toLowerCase();
-  const id = `${protocolType}-${chainId}`;
-  
-  // Get numeric chain ID
-  const numericChainId = chainName.toLowerCase() === "mainnet" ? 1 : 100;
+  const normalizedChainId = chainIdentifier.toLowerCase();
+  const id = `${protocolType}-${normalizedChainId}`;
   
   // Ensure chain exists first
-  await ensureChain(context, numericChainId, chainName);
+  await ensureChain(context, chainNumericId, chainDisplayName);
   
   await context.db.insert(Protocol)
     .values({
       id,
       name: protocolDisplayName,
       type: protocolType,
-      chainId,
+      chainId: normalizedChainId, // References Chain.id (the lowercase string)
       poolAddress,
     })
     .onConflictDoNothing();
@@ -71,13 +70,13 @@ export async function ensureProtocol(
  */
 export async function ensureToken(
   context: Context,
-  chainName: string,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
   address: `0x${string}`,
   blockNumber: bigint,
   timestamp: bigint
 ): Promise<string> {
-  const chainId = chainName.toLowerCase();
-  const id = `${chainId}-${address.toLowerCase()}`;
+  const normalizedChainId = chainIdentifier.toLowerCase();
+  const id = `${normalizedChainId}-${address.toLowerCase()}`;
   
   // Fetch metadata from contract
   const metadata = await getTokenMetadata(context, address);
@@ -85,7 +84,7 @@ export async function ensureToken(
   await context.db.insert(Token)
     .values({
       id,
-      chainId,
+      chainId: normalizedChainId, // References Chain.id (the lowercase string)
       address,
       symbol: metadata.symbol,
       name: metadata.name,
@@ -139,18 +138,18 @@ export async function ensureAToken(
  */
 export async function ensureUser(
   context: Context,
-  chainName: string,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis") - references Chain.id
   address: `0x${string}`,
   blockNumber: bigint,
   timestamp: bigint
 ): Promise<string> {
-  const chainId = chainName.toLowerCase();
-  const id = `${chainId}-${address.toLowerCase()}`;
+  const normalizedChainId = chainIdentifier.toLowerCase();
+  const id = `${normalizedChainId}-${address.toLowerCase()}`;
   
   await context.db.insert(User)
     .values({
       id,
-      chainId,
+      chainId: normalizedChainId, // This references Chain.id (which is the lowercase string, not integer!)
       address,
       firstSeenBlock: blockNumber,
       firstSeenTimestamp: timestamp,
@@ -169,7 +168,7 @@ export async function ensureUser(
 export async function createReserveConfig(
   context: Context,
   protocolId: string,
-  tokenId: string,
+  tokenId: string, // Full token ID with chain (e.g., "gnosis-0x...")
   blockNumber: bigint,
   timestamp: bigint,
   transactionHash: string,
@@ -179,14 +178,17 @@ export async function createReserveConfig(
   liquidityIndex: bigint,
   variableBorrowIndex: bigint
 ): Promise<string> {
-  const id = `${protocolId}-${tokenId}-${blockNumber}`;
+  // Extract just the address from tokenId to avoid duplicating chain identifier
+  // tokenId format: "chainIdentifier-0xaddress" → extract "0xaddress"
+  const tokenAddress = tokenId.includes('-') ? tokenId.split('-').slice(1).join('-') : tokenId;
+  const id = `${protocolId}-${tokenAddress}-${blockNumber}`;
   
   // Upsert to handle duplicate events in same block
   await context.db.insert(ReserveConfig)
     .values({
       id,
       protocolId,
-      tokenId,
+      tokenId, // Store the full tokenId for FK reference
       blockNumber,
       timestamp,
       transactionHash,
@@ -204,22 +206,30 @@ export async function createReserveConfig(
 /**
  * Helper to get token ID from address and chain
  */
-export function getTokenId(chainName: string, address: `0x${string}`): string {
-  return `${chainName.toLowerCase()}-${address.toLowerCase()}`;
+export function getTokenId(chainIdentifier: string, address: `0x${string}`): string {
+  return `${chainIdentifier.toLowerCase()}-${address.toLowerCase()}`;
 }
 
 /**
  * Helper to get protocol ID
  */
-export function getProtocolId(protocolType: string, chainName: string): string {
-  return `${protocolType}-${chainName.toLowerCase()}`;
+export function getProtocolId(protocolType: string, chainIdentifier: string): string {
+  return `${protocolType}-${chainIdentifier.toLowerCase()}`;
 }
 
 /**
  * Helper to get user ID
  */
-export function getUserId(chainName: string, address: `0x${string}`): string {
-  return `${chainName.toLowerCase()}-${address.toLowerCase()}`;
+export function getUserId(chainIdentifier: string, address: `0x${string}`): string {
+  return `${chainIdentifier.toLowerCase()}-${address.toLowerCase()}`;
+}
+
+/**
+ * Extract address from a full ID that contains chain identifier
+ * Format: "chainIdentifier-0xaddress" → "0xaddress"
+ */
+export function extractAddressFromId(id: string): string {
+  return id.includes('-') ? id.split('-').slice(1).join('-') : id;
 }
 
 // Legacy aliases for backward compatibility during migration

@@ -1,5 +1,6 @@
 import type { Context } from "ponder:registry";
 import { eq } from "ponder";
+import { ensureUser, extractAddressFromId } from "@/db/helpers";
 
 /**
  * Position Service - Handles all position updates
@@ -15,6 +16,7 @@ import { eq } from "ponder";
  */
 export async function handleSupplyChange(
   context: Context,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
   userSupplyPositionTable: any,
   protocolId: string,
   reserveId: string,
@@ -24,7 +26,9 @@ export async function handleSupplyChange(
   timestamp: bigint
 ) {
   const { db } = context;
-  const positionId = `${protocolId}-${userAddress}-${reserveId}`;
+  const normalized = userAddress.toLowerCase() as `0x${string}`;
+  const userId = await ensureUser(context, chainIdentifier, normalized, blockNumber, timestamp);
+  const positionId = `${protocolId}-${normalized}-${reserveId}`;
 
   const existing = await db.sql
     .select()
@@ -46,7 +50,8 @@ export async function handleSupplyChange(
       id: positionId,
       protocolId,
       reserveId,
-      user: userAddress,
+      userId,
+      user: normalized,
       balance: amountDelta,
       isCollateral: true,
       lastUpdateBlockNumber: blockNumber,
@@ -69,7 +74,9 @@ export async function handleWithdrawChange(
   timestamp: bigint
 ) {
   const { db } = context;
-  const positionId = `${protocolId}-${userAddress}-${reserveId}`;
+  // Extract token address to avoid duplicating chain identifier
+  const tokenAddr = extractAddressFromId(reserveId);
+  const positionId = `${protocolId}-${userAddress}-${tokenAddr}`;
 
   const existing = await db.sql
     .select()
@@ -102,6 +109,7 @@ export async function handleWithdrawChange(
  */
 export async function handleBorrowChange(
   context: Context,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
   userBorrowPositionTable: any,
   protocolId: string,
   reserveId: string,
@@ -112,7 +120,11 @@ export async function handleBorrowChange(
   timestamp: bigint
 ) {
   const { db } = context;
-  const positionId = `${protocolId}-${userAddress}-${reserveId}`;
+  const normalized = userAddress.toLowerCase() as `0x${string}`;
+  const userId = await ensureUser(context, chainIdentifier, normalized, blockNumber, timestamp);
+  // Extract token address to avoid duplicating chain identifier
+  const tokenAddr = extractAddressFromId(reserveId);
+  const positionId = `${protocolId}-${normalized}-${tokenAddr}`;
   const isStableRate = interestRateMode === 1;
 
   const existing = await db.sql
@@ -136,7 +148,8 @@ export async function handleBorrowChange(
       id: positionId,
       protocolId,
       reserveId,
-      user: userAddress,
+      userId,
+      user: normalized,
       stableDebt: isStableRate ? amount : 0n,
       variableDebt: !isStableRate ? amount : 0n,
       lastUpdateBlockNumber: blockNumber,
@@ -159,7 +172,9 @@ export async function handleRepayChange(
   timestamp: bigint
 ) {
   const { db } = context;
-  const positionId = `${protocolId}-${userAddress}-${reserveId}`;
+  // Extract token address to avoid duplicating chain identifier
+  const tokenAddr = extractAddressFromId(reserveId);
+  const positionId = `${protocolId}-${userAddress}-${tokenAddr}`;
 
   const existing = await db.sql
     .select()
@@ -206,7 +221,9 @@ export async function handleCollateralToggle(
   timestamp: bigint
 ) {
   const { db } = context;
-  const positionId = `${protocolId}-${userAddress}-${reserveId}`;
+  // Extract token address to avoid duplicating chain identifier
+  const tokenAddr = extractAddressFromId(reserveId);
+  const positionId = `${protocolId}-${userAddress}-${tokenAddr}`;
 
   const existing = await db.sql
     .select()
@@ -244,8 +261,9 @@ export async function handleLiquidation(
 ) {
   const { db } = context;
 
-  // Update collateral position
-  const collateralPositionId = `${protocolId}-${userAddress}-${collateralReserveId}`;
+  // Update collateral position - extract token addresses to avoid duplicating chain identifier
+  const collateralTokenAddr = extractAddressFromId(collateralReserveId);
+  const collateralPositionId = `${protocolId}-${userAddress}-${collateralTokenAddr}`;
   const collateralExisting = await db.sql
     .select()
     .from(userSupplyPositionTable)
@@ -271,8 +289,9 @@ export async function handleLiquidation(
     }
   }
 
-  // Update borrow position
-  const borrowPositionId = `${protocolId}-${userAddress}-${debtReserveId}`;
+  // Update borrow position - extract token address to avoid duplicating chain identifier
+  const debtTokenAddr = extractAddressFromId(debtReserveId);
+  const borrowPositionId = `${protocolId}-${userAddress}-${debtTokenAddr}`;
   const borrowExisting = await db.sql
     .select()
     .from(userBorrowPositionTable)

@@ -1,5 +1,6 @@
 import type { Context } from "ponder:registry";
 import { eq, desc, and, lte } from "ponder";
+import { ensureUser, extractAddressFromId } from "@/db/helpers";
 
 const RAY = 10n ** 27n;
 
@@ -93,7 +94,7 @@ async function getPreviousBorrowSnapshot(
  */
 export async function trackScaledSupply(
   context: Context,
-  chainId: string,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
   userScaledSupplyPositionTable: any,
   reserveDataUpdatedTable: any,
   protocolId: string,
@@ -109,7 +110,9 @@ export async function trackScaledSupply(
   const reserveData = await getReserveDataAtBlock(context, reserveDataUpdatedTable, reserveId, blockNumber);
   const currentIndex = reserveData.liquidityIndex;
   const scaledAmount = (amount * RAY) / currentIndex;
-  const snapshotId = `${protocolId}-${normalizedUser}-${reserveId}-${blockNumber}`;
+  // Extract token address to avoid duplicating chain identifier
+  const tokenAddr = extractAddressFromId(reserveId);
+  const snapshotId = `${protocolId}-${normalizedUser}-${tokenAddr}-${blockNumber}`;
 
   const currentSnapshot = await db.sql
     .select()
@@ -131,10 +134,12 @@ export async function trackScaledSupply(
     const newScaledBalance = prevSnapshot ? prevSnapshot.scaledBalance + scaledAmount : scaledAmount;
     const isCollateral = prevSnapshot ? prevSnapshot.isCollateral : true;
 
+    const userId = await ensureUser(context, chainIdentifier, normalizedUser as `0x${string}`, blockNumber, timestamp);
     await db.insert(userScaledSupplyPositionTable).values({
       id: snapshotId,
       protocolId,
       reserveId,
+      userId,
       user: normalizedUser as `0x${string}`,
       blockNumber,
       timestamp,
@@ -150,7 +155,7 @@ export async function trackScaledSupply(
  */
 export async function trackScaledWithdraw(
   context: Context,
-  chainId: string,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
   userScaledSupplyPositionTable: any,
   reserveDataUpdatedTable: any,
   protocolId: string,
@@ -166,7 +171,9 @@ export async function trackScaledWithdraw(
   const reserveData = await getReserveDataAtBlock(context, reserveDataUpdatedTable, reserveId, blockNumber);
   const currentIndex = reserveData.liquidityIndex;
   const scaledAmount = (amount * RAY) / currentIndex;
-  const snapshotId = `${protocolId}-${normalizedUser}-${reserveId}-${blockNumber}`;
+  // Extract token address to avoid duplicating chain identifier
+  const tokenAddr = extractAddressFromId(reserveId);
+  const snapshotId = `${protocolId}-${normalizedUser}-${tokenAddr}-${blockNumber}`;
 
   const currentSnapshot = await db.sql
     .select()
@@ -187,10 +194,12 @@ export async function trackScaledWithdraw(
     const prevSnapshot = await getPreviousSupplySnapshot(context, userScaledSupplyPositionTable, normalizedUser, reserveId, blockNumber);
     if (!prevSnapshot) {
       console.warn(`⚠️  No previous supply snapshot found for ${normalizedUser}-${reserveId} at withdraw`);
+      const userId = await ensureUser(context, chainIdentifier, normalizedUser as `0x${string}`, blockNumber, timestamp);
       await db.insert(userScaledSupplyPositionTable).values({
         id: snapshotId,
         protocolId,
         reserveId,
+        userId,
         user: normalizedUser as `0x${string}`,
         blockNumber,
         timestamp,
@@ -202,10 +211,12 @@ export async function trackScaledWithdraw(
     }
 
     const newScaledBalance = prevSnapshot.scaledBalance - scaledAmount;
+    const userId = await ensureUser(context, chainIdentifier, normalizedUser as `0x${string}`, blockNumber, timestamp);
     await db.insert(userScaledSupplyPositionTable).values({
       id: snapshotId,
       protocolId,
       reserveId,
+      userId,
       user: normalizedUser as `0x${string}`,
       blockNumber,
       timestamp,
@@ -221,7 +232,7 @@ export async function trackScaledWithdraw(
  */
 export async function trackScaledBorrow(
   context: Context,
-  chainId: string,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
   userScaledBorrowPositionTable: any,
   reserveDataUpdatedTable: any,
   protocolId: string,
@@ -240,7 +251,9 @@ export async function trackScaledBorrow(
   const reserveData = await getReserveDataAtBlock(context, reserveDataUpdatedTable, reserveId, blockNumber);
   const currentIndex = reserveData.variableBorrowIndex;
   const scaledDebt = (amount * RAY) / currentIndex;
-  const snapshotId = `${protocolId}-${normalizedUser}-${reserveId}-${blockNumber}`;
+  // Extract token address to avoid duplicating chain identifier
+  const tokenAddr = extractAddressFromId(reserveId);
+  const snapshotId = `${protocolId}-${normalizedUser}-${tokenAddr}-${blockNumber}`;
 
   const currentSnapshot = await db.sql
     .select()
@@ -261,10 +274,12 @@ export async function trackScaledBorrow(
     const prevSnapshot = await getPreviousBorrowSnapshot(context, userScaledBorrowPositionTable, normalizedUser, reserveId, blockNumber - 1n);
     const newScaledDebt = prevSnapshot ? prevSnapshot.scaledVariableDebt + scaledDebt : scaledDebt;
 
+    const userId = await ensureUser(context, chainIdentifier, normalizedUser as `0x${string}`, blockNumber, timestamp);
     await db.insert(userScaledBorrowPositionTable).values({
       id: snapshotId,
       protocolId,
       reserveId,
+      userId,
       user: normalizedUser as `0x${string}`,
       blockNumber,
       timestamp,
@@ -279,7 +294,7 @@ export async function trackScaledBorrow(
  */
 export async function trackScaledRepay(
   context: Context,
-  chainId: string,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
   userScaledBorrowPositionTable: any,
   reserveDataUpdatedTable: any,
   protocolId: string,
@@ -295,7 +310,9 @@ export async function trackScaledRepay(
   const reserveData = await getReserveDataAtBlock(context, reserveDataUpdatedTable, reserveId, blockNumber);
   const currentIndex = reserveData.variableBorrowIndex;
   const scaledDebt = (amount * RAY) / currentIndex;
-  const snapshotId = `${protocolId}-${normalizedUser}-${reserveId}-${blockNumber}`;
+  // Extract token address to avoid duplicating chain identifier
+  const tokenAddr = extractAddressFromId(reserveId);
+  const snapshotId = `${protocolId}-${normalizedUser}-${tokenAddr}-${blockNumber}`;
 
   const currentSnapshot = await db.sql
     .select()
@@ -316,10 +333,12 @@ export async function trackScaledRepay(
     const prevSnapshot = await getPreviousBorrowSnapshot(context, userScaledBorrowPositionTable, normalizedUser, reserveId, blockNumber);
     if (!prevSnapshot) {
       console.warn(`⚠️  No previous borrow snapshot found for ${normalizedUser}-${reserveId} at repay`);
+      const userId = await ensureUser(context, chainIdentifier, normalizedUser as `0x${string}`, blockNumber, timestamp);
       await db.insert(userScaledBorrowPositionTable).values({
         id: snapshotId,
         protocolId,
         reserveId,
+        userId,
         user: normalizedUser as `0x${string}`,
         blockNumber,
         timestamp,
@@ -330,10 +349,12 @@ export async function trackScaledRepay(
     }
 
     const newScaledDebt = prevSnapshot.scaledVariableDebt - scaledDebt;
+    const userId = await ensureUser(context, chainIdentifier, normalizedUser as `0x${string}`, blockNumber, timestamp);
     await db.insert(userScaledBorrowPositionTable).values({
       id: snapshotId,
       protocolId,
       reserveId,
+      userId,
       user: normalizedUser as `0x${string}`,
       blockNumber,
       timestamp,
@@ -348,7 +369,7 @@ export async function trackScaledRepay(
  */
 export async function trackCollateralEnabled(
   context: Context,
-  chainId: string,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
   userScaledSupplyPositionTable: any,
   protocolId: string,
   reserveId: string,
@@ -358,7 +379,9 @@ export async function trackCollateralEnabled(
 ) {
   const { db } = context;
   const normalizedUser = userAddress.toLowerCase();
-  const snapshotId = `${protocolId}-${normalizedUser}-${reserveId}-${blockNumber}`;
+  // Extract token address to avoid duplicating chain identifier
+  const tokenAddr = extractAddressFromId(reserveId);
+  const snapshotId = `${protocolId}-${normalizedUser}-${tokenAddr}-${blockNumber}`;
 
   const currentSnapshot = await db.sql
     .select()
@@ -398,7 +421,7 @@ export async function trackCollateralEnabled(
  */
 export async function trackCollateralDisabled(
   context: Context,
-  chainId: string,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
   userScaledSupplyPositionTable: any,
   protocolId: string,
   reserveId: string,
@@ -408,7 +431,9 @@ export async function trackCollateralDisabled(
 ) {
   const { db } = context;
   const normalizedUser = userAddress.toLowerCase();
-  const snapshotId = `${protocolId}-${normalizedUser}-${reserveId}-${blockNumber}`;
+  // Extract token address to avoid duplicating chain identifier
+  const tokenAddr = extractAddressFromId(reserveId);
+  const snapshotId = `${protocolId}-${normalizedUser}-${tokenAddr}-${blockNumber}`;
 
   const currentSnapshot = await db.sql
     .select()
@@ -448,7 +473,7 @@ export async function trackCollateralDisabled(
  */
 export async function trackEModeSet(
   context: Context,
-  chainId: string,
+  chainIdentifier: string, // Lowercase chain identifier ("mainnet", "gnosis")
   userEModeCategoryTable: any,
   protocolId: string,
   userAddress: string,

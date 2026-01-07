@@ -7,7 +7,7 @@
  * Examples: "sparklend-mainnet", "aave-core-mainnet", "aave-horizon-mainnet"
  */
 
-import { onchainTable } from "ponder";
+import { onchainTable, relations } from "ponder";
 import { Chain } from "./chain";
 
 export const Protocol = onchainTable("Protocol", (t) => ({
@@ -20,9 +20,16 @@ export const Protocol = onchainTable("Protocol", (t) => ({
   // Protocol type identifier (e.g., "sparklend", "aave-core", "aave-horizon")
   type: t.text().notNull(),
   
-  // Foreign key to Chain table
-  chainId: t.text().notNull().references(() => Chain.id),
+  // FK to Chain table (enforced at application level)
+  chainId: t.text().notNull(),
   
   // Pool contract address for this protocol instance
   poolAddress: t.hex().notNull(),
+}));
+
+export const protocolRelations = relations(Protocol, ({ one }) => ({
+  chain: one(Chain, {
+    fields: [Protocol.chainId],
+    references: [Chain.id],
+  }),
 }));

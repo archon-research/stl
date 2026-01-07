@@ -23,7 +23,7 @@ import {
   SparklendMainnetUserEModeCategory,
 } from "@sparklend/schema/chains/mainnet";
 import { ensureProtocol, ensureReserve, createReserveConfiguration, ensureUser } from "@/db/helpers";
-import { SPARKLEND_MAINNET_POOL_ADDRESS } from "@/constants";
+import { SPARKLEND_MAINNET_POOL_ADDRESS, CHAIN_IDS } from "@/constants";
 import {
   handleSupplyChange,
   handleWithdrawChange,
@@ -49,18 +49,19 @@ import {
  * Register Sparklend Mainnet Pool Event Handlers
  */
 export function registerSparklendMainnetPoolEventHandlers() {
-  const chainId = "mainnet";
-  const CHAIN_NAME = "Mainnet";
+  const CHAIN_IDENTIFIER = "mainnet"; // Lowercase string used in IDs and DB references
+  const CHAIN_ID = CHAIN_IDS.mainnet; // Numeric chain ID (1)
+  const CHAIN_DISPLAY_NAME = "Mainnet"; // Display name
   const PROTOCOL_TYPE = "sparklend";
-  const PROTOCOL_ID = `${PROTOCOL_TYPE}-${chainId}`;
+  const PROTOCOL_ID = `${PROTOCOL_TYPE}-${CHAIN_IDENTIFIER}`;
 
   // BackUnbacked Event
   ponder.on("SparklendMainnetPool:BackUnbacked", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
@@ -68,7 +69,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
 
     const backerId = await ensureUser(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.backer,
       event.block.number,
       event.block.timestamp
@@ -77,7 +78,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
     const txHash = event.transaction?.hash || event.block.hash;
 
     await context.db.insert(SparklendMainnetBackUnbacked).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       reserveId,
       backerId,
@@ -88,30 +89,30 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   // Borrow Event
   ponder.on("SparklendMainnetPool:Borrow", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
-    const onBehalfOfId = await ensureUser(context, CHAIN_NAME, event.args.onBehalfOf, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
+    const onBehalfOfId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.onBehalfOf, event.block.number, event.block.timestamp);
 
     const txHash = event.transaction?.hash || event.block.hash;
     const blockNumber = event.block.number;
     const timestamp = event.block.timestamp;
 
     await context.db.insert(SparklendMainnetBorrow).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       reserveId,
       userId,
@@ -126,10 +127,11 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
 
     await handleBorrowChange(
       context,
+      CHAIN_IDENTIFIER,
       SparklendMainnetUserBorrowPosition,
       PROTOCOL_ID,
       reserveId,
@@ -142,7 +144,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
 
     await trackScaledBorrow(
       context,
-      chainId,
+      CHAIN_IDENTIFIER,
       SparklendMainnetUserScaledBorrowPosition,
       SparklendMainnetReserveDataUpdated,
       PROTOCOL_ID,
@@ -156,7 +158,8 @@ export function registerSparklendMainnetPoolEventHandlers() {
 
     await trackActiveUser(
       context,
-      chainId,
+      CHAIN_IDENTIFIER,
+      PROTOCOL_ID,
       SparklendMainnetActiveUser,
       event.args.onBehalfOf,
       blockNumber,
@@ -166,22 +169,22 @@ export function registerSparklendMainnetPoolEventHandlers() {
 
   // FlashLoan Event
   ponder.on("SparklendMainnetPool:FlashLoan", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.asset,
       event.block.number,
       event.block.timestamp
     );
 
-    const initiatorId = await ensureUser(context, CHAIN_NAME, event.args.initiator, event.block.number, event.block.timestamp);
+    const initiatorId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.initiator, event.block.number, event.block.timestamp);
 
     const txHash = event.transaction?.hash || event.block.hash;
 
     await context.db.insert(SparklendMainnetFlashLoan).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       reserveId,
       initiatorId,
@@ -195,16 +198,16 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   // IsolationModeTotalDebtUpdated Event
   ponder.on("SparklendMainnetPool:IsolationModeTotalDebtUpdated", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.asset,
       event.block.number,
       event.block.timestamp
@@ -213,7 +216,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
     const txHash = event.transaction?.hash || event.block.hash;
 
     await context.db.insert(SparklendMainnetIsolationModeTotalDebtUpdated).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       reserveId,
       totalDebt: event.args.totalDebt,
@@ -221,16 +224,16 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   // LiquidationCall Event
   ponder.on("SparklendMainnetPool:LiquidationCall", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const collateralReserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.collateralAsset,
       event.block.number,
       event.block.timestamp
@@ -238,21 +241,21 @@ export function registerSparklendMainnetPoolEventHandlers() {
     
     const debtReserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.debtAsset,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
-    const liquidatorId = await ensureUser(context, CHAIN_NAME, event.args.liquidator, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
+    const liquidatorId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.liquidator, event.block.number, event.block.timestamp);
 
     const txHash = event.transaction?.hash || event.block.hash;
     const blockNumber = event.block.number;
     const timestamp = event.block.timestamp;
 
     await context.db.insert(SparklendMainnetLiquidationCall).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       collateralReserveId,
       debtReserveId,
@@ -267,7 +270,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
 
     await handleLiquidation(
       context,
@@ -285,7 +288,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
 
     await trackScaledWithdraw(
       context,
-      chainId,
+      CHAIN_IDENTIFIER,
       SparklendMainnetUserScaledSupplyPosition,
       SparklendMainnetReserveDataUpdated,
       PROTOCOL_ID,
@@ -298,7 +301,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
 
     await trackScaledRepay(
       context,
-      chainId,
+      CHAIN_IDENTIFIER,
       SparklendMainnetUserScaledBorrowPosition,
       SparklendMainnetReserveDataUpdated,
       PROTOCOL_ID,
@@ -309,29 +312,29 @@ export function registerSparklendMainnetPoolEventHandlers() {
       timestamp
     );
 
-    await trackActiveUser(context, chainId, SparklendMainnetActiveUser, event.args.user, blockNumber, timestamp);
-    await trackActiveUser(context, chainId, SparklendMainnetActiveUser, event.args.liquidator, blockNumber, timestamp);
+    await trackActiveUser(context, CHAIN_IDENTIFIER, PROTOCOL_ID, SparklendMainnetActiveUser, event.args.user, blockNumber, timestamp);
+    await trackActiveUser(context, CHAIN_IDENTIFIER, PROTOCOL_ID, SparklendMainnetActiveUser, event.args.liquidator, blockNumber, timestamp);
   });
 
   // MintUnbacked Event
   ponder.on("SparklendMainnetPool:MintUnbacked", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
-    const onBehalfOfId = await ensureUser(context, CHAIN_NAME, event.args.onBehalfOf, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
+    const onBehalfOfId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.onBehalfOf, event.block.number, event.block.timestamp);
 
     const txHash = event.transaction?.hash || event.block.hash;
 
     await context.db.insert(SparklendMainnetMintUnbacked).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       reserveId,
       userId,
@@ -344,16 +347,16 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   // MintedToTreasury Event
   ponder.on("SparklendMainnetPool:MintedToTreasury", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
@@ -362,7 +365,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
     const txHash = event.transaction?.hash || event.block.hash;
 
     await context.db.insert(SparklendMainnetMintedToTreasury).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       reserveId,
       amountMinted: event.args.amountMinted,
@@ -370,30 +373,30 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   // Repay Event
   ponder.on("SparklendMainnetPool:Repay", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
-    const repayerId = await ensureUser(context, CHAIN_NAME, event.args.repayer, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
+    const repayerId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.repayer, event.block.number, event.block.timestamp);
 
     const txHash = event.transaction?.hash || event.block.hash;
     const blockNumber = event.block.number;
     const timestamp = event.block.timestamp;
 
     await context.db.insert(SparklendMainnetRepay).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       reserveId,
       userId,
@@ -406,7 +409,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
 
     await handleRepayChange(
       context,
@@ -421,7 +424,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
 
     await trackScaledRepay(
       context,
-      chainId,
+      CHAIN_IDENTIFIER,
       SparklendMainnetUserScaledBorrowPosition,
       SparklendMainnetReserveDataUpdated,
       PROTOCOL_ID,
@@ -432,16 +435,16 @@ export function registerSparklendMainnetPoolEventHandlers() {
       timestamp
     );
 
-    await trackActiveUser(context, chainId, SparklendMainnetActiveUser, event.args.user, blockNumber, timestamp);
+    await trackActiveUser(context, CHAIN_IDENTIFIER, PROTOCOL_ID, SparklendMainnetActiveUser, event.args.user, blockNumber, timestamp);
   });
 
   // ReserveDataUpdated Event
   ponder.on("SparklendMainnetPool:ReserveDataUpdated", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
@@ -467,7 +470,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
     const timestamp = event.block.timestamp;
 
     await context.db.insert(SparklendMainnetReserveDataUpdated).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       reserveId,
       reserveConfigurationId,
@@ -480,29 +483,29 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   // ReserveUsedAsCollateralDisabled Event
   ponder.on("SparklendMainnetPool:ReserveUsedAsCollateralDisabled", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
 
     const txHash = event.transaction?.hash || event.block.hash;
     const blockNumber = event.block.number;
     const timestamp = event.block.timestamp;
 
     await context.db.insert(SparklendMainnetReserveUsedAsCollateralDisabled).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       reserveId,
       userId,
@@ -511,7 +514,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
 
     await handleCollateralToggle(
       context,
@@ -526,7 +529,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
 
     await trackCollateralDisabled(
       context,
-      chainId,
+      CHAIN_IDENTIFIER,
       SparklendMainnetUserScaledSupplyPosition,
       PROTOCOL_ID,
       reserveId,
@@ -535,29 +538,29 @@ export function registerSparklendMainnetPoolEventHandlers() {
       timestamp
     );
 
-    await trackActiveUser(context, chainId, SparklendMainnetActiveUser, event.args.user, blockNumber, timestamp);
+    await trackActiveUser(context, CHAIN_IDENTIFIER, PROTOCOL_ID, SparklendMainnetActiveUser, event.args.user, blockNumber, timestamp);
   });
 
   // ReserveUsedAsCollateralEnabled Event
   ponder.on("SparklendMainnetPool:ReserveUsedAsCollateralEnabled", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
 
     const txHash = event.transaction?.hash || event.block.hash;
     const blockNumber = event.block.number;
     const timestamp = event.block.timestamp;
 
     await context.db.insert(SparklendMainnetReserveUsedAsCollateralEnabled).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       reserveId,
       userId,
@@ -566,7 +569,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
 
     await handleCollateralToggle(
       context,
@@ -581,7 +584,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
 
     await trackCollateralEnabled(
       context,
-      chainId,
+      CHAIN_IDENTIFIER,
       SparklendMainnetUserScaledSupplyPosition,
       PROTOCOL_ID,
       reserveId,
@@ -590,30 +593,30 @@ export function registerSparklendMainnetPoolEventHandlers() {
       timestamp
     );
 
-    await trackActiveUser(context, chainId, SparklendMainnetActiveUser, event.args.user, blockNumber, timestamp);
+    await trackActiveUser(context, CHAIN_IDENTIFIER, PROTOCOL_ID, SparklendMainnetActiveUser, event.args.user, blockNumber, timestamp);
   });
 
   // Supply Event
   ponder.on("SparklendMainnetPool:Supply", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
-    const onBehalfOfId = await ensureUser(context, CHAIN_NAME, event.args.onBehalfOf, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
+    const onBehalfOfId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.onBehalfOf, event.block.number, event.block.timestamp);
 
     const txHash = event.transaction?.hash || event.block.hash;
     const blockNumber = event.block.number;
     const timestamp = event.block.timestamp;
 
     await context.db.insert(SparklendMainnetSupply).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       reserveId,
       userId,
@@ -626,10 +629,11 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
 
     await handleSupplyChange(
       context,
+      CHAIN_IDENTIFIER,
       SparklendMainnetUserSupplyPosition,
       PROTOCOL_ID,
       reserveId,
@@ -641,7 +645,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
 
     await trackScaledSupply(
       context,
-      chainId,
+      CHAIN_IDENTIFIER,
       SparklendMainnetUserScaledSupplyPosition,
       SparklendMainnetReserveDataUpdated,
       PROTOCOL_ID,
@@ -652,27 +656,27 @@ export function registerSparklendMainnetPoolEventHandlers() {
       timestamp
     );
 
-    await trackActiveUser(context, chainId, SparklendMainnetActiveUser, event.args.onBehalfOf, blockNumber, timestamp);
+    await trackActiveUser(context, CHAIN_IDENTIFIER, PROTOCOL_ID, SparklendMainnetActiveUser, event.args.onBehalfOf, blockNumber, timestamp);
   });
 
   // SwapBorrowRateMode Event
   ponder.on("SparklendMainnetPool:SwapBorrowRateMode", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
 
     const txHash = event.transaction?.hash || event.block.hash;
 
     await context.db.insert(SparklendMainnetSwapBorrowRateMode).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       reserveId,
       userId,
@@ -682,21 +686,21 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   // UserEModeSet Event
   ponder.on("SparklendMainnetPool:UserEModeSet", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
 
     const txHash = event.transaction?.hash || event.block.hash;
     const blockNumber = event.block.number;
     const timestamp = event.block.timestamp;
 
     await context.db.insert(SparklendMainnetUserEModeSet).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       userId,
       user: event.args.user,
@@ -705,11 +709,11 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
 
     await trackEModeSet(
       context,
-      chainId,
+      CHAIN_IDENTIFIER,
       SparklendMainnetUserEModeCategory,
       PROTOCOL_ID,
       event.args.user,
@@ -718,30 +722,30 @@ export function registerSparklendMainnetPoolEventHandlers() {
       timestamp
     );
 
-    await trackActiveUser(context, chainId, SparklendMainnetActiveUser, event.args.user, blockNumber, timestamp);
+    await trackActiveUser(context, CHAIN_IDENTIFIER, PROTOCOL_ID, SparklendMainnetActiveUser, event.args.user, blockNumber, timestamp);
   });
 
   // Withdraw Event
   ponder.on("SparklendMainnetPool:Withdraw", async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, SPARKLEND_MAINNET_POOL_ADDRESS, "Sparklend");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
-    const toId = await ensureUser(context, CHAIN_NAME, event.args.to, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
+    const toId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.to, event.block.number, event.block.timestamp);
 
     const txHash = event.transaction?.hash || event.block.hash;
     const blockNumber = event.block.number;
     const timestamp = event.block.timestamp;
 
     await context.db.insert(SparklendMainnetWithdraw).values({
-      id: `sparklend-${chainId}-${event.id}`,
+      id: `sparklend-${CHAIN_IDENTIFIER}-${event.id}`,
       protocolId: PROTOCOL_ID,
       reserveId,
       userId,
@@ -753,7 +757,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
       transactionHash: txHash,
       blockNumber,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
 
     await handleWithdrawChange(
       context,
@@ -768,7 +772,7 @@ export function registerSparklendMainnetPoolEventHandlers() {
 
     await trackScaledWithdraw(
       context,
-      chainId,
+      CHAIN_IDENTIFIER,
       SparklendMainnetUserScaledSupplyPosition,
       SparklendMainnetReserveDataUpdated,
       PROTOCOL_ID,
@@ -779,6 +783,6 @@ export function registerSparklendMainnetPoolEventHandlers() {
       timestamp
     );
 
-    await trackActiveUser(context, chainId, SparklendMainnetActiveUser, event.args.user, blockNumber, timestamp);
+    await trackActiveUser(context, CHAIN_IDENTIFIER, PROTOCOL_ID, SparklendMainnetActiveUser, event.args.user, blockNumber, timestamp);
   });
 }

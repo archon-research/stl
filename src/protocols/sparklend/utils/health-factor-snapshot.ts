@@ -1,6 +1,6 @@
 import type { Context } from "ponder:registry";
 import { eq, and, lte } from "ponder";
-import { getProtocolId } from "@/db/helpers";
+import { ensureUser, extractAddressFromId } from "@/db/helpers";
 
 /**
  * Track a user as active in the protocol
@@ -8,6 +8,7 @@ import { getProtocolId } from "@/db/helpers";
 export async function trackActiveUser(
   context: Context,
   chainId: string,
+  protocolId: string,
   activeUserTable: any,
   userAddress: `0x${string}`,
   blockNumber: bigint,
@@ -15,23 +16,31 @@ export async function trackActiveUser(
 ): Promise<void> {
   const { db } = context;
   const normalized = userAddress.toLowerCase() as `0x${string}`;
-  const id = `sparklend-${chainId}-${normalized}`;
+  const userId = await ensureUser(context, chainId, normalized, blockNumber, timestamp);
+  // Extract just the address to avoid duplicating chain identifier
+  const userAddr = extractAddressFromId(userId);
+  const id = `${protocolId}-${userAddr}`;
 
   await db.insert(activeUserTable)
     .values({
       id,
+      protocolId,
+      userId,
       user: normalized,
+      firstSeenBlock: blockNumber,
+      firstSeenTimestamp: timestamp,
+      lastActivityBlock: blockNumber,
+      lastActivityTimestamp: timestamp,
       hasActivePosition: true,
-      lastUpdateBlockNumber: blockNumber,
-      lastUpdateTimestamp: timestamp,
     })
-    .onConflictDoUpdate((oc) =>
-      oc.set({
+    .onConflictDoUpdate({
+      target: activeUserTable.id,
+      set: {
         hasActivePosition: true,
-        lastUpdateBlockNumber: blockNumber,
-        lastUpdateTimestamp: timestamp,
-      })
-    );
+        lastActivityBlock: blockNumber,
+        lastActivityTimestamp: timestamp,
+      }
+    });
 }
 
 /**
@@ -255,11 +264,13 @@ export async function snapshotUserHealthFactor(
     );
 
     // Store health factor history
+    const userId = await ensureUser(context, chainId, normalizedUser, blockNumber, timestamp);
     const hfId = `${protocolId}-${normalizedUser}-${blockNumber}`;
     await db.insert(userHealthFactorHistoryTable)
       .values({
         id: hfId,
         protocolId,
+        userId,
         user: normalizedUser,
         healthFactor: result.healthFactor,
         totalCollateralBase: result.totalCollateralBase,

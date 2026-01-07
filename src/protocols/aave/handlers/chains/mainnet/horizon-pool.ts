@@ -7,13 +7,15 @@
 import { ponder } from "ponder:registry";
 import * as schema from "@aave/schema/chains/mainnet";
 import { ensureProtocol, ensureReserve, createReserveConfiguration, ensureUser } from "@/db/helpers";
-import { AAVE_V3_HORIZON_POOL_ADDRESS } from "@/constants";
+import { AAVE_V3_HORIZON_POOL_ADDRESS, CHAIN_IDS } from "@/constants";
 
 export function registerAaveMainnetHorizonHandlers() {
   const pool = "AaveMainnetHorizonPool";
-  const CHAIN_NAME = "Mainnet";
+  const CHAIN_IDENTIFIER = "mainnet"; // Lowercase string used in IDs and DB references
+  const CHAIN_ID = CHAIN_IDS.mainnet; // Numeric chain ID (1)
+  const CHAIN_DISPLAY_NAME = "Mainnet"; // Display name
   const PROTOCOL_TYPE = "aave-horizon";
-  const PROTOCOL_ID = `${PROTOCOL_TYPE}-mainnet`;
+  const PROTOCOL_ID = `${PROTOCOL_TYPE}-${CHAIN_IDENTIFIER}`;
   
   const getTxHash = (event: any) => event.transaction?.hash || event.block.hash;
 
@@ -22,18 +24,18 @@ export function registerAaveMainnetHorizonHandlers() {
   // ===========================
 
   ponder.on(`${pool}:Borrow`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
-    const onBehalfOfId = await ensureUser(context, CHAIN_NAME, event.args.onBehalfOf, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
+    const onBehalfOfId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.onBehalfOf, event.block.number, event.block.timestamp);
 
     await context.db.insert(schema.AaveMainnetHorizonSharedEvents.Borrow).values({
       id: `aave-mainnet-horizon-${event.id}`,
@@ -51,21 +53,21 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:DeficitCovered`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const callerId = await ensureUser(context, CHAIN_NAME, event.args.caller, event.block.number, event.block.timestamp);
+    const callerId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.caller, event.block.number, event.block.timestamp);
 
     await context.db.insert(schema.AaveMainnetHorizonSharedEvents.DeficitCovered).values({
       id: `aave-mainnet-horizon-${event.id}`,
@@ -78,21 +80,21 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:DeficitCreated`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.debtAsset,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
 
     await context.db.insert(schema.AaveMainnetHorizonSharedEvents.DeficitCreated).values({
       id: `aave-mainnet-horizon-${event.id}`,
@@ -105,21 +107,21 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:FlashLoan`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.asset,
       event.block.number,
       event.block.timestamp
     );
 
-    const initiatorId = await ensureUser(context, CHAIN_NAME, event.args.initiator, event.block.number, event.block.timestamp);
+    const initiatorId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.initiator, event.block.number, event.block.timestamp);
 
     await context.db.insert(schema.AaveMainnetHorizonSharedEvents.FlashLoan).values({
       id: `aave-mainnet-horizon-${event.id}`,
@@ -136,15 +138,15 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:IsolationModeTotalDebtUpdated`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.asset,
       event.block.number,
       event.block.timestamp
@@ -159,15 +161,15 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:LiquidationCall`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const collateralReserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.collateralAsset,
       event.block.number,
       event.block.timestamp
@@ -175,14 +177,14 @@ export function registerAaveMainnetHorizonHandlers() {
     
     const debtReserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.debtAsset,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
-    const liquidatorId = await ensureUser(context, CHAIN_NAME, event.args.liquidator, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
+    const liquidatorId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.liquidator, event.block.number, event.block.timestamp);
 
     await context.db.insert(schema.AaveMainnetHorizonSharedEvents.LiquidationCall).values({
       id: `aave-mainnet-horizon-${event.id}`,
@@ -200,15 +202,15 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:MintedToTreasury`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
@@ -223,22 +225,22 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:Repay`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
-    const repayerId = await ensureUser(context, CHAIN_NAME, event.args.repayer, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
+    const repayerId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.repayer, event.block.number, event.block.timestamp);
 
     await context.db.insert(schema.AaveMainnetHorizonSharedEvents.Repay).values({
       id: `aave-mainnet-horizon-${event.id}`,
@@ -254,15 +256,15 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:ReserveDataUpdated`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
@@ -297,21 +299,21 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:ReserveUsedAsCollateralDisabled`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
 
     await context.db.insert(schema.AaveMainnetHorizonSharedEvents.ReserveUsedAsCollateralDisabled).values({
       id: `aave-mainnet-horizon-${event.id}`,
@@ -323,21 +325,21 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:ReserveUsedAsCollateralEnabled`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
 
     await context.db.insert(schema.AaveMainnetHorizonSharedEvents.ReserveUsedAsCollateralEnabled).values({
       id: `aave-mainnet-horizon-${event.id}`,
@@ -349,22 +351,22 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:Supply`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
-    const onBehalfOfId = await ensureUser(context, CHAIN_NAME, event.args.onBehalfOf, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
+    const onBehalfOfId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.onBehalfOf, event.block.number, event.block.timestamp);
 
     await context.db.insert(schema.AaveMainnetHorizonSharedEvents.Supply).values({
       id: `aave-mainnet-horizon-${event.id}`,
@@ -380,13 +382,13 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:UserEModeSet`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
 
     await context.db.insert(schema.AaveMainnetHorizonSharedEvents.UserEModeSet).values({
       id: `aave-mainnet-horizon-${event.id}`,
@@ -398,22 +400,22 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:Withdraw`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
-    const toId = await ensureUser(context, CHAIN_NAME, event.args.to, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
+    const toId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.to, event.block.number, event.block.timestamp);
 
     await context.db.insert(schema.AaveMainnetHorizonSharedEvents.Withdraw).values({
       id: `aave-mainnet-horizon-${event.id}`,
@@ -428,7 +430,7 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   // ===========================
@@ -436,17 +438,17 @@ export function registerAaveMainnetHorizonHandlers() {
   // ===========================
 
   ponder.on(`${pool}:BackUnbacked`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const backerId = await ensureUser(context, CHAIN_NAME, event.args.backer, event.block.number, event.block.timestamp);
+    const backerId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.backer, event.block.number, event.block.timestamp);
 
     await context.db.insert(schema.AaveMainnetHorizonUniqueEvents.BackUnbacked).values({
       id: `aave-mainnet-horizon-${event.id}`,
@@ -460,22 +462,22 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 
   ponder.on(`${pool}:MintUnbacked`, async ({ event, context }) => {
-    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
+    await ensureProtocol(context, PROTOCOL_TYPE, CHAIN_IDENTIFIER, CHAIN_ID, CHAIN_DISPLAY_NAME, AAVE_V3_HORIZON_POOL_ADDRESS, "Aave Horizon");
     
     const reserveId = await ensureReserve(
       context,
-      CHAIN_NAME,
+      CHAIN_IDENTIFIER,
       event.args.reserve,
       event.block.number,
       event.block.timestamp
     );
 
-    const userId = await ensureUser(context, CHAIN_NAME, event.args.user, event.block.number, event.block.timestamp);
-    const onBehalfOfId = await ensureUser(context, CHAIN_NAME, event.args.onBehalfOf, event.block.number, event.block.timestamp);
+    const userId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.user, event.block.number, event.block.timestamp);
+    const onBehalfOfId = await ensureUser(context, CHAIN_IDENTIFIER, event.args.onBehalfOf, event.block.number, event.block.timestamp);
 
     await context.db.insert(schema.AaveMainnetHorizonUniqueEvents.MintUnbacked).values({
       id: `aave-mainnet-horizon-${event.id}`,
@@ -491,6 +493,6 @@ export function registerAaveMainnetHorizonHandlers() {
       transactionHash: getTxHash(event),
       blockNumber: event.block.number,
       logIndex: BigInt(event.log.logIndex),
-    });
+    }).onConflictDoNothing();
   });
 }

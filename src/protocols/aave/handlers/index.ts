@@ -2,6 +2,7 @@
  * Aave Protocol Handlers
  * 
  * Imports all chain-specific handlers for the Aave protocol.
+ * Handlers are automatically registered on import.
  */
 
 import "./chains/mainnet";

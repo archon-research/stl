@@ -1,11 +1,12 @@
 /**
  * Sparklend Protocol Handlers
  *
- * Exports all event and block handlers for all supported chains
+ * Imports all event and block handlers for all supported chains.
+ * Handlers are automatically registered on import.
  */
 
 // Mainnet handlers
-export * from "./chains/mainnet";
+import "./chains/mainnet";
 
 // Gnosis handlers
-export * from "./chains/gnosis";
+import "./chains/gnosis";
