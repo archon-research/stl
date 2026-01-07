@@ -10,7 +10,17 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+)
+
+const (
+	// tracerName is the instrumentation name for this service.
+	tracerName = "github.com/archon-research/stl/stl-verify/internal/services/live_data"
 )
 
 // LiveConfig holds configuration for the LiveService.
@@ -209,11 +219,22 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 	if err != nil {
 		return fmt.Errorf("failed to parse block number: %w", err)
 	}
+
+	// Start span for the entire block processing
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(s.ctx, "live.processBlock",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("block.number", blockNum),
+			attribute.String("block.hash", header.Hash),
+			attribute.String("block.parent_hash", header.ParentHash),
+		),
+	)
 	defer func() {
+		span.SetAttributes(attribute.Int64("block.duration_ms", time.Since(start).Milliseconds()))
+		span.End()
 		s.logger.Info("processBlock completed", "block", blockNum, "duration", time.Since(start))
 	}()
-
-	ctx := s.ctx
 
 	block := LightBlock{
 		Number:     blockNum,
@@ -223,15 +244,23 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 
 	// Check if we've already processed this block
 	if s.isDuplicateBlock(ctx, header.Hash, blockNum) {
+		span.SetAttributes(attribute.Bool("block.duplicate", true))
 		return nil
 	}
 
 	// Detect reorg BEFORE adding to chain
 	isReorg, reorgDepth, commonAncestor, err := s.detectReorg(header, blockNum, receivedAt)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "reorg detection failed")
 		return fmt.Errorf("reorg detection failed: %w", err)
 	}
 	if isReorg {
+		span.SetAttributes(
+			attribute.Bool("block.reorg", true),
+			attribute.Int("block.reorg_depth", reorgDepth),
+			attribute.Int64("block.common_ancestor", commonAncestor),
+		)
 		s.logger.Warn("reorg detected", "block", blockNum, "depth", reorgDepth, "commonAncestor", commonAncestor)
 		if s.metrics != nil {
 			s.metrics.RecordReorg(ctx, reorgDepth, commonAncestor, blockNum)
@@ -241,6 +270,7 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 	// Now atomically add to chain (may fail if added concurrently)
 	if !s.tryAddBlock(block) {
 		s.logger.Debug("block added by concurrent process, skipping", "block", blockNum)
+		span.SetAttributes(attribute.Bool("block.concurrent_skip", true))
 		return nil
 	}
 
@@ -253,6 +283,8 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 		IsOrphaned: false,
 	}
 	if err := s.stateRepo.SaveBlock(ctx, state); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to save block state")
 		return fmt.Errorf("failed to save block state: %w", err)
 	}
 

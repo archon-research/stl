@@ -7,8 +7,18 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+)
+
+const (
+	// tracerName is the instrumentation name for this service.
+	tracerName = "github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 )
 
 // BackfillConfig holds configuration for the BackfillService.
@@ -152,11 +162,23 @@ func (s *BackfillService) run() {
 
 // findAndFillGaps queries the state repo for gaps and fills them.
 func (s *BackfillService) findAndFillGaps() error {
-	ctx := s.ctx
+	start := time.Now()
+
+	// Start span for the backfill pass
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(s.ctx, "backfill.findAndFillGaps",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer func() {
+		span.SetAttributes(attribute.Int64("backfill.duration_ms", time.Since(start).Milliseconds()))
+		span.End()
+	}()
 
 	// Get the highest block we've processed
 	maxBlock, err := s.stateRepo.GetMaxBlockNumber(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to get max block number")
 		return fmt.Errorf("failed to get max block number: %w", err)
 	}
 	if maxBlock == 0 {
@@ -167,17 +189,26 @@ func (s *BackfillService) findAndFillGaps() error {
 	// Get the lowest block we have
 	minBlock, err := s.stateRepo.GetMinBlockNumber(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to get min block number")
 		return fmt.Errorf("failed to get min block number: %w", err)
 	}
 
 	// Find gaps in our block sequence
 	gaps, err := s.stateRepo.FindGaps(ctx, minBlock, maxBlock)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to find block gaps")
 		return fmt.Errorf("failed to find block gaps: %w", err)
 	}
 
 	if len(gaps) == 0 {
 		s.logger.Debug("no gaps to backfill", "minBlock", minBlock, "maxBlock", maxBlock)
+		span.SetAttributes(
+			attribute.Int("backfill.gaps_count", 0),
+			attribute.Int64("backfill.min_block", minBlock),
+			attribute.Int64("backfill.max_block", maxBlock),
+		)
 		return nil
 	}
 
@@ -186,6 +217,13 @@ func (s *BackfillService) findAndFillGaps() error {
 	for _, gap := range gaps {
 		totalMissing += gap.To - gap.From + 1
 	}
+
+	span.SetAttributes(
+		attribute.Int("backfill.gaps_count", len(gaps)),
+		attribute.Int64("backfill.total_missing", totalMissing),
+		attribute.Int64("backfill.min_block", minBlock),
+		attribute.Int64("backfill.max_block", maxBlock),
+	)
 
 	s.logger.Info("found gaps to backfill",
 		"gaps", len(gaps),
@@ -201,7 +239,7 @@ func (s *BackfillService) findAndFillGaps() error {
 		default:
 		}
 
-		if err := s.fillGap(gap); err != nil {
+		if err := s.fillGapWithContext(ctx, gap); err != nil {
 			s.logger.Warn("failed to fill gap", "from", gap.From, "to", gap.To, "error", err)
 			// Continue with other gaps
 		}
@@ -243,6 +281,32 @@ func (s *BackfillService) fillGap(gap outbound.BlockRange) error {
 
 	s.logger.Info("gap backfill complete", "from", gap.From, "to", gap.To)
 	return nil
+}
+
+// fillGapWithContext fills a gap with tracing context propagation.
+func (s *BackfillService) fillGapWithContext(ctx context.Context, gap outbound.BlockRange) error {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "backfill.fillGap",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("gap.from", gap.From),
+			attribute.Int64("gap.to", gap.To),
+			attribute.Int64("gap.size", gap.To-gap.From+1),
+		),
+	)
+	defer span.End()
+
+	// Temporarily override context for batch processing
+	oldCtx := s.ctx
+	s.ctx = ctx
+	defer func() { s.ctx = oldCtx }()
+
+	err := s.fillGap(gap)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "gap fill failed")
+	}
+	return err
 }
 
 // processBatch fetches and processes a batch of blocks.
