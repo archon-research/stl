@@ -73,8 +73,7 @@ type LiveService struct {
 	eventSink  outbound.EventSink
 	metrics    outbound.MetricsRecorder
 
-	// In-memory chain state for reorg detection
-	chainMu           sync.RWMutex
+	// In-memory chain state for reorg detection (single-goroutine access)
 	unfinalizedBlocks []LightBlock
 	finalizedBlock    *LightBlock
 
@@ -188,13 +187,10 @@ func (s *LiveService) processHeaders(headers <-chan outbound.BlockHeader) {
 // isDuplicateBlock checks if a block has already been processed.
 // It first does a quick in-memory check, then falls back to DB lookup.
 func (s *LiveService) isDuplicateBlock(ctx context.Context, hash string, blockNum int64) bool {
-	// First check if duplicate (quick check under read lock)
-	s.chainMu.RLock()
+	// Quick in-memory check
 	inMemory := slices.ContainsFunc(s.unfinalizedBlocks, func(b LightBlock) bool {
 		return b.Hash == hash
 	})
-	s.chainMu.RUnlock()
-
 	if inMemory {
 		s.logger.Debug("duplicate block, skipping", "block", blockNum)
 		return true
@@ -267,12 +263,8 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 		}
 	}
 
-	// Now atomically add to chain (may fail if added concurrently)
-	if !s.tryAddBlock(block) {
-		s.logger.Debug("block added by concurrent process, skipping", "block", blockNum)
-		span.SetAttributes(attribute.Bool("block.concurrent_skip", true))
-		return nil
-	}
+	// Add block to in-memory chain
+	s.addBlock(block)
 
 	// Save block state to DB
 	state := outbound.BlockState{
@@ -297,38 +289,27 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 	return nil
 }
 
-// tryAddBlock atomically checks for duplicate and adds to unfinalized chain.
-// Returns false if block already exists (duplicate).
-func (s *LiveService) tryAddBlock(block LightBlock) bool {
-	s.chainMu.Lock()
-	defer s.chainMu.Unlock()
-
-	// Add to chain (sorted insert)
+// addBlock adds a block to the in-memory unfinalized chain.
+func (s *LiveService) addBlock(block LightBlock) {
+	// Sorted insert by block number
 	insertIdx := len(s.unfinalizedBlocks)
 	for i, b := range s.unfinalizedBlocks {
-		if b.Number > block.Number {
+		if b.Number >= block.Number {
 			insertIdx = i
-			break
-		} else if b.Number == block.Number {
-			insertIdx = i + 1
 			break
 		}
 	}
 
 	s.unfinalizedBlocks = slices.Insert(s.unfinalizedBlocks, insertIdx, block)
 
+	// Trim to max size
 	if len(s.unfinalizedBlocks) > s.config.MaxUnfinalizedBlocks {
 		s.unfinalizedBlocks = s.unfinalizedBlocks[1:]
 	}
-
-	return true
 }
 
 // detectReorg detects chain reorganizations using Ponder-style parent hash chain validation.
 func (s *LiveService) detectReorg(header outbound.BlockHeader, incomingBlockNum int64, receivedAt time.Time) (bool, int, int64, error) {
-	s.chainMu.Lock()
-	defer s.chainMu.Unlock()
-
 	if len(s.unfinalizedBlocks) == 0 {
 		return false, 0, 0, nil
 	}
@@ -442,9 +423,6 @@ func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, r
 
 // updateFinalizedBlock updates the finalized block pointer.
 func (s *LiveService) updateFinalizedBlock(currentBlockNum int64) {
-	s.chainMu.Lock()
-	defer s.chainMu.Unlock()
-
 	finalizedNum := currentBlockNum - int64(s.config.FinalityBlockCount)
 	if finalizedNum <= 0 {
 		return
@@ -481,9 +459,6 @@ func (s *LiveService) restoreInMemoryChain() {
 	if len(recentBlocks) == 0 {
 		return
 	}
-
-	s.chainMu.Lock()
-	defer s.chainMu.Unlock()
 
 	s.unfinalizedBlocks = make([]LightBlock, 0, len(recentBlocks))
 	for i := len(recentBlocks) - 1; i >= 0; i-- {
