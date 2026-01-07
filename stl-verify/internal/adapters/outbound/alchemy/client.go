@@ -39,6 +39,9 @@ type ClientConfig struct {
 	// BackoffFactor is the multiplier applied to backoff after each retry.
 	BackoffFactor float64
 
+	// DisableBlobs disables fetching blob sidecars (useful for pre-Dencun blocks or unsupported nodes).
+	DisableBlobs bool
+
 	// Logger is the structured logger for the client.
 	Logger *slog.Logger
 
@@ -230,18 +233,26 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		return nil, nil
 	}
 
-	// Build batch request: 4 calls per block (block, receipts, traces, blobs)
-	requests := make([]jsonRPCRequest, 0, len(blockNums)*4)
+	// Build batch request: 3-4 calls per block (block, receipts, traces, and optionally blobs)
+	callsPerBlock := 3
+	if !c.config.DisableBlobs {
+		callsPerBlock = 4
+	}
+	requests := make([]jsonRPCRequest, 0, len(blockNums)*callsPerBlock)
 	for i, blockNum := range blockNums {
 		hexNum := fmt.Sprintf("0x%x", blockNum)
-		baseID := i * 4
+		baseID := i * 4 // Keep consistent IDs for response mapping
 
 		requests = append(requests,
 			jsonRPCRequest{JSONRPC: "2.0", ID: baseID, Method: "eth_getBlockByNumber", Params: []interface{}{hexNum, fullTx}},
 			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 1, Method: "eth_getBlockReceipts", Params: []interface{}{hexNum}},
 			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 2, Method: "trace_block", Params: []interface{}{hexNum}},
-			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 3, Method: "eth_getBlobSidecars", Params: []interface{}{hexNum}},
 		)
+		if !c.config.DisableBlobs {
+			requests = append(requests,
+				jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 3, Method: "eth_getBlobSidecars", Params: []interface{}{hexNum}},
+			)
+		}
 	}
 
 	responses, err := c.callBatch(ctx, requests)
@@ -294,15 +305,17 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 			results[i].TracesErr = fmt.Errorf("missing response for traces of block %d", blockNum)
 		}
 
-		// Blobs
-		if resp := respMap[baseID+3]; resp != nil {
-			if resp.Error != nil {
-				results[i].BlobsErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+		// Blobs (only if enabled)
+		if !c.config.DisableBlobs {
+			if resp := respMap[baseID+3]; resp != nil {
+				if resp.Error != nil {
+					results[i].BlobsErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+				} else {
+					results[i].Blobs = resp.Result
+				}
 			} else {
-				results[i].Blobs = resp.Result
+				results[i].BlobsErr = fmt.Errorf("missing response for blobs of block %d", blockNum)
 			}
-		} else {
-			results[i].BlobsErr = fmt.Errorf("missing response for blobs of block %d", blockNum)
 		}
 	}
 

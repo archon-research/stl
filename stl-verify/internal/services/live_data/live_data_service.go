@@ -24,6 +24,9 @@ type LiveConfig struct {
 	// MaxUnfinalizedBlocks is the max number of unfinalized blocks to keep in memory.
 	MaxUnfinalizedBlocks int
 
+	// DisableBlobs disables fetching blob sidecars (useful for pre-Dencun blocks or unsupported nodes).
+	DisableBlobs bool
+
 	// Logger is the structured logger.
 	Logger *slog.Logger
 
@@ -201,10 +204,14 @@ func (s *LiveService) isDuplicateBlock(ctx context.Context, hash string, blockNu
 
 // processBlock handles a single block: dedup, reorg detection, state tracking, data fetching, publishing.
 func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.Time) error {
+	start := time.Now()
 	blockNum, err := parseBlockNumber(header.Number)
 	if err != nil {
 		return fmt.Errorf("failed to parse block number: %w", err)
 	}
+	defer func() {
+		s.logger.Info("processBlock completed", "block", blockNum, "duration", time.Since(start))
+	}()
 
 	ctx := s.ctx
 
@@ -477,7 +484,7 @@ func (s *LiveService) fetchAndPublishBlockData(header outbound.BlockHeader, bloc
 	blockTimestamp, _ := parseBlockNumber(header.Timestamp)
 
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(3)
 
 	// Fetch and publish block
 	go func() {
@@ -497,11 +504,14 @@ func (s *LiveService) fetchAndPublishBlockData(header outbound.BlockHeader, bloc
 		s.fetchCacheAndPublishTraces(chainID, blockNum, blockHash, receivedAt, isReorg)
 	}()
 
-	// Fetch and publish blobs
-	go func() {
-		defer wg.Done()
-		s.fetchCacheAndPublishBlobs(chainID, blockNum, blockHash, receivedAt, isReorg)
-	}()
+	// Fetch and publish blobs (if enabled)
+	if !s.config.DisableBlobs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.fetchCacheAndPublishBlobs(chainID, blockNum, blockHash, receivedAt, isReorg)
+		}()
+	}
 
 	wg.Wait()
 }

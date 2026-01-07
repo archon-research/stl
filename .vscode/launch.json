@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Watcher",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/stl-verify/cmd/watcher/main.go",
+      "envFile": "${workspaceFolder}/.env",
+      "args": ["-disable-blobs"]
+    }
+  ]
+}

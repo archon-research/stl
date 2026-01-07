@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -18,11 +19,16 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
 )
 
 func main() {
+	// Parse command-line flags
+	disableBlobs := flag.Bool("disable-blobs", false, "Disable fetching blob sidecars")
+	flag.Parse()
+
 	// Load .env file if present
 	loadEnvFile(".env")
 
@@ -31,6 +37,21 @@ func main() {
 		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(logger)
+
+	// Initialize OpenTelemetry tracer
+	jaegerEndpoint := getEnv("JAEGER_ENDPOINT", "localhost:4317")
+	shutdownTracer, err := telemetry.InitTracer(context.Background(), telemetry.TracerConfig{
+		ServiceName:    "stl-watcher",
+		ServiceVersion: "0.1.0",
+		Environment:    getEnv("ENVIRONMENT", "development"),
+		JaegerEndpoint: jaegerEndpoint,
+	})
+	if err != nil {
+		logger.Warn("failed to init tracer, continuing without tracing", "error", err)
+	} else {
+		defer shutdownTracer(context.Background())
+		logger.Info("tracer initialized", "endpoint", jaegerEndpoint)
+	}
 
 	// Get configuration from environment
 	alchemyAPIKey := getEnv("ALCHEMY_API_KEY", "")
@@ -81,11 +102,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create OpenTelemetry instrumentation for Alchemy client
+	alchemyTelemetry, err := alchemy.NewTelemetry()
+	if err != nil {
+		logger.Warn("failed to create alchemy telemetry, continuing without instrumentation", "error", err)
+	}
+
 	// Create Alchemy HTTP client
 	httpURL := fmt.Sprintf("https://eth-mainnet.g.alchemy.com/v2/%s", alchemyAPIKey)
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
-		HTTPURL: httpURL,
-		Logger:  logger,
+		HTTPURL:      httpURL,
+		DisableBlobs: *disableBlobs,
+		Logger:       logger,
+		Telemetry:    alchemyTelemetry,
 	})
 	if err != nil {
 		logger.Error("failed to create client", "error", err)
@@ -101,6 +130,7 @@ func main() {
 		ChainID:              1, // Ethereum mainnet
 		FinalityBlockCount:   64,
 		MaxUnfinalizedBlocks: 128,
+		DisableBlobs:         *disableBlobs,
 		Logger:               logger,
 	}
 
