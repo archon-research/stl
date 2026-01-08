@@ -1635,136 +1635,206 @@ func (m *mockFailingClient) GetBlobSidecars(ctx context.Context, blockNum int64)
 	return m.mockBlockchainClient.GetBlobSidecars(ctx, blockNum)
 }
 
-func TestFetchAndPublishBlockData_BlockFetchFailure_LogsWarning(t *testing.T) {
-	ctx := context.Background()
-	stateRepo := newMockStateRepo()
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
+// mockFailingCache simulates cache failures
+type mockFailingCache struct {
+	*memory.BlockCache
+	failSetBlock    bool
+	failSetReceipts bool
+	failSetTraces   bool
+	failSetBlobs    bool
+}
 
-	client := newMockFailingClient()
-	client.failGetBlock = true
-	client.addBlock(100, "") // Add for receipts/traces
-
-	svc, err := NewLiveService(LiveConfig{
-		DisableBlobs: true, // Disable blobs for simpler test
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
-	if err != nil {
-		t.Fatalf("failed to create service: %v", err)
-	}
-
-	header := outbound.BlockHeader{
-		Number:     "0x64",
-		Hash:       "0xhash",
-		ParentHash: "0xparent",
-		Timestamp:  "0x0",
-	}
-
-	// Should not panic, just log warning
-	svc.fetchAndPublishBlockData(ctx, header, 100, time.Now(), false)
-
-	// Block event should NOT be published (fetch failed)
-	events := eventSink.GetEvents()
-	for _, e := range events {
-		if _, ok := e.(outbound.BlockEvent); ok {
-			t.Error("expected no BlockEvent when fetch fails")
-		}
+func newMockFailingCache() *mockFailingCache {
+	return &mockFailingCache{
+		BlockCache: memory.NewBlockCache(),
 	}
 }
 
-func TestFetchAndPublishBlockData_ReceiptsFetchFailure_LogsWarning(t *testing.T) {
-	ctx := context.Background()
-	stateRepo := newMockStateRepo()
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
-
-	client := newMockFailingClient()
-	client.failGetReceipts = true
-	client.addBlock(100, "")
-
-	svc, err := NewLiveService(LiveConfig{
-		DisableBlobs: true,
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
-	if err != nil {
-		t.Fatalf("failed to create service: %v", err)
+func (c *mockFailingCache) SetBlock(ctx context.Context, chainID, blockNum int64, data json.RawMessage) error {
+	if c.failSetBlock {
+		return fmt.Errorf("simulated cache block failure")
 	}
+	return c.BlockCache.SetBlock(ctx, chainID, blockNum, data)
+}
 
-	header := outbound.BlockHeader{
-		Number:     "0x64",
-		Hash:       "0xhash",
-		ParentHash: "0xparent",
-		Timestamp:  "0x0",
+func (c *mockFailingCache) SetReceipts(ctx context.Context, chainID, blockNum int64, data json.RawMessage) error {
+	if c.failSetReceipts {
+		return fmt.Errorf("simulated cache receipts failure")
 	}
+	return c.BlockCache.SetReceipts(ctx, chainID, blockNum, data)
+}
 
-	svc.fetchAndPublishBlockData(ctx, header, 100, time.Now(), false)
+func (c *mockFailingCache) SetTraces(ctx context.Context, chainID, blockNum int64, data json.RawMessage) error {
+	if c.failSetTraces {
+		return fmt.Errorf("simulated cache traces failure")
+	}
+	return c.BlockCache.SetTraces(ctx, chainID, blockNum, data)
+}
 
-	// Block event should be published, but receipts should not
-	events := eventSink.GetEvents()
-	hasBlock := false
-	hasReceipts := false
-	for _, e := range events {
-		if _, ok := e.(outbound.BlockEvent); ok {
-			hasBlock = true
-		}
-		if _, ok := e.(outbound.ReceiptsEvent); ok {
-			hasReceipts = true
-		}
+func (c *mockFailingCache) SetBlobs(ctx context.Context, chainID, blockNum int64, data json.RawMessage) error {
+	if c.failSetBlobs {
+		return fmt.Errorf("simulated cache blobs failure")
 	}
-	if !hasBlock {
-		t.Error("expected BlockEvent to be published")
-	}
-	if hasReceipts {
-		t.Error("expected no ReceiptsEvent when fetch fails")
+	return c.BlockCache.SetBlobs(ctx, chainID, blockNum, data)
+}
+
+// mockFailingEventSink simulates publish failures
+type mockFailingEventSink struct {
+	*memory.EventSink
+	failPublish bool
+}
+
+func newMockFailingEventSink() *mockFailingEventSink {
+	return &mockFailingEventSink{
+		EventSink: memory.NewEventSink(),
 	}
 }
 
-func TestFetchAndPublishBlockData_AllSucceed_PublishesAllEvents(t *testing.T) {
-	ctx := context.Background()
-	stateRepo := newMockStateRepo()
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
+func (s *mockFailingEventSink) Publish(ctx context.Context, event outbound.Event) error {
+	if s.failPublish {
+		return fmt.Errorf("simulated publish failure")
+	}
+	return s.EventSink.Publish(ctx, event)
+}
 
-	client := newMockFailingClient()
-	client.addBlock(100, "")
-
-	svc, err := NewLiveService(LiveConfig{
-		DisableBlobs: true,
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
-	if err != nil {
-		t.Fatalf("failed to create service: %v", err)
+func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
+	tests := []struct {
+		name              string
+		failGetBlock      bool
+		failGetReceipts   bool
+		failGetTraces     bool
+		failGetBlobs      bool
+		failCacheBlock    bool
+		failCacheReceipts bool
+		failCacheTraces   bool
+		failCacheBlobs    bool
+		failPublish       bool
+		disableBlobs      bool
+		wantErr           bool
+		errContains       string
+	}{
+		{
+			name:    "all_succeed",
+			wantErr: false,
+		},
+		{
+			name:         "block_fetch_fails",
+			failGetBlock: true,
+			wantErr:      true,
+			errContains:  "failed to fetch block",
+		},
+		{
+			name:            "receipts_fetch_fails",
+			failGetReceipts: true,
+			wantErr:         true,
+			errContains:     "failed to fetch receipts",
+		},
+		{
+			name:          "traces_fetch_fails",
+			failGetTraces: true,
+			wantErr:       true,
+			errContains:   "failed to fetch traces",
+		},
+		{
+			name:         "blobs_fetch_fails",
+			failGetBlobs: true,
+			wantErr:      true,
+			errContains:  "failed to fetch blobs",
+		},
+		{
+			name:           "block_cache_fails",
+			failCacheBlock: true,
+			wantErr:        true,
+			errContains:    "failed to cache block",
+		},
+		{
+			name:              "receipts_cache_fails",
+			failCacheReceipts: true,
+			wantErr:           true,
+			errContains:       "failed to cache receipts",
+		},
+		{
+			name:            "traces_cache_fails",
+			failCacheTraces: true,
+			wantErr:         true,
+			errContains:     "failed to cache traces",
+		},
+		{
+			name:           "blobs_cache_fails",
+			failCacheBlobs: true,
+			wantErr:        true,
+			errContains:    "failed to cache blobs",
+		},
+		{
+			name:        "publish_fails",
+			failPublish: true,
+			wantErr:     true,
+			errContains: "failed to publish",
+		},
+		{
+			name:         "blobs_disabled_blobs_error_ignored",
+			failGetBlobs: true,
+			disableBlobs: true,
+			wantErr:      false,
+		},
+		{
+			name:            "multiple_failures",
+			failGetBlock:    true,
+			failGetReceipts: true,
+			failGetTraces:   true,
+			wantErr:         true,
+		},
 	}
 
-	header := outbound.BlockHeader{
-		Number:     "0x64",
-		Hash:       "0xhash",
-		ParentHash: "0xparent",
-		Timestamp:  "0x0",
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			stateRepo := newMockStateRepo()
 
-	svc.fetchAndPublishBlockData(ctx, header, 100, time.Now(), false)
+			client := newMockFailingClient()
+			client.failGetBlock = tt.failGetBlock
+			client.failGetReceipts = tt.failGetReceipts
+			client.failGetTraces = tt.failGetTraces
+			client.failGetBlobs = tt.failGetBlobs
+			client.addBlock(100, "")
 
-	events := eventSink.GetEvents()
-	hasBlock := false
-	hasReceipts := false
-	hasTraces := false
-	for _, e := range events {
-		switch e.(type) {
-		case outbound.BlockEvent:
-			hasBlock = true
-		case outbound.ReceiptsEvent:
-			hasReceipts = true
-		case outbound.TracesEvent:
-			hasTraces = true
-		}
-	}
+			cache := newMockFailingCache()
+			cache.failSetBlock = tt.failCacheBlock
+			cache.failSetReceipts = tt.failCacheReceipts
+			cache.failSetTraces = tt.failCacheTraces
+			cache.failSetBlobs = tt.failCacheBlobs
 
-	if !hasBlock {
-		t.Error("expected BlockEvent")
-	}
-	if !hasReceipts {
-		t.Error("expected ReceiptsEvent")
-	}
-	if !hasTraces {
-		t.Error("expected TracesEvent")
+			eventSink := newMockFailingEventSink()
+			eventSink.failPublish = tt.failPublish
+
+			svc, err := NewLiveService(LiveConfig{
+				DisableBlobs: tt.disableBlobs,
+			}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+			if err != nil {
+				t.Fatalf("failed to create service: %v", err)
+			}
+
+			header := outbound.BlockHeader{
+				Number:     "0x64",
+				Hash:       "0xhash",
+				ParentHash: "0xparent",
+				Timestamp:  "0x0",
+			}
+
+			err = svc.fetchAndPublishBlockData(ctx, header, 100, time.Now(), false)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Error("expected error, got nil")
+				} else if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+					t.Errorf("expected error containing %q, got %q", tt.errContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}
+		})
 	}
 }
 
@@ -1791,7 +1861,10 @@ func TestFetchAndPublishBlockData_WithBlobs_PublishesBlobEvent(t *testing.T) {
 		Timestamp:  "0x0",
 	}
 
-	svc.fetchAndPublishBlockData(ctx, header, 100, time.Now(), false)
+	err = svc.fetchAndPublishBlockData(ctx, header, 100, time.Now(), false)
+	if err != nil {
+		t.Fatalf("fetchAndPublishBlockData failed: %v", err)
+	}
 
 	events := eventSink.GetEvents()
 	hasBlobs := false
@@ -1829,7 +1902,10 @@ func TestFetchAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
 		Timestamp:  "0x0",
 	}
 
-	svc.fetchAndPublishBlockData(ctx, header, 100, time.Now(), true) // isReorg = true
+	err = svc.fetchAndPublishBlockData(ctx, header, 100, time.Now(), true) // isReorg = true
+	if err != nil {
+		t.Fatalf("fetchAndPublishBlockData failed: %v", err)
+	}
 
 	events := eventSink.GetEvents()
 	for _, e := range events {
