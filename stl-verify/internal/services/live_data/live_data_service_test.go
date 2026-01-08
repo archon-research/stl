@@ -969,97 +969,117 @@ func TestHandleReorg_WalksBackViaNetwork(t *testing.T) {
 	}
 }
 
-func TestHandleReorg_BelowFinalizedBlock_ReturnsError(t *testing.T) {
-	stateRepo := newMockStateRepo()
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
-
-	svc, err := NewLiveService(LiveConfig{
-		FinalityBlockCount: 64,
-	}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
-	if err != nil {
-		t.Fatalf("failed to create service: %v", err)
-	}
-
-	// Set finalized block at 50
-	svc.finalizedBlock = &LightBlock{Number: 50, Hash: "0xfinalized"}
-
-	// Some unfinalized blocks
-	svc.unfinalizedBlocks = []LightBlock{
-		{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99"},
-	}
-
-	// Incoming block at finalized height (late arrival)
-	header := outbound.BlockHeader{
-		Number:     "0x32", // 50
-		Hash:       "0xlate_block",
-		ParentHash: "0xunknown",
-	}
-
-	_, _, _, err = svc.handleReorg(header, 50, time.Now())
-	if err == nil {
-		t.Error("expected error for block at/below finalized height")
-	}
-	if err != nil && !contains(err.Error(), "at or below finalized block") {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
-func TestHandleReorg_NoCommonAncestor_ReturnsError(t *testing.T) {
-	stateRepo := newMockStateRepo()
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
-
-	// Client returns blocks that don't match our chain
-	client := newMockClient()
-	// Set up a chain of unknown blocks that the walk will traverse
-	client.blocks[99] = blockTestData{
-		header: outbound.BlockHeader{
-			Number:     "0x63",
-			Hash:       "0xunknown_parent",
-			ParentHash: "0xunknown_grandparent",
+func TestHandleReorg_Errors(t *testing.T) {
+	tests := []struct {
+		name        string
+		config      LiveConfig
+		setupClient func(*mockBlockchainClient)
+		setupChain  func(*LiveService)
+		header      outbound.BlockHeader
+		blockNum    int64
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name: "below_finalized_block",
+			config: LiveConfig{
+				FinalityBlockCount: 64,
+			},
+			setupChain: func(svc *LiveService) {
+				svc.finalizedBlock = &LightBlock{Number: 50, Hash: "0xfinalized"}
+				svc.unfinalizedBlocks = []LightBlock{
+					{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99"},
+				}
+			},
+			header: outbound.BlockHeader{
+				Number:     "0x32", // 50
+				Hash:       "0xlate_block",
+				ParentHash: "0xunknown",
+			},
+			blockNum:    50,
+			wantErr:     true,
+			errContains: "at or below finalized block",
+		},
+		{
+			name: "no_common_ancestor",
+			config: LiveConfig{
+				FinalityBlockCount: 3, // Walk will exhaust after 3 iterations
+			},
+			setupClient: func(client *mockBlockchainClient) {
+				// Set up a chain of unknown blocks that the walk will traverse
+				client.blocks[99] = blockTestData{
+					header: outbound.BlockHeader{
+						Number:     "0x63",
+						Hash:       "0xunknown_parent",
+						ParentHash: "0xunknown_grandparent",
+					},
+				}
+				client.blocks[98] = blockTestData{
+					header: outbound.BlockHeader{
+						Number:     "0x62",
+						Hash:       "0xunknown_grandparent",
+						ParentHash: "0xunknown_great_grandparent",
+					},
+				}
+				client.blocks[97] = blockTestData{
+					header: outbound.BlockHeader{
+						Number:     "0x61",
+						Hash:       "0xunknown_great_grandparent",
+						ParentHash: "0xunknown_great_great_grandparent",
+					},
+				}
+			},
+			setupChain: func(svc *LiveService) {
+				// Our chain - completely different from the unknown chain
+				svc.unfinalizedBlocks = []LightBlock{
+					{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99"},
+				}
+			},
+			header: outbound.BlockHeader{
+				Number:     "0x64", // 100
+				Hash:       "0xblock100_alt",
+				ParentHash: "0xunknown_parent",
+			},
+			blockNum:    100,
+			wantErr:     true,
+			errContains: "no common ancestor found",
 		},
 	}
-	client.blocks[98] = blockTestData{
-		header: outbound.BlockHeader{
-			Number:     "0x62",
-			Hash:       "0xunknown_grandparent",
-			ParentHash: "0xunknown_great_grandparent",
-		},
-	}
-	client.blocks[97] = blockTestData{
-		header: outbound.BlockHeader{
-			Number:     "0x61",
-			Hash:       "0xunknown_great_grandparent",
-			ParentHash: "0xunknown_great_great_grandparent",
-		},
-	}
 
-	svc, err := NewLiveService(LiveConfig{
-		FinalityBlockCount: 3, // Walk will exhaust after 3 iterations
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
-	if err != nil {
-		t.Fatalf("failed to create service: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stateRepo := newMockStateRepo()
+			cache := memory.NewBlockCache()
+			eventSink := memory.NewEventSink()
+			client := newMockClient()
 
-	// Our chain - completely different from the unknown chain
-	svc.unfinalizedBlocks = []LightBlock{
-		{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99"},
-	}
+			if tt.setupClient != nil {
+				tt.setupClient(client)
+			}
 
-	// Incoming block with unknown parent chain
-	header := outbound.BlockHeader{
-		Number:     "0x64", // 100
-		Hash:       "0xblock100_alt",
-		ParentHash: "0xunknown_parent",
-	}
+			svc, err := NewLiveService(tt.config, newMockSubscriber(), client, stateRepo, cache, eventSink)
+			if err != nil {
+				t.Fatalf("failed to create service: %v", err)
+			}
 
-	_, _, _, err = svc.handleReorg(header, 100, time.Now())
-	if err == nil {
-		t.Error("expected error when no common ancestor found")
-	}
-	if err != nil && !contains(err.Error(), "no common ancestor found") {
-		t.Errorf("unexpected error message: %v", err)
+			if tt.setupChain != nil {
+				tt.setupChain(svc)
+			}
+
+			_, _, _, err = svc.handleReorg(tt.header, tt.blockNum, time.Now())
+
+			if tt.wantErr {
+				if err == nil {
+					t.Error("expected error, got nil")
+				} else if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+					t.Errorf("expected error containing %q, got %q", tt.errContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}
+		})
 	}
 }
 
@@ -1410,32 +1430,99 @@ func TestRestoreInMemoryChain_RespectsMaxUnfinalizedBlocks(t *testing.T) {
 // processBlock error handling tests
 // ============================================================================
 
-func TestProcessBlock_InvalidBlockNumber_ReturnsError(t *testing.T) {
-	stateRepo := newMockStateRepo()
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
-
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
-	if err != nil {
-		t.Fatalf("failed to create service: %v", err)
+func TestProcessBlock_Errors(t *testing.T) {
+	tests := []struct {
+		name        string
+		header      outbound.BlockHeader
+		setupMocks  func(*mockStateRepo, *mockBlockchainClient)
+		setupChain  func(*LiveService)
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name: "invalid_block_number",
+			header: outbound.BlockHeader{
+				Number:     "not_a_hex",
+				Hash:       "0xhash",
+				ParentHash: "0xparent",
+			},
+			wantErr:     true,
+			errContains: "failed to parse block number",
+		},
+		{
+			name: "save_block_error",
+			header: outbound.BlockHeader{
+				Number:     "0x64",
+				Hash:       "0xnew_hash",
+				ParentHash: "0x63",
+			},
+			setupMocks: func(repo *mockStateRepo, client *mockBlockchainClient) {
+				repo.saveBlockErr = fmt.Errorf("database write failed")
+				client.addBlock(100, "")
+			},
+			wantErr:     true,
+			errContains: "failed to save block state",
+		},
+		{
+			name: "reorg_detection_error",
+			header: outbound.BlockHeader{
+				Number:     "0x64", // 100 - at finalized height
+				Hash:       "0xlate",
+				ParentHash: "0xunknown",
+			},
+			setupChain: func(svc *LiveService) {
+				svc.finalizedBlock = &LightBlock{Number: 100, Hash: "0xfinalized"}
+				svc.unfinalizedBlocks = []LightBlock{
+					{Number: 105, Hash: "0x105", ParentHash: "0x104"},
+				}
+			},
+			wantErr:     true,
+			errContains: "reorg detection failed",
+		},
 	}
-	// Set context for processBlock (normally set by Start)
-	svc.ctx, svc.cancel = context.WithCancel(context.Background())
-	defer svc.cancel()
 
-	// Invalid hex block number
-	header := outbound.BlockHeader{
-		Number:     "not_a_hex",
-		Hash:       "0xhash",
-		ParentHash: "0xparent",
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stateRepo := newMockStateRepo()
+			cache := memory.NewBlockCache()
+			eventSink := memory.NewEventSink()
+			client := newMockClient()
 
-	err = svc.processBlock(header, time.Now())
-	if err == nil {
-		t.Error("expected error for invalid block number")
-	}
-	if err != nil && !contains(err.Error(), "failed to parse block number") {
-		t.Errorf("unexpected error: %v", err)
+			if tt.setupMocks != nil {
+				tt.setupMocks(stateRepo, client)
+			}
+
+			config := LiveConfig{}
+			if tt.name == "reorg_detection_error" {
+				config.FinalityBlockCount = 10
+			}
+
+			svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
+			if err != nil {
+				t.Fatalf("failed to create service: %v", err)
+			}
+
+			svc.ctx, svc.cancel = context.WithCancel(context.Background())
+			defer svc.cancel()
+
+			if tt.setupChain != nil {
+				tt.setupChain(svc)
+			}
+
+			err = svc.processBlock(tt.header, time.Now())
+
+			if tt.wantErr {
+				if err == nil {
+					t.Error("expected error, got nil")
+				} else if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+					t.Errorf("expected error containing %q, got %q", tt.errContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}
+		})
 	}
 }
 
@@ -1475,76 +1562,6 @@ func TestProcessBlock_SkipsDuplicate(t *testing.T) {
 	// Should still be 1 block (not 2)
 	if len(svc.unfinalizedBlocks) != 1 {
 		t.Errorf("expected 1 block (duplicate skipped), got %d", len(svc.unfinalizedBlocks))
-	}
-}
-
-func TestProcessBlock_SaveBlockError_ReturnsError(t *testing.T) {
-	stateRepo := newMockStateRepo()
-	stateRepo.saveBlockErr = fmt.Errorf("database write failed")
-
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
-
-	client := newMockClient()
-	client.addBlock(100, "")
-
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), client, stateRepo, cache, eventSink)
-	if err != nil {
-		t.Fatalf("failed to create service: %v", err)
-	}
-	// Set context for processBlock
-	svc.ctx, svc.cancel = context.WithCancel(context.Background())
-	defer svc.cancel()
-
-	header := outbound.BlockHeader{
-		Number:     "0x64",
-		Hash:       "0xnew_hash",
-		ParentHash: "0x63",
-	}
-
-	err = svc.processBlock(header, time.Now())
-	if err == nil {
-		t.Error("expected error when SaveBlock fails")
-	}
-	if err != nil && !contains(err.Error(), "failed to save block state") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestProcessBlock_ReorgDetectionError_ReturnsError(t *testing.T) {
-	stateRepo := newMockStateRepo()
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
-
-	svc, err := NewLiveService(LiveConfig{
-		FinalityBlockCount: 10,
-	}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
-	if err != nil {
-		t.Fatalf("failed to create service: %v", err)
-	}
-	// Set context for processBlock
-	svc.ctx, svc.cancel = context.WithCancel(context.Background())
-	defer svc.cancel()
-
-	// Set up chain with finalized block
-	svc.finalizedBlock = &LightBlock{Number: 100, Hash: "0xfinalized"}
-	svc.unfinalizedBlocks = []LightBlock{
-		{Number: 105, Hash: "0x105", ParentHash: "0x104"},
-	}
-
-	// Incoming block at finalized height (will trigger handleReorg error)
-	header := outbound.BlockHeader{
-		Number:     "0x64", // 100 - at finalized height
-		Hash:       "0xlate",
-		ParentHash: "0xunknown",
-	}
-
-	err = svc.processBlock(header, time.Now())
-	if err == nil {
-		t.Error("expected error for reorg at finalized height")
-	}
-	if err != nil && !contains(err.Error(), "reorg detection failed") {
-		t.Errorf("unexpected error: %v", err)
 	}
 }
 
