@@ -33,50 +33,50 @@ func NewBlockCache() *BlockCache {
 	}
 }
 
-func (c *BlockCache) key(chainID int64, blockNumber int64, dataType string) string {
-	return fmt.Sprintf("%d:%d:%s", chainID, blockNumber, dataType)
+func (c *BlockCache) key(chainID int64, blockNumber int64, version int, dataType string) string {
+	return fmt.Sprintf("%d:%d:%d:%s", chainID, blockNumber, version, dataType)
 }
 
 // SetBlock stores the full block with transactions.
-func (c *BlockCache) SetBlock(ctx context.Context, chainID int64, blockNumber int64, data json.RawMessage) error {
+func (c *BlockCache) SetBlock(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.blocks[c.key(chainID, blockNumber, "block")] = data
+	c.blocks[c.key(chainID, blockNumber, version, "block")] = data
 	return nil
 }
 
 // SetReceipts stores transaction receipts for a block.
-func (c *BlockCache) SetReceipts(ctx context.Context, chainID int64, blockNumber int64, data json.RawMessage) error {
+func (c *BlockCache) SetReceipts(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.blocks[c.key(chainID, blockNumber, "receipts")] = data
+	c.blocks[c.key(chainID, blockNumber, version, "receipts")] = data
 	return nil
 }
 
 // SetTraces stores execution traces for a block.
-func (c *BlockCache) SetTraces(ctx context.Context, chainID int64, blockNumber int64, data json.RawMessage) error {
+func (c *BlockCache) SetTraces(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.blocks[c.key(chainID, blockNumber, "traces")] = data
+	c.blocks[c.key(chainID, blockNumber, version, "traces")] = data
 	return nil
 }
 
 // SetBlobs stores blob sidecars for a block.
-func (c *BlockCache) SetBlobs(ctx context.Context, chainID int64, blockNumber int64, data json.RawMessage) error {
+func (c *BlockCache) SetBlobs(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.blocks[c.key(chainID, blockNumber, "blobs")] = data
+	c.blocks[c.key(chainID, blockNumber, version, "blobs")] = data
 	return nil
 }
 
-// DeleteBlock removes all cached data for a block.
-func (c *BlockCache) DeleteBlock(ctx context.Context, chainID int64, blockNumber int64) error {
+// DeleteBlock removes all cached data for a block at a specific version.
+func (c *BlockCache) DeleteBlock(ctx context.Context, chainID int64, blockNumber int64, version int) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.blocks, c.key(chainID, blockNumber, "block"))
-	delete(c.blocks, c.key(chainID, blockNumber, "receipts"))
-	delete(c.blocks, c.key(chainID, blockNumber, "traces"))
-	delete(c.blocks, c.key(chainID, blockNumber, "blobs"))
+	delete(c.blocks, c.key(chainID, blockNumber, version, "block"))
+	delete(c.blocks, c.key(chainID, blockNumber, version, "receipts"))
+	delete(c.blocks, c.key(chainID, blockNumber, version, "traces"))
+	delete(c.blocks, c.key(chainID, blockNumber, version, "blobs"))
 	return nil
 }
 

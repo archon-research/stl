@@ -403,7 +403,7 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.cache.SetBlock(s.ctx, chainID, blockNum, bd.Block); err != nil {
+			if err := s.cache.SetBlock(s.ctx, chainID, blockNum, version, bd.Block); err != nil {
 				s.logger.Warn("failed to cache block", "block", blockNum, "error", err)
 				return
 			}
@@ -415,7 +415,7 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 				ParentHash:     parentHash,
 				BlockTimestamp: blockTimestamp,
 				ReceivedAt:     receivedAt,
-				CacheKey:       shared.CacheKey(chainID, blockNum, "block"),
+				CacheKey:       shared.CacheKey(chainID, blockNum, version, "block"),
 				IsBackfill:     true,
 			}
 			if err := s.eventSink.Publish(s.ctx, event); err != nil {
@@ -429,16 +429,17 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.cache.SetReceipts(s.ctx, chainID, blockNum, bd.Receipts); err != nil {
+			if err := s.cache.SetReceipts(s.ctx, chainID, blockNum, version, bd.Receipts); err != nil {
 				s.logger.Warn("failed to cache receipts", "block", blockNum, "error", err)
 				return
 			}
 			event := outbound.ReceiptsEvent{
 				ChainID:     chainID,
 				BlockNumber: blockNum,
+				Version:     version,
 				BlockHash:   blockHash,
 				ReceivedAt:  receivedAt,
-				CacheKey:    shared.CacheKey(chainID, blockNum, "receipts"),
+				CacheKey:    shared.CacheKey(chainID, blockNum, version, "receipts"),
 				IsBackfill:  true,
 			}
 			if err := s.eventSink.Publish(s.ctx, event); err != nil {
@@ -452,16 +453,17 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.cache.SetTraces(s.ctx, chainID, blockNum, bd.Traces); err != nil {
+			if err := s.cache.SetTraces(s.ctx, chainID, blockNum, version, bd.Traces); err != nil {
 				s.logger.Warn("failed to cache traces", "block", blockNum, "error", err)
 				return
 			}
 			event := outbound.TracesEvent{
 				ChainID:     chainID,
 				BlockNumber: blockNum,
+				Version:     version,
 				BlockHash:   blockHash,
 				ReceivedAt:  receivedAt,
-				CacheKey:    shared.CacheKey(chainID, blockNum, "traces"),
+				CacheKey:    shared.CacheKey(chainID, blockNum, version, "traces"),
 				IsBackfill:  true,
 			}
 			if err := s.eventSink.Publish(s.ctx, event); err != nil {
@@ -475,16 +477,17 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.cache.SetBlobs(s.ctx, chainID, blockNum, bd.Blobs); err != nil {
+			if err := s.cache.SetBlobs(s.ctx, chainID, blockNum, version, bd.Blobs); err != nil {
 				s.logger.Warn("failed to cache blobs", "block", blockNum, "error", err)
 				return
 			}
 			event := outbound.BlobsEvent{
 				ChainID:     chainID,
 				BlockNumber: blockNum,
+				Version:     version,
 				BlockHash:   blockHash,
 				ReceivedAt:  receivedAt,
-				CacheKey:    shared.CacheKey(chainID, blockNum, "blobs"),
+				CacheKey:    shared.CacheKey(chainID, blockNum, version, "blobs"),
 				IsBackfill:  true,
 			}
 			if err := s.eventSink.Publish(s.ctx, event); err != nil {

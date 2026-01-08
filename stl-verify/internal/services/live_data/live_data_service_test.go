@@ -1650,32 +1650,32 @@ func newMockFailingCache() *mockFailingCache {
 	}
 }
 
-func (c *mockFailingCache) SetBlock(ctx context.Context, chainID, blockNum int64, data json.RawMessage) error {
+func (c *mockFailingCache) SetBlock(ctx context.Context, chainID, blockNum int64, version int, data json.RawMessage) error {
 	if c.failSetBlock {
 		return fmt.Errorf("simulated cache block failure")
 	}
-	return c.BlockCache.SetBlock(ctx, chainID, blockNum, data)
+	return c.BlockCache.SetBlock(ctx, chainID, blockNum, version, data)
 }
 
-func (c *mockFailingCache) SetReceipts(ctx context.Context, chainID, blockNum int64, data json.RawMessage) error {
+func (c *mockFailingCache) SetReceipts(ctx context.Context, chainID, blockNum int64, version int, data json.RawMessage) error {
 	if c.failSetReceipts {
 		return fmt.Errorf("simulated cache receipts failure")
 	}
-	return c.BlockCache.SetReceipts(ctx, chainID, blockNum, data)
+	return c.BlockCache.SetReceipts(ctx, chainID, blockNum, version, data)
 }
 
-func (c *mockFailingCache) SetTraces(ctx context.Context, chainID, blockNum int64, data json.RawMessage) error {
+func (c *mockFailingCache) SetTraces(ctx context.Context, chainID, blockNum int64, version int, data json.RawMessage) error {
 	if c.failSetTraces {
 		return fmt.Errorf("simulated cache traces failure")
 	}
-	return c.BlockCache.SetTraces(ctx, chainID, blockNum, data)
+	return c.BlockCache.SetTraces(ctx, chainID, blockNum, version, data)
 }
 
-func (c *mockFailingCache) SetBlobs(ctx context.Context, chainID, blockNum int64, data json.RawMessage) error {
+func (c *mockFailingCache) SetBlobs(ctx context.Context, chainID, blockNum int64, version int, data json.RawMessage) error {
 	if c.failSetBlobs {
 		return fmt.Errorf("simulated cache blobs failure")
 	}
-	return c.BlockCache.SetBlobs(ctx, chainID, blockNum, data)
+	return c.BlockCache.SetBlobs(ctx, chainID, blockNum, version, data)
 }
 
 // mockFailingEventSink simulates publish failures

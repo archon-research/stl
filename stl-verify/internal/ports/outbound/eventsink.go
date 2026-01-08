@@ -76,6 +76,9 @@ type ReceiptsEvent struct {
 	// BlockNumber is the block number.
 	BlockNumber int64 `json:"blockNumber"`
 
+	// Version is incremented each time this block number is reorged.
+	Version int `json:"version"`
+
 	// BlockHash is the block hash.
 	BlockHash string `json:"blockHash"`
 
@@ -105,6 +108,9 @@ type TracesEvent struct {
 	// BlockNumber is the block number.
 	BlockNumber int64 `json:"blockNumber"`
 
+	// Version is incremented each time this block number is reorged.
+	Version int `json:"version"`
+
 	// BlockHash is the block hash.
 	BlockHash string `json:"blockHash"`
 
@@ -133,6 +139,9 @@ type BlobsEvent struct {
 
 	// BlockNumber is the block number.
 	BlockNumber int64 `json:"blockNumber"`
+
+	// Version is incremented each time this block number is reorged.
+	Version int `json:"version"`
 
 	// BlockHash is the block hash.
 	BlockHash string `json:"blockHash"`

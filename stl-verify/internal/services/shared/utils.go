@@ -22,7 +22,8 @@ func ParseBlockHeader(data []byte, header *outbound.BlockHeader) error {
 }
 
 // CacheKey generates the cache key for a given data type.
-// Format: {chainID}:{blockNumber}:{dataType}
-func CacheKey(chainID, blockNumber int64, dataType string) string {
-	return fmt.Sprintf("%d:%d:%s", chainID, blockNumber, dataType)
+// Format: {chainID}:{blockNumber}:{version}:{dataType}
+// The version is incremented each time a block at the same height is reorged.
+func CacheKey(chainID, blockNumber int64, version int, dataType string) string {
+	return fmt.Sprintf("%d:%d:%d:%s", chainID, blockNumber, version, dataType)
 }

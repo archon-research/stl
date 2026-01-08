@@ -496,6 +496,13 @@ func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbo
 	parentHash := header.ParentHash
 	blockTimestamp, _ := parseBlockNumber(header.Timestamp)
 
+	// Get version: count of existing blocks at this number (before we save the new one)
+	// This is done before parallel fetches so all data types use the same version.
+	version, err := s.stateRepo.GetBlockVersionCount(ctx, blockNum)
+	if err != nil {
+		return fmt.Errorf("failed to get block version count for block %d: %w", blockNum, err)
+	}
+
 	numWorkers := 3
 	if !s.config.DisableBlobs {
 		numWorkers = 4
@@ -504,23 +511,23 @@ func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbo
 
 	// Fetch and publish block
 	go func() {
-		errCh <- s.fetchCacheAndPublishBlock(ctx, chainID, blockNum, blockHash, parentHash, blockTimestamp, receivedAt, isReorg)
+		errCh <- s.fetchCacheAndPublishBlock(ctx, chainID, blockNum, version, blockHash, parentHash, blockTimestamp, receivedAt, isReorg)
 	}()
 
 	// Fetch and publish receipts
 	go func() {
-		errCh <- s.fetchCacheAndPublishReceipts(ctx, chainID, blockNum, blockHash, receivedAt, isReorg)
+		errCh <- s.fetchCacheAndPublishReceipts(ctx, chainID, blockNum, version, blockHash, receivedAt, isReorg)
 	}()
 
 	// Fetch and publish traces
 	go func() {
-		errCh <- s.fetchCacheAndPublishTraces(ctx, chainID, blockNum, blockHash, receivedAt, isReorg)
+		errCh <- s.fetchCacheAndPublishTraces(ctx, chainID, blockNum, version, blockHash, receivedAt, isReorg)
 	}()
 
 	// Fetch and publish blobs (if enabled)
 	if !s.config.DisableBlobs {
 		go func() {
-			errCh <- s.fetchCacheAndPublishBlobs(ctx, chainID, blockNum, blockHash, receivedAt, isReorg)
+			errCh <- s.fetchCacheAndPublishBlobs(ctx, chainID, blockNum, version, blockHash, receivedAt, isReorg)
 		}()
 	}
 
@@ -538,7 +545,7 @@ func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbo
 	return nil
 }
 
-func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, blockNum int64, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg bool) error {
+func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, blockNum int64, version int, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg bool) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("fetchCacheAndPublishBlock completed", "block", blockNum, "duration", time.Since(start))
@@ -549,14 +556,8 @@ func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, bl
 		return fmt.Errorf("failed to fetch block %d: %w", blockNum, err)
 	}
 
-	if err := s.cache.SetBlock(ctx, chainID, blockNum, data); err != nil {
+	if err := s.cache.SetBlock(ctx, chainID, blockNum, version, data); err != nil {
 		return fmt.Errorf("failed to cache block %d: %w", blockNum, err)
-	}
-
-	// Get version: count of existing blocks at this number (before we save the new one)
-	version, err := s.stateRepo.GetBlockVersionCount(ctx, blockNum)
-	if err != nil {
-		return fmt.Errorf("failed to get block version count for block %d: %w", blockNum, err)
 	}
 
 	event := outbound.BlockEvent{
@@ -567,7 +568,7 @@ func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, bl
 		ParentHash:     parentHash,
 		BlockTimestamp: blockTimestamp,
 		ReceivedAt:     receivedAt,
-		CacheKey:       cacheKey(chainID, blockNum, "block"),
+		CacheKey:       cacheKey(chainID, blockNum, version, "block"),
 		IsReorg:        isReorg,
 		IsBackfill:     false,
 	}
@@ -577,7 +578,7 @@ func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, bl
 	return nil
 }
 
-func (s *LiveService) fetchCacheAndPublishReceipts(ctx context.Context, chainID, blockNum int64, blockHash string, receivedAt time.Time, isReorg bool) error {
+func (s *LiveService) fetchCacheAndPublishReceipts(ctx context.Context, chainID, blockNum int64, version int, blockHash string, receivedAt time.Time, isReorg bool) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("fetchCacheAndPublishReceipts completed", "block", blockNum, "duration", time.Since(start))
@@ -588,16 +589,17 @@ func (s *LiveService) fetchCacheAndPublishReceipts(ctx context.Context, chainID,
 		return fmt.Errorf("failed to fetch receipts for block %d: %w", blockNum, err)
 	}
 
-	if err := s.cache.SetReceipts(ctx, chainID, blockNum, data); err != nil {
+	if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, data); err != nil {
 		return fmt.Errorf("failed to cache receipts for block %d: %w", blockNum, err)
 	}
 
 	event := outbound.ReceiptsEvent{
 		ChainID:     chainID,
 		BlockNumber: blockNum,
+		Version:     version,
 		BlockHash:   blockHash,
 		ReceivedAt:  receivedAt,
-		CacheKey:    cacheKey(chainID, blockNum, "receipts"),
+		CacheKey:    cacheKey(chainID, blockNum, version, "receipts"),
 		IsReorg:     isReorg,
 		IsBackfill:  false,
 	}
@@ -607,7 +609,7 @@ func (s *LiveService) fetchCacheAndPublishReceipts(ctx context.Context, chainID,
 	return nil
 }
 
-func (s *LiveService) fetchCacheAndPublishTraces(ctx context.Context, chainID, blockNum int64, blockHash string, receivedAt time.Time, isReorg bool) error {
+func (s *LiveService) fetchCacheAndPublishTraces(ctx context.Context, chainID, blockNum int64, version int, blockHash string, receivedAt time.Time, isReorg bool) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("fetchCacheAndPublishTraces completed", "block", blockNum, "duration", time.Since(start))
@@ -618,16 +620,17 @@ func (s *LiveService) fetchCacheAndPublishTraces(ctx context.Context, chainID, b
 		return fmt.Errorf("failed to fetch traces for block %d: %w", blockNum, err)
 	}
 
-	if err := s.cache.SetTraces(ctx, chainID, blockNum, data); err != nil {
+	if err := s.cache.SetTraces(ctx, chainID, blockNum, version, data); err != nil {
 		return fmt.Errorf("failed to cache traces for block %d: %w", blockNum, err)
 	}
 
 	event := outbound.TracesEvent{
 		ChainID:     chainID,
 		BlockNumber: blockNum,
+		Version:     version,
 		BlockHash:   blockHash,
 		ReceivedAt:  receivedAt,
-		CacheKey:    cacheKey(chainID, blockNum, "traces"),
+		CacheKey:    cacheKey(chainID, blockNum, version, "traces"),
 		IsReorg:     isReorg,
 		IsBackfill:  false,
 	}
@@ -637,7 +640,7 @@ func (s *LiveService) fetchCacheAndPublishTraces(ctx context.Context, chainID, b
 	return nil
 }
 
-func (s *LiveService) fetchCacheAndPublishBlobs(ctx context.Context, chainID, blockNum int64, blockHash string, receivedAt time.Time, isReorg bool) error {
+func (s *LiveService) fetchCacheAndPublishBlobs(ctx context.Context, chainID, blockNum int64, version int, blockHash string, receivedAt time.Time, isReorg bool) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("fetchCacheAndPublishBlobs completed", "block", blockNum, "duration", time.Since(start))
@@ -648,16 +651,17 @@ func (s *LiveService) fetchCacheAndPublishBlobs(ctx context.Context, chainID, bl
 		return fmt.Errorf("failed to fetch blobs for block %d: %w", blockNum, err)
 	}
 
-	if err := s.cache.SetBlobs(ctx, chainID, blockNum, data); err != nil {
+	if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, data); err != nil {
 		return fmt.Errorf("failed to cache blobs for block %d: %w", blockNum, err)
 	}
 
 	event := outbound.BlobsEvent{
 		ChainID:     chainID,
 		BlockNumber: blockNum,
+		Version:     version,
 		BlockHash:   blockHash,
 		ReceivedAt:  receivedAt,
-		CacheKey:    cacheKey(chainID, blockNum, "blobs"),
+		CacheKey:    cacheKey(chainID, blockNum, version, "blobs"),
 		IsReorg:     isReorg,
 		IsBackfill:  false,
 	}
@@ -675,9 +679,9 @@ func parseBlockNumber(hexNum string) (int64, error) {
 }
 
 // cacheKey generates the cache key for a given data type.
-// Format: {chainID}:{blockNumber}:{dataType}
-// The cache key is important because this is how we make sure that
-// data will be eventually correct after reorgs.
-func cacheKey(chainID, blockNumber int64, dataType string) string {
-	return fmt.Sprintf("%d:%d:%s", chainID, blockNumber, dataType)
+// Format: {chainID}:{blockNumber}:{version}:{dataType}
+// The version is incremented each time the watcher sees the same block after a reorg.
+// This ensures data will be eventually correct after reorgs.
+func cacheKey(chainID, blockNumber int64, version int, dataType string) string {
+	return fmt.Sprintf("%d:%d:%d:%s", chainID, blockNumber, version, dataType)
 }
