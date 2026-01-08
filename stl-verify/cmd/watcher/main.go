@@ -17,11 +17,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
@@ -143,9 +148,62 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create in-memory cache and event sink for testing
+	// Create in-memory cache
 	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
+
+	// Create SNS event sink
+	snsEndpoint := getEnv("AWS_SNS_ENDPOINT", "http://localhost:4566")
+	awsRegion := getEnv("AWS_REGION", "us-east-1")
+
+	// Configure SNS topics for each event type
+	snsTopics := snsadapter.TopicARNs{
+		Blocks:   getEnv("AWS_SNS_TOPIC_BLOCKS", "arn:aws:sns:us-east-1:000000000000:stl-block-events"),
+		Receipts: getEnv("AWS_SNS_TOPIC_RECEIPTS", "arn:aws:sns:us-east-1:000000000000:stl-receipts-events"),
+		Traces:   getEnv("AWS_SNS_TOPIC_TRACES", "arn:aws:sns:us-east-1:000000000000:stl-traces-events"),
+		Blobs:    getEnv("AWS_SNS_TOPIC_BLOBS", "arn:aws:sns:us-east-1:000000000000:stl-blobs-events"),
+	}
+
+	// Configure AWS SDK for LocalStack or production
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+		awsconfig.WithRegion(awsRegion),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			getEnv("AWS_ACCESS_KEY_ID", "test"),
+			getEnv("AWS_SECRET_ACCESS_KEY", "test"),
+			"",
+		)),
+	)
+	if err != nil {
+		logger.Error("failed to load AWS config", "error", err)
+		os.Exit(1)
+	}
+
+	// Create SNS client with custom endpoint for LocalStack
+	snsClient := sns.NewFromConfig(awsCfg, func(o *sns.Options) {
+		if snsEndpoint != "" {
+			o.BaseEndpoint = aws.String(snsEndpoint)
+		}
+	})
+
+	eventSink, err := snsadapter.NewEventSink(snsClient, snsadapter.Config{
+		Topics: snsTopics,
+		Logger: logger,
+	})
+	if err != nil {
+		logger.Error("failed to create SNS event sink", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := eventSink.Close(); err != nil {
+			logger.Error("failed to close SNS event sink", "error", err)
+		}
+	}()
+	logger.Info("SNS event sink created",
+		"endpoint", snsEndpoint,
+		"blocks_topic", snsTopics.Blocks,
+		"receipts_topic", snsTopics.Receipts,
+		"traces_topic", snsTopics.Traces,
+		"blobs_topic", snsTopics.Blobs,
+	)
 
 	// Create LiveService (handles WebSocket subscription and reorg detection)
 	config := live_data.LiveConfig{
