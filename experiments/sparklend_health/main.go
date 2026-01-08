@@ -23,10 +23,10 @@ import (
 )
 
 const (
-	SparkLendPool      = "0xC13e21B648A5Ee794902342038FF3aDAB66BE987"
-	Multicall3         = "0xcA11bde05977b3631167028862bE2a173976CA11"
-	CallsPerMulticall  = 250 // 250 users per multicall
-	MulticallsPerBatch = 20  // 20 multicalls per RPC batch = 5,000 users/batch
+	SparkLendPool     = "0xC13e21B648A5Ee794902342038FF3aDAB66BE987"
+	Multicall3        = "0xcA11bde05977b3631167028862bE2a173976CA11"
+	CallsPerMulticall = 250 // 250 users per multicall
+	BlocksPerRPCBatch = 20  // Max blocks per RPC batch request
 )
 
 // Multicall3 ABI for aggregate3
@@ -37,6 +37,7 @@ const poolABI = `[{"inputs":[{"internalType":"address","name":"user","type":"add
 
 type UserAccountData struct {
 	User                        string
+	BlockNumber                 int64
 	TotalCollateralBase         *big.Int
 	TotalDebtBase               *big.Int
 	AvailableBorrowsBase        *big.Int
@@ -134,18 +135,29 @@ func main() {
 	}
 	logger.Info("loaded users from CSV", "count", len(users))
 
+	var bn int64
 	if blockNumber == "latest" {
-		bn, err := getBlockNumber(alchemyURL)
+		var err error
+		bn, err = getBlockNumber(alchemyURL)
 		if err != nil {
 			logger.Error("failed to get block number", "error", err)
 			os.Exit(1)
 		}
-		blockNumber = fmt.Sprintf("0x%x", bn)
-		logger.Info("using block", "number", bn, "hex", blockNumber)
+	} else {
+		// Parse hex block number
+		bnBig := new(big.Int)
+		bnBig.SetString(strings.TrimPrefix(blockNumber, "0x"), 16)
+		bn = bnBig.Int64()
 	}
 
+	blockNumbers := make([]int64, 100)
+	for i := range blockNumbers {
+		blockNumbers[i] = bn - int64(i)
+	}
+	logger.Info("querying blocks", "from", bn, "to", bn-99, "count", len(blockNumbers))
+
 	start := time.Now()
-	results, err := queryAllUsers(alchemyURL, users, blockNumber, logger)
+	results, err := queryAllUsers(alchemyURL, users, blockNumbers, logger)
 	if err != nil {
 		logger.Error("failed to query users", "error", err)
 		os.Exit(1)
@@ -238,49 +250,67 @@ func getBlockNumber(rpcURL string) (int64, error) {
 	return bn.Int64(), nil
 }
 
-func queryAllUsers(rpcURL string, users []string, blockNumber string, logger *slog.Logger) ([]UserAccountData, error) {
+func queryAllUsers(rpcURL string, users []string, blockNumbers []int64, logger *slog.Logger) ([]UserAccountData, error) {
 	userChunks := chunkSlice(users, CallsPerMulticall)
 	logger.Info("split users into multicall chunks", "chunks", len(userChunks))
 
-	multicallBatches := chunkSlice(userChunks, MulticallsPerBatch)
-	logger.Info("split multicalls into RPC batches", "batches", len(multicallBatches))
+	blockChunks := chunkSlice(blockNumbers, BlocksPerRPCBatch)
+	logger.Info("split blocks into RPC batches", "blockBatches", len(blockChunks), "totalBlocks", len(blockNumbers))
 
 	poolAddr := common.HexToAddress(SparkLendPool)
 
-	// Prepare all batch requests upfront
+	// Prepare all batch requests - one batch per (userChunk, blockChunk) pair
+	type multicallInfo struct {
+		userChunk   []string
+		blockNumber int64
+	}
 	type batchWork struct {
 		batchIdx    int
-		batch       [][]string
+		multicalls  []multicallInfo
 		rpcRequests []RPCRequest
 	}
 
 	var works []batchWork
-	for batchIdx, batch := range multicallBatches {
-		var rpcRequests []RPCRequest
-		for i, userChunk := range batch {
-			calldata, err := buildMulticallData(userChunk, poolAddr)
-			if err != nil {
-				return nil, fmt.Errorf("failed to build multicall: %w", err)
-			}
-			rpcRequests = append(rpcRequests, RPCRequest{
-				JSONRPC: "2.0",
-				Method:  "eth_call",
-				Params: []interface{}{
-					map[string]string{"to": Multicall3, "data": "0x" + hex.EncodeToString(calldata)},
-					blockNumber,
-				},
-				ID: batchIdx*MulticallsPerBatch + i + 1,
-			})
+	requestID := 1
+	batchIdx := 0
+
+	for _, userChunk := range userChunks {
+		calldata, err := buildMulticallData(userChunk, poolAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build multicall: %w", err)
 		}
-		works = append(works, batchWork{batchIdx: batchIdx, batch: batch, rpcRequests: rpcRequests})
+
+		for _, blockChunk := range blockChunks {
+			var rpcRequests []RPCRequest
+			var multicalls []multicallInfo
+
+			for _, bn := range blockChunk {
+				blockHex := fmt.Sprintf("0x%x", bn)
+				rpcRequests = append(rpcRequests, RPCRequest{
+					JSONRPC: "2.0",
+					Method:  "eth_call",
+					Params: []interface{}{
+						map[string]string{"to": Multicall3, "data": "0x" + hex.EncodeToString(calldata)},
+						blockHex,
+					},
+					ID: requestID,
+				})
+				multicalls = append(multicalls, multicallInfo{userChunk: userChunk, blockNumber: bn})
+				requestID++
+			}
+			works = append(works, batchWork{batchIdx: batchIdx, multicalls: multicalls, rpcRequests: rpcRequests})
+			batchIdx++
+		}
 	}
+
+	logger.Info("prepared work batches", "totalBatches", len(works))
 
 	// Execute all batches concurrently
 	type batchResult struct {
-		batchIdx  int
-		batch     [][]string
-		responses []RPCResponse
-		err       error
+		batchIdx   int
+		multicalls []multicallInfo
+		responses  []RPCResponse
+		err        error
 	}
 
 	resultsChan := make(chan batchResult, len(works))
@@ -292,10 +322,10 @@ func queryAllUsers(rpcURL string, users []string, blockNumber string, logger *sl
 			defer wg.Done()
 			responses, err := sendBatchRequest(rpcURL, w.rpcRequests)
 			resultsChan <- batchResult{
-				batchIdx:  w.batchIdx,
-				batch:     w.batch,
-				responses: responses,
-				err:       err,
+				batchIdx:   w.batchIdx,
+				multicalls: w.multicalls,
+				responses:  responses,
+				err:        err,
 			}
 		}(work)
 	}
@@ -321,8 +351,8 @@ func queryAllUsers(rpcURL string, users []string, blockNumber string, logger *sl
 				logger.Warn("multicall failed", "batch", res.batchIdx, "multicall", i, "error", resp.Error.Message)
 				continue
 			}
-			userChunk := res.batch[i]
-			results, err := decodeMulticallResponse(resp.Result, userChunk)
+			info := res.multicalls[i]
+			results, err := decodeMulticallResponse(resp.Result, info.userChunk, info.blockNumber)
 			if err != nil {
 				logger.Warn("failed to decode multicall response", "error", err)
 				continue
@@ -373,7 +403,7 @@ func sendBatchRequest(rpcURL string, requests []RPCRequest) ([]RPCResponse, erro
 	return responses, nil
 }
 
-func decodeMulticallResponse(result string, users []string) ([]UserAccountData, error) {
+func decodeMulticallResponse(result string, users []string, blockNumber int64) ([]UserAccountData, error) {
 	result = strings.TrimPrefix(result, "0x")
 	data, err := hex.DecodeString(result)
 	if err != nil {
@@ -402,6 +432,7 @@ func decodeMulticallResponse(result string, users []string) ([]UserAccountData, 
 		if !r.Success || len(r.ReturnData) < 192 {
 			results = append(results, UserAccountData{
 				User:                        user,
+				BlockNumber:                 blockNumber,
 				TotalCollateralBase:         big.NewInt(0),
 				TotalDebtBase:               big.NewInt(0),
 				AvailableBorrowsBase:        big.NewInt(0),
@@ -415,12 +446,13 @@ func decodeMulticallResponse(result string, users []string) ([]UserAccountData, 
 		// Decode getUserAccountData response
 		unpacked, err := sparkPoolParsedABI.Unpack("getUserAccountData", r.ReturnData)
 		if err != nil {
-			results = append(results, UserAccountData{User: user})
+			results = append(results, UserAccountData{User: user, BlockNumber: blockNumber})
 			continue
 		}
 
 		results = append(results, UserAccountData{
 			User:                        user,
+			BlockNumber:                 blockNumber,
 			TotalCollateralBase:         unpacked[0].(*big.Int),
 			TotalDebtBase:               unpacked[1].(*big.Int),
 			AvailableBorrowsBase:        unpacked[2].(*big.Int),
@@ -455,7 +487,7 @@ func printSampleResults(results []UserAccountData, count int) {
 			debt := new(big.Float).Quo(new(big.Float).SetInt(r.TotalDebtBase), big.NewFloat(1e8))
 			healthFactor := new(big.Float).Quo(new(big.Float).SetInt(r.HealthFactor), big.NewFloat(1e18))
 
-			fmt.Printf("User: %s\n", r.User)
+			fmt.Printf("User: %s (block %d)\n", r.User, r.BlockNumber)
 			fmt.Printf("  Collateral: $%.2f\n", collateral)
 			fmt.Printf("  Debt: $%.2f\n", debt)
 			fmt.Printf("  Health Factor: %.4f\n", healthFactor)
@@ -479,7 +511,7 @@ func writeResultsToCSV(path string, results []UserAccountData) error {
 	defer writer.Flush()
 
 	// Write header
-	header := []string{"user", "total_collateral_usd", "total_debt_usd", "available_borrows_usd", "liquidation_threshold", "ltv", "health_factor"}
+	header := []string{"user", "block_number", "total_collateral_usd", "total_debt_usd", "available_borrows_usd", "liquidation_threshold", "ltv", "health_factor"}
 	if err := writer.Write(header); err != nil {
 		return err
 	}
@@ -519,7 +551,7 @@ func writeResultsToCSV(path string, results []UserAccountData) error {
 			}
 		}
 
-		row := []string{r.User, collateral, debt, availableBorrows, liqThreshold, ltv, healthFactor}
+		row := []string{r.User, fmt.Sprintf("%d", r.BlockNumber), collateral, debt, availableBorrows, liqThreshold, ltv, healthFactor}
 		if err := writer.Write(row); err != nil {
 			return err
 		}
