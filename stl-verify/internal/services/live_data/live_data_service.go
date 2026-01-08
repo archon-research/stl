@@ -347,7 +347,8 @@ func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, r
 	}
 
 	// Walk back to find common ancestor
-	remoteBlock := LightBlock{
+	// Start with the incoming block, then walk to its parent each iteration
+	walkBlock := LightBlock{
 		Number:     blockNum,
 		Hash:       header.Hash,
 		ParentHash: header.ParentHash,
@@ -357,7 +358,7 @@ func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, r
 	for walkCount := 0; walkCount < s.config.FinalityBlockCount; walkCount++ {
 		// Check if parent matches our chain
 		for _, b := range s.unfinalizedBlocks {
-			if b.Hash == remoteBlock.ParentHash {
+			if b.Hash == walkBlock.ParentHash {
 				commonAncestor = b.Number
 				break
 			}
@@ -367,19 +368,20 @@ func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, r
 		}
 
 		// Check finality boundary
-		if s.finalizedBlock != nil && remoteBlock.Number <= s.finalizedBlock.Number {
+		if s.finalizedBlock != nil && walkBlock.Number <= s.finalizedBlock.Number {
 			return false, 0, 0, fmt.Errorf("block %d is at or below finalized block %d (likely late arrival after pruning)",
-				remoteBlock.Number, s.finalizedBlock.Number)
+				walkBlock.Number, s.finalizedBlock.Number)
 		}
 
 		// Fetch parent from network
-		parentHeader, err := s.client.GetBlockByHash(ctx, remoteBlock.ParentHash, false)
+		parentHeader, err := s.client.GetBlockByHash(ctx, walkBlock.ParentHash, false)
 		if err != nil {
-			break
+			return false, 0, 0, fmt.Errorf("failed to fetch parent block %s during reorg walk: %w", walkBlock.ParentHash, err)
 		}
 
+		// Walk to parent block to continue searching for common ancestor
 		parentNum, _ := parseBlockNumber(parentHeader.Number)
-		remoteBlock = LightBlock{
+		walkBlock = LightBlock{
 			Number:     parentNum,
 			Hash:       parentHeader.Hash,
 			ParentHash: parentHeader.ParentHash,
@@ -387,7 +389,7 @@ func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, r
 	}
 
 	if commonAncestor < 0 {
-		commonAncestor = blockNum - 1
+		return false, 0, 0, fmt.Errorf("no common ancestor found after walking %d blocks (chain diverged beyond finality window)", s.config.FinalityBlockCount)
 	}
 
 	reorgDepth := len(reorgedBlocks)

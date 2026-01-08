@@ -722,16 +722,19 @@ func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
 	eventSink := memory.NewEventSink()
 
 	client := newMockClient()
-	// Add parent block for ancestry walk
-	client.blocks[99] = blockTestData{
+	// Add alternate chain blocks for ancestry walk
+	// Block 100_alt's parent is block 99 (which exists in our chain)
+	client.blocks[100] = blockTestData{
 		header: outbound.BlockHeader{
-			Number:     "0x63",
-			Hash:       "0xblock99",
-			ParentHash: "0xblock98",
+			Number:     "0x64",
+			Hash:       "0xblock100_alt",
+			ParentHash: "0xblock99", // Points to our block 99
 		},
 	}
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{
+		FinalityBlockCount: 64,
+	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -756,13 +759,15 @@ func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
 	if !isReorg {
 		t.Error("expected reorg when parent hash mismatches")
 	}
-	// Parent doesn't match any block in memory, so common ancestor falls back to blockNum-1 = 100
-	// No blocks are reorged (depth=0) because block 101 is ahead of our chain tip (100)
+	// Walk finds block100_alt's parent (0xblock99) in our chain
+	// Common ancestor is 99. Depth is 0 because no blocks >= 101 exist in our chain.
+	// Block 100 gets pruned during chain reconstruction, but isn't counted in depth
+	// (depth counts blocks at or above the incoming block number)
 	if depth != 0 {
-		t.Errorf("expected depth 0 (no existing blocks orphaned), got %d", depth)
+		t.Errorf("expected depth 0 (no blocks >= 101 in chain), got %d", depth)
 	}
-	if ancestor != 100 {
-		t.Errorf("expected common ancestor 100 (fallback), got %d", ancestor)
+	if ancestor != 99 {
+		t.Errorf("expected common ancestor 99, got %d", ancestor)
 	}
 }
 
@@ -1000,22 +1005,44 @@ func TestHandleReorg_BelowFinalizedBlock_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestHandleReorg_NoCommonAncestor_FallsBackToBlockMinus1(t *testing.T) {
+func TestHandleReorg_NoCommonAncestor_ReturnsError(t *testing.T) {
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	// Client returns error for all lookups
+	// Client returns blocks that don't match our chain
 	client := newMockClient()
+	// Set up a chain of unknown blocks that the walk will traverse
+	client.blocks[99] = blockTestData{
+		header: outbound.BlockHeader{
+			Number:     "0x63",
+			Hash:       "0xunknown_parent",
+			ParentHash: "0xunknown_grandparent",
+		},
+	}
+	client.blocks[98] = blockTestData{
+		header: outbound.BlockHeader{
+			Number:     "0x62",
+			Hash:       "0xunknown_grandparent",
+			ParentHash: "0xunknown_great_grandparent",
+		},
+	}
+	client.blocks[97] = blockTestData{
+		header: outbound.BlockHeader{
+			Number:     "0x61",
+			Hash:       "0xunknown_great_grandparent",
+			ParentHash: "0xunknown_great_great_grandparent",
+		},
+	}
 
 	svc, err := NewLiveService(LiveConfig{
-		FinalityBlockCount: 3, // Small so walk completes quickly
+		FinalityBlockCount: 3, // Walk will exhaust after 3 iterations
 	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
 
-	// Our chain
+	// Our chain - completely different from the unknown chain
 	svc.unfinalizedBlocks = []LightBlock{
 		{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99"},
 	}
@@ -1027,16 +1054,12 @@ func TestHandleReorg_NoCommonAncestor_FallsBackToBlockMinus1(t *testing.T) {
 		ParentHash: "0xunknown_parent",
 	}
 
-	isReorg, _, ancestor, err := svc.handleReorg(header, 100, time.Now())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, _, _, err = svc.handleReorg(header, 100, time.Now())
+	if err == nil {
+		t.Error("expected error when no common ancestor found")
 	}
-	if !isReorg {
-		t.Error("expected isReorg to be true")
-	}
-	// When no common ancestor found, falls back to blockNum - 1
-	if ancestor != 99 {
-		t.Errorf("expected fallback ancestor 99, got %d", ancestor)
+	if err != nil && !contains(err.Error(), "no common ancestor found") {
+		t.Errorf("unexpected error message: %v", err)
 	}
 }
 
