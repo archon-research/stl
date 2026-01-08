@@ -53,7 +53,7 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 	query := `
 		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned)
 		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (number, hash) DO UPDATE SET
+		ON CONFLICT (hash) DO UPDATE SET
 			parent_hash = EXCLUDED.parent_hash,
 			received_at = EXCLUDED.received_at,
 			is_orphaned = EXCLUDED.is_orphaned
