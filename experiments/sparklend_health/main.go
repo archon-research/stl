@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -24,8 +25,8 @@ import (
 const (
 	SparkLendPool      = "0xC13e21B648A5Ee794902342038FF3aDAB66BE987"
 	Multicall3         = "0xcA11bde05977b3631167028862bE2a173976CA11"
-	CallsPerMulticall  = 100
-	MulticallsPerBatch = 10
+	CallsPerMulticall  = 250 // 250 users per multicall
+	MulticallsPerBatch = 20  // 20 multicalls per RPC batch = 5,000 users/batch
 )
 
 // Multicall3 ABI for aggregate3
@@ -238,7 +239,6 @@ func getBlockNumber(rpcURL string) (int64, error) {
 }
 
 func queryAllUsers(rpcURL string, users []string, blockNumber string, logger *slog.Logger) ([]UserAccountData, error) {
-	var allResults []UserAccountData
 	userChunks := chunkSlice(users, CallsPerMulticall)
 	logger.Info("split users into multicall chunks", "chunks", len(userChunks))
 
@@ -247,6 +247,14 @@ func queryAllUsers(rpcURL string, users []string, blockNumber string, logger *sl
 
 	poolAddr := common.HexToAddress(SparkLendPool)
 
+	// Prepare all batch requests upfront
+	type batchWork struct {
+		batchIdx    int
+		batch       [][]string
+		rpcRequests []RPCRequest
+	}
+
+	var works []batchWork
 	for batchIdx, batch := range multicallBatches {
 		var rpcRequests []RPCRequest
 		for i, userChunk := range batch {
@@ -264,18 +272,56 @@ func queryAllUsers(rpcURL string, users []string, blockNumber string, logger *sl
 				ID: batchIdx*MulticallsPerBatch + i + 1,
 			})
 		}
+		works = append(works, batchWork{batchIdx: batchIdx, batch: batch, rpcRequests: rpcRequests})
+	}
 
-		responses, err := sendBatchRequest(rpcURL, rpcRequests)
-		if err != nil {
-			return nil, fmt.Errorf("batch %d failed: %w", batchIdx, err)
+	// Execute all batches concurrently
+	type batchResult struct {
+		batchIdx  int
+		batch     [][]string
+		responses []RPCResponse
+		err       error
+	}
+
+	resultsChan := make(chan batchResult, len(works))
+	var wg sync.WaitGroup
+
+	for _, work := range works {
+		wg.Add(1)
+		go func(w batchWork) {
+			defer wg.Done()
+			responses, err := sendBatchRequest(rpcURL, w.rpcRequests)
+			resultsChan <- batchResult{
+				batchIdx:  w.batchIdx,
+				batch:     w.batch,
+				responses: responses,
+				err:       err,
+			}
+		}(work)
+	}
+
+	wg.Wait()
+	close(resultsChan)
+
+	// Collect results in order
+	batchResults := make([]batchResult, len(works))
+	for res := range resultsChan {
+		batchResults[res.batchIdx] = res
+	}
+
+	// Process results in order
+	var allResults []UserAccountData
+	for _, res := range batchResults {
+		if res.err != nil {
+			return nil, fmt.Errorf("batch %d failed: %w", res.batchIdx, res.err)
 		}
 
-		for i, resp := range responses {
+		for i, resp := range res.responses {
 			if resp.Error != nil {
-				logger.Warn("multicall failed", "batch", batchIdx, "multicall", i, "error", resp.Error.Message)
+				logger.Warn("multicall failed", "batch", res.batchIdx, "multicall", i, "error", resp.Error.Message)
 				continue
 			}
-			userChunk := batch[i]
+			userChunk := res.batch[i]
 			results, err := decodeMulticallResponse(resp.Result, userChunk)
 			if err != nil {
 				logger.Warn("failed to decode multicall response", "error", err)
@@ -283,11 +329,8 @@ func queryAllUsers(rpcURL string, users []string, blockNumber string, logger *sl
 			}
 			allResults = append(allResults, results...)
 		}
-
-		if batchIdx < len(multicallBatches)-1 {
-			time.Sleep(50 * time.Millisecond)
-		}
 	}
+
 	return allResults, nil
 }
 
