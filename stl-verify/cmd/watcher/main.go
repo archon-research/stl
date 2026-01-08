@@ -26,8 +26,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
 )
@@ -148,8 +150,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create in-memory cache
-	cache := memory.NewBlockCache()
+	// Create cache (Redis if available, otherwise in-memory)
+	var cache outbound.BlockCache
+	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
+	redisCache, err := rediscache.NewBlockCache(rediscache.Config{
+		Addr:      redisAddr,
+		Password:  getEnv("REDIS_PASSWORD", ""),
+		DB:        0,
+		TTL:       24 * time.Hour,
+		KeyPrefix: "stl",
+	}, logger)
+	if err != nil {
+		logger.Warn("failed to create Redis cache, falling back to memory", "error", err)
+		cache = memory.NewBlockCache()
+	} else if err := redisCache.Ping(context.Background()); err != nil {
+		logger.Warn("Redis not reachable, falling back to memory cache", "error", err)
+		cache = memory.NewBlockCache()
+	} else {
+		logger.Info("Redis cache connected", "addr", redisAddr)
+		cache = redisCache
+		defer func() {
+			if err := redisCache.Close(); err != nil {
+				logger.Warn("failed to close Redis connection", "error", err)
+			}
+		}()
+	}
 
 	// Create SNS event sink
 	snsEndpoint := getEnv("AWS_SNS_ENDPOINT", "http://localhost:4566")
