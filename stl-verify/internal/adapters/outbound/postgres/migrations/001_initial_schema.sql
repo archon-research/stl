@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS block_states (
     parent_hash TEXT NOT NULL,
     received_at BIGINT NOT NULL,
     is_orphaned BOOLEAN NOT NULL DEFAULT FALSE,
+    version INT NOT NULL DEFAULT 0,
     PRIMARY KEY (number, hash)
 );
 
