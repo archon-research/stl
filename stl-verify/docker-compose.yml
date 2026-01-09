@@ -54,7 +54,9 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes
+    # Limit memory to 4GB with LRU eviction to prevent OOM during background saves
+    # allkeys-lru evicts least recently used keys when maxmemory is reached
+    command: redis-server --appendonly yes --maxmemory 4gb --maxmemory-policy allkeys-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
