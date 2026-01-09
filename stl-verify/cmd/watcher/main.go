@@ -91,13 +91,19 @@ func main() {
 	postgresURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
 	enableBackfill := getEnv("ENABLE_BACKFILL", "false") == "true"
 
-	// Set up PostgreSQL connection for block state tracking
+	// Set up PostgreSQL connection pool for block state tracking
 	db, err := sql.Open("pgx", postgresURL)
 	if err != nil {
 		logger.Error("failed to connect to PostgreSQL", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
+
+	// Configure connection pool
+	db.SetMaxOpenConns(25)                 // Maximum number of open connections
+	db.SetMaxIdleConns(10)                 // Maximum number of idle connections
+	db.SetConnMaxLifetime(5 * time.Minute) // Maximum lifetime of a connection
+	db.SetConnMaxIdleTime(1 * time.Minute) // Maximum idle time before closing
 
 	if err := db.Ping(); err != nil {
 		logger.Error("failed to ping PostgreSQL", "error", err)
