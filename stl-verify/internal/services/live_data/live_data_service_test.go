@@ -1175,7 +1175,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Error("expected error, got nil")
-				} else if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				} else if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("expected error containing %q, got %q", tt.errContains, err.Error())
 				}
 			} else {
@@ -1233,20 +1233,6 @@ func TestHandleReorg_ReturnsReorgEvent(t *testing.T) {
 	if reorgEvent.Depth != depth {
 		t.Errorf("expected depth %d, got %d", depth, reorgEvent.Depth)
 	}
-}
-
-// Helper function for string contains check
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // ============================================================================
@@ -1622,7 +1608,7 @@ func TestProcessBlock_Errors(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Error("expected error, got nil")
-				} else if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				} else if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("expected error containing %q, got %q", tt.errContains, err.Error())
 				}
 			} else {
@@ -1974,7 +1960,7 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Error("expected error, got nil")
-				} else if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				} else if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("expected error containing %q, got %q", tt.errContains, err.Error())
 				}
 			} else {
@@ -2182,7 +2168,7 @@ func TestStart_SubscribeError_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when subscribe fails")
 	}
-	if err != nil && !contains(err.Error(), "failed to subscribe") {
+	if err != nil && !strings.Contains(err.Error(), "failed to subscribe") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -2521,7 +2507,7 @@ func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when fetching parent fails")
 	}
-	if !contains(err.Error(), "failed to fetch parent block") {
+	if !strings.Contains(err.Error(), "failed to fetch parent block") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -2587,7 +2573,7 @@ func TestProcessBlock_FetchAndPublishError_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when fetchAndPublishBlockData fails")
 	}
-	if !contains(err.Error(), "failed to fetch and publish block data") {
+	if !strings.Contains(err.Error(), "failed to fetch and publish block data") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }

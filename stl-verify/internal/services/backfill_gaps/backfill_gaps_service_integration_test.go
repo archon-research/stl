@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -585,7 +586,7 @@ func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
 	} else {
 		t.Logf("correctly detected chain integrity violation: %v", err)
 		// Verify the error mentions block 6
-		if !contains(err.Error(), "block 6") {
+		if !strings.Contains(err.Error(), "block 6") {
 			t.Errorf("error should mention block 6, got: %v", err)
 		}
 	}
@@ -628,17 +629,4 @@ func TestVerifyChainIntegrity_WithGaps(t *testing.T) {
 	if err != nil {
 		t.Errorf("expected valid chain with gaps (only consecutive blocks checked), got: %v", err)
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
