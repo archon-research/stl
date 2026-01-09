@@ -291,6 +291,9 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 			span.SetStatus(codes.Error, "failed to handle reorg atomically")
 			return fmt.Errorf("failed to handle reorg atomically: %w", err)
 		}
+		// Prune reorged blocks from in-memory chain AFTER successful DB save
+		// This ensures memory and DB stay in sync
+		s.pruneReorgedBlocks(commonAncestor)
 	} else {
 		// Normal block save
 		version, err = s.stateRepo.SaveBlock(ctx, state)
@@ -335,6 +338,18 @@ func (s *LiveService) addBlock(block LightBlock) {
 	if len(s.unfinalizedBlocks) > s.config.MaxUnfinalizedBlocks {
 		s.unfinalizedBlocks = s.unfinalizedBlocks[1:]
 	}
+}
+
+// pruneReorgedBlocks removes blocks above the common ancestor from the in-memory chain.
+// This should only be called AFTER the reorg has been successfully persisted to the database.
+func (s *LiveService) pruneReorgedBlocks(commonAncestor int64) {
+	newChain := make([]LightBlock, 0, len(s.unfinalizedBlocks))
+	for _, b := range s.unfinalizedBlocks {
+		if b.Number <= commonAncestor {
+			newChain = append(newChain, b)
+		}
+	}
+	s.unfinalizedBlocks = newChain
 }
 
 // detectReorg detects chain reorganizations using Ponder-style parent hash chain validation.
@@ -422,14 +437,10 @@ func (s *LiveService) handleReorg(block LightBlock, receivedAt time.Time) (bool,
 	}
 	reorgDepth := len(orphanedBlocks)
 
-	// Prune reorged blocks from in-memory chain
-	newChain := make([]LightBlock, 0)
-	for _, b := range s.unfinalizedBlocks {
-		if b.Number <= commonAncestor {
-			newChain = append(newChain, b)
-		}
-	}
-	s.unfinalizedBlocks = newChain
+	// NOTE: We do NOT prune the in-memory chain here.
+	// The pruning happens in processBlock AFTER successful HandleReorgAtomic.
+	// This ensures that if the DB operation fails, the in-memory chain is not modified,
+	// maintaining consistency between memory and database state.
 
 	// Build reorg event to be saved atomically with the new block
 	// We always create a reorg event when a reorg is detected, even if depth is 0

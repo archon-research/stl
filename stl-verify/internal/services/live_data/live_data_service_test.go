@@ -62,12 +62,13 @@ func (m *mockSubscriber) sendHeader(header outbound.BlockHeader) {
 // It embeds the memory implementation and overrides specific methods for testing.
 type mockStateRepo struct {
 	*memory.BlockStateRepository
-	mu                 sync.RWMutex
-	getByHashErr       error
-	getRecentErr       error
-	getRecentBlocks    []outbound.BlockState // Override response
-	saveBlockErr       error
-	getVersionCountErr error
+	mu                   sync.RWMutex
+	getByHashErr         error
+	getRecentErr         error
+	getRecentBlocks      []outbound.BlockState // Override response
+	saveBlockErr         error
+	getVersionCountErr   error
+	handleReorgAtomicErr error
 }
 
 func newMockStateRepo() *mockStateRepo {
@@ -124,6 +125,17 @@ func (m *mockStateRepo) GetBlockVersionCount(ctx context.Context, number int64) 
 		return 0, err
 	}
 	return m.BlockStateRepository.GetBlockVersionCount(ctx, number)
+}
+
+func (m *mockStateRepo) HandleReorgAtomic(ctx context.Context, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+	m.mu.RLock()
+	err := m.handleReorgAtomicErr
+	m.mu.RUnlock()
+
+	if err != nil {
+		return 0, err
+	}
+	return m.BlockStateRepository.HandleReorgAtomic(ctx, event, newBlock)
 }
 
 // mockBlockchainClient provides predictable block data for testing.
@@ -1007,9 +1019,15 @@ func TestHandleReorg_FindsCommonAncestorInMemory(t *testing.T) {
 	if reorgEvent == nil {
 		t.Error("expected reorg event to be populated")
 	}
-	// After reorg, chain should be pruned to blocks <= 98
+	// handleReorg should NOT prune the chain - that happens after successful DB save
+	// The chain should still have all 6 blocks
+	if len(svc.unfinalizedBlocks) != 6 {
+		t.Errorf("expected 6 blocks still in chain (not pruned by handleReorg), got %d", len(svc.unfinalizedBlocks))
+	}
+	// Verify pruneReorgedBlocks works correctly when called separately
+	svc.pruneReorgedBlocks(ancestor)
 	if len(svc.unfinalizedBlocks) != 4 {
-		t.Errorf("expected 4 blocks remaining, got %d", len(svc.unfinalizedBlocks))
+		t.Errorf("expected 4 blocks after pruneReorgedBlocks, got %d", len(svc.unfinalizedBlocks))
 	}
 }
 
@@ -3348,4 +3366,98 @@ func TestProcessBlock_RollsBackInMemoryChainOnDBFailure(t *testing.T) {
 	}
 
 	t.Log("SUCCESS: In-memory chain correctly rolled back after DB failure")
+}
+
+// TestProcessBlock_ReorgChainNotPrunedOnDBFailure verifies that when HandleReorgAtomic fails,
+// the in-memory chain is NOT modified. This prevents divergence between memory and database state.
+// Without this protection, a failed reorg DB update would leave memory pruned but DB unchanged.
+func TestProcessBlock_ReorgChainNotPrunedOnDBFailure(t *testing.T) {
+	ctx := context.Background()
+
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+	client := newMockClient()
+
+	// Add blocks for RPC lookups
+	client.addBlock(99, "")
+	client.addBlock(100, "")
+
+	config := LiveConfig{
+		ChainID:              1,
+		FinalityBlockCount:   64,
+		MaxUnfinalizedBlocks: 200,
+		DisableBlobs:         true,
+		Logger:               slog.Default(),
+	}
+
+	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx = ctx
+
+	// Get block 100's header
+	block100Header := client.getHeader(100)
+	block99Hash := block100Header.ParentHash
+
+	// Set up initial chain with blocks 99 and 100 (using our own block 100 hash)
+	// This simulates having already seen a block 100 on the old fork
+	oldBlock100Hash := "0xoldblock100hash_will_be_orphaned"
+	svc.unfinalizedBlocks = []LightBlock{
+		{Number: 99, Hash: block99Hash, ParentHash: "0xblock98"},
+		{Number: 100, Hash: oldBlock100Hash, ParentHash: block99Hash},
+	}
+
+	// Simulate receiving a NEW block 100 with a DIFFERENT hash (reorg at block 100)
+	// The mock client's block 100 has a different hash than what's in our chain
+	reorgBlock100Header := outbound.BlockHeader{
+		Number:     "0x64", // 100
+		Hash:       "0xnewblock100hash_from_reorg",
+		ParentHash: block99Hash, // Same parent, different block = reorg
+	}
+
+	// Configure repo to fail on HandleReorgAtomic
+	stateRepo.mu.Lock()
+	stateRepo.handleReorgAtomicErr = fmt.Errorf("database transaction failed")
+	stateRepo.mu.Unlock()
+
+	// Try to process the reorg block - should fail
+	err = svc.processBlock(reorgBlock100Header, time.Now())
+	if err == nil {
+		t.Fatal("expected error when HandleReorgAtomic fails")
+	}
+	if !strings.Contains(err.Error(), "database transaction failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// CRITICAL CHECK: The in-memory chain should NOT be pruned
+	// It should still contain BOTH blocks 99 and 100 (the old block 100)
+	if len(svc.unfinalizedBlocks) != 2 {
+		t.Errorf("expected 2 blocks in chain (not pruned), got %d", len(svc.unfinalizedBlocks))
+	}
+
+	// Verify block 99 is still there
+	found99 := false
+	for _, b := range svc.unfinalizedBlocks {
+		if b.Number == 99 {
+			found99 = true
+		}
+	}
+	if !found99 {
+		t.Error("block 99 should still be in unfinalizedBlocks")
+	}
+
+	// Verify the OLD block 100 is still there (not pruned)
+	found100 := false
+	for _, b := range svc.unfinalizedBlocks {
+		if b.Number == 100 && b.Hash == oldBlock100Hash {
+			found100 = true
+		}
+	}
+	if !found100 {
+		t.Error("old block 100 should still be in unfinalizedBlocks after DB failure - chain should NOT be pruned!")
+	}
+
+	t.Log("SUCCESS: In-memory chain not pruned after HandleReorgAtomic failure")
 }
