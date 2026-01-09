@@ -82,21 +82,31 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 		return 0, fmt.Errorf("failed to acquire advisory lock: %w", err)
 	}
 
-	// Now calculate the version safely - no other transaction can insert at this block number
+	// Check if a block with this hash already exists (duplicate detection).
+	// If so, return the existing version without modifying the data.
+	var existingVersion int
+	err = tx.QueryRowContext(ctx, `SELECT version FROM block_states WHERE hash = $1`, state.Hash).Scan(&existingVersion)
+	if err == nil {
+		// Block already exists - return its version without updating
+		if commitErr := tx.Commit(); commitErr != nil {
+			return 0, fmt.Errorf("failed to commit transaction: %w", commitErr)
+		}
+		return existingVersion, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("failed to check for existing block: %w", err)
+	}
+
+	// Block doesn't exist - calculate the next version safely
 	var version int
 	err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), -1) + 1 FROM block_states WHERE number = $1`, state.Number).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get next version: %w", err)
 	}
 
-	// Insert the block with the calculated version
+	// Insert the block with the calculated version (no ON CONFLICT needed since we checked above)
 	query := `
 		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned, version)
 		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (hash) DO UPDATE SET
-			parent_hash = EXCLUDED.parent_hash,
-			received_at = EXCLUDED.received_at,
-			is_orphaned = EXCLUDED.is_orphaned
 	`
 	_, err = tx.ExecContext(ctx, query, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned, version)
 	if err != nil {
