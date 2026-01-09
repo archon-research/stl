@@ -82,6 +82,19 @@ func (m *benchmarkBlockchainClient) GetBlockByHash(ctx context.Context, hash str
 	return nil, fmt.Errorf("block %s not found", hash)
 }
 
+func (m *benchmarkBlockchainClient) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			data, _ := json.Marshal(bd.header)
+			return data, nil
+		}
+	}
+	return nil, fmt.Errorf("block %s not found", hash)
+}
+
 func (m *benchmarkBlockchainClient) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

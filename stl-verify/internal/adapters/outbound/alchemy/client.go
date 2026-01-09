@@ -157,6 +157,27 @@ func (c *Client) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (
 	return &header, nil
 }
 
+// GetFullBlockByHash fetches full block JSON by hash.
+func (c *Client) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
+	req := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "eth_getBlockByHash",
+		Params:  []interface{}{hash, fullTx},
+	}
+
+	resp, err := c.call(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.Result == nil || string(resp.Result) == "null" {
+		return nil, fmt.Errorf("block not found: %s", hash)
+	}
+
+	return resp.Result, nil
+}
+
 // GetBlockReceipts fetches all transaction receipts for a block.
 func (c *Client) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	hexNum := fmt.Sprintf("0x%x", blockNum)

@@ -573,9 +573,12 @@ func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, bl
 		s.logger.Debug("fetchCacheAndPublishBlock completed", "block", blockNum, "duration", time.Since(start))
 	}()
 
-	data, err := s.client.GetBlockByNumber(ctx, blockNum, true)
+	// Fetch by hash to prevent TOCTOU race condition.
+	// If we fetched by number, a reorg between receiving the header and fetching
+	// could cause us to cache data for the wrong block.
+	data, err := s.client.GetFullBlockByHash(ctx, blockHash, true)
 	if err != nil {
-		return fmt.Errorf("failed to fetch block %d: %w", blockNum, err)
+		return fmt.Errorf("failed to fetch block %d by hash %s: %w", blockNum, blockHash, err)
 	}
 
 	if err := s.cache.SetBlock(ctx, chainID, blockNum, version, data); err != nil {

@@ -229,6 +229,10 @@ func (m *largeBenchmarkClient) GetBlockByHash(ctx context.Context, hash string, 
 	return nil, fmt.Errorf("not implemented")
 }
 
+func (m *largeBenchmarkClient) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
 func (m *largeBenchmarkClient) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	return json.RawMessage(`[]`), nil
 }

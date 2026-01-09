@@ -137,6 +137,19 @@ func (m *mockBlockchainClient) GetBlockByHash(ctx context.Context, hash string, 
 	return nil, fmt.Errorf("block %s not found", hash)
 }
 
+func (m *mockBlockchainClient) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			data, _ := json.Marshal(bd.header)
+			return data, nil
+		}
+	}
+	return nil, fmt.Errorf("block %s not found", hash)
+}
+
 func (m *mockBlockchainClient) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

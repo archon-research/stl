@@ -36,6 +36,10 @@ type BlockchainClient interface {
 	// If fullTx is true, includes full transaction objects; otherwise just hashes.
 	GetBlockByHash(ctx context.Context, hash string, fullTx bool) (*BlockHeader, error)
 
+	// GetFullBlockByHash fetches full block JSON by hash.
+	// Use this when you need the raw block data, not just the header.
+	GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error)
+
 	// GetBlockReceipts fetches all transaction receipts for a block.
 	GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error)
 

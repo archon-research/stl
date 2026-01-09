@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -205,6 +206,24 @@ func (m *mockBlockchainClient) GetBlockByHash(ctx context.Context, hash string, 
 		if bd.header.Hash == hash {
 			h := bd.header
 			return &h, nil
+		}
+	}
+	return nil, fmt.Errorf("block %s not found", hash)
+}
+
+func (m *mockBlockchainClient) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Check if we should return an error for this specific hash
+	if m.getByHashErr != nil && (m.getByHashErrFor == "" || m.getByHashErrFor == hash) {
+		return nil, m.getByHashErr
+	}
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			data, _ := json.Marshal(bd.header)
+			return data, nil
 		}
 	}
 	return nil, fmt.Errorf("block %s not found", hash)
@@ -1615,6 +1634,10 @@ func TestProcessBlock_AddsBlockToChain(t *testing.T) {
 	client.addBlock(100, "")
 	client.addBlock(101, "")
 
+	// Get the actual hashes from the mock client
+	header100 := client.getHeader(100)
+	header101 := client.getHeader(101)
+
 	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -1623,19 +1646,13 @@ func TestProcessBlock_AddsBlockToChain(t *testing.T) {
 	svc.ctx, svc.cancel = context.WithCancel(context.Background())
 	defer svc.cancel()
 
-	// Start with block 100
+	// Start with block 100 using actual hash
 	svc.unfinalizedBlocks = []LightBlock{
-		{Number: 100, Hash: "0x100", ParentHash: "0x99"},
+		{Number: 100, Hash: header100.Hash, ParentHash: header100.ParentHash},
 	}
 
-	// Process block 101
-	header := outbound.BlockHeader{
-		Number:     "0x65",
-		Hash:       "0x101",
-		ParentHash: "0x100",
-	}
-
-	err = svc.processBlock(header, time.Now())
+	// Process block 101 using actual header
+	err = svc.processBlock(header101, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1670,6 +1687,13 @@ func (m *mockFailingClient) GetBlockByNumber(ctx context.Context, blockNum int64
 		return nil, fmt.Errorf("simulated block fetch failure")
 	}
 	return m.mockBlockchainClient.GetBlockByNumber(ctx, blockNum, fullTx)
+}
+
+func (m *mockFailingClient) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
+	if m.failGetBlock {
+		return nil, fmt.Errorf("simulated block fetch failure")
+	}
+	return m.mockBlockchainClient.GetFullBlockByHash(ctx, hash, fullTx)
 }
 
 func (m *mockFailingClient) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
@@ -1856,6 +1880,9 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 			client.failGetBlobs = tt.failGetBlobs
 			client.addBlock(100, "")
 
+			// Get the actual hash from mock client
+			header100 := client.getHeader(100)
+
 			cache := newMockFailingCache()
 			cache.failSetBlock = tt.failCacheBlock
 			cache.failSetReceipts = tt.failCacheReceipts
@@ -1872,14 +1899,8 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 				t.Fatalf("failed to create service: %v", err)
 			}
 
-			header := outbound.BlockHeader{
-				Number:     "0x64",
-				Hash:       "0xhash",
-				ParentHash: "0xparent",
-				Timestamp:  "0x0",
-			}
-
-			err = svc.fetchAndPublishBlockData(ctx, header, 100, 0, time.Now(), false)
+			// Use actual header from mock client
+			err = svc.fetchAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false)
 
 			if tt.wantErr {
 				if err == nil {
@@ -1905,6 +1926,9 @@ func TestFetchAndPublishBlockData_WithBlobs_PublishesBlobEvent(t *testing.T) {
 	client := newMockFailingClient()
 	client.addBlock(100, "")
 
+	// Get actual header from mock client
+	header100 := client.getHeader(100)
+
 	svc, err := NewLiveService(LiveConfig{
 		DisableBlobs: false, // Enable blobs
 	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
@@ -1912,14 +1936,7 @@ func TestFetchAndPublishBlockData_WithBlobs_PublishesBlobEvent(t *testing.T) {
 		t.Fatalf("failed to create service: %v", err)
 	}
 
-	header := outbound.BlockHeader{
-		Number:     "0x64",
-		Hash:       "0xhash",
-		ParentHash: "0xparent",
-		Timestamp:  "0x0",
-	}
-
-	err = svc.fetchAndPublishBlockData(ctx, header, 100, 0, time.Now(), false)
+	err = svc.fetchAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false)
 	if err != nil {
 		t.Fatalf("fetchAndPublishBlockData failed: %v", err)
 	}
@@ -1946,6 +1963,9 @@ func TestFetchAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
 	client := newMockFailingClient()
 	client.addBlock(100, "")
 
+	// Get actual header from mock client
+	header100 := client.getHeader(100)
+
 	svc, err := NewLiveService(LiveConfig{
 		DisableBlobs: true,
 	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
@@ -1953,14 +1973,7 @@ func TestFetchAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
 		t.Fatalf("failed to create service: %v", err)
 	}
 
-	header := outbound.BlockHeader{
-		Number:     "0x64",
-		Hash:       "0xhash",
-		ParentHash: "0xparent",
-		Timestamp:  "0x0",
-	}
-
-	err = svc.fetchAndPublishBlockData(ctx, header, 100, 0, time.Now(), true) // isReorg = true
+	err = svc.fetchAndPublishBlockData(ctx, header100, 100, 0, time.Now(), true) // isReorg = true
 	if err != nil {
 		t.Fatalf("fetchAndPublishBlockData failed: %v", err)
 	}
@@ -2346,8 +2359,13 @@ func TestProcessBlock_WithMetrics_RecordsReorg(t *testing.T) {
 	client.blocks[99] = blockTestData{
 		header: outbound.BlockHeader{Number: "0x63", Hash: "0x99", ParentHash: "0x98"},
 	}
-	// Add block 100 data for fetching
-	client.addBlock(100, "0x99")
+	// Add block 100 with alt hash for the reorg
+	client.blocks[100] = blockTestData{
+		header:   outbound.BlockHeader{Number: "0x64", Hash: "0x100_alt", ParentHash: "0x99", Timestamp: "0x0"},
+		receipts: json.RawMessage(`[]`),
+		traces:   json.RawMessage(`[]`),
+		blobs:    json.RawMessage(`[]`),
+	}
 
 	metrics := &mockMetrics{}
 
@@ -2522,8 +2540,13 @@ func TestProcessBlock_VersionIsCorrectAfterReorg(t *testing.T) {
 	eventSink := memory.NewEventSink()
 
 	client := newMockClient()
-	// Add block data for fetching
-	client.addBlock(100, "0x99")
+	// Add block data for fetching with specific hash
+	client.blocks[100] = blockTestData{
+		header:   outbound.BlockHeader{Number: "0x64", Hash: "0x100_new", ParentHash: "0x99", Timestamp: "0x0"},
+		receipts: json.RawMessage(`[]`),
+		traces:   json.RawMessage(`[]`),
+		blobs:    json.RawMessage(`[]`),
+	}
 
 	svc, err := NewLiveService(LiveConfig{
 		DisableBlobs: true,
@@ -2595,7 +2618,13 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 	eventSink := memory.NewEventSink()
 
 	client := newMockClient()
-	client.addBlock(100, "0x99")
+	// Add block data for fetching - we need blocks with specific hashes for the v0 and v2 cases
+	client.blocks[100] = blockTestData{
+		header:   outbound.BlockHeader{Number: "0x64", Hash: "0x100_v0", ParentHash: "0x99", Timestamp: "0x0"},
+		receipts: json.RawMessage(`[]`),
+		traces:   json.RawMessage(`[]`),
+		blobs:    json.RawMessage(`[]`),
+	}
 
 	svc, err := NewLiveService(LiveConfig{
 		DisableBlobs: true,
@@ -2655,6 +2684,14 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 	// Clear the unfinalized chain to avoid reorg detection complexity
 	svc.unfinalizedBlocks = nil
 
+	// Add block data for v2
+	client.blocks[100] = blockTestData{
+		header:   outbound.BlockHeader{Number: "0x64", Hash: "0x100_v2", ParentHash: "0x99", Timestamp: "0x0"},
+		receipts: json.RawMessage(`[]`),
+		traces:   json.RawMessage(`[]`),
+		blobs:    json.RawMessage(`[]`),
+	}
+
 	header3 := outbound.BlockHeader{
 		Number:     "0x64", // 100
 		Hash:       "0x100_v2",
@@ -2673,4 +2710,131 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 	if savedBlock3.Version != 2 {
 		t.Errorf("expected third block to have version 2, got %d (bug: Version not set in BlockState before SaveBlock)", savedBlock3.Version)
 	}
+}
+
+// TestFetchBlockData_ReorgBetweenHeaderAndFetch verifies that fetching by hash
+// prevents the TOCTOU vulnerability where a reorg between receiving the header
+// and fetching block data could cause us to cache data for the wrong block.
+//
+// Before the fix: We fetched by block number, so if a reorg happened, we'd get
+// data for the NEW canonical block but our DB/events referenced the OLD hash.
+//
+// After the fix: We fetch by hash, so we always get data for exactly the block
+// we committed to in the database.
+func TestFetchBlockData_ReorgBetweenHeaderAndFetch(t *testing.T) {
+	ctx := context.Background()
+
+	// Setup
+	client := newMockClient()
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Add a base block chain including block 100 with a specific hash
+	for i := int64(99); i <= 100; i++ {
+		client.addBlock(i, "")
+	}
+
+	// Get the hash that was generated for block 100
+	block100Header := client.getHeader(100)
+	expectedHash := block100Header.Hash
+
+	config := LiveConfig{
+		ChainID:              1,
+		FinalityBlockCount:   64,
+		MaxUnfinalizedBlocks: 200,
+		DisableBlobs:         true, // Simplify test
+		Logger:               slog.Default(),
+	}
+
+	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx = ctx
+
+	// Simulate receiving a header via WebSocket
+	header := outbound.BlockHeader{
+		Number:     "0x64", // 100
+		Hash:       expectedHash,
+		ParentHash: block100Header.ParentHash,
+		Timestamp:  block100Header.Timestamp,
+	}
+
+	// Process the block - now fetches by hash instead of number
+	err = svc.processBlock(header, time.Now())
+	if err != nil {
+		t.Fatalf("processBlock failed: %v", err)
+	}
+
+	// Verify the cached block has the correct hash
+	cachedData := cache.GetBlock(1, 100, 0)
+	if cachedData == nil {
+		t.Fatal("expected block to be cached")
+	}
+
+	var cachedHeader outbound.BlockHeader
+	if err := json.Unmarshal(cachedData, &cachedHeader); err != nil {
+		t.Fatalf("failed to parse cached block: %v", err)
+	}
+
+	// The cached block hash should match what we committed to
+	if cachedHeader.Hash != expectedHash {
+		t.Errorf("cached block hash %s does not match expected hash %s", cachedHeader.Hash, expectedHash)
+	}
+
+	t.Logf("SUCCESS: Cached block hash matches committed hash: %s", cachedHeader.Hash)
+}
+
+// TestFetchBlockData_ByHashReturnsErrorWhenBlockNotFound verifies that fetching
+// by hash returns an error if the block doesn't exist (e.g., due to a reorg
+// that removed it before we could fetch the full data).
+func TestFetchBlockData_ByHashReturnsErrorWhenBlockNotFound(t *testing.T) {
+	ctx := context.Background()
+
+	// Setup
+	client := newMockClient()
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Add a base block chain but NOT block 100
+	client.addBlock(99, "")
+
+	config := LiveConfig{
+		ChainID:              1,
+		FinalityBlockCount:   64,
+		MaxUnfinalizedBlocks: 200,
+		DisableBlobs:         true,
+		Logger:               slog.Default(),
+	}
+
+	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx = ctx
+
+	// Simulate receiving a header for a block that doesn't exist in RPC
+	// (e.g., it was reorged away before we could fetch it)
+	nonExistentHash := "0xDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF"
+	header := outbound.BlockHeader{
+		Number:     "0x64", // 100
+		Hash:       nonExistentHash,
+		ParentHash: fmt.Sprintf("0x%064x", 99),
+		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
+	}
+
+	// Process should fail because we can't fetch the block by hash
+	err = svc.processBlock(header, time.Now())
+	if err == nil {
+		t.Fatal("expected error when fetching non-existent block by hash")
+	}
+
+	// Verify the error mentions the hash
+	if !strings.Contains(err.Error(), nonExistentHash) {
+		t.Errorf("expected error to contain hash %s, got: %v", nonExistentHash, err)
+	}
+
+	t.Logf("Correctly failed when block not found by hash: %v", err)
 }

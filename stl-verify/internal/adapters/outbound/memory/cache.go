@@ -112,3 +112,10 @@ func (c *BlockCache) Clear() {
 	defer c.mu.Unlock()
 	c.blocks = make(map[string]json.RawMessage)
 }
+
+// GetBlock retrieves cached block data (for testing).
+func (c *BlockCache) GetBlock(chainID int64, blockNumber int64, version int) json.RawMessage {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.blocks[c.key(chainID, blockNumber, version, "block")]
+}
