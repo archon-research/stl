@@ -59,8 +59,12 @@ type BlockRange struct {
 // BlockStateRepository defines the interface for persisting block state.
 // Used for tracking the last processed block, detecting reorgs, and deduplication.
 type BlockStateRepository interface {
-	// SaveBlock persists a block's state. Used for tracking and reorg detection.
-	SaveBlock(ctx context.Context, state BlockState) error
+	// SaveBlock persists a block's state with atomic version assignment.
+	// Returns the assigned version number. The version is calculated atomically
+	// to prevent race conditions when multiple processes save blocks concurrently.
+	// The state.Version field is ignored; the returned version should be used
+	// for cache keys and event publishing.
+	SaveBlock(ctx context.Context, state BlockState) (int, error)
 
 	// GetLastBlock retrieves the most recently saved canonical (non-orphaned) block state.
 	// Returns nil if no blocks have been saved yet.

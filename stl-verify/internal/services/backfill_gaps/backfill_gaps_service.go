@@ -363,23 +363,16 @@ func (s *BackfillService) processBlockData(bd outbound.BlockData) error {
 
 	receivedAt := time.Now()
 
-	// Get version BEFORE saving - this is the count of existing blocks at this height.
-	version, err := s.stateRepo.GetBlockVersionCount(ctx, blockNum)
-	if err != nil {
-		s.logger.Warn("failed to get block version count", "block", blockNum, "error", err)
-		version = 0 // Default to 0 on error
-	}
-
-	// Save block state to DB
+	// Save block state to DB - version is assigned atomically to prevent race conditions
 	state := outbound.BlockState{
 		Number:     blockNum,
 		Hash:       header.Hash,
 		ParentHash: header.ParentHash,
 		ReceivedAt: receivedAt.Unix(),
 		IsOrphaned: false,
-		Version:    version,
 	}
-	if err := s.stateRepo.SaveBlock(ctx, state); err != nil {
+	version, err := s.stateRepo.SaveBlock(ctx, state)
+	if err != nil {
 		return fmt.Errorf("failed to save block state: %w", err)
 	}
 

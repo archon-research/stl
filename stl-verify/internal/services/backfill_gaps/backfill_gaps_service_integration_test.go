@@ -68,7 +68,7 @@ func setupPostgres(t *testing.T) (*postgres.BlockStateRepository, func()) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	repo := postgres.NewBlockStateRepository(db)
+	repo := postgres.NewBlockStateRepository(db, nil)
 	if err := repo.Migrate(ctx); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
@@ -84,7 +84,7 @@ func setupPostgres(t *testing.T) (*postgres.BlockStateRepository, func()) {
 // saveBlock is a helper to save a block with minimal boilerplate.
 func saveBlock(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, number int64) {
 	t.Helper()
-	err := repo.SaveBlock(ctx, outbound.BlockState{
+	_, err := repo.SaveBlock(ctx, outbound.BlockState{
 		Number:     number,
 		Hash:       fmt.Sprintf("0x%064x", number),
 		ParentHash: fmt.Sprintf("0x%064x", number-1),
@@ -413,5 +413,128 @@ func TestGetMinMaxBlockNumber_IgnoresOrphaned(t *testing.T) {
 	}
 	if max != 50 {
 		t.Errorf("expected max=50 (ignoring orphaned), got %d", max)
+	}
+}
+
+func TestSaveBlock_ConcurrentVersionRaceCondition(t *testing.T) {
+	// This test demonstrates the TOCTOU (Time-of-Check-Time-of-Use) race condition
+	// when two goroutines try to save blocks at the same height concurrently.
+	//
+	// Bug scenario:
+	// 1. Goroutine A calls GetBlockVersionCount(100) → gets 0
+	// 2. Goroutine B calls GetBlockVersionCount(100) → gets 0 (before A saves)
+	// 3. Goroutine A saves block with Version: 0
+	// 4. Goroutine B saves block with Version: 0
+	// 5. Now there are TWO blocks at height 100 with Version: 0!
+	//
+	// This breaks the version uniqueness assumption and causes cache key collisions.
+
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	const blockNum int64 = 100
+	const numGoroutines = 10
+
+	// Use a channel to synchronize the start of all goroutines
+	startCh := make(chan struct{})
+	doneCh := make(chan error, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			// Wait for the start signal
+			<-startCh
+
+			// Simulate the pattern used in live_data_service and backfill_gaps_service:
+			// 1. Get version count
+			// 2. Save block - version is now assigned atomically by SaveBlock
+			_, err := repo.SaveBlock(ctx, outbound.BlockState{
+				Number:     blockNum,
+				Hash:       fmt.Sprintf("0x%064x_%d", blockNum, id),
+				ParentHash: fmt.Sprintf("0x%064x", blockNum-1),
+				ReceivedAt: time.Now().Unix(),
+				IsOrphaned: false,
+			})
+			if err != nil {
+				doneCh <- fmt.Errorf("goroutine %d: SaveBlock failed: %w", id, err)
+				return
+			}
+			doneCh <- nil
+		}(i)
+	}
+
+	// Start all goroutines at once to maximize race condition likelihood
+	close(startCh)
+
+	// Wait for all goroutines to complete
+	for i := 0; i < numGoroutines; i++ {
+		if err := <-doneCh; err != nil {
+			t.Logf("Error: %v", err)
+		}
+	}
+
+	// Check how many blocks were saved and if versions are unique
+	rows, err := repo.GetOrphanedBlocks(ctx, 0) // This won't work, need raw query
+	if err != nil {
+		t.Logf("GetOrphanedBlocks error: %v", err)
+	}
+	_ = rows
+
+	// Query all blocks at this height to check for duplicate versions
+	finalCount, err := repo.GetBlockVersionCount(ctx, blockNum)
+	if err != nil {
+		t.Fatalf("failed to get final version count: %v", err)
+	}
+
+	// If there's no race condition, we should have exactly numGoroutines blocks
+	// with versions 0, 1, 2, ..., numGoroutines-1
+	if finalCount != numGoroutines {
+		t.Errorf("expected %d blocks saved, but GetBlockVersionCount returns %d (some blocks may have duplicate versions)", numGoroutines, finalCount)
+	}
+
+	// The real test: check if all versions are unique
+	// We need to query the database directly
+	type blockVersion struct {
+		hash    string
+		version int
+	}
+	var blocks []blockVersion
+
+	// Use a raw query to get all blocks at this height
+	query := `SELECT hash, version FROM block_states WHERE number = $1 ORDER BY version`
+	rowsResult, err := repo.DB().QueryContext(ctx, query, blockNum)
+	if err != nil {
+		t.Fatalf("failed to query blocks: %v", err)
+	}
+	defer rowsResult.Close()
+
+	for rowsResult.Next() {
+		var b blockVersion
+		if err := rowsResult.Scan(&b.hash, &b.version); err != nil {
+			t.Fatalf("failed to scan row: %v", err)
+		}
+		blocks = append(blocks, b)
+	}
+
+	t.Logf("Saved %d blocks at height %d", len(blocks), blockNum)
+
+	// Check for duplicate versions
+	versionCounts := make(map[int]int)
+	for _, b := range blocks {
+		versionCounts[b.version]++
+		t.Logf("  Block %s: version=%d", b.hash[:20], b.version)
+	}
+
+	for version, count := range versionCounts {
+		if count > 1 {
+			t.Errorf("RACE CONDITION DETECTED: version %d appears %d times (should be unique)", version, count)
+		}
+	}
+
+	// Also verify versions are sequential from 0 to len(blocks)-1
+	for i := 0; i < len(blocks); i++ {
+		if versionCounts[i] != 1 {
+			t.Errorf("expected exactly one block with version %d, got %d", i, versionCounts[i])
+		}
 	}
 }

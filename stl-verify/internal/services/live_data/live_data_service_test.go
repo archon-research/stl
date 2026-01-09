@@ -77,13 +77,13 @@ func newMockStateRepo() *mockStateRepo {
 	}
 }
 
-func (m *mockStateRepo) SaveBlock(ctx context.Context, state outbound.BlockState) error {
+func (m *mockStateRepo) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
 	m.mu.RLock()
 	err := m.saveBlockErr
 	m.mu.RUnlock()
 
 	if err != nil {
-		return err
+		return 0, err
 	}
 	return m.BlockStateRepository.SaveBlock(ctx, state)
 }
@@ -375,7 +375,7 @@ func TestLateBlockAfterPruning(t *testing.T) {
 	}
 
 	// Seed the state repo with block 1
-	if err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
 		Number:     1,
 		Hash:       client.getHeader(1).Hash,
 		ParentHash: client.getHeader(1).ParentHash,
@@ -593,7 +593,7 @@ func TestIsDuplicateBlock_FoundInDB(t *testing.T) {
 	eventSink := memory.NewEventSink()
 
 	// Pre-populate the state repo with a block
-	_ = stateRepo.SaveBlock(ctx, outbound.BlockState{
+	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
 		Number: 50,
 		Hash:   "0xdb_block_hash",
 	})
@@ -1138,8 +1138,8 @@ func TestHandleReorg_RecordsReorgEvent(t *testing.T) {
 	}
 
 	// Pre-save blocks to state repo
-	_ = stateRepo.SaveBlock(ctx, outbound.BlockState{Number: 99, Hash: "0xblock99"})
-	_ = stateRepo.SaveBlock(ctx, outbound.BlockState{Number: 100, Hash: "0xblock100"})
+	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{Number: 99, Hash: "0xblock99"})
+	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{Number: 100, Hash: "0xblock100"})
 
 	// Our chain
 	svc.unfinalizedBlocks = []LightBlock{
@@ -1343,7 +1343,7 @@ func TestRestoreInMemoryChain_RestoresBlocks(t *testing.T) {
 
 	// Seed the DB with blocks
 	for i := int64(1); i <= 50; i++ {
-		_ = stateRepo.SaveBlock(ctx, outbound.BlockState{
+		_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
 			Number:     i,
 			Hash:       fmt.Sprintf("0x%d", i),
 			ParentHash: fmt.Sprintf("0x%d", i-1),
@@ -1382,7 +1382,7 @@ func TestRestoreInMemoryChain_SetsFinalizedBlock(t *testing.T) {
 
 	// Seed with blocks 1-100
 	for i := int64(1); i <= 100; i++ {
-		_ = stateRepo.SaveBlock(ctx, outbound.BlockState{
+		_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
 			Number:     i,
 			Hash:       fmt.Sprintf("0x%d", i),
 			ParentHash: fmt.Sprintf("0x%d", i-1),
@@ -2211,7 +2211,7 @@ func TestStart_RestoresChainFromDB(t *testing.T) {
 
 	// Pre-populate DB with blocks
 	for i := int64(1); i <= 10; i++ {
-		_ = stateRepo.SaveBlock(ctx, outbound.BlockState{
+		_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
 			Number: i,
 			Hash:   fmt.Sprintf("0x%d", i),
 		})
@@ -2441,39 +2441,8 @@ func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestProcessBlock_GetVersionCountError(t *testing.T) {
-	stateRepo := newMockStateRepo()
-	stateRepo.getVersionCountErr = fmt.Errorf("database error")
-
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
-
-	client := newMockClient()
-	client.addBlock(100, "0x99")
-
-	svc, err := NewLiveService(LiveConfig{
-		DisableBlobs: true,
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
-	if err != nil {
-		t.Fatalf("failed to create service: %v", err)
-	}
-	svc.ctx, svc.cancel = context.WithCancel(context.Background())
-	defer svc.cancel()
-
-	header := outbound.BlockHeader{
-		Number:     "0x64",
-		Hash:       "0x100",
-		ParentHash: "0x99",
-	}
-
-	err = svc.processBlock(header, time.Now())
-	if err == nil {
-		t.Error("expected error when GetBlockVersionCount fails")
-	}
-	if !contains(err.Error(), "failed to get block version") {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
+// TestProcessBlock_GetVersionCountError was removed because version is now
+// assigned atomically by SaveBlock rather than fetched separately.
 
 func TestProcessHeaders_LogsErrorOnProcessBlockFailure(t *testing.T) {
 	stateRepo := newMockStateRepo()
@@ -2658,7 +2627,7 @@ func TestProcessBlock_VersionIsCorrectAfterReorg(t *testing.T) {
 	defer svc.cancel()
 
 	// Pre-save a block at height 100 (this is version 0)
-	_ = stateRepo.SaveBlock(ctx, outbound.BlockState{
+	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
 		Number:     100,
 		Hash:       "0x100_original",
 		ParentHash: "0x99",
@@ -2753,7 +2722,7 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 	// without triggering the reorg detection logic
 	// This mimics what happens when MarkBlocksOrphanedAfter runs and then
 	// a new block is processed
-	err = stateRepo.SaveBlock(ctx, outbound.BlockState{
+	_, err = stateRepo.SaveBlock(ctx, outbound.BlockState{
 		Number:     100,
 		Hash:       "0x100_v1",
 		ParentHash: "0x99",

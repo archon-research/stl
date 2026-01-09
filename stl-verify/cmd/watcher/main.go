@@ -110,7 +110,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	blockStateRepo := postgres.NewBlockStateRepository(db)
+	blockStateRepo := postgres.NewBlockStateRepository(db, logger)
 
 	// Run migration
 	if err := blockStateRepo.Migrate(context.Background()); err != nil {

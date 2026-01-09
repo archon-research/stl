@@ -172,7 +172,7 @@ func TestBackfillService_FillsGaps(t *testing.T) {
 
 	// Seed the state repo with blocks 1, 50, and 100 (leaving gaps 2-49 and 51-99)
 	for _, num := range []int64{1, 50, 100} {
-		if err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
 			Number:     num,
 			Hash:       client.getHeader(num).Hash,
 			ParentHash: client.getHeader(num).ParentHash,
@@ -255,7 +255,7 @@ func TestBackfillService_VersionIsSavedToDatabase(t *testing.T) {
 
 	// Seed blocks 1 and 10 to create a gap at 2-9
 	for _, num := range []int64{1, 10} {
-		if err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
 			Number:     num,
 			Hash:       client.getHeader(num).Hash,
 			ParentHash: client.getHeader(num).ParentHash,

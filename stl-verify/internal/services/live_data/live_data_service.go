@@ -269,25 +269,16 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 	// Add block to in-memory chain
 	s.addBlock(block)
 
-	// Get version BEFORE saving - this is the count of existing blocks at this height.
-	// The version will be used as an index (0 for first block, 1 for second after reorg, etc.)
-	version, err := s.stateRepo.GetBlockVersionCount(ctx, blockNum)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to get block version")
-		return fmt.Errorf("failed to get block version for block %d: %w", blockNum, err)
-	}
-
-	// Save block state to DB
+	// Save block state to DB - version is assigned atomically to prevent race conditions
 	state := outbound.BlockState{
 		Number:     blockNum,
 		Hash:       header.Hash,
 		ParentHash: header.ParentHash,
 		ReceivedAt: receivedAt.Unix(),
 		IsOrphaned: false,
-		Version:    version,
 	}
-	if err := s.stateRepo.SaveBlock(ctx, state); err != nil {
+	version, err := s.stateRepo.SaveBlock(ctx, state)
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to save block state")
 		return fmt.Errorf("failed to save block state: %w", err)

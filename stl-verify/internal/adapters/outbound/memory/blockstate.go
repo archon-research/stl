@@ -37,12 +37,24 @@ func NewBlockStateRepository() *BlockStateRepository {
 	}
 }
 
-// SaveBlock persists a block's state.
-func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) error {
+// SaveBlock persists a block's state with atomic version assignment.
+// Returns the assigned version number.
+func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// Calculate the next version atomically while holding the lock
+	maxVersion := -1
+	for _, b := range r.blocks {
+		if b.Number == state.Number && b.Version > maxVersion {
+			maxVersion = b.Version
+		}
+	}
+	version := maxVersion + 1
+	state.Version = version
+
 	r.blocks[state.Hash] = state
-	return nil
+	return version, nil
 }
 
 // GetLastBlock retrieves the most recently saved canonical block state.

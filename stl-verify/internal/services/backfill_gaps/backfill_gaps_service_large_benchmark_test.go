@@ -95,7 +95,7 @@ func setupLargePostgres(b *testing.B) (*sql.DB, *postgres.BlockStateRepository, 
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	repo := postgres.NewBlockStateRepository(db)
+	repo := postgres.NewBlockStateRepository(db, nil)
 	if err := repo.Migrate(ctx); err != nil {
 		b.Fatalf("failed to migrate: %v", err)
 	}

@@ -220,7 +220,7 @@ func TestConcurrentLiveAndBackfill(t *testing.T) {
 	}
 
 	// Seed the state repo with block 1 so backfill knows where to start
-	if err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
 		Number:     1,
 		Hash:       client.getHeader(1).Hash,
 		ParentHash: client.getHeader(1).ParentHash,

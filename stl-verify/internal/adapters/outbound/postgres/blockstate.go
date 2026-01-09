@@ -18,6 +18,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -31,12 +32,21 @@ var _ outbound.BlockStateRepository = (*BlockStateRepository)(nil)
 
 // BlockStateRepository is a PostgreSQL implementation of the outbound.BlockStateRepository port.
 type BlockStateRepository struct {
-	db *sql.DB
+	db     *sql.DB
+	logger *slog.Logger
 }
 
 // NewBlockStateRepository creates a new PostgreSQL block state repository.
-func NewBlockStateRepository(db *sql.DB) *BlockStateRepository {
-	return &BlockStateRepository{db: db}
+func NewBlockStateRepository(db *sql.DB, logger *slog.Logger) *BlockStateRepository {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &BlockStateRepository{db: db, logger: logger}
+}
+
+// DB returns the underlying database connection for advanced queries.
+func (r *BlockStateRepository) DB() *sql.DB {
+	return r.db
 }
 
 // Migrate creates the block_states and reorg_events tables if they don't exist.
@@ -48,22 +58,56 @@ func (r *BlockStateRepository) Migrate(ctx context.Context) error {
 	return nil
 }
 
-// SaveBlock persists a block's state.
-func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) error {
+// SaveBlock persists a block's state with atomic version assignment.
+// The version is calculated atomically using an advisory lock to prevent race conditions.
+// The provided state.Version is ignored; the actual assigned version is returned.
+func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
+	// Use a transaction with an advisory lock to ensure atomic version assignment.
+	// The advisory lock key is based on the block number to allow concurrent inserts
+	// for different block numbers while serializing inserts for the same block number.
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			r.logger.Error("failed to rollback transaction", "error", err, "blockNumber", state.Number)
+		}
+	}()
+
+	// Acquire an advisory lock based on the block number.
+	// pg_advisory_xact_lock is released automatically when the transaction ends.
+	_, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, state.Number)
+	if err != nil {
+		return 0, fmt.Errorf("failed to acquire advisory lock: %w", err)
+	}
+
+	// Now calculate the version safely - no other transaction can insert at this block number
+	var version int
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), -1) + 1 FROM block_states WHERE number = $1`, state.Number).Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get next version: %w", err)
+	}
+
+	// Insert the block with the calculated version
 	query := `
 		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned, version)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (hash) DO UPDATE SET
 			parent_hash = EXCLUDED.parent_hash,
 			received_at = EXCLUDED.received_at,
-			is_orphaned = EXCLUDED.is_orphaned,
-			version = EXCLUDED.version
+			is_orphaned = EXCLUDED.is_orphaned
 	`
-	_, err := r.db.ExecContext(ctx, query, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned, state.Version)
+	_, err = tx.ExecContext(ctx, query, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned, version)
 	if err != nil {
-		return fmt.Errorf("failed to save block state: %w", err)
+		return 0, fmt.Errorf("failed to save block state: %w", err)
 	}
-	return nil
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return version, nil
 }
 
 // GetLastBlock retrieves the most recently saved canonical (non-orphaned) block state.
