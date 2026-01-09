@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -79,6 +80,11 @@ func main() {
 	alchemyWSURL := getEnv("ALCHEMY_WS_URL", "wss://eth-mainnet.g.alchemy.com/v2")
 	if alchemyAPIKey == "" {
 		logger.Error("ALCHEMY_API_KEY environment variable is required")
+		os.Exit(1)
+	}
+	chainID, err := strconv.ParseInt(requireEnv("CHAIN_ID"), 10, 64)
+	if err != nil {
+		logger.Error("CHAIN_ID must be a valid integer", "error", err)
 		os.Exit(1)
 	}
 	postgresURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
@@ -216,7 +222,7 @@ func main() {
 
 	// Create LiveService (handles WebSocket subscription and reorg detection)
 	config := live_data.LiveConfig{
-		ChainID:              1, // Ethereum mainnet
+		ChainID:              chainID,
 		FinalityBlockCount:   64,
 		MaxUnfinalizedBlocks: 128,
 		DisableBlobs:         *disableBlobs,
@@ -241,7 +247,7 @@ func main() {
 	enableBackfill := getEnv("ENABLE_BACKFILL", "false") == "true"
 	if enableBackfill {
 		backfillConfig := backfill_gaps.BackfillConfig{
-			ChainID:      1,
+			ChainID:      chainID,
 			BatchSize:    10,
 			PollInterval: 30 * time.Second,
 			Logger:       logger,
