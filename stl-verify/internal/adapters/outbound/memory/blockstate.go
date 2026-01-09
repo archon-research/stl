@@ -11,6 +11,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -402,4 +403,53 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 	}
 
 	return gaps, nil
+}
+
+// VerifyChainIntegrity verifies that the parent_hash chain is properly linked.
+// Returns nil if the chain is valid, or an error describing the first broken link.
+func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if fromBlock >= toBlock {
+		return nil // Nothing to verify
+	}
+
+	// Build a sorted list of canonical blocks in range
+	type blockInfo struct {
+		number     int64
+		hash       string
+		parentHash string
+	}
+	var blocksInRange []blockInfo
+	for _, b := range r.blocks {
+		if !b.IsOrphaned && b.Number >= fromBlock && b.Number <= toBlock {
+			blocksInRange = append(blocksInRange, blockInfo{
+				number:     b.Number,
+				hash:       b.Hash,
+				parentHash: b.ParentHash,
+			})
+		}
+	}
+
+	// Sort by block number
+	sort.Slice(blocksInRange, func(i, j int) bool {
+		return blocksInRange[i].number < blocksInRange[j].number
+	})
+
+	// Check each consecutive pair
+	for i := 1; i < len(blocksInRange); i++ {
+		curr := blocksInRange[i]
+		prev := blocksInRange[i-1]
+
+		// Only check if blocks are consecutive
+		if curr.number == prev.number+1 {
+			if curr.parentHash != prev.hash {
+				return fmt.Errorf("chain integrity violation at block %d: parent_hash %s does not match hash %s of block %d",
+					curr.number, curr.parentHash, prev.hash, prev.number)
+			}
+		}
+	}
+
+	return nil
 }

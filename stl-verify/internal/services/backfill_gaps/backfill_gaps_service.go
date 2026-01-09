@@ -540,6 +540,16 @@ func (s *BackfillService) advanceWatermark(ctx context.Context) error {
 
 	// Only advance if we have a higher watermark
 	if newWatermark > currentWatermark {
+		// Verify chain integrity before advancing watermark
+		// This ensures eventual consistency of the parent_hash chain
+		if err := s.stateRepo.VerifyChainIntegrity(ctx, currentWatermark, newWatermark); err != nil {
+			s.logger.Error("chain integrity violation detected, not advancing watermark",
+				"error", err,
+				"from", currentWatermark,
+				"to", newWatermark)
+			return fmt.Errorf("chain integrity check failed: %w", err)
+		}
+
 		if err := s.stateRepo.SetBackfillWatermark(ctx, newWatermark); err != nil {
 			return fmt.Errorf("failed to set watermark: %w", err)
 		}

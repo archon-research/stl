@@ -138,4 +138,10 @@ type BlockStateRepository interface {
 	// Uses the backfill watermark to skip already-verified blocks.
 	// Returns an empty slice if there are no gaps.
 	FindGaps(ctx context.Context, minBlock, maxBlock int64) ([]BlockRange, error)
+
+	// VerifyChainIntegrity verifies that the parent_hash chain is properly linked
+	// in the given range. Returns nil if the chain is valid, or an error describing
+	// the first broken link found.
+	// This should be called after backfill completes to ensure eventual consistency.
+	VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error
 }

@@ -531,3 +531,46 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 
 	return gaps, nil
 }
+
+// VerifyChainIntegrity verifies that the parent_hash chain is properly linked.
+// It checks that each block's parent_hash matches the hash of the previous block number.
+// Returns nil if the chain is valid, or an error describing the first broken link.
+func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error {
+	if fromBlock >= toBlock {
+		return nil // Nothing to verify
+	}
+
+	// Query that finds the first block where parent_hash doesn't match
+	// the hash of the previous block number
+	query := `
+		WITH ordered_blocks AS (
+			SELECT number, hash, parent_hash,
+				LAG(hash) OVER (ORDER BY number) as prev_hash,
+				LAG(number) OVER (ORDER BY number) as prev_number
+			FROM block_states
+			WHERE NOT is_orphaned AND number >= $1 AND number <= $2
+		)
+		SELECT number, hash, parent_hash, prev_hash, prev_number
+		FROM ordered_blocks
+		WHERE prev_hash IS NOT NULL
+			AND prev_number = number - 1
+			AND parent_hash != prev_hash
+		LIMIT 1
+	`
+
+	var brokenBlock, prevBlockNum int64
+	var blockHash, parentHash, prevHash string
+
+	err := r.db.QueryRowContext(ctx, query, fromBlock, toBlock).Scan(
+		&brokenBlock, &blockHash, &parentHash, &prevHash, &prevBlockNum,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // Chain is valid
+		}
+		return fmt.Errorf("failed to verify chain integrity: %w", err)
+	}
+
+	return fmt.Errorf("chain integrity violation at block %d: parent_hash %s does not match hash %s of block %d",
+		brokenBlock, parentHash, prevHash, prevBlockNum)
+}

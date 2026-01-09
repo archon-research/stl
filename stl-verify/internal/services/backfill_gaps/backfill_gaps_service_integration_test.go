@@ -538,3 +538,107 @@ func TestSaveBlock_ConcurrentVersionRaceCondition(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifyChainIntegrity_ValidChain(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Save a contiguous chain with correct parent_hash links
+	for i := int64(1); i <= 10; i++ {
+		saveBlock(t, ctx, repo, i)
+	}
+
+	// Verify chain integrity - should pass
+	err := repo.VerifyChainIntegrity(ctx, 1, 10)
+	if err != nil {
+		t.Errorf("expected valid chain, got error: %v", err)
+	}
+}
+
+func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Save blocks 1-5 with correct links
+	for i := int64(1); i <= 5; i++ {
+		saveBlock(t, ctx, repo, i)
+	}
+
+	// Save block 6 with WRONG parent_hash (points to block 3 instead of 5)
+	_, err := repo.SaveBlock(ctx, outbound.BlockState{
+		Number:     6,
+		Hash:       fmt.Sprintf("0x%064x", 6),
+		ParentHash: fmt.Sprintf("0x%064x", 3), // Wrong! Should be 5
+		ReceivedAt: time.Now().Unix(),
+		IsOrphaned: false,
+	})
+	if err != nil {
+		t.Fatalf("failed to save block 6: %v", err)
+	}
+
+	// Verify chain integrity - should fail at block 6
+	err = repo.VerifyChainIntegrity(ctx, 1, 6)
+	if err == nil {
+		t.Error("expected chain integrity error, got nil")
+	} else {
+		t.Logf("correctly detected chain integrity violation: %v", err)
+		// Verify the error mentions block 6
+		if !contains(err.Error(), "block 6") {
+			t.Errorf("error should mention block 6, got: %v", err)
+		}
+	}
+}
+
+func TestVerifyChainIntegrity_EmptyRange(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Empty range should return nil (nothing to verify)
+	err := repo.VerifyChainIntegrity(ctx, 10, 5)
+	if err != nil {
+		t.Errorf("expected nil for empty range, got: %v", err)
+	}
+
+	// Same block should return nil
+	err = repo.VerifyChainIntegrity(ctx, 5, 5)
+	if err != nil {
+		t.Errorf("expected nil for same block range, got: %v", err)
+	}
+}
+
+func TestVerifyChainIntegrity_WithGaps(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Save blocks with a gap (1, 2, 3, 5, 6) - missing block 4
+	for i := int64(1); i <= 3; i++ {
+		saveBlock(t, ctx, repo, i)
+	}
+	// Block 5's parent_hash points to 4 (which doesn't exist in DB, but that's okay)
+	saveBlock(t, ctx, repo, 5)
+	saveBlock(t, ctx, repo, 6)
+
+	// This should pass because we only check consecutive blocks that exist
+	// Block 5 and 6 are consecutive and properly linked
+	err := repo.VerifyChainIntegrity(ctx, 1, 6)
+	if err != nil {
+		t.Errorf("expected valid chain with gaps (only consecutive blocks checked), got: %v", err)
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}

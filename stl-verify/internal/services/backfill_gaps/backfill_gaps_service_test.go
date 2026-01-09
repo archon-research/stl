@@ -321,3 +321,139 @@ func TestBackfillService_VersionIsSavedToDatabase(t *testing.T) {
 		t.Errorf("expected cache key %q, got %q", expectedCacheKey, block5Event.CacheKey)
 	}
 }
+
+func TestVerifyChainIntegrity_MemoryAdapter_ValidChain(t *testing.T) {
+	ctx := context.Background()
+	stateRepo := memory.NewBlockStateRepository()
+
+	// Save a contiguous chain with correct parent_hash links
+	for i := int64(1); i <= 10; i++ {
+		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x%064x", i),
+			ParentHash: fmt.Sprintf("0x%064x", i-1),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Verify chain integrity - should pass
+	err := stateRepo.VerifyChainIntegrity(ctx, 1, 10)
+	if err != nil {
+		t.Errorf("expected valid chain, got error: %v", err)
+	}
+}
+
+func TestVerifyChainIntegrity_MemoryAdapter_BrokenChain(t *testing.T) {
+	ctx := context.Background()
+	stateRepo := memory.NewBlockStateRepository()
+
+	// Save blocks 1-5 with correct links
+	for i := int64(1); i <= 5; i++ {
+		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x%064x", i),
+			ParentHash: fmt.Sprintf("0x%064x", i-1),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Save block 6 with WRONG parent_hash (points to block 3 instead of 5)
+	_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:     6,
+		Hash:       fmt.Sprintf("0x%064x", 6),
+		ParentHash: fmt.Sprintf("0x%064x", 3), // Wrong! Should be 5
+	})
+	if err != nil {
+		t.Fatalf("failed to save block 6: %v", err)
+	}
+
+	// Verify chain integrity - should fail at block 6
+	err = stateRepo.VerifyChainIntegrity(ctx, 1, 6)
+	if err == nil {
+		t.Error("expected chain integrity error, got nil")
+	} else {
+		t.Logf("correctly detected chain integrity violation: %v", err)
+	}
+}
+
+func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
+	ctx := context.Background()
+
+	// Setup
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Add blocks 1-10 to the mock client with correct links
+	for i := int64(1); i <= 10; i++ {
+		client.addBlock(i, "")
+	}
+
+	// Manually save blocks with a broken chain:
+	// Blocks 1-5 correct, block 6 has wrong parent
+	for i := int64(1); i <= 5; i++ {
+		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x%064x", i),
+			ParentHash: fmt.Sprintf("0x%064x", i-1),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Block 6 with wrong parent_hash
+	_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:     6,
+		Hash:       fmt.Sprintf("0x%064x", 6),
+		ParentHash: fmt.Sprintf("0x%064x", 3), // Wrong! Points to block 3
+	})
+	if err != nil {
+		t.Fatalf("failed to save block 6: %v", err)
+	}
+
+	// Blocks 7-10 continue (even though 6 is broken)
+	for i := int64(7); i <= 10; i++ {
+		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x%064x", i),
+			ParentHash: fmt.Sprintf("0x%064x", i-1),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	config := BackfillConfig{
+		ChainID:   1,
+		BatchSize: 10,
+		Logger:    slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Try to advance watermark - should fail due to broken chain
+	err = service.advanceWatermark(ctx)
+	if err == nil {
+		t.Error("expected advanceWatermark to fail due to broken chain, got nil")
+	} else {
+		t.Logf("correctly refused to advance watermark: %v", err)
+	}
+
+	// Verify watermark was NOT advanced
+	watermark, err := stateRepo.GetBackfillWatermark(ctx)
+	if err != nil {
+		t.Fatalf("failed to get watermark: %v", err)
+	}
+	if watermark != 0 {
+		t.Errorf("expected watermark to remain at 0, got %d", watermark)
+	}
+}
