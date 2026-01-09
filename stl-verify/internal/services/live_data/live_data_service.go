@@ -235,20 +235,24 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 		s.logger.Info("processBlock completed", "block", blockNum, "duration", time.Since(start))
 	}()
 
+	// Normalize hashes once at the entry point (from WebSocket/RPC)
+	normalizedHash := normalizeHash(header.Hash)
+	normalizedParentHash := normalizeHash(header.ParentHash)
+
 	block := LightBlock{
 		Number:     blockNum,
-		Hash:       header.Hash,
-		ParentHash: header.ParentHash,
+		Hash:       normalizedHash,
+		ParentHash: normalizedParentHash,
 	}
 
 	// Check if we've already processed this block
-	if s.isDuplicateBlock(ctx, header.Hash, blockNum) {
+	if s.isDuplicateBlock(ctx, normalizedHash, blockNum) {
 		span.SetAttributes(attribute.Bool("block.duplicate", true))
 		return nil
 	}
 
 	// Detect reorg BEFORE adding to chain
-	isReorg, reorgDepth, commonAncestor, reorgEvent, err := s.detectReorg(header, blockNum, receivedAt)
+	isReorg, reorgDepth, commonAncestor, reorgEvent, err := s.detectReorg(block, receivedAt)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "reorg detection failed")
@@ -271,9 +275,9 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 
 	// Build block state for DB
 	state := outbound.BlockState{
-		Number:     blockNum,
-		Hash:       header.Hash,
-		ParentHash: header.ParentHash,
+		Number:     block.Number,
+		Hash:       block.Hash,
+		ParentHash: block.ParentHash,
 		ReceivedAt: receivedAt.Unix(),
 		IsOrphaned: false,
 	}
@@ -332,7 +336,7 @@ func (s *LiveService) addBlock(block LightBlock) {
 
 // detectReorg detects chain reorganizations using Ponder-style parent hash chain validation.
 // Returns: isReorg, reorgDepth, commonAncestor, reorgEvent (if reorg), error
-func (s *LiveService) detectReorg(header outbound.BlockHeader, incomingBlockNum int64, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, error) {
+func (s *LiveService) detectReorg(block LightBlock, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, error) {
 	if len(s.unfinalizedBlocks) == 0 {
 		return false, 0, 0, nil, nil
 	}
@@ -340,17 +344,17 @@ func (s *LiveService) detectReorg(header outbound.BlockHeader, incomingBlockNum 
 	latestBlock := s.unfinalizedBlocks[len(s.unfinalizedBlocks)-1]
 
 	// Block number decreased - definite reorg
-	if incomingBlockNum <= latestBlock.Number {
-		return s.handleReorg(header, incomingBlockNum, receivedAt)
+	if block.Number <= latestBlock.Number {
+		return s.handleReorg(block, receivedAt)
 	}
 
 	// Block is exactly one ahead - check parent hash
-	if incomingBlockNum == latestBlock.Number+1 {
-		if header.ParentHash == latestBlock.Hash {
+	if block.Number == latestBlock.Number+1 {
+		if block.ParentHash == latestBlock.Hash {
 			return false, 0, 0, nil, nil
 		}
 		// Parent hash mismatch - reorg
-		return s.handleReorg(header, incomingBlockNum, receivedAt)
+		return s.handleReorg(block, receivedAt)
 	}
 
 	// Gap in blocks - will be backfilled by BackfillService
@@ -360,16 +364,12 @@ func (s *LiveService) detectReorg(header outbound.BlockHeader, incomingBlockNum 
 // handleReorg processes a detected reorg and returns the reorg event for atomic handling.
 // The actual database operations (save reorg event, mark orphans, save new block) are
 // done atomically in processBlock via HandleReorgAtomic.
-func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, error) {
+func (s *LiveService) handleReorg(block LightBlock, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, error) {
 	ctx := s.ctx
 
 	// Walk back to find common ancestor
-	// Start with the incoming block, then walk to its parent each iteration
-	walkBlock := LightBlock{
-		Number:     blockNum,
-		Hash:       header.Hash,
-		ParentHash: header.ParentHash,
-	}
+	// Start with the incoming block (already normalized), then walk to its parent each iteration
+	walkBlock := block
 
 	var commonAncestor int64 = -1
 	for walkCount := 0; walkCount < s.config.FinalityBlockCount; walkCount++ {
@@ -397,11 +397,12 @@ func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, r
 		}
 
 		// Walk to parent block to continue searching for common ancestor
+		// Normalize RPC response at the point of ingestion
 		parentNum, _ := parseBlockNumber(parentHeader.Number)
 		walkBlock = LightBlock{
 			Number:     parentNum,
-			Hash:       parentHeader.Hash,
-			ParentHash: parentHeader.ParentHash,
+			Hash:       normalizeHash(parentHeader.Hash),
+			ParentHash: normalizeHash(parentHeader.ParentHash),
 		}
 	}
 
@@ -435,9 +436,9 @@ func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, r
 		// Use the first orphaned block (closest to incoming block number) for OldHash
 		reorgEvent = &outbound.ReorgEvent{
 			DetectedAt:  receivedAt,
-			BlockNumber: blockNum,
+			BlockNumber: block.Number,
 			OldHash:     orphanedBlocks[0].Hash, // Most recent orphaned block
-			NewHash:     header.Hash,
+			NewHash:     block.Hash,
 			Depth:       reorgDepth,
 		}
 	} else {
@@ -446,9 +447,9 @@ func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, r
 		// We still need to record this as a reorg event
 		reorgEvent = &outbound.ReorgEvent{
 			DetectedAt:  receivedAt,
-			BlockNumber: blockNum,
+			BlockNumber: block.Number,
 			OldHash:     "", // No block orphaned at this exact number
-			NewHash:     header.Hash,
+			NewHash:     block.Hash,
 			Depth:       0,
 		}
 	}
@@ -496,6 +497,7 @@ func (s *LiveService) restoreInMemoryChain() {
 	}
 
 	// GetRecentBlocks returns blocks in ascending order (oldest first)
+	// Trust database data - it was normalized when originally stored
 	s.unfinalizedBlocks = make([]LightBlock, 0, len(recentBlocks))
 	for _, b := range recentBlocks {
 		s.unfinalizedBlocks = append(s.unfinalizedBlocks, LightBlock{
@@ -734,6 +736,13 @@ func (s *LiveService) fetchCacheAndPublishBlobs(ctx context.Context, chainID, bl
 func parseBlockNumber(hexNum string) (int64, error) {
 	hexNum = strings.TrimPrefix(hexNum, "0x")
 	return strconv.ParseInt(hexNum, 16, 64)
+}
+
+// normalizeHash normalizes a hex hash to lowercase for consistent comparisons.
+// Ethereum hashes are case-insensitive (0xAAA == 0xaaa), but Go string comparison
+// is case-sensitive. Normalizing to lowercase prevents false mismatches.
+func normalizeHash(hash string) string {
+	return strings.ToLower(hash)
 }
 
 // cacheKey generates the cache key for a given data type.

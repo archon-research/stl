@@ -746,13 +746,13 @@ func TestDetectReorg_EmptyChain_NoReorg(t *testing.T) {
 	// Empty chain
 	svc.unfinalizedBlocks = []LightBlock{}
 
-	header := outbound.BlockHeader{
-		Number:     "0x64", // 100
+	block := LightBlock{
+		Number:     100,
 		Hash:       "0xnew_hash",
 		ParentHash: "0xparent",
 	}
 
-	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(header, 100, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -790,13 +790,13 @@ func TestDetectReorg_NextBlock_ParentMatches_NoReorg(t *testing.T) {
 	}
 
 	// Next block 101 with correct parent
-	header := outbound.BlockHeader{
-		Number:     "0x65", // 101
+	block := LightBlock{
+		Number:     101,
 		Hash:       "0xblock101",
 		ParentHash: "0xblock100", // Matches latest
 	}
 
-	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(header, 101, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -841,13 +841,13 @@ func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
 	}
 
 	// Block 101 with WRONG parent (orphan 100, replace with different chain)
-	header := outbound.BlockHeader{
-		Number:     "0x65", // 101
+	block := LightBlock{
+		Number:     101,
 		Hash:       "0xblock101_alt",
 		ParentHash: "0xblock100_alt", // Different parent - triggers reorg
 	}
 
-	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(header, 101, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -896,13 +896,13 @@ func TestDetectReorg_LowerBlockNumber_Reorg(t *testing.T) {
 	}
 
 	// Receive block 99 again with different hash - definite reorg
-	header := outbound.BlockHeader{
-		Number:     "0x63", // 99
+	block := LightBlock{
+		Number:     99,
 		Hash:       "0xblock99_alt",
 		ParentHash: "0xblock98", // Same ancestor
 	}
 
-	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(header, 99, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -937,13 +937,13 @@ func TestDetectReorg_Gap_NoReorg(t *testing.T) {
 	}
 
 	// Receive block 105 (gap of 4 blocks)
-	header := outbound.BlockHeader{
-		Number:     "0x69", // 105
+	block := LightBlock{
+		Number:     105,
 		Hash:       "0xblock105",
 		ParentHash: "0xblock104",
 	}
 
-	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(header, 105, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -983,13 +983,13 @@ func TestHandleReorg_FindsCommonAncestorInMemory(t *testing.T) {
 	}
 
 	// Incoming block 99 with different hash but parent is block 98
-	header := outbound.BlockHeader{
-		Number:     "0x63",
+	block := LightBlock{
+		Number:     99,
 		Hash:       "0xblock99_alt",
 		ParentHash: "0xblock98", // Matches our block 98
 	}
 
-	isReorg, depth, ancestor, reorgEvent, err := svc.handleReorg(header, 99, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.handleReorg(block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1053,13 +1053,13 @@ func TestHandleReorg_WalksBackViaNetwork(t *testing.T) {
 
 	// Incoming block 99 from alternate chain
 	// Its parent is 98_alt, we need to walk back to find common ancestor
-	header := outbound.BlockHeader{
-		Number:     "0x63",
+	block := LightBlock{
+		Number:     99,
 		Hash:       "0xblock99_alt",
 		ParentHash: "0xblock98_alt", // Not in our chain
 	}
 
-	isReorg, depth, ancestor, _, err := svc.handleReorg(header, 99, time.Now())
+	isReorg, depth, ancestor, _, err := svc.handleReorg(block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1082,8 +1082,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 		config      LiveConfig
 		setupClient func(*mockBlockchainClient)
 		setupChain  func(*LiveService)
-		header      outbound.BlockHeader
-		blockNum    int64
+		block       LightBlock
 		wantErr     bool
 		errContains string
 	}{
@@ -1098,12 +1097,11 @@ func TestHandleReorg_Errors(t *testing.T) {
 					{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99"},
 				}
 			},
-			header: outbound.BlockHeader{
-				Number:     "0x32", // 50
+			block: LightBlock{
+				Number:     50,
 				Hash:       "0xlate_block",
 				ParentHash: "0xunknown",
 			},
-			blockNum:    50,
 			wantErr:     true,
 			errContains: "at or below finalized block",
 		},
@@ -1142,12 +1140,11 @@ func TestHandleReorg_Errors(t *testing.T) {
 					{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99"},
 				}
 			},
-			header: outbound.BlockHeader{
-				Number:     "0x64", // 100
+			block: LightBlock{
+				Number:     100,
 				Hash:       "0xblock100_alt",
 				ParentHash: "0xunknown_parent",
 			},
-			blockNum:    100,
 			wantErr:     true,
 			errContains: "no common ancestor found",
 		},
@@ -1173,7 +1170,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 				tt.setupChain(svc)
 			}
 
-			_, _, _, _, err = svc.handleReorg(tt.header, tt.blockNum, time.Now())
+			_, _, _, _, err = svc.handleReorg(tt.block, time.Now())
 
 			if tt.wantErr {
 				if err == nil {
@@ -1208,13 +1205,13 @@ func TestHandleReorg_ReturnsReorgEvent(t *testing.T) {
 	}
 
 	// Reorg at block 99
-	header := outbound.BlockHeader{
-		Number:     "0x63",
+	block := LightBlock{
+		Number:     99,
 		Hash:       "0xblock99_new",
 		ParentHash: "0xblock98",
 	}
 
-	_, depth, _, reorgEvent, err := svc.handleReorg(header, 99, time.Now())
+	_, depth, _, reorgEvent, err := svc.handleReorg(block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2514,13 +2511,13 @@ func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
 	}
 
 	// Incoming reorg block with unknown parent
-	header := outbound.BlockHeader{
-		Number:     "0x64", // 100
+	block := LightBlock{
+		Number:     100,
 		Hash:       "0x100_alt",
 		ParentHash: "0xunknown_parent",
 	}
 
-	_, _, _, _, err = svc.handleReorg(header, 100, time.Now())
+	_, _, _, _, err = svc.handleReorg(block, time.Now())
 	if err == nil {
 		t.Error("expected error when fetching parent fails")
 	}
@@ -3025,4 +3022,271 @@ func (m *mockClientWithHashTracking) GetBlobSidecarsByHash(ctx context.Context, 
 	m.fetchedByHash[hash] = append(m.fetchedByHash[hash], "GetBlobSidecarsByHash")
 	m.mu.Unlock()
 	return m.mockBlockchainClient.GetBlobSidecarsByHash(ctx, hash)
+}
+
+// TestHashComparisonCaseInsensitive verifies that hash comparisons are case-insensitive.
+// Ethereum hashes are hex strings where 0xAAA and 0xaaa are semantically equal,
+// but Go string comparison is case-sensitive. This test ensures we handle this correctly.
+func TestHashComparisonCaseInsensitive(t *testing.T) {
+	ctx := context.Background()
+
+	// Create mock dependencies
+	client := &caseInsensitiveMockClient{
+		blocks: make(map[int64]blockTestData),
+	}
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Add blocks with UPPERCASE hashes
+	// Block 99 with uppercase hash
+	client.blocks[99] = blockTestData{
+		header: outbound.BlockHeader{
+			Number:     "0x63", // 99
+			Hash:       "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			ParentHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
+			Timestamp:  "0x12345678",
+		},
+		receipts: json.RawMessage(`[]`),
+		traces:   json.RawMessage(`[]`),
+		blobs:    json.RawMessage(`[]`),
+	}
+
+	// Block 100 with uppercase hash, parent is block 99
+	client.blocks[100] = blockTestData{
+		header: outbound.BlockHeader{
+			Number:     "0x64", // 100
+			Hash:       "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+			ParentHash: "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			Timestamp:  "0x12345679",
+		},
+		receipts: json.RawMessage(`[]`),
+		traces:   json.RawMessage(`[]`),
+		blobs:    json.RawMessage(`[]`),
+	}
+
+	config := LiveConfig{
+		ChainID:              1,
+		FinalityBlockCount:   64,
+		MaxUnfinalizedBlocks: 200,
+		DisableBlobs:         true,
+		Logger:               slog.Default(),
+	}
+
+	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx = ctx
+
+	// Test 1: Process block 99 with UPPERCASE hash
+	err = svc.processBlock(outbound.BlockHeader{
+		Number:     "0x63",
+		Hash:       "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		ParentHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
+		Timestamp:  "0x12345678",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("failed to process block 99: %v", err)
+	}
+
+	// Verify block was stored
+	if len(svc.unfinalizedBlocks) != 1 {
+		t.Fatalf("expected 1 unfinalized block, got %d", len(svc.unfinalizedBlocks))
+	}
+
+	// Verify hash was normalized to lowercase
+	if svc.unfinalizedBlocks[0].Hash != strings.ToLower("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") {
+		t.Errorf("hash should be normalized to lowercase, got %s", svc.unfinalizedBlocks[0].Hash)
+	}
+
+	// Test 2: Send same block with LOWERCASE hash - should be detected as duplicate
+	initialBlockCount := len(svc.unfinalizedBlocks)
+	err = svc.processBlock(outbound.BlockHeader{
+		Number:     "0x63",
+		Hash:       "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // lowercase
+		ParentHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
+		Timestamp:  "0x12345678",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("failed to process duplicate block: %v", err)
+	}
+
+	// Block count should not increase (duplicate was detected)
+	if len(svc.unfinalizedBlocks) != initialBlockCount {
+		t.Errorf("duplicate block should not be added, expected %d blocks, got %d",
+			initialBlockCount, len(svc.unfinalizedBlocks))
+	}
+
+	// Test 3: Process block 100 with lowercase parentHash - should chain correctly
+	err = svc.processBlock(outbound.BlockHeader{
+		Number:     "0x64",
+		Hash:       "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+		ParentHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // lowercase parent
+		Timestamp:  "0x12345679",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("failed to process block 100 with lowercase parent hash: %v", err)
+	}
+
+	// Verify block was added (no reorg detected due to case mismatch)
+	if len(svc.unfinalizedBlocks) != 2 {
+		t.Fatalf("expected 2 unfinalized blocks, got %d", len(svc.unfinalizedBlocks))
+	}
+
+	// Verify parent hash was normalized
+	block100 := svc.unfinalizedBlocks[1]
+	if block100.ParentHash != strings.ToLower("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") {
+		t.Errorf("parent hash should be normalized to lowercase, got %s", block100.ParentHash)
+	}
+
+	// Verify chain integrity (parent hash of block 100 should match hash of block 99)
+	block99 := svc.unfinalizedBlocks[0]
+	if block100.ParentHash != block99.Hash {
+		t.Errorf("chain integrity violated: block 100 parentHash (%s) != block 99 hash (%s)",
+			block100.ParentHash, block99.Hash)
+	}
+
+	t.Log("SUCCESS: Hash comparisons are case-insensitive")
+}
+
+// caseInsensitiveMockClient is a mock that uses case-insensitive hash lookups
+// to simulate real RPC behavior where hash case doesn't matter
+type caseInsensitiveMockClient struct {
+	mu     sync.RWMutex
+	blocks map[int64]blockTestData
+}
+
+func (m *caseInsensitiveMockClient) GetBlockByNumber(ctx context.Context, blockNum int64, fullTx bool) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if bd, ok := m.blocks[blockNum]; ok {
+		data, _ := json.Marshal(bd.header)
+		return data, nil
+	}
+	return nil, fmt.Errorf("block %d not found", blockNum)
+}
+
+func (m *caseInsensitiveMockClient) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (*outbound.BlockHeader, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, bd := range m.blocks {
+		if strings.EqualFold(bd.header.Hash, hash) {
+			h := bd.header
+			return &h, nil
+		}
+	}
+	return nil, fmt.Errorf("block %s not found", hash)
+}
+
+func (m *caseInsensitiveMockClient) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, bd := range m.blocks {
+		if strings.EqualFold(bd.header.Hash, hash) {
+			data, _ := json.Marshal(bd.header)
+			return data, nil
+		}
+	}
+	return nil, fmt.Errorf("block %s not found", hash)
+}
+
+func (m *caseInsensitiveMockClient) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if bd, ok := m.blocks[blockNum]; ok {
+		return bd.receipts, nil
+	}
+	return nil, fmt.Errorf("receipts for block %d not found", blockNum)
+}
+
+func (m *caseInsensitiveMockClient) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, bd := range m.blocks {
+		if strings.EqualFold(bd.header.Hash, hash) {
+			return bd.receipts, nil
+		}
+	}
+	return nil, fmt.Errorf("receipts for block %s not found", hash)
+}
+
+func (m *caseInsensitiveMockClient) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if bd, ok := m.blocks[blockNum]; ok {
+		return bd.traces, nil
+	}
+	return nil, fmt.Errorf("traces for block %d not found", blockNum)
+}
+
+func (m *caseInsensitiveMockClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, bd := range m.blocks {
+		if strings.EqualFold(bd.header.Hash, hash) {
+			return bd.traces, nil
+		}
+	}
+	return nil, fmt.Errorf("traces for block %s not found", hash)
+}
+
+func (m *caseInsensitiveMockClient) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if bd, ok := m.blocks[blockNum]; ok {
+		return bd.blobs, nil
+	}
+	return nil, fmt.Errorf("blobs for block %d not found", blockNum)
+}
+
+func (m *caseInsensitiveMockClient) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, bd := range m.blocks {
+		if strings.EqualFold(bd.header.Hash, hash) {
+			return bd.blobs, nil
+		}
+	}
+	return nil, fmt.Errorf("blobs for block %s not found", hash)
+}
+
+func (m *caseInsensitiveMockClient) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var max int64
+	for num := range m.blocks {
+		if num > max {
+			max = num
+		}
+	}
+	return max, nil
+}
+
+func (m *caseInsensitiveMockClient) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx bool) ([]outbound.BlockData, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]outbound.BlockData, len(blockNums))
+	for i, num := range blockNums {
+		result[i] = outbound.BlockData{BlockNumber: num}
+		if bd, ok := m.blocks[num]; ok {
+			blockJSON, _ := json.Marshal(bd.header)
+			result[i].Block = blockJSON
+			result[i].Receipts = bd.receipts
+			result[i].Traces = bd.traces
+			result[i].Blobs = bd.blobs
+		}
+	}
+	return result, nil
 }
