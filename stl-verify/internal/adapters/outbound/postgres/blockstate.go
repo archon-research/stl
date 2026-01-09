@@ -227,29 +227,6 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 	return nil
 }
 
-// MarkBlocksOrphanedAfter marks all blocks after the given number as orphaned.
-func (r *BlockStateRepository) MarkBlocksOrphanedAfter(ctx context.Context, number int64) error {
-	query := `UPDATE block_states SET is_orphaned = TRUE WHERE number > $1 AND NOT is_orphaned`
-	_, err := r.db.ExecContext(ctx, query, number)
-	if err != nil {
-		return fmt.Errorf("failed to mark blocks orphaned after %d: %w", number, err)
-	}
-	return nil
-}
-
-// SaveReorgEvent records a chain reorganization event.
-func (r *BlockStateRepository) SaveReorgEvent(ctx context.Context, event outbound.ReorgEvent) error {
-	query := `
-		INSERT INTO reorg_events (detected_at, block_number, old_hash, new_hash, depth)
-		VALUES ($1, $2, $3, $4, $5)
-	`
-	_, err := r.db.ExecContext(ctx, query, event.DetectedAt, event.BlockNumber, event.OldHash, event.NewHash, event.Depth)
-	if err != nil {
-		return fmt.Errorf("failed to save reorg event: %w", err)
-	}
-	return nil
-}
-
 // HandleReorgAtomic atomically performs all reorg-related database operations in a single transaction.
 // This ensures consistency: either all operations succeed, or none do.
 // The commonAncestor is derived from the ReorgEvent (BlockNumber - Depth).

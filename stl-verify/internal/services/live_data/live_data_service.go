@@ -248,7 +248,7 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 	}
 
 	// Detect reorg BEFORE adding to chain
-	isReorg, reorgDepth, commonAncestor, err := s.detectReorg(header, blockNum, receivedAt)
+	isReorg, reorgDepth, commonAncestor, reorgEvent, err := s.detectReorg(header, blockNum, receivedAt)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "reorg detection failed")
@@ -269,7 +269,7 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 	// Add block to in-memory chain
 	s.addBlock(block)
 
-	// Save block state to DB - version is assigned atomically to prevent race conditions
+	// Build block state for DB
 	state := outbound.BlockState{
 		Number:     blockNum,
 		Hash:       header.Hash,
@@ -277,11 +277,25 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 		ReceivedAt: receivedAt.Unix(),
 		IsOrphaned: false,
 	}
-	version, err := s.stateRepo.SaveBlock(ctx, state)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to save block state")
-		return fmt.Errorf("failed to save block state: %w", err)
+
+	// Save block state to DB - use atomic reorg handling if this is a reorg
+	var version int
+	if isReorg && reorgEvent != nil {
+		// Atomically: save reorg event + mark orphans + save new block
+		version, err = s.stateRepo.HandleReorgAtomic(ctx, *reorgEvent, state)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to handle reorg atomically")
+			return fmt.Errorf("failed to handle reorg atomically: %w", err)
+		}
+	} else {
+		// Normal block save
+		version, err = s.stateRepo.SaveBlock(ctx, state)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to save block state")
+			return fmt.Errorf("failed to save block state: %w", err)
+		}
 	}
 
 	// Fetch all data types concurrently, cache, and publish events
@@ -317,9 +331,10 @@ func (s *LiveService) addBlock(block LightBlock) {
 }
 
 // detectReorg detects chain reorganizations using Ponder-style parent hash chain validation.
-func (s *LiveService) detectReorg(header outbound.BlockHeader, incomingBlockNum int64, receivedAt time.Time) (bool, int, int64, error) {
+// Returns: isReorg, reorgDepth, commonAncestor, reorgEvent (if reorg), error
+func (s *LiveService) detectReorg(header outbound.BlockHeader, incomingBlockNum int64, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, error) {
 	if len(s.unfinalizedBlocks) == 0 {
-		return false, 0, 0, nil
+		return false, 0, 0, nil, nil
 	}
 
 	latestBlock := s.unfinalizedBlocks[len(s.unfinalizedBlocks)-1]
@@ -332,18 +347,20 @@ func (s *LiveService) detectReorg(header outbound.BlockHeader, incomingBlockNum 
 	// Block is exactly one ahead - check parent hash
 	if incomingBlockNum == latestBlock.Number+1 {
 		if header.ParentHash == latestBlock.Hash {
-			return false, 0, 0, nil
+			return false, 0, 0, nil, nil
 		}
 		// Parent hash mismatch - reorg
 		return s.handleReorg(header, incomingBlockNum, receivedAt)
 	}
 
 	// Gap in blocks - will be backfilled by BackfillService
-	return false, 0, 0, nil
+	return false, 0, 0, nil, nil
 }
 
-// handleReorg processes a detected reorg.
-func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, receivedAt time.Time) (bool, int, int64, error) {
+// handleReorg processes a detected reorg and returns the reorg event for atomic handling.
+// The actual database operations (save reorg event, mark orphans, save new block) are
+// done atomically in processBlock via HandleReorgAtomic.
+func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, error) {
 	ctx := s.ctx
 
 	// Find reorged blocks
@@ -377,14 +394,14 @@ func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, r
 
 		// Check finality boundary
 		if s.finalizedBlock != nil && walkBlock.Number <= s.finalizedBlock.Number {
-			return false, 0, 0, fmt.Errorf("block %d is at or below finalized block %d (likely late arrival after pruning)",
+			return false, 0, 0, nil, fmt.Errorf("block %d is at or below finalized block %d (likely late arrival after pruning)",
 				walkBlock.Number, s.finalizedBlock.Number)
 		}
 
 		// Fetch parent from network
 		parentHeader, err := s.client.GetBlockByHash(ctx, walkBlock.ParentHash, false)
 		if err != nil {
-			return false, 0, 0, fmt.Errorf("failed to fetch parent block %s during reorg walk: %w", walkBlock.ParentHash, err)
+			return false, 0, 0, nil, fmt.Errorf("failed to fetch parent block %s during reorg walk: %w", walkBlock.ParentHash, err)
 		}
 
 		// Walk to parent block to continue searching for common ancestor
@@ -397,12 +414,19 @@ func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, r
 	}
 
 	if commonAncestor < 0 {
-		return false, 0, 0, fmt.Errorf("no common ancestor found after walking %d blocks (chain diverged beyond finality window)", s.config.FinalityBlockCount)
+		return false, 0, 0, nil, fmt.Errorf("no common ancestor found after walking %d blocks (chain diverged beyond finality window)", s.config.FinalityBlockCount)
 	}
 
-	reorgDepth := len(reorgedBlocks)
+	// Collect all blocks that will be orphaned (blocks > commonAncestor)
+	orphanedBlocks := make([]LightBlock, 0)
+	for i := len(s.unfinalizedBlocks) - 1; i >= 0; i-- {
+		if s.unfinalizedBlocks[i].Number > commonAncestor {
+			orphanedBlocks = append(orphanedBlocks, s.unfinalizedBlocks[i])
+		}
+	}
+	reorgDepth := len(orphanedBlocks)
 
-	// Prune reorged blocks
+	// Prune reorged blocks from in-memory chain
 	newChain := make([]LightBlock, 0)
 	for _, b := range s.unfinalizedBlocks {
 		if b.Number <= commonAncestor {
@@ -411,24 +435,33 @@ func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, r
 	}
 	s.unfinalizedBlocks = newChain
 
-	// Record reorg event
-	if reorgDepth > 0 && len(reorgedBlocks) > 0 {
-		reorgEvent := outbound.ReorgEvent{
+	// Build reorg event to be saved atomically with the new block
+	// We always create a reorg event when a reorg is detected, even if depth is 0
+	// (depth can be 0 when the incoming block is ahead of our chain but on a different fork)
+	var reorgEvent *outbound.ReorgEvent
+	if len(orphanedBlocks) > 0 {
+		// Use the first orphaned block (closest to incoming block number) for OldHash
+		reorgEvent = &outbound.ReorgEvent{
 			DetectedAt:  receivedAt,
 			BlockNumber: blockNum,
-			OldHash:     reorgedBlocks[len(reorgedBlocks)-1].Hash,
+			OldHash:     orphanedBlocks[0].Hash, // Most recent orphaned block
 			NewHash:     header.Hash,
 			Depth:       reorgDepth,
 		}
-		if err := s.stateRepo.SaveReorgEvent(ctx, reorgEvent); err != nil {
-			return false, 0, 0, fmt.Errorf("failed to save reorg event: %w", err)
-		}
-		if err := s.stateRepo.MarkBlocksOrphanedAfter(ctx, commonAncestor); err != nil {
-			return false, 0, 0, fmt.Errorf("failed to mark orphaned blocks: %w", err)
+	} else {
+		// No blocks orphaned, but we still detected a chain divergence
+		// This can happen when the incoming block is ahead but on a different fork
+		// We still need to record this as a reorg event
+		reorgEvent = &outbound.ReorgEvent{
+			DetectedAt:  receivedAt,
+			BlockNumber: blockNum,
+			OldHash:     "", // No block orphaned at this exact number
+			NewHash:     header.Hash,
+			Depth:       0,
 		}
 	}
 
-	return true, reorgDepth, commonAncestor, nil
+	return true, reorgDepth, commonAncestor, reorgEvent, nil
 }
 
 // updateFinalizedBlock updates the finalized block pointer.

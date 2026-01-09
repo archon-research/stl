@@ -61,14 +61,12 @@ func (m *mockSubscriber) sendHeader(header outbound.BlockHeader) {
 // It embeds the memory implementation and overrides specific methods for testing.
 type mockStateRepo struct {
 	*memory.BlockStateRepository
-	mu                   sync.RWMutex
-	getByHashErr         error
-	getRecentErr         error
-	getRecentBlocks      []outbound.BlockState // Override response
-	saveBlockErr         error
-	getVersionCountErr   error
-	saveReorgEventErr    error
-	markOrphanedAfterErr error
+	mu                 sync.RWMutex
+	getByHashErr       error
+	getRecentErr       error
+	getRecentBlocks    []outbound.BlockState // Override response
+	saveBlockErr       error
+	getVersionCountErr error
 }
 
 func newMockStateRepo() *mockStateRepo {
@@ -125,28 +123,6 @@ func (m *mockStateRepo) GetBlockVersionCount(ctx context.Context, number int64) 
 		return 0, err
 	}
 	return m.BlockStateRepository.GetBlockVersionCount(ctx, number)
-}
-
-func (m *mockStateRepo) SaveReorgEvent(ctx context.Context, event outbound.ReorgEvent) error {
-	m.mu.RLock()
-	err := m.saveReorgEventErr
-	m.mu.RUnlock()
-
-	if err != nil {
-		return err
-	}
-	return m.BlockStateRepository.SaveReorgEvent(ctx, event)
-}
-
-func (m *mockStateRepo) MarkBlocksOrphanedAfter(ctx context.Context, blockNum int64) error {
-	m.mu.RLock()
-	err := m.markOrphanedAfterErr
-	m.mu.RUnlock()
-
-	if err != nil {
-		return err
-	}
-	return m.BlockStateRepository.MarkBlocksOrphanedAfter(ctx, blockNum)
 }
 
 // mockBlockchainClient provides predictable block data for testing.
@@ -706,7 +682,7 @@ func TestDetectReorg_EmptyChain_NoReorg(t *testing.T) {
 		ParentHash: "0xparent",
 	}
 
-	isReorg, depth, ancestor, err := svc.detectReorg(header, 100, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(header, 100, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -715,6 +691,9 @@ func TestDetectReorg_EmptyChain_NoReorg(t *testing.T) {
 	}
 	if depth != 0 || ancestor != 0 {
 		t.Errorf("expected depth=0, ancestor=0, got depth=%d, ancestor=%d", depth, ancestor)
+	}
+	if reorgEvent != nil {
+		t.Error("expected no reorg event for empty chain")
 	}
 }
 
@@ -747,7 +726,7 @@ func TestDetectReorg_NextBlock_ParentMatches_NoReorg(t *testing.T) {
 		ParentHash: "0xblock100", // Matches latest
 	}
 
-	isReorg, depth, ancestor, err := svc.detectReorg(header, 101, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(header, 101, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -756,6 +735,9 @@ func TestDetectReorg_NextBlock_ParentMatches_NoReorg(t *testing.T) {
 	}
 	if depth != 0 || ancestor != 0 {
 		t.Errorf("expected depth=0, ancestor=0, got depth=%d, ancestor=%d", depth, ancestor)
+	}
+	if reorgEvent != nil {
+		t.Error("expected no reorg event when parent hash matches")
 	}
 }
 
@@ -795,7 +777,7 @@ func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
 		ParentHash: "0xblock100_alt", // Different parent - triggers reorg
 	}
 
-	isReorg, depth, ancestor, err := svc.detectReorg(header, 101, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(header, 101, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -803,14 +785,16 @@ func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
 		t.Error("expected reorg when parent hash mismatches")
 	}
 	// Walk finds block100_alt's parent (0xblock99) in our chain
-	// Common ancestor is 99. Depth is 0 because no blocks >= 101 exist in our chain.
-	// Block 100 gets pruned during chain reconstruction, but isn't counted in depth
-	// (depth counts blocks at or above the incoming block number)
-	if depth != 0 {
-		t.Errorf("expected depth 0 (no blocks >= 101 in chain), got %d", depth)
+	// Common ancestor is 99. Depth is 1 because block 100 is orphaned.
+	// Block 100 is > common ancestor (99), so it counts as orphaned.
+	if depth != 1 {
+		t.Errorf("expected depth 1 (block 100 orphaned), got %d", depth)
 	}
 	if ancestor != 99 {
 		t.Errorf("expected common ancestor 99, got %d", ancestor)
+	}
+	if reorgEvent == nil {
+		t.Error("expected reorg event when parent hash mismatches")
 	}
 }
 
@@ -848,7 +832,7 @@ func TestDetectReorg_LowerBlockNumber_Reorg(t *testing.T) {
 		ParentHash: "0xblock98", // Same ancestor
 	}
 
-	isReorg, depth, ancestor, err := svc.detectReorg(header, 99, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(header, 99, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -861,6 +845,9 @@ func TestDetectReorg_LowerBlockNumber_Reorg(t *testing.T) {
 	}
 	if depth != 2 {
 		t.Errorf("expected depth 2 (blocks 99, 100 orphaned), got %d", depth)
+	}
+	if reorgEvent == nil {
+		t.Error("expected reorg event when block number <= latest")
 	}
 }
 
@@ -886,7 +873,7 @@ func TestDetectReorg_Gap_NoReorg(t *testing.T) {
 		ParentHash: "0xblock104",
 	}
 
-	isReorg, depth, ancestor, err := svc.detectReorg(header, 105, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(header, 105, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -895,6 +882,9 @@ func TestDetectReorg_Gap_NoReorg(t *testing.T) {
 	}
 	if depth != 0 || ancestor != 0 {
 		t.Errorf("expected depth=0, ancestor=0 for gap, got depth=%d, ancestor=%d", depth, ancestor)
+	}
+	if reorgEvent != nil {
+		t.Error("expected no reorg event for gap")
 	}
 }
 
@@ -929,7 +919,7 @@ func TestHandleReorg_FindsCommonAncestorInMemory(t *testing.T) {
 		ParentHash: "0xblock98", // Matches our block 98
 	}
 
-	isReorg, depth, ancestor, err := svc.handleReorg(header, 99, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.handleReorg(header, 99, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -942,6 +932,10 @@ func TestHandleReorg_FindsCommonAncestorInMemory(t *testing.T) {
 	// Depth = blocks 99, 100 were orphaned
 	if depth != 2 {
 		t.Errorf("expected depth 2 (blocks 99, 100), got %d", depth)
+	}
+	// Reorg event should be populated
+	if reorgEvent == nil {
+		t.Error("expected reorg event to be populated")
 	}
 	// After reorg, chain should be pruned to blocks <= 98
 	if len(svc.unfinalizedBlocks) != 4 {
@@ -995,7 +989,7 @@ func TestHandleReorg_WalksBackViaNetwork(t *testing.T) {
 		ParentHash: "0xblock98_alt", // Not in our chain
 	}
 
-	isReorg, depth, ancestor, err := svc.handleReorg(header, 99, time.Now())
+	isReorg, depth, ancestor, _, err := svc.handleReorg(header, 99, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1003,12 +997,12 @@ func TestHandleReorg_WalksBackViaNetwork(t *testing.T) {
 		t.Error("expected isReorg to be true")
 	}
 	// Common ancestor should be 97 (found after walking 98_alt's parent)
-	// Depth is 2: blocks 99 and 100 are orphaned (blocks at or above incoming block 99)
+	// Depth is 3: blocks 98, 99 and 100 are orphaned (all blocks > common ancestor 97)
 	if ancestor != 97 {
 		t.Errorf("expected common ancestor 97, got %d", ancestor)
 	}
-	if depth != 2 {
-		t.Errorf("expected depth 2 (blocks 99, 100 orphaned), got %d", depth)
+	if depth != 3 {
+		t.Errorf("expected depth 3 (blocks 98, 99, 100 orphaned), got %d", depth)
 	}
 }
 
@@ -1109,7 +1103,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 				tt.setupChain(svc)
 			}
 
-			_, _, _, err = svc.handleReorg(tt.header, tt.blockNum, time.Now())
+			_, _, _, _, err = svc.handleReorg(tt.header, tt.blockNum, time.Now())
 
 			if tt.wantErr {
 				if err == nil {
@@ -1126,8 +1120,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 	}
 }
 
-func TestHandleReorg_RecordsReorgEvent(t *testing.T) {
-	ctx := context.Background()
+func TestHandleReorg_ReturnsReorgEvent(t *testing.T) {
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
@@ -1136,10 +1129,6 @@ func TestHandleReorg_RecordsReorgEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
-
-	// Pre-save blocks to state repo
-	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{Number: 99, Hash: "0xblock99"})
-	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{Number: 100, Hash: "0xblock100"})
 
 	// Our chain
 	svc.unfinalizedBlocks = []LightBlock{
@@ -1155,18 +1144,27 @@ func TestHandleReorg_RecordsReorgEvent(t *testing.T) {
 		ParentHash: "0xblock98",
 	}
 
-	_, _, _, err = svc.handleReorg(header, 99, time.Now())
+	_, depth, _, reorgEvent, err := svc.handleReorg(header, 99, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify reorg event was recorded (memory impl stores in slice)
-	events, err := stateRepo.GetReorgEvents(ctx, 10)
-	if err != nil {
-		t.Fatalf("failed to get reorg events: %v", err)
+	// Verify reorg event is returned with correct data
+	if reorgEvent == nil {
+		t.Fatal("expected reorg event to be returned")
 	}
-	if len(events) != 1 {
-		t.Errorf("expected 1 reorg event, got %d", len(events))
+	if reorgEvent.BlockNumber != 99 {
+		t.Errorf("expected block number 99, got %d", reorgEvent.BlockNumber)
+	}
+	// OldHash is the most recent orphaned block (the tip of the old chain)
+	if reorgEvent.OldHash != "0xblock100" {
+		t.Errorf("expected old hash 0xblock100 (tip of old chain), got %s", reorgEvent.OldHash)
+	}
+	if reorgEvent.NewHash != "0xblock99_new" {
+		t.Errorf("expected new hash 0xblock99_new, got %s", reorgEvent.NewHash)
+	}
+	if reorgEvent.Depth != depth {
+		t.Errorf("expected depth %d, got %d", depth, reorgEvent.Depth)
 	}
 }
 
@@ -2432,7 +2430,7 @@ func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
 		ParentHash: "0xunknown_parent",
 	}
 
-	_, _, _, err = svc.handleReorg(header, 100, time.Now())
+	_, _, _, _, err = svc.handleReorg(header, 100, time.Now())
 	if err == nil {
 		t.Error("expected error when fetching parent fails")
 	}
@@ -2473,96 +2471,6 @@ func TestProcessHeaders_LogsErrorOnProcessBlockFailure(t *testing.T) {
 
 	// Give time for processing and logging
 	time.Sleep(50 * time.Millisecond)
-}
-
-func TestHandleReorg_SaveReorgEventError_ReturnsError(t *testing.T) {
-	stateRepo := newMockStateRepo()
-	stateRepo.saveReorgEventErr = fmt.Errorf("database error")
-
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
-
-	client := newMockClient()
-	// Set up blocks for reorg detection
-	client.blocks[99] = blockTestData{
-		header: outbound.BlockHeader{Number: "0x63", Hash: "0x99", ParentHash: "0x98"},
-	}
-
-	svc, err := NewLiveService(LiveConfig{
-		FinalityBlockCount: 10,
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
-	if err != nil {
-		t.Fatalf("failed to create service: %v", err)
-	}
-	svc.ctx, svc.cancel = context.WithCancel(context.Background())
-	defer svc.cancel()
-
-	// Set up chain with blocks
-	svc.unfinalizedBlocks = []LightBlock{
-		{Number: 98, Hash: "0x98", ParentHash: "0x97"},
-		{Number: 99, Hash: "0x99", ParentHash: "0x98"},
-		{Number: 100, Hash: "0x100", ParentHash: "0x99"},
-	}
-
-	// Incoming reorg block at 100 with different hash but same parent
-	header := outbound.BlockHeader{
-		Number:     "0x64", // 100
-		Hash:       "0x100_alt",
-		ParentHash: "0x99",
-	}
-
-	_, _, _, err = svc.handleReorg(header, 100, time.Now())
-	if err == nil {
-		t.Error("expected error when SaveReorgEvent fails")
-	}
-	if !contains(err.Error(), "failed to save reorg event") {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
-func TestHandleReorg_MarkOrphanedError_ReturnsError(t *testing.T) {
-	stateRepo := newMockStateRepo()
-	stateRepo.markOrphanedAfterErr = fmt.Errorf("database error")
-
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
-
-	client := newMockClient()
-	// Set up blocks for reorg detection
-	client.blocks[99] = blockTestData{
-		header: outbound.BlockHeader{Number: "0x63", Hash: "0x99", ParentHash: "0x98"},
-	}
-
-	svc, err := NewLiveService(LiveConfig{
-		FinalityBlockCount: 10,
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
-	if err != nil {
-		t.Fatalf("failed to create service: %v", err)
-	}
-	svc.ctx, svc.cancel = context.WithCancel(context.Background())
-	defer svc.cancel()
-
-	// Set up chain with blocks
-	svc.unfinalizedBlocks = []LightBlock{
-		{Number: 98, Hash: "0x98", ParentHash: "0x97"},
-		{Number: 99, Hash: "0x99", ParentHash: "0x98"},
-		{Number: 100, Hash: "0x100", ParentHash: "0x99"},
-	}
-
-	// Incoming reorg block at 100 with different hash but same parent
-	header := outbound.BlockHeader{
-		Number:     "0x64", // 100
-		Hash:       "0x100_alt",
-		ParentHash: "0x99",
-	}
-
-	_, _, _, err = svc.handleReorg(header, 100, time.Now())
-	if err == nil {
-		t.Error("expected error when MarkBlocksOrphanedAfter fails")
-	}
-	if !contains(err.Error(), "failed to mark orphaned blocks") {
-		t.Errorf("unexpected error message: %v", err)
-	}
 }
 
 func TestProcessBlock_FetchAndPublishError_ReturnsError(t *testing.T) {

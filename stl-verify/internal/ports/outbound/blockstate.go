@@ -91,13 +91,6 @@ type BlockStateRepository interface {
 	// The block is kept for historical purposes but excluded from canonical queries.
 	MarkBlockOrphaned(ctx context.Context, hash string) error
 
-	// MarkBlocksOrphanedAfter marks all blocks after the given number as orphaned.
-	// Used during reorg handling to mark orphaned blocks.
-	MarkBlocksOrphanedAfter(ctx context.Context, number int64) error
-
-	// SaveReorgEvent records a chain reorganization event.
-	SaveReorgEvent(ctx context.Context, event ReorgEvent) error
-
 	// HandleReorgAtomic atomically performs all reorg-related database operations:
 	// 1. Saves the reorg event
 	// 2. Marks all blocks after commonAncestor as orphaned

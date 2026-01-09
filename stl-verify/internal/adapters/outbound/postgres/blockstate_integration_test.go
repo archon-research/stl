@@ -141,69 +141,6 @@ func TestSaveBlock_DuplicateHashIsIdempotent(t *testing.T) {
 	})
 }
 
-// TestReorgOperations_ShouldBeAtomic tests that reorg-related operations
-// (SaveReorgEvent, MarkBlocksOrphanedAfter, SaveBlock) should be atomic.
-// Currently they are NOT atomic - this test documents the gap.
-//
-// The issue: If a crash occurs after MarkBlocksOrphanedAfter but before
-// the new block is saved, we end up with orphaned blocks but no canonical
-// replacement, leaving a gap in the canonical chain.
-func TestReorgOperations_ShouldBeAtomic(t *testing.T) {
-	repo, cleanup := setupPostgres(t)
-	defer cleanup()
-
-	ctx := context.Background()
-
-	// Setup: Create a chain of blocks 100, 101, 102
-	for i := int64(100); i <= 102; i++ {
-		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0xoriginal_%d", i),
-			ParentHash: fmt.Sprintf("0xoriginal_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
-			IsOrphaned: false,
-		})
-		if err != nil {
-			t.Fatalf("failed to save block %d: %v", i, err)
-		}
-	}
-
-	// Verify we have canonical blocks at 101 and 102
-	block101, err := repo.GetBlockByNumber(ctx, 101)
-	if err != nil || block101 == nil {
-		t.Fatalf("expected canonical block at 101, got err=%v, block=%v", err, block101)
-	}
-	block102, err := repo.GetBlockByNumber(ctx, 102)
-	if err != nil || block102 == nil {
-		t.Fatalf("expected canonical block at 102, got err=%v, block=%v", err, block102)
-	}
-
-	// Simulate a reorg: mark blocks after 100 as orphaned
-	// (In real code, this happens before the new block is saved)
-	err = repo.MarkBlocksOrphanedAfter(ctx, 100)
-	if err != nil {
-		t.Fatalf("failed to mark blocks orphaned: %v", err)
-	}
-
-	// Now we're in an inconsistent state - no canonical blocks at 101, 102
-	// This is the window where a crash would leave the database broken
-	t.Run("gap_exists_after_orphaning", func(t *testing.T) {
-		block101After, _ := repo.GetBlockByNumber(ctx, 101)
-		block102After, _ := repo.GetBlockByNumber(ctx, 102)
-
-		if block101After != nil || block102After != nil {
-			t.Skip("blocks are still canonical (unexpected)")
-		}
-
-		// This is the problematic state - document it
-		t.Log("WARNING: After MarkBlocksOrphanedAfter, there are no canonical blocks at 101-102")
-		t.Log("If a crash occurred now, the chain would have a gap")
-	})
-
-	// In the real flow, SaveBlock would be called next to add the new canonical block
-	// But if we crash before that, we have a problem
-}
-
 // TestHandleReorgAtomic_AllOrNothingSemantics tests that HandleReorgAtomic
 // performs all operations atomically - either all succeed or none do.
 // After calling HandleReorgAtomic, we should have:

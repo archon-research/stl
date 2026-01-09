@@ -157,28 +157,6 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 	return nil
 }
 
-// MarkBlocksOrphanedAfter marks all blocks after the given number as orphaned.
-func (r *BlockStateRepository) MarkBlocksOrphanedAfter(ctx context.Context, number int64) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	for hash, b := range r.blocks {
-		if b.Number > number {
-			b.IsOrphaned = true
-			r.blocks[hash] = b
-		}
-	}
-	return nil
-}
-
-// SaveReorgEvent records a chain reorganization event.
-func (r *BlockStateRepository) SaveReorgEvent(ctx context.Context, event outbound.ReorgEvent) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.reorgEvents = append(r.reorgEvents, event)
-	return nil
-}
-
 // HandleReorgAtomic atomically performs all reorg-related operations.
 // In the memory implementation, this is naturally atomic since we hold the lock.
 func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
