@@ -3290,3 +3290,76 @@ func (m *caseInsensitiveMockClient) GetBlocksBatch(ctx context.Context, blockNum
 	}
 	return result, nil
 }
+
+// TestProcessBlock_RollsBackInMemoryChainOnDBFailure verifies that when SaveBlock fails,
+// the block is removed from the in-memory chain to maintain consistency with the database.
+// Without this rollback, the in-memory chain and DB would diverge, causing incorrect
+// reorg detection and chain integrity issues.
+func TestProcessBlock_RollsBackInMemoryChainOnDBFailure(t *testing.T) {
+	ctx := context.Background()
+
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+	client := newMockClient()
+
+	// Add blocks for RPC lookups
+	client.addBlock(99, "")
+	client.addBlock(100, "")
+
+	config := LiveConfig{
+		ChainID:              1,
+		FinalityBlockCount:   64,
+		MaxUnfinalizedBlocks: 200,
+		DisableBlobs:         true,
+		Logger:               slog.Default(),
+	}
+
+	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx = ctx
+
+	// Get block 100's header so we know what parent hash it expects
+	block100Header := client.getHeader(100)
+	block99Hash := block100Header.ParentHash
+
+	// Set up initial chain with block 99 using the correct hash
+	svc.unfinalizedBlocks = []LightBlock{
+		{Number: 99, Hash: block99Hash, ParentHash: "0xblock98"},
+	}
+
+	// Configure repo to fail on SaveBlock for the next block
+	stateRepo.mu.Lock()
+	stateRepo.saveBlockErr = fmt.Errorf("database connection failed")
+	stateRepo.mu.Unlock()
+
+	// Try to process block 100 - should fail
+	err = svc.processBlock(block100Header, time.Now())
+	if err == nil {
+		t.Fatal("expected error when SaveBlock fails")
+	}
+	if !strings.Contains(err.Error(), "database connection failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// CRITICAL CHECK: The in-memory chain should NOT contain block 100
+	// because the DB save failed. If it does contain block 100, we have
+	// a consistency issue between memory and DB.
+	for _, b := range svc.unfinalizedBlocks {
+		if b.Number == 100 {
+			t.Error("block 100 should NOT be in unfinalizedBlocks after DB save failed - memory/DB inconsistency!")
+		}
+	}
+
+	// Verify the chain only contains block 99
+	if len(svc.unfinalizedBlocks) != 1 {
+		t.Errorf("expected 1 block in chain, got %d", len(svc.unfinalizedBlocks))
+	}
+	if svc.unfinalizedBlocks[0].Number != 99 {
+		t.Errorf("expected block 99, got block %d", svc.unfinalizedBlocks[0].Number)
+	}
+
+	t.Log("SUCCESS: In-memory chain correctly rolled back after DB failure")
+}

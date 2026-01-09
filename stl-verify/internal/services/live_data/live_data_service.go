@@ -270,9 +270,6 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 		}
 	}
 
-	// Add block to in-memory chain
-	s.addBlock(block)
-
 	// Build block state for DB
 	state := outbound.BlockState{
 		Number:     block.Number,
@@ -283,6 +280,8 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 	}
 
 	// Save block state to DB - use atomic reorg handling if this is a reorg
+	// NOTE: We save to DB BEFORE adding to in-memory chain to ensure consistency.
+	// If DB save fails, we don't want a "ghost" block in memory that doesn't exist in DB.
 	var version int
 	if isReorg && reorgEvent != nil {
 		// Atomically: save reorg event + mark orphans + save new block
@@ -301,6 +300,10 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 			return fmt.Errorf("failed to save block state: %w", err)
 		}
 	}
+
+	// Add block to in-memory chain AFTER successful DB save
+	// This ensures memory and DB stay in sync
+	s.addBlock(block)
 
 	// Fetch all data types concurrently, cache, and publish events
 	if err := s.fetchAndPublishBlockData(ctx, header, blockNum, version, receivedAt, isReorg); err != nil {
