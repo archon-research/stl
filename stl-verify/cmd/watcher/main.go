@@ -4,7 +4,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -21,7 +20,6 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
-	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
@@ -92,23 +90,12 @@ func main() {
 	enableBackfill := getEnv("ENABLE_BACKFILL", "false") == "true"
 
 	// Set up PostgreSQL connection pool for block state tracking
-	db, err := sql.Open("pgx", postgresURL)
+	db, err := postgres.OpenDB(context.Background(), postgres.DefaultDBConfig(postgresURL))
 	if err != nil {
 		logger.Error("failed to connect to PostgreSQL", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
-
-	// Configure connection pool
-	db.SetMaxOpenConns(25)                 // Maximum number of open connections
-	db.SetMaxIdleConns(10)                 // Maximum number of idle connections
-	db.SetConnMaxLifetime(5 * time.Minute) // Maximum lifetime of a connection
-	db.SetConnMaxIdleTime(1 * time.Minute) // Maximum idle time before closing
-
-	if err := db.Ping(); err != nil {
-		logger.Error("failed to ping PostgreSQL", "error", err)
-		os.Exit(1)
-	}
 
 	blockStateRepo := postgres.NewBlockStateRepository(db, logger)
 
