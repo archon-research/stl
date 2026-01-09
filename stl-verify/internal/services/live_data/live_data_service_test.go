@@ -2699,3 +2699,101 @@ func TestProcessBlock_VersionIsCorrectAfterReorg(t *testing.T) {
 		t.Errorf("expected cache key %q, got %q", expectedCacheKey, blockEvents[0].CacheKey)
 	}
 }
+
+func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
+	// This test verifies that when we save a block, the version field is
+	// correctly persisted to the database.
+	//
+	// Bug scenario:
+	// 1. Block 100 is processed with version 0
+	// 2. Reorg happens, new block 100 arrives with version 1
+	// 3. If Version field is not set in BlockState before SaveBlock,
+	//    the block is saved with Version=0 (Go's default)
+	// 4. GetBlockVersionCount uses MAX(version)+1, so it would always return 1
+	// 5. All subsequent reorgs would get version=1, causing cache key collisions
+
+	ctx := context.Background()
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	client := newMockClient()
+	client.addBlock(100, "0x99")
+
+	svc, err := NewLiveService(LiveConfig{
+		DisableBlobs: true,
+	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx, svc.cancel = context.WithCancel(context.Background())
+	defer svc.cancel()
+
+	// Process first block at height 100 (version 0)
+	header1 := outbound.BlockHeader{
+		Number:     "0x64", // 100
+		Hash:       "0x100_v0",
+		ParentHash: "0x99",
+	}
+	err = svc.processBlock(header1, time.Now())
+	if err != nil {
+		t.Fatalf("failed to process first block: %v", err)
+	}
+
+	// Verify the saved block has version 0
+	savedBlock1, err := stateRepo.GetBlockByHash(ctx, "0x100_v0")
+	if err != nil {
+		t.Fatalf("failed to get saved block: %v", err)
+	}
+	if savedBlock1.Version != 0 {
+		t.Errorf("expected first block to have version 0, got %d", savedBlock1.Version)
+	}
+
+	// Directly save a second block at height 100 to simulate reorg scenario
+	// without triggering the reorg detection logic
+	// This mimics what happens when MarkBlocksOrphanedAfter runs and then
+	// a new block is processed
+	err = stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:     100,
+		Hash:       "0x100_v1",
+		ParentHash: "0x99",
+		Version:    1, // Manually set version to 1 as it should be
+	})
+	if err != nil {
+		t.Fatalf("failed to save second block: %v", err)
+	}
+
+	// Now verify that GetBlockVersionCount returns the correct next version
+	// If version was saved correctly, MAX(version)+1 = 1+1 = 2
+	nextVersion, err := stateRepo.GetBlockVersionCount(ctx, 100)
+	if err != nil {
+		t.Fatalf("failed to get version count: %v", err)
+	}
+	if nextVersion != 2 {
+		t.Errorf("expected next version to be 2, got %d", nextVersion)
+	}
+
+	// Now the key test: process a THIRD block at height 100
+	// The service should get version=2 and save it with version=2
+	// Clear the unfinalized chain to avoid reorg detection complexity
+	svc.unfinalizedBlocks = nil
+
+	header3 := outbound.BlockHeader{
+		Number:     "0x64", // 100
+		Hash:       "0x100_v2",
+		ParentHash: "0x99",
+	}
+	err = svc.processBlock(header3, time.Now())
+	if err != nil {
+		t.Fatalf("failed to process third block: %v", err)
+	}
+
+	// Verify the third saved block has version 2
+	savedBlock3, err := stateRepo.GetBlockByHash(ctx, "0x100_v2")
+	if err != nil {
+		t.Fatalf("failed to get third saved block: %v", err)
+	}
+	if savedBlock3.Version != 2 {
+		t.Errorf("expected third block to have version 2, got %d (bug: Version not set in BlockState before SaveBlock)", savedBlock3.Version)
+	}
+}

@@ -285,6 +285,7 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 		ParentHash: header.ParentHash,
 		ReceivedAt: receivedAt.Unix(),
 		IsOrphaned: false,
+		Version:    version,
 	}
 	if err := s.stateRepo.SaveBlock(ctx, state); err != nil {
 		span.RecordError(err)
