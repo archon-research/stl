@@ -237,11 +237,23 @@ func (m *largeBenchmarkClient) GetBlockReceipts(ctx context.Context, blockNum in
 	return json.RawMessage(`[]`), nil
 }
 
+func (m *largeBenchmarkClient) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	return json.RawMessage(`[]`), nil
+}
+
 func (m *largeBenchmarkClient) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	return json.RawMessage(`[]`), nil
 }
 
+func (m *largeBenchmarkClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	return json.RawMessage(`[]`), nil
+}
+
 func (m *largeBenchmarkClient) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
+	return json.RawMessage(`[]`), nil
+}
+
+func (m *largeBenchmarkClient) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
 	return json.RawMessage(`[]`), nil
 }
 

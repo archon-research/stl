@@ -105,6 +105,18 @@ func (m *benchmarkBlockchainClient) GetBlockReceipts(ctx context.Context, blockN
 	return nil, fmt.Errorf("receipts for block %d not found", blockNum)
 }
 
+func (m *benchmarkBlockchainClient) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			return bd.receipts, nil
+		}
+	}
+	return nil, fmt.Errorf("receipts for block %s not found", hash)
+}
+
 func (m *benchmarkBlockchainClient) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -115,6 +127,18 @@ func (m *benchmarkBlockchainClient) GetBlockTraces(ctx context.Context, blockNum
 	return nil, fmt.Errorf("traces for block %d not found", blockNum)
 }
 
+func (m *benchmarkBlockchainClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			return bd.traces, nil
+		}
+	}
+	return nil, fmt.Errorf("traces for block %s not found", hash)
+}
+
 func (m *benchmarkBlockchainClient) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -123,6 +147,18 @@ func (m *benchmarkBlockchainClient) GetBlobSidecars(ctx context.Context, blockNu
 		return bd.blobs, nil
 	}
 	return nil, fmt.Errorf("blobs for block %d not found", blockNum)
+}
+
+func (m *benchmarkBlockchainClient) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			return bd.blobs, nil
+		}
+	}
+	return nil, fmt.Errorf("blobs for block %s not found", hash)
 }
 
 func (m *benchmarkBlockchainClient) GetCurrentBlockNumber(ctx context.Context) (int64, error) {

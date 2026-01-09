@@ -615,9 +615,12 @@ func (s *LiveService) fetchCacheAndPublishReceipts(ctx context.Context, chainID,
 		s.logger.Debug("fetchCacheAndPublishReceipts completed", "block", blockNum, "duration", time.Since(start))
 	}()
 
-	data, err := s.client.GetBlockReceipts(ctx, blockNum)
+	// Fetch by hash to prevent TOCTOU race condition.
+	// If we fetched by number, a reorg between receiving the header and fetching
+	// could cause us to cache receipts for the wrong block.
+	data, err := s.client.GetBlockReceiptsByHash(ctx, blockHash)
 	if err != nil {
-		return fmt.Errorf("failed to fetch receipts for block %d: %w", blockNum, err)
+		return fmt.Errorf("failed to fetch receipts for block %d by hash %s: %w", blockNum, blockHash, err)
 	}
 
 	if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, data); err != nil {
@@ -652,9 +655,12 @@ func (s *LiveService) fetchCacheAndPublishTraces(ctx context.Context, chainID, b
 		s.logger.Debug("fetchCacheAndPublishTraces completed", "block", blockNum, "duration", time.Since(start))
 	}()
 
-	data, err := s.client.GetBlockTraces(ctx, blockNum)
+	// Fetch by hash to prevent TOCTOU race condition.
+	// If we fetched by number, a reorg between receiving the header and fetching
+	// could cause us to cache traces for the wrong block.
+	data, err := s.client.GetBlockTracesByHash(ctx, blockHash)
 	if err != nil {
-		return fmt.Errorf("failed to fetch traces for block %d: %w", blockNum, err)
+		return fmt.Errorf("failed to fetch traces for block %d by hash %s: %w", blockNum, blockHash, err)
 	}
 
 	if err := s.cache.SetTraces(ctx, chainID, blockNum, version, data); err != nil {
@@ -689,9 +695,12 @@ func (s *LiveService) fetchCacheAndPublishBlobs(ctx context.Context, chainID, bl
 		s.logger.Debug("fetchCacheAndPublishBlobs completed", "block", blockNum, "duration", time.Since(start))
 	}()
 
-	data, err := s.client.GetBlobSidecars(ctx, blockNum)
+	// Fetch by hash to prevent TOCTOU race condition.
+	// If we fetched by number, a reorg between receiving the header and fetching
+	// could cause us to cache blobs for the wrong block.
+	data, err := s.client.GetBlobSidecarsByHash(ctx, blockHash)
 	if err != nil {
-		return fmt.Errorf("failed to fetch blobs for block %d: %w", blockNum, err)
+		return fmt.Errorf("failed to fetch blobs for block %d by hash %s: %w", blockNum, blockHash, err)
 	}
 
 	if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, data); err != nil {

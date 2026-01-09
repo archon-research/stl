@@ -178,7 +178,7 @@ func (c *Client) GetFullBlockByHash(ctx context.Context, hash string, fullTx boo
 	return resp.Result, nil
 }
 
-// GetBlockReceipts fetches all transaction receipts for a block.
+// GetBlockReceipts fetches all transaction receipts for a block by number.
 func (c *Client) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	hexNum := fmt.Sprintf("0x%x", blockNum)
 	req := jsonRPCRequest{
@@ -196,7 +196,25 @@ func (c *Client) GetBlockReceipts(ctx context.Context, blockNum int64) (json.Raw
 	return resp.Result, nil
 }
 
-// GetBlockTraces fetches execution traces for a block.
+// GetBlockReceiptsByHash fetches all transaction receipts for a block by hash.
+// Use this to prevent TOCTOU race conditions during reorgs.
+func (c *Client) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	req := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "eth_getBlockReceipts",
+		Params:  []interface{}{hash},
+	}
+
+	resp, err := c.call(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Result, nil
+}
+
+// GetBlockTraces fetches execution traces for a block by number.
 func (c *Client) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	hexNum := fmt.Sprintf("0x%x", blockNum)
 	req := jsonRPCRequest{
@@ -214,7 +232,25 @@ func (c *Client) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMe
 	return resp.Result, nil
 }
 
-// GetBlobSidecars fetches blob sidecars for a block.
+// GetBlockTracesByHash fetches execution traces for a block by hash.
+// Use this to prevent TOCTOU race conditions during reorgs.
+func (c *Client) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	req := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "trace_block",
+		Params:  []interface{}{hash},
+	}
+
+	resp, err := c.call(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Result, nil
+}
+
+// GetBlobSidecars fetches blob sidecars for a block by number.
 func (c *Client) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	hexNum := fmt.Sprintf("0x%x", blockNum)
 	req := jsonRPCRequest{
@@ -222,6 +258,24 @@ func (c *Client) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawM
 		ID:      1,
 		Method:  "eth_getBlobSidecars",
 		Params:  []interface{}{hexNum},
+	}
+
+	resp, err := c.call(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Result, nil
+}
+
+// GetBlobSidecarsByHash fetches blob sidecars for a block by hash.
+// Use this to prevent TOCTOU race conditions during reorgs.
+func (c *Client) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	req := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "eth_getBlobSidecars",
+		Params:  []interface{}{hash},
 	}
 
 	resp, err := c.call(ctx, req)

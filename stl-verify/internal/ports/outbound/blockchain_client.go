@@ -40,14 +40,26 @@ type BlockchainClient interface {
 	// Use this when you need the raw block data, not just the header.
 	GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error)
 
-	// GetBlockReceipts fetches all transaction receipts for a block.
+	// GetBlockReceipts fetches all transaction receipts for a block by number.
 	GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error)
 
-	// GetBlockTraces fetches execution traces for a block.
+	// GetBlockReceiptsByHash fetches all transaction receipts for a block by hash.
+	// Use this to prevent TOCTOU race conditions during reorgs.
+	GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error)
+
+	// GetBlockTraces fetches execution traces for a block by number.
 	GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error)
 
-	// GetBlobSidecars fetches blob sidecars for a block.
+	// GetBlockTracesByHash fetches execution traces for a block by hash.
+	// Use this to prevent TOCTOU race conditions during reorgs.
+	GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error)
+
+	// GetBlobSidecars fetches blob sidecars for a block by number.
 	GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error)
+
+	// GetBlobSidecarsByHash fetches blob sidecars for a block by hash.
+	// Use this to prevent TOCTOU race conditions during reorgs.
+	GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error)
 
 	// GetCurrentBlockNumber fetches the latest block number.
 	GetCurrentBlockNumber(ctx context.Context) (int64, error)

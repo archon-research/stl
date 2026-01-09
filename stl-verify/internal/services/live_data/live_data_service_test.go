@@ -239,6 +239,23 @@ func (m *mockBlockchainClient) GetBlockReceipts(ctx context.Context, blockNum in
 	return nil, fmt.Errorf("receipts for block %d not found", blockNum)
 }
 
+func (m *mockBlockchainClient) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Check if we should return an error for this specific hash
+	if m.getByHashErr != nil && (m.getByHashErrFor == "" || m.getByHashErrFor == hash) {
+		return nil, m.getByHashErr
+	}
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			return bd.receipts, nil
+		}
+	}
+	return nil, fmt.Errorf("receipts for block %s not found", hash)
+}
+
 func (m *mockBlockchainClient) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -249,6 +266,23 @@ func (m *mockBlockchainClient) GetBlockTraces(ctx context.Context, blockNum int6
 	return nil, fmt.Errorf("traces for block %d not found", blockNum)
 }
 
+func (m *mockBlockchainClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Check if we should return an error for this specific hash
+	if m.getByHashErr != nil && (m.getByHashErrFor == "" || m.getByHashErrFor == hash) {
+		return nil, m.getByHashErr
+	}
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			return bd.traces, nil
+		}
+	}
+	return nil, fmt.Errorf("traces for block %s not found", hash)
+}
+
 func (m *mockBlockchainClient) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -257,6 +291,23 @@ func (m *mockBlockchainClient) GetBlobSidecars(ctx context.Context, blockNum int
 		return bd.blobs, nil
 	}
 	return nil, fmt.Errorf("blobs for block %d not found", blockNum)
+}
+
+func (m *mockBlockchainClient) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Check if we should return an error for this specific hash
+	if m.getByHashErr != nil && (m.getByHashErrFor == "" || m.getByHashErrFor == hash) {
+		return nil, m.getByHashErr
+	}
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			return bd.blobs, nil
+		}
+	}
+	return nil, fmt.Errorf("blobs for block %s not found", hash)
 }
 
 func (m *mockBlockchainClient) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
@@ -1703,6 +1754,13 @@ func (m *mockFailingClient) GetBlockReceipts(ctx context.Context, blockNum int64
 	return m.mockBlockchainClient.GetBlockReceipts(ctx, blockNum)
 }
 
+func (m *mockFailingClient) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	if m.failGetReceipts {
+		return nil, fmt.Errorf("simulated receipts fetch failure")
+	}
+	return m.mockBlockchainClient.GetBlockReceiptsByHash(ctx, hash)
+}
+
 func (m *mockFailingClient) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	if m.failGetTraces {
 		return nil, fmt.Errorf("simulated traces fetch failure")
@@ -1710,11 +1768,25 @@ func (m *mockFailingClient) GetBlockTraces(ctx context.Context, blockNum int64) 
 	return m.mockBlockchainClient.GetBlockTraces(ctx, blockNum)
 }
 
+func (m *mockFailingClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	if m.failGetTraces {
+		return nil, fmt.Errorf("simulated traces fetch failure")
+	}
+	return m.mockBlockchainClient.GetBlockTracesByHash(ctx, hash)
+}
+
 func (m *mockFailingClient) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	if m.failGetBlobs {
 		return nil, fmt.Errorf("simulated blobs fetch failure")
 	}
 	return m.mockBlockchainClient.GetBlobSidecars(ctx, blockNum)
+}
+
+func (m *mockFailingClient) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	if m.failGetBlobs {
+		return nil, fmt.Errorf("simulated blobs fetch failure")
+	}
+	return m.mockBlockchainClient.GetBlobSidecarsByHash(ctx, hash)
 }
 
 // mockFailingCache simulates cache failures
@@ -2837,4 +2909,120 @@ func TestFetchBlockData_ByHashReturnsErrorWhenBlockNotFound(t *testing.T) {
 	}
 
 	t.Logf("Correctly failed when block not found by hash: %v", err)
+}
+
+// TestFetchReceiptsTracesBlobsByHash verifies that receipts, traces, and blobs
+// are fetched by hash (not number) to prevent TOCTOU race conditions.
+//
+// The vulnerability: If we fetch by number, a reorg between receiving the header
+// and fetching data could cause us to cache data for the WRONG block:
+// 1. Receive header for block 100 with hash 0xAAA
+// 2. Save block state with hash 0xAAA
+// 3. Start fetching receipts/traces/blobs by NUMBER
+// 4. Reorg happens - block 100 is now 0xBBB
+// 5. Fetch returns data for 0xBBB (current block at that number)
+// 6. We cache 0xBBB's data but publish event saying "block hash 0xAAA"
+//
+// The fix: Fetch by hash to ensure we always get data for the exact block
+// we committed to, or fail if that block no longer exists.
+func TestFetchReceiptsTracesBlobsByHash(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a mock client that tracks which methods are called
+	client := &mockClientWithHashTracking{
+		mockBlockchainClient: newMockClient(),
+		fetchedByHash:        make(map[string][]string),
+	}
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Add block 99 and 100
+	client.addBlock(99, "")
+	client.addBlock(100, "")
+
+	block100Header := client.getHeader(100)
+	expectedHash := block100Header.Hash
+
+	config := LiveConfig{
+		ChainID:              1,
+		FinalityBlockCount:   64,
+		MaxUnfinalizedBlocks: 200,
+		DisableBlobs:         false, // Enable blobs to test all data types
+		Logger:               slog.Default(),
+	}
+
+	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx = ctx
+
+	// Process the block
+	header := outbound.BlockHeader{
+		Number:     "0x64", // 100
+		Hash:       expectedHash,
+		ParentHash: block100Header.ParentHash,
+		Timestamp:  block100Header.Timestamp,
+	}
+
+	err = svc.processBlock(header, time.Now())
+	if err != nil {
+		t.Fatalf("processBlock failed: %v", err)
+	}
+
+	// Verify that all data types were fetched by hash
+	fetchedMethods := client.fetchedByHash[expectedHash]
+	expectedMethods := []string{"GetFullBlockByHash", "GetBlockReceiptsByHash", "GetBlockTracesByHash", "GetBlobSidecarsByHash"}
+
+	for _, method := range expectedMethods {
+		found := false
+		for _, fetched := range fetchedMethods {
+			if fetched == method {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %s to be called with hash %s, but it wasn't. Called methods: %v",
+				method, expectedHash, fetchedMethods)
+		}
+	}
+
+	t.Logf("SUCCESS: All data types fetched by hash: %v", fetchedMethods)
+}
+
+// mockClientWithHashTracking wraps mockBlockchainClient to track which methods are called with which hashes
+type mockClientWithHashTracking struct {
+	*mockBlockchainClient
+	mu            sync.Mutex
+	fetchedByHash map[string][]string // hash -> list of method names called
+}
+
+func (m *mockClientWithHashTracking) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
+	m.mu.Lock()
+	m.fetchedByHash[hash] = append(m.fetchedByHash[hash], "GetFullBlockByHash")
+	m.mu.Unlock()
+	return m.mockBlockchainClient.GetFullBlockByHash(ctx, hash, fullTx)
+}
+
+func (m *mockClientWithHashTracking) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	m.mu.Lock()
+	m.fetchedByHash[hash] = append(m.fetchedByHash[hash], "GetBlockReceiptsByHash")
+	m.mu.Unlock()
+	return m.mockBlockchainClient.GetBlockReceiptsByHash(ctx, hash)
+}
+
+func (m *mockClientWithHashTracking) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	m.mu.Lock()
+	m.fetchedByHash[hash] = append(m.fetchedByHash[hash], "GetBlockTracesByHash")
+	m.mu.Unlock()
+	return m.mockBlockchainClient.GetBlockTracesByHash(ctx, hash)
+}
+
+func (m *mockClientWithHashTracking) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	m.mu.Lock()
+	m.fetchedByHash[hash] = append(m.fetchedByHash[hash], "GetBlobSidecarsByHash")
+	m.mu.Unlock()
+	return m.mockBlockchainClient.GetBlobSidecarsByHash(ctx, hash)
 }
