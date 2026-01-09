@@ -470,3 +470,120 @@ func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
 		t.Errorf("expected watermark to remain at 0, got %d", watermark)
 	}
 }
+
+// TestBackfillService_RejectsNonCanonicalBlock verifies that backfill rejects
+// blocks that don't match the expected parent hash chain.
+//
+// Scenario:
+//  1. Live service has already processed block 10 with hash A10 (parent_hash = A9)
+//  2. Backfill tries to fill block 9 (the gap)
+//  3. But due to a reorg in the RPC node, the RPC returns block 9 with hash B9
+//     (a different chain where B9 -> B10 instead of A9 -> A10)
+//  4. Backfill should detect this mismatch and NOT save/cache/publish the wrong block
+//
+// Why this matters:
+// - If we save B9 and publish it, consumers will have inconsistent data
+// - Block 10 references A9 as parent, but we cached data for B9
+// - The chain integrity check happens AFTER caching, so damage is done
+func TestBackfillService_RejectsNonCanonicalBlock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Create a client that returns a "reorged" version of block 9
+	client := newMockClient()
+
+	// Add blocks 1-8 with normal chain (these match what we'll put in DB)
+	for i := int64(1); i <= 8; i++ {
+		client.addBlock(i, "")
+	}
+
+	// Add block 10 - this is what the live service already processed
+	// Its parent_hash points to the "original" block 9's hash
+	originalBlock9Hash := fmt.Sprintf("0x%064x", 9) // The hash that block 10 expects as parent
+
+	// But the client returns a DIFFERENT block 9 (simulating reorg in RPC)
+	// This block 9 has a different hash than what block 10 expects as parent
+	reorgedBlock9Hash := "0xREORGED_BLOCK_9_HASH_DOES_NOT_MATCH_BLOCK_10_PARENT"
+	client.blocks[9] = blockTestData{
+		header: outbound.BlockHeader{
+			Number:     "0x9",
+			Hash:       reorgedBlock9Hash,         // Different hash!
+			ParentHash: fmt.Sprintf("0x%064x", 8), // Links to block 8
+			Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
+		},
+		receipts: json.RawMessage(`[]`),
+		traces:   json.RawMessage(`[]`),
+		blobs:    json.RawMessage(`[]`),
+	}
+
+	// Add block 10 to client for completeness
+	client.addBlock(10, originalBlock9Hash)
+
+	// Pre-populate state repo with blocks 1-8 and 10 (leaving gap at 9)
+	for i := int64(1); i <= 8; i++ {
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       client.getHeader(i).Hash,
+			ParentHash: client.getHeader(i).ParentHash,
+			ReceivedAt: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Save block 10 with parent_hash pointing to ORIGINAL block 9 hash
+	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:     10,
+		Hash:       client.getHeader(10).Hash,
+		ParentHash: originalBlock9Hash, // This is A9, but client returns B9
+		ReceivedAt: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("failed to save block 10: %v", err)
+	}
+
+	config := BackfillConfig{
+		ChainID:   1,
+		BatchSize: 10,
+		Logger:    slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Run backfill - it should try to fill block 9
+	err = service.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+
+	// The backfill should either:
+	// 1. Reject block 9 because its hash doesn't match block 10's parent_hash, OR
+	// 2. Log a warning and skip the block
+
+	// Check that block 9 was NOT saved with the wrong hash
+	block9, err := stateRepo.GetBlockByNumber(ctx, 9)
+	if err != nil {
+		t.Fatalf("failed to get block 9: %v", err)
+	}
+	if block9 != nil && block9.Hash == reorgedBlock9Hash {
+		t.Error("BUG: Backfill saved block 9 with wrong hash that doesn't link to block 10")
+		t.Errorf("Block 9 hash: %s", block9.Hash)
+		t.Errorf("Block 10 parent_hash: %s", originalBlock9Hash)
+		t.Error("This means we cached and published data for the wrong block!")
+	}
+
+	// Check that no events were published for block 9
+	blockEvents := eventSink.GetEventsByType(outbound.EventTypeBlock)
+	for _, e := range blockEvents {
+		be := e.(outbound.BlockEvent)
+		if be.BlockNumber == 9 {
+			t.Error("BUG: Published event for block 9 with wrong hash")
+		}
+	}
+}

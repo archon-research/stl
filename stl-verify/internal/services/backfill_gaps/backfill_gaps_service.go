@@ -361,6 +361,17 @@ func (s *BackfillService) processBlockData(bd outbound.BlockData) error {
 		return nil
 	}
 
+	// Validate that fetched block matches the expected chain.
+	// This prevents caching/publishing data for a reorged block that doesn't
+	// link correctly with blocks we've already processed.
+	if err := s.validateBlockLinkage(ctx, blockNum, header.Hash, header.ParentHash); err != nil {
+		s.logger.Warn("block linkage validation failed, skipping",
+			"block", blockNum,
+			"hash", header.Hash,
+			"error", err)
+		return fmt.Errorf("block linkage validation failed: %w", err)
+	}
+
 	receivedAt := time.Now()
 
 	// Save block state to DB - version is assigned atomically to prevent race conditions
@@ -380,6 +391,49 @@ func (s *BackfillService) processBlockData(bd outbound.BlockData) error {
 	s.cacheAndPublishBlockData(bd, header, version, receivedAt)
 
 	return nil
+}
+
+// validateBlockLinkage checks that the fetched block links correctly with
+// existing blocks in our database. This prevents saving/caching/publishing
+// blocks from a reorged chain that don't match our canonical chain.
+//
+// Validation rules:
+// 1. If block N+1 exists, fetched block N's hash must equal N+1's parent_hash
+// 2. If block N-1 exists, fetched block N's parent_hash must equal N-1's hash
+func (s *BackfillService) validateBlockLinkage(ctx context.Context, blockNum int64, blockHash, parentHash string) error {
+	// Check forward linkage: does block N+1 exist and expect this block as parent?
+	nextBlock, err := s.stateRepo.GetBlockByNumber(ctx, blockNum+1)
+	if err != nil {
+		s.logger.Debug("failed to check next block for linkage", "block", blockNum+1, "error", err)
+	} else if nextBlock != nil {
+		if nextBlock.ParentHash != blockHash {
+			return fmt.Errorf("hash %s does not match next block's parent_hash %s",
+				truncateHash(blockHash), truncateHash(nextBlock.ParentHash))
+		}
+	}
+
+	// Check backward linkage: does our parent_hash match block N-1's hash?
+	if blockNum > 1 {
+		prevBlock, err := s.stateRepo.GetBlockByNumber(ctx, blockNum-1)
+		if err != nil {
+			s.logger.Debug("failed to check previous block for linkage", "block", blockNum-1, "error", err)
+		} else if prevBlock != nil {
+			if prevBlock.Hash != parentHash {
+				return fmt.Errorf("parent_hash %s does not match previous block's hash %s",
+					truncateHash(parentHash), truncateHash(prevBlock.Hash))
+			}
+		}
+	}
+
+	return nil
+}
+
+// truncateHash returns a shortened version of a hash for logging.
+func truncateHash(hash string) string {
+	if len(hash) > 18 {
+		return hash[:10] + "..." + hash[len(hash)-6:]
+	}
+	return hash
 }
 
 // cacheAndPublishBlockData caches pre-fetched data and publishes events.
