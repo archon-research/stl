@@ -3,8 +3,16 @@
 .env.local
 .env.*
 
-# Debug binaries
-__debug_*
+# Binary
+/blockwatcher
+
+# Test artifacts
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
 
 # OS
 .DS_Store
