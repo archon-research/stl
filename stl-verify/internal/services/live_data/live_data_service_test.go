@@ -61,11 +61,14 @@ func (m *mockSubscriber) sendHeader(header outbound.BlockHeader) {
 // It embeds the memory implementation and overrides specific methods for testing.
 type mockStateRepo struct {
 	*memory.BlockStateRepository
-	mu              sync.RWMutex
-	getByHashErr    error
-	getRecentErr    error
-	getRecentBlocks []outbound.BlockState // Override response
-	saveBlockErr    error
+	mu                   sync.RWMutex
+	getByHashErr         error
+	getRecentErr         error
+	getRecentBlocks      []outbound.BlockState // Override response
+	saveBlockErr         error
+	getVersionCountErr   error
+	saveReorgEventErr    error
+	markOrphanedAfterErr error
 }
 
 func newMockStateRepo() *mockStateRepo {
@@ -113,11 +116,46 @@ func (m *mockStateRepo) GetRecentBlocks(ctx context.Context, limit int) ([]outbo
 	return m.BlockStateRepository.GetRecentBlocks(ctx, limit)
 }
 
+func (m *mockStateRepo) GetBlockVersionCount(ctx context.Context, number int64) (int, error) {
+	m.mu.RLock()
+	err := m.getVersionCountErr
+	m.mu.RUnlock()
+
+	if err != nil {
+		return 0, err
+	}
+	return m.BlockStateRepository.GetBlockVersionCount(ctx, number)
+}
+
+func (m *mockStateRepo) SaveReorgEvent(ctx context.Context, event outbound.ReorgEvent) error {
+	m.mu.RLock()
+	err := m.saveReorgEventErr
+	m.mu.RUnlock()
+
+	if err != nil {
+		return err
+	}
+	return m.BlockStateRepository.SaveReorgEvent(ctx, event)
+}
+
+func (m *mockStateRepo) MarkBlocksOrphanedAfter(ctx context.Context, blockNum int64) error {
+	m.mu.RLock()
+	err := m.markOrphanedAfterErr
+	m.mu.RUnlock()
+
+	if err != nil {
+		return err
+	}
+	return m.BlockStateRepository.MarkBlocksOrphanedAfter(ctx, blockNum)
+}
+
 // mockBlockchainClient provides predictable block data for testing.
 type mockBlockchainClient struct {
-	mu     sync.RWMutex
-	blocks map[int64]blockTestData
-	delay  time.Duration
+	mu              sync.RWMutex
+	blocks          map[int64]blockTestData
+	delay           time.Duration
+	getByHashErr    error
+	getByHashErrFor string // Only return error for this specific hash
 }
 
 type blockTestData struct {
@@ -181,6 +219,11 @@ func (m *mockBlockchainClient) GetBlockByNumber(ctx context.Context, blockNum in
 func (m *mockBlockchainClient) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (*outbound.BlockHeader, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	// Check if we should return an error for this specific hash
+	if m.getByHashErr != nil && (m.getByHashErrFor == "" || m.getByHashErrFor == hash) {
+		return nil, m.getByHashErr
+	}
 
 	for _, bd := range m.blocks {
 		if bd.header.Hash == hash {
@@ -2193,5 +2236,394 @@ func TestStart_RestoresChainFromDB(t *testing.T) {
 	// Chain should be restored from DB with all 10 blocks
 	if len(svc.unfinalizedBlocks) != 10 {
 		t.Errorf("expected 10 blocks to be restored from DB, got %d", len(svc.unfinalizedBlocks))
+	}
+}
+
+func TestProcessHeaders_ContextCancellation(t *testing.T) {
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	subscriber := newMockSubscriber()
+	svc, err := NewLiveService(LiveConfig{}, subscriber, newMockClient(), stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	err = svc.Start(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Give processHeaders goroutine time to start
+	time.Sleep(10 * time.Millisecond)
+
+	// Stop service - should trigger context cancellation in processHeaders
+	err = svc.Stop()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Context should be cancelled
+	select {
+	case <-svc.ctx.Done():
+		// Expected
+	default:
+		t.Error("expected context to be cancelled")
+	}
+}
+
+func TestProcessHeaders_ChannelClosed(t *testing.T) {
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	subscriber := newMockSubscriber()
+	svc, err := NewLiveService(LiveConfig{}, subscriber, newMockClient(), stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	err = svc.Start(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = svc.Stop() }()
+
+	// Give processHeaders goroutine time to start
+	time.Sleep(10 * time.Millisecond)
+
+	// Close the subscriber's channel - should trigger the !ok branch
+	subscriber.mu.Lock()
+	subscriber.closed = true
+	close(subscriber.headers)
+	subscriber.mu.Unlock()
+
+	// Give processHeaders time to exit
+	time.Sleep(10 * time.Millisecond)
+}
+
+func TestAddBlock_TrimsToMaxSize(t *testing.T) {
+	svc := &LiveService{
+		config: LiveConfig{
+			MaxUnfinalizedBlocks: 5,
+		},
+		unfinalizedBlocks: make([]LightBlock, 0),
+	}
+
+	// Add 7 blocks - should trim to 5
+	for i := int64(1); i <= 7; i++ {
+		svc.addBlock(LightBlock{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x%d", i),
+			ParentHash: fmt.Sprintf("0x%d", i-1),
+		})
+	}
+
+	if len(svc.unfinalizedBlocks) != 5 {
+		t.Errorf("expected 5 blocks after trimming, got %d", len(svc.unfinalizedBlocks))
+	}
+
+	// First block should be 3 (blocks 1 and 2 trimmed)
+	if svc.unfinalizedBlocks[0].Number != 3 {
+		t.Errorf("expected first block to be 3, got %d", svc.unfinalizedBlocks[0].Number)
+	}
+
+	// Last block should be 7
+	if svc.unfinalizedBlocks[4].Number != 7 {
+		t.Errorf("expected last block to be 7, got %d", svc.unfinalizedBlocks[4].Number)
+	}
+}
+
+func TestProcessBlock_WithMetrics_RecordsReorg(t *testing.T) {
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	client := newMockClient()
+	// Set up chain: 98 -> 99
+	client.blocks[98] = blockTestData{
+		header: outbound.BlockHeader{Number: "0x62", Hash: "0x98", ParentHash: "0x97"},
+	}
+	client.blocks[99] = blockTestData{
+		header: outbound.BlockHeader{Number: "0x63", Hash: "0x99", ParentHash: "0x98"},
+	}
+	// Add block 100 data for fetching
+	client.addBlock(100, "0x99")
+
+	metrics := &mockMetrics{}
+
+	svc, err := NewLiveService(LiveConfig{
+		DisableBlobs: true,
+		Metrics:      metrics,
+	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx, svc.cancel = context.WithCancel(context.Background())
+	defer svc.cancel()
+
+	// Set up in-memory chain
+	svc.unfinalizedBlocks = []LightBlock{
+		{Number: 98, Hash: "0x98", ParentHash: "0x97"},
+		{Number: 99, Hash: "0x99", ParentHash: "0x98"},
+		{Number: 100, Hash: "0x100", ParentHash: "0x99"},
+	}
+
+	// Process a reorg block at 100 with different hash
+	header := outbound.BlockHeader{
+		Number:     "0x64", // 100
+		Hash:       "0x100_alt",
+		ParentHash: "0x99",
+	}
+
+	err = svc.processBlock(header, time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify metrics recorded the reorg
+	if metrics.reorgCount != 1 {
+		t.Errorf("expected 1 reorg recorded, got %d", metrics.reorgCount)
+	}
+}
+
+type mockMetrics struct {
+	mu         sync.Mutex
+	reorgCount int
+}
+
+func (m *mockMetrics) RecordReorg(ctx context.Context, depth int, commonAncestor, blockNum int64) {
+	m.mu.Lock()
+	m.reorgCount++
+	m.mu.Unlock()
+}
+
+func (m *mockMetrics) RecordBlockProcessed(ctx context.Context, blockNum int64, durationMs int64) {}
+
+func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	client := newMockClient()
+	// Set up error for fetching parent
+	client.getByHashErr = fmt.Errorf("network error")
+	client.getByHashErrFor = "0xunknown_parent"
+
+	svc, err := NewLiveService(LiveConfig{
+		FinalityBlockCount: 10,
+	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx, svc.cancel = context.WithCancel(context.Background())
+	defer svc.cancel()
+
+	// Set up chain
+	svc.unfinalizedBlocks = []LightBlock{
+		{Number: 100, Hash: "0x100", ParentHash: "0x99"},
+	}
+
+	// Incoming reorg block with unknown parent
+	header := outbound.BlockHeader{
+		Number:     "0x64", // 100
+		Hash:       "0x100_alt",
+		ParentHash: "0xunknown_parent",
+	}
+
+	_, _, _, err = svc.handleReorg(header, 100, time.Now())
+	if err == nil {
+		t.Error("expected error when fetching parent fails")
+	}
+	if !contains(err.Error(), "failed to fetch parent block") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestFetchAndPublishBlockData_GetVersionCountError(t *testing.T) {
+	stateRepo := newMockStateRepo()
+	stateRepo.getVersionCountErr = fmt.Errorf("database error")
+
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	client := newMockClient()
+	client.addBlock(100, "0x99")
+
+	svc, err := NewLiveService(LiveConfig{
+		DisableBlobs: true,
+	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx, svc.cancel = context.WithCancel(context.Background())
+	defer svc.cancel()
+
+	header := outbound.BlockHeader{
+		Number:     "0x64",
+		Hash:       "0x100",
+		ParentHash: "0x99",
+	}
+
+	err = svc.fetchAndPublishBlockData(svc.ctx, header, 100, time.Now(), false)
+	if err == nil {
+		t.Error("expected error when GetBlockVersionCount fails")
+	}
+	if !contains(err.Error(), "failed to get block version count") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestProcessHeaders_LogsErrorOnProcessBlockFailure(t *testing.T) {
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	subscriber := newMockSubscriber()
+	svc, err := NewLiveService(LiveConfig{}, subscriber, newMockClient(), stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	err = svc.Start(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = svc.Stop() }()
+
+	// Give processHeaders goroutine time to start
+	time.Sleep(10 * time.Millisecond)
+
+	// Send a header with invalid block number - this will cause processBlock to fail
+	subscriber.sendHeader(outbound.BlockHeader{
+		Number:     "invalid_hex",
+		Hash:       "0x123",
+		ParentHash: "0x122",
+	})
+
+	// Give time for processing and logging
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestHandleReorg_SaveReorgEventError_ReturnsError(t *testing.T) {
+	stateRepo := newMockStateRepo()
+	stateRepo.saveReorgEventErr = fmt.Errorf("database error")
+
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	client := newMockClient()
+	// Set up blocks for reorg detection
+	client.blocks[99] = blockTestData{
+		header: outbound.BlockHeader{Number: "0x63", Hash: "0x99", ParentHash: "0x98"},
+	}
+
+	svc, err := NewLiveService(LiveConfig{
+		FinalityBlockCount: 10,
+	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx, svc.cancel = context.WithCancel(context.Background())
+	defer svc.cancel()
+
+	// Set up chain with blocks
+	svc.unfinalizedBlocks = []LightBlock{
+		{Number: 98, Hash: "0x98", ParentHash: "0x97"},
+		{Number: 99, Hash: "0x99", ParentHash: "0x98"},
+		{Number: 100, Hash: "0x100", ParentHash: "0x99"},
+	}
+
+	// Incoming reorg block at 100 with different hash but same parent
+	header := outbound.BlockHeader{
+		Number:     "0x64", // 100
+		Hash:       "0x100_alt",
+		ParentHash: "0x99",
+	}
+
+	_, _, _, err = svc.handleReorg(header, 100, time.Now())
+	if err == nil {
+		t.Error("expected error when SaveReorgEvent fails")
+	}
+	if !contains(err.Error(), "failed to save reorg event") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestHandleReorg_MarkOrphanedError_ReturnsError(t *testing.T) {
+	stateRepo := newMockStateRepo()
+	stateRepo.markOrphanedAfterErr = fmt.Errorf("database error")
+
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	client := newMockClient()
+	// Set up blocks for reorg detection
+	client.blocks[99] = blockTestData{
+		header: outbound.BlockHeader{Number: "0x63", Hash: "0x99", ParentHash: "0x98"},
+	}
+
+	svc, err := NewLiveService(LiveConfig{
+		FinalityBlockCount: 10,
+	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx, svc.cancel = context.WithCancel(context.Background())
+	defer svc.cancel()
+
+	// Set up chain with blocks
+	svc.unfinalizedBlocks = []LightBlock{
+		{Number: 98, Hash: "0x98", ParentHash: "0x97"},
+		{Number: 99, Hash: "0x99", ParentHash: "0x98"},
+		{Number: 100, Hash: "0x100", ParentHash: "0x99"},
+	}
+
+	// Incoming reorg block at 100 with different hash but same parent
+	header := outbound.BlockHeader{
+		Number:     "0x64", // 100
+		Hash:       "0x100_alt",
+		ParentHash: "0x99",
+	}
+
+	_, _, _, err = svc.handleReorg(header, 100, time.Now())
+	if err == nil {
+		t.Error("expected error when MarkBlocksOrphanedAfter fails")
+	}
+	if !contains(err.Error(), "failed to mark orphaned blocks") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestProcessBlock_FetchAndPublishError_ReturnsError(t *testing.T) {
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Client with no block data - will cause fetch to fail
+	client := newMockClient()
+
+	svc, err := NewLiveService(LiveConfig{
+		DisableBlobs: true,
+	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx, svc.cancel = context.WithCancel(context.Background())
+	defer svc.cancel()
+
+	header := outbound.BlockHeader{
+		Number:     "0x64",
+		Hash:       "0x100",
+		ParentHash: "0x99",
+	}
+
+	err = svc.processBlock(header, time.Now())
+	if err == nil {
+		t.Error("expected error when fetchAndPublishBlockData fails")
+	}
+	if !contains(err.Error(), "failed to fetch and publish block data") {
+		t.Errorf("unexpected error message: %v", err)
 	}
 }
