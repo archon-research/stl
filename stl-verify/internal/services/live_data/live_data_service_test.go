@@ -1226,18 +1226,17 @@ func TestUpdateFinalizedBlock_PrunesOldBlocks(t *testing.T) {
 		})
 	}
 
-	initialLen := len(svc.unfinalizedBlocks)
 	svc.updateFinalizedBlock(100)
 
 	// Cutoff = 90 - 5 = 85, so blocks < 85 should be pruned
-	// Blocks 85-100 should remain
-	if len(svc.unfinalizedBlocks) >= initialLen {
-		t.Error("expected blocks to be pruned")
+	// Blocks 85-100 should remain (16 blocks)
+	if len(svc.unfinalizedBlocks) != 16 {
+		t.Errorf("expected 16 blocks remaining (85-100), got %d", len(svc.unfinalizedBlocks))
 	}
 
-	// First remaining block should be >= cutoff
-	if len(svc.unfinalizedBlocks) > 0 && svc.unfinalizedBlocks[0].Number < 85 {
-		t.Errorf("expected first block >= 85, got %d", svc.unfinalizedBlocks[0].Number)
+	// First remaining block should be 85
+	if svc.unfinalizedBlocks[0].Number != 85 {
+		t.Errorf("expected first block to be 85, got %d", svc.unfinalizedBlocks[0].Number)
 	}
 }
 
@@ -1318,15 +1317,16 @@ func TestRestoreInMemoryChain_RestoresBlocks(t *testing.T) {
 
 	svc.restoreInMemoryChain()
 
-	// Should restore blocks from DB
-	if len(svc.unfinalizedBlocks) == 0 {
-		t.Error("expected blocks to be restored from DB")
+	// Should restore all 50 blocks from DB
+	if len(svc.unfinalizedBlocks) != 50 {
+		t.Errorf("expected 50 blocks to be restored from DB, got %d", len(svc.unfinalizedBlocks))
 	}
 
-	// Verify blocks are sorted by number ascending
-	for i := 1; i < len(svc.unfinalizedBlocks); i++ {
-		if svc.unfinalizedBlocks[i].Number < svc.unfinalizedBlocks[i-1].Number {
-			t.Errorf("blocks not sorted at index %d", i)
+	// Verify blocks are sorted by number ascending (1 to 50)
+	for i := 0; i < len(svc.unfinalizedBlocks); i++ {
+		expected := int64(i + 1)
+		if svc.unfinalizedBlocks[i].Number != expected {
+			t.Errorf("expected block %d at index %d, got %d", expected, i, svc.unfinalizedBlocks[i].Number)
 		}
 	}
 }
@@ -2190,8 +2190,8 @@ func TestStart_RestoresChainFromDB(t *testing.T) {
 	}
 	defer func() { _ = svc.Stop() }()
 
-	// Chain should be restored from DB
-	if len(svc.unfinalizedBlocks) == 0 {
-		t.Error("expected chain to be restored from DB")
+	// Chain should be restored from DB with all 10 blocks
+	if len(svc.unfinalizedBlocks) != 10 {
+		t.Errorf("expected 10 blocks to be restored from DB, got %d", len(svc.unfinalizedBlocks))
 	}
 }
