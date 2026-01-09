@@ -638,7 +638,10 @@ func TestIsDuplicateBlock_FoundInMemory(t *testing.T) {
 	}
 
 	// Check for duplicate - should find it in memory
-	isDup := svc.isDuplicateBlock(ctx, "0xabcd1234", 100)
+	isDup, err := svc.isDuplicateBlock(ctx, "0xabcd1234", 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !isDup {
 		t.Error("expected isDuplicateBlock to return true for block in memory")
 	}
@@ -665,7 +668,10 @@ func TestIsDuplicateBlock_FoundInDB(t *testing.T) {
 	svc.unfinalizedBlocks = []LightBlock{}
 
 	// Check for duplicate - should find it in DB
-	isDup := svc.isDuplicateBlock(ctx, "0xdb_block_hash", 50)
+	isDup, err := svc.isDuplicateBlock(ctx, "0xdb_block_hash", 50)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !isDup {
 		t.Error("expected isDuplicateBlock to return true for block in DB")
 	}
@@ -686,7 +692,10 @@ func TestIsDuplicateBlock_NotFound(t *testing.T) {
 	svc.unfinalizedBlocks = []LightBlock{}
 
 	// Check for duplicate - should not find it anywhere
-	isDup := svc.isDuplicateBlock(ctx, "0xnonexistent", 999)
+	isDup, err := svc.isDuplicateBlock(ctx, "0xnonexistent", 999)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if isDup {
 		t.Error("expected isDuplicateBlock to return false for non-existent block")
 	}
@@ -708,8 +717,11 @@ func TestIsDuplicateBlock_DBErrorContinues(t *testing.T) {
 	// Memory is empty
 	svc.unfinalizedBlocks = []LightBlock{}
 
-	// Check for duplicate - DB error should log warning and return false
-	isDup := svc.isDuplicateBlock(ctx, "0xsome_hash", 100)
+	// Check for duplicate - DB error should return error
+	isDup, err := svc.isDuplicateBlock(ctx, "0xsome_hash", 100)
+	if err == nil {
+		t.Error("expected isDuplicateBlock to return error when DB fails")
+	}
 	if isDup {
 		t.Error("expected isDuplicateBlock to return false when DB errors")
 	}
@@ -735,7 +747,10 @@ func TestIsDuplicateBlock_ChecksMemoryBeforeDB(t *testing.T) {
 	}
 
 	// Should find in memory and return true without hitting DB
-	isDup := svc.isDuplicateBlock(ctx, "0xmemory_hash", 100)
+	isDup, err := svc.isDuplicateBlock(ctx, "0xmemory_hash", 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !isDup {
 		t.Error("expected isDuplicateBlock to return true when found in memory")
 	}
@@ -1396,7 +1411,9 @@ func TestRestoreInMemoryChain_EmptyDB(t *testing.T) {
 	// Start with non-empty chain to verify it gets replaced
 	svc.unfinalizedBlocks = []LightBlock{{Number: 999}}
 
-	svc.restoreInMemoryChain()
+	if err := svc.restoreInMemoryChain(); err != nil {
+		t.Fatalf("restoreInMemoryChain failed: %v", err)
+	}
 
 	// DB is empty, chain should remain unchanged
 	if len(svc.unfinalizedBlocks) != 1 {
@@ -1427,7 +1444,9 @@ func TestRestoreInMemoryChain_RestoresBlocks(t *testing.T) {
 		t.Fatalf("failed to create service: %v", err)
 	}
 
-	svc.restoreInMemoryChain()
+	if err := svc.restoreInMemoryChain(); err != nil {
+		t.Fatalf("restoreInMemoryChain failed: %v", err)
+	}
 
 	// Should restore all 50 blocks from DB
 	if len(svc.unfinalizedBlocks) != 50 {
@@ -1466,7 +1485,9 @@ func TestRestoreInMemoryChain_SetsFinalizedBlock(t *testing.T) {
 		t.Fatalf("failed to create service: %v", err)
 	}
 
-	svc.restoreInMemoryChain()
+	if err := svc.restoreInMemoryChain(); err != nil {
+		t.Fatalf("restoreInMemoryChain failed: %v", err)
+	}
 
 	// Finalized block should be set
 	// Tip = 100, finalized = 100 - 10 = 90
@@ -1493,8 +1514,11 @@ func TestRestoreInMemoryChain_DBError_LogsWarning(t *testing.T) {
 	// Add some blocks to verify they aren't cleared on error
 	svc.unfinalizedBlocks = []LightBlock{{Number: 1}, {Number: 2}}
 
-	// Should not panic, just log warning
-	svc.restoreInMemoryChain()
+	// Should return error now
+	err = svc.restoreInMemoryChain()
+	if err == nil {
+		t.Error("expected error when database fails")
+	}
 
 	// Chain should remain unchanged on error
 	if len(svc.unfinalizedBlocks) != 2 {
@@ -1521,7 +1545,9 @@ func TestRestoreInMemoryChain_RespectsMaxUnfinalizedBlocks(t *testing.T) {
 		t.Fatalf("failed to create service: %v", err)
 	}
 
-	svc.restoreInMemoryChain()
+	if err := svc.restoreInMemoryChain(); err != nil {
+		t.Fatalf("restoreInMemoryChain failed: %v", err)
+	}
 
 	// Should restore all 3 blocks in ascending order
 	if len(svc.unfinalizedBlocks) != 3 {
