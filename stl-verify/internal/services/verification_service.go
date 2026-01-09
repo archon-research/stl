@@ -1,5 +1,5 @@
 // Package application contains the implementation of use cases.
-package application
+package services
 
 import (
 	"context"
