@@ -173,7 +173,10 @@ func (s *LiveService) processHeaders(headers <-chan outbound.BlockHeader) {
 				return
 			}
 			if err := s.processBlock(header, time.Now()); err != nil {
-				blockNum, _ := parseBlockNumber(header.Number)
+				blockNum, parseErr := parseBlockNumber(header.Number)
+				if parseErr != nil {
+					err = errors.Join(parseErr)
+				}
 				s.logger.Warn("failed to process live block",
 					"block", blockNum,
 					"hash", header.Hash,
