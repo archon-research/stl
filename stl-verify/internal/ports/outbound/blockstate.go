@@ -24,7 +24,25 @@ type BlockState struct {
 
 	// Version is the version of this block at its number (0 for first, 1 after first reorg, etc).
 	Version int
+
+	// Publish status flags - track which events have been successfully published.
+	// These allow crash recovery: if a service saves a block then crashes before
+	// publishing all events, another service (e.g., backfill) can complete the work.
+	BlockPublished    bool
+	ReceiptsPublished bool
+	TracesPublished   bool
+	BlobsPublished    bool
 }
+
+// PublishType represents the type of event that was published.
+type PublishType string
+
+const (
+	PublishTypeBlock    PublishType = "block"
+	PublishTypeReceipts PublishType = "receipts"
+	PublishTypeTraces   PublishType = "traces"
+	PublishTypeBlobs    PublishType = "blobs"
+)
 
 // ReorgEvent represents a chain reorganization event.
 type ReorgEvent struct {
@@ -144,4 +162,16 @@ type BlockStateRepository interface {
 	// the first broken link found.
 	// This should be called after backfill completes to ensure eventual consistency.
 	VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error
+
+	// MarkPublishComplete marks a specific publish type as completed for a block.
+	// This is called after each successful cache+publish operation.
+	// Allows crash recovery: if a service crashes mid-publish, another service
+	// (e.g., backfill) can check which publishes are incomplete and retry them.
+	MarkPublishComplete(ctx context.Context, hash string, publishType PublishType) error
+
+	// GetBlocksWithIncompletePublish returns canonical blocks that have at least one
+	// publish type incomplete. Used by backfill to recover from crashes.
+	// The disableBlobs flag indicates whether blob publishing is disabled (and thus
+	// should not be considered incomplete).
+	GetBlocksWithIncompletePublish(ctx context.Context, limit int, disableBlobs bool) ([]BlockState, error)
 }

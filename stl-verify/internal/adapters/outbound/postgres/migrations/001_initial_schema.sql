@@ -9,6 +9,12 @@ CREATE TABLE IF NOT EXISTS block_states (
     received_at BIGINT NOT NULL,
     is_orphaned BOOLEAN NOT NULL DEFAULT FALSE,
     version INT NOT NULL DEFAULT 0,
+    -- Publish status tracking: allows crash recovery and prevents duplicate publishes
+    -- Each flag is set to TRUE after the corresponding event is successfully published
+    block_published BOOLEAN NOT NULL DEFAULT FALSE,
+    receipts_published BOOLEAN NOT NULL DEFAULT FALSE,
+    traces_published BOOLEAN NOT NULL DEFAULT FALSE,
+    blobs_published BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (number, hash),
     CONSTRAINT unique_block_number_version UNIQUE (number, version),
     CONSTRAINT version_non_negative CHECK (version >= 0)
@@ -18,6 +24,9 @@ CREATE INDEX IF NOT EXISTS idx_block_states_hash ON block_states(hash);
 CREATE INDEX IF NOT EXISTS idx_block_states_received_at ON block_states(received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_block_states_canonical ON block_states(number DESC) WHERE NOT is_orphaned;
 CREATE INDEX IF NOT EXISTS idx_block_states_orphaned ON block_states(is_orphaned) WHERE is_orphaned;
+-- Index for finding blocks with incomplete publishes (for backfill recovery)
+CREATE INDEX IF NOT EXISTS idx_block_states_incomplete_publish ON block_states(number) 
+    WHERE NOT is_orphaned AND (NOT block_published OR NOT receipts_published OR NOT traces_published);
 
 -- Function to auto-assign version on insert
 -- Calculates MAX(version) + 1 for the block number, defaulting to 0

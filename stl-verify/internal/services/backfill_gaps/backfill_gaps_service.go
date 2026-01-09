@@ -468,6 +468,11 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 			}
 			if err := s.eventSink.Publish(s.ctx, event); err != nil {
 				s.logger.Warn("failed to publish block event", "block", blockNum, "error", err)
+				return
+			}
+			// Mark block publish complete for crash recovery tracking
+			if err := s.stateRepo.MarkPublishComplete(s.ctx, blockHash, outbound.PublishTypeBlock); err != nil {
+				s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
 			}
 		}()
 	}
@@ -492,6 +497,11 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 			}
 			if err := s.eventSink.Publish(s.ctx, event); err != nil {
 				s.logger.Warn("failed to publish receipts event", "block", blockNum, "error", err)
+				return
+			}
+			// Mark receipts publish complete for crash recovery tracking
+			if err := s.stateRepo.MarkPublishComplete(s.ctx, blockHash, outbound.PublishTypeReceipts); err != nil {
+				s.logger.Warn("failed to mark receipts publish complete", "block", blockNum, "error", err)
 			}
 		}()
 	}
@@ -516,6 +526,11 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 			}
 			if err := s.eventSink.Publish(s.ctx, event); err != nil {
 				s.logger.Warn("failed to publish traces event", "block", blockNum, "error", err)
+				return
+			}
+			// Mark traces publish complete for crash recovery tracking
+			if err := s.stateRepo.MarkPublishComplete(s.ctx, blockHash, outbound.PublishTypeTraces); err != nil {
+				s.logger.Warn("failed to mark traces publish complete", "block", blockNum, "error", err)
 			}
 		}()
 	}
@@ -540,6 +555,11 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 			}
 			if err := s.eventSink.Publish(s.ctx, event); err != nil {
 				s.logger.Warn("failed to publish blobs event", "block", blockNum, "error", err)
+				return
+			}
+			// Mark blobs publish complete for crash recovery tracking
+			if err := s.stateRepo.MarkPublishComplete(s.ctx, blockHash, outbound.PublishTypeBlobs); err != nil {
+				s.logger.Warn("failed to mark blobs publish complete", "block", blockNum, "error", err)
 			}
 		}()
 	}

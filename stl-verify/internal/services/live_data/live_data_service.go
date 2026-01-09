@@ -600,6 +600,12 @@ func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, bl
 	if err := s.eventSink.Publish(ctx, event); err != nil {
 		return fmt.Errorf("failed to publish block event for block %d: %w", blockNum, err)
 	}
+
+	// Mark block publish as complete in DB for crash recovery
+	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlock); err != nil {
+		s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
+	}
+
 	return nil
 }
 
@@ -631,6 +637,12 @@ func (s *LiveService) fetchCacheAndPublishReceipts(ctx context.Context, chainID,
 	if err := s.eventSink.Publish(ctx, event); err != nil {
 		return fmt.Errorf("failed to publish receipts event for block %d: %w", blockNum, err)
 	}
+
+	// Mark receipts publish as complete in DB for crash recovery
+	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeReceipts); err != nil {
+		s.logger.Warn("failed to mark receipts publish complete", "block", blockNum, "error", err)
+	}
+
 	return nil
 }
 
@@ -662,6 +674,12 @@ func (s *LiveService) fetchCacheAndPublishTraces(ctx context.Context, chainID, b
 	if err := s.eventSink.Publish(ctx, event); err != nil {
 		return fmt.Errorf("failed to publish traces event for block %d: %w", blockNum, err)
 	}
+
+	// Mark traces publish as complete in DB for crash recovery
+	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeTraces); err != nil {
+		s.logger.Warn("failed to mark traces publish complete", "block", blockNum, "error", err)
+	}
+
 	return nil
 }
 
@@ -693,6 +711,12 @@ func (s *LiveService) fetchCacheAndPublishBlobs(ctx context.Context, chainID, bl
 	if err := s.eventSink.Publish(ctx, event); err != nil {
 		return fmt.Errorf("failed to publish blobs event for block %d: %w", blockNum, err)
 	}
+
+	// Mark blobs publish as complete in DB for crash recovery
+	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlobs); err != nil {
+		s.logger.Warn("failed to mark blobs publish complete", "block", blockNum, "error", err)
+	}
+
 	return nil
 }
 

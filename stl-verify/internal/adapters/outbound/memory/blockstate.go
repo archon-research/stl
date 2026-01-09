@@ -453,3 +453,69 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 
 	return nil
 }
+
+// MarkPublishComplete marks a specific publish type as completed for a block.
+func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash string, publishType outbound.PublishType) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	block, ok := r.blocks[hash]
+	if !ok {
+		return fmt.Errorf("block with hash %s not found", hash)
+	}
+
+	switch publishType {
+	case outbound.PublishTypeBlock:
+		block.BlockPublished = true
+	case outbound.PublishTypeReceipts:
+		block.ReceiptsPublished = true
+	case outbound.PublishTypeTraces:
+		block.TracesPublished = true
+	case outbound.PublishTypeBlobs:
+		block.BlobsPublished = true
+	default:
+		return fmt.Errorf("unknown publish type: %s", publishType)
+	}
+
+	r.blocks[hash] = block
+	return nil
+}
+
+// GetBlocksWithIncompletePublish returns canonical blocks that have at least one
+// publish type incomplete. Used by backfill to recover from crashes.
+func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int, disableBlobs bool) ([]outbound.BlockState, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var incomplete []outbound.BlockState
+	for _, b := range r.blocks {
+		if b.IsOrphaned {
+			continue
+		}
+
+		hasIncomplete := !b.BlockPublished || !b.ReceiptsPublished || !b.TracesPublished
+		if !disableBlobs {
+			hasIncomplete = hasIncomplete || !b.BlobsPublished
+		}
+
+		if hasIncomplete {
+			bc := b
+			incomplete = append(incomplete, bc)
+		}
+
+		if len(incomplete) >= limit {
+			break
+		}
+	}
+
+	// Sort by block number for consistent ordering
+	sort.Slice(incomplete, func(i, j int) bool {
+		return incomplete[i].Number < incomplete[j].Number
+	})
+
+	if len(incomplete) > limit {
+		incomplete = incomplete[:limit]
+	}
+
+	return incomplete, nil
+}
