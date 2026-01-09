@@ -140,3 +140,170 @@ func TestSaveBlock_DuplicateHashIsIdempotent(t *testing.T) {
 		}
 	})
 }
+
+// TestReorgOperations_ShouldBeAtomic tests that reorg-related operations
+// (SaveReorgEvent, MarkBlocksOrphanedAfter, SaveBlock) should be atomic.
+// Currently they are NOT atomic - this test documents the gap.
+//
+// The issue: If a crash occurs after MarkBlocksOrphanedAfter but before
+// the new block is saved, we end up with orphaned blocks but no canonical
+// replacement, leaving a gap in the canonical chain.
+func TestReorgOperations_ShouldBeAtomic(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Setup: Create a chain of blocks 100, 101, 102
+	for i := int64(100); i <= 102; i++ {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0xoriginal_%d", i),
+			ParentHash: fmt.Sprintf("0xoriginal_%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+			IsOrphaned: false,
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Verify we have canonical blocks at 101 and 102
+	block101, err := repo.GetBlockByNumber(ctx, 101)
+	if err != nil || block101 == nil {
+		t.Fatalf("expected canonical block at 101, got err=%v, block=%v", err, block101)
+	}
+	block102, err := repo.GetBlockByNumber(ctx, 102)
+	if err != nil || block102 == nil {
+		t.Fatalf("expected canonical block at 102, got err=%v, block=%v", err, block102)
+	}
+
+	// Simulate a reorg: mark blocks after 100 as orphaned
+	// (In real code, this happens before the new block is saved)
+	err = repo.MarkBlocksOrphanedAfter(ctx, 100)
+	if err != nil {
+		t.Fatalf("failed to mark blocks orphaned: %v", err)
+	}
+
+	// Now we're in an inconsistent state - no canonical blocks at 101, 102
+	// This is the window where a crash would leave the database broken
+	t.Run("gap_exists_after_orphaning", func(t *testing.T) {
+		block101After, _ := repo.GetBlockByNumber(ctx, 101)
+		block102After, _ := repo.GetBlockByNumber(ctx, 102)
+
+		if block101After != nil || block102After != nil {
+			t.Skip("blocks are still canonical (unexpected)")
+		}
+
+		// This is the problematic state - document it
+		t.Log("WARNING: After MarkBlocksOrphanedAfter, there are no canonical blocks at 101-102")
+		t.Log("If a crash occurred now, the chain would have a gap")
+	})
+
+	// In the real flow, SaveBlock would be called next to add the new canonical block
+	// But if we crash before that, we have a problem
+}
+
+// TestHandleReorgAtomic_AllOrNothingSemantics tests that HandleReorgAtomic
+// performs all operations atomically - either all succeed or none do.
+// After calling HandleReorgAtomic, we should have:
+// 1. A reorg event recorded
+// 2. Old blocks marked as orphaned
+// 3. New canonical block saved
+// All in a single transaction.
+func TestHandleReorgAtomic_AllOrNothingSemantics(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Setup: Create a chain of blocks 100, 101, 102
+	for i := int64(100); i <= 102; i++ {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0xoriginal_%d", i),
+			ParentHash: fmt.Sprintf("0xoriginal_%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+			IsOrphaned: false,
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Create reorg event and new block for atomic handling
+	reorgEvent := outbound.ReorgEvent{
+		DetectedAt:  time.Now(),
+		BlockNumber: 101,
+		OldHash:     "0xoriginal_101",
+		NewHash:     "0xnew_101",
+		Depth:       1, // commonAncestor = 101 - 1 = 100
+	}
+
+	newBlock := outbound.BlockState{
+		Number:     101,
+		Hash:       "0xnew_101",
+		ParentHash: "0xoriginal_100",
+		ReceivedAt: time.Now().Unix(),
+		IsOrphaned: false,
+	}
+
+	// Execute atomic reorg
+	version, err := repo.HandleReorgAtomic(ctx, reorgEvent, newBlock)
+	if err != nil {
+		t.Fatalf("HandleReorgAtomic failed: %v", err)
+	}
+
+	t.Run("version_is_assigned", func(t *testing.T) {
+		// Original block 101 was version 0, new one should be version 1
+		if version != 1 {
+			t.Errorf("expected version 1, got %d", version)
+		}
+	})
+
+	t.Run("new_block_is_canonical", func(t *testing.T) {
+		block, err := repo.GetBlockByNumber(ctx, 101)
+		if err != nil {
+			t.Fatalf("failed to get block: %v", err)
+		}
+		if block == nil {
+			t.Fatal("expected canonical block at 101, got nil")
+		}
+		if block.Hash != "0xnew_101" {
+			t.Errorf("expected new block hash, got %q", block.Hash)
+		}
+	})
+
+	t.Run("old_blocks_are_orphaned", func(t *testing.T) {
+		// Block 101 original should be orphaned
+		oldBlock, err := repo.GetBlockByHash(ctx, "0xoriginal_101")
+		if err != nil {
+			t.Fatalf("failed to get old block: %v", err)
+		}
+		if !oldBlock.IsOrphaned {
+			t.Error("expected old block 101 to be orphaned")
+		}
+
+		// Block 102 should also be orphaned (it was after common ancestor 100)
+		block102, err := repo.GetBlockByHash(ctx, "0xoriginal_102")
+		if err != nil {
+			t.Fatalf("failed to get block 102: %v", err)
+		}
+		if !block102.IsOrphaned {
+			t.Error("expected block 102 to be orphaned")
+		}
+	})
+
+	t.Run("reorg_event_is_recorded", func(t *testing.T) {
+		events, err := repo.GetReorgEvents(ctx, 10)
+		if err != nil {
+			t.Fatalf("failed to get reorg events: %v", err)
+		}
+		if len(events) != 1 {
+			t.Fatalf("expected 1 reorg event, got %d", len(events))
+		}
+		if events[0].Depth != 1 {
+			t.Errorf("expected depth 1, got %d", events[0].Depth)
+		}
+	})
+}

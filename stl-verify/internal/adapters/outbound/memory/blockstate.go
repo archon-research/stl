@@ -179,6 +179,47 @@ func (r *BlockStateRepository) SaveReorgEvent(ctx context.Context, event outboun
 	return nil
 }
 
+// HandleReorgAtomic atomically performs all reorg-related operations.
+// In the memory implementation, this is naturally atomic since we hold the lock.
+func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	commonAncestor := event.BlockNumber - int64(event.Depth)
+
+	// Check if block already exists (idempotency)
+	if existing, ok := r.blocks[newBlock.Hash]; ok {
+		return existing.Version, nil
+	}
+
+	// 1. Save reorg event
+	r.reorgEvents = append(r.reorgEvents, event)
+
+	// 2. Mark old blocks as orphaned
+	for hash, b := range r.blocks {
+		if b.Number > commonAncestor && !b.IsOrphaned {
+			b.IsOrphaned = true
+			r.blocks[hash] = b
+		}
+	}
+
+	// 3. Calculate version for new block
+	version := 0
+	for _, b := range r.blocks {
+		if b.Number == newBlock.Number {
+			if b.Version >= version {
+				version = b.Version + 1
+			}
+		}
+	}
+
+	// 4. Save new block
+	newBlock.Version = version
+	r.blocks[newBlock.Hash] = newBlock
+
+	return version, nil
+}
+
 // GetReorgEvents retrieves reorg events, ordered by detection time descending.
 func (r *BlockStateRepository) GetReorgEvents(ctx context.Context, limit int) ([]outbound.ReorgEvent, error) {
 	r.mu.RLock()

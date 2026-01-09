@@ -98,6 +98,14 @@ type BlockStateRepository interface {
 	// SaveReorgEvent records a chain reorganization event.
 	SaveReorgEvent(ctx context.Context, event ReorgEvent) error
 
+	// HandleReorgAtomic atomically performs all reorg-related database operations:
+	// 1. Saves the reorg event
+	// 2. Marks all blocks after commonAncestor as orphaned
+	// 3. Saves the new canonical block
+	// This prevents inconsistent state if a crash occurs mid-reorg.
+	// Returns the version assigned to the new block.
+	HandleReorgAtomic(ctx context.Context, event ReorgEvent, newBlock BlockState) (int, error)
+
 	// GetReorgEvents retrieves reorg events, ordered by detection time descending.
 	GetReorgEvents(ctx context.Context, limit int) ([]ReorgEvent, error)
 

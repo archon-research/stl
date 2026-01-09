@@ -250,6 +250,83 @@ func (r *BlockStateRepository) SaveReorgEvent(ctx context.Context, event outboun
 	return nil
 }
 
+// HandleReorgAtomic atomically performs all reorg-related database operations in a single transaction.
+// This ensures consistency: either all operations succeed, or none do.
+// The commonAncestor is derived from the ReorgEvent (BlockNumber - Depth).
+func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			r.logger.Error("failed to rollback transaction", "error", err)
+		}
+	}()
+
+	// Calculate common ancestor from event
+	commonAncestor := event.BlockNumber - int64(event.Depth)
+
+	// 1. Acquire advisory lock for the new block number
+	_, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, newBlock.Number)
+	if err != nil {
+		return 0, fmt.Errorf("failed to acquire advisory lock: %w", err)
+	}
+
+	// 2. Check if this block hash already exists (idempotency)
+	var existingVersion int
+	err = tx.QueryRowContext(ctx, `SELECT version FROM block_states WHERE hash = $1`, newBlock.Hash).Scan(&existingVersion)
+	if err == nil {
+		// Block already exists - commit and return existing version
+		if commitErr := tx.Commit(); commitErr != nil {
+			return 0, fmt.Errorf("failed to commit transaction: %w", commitErr)
+		}
+		return existingVersion, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("failed to check for existing block: %w", err)
+	}
+
+	// 3. Save reorg event
+	reorgQuery := `
+		INSERT INTO reorg_events (detected_at, block_number, old_hash, new_hash, depth)
+		VALUES ($1, $2, $3, $4, $5)
+	`
+	_, err = tx.ExecContext(ctx, reorgQuery, event.DetectedAt, event.BlockNumber, event.OldHash, event.NewHash, event.Depth)
+	if err != nil {
+		return 0, fmt.Errorf("failed to save reorg event: %w", err)
+	}
+
+	// 4. Mark old blocks as orphaned
+	orphanQuery := `UPDATE block_states SET is_orphaned = TRUE WHERE number > $1 AND NOT is_orphaned`
+	_, err = tx.ExecContext(ctx, orphanQuery, commonAncestor)
+	if err != nil {
+		return 0, fmt.Errorf("failed to mark blocks orphaned: %w", err)
+	}
+
+	// 5. Calculate version for new block
+	var version int
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), -1) + 1 FROM block_states WHERE number = $1`, newBlock.Number).Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get next version: %w", err)
+	}
+
+	// 6. Insert new canonical block
+	insertQuery := `
+		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned, version)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
+	_, err = tx.ExecContext(ctx, insertQuery, newBlock.Number, newBlock.Hash, newBlock.ParentHash, newBlock.ReceivedAt, newBlock.IsOrphaned, version)
+	if err != nil {
+		return 0, fmt.Errorf("failed to save new block state: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return version, nil
+}
+
 // GetReorgEvents retrieves reorg events, ordered by detection time descending.
 func (r *BlockStateRepository) GetReorgEvents(ctx context.Context, limit int) ([]outbound.ReorgEvent, error) {
 	query := `
