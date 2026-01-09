@@ -139,7 +139,9 @@ func (s *LiveService) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
 	// Restore in-memory chain state from DB
-	s.restoreInMemoryChain()
+	if err := s.restoreInMemoryChain(); err != nil {
+		return fmt.Errorf("failed to restore chain from DB: %w", err)
+	}
 
 	// Subscribe to new block headers
 	headers, err := s.subscriber.Subscribe(s.ctx)
@@ -189,26 +191,27 @@ func (s *LiveService) processHeaders(headers <-chan outbound.BlockHeader) {
 
 // isDuplicateBlock checks if a block has already been processed.
 // It first does a quick in-memory check, then falls back to DB lookup.
-func (s *LiveService) isDuplicateBlock(ctx context.Context, hash string, blockNum int64) bool {
+func (s *LiveService) isDuplicateBlock(ctx context.Context, hash string, blockNum int64) (bool, error) {
 	// Quick in-memory check
 	inMemory := slices.ContainsFunc(s.unfinalizedBlocks, func(b LightBlock) bool {
 		return b.Hash == hash
 	})
 	if inMemory {
 		s.logger.Debug("duplicate block, skipping", "block", blockNum)
-		return true
+		return true, nil
 	}
 
 	// Also check DB for duplicates (backfill may have processed this block)
 	existing, err := s.stateRepo.GetBlockByHash(ctx, hash)
 	if err != nil {
-		s.logger.Warn("failed to check DB for duplicate", "error", err)
-	} else if existing != nil {
+		return false, fmt.Errorf("failed to check DB for duplicate: %w", err)
+	}
+	if existing != nil {
 		s.logger.Debug("block already in DB, skipping", "block", blockNum)
-		return true
+		return true, nil
 	}
 
-	return false
+	return false, nil
 }
 
 // processBlock handles a single block: dedup, reorg detection, state tracking, data fetching, publishing.
@@ -246,7 +249,13 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 	}
 
 	// Check if we've already processed this block
-	if s.isDuplicateBlock(ctx, normalizedHash, blockNum) {
+	isDuplicate, err := s.isDuplicateBlock(ctx, normalizedHash, blockNum)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to check for duplicate block")
+		return fmt.Errorf("failed to check for duplicate block: %w", err)
+	}
+	if isDuplicate {
 		span.SetAttributes(attribute.Bool("block.duplicate", true))
 		return nil
 	}
@@ -499,15 +508,14 @@ func (s *LiveService) updateFinalizedBlock(currentBlockNum int64) {
 }
 
 // restoreInMemoryChain restores the in-memory chain state from the database.
-func (s *LiveService) restoreInMemoryChain() {
+func (s *LiveService) restoreInMemoryChain() error {
 	recentBlocks, err := s.stateRepo.GetRecentBlocks(s.ctx, s.config.MaxUnfinalizedBlocks)
 	if err != nil {
-		s.logger.Warn("failed to restore chain from DB", "error", err)
-		return
+		return fmt.Errorf("failed to get recent blocks: %w", err)
 	}
 
 	if len(recentBlocks) == 0 {
-		return
+		return nil
 	}
 
 	// GetRecentBlocks returns blocks in ascending order (oldest first)
@@ -532,6 +540,7 @@ func (s *LiveService) restoreInMemoryChain() {
 	}
 
 	s.logger.Info("restored chain from DB", "blockCount", len(s.unfinalizedBlocks))
+	return nil
 }
 
 // fetchAndPublishBlockData fetches all data types concurrently and publishes events.
