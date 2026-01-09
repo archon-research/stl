@@ -73,6 +73,8 @@ tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 	go install golang.org/x/vuln/cmd/govulncheck@latest
 	go install golang.org/x/tools/cmd/goimports@latest
+	go install github.com/go-delve/delve/cmd/dlv@latest
+	go install golang.org/x/tools/gopls@latest
 
 # CI target: everything with strict checks
 ci: test-race vet fmt-check tidy staticcheck vulncheck golangci-lint
