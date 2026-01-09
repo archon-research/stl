@@ -363,14 +363,6 @@ func (s *LiveService) detectReorg(header outbound.BlockHeader, incomingBlockNum 
 func (s *LiveService) handleReorg(header outbound.BlockHeader, blockNum int64, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, error) {
 	ctx := s.ctx
 
-	// Find reorged blocks
-	reorgedBlocks := make([]LightBlock, 0)
-	for i := len(s.unfinalizedBlocks) - 1; i >= 0; i-- {
-		if s.unfinalizedBlocks[i].Number >= blockNum {
-			reorgedBlocks = append(reorgedBlocks, s.unfinalizedBlocks[i])
-		}
-	}
-
 	// Walk back to find common ancestor
 	// Start with the incoming block, then walk to its parent each iteration
 	walkBlock := LightBlock{
