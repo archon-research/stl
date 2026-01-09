@@ -1881,7 +1881,7 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 				Timestamp:  "0x0",
 			}
 
-			err = svc.fetchAndPublishBlockData(ctx, header, 100, time.Now(), false)
+			err = svc.fetchAndPublishBlockData(ctx, header, 100, 0, time.Now(), false)
 
 			if tt.wantErr {
 				if err == nil {
@@ -1921,7 +1921,7 @@ func TestFetchAndPublishBlockData_WithBlobs_PublishesBlobEvent(t *testing.T) {
 		Timestamp:  "0x0",
 	}
 
-	err = svc.fetchAndPublishBlockData(ctx, header, 100, time.Now(), false)
+	err = svc.fetchAndPublishBlockData(ctx, header, 100, 0, time.Now(), false)
 	if err != nil {
 		t.Fatalf("fetchAndPublishBlockData failed: %v", err)
 	}
@@ -1962,7 +1962,7 @@ func TestFetchAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
 		Timestamp:  "0x0",
 	}
 
-	err = svc.fetchAndPublishBlockData(ctx, header, 100, time.Now(), true) // isReorg = true
+	err = svc.fetchAndPublishBlockData(ctx, header, 100, 0, time.Now(), true) // isReorg = true
 	if err != nil {
 		t.Fatalf("fetchAndPublishBlockData failed: %v", err)
 	}
@@ -2441,7 +2441,7 @@ func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestFetchAndPublishBlockData_GetVersionCountError(t *testing.T) {
+func TestProcessBlock_GetVersionCountError(t *testing.T) {
 	stateRepo := newMockStateRepo()
 	stateRepo.getVersionCountErr = fmt.Errorf("database error")
 
@@ -2466,11 +2466,11 @@ func TestFetchAndPublishBlockData_GetVersionCountError(t *testing.T) {
 		ParentHash: "0x99",
 	}
 
-	err = svc.fetchAndPublishBlockData(svc.ctx, header, 100, time.Now(), false)
+	err = svc.processBlock(header, time.Now())
 	if err == nil {
 		t.Error("expected error when GetBlockVersionCount fails")
 	}
-	if !contains(err.Error(), "failed to get block version count") {
+	if !contains(err.Error(), "failed to get block version") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -2625,5 +2625,77 @@ func TestProcessBlock_FetchAndPublishError_ReturnsError(t *testing.T) {
 	}
 	if !contains(err.Error(), "failed to fetch and publish block data") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestProcessBlock_VersionIsCorrectAfterReorg(t *testing.T) {
+	// This test verifies that when we process a new block at a height that
+	// already has a block, the version is correctly set to the count of
+	// existing blocks BEFORE we save the new one.
+	//
+	// Bug scenario:
+	// 1. Block 100 already exists (version 0)
+	// 2. Reorg happens, new block 100 arrives
+	// 3. If we SaveBlock first, then GetBlockVersionCount, we get 2 (wrong!)
+	// 4. The correct version should be 1 (second block at this height)
+
+	ctx := context.Background()
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	client := newMockClient()
+	// Add block data for fetching
+	client.addBlock(100, "0x99")
+
+	svc, err := NewLiveService(LiveConfig{
+		DisableBlobs: true,
+	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	svc.ctx, svc.cancel = context.WithCancel(context.Background())
+	defer svc.cancel()
+
+	// Pre-save a block at height 100 (this is version 0)
+	_ = stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:     100,
+		Hash:       "0x100_original",
+		ParentHash: "0x99",
+	})
+
+	// Verify there's 1 block at height 100
+	count, _ := stateRepo.GetBlockVersionCount(ctx, 100)
+	if count != 1 {
+		t.Fatalf("expected 1 block at height 100, got %d", count)
+	}
+
+	// Now process a NEW block at height 100 (reorg scenario)
+	// This should be version 1 (the second block at this height)
+	header := outbound.BlockHeader{
+		Number:     "0x64", // 100
+		Hash:       "0x100_new",
+		ParentHash: "0x99",
+	}
+
+	err = svc.processBlock(header, time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Check the published block event - version should be 1
+	blockEvents := eventSink.GetBlockEvents()
+	if len(blockEvents) != 1 {
+		t.Fatalf("expected 1 block event, got %d", len(blockEvents))
+	}
+
+	if blockEvents[0].Version != 1 {
+		t.Errorf("expected block event version to be 1, got %d (bug: version was calculated after SaveBlock)", blockEvents[0].Version)
+	}
+
+	// Also verify the cache key has the correct version
+	expectedCacheKey := "stl:1:100:1:block"
+	if blockEvents[0].CacheKey != expectedCacheKey {
+		t.Errorf("expected cache key %q, got %q", expectedCacheKey, blockEvents[0].CacheKey)
 	}
 }

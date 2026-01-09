@@ -269,6 +269,15 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 	// Add block to in-memory chain
 	s.addBlock(block)
 
+	// Get version BEFORE saving - this is the count of existing blocks at this height.
+	// The version will be used as an index (0 for first block, 1 for second after reorg, etc.)
+	version, err := s.stateRepo.GetBlockVersionCount(ctx, blockNum)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to get block version")
+		return fmt.Errorf("failed to get block version for block %d: %w", blockNum, err)
+	}
+
 	// Save block state to DB
 	state := outbound.BlockState{
 		Number:     blockNum,
@@ -284,7 +293,7 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 	}
 
 	// Fetch all data types concurrently, cache, and publish events
-	if err := s.fetchAndPublishBlockData(ctx, header, blockNum, receivedAt, isReorg); err != nil {
+	if err := s.fetchAndPublishBlockData(ctx, header, blockNum, version, receivedAt, isReorg); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to fetch and publish block data")
 		return fmt.Errorf("failed to fetch and publish block data: %w", err)
@@ -493,18 +502,11 @@ func (s *LiveService) restoreInMemoryChain() {
 }
 
 // fetchAndPublishBlockData fetches all data types concurrently and publishes events.
-func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbound.BlockHeader, blockNum int64, receivedAt time.Time, isReorg bool) error {
+func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbound.BlockHeader, blockNum int64, version int, receivedAt time.Time, isReorg bool) error {
 	chainID := s.config.ChainID
 	blockHash := header.Hash
 	parentHash := header.ParentHash
 	blockTimestamp, _ := parseBlockNumber(header.Timestamp)
-
-	// Get version: count of existing blocks at this number (before we save the new one)
-	// This is done before parallel fetches so all data types use the same version.
-	version, err := s.stateRepo.GetBlockVersionCount(ctx, blockNum)
-	if err != nil {
-		return fmt.Errorf("failed to get block version count for block %d: %w", blockNum, err)
-	}
 
 	numWorkers := 3
 	if !s.config.DisableBlobs {
