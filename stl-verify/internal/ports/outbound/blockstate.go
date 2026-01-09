@@ -21,6 +21,9 @@ type BlockState struct {
 
 	// IsOrphaned indicates this block was replaced during a chain reorganization.
 	IsOrphaned bool
+
+	// Version is the version of this block at its number (0 for first, 1 after first reorg, etc).
+	Version int
 }
 
 // ReorgEvent represents a chain reorganization event.

@@ -51,14 +51,15 @@ func (r *BlockStateRepository) Migrate(ctx context.Context) error {
 // SaveBlock persists a block's state.
 func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) error {
 	query := `
-		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned, version)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (hash) DO UPDATE SET
 			parent_hash = EXCLUDED.parent_hash,
 			received_at = EXCLUDED.received_at,
-			is_orphaned = EXCLUDED.is_orphaned
+			is_orphaned = EXCLUDED.is_orphaned,
+			version = EXCLUDED.version
 	`
-	_, err := r.db.ExecContext(ctx, query, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned)
+	_, err := r.db.ExecContext(ctx, query, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned, state.Version)
 	if err != nil {
 		return fmt.Errorf("failed to save block state: %w", err)
 	}
@@ -68,14 +69,14 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 // GetLastBlock retrieves the most recently saved canonical (non-orphaned) block state.
 func (r *BlockStateRepository) GetLastBlock(ctx context.Context) (*outbound.BlockState, error) {
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version
 		FROM block_states
 		WHERE NOT is_orphaned
 		ORDER BY number DESC
 		LIMIT 1
 	`
 	var state outbound.BlockState
-	err := r.db.QueryRowContext(ctx, query).Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned)
+	err := r.db.QueryRowContext(ctx, query).Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -88,12 +89,12 @@ func (r *BlockStateRepository) GetLastBlock(ctx context.Context) (*outbound.Bloc
 // GetBlockByNumber retrieves a canonical block state by its number.
 func (r *BlockStateRepository) GetBlockByNumber(ctx context.Context, number int64) (*outbound.BlockState, error) {
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version
 		FROM block_states
 		WHERE number = $1 AND NOT is_orphaned
 	`
 	var state outbound.BlockState
-	err := r.db.QueryRowContext(ctx, query, number).Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned)
+	err := r.db.QueryRowContext(ctx, query, number).Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -106,12 +107,12 @@ func (r *BlockStateRepository) GetBlockByNumber(ctx context.Context, number int6
 // GetBlockByHash retrieves a block state by its hash (includes orphaned blocks).
 func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) (*outbound.BlockState, error) {
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version
 		FROM block_states
 		WHERE hash = $1
 	`
 	var state outbound.BlockState
-	err := r.db.QueryRowContext(ctx, query, hash).Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned)
+	err := r.db.QueryRowContext(ctx, query, hash).Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -121,9 +122,10 @@ func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) 
 	return &state, nil
 }
 
-// GetBlockVersionCount returns the count of all blocks (including orphaned) at a given number.
+// GetBlockVersionCount returns the next version number for blocks at a given number.
+// If no blocks exist at that number, returns 0. Otherwise returns MAX(version) + 1.
 func (r *BlockStateRepository) GetBlockVersionCount(ctx context.Context, number int64) (int, error) {
-	query := `SELECT COUNT(*) FROM block_states WHERE number = $1`
+	query := `SELECT COALESCE(MAX(version), -1) + 1 FROM block_states WHERE number = $1`
 	var count int
 	err := r.db.QueryRowContext(ctx, query, number).Scan(&count)
 	if err != nil {
@@ -135,7 +137,7 @@ func (r *BlockStateRepository) GetBlockVersionCount(ctx context.Context, number 
 // GetRecentBlocks retrieves the N most recent canonical blocks.
 func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) ([]outbound.BlockState, error) {
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version
 		FROM block_states
 		WHERE NOT is_orphaned
 		ORDER BY number DESC
@@ -150,7 +152,7 @@ func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) (
 	var states []outbound.BlockState
 	for rows.Next() {
 		var state outbound.BlockState
-		if err := rows.Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned); err != nil {
+		if err := rows.Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version); err != nil {
 			return nil, fmt.Errorf("failed to scan block state: %w", err)
 		}
 		states = append(states, state)
@@ -253,7 +255,7 @@ func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, f
 // GetOrphanedBlocks retrieves orphaned blocks for analysis.
 func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int) ([]outbound.BlockState, error) {
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version
 		FROM block_states
 		WHERE is_orphaned
 		ORDER BY received_at DESC
@@ -268,7 +270,7 @@ func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int)
 	var states []outbound.BlockState
 	for rows.Next() {
 		var state outbound.BlockState
-		if err := rows.Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned); err != nil {
+		if err := rows.Scan(&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version); err != nil {
 			return nil, fmt.Errorf("failed to scan block state: %w", err)
 		}
 		states = append(states, state)
