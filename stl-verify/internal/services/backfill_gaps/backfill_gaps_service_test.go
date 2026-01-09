@@ -229,3 +229,95 @@ func TestBackfillService_FillsGaps(t *testing.T) {
 		}
 	})
 }
+
+func TestBackfillService_VersionIsSavedToDatabase(t *testing.T) {
+	// This test verifies that when backfill saves a block, the version field is
+	// correctly persisted to the database.
+	//
+	// Bug scenario:
+	// 1. Backfill processes block 5 and saves it to DB
+	// 2. The Version field should be set based on GetBlockVersionCount BEFORE SaveBlock
+	// 3. If Version is not set, it defaults to 0
+	// 4. The published event should have the same version as what's in the DB
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Pre-populate client with blocks 1-10
+	for i := int64(1); i <= 10; i++ {
+		client.addBlock(i, "")
+	}
+
+	// Seed blocks 1 and 10 to create a gap at 2-9
+	for _, num := range []int64{1, 10} {
+		if err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     num,
+			Hash:       client.getHeader(num).Hash,
+			ParentHash: client.getHeader(num).ParentHash,
+			ReceivedAt: time.Now().Unix(),
+			Version:    0,
+		}); err != nil {
+			t.Fatalf("failed to save block %d: %v", num, err)
+		}
+	}
+
+	config := BackfillConfig{
+		ChainID:   1,
+		BatchSize: 10,
+		Logger:    slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Run a single backfill pass
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatalf("backfill failed: %v", err)
+	}
+
+	// Check that backfilled block 5 was saved with version 0 (first block at that height)
+	backfilledBlock, err := stateRepo.GetBlockByHash(ctx, client.getHeader(5).Hash)
+	if err != nil {
+		t.Fatalf("failed to get backfilled block: %v", err)
+	}
+	if backfilledBlock == nil {
+		t.Fatalf("backfilled block at height 5 not found")
+	}
+	if backfilledBlock.Version != 0 {
+		t.Errorf("expected backfilled block to have version 0, got %d", backfilledBlock.Version)
+	}
+
+	// Check that the published event has version 0 (matching the DB)
+	blockEvents := eventSink.GetBlockEvents()
+	var block5Event *outbound.BlockEvent
+	for _, e := range blockEvents {
+		if e.BlockNumber == 5 {
+			block5Event = &e
+			break
+		}
+	}
+	if block5Event == nil {
+		t.Fatalf("no event found for block 5")
+	}
+
+	// BUG: The event version should match the saved block version
+	// If GetBlockVersionCount is called AFTER SaveBlock, the event will have version 1
+	// but the DB will have version 0 (because Version wasn't set in BlockState)
+	if block5Event.Version != backfilledBlock.Version {
+		t.Errorf("event version (%d) doesn't match saved block version (%d) - bug: version mismatch between DB and published event",
+			block5Event.Version, backfilledBlock.Version)
+	}
+
+	// The cache key should match the saved version
+	expectedCacheKey := fmt.Sprintf("stl:1:5:%d:block", backfilledBlock.Version)
+	if block5Event.CacheKey != expectedCacheKey {
+		t.Errorf("expected cache key %q, got %q", expectedCacheKey, block5Event.CacheKey)
+	}
+}

@@ -363,6 +363,13 @@ func (s *BackfillService) processBlockData(bd outbound.BlockData) error {
 
 	receivedAt := time.Now()
 
+	// Get version BEFORE saving - this is the count of existing blocks at this height.
+	version, err := s.stateRepo.GetBlockVersionCount(ctx, blockNum)
+	if err != nil {
+		s.logger.Warn("failed to get block version count", "block", blockNum, "error", err)
+		version = 0 // Default to 0 on error
+	}
+
 	// Save block state to DB
 	state := outbound.BlockState{
 		Number:     blockNum,
@@ -370,31 +377,25 @@ func (s *BackfillService) processBlockData(bd outbound.BlockData) error {
 		ParentHash: header.ParentHash,
 		ReceivedAt: receivedAt.Unix(),
 		IsOrphaned: false,
+		Version:    version,
 	}
 	if err := s.stateRepo.SaveBlock(ctx, state); err != nil {
 		return fmt.Errorf("failed to save block state: %w", err)
 	}
 
 	// Cache and publish the data
-	s.cacheAndPublishBlockData(bd, header, receivedAt)
+	s.cacheAndPublishBlockData(bd, header, version, receivedAt)
 
 	return nil
 }
 
 // cacheAndPublishBlockData caches pre-fetched data and publishes events.
-func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header outbound.BlockHeader, receivedAt time.Time) {
+func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header outbound.BlockHeader, version int, receivedAt time.Time) {
 	chainID := s.config.ChainID
 	blockNum := bd.BlockNumber
 	blockHash := header.Hash
 	parentHash := header.ParentHash
 	blockTimestamp, _ := shared.ParseBlockNumber(header.Timestamp)
-
-	// Get version before we save: count of existing blocks at this number
-	version, err := s.stateRepo.GetBlockVersionCount(s.ctx, blockNum)
-	if err != nil {
-		s.logger.Warn("failed to get block version count", "block", blockNum, "error", err)
-		version = 0 // Default to 0 on error
-	}
 
 	var wg sync.WaitGroup
 
