@@ -38,6 +38,7 @@ This starts:
 ALCHEMY_API_KEY=your_alchemy_api_key_here
 
 # Optional (defaults shown)
+ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable
 REDIS_ADDR=localhost:6379
 REDIS_PASSWORD=

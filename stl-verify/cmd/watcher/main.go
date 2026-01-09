@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
@@ -22,12 +20,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/telemetry"
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
 )
@@ -37,9 +33,6 @@ func main() {
 	disableBlobs := flag.Bool("disable-blobs", false, "Disable fetching blob sidecars")
 	pprofAddr := flag.String("pprof", "", "Enable pprof profiling server (e.g., ':6060')")
 	flag.Parse()
-
-	// Load .env file if present
-	loadEnvFile(".env")
 
 	// Set up structured logging
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -82,12 +75,13 @@ func main() {
 
 	// Get configuration from environment
 	alchemyAPIKey := getEnv("ALCHEMY_API_KEY", "")
+	alchemyHTTPURL := getEnv("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
+	alchemyWSURL := getEnv("ALCHEMY_WS_URL", "wss://eth-mainnet.g.alchemy.com/v2")
 	if alchemyAPIKey == "" {
 		logger.Error("ALCHEMY_API_KEY environment variable is required")
 		os.Exit(1)
 	}
 	postgresURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
-	enableBackfill := getEnv("ENABLE_BACKFILL", "false") == "true"
 
 	// Set up PostgreSQL connection pool for block state tracking
 	db, err := postgres.OpenDB(context.Background(), postgres.DefaultDBConfig(postgresURL))
@@ -108,7 +102,7 @@ func main() {
 
 	// Create Alchemy subscriber (WebSocket only)
 	subscriberConfig := alchemy.SubscriberConfig{
-		WebSocketURL:      fmt.Sprintf("wss://eth-mainnet.g.alchemy.com/v2/%s", alchemyAPIKey),
+		WebSocketURL:      fmt.Sprintf("%s/%s", alchemyWSURL, alchemyAPIKey),
 		InitialBackoff:    1 * time.Second,
 		MaxBackoff:        30 * time.Second,
 		PingInterval:      30 * time.Second,
@@ -131,9 +125,8 @@ func main() {
 	}
 
 	// Create Alchemy HTTP client
-	httpURL := fmt.Sprintf("https://eth-mainnet.g.alchemy.com/v2/%s", alchemyAPIKey)
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
-		HTTPURL:      httpURL,
+		HTTPURL:      fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
 		DisableBlobs: *disableBlobs,
 		Logger:       logger,
 		Telemetry:    alchemyTelemetry,
@@ -143,10 +136,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create cache (Redis if available, otherwise in-memory)
-	var cache outbound.BlockCache
+	// Create Redis cache
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
-	redisCache, err := rediscache.NewBlockCache(rediscache.Config{
+	cache, err := rediscache.NewBlockCache(rediscache.Config{
 		Addr:      redisAddr,
 		Password:  getEnv("REDIS_PASSWORD", ""),
 		DB:        0,
@@ -154,20 +146,19 @@ func main() {
 		KeyPrefix: "stl",
 	}, logger)
 	if err != nil {
-		logger.Warn("failed to create Redis cache, falling back to memory", "error", err)
-		cache = memory.NewBlockCache()
-	} else if err := redisCache.Ping(context.Background()); err != nil {
-		logger.Warn("Redis not reachable, falling back to memory cache", "error", err)
-		cache = memory.NewBlockCache()
-	} else {
-		logger.Info("Redis cache connected", "addr", redisAddr)
-		cache = redisCache
-		defer func() {
-			if err := redisCache.Close(); err != nil {
-				logger.Warn("failed to close Redis connection", "error", err)
-			}
-		}()
+		logger.Error("failed to create Redis cache", "error", err)
+		os.Exit(1)
 	}
+	if err := cache.Ping(context.Background()); err != nil {
+		logger.Error("Redis not reachable", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("Redis cache connected", "addr", redisAddr)
+	defer func() {
+		if err := cache.Close(); err != nil {
+			logger.Warn("failed to close Redis connection", "error", err)
+		}
+	}()
 
 	// Create SNS event sink
 	snsEndpoint := getEnv("AWS_SNS_ENDPOINT", "http://localhost:4566")
@@ -175,10 +166,10 @@ func main() {
 
 	// Configure SNS topics for each event type
 	snsTopics := snsadapter.TopicARNs{
-		Blocks:   getEnv("AWS_SNS_TOPIC_BLOCKS", "arn:aws:sns:us-east-1:000000000000:stl-block-events"),
-		Receipts: getEnv("AWS_SNS_TOPIC_RECEIPTS", "arn:aws:sns:us-east-1:000000000000:stl-receipts-events"),
-		Traces:   getEnv("AWS_SNS_TOPIC_TRACES", "arn:aws:sns:us-east-1:000000000000:stl-traces-events"),
-		Blobs:    getEnv("AWS_SNS_TOPIC_BLOBS", "arn:aws:sns:us-east-1:000000000000:stl-blobs-events"),
+		Blocks:   requireEnv("AWS_SNS_TOPIC_BLOCKS"),
+		Receipts: requireEnv("AWS_SNS_TOPIC_RECEIPTS"),
+		Traces:   requireEnv("AWS_SNS_TOPIC_TRACES"),
+		Blobs:    requireEnv("AWS_SNS_TOPIC_BLOBS"),
 	}
 
 	// Configure AWS SDK for LocalStack or production
@@ -247,6 +238,7 @@ func main() {
 
 	// Create BackfillService (handles gap filling from DB state)
 	var backfillService *backfill_gaps.BackfillService
+	enableBackfill := getEnv("ENABLE_BACKFILL", "false") == "true"
 	if enableBackfill {
 		backfillConfig := backfill_gaps.BackfillConfig{
 			ChainID:      1,
@@ -336,37 +328,12 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
-// loadEnvFile loads environment variables from a file.
-// Each line should be in KEY=VALUE format. Lines starting with # are ignored.
-// Does not override existing environment variables.
-func loadEnvFile(filename string) {
-	file, err := os.Open(filename)
-	if err != nil {
-		return // Silently ignore if file doesn't exist
+// requireEnv returns the value of an environment variable or exits if not set.
+func requireEnv(key string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		slog.Error("required environment variable not set", "key", key)
+		os.Exit(1)
 	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		// Skip empty lines and comments
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		// Split on first = only
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		// Don't override existing env vars
-		if os.Getenv(key) == "" {
-			os.Setenv(key, value)
-		}
-	}
+	return value
 }

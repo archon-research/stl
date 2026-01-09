@@ -7,7 +7,11 @@
       "request": "launch",
       "mode": "auto",
       "program": "${workspaceFolder}/stl-verify/cmd/watcher/main.go",
-      "args": ["-disable-blobs"]
+      "args": ["-disable-blobs"],
+      "envFile": [
+        "${workspaceFolder}/stl-verify/cmd/watcher/.env",
+        "${workspaceFolder}/stl-verify/cmd/watcher/.env.local"
+      ]
     }
   ]
 }

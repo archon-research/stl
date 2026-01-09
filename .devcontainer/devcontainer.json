@@ -1,9 +1,6 @@
 {
   "name": "stl-verify",
   "image": "mcr.microsoft.com/devcontainers/go:1.25",
-  // "features": {
-  //   "ghcr.io/devcontainers/features/docker-in-docker:2": {}
-  // },
   "customizations": {
     "vscode": {
       "extensions": [
