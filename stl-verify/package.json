@@ -1,0 +1,23 @@
+{
+  "name": "stl-verify",
+  "version": "1.0.0",
+  "description": "Multi-chain blockchain data fetching and risk calculation service",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch run src/index.ts",
+    "test": "bun test",
+    "build": "mkdir -p dist && cd /tmp && bun build $OLDPWD/src/index.ts --compile --outfile stl-verify && cp stl-verify $OLDPWD/dist/",
+    "build:linux": "mkdir -p dist && cd /tmp && bun build $OLDPWD/src/index.ts --compile --target=bun-linux-x64 --outfile stl-verify-linux && cp stl-verify-linux $OLDPWD/dist/",
+    "build:linux-arm": "mkdir -p dist && cd /tmp && bun build $OLDPWD/src/index.ts --compile --target=bun-linux-arm64 --outfile stl-verify-linux-arm && cp stl-verify-linux-arm $OLDPWD/dist/"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "dependencies": {
+    "ethers": "^6.0.0"
+  }
+}
