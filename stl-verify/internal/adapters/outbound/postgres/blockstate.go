@@ -53,68 +53,37 @@ func (r *BlockStateRepository) DB() *sql.DB {
 func (r *BlockStateRepository) Migrate(ctx context.Context) error {
 	_, err := r.db.ExecContext(ctx, initialSchema)
 	if err != nil {
-		return fmt.Errorf("failed to migrate tables: %w", err)
+		return fmt.Errorf("failed to migrate schema: %w", err)
 	}
 	return nil
 }
 
 // SaveBlock persists a block's state with atomic version assignment.
-// The version is calculated atomically using an advisory lock to prevent race conditions.
+// The version is automatically assigned by a database trigger, ensuring uniqueness.
 // The provided state.Version is ignored; the actual assigned version is returned.
 func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
-	// Use a transaction with an advisory lock to ensure atomic version assignment.
-	// The advisory lock key is based on the block number to allow concurrent inserts
-	// for different block numbers while serializing inserts for the same block number.
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() {
-		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-			r.logger.Error("failed to rollback transaction", "error", err, "blockNumber", state.Number)
-		}
-	}()
-
-	// Acquire an advisory lock based on the block number.
-	// pg_advisory_xact_lock is released automatically when the transaction ends.
-	_, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, state.Number)
-	if err != nil {
-		return 0, fmt.Errorf("failed to acquire advisory lock: %w", err)
-	}
-
 	// Check if a block with this hash already exists (duplicate detection).
 	// If so, return the existing version without modifying the data.
 	var existingVersion int
-	err = tx.QueryRowContext(ctx, `SELECT version FROM block_states WHERE hash = $1`, state.Hash).Scan(&existingVersion)
+	err := r.db.QueryRowContext(ctx, `SELECT version FROM block_states WHERE hash = $1`, state.Hash).Scan(&existingVersion)
 	if err == nil {
 		// Block already exists - return its version without updating
-		if commitErr := tx.Commit(); commitErr != nil {
-			return 0, fmt.Errorf("failed to commit transaction: %w", commitErr)
-		}
 		return existingVersion, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("failed to check for existing block: %w", err)
 	}
 
-	// Block doesn't exist - calculate the next version safely
-	var version int
-	err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), -1) + 1 FROM block_states WHERE number = $1`, state.Number).Scan(&version)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get next version: %w", err)
-	}
-
-	// Insert the block with the calculated version (no ON CONFLICT needed since we checked above)
+	// Insert the block - the trigger will assign the version automatically.
+	// RETURNING gives us the version that was assigned by the trigger.
 	query := `
-		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned, version)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING version
 	`
-	_, err = tx.ExecContext(ctx, query, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned, version)
+	var version int
+	err = r.db.QueryRowContext(ctx, query, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("failed to save block state: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return version, nil

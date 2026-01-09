@@ -9,13 +9,34 @@ CREATE TABLE IF NOT EXISTS block_states (
     received_at BIGINT NOT NULL,
     is_orphaned BOOLEAN NOT NULL DEFAULT FALSE,
     version INT NOT NULL DEFAULT 0,
-    PRIMARY KEY (number, hash)
+    PRIMARY KEY (number, hash),
+    CONSTRAINT unique_block_number_version UNIQUE (number, version),
+    CONSTRAINT version_non_negative CHECK (version >= 0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_block_states_hash ON block_states(hash);
 CREATE INDEX IF NOT EXISTS idx_block_states_received_at ON block_states(received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_block_states_canonical ON block_states(number DESC) WHERE NOT is_orphaned;
 CREATE INDEX IF NOT EXISTS idx_block_states_orphaned ON block_states(is_orphaned) WHERE is_orphaned;
+
+-- Function to auto-assign version on insert
+-- Calculates MAX(version) + 1 for the block number, defaulting to 0
+CREATE OR REPLACE FUNCTION assign_block_version()
+RETURNS TRIGGER AS $$
+BEGIN
+    SELECT COALESCE(MAX(version), -1) + 1 INTO NEW.version
+    FROM block_states
+    WHERE number = NEW.number;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger to auto-assign version before insert
+DROP TRIGGER IF EXISTS trigger_assign_block_version ON block_states;
+CREATE TRIGGER trigger_assign_block_version
+    BEFORE INSERT ON block_states
+    FOR EACH ROW
+    EXECUTE FUNCTION assign_block_version();
 
 -- Reorg events table tracks detected chain reorganizations
 CREATE TABLE IF NOT EXISTS reorg_events (
