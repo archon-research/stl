@@ -41,3 +41,12 @@ jobs:
       # Run full CI suite: test-race, vet, fmt-check, tidy, staticcheck, vulncheck, golangci-lint
       - name: Run CI checks
         run: make ci
+
+      # Fail if any files were modified (e.g., by go mod tidy, go fmt or something else)
+      - name: Check for uncommitted changes
+        run: |
+          if ! git diff --quiet; then
+            echo "::error::CI modified files. Please run 'make fmt tidy' locally and commit the changes."
+            git diff --name-only
+            exit 1
+          fi
