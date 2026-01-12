@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -822,5 +823,567 @@ func TestHandleReorgAtomic_Idempotency(t *testing.T) {
 
 	if version1 != version2 {
 		t.Errorf("expected same version on idempotent call, got v1=%d, v2=%d", version1, version2)
+	}
+}
+
+// TestBackfillWatermark tests GetBackfillWatermark and SetBackfillWatermark.
+func TestBackfillWatermark(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("initial watermark is 0", func(t *testing.T) {
+		watermark, err := repo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if watermark != 0 {
+			t.Errorf("expected watermark 0, got %d", watermark)
+		}
+	})
+
+	t.Run("set and get watermark", func(t *testing.T) {
+		if err := repo.SetBackfillWatermark(ctx, 100); err != nil {
+			t.Fatalf("failed to set watermark: %v", err)
+		}
+
+		watermark, err := repo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if watermark != 100 {
+			t.Errorf("expected watermark 100, got %d", watermark)
+		}
+	})
+
+	t.Run("update watermark", func(t *testing.T) {
+		if err := repo.SetBackfillWatermark(ctx, 500); err != nil {
+			t.Fatalf("failed to set watermark: %v", err)
+		}
+
+		watermark, err := repo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if watermark != 500 {
+			t.Errorf("expected watermark 500, got %d", watermark)
+		}
+	})
+}
+
+// TestFindGaps tests gap detection in block sequences.
+func TestFindGaps(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("no gaps in contiguous chain", func(t *testing.T) {
+		// Save blocks 1-10
+		for i := int64(1); i <= 10; i++ {
+			_, err := repo.SaveBlock(ctx, outbound.BlockState{
+				Number:     i,
+				Hash:       fmt.Sprintf("0xblock_%d", i),
+				ParentHash: fmt.Sprintf("0xblock_%d", i-1),
+				ReceivedAt: time.Now().Unix(),
+			})
+			if err != nil {
+				t.Fatalf("failed to save block %d: %v", i, err)
+			}
+		}
+
+		gaps, err := repo.FindGaps(ctx, 1, 10)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(gaps) != 0 {
+			t.Errorf("expected no gaps, got %d: %v", len(gaps), gaps)
+		}
+	})
+}
+
+// TestFindGaps_WithGap tests gap detection with missing blocks.
+func TestFindGaps_WithGap(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Save blocks 1, 2, 5, 6, 10 (missing 3-4 and 7-9)
+	for _, num := range []int64{1, 2, 5, 6, 10} {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     num,
+			Hash:       fmt.Sprintf("0xblock_%d", num),
+			ParentHash: fmt.Sprintf("0xblock_%d", num-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", num, err)
+		}
+	}
+
+	gaps, err := repo.FindGaps(ctx, 1, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Expect gaps: [3,4] and [7,9]
+	if len(gaps) != 2 {
+		t.Fatalf("expected 2 gaps, got %d: %v", len(gaps), gaps)
+	}
+
+	if gaps[0].From != 3 || gaps[0].To != 4 {
+		t.Errorf("expected first gap [3,4], got [%d,%d]", gaps[0].From, gaps[0].To)
+	}
+	if gaps[1].From != 7 || gaps[1].To != 9 {
+		t.Errorf("expected second gap [7,9], got [%d,%d]", gaps[1].From, gaps[1].To)
+	}
+}
+
+// TestFindGaps_WatermarkSkipsVerifiedBlocks tests that watermark optimizes gap detection.
+func TestFindGaps_WatermarkSkipsVerifiedBlocks(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Save blocks 1-5 and 8-10 (missing 6-7)
+	for _, num := range []int64{1, 2, 3, 4, 5, 8, 9, 10} {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     num,
+			Hash:       fmt.Sprintf("0xblock_%d", num),
+			ParentHash: fmt.Sprintf("0xblock_%d", num-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", num, err)
+		}
+	}
+
+	// Set watermark to 5 (blocks 1-5 are verified)
+	if err := repo.SetBackfillWatermark(ctx, 5); err != nil {
+		t.Fatalf("failed to set watermark: %v", err)
+	}
+
+	gaps, err := repo.FindGaps(ctx, 1, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should only find gap [6,7] since 1-5 are above watermark
+	if len(gaps) != 1 {
+		t.Fatalf("expected 1 gap, got %d: %v", len(gaps), gaps)
+	}
+	if gaps[0].From != 6 || gaps[0].To != 7 {
+		t.Errorf("expected gap [6,7], got [%d,%d]", gaps[0].From, gaps[0].To)
+	}
+}
+
+// TestFindGaps_InvalidRange tests FindGaps with invalid range.
+func TestFindGaps_InvalidRange(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// minBlock > maxBlock should return nil
+	gaps, err := repo.FindGaps(ctx, 100, 50)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gaps != nil {
+		t.Errorf("expected nil, got %v", gaps)
+	}
+}
+
+// TestFindGaps_WatermarkCoversRange tests when watermark covers entire range.
+func TestFindGaps_WatermarkCoversRange(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Set watermark higher than the range we're checking
+	if err := repo.SetBackfillWatermark(ctx, 100); err != nil {
+		t.Fatalf("failed to set watermark: %v", err)
+	}
+
+	gaps, err := repo.FindGaps(ctx, 1, 50)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should find no gaps since watermark is above the range
+	if gaps != nil {
+		t.Errorf("expected nil, got %v", gaps)
+	}
+}
+
+// TestFindGaps_GapAtBeginning tests gap detection when first block is missing.
+func TestFindGaps_GapAtBeginning(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Save blocks 5-10 (missing 1-4)
+	for i := int64(5); i <= 10; i++ {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0xblock_%d", i),
+			ParentHash: fmt.Sprintf("0xblock_%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	gaps, err := repo.FindGaps(ctx, 1, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(gaps) != 1 {
+		t.Fatalf("expected 1 gap, got %d: %v", len(gaps), gaps)
+	}
+	if gaps[0].From != 1 || gaps[0].To != 4 {
+		t.Errorf("expected gap [1,4], got [%d,%d]", gaps[0].From, gaps[0].To)
+	}
+}
+
+// TestFindGaps_IgnoresOrphanedBlocks tests that orphaned blocks are treated as gaps.
+func TestFindGaps_IgnoresOrphanedBlocks(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Save blocks 1-5
+	for i := int64(1); i <= 5; i++ {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0xblock_%d", i),
+			ParentHash: fmt.Sprintf("0xblock_%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Orphan block 3
+	if err := repo.MarkBlockOrphaned(ctx, "0xblock_3"); err != nil {
+		t.Fatalf("failed to mark orphaned: %v", err)
+	}
+
+	gaps, err := repo.FindGaps(ctx, 1, 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Block 3 is orphaned, so there should be a gap at 3
+	if len(gaps) != 1 {
+		t.Fatalf("expected 1 gap (orphaned block), got %d: %v", len(gaps), gaps)
+	}
+	if gaps[0].From != 3 || gaps[0].To != 3 {
+		t.Errorf("expected gap [3,3], got [%d,%d]", gaps[0].From, gaps[0].To)
+	}
+}
+
+// TestVerifyChainIntegrity tests chain integrity verification.
+func TestVerifyChainIntegrity(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("valid chain passes", func(t *testing.T) {
+		// Save a properly linked chain
+		for i := int64(1); i <= 5; i++ {
+			_, err := repo.SaveBlock(ctx, outbound.BlockState{
+				Number:     i,
+				Hash:       fmt.Sprintf("0x%064d", i),
+				ParentHash: fmt.Sprintf("0x%064d", i-1),
+				ReceivedAt: time.Now().Unix(),
+			})
+			if err != nil {
+				t.Fatalf("failed to save block %d: %v", i, err)
+			}
+		}
+
+		err := repo.VerifyChainIntegrity(ctx, 1, 5)
+		if err != nil {
+			t.Errorf("expected valid chain, got error: %v", err)
+		}
+	})
+}
+
+// TestVerifyChainIntegrity_BrokenChain tests detection of broken chain links.
+func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Save blocks with a broken link at block 3
+	for i := int64(1); i <= 5; i++ {
+		parentHash := fmt.Sprintf("0x%064d", i-1)
+		if i == 3 {
+			parentHash = "0xwrong_parent" // This doesn't match block 2's hash
+		}
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x%064d", i),
+			ParentHash: parentHash,
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	err := repo.VerifyChainIntegrity(ctx, 1, 5)
+	if err == nil {
+		t.Error("expected error for broken chain, got nil")
+	}
+	// Should indicate the break is at block 3
+	if err != nil && !strings.Contains(err.Error(), "block 3") {
+		t.Errorf("expected error to mention block 3, got: %v", err)
+	}
+}
+
+// TestVerifyChainIntegrity_EmptyRange tests chain verification with fromBlock >= toBlock.
+func TestVerifyChainIntegrity_EmptyRange(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("fromBlock equals toBlock", func(t *testing.T) {
+		err := repo.VerifyChainIntegrity(ctx, 5, 5)
+		if err != nil {
+			t.Errorf("expected no error for empty range, got: %v", err)
+		}
+	})
+
+	t.Run("fromBlock greater than toBlock", func(t *testing.T) {
+		err := repo.VerifyChainIntegrity(ctx, 10, 5)
+		if err != nil {
+			t.Errorf("expected no error for empty range, got: %v", err)
+		}
+	})
+}
+
+// TestVerifyChainIntegrity_IgnoresOrphanedBlocks tests that orphaned blocks are excluded.
+func TestVerifyChainIntegrity_IgnoresOrphanedBlocks(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Save a valid chain
+	for i := int64(1); i <= 5; i++ {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x%064d", i),
+			ParentHash: fmt.Sprintf("0x%064d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Orphan block 2 and add a replacement with correct parent
+	if err := repo.MarkBlockOrphaned(ctx, fmt.Sprintf("0x%064d", 2)); err != nil {
+		t.Fatalf("failed to mark orphaned: %v", err)
+	}
+
+	_, err := repo.SaveBlock(ctx, outbound.BlockState{
+		Number:     2,
+		Hash:       "0xnew_block_2",
+		ParentHash: fmt.Sprintf("0x%064d", 1), // Correct parent
+		ReceivedAt: time.Now().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("failed to save replacement block: %v", err)
+	}
+
+	// Now block 3 has parent pointing to old block 2 hash, which is orphaned
+	// The chain should be considered broken
+	err = repo.VerifyChainIntegrity(ctx, 1, 5)
+	if err == nil {
+		t.Error("expected chain integrity error (block 3 points to orphaned parent)")
+	}
+}
+
+// TestMarkPublishComplete_InvalidType tests MarkPublishComplete with invalid type.
+func TestMarkPublishComplete_InvalidType(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Save a block
+	_, err := repo.SaveBlock(ctx, outbound.BlockState{
+		Number:     100,
+		Hash:       "0xtest",
+		ParentHash: "0xparent",
+		ReceivedAt: time.Now().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("failed to save block: %v", err)
+	}
+
+	// Try with invalid publish type
+	err = repo.MarkPublishComplete(ctx, "0xtest", outbound.PublishType("invalid_type"))
+	if err == nil {
+		t.Error("expected error for invalid publish type")
+	}
+}
+
+// TestSaveBlock_ConcurrentRaceConditionWithRetry tests that SaveBlock handles concurrent saves
+// with retry logic when unique constraint violations occur.
+func TestSaveBlock_ConcurrentRaceConditionWithRetry(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	const blockNum int64 = 100
+	const numGoroutines = 10
+
+	// Use a channel to synchronize the start of all goroutines
+	startCh := make(chan struct{})
+	resultCh := make(chan struct {
+		version int
+		err     error
+	}, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			// Wait for the start signal
+			<-startCh
+
+			// Each goroutine tries to save a block with a unique hash
+			version, err := repo.SaveBlock(ctx, outbound.BlockState{
+				Number:     blockNum,
+				Hash:       fmt.Sprintf("0x%064d_%d", blockNum, id),
+				ParentHash: fmt.Sprintf("0x%064d", blockNum-1),
+				ReceivedAt: time.Now().Unix(),
+				IsOrphaned: false,
+			})
+			resultCh <- struct {
+				version int
+				err     error
+			}{version, err}
+		}(i)
+	}
+
+	// Start all goroutines at once to maximize race condition likelihood
+	close(startCh)
+
+	// Wait for all goroutines to complete
+	successCount := 0
+	for i := 0; i < numGoroutines; i++ {
+		result := <-resultCh
+		if result.err == nil {
+			successCount++
+		} else {
+			t.Logf("Goroutine failed: %v", result.err)
+		}
+	}
+
+	// All goroutines should succeed thanks to retry logic
+	if successCount != numGoroutines {
+		t.Errorf("expected all %d saves to succeed, but only %d succeeded", numGoroutines, successCount)
+	}
+
+	// Verify all blocks were saved
+	count, err := repo.GetBlockVersionCount(ctx, blockNum)
+	if err != nil {
+		t.Fatalf("failed to get version count: %v", err)
+	}
+	if count != numGoroutines {
+		t.Errorf("expected %d blocks, got %d", numGoroutines, count)
+	}
+}
+
+// TestGetRecentBlocks_EmptyDatabase tests GetRecentBlocks when no blocks exist.
+func TestGetRecentBlocks_EmptyDatabase(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	blocks, err := repo.GetRecentBlocks(ctx, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(blocks) != 0 {
+		t.Errorf("expected 0 blocks, got %d", len(blocks))
+	}
+}
+
+// TestHandleReorgAtomic_MultipleBlocksOrphaned tests reorg handling with multiple blocks.
+func TestHandleReorgAtomic_MultipleBlocksOrphaned(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create a chain of 10 blocks (100-109)
+	for i := int64(100); i <= 109; i++ {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0xoriginal_%d", i),
+			ParentHash: fmt.Sprintf("0xoriginal_%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Reorg at block 105 with depth 5 (common ancestor is 100)
+	reorgEvent := outbound.ReorgEvent{
+		DetectedAt:  time.Now(),
+		BlockNumber: 105,
+		OldHash:     "0xoriginal_105",
+		NewHash:     "0xnew_105",
+		Depth:       5,
+	}
+
+	newBlock := outbound.BlockState{
+		Number:     105,
+		Hash:       "0xnew_105",
+		ParentHash: "0xoriginal_100",
+		ReceivedAt: time.Now().Unix(),
+	}
+
+	_, err := repo.HandleReorgAtomic(ctx, reorgEvent, newBlock)
+	if err != nil {
+		t.Fatalf("HandleReorgAtomic failed: %v", err)
+	}
+
+	// Verify blocks 101-109 are orphaned
+	for i := int64(101); i <= 109; i++ {
+		block, err := repo.GetBlockByHash(ctx, fmt.Sprintf("0xoriginal_%d", i))
+		if err != nil {
+			t.Fatalf("failed to get block %d: %v", i, err)
+		}
+		if !block.IsOrphaned {
+			t.Errorf("expected block %d to be orphaned", i)
+		}
+	}
+
+	// Verify new block is canonical
+	canonical, err := repo.GetBlockByNumber(ctx, 105)
+	if err != nil {
+		t.Fatalf("failed to get canonical block: %v", err)
+	}
+	if canonical.Hash != "0xnew_105" {
+		t.Errorf("expected new canonical block, got %s", canonical.Hash)
 	}
 }
