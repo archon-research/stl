@@ -18,3 +18,5 @@
 
 # Html
 *.html
+
+/dist
