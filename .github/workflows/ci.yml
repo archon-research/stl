@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+# Cancel in-progress runs for the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, Test & Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: stl-verify # TODO: When we add more stl components we need to adjust this or have different jobs for each component
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+          cache-dependency-path: "stl-verify/go.sum"
+
+      # Install CI tools (staticcheck, golangci-lint, govulncheck)
+      - name: Install tools
+        run: make tools
+
+      # Run full CI suite: test-race, vet, fmt-check, tidy, staticcheck, vulncheck, golangci-lint
+      - name: Run CI checks
+        run: make ci
