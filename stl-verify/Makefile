@@ -1,7 +1,7 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test lint vet fmt tidy check clean cover cover-all bench-postgres run help
+.PHONY: all test lint vet fmt tidy check clean cover cover-all bench-postgres run help e2e
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -52,15 +52,25 @@ tidy:
 	go mod tidy
 	go mod verify
 
-# Run staticcheck (install if needed)
-staticcheck:
-	@echo "==> Running staticcheck..."
-	$(GOBIN)/staticcheck ./...
+# Check if go.mod is tidy (CI-friendly, fails if not tidy)
+tidy-check:
+	@echo "==> Checking go.mod is tidy..."
+	@cp go.mod go.mod.bak && cp go.sum go.sum.bak
+	@go mod tidy
+	@diff -q go.mod go.mod.bak > /dev/null || (echo "go.mod is not tidy. Run 'go mod tidy'"; mv go.mod.bak go.mod; mv go.sum.bak go.sum; exit 1)
+	@diff -q go.sum go.sum.bak > /dev/null || (echo "go.sum is not tidy. Run 'go mod tidy'"; mv go.mod.bak go.mod; mv go.sum.bak go.sum; exit 1)
+	@mv go.mod.bak go.mod && mv go.sum.bak go.sum
+	@echo "go.mod is tidy"
 
-# Run golangci-lint (install if needed)
+# Run staticcheck with all checks (install if needed)
+staticcheck:
+	@echo "==> Running staticcheck with all checks..."
+	$(GOBIN)/staticcheck -checks=all ./...
+
+# Run golangci-lint with all linters (install if needed)
 golangci-lint:
-	@echo "==> Running golangci-lint..."
-	$(GOBIN)/golangci-lint run
+	@echo "==> Running golangci-lint with all linters..."
+	$(GOBIN)/golangci-lint run --enable-all
 
 # Run govulncheck for security vulnerabilities (install if needed)
 vulncheck:
@@ -90,6 +100,12 @@ bench-postgres-go:
 	@echo "==> Running Go benchmarks for PostgreSQL..."
 	go test -tags=benchmark -bench=BenchmarkQueries -benchmem -timeout=30m ./internal/adapters/outbound/postgres/...
 
+# Run end-to-end tests (requires Docker)
+e2e:
+	@echo "==> Running end-to-end tests..."
+	@echo "    This uses testcontainers to spin up PostgreSQL, Redis, and LocalStack."
+	go test -tags=e2e -v -timeout=5m ./cmd/watcher/...
+
 # Install development tools
 tools:
 	@echo "==> Installing development tools..."
@@ -101,4 +117,4 @@ tools:
 	go install golang.org/x/tools/gopls@latest
 
 # CI target: everything with strict checks
-ci: test-race vet fmt-check tidy staticcheck vulncheck golangci-lint
+ci: test-race vet fmt-check tidy-check staticcheck vulncheck golangci-lint
