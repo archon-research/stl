@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -60,7 +61,44 @@ func (r *BlockStateRepository) Migrate(ctx context.Context) error {
 // SaveBlock persists a block's state with atomic version assignment.
 // The version is automatically assigned by a database trigger, ensuring uniqueness.
 // The provided state.Version is ignored; the actual assigned version is returned.
+// If a concurrent insert causes a unique constraint violation, the function retries.
 func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
+	const maxRetries = 5
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		version, err := r.trySaveBlock(ctx, state)
+		if err == nil {
+			return version, nil
+		}
+
+		// Check if this is a unique constraint violation (PostgreSQL error code 23505)
+		// This can happen when concurrent inserts race for the same version number
+		if isUniqueViolation(err) {
+			r.logger.Debug("SaveBlock retry due to version conflict",
+				"attempt", attempt+1,
+				"block", state.Number,
+				"hash", state.Hash)
+			continue
+		}
+
+		return 0, err
+	}
+
+	return 0, fmt.Errorf("failed to save block after %d retries due to concurrent version conflicts", maxRetries)
+}
+
+// isUniqueViolation checks if the error is a PostgreSQL unique constraint violation.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	// PostgreSQL unique violation error contains "SQLSTATE 23505" or "unique constraint"
+	errStr := err.Error()
+	return strings.Contains(errStr, "23505") || strings.Contains(errStr, "unique constraint")
+}
+
+// trySaveBlock attempts to save a block once.
+func (r *BlockStateRepository) trySaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
 	// Check if a block with this hash already exists (duplicate detection).
 	// If so, return the existing version without modifying the data.
 	var existingVersion int
