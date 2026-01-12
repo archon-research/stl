@@ -1,7 +1,7 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test lint vet fmt tidy check clean cover run help
+.PHONY: all test lint vet fmt tidy check clean cover cover-all run help
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -20,6 +20,13 @@ test-race:
 cover:
 	@echo "==> Running tests with coverage..."
 	go test -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report: coverage.html"
+
+# Run all tests (including integration) with coverage
+cover-all:
+	@echo "==> Running all tests with coverage (including integration)..."
+	go test -tags=integration -coverprofile=coverage.out -coverpkg=./... ./...
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report: coverage.html"
 

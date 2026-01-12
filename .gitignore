@@ -16,3 +16,6 @@
 
 # OS
 .DS_Store
+
+# Html
+*.html
