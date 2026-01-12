@@ -232,10 +232,27 @@ func TestHandleReorgAtomic_AllOrNothingSemantics(t *testing.T) {
 	})
 
 	t.Run("reorg_event_is_recorded", func(t *testing.T) {
-		events, err := repo.GetReorgEvents(ctx, 10)
+		// Query reorg events directly via raw SQL
+		rows, err := repo.DB().QueryContext(ctx, `
+			SELECT id, detected_at, block_number, old_hash, new_hash, depth
+			FROM reorg_events
+			ORDER BY detected_at DESC
+			LIMIT 10
+		`)
 		if err != nil {
 			t.Fatalf("failed to get reorg events: %v", err)
 		}
+		defer rows.Close()
+
+		var events []outbound.ReorgEvent
+		for rows.Next() {
+			var e outbound.ReorgEvent
+			if err := rows.Scan(&e.ID, &e.DetectedAt, &e.BlockNumber, &e.OldHash, &e.NewHash, &e.Depth); err != nil {
+				t.Fatalf("failed to scan reorg event: %v", err)
+			}
+			events = append(events, e)
+		}
+
 		if len(events) != 1 {
 			t.Fatalf("expected 1 reorg event, got %d", len(events))
 		}

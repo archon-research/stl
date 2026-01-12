@@ -474,13 +474,6 @@ func TestSaveBlock_ConcurrentVersionRaceCondition(t *testing.T) {
 		}
 	}
 
-	// Check how many blocks were saved and if versions are unique
-	rows, err := repo.GetOrphanedBlocks(ctx, 0) // This won't work, need raw query
-	if err != nil {
-		t.Logf("GetOrphanedBlocks error: %v", err)
-	}
-	_ = rows
-
 	// Query all blocks at this height to check for duplicate versions
 	finalCount, err := repo.GetBlockVersionCount(ctx, blockNum)
 	if err != nil {
