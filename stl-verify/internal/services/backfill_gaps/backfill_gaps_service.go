@@ -239,7 +239,7 @@ func (s *BackfillService) findAndFillGaps() error {
 		default:
 		}
 
-		if err := s.fillGapWithContext(ctx, gap); err != nil {
+		if err := s.fillGapWithTracing(ctx, gap); err != nil {
 			s.logger.Warn("failed to fill gap", "from", gap.From, "to", gap.To, "error", err)
 			// Continue with other gaps
 		}
@@ -283,8 +283,8 @@ func (s *BackfillService) fillGap(ctx context.Context, gap outbound.BlockRange) 
 	return nil
 }
 
-// fillGapWithContext fills a gap with tracing context propagation.
-func (s *BackfillService) fillGapWithContext(ctx context.Context, gap outbound.BlockRange) error {
+// fillGapWithTracing fills a gap with tracing context propagation.
+func (s *BackfillService) fillGapWithTracing(ctx context.Context, gap outbound.BlockRange) error {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "backfill.fillGap",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -333,7 +333,7 @@ func (s *BackfillService) processBatch(ctx context.Context, from, to int64) erro
 
 // processBlockData processes a single block's data.
 func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.BlockData) error {
-	blockNum := bd.BlockNumber
+	blockNum := bd.BlockNumber	
 
 	if bd.Block == nil {
 		return fmt.Errorf("missing block data")
@@ -347,8 +347,9 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 	// Check if block already exists in DB (idempotency)
 	existing, err := s.stateRepo.GetBlockByHash(ctx, header.Hash)
 	if err != nil {
-		s.logger.Warn("failed to check for existing block", "block", blockNum, "error", err)
-	} else if existing != nil {
+		return fmt.Errorf("failed to check for existing block: %w", err)
+	}
+	if existing != nil {
 		s.logger.Debug("block already exists, skipping", "block", blockNum)
 		return nil
 	}
@@ -374,6 +375,7 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 		ReceivedAt: receivedAt.Unix(),
 		IsOrphaned: false,
 	}
+
 	version, err := s.stateRepo.SaveBlock(ctx, state)
 	if err != nil {
 		return fmt.Errorf("failed to save block state: %w", err)
