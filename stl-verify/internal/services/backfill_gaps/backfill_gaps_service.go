@@ -255,7 +255,7 @@ func (s *BackfillService) findAndFillGaps() error {
 }
 
 // fillGap fills a single gap range using batched RPC calls.
-func (s *BackfillService) fillGap(gap outbound.BlockRange) error {
+func (s *BackfillService) fillGap(ctx context.Context, gap outbound.BlockRange) error {
 	batchSize := s.config.BatchSize
 	total := gap.To - gap.From + 1
 
@@ -263,8 +263,8 @@ func (s *BackfillService) fillGap(gap outbound.BlockRange) error {
 
 	for batchStart := gap.From; batchStart <= gap.To; batchStart += int64(batchSize) {
 		select {
-		case <-s.ctx.Done():
-			return s.ctx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
 		default:
 		}
 
@@ -273,7 +273,7 @@ func (s *BackfillService) fillGap(gap outbound.BlockRange) error {
 			batchEnd = gap.To
 		}
 
-		if err := s.processBatch(batchStart, batchEnd); err != nil {
+		if err := s.processBatch(ctx, batchStart, batchEnd); err != nil {
 			s.logger.Warn("batch failed", "from", batchStart, "to", batchEnd, "error", err)
 			// Continue with next batch
 		}
@@ -296,12 +296,7 @@ func (s *BackfillService) fillGapWithContext(ctx context.Context, gap outbound.B
 	)
 	defer span.End()
 
-	// Temporarily override context for batch processing
-	oldCtx := s.ctx
-	s.ctx = ctx
-	defer func() { s.ctx = oldCtx }()
-
-	err := s.fillGap(gap)
+	err := s.fillGap(ctx, gap)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gap fill failed")
@@ -310,9 +305,7 @@ func (s *BackfillService) fillGapWithContext(ctx context.Context, gap outbound.B
 }
 
 // processBatch fetches and processes a batch of blocks.
-func (s *BackfillService) processBatch(from, to int64) error {
-	ctx := s.ctx
-
+func (s *BackfillService) processBatch(ctx context.Context, from, to int64) error {
 	// Build block numbers for this batch
 	blockNums := make([]int64, 0, to-from+1)
 	for blockNum := from; blockNum <= to; blockNum++ {
@@ -329,7 +322,7 @@ func (s *BackfillService) processBatch(from, to int64) error {
 
 	// Process each block in the batch
 	for _, bd := range blockDataList {
-		if err := s.processBlockData(bd); err != nil {
+		if err := s.processBlockData(ctx, bd); err != nil {
 			s.logger.Warn("failed to process block", "block", bd.BlockNumber, "error", err)
 			// Continue with other blocks
 		}
@@ -339,8 +332,7 @@ func (s *BackfillService) processBatch(from, to int64) error {
 }
 
 // processBlockData processes a single block's data.
-func (s *BackfillService) processBlockData(bd outbound.BlockData) error {
-	ctx := s.ctx
+func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.BlockData) error {
 	blockNum := bd.BlockNumber
 
 	if bd.Block == nil {
@@ -388,7 +380,7 @@ func (s *BackfillService) processBlockData(bd outbound.BlockData) error {
 	}
 
 	// Cache and publish the data
-	s.cacheAndPublishBlockData(bd, header, version, receivedAt)
+	s.cacheAndPublishBlockData(ctx, bd, header, version, receivedAt)
 
 	return nil
 }
@@ -437,7 +429,7 @@ func truncateHash(hash string) string {
 }
 
 // cacheAndPublishBlockData caches pre-fetched data and publishes events.
-func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header outbound.BlockHeader, version int, receivedAt time.Time) {
+func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbound.BlockData, header outbound.BlockHeader, version int, receivedAt time.Time) {
 	chainID := s.config.ChainID
 	blockNum := bd.BlockNumber
 	blockHash := header.Hash
@@ -451,7 +443,7 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.cache.SetBlock(s.ctx, chainID, blockNum, version, bd.Block); err != nil {
+			if err := s.cache.SetBlock(ctx, chainID, blockNum, version, bd.Block); err != nil {
 				s.logger.Warn("failed to cache block", "block", blockNum, "error", err)
 				return
 			}
@@ -466,12 +458,12 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 				CacheKey:       shared.CacheKey(chainID, blockNum, version, "block"),
 				IsBackfill:     true,
 			}
-			if err := s.eventSink.Publish(s.ctx, event); err != nil {
+			if err := s.eventSink.Publish(ctx, event); err != nil {
 				s.logger.Warn("failed to publish block event", "block", blockNum, "error", err)
 				return
 			}
 			// Mark block publish complete for crash recovery tracking
-			if err := s.stateRepo.MarkPublishComplete(s.ctx, blockHash, outbound.PublishTypeBlock); err != nil {
+			if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlock); err != nil {
 				s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
 			}
 		}()
@@ -482,7 +474,7 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.cache.SetReceipts(s.ctx, chainID, blockNum, version, bd.Receipts); err != nil {
+			if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, bd.Receipts); err != nil {
 				s.logger.Warn("failed to cache receipts", "block", blockNum, "error", err)
 				return
 			}
@@ -495,12 +487,12 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 				CacheKey:    shared.CacheKey(chainID, blockNum, version, "receipts"),
 				IsBackfill:  true,
 			}
-			if err := s.eventSink.Publish(s.ctx, event); err != nil {
+			if err := s.eventSink.Publish(ctx, event); err != nil {
 				s.logger.Warn("failed to publish receipts event", "block", blockNum, "error", err)
 				return
 			}
 			// Mark receipts publish complete for crash recovery tracking
-			if err := s.stateRepo.MarkPublishComplete(s.ctx, blockHash, outbound.PublishTypeReceipts); err != nil {
+			if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeReceipts); err != nil {
 				s.logger.Warn("failed to mark receipts publish complete", "block", blockNum, "error", err)
 			}
 		}()
@@ -511,7 +503,7 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.cache.SetTraces(s.ctx, chainID, blockNum, version, bd.Traces); err != nil {
+			if err := s.cache.SetTraces(ctx, chainID, blockNum, version, bd.Traces); err != nil {
 				s.logger.Warn("failed to cache traces", "block", blockNum, "error", err)
 				return
 			}
@@ -524,12 +516,12 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 				CacheKey:    shared.CacheKey(chainID, blockNum, version, "traces"),
 				IsBackfill:  true,
 			}
-			if err := s.eventSink.Publish(s.ctx, event); err != nil {
+			if err := s.eventSink.Publish(ctx, event); err != nil {
 				s.logger.Warn("failed to publish traces event", "block", blockNum, "error", err)
 				return
 			}
 			// Mark traces publish complete for crash recovery tracking
-			if err := s.stateRepo.MarkPublishComplete(s.ctx, blockHash, outbound.PublishTypeTraces); err != nil {
+			if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeTraces); err != nil {
 				s.logger.Warn("failed to mark traces publish complete", "block", blockNum, "error", err)
 			}
 		}()
@@ -540,7 +532,7 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.cache.SetBlobs(s.ctx, chainID, blockNum, version, bd.Blobs); err != nil {
+			if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, bd.Blobs); err != nil {
 				s.logger.Warn("failed to cache blobs", "block", blockNum, "error", err)
 				return
 			}
@@ -553,12 +545,12 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 				CacheKey:    shared.CacheKey(chainID, blockNum, version, "blobs"),
 				IsBackfill:  true,
 			}
-			if err := s.eventSink.Publish(s.ctx, event); err != nil {
+			if err := s.eventSink.Publish(ctx, event); err != nil {
 				s.logger.Warn("failed to publish blobs event", "block", blockNum, "error", err)
 				return
 			}
 			// Mark blobs publish complete for crash recovery tracking
-			if err := s.stateRepo.MarkPublishComplete(s.ctx, blockHash, outbound.PublishTypeBlobs); err != nil {
+			if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlobs); err != nil {
 				s.logger.Warn("failed to mark blobs publish complete", "block", blockNum, "error", err)
 			}
 		}()
