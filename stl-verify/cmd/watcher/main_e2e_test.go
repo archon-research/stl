@@ -321,8 +321,10 @@ func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
 	mockSub.sendHeader(header)
 
 	// Wait for messages on all queues
+	const messageTimeout = 10 * time.Second
+
 	t.Run("block_published", func(t *testing.T) {
-		msg := infra.WaitForMessage(t, infra.BlocksQueueURL, 10*time.Second)
+		msg := infra.WaitForMessage(t, infra.BlocksQueueURL, messageTimeout)
 		if msg == "" {
 			t.Fatal("expected block message, got none")
 		}
@@ -336,7 +338,7 @@ func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
 	})
 
 	t.Run("receipts_published", func(t *testing.T) {
-		msg := infra.WaitForMessage(t, infra.ReceiptsQueueURL, 10*time.Second)
+		msg := infra.WaitForMessage(t, infra.ReceiptsQueueURL, messageTimeout)
 		if msg == "" {
 			t.Fatal("expected receipts message, got none")
 		}
@@ -344,7 +346,7 @@ func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
 	})
 
 	t.Run("traces_published", func(t *testing.T) {
-		msg := infra.WaitForMessage(t, infra.TracesQueueURL, 10*time.Second)
+		msg := infra.WaitForMessage(t, infra.TracesQueueURL, messageTimeout)
 		if msg == "" {
 			t.Fatal("expected traces message, got none")
 		}
