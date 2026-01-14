@@ -509,7 +509,11 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	// Start PostgreSQL
 	postgresContainer, postgresURL := startPostgres(t, ctx)
 	infra.containers = append(infra.containers, postgresContainer)
-	cleanupFuncs = append(cleanupFuncs, func() { postgresContainer.Terminate(ctx) })
+	cleanupFuncs = append(cleanupFuncs, func() {
+		if err := postgresContainer.Terminate(ctx); err != nil {
+			logger.Error("failed to terminate postgres container", "error", err)
+		}
+	})
 
 	db, err := sql.Open("pgx", postgresURL)
 	if err != nil {
@@ -527,7 +531,11 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	// Start Redis
 	redisContainer, redisAddr := startRedis(t, ctx)
 	infra.containers = append(infra.containers, redisContainer)
-	cleanupFuncs = append(cleanupFuncs, func() { redisContainer.Terminate(ctx) })
+	cleanupFuncs = append(cleanupFuncs, func() {
+		if err := redisContainer.Terminate(ctx); err != nil {
+			logger.Error("failed to terminate redis container", "error", err)
+		}
+	})
 
 	cache, err := rediscache.NewBlockCache(rediscache.Config{
 		Addr:      redisAddr,
@@ -545,7 +553,11 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	// Start LocalStack
 	localstackContainer, localstackEndpoint := startLocalStack(t, ctx)
 	infra.containers = append(infra.containers, localstackContainer)
-	cleanupFuncs = append(cleanupFuncs, func() { localstackContainer.Terminate(ctx) })
+	cleanupFuncs = append(cleanupFuncs, func() {
+		if err := localstackContainer.Terminate(ctx); err != nil {
+			logger.Error("failed to terminate localstack container", "error", err)
+		}
+	})
 
 	// Create AWS clients
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
