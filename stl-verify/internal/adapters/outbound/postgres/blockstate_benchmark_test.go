@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -18,27 +20,41 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-const (
-	// Total number of rows to insert for large-scale tests
-	totalRows = 10_000_000
-)
+// Default row count for benchmarks. Can be overridden via BENCH_ROW_COUNT env var.
+// Use 1M for PR checks, 10M for merge to main.
+const defaultRowCount = 10_000_000
+
+// getTotalRows returns the number of rows to use for benchmarks.
+// Reads from BENCH_ROW_COUNT environment variable, defaults to defaultRowCount.
+func getTotalRows() int64 {
+	if v := os.Getenv("BENCH_ROW_COUNT"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultRowCount
+}
 
 // =============================================================================
 // Test Cases
 // =============================================================================
 
-// TestLargeDataset_QueryPerformance tests query performance with `totalRows` (ie 10M rows).
+// TestLargeDataset_QueryPerformance tests query performance with configurable row count.
+// Set BENCH_ROW_COUNT env var to control dataset size (default: 10M).
 func TestLargeDataset_QueryPerformance(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping large dataset test in short mode")
 	}
+
+	totalRows := getTotalRows()
+	t.Logf("Running benchmark with %d rows (set BENCH_ROW_COUNT to override)", totalRows)
 
 	repo, cleanup := setupLargePostgres(t)
 	defer cleanup()
 
 	ctx := context.Background()
 
-	// Insert 10 million blocks
+	// Insert blocks
 	bulkInsertBlocksCOPY(t, repo.DB(), 1, totalRows)
 
 	// Create indexes and analyze
