@@ -5,8 +5,9 @@ resource "random_id" "bucket_suffix" {
 
 locals {
   # Standard naming prefix: ${project}-${environment}
-  prefix      = "${var.project_name}-${var.environment}"
-  bucket_name = "${local.prefix}-ethereum-raw-${random_id.bucket_suffix.hex}"
+  prefix           = "${var.project_name}-${var.environment}"
+  prefix_lowercase = lower(local.prefix)
+  bucket_name      = "${local.prefix_lowercase}-ethereum-raw-${random_id.bucket_suffix.hex}"
 }
 
 # S3 Bucket - configured to never be deleted and fully private
@@ -125,7 +126,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "main" {
 
 # Dedicated bucket for access logs
 resource "aws_s3_bucket" "logs" {
-  bucket = "${local.prefix}-access-logs-${random_id.bucket_suffix.hex}"
+  bucket = "${local.prefix_lowercase}-access-logs-${random_id.bucket_suffix.hex}"
 
   tags = {
     Name    = "${local.prefix}-access-logs"
