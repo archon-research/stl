@@ -7,7 +7,7 @@
 
 locals {
   state_bucket_name = "${local.prefix_lowercase}-terraform-state"
-  locks_table_name  = "${local.prefix}-terraform-locks"
+  locks_table_name  = "${local.prefix_lowercase}-terraform-locks"
 }
 
 # S3 bucket for state storage

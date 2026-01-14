@@ -6,7 +6,7 @@ terraform {
     key            = "infra/terraform.tfstate"
     region         = "eu-west-1"
     encrypt        = true
-    dynamodb_table = "stl-SentinelStaging-terraform-locks"
+    dynamodb_table = "stl-sentinelstaging-terraform-locks"
   }
 
   required_providers {

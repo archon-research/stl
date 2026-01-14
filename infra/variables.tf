@@ -13,5 +13,5 @@ variable "project_name" {
 variable "environment" {
   description = "Environment name (e.g., dev, staging, prod)"
   type        = string
-  default     = "SentinelStaging"
+  # No default - must be specified explicitly
 }
