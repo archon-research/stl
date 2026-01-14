@@ -622,8 +622,10 @@ func TestPublish_MarshalError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for marshal failure")
 	}
-	if !errors.Is(err, err) || err.Error() == "" {
-		t.Errorf("expected marshal error, got: %v", err)
+	// Verify this is a JSON marshaling error (chan types cannot be marshaled)
+	var unsupportedTypeErr *json.UnsupportedTypeError
+	if !errors.As(err, &unsupportedTypeErr) {
+		t.Errorf("expected json.UnsupportedTypeError, got: %v", err)
 	}
 
 	if len(client.calls) != 0 {
