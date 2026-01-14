@@ -2,8 +2,6 @@
 # Terraform State Backend Resources
 # =============================================================================
 # These resources store Terraform state remotely with locking.
-# After initial apply, uncomment the backend block in main.tf and run:
-#   tofu init -migrate-state
 
 locals {
   state_bucket_name = "${local.prefix_lowercase}-terraform-state-${random_id.bucket_suffix.hex}"
