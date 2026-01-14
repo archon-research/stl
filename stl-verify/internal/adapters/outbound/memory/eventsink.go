@@ -4,8 +4,8 @@
 // It provides helper methods for inspecting events during tests:
 //   - GetEvents(): Returns all published events
 //   - GetEventsByType(): Filters events by type
-//   - GetBlockEvents()/GetReorgEvents(): Type-specific event retrieval
-//   - SetOnPublish(): Register callback for event assertions
+//   - GetBlockEvents()/GetReceiptsEvents()/GetTracesEvents()/GetBlobsEvents(): Type-specific retrieval
+//   - OnPublish(): Register callback for event assertions
 //
 // All operations are thread-safe. For production, use a message queue adapter.
 package memory

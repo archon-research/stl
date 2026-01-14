@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
+	"strings"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -61,7 +63,65 @@ func (r *BlockStateRepository) Migrate(ctx context.Context) error {
 // SaveBlock persists a block's state with atomic version assignment.
 // The version is automatically assigned by a database trigger, ensuring uniqueness.
 // The provided state.Version is ignored; the actual assigned version is returned.
+// If a concurrent insert causes a unique constraint violation, the function retries
+// with exponential backoff and jitter.
 func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
+	const (
+		maxRetries     = 5
+		baseDelay      = 10 * time.Millisecond
+		maxDelay       = 50 * time.Millisecond
+		jitterFraction = 0.5 // Add up to 50% jitter
+	)
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		version, err := r.trySaveBlock(ctx, state)
+		if err == nil {
+			return version, nil
+		}
+
+		// Check if this is a unique constraint violation (PostgreSQL error code 23505)
+		// This can happen when concurrent inserts race for the same version number
+		if isUniqueViolation(err) {
+			r.logger.Debug("SaveBlock retry due to version conflict",
+				"attempt", attempt+1,
+				"block", state.Number,
+				"hash", state.Hash)
+
+			// Calculate exponential backoff with jitter
+			delay := baseDelay * time.Duration(1<<attempt) // 2^attempt * baseDelay
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+			// Add jitter: delay * (1 + random(0, jitterFraction))
+			jitter := time.Duration(float64(delay) * jitterFraction * rand.Float64())
+			delay += jitter
+
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case <-time.After(delay):
+				continue
+			}
+		}
+
+		return 0, err
+	}
+
+	return 0, fmt.Errorf("failed to save block after %d retries due to concurrent version conflicts", maxRetries)
+}
+
+// isUniqueViolation checks if the error is a PostgreSQL unique constraint violation.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	// PostgreSQL unique violation error contains "SQLSTATE 23505" or "unique constraint"
+	errStr := err.Error()
+	return strings.Contains(errStr, "23505") || strings.Contains(errStr, "unique constraint")
+}
+
+// trySaveBlock attempts to save a block once.
+func (r *BlockStateRepository) trySaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
 	// Check if a block with this hash already exists (duplicate detection).
 	// If so, return the existing version without modifying the data.
 	var existingVersion int
@@ -283,115 +343,6 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outb
 	}
 
 	return version, nil
-}
-
-// GetReorgEvents retrieves reorg events, ordered by detection time descending.
-func (r *BlockStateRepository) GetReorgEvents(ctx context.Context, limit int) ([]outbound.ReorgEvent, error) {
-	query := `
-		SELECT id, detected_at, block_number, old_hash, new_hash, depth
-		FROM reorg_events
-		ORDER BY detected_at DESC
-		LIMIT $1
-	`
-	rows, err := r.db.QueryContext(ctx, query, limit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get reorg events: %w", err)
-	}
-	defer rows.Close()
-
-	var events []outbound.ReorgEvent
-	for rows.Next() {
-		var event outbound.ReorgEvent
-		if err := rows.Scan(&event.ID, &event.DetectedAt, &event.BlockNumber, &event.OldHash, &event.NewHash, &event.Depth); err != nil {
-			return nil, fmt.Errorf("failed to scan reorg event: %w", err)
-		}
-		events = append(events, event)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating reorg events: %w", err)
-	}
-	return events, nil
-}
-
-// GetReorgEventsByBlockRange retrieves reorg events within a block number range.
-func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, fromBlock, toBlock int64) ([]outbound.ReorgEvent, error) {
-	query := `
-		SELECT id, detected_at, block_number, old_hash, new_hash, depth
-		FROM reorg_events
-		WHERE block_number >= $1 AND block_number <= $2
-		ORDER BY block_number DESC, detected_at DESC
-	`
-	rows, err := r.db.QueryContext(ctx, query, fromBlock, toBlock)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get reorg events by block range: %w", err)
-	}
-	defer rows.Close()
-
-	var events []outbound.ReorgEvent
-	for rows.Next() {
-		var event outbound.ReorgEvent
-		if err := rows.Scan(&event.ID, &event.DetectedAt, &event.BlockNumber, &event.OldHash, &event.NewHash, &event.Depth); err != nil {
-			return nil, fmt.Errorf("failed to scan reorg event: %w", err)
-		}
-		events = append(events, event)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating reorg events: %w", err)
-	}
-	return events, nil
-}
-
-// GetOrphanedBlocks retrieves orphaned blocks for analysis.
-func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int) ([]outbound.BlockState, error) {
-	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-		       block_published, receipts_published, traces_published, blobs_published
-		FROM block_states
-		WHERE is_orphaned
-		ORDER BY received_at DESC
-		LIMIT $1
-	`
-	rows, err := r.db.QueryContext(ctx, query, limit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get orphaned blocks: %w", err)
-	}
-	defer rows.Close()
-
-	var states []outbound.BlockState
-	for rows.Next() {
-		var state outbound.BlockState
-		if err := rows.Scan(
-			&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-			&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished); err != nil {
-			return nil, fmt.Errorf("failed to scan block state: %w", err)
-		}
-		states = append(states, state)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating block states: %w", err)
-	}
-	return states, nil
-}
-
-// PruneOldBlocks deletes canonical blocks older than the given number.
-// Orphaned blocks are kept for historical analysis.
-func (r *BlockStateRepository) PruneOldBlocks(ctx context.Context, keepAfter int64) error {
-	query := `DELETE FROM block_states WHERE number < $1 AND NOT is_orphaned`
-	_, err := r.db.ExecContext(ctx, query, keepAfter)
-	if err != nil {
-		return fmt.Errorf("failed to prune old blocks: %w", err)
-	}
-	return nil
-}
-
-// PruneOldReorgEvents deletes reorg events older than the given time.
-func (r *BlockStateRepository) PruneOldReorgEvents(ctx context.Context, olderThan time.Time) error {
-	query := `DELETE FROM reorg_events WHERE detected_at < $1`
-	_, err := r.db.ExecContext(ctx, query, olderThan)
-	if err != nil {
-		return fmt.Errorf("failed to prune old reorg events: %w", err)
-	}
-	return nil
 }
 
 // GetMinBlockNumber returns the lowest canonical block number.

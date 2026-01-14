@@ -24,7 +24,7 @@ func setupPostgres(t *testing.T) (*postgres.BlockStateRepository, func()) {
 	ctx := context.Background()
 
 	req := testcontainers.ContainerRequest{
-		Image:        "postgres:16-alpine",
+		Image:        "postgres:18",
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "test",
@@ -99,7 +99,7 @@ func saveBlock(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepos
 
 func TestFindGaps_NoGaps(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -120,7 +120,7 @@ func TestFindGaps_NoGaps(t *testing.T) {
 
 func TestFindGaps_SingleGapInMiddle(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -145,7 +145,7 @@ func TestFindGaps_SingleGapInMiddle(t *testing.T) {
 
 func TestFindGaps_MultipleGaps(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -179,7 +179,7 @@ func TestFindGaps_MultipleGaps(t *testing.T) {
 
 func TestFindGaps_GapAtBeginning(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -204,7 +204,7 @@ func TestFindGaps_GapAtBeginning(t *testing.T) {
 
 func TestFindGaps_AlternatingMissing(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -238,7 +238,7 @@ func TestFindGaps_AlternatingMissing(t *testing.T) {
 
 func TestFindGaps_OnlyOneBlock(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -263,7 +263,7 @@ func TestFindGaps_OnlyOneBlock(t *testing.T) {
 
 func TestFindGaps_EmptyTable(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -286,7 +286,7 @@ func TestFindGaps_EmptyTable(t *testing.T) {
 
 func TestFindGaps_IgnoresOrphanedBlocks(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -318,7 +318,7 @@ func TestFindGaps_IgnoresOrphanedBlocks(t *testing.T) {
 
 func TestFindGaps_LargeGap(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -342,7 +342,7 @@ func TestFindGaps_LargeGap(t *testing.T) {
 
 func TestGetMinMaxBlockNumber(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -387,7 +387,7 @@ func TestGetMinMaxBlockNumber(t *testing.T) {
 
 func TestGetMinMaxBlockNumber_IgnoresOrphaned(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -431,7 +431,7 @@ func TestSaveBlock_ConcurrentVersionRaceCondition(t *testing.T) {
 	// This breaks the version uniqueness assumption and causes cache key collisions.
 
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 	const blockNum int64 = 100
@@ -473,13 +473,6 @@ func TestSaveBlock_ConcurrentVersionRaceCondition(t *testing.T) {
 			t.Logf("Error: %v", err)
 		}
 	}
-
-	// Check how many blocks were saved and if versions are unique
-	rows, err := repo.GetOrphanedBlocks(ctx, 0) // This won't work, need raw query
-	if err != nil {
-		t.Logf("GetOrphanedBlocks error: %v", err)
-	}
-	_ = rows
 
 	// Query all blocks at this height to check for duplicate versions
 	finalCount, err := repo.GetBlockVersionCount(ctx, blockNum)
@@ -542,7 +535,7 @@ func TestSaveBlock_ConcurrentVersionRaceCondition(t *testing.T) {
 
 func TestVerifyChainIntegrity_ValidChain(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 	ctx := context.Background()
 
 	// Save a contiguous chain with correct parent_hash links
@@ -559,7 +552,7 @@ func TestVerifyChainIntegrity_ValidChain(t *testing.T) {
 
 func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 	ctx := context.Background()
 
 	// Save blocks 1-5 with correct links
@@ -594,7 +587,7 @@ func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
 
 func TestVerifyChainIntegrity_EmptyRange(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 	ctx := context.Background()
 
 	// Empty range should return nil (nothing to verify)
@@ -612,7 +605,7 @@ func TestVerifyChainIntegrity_EmptyRange(t *testing.T) {
 
 func TestVerifyChainIntegrity_WithGaps(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 	ctx := context.Background()
 
 	// Save blocks with a gap (1, 2, 3, 5, 6) - missing block 4

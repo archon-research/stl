@@ -428,7 +428,6 @@ func (s *LiveService) handleReorg(block LightBlock, receivedAt time.Time) (bool,
 		parentNum, _ := parseBlockNumber(parentHeader.Number)
 		walkBlock = LightBlock{
 			Number:     parentNum,
-			Hash:       normalizeHash(parentHeader.Hash),
 			ParentHash: normalizeHash(parentHeader.ParentHash),
 		}
 	}
