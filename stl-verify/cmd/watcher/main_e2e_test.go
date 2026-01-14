@@ -519,7 +519,11 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	if err != nil {
 		t.Fatalf("failed to connect to postgres: %v", err)
 	}
-	cleanupFuncs = append(cleanupFuncs, func() { db.Close() })
+	cleanupFuncs = append(cleanupFuncs, func() {
+		if err := db.Close(); err != nil {
+			logger.Error("failed to close database connection", "error", err)
+		}
+	})
 	infra.DB = db
 
 	blockStateRepo := postgres.NewBlockStateRepository(db, logger)
@@ -547,7 +551,11 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	if err != nil {
 		t.Fatalf("failed to create redis cache: %v", err)
 	}
-	cleanupFuncs = append(cleanupFuncs, func() { cache.Close() })
+	cleanupFuncs = append(cleanupFuncs, func() {
+		if err := cache.Close(); err != nil {
+			logger.Error("failed to close redis cache", "error", err)
+		}
+	})
 	infra.Cache = cache
 
 	// Start LocalStack
@@ -600,7 +608,11 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	if err != nil {
 		t.Fatalf("failed to create event sink: %v", err)
 	}
-	cleanupFuncs = append(cleanupFuncs, func() { eventSink.Close() })
+	cleanupFuncs = append(cleanupFuncs, func() {
+		if err := eventSink.Close(); err != nil {
+			logger.Error("failed to close event sink", "error", err)
+		}
+	})
 	infra.EventSink = eventSink
 
 	infra.Cleanup = func() {
