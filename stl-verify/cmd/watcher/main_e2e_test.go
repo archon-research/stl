@@ -354,11 +354,19 @@ func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
 	})
 
 	t.Run("block_state_saved", func(t *testing.T) {
-		// Verify block state was saved to DB
-		time.Sleep(500 * time.Millisecond) // Allow time for async processing
-		state, err := infra.BlockStateRepo.GetBlockByNumber(ctx, 100)
-		if err != nil {
-			t.Fatalf("failed to get block state: %v", err)
+		// Poll for block state with timeout instead of static sleep
+		var state *outbound.BlockState
+		var err error
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			state, err = infra.BlockStateRepo.GetBlockByNumber(ctx, 100)
+			if err != nil {
+				t.Fatalf("failed to get block state: %v", err)
+			}
+			if state != nil {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
 		if state == nil {
 			t.Fatal("expected block state to be saved")
@@ -420,8 +428,23 @@ func TestEndToEnd_MultipleBlocksInSequence(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Wait for all blocks to be processed
-	time.Sleep(3 * time.Second)
+	// Poll until all blocks are saved (or timeout)
+	deadline := time.Now().Add(10 * time.Second)
+	allSaved := false
+	for time.Now().Before(deadline) {
+		allSaved = true
+		for i := int64(100); i < 100+numBlocks; i++ {
+			state, _ := infra.BlockStateRepo.GetBlockByNumber(ctx, i)
+			if state == nil {
+				allSaved = false
+				break
+			}
+		}
+		if allSaved {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	// Verify all blocks are saved
 	for i := int64(100); i < 100+numBlocks; i++ {

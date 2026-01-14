@@ -328,8 +328,24 @@ func TestConcurrentLiveAndBackfill(t *testing.T) {
 	// Wait for live to complete
 	wg.Wait()
 
-	// Give time for backfill to fill gaps
-	time.Sleep(500 * time.Millisecond)
+	// Poll until backfill fills the gaps (blocks 2-149) or timeout
+	deadline := time.Now().Add(10 * time.Second)
+	gapsFilled := false
+	for time.Now().Before(deadline) {
+		gapsFilled = true
+		// Check a sample of gap blocks to see if backfill is done
+		for _, blockNum := range []int64{2, 50, 100, 149} {
+			block, _ := stateRepo.GetBlockByNumber(ctx, blockNum)
+			if block == nil {
+				gapsFilled = false
+				break
+			}
+		}
+		if gapsFilled {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	// Stop both services
 	if err := backfillService.Stop(); err != nil {
