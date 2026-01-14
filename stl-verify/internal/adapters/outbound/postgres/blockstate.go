@@ -19,7 +19,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -61,9 +63,15 @@ func (r *BlockStateRepository) Migrate(ctx context.Context) error {
 // SaveBlock persists a block's state with atomic version assignment.
 // The version is automatically assigned by a database trigger, ensuring uniqueness.
 // The provided state.Version is ignored; the actual assigned version is returned.
-// If a concurrent insert causes a unique constraint violation, the function retries.
+// If a concurrent insert causes a unique constraint violation, the function retries
+// with exponential backoff and jitter.
 func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
-	const maxRetries = 5
+	const (
+		maxRetries     = 5
+		baseDelay      = 10 * time.Millisecond
+		maxDelay       = 50 * time.Millisecond
+		jitterFraction = 0.5 // Add up to 50% jitter
+	)
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		version, err := r.trySaveBlock(ctx, state)
@@ -78,7 +86,22 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 				"attempt", attempt+1,
 				"block", state.Number,
 				"hash", state.Hash)
-			continue
+
+			// Calculate exponential backoff with jitter
+			delay := baseDelay * time.Duration(1<<attempt) // 2^attempt * baseDelay
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+			// Add jitter: delay * (1 + random(0, jitterFraction))
+			jitter := time.Duration(float64(delay) * jitterFraction * rand.Float64())
+			delay += jitter
+
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case <-time.After(delay):
+				continue
+			}
 		}
 
 		return 0, err
