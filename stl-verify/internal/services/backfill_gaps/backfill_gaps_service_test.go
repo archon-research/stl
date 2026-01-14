@@ -88,7 +88,9 @@ func (m *mockBlockchainClient) GetBlockByHash(ctx context.Context, hash string, 
 			return &h, nil
 		}
 	}
-	return nil, fmt.Errorf("block %s not found", hash)
+	// Return nil, nil when block not found (not an error - just doesn't exist)
+	// This matches real RPC behavior where eth_getBlockByHash returns null for unknown hashes
+	return nil, nil
 }
 
 func (m *mockBlockchainClient) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
@@ -203,6 +205,24 @@ func (m *mockBlockchainClient) GetBlocksBatch(ctx context.Context, blockNums []i
 		}
 	}
 	return result, nil
+}
+
+// setBlockHeader allows setting or overriding a block's header data.
+func (m *mockBlockchainClient) setBlockHeader(num int64, hash, parentHash string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.blocks[num] = blockTestData{
+		header: outbound.BlockHeader{
+			Number:     fmt.Sprintf("0x%x", num),
+			Hash:       hash,
+			ParentHash: parentHash,
+			Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
+		},
+		receipts: json.RawMessage(`[]`),
+		traces:   json.RawMessage(`[]`),
+		blobs:    json.RawMessage(`[]`),
+	}
 }
 
 func TestBackfillService_FillsGaps(t *testing.T) {
@@ -507,6 +527,165 @@ func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
 	}
 }
 
+// TestBackfillService_ReorgDuringDowntime_CannotMakeProgress verifies that when
+// the DB boundary is on a stale chain and boundary checking is disabled, the
+// service cannot fill a gap that crosses that boundary.
+// We should not disable boundary checking in production, but this test ensures that
+// the service behaves predictably
+func TestBackfillService_ReorgDuringDowntime_CannotMakeProgress(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+	client := newMockClient()
+
+	// Arrange: DB contains an "old" chain up to 110, but has a gap at 106-107.
+	// RPC returns a "new" chain for the missing blocks, which does not link to the
+	// DB boundary.
+	for i := int64(100); i <= 110; i++ {
+		if i == 106 || i == 107 {
+			continue
+		}
+		parentHash := hashWithSuffix(i-1, "_old")
+		if i == 100 {
+			parentHash = fmt.Sprintf("0x%064d", 99)
+		}
+		saveBlockState(t, ctx, stateRepo, i, hashWithSuffix(i, "_old"), parentHash)
+	}
+
+	// RPC has a reorged chain for 103+; we only need the missing blocks.
+	client.setBlockHeader(106, hashWithSuffix(106, "_new"), hashWithSuffix(105, "_new"))
+	client.setBlockHeader(107, hashWithSuffix(107, "_new"), hashWithSuffix(106, "_new"))
+
+	config := BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		BoundaryCheckDepth: -1, // Disabled: the service will not orphan stale boundary blocks.
+		Logger:             slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Act: attempt to backfill the gap.
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+
+	// Assert: the gap remains and no block events were published for those heights.
+	assertBlocksMissing(t, ctx, stateRepo, 106, 107)
+
+	blockEvents := eventSink.GetEventsByType(outbound.EventTypeBlock)
+	for _, e := range blockEvents {
+		be := e.(outbound.BlockEvent)
+		if be.BlockNumber == 106 || be.BlockNumber == 107 {
+			t.Fatalf("unexpected block event for %d", be.BlockNumber)
+		}
+	}
+
+	// A second run should remain unable to make progress.
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatalf("second RunOnce failed: %v", err)
+	}
+	assertBlocksMissing(t, ctx, stateRepo, 106, 107)
+}
+
+// TestBackfillService_ReorgDuringDowntime_RecoveryWithBoundaryCheck verifies that
+// boundary verification detects stale blocks and triggers reorg recovery.
+func TestBackfillService_ReorgDuringDowntime_RecoveryWithBoundaryCheck(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+	client := newMockClient()
+
+	// Arrange: DB has 100-105 on an old chain.
+	for i := int64(100); i <= 105; i++ {
+		parentHash := hashWithSuffix(i-1, "_old")
+		if i == 100 {
+			parentHash = fmt.Sprintf("0x%064d", 99)
+		}
+		saveBlockState(t, ctx, stateRepo, i, hashWithSuffix(i, "_old"), parentHash)
+	}
+
+	// RPC: 100-102 unchanged, 103-105 replaced.
+	for i := int64(100); i <= 102; i++ {
+		parentHash := hashWithSuffix(i-1, "_old")
+		if i == 100 {
+			parentHash = fmt.Sprintf("0x%064d", 99)
+		}
+		client.setBlockHeader(i, hashWithSuffix(i, "_old"), parentHash)
+	}
+
+	for i := int64(103); i <= 105; i++ {
+		var newParentHash string
+		if i == 103 {
+			newParentHash = hashWithSuffix(102, "_old")
+		} else {
+			newParentHash = hashWithSuffix(i-1, "_new")
+		}
+		client.setBlockHeader(i, hashWithSuffix(i, "_new"), newParentHash)
+	}
+
+	config := BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		BoundaryCheckDepth: 10,
+		Logger:             slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Act
+	err = service.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+
+	// Assert: blocks 103-105 have the new hashes.
+	for i := int64(103); i <= 105; i++ {
+		expectedHash := hashWithSuffix(i, "_new")
+		block, err := stateRepo.GetBlockByNumber(ctx, i)
+		if err != nil {
+			t.Fatalf("failed to get block %d: %v", i, err)
+		}
+		if block == nil {
+			t.Errorf("block %d is missing after recovery", i)
+		} else if block.Hash != expectedHash {
+			t.Errorf("block %d has wrong hash after recovery: got %s, want %s", i, truncateHashForTest(block.Hash), truncateHashForTest(expectedHash))
+		}
+	}
+
+	// Old hashes are marked orphaned.
+	for i := int64(103); i <= 105; i++ {
+		oldHash := hashWithSuffix(i, "_old")
+		orphanedBlock, err := stateRepo.GetBlockByHash(ctx, oldHash)
+		if err != nil {
+			t.Fatalf("failed to look up old block %d: %v", i, err)
+		}
+		if orphanedBlock != nil && !orphanedBlock.IsOrphaned {
+			t.Errorf("Old block %d should be marked as orphaned but isn't", i)
+		}
+	}
+}
+
+// truncateHashForTest is a helper for test output
+func truncateHashForTest(hash string) string {
+	if len(hash) > 30 {
+		return hash[:15] + "..." + hash[len(hash)-10:]
+	}
+	return hash
+}
+
 // TestBackfillService_RejectsNonCanonicalBlock verifies that backfill rejects
 // blocks that don't match the expected parent hash chain.
 //
@@ -544,17 +723,7 @@ func TestBackfillService_RejectsNonCanonicalBlock(t *testing.T) {
 	// But the client returns a DIFFERENT block 9 (simulating reorg in RPC)
 	// This block 9 has a different hash than what block 10 expects as parent
 	reorgedBlock9Hash := "0xREORGED_BLOCK_9_HASH_DOES_NOT_MATCH_BLOCK_10_PARENT"
-	client.blocks[9] = blockTestData{
-		header: outbound.BlockHeader{
-			Number:     "0x9",
-			Hash:       reorgedBlock9Hash,         // Different hash!
-			ParentHash: fmt.Sprintf("0x%064x", 8), // Links to block 8
-			Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
-		},
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
+	client.setBlockHeader(9, reorgedBlock9Hash, fmt.Sprintf("0x%064x", 8))
 
 	// Add block 10 to client for completeness
 	client.addBlock(10, originalBlock9Hash)
@@ -620,6 +789,41 @@ func TestBackfillService_RejectsNonCanonicalBlock(t *testing.T) {
 		be := e.(outbound.BlockEvent)
 		if be.BlockNumber == 9 {
 			t.Error("BUG: Published event for block 9 with wrong hash")
+		}
+	}
+}
+
+// ---
+// Utilities for tests
+// ---
+
+func hashWithSuffix(num int64, suffix string) string {
+	return fmt.Sprintf("0x%064d%s", num, suffix)
+}
+
+func saveBlockState(t *testing.T, ctx context.Context, repo outbound.BlockStateRepository, num int64, hash, parentHash string) {
+	t.Helper()
+
+	if _, err := repo.SaveBlock(ctx, outbound.BlockState{
+		Number:     num,
+		Hash:       hash,
+		ParentHash: parentHash,
+		ReceivedAt: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("failed to save block %d: %v", num, err)
+	}
+}
+
+func assertBlocksMissing(t *testing.T, ctx context.Context, repo outbound.BlockStateRepository, from, to int64) {
+	t.Helper()
+
+	for i := from; i <= to; i++ {
+		block, err := repo.GetBlockByNumber(ctx, i)
+		if err != nil {
+			t.Fatalf("failed to get block %d: %v", i, err)
+		}
+		if block != nil {
+			t.Fatalf("expected block %d to be missing, got hash=%s", i, truncateHashForTest(block.Hash))
 		}
 	}
 }
