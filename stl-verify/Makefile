@@ -87,18 +87,13 @@ clean:
 bench-postgres:
 	@echo "==> Running PostgreSQL performance benchmarks..."
 	@echo "    This will insert 10 million rows and test query performance."
-	@echo "    Expected runtime: 10-20 minutes"
-	go test -tags=benchmark -v -timeout=60m -run TestLargeDataset_QueryPerformance ./internal/adapters/outbound/postgres/...
+	@echo "    Expected runtime: 2-3 minutes"
+	go test -tags=benchmark -v -timeout=5m -run TestLargeDataset_QueryPerformance ./internal/adapters/outbound/postgres/...
 
 # Run PostgreSQL EXPLAIN ANALYZE (for query plan inspection)
 bench-postgres-explain:
 	@echo "==> Running PostgreSQL EXPLAIN ANALYZE tests..."
-	go test -tags=benchmark -v -timeout=30m -run TestExplainAnalyze ./internal/adapters/outbound/postgres/...
-
-# Run Go benchmarks for PostgreSQL (uses 1M rows for faster iteration)
-bench-postgres-go:
-	@echo "==> Running Go benchmarks for PostgreSQL..."
-	go test -tags=benchmark -bench=BenchmarkQueries -benchmem -timeout=30m ./internal/adapters/outbound/postgres/...
+	go test -tags=benchmark -v -timeout=1m -run TestExplainAnalyze ./internal/adapters/outbound/postgres/...
 
 # Run end-to-end tests (requires Docker)
 e2e:
