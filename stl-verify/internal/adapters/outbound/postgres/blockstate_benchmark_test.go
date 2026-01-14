@@ -27,7 +27,7 @@ const (
 // Test Cases
 // =============================================================================
 
-// TestLargeDataset_QueryPerformance tests query performance with 10 million rows.
+// TestLargeDataset_QueryPerformance tests query performance with `totalRows` (ie 10M rows).
 func TestLargeDataset_QueryPerformance(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping large dataset test in short mode")
