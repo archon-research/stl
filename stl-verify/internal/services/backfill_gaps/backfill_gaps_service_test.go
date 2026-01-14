@@ -549,9 +549,6 @@ func TestBackfillService_ReorgDuringDowntime_CannotMakeProgress(t *testing.T) {
 			continue
 		}
 		parentHash := hashWithSuffix(i-1, "_old")
-		if i == 100 {
-			parentHash = fmt.Sprintf("0x%064d", 99)
-		}
 		saveBlockState(t, ctx, stateRepo, i, hashWithSuffix(i, "_old"), parentHash)
 	}
 
@@ -610,28 +607,24 @@ func TestBackfillService_ReorgDuringDowntime_RecoveryWithBoundaryCheck(t *testin
 	// Arrange: DB has 100-105 on an old chain.
 	for i := int64(100); i <= 105; i++ {
 		parentHash := hashWithSuffix(i-1, "_old")
-		if i == 100 {
-			parentHash = fmt.Sprintf("0x%064d", 99)
-		}
 		saveBlockState(t, ctx, stateRepo, i, hashWithSuffix(i, "_old"), parentHash)
 	}
 
-	// RPC: 100-102 unchanged, 103-105 replaced.
+	// RPC: 100-102 unchanged
 	for i := int64(100); i <= 102; i++ {
 		parentHash := hashWithSuffix(i-1, "_old")
-		if i == 100 {
-			parentHash = fmt.Sprintf("0x%064d", 99)
-		}
 		client.setBlockHeader(i, hashWithSuffix(i, "_old"), parentHash)
 	}
-
+	
+	// RPC: 103-105 are on a new chain (different hashes and parent links)
 	for i := int64(103); i <= 105; i++ {
-		var newParentHash string
+		newParentHash := hashWithSuffix(i-1, "_new")
+		
+		// Special case: 103's parent should point to 102_old to link to the existing chain
 		if i == 103 {
 			newParentHash = hashWithSuffix(102, "_old")
-		} else {
-			newParentHash = hashWithSuffix(i-1, "_new")
 		}
+
 		client.setBlockHeader(i, hashWithSuffix(i, "_new"), newParentHash)
 	}
 
