@@ -507,7 +507,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	var cleanupFuncs []func()
 
 	// Start PostgreSQL
-	postgresContainer, postgresURL := startPostgres(t, ctx)
+	postgresContainer, postgresCfg := startPostgres(t, ctx)
 	infra.containers = append(infra.containers, postgresContainer)
 	cleanupFuncs = append(cleanupFuncs, func() {
 		if err := postgresContainer.Terminate(ctx); err != nil {
@@ -515,7 +515,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 		}
 	})
 
-	db, err := sql.Open("pgx", postgresURL)
+	db, err := sql.Open("pgx", postgresCfg.ConnectionString())
 	if err != nil {
 		t.Fatalf("failed to connect to postgres: %v", err)
 	}
@@ -529,7 +529,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	infra.BlockStateRepo = blockStateRepo
 
 	// Start Redis
-	redisContainer, redisAddr := startRedis(t, ctx)
+	redisContainer, redisCfg := startRedis(t, ctx)
 	infra.containers = append(infra.containers, redisContainer)
 	cleanupFuncs = append(cleanupFuncs, func() {
 		if err := redisContainer.Terminate(ctx); err != nil {
@@ -538,9 +538,9 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	})
 
 	cache, err := rediscache.NewBlockCache(rediscache.Config{
-		Addr:      redisAddr,
-		Password:  "",
-		DB:        0,
+		Addr:      redisCfg.Addr,
+		Password:  redisCfg.Password,
+		DB:        redisCfg.DB,
 		TTL:       1 * time.Hour,
 		KeyPrefix: "test",
 	}, logger)
@@ -551,7 +551,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	infra.Cache = cache
 
 	// Start LocalStack
-	localstackContainer, localstackEndpoint := startLocalStack(t, ctx)
+	localstackContainer, localstackCfg := startLocalStack(t, ctx)
 	infra.containers = append(infra.containers, localstackContainer)
 	cleanupFuncs = append(cleanupFuncs, func() {
 		if err := localstackContainer.Terminate(ctx); err != nil {
@@ -561,7 +561,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 
 	// Create AWS clients
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithRegion("us-east-1"),
+		awsconfig.WithRegion(localstackCfg.Region),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
 	)
 	if err != nil {
@@ -569,10 +569,10 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	}
 
 	snsClient := sns.NewFromConfig(awsCfg, func(o *sns.Options) {
-		o.BaseEndpoint = aws.String(localstackEndpoint)
+		o.BaseEndpoint = aws.String(localstackCfg.Endpoint)
 	})
 	sqsClient := sqs.NewFromConfig(awsCfg, func(o *sqs.Options) {
-		o.BaseEndpoint = aws.String(localstackEndpoint)
+		o.BaseEndpoint = aws.String(localstackCfg.Endpoint)
 	})
 	infra.SNSClient = snsClient
 	infra.SQSClient = sqsClient
@@ -649,16 +649,39 @@ func (infra *TestInfrastructure) WaitForMessage(t *testing.T, queueURL string, t
 // Container Setup
 // =============================================================================
 
-func startPostgres(t *testing.T, ctx context.Context) (testcontainers.Container, string) {
+// PostgresTestConfig contains all configuration needed to connect to test Postgres.
+type PostgresTestConfig struct {
+	Host     string
+	Port     string
+	User     string
+	Password string
+	Database string
+	SSLMode  string
+}
+
+// ConnectionString returns the full postgres connection URL.
+func (c PostgresTestConfig) ConnectionString() string {
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+		c.User, c.Password, c.Host, c.Port, c.Database, c.SSLMode)
+}
+
+func startPostgres(t *testing.T, ctx context.Context) (testcontainers.Container, PostgresTestConfig) {
 	t.Helper()
+
+	config := PostgresTestConfig{
+		User:     "test",
+		Password: "test",
+		Database: "testdb",
+		SSLMode:  "disable",
+	}
 
 	req := testcontainers.ContainerRequest{
 		Image:        "postgres:18",
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
-			"POSTGRES_USER":     "test",
-			"POSTGRES_PASSWORD": "test",
-			"POSTGRES_DB":       "testdb",
+			"POSTGRES_USER":     config.User,
+			"POSTGRES_PASSWORD": config.Password,
+			"POSTGRES_DB":       config.Database,
 		},
 		WaitingFor: wait.ForLog("database system is ready to accept connections").
 			WithOccurrence(2).
@@ -675,12 +698,26 @@ func startPostgres(t *testing.T, ctx context.Context) (testcontainers.Container,
 
 	host, _ := container.Host(ctx)
 	port, _ := container.MappedPort(ctx, "5432")
+	config.Host = host
+	config.Port = port.Port()
 
-	return container, fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
+	return container, config
 }
 
-func startRedis(t *testing.T, ctx context.Context) (testcontainers.Container, string) {
+// RedisTestConfig contains all configuration needed to connect to test Redis.
+type RedisTestConfig struct {
+	Addr     string
+	Password string
+	DB       int
+}
+
+func startRedis(t *testing.T, ctx context.Context) (testcontainers.Container, RedisTestConfig) {
 	t.Helper()
+
+	config := RedisTestConfig{
+		Password: "",
+		DB:       0,
+	}
 
 	req := testcontainers.ContainerRequest{
 		Image:        "redis:8.0-M04-alpine",
@@ -698,12 +735,23 @@ func startRedis(t *testing.T, ctx context.Context) (testcontainers.Container, st
 
 	host, _ := container.Host(ctx)
 	port, _ := container.MappedPort(ctx, "6379")
+	config.Addr = fmt.Sprintf("%s:%s", host, port.Port())
 
-	return container, fmt.Sprintf("%s:%s", host, port.Port())
+	return container, config
 }
 
-func startLocalStack(t *testing.T, ctx context.Context) (testcontainers.Container, string) {
+// LocalStackTestConfig contains all configuration needed to connect to test LocalStack.
+type LocalStackTestConfig struct {
+	Endpoint string
+	Region   string
+}
+
+func startLocalStack(t *testing.T, ctx context.Context) (testcontainers.Container, LocalStackTestConfig) {
 	t.Helper()
+
+	config := LocalStackTestConfig{
+		Region: "us-east-1",
+	}
 
 	req := testcontainers.ContainerRequest{
 		Image:        "localstack/localstack:latest",
@@ -727,8 +775,9 @@ func startLocalStack(t *testing.T, ctx context.Context) (testcontainers.Containe
 
 	host, _ := container.Host(ctx)
 	port, _ := container.MappedPort(ctx, "4566")
+	config.Endpoint = fmt.Sprintf("http://%s:%s", host, port.Port())
 
-	return container, fmt.Sprintf("http://%s:%s", host, port.Port())
+	return container, config
 }
 
 func createSNSTopics(t *testing.T, ctx context.Context, client *sns.Client) map[string]string {

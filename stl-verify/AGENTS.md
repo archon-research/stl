@@ -85,8 +85,8 @@ gofmt -w .
 goimports -w .
 ```
 
-### Building
-When building binaries, always output the binary to stl/dist.
+### Compiling
+When Compiling binaries, always output the binary to stl/dist.
 
 ## Do NOT
 
