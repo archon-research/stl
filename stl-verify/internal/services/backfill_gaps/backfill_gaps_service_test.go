@@ -555,8 +555,10 @@ func TestBackfillService_ReorgDuringDowntime_CannotMakeProgress(t *testing.T) {
 		saveBlockState(t, ctx, stateRepo, i, hashWithSuffix(i, "_old"), parentHash)
 	}
 
-	// RPC has a reorged chain for 103+; we only need the missing blocks.
-	client.setBlockHeader(106, hashWithSuffix(106, "_new"), hashWithSuffix(105, "_new"))
+	// RPC returns the missing blocks on a different chain segment (i.e., the DB boundary at 105 is stale).
+	// We only stub 106-107 because those are the missing heights; the key is that 106's parent does not match
+	// the hash of DB block 105.
+	client.setBlockHeader(106, hashWithSuffix(106, "_new"), hashWithSuffix(105, "_new")) // Note: 106_new parent is not 105_old
 	client.setBlockHeader(107, hashWithSuffix(107, "_new"), hashWithSuffix(106, "_new"))
 
 	config := BackfillConfig{
