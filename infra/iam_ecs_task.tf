@@ -14,7 +14,7 @@ data "aws_iam_policy_document" "s3_access_assume_role" {
 
 # IAM Role
 resource "aws_iam_role" "ethereum_raw_data_access" {
-  name               = "stl-ethereum-raw-data-access"
+  name               = "${local.prefix}-ethereum-raw-data-access"
   assume_role_policy = data.aws_iam_policy_document.s3_access_assume_role.json
 }
 
@@ -58,7 +58,7 @@ data "aws_iam_policy_document" "s3_read_write" {
 }
 
 resource "aws_iam_policy" "ethereum_raw_data_access" {
-  name        = "stl-ethereum-raw-data-access"
+  name        = "${local.prefix}-ethereum-raw-data-access"
   description = "Read and write access to alchemy-ethereum-raw S3 bucket"
   policy      = data.aws_iam_policy_document.s3_read_write.json
 }

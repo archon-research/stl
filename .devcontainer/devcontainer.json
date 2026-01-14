@@ -1,20 +1,34 @@
 {
   "name": "stl-verify",
   "image": "mcr.microsoft.com/devcontainers/go:1.25",
+  "features": {
+    "ghcr.io/devcontainers/features/terraform:1": {
+      "version": "latest",
+      "installTFsec": true,
+      "installTerraformDocs": true
+    },
+    "ghcr.io/devcontainers/features/aws-cli:1": {}
+  },
   "customizations": {
     "vscode": {
       "extensions": [
         "golang.go",
         "github.copilot",
         "github.copilot-chat",
-        "redhat.vscode-yaml"
+        "redhat.vscode-yaml",
+        "hashicorp.terraform"
       ],
       "settings": {
         "go.useLanguageServer": true,
         "go.lintTool": "golangci-lint",
-        "go.lintFlags": ["--fast"],
+        "go.lintFlags": [
+          "--fast"
+        ],
         "go.formatTool": "goimports",
-        "go.testFlags": ["-v", "-race"],
+        "go.testFlags": [
+          "-v",
+          "-race"
+        ],
         "go.coverOnSave": false,
         "go.coverageDecorator": {
           "type": "gutter"
