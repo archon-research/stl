@@ -615,11 +615,11 @@ func TestBackfillService_ReorgDuringDowntime_RecoveryWithBoundaryCheck(t *testin
 		parentHash := hashWithSuffix(i-1, "_old")
 		client.setBlockHeader(i, hashWithSuffix(i, "_old"), parentHash)
 	}
-	
+
 	// RPC: 103-105 are on a new chain (different hashes and parent links)
 	for i := int64(103); i <= 105; i++ {
 		newParentHash := hashWithSuffix(i-1, "_new")
-		
+
 		// Special case: 103's parent should point to 102_old to link to the existing chain
 		if i == 103 {
 			newParentHash = hashWithSuffix(102, "_old")
