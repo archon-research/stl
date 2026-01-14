@@ -1,13 +1,9 @@
 terraform {
   required_version = "~> 1.0"
 
-  backend "s3" {
-    bucket         = "stl-sentinelstaging-terraform-state"
-    key            = "infra/terraform.tfstate"
-    region         = "eu-west-1"
-    encrypt        = true
-    dynamodb_table = "stl-sentinelstaging-terraform-locks"
-  }
+  # Backend configured via -backend-config file per environment
+  # Usage: tofu init -backend-config=environments/sentinelstaging.backend.hcl
+  backend "s3" {}
 
   required_providers {
     aws = {

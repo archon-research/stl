@@ -1,6 +1,13 @@
-# Random suffix to ensure bucket name uniqueness
+# Deterministic suffix based on project/environment/region
+# Only regenerates if these values change
 resource "random_id" "bucket_suffix" {
   byte_length = 4
+
+  keepers = {
+    project     = var.project_name
+    environment = var.environment
+    region      = var.aws_region
+  }
 }
 
 locals {

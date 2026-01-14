@@ -6,7 +6,7 @@
 #   tofu init -migrate-state
 
 locals {
-  state_bucket_name = "${local.prefix_lowercase}-terraform-state"
+  state_bucket_name = "${local.prefix_lowercase}-terraform-state-${random_id.bucket_suffix.hex}"
   locks_table_name  = "${local.prefix_lowercase}-terraform-locks"
 }
 
