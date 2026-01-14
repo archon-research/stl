@@ -88,7 +88,7 @@ func setupPostgres(t *testing.T) (*BlockStateRepository, func()) {
 // should be silently ignored rather than updating the row.
 func TestSaveBlock_DuplicateHashIsIdempotent(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -151,7 +151,7 @@ func TestSaveBlock_DuplicateHashIsIdempotent(t *testing.T) {
 // All in a single transaction.
 func TestHandleReorgAtomic_AllOrNothingSemantics(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -266,7 +266,7 @@ func TestHandleReorgAtomic_AllOrNothingSemantics(t *testing.T) {
 // TestGetLastBlock tests retrieving the most recent canonical block.
 func TestGetLastBlock(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -328,7 +328,7 @@ func TestGetLastBlock(t *testing.T) {
 // TestGetBlockByNumber tests retrieving canonical blocks by number.
 func TestGetBlockByNumber(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -397,7 +397,7 @@ func TestGetBlockByNumber(t *testing.T) {
 // TestGetBlockByHash tests retrieving blocks by hash (including orphaned).
 func TestGetBlockByHash(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -442,7 +442,7 @@ func TestGetBlockByHash(t *testing.T) {
 // TestGetBlockVersionCount tests version counting for reorg scenarios.
 func TestGetBlockVersionCount(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -497,7 +497,7 @@ func TestGetBlockVersionCount(t *testing.T) {
 // TestGetRecentBlocks tests retrieving recent canonical blocks.
 func TestGetRecentBlocks(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -554,7 +554,7 @@ func TestGetRecentBlocks(t *testing.T) {
 // TestMinMaxBlockNumber tests GetMinBlockNumber and GetMaxBlockNumber.
 func TestMinMaxBlockNumber(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -633,7 +633,7 @@ func TestMinMaxBlockNumber(t *testing.T) {
 // TestMarkPublishComplete tests marking publish types as complete.
 func TestMarkPublishComplete(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -699,7 +699,7 @@ func TestMarkPublishComplete(t *testing.T) {
 // TestGetBlocksWithIncompletePublish tests finding blocks needing republish.
 func TestGetBlocksWithIncompletePublish(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -779,7 +779,7 @@ func TestGetBlocksWithIncompletePublish(t *testing.T) {
 // TestHandleReorgAtomic_Idempotency tests that HandleReorgAtomic is idempotent.
 func TestHandleReorgAtomic_Idempotency(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -829,7 +829,7 @@ func TestHandleReorgAtomic_Idempotency(t *testing.T) {
 // TestBackfillWatermark tests GetBackfillWatermark and SetBackfillWatermark.
 func TestBackfillWatermark(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -875,7 +875,7 @@ func TestBackfillWatermark(t *testing.T) {
 // TestFindGaps tests gap detection in block sequences.
 func TestFindGaps(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -906,7 +906,7 @@ func TestFindGaps(t *testing.T) {
 // TestFindGaps_WithGap tests gap detection with missing blocks.
 func TestFindGaps_WithGap(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -944,7 +944,7 @@ func TestFindGaps_WithGap(t *testing.T) {
 // TestFindGaps_WatermarkSkipsVerifiedBlocks tests that watermark optimizes gap detection.
 func TestFindGaps_WatermarkSkipsVerifiedBlocks(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -983,7 +983,7 @@ func TestFindGaps_WatermarkSkipsVerifiedBlocks(t *testing.T) {
 // TestFindGaps_InvalidRange tests FindGaps with invalid range.
 func TestFindGaps_InvalidRange(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -1000,7 +1000,7 @@ func TestFindGaps_InvalidRange(t *testing.T) {
 // TestFindGaps_WatermarkCoversRange tests when watermark covers entire range.
 func TestFindGaps_WatermarkCoversRange(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -1023,7 +1023,7 @@ func TestFindGaps_WatermarkCoversRange(t *testing.T) {
 // TestFindGaps_GapAtBeginning tests gap detection when first block is missing.
 func TestFindGaps_GapAtBeginning(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -1056,7 +1056,7 @@ func TestFindGaps_GapAtBeginning(t *testing.T) {
 // TestFindGaps_IgnoresOrphanedBlocks tests that orphaned blocks are treated as gaps.
 func TestFindGaps_IgnoresOrphanedBlocks(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -1095,7 +1095,7 @@ func TestFindGaps_IgnoresOrphanedBlocks(t *testing.T) {
 // TestVerifyChainIntegrity tests chain integrity verification.
 func TestVerifyChainIntegrity(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -1123,7 +1123,7 @@ func TestVerifyChainIntegrity(t *testing.T) {
 // TestVerifyChainIntegrity_BrokenChain tests detection of broken chain links.
 func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -1157,7 +1157,7 @@ func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
 // TestVerifyChainIntegrity_EmptyRange tests chain verification with fromBlock >= toBlock.
 func TestVerifyChainIntegrity_EmptyRange(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -1179,7 +1179,7 @@ func TestVerifyChainIntegrity_EmptyRange(t *testing.T) {
 // TestVerifyChainIntegrity_IgnoresOrphanedBlocks tests that orphaned blocks are excluded.
 func TestVerifyChainIntegrity_IgnoresOrphanedBlocks(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -1222,7 +1222,7 @@ func TestVerifyChainIntegrity_IgnoresOrphanedBlocks(t *testing.T) {
 // TestMarkPublishComplete_InvalidType tests MarkPublishComplete with invalid type.
 func TestMarkPublishComplete_InvalidType(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -1248,7 +1248,7 @@ func TestMarkPublishComplete_InvalidType(t *testing.T) {
 // with retry logic when unique constraint violations occur.
 func TestSaveBlock_ConcurrentRaceConditionWithRetry(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 	const blockNum int64 = 100
@@ -1313,7 +1313,7 @@ func TestSaveBlock_ConcurrentRaceConditionWithRetry(t *testing.T) {
 // TestGetRecentBlocks_EmptyDatabase tests GetRecentBlocks when no blocks exist.
 func TestGetRecentBlocks_EmptyDatabase(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -1329,7 +1329,7 @@ func TestGetRecentBlocks_EmptyDatabase(t *testing.T) {
 // TestHandleReorgAtomic_MultipleBlocksOrphaned tests reorg handling with multiple blocks.
 func TestHandleReorgAtomic_MultipleBlocksOrphaned(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 

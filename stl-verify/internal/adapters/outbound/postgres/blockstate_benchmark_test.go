@@ -50,7 +50,7 @@ func TestLargeDataset_QueryPerformance(t *testing.T) {
 	t.Logf("Running benchmark with %d rows (set BENCH_ROW_COUNT to override)", totalRows)
 
 	repo, cleanup := setupLargePostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
@@ -262,7 +262,7 @@ func TestExplainAnalyze(t *testing.T) {
 	}
 
 	repo, cleanup := setupLargePostgres(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 

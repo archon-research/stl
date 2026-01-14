@@ -278,7 +278,7 @@ func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
 
 	// Set up infrastructure
 	infra := setupTestInfrastructure(t, ctx)
-	defer infra.Cleanup()
+	t.Cleanup(infra.Cleanup)
 
 	// Create mock subscriber that will emit blocks
 	mockSub := newMockSubscriber()
@@ -388,7 +388,7 @@ func TestEndToEnd_MultipleBlocksInSequence(t *testing.T) {
 	defer cancel()
 
 	infra := setupTestInfrastructure(t, ctx)
-	defer infra.Cleanup()
+	t.Cleanup(infra.Cleanup)
 
 	mockSub := newMockSubscriber()
 	mockClient := newMockBlockchainClient()

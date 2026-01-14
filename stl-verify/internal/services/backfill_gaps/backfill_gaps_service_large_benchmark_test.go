@@ -285,7 +285,7 @@ func (m *largeBenchmarkClient) GetBlocksBatch(ctx context.Context, blockNums []i
 // BenchmarkLargePostgres_FindGaps benchmarks gap detection on a 10M row table.
 func BenchmarkLargePostgres_FindGaps(b *testing.B) {
 	db, repo, cleanup := setupLargePostgres(b)
-	defer cleanup()
+	b.Cleanup(cleanup)
 
 	// Define gap ranges scattered throughout the dataset
 	gapRanges := []outbound.BlockRange{
@@ -428,7 +428,7 @@ func BenchmarkLargePostgres_FindGaps(b *testing.B) {
 // BenchmarkLargePostgres_BackfillService benchmarks the full backfill service on 10M rows.
 func BenchmarkLargePostgres_BackfillService(b *testing.B) {
 	db, repo, cleanup := setupLargePostgres(b)
-	defer cleanup()
+	b.Cleanup(cleanup)
 
 	// Create a small gap to backfill (we don't want to backfill thousands of blocks each iteration)
 	gapRanges := []outbound.BlockRange{
@@ -510,7 +510,7 @@ func BenchmarkLargePostgres_BackfillService(b *testing.B) {
 // This is not a traditional benchmark but provides query planning insights.
 func BenchmarkLargePostgres_QueryAnalysis(b *testing.B) {
 	db, repo, cleanup := setupLargePostgres(b)
-	defer cleanup()
+	b.Cleanup(cleanup)
 
 	gapRanges := []outbound.BlockRange{
 		{From: 5_000_000, To: 5_000_099},
