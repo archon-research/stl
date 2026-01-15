@@ -57,45 +57,56 @@ resource "aws_s3_bucket_ownership_controls" "main" {
   }
 }
 
-# Enforce SSL/TLS for all requests
+# Policy to enforce SSL/TLS for all requests
+data "aws_iam_policy_document" "enforce_ssl" {
+  statement {
+    sid    = "EnforceSSLOnly"
+    effect = "Deny"
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    actions = ["s3:*"]
+    resources = [
+      aws_s3_bucket.main.arn,
+      "${aws_s3_bucket.main.arn}/*"
+    ]
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    sid    = "EnforceTLSVersion"
+    effect = "Deny"
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    actions = ["s3:*"]
+    resources = [
+      aws_s3_bucket.main.arn,
+      "${aws_s3_bucket.main.arn}/*"
+    ]
+
+    condition {
+      test     = "NumericLessThan"
+      variable = "s3:TlsVersion"
+      values   = ["1.2"]
+    }
+  }
+}
+
 resource "aws_s3_bucket_policy" "enforce_ssl" {
   bucket = aws_s3_bucket.main.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid       = "EnforceSSLOnly"
-        Effect    = "Deny"
-        Principal = "*"
-        Action    = "s3:*"
-        Resource = [
-          aws_s3_bucket.main.arn,
-          "${aws_s3_bucket.main.arn}/*"
-        ]
-        Condition = {
-          Bool = {
-            "aws:SecureTransport" = "false"
-          }
-        }
-      },
-      {
-        Sid       = "EnforceTLSVersion"
-        Effect    = "Deny"
-        Principal = "*"
-        Action    = "s3:*"
-        Resource = [
-          aws_s3_bucket.main.arn,
-          "${aws_s3_bucket.main.arn}/*"
-        ]
-        Condition = {
-          NumericLessThan = {
-            "s3:TlsVersion" = "1.2"
-          }
-        }
-      }
-    ]
-  })
+  policy = data.aws_iam_policy_document.enforce_ssl.json
 
   # Ensure public access block is applied first
   depends_on = [aws_s3_bucket_public_access_block.main]
