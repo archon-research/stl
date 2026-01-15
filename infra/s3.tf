@@ -11,10 +11,8 @@ resource "random_id" "bucket_suffix" {
 }
 
 locals {
-  # Standard naming prefix: ${project}-${environment}
-  prefix           = "${var.project_name}-${var.environment}"
-  prefix_lowercase = lower(local.prefix)
-  bucket_name      = "${local.prefix_lowercase}-ethereum-raw-${random_id.bucket_suffix.hex}"
+  # S3-specific locals
+  bucket_name = "${local.prefix_lowercase}-ethereum-raw-${random_id.bucket_suffix.hex}"
 }
 
 # S3 Bucket - configured to never be deleted and fully private
