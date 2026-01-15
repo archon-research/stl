@@ -389,7 +389,7 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 	// Check if block already exists in DB (idempotency)
 	existing, err := s.stateRepo.GetBlockByHash(ctx, header.Hash)
 	if err != nil {
-		return fmt.Errorf("failed to check for existing block: %w", err)
+		return fmt.Errorf("failed to check for existing block %d: %w", blockNum, err)
 	}
 	if existing != nil {
 		s.logger.Debug("block already exists, skipping", "block", blockNum)
