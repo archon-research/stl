@@ -1,7 +1,9 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test lint vet fmt tidy check clean cover run help
+.PHONY: all test lint vet fmt tidy check clean cover run help \
+        tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
+        tf-init-staging tf-validate-staging tf-plan-staging tf-apply-staging tf-check-staging
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -78,3 +80,55 @@ tools:
 
 # CI target: everything with strict checks
 ci: test-race vet fmt-check tidy staticcheck vulncheck golangci-lint
+
+# =============================================================================
+# Terraform Commands
+# =============================================================================
+
+INFRA_DIR := ../infra
+
+# Initialize Terraform for an environment
+# Usage: make tf-init ENV=sentinelstaging
+tf-init:
+	@echo "==> Initializing Terraform for $(ENV)..."
+	cd $(INFRA_DIR) && tofu init -backend-config=environments/$(ENV).backend.hcl -reconfigure
+
+# Validate Terraform configuration
+# Usage: make tf-validate ENV=sentinelstaging
+tf-validate:
+	@echo "==> Validating Terraform for $(ENV)..."
+	cd $(INFRA_DIR) && tofu validate
+
+# Plan Terraform changes
+# Usage: make tf-plan ENV=sentinelstaging
+tf-plan:
+	@echo "==> Planning Terraform for $(ENV)..."
+	cd $(INFRA_DIR) && tofu plan -var-file=environments/$(ENV).tfvars
+
+# Apply Terraform changes
+# Usage: make tf-apply ENV=sentinelstaging
+tf-apply:
+	@echo "==> Applying Terraform for $(ENV)..."
+	cd $(INFRA_DIR) && tofu apply -var-file=environments/$(ENV).tfvars
+
+# Full Terraform workflow: init, validate, plan
+# Usage: make tf-check ENV=sentinelstaging
+tf-check: tf-init tf-validate tf-plan
+
+# =============================================================================
+# Sentinelstaging Shortcuts
+# =============================================================================
+
+tf-init-staging:
+	@$(MAKE) tf-init ENV=sentinelstaging
+
+tf-validate-staging:
+	@$(MAKE) tf-validate ENV=sentinelstaging
+
+tf-plan-staging:
+	@$(MAKE) tf-plan ENV=sentinelstaging
+
+tf-apply-staging:
+	@$(MAKE) tf-apply ENV=sentinelstaging
+
+tf-check-staging: tf-init-staging tf-validate-staging tf-plan-staging
