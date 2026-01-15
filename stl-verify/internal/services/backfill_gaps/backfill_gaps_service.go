@@ -32,6 +32,10 @@ type BackfillConfig struct {
 	// PollInterval is how often to check for gaps when running continuously.
 	PollInterval time.Duration
 
+	// BoundaryCheckDepth is how many recent blocks to verify against RPC before backfilling.
+	// This detects reorgs that happened while the service was down.
+	BoundaryCheckDepth int
+
 	// Logger is the structured logger.
 	Logger *slog.Logger
 }
@@ -39,10 +43,11 @@ type BackfillConfig struct {
 // BackfillConfigDefaults returns default configuration.
 func BackfillConfigDefaults() BackfillConfig {
 	return BackfillConfig{
-		ChainID:      1,
-		BatchSize:    10,
-		PollInterval: 30 * time.Second,
-		Logger:       slog.Default(),
+		ChainID:            1,
+		BatchSize:          10,
+		PollInterval:       30 * time.Second,
+		BoundaryCheckDepth: 10,
+		Logger:             slog.Default(),
 	}
 }
 
@@ -93,6 +98,10 @@ func NewBackfillService(
 	}
 	if config.PollInterval == 0 {
 		config.PollInterval = defaults.PollInterval
+	}
+	// BoundaryCheckDepth: 0 = use default, > 0 = use value, < 0 = disabled
+	if config.BoundaryCheckDepth == 0 {
+		config.BoundaryCheckDepth = defaults.BoundaryCheckDepth
 	}
 	if config.Logger == nil {
 		config.Logger = defaults.Logger
@@ -194,6 +203,39 @@ func (s *BackfillService) findAndFillGaps() error {
 		return fmt.Errorf("failed to get min block number: %w", err)
 	}
 
+	// Verify our boundary blocks match the canonical chain on RPC.
+	// This detects reorgs that happened while the service was down.
+	staleBlocks, err := s.verifyBoundaryBlocks(ctx)
+	if err != nil {
+		span.RecordError(err)
+		s.logger.Warn("boundary verification failed", "error", err)
+		// Continue anyway - we'll catch linkage issues per-block
+	} else if len(staleBlocks) > 0 {
+		// We have stale blocks - recover from the reorg before filling gaps
+		span.SetAttributes(attribute.Int("backfill.stale_blocks_detected", len(staleBlocks)))
+		s.logger.Warn("detected stale blocks from reorg during downtime",
+			"staleCount", len(staleBlocks),
+			"oldestStale", staleBlocks[len(staleBlocks)-1].Number,
+			"newestStale", staleBlocks[0].Number)
+
+		if err := s.recoverFromStaleChain(ctx, staleBlocks); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to recover from stale chain")
+			return fmt.Errorf("failed to recover from stale chain: %w", err)
+		}
+
+		// After orphaning stale blocks, we need to backfill up to the current chain head.
+		// Get maxBlock from RPC since our DB's maxBlock is now lower (orphaned blocks excluded).
+		rpcHead, err := s.client.GetCurrentBlockNumber(ctx)
+		if err != nil {
+			s.logger.Warn("failed to get current block from RPC, using DB maxBlock", "error", err)
+		} else if rpcHead > maxBlock {
+			maxBlock = rpcHead
+			s.logger.Info("using RPC head as maxBlock after reorg recovery",
+				"rpcHead", rpcHead)
+		}
+	}
+
 	// Find gaps in our block sequence
 	gaps, err := s.stateRepo.FindGaps(ctx, minBlock, maxBlock)
 	if err != nil {
@@ -239,7 +281,7 @@ func (s *BackfillService) findAndFillGaps() error {
 		default:
 		}
 
-		if err := s.fillGapWithContext(ctx, gap); err != nil {
+		if err := s.fillGapWithTracing(ctx, gap); err != nil {
 			s.logger.Warn("failed to fill gap", "from", gap.From, "to", gap.To, "error", err)
 			// Continue with other gaps
 		}
@@ -255,7 +297,7 @@ func (s *BackfillService) findAndFillGaps() error {
 }
 
 // fillGap fills a single gap range using batched RPC calls.
-func (s *BackfillService) fillGap(gap outbound.BlockRange) error {
+func (s *BackfillService) fillGap(ctx context.Context, gap outbound.BlockRange) error {
 	batchSize := s.config.BatchSize
 	total := gap.To - gap.From + 1
 
@@ -263,8 +305,8 @@ func (s *BackfillService) fillGap(gap outbound.BlockRange) error {
 
 	for batchStart := gap.From; batchStart <= gap.To; batchStart += int64(batchSize) {
 		select {
-		case <-s.ctx.Done():
-			return s.ctx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
 		default:
 		}
 
@@ -273,7 +315,7 @@ func (s *BackfillService) fillGap(gap outbound.BlockRange) error {
 			batchEnd = gap.To
 		}
 
-		if err := s.processBatch(batchStart, batchEnd); err != nil {
+		if err := s.processBatch(ctx, batchStart, batchEnd); err != nil {
 			s.logger.Warn("batch failed", "from", batchStart, "to", batchEnd, "error", err)
 			// Continue with next batch
 		}
@@ -283,8 +325,8 @@ func (s *BackfillService) fillGap(gap outbound.BlockRange) error {
 	return nil
 }
 
-// fillGapWithContext fills a gap with tracing context propagation.
-func (s *BackfillService) fillGapWithContext(ctx context.Context, gap outbound.BlockRange) error {
+// fillGapWithTracing fills a gap with tracing context propagation.
+func (s *BackfillService) fillGapWithTracing(ctx context.Context, gap outbound.BlockRange) error {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "backfill.fillGap",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -296,12 +338,7 @@ func (s *BackfillService) fillGapWithContext(ctx context.Context, gap outbound.B
 	)
 	defer span.End()
 
-	// Temporarily override context for batch processing
-	oldCtx := s.ctx
-	s.ctx = ctx
-	defer func() { s.ctx = oldCtx }()
-
-	err := s.fillGap(gap)
+	err := s.fillGap(ctx, gap)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gap fill failed")
@@ -310,9 +347,7 @@ func (s *BackfillService) fillGapWithContext(ctx context.Context, gap outbound.B
 }
 
 // processBatch fetches and processes a batch of blocks.
-func (s *BackfillService) processBatch(from, to int64) error {
-	ctx := s.ctx
-
+func (s *BackfillService) processBatch(ctx context.Context, from, to int64) error {
 	// Build block numbers for this batch
 	blockNums := make([]int64, 0, to-from+1)
 	for blockNum := from; blockNum <= to; blockNum++ {
@@ -329,7 +364,7 @@ func (s *BackfillService) processBatch(from, to int64) error {
 
 	// Process each block in the batch
 	for _, bd := range blockDataList {
-		if err := s.processBlockData(bd); err != nil {
+		if err := s.processBlockData(ctx, bd); err != nil {
 			s.logger.Warn("failed to process block", "block", bd.BlockNumber, "error", err)
 			// Continue with other blocks
 		}
@@ -339,8 +374,7 @@ func (s *BackfillService) processBatch(from, to int64) error {
 }
 
 // processBlockData processes a single block's data.
-func (s *BackfillService) processBlockData(bd outbound.BlockData) error {
-	ctx := s.ctx
+func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.BlockData) error {
 	blockNum := bd.BlockNumber
 
 	if bd.Block == nil {
@@ -355,8 +389,9 @@ func (s *BackfillService) processBlockData(bd outbound.BlockData) error {
 	// Check if block already exists in DB (idempotency)
 	existing, err := s.stateRepo.GetBlockByHash(ctx, header.Hash)
 	if err != nil {
-		s.logger.Warn("failed to check for existing block", "block", blockNum, "error", err)
-	} else if existing != nil {
+		return fmt.Errorf("failed to check for existing block %d: %w", blockNum, err)
+	}
+	if existing != nil {
 		s.logger.Debug("block already exists, skipping", "block", blockNum)
 		return nil
 	}
@@ -382,13 +417,14 @@ func (s *BackfillService) processBlockData(bd outbound.BlockData) error {
 		ReceivedAt: receivedAt.Unix(),
 		IsOrphaned: false,
 	}
+
 	version, err := s.stateRepo.SaveBlock(ctx, state)
 	if err != nil {
 		return fmt.Errorf("failed to save block state: %w", err)
 	}
 
 	// Cache and publish the data
-	s.cacheAndPublishBlockData(bd, header, version, receivedAt)
+	s.cacheAndPublishBlockData(ctx, bd, header, version, receivedAt)
 
 	return nil
 }
@@ -436,8 +472,98 @@ func truncateHash(hash string) string {
 	return hash
 }
 
+// verifyBoundaryBlocks checks that our most recent blocks match the canonical chain on RPC.
+// This detects reorgs that happened while the service was down.
+//
+// Returns a slice of stale blocks (blocks in our DB that no longer exist on the canonical chain).
+// The slice is ordered from most recent to oldest.
+// Returns empty slice if all boundary blocks are valid or if boundary checking is disabled.
+func (s *BackfillService) verifyBoundaryBlocks(ctx context.Context) ([]outbound.BlockState, error) {
+	depth := s.config.BoundaryCheckDepth
+	if depth <= 0 {
+		// Boundary checking is disabled
+		return nil, nil
+	}
+
+	// Get our most recent N blocks from DB
+	recentBlocks, err := s.stateRepo.GetRecentBlocks(ctx, depth)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get recent blocks: %w", err)
+	}
+
+	if len(recentBlocks) == 0 {
+		return nil, nil
+	}
+
+	var staleBlocks []outbound.BlockState
+
+	// Check each block against RPC - if the hash doesn't exist, the block is stale
+	for _, dbBlock := range recentBlocks {
+		// Query RPC for this block's hash
+		rpcHeader, err := s.client.GetBlockByHash(ctx, dbBlock.Hash, false)
+		if err != nil {
+			// RPC error - log and continue checking other blocks
+			s.logger.Warn("failed to verify block against RPC",
+				"block", dbBlock.Number,
+				"hash", truncateHash(dbBlock.Hash),
+				"error", err)
+			continue
+		}
+
+		if rpcHeader == nil {
+			// Block hash doesn't exist on canonical chain - it's stale!
+			s.logger.Info("detected stale block (hash not found on canonical chain)",
+				"block", dbBlock.Number,
+				"hash", truncateHash(dbBlock.Hash))
+			staleBlocks = append(staleBlocks, dbBlock)
+		}
+	}
+
+	return staleBlocks, nil
+}
+
+// recoverFromStaleChain handles recovery when we detect blocks that are no longer
+// on the canonical chain (due to a reorg that happened while we were offline).
+//
+// This method only marks stale blocks as orphaned. The actual re-fetching of
+// canonical blocks is handled by the normal gap-filling logic in findAndFillGaps,
+// since orphaned blocks are excluded from canonical queries and will appear as gaps.
+func (s *BackfillService) recoverFromStaleChain(ctx context.Context, staleBlocks []outbound.BlockState) error {
+	if len(staleBlocks) == 0 {
+		return nil
+	}
+
+	// Find the lowest stale block number for logging
+	lowestStale := staleBlocks[0].Number
+	for _, block := range staleBlocks {
+		if block.Number < lowestStale {
+			lowestStale = block.Number
+		}
+	}
+
+	s.logger.Info("recovering from stale chain",
+		"lowestStaleBlock", lowestStale,
+		"staleBlockCount", len(staleBlocks))
+
+	// Mark all stale blocks as orphaned
+	// After this, FindGaps will detect these block numbers as missing
+	for _, staleBlock := range staleBlocks {
+		if err := s.stateRepo.MarkBlockOrphaned(ctx, staleBlock.Hash); err != nil {
+			return fmt.Errorf("failed to mark block %d as orphaned: %w", staleBlock.Number, err)
+		}
+		s.logger.Info("marked stale block as orphaned",
+			"block", staleBlock.Number,
+			"hash", truncateHash(staleBlock.Hash))
+	}
+
+	s.logger.Info("stale blocks marked as orphaned, gap filling will re-fetch canonical blocks",
+		"staleBlockCount", len(staleBlocks))
+
+	return nil
+}
+
 // cacheAndPublishBlockData caches pre-fetched data and publishes events.
-func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header outbound.BlockHeader, version int, receivedAt time.Time) {
+func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbound.BlockData, header outbound.BlockHeader, version int, receivedAt time.Time) {
 	chainID := s.config.ChainID
 	blockNum := bd.BlockNumber
 	blockHash := header.Hash
@@ -451,7 +577,7 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.cache.SetBlock(s.ctx, chainID, blockNum, version, bd.Block); err != nil {
+			if err := s.cache.SetBlock(ctx, chainID, blockNum, version, bd.Block); err != nil {
 				s.logger.Warn("failed to cache block", "block", blockNum, "error", err)
 				return
 			}
@@ -466,12 +592,12 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 				CacheKey:       shared.CacheKey(chainID, blockNum, version, "block"),
 				IsBackfill:     true,
 			}
-			if err := s.eventSink.Publish(s.ctx, event); err != nil {
+			if err := s.eventSink.Publish(ctx, event); err != nil {
 				s.logger.Warn("failed to publish block event", "block", blockNum, "error", err)
 				return
 			}
 			// Mark block publish complete for crash recovery tracking
-			if err := s.stateRepo.MarkPublishComplete(s.ctx, blockHash, outbound.PublishTypeBlock); err != nil {
+			if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlock); err != nil {
 				s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
 			}
 		}()
@@ -482,7 +608,7 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.cache.SetReceipts(s.ctx, chainID, blockNum, version, bd.Receipts); err != nil {
+			if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, bd.Receipts); err != nil {
 				s.logger.Warn("failed to cache receipts", "block", blockNum, "error", err)
 				return
 			}
@@ -495,12 +621,12 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 				CacheKey:    shared.CacheKey(chainID, blockNum, version, "receipts"),
 				IsBackfill:  true,
 			}
-			if err := s.eventSink.Publish(s.ctx, event); err != nil {
+			if err := s.eventSink.Publish(ctx, event); err != nil {
 				s.logger.Warn("failed to publish receipts event", "block", blockNum, "error", err)
 				return
 			}
 			// Mark receipts publish complete for crash recovery tracking
-			if err := s.stateRepo.MarkPublishComplete(s.ctx, blockHash, outbound.PublishTypeReceipts); err != nil {
+			if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeReceipts); err != nil {
 				s.logger.Warn("failed to mark receipts publish complete", "block", blockNum, "error", err)
 			}
 		}()
@@ -511,7 +637,7 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.cache.SetTraces(s.ctx, chainID, blockNum, version, bd.Traces); err != nil {
+			if err := s.cache.SetTraces(ctx, chainID, blockNum, version, bd.Traces); err != nil {
 				s.logger.Warn("failed to cache traces", "block", blockNum, "error", err)
 				return
 			}
@@ -524,12 +650,12 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 				CacheKey:    shared.CacheKey(chainID, blockNum, version, "traces"),
 				IsBackfill:  true,
 			}
-			if err := s.eventSink.Publish(s.ctx, event); err != nil {
+			if err := s.eventSink.Publish(ctx, event); err != nil {
 				s.logger.Warn("failed to publish traces event", "block", blockNum, "error", err)
 				return
 			}
 			// Mark traces publish complete for crash recovery tracking
-			if err := s.stateRepo.MarkPublishComplete(s.ctx, blockHash, outbound.PublishTypeTraces); err != nil {
+			if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeTraces); err != nil {
 				s.logger.Warn("failed to mark traces publish complete", "block", blockNum, "error", err)
 			}
 		}()
@@ -540,7 +666,7 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.cache.SetBlobs(s.ctx, chainID, blockNum, version, bd.Blobs); err != nil {
+			if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, bd.Blobs); err != nil {
 				s.logger.Warn("failed to cache blobs", "block", blockNum, "error", err)
 				return
 			}
@@ -553,12 +679,12 @@ func (s *BackfillService) cacheAndPublishBlockData(bd outbound.BlockData, header
 				CacheKey:    shared.CacheKey(chainID, blockNum, version, "blobs"),
 				IsBackfill:  true,
 			}
-			if err := s.eventSink.Publish(s.ctx, event); err != nil {
+			if err := s.eventSink.Publish(ctx, event); err != nil {
 				s.logger.Warn("failed to publish blobs event", "block", blockNum, "error", err)
 				return
 			}
 			// Mark blobs publish complete for crash recovery tracking
-			if err := s.stateRepo.MarkPublishComplete(s.ctx, blockHash, outbound.PublishTypeBlobs); err != nil {
+			if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlobs); err != nil {
 				s.logger.Warn("failed to mark blobs publish complete", "block", blockNum, "error", err)
 			}
 		}()
