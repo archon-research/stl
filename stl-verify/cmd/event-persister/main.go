@@ -109,7 +109,7 @@ type BorrowEventProcessor struct {
 
 func main() {
 	queueURL := flag.String("queue", "", "SQS Queue URL")
-	redisAddr := flag.String("redis", "localhost:6379", "Redis address")
+	redisAddr := flag.String("redis", "", "Redis address")
 	dbURL := flag.String("db", "", "PostgreSQL connection URL")
 	maxMessages := flag.Int("max", 10, "Max messages per poll")
 	waitTime := flag.Int("wait", 20, "Wait time in seconds (long polling)")
@@ -158,10 +158,12 @@ func main() {
 	fullAlchemyURL := fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
 
 	// Get Redis address
-	if *redisAddr == "localhost:6379" {
-		if envRedis := os.Getenv("REDIS_ADDR"); envRedis != "" {
-			*redisAddr = envRedis
-		}
+	if *redisAddr == "" {
+		*redisAddr = os.Getenv("REDIS_ADDR")
+	}
+	if *redisAddr == "" {
+		logger.Error("Redis address not provided (use -redis flag or REDIS_ADDR env var)")
+		os.Exit(1)
 	}
 
 	// Get chain ID
