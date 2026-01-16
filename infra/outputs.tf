@@ -85,8 +85,8 @@ output "worker_security_group_id" {
   value       = aws_security_group.worker.id
 }
 
-output "redis_security_group_id" {
-  description = "ID of the ElastiCache Redis security group"
+output "ethereum_redis_security_group_id" {
+  description = "ID of the Ethereum ElastiCache Redis security group"
   value       = aws_security_group.redis.id
 }
 

@@ -1,20 +1,22 @@
 # =============================================================================
-# ElastiCache Redis Configuration
+# ElastiCache Redis Configuration - Ethereum
 # =============================================================================
-# Redis is used for:
+# Redis cache for Ethereum blockchain:
 # - Block cache (watcher/worker coordination)
+# Note: Each blockchain gets its own cache cluster
 
 # -----------------------------------------------------------------------------
 # Subnet Group
 # -----------------------------------------------------------------------------
 # Redis runs in the isolated subnet (no internet access)
 
-resource "aws_elasticache_subnet_group" "redis" {
-  name       = "${local.prefix}-redis"
+resource "aws_elasticache_subnet_group" "ethereum_redis" {
+  name       = "${local.prefix}-ethereum-redis"
   subnet_ids = [aws_subnet.isolated.id]
 
   tags = {
-    Name = "${local.prefix}-redis-subnet-group"
+    Name       = "${local.prefix}-ethereum-redis-subnet-group"
+    Blockchain = "ethereum"
   }
 }
 
@@ -23,8 +25,8 @@ resource "aws_elasticache_subnet_group" "redis" {
 # -----------------------------------------------------------------------------
 # Custom parameters for our use case
 
-resource "aws_elasticache_parameter_group" "redis" {
-  name   = "${local.prefix}-redis-params"
+resource "aws_elasticache_parameter_group" "ethereum_redis" {
+  name   = "${local.prefix}-ethereum-redis-params"
   family = "redis7"
 
   # Eviction policy: evict least recently used keys when memory is full
@@ -65,36 +67,37 @@ resource "aws_elasticache_parameter_group" "redis" {
   }
 
   tags = {
-    Name = "${local.prefix}-redis-params"
+    Name       = "${local.prefix}-ethereum-redis-params"
+    Blockchain = "ethereum"
   }
 }
 
 # -----------------------------------------------------------------------------
-# ElastiCache Redis Cluster
+# ElastiCache Redis Cluster - Ethereum
 # -----------------------------------------------------------------------------
 
-resource "aws_elasticache_replication_group" "redis" {
-  replication_group_id = "${local.prefix}-redis"
-  description          = "Redis cache for ${var.environment}"
+resource "aws_elasticache_replication_group" "ethereum_redis" {
+  replication_group_id = "${local.prefix}-eth-redis"
+  description          = "Ethereum block cache for ${var.environment}"
 
   # Engine configuration
   engine               = "redis"
   engine_version       = var.redis_engine_version
   node_type            = var.redis_node_type
-  parameter_group_name = aws_elasticache_parameter_group.redis.name
+  parameter_group_name = aws_elasticache_parameter_group.ethereum_redis.name
 
   # Cluster configuration
   num_cache_clusters = var.redis_num_cache_clusters
   port               = 6379
 
   # Network configuration
-  subnet_group_name  = aws_elasticache_subnet_group.redis.name
+  subnet_group_name  = aws_elasticache_subnet_group.ethereum_redis.name
   security_group_ids = [aws_security_group.redis.id]
 
   # Encryption
   at_rest_encryption_enabled = false
   transit_encryption_enabled = var.redis_transit_encryption
-  auth_token                 = var.redis_transit_encryption ? random_password.redis_auth[0].result : null
+  auth_token                 = var.redis_transit_encryption ? random_password.ethereum_redis_auth[0].result : null
 
   # High availability (only for multi-node)
   automatic_failover_enabled = var.redis_num_cache_clusters > 1
@@ -112,8 +115,9 @@ resource "aws_elasticache_replication_group" "redis" {
   apply_immediately = var.environment != "sentinelprod"
 
   tags = {
-    Name        = "${local.prefix}-redis"
+    Name        = "${local.prefix}-ethereum-redis"
     Environment = var.environment
+    Blockchain  = "ethereum"
   }
 
   lifecycle {
@@ -128,36 +132,37 @@ resource "aws_elasticache_replication_group" "redis" {
 # Auth Token (password) for transit encryption
 # -----------------------------------------------------------------------------
 
-resource "random_password" "redis_auth" {
+resource "random_password" "ethereum_redis_auth" {
   count   = var.redis_transit_encryption ? 1 : 0
   length  = 32
   special = false # ElastiCache auth token doesn't support all special chars
 }
 
 # -----------------------------------------------------------------------------
-# Store Redis credentials in Secrets Manager
+# Store Ethereum Redis credentials in Secrets Manager
 # -----------------------------------------------------------------------------
 
-resource "aws_secretsmanager_secret" "redis" {
-  name        = "${local.prefix}-redis"
-  description = "Redis connection details for ${var.environment}"
+resource "aws_secretsmanager_secret" "ethereum_redis" {
+  name        = "${local.prefix}-ethereum-redis"
+  description = "Ethereum Redis connection details for ${var.environment}"
 
   recovery_window_in_days = 7
 
   tags = {
-    Name    = "${local.prefix}-redis"
-    Service = "redis"
+    Name       = "${local.prefix}-ethereum-redis"
+    Service    = "redis"
+    Blockchain = "ethereum"
   }
 }
 
-resource "aws_secretsmanager_secret_version" "redis" {
-  secret_id = aws_secretsmanager_secret.redis.id
+resource "aws_secretsmanager_secret_version" "ethereum_redis" {
+  secret_id = aws_secretsmanager_secret.ethereum_redis.id
   secret_string = jsonencode({
-    host               = aws_elasticache_replication_group.redis.primary_endpoint_address
+    host               = aws_elasticache_replication_group.ethereum_redis.primary_endpoint_address
     port               = 6379
-    auth_token         = var.redis_transit_encryption ? random_password.redis_auth[0].result : null
+    auth_token         = var.redis_transit_encryption ? random_password.ethereum_redis_auth[0].result : null
     transit_encryption = var.redis_transit_encryption
-    reader_endpoint    = var.redis_num_cache_clusters > 1 ? aws_elasticache_replication_group.redis.reader_endpoint_address : null
+    reader_endpoint    = var.redis_num_cache_clusters > 1 ? aws_elasticache_replication_group.ethereum_redis.reader_endpoint_address : null
   })
 
   lifecycle {
@@ -169,9 +174,9 @@ resource "aws_secretsmanager_secret_version" "redis" {
 # IAM Policy for reading Redis secret
 # -----------------------------------------------------------------------------
 
-data "aws_iam_policy_document" "redis_secret_read" {
+data "aws_iam_policy_document" "ethereum_redis_secret_read" {
   statement {
-    sid    = "ReadRedisSecret"
+    sid    = "ReadEthereumRedisSecret"
     effect = "Allow"
 
     actions = [
@@ -179,38 +184,38 @@ data "aws_iam_policy_document" "redis_secret_read" {
     ]
 
     resources = [
-      aws_secretsmanager_secret.redis.arn,
+      aws_secretsmanager_secret.ethereum_redis.arn,
     ]
   }
 }
 
-resource "aws_iam_policy" "redis_secret_read" {
-  name        = "${local.prefix}-redis-secret-read"
-  description = "Allows reading Redis credentials from Secrets Manager"
-  policy      = data.aws_iam_policy_document.redis_secret_read.json
+resource "aws_iam_policy" "ethereum_redis_secret_read" {
+  name        = "${local.prefix}-ethereum-redis-secret-read"
+  description = "Allows reading Ethereum Redis credentials from Secrets Manager"
+  policy      = data.aws_iam_policy_document.ethereum_redis_secret_read.json
 }
 
-resource "aws_iam_role_policy_attachment" "redis_secret_access" {
+resource "aws_iam_role_policy_attachment" "ethereum_redis_secret_access" {
   role       = aws_iam_role.ethereum_raw_data_access.name
-  policy_arn = aws_iam_policy.redis_secret_read.arn
+  policy_arn = aws_iam_policy.ethereum_redis_secret_read.arn
 }
 
 # -----------------------------------------------------------------------------
 # Outputs
 # -----------------------------------------------------------------------------
 
-output "redis_endpoint" {
-  description = "Redis primary endpoint"
-  value       = aws_elasticache_replication_group.redis.primary_endpoint_address
+output "ethereum_redis_endpoint" {
+  description = "Ethereum Redis primary endpoint"
+  value       = aws_elasticache_replication_group.ethereum_redis.primary_endpoint_address
   sensitive   = true
 }
 
-output "redis_port" {
-  description = "Redis port"
+output "ethereum_redis_port" {
+  description = "Ethereum Redis port"
   value       = 6379
 }
 
-output "redis_secret_arn" {
-  description = "ARN of the Redis credentials secret"
-  value       = aws_secretsmanager_secret.redis.arn
+output "ethereum_redis_secret_arn" {
+  description = "ARN of the Ethereum Redis credentials secret"
+  value       = aws_secretsmanager_secret.ethereum_redis.arn
 }
