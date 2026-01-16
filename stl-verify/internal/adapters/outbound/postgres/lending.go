@@ -1,14 +1,3 @@
-// lending.go provides a PostgreSQL implementation for lending protocol data.
-//
-// This repository persists borrower positions and collateral data to PostgreSQL.
-// It supports:
-//   - Automatic schema migration via embedded SQL
-//   - Auto-creation of users, tokens, and protocols
-//   - Borrower position tracking with reorg support (block_version)
-//   - Collateral position tracking
-//
-// The schema is defined in migrations/002_lending_protocol_tables.sql and is
-// automatically applied via the Migrate() method.
 package postgres
 
 import (
@@ -22,17 +11,12 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-//go:embed migrations/002_lending_protocol_tables.sql
-var lendingSchema string
-
-// LendingRepository handles all lending protocol database operations.
 type LendingRepository struct {
 	db      *sql.DB
 	chainID int64
 	logger  *slog.Logger
 }
 
-// NewLendingRepository creates a new lending repository.
 func NewLendingRepository(db *sql.DB, chainID int64, logger *slog.Logger) *LendingRepository {
 	if logger == nil {
 		logger = slog.Default()
@@ -44,32 +28,19 @@ func NewLendingRepository(db *sql.DB, chainID int64, logger *slog.Logger) *Lendi
 	}
 }
 
-// Migrate creates the lending protocol tables if they don't exist.
-func (r *LendingRepository) Migrate(ctx context.Context) error {
-	_, err := r.db.ExecContext(ctx, lendingSchema)
-	if err != nil {
-		return fmt.Errorf("failed to migrate lending schema: %w", err)
-	}
-	return nil
-}
-
-// BeginTx starts a new database transaction.
 func (r *LendingRepository) BeginTx(ctx context.Context) (*sql.Tx, error) {
 	return r.db.BeginTx(ctx, nil)
 }
 
-// EnsureUser creates a user if it doesn't exist and returns the user ID.
 func (r *LendingRepository) EnsureUser(ctx context.Context, tx *sql.Tx, address common.Address) (int64, error) {
 	var userID int64
-	addressHex := strings.ToLower(address.Hex()) // Store as lowercase hex string
+	addressHex := strings.ToLower(address.Hex())
 
-	// Try to get existing user
 	err := tx.QueryRowContext(ctx,
 		`SELECT id FROM users WHERE chain_id = $1 AND address = $2`,
 		r.chainID, addressHex).Scan(&userID)
 
 	if err == sql.ErrNoRows {
-		// Create new user
 		err = tx.QueryRowContext(ctx,
 			`INSERT INTO users (chain_id, address, first_seen_block, created_at, updated_at)
 			 VALUES ($1, $2, $3, NOW(), NOW())
@@ -86,7 +57,6 @@ func (r *LendingRepository) EnsureUser(ctx context.Context, tx *sql.Tx, address 
 	return userID, nil
 }
 
-// GetOrCreateToken gets an existing token or creates it with the provided decimals.
 func (r *LendingRepository) GetOrCreateToken(ctx context.Context, tx *sql.Tx, address common.Address, decimals int) (int64, error) {
 	var tokenID int64
 	addressHex := strings.ToLower(address.Hex())
@@ -96,7 +66,6 @@ func (r *LendingRepository) GetOrCreateToken(ctx context.Context, tx *sql.Tx, ad
 		r.chainID, addressHex).Scan(&tokenID)
 
 	if err == sql.ErrNoRows {
-		// Auto-create token with provided decimals
 		r.logger.Info("auto-creating token", "address", address.Hex(), "decimals", decimals)
 		err = tx.QueryRowContext(ctx,
 			`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block)
@@ -115,7 +84,6 @@ func (r *LendingRepository) GetOrCreateToken(ctx context.Context, tx *sql.Tx, ad
 	return tokenID, nil
 }
 
-// GetOrCreateProtocol gets an existing protocol or creates it with default values.
 func (r *LendingRepository) GetOrCreateProtocol(ctx context.Context, tx *sql.Tx, address common.Address) (int64, error) {
 	var protocolID int64
 	addressHex := strings.ToLower(address.Hex())
@@ -125,7 +93,6 @@ func (r *LendingRepository) GetOrCreateProtocol(ctx context.Context, tx *sql.Tx,
 		r.chainID, addressHex).Scan(&protocolID)
 
 	if err == sql.ErrNoRows {
-		// Auto-create protocol with default values
 		r.logger.Info("auto-creating protocol", "address", address.Hex())
 		err = tx.QueryRowContext(ctx,
 			`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
@@ -144,8 +111,6 @@ func (r *LendingRepository) GetOrCreateProtocol(ctx context.Context, tx *sql.Tx,
 	return protocolID, nil
 }
 
-// SaveBorrower inserts or updates a borrower position.
-// amount should be the decimal-adjusted amount as a string (e.g., "1000.50" for USDC)
 func (r *LendingRepository) SaveBorrower(ctx context.Context, tx *sql.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount string) error {
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO borrowers (user_id, protocol_id, token_id, block_number, block_version, amount, change, created_at)
@@ -160,8 +125,6 @@ func (r *LendingRepository) SaveBorrower(ctx context.Context, tx *sql.Tx, userID
 	return nil
 }
 
-// SaveBorrowerCollateral inserts or updates a collateral position.
-// amount should be the decimal-adjusted amount as a string (e.g., "5000.123456" for USDC)
 func (r *LendingRepository) SaveBorrowerCollateral(ctx context.Context, tx *sql.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount string) error {
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, created_at)
