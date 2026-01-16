@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -21,14 +22,12 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/joho/godotenv"
-	_ "github.com/lib/pq"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 )
 
-// Metadata from SQS
 type ReceiptMetadata struct {
 	ChainId     int64  `json:"chainId"`
 	BlockNumber int64  `json:"blockNumber"`
@@ -76,7 +75,6 @@ type SNSMessage struct {
 	Timestamp string `json:"Timestamp"`
 }
 
-// UserReserveData from Aave V3 UIPoolDataProvider
 type UserReserveData struct {
 	UnderlyingAsset                 common.Address
 	ScaledATokenBalance             *big.Int
@@ -101,10 +99,16 @@ type BorrowEventProcessor struct {
 	getUserReservesABI    *abi.ABI
 	getReserveDataABI     *abi.ABI
 	erc20DecimalsABI      *abi.ABI
-	seenTxs               map[string]bool
 	uiPoolDataProvider    common.Address
 	poolAddressesProvider common.Address
 	aavePool              common.Address
+	eventSignatures       map[common.Hash]*abi.Event
+}
+
+type collateralData struct {
+	asset         common.Address
+	decimals      int
+	actualBalance *big.Int
 }
 
 func main() {
@@ -126,11 +130,6 @@ func main() {
 		}))
 	}
 
-	// Load environment
-	_ = godotenv.Load(".env")
-	_ = godotenv.Load(".env.local")
-
-	// Get queue URL
 	if *queueURL == "" {
 		*queueURL = os.Getenv("AWS_SQS_QUEUE_RECEIPTS")
 	}
@@ -139,7 +138,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Get database URL
 	if *dbURL == "" {
 		*dbURL = os.Getenv("DATABASE_URL")
 	}
@@ -148,7 +146,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Get Alchemy configuration
 	alchemyAPIKey := os.Getenv("ALCHEMY_API_KEY")
 	if alchemyAPIKey == "" {
 		logger.Error("ALCHEMY_API_KEY environment variable is required")
@@ -157,7 +154,6 @@ func main() {
 	alchemyHTTPURL := getEnv("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
 	fullAlchemyURL := fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
 
-	// Get Redis address
 	if *redisAddr == "" {
 		*redisAddr = os.Getenv("REDIS_ADDR")
 	}
@@ -166,13 +162,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Get chain ID
 	chainIDStr := os.Getenv("CHAIN_ID")
 	if chainIDStr == "" {
-		chainIDStr = "1" // Default to mainnet
+		chainIDStr = "1"
 	}
 	var chainID int64 = 1
-	fmt.Sscanf(chainIDStr, "%d", &chainID)
+	_, _ = fmt.Sscanf(chainIDStr, "%d", &chainID)
 
 	logger.Info("starting borrow event processor",
 		"queue", *queueURL,
@@ -181,7 +176,6 @@ func main() {
 
 	ctx := context.Background()
 
-	// Create AWS config
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(getEnv("AWS_REGION", "us-east-1")),
 		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
@@ -197,14 +191,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create SQS client
 	sqsClient := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
 		if endpoint := os.Getenv("AWS_SQS_ENDPOINT"); endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
 		}
 	})
 
-	// Create Redis client
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     *redisAddr,
 		Password: getEnv("REDIS_PASSWORD", ""),
@@ -216,7 +208,6 @@ func main() {
 	}
 	logger.Info("connected to Redis")
 
-	// Create Ethereum client
 	ethClient, err := ethclient.Dial(fullAlchemyURL)
 	if err != nil {
 		logger.Error("failed to connect to Ethereum node", "error", err)
@@ -224,8 +215,7 @@ func main() {
 	}
 	logger.Info("connected to Ethereum node")
 
-	// Connect to PostgreSQL
-	db, err := sql.Open("postgres", *dbURL)
+	db, err := sql.Open("pgx", *dbURL)
 	if err != nil {
 		logger.Error("failed to open database", "error", err)
 		os.Exit(1)
@@ -238,13 +228,7 @@ func main() {
 	}
 	logger.Info("connected to PostgreSQL")
 
-	// Create lending repository and run migration
 	lendingRepo := postgres.NewLendingRepository(db, chainID, logger)
-	if err := lendingRepo.Migrate(ctx); err != nil {
-		logger.Error("failed to migrate lending tables", "error", err)
-		os.Exit(1)
-	}
-	logger.Info("lending tables migrated successfully")
 
 	processor := &BorrowEventProcessor{
 		sqsClient:             sqsClient,
@@ -256,23 +240,19 @@ func main() {
 		waitTimeSeconds:       int32(*waitTime),
 		logger:                logger,
 		verbose:               *verbose,
-		seenTxs:               make(map[string]bool),
 		uiPoolDataProvider:    common.HexToAddress("0x56b7A1012765C285afAC8b8F25C69Bf10ccfE978"),
 		poolAddressesProvider: common.HexToAddress("0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e"),
 		aavePool:              common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"),
 	}
 
-	// Load ABIs
 	if err := processor.loadABIs(); err != nil {
 		logger.Error("failed to load ABIs", "error", err)
 		os.Exit(1)
 	}
 
-	// Setup graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// Start processing
 	go func() {
 		for {
 			if err := processor.processMessages(ctx); err != nil {
@@ -286,23 +266,22 @@ func main() {
 }
 
 func (p *BorrowEventProcessor) loadABIs() error {
-	// Borrow event ABI
 	borrowEventABI := `[
-		{
-			"anonymous": false,
-			"inputs": [
-				{"indexed": true, "name": "reserve", "type": "address"},
-				{"indexed": false, "name": "user", "type": "address"},
-				{"indexed": true, "name": "onBehalfOf", "type": "address"},
-				{"indexed": false, "name": "amount", "type": "uint256"},
-				{"indexed": false, "name": "interestRateMode", "type": "uint8"},
-				{"indexed": false, "name": "borrowRate", "type": "uint256"},
-				{"indexed": true, "name": "referralCode", "type": "uint16"}
-			],
-			"name": "Borrow",
-			"type": "event"
-		}
-	]`
+       {
+          "anonymous": false,
+          "inputs": [
+             {"indexed": true, "name": "reserve", "type": "address"},
+             {"indexed": false, "name": "user", "type": "address"},
+             {"indexed": true, "name": "onBehalfOf", "type": "address"},
+             {"indexed": false, "name": "amount", "type": "uint256"},
+             {"indexed": false, "name": "interestRateMode", "type": "uint8"},
+             {"indexed": false, "name": "borrowRate", "type": "uint256"},
+             {"indexed": true, "name": "referralCode", "type": "uint16"}
+          ],
+          "name": "Borrow",
+          "type": "event"
+       }
+    ]`
 
 	parsedBorrowABI, err := abi.JSON(strings.NewReader(borrowEventABI))
 	if err != nil {
@@ -310,34 +289,41 @@ func (p *BorrowEventProcessor) loadABIs() error {
 	}
 	p.borrowABI = &parsedBorrowABI
 
-	// UIPoolDataProvider ABI
+	p.eventSignatures = make(map[common.Hash]*abi.Event)
+
+	if borrowEvent, ok := p.borrowABI.Events["Borrow"]; ok {
+		p.eventSignatures[borrowEvent.ID] = &borrowEvent
+	} else {
+		return fmt.Errorf("Borrow event not found in ABI")
+	}
+
 	getUserReservesABI := `[
-		{
-			"inputs": [
-				{"name": "provider", "type": "address"},
-				{"name": "user", "type": "address"}
-			],
-			"name": "getUserReservesData",
-			"outputs": [
-				{
-					"components": [
-						{"name": "underlyingAsset", "type": "address"},
-						{"name": "scaledATokenBalance", "type": "uint256"},
-						{"name": "usageAsCollateralEnabledOnUser", "type": "bool"},
-						{"name": "stableBorrowRate", "type": "uint256"},
-						{"name": "scaledVariableDebt", "type": "uint256"},
-						{"name": "principalStableDebt", "type": "uint256"},
-						{"name": "stableBorrowLastUpdateTimestamp", "type": "uint256"}
-					],
-					"name": "",
-					"type": "tuple[]"
-				},
-				{"name": "", "type": "uint8"}
-			],
-			"stateMutability": "view",
-			"type": "function"
-		}
-	]`
+       {
+          "inputs": [
+             {"name": "provider", "type": "address"},
+             {"name": "user", "type": "address"}
+          ],
+          "name": "getUserReservesData",
+          "outputs": [
+             {
+                "components": [
+                   {"name": "underlyingAsset", "type": "address"},
+                   {"name": "scaledATokenBalance", "type": "uint256"},
+                   {"name": "usageAsCollateralEnabledOnUser", "type": "bool"},
+                   {"name": "stableBorrowRate", "type": "uint256"},
+                   {"name": "scaledVariableDebt", "type": "uint256"},
+                   {"name": "principalStableDebt", "type": "uint256"},
+                   {"name": "stableBorrowLastUpdateTimestamp", "type": "uint256"}
+                ],
+                "name": "",
+                "type": "tuple[]"
+             },
+             {"name": "", "type": "uint8"}
+          ],
+          "stateMutability": "view",
+          "type": "function"
+       }
+    ]`
 
 	parsedGetUserReservesABI, err := abi.JSON(strings.NewReader(getUserReservesABI))
 	if err != nil {
@@ -345,38 +331,37 @@ func (p *BorrowEventProcessor) loadABIs() error {
 	}
 	p.getUserReservesABI = &parsedGetUserReservesABI
 
-	// Pool getReserveData ABI (for liquidity index)
 	getReserveDataABI := `[
-		{
-			"inputs": [{"name": "asset", "type": "address"}],
-			"name": "getReserveData",
-			"outputs": [
-				{
-					"components": [
-						{"name": "configuration", "type": "uint256"},
-						{"name": "liquidityIndex", "type": "uint128"},
-						{"name": "currentLiquidityRate", "type": "uint128"},
-						{"name": "variableBorrowIndex", "type": "uint128"},
-						{"name": "currentVariableBorrowRate", "type": "uint128"},
-						{"name": "currentStableBorrowRate", "type": "uint128"},
-						{"name": "lastUpdateTimestamp", "type": "uint40"},
-						{"name": "id", "type": "uint16"},
-						{"name": "aTokenAddress", "type": "address"},
-						{"name": "stableDebtTokenAddress", "type": "address"},
-						{"name": "variableDebtTokenAddress", "type": "address"},
-						{"name": "interestRateStrategyAddress", "type": "address"},
-						{"name": "accruedToTreasury", "type": "uint128"},
-						{"name": "unbacked", "type": "uint128"},
-						{"name": "isolationModeTotalDebt", "type": "uint128"}
-					],
-					"name": "",
-					"type": "tuple"
-				}
-			],
-			"stateMutability": "view",
-			"type": "function"
-		}
-	]`
+       {
+          "inputs": [{"name": "asset", "type": "address"}],
+          "name": "getReserveData",
+          "outputs": [
+             {
+                "components": [
+                   {"name": "configuration", "type": "uint256"},
+                   {"name": "liquidityIndex", "type": "uint128"},
+                   {"name": "currentLiquidityRate", "type": "uint128"},
+                   {"name": "variableBorrowIndex", "type": "uint128"},
+                   {"name": "currentVariableBorrowRate", "type": "uint128"},
+                   {"name": "currentStableBorrowRate", "type": "uint128"},
+                   {"name": "lastUpdateTimestamp", "type": "uint40"},
+                   {"name": "id", "type": "uint16"},
+                   {"name": "aTokenAddress", "type": "address"},
+                   {"name": "stableDebtTokenAddress", "type": "address"},
+                   {"name": "variableDebtTokenAddress", "type": "address"},
+                   {"name": "interestRateStrategyAddress", "type": "address"},
+                   {"name": "accruedToTreasury", "type": "uint128"},
+                   {"name": "unbacked", "type": "uint128"},
+                   {"name": "isolationModeTotalDebt", "type": "uint128"}
+                ],
+                "name": "",
+                "type": "tuple"
+             }
+          ],
+          "stateMutability": "view",
+          "type": "function"
+       }
+    ]`
 
 	parsedGetReserveDataABI, err := abi.JSON(strings.NewReader(getReserveDataABI))
 	if err != nil {
@@ -384,14 +369,13 @@ func (p *BorrowEventProcessor) loadABIs() error {
 	}
 	p.getReserveDataABI = &parsedGetReserveDataABI
 
-	// ERC20 decimals() ABI
 	erc20DecimalsABI := `[{
-		"inputs": [],
-		"name": "decimals",
-		"outputs": [{"name": "", "type": "uint8"}],
-		"stateMutability": "view",
-		"type": "function"
-	}]`
+       "inputs": [],
+       "name": "decimals",
+       "outputs": [{"name": "", "type": "uint8"}],
+       "stateMutability": "view",
+       "type": "function"
+    }]`
 
 	parsedERC20DecimalsABI, err := abi.JSON(strings.NewReader(erc20DecimalsABI))
 	if err != nil {
@@ -421,7 +405,7 @@ func (p *BorrowEventProcessor) processMessages(ctx context.Context) error {
 		return nil
 	}
 
-	p.logger.Info("📨 received messages", "count", len(result.Messages))
+	p.logger.Info("received messages", "count", len(result.Messages))
 
 	for _, msg := range result.Messages {
 		if err := p.processMessage(ctx, msg); err != nil {
@@ -429,14 +413,13 @@ func (p *BorrowEventProcessor) processMessages(ctx context.Context) error {
 			continue
 		}
 
-		// Delete message
-		//_, err := p.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-		//	QueueUrl:      aws.String(p.queueURL),
-		//	ReceiptHandle: msg.ReceiptHandle,
-		//})
-		//if err != nil {
-		//	p.logger.Error("failed to delete message", "error", err)
-		//}
+		_, deleteErr := p.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+			QueueUrl:      aws.String(p.queueURL),
+			ReceiptHandle: msg.ReceiptHandle,
+		})
+		if deleteErr != nil {
+			p.logger.Error("failed to delete message", "error", deleteErr)
+		}
 	}
 
 	return nil
@@ -462,6 +445,10 @@ func (p *BorrowEventProcessor) processMessage(ctx context.Context, msg types.Mes
 
 func (p *BorrowEventProcessor) fetchAndProcessReceipts(ctx context.Context, metadata ReceiptMetadata) error {
 	receiptsJSON, err := p.redisClient.Get(ctx, metadata.CacheKey).Result()
+	if errors.Is(err, redis.Nil) {
+		p.logger.Warn("cache key expired or not found", "key", metadata.CacheKey)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("failed to fetch from Redis: %w", err)
 	}
@@ -481,50 +468,31 @@ func (p *BorrowEventProcessor) fetchAndProcessReceipts(ctx context.Context, meta
 }
 
 func (p *BorrowEventProcessor) processReceipt(ctx context.Context, receipt TransactionReceipt, blockNumber int64, blockVersion int) error {
-	if p.seenTxs[receipt.TransactionHash] {
-		return nil
-	}
-	p.seenTxs[receipt.TransactionHash] = true
-
-	// Find Borrow events
 	for _, log := range receipt.Logs {
-		if err := p.processBorrowLog(ctx, log, receipt.TransactionHash, blockNumber, blockVersion); err != nil {
-			// Check if it's actually a borrow event that failed to save
-			if strings.Contains(err.Error(), "failed to") {
-				p.logger.Error("failed to process borrow event", "error", err, "tx", receipt.TransactionHash)
-			} else {
-				p.logger.Debug("not a borrow event", "error", err)
-			}
+		if !p.isBorrowEvent(log) {
+			continue
+		}
+
+		if err := p.processBorrowLog(ctx, log, blockNumber, blockVersion); err != nil {
+			p.logger.Error("failed to process borrow event", "error", err, "tx", receipt.TransactionHash)
 		}
 	}
-
 	return nil
 }
 
-func (p *BorrowEventProcessor) processBorrowLog(ctx context.Context, log Log, txHash string, blockNumber int64, blockVersion int) error {
+func (p *BorrowEventProcessor) processBorrowLog(ctx context.Context, log Log, blockNumber int64, blockVersion int) error {
 	if len(log.Topics) == 0 {
 		return fmt.Errorf("no topics")
 	}
 
 	eventSig := common.HexToHash(log.Topics[0])
-
-	// Find Borrow event
-	var borrowEvent *abi.Event
-	for _, event := range p.borrowABI.Events {
-		if event.ID == eventSig {
-			borrowEvent = &event
-			break
-		}
-	}
-
-	if borrowEvent == nil {
+	borrowEvent, ok := p.eventSignatures[eventSig]
+	if !ok {
 		return fmt.Errorf("not a borrow event")
 	}
 
-	// Decode event
 	eventData := make(map[string]interface{})
 
-	// Indexed parameters
 	var indexed abi.Arguments
 	for _, arg := range borrowEvent.Inputs {
 		if arg.Indexed {
@@ -542,7 +510,6 @@ func (p *BorrowEventProcessor) processBorrowLog(ctx context.Context, log Log, tx
 		}
 	}
 
-	// Non-indexed parameters
 	var nonIndexed abi.Arguments
 	for _, arg := range borrowEvent.Inputs {
 		if !arg.Indexed {
@@ -557,10 +524,8 @@ func (p *BorrowEventProcessor) processBorrowLog(ctx context.Context, log Log, tx
 		}
 	}
 
-	// Get contract address (protocol)
 	protocolAddress := common.HexToAddress(log.Address)
 
-	// Save to database
 	return p.saveBorrowEvent(ctx, protocolAddress, eventData, blockNumber, blockVersion)
 }
 
@@ -569,115 +534,117 @@ func (p *BorrowEventProcessor) saveBorrowEvent(ctx context.Context, protocolAddr
 	onBehalfOf := eventData["onBehalfOf"].(common.Address)
 	amount := eventData["amount"].(*big.Int)
 
-	p.logger.Info("💰 Borrow event detected",
+	p.logger.Info("Borrow event detected",
 		"user", onBehalfOf.Hex(),
 		"protocol", protocolAddress.Hex(),
 		"reserve", reserve.Hex(),
 		"amount", amount.String(),
+		"block_version", blockVersion,
 		"block", blockNumber)
 
-	// Start transaction
-	tx, err := p.lendingRepo.BeginTx(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	// 1. Ensure user exists
-	userID, err := p.lendingRepo.EnsureUser(ctx, tx, onBehalfOf)
-	if err != nil {
-		return fmt.Errorf("failed to ensure user: %w", err)
-	}
-
-	// 2. Get or create protocol
-	protocolID, err := p.lendingRepo.GetOrCreateProtocol(ctx, tx, protocolAddress)
-	if err != nil {
-		return fmt.Errorf("failed to get protocol: %w", err)
-	}
-
-	// 3. Get or create token for borrowed asset
 	borrowTokenDecimals, err := p.getTokenDecimals(ctx, reserve)
 	if err != nil {
 		p.logger.Warn("failed to get borrow token decimals, using default 18", "token", reserve.Hex(), "error", err)
 		borrowTokenDecimals = 18
 	}
+
+	reserves, err := p.getUserReservesData(ctx, onBehalfOf, blockNumber)
+	if err != nil {
+		p.logger.Warn("failed to get user reserves", "error", err)
+		reserves = []UserReserveData{}
+	}
+
+	var collaterals []collateralData
+	for _, reserve := range reserves {
+		if reserve.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && reserve.UsageAsCollateralEnabledOnUser {
+			if reserve.UnderlyingAsset == (common.Address{}) {
+				p.logger.Debug("skipping zero address collateral")
+				continue
+			}
+
+			decimals, err := p.getTokenDecimals(ctx, reserve.UnderlyingAsset)
+			if err != nil {
+				p.logger.Warn("failed to get collateral token decimals, using default 18", "token", reserve.UnderlyingAsset.Hex(), "error", err)
+				decimals = 18
+			}
+
+			actualBalance, err := p.getActualBalance(ctx, protocolAddress, reserve.UnderlyingAsset, reserve.ScaledATokenBalance, blockNumber)
+			if err != nil {
+				p.logger.Warn("failed to calculate actual balance, using scaled", "token", reserve.UnderlyingAsset.Hex(), "error", err)
+				actualBalance = reserve.ScaledATokenBalance
+			}
+
+			collaterals = append(collaterals, collateralData{
+				asset:         reserve.UnderlyingAsset,
+				decimals:      decimals,
+				actualBalance: actualBalance,
+			})
+		}
+	}
+
+	tx, err := p.lendingRepo.BeginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			p.logger.Warn("failed to rollback transaction", "error", rbErr)
+		}
+	}()
+
+	userID, err := p.lendingRepo.EnsureUser(ctx, tx, onBehalfOf)
+	if err != nil {
+		return fmt.Errorf("failed to ensure user: %w", err)
+	}
+
+	protocolID, err := p.lendingRepo.GetOrCreateProtocol(ctx, tx, protocolAddress)
+	if err != nil {
+		return fmt.Errorf("failed to get protocol: %w", err)
+	}
+
 	borrowTokenID, err := p.lendingRepo.GetOrCreateToken(ctx, tx, reserve, borrowTokenDecimals)
 	if err != nil {
 		return fmt.Errorf("failed to get borrow token: %w", err)
 	}
 
-	// 4. Convert raw amount to decimal-adjusted amount
 	decimalAdjustedAmount := p.convertToDecimalAdjusted(amount, borrowTokenDecimals)
 	p.logger.Debug("converted borrow amount", "raw", amount.String(), "decimals", borrowTokenDecimals, "adjusted", decimalAdjustedAmount)
 
-	// 5. Insert borrower record with decimal-adjusted amount
 	if err := p.lendingRepo.SaveBorrower(ctx, tx, userID, protocolID, borrowTokenID, blockNumber, blockVersion, decimalAdjustedAmount); err != nil {
 		return fmt.Errorf("failed to insert borrower: %w", err)
 	}
 
-	// 6. Get user's collateral data
-	reserves, err := p.getUserReservesData(ctx, onBehalfOf, blockNumber)
-	if err != nil {
-		p.logger.Warn("failed to get user reserves", "error", err)
-		// Continue anyway - we still save the borrow
-	} else {
-		p.logger.Debug("found reserves", "count", len(reserves))
-		// 6. Insert collateral records with ACTUAL balances (not scaled)
-		for _, reserve := range reserves {
-			if reserve.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && reserve.UsageAsCollateralEnabledOnUser {
-				// Skip zero address (invalid token)
-				if reserve.UnderlyingAsset == (common.Address{}) {
-					p.logger.Debug("skipping zero address collateral")
-					continue
-				}
+	for _, col := range collaterals {
+		tokenID, err := p.lendingRepo.GetOrCreateToken(ctx, tx, col.asset, col.decimals)
+		if err != nil {
+			p.logger.Warn("failed to get collateral token", "token", col.asset.Hex(), "error", err)
+			continue
+		}
 
-				collateralDecimals, err := p.getTokenDecimals(ctx, reserve.UnderlyingAsset)
-				if err != nil {
-					p.logger.Warn("failed to get collateral token decimals, using default 18", "token", reserve.UnderlyingAsset.Hex(), "error", err)
-					collateralDecimals = 18
-				}
+		decimalAdjustedCollateral := p.convertToDecimalAdjusted(col.actualBalance, col.decimals)
+		p.logger.Debug("converted collateral amount", "raw", col.actualBalance.String(), "decimals", col.decimals, "adjusted", decimalAdjustedCollateral)
 
-				tokenID, err := p.lendingRepo.GetOrCreateToken(ctx, tx, reserve.UnderlyingAsset, collateralDecimals)
-				if err != nil {
-					p.logger.Warn("failed to get collateral token", "token", reserve.UnderlyingAsset.Hex(), "error", err)
-					continue
-				}
-
-				actualBalance, err := p.getActualBalance(ctx, protocolAddress, reserve.UnderlyingAsset, reserve.ScaledATokenBalance, blockNumber)
-				if err != nil {
-					p.logger.Warn("failed to calculate actual balance, using scaled", "token", reserve.UnderlyingAsset.Hex(), "error", err)
-					actualBalance = reserve.ScaledATokenBalance
-				}
-
-				decimalAdjustedCollateral := p.convertToDecimalAdjusted(actualBalance, collateralDecimals)
-				p.logger.Debug("converted collateral amount", "raw", actualBalance.String(), "decimals", collateralDecimals, "adjusted", decimalAdjustedCollateral)
-
-				if err := p.lendingRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedCollateral); err != nil {
-					p.logger.Warn("failed to insert collateral", "error", err)
-				} else {
-					p.logger.Debug("💎 saved collateral", "token", reserve.UnderlyingAsset.Hex(), "decimals", collateralDecimals, "adjusted_amount", decimalAdjustedCollateral)
-				}
-			}
+		if err := p.lendingRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedCollateral); err != nil {
+			p.logger.Warn("failed to insert collateral", "error", err)
+		} else {
+			p.logger.Debug("saved collateral", "token", col.asset.Hex(), "decimals", col.decimals, "adjusted_amount", decimalAdjustedCollateral)
 		}
 	}
 
-	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	p.logger.Info("✅ Saved to database", "user", onBehalfOf.Hex(), "block", blockNumber)
+	p.logger.Info("Saved to database", "user", onBehalfOf.Hex(), "block", blockNumber)
 	return nil
 }
 
 func (p *BorrowEventProcessor) getUserReservesData(ctx context.Context, user common.Address, blockNumber int64) ([]UserReserveData, error) {
-	// Pack function call
 	data, err := p.getUserReservesABI.Pack("getUserReservesData", p.poolAddressesProvider, user)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack function call: %w", err)
 	}
 
-	// Call contract at specific block
 	msg := ethereum.CallMsg{
 		To:   &p.uiPoolDataProvider,
 		Data: data,
@@ -688,19 +655,13 @@ func (p *BorrowEventProcessor) getUserReservesData(ctx context.Context, user com
 		return nil, fmt.Errorf("failed to call contract: %w", err)
 	}
 
-	p.logger.Debug("📦 raw contract response",
+	p.logger.Debug("raw contract response",
 		"length", len(result),
 		"hex", fmt.Sprintf("0x%x", result[:min(len(result), 256)]))
 
 	if len(result) < 64 {
 		return []UserReserveData{}, nil
 	}
-
-	// Manual decoding - parse the raw bytes
-	// Result structure:
-	// 0-32: offset to array
-	// 32-64: userEModeCategory (uint8)
-	// Then the array data starts
 
 	offset := new(big.Int).SetBytes(result[0:32]).Uint64()
 	p.logger.Debug("decoded offset", "offset", offset)
@@ -709,7 +670,6 @@ func (p *BorrowEventProcessor) getUserReservesData(ctx context.Context, user com
 		return []UserReserveData{}, nil
 	}
 
-	// Read array length
 	arrayLengthBytes := result[offset : offset+32]
 	arrayLength := new(big.Int).SetBytes(arrayLengthBytes).Uint64()
 	p.logger.Debug("decoded array length", "count", arrayLength)
@@ -720,7 +680,6 @@ func (p *BorrowEventProcessor) getUserReservesData(ctx context.Context, user com
 
 	reserves := make([]UserReserveData, 0, arrayLength)
 
-	// Each struct is 7 fields * 32 bytes = 224 bytes
 	structSize := uint64(224)
 	dataStart := offset + 32
 
@@ -733,7 +692,6 @@ func (p *BorrowEventProcessor) getUserReservesData(ctx context.Context, user com
 
 		structData := result[structOffset : structOffset+structSize]
 
-		// Parse each field (each is 32 bytes)
 		underlyingAsset := common.BytesToAddress(structData[0:32])
 		scaledATokenBalance := new(big.Int).SetBytes(structData[32:64])
 		usageAsCollateral := new(big.Int).SetBytes(structData[64:96]).Uint64() != 0
@@ -742,11 +700,7 @@ func (p *BorrowEventProcessor) getUserReservesData(ctx context.Context, user com
 		principalStableDebt := new(big.Int).SetBytes(structData[160:192])
 		stableBorrowLastUpdate := new(big.Int).SetBytes(structData[192:224])
 
-		// Note: scaledATokenBalance is a scaled value
-		// Actual balance = scaledATokenBalance * liquidityIndex / RAY
-		// For now we store the scaled value - can be converted later with reserve data
-
-		p.logger.Debug("📊 decoded reserve",
+		p.logger.Debug("decoded reserve",
 			"index", i,
 			"asset", underlyingAsset.Hex(),
 			"scaledATokenBalance", scaledATokenBalance.String(),
@@ -768,7 +722,6 @@ func (p *BorrowEventProcessor) getUserReservesData(ctx context.Context, user com
 }
 
 func (p *BorrowEventProcessor) getTokenDecimals(ctx context.Context, tokenAddress common.Address) (int, error) {
-	// Call decimals() on the token contract
 	data, err := p.erc20DecimalsABI.Pack("decimals")
 	if err != nil {
 		return 0, fmt.Errorf("failed to pack decimals call: %w", err)
@@ -779,7 +732,7 @@ func (p *BorrowEventProcessor) getTokenDecimals(ctx context.Context, tokenAddres
 		Data: data,
 	}
 
-	result, err := p.ethClient.CallContract(ctx, msg, nil) // Use latest block for decimals (immutable)
+	result, err := p.ethClient.CallContract(ctx, msg, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to call decimals on token %s: %w", tokenAddress.Hex(), err)
 	}
@@ -795,7 +748,6 @@ func (p *BorrowEventProcessor) getTokenDecimals(ctx context.Context, tokenAddres
 }
 
 func (p *BorrowEventProcessor) getActualBalance(ctx context.Context, protocolAddress, asset common.Address, scaledBalance *big.Int, blockNumber int64) (*big.Int, error) {
-	// Query reserve data to get liquidity index
 	data, err := p.getReserveDataABI.Pack("getReserveData", asset)
 	if err != nil {
 		p.logger.Warn("failed to pack getReserveData, using scaled balance", "error", err)
@@ -818,14 +770,6 @@ func (p *BorrowEventProcessor) getActualBalance(ctx context.Context, protocolAdd
 		return scaledBalance, nil
 	}
 
-	// ABI encoding of the struct:
-	// Bytes 0-31:   configuration (uint256)
-	// Bytes 32-63:  liquidityIndex (uint128, right-aligned in 32 bytes)
-	// Bytes 64-95:  currentLiquidityRate (uint128, right-aligned in 32 bytes)
-	// ...
-
-	// For uint128, the value is in the LAST 16 bytes of the 32-byte slot
-	// So liquidityIndex is at bytes 48-63 (not 32-63)
 	liquidityIndex := new(big.Int).SetBytes(result[48:64])
 
 	p.logger.Debug("extracted liquidity index",
@@ -838,8 +782,6 @@ func (p *BorrowEventProcessor) getActualBalance(ctx context.Context, protocolAdd
 		return scaledBalance, nil
 	}
 
-	// Calculate actual balance: scaledBalance * liquidityIndex / RAY
-	// RAY = 10^27
 	RAY := new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
 
 	actualBalance := new(big.Int).Mul(scaledBalance, liquidityIndex)
@@ -855,40 +797,24 @@ func (p *BorrowEventProcessor) getActualBalance(ctx context.Context, protocolAdd
 	return actualBalance, nil
 }
 
-// convertToDecimalAdjusted converts a raw token amount to decimal-adjusted format
-// Returns the amount as a string with decimal precision applied
-// Example: 1000000000 (raw USDC with 6 decimals) -> "1000.000000"
 func (p *BorrowEventProcessor) convertToDecimalAdjusted(rawAmount *big.Int, decimals int) string {
 	if decimals == 0 {
 		return rawAmount.String()
 	}
 
-	// Create divisor: 10^decimals
 	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
 
-	// Integer part: rawAmount / 10^decimals
 	integerPart := new(big.Int).Div(rawAmount, divisor)
 
-	// Fractional part: rawAmount % 10^decimals
 	remainder := new(big.Int).Mod(rawAmount, divisor)
 
-	// Format with decimal point
 	if remainder.Cmp(big.NewInt(0)) == 0 {
-		// No fractional part, just return integer
 		return integerPart.String()
 	}
 
-	// Pad remainder to decimals length
 	fractionalStr := fmt.Sprintf("%0*s", decimals, remainder.String())
 
 	return fmt.Sprintf("%s.%s", integerPart.String(), fractionalStr)
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func getEnv(key, defaultValue string) string {
@@ -896,4 +822,14 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func (p *BorrowEventProcessor) isBorrowEvent(log Log) bool {
+	if len(log.Topics) == 0 {
+		return false
+	}
+
+	eventSig := common.HexToHash(log.Topics[0])
+	_, ok := p.eventSignatures[eventSig]
+	return ok
 }
