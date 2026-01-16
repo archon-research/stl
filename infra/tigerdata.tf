@@ -31,8 +31,11 @@ resource "timescale_service" "main" {
   ha_replicas   = var.tigerdata_ha_replicas
   sync_replicas = 0
 
-  # Service requires active VPC peering before creation
-  depends_on = [aws_vpc_peering_connection_accepter.tigerdata]
+  # Service requires active VPC peering and route before creation
+  depends_on = [
+    aws_vpc_peering_connection_accepter.tigerdata,
+    aws_route.private_to_tigerdata,
+  ]
 }
 
 # -----------------------------------------------------------------------------

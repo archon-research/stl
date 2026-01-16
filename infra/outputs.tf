@@ -97,6 +97,7 @@ output "redis_security_group_id" {
 output "tigerdata_hostname" {
   description = "TigerData primary hostname"
   value       = timescale_service.main.hostname
+  sensitive   = true
 }
 
 output "tigerdata_port" {
@@ -107,6 +108,7 @@ output "tigerdata_port" {
 output "tigerdata_pooler_hostname" {
   description = "TigerData connection pooler hostname"
   value       = timescale_service.main.pooler_hostname
+  sensitive   = true
 }
 
 output "tigerdata_pooler_port" {
@@ -117,6 +119,7 @@ output "tigerdata_pooler_port" {
 output "tigerdata_replica_hostname" {
   description = "TigerData HA replica hostname (if enabled)"
   value       = timescale_service.main.replica_hostname
+  sensitive   = true
 }
 
 output "tigerdata_vpc_peering_id" {

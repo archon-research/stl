@@ -64,6 +64,11 @@ resource "aws_secretsmanager_secret_version" "tigerdata_db" {
     connection_url = "postgres://${timescale_service.main.username}:${timescale_service.main.password}@${timescale_service.main.hostname}:${timescale_service.main.port}/tsdb?sslmode=require"
     pooler_url     = "postgres://${timescale_service.main.username}:${timescale_service.main.password}@${timescale_service.main.pooler_hostname}:${timescale_service.main.port}/tsdb?sslmode=require"
   })
+
+  lifecycle {
+    # Don't update if credentials were rotated outside of Terraform
+    ignore_changes = [secret_string]
+  }
 }
 
 # -----------------------------------------------------------------------------
