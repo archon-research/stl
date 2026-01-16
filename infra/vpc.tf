@@ -13,7 +13,10 @@ locals {
   # Subnet CIDRs
   public_subnet_cidr   = "10.0.1.0/24"   # NAT Gateway, ALB, IGW
   private_subnet_cidr  = "10.0.10.0/24"  # ECS Fargate (Watcher, Worker, API)
-  isolated_subnet_cidr = "10.0.100.0/24" # RDS, ElastiCache (no internet)
+  isolated_subnet_cidr = "10.0.100.0/24" # ElastiCache (no internet)
+
+  # TigerData VPC CIDR (must not overlap with AWS VPC)
+  tigerdata_vpc_cidr = "10.1.0.0/24"
 }
 
 # -----------------------------------------------------------------------------

@@ -62,13 +62,13 @@ resource "aws_vpc_security_group_ingress_rule" "api_http_from_alb" {
   referenced_security_group_id = aws_security_group.alb.id
 }
 
-resource "aws_vpc_security_group_egress_rule" "api_to_rds" {
-  security_group_id            = aws_security_group.api.id
-  description                  = "API to RDS"
-  ip_protocol                  = "tcp"
-  from_port                    = 5432
-  to_port                      = 5432
-  referenced_security_group_id = aws_security_group.rds.id
+resource "aws_vpc_security_group_egress_rule" "api_to_tigerdata" {
+  security_group_id = aws_security_group.api.id
+  description       = "PostgreSQL to TigerData via VPC peering"
+  ip_protocol       = "tcp"
+  from_port         = 5432
+  to_port           = 5432
+  cidr_ipv4         = local.tigerdata_vpc_cidr
 }
 
 # -----------------------------------------------------------------------------
@@ -95,13 +95,13 @@ resource "aws_vpc_security_group_egress_rule" "watcher_to_internet" {
   cidr_ipv4         = "0.0.0.0/0"
 }
 
-resource "aws_vpc_security_group_egress_rule" "watcher_to_rds" {
-  security_group_id            = aws_security_group.watcher.id
-  description                  = "Watcher to RDS"
-  ip_protocol                  = "tcp"
-  from_port                    = 5432
-  to_port                      = 5432
-  referenced_security_group_id = aws_security_group.rds.id
+resource "aws_vpc_security_group_egress_rule" "watcher_to_tigerdata" {
+  security_group_id = aws_security_group.watcher.id
+  description       = "PostgreSQL to TigerData via VPC peering"
+  ip_protocol       = "tcp"
+  from_port         = 5432
+  to_port           = 5432
+  cidr_ipv4         = local.tigerdata_vpc_cidr
 }
 
 resource "aws_vpc_security_group_egress_rule" "watcher_to_redis" {
@@ -137,13 +137,13 @@ resource "aws_vpc_security_group_egress_rule" "worker_to_internet" {
   cidr_ipv4         = "0.0.0.0/0"
 }
 
-resource "aws_vpc_security_group_egress_rule" "worker_to_rds" {
-  security_group_id            = aws_security_group.worker.id
-  description                  = "PostgreSQL to RDS"
-  ip_protocol                  = "tcp"
-  from_port                    = 5432
-  to_port                      = 5432
-  referenced_security_group_id = aws_security_group.rds.id
+resource "aws_vpc_security_group_egress_rule" "worker_to_tigerdata" {
+  security_group_id = aws_security_group.worker.id
+  description       = "PostgreSQL to TigerData via VPC peering"
+  ip_protocol       = "tcp"
+  from_port         = 5432
+  to_port           = 5432
+  cidr_ipv4         = local.tigerdata_vpc_cidr
 }
 
 resource "aws_vpc_security_group_egress_rule" "worker_to_redis" {
@@ -156,47 +156,10 @@ resource "aws_vpc_security_group_egress_rule" "worker_to_redis" {
 }
 
 # -----------------------------------------------------------------------------
-# RDS Security Group
+# RDS Security Group - REMOVED
 # -----------------------------------------------------------------------------
-# Inbound: 5432 from API, Watcher, Worker
-# No outbound required
-
-resource "aws_security_group" "rds" {
-  name        = "${local.prefix}-rds-sg"
-  description = "Security group for RDS PostgreSQL"
-  vpc_id      = aws_vpc.main.id
-
-  tags = {
-    Name = "${local.prefix}-rds-sg"
-  }
-}
-
-resource "aws_vpc_security_group_ingress_rule" "rds_from_api" {
-  security_group_id            = aws_security_group.rds.id
-  description                  = "PostgreSQL from API"
-  ip_protocol                  = "tcp"
-  from_port                    = 5432
-  to_port                      = 5432
-  referenced_security_group_id = aws_security_group.api.id
-}
-
-resource "aws_vpc_security_group_ingress_rule" "rds_from_watcher" {
-  security_group_id            = aws_security_group.rds.id
-  description                  = "PostgreSQL from Watcher"
-  ip_protocol                  = "tcp"
-  from_port                    = 5432
-  to_port                      = 5432
-  referenced_security_group_id = aws_security_group.watcher.id
-}
-
-resource "aws_vpc_security_group_ingress_rule" "rds_from_worker" {
-  security_group_id            = aws_security_group.rds.id
-  description                  = "PostgreSQL from Worker"
-  ip_protocol                  = "tcp"
-  from_port                    = 5432
-  to_port                      = 5432
-  referenced_security_group_id = aws_security_group.worker.id
-}
+# Database moved to TigerData (TimescaleDB) with VPC peering.
+# See tigerdata.tf for configuration.
 
 # -----------------------------------------------------------------------------
 # ElastiCache Redis Security Group
