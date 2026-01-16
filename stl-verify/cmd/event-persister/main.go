@@ -294,7 +294,7 @@ func (p *BorrowEventProcessor) loadABIs() error {
 	if borrowEvent, ok := p.borrowABI.Events["Borrow"]; ok {
 		p.eventSignatures[borrowEvent.ID] = &borrowEvent
 	} else {
-		return fmt.Errorf("Borrow event not found in ABI")
+		return fmt.Errorf("borrow event not found in ABI")
 	}
 
 	getUserReservesABI := `[
