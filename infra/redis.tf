@@ -27,7 +27,7 @@ resource "aws_elasticache_subnet_group" "ethereum_redis" {
 
 resource "aws_elasticache_parameter_group" "ethereum_redis" {
   name   = "${local.prefix}-ethereum-redis-params"
-  family = "redis7"
+  family = "valkey8"
 
   # Eviction policy: evict least recently used keys when memory is full
   # allkeys-lru is safer than volatile-lru for caches with ~4 hour TTLs
@@ -40,12 +40,6 @@ resource "aws_elasticache_parameter_group" "ethereum_redis" {
   parameter {
     name  = "maxmemory-samples"
     value = "10"
-  }
-
-  # Async deletion to prevent blocking on large key evictions
-  parameter {
-    name  = "lazyfree-lazy-eviction"
-    value = "yes"
   }
 
   # TCP keepalive for connection health (seconds)
@@ -80,8 +74,8 @@ resource "aws_elasticache_replication_group" "ethereum_redis" {
   replication_group_id = "${local.prefix}-eth-redis"
   description          = "Ethereum block cache for ${var.environment}"
 
-  # Engine configuration
-  engine               = "redis"
+  # Engine configuration (Valkey - AWS's Redis-compatible fork)
+  engine               = "valkey"
   engine_version       = var.redis_engine_version
   node_type            = var.redis_node_type
   parameter_group_name = aws_elasticache_parameter_group.ethereum_redis.name
@@ -166,6 +160,10 @@ resource "aws_secretsmanager_secret_version" "ethereum_redis" {
   })
 
   lifecycle {
+    # Ignore changes to prevent Terraform from overwriting credentials if:
+    # 1. Auth token is rotated manually outside of Terraform
+    # 2. Endpoint addresses change during maintenance/failover
+    # To force an update, use: tofu taint aws_secretsmanager_secret_version.ethereum_redis
     ignore_changes = [secret_string]
   }
 }

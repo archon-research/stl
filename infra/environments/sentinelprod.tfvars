@@ -23,7 +23,7 @@ tigerdata_ha_replicas = 1    # 1 HA replica for failover
 # Production: Multi-node with read replicas for many readers/writers
 # Cache designed for ~4 hour TTLs
 redis_node_type          = "cache.r7g.large" # 13GB memory, memory-optimized
-redis_engine_version     = "7.1"
-redis_num_cache_clusters = 3    # 1 primary + 2 read replicas
-redis_transit_encryption = true # TLS enabled
-redis_snapshot_retention = 7    # 7 days of backups
+redis_engine_version     = "8.0"             # Valkey 8.0 (AWS Redis-compatible fork)
+redis_num_cache_clusters = 3                 # 1 primary + 2 read replicas
+redis_transit_encryption = true              # TLS enabled
+redis_snapshot_retention = 7                 # 7 days of backups

@@ -475,5 +475,5 @@ output "ethereum_redis_alarms_topic_arn" {
 
 output "redis_dashboard_url" {
   description = "CloudWatch dashboard URL for Redis monitoring"
-  value       = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards:name=${local.prefix}-redis"
+  value       = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards:name=${local.prefix}-ethereum-redis"
 }

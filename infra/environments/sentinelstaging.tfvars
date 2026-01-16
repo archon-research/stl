@@ -22,7 +22,7 @@ tigerdata_ha_replicas = 0   # No HA for staging
 
 # Staging: minimal single-node setup
 redis_node_type          = "cache.t4g.micro" # ~$12/month
-redis_engine_version     = "8.0"
-redis_num_cache_clusters = 1     # Single node, no HA
-redis_transit_encryption = false # No TLS for simplicity
-redis_snapshot_retention = 0     # No backups
+redis_engine_version     = "8.0"             # Valkey 8.0 (AWS Redis-compatible fork)
+redis_num_cache_clusters = 1                 # Single node, no HA
+redis_transit_encryption = false             # No TLS for simplicity
+redis_snapshot_retention = 0                 # No backups
