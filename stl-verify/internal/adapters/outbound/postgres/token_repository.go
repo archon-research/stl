@@ -16,16 +16,25 @@ var _ outbound.TokenRepository = (*TokenRepository)(nil)
 
 // TokenRepository is a PostgreSQL implementation of the outbound.TokenRepository port.
 type TokenRepository struct {
-	db     *sql.DB
-	logger *slog.Logger
+	db        *sql.DB
+	logger    *slog.Logger
+	batchSize int
 }
 
 // NewTokenRepository creates a new PostgreSQL Token repository.
-func NewTokenRepository(db *sql.DB, logger *slog.Logger) *TokenRepository {
+// If batchSize is <= 0, the default batch size from DefaultRepositoryConfig() is used.
+func NewTokenRepository(db *sql.DB, logger *slog.Logger, batchSize int) *TokenRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &TokenRepository{db: db, logger: logger}
+	if batchSize <= 0 {
+		batchSize = DefaultRepositoryConfig().TokenBatchSize
+	}
+	return &TokenRepository{
+		db:        db,
+		logger:    logger,
+		batchSize: batchSize,
+	}
 }
 
 // UpsertTokens upserts token records in batches.
@@ -34,9 +43,8 @@ func (r *TokenRepository) UpsertTokens(ctx context.Context, tokens []*entity.Tok
 		return nil
 	}
 
-	const batchSize = 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
+	for i := 0; i < len(tokens); i += r.batchSize {
+		end := i + r.batchSize
 		if end > len(tokens) {
 			end = len(tokens)
 		}
@@ -96,9 +104,8 @@ func (r *TokenRepository) UpsertReceiptTokens(ctx context.Context, tokens []*ent
 		return nil
 	}
 
-	const batchSize = 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
+	for i := 0; i < len(tokens); i += r.batchSize {
+		end := i + r.batchSize
 		if end > len(tokens) {
 			end = len(tokens)
 		}
@@ -130,7 +137,7 @@ func (r *TokenRepository) upsertReceiptTokenBatch(ctx context.Context, tokens []
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
 
-		metadata, err  := marshalMetadata(token.Metadata)
+		metadata, err := marshalMetadata(token.Metadata)
 		if err != nil {
 			return fmt.Errorf("failed to marshal receipt token metadata for token ID %d: %w", token.ID, err)
 		}
@@ -158,9 +165,8 @@ func (r *TokenRepository) UpsertDebtTokens(ctx context.Context, tokens []*entity
 		return nil
 	}
 
-	const batchSize = 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
+	for i := 0; i < len(tokens); i += r.batchSize {
+		end := i + r.batchSize
 		if end > len(tokens) {
 			end = len(tokens)
 		}
@@ -192,7 +198,7 @@ func (r *TokenRepository) upsertDebtTokenBatch(ctx context.Context, tokens []*en
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8, baseIdx+9))
 
-		metadata, err  := marshalMetadata(token.Metadata)
+		metadata, err := marshalMetadata(token.Metadata)
 		if err != nil {
 			return fmt.Errorf("failed to marshal debt token metadata for token ID %d: %w", token.ID, err)
 		}

@@ -16,16 +16,25 @@ var _ outbound.UserRepository = (*UserRepository)(nil)
 
 // UserRepository is a PostgreSQL implementation of the outbound.UserRepository port.
 type UserRepository struct {
-	db     *sql.DB
-	logger *slog.Logger
+	db        *sql.DB
+	logger    *slog.Logger
+	batchSize int
 }
 
 // NewUserRepository creates a new PostgreSQL User repository.
-func NewUserRepository(db *sql.DB, logger *slog.Logger) *UserRepository {
+// If batchSize is <= 0, the default batch size from DefaultRepositoryConfig() is used.
+func NewUserRepository(db *sql.DB, logger *slog.Logger, batchSize int) *UserRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &UserRepository{db: db, logger: logger}
+	if batchSize <= 0 {
+		batchSize = DefaultRepositoryConfig().UserBatchSize
+	}
+	return &UserRepository{
+		db:        db,
+		logger:    logger,
+		batchSize: batchSize,
+	}
 }
 
 // UpsertUsers upserts user records.
@@ -34,9 +43,8 @@ func (r *UserRepository) UpsertUsers(ctx context.Context, users []*entity.User) 
 		return nil
 	}
 
-	const batchSize = 500
-	for i := 0; i < len(users); i += batchSize {
-		end := i + batchSize
+	for i := 0; i < len(users); i += r.batchSize {
+		end := i + r.batchSize
 		if end > len(users) {
 			end = len(users)
 		}
@@ -68,7 +76,7 @@ func (r *UserRepository) upsertUserBatch(ctx context.Context, users []*entity.Us
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, NOW())",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5))
 
-		metadata, err  := marshalMetadata(user.Metadata)
+		metadata, err := marshalMetadata(user.Metadata)
 		if err != nil {
 			return fmt.Errorf("failed to marshal user metadata for user ID %d: %w", user.ID, err)
 		}
@@ -95,9 +103,8 @@ func (r *UserRepository) UpsertUserProtocolMetadata(ctx context.Context, metadat
 		return nil
 	}
 
-	const batchSize = 500
-	for i := 0; i < len(metadata); i += batchSize {
-		end := i + batchSize
+	for i := 0; i < len(metadata); i += r.batchSize {
+		end := i + r.batchSize
 		if end > len(metadata) {
 			end = len(metadata)
 		}
@@ -129,7 +136,7 @@ func (r *UserRepository) upsertUserProtocolMetadataBatch(ctx context.Context, me
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, NOW())",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4))
 
-		metadataJSON, err  := marshalMetadata(m.Metadata)
+		metadataJSON, err := marshalMetadata(m.Metadata)
 		if err != nil {
 			return fmt.Errorf("failed to marshal user protocol metadata for user_id %d, protocol_id %d: %w", m.UserID, m.ProtocolID, err)
 		}

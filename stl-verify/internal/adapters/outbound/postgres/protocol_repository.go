@@ -17,16 +17,25 @@ var _ outbound.ProtocolRepository = (*ProtocolRepository)(nil)
 
 // ProtocolRepository is a PostgreSQL implementation of the outbound.ProtocolRepository port.
 type ProtocolRepository struct {
-	db     *sql.DB
-	logger *slog.Logger
+	db        *sql.DB
+	logger    *slog.Logger
+	batchSize int
 }
 
 // NewProtocolRepository creates a new PostgreSQL Protocol repository.
-func NewProtocolRepository(db *sql.DB, logger *slog.Logger) *ProtocolRepository {
+// If batchSize is <= 0, the default batch size from DefaultRepositoryConfig() is used.
+func NewProtocolRepository(db *sql.DB, logger *slog.Logger, batchSize int) *ProtocolRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &ProtocolRepository{db: db, logger: logger}
+	if batchSize <= 0 {
+		batchSize = DefaultRepositoryConfig().ProtocolBatchSize
+	}
+	return &ProtocolRepository{
+		db:        db,
+		logger:    logger,
+		batchSize: batchSize,
+	}
 }
 
 // UpsertChains upserts chain records.
@@ -57,9 +66,8 @@ func (r *ProtocolRepository) UpsertProtocols(ctx context.Context, protocols []*e
 		return nil
 	}
 
-	const batchSize = 500
-	for i := 0; i < len(protocols); i += batchSize {
-		end := i + batchSize
+	for i := 0; i < len(protocols); i += r.batchSize {
+		end := i + r.batchSize
 		if end > len(protocols) {
 			end = len(protocols)
 		}
@@ -120,9 +128,8 @@ func (r *ProtocolRepository) UpsertSparkLendReserveData(ctx context.Context, dat
 		return nil
 	}
 
-	const batchSize = 500
-	for i := 0; i < len(data); i += batchSize {
-		end := i + batchSize
+	for i := 0; i < len(data); i += r.batchSize {
+		end := i + r.batchSize
 		if end > len(data) {
 			end = len(data)
 		}

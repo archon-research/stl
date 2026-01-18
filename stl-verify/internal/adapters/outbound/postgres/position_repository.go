@@ -16,16 +16,25 @@ var _ outbound.PositionRepository = (*PositionRepository)(nil)
 
 // PositionRepository is a PostgreSQL implementation of the outbound.PositionRepository port.
 type PositionRepository struct {
-	db     *sql.DB
-	logger *slog.Logger
+	db        *sql.DB
+	logger    *slog.Logger
+	batchSize int
 }
 
 // NewPositionRepository creates a new PostgreSQL Position repository.
-func NewPositionRepository(db *sql.DB, logger *slog.Logger) *PositionRepository {
+// If batchSize is <= 0, the default batch size from DefaultRepositoryConfig() is used.
+func NewPositionRepository(db *sql.DB, logger *slog.Logger, batchSize int) *PositionRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &PositionRepository{db: db, logger: logger}
+	if batchSize <= 0 {
+		batchSize = DefaultRepositoryConfig().PositionBatchSize
+	}
+	return &PositionRepository{
+		db:        db,
+		logger:    logger,
+		batchSize: batchSize,
+	}
 }
 
 // UpsertBorrowers upserts borrower (debt) position records.
@@ -34,9 +43,8 @@ func (r *PositionRepository) UpsertBorrowers(ctx context.Context, borrowers []*e
 		return nil
 	}
 
-	const batchSize = 1000
-	for i := 0; i < len(borrowers); i += batchSize {
-		end := i + batchSize
+	for i := 0; i < len(borrowers); i += r.batchSize {
+		end := i + r.batchSize
 		if end > len(borrowers) {
 			end = len(borrowers)
 		}
@@ -102,9 +110,8 @@ func (r *PositionRepository) UpsertBorrowerCollateral(ctx context.Context, colla
 		return nil
 	}
 
-	const batchSize = 1000
-	for i := 0; i < len(collateral); i += batchSize {
-		end := i + batchSize
+	for i := 0; i < len(collateral); i += r.batchSize {
+		end := i + r.batchSize
 		if end > len(collateral) {
 			end = len(collateral)
 		}
