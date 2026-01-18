@@ -3,12 +3,13 @@ package postgres
 
 import (
 	"encoding/json"
-	"log/slog"
 	"math/big"
 )
 
 // bigIntToNumeric converts a *big.Int to a string for NUMERIC column storage.
 // Returns nil if the input is nil.
+// Postgres's NUMERIC type can handle arbitrary precision numbers as strings.
+// This helper ensures that we store big.Int values correctly.
 func bigIntToNumeric(b *big.Int) any {
 	if b == nil {
 		return nil
