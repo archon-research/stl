@@ -1,0 +1,208 @@
+package postgres
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log/slog"
+	"strings"
+
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+)
+
+// Compile-time check that TokenRepository implements outbound.TokenRepository
+var _ outbound.TokenRepository = (*TokenRepository)(nil)
+
+// TokenRepository is a PostgreSQL implementation of the outbound.TokenRepository port.
+type TokenRepository struct {
+	db     *sql.DB
+	logger *slog.Logger
+}
+
+// NewTokenRepository creates a new PostgreSQL Token repository.
+func NewTokenRepository(db *sql.DB, logger *slog.Logger) *TokenRepository {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &TokenRepository{db: db, logger: logger}
+}
+
+// UpsertTokens upserts token records in batches.
+func (r *TokenRepository) UpsertTokens(ctx context.Context, tokens []*entity.Token) error {
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	const batchSize = 500
+	for i := 0; i < len(tokens); i += batchSize {
+		end := i + batchSize
+		if end > len(tokens) {
+			end = len(tokens)
+		}
+		batch := tokens[i:end]
+
+		if err := r.upsertTokenBatch(ctx, batch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *TokenRepository) upsertTokenBatch(ctx context.Context, tokens []*entity.Token) error {
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`
+		INSERT INTO tokens (id, chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
+		VALUES `)
+
+	args := make([]any, 0, len(tokens)*7)
+	for i, token := range tokens {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		baseIdx := i * 7
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
+
+		metadata := marshalMetadata(token.Metadata)
+		args = append(args, token.ID, token.ChainID, token.Address, token.Symbol, token.Decimals, token.CreatedAtBlock, metadata)
+	}
+
+	sb.WriteString(`
+		ON CONFLICT (chain_id, address) DO UPDATE SET
+			symbol = EXCLUDED.symbol,
+			decimals = EXCLUDED.decimals,
+			metadata = EXCLUDED.metadata,
+			updated_at = NOW()
+	`)
+
+	_, err := r.db.ExecContext(ctx, sb.String(), args...)
+	if err != nil {
+		return fmt.Errorf("failed to upsert token batch: %w", err)
+	}
+	return nil
+}
+
+// UpsertReceiptTokens upserts receipt token records.
+func (r *TokenRepository) UpsertReceiptTokens(ctx context.Context, tokens []*entity.ReceiptToken) error {
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	const batchSize = 500
+	for i := 0; i < len(tokens); i += batchSize {
+		end := i + batchSize
+		if end > len(tokens) {
+			end = len(tokens)
+		}
+		batch := tokens[i:end]
+
+		if err := r.upsertReceiptTokenBatch(ctx, batch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *TokenRepository) upsertReceiptTokenBatch(ctx context.Context, tokens []*entity.ReceiptToken) error {
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`
+		INSERT INTO receipt_tokens (id, protocol_id, underlying_token_id, receipt_token_address, symbol, created_at_block, metadata, updated_at)
+		VALUES `)
+
+	args := make([]any, 0, len(tokens)*8)
+	for i, token := range tokens {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		baseIdx := i * 8
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
+
+		metadata := marshalMetadata(token.Metadata)
+		args = append(args, token.ID, token.ProtocolID, token.UnderlyingTokenID, token.ReceiptTokenAddress, token.Symbol, token.CreatedAtBlock, metadata)
+	}
+
+	sb.WriteString(`
+		ON CONFLICT (protocol_id, underlying_token_id) DO UPDATE SET
+			receipt_token_address = EXCLUDED.receipt_token_address,
+			symbol = EXCLUDED.symbol,
+			metadata = EXCLUDED.metadata,
+			updated_at = NOW()
+	`)
+
+	_, err := r.db.ExecContext(ctx, sb.String(), args...)
+	if err != nil {
+		return fmt.Errorf("failed to upsert receipt token batch: %w", err)
+	}
+	return nil
+}
+
+// UpsertDebtTokens upserts debt token records.
+func (r *TokenRepository) UpsertDebtTokens(ctx context.Context, tokens []*entity.DebtToken) error {
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	const batchSize = 500
+	for i := 0; i < len(tokens); i += batchSize {
+		end := i + batchSize
+		if end > len(tokens) {
+			end = len(tokens)
+		}
+		batch := tokens[i:end]
+
+		if err := r.upsertDebtTokenBatch(ctx, batch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *TokenRepository) upsertDebtTokenBatch(ctx context.Context, tokens []*entity.DebtToken) error {
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`
+		INSERT INTO debt_tokens (id, protocol_id, underlying_token_id, variable_debt_address, stable_debt_address, variable_symbol, stable_symbol, created_at_block, metadata, updated_at)
+		VALUES `)
+
+	args := make([]any, 0, len(tokens)*10)
+	for i, token := range tokens {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		baseIdx := i * 10
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8, baseIdx+9))
+
+		metadata := marshalMetadata(token.Metadata)
+		args = append(args, token.ID, token.ProtocolID, token.UnderlyingTokenID, token.VariableDebtAddress, token.StableDebtAddress, token.VariableSymbol, token.StableSymbol, token.CreatedAtBlock, metadata)
+	}
+
+	sb.WriteString(`
+		ON CONFLICT (protocol_id, underlying_token_id) DO UPDATE SET
+			variable_debt_address = EXCLUDED.variable_debt_address,
+			stable_debt_address = EXCLUDED.stable_debt_address,
+			variable_symbol = EXCLUDED.variable_symbol,
+			stable_symbol = EXCLUDED.stable_symbol,
+			metadata = EXCLUDED.metadata,
+			updated_at = NOW()
+	`)
+
+	_, err := r.db.ExecContext(ctx, sb.String(), args...)
+	if err != nil {
+		return fmt.Errorf("failed to upsert debt token batch: %w", err)
+	}
+	return nil
+}
