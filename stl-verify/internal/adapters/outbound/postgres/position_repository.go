@@ -54,6 +54,15 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, borrowers 
 		return nil
 	}
 
+	for i, b := range borrowers {
+		if b.Amount == nil {
+			return fmt.Errorf("borrower[%d] (ID=%d, UserID=%d): Amount must not be nil", i, b.ID, b.UserID)
+		}
+		if b.Change == nil {
+			return fmt.Errorf("borrower[%d] (ID=%d, UserID=%d): Change must not be nil", i, b.ID, b.UserID)
+		}
+	}
+
 	var sb strings.Builder
 	sb.WriteString(`
 		INSERT INTO borrowers (id, user_id, protocol_id, token_id, block_number, block_version, amount, change)
@@ -111,6 +120,16 @@ func (r *PositionRepository) UpsertBorrowerCollateral(ctx context.Context, colla
 func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, collateral []*entity.BorrowerCollateral) error {
 	if len(collateral) == 0 {
 		return nil
+	}
+
+	// Validate all entities before constructing the query.
+	for i, c := range collateral {
+		if c.Amount == nil {
+			return fmt.Errorf("borrower_collateral[%d] (ID=%d, UserID=%d): Amount must not be nil", i, c.ID, c.UserID)
+		}
+		if c.Change == nil {
+			return fmt.Errorf("borrower_collateral[%d] (ID=%d, UserID=%d): Change must not be nil", i, c.ID, c.UserID)
+		}
 	}
 
 	var sb strings.Builder
