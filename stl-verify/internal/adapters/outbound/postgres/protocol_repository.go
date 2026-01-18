@@ -12,9 +12,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-//go:embed migrations/002_sentinel_data_schema.sql
-var sentinelSchema string
-
 // Compile-time check that ProtocolRepository implements outbound.ProtocolRepository
 var _ outbound.ProtocolRepository = (*ProtocolRepository)(nil)
 
@@ -30,17 +27,6 @@ func NewProtocolRepository(db *sql.DB, logger *slog.Logger) *ProtocolRepository 
 		logger = slog.Default()
 	}
 	return &ProtocolRepository{db: db, logger: logger}
-}
-
-// Migrate creates the Sentinel tables if they don't exist.
-// This is placed on ProtocolRepository as it owns the schema,
-// but could be moved to a separate migrator if needed.
-func (r *ProtocolRepository) Migrate(ctx context.Context) error {
-	_, err := r.db.ExecContext(ctx, sentinelSchema)
-	if err != nil {
-		return fmt.Errorf("failed to migrate sentinel schema: %w", err)
-	}
-	return nil
 }
 
 // UpsertChains upserts chain records.
@@ -105,7 +91,11 @@ func (r *ProtocolRepository) upsertProtocolBatch(ctx context.Context, protocols 
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
 
-		metadata := marshalMetadata(protocol.Metadata)
+		metadata, err := marshalMetadata(protocol.Metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal protocol metadata for protocol ID %d: %w", protocol.ID, err)
+		}
+
 		args = append(args, protocol.ID, protocol.ChainID, protocol.Address, protocol.Name, protocol.ProtocolType, protocol.CreatedAtBlock, metadata)
 	}
 

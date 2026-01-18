@@ -68,7 +68,10 @@ func (r *TokenRepository) upsertTokenBatch(ctx context.Context, tokens []*entity
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
 
-		metadata := marshalMetadata(token.Metadata)
+		metadata, err := marshalMetadata(token.Metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal token metadata for token ID %d: %w", token.ID, err)
+		}
 		args = append(args, token.ID, token.ChainID, token.Address, token.Symbol, token.Decimals, token.CreatedAtBlock, metadata)
 	}
 
@@ -127,7 +130,10 @@ func (r *TokenRepository) upsertReceiptTokenBatch(ctx context.Context, tokens []
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
 
-		metadata := marshalMetadata(token.Metadata)
+		metadata, err  := marshalMetadata(token.Metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal receipt token metadata for token ID %d: %w", token.ID, err)
+		}
 		args = append(args, token.ID, token.ProtocolID, token.UnderlyingTokenID, token.ReceiptTokenAddress, token.Symbol, token.CreatedAtBlock, metadata)
 	}
 
@@ -186,7 +192,10 @@ func (r *TokenRepository) upsertDebtTokenBatch(ctx context.Context, tokens []*en
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8, baseIdx+9))
 
-		metadata := marshalMetadata(token.Metadata)
+		metadata, err  := marshalMetadata(token.Metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal debt token metadata for token ID %d: %w", token.ID, err)
+		}
 		args = append(args, token.ID, token.ProtocolID, token.UnderlyingTokenID, token.VariableDebtAddress, token.StableDebtAddress, token.VariableSymbol, token.StableSymbol, token.CreatedAtBlock, metadata)
 	}
 

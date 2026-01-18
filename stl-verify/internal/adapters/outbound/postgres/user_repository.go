@@ -68,7 +68,10 @@ func (r *UserRepository) upsertUserBatch(ctx context.Context, users []*entity.Us
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, NOW())",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5))
 
-		metadata := marshalMetadata(user.Metadata)
+		metadata, err  := marshalMetadata(user.Metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal user metadata for user ID %d: %w", user.ID, err)
+		}
 		args = append(args, user.ID, user.ChainID, user.Address, user.FirstSeenBlock, metadata)
 	}
 
@@ -126,7 +129,10 @@ func (r *UserRepository) upsertUserProtocolMetadataBatch(ctx context.Context, me
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, NOW())",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4))
 
-		metadataJSON := marshalMetadata(m.Metadata)
+		metadataJSON, err  := marshalMetadata(m.Metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal user protocol metadata for user_id %d, protocol_id %d: %w", m.UserID, m.ProtocolID, err)
+		}
 
 		args = append(args, m.ID, m.UserID, m.ProtocolID, metadataJSON)
 	}
