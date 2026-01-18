@@ -23,7 +23,14 @@ type TokenRepository struct {
 
 // NewTokenRepository creates a new PostgreSQL Token repository.
 // If batchSize is <= 0, the default batch size from DefaultRepositoryConfig() is used.
-func NewTokenRepository(db *sql.DB, logger *slog.Logger, batchSize int) *TokenRepository {
+// Returns an error if the database connection is nil.
+//
+// Note: This function does not verify that the database connection is alive.
+// Use a separate health check or call db.Ping() if connection validation is needed.
+func NewTokenRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*TokenRepository, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database connection cannot be nil")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -34,7 +41,7 @@ func NewTokenRepository(db *sql.DB, logger *slog.Logger, batchSize int) *TokenRe
 		db:        db,
 		logger:    logger,
 		batchSize: batchSize,
-	}
+	}, nil
 }
 
 // UpsertTokens upserts token records in batches.

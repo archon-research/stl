@@ -23,7 +23,14 @@ type PositionRepository struct {
 
 // NewPositionRepository creates a new PostgreSQL Position repository.
 // If batchSize is <= 0, the default batch size from DefaultRepositoryConfig() is used.
-func NewPositionRepository(db *sql.DB, logger *slog.Logger, batchSize int) *PositionRepository {
+// Returns an error if the database connection is nil.
+//
+// Note: This function does not verify that the database connection is alive.
+// Use a separate health check or call db.Ping() if connection validation is needed.
+func NewPositionRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*PositionRepository, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database connection cannot be nil")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -34,7 +41,7 @@ func NewPositionRepository(db *sql.DB, logger *slog.Logger, batchSize int) *Posi
 		db:        db,
 		logger:    logger,
 		batchSize: batchSize,
-	}
+	}, nil
 }
 
 // UpsertBorrowers upserts borrower (debt) position records.

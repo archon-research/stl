@@ -24,7 +24,14 @@ type ProtocolRepository struct {
 
 // NewProtocolRepository creates a new PostgreSQL Protocol repository.
 // If batchSize is <= 0, the default batch size from DefaultRepositoryConfig() is used.
-func NewProtocolRepository(db *sql.DB, logger *slog.Logger, batchSize int) *ProtocolRepository {
+// Returns an error if the database connection is nil.
+//
+// Note: This function does not verify that the database connection is alive.
+// Use a separate health check or call db.Ping() if connection validation is needed.
+func NewProtocolRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*ProtocolRepository, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database connection cannot be nil")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -35,7 +42,7 @@ func NewProtocolRepository(db *sql.DB, logger *slog.Logger, batchSize int) *Prot
 		db:        db,
 		logger:    logger,
 		batchSize: batchSize,
-	}
+	}, nil
 }
 
 // UpsertChains upserts chain records.

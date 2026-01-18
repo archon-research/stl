@@ -23,7 +23,14 @@ type UserRepository struct {
 
 // NewUserRepository creates a new PostgreSQL User repository.
 // If batchSize is <= 0, the default batch size from DefaultRepositoryConfig() is used.
-func NewUserRepository(db *sql.DB, logger *slog.Logger, batchSize int) *UserRepository {
+// Returns an error if the database connection is nil.
+//
+// Note: This function does not verify that the database connection is alive.
+// Use a separate health check or call db.Ping() if connection validation is needed.
+func NewUserRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*UserRepository, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database connection cannot be nil")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -34,7 +41,7 @@ func NewUserRepository(db *sql.DB, logger *slog.Logger, batchSize int) *UserRepo
 		db:        db,
 		logger:    logger,
 		batchSize: batchSize,
-	}
+	}, nil
 }
 
 // UpsertUsers upserts user records.

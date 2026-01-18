@@ -1,29 +1,7 @@
 package postgres
 
-import (
-	"database/sql"
-	"log/slog"
-)
-
 // RepositoryConfig holds configuration for repository batch operations.
 // Batch sizes affect performance and memory usage when processing large datasets.
-//
-// Usage example:
-//
-//	// Use default configuration
-//	tokenRepo := postgres.NewTokenRepository(db, logger, 0)
-//
-//	// Use custom batch size
-//	tokenRepo := postgres.NewTokenRepository(db, logger, 1000)
-//
-//	// Use configuration struct for multiple repositories
-//	cfg := postgres.DefaultRepositoryConfig()
-//	cfg.TokenBatchSize = 750  // Customize if needed
-//
-//	tokenRepo := postgres.NewTokenRepository(db, logger, cfg.TokenBatchSize)
-//	userRepo := postgres.NewUserRepository(db, logger, cfg.UserBatchSize)
-//	positionRepo := postgres.NewPositionRepository(db, logger, cfg.PositionBatchSize)
-//	protocolRepo := postgres.NewProtocolRepository(db, logger, cfg.ProtocolBatchSize)
 type RepositoryConfig struct {
 	// TokenBatchSize controls the number of token records processed in a single
 	// database operation. Tokens have complex metadata and multiple fields,
@@ -50,16 +28,6 @@ type RepositoryConfig struct {
 }
 
 // DefaultRepositoryConfig returns a RepositoryConfig with sensible defaults.
-// These defaults are chosen based on:
-// - PostgreSQL parameter limits (default max ~32k parameters)
-// - Memory usage for typical entity sizes
-// - Balance between transaction overhead and memory pressure
-//
-// Batch size tuning guidelines:
-// - Increase batch sizes if you have ample memory and want faster bulk operations
-// - Decrease batch sizes if you experience memory pressure or timeouts
-// - Monitor PostgreSQL logs for "too many parameters" errors (increase if needed)
-// - Consider network latency: larger batches reduce round trips but increase payload size
 func DefaultRepositoryConfig() RepositoryConfig {
 	return RepositoryConfig{
 		// 500 tokens * 7 params = 3500 parameters per batch
