@@ -212,7 +212,10 @@ func TestStreamFile(t *testing.T) {
 			if strings.HasSuffix(tt.key, ".gz") {
 				var buf bytes.Buffer
 				gzWriter := gzip.NewWriter(&buf)
-				gzWriter.Write([]byte(tt.mockContent))
+				_, err := gzWriter.Write([]byte(tt.mockContent))
+				if err != nil {
+					t.Fatalf("failed to write gzip content: %v", err)
+				}
 				gzWriter.Close()
 				bodyContent = buf.Bytes()
 			} else {
@@ -259,7 +262,10 @@ func TestGzipReadCloser(t *testing.T) {
 	testContent := "test content"
 	var buf bytes.Buffer
 	gzWriter := gzip.NewWriter(&buf)
-	gzWriter.Write([]byte(testContent))
+	_, err := gzWriter.Write([]byte(testContent))
+	if err != nil {
+		t.Fatalf("failed to write gzip content: %v", err)
+	}
 	gzWriter.Close()
 
 	gzReader, err := gzip.NewReader(&buf)
