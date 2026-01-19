@@ -91,7 +91,6 @@ func TestPublish_Success(t *testing.T) {
 		BlockHash:   "0xabc123",
 		ParentHash:  "0xdef456",
 		ReceivedAt:  time.Now(),
-		CacheKey:    "block:1:12345",
 	}
 
 	err = sink.Publish(context.Background(), event)
@@ -406,7 +405,6 @@ func TestPublish_MessageContainsAllFields(t *testing.T) {
 		ParentHash:     "0xdef456",
 		BlockTimestamp: 1704067200,
 		ReceivedAt:     now,
-		CacheKey:       "block:1:12345",
 		IsReorg:        true,
 		IsBackfill:     false,
 	}
@@ -439,9 +437,6 @@ func TestPublish_MessageContainsAllFields(t *testing.T) {
 	}
 	if decoded.BlockTimestamp != 1704067200 {
 		t.Errorf("expected BlockTimestamp=1704067200, got %d", decoded.BlockTimestamp)
-	}
-	if decoded.CacheKey != "block:1:12345" {
-		t.Errorf("expected CacheKey=block:1:12345, got %s", decoded.CacheKey)
 	}
 	if !decoded.IsReorg {
 		t.Error("expected IsReorg=true")

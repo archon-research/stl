@@ -644,7 +644,6 @@ func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum i
 		ParentHash:     parentHash,
 		BlockTimestamp: blockTimestamp,
 		ReceivedAt:     receivedAt,
-		CacheKey:       cacheKey(chainID, blockNum, version, "block"),
 		IsReorg:        isReorg,
 		IsBackfill:     false,
 	}
@@ -672,12 +671,4 @@ func parseBlockNumber(hexNum string) (int64, error) {
 // is case-sensitive. Normalizing to lowercase prevents false mismatches.
 func normalizeHash(hash string) string {
 	return strings.ToLower(hash)
-}
-
-// cacheKey generates the cache key for a given data type.
-// Format: {chainID}:{blockNumber}:{version}:{dataType}
-// The version is incremented each time the watcher sees the same block after a reorg.
-// This ensures data will be eventually correct after reorgs.
-func cacheKey(chainID, blockNumber int64, version int, dataType string) string {
-	return fmt.Sprintf("stl:%d:%d:%d:%s", chainID, blockNumber, version, dataType)
 }

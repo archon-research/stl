@@ -406,12 +406,6 @@ func TestBackfillService_VersionIsSavedToDatabase(t *testing.T) {
 		t.Errorf("event version (%d) doesn't match saved block version (%d) - bug: version mismatch between DB and published event",
 			block5Event.Version, backfilledBlock.Version)
 	}
-
-	// The cache key should match the saved version
-	expectedCacheKey := fmt.Sprintf("stl:1:5:%d:block", backfilledBlock.Version)
-	if block5Event.CacheKey != expectedCacheKey {
-		t.Errorf("expected cache key %q, got %q", expectedCacheKey, block5Event.CacheKey)
-	}
 }
 
 func TestVerifyChainIntegrity_MemoryAdapter_ValidChain(t *testing.T) {

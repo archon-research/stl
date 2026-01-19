@@ -2746,12 +2746,6 @@ func TestProcessBlock_VersionIsCorrectAfterReorg(t *testing.T) {
 	if blockEvents[0].Version != 1 {
 		t.Errorf("expected block event version to be 1, got %d (bug: version was calculated after SaveBlock)", blockEvents[0].Version)
 	}
-
-	// Also verify the cache key has the correct version
-	expectedCacheKey := "stl:1:100:1:block"
-	if blockEvents[0].CacheKey != expectedCacheKey {
-		t.Errorf("expected cache key %q, got %q", expectedCacheKey, blockEvents[0].CacheKey)
-	}
 }
 
 func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {

@@ -21,11 +21,15 @@ type Event interface {
 	GetBlockNumber() int64
 	// GetChainID returns the chain ID.
 	GetChainID() int64
-	// GetCacheKey returns the cache key where the data is stored.
-	GetCacheKey() string
 }
 
 // BlockEvent is published when block data is ready in cache.
+// Consumers should derive cache keys using the convention:
+//
+//	stl:{chainId}:{blockNumber}:{version}:{dataType}
+//
+// where dataType is one of: block, receipts, traces, blobs
+// Example: stl:1:12345:0:block, stl:1:12345:0:receipts
 type BlockEvent struct {
 	// ChainID identifies which blockchain this data is from.
 	ChainID int64 `json:"chainId"`
@@ -50,9 +54,6 @@ type BlockEvent struct {
 	// ReceivedAt is when we received and cached this data.
 	ReceivedAt time.Time `json:"receivedAt"`
 
-	// CacheKey is the key where the data is stored in cache.
-	CacheKey string `json:"cacheKey"`
-
 	// IsReorg indicates this block is part of a chain reorganization.
 	IsReorg bool `json:"isReorg,omitempty"`
 
@@ -63,7 +64,6 @@ type BlockEvent struct {
 func (e BlockEvent) EventType() EventType  { return EventTypeBlock }
 func (e BlockEvent) GetBlockNumber() int64 { return e.BlockNumber }
 func (e BlockEvent) GetChainID() int64     { return e.ChainID }
-func (e BlockEvent) GetCacheKey() string   { return e.CacheKey }
 
 // EventSink defines the interface for publishing block data events.
 // Events contain only metadata; actual data is in the cache.

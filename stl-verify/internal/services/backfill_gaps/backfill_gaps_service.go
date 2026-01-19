@@ -665,7 +665,6 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 		ParentHash:     parentHash,
 		BlockTimestamp: blockTimestamp,
 		ReceivedAt:     receivedAt,
-		CacheKey:       shared.CacheKey(chainID, blockNum, version, "block"),
 		IsBackfill:     true,
 	}
 	if err := s.eventSink.Publish(ctx, event); err != nil {
