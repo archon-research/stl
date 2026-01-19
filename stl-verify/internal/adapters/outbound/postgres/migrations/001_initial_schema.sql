@@ -245,6 +245,7 @@ CREATE TABLE IF NOT EXISTS sparklend_reserve_data (
     protocol_id BIGINT NOT NULL REFERENCES protocols(id),
     token_id BIGINT NOT NULL REFERENCES tokens(id),
     block_number BIGINT NOT NULL,
+    block_version INTEGER NOT NULL DEFAULT 0,
     -- Reserve state
     unbacked NUMERIC,
     accrued_to_treasury_scaled NUMERIC,
@@ -262,7 +263,7 @@ CREATE TABLE IF NOT EXISTS sparklend_reserve_data (
     -- Timestamps
     last_update_timestamp BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT sparklend_reserve_data_unique UNIQUE (protocol_id, token_id, block_number)
+    CONSTRAINT sparklend_reserve_data_unique UNIQUE (protocol_id, token_id, block_number, block_version)
 );
 
 CREATE INDEX IF NOT EXISTS idx_sparklend_reserve_data_protocol_id ON sparklend_reserve_data(protocol_id);

@@ -19,6 +19,6 @@ type ProtocolRepository interface {
 
 	// UpsertSparkLendReserveData upserts SparkLend reserve data records.
 	// This stores protocol-level market data (rates, indexes, totals) per token per block.
-	// Conflict resolution: ON CONFLICT (protocol_id, token_id, block_number) DO UPDATE
+	// Conflict resolution: ON CONFLICT (protocol_id, token_id, block_number, block_version) DO UPDATE
 	UpsertSparkLendReserveData(ctx context.Context, data []*entity.SparkLendReserveData) error
 }

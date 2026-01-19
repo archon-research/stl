@@ -158,22 +158,22 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 	var sb strings.Builder
 	sb.WriteString(`
 		INSERT INTO sparklend_reserve_data (
-			id, protocol_id, token_id, block_number,
+			id, protocol_id, token_id, block_number, block_version,
 			unbacked, accrued_to_treasury_scaled, total_a_token, total_stable_debt, total_variable_debt,
 			liquidity_rate, variable_borrow_rate, stable_borrow_rate, average_stable_borrow_rate,
 			liquidity_index, variable_borrow_index, last_update_timestamp
 		) VALUES `)
 
-	args := make([]any, 0, len(data)*16)
+	args := make([]any, 0, len(data)*17)
 	for i, d := range data {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 16
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+		baseIdx := i * 17
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8,
-			baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14, baseIdx+15, baseIdx+16))
-		args = append(args, d.ID, d.ProtocolID, d.TokenID, d.BlockNumber)
+			baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14, baseIdx+15, baseIdx+16, baseIdx+17))
+		args = append(args, d.ID, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion)
 
 		for _, valToConvert := range []*big.Int{
 			d.Unbacked,
@@ -199,7 +199,7 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 	}
 
 	sb.WriteString(`
-		ON CONFLICT (protocol_id, token_id, block_number) DO UPDATE SET
+		ON CONFLICT (protocol_id, token_id, block_number, block_version) DO UPDATE SET
 			unbacked = EXCLUDED.unbacked,
 			accrued_to_treasury_scaled = EXCLUDED.accrued_to_treasury_scaled,
 			total_a_token = EXCLUDED.total_a_token,
