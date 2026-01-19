@@ -44,11 +44,18 @@ func NewUserRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*UserRep
 	}, nil
 }
 
-// UpsertUsers upserts user records.
+// UpsertUsers upserts user records atomically.
+// All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
 func (r *UserRepository) UpsertUsers(ctx context.Context, users []*entity.User) error {
 	if len(users) == 0 {
 		return nil
 	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
 
 	for i := 0; i < len(users); i += r.batchSize {
 		end := i + r.batchSize
@@ -57,14 +64,18 @@ func (r *UserRepository) UpsertUsers(ctx context.Context, users []*entity.User) 
 		}
 		batch := users[i:end]
 
-		if err := r.upsertUserBatch(ctx, batch); err != nil {
+		if err := r.upsertUserBatch(ctx, tx, batch); err != nil {
 			return err
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *UserRepository) upsertUserBatch(ctx context.Context, users []*entity.User) error {
+func (r *UserRepository) upsertUserBatch(ctx context.Context, tx *sql.Tx, users []*entity.User) error {
 	if len(users) == 0 {
 		return nil
 	}
@@ -97,18 +108,25 @@ func (r *UserRepository) upsertUserBatch(ctx context.Context, users []*entity.Us
 			updated_at = NOW()
 	`)
 
-	_, err := r.db.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.ExecContext(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert user batch: %w", err)
 	}
 	return nil
 }
 
-// UpsertUserProtocolMetadata upserts user protocol metadata records.
+// UpsertUserProtocolMetadata upserts user protocol metadata records atomically atomically.
+// All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
 func (r *UserRepository) UpsertUserProtocolMetadata(ctx context.Context, metadata []*entity.UserProtocolMetadata) error {
 	if len(metadata) == 0 {
 		return nil
 	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
 
 	for i := 0; i < len(metadata); i += r.batchSize {
 		end := i + r.batchSize
@@ -117,14 +135,18 @@ func (r *UserRepository) UpsertUserProtocolMetadata(ctx context.Context, metadat
 		}
 		batch := metadata[i:end]
 
-		if err := r.upsertUserProtocolMetadataBatch(ctx, batch); err != nil {
+		if err := r.upsertUserProtocolMetadataBatch(ctx, tx, batch); err != nil {
 			return err
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *UserRepository) upsertUserProtocolMetadataBatch(ctx context.Context, metadata []*entity.UserProtocolMetadata) error {
+func (r *UserRepository) upsertUserProtocolMetadataBatch(ctx context.Context, tx *sql.Tx, metadata []*entity.UserProtocolMetadata) error {
 	if len(metadata) == 0 {
 		return nil
 	}
@@ -157,7 +179,7 @@ func (r *UserRepository) upsertUserProtocolMetadataBatch(ctx context.Context, me
 			updated_at = NOW()
 	`)
 
-	_, err := r.db.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.ExecContext(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert user protocol metadata batch: %w", err)
 	}

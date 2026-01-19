@@ -44,11 +44,18 @@ func NewTokenRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*TokenR
 	}, nil
 }
 
-// UpsertTokens upserts token records in batches.
+// UpsertTokens upserts token records in batches atomically.
+// All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
 func (r *TokenRepository) UpsertTokens(ctx context.Context, tokens []*entity.Token) error {
 	if len(tokens) == 0 {
 		return nil
 	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
 
 	for i := 0; i < len(tokens); i += r.batchSize {
 		end := i + r.batchSize
@@ -57,14 +64,18 @@ func (r *TokenRepository) UpsertTokens(ctx context.Context, tokens []*entity.Tok
 		}
 		batch := tokens[i:end]
 
-		if err := r.upsertTokenBatch(ctx, batch); err != nil {
+		if err := r.upsertTokenBatch(ctx, tx, batch); err != nil {
 			return err
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *TokenRepository) upsertTokenBatch(ctx context.Context, tokens []*entity.Token) error {
+func (r *TokenRepository) upsertTokenBatch(ctx context.Context, tx *sql.Tx, tokens []*entity.Token) error {
 	if len(tokens) == 0 {
 		return nil
 	}
@@ -98,18 +109,25 @@ func (r *TokenRepository) upsertTokenBatch(ctx context.Context, tokens []*entity
 			updated_at = NOW()
 	`)
 
-	_, err := r.db.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.ExecContext(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert token batch: %w", err)
 	}
 	return nil
 }
 
-// UpsertReceiptTokens upserts receipt token records.
+// UpsertReceiptTokens upserts receipt token records atomically atomically.
+// All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
 func (r *TokenRepository) UpsertReceiptTokens(ctx context.Context, tokens []*entity.ReceiptToken) error {
 	if len(tokens) == 0 {
 		return nil
 	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
 
 	for i := 0; i < len(tokens); i += r.batchSize {
 		end := i + r.batchSize
@@ -118,14 +136,18 @@ func (r *TokenRepository) UpsertReceiptTokens(ctx context.Context, tokens []*ent
 		}
 		batch := tokens[i:end]
 
-		if err := r.upsertReceiptTokenBatch(ctx, batch); err != nil {
+		if err := r.upsertReceiptTokenBatch(ctx, tx, batch); err != nil {
 			return err
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *TokenRepository) upsertReceiptTokenBatch(ctx context.Context, tokens []*entity.ReceiptToken) error {
+func (r *TokenRepository) upsertReceiptTokenBatch(ctx context.Context, tx *sql.Tx, tokens []*entity.ReceiptToken) error {
 	if len(tokens) == 0 {
 		return nil
 	}
@@ -159,18 +181,25 @@ func (r *TokenRepository) upsertReceiptTokenBatch(ctx context.Context, tokens []
 			updated_at = NOW()
 	`)
 
-	_, err := r.db.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.ExecContext(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert receipt token batch: %w", err)
 	}
 	return nil
 }
 
-// UpsertDebtTokens upserts debt token records.
+// UpsertDebtTokens upserts debt token records atomically atomically.
+// All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
 func (r *TokenRepository) UpsertDebtTokens(ctx context.Context, tokens []*entity.DebtToken) error {
 	if len(tokens) == 0 {
 		return nil
 	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
 
 	for i := 0; i < len(tokens); i += r.batchSize {
 		end := i + r.batchSize
@@ -179,14 +208,18 @@ func (r *TokenRepository) UpsertDebtTokens(ctx context.Context, tokens []*entity
 		}
 		batch := tokens[i:end]
 
-		if err := r.upsertDebtTokenBatch(ctx, batch); err != nil {
+		if err := r.upsertDebtTokenBatch(ctx, tx, batch); err != nil {
 			return err
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *TokenRepository) upsertDebtTokenBatch(ctx context.Context, tokens []*entity.DebtToken) error {
+func (r *TokenRepository) upsertDebtTokenBatch(ctx context.Context, tx *sql.Tx, tokens []*entity.DebtToken) error {
 	if len(tokens) == 0 {
 		return nil
 	}
@@ -222,7 +255,7 @@ func (r *TokenRepository) upsertDebtTokenBatch(ctx context.Context, tokens []*en
 			updated_at = NOW()
 	`)
 
-	_, err := r.db.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.ExecContext(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert debt token batch: %w", err)
 	}

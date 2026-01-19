@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	_ "embed"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -46,11 +45,18 @@ func NewProtocolRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*Pro
 	}, nil
 }
 
-// UpsertProtocols upserts protocol records.
+// UpsertProtocols upserts protocol records atomically.
+// All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
 func (r *ProtocolRepository) UpsertProtocols(ctx context.Context, protocols []*entity.Protocol) error {
 	if len(protocols) == 0 {
 		return nil
 	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
 
 	for i := 0; i < len(protocols); i += r.batchSize {
 		end := i + r.batchSize
@@ -59,14 +65,18 @@ func (r *ProtocolRepository) UpsertProtocols(ctx context.Context, protocols []*e
 		}
 		batch := protocols[i:end]
 
-		if err := r.upsertProtocolBatch(ctx, batch); err != nil {
+		if err := r.upsertProtocolBatch(ctx, tx, batch); err != nil {
 			return err
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *ProtocolRepository) upsertProtocolBatch(ctx context.Context, protocols []*entity.Protocol) error {
+func (r *ProtocolRepository) upsertProtocolBatch(ctx context.Context, tx *sql.Tx, protocols []*entity.Protocol) error {
 	if len(protocols) == 0 {
 		return nil
 	}
@@ -101,18 +111,25 @@ func (r *ProtocolRepository) upsertProtocolBatch(ctx context.Context, protocols 
 			updated_at = NOW()
 	`)
 
-	_, err := r.db.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.ExecContext(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert protocol batch: %w", err)
 	}
 	return nil
 }
 
-// UpsertSparkLendReserveData upserts SparkLend reserve data records.
+// UpsertSparkLendReserveData upserts SparkLend reserve data records atomically atomically.
+// All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
 func (r *ProtocolRepository) UpsertSparkLendReserveData(ctx context.Context, data []*entity.SparkLendReserveData) error {
 	if len(data) == 0 {
 		return nil
 	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
 
 	for i := 0; i < len(data); i += r.batchSize {
 		end := i + r.batchSize
@@ -121,14 +138,18 @@ func (r *ProtocolRepository) UpsertSparkLendReserveData(ctx context.Context, dat
 		}
 		batch := data[i:end]
 
-		if err := r.upsertSparkLendReserveDataBatch(ctx, batch); err != nil {
+		if err := r.upsertSparkLendReserveDataBatch(ctx, tx, batch); err != nil {
 			return err
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context, data []*entity.SparkLendReserveData) error {
+func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context, tx *sql.Tx, data []*entity.SparkLendReserveData) error {
 	if len(data) == 0 {
 		return nil
 	}
@@ -192,7 +213,7 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 			last_update_timestamp = EXCLUDED.last_update_timestamp
 	`)
 
-	_, err := r.db.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.ExecContext(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert sparklend reserve data batch: %w", err)
 	}

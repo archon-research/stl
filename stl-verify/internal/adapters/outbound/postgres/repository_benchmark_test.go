@@ -104,9 +104,9 @@ func generateBorrowers(count int, startBlock int64) []*entity.Borrower {
 	borrowers := make([]*entity.Borrower, count)
 	for i := 0; i < count; i++ {
 		borrowers[i] = &entity.Borrower{
-			UserID:       int64((i % 1000) + 1),   // 1000 unique users
-			ProtocolID:   int64((i % 10) + 1),     // 10 protocols
-			TokenID:      int64((i % 50) + 1),     // 50 tokens
+			UserID:       int64((i % 1000) + 1), // 1000 unique users
+			ProtocolID:   int64((i % 10) + 1),   // 10 protocols
+			TokenID:      int64((i % 50) + 1),   // 50 tokens
 			BlockNumber:  startBlock + int64(i/100),
 			BlockVersion: 0,
 			Amount:       big.NewInt(int64(1000000 + i)),
