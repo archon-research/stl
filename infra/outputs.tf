@@ -14,16 +14,39 @@ output "bucket_region" {
 }
 
 # =============================================================================
-# Ethereum Raw Data Access Role
+# Ethereum ECS Task Roles
 # =============================================================================
 
+# Watcher Role (SNS publish + read-only resources)
+output "ethereum_watcher_role_arn" {
+  description = "ARN of the Watcher ECS task role (publishes to SNS)"
+  value       = aws_iam_role.ethereum_watcher.arn
+}
+
+output "ethereum_watcher_role_name" {
+  description = "Name of the Watcher ECS task role"
+  value       = aws_iam_role.ethereum_watcher.name
+}
+
+# Worker Role (SQS consume + read-only resources)
+output "ethereum_worker_role_arn" {
+  description = "ARN of the Worker ECS task role (consumes from SQS)"
+  value       = aws_iam_role.ethereum_worker.arn
+}
+
+output "ethereum_worker_role_name" {
+  description = "Name of the Worker ECS task role"
+  value       = aws_iam_role.ethereum_worker.name
+}
+
+# Legacy role (deprecated - kept for backward compatibility)
 output "ethereum_raw_data_role_arn" {
-  description = "ARN of the IAM role for accessing the ethereum-raw S3 bucket"
+  description = "DEPRECATED: Use ethereum_watcher_role_arn or ethereum_worker_role_arn instead"
   value       = aws_iam_role.ethereum_raw_data_access.arn
 }
 
 output "ethereum_raw_data_role_name" {
-  description = "Name of the IAM role for accessing the ethereum-raw S3 bucket"
+  description = "DEPRECATED: Use ethereum_watcher_role_name or ethereum_worker_role_name instead"
   value       = aws_iam_role.ethereum_raw_data_access.name
 }
 
