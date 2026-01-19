@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS chains (
 
 -- Tokens table - ERC20 tokens
 CREATE TABLE IF NOT EXISTS tokens (
-    id BIGINT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     chain_id INTEGER NOT NULL REFERENCES chains(chain_id),
     address BYTEA NOT NULL,
     symbol VARCHAR(50),
@@ -105,7 +105,7 @@ CREATE INDEX IF NOT EXISTS idx_tokens_symbol ON tokens(symbol);
 
 -- Protocols table - DeFi protocols (e.g., SparkLend, Aave)
 CREATE TABLE IF NOT EXISTS protocols (
-    id BIGINT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     chain_id INTEGER NOT NULL REFERENCES chains(chain_id),
     address BYTEA NOT NULL,
     name VARCHAR(100) NOT NULL,
@@ -126,7 +126,7 @@ CREATE INDEX IF NOT EXISTS idx_protocols_type ON protocols(protocol_type);
 
 -- Receipt tokens (aTokens, spTokens, cTokens, etc.)
 CREATE TABLE IF NOT EXISTS receipt_tokens (
-    id BIGINT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     protocol_id BIGINT NOT NULL REFERENCES protocols(id),
     underlying_token_id BIGINT NOT NULL REFERENCES tokens(id),
     receipt_token_address BYTEA NOT NULL,
@@ -143,7 +143,7 @@ CREATE INDEX IF NOT EXISTS idx_receipt_tokens_underlying_token_id ON receipt_tok
 
 -- Debt tokens (variable and stable debt tokens)
 CREATE TABLE IF NOT EXISTS debt_tokens (
-    id BIGINT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     protocol_id BIGINT NOT NULL REFERENCES protocols(id),
     underlying_token_id BIGINT NOT NULL REFERENCES tokens(id),
     variable_debt_address BYTEA,
@@ -167,7 +167,7 @@ CREATE INDEX IF NOT EXISTS idx_debt_tokens_underlying_token_id ON debt_tokens(un
 
 -- Users table - wallet addresses that interact with protocols
 CREATE TABLE IF NOT EXISTS users (
-    id BIGINT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     chain_id INTEGER NOT NULL REFERENCES chains(chain_id),
     address BYTEA NOT NULL,
     first_seen_block BIGINT,
@@ -182,7 +182,7 @@ CREATE INDEX IF NOT EXISTS idx_users_chain_id ON users(chain_id);
 
 -- User protocol metadata - protocol-specific user data
 CREATE TABLE IF NOT EXISTS user_protocol_metadata (
-    id BIGINT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id),
     protocol_id BIGINT NOT NULL REFERENCES protocols(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -200,7 +200,7 @@ CREATE INDEX IF NOT EXISTS idx_user_protocol_metadata_protocol_id ON user_protoc
 
 -- Borrowers table - tracks user debt positions over time
 CREATE TABLE IF NOT EXISTS borrowers (
-    id BIGINT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id),
     protocol_id BIGINT NOT NULL REFERENCES protocols(id),
     token_id BIGINT NOT NULL REFERENCES tokens(id),
@@ -220,7 +220,7 @@ CREATE INDEX IF NOT EXISTS idx_borrowers_user_protocol ON borrowers(user_id, pro
 
 -- Borrower collateral table - tracks user collateral positions over time
 CREATE TABLE IF NOT EXISTS borrower_collateral (
-    id BIGINT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id),
     protocol_id BIGINT NOT NULL REFERENCES protocols(id),
     token_id BIGINT NOT NULL REFERENCES tokens(id),

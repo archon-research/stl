@@ -71,23 +71,23 @@ func (r *UserRepository) upsertUserBatch(ctx context.Context, users []*entity.Us
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO users (id, chain_id, address, first_seen_block, metadata, updated_at)
+		INSERT INTO users (chain_id, address, first_seen_block, metadata, updated_at)
 		VALUES `)
 
-	args := make([]any, 0, len(users)*6)
+	args := make([]any, 0, len(users)*4)
 	for i, user := range users {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 6
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, NOW())",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5))
+		baseIdx := i * 4
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, NOW())",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4))
 
 		metadata, err := marshalMetadata(user.Metadata)
 		if err != nil {
-			return fmt.Errorf("failed to marshal user metadata for user ID %d: %w", user.ID, err)
+			return fmt.Errorf("failed to marshal user metadata for chain %d, address %x: %w", user.ChainID, user.Address, err)
 		}
-		args = append(args, user.ID, user.ChainID, user.Address, user.FirstSeenBlock, metadata)
+		args = append(args, user.ChainID, user.Address, user.FirstSeenBlock, metadata)
 	}
 
 	sb.WriteString(`
@@ -131,24 +131,24 @@ func (r *UserRepository) upsertUserProtocolMetadataBatch(ctx context.Context, me
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO user_protocol_metadata (id, user_id, protocol_id, metadata, updated_at)
+		INSERT INTO user_protocol_metadata (user_id, protocol_id, metadata, updated_at)
 		VALUES `)
 
-	args := make([]any, 0, len(metadata)*4)
+	args := make([]any, 0, len(metadata)*3)
 	for i, m := range metadata {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 4
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, NOW())",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4))
+		baseIdx := i * 3
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, NOW())",
+			baseIdx+1, baseIdx+2, baseIdx+3))
 
 		metadataJSON, err := marshalMetadata(m.Metadata)
 		if err != nil {
 			return fmt.Errorf("failed to marshal user protocol metadata for user_id %d, protocol_id %d: %w", m.UserID, m.ProtocolID, err)
 		}
 
-		args = append(args, m.ID, m.UserID, m.ProtocolID, metadataJSON)
+		args = append(args, m.UserID, m.ProtocolID, metadataJSON)
 	}
 
 	sb.WriteString(`

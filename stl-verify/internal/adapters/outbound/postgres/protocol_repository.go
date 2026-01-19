@@ -95,24 +95,24 @@ func (r *ProtocolRepository) upsertProtocolBatch(ctx context.Context, protocols 
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO protocols (id, chain_id, address, name, protocol_type, created_at_block, metadata, updated_at)
+		INSERT INTO protocols (chain_id, address, name, protocol_type, created_at_block, metadata, updated_at)
 		VALUES `)
 
-	args := make([]any, 0, len(protocols)*8)
+	args := make([]any, 0, len(protocols)*6)
 	for i, protocol := range protocols {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 8
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
+		baseIdx := i * 6
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6))
 
 		metadata, err := marshalMetadata(protocol.Metadata)
 		if err != nil {
-			return fmt.Errorf("failed to marshal protocol metadata for protocol ID %d: %w", protocol.ID, err)
+			return fmt.Errorf("failed to marshal protocol metadata for chain %d, address %x: %w", protocol.ChainID, protocol.Address, err)
 		}
 
-		args = append(args, protocol.ID, protocol.ChainID, protocol.Address, protocol.Name, protocol.ProtocolType, protocol.CreatedAtBlock, metadata)
+		args = append(args, protocol.ChainID, protocol.Address, protocol.Name, protocol.ProtocolType, protocol.CreatedAtBlock, metadata)
 	}
 
 	sb.WriteString(`
@@ -158,22 +158,22 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 	var sb strings.Builder
 	sb.WriteString(`
 		INSERT INTO sparklend_reserve_data (
-			id, protocol_id, token_id, block_number, block_version,
+			protocol_id, token_id, block_number, block_version,
 			unbacked, accrued_to_treasury_scaled, total_a_token, total_stable_debt, total_variable_debt,
 			liquidity_rate, variable_borrow_rate, stable_borrow_rate, average_stable_borrow_rate,
 			liquidity_index, variable_borrow_index, last_update_timestamp
 		) VALUES `)
 
-	args := make([]any, 0, len(data)*17)
+	args := make([]any, 0, len(data)*16)
 	for i, d := range data {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 17
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+		baseIdx := i * 16
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8,
-			baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14, baseIdx+15, baseIdx+16, baseIdx+17))
-		args = append(args, d.ID, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion)
+			baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14, baseIdx+15, baseIdx+16))
+		args = append(args, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion)
 
 		for _, valToConvert := range []*big.Int{
 			d.Unbacked,
@@ -190,7 +190,7 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 		} {
 			convertedVal, err := bigIntToNumeric(valToConvert)
 			if err != nil {
-				return fmt.Errorf("sparklend_reserve_data[%d] (ID=%d, ProtocolID=%d, TokenID=%d): numeric fields must not be nil", i, d.ID, d.ProtocolID, d.TokenID)
+				return fmt.Errorf("sparklend_reserve_data[%d] (ProtocolID=%d, TokenID=%d): numeric fields must not be nil", i, d.ProtocolID, d.TokenID)
 			}
 			args = append(args, convertedVal)
 		}

@@ -104,7 +104,6 @@ func generateBorrowers(count int, startBlock int64) []*entity.Borrower {
 	borrowers := make([]*entity.Borrower, count)
 	for i := 0; i < count; i++ {
 		borrowers[i] = &entity.Borrower{
-			ID:           int64(i + 1),
 			UserID:       int64((i % 1000) + 1),   // 1000 unique users
 			ProtocolID:   int64((i % 10) + 1),     // 10 protocols
 			TokenID:      int64((i % 50) + 1),     // 50 tokens
@@ -122,7 +121,6 @@ func generateBorrowerCollateral(count int, startBlock int64) []*entity.BorrowerC
 	collateral := make([]*entity.BorrowerCollateral, count)
 	for i := 0; i < count; i++ {
 		collateral[i] = &entity.BorrowerCollateral{
-			ID:           int64(i + 1),
 			UserID:       int64((i % 1000) + 1),
 			ProtocolID:   int64((i % 10) + 1),
 			TokenID:      int64((i % 50) + 1),

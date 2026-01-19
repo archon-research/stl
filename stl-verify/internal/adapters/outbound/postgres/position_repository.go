@@ -110,35 +110,35 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, exec dbExe
 
 	for i, b := range borrowers {
 		if b.Amount == nil {
-			return fmt.Errorf("borrower[%d] (ID=%d, UserID=%d): Amount must not be nil", i, b.ID, b.UserID)
+			return fmt.Errorf("borrower[%d] (UserID=%d): Amount must not be nil", i, b.UserID)
 		}
 		if b.Change == nil {
-			return fmt.Errorf("borrower[%d] (ID=%d, UserID=%d): Change must not be nil", i, b.ID, b.UserID)
+			return fmt.Errorf("borrower[%d] (UserID=%d): Change must not be nil", i, b.UserID)
 		}
 	}
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO borrowers (id, user_id, protocol_id, token_id, block_number, block_version, amount, change)
+		INSERT INTO borrowers (user_id, protocol_id, token_id, block_number, block_version, amount, change)
 		VALUES `)
 
-	args := make([]any, 0, len(borrowers)*8)
+	args := make([]any, 0, len(borrowers)*7)
 	for i, b := range borrowers {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 8
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8))
+		baseIdx := i * 7
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
 
 		amount, err := bigIntToNumeric(b.Amount); if err != nil {
-			return fmt.Errorf("borrower[%d] (ID=%d, UserID=%d): failed to convert Amount to numeric: %w", i, b.ID, b.UserID, err)
+			return fmt.Errorf("borrower[%d] (UserID=%d): failed to convert Amount to numeric: %w", i, b.UserID, err)
 		}
 		change, err := bigIntToNumeric(b.Change); if err != nil {
-			return fmt.Errorf("borrower[%d] (ID=%d, UserID=%d): failed to convert Change to numeric: %w", i, b.ID, b.UserID, err)
+			return fmt.Errorf("borrower[%d] (UserID=%d): failed to convert Change to numeric: %w", i, b.UserID, err)
 		}
 
-		args = append(args, b.ID, b.UserID, b.ProtocolID, b.TokenID, b.BlockNumber, b.BlockVersion, amount, change)
+		args = append(args, b.UserID, b.ProtocolID, b.TokenID, b.BlockNumber, b.BlockVersion, amount, change)
 	}
 
 	sb.WriteString(`
@@ -216,35 +216,35 @@ func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, 
 	// Validate all entities before constructing the query.
 	for i, c := range collateral {
 		if c.Amount == nil {
-			return fmt.Errorf("borrower_collateral[%d] (ID=%d, UserID=%d): Amount must not be nil", i, c.ID, c.UserID)
+			return fmt.Errorf("borrower_collateral[%d] (UserID=%d): Amount must not be nil", i, c.UserID)
 		}
 		if c.Change == nil {
-			return fmt.Errorf("borrower_collateral[%d] (ID=%d, UserID=%d): Change must not be nil", i, c.ID, c.UserID)
+			return fmt.Errorf("borrower_collateral[%d] (UserID=%d): Change must not be nil", i, c.UserID)
 		}
 	}
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO borrower_collateral (id, user_id, protocol_id, token_id, block_number, block_version, amount, change)
+		INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change)
 		VALUES `)
 
-	args := make([]any, 0, len(collateral)*8)
+	args := make([]any, 0, len(collateral)*7)
 	for i, c := range collateral {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 8
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8))
+		baseIdx := i * 7
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
 
 		amount, err := bigIntToNumeric(c.Amount); if err != nil {
-			return fmt.Errorf("borrower_collateral[%d] (ID=%d, UserID=%d): failed to convert Amount to numeric: %w", i, c.ID, c.UserID, err)
+			return fmt.Errorf("borrower_collateral[%d] (UserID=%d): failed to convert Amount to numeric: %w", i, c.UserID, err)
 		}
 		change, err := bigIntToNumeric(c.Change); if err != nil {
-			return fmt.Errorf("borrower_collateral[%d] (ID=%d, UserID=%d): failed to convert Change to numeric: %w", i, c.ID, c.UserID, err)
+			return fmt.Errorf("borrower_collateral[%d] (UserID=%d): failed to convert Change to numeric: %w", i, c.UserID, err)
 		}
 
-		args = append(args, c.ID, c.UserID, c.ProtocolID, c.TokenID, c.BlockNumber, c.BlockVersion, amount, change)
+		args = append(args, c.UserID, c.ProtocolID, c.TokenID, c.BlockNumber, c.BlockVersion, amount, change)
 	}
 
 	sb.WriteString(`

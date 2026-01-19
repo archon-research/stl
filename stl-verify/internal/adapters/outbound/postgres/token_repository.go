@@ -71,23 +71,23 @@ func (r *TokenRepository) upsertTokenBatch(ctx context.Context, tokens []*entity
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO tokens (id, chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
+		INSERT INTO tokens (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
 		VALUES `)
 
-	args := make([]any, 0, len(tokens)*7)
+	args := make([]any, 0, len(tokens)*6)
 	for i, token := range tokens {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 7
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
+		baseIdx := i * 6
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6))
 
 		metadata, err := marshalMetadata(token.Metadata)
 		if err != nil {
-			return fmt.Errorf("failed to marshal token metadata for token ID %d: %w", token.ID, err)
+			return fmt.Errorf("failed to marshal token metadata for chain %d, address %x: %w", token.ChainID, token.Address, err)
 		}
-		args = append(args, token.ID, token.ChainID, token.Address, token.Symbol, token.Decimals, token.CreatedAtBlock, metadata)
+		args = append(args, token.ChainID, token.Address, token.Symbol, token.Decimals, token.CreatedAtBlock, metadata)
 	}
 
 	sb.WriteString(`
@@ -132,23 +132,23 @@ func (r *TokenRepository) upsertReceiptTokenBatch(ctx context.Context, tokens []
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO receipt_tokens (id, protocol_id, underlying_token_id, receipt_token_address, symbol, created_at_block, metadata, updated_at)
+		INSERT INTO receipt_tokens (protocol_id, underlying_token_id, receipt_token_address, symbol, created_at_block, metadata, updated_at)
 		VALUES `)
 
-	args := make([]any, 0, len(tokens)*8)
+	args := make([]any, 0, len(tokens)*6)
 	for i, token := range tokens {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 8
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
+		baseIdx := i * 6
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6))
 
 		metadata, err := marshalMetadata(token.Metadata)
 		if err != nil {
-			return fmt.Errorf("failed to marshal receipt token metadata for token ID %d: %w", token.ID, err)
+			return fmt.Errorf("failed to marshal receipt token metadata for protocol %d, underlying %d: %w", token.ProtocolID, token.UnderlyingTokenID, err)
 		}
-		args = append(args, token.ID, token.ProtocolID, token.UnderlyingTokenID, token.ReceiptTokenAddress, token.Symbol, token.CreatedAtBlock, metadata)
+		args = append(args, token.ProtocolID, token.UnderlyingTokenID, token.ReceiptTokenAddress, token.Symbol, token.CreatedAtBlock, metadata)
 	}
 
 	sb.WriteString(`
@@ -193,23 +193,23 @@ func (r *TokenRepository) upsertDebtTokenBatch(ctx context.Context, tokens []*en
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO debt_tokens (id, protocol_id, underlying_token_id, variable_debt_address, stable_debt_address, variable_symbol, stable_symbol, created_at_block, metadata, updated_at)
+		INSERT INTO debt_tokens (protocol_id, underlying_token_id, variable_debt_address, stable_debt_address, variable_symbol, stable_symbol, created_at_block, metadata, updated_at)
 		VALUES `)
 
-	args := make([]any, 0, len(tokens)*10)
+	args := make([]any, 0, len(tokens)*8)
 	for i, token := range tokens {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 10
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8, baseIdx+9))
+		baseIdx := i * 8
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8))
 
 		metadata, err := marshalMetadata(token.Metadata)
 		if err != nil {
-			return fmt.Errorf("failed to marshal debt token metadata for token ID %d: %w", token.ID, err)
+			return fmt.Errorf("failed to marshal debt token metadata for protocol %d, underlying %d: %w", token.ProtocolID, token.UnderlyingTokenID, err)
 		}
-		args = append(args, token.ID, token.ProtocolID, token.UnderlyingTokenID, token.VariableDebtAddress, token.StableDebtAddress, token.VariableSymbol, token.StableSymbol, token.CreatedAtBlock, metadata)
+		args = append(args, token.ProtocolID, token.UnderlyingTokenID, token.VariableDebtAddress, token.StableDebtAddress, token.VariableSymbol, token.StableSymbol, token.CreatedAtBlock, metadata)
 	}
 
 	sb.WriteString(`
