@@ -11,6 +11,11 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
+// dbExecutor is an interface that both *sql.DB and *sql.Tx implement.
+type dbExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // Compile-time check that PositionRepository implements outbound.PositionRepository
 var _ outbound.PositionRepository = (*PositionRepository)(nil)
 
@@ -45,7 +50,41 @@ func NewPositionRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*Pos
 }
 
 // UpsertBorrowers upserts borrower (debt) position records.
+// Note: This method processes in batches. If a batch fails, previous batches remain committed.
+// Use UpsertBorrowersAtomic for all-or-nothing semantics.
 func (r *PositionRepository) UpsertBorrowers(ctx context.Context, borrowers []*entity.Borrower) error {
+	return r.upsertBorrowersWithExecutor(ctx, r.db, borrowers)
+}
+
+// UpsertBorrowersInTx upserts borrower records using the provided transaction.
+func (r *PositionRepository) UpsertBorrowersInTx(ctx context.Context, tx *sql.Tx, borrowers []*entity.Borrower) error {
+	return r.upsertBorrowersWithExecutor(ctx, tx, borrowers)
+}
+
+// UpsertBorrowersAtomic upserts all borrower records in a single transaction.
+// If any batch fails, all changes are rolled back.
+func (r *PositionRepository) UpsertBorrowersAtomic(ctx context.Context, borrowers []*entity.Borrower) error {
+	if len(borrowers) == 0 {
+		return nil
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := r.upsertBorrowersWithExecutor(ctx, tx, borrowers); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
+}
+
+func (r *PositionRepository) upsertBorrowersWithExecutor(ctx context.Context, exec dbExecutor, borrowers []*entity.Borrower) error {
 	if len(borrowers) == 0 {
 		return nil
 	}
@@ -57,14 +96,14 @@ func (r *PositionRepository) UpsertBorrowers(ctx context.Context, borrowers []*e
 		}
 		batch := borrowers[i:end]
 
-		if err := r.upsertBorrowerBatch(ctx, batch); err != nil {
+		if err := r.upsertBorrowerBatch(ctx, exec, batch); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, borrowers []*entity.Borrower) error {
+func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, exec dbExecutor, borrowers []*entity.Borrower) error {
 	if len(borrowers) == 0 {
 		return nil
 	}
@@ -92,10 +131,10 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, borrowers 
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8))
 
-		amount, err := bigIntToNumeric(b.Amount); err != nil {
+		amount, err := bigIntToNumeric(b.Amount); if err != nil {
 			return fmt.Errorf("borrower[%d] (ID=%d, UserID=%d): failed to convert Amount to numeric: %w", i, b.ID, b.UserID, err)
 		}
-		change, err := bigIntToNumeric(b.Change); err != nil {
+		change, err := bigIntToNumeric(b.Change); if err != nil {
 			return fmt.Errorf("borrower[%d] (ID=%d, UserID=%d): failed to convert Change to numeric: %w", i, b.ID, b.UserID, err)
 		}
 
@@ -108,7 +147,7 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, borrowers 
 			change = EXCLUDED.change
 	`)
 
-	_, err := r.db.ExecContext(ctx, sb.String(), args...)
+	_, err := exec.ExecContext(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert borrower batch: %w", err)
 	}
@@ -116,7 +155,41 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, borrowers 
 }
 
 // UpsertBorrowerCollateral upserts collateral position records.
+// Note: This method processes in batches. If a batch fails, previous batches remain committed.
+// Use UpsertBorrowerCollateralAtomic for all-or-nothing semantics.
 func (r *PositionRepository) UpsertBorrowerCollateral(ctx context.Context, collateral []*entity.BorrowerCollateral) error {
+	return r.upsertBorrowerCollateralWithExecutor(ctx, r.db, collateral)
+}
+
+// UpsertBorrowerCollateralInTx upserts collateral records using the provided transaction.
+func (r *PositionRepository) UpsertBorrowerCollateralInTx(ctx context.Context, tx *sql.Tx, collateral []*entity.BorrowerCollateral) error {
+	return r.upsertBorrowerCollateralWithExecutor(ctx, tx, collateral)
+}
+
+// UpsertBorrowerCollateralAtomic upserts all collateral records in a single transaction.
+// If any batch fails, all changes are rolled back.
+func (r *PositionRepository) UpsertBorrowerCollateralAtomic(ctx context.Context, collateral []*entity.BorrowerCollateral) error {
+	if len(collateral) == 0 {
+		return nil
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := r.upsertBorrowerCollateralWithExecutor(ctx, tx, collateral); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
+}
+
+func (r *PositionRepository) upsertBorrowerCollateralWithExecutor(ctx context.Context, exec dbExecutor, collateral []*entity.BorrowerCollateral) error {
 	if len(collateral) == 0 {
 		return nil
 	}
@@ -128,14 +201,14 @@ func (r *PositionRepository) UpsertBorrowerCollateral(ctx context.Context, colla
 		}
 		batch := collateral[i:end]
 
-		if err := r.upsertBorrowerCollateralBatch(ctx, batch); err != nil {
+		if err := r.upsertBorrowerCollateralBatch(ctx, exec, batch); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, collateral []*entity.BorrowerCollateral) error {
+func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, exec dbExecutor, collateral []*entity.BorrowerCollateral) error {
 	if len(collateral) == 0 {
 		return nil
 	}
@@ -164,10 +237,10 @@ func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, 
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8))
 
-		amount, err := bigIntToNumeric(c.Amount); err != nil {
+		amount, err := bigIntToNumeric(c.Amount); if err != nil {
 			return fmt.Errorf("borrower_collateral[%d] (ID=%d, UserID=%d): failed to convert Amount to numeric: %w", i, c.ID, c.UserID, err)
 		}
-		change, err := bigIntToNumeric(c.Change); err != nil {
+		change, err := bigIntToNumeric(c.Change); if err != nil {
 			return fmt.Errorf("borrower_collateral[%d] (ID=%d, UserID=%d): failed to convert Change to numeric: %w", i, c.ID, c.UserID, err)
 		}
 
@@ -180,7 +253,7 @@ func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, 
 			change = EXCLUDED.change
 	`)
 
-	_, err := r.db.ExecContext(ctx, sb.String(), args...)
+	_, err := exec.ExecContext(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert borrower collateral batch: %w", err)
 	}
