@@ -46,28 +46,6 @@ func NewProtocolRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*Pro
 	}, nil
 }
 
-// UpsertChains upserts chain records.
-func (r *ProtocolRepository) UpsertChains(ctx context.Context, chains []*entity.Chain) error {
-	if len(chains) == 0 {
-		return nil
-	}
-
-	query := `
-		INSERT INTO chains (chain_id, name, updated_at)
-		VALUES ($1, $2, NOW())
-		ON CONFLICT (chain_id) DO UPDATE SET
-			name = EXCLUDED.name,
-			updated_at = NOW()
-	`
-
-	for _, chain := range chains {
-		if _, err := r.db.ExecContext(ctx, query, chain.ChainID, chain.Name); err != nil {
-			return fmt.Errorf("failed to upsert chain %d: %w", chain.ChainID, err)
-		}
-	}
-	return nil
-}
-
 // UpsertProtocols upserts protocol records.
 func (r *ProtocolRepository) UpsertProtocols(ctx context.Context, protocols []*entity.Protocol) error {
 	if len(protocols) == 0 {

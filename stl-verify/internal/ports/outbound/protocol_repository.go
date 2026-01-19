@@ -9,10 +9,6 @@ import (
 // ProtocolRepository defines the interface for protocol-related data persistence.
 // This aggregate includes chains, protocols, and protocol-specific reserve data.
 type ProtocolRepository interface {
-	// UpsertChains upserts chain (network) records.
-	// Conflict resolution: ON CONFLICT (chain_id) DO UPDATE
-	UpsertChains(ctx context.Context, chains []*entity.Chain) error
-
 	// UpsertProtocols upserts protocol records.
 	// Conflict resolution: ON CONFLICT (chain_id, address) DO UPDATE
 	UpsertProtocols(ctx context.Context, protocols []*entity.Protocol) error

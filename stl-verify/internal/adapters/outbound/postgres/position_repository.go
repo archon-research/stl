@@ -11,11 +11,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// dbExecutor is an interface that both *sql.DB and *sql.Tx implement.
-type dbExecutor interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-}
-
 // Compile-time check that PositionRepository implements outbound.PositionRepository
 var _ outbound.PositionRepository = (*PositionRepository)(nil)
 
@@ -62,8 +57,16 @@ func (r *PositionRepository) UpsertBorrowers(ctx context.Context, borrowers []*e
 	}
 	defer tx.Rollback()
 
-	if err := r.upsertBorrowersWithExecutor(ctx, tx, borrowers); err != nil {
-		return err
+	for i := 0; i < len(borrowers); i += r.batchSize {
+		end := i + r.batchSize
+		if end > len(borrowers) {
+			end = len(borrowers)
+		}
+		batch := borrowers[i:end]
+
+		if err := r.upsertBorrowerBatch(ctx, tx, batch); err != nil {
+			return err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -72,42 +75,9 @@ func (r *PositionRepository) UpsertBorrowers(ctx context.Context, borrowers []*e
 	return nil
 }
 
-// UpsertBorrowersInTx upserts borrower records using the provided transaction.
-func (r *PositionRepository) UpsertBorrowersInTx(ctx context.Context, tx *sql.Tx, borrowers []*entity.Borrower) error {
-	return r.upsertBorrowersWithExecutor(ctx, tx, borrowers)
-}
-
-func (r *PositionRepository) upsertBorrowersWithExecutor(ctx context.Context, exec dbExecutor, borrowers []*entity.Borrower) error {
+func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, tx *sql.Tx, borrowers []*entity.Borrower) error {
 	if len(borrowers) == 0 {
 		return nil
-	}
-
-	for i := 0; i < len(borrowers); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(borrowers) {
-			end = len(borrowers)
-		}
-		batch := borrowers[i:end]
-
-		if err := r.upsertBorrowerBatch(ctx, exec, batch); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, exec dbExecutor, borrowers []*entity.Borrower) error {
-	if len(borrowers) == 0 {
-		return nil
-	}
-
-	for i, b := range borrowers {
-		if b.Amount == nil {
-			return fmt.Errorf("borrower[%d] (UserID=%d): Amount must not be nil", i, b.UserID)
-		}
-		if b.Change == nil {
-			return fmt.Errorf("borrower[%d] (UserID=%d): Change must not be nil", i, b.UserID)
-		}
 	}
 
 	var sb strings.Builder
@@ -142,7 +112,7 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, exec dbExe
 			change = EXCLUDED.change
 	`)
 
-	_, err := exec.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.ExecContext(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert borrower batch: %w", err)
 	}
@@ -162,8 +132,16 @@ func (r *PositionRepository) UpsertBorrowerCollateral(ctx context.Context, colla
 	}
 	defer tx.Rollback()
 
-	if err := r.upsertBorrowerCollateralWithExecutor(ctx, tx, collateral); err != nil {
-		return err
+	for i := 0; i < len(collateral); i += r.batchSize {
+		end := i + r.batchSize
+		if end > len(collateral) {
+			end = len(collateral)
+		}
+		batch := collateral[i:end]
+
+		if err := r.upsertBorrowerCollateralBatch(ctx, tx, batch); err != nil {
+			return err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -172,43 +150,9 @@ func (r *PositionRepository) UpsertBorrowerCollateral(ctx context.Context, colla
 	return nil
 }
 
-// UpsertBorrowerCollateralInTx upserts collateral records using the provided transaction.
-func (r *PositionRepository) UpsertBorrowerCollateralInTx(ctx context.Context, tx *sql.Tx, collateral []*entity.BorrowerCollateral) error {
-	return r.upsertBorrowerCollateralWithExecutor(ctx, tx, collateral)
-}
-
-func (r *PositionRepository) upsertBorrowerCollateralWithExecutor(ctx context.Context, exec dbExecutor, collateral []*entity.BorrowerCollateral) error {
+func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, tx *sql.Tx, collateral []*entity.BorrowerCollateral) error {
 	if len(collateral) == 0 {
 		return nil
-	}
-
-	for i := 0; i < len(collateral); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(collateral) {
-			end = len(collateral)
-		}
-		batch := collateral[i:end]
-
-		if err := r.upsertBorrowerCollateralBatch(ctx, exec, batch); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, exec dbExecutor, collateral []*entity.BorrowerCollateral) error {
-	if len(collateral) == 0 {
-		return nil
-	}
-
-	// Validate all entities before constructing the query.
-	for i, c := range collateral {
-		if c.Amount == nil {
-			return fmt.Errorf("borrower_collateral[%d] (UserID=%d): Amount must not be nil", i, c.UserID)
-		}
-		if c.Change == nil {
-			return fmt.Errorf("borrower_collateral[%d] (UserID=%d): Change must not be nil", i, c.UserID)
-		}
 	}
 
 	var sb strings.Builder
@@ -225,10 +169,12 @@ func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, 
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
 
-		amount, err := bigIntToNumeric(c.Amount); if err != nil {
+		amount, err := bigIntToNumeric(c.Amount)
+		if err != nil {
 			return fmt.Errorf("borrower_collateral[%d] (UserID=%d): failed to convert Amount to numeric: %w", i, c.UserID, err)
 		}
-		change, err := bigIntToNumeric(c.Change); if err != nil {
+		change, err := bigIntToNumeric(c.Change)
+		if err != nil {
 			return fmt.Errorf("borrower_collateral[%d] (UserID=%d): failed to convert Change to numeric: %w", i, c.UserID, err)
 		}
 
@@ -241,7 +187,7 @@ func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, 
 			change = EXCLUDED.change
 	`)
 
-	_, err := exec.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.ExecContext(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert borrower collateral batch: %w", err)
 	}
