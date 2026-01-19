@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -26,6 +28,10 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+)
+
+const (
+	Multicall3Address = "0xcA11bde05977b3631167028862bE2a173976CA11"
 )
 
 type ReceiptMetadata struct {
@@ -99,16 +105,31 @@ type BorrowEventProcessor struct {
 	getUserReservesABI    *abi.ABI
 	getReserveDataABI     *abi.ABI
 	erc20DecimalsABI      *abi.ABI
+	multicallABI          *abi.ABI
 	uiPoolDataProvider    common.Address
 	poolAddressesProvider common.Address
 	aavePool              common.Address
+	multicall3            common.Address
 	eventSignatures       map[common.Hash]*abi.Event
+	decimalsCache         map[common.Address]int
+	decimalsCacheMu       sync.RWMutex
 }
 
 type collateralData struct {
 	asset         common.Address
 	decimals      int
 	actualBalance *big.Int
+}
+
+type Call3 struct {
+	Target       common.Address
+	AllowFailure bool
+	CallData     []byte
+}
+
+type Multicall3Result struct {
+	Success    bool
+	ReturnData []byte
 }
 
 func main() {
@@ -243,6 +264,8 @@ func main() {
 		uiPoolDataProvider:    common.HexToAddress("0x56b7A1012765C285afAC8b8F25C69Bf10ccfE978"),
 		poolAddressesProvider: common.HexToAddress("0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e"),
 		aavePool:              common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"),
+		multicall3:            common.HexToAddress(Multicall3Address),
+		decimalsCache:         make(map[common.Address]int),
 	}
 
 	if err := processor.loadABIs(); err != nil {
@@ -383,6 +406,41 @@ func (p *BorrowEventProcessor) loadABIs() error {
 	}
 	p.erc20DecimalsABI = &parsedERC20DecimalsABI
 
+	multicallABI := `[{
+       "inputs": [
+          {
+             "components": [
+                {"internalType": "address", "name": "target", "type": "address"},
+                {"internalType": "bool", "name": "allowFailure", "type": "bool"},
+                {"internalType": "bytes", "name": "callData", "type": "bytes"}
+             ],
+             "internalType": "struct Multicall3.Call3[]",
+             "name": "calls",
+             "type": "tuple[]"
+          }
+       ],
+       "name": "aggregate3",
+       "outputs": [
+          {
+             "components": [
+                {"internalType": "bool", "name": "success", "type": "bool"},
+                {"internalType": "bytes", "name": "returnData", "type": "bytes"}
+             ],
+             "internalType": "struct Multicall3.Result[]",
+             "name": "returnData",
+             "type": "tuple[]"
+          }
+       ],
+       "stateMutability": "payable",
+       "type": "function"
+    }]`
+
+	parsedMulticallABI, err := abi.JSON(strings.NewReader(multicallABI))
+	if err != nil {
+		return fmt.Errorf("failed to parse multicall ABI: %w", err)
+	}
+	p.multicallABI = &parsedMulticallABI
+
 	p.logger.Info("loaded ABIs")
 	return nil
 }
@@ -473,14 +531,14 @@ func (p *BorrowEventProcessor) processReceipt(ctx context.Context, receipt Trans
 			continue
 		}
 
-		if err := p.processBorrowLog(ctx, log, blockNumber, blockVersion); err != nil {
+		if err := p.processBorrowLog(ctx, log, receipt.TransactionHash, blockNumber, blockVersion); err != nil {
 			p.logger.Error("failed to process borrow event", "error", err, "tx", receipt.TransactionHash)
 		}
 	}
 	return nil
 }
 
-func (p *BorrowEventProcessor) processBorrowLog(ctx context.Context, log Log, blockNumber int64, blockVersion int) error {
+func (p *BorrowEventProcessor) processBorrowLog(ctx context.Context, log Log, txHash string, blockNumber int64, blockVersion int) error {
 	if len(log.Topics) == 0 {
 		return fmt.Errorf("no topics")
 	}
@@ -526,10 +584,10 @@ func (p *BorrowEventProcessor) processBorrowLog(ctx context.Context, log Log, bl
 
 	protocolAddress := common.HexToAddress(log.Address)
 
-	return p.saveBorrowEvent(ctx, protocolAddress, eventData, blockNumber, blockVersion)
+	return p.saveBorrowEvent(ctx, protocolAddress, eventData, txHash, blockNumber, blockVersion)
 }
 
-func (p *BorrowEventProcessor) saveBorrowEvent(ctx context.Context, protocolAddress common.Address, eventData map[string]interface{}, blockNumber int64, blockVersion int) error {
+func (p *BorrowEventProcessor) saveBorrowEvent(ctx context.Context, protocolAddress common.Address, eventData map[string]interface{}, txHash string, blockNumber int64, blockVersion int) error {
 	reserve := eventData["reserve"].(common.Address)
 	onBehalfOf := eventData["onBehalfOf"].(common.Address)
 	amount := eventData["amount"].(*big.Int)
@@ -539,43 +597,88 @@ func (p *BorrowEventProcessor) saveBorrowEvent(ctx context.Context, protocolAddr
 		"protocol", protocolAddress.Hex(),
 		"reserve", reserve.Hex(),
 		"amount", amount.String(),
+		"tx", txHash,
 		"block_version", blockVersion,
 		"block", blockNumber)
 
-	borrowTokenDecimals, err := p.getTokenDecimals(ctx, reserve)
-	if err != nil {
-		p.logger.Warn("failed to get borrow token decimals, using default 18", "token", reserve.Hex(), "error", err)
-		borrowTokenDecimals = 18
-	}
-
 	reserves, err := p.getUserReservesData(ctx, onBehalfOf, blockNumber)
 	if err != nil {
-		p.logger.Warn("failed to get user reserves", "error", err)
+		p.logger.Warn("failed to get user reserves", "error", err, "tx", txHash, "block", blockNumber)
 		reserves = []UserReserveData{}
 	}
 
+	tokensToFetch := make(map[common.Address]bool)
+	tokensToFetch[reserve] = true
+
+	for _, r := range reserves {
+		if r.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && r.UsageAsCollateralEnabledOnUser {
+			if r.UnderlyingAsset != (common.Address{}) {
+				tokensToFetch[r.UnderlyingAsset] = true
+			}
+		}
+	}
+
+	assetsForReserveData := make([]common.Address, 0)
+	for _, r := range reserves {
+		if r.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && r.UsageAsCollateralEnabledOnUser {
+			if r.UnderlyingAsset != (common.Address{}) {
+				assetsForReserveData = append(assetsForReserveData, r.UnderlyingAsset)
+			}
+		}
+	}
+
+	decimalsMap, err := p.batchGetDecimals(ctx, tokensToFetch)
+	if err != nil {
+		p.logger.Warn("failed to batch get decimals", "error", err, "tx", txHash, "block", blockNumber)
+		decimalsMap = make(map[common.Address]int)
+	}
+
+	reserveDataMap, err := p.batchGetReserveData(ctx, protocolAddress, assetsForReserveData, blockNumber)
+	if err != nil {
+		p.logger.Warn("failed to batch get reserve data", "error", err, "tx", txHash, "block", blockNumber)
+		reserveDataMap = make(map[common.Address]*big.Int)
+	}
+
+	borrowTokenDecimals, ok := decimalsMap[reserve]
+	if !ok {
+		p.logger.Error("SKIPPING EVENT: Failed to get borrow token decimals",
+			"token", reserve.Hex(),
+			"tx", txHash,
+			"block", blockNumber,
+			"user", onBehalfOf.Hex(),
+			"protocol", protocolAddress.Hex())
+		return fmt.Errorf("borrow token decimals not found for %s", reserve.Hex())
+	}
+
 	var collaterals []collateralData
-	for _, reserve := range reserves {
-		if reserve.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && reserve.UsageAsCollateralEnabledOnUser {
-			if reserve.UnderlyingAsset == (common.Address{}) {
-				p.logger.Debug("skipping zero address collateral")
+	for _, r := range reserves {
+		if r.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && r.UsageAsCollateralEnabledOnUser {
+			if r.UnderlyingAsset == (common.Address{}) {
 				continue
 			}
 
-			decimals, err := p.getTokenDecimals(ctx, reserve.UnderlyingAsset)
-			if err != nil {
-				p.logger.Warn("failed to get collateral token decimals, using default 18", "token", reserve.UnderlyingAsset.Hex(), "error", err)
-				decimals = 18
+			decimals, ok := decimalsMap[r.UnderlyingAsset]
+			if !ok {
+				p.logger.Error("SKIPPING COLLATERAL: Failed to get collateral token decimals",
+					"token", r.UnderlyingAsset.Hex(),
+					"tx", txHash,
+					"block", blockNumber,
+					"user", onBehalfOf.Hex())
+				continue
 			}
 
-			actualBalance, err := p.getActualBalance(ctx, protocolAddress, reserve.UnderlyingAsset, reserve.ScaledATokenBalance, blockNumber)
-			if err != nil {
-				p.logger.Warn("failed to calculate actual balance, using scaled", "token", reserve.UnderlyingAsset.Hex(), "error", err)
-				actualBalance = reserve.ScaledATokenBalance
+			liquidityIndex, ok := reserveDataMap[r.UnderlyingAsset]
+			var actualBalance *big.Int
+			if ok && liquidityIndex != nil && liquidityIndex.Cmp(big.NewInt(0)) > 0 {
+				RAY := new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
+				actualBalance = new(big.Int).Mul(r.ScaledATokenBalance, liquidityIndex)
+				actualBalance.Div(actualBalance, RAY)
+			} else {
+				actualBalance = r.ScaledATokenBalance
 			}
 
 			collaterals = append(collaterals, collateralData{
-				asset:         reserve.UnderlyingAsset,
+				asset:         r.UnderlyingAsset,
 				decimals:      decimals,
 				actualBalance: actualBalance,
 			})
@@ -617,7 +720,7 @@ func (p *BorrowEventProcessor) saveBorrowEvent(ctx context.Context, protocolAddr
 	for _, col := range collaterals {
 		tokenID, err := p.lendingRepo.GetOrCreateToken(ctx, tx, col.asset, col.decimals)
 		if err != nil {
-			p.logger.Warn("failed to get collateral token", "token", col.asset.Hex(), "error", err)
+			p.logger.Warn("failed to get collateral token", "token", col.asset.Hex(), "error", err, "tx", txHash)
 			continue
 		}
 
@@ -625,7 +728,7 @@ func (p *BorrowEventProcessor) saveBorrowEvent(ctx context.Context, protocolAddr
 		p.logger.Debug("converted collateral amount", "raw", col.actualBalance.String(), "decimals", col.decimals, "adjusted", decimalAdjustedCollateral)
 
 		if err := p.lendingRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedCollateral); err != nil {
-			p.logger.Warn("failed to insert collateral", "error", err)
+			p.logger.Warn("failed to insert collateral", "error", err, "tx", txHash)
 		} else {
 			p.logger.Debug("saved collateral", "token", col.asset.Hex(), "decimals", col.decimals, "adjusted_amount", decimalAdjustedCollateral)
 		}
@@ -635,8 +738,183 @@ func (p *BorrowEventProcessor) saveBorrowEvent(ctx context.Context, protocolAddr
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	p.logger.Info("Saved to database", "user", onBehalfOf.Hex(), "block", blockNumber)
+	p.logger.Info("Saved to database", "user", onBehalfOf.Hex(), "tx", txHash, "block", blockNumber)
 	return nil
+}
+
+func (p *BorrowEventProcessor) batchGetDecimals(ctx context.Context, tokens map[common.Address]bool) (map[common.Address]int, error) {
+	result := make(map[common.Address]int)
+
+	var tokensToFetch []common.Address
+	p.decimalsCacheMu.RLock()
+	for token := range tokens {
+		if decimals, ok := p.decimalsCache[token]; ok {
+			result[token] = decimals
+		} else {
+			tokensToFetch = append(tokensToFetch, token)
+		}
+	}
+	p.decimalsCacheMu.RUnlock()
+
+	if len(tokensToFetch) == 0 {
+		return result, nil
+	}
+
+	p.logger.Debug("fetching decimals for tokens", "count", len(tokensToFetch))
+
+	var calls []Call3
+	for _, token := range tokensToFetch {
+		callData, err := p.erc20DecimalsABI.Pack("decimals")
+		if err != nil {
+			p.logger.Warn("failed to pack decimals call", "token", token.Hex(), "error", err)
+			continue
+		}
+		calls = append(calls, Call3{
+			Target:       token,
+			AllowFailure: true,
+			CallData:     callData,
+		})
+	}
+
+	if len(calls) == 0 {
+		return result, nil
+	}
+
+	results, err := p.executeMulticall(ctx, calls, nil)
+	if err != nil {
+		return result, fmt.Errorf("multicall failed: %w", err)
+	}
+
+	p.decimalsCacheMu.Lock()
+	defer p.decimalsCacheMu.Unlock()
+
+	for i, mcResult := range results {
+		if i >= len(tokensToFetch) {
+			break
+		}
+		token := tokensToFetch[i]
+
+		if !mcResult.Success {
+			p.logger.Warn("decimals call failed (call not successful)",
+				"token", token.Hex(),
+				"returnDataLength", len(mcResult.ReturnData))
+			continue
+		}
+
+		if len(mcResult.ReturnData) == 0 {
+			p.logger.Warn("decimals call returned empty data", "token", token.Hex())
+			continue
+		}
+
+		var decimals uint8
+		err := p.erc20DecimalsABI.UnpackIntoInterface(&decimals, "decimals", mcResult.ReturnData)
+		if err != nil {
+			p.logger.Warn("failed to unpack decimals",
+				"token", token.Hex(),
+				"error", err,
+				"returnDataHex", hex.EncodeToString(mcResult.ReturnData))
+			continue
+		}
+
+		result[token] = int(decimals)
+		p.decimalsCache[token] = int(decimals)
+		p.logger.Debug("fetched and cached decimals", "token", token.Hex(), "decimals", decimals)
+	}
+
+	return result, nil
+}
+
+func (p *BorrowEventProcessor) batchGetReserveData(ctx context.Context, protocolAddress common.Address, assets []common.Address, blockNumber int64) (map[common.Address]*big.Int, error) {
+	result := make(map[common.Address]*big.Int)
+
+	if len(assets) == 0 {
+		return result, nil
+	}
+
+	var calls []Call3
+	for _, asset := range assets {
+		callData, err := p.getReserveDataABI.Pack("getReserveData", asset)
+		if err != nil {
+			continue
+		}
+		calls = append(calls, Call3{
+			Target:       protocolAddress,
+			AllowFailure: true,
+			CallData:     callData,
+		})
+	}
+
+	if len(calls) == 0 {
+		return result, nil
+	}
+
+	blockNum := big.NewInt(blockNumber)
+	results, err := p.executeMulticall(ctx, calls, blockNum)
+	if err != nil {
+		return result, fmt.Errorf("multicall failed: %w", err)
+	}
+
+	for i, mcResult := range results {
+		if i >= len(assets) {
+			break
+		}
+		asset := assets[i]
+
+		if !mcResult.Success || len(mcResult.ReturnData) < 96 {
+			p.logger.Debug("getReserveData call failed", "asset", asset.Hex())
+			continue
+		}
+
+		liquidityIndex := new(big.Int).SetBytes(mcResult.ReturnData[48:64])
+		result[asset] = liquidityIndex
+
+		p.logger.Debug("fetched liquidity index", "asset", asset.Hex(), "liquidityIndex", liquidityIndex.String())
+	}
+
+	return result, nil
+}
+
+func (p *BorrowEventProcessor) executeMulticall(ctx context.Context, calls []Call3, blockNumber *big.Int) ([]Multicall3Result, error) {
+	if len(calls) == 0 {
+		return []Multicall3Result{}, nil
+	}
+
+	data, err := p.multicallABI.Pack("aggregate3", calls)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack multicall: %w", err)
+	}
+
+	msg := ethereum.CallMsg{
+		To:   &p.multicall3,
+		Data: data,
+	}
+
+	result, err := p.ethClient.CallContract(ctx, msg, blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call multicall contract: %w", err)
+	}
+
+	unpacked, err := p.multicallABI.Unpack("aggregate3", result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unpack multicall response: %w", err)
+	}
+
+	resultsRaw := unpacked[0].([]struct {
+		Success    bool   `json:"success"`
+		ReturnData []byte `json:"returnData"`
+	})
+
+	results := make([]Multicall3Result, len(resultsRaw))
+	for i, r := range resultsRaw {
+		results[i] = Multicall3Result{
+			Success:    r.Success,
+			ReturnData: r.ReturnData,
+		}
+	}
+
+	p.logger.Debug("multicall executed", "calls", len(calls), "results", len(results))
+
+	return results, nil
 }
 
 func (p *BorrowEventProcessor) getUserReservesData(ctx context.Context, user common.Address, blockNumber int64) ([]UserReserveData, error) {
@@ -664,15 +942,31 @@ func (p *BorrowEventProcessor) getUserReservesData(ctx context.Context, user com
 	}
 
 	offset := new(big.Int).SetBytes(result[0:32]).Uint64()
-	p.logger.Debug("decoded offset", "offset", offset)
-
 	if offset+32 > uint64(len(result)) {
 		return []UserReserveData{}, nil
 	}
 
 	arrayLengthBytes := result[offset : offset+32]
-	arrayLength := new(big.Int).SetBytes(arrayLengthBytes).Uint64()
-	p.logger.Debug("decoded array length", "count", arrayLength)
+	arrayLengthClaimed := new(big.Int).SetBytes(arrayLengthBytes).Uint64()
+
+	const structSize = uint64(224)
+	dataStart := offset + 32
+	availableBytes := uint64(len(result)) - dataStart
+	actualArrayLength := availableBytes / structSize
+
+	arrayLength := arrayLengthClaimed
+	if actualArrayLength < arrayLengthClaimed {
+		p.logger.Warn("array length mismatch",
+			"claimed", arrayLengthClaimed,
+			"actual", actualArrayLength,
+			"availableBytes", availableBytes)
+		arrayLength = actualArrayLength
+	}
+
+	p.logger.Debug("decoded array info",
+		"offset", offset,
+		"claimed_length", arrayLengthClaimed,
+		"actual_length", arrayLength)
 
 	if arrayLength == 0 {
 		return []UserReserveData{}, nil
@@ -680,19 +974,21 @@ func (p *BorrowEventProcessor) getUserReservesData(ctx context.Context, user com
 
 	reserves := make([]UserReserveData, 0, arrayLength)
 
-	structSize := uint64(224)
-	dataStart := offset + 32
-
 	for i := uint64(0); i < arrayLength; i++ {
 		structOffset := dataStart + (i * structSize)
 		if structOffset+structSize > uint64(len(result)) {
-			p.logger.Warn("struct data out of bounds", "i", i, "offset", structOffset, "size", structSize, "total", len(result))
+			p.logger.Warn("reached end of data", "processed", i, "expected", arrayLength)
 			break
 		}
 
 		structData := result[structOffset : structOffset+structSize]
 
 		underlyingAsset := common.BytesToAddress(structData[0:32])
+
+		if underlyingAsset == (common.Address{}) {
+			continue
+		}
+
 		scaledATokenBalance := new(big.Int).SetBytes(structData[32:64])
 		usageAsCollateral := new(big.Int).SetBytes(structData[64:96]).Uint64() != 0
 		stableBorrowRate := new(big.Int).SetBytes(structData[96:128])
@@ -718,83 +1014,8 @@ func (p *BorrowEventProcessor) getUserReservesData(ctx context.Context, user com
 		})
 	}
 
+	p.logger.Debug("decoded user reserves", "total_slots", arrayLength, "valid_reserves", len(reserves))
 	return reserves, nil
-}
-
-func (p *BorrowEventProcessor) getTokenDecimals(ctx context.Context, tokenAddress common.Address) (int, error) {
-	data, err := p.erc20DecimalsABI.Pack("decimals")
-	if err != nil {
-		return 0, fmt.Errorf("failed to pack decimals call: %w", err)
-	}
-
-	msg := ethereum.CallMsg{
-		To:   &tokenAddress,
-		Data: data,
-	}
-
-	result, err := p.ethClient.CallContract(ctx, msg, nil)
-	if err != nil {
-		return 0, fmt.Errorf("failed to call decimals on token %s: %w", tokenAddress.Hex(), err)
-	}
-
-	var decimals uint8
-	err = p.erc20DecimalsABI.UnpackIntoInterface(&decimals, "decimals", result)
-	if err != nil {
-		return 0, fmt.Errorf("failed to unpack decimals for token %s: %w", tokenAddress.Hex(), err)
-	}
-
-	p.logger.Debug("fetched token decimals", "token", tokenAddress.Hex(), "decimals", decimals)
-	return int(decimals), nil
-}
-
-func (p *BorrowEventProcessor) getActualBalance(ctx context.Context, protocolAddress, asset common.Address, scaledBalance *big.Int, blockNumber int64) (*big.Int, error) {
-	data, err := p.getReserveDataABI.Pack("getReserveData", asset)
-	if err != nil {
-		p.logger.Warn("failed to pack getReserveData, using scaled balance", "error", err)
-		return scaledBalance, nil
-	}
-
-	msg := ethereum.CallMsg{
-		To:   &protocolAddress,
-		Data: data,
-	}
-
-	result, err := p.ethClient.CallContract(ctx, msg, big.NewInt(blockNumber))
-	if err != nil {
-		p.logger.Warn("failed to get reserve data, using scaled balance", "asset", asset.Hex(), "error", err)
-		return scaledBalance, nil
-	}
-
-	if len(result) < 96 {
-		p.logger.Warn("reserve data too short", "length", len(result), "asset", asset.Hex())
-		return scaledBalance, nil
-	}
-
-	liquidityIndex := new(big.Int).SetBytes(result[48:64])
-
-	p.logger.Debug("extracted liquidity index",
-		"asset", asset.Hex(),
-		"bytes_32_64_hex", fmt.Sprintf("0x%x", result[32:64]),
-		"liquidityIndex", liquidityIndex.String())
-
-	if liquidityIndex.Cmp(big.NewInt(0)) == 0 {
-		p.logger.Warn("liquidityIndex is zero, using scaled balance", "asset", asset.Hex())
-		return scaledBalance, nil
-	}
-
-	RAY := new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
-
-	actualBalance := new(big.Int).Mul(scaledBalance, liquidityIndex)
-	actualBalance.Div(actualBalance, RAY)
-
-	p.logger.Debug("calculated actual balance",
-		"asset", asset.Hex(),
-		"scaled", scaledBalance.String(),
-		"liquidityIndex", liquidityIndex.String(),
-		"RAY", RAY.String(),
-		"actual", actualBalance.String())
-
-	return actualBalance, nil
 }
 
 func (p *BorrowEventProcessor) convertToDecimalAdjusted(rawAmount *big.Int, decimals int) string {
