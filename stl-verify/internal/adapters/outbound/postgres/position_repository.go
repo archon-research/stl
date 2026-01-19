@@ -49,21 +49,9 @@ func NewPositionRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*Pos
 	}, nil
 }
 
-// UpsertBorrowers upserts borrower (debt) position records.
-// Note: This method processes in batches. If a batch fails, previous batches remain committed.
-// Use UpsertBorrowersAtomic for all-or-nothing semantics.
+// UpsertBorrowers upserts borrower (debt) position records atomically.
+// All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
 func (r *PositionRepository) UpsertBorrowers(ctx context.Context, borrowers []*entity.Borrower) error {
-	return r.upsertBorrowersWithExecutor(ctx, r.db, borrowers)
-}
-
-// UpsertBorrowersInTx upserts borrower records using the provided transaction.
-func (r *PositionRepository) UpsertBorrowersInTx(ctx context.Context, tx *sql.Tx, borrowers []*entity.Borrower) error {
-	return r.upsertBorrowersWithExecutor(ctx, tx, borrowers)
-}
-
-// UpsertBorrowersAtomic upserts all borrower records in a single transaction.
-// If any batch fails, all changes are rolled back.
-func (r *PositionRepository) UpsertBorrowersAtomic(ctx context.Context, borrowers []*entity.Borrower) error {
 	if len(borrowers) == 0 {
 		return nil
 	}
@@ -82,6 +70,11 @@ func (r *PositionRepository) UpsertBorrowersAtomic(ctx context.Context, borrower
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
+}
+
+// UpsertBorrowersInTx upserts borrower records using the provided transaction.
+func (r *PositionRepository) UpsertBorrowersInTx(ctx context.Context, tx *sql.Tx, borrowers []*entity.Borrower) error {
+	return r.upsertBorrowersWithExecutor(ctx, tx, borrowers)
 }
 
 func (r *PositionRepository) upsertBorrowersWithExecutor(ctx context.Context, exec dbExecutor, borrowers []*entity.Borrower) error {
@@ -154,21 +147,9 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, exec dbExe
 	return nil
 }
 
-// UpsertBorrowerCollateral upserts collateral position records.
-// Note: This method processes in batches. If a batch fails, previous batches remain committed.
-// Use UpsertBorrowerCollateralAtomic for all-or-nothing semantics.
+// UpsertBorrowerCollateral upserts collateral position records atomically.
+// All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
 func (r *PositionRepository) UpsertBorrowerCollateral(ctx context.Context, collateral []*entity.BorrowerCollateral) error {
-	return r.upsertBorrowerCollateralWithExecutor(ctx, r.db, collateral)
-}
-
-// UpsertBorrowerCollateralInTx upserts collateral records using the provided transaction.
-func (r *PositionRepository) UpsertBorrowerCollateralInTx(ctx context.Context, tx *sql.Tx, collateral []*entity.BorrowerCollateral) error {
-	return r.upsertBorrowerCollateralWithExecutor(ctx, tx, collateral)
-}
-
-// UpsertBorrowerCollateralAtomic upserts all collateral records in a single transaction.
-// If any batch fails, all changes are rolled back.
-func (r *PositionRepository) UpsertBorrowerCollateralAtomic(ctx context.Context, collateral []*entity.BorrowerCollateral) error {
 	if len(collateral) == 0 {
 		return nil
 	}
@@ -187,6 +168,11 @@ func (r *PositionRepository) UpsertBorrowerCollateralAtomic(ctx context.Context,
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
+}
+
+// UpsertBorrowerCollateralInTx upserts collateral records using the provided transaction.
+func (r *PositionRepository) UpsertBorrowerCollateralInTx(ctx context.Context, tx *sql.Tx, collateral []*entity.BorrowerCollateral) error {
+	return r.upsertBorrowerCollateralWithExecutor(ctx, tx, collateral)
 }
 
 func (r *PositionRepository) upsertBorrowerCollateralWithExecutor(ctx context.Context, exec dbExecutor, collateral []*entity.BorrowerCollateral) error {
