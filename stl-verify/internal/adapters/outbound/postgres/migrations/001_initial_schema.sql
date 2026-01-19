@@ -246,7 +246,7 @@ CREATE INDEX IF NOT EXISTS idx_borrower_collateral_user_protocol ON borrower_col
 -- Created as a TimescaleDB hypertable for efficient time-series queries.
 -- Uses block_number as the partition column with chunks of 100,000 blocks (~2 weeks at ~12s/block).
 CREATE TABLE IF NOT EXISTS sparklend_reserve_data (
-    id BIGSERIAL PRIMARY KEY,
+    id BIGSERIAL,
     protocol_id BIGINT NOT NULL REFERENCES protocols(id),
     token_id BIGINT NOT NULL REFERENCES tokens(id),
     block_number BIGINT NOT NULL,
@@ -268,6 +268,7 @@ CREATE TABLE IF NOT EXISTS sparklend_reserve_data (
     -- Timestamps
     last_update_timestamp BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (id, block_number),
     CONSTRAINT sparklend_reserve_data_unique UNIQUE (protocol_id, token_id, block_number, block_version)
 ) WITH (
     tsdb.hypertable,
