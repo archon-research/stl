@@ -1,6 +1,9 @@
 -- 001_initial_schema.sql
 -- Creates the core tables for block state tracking
 
+-- Enable TimescaleDB extension for time-series data
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
 -- Block states table tracks all blocks seen (both canonical and orphaned)
 CREATE TABLE IF NOT EXISTS block_states (
     number BIGINT NOT NULL,
@@ -236,12 +239,14 @@ CREATE INDEX IF NOT EXISTS idx_borrower_collateral_block_number ON borrower_coll
 CREATE INDEX IF NOT EXISTS idx_borrower_collateral_user_protocol ON borrower_collateral(user_id, protocol_id);
 
 -- =============================================================================
--- PROTOCOL-SPECIFIC TABLES
+-- PROTOCOL-SPECIFIC TABLES (TimescaleDB Hypertables)
 -- =============================================================================
 
 -- SparkLend reserve data - protocol reserve state snapshots
+-- Created as a TimescaleDB hypertable for efficient time-series queries.
+-- Uses block_number as the partition column with chunks of 100,000 blocks (~2 weeks at ~12s/block).
 CREATE TABLE IF NOT EXISTS sparklend_reserve_data (
-    id BIGINT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     protocol_id BIGINT NOT NULL REFERENCES protocols(id),
     token_id BIGINT NOT NULL REFERENCES tokens(id),
     block_number BIGINT NOT NULL,
@@ -264,6 +269,10 @@ CREATE TABLE IF NOT EXISTS sparklend_reserve_data (
     last_update_timestamp BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT sparklend_reserve_data_unique UNIQUE (protocol_id, token_id, block_number, block_version)
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'block_number',
+    tsdb.chunk_interval = 100000
 );
 
 CREATE INDEX IF NOT EXISTS idx_sparklend_reserve_data_protocol_id ON sparklend_reserve_data(protocol_id);
