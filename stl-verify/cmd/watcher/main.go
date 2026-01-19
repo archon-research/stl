@@ -242,6 +242,7 @@ func main() {
 			ChainID:      chainID,
 			BatchSize:    10,
 			PollInterval: 30 * time.Second,
+			DisableBlobs: *disableBlobs,
 			Logger:       logger,
 		}
 

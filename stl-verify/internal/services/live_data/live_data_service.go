@@ -543,39 +543,77 @@ func (s *LiveService) restoreInMemoryChain() error {
 	return nil
 }
 
-// fetchAndPublishBlockData fetches all data types concurrently, caches them, and publishes a single block event
-// only after all data has been successfully cached.
+// fetchAndPublishBlockData fetches all data types in a single batched RPC call by hash,
+// caches them in parallel, and publishes a single block event only after all data has been successfully cached.
+// Fetching by hash is TOCTOU-safe - it ensures we get data for the exact block we received.
 func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbound.BlockHeader, blockNum int64, version int, receivedAt time.Time, isReorg bool) error {
 	chainID := s.config.ChainID
 	blockHash := header.Hash
 	parentHash := header.ParentHash
 	blockTimestamp, _ := parseBlockNumber(header.Timestamp)
 
+	start := time.Now()
+
+	// Fetch all data in a single batched HTTP request (by hash for TOCTOU safety)
+	bd, err := s.client.GetBlockDataByHash(ctx, blockNum, blockHash, true)
+	if err != nil {
+		return fmt.Errorf("failed to fetch block data for block %d: %w", blockNum, err)
+	}
+
+	s.logger.Debug("fetched block data", "block", blockNum, "duration", time.Since(start))
+
+	// Check for fetch errors before caching
+	if bd.BlockErr != nil {
+		return fmt.Errorf("failed to fetch block %d: %w", blockNum, bd.BlockErr)
+	}
+	if bd.ReceiptsErr != nil {
+		return fmt.Errorf("failed to fetch receipts for block %d: %w", blockNum, bd.ReceiptsErr)
+	}
+	if bd.TracesErr != nil {
+		return fmt.Errorf("failed to fetch traces for block %d: %w", blockNum, bd.TracesErr)
+	}
+	if !s.config.DisableBlobs && bd.BlobsErr != nil {
+		return fmt.Errorf("failed to fetch blobs for block %d: %w", blockNum, bd.BlobsErr)
+	}
+
+	// Cache all data types in parallel
 	numWorkers := 3
 	if !s.config.DisableBlobs {
 		numWorkers = 4
 	}
 	errCh := make(chan error, numWorkers)
 
-	// Fetch and cache block data (no event published yet)
 	go func() {
-		errCh <- s.fetchAndCacheBlock(ctx, chainID, blockNum, version, blockHash)
+		if err := s.cache.SetBlock(ctx, chainID, blockNum, version, bd.Block); err != nil {
+			errCh <- fmt.Errorf("failed to cache block %d: %w", blockNum, err)
+		} else {
+			errCh <- nil
+		}
 	}()
 
-	// Fetch and cache receipts
 	go func() {
-		errCh <- s.fetchAndCacheReceipts(ctx, chainID, blockNum, version, blockHash)
+		if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, bd.Receipts); err != nil {
+			errCh <- fmt.Errorf("failed to cache receipts for block %d: %w", blockNum, err)
+		} else {
+			errCh <- nil
+		}
 	}()
 
-	// Fetch and cache traces
 	go func() {
-		errCh <- s.fetchAndCacheTraces(ctx, chainID, blockNum, version, blockHash)
+		if err := s.cache.SetTraces(ctx, chainID, blockNum, version, bd.Traces); err != nil {
+			errCh <- fmt.Errorf("failed to cache traces for block %d: %w", blockNum, err)
+		} else {
+			errCh <- nil
+		}
 	}()
 
-	// Fetch and cache blobs (if enabled)
 	if !s.config.DisableBlobs {
 		go func() {
-			errCh <- s.fetchAndCacheBlobs(ctx, chainID, blockNum, version, blockHash)
+			if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, bd.Blobs); err != nil {
+				errCh <- fmt.Errorf("failed to cache blobs for block %d: %w", blockNum, err)
+			} else {
+				errCh <- nil
+			}
 		}()
 	}
 
@@ -591,29 +629,10 @@ func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbo
 		return errors.Join(errs...)
 	}
 
+	s.logger.Debug("cached all block data", "block", blockNum, "duration", time.Since(start))
+
 	// All data cached successfully - now publish the block event
 	return s.publishBlockEvent(ctx, chainID, blockNum, version, blockHash, parentHash, blockTimestamp, receivedAt, isReorg)
-}
-
-func (s *LiveService) fetchAndCacheBlock(ctx context.Context, chainID, blockNum int64, version int, blockHash string) error {
-	start := time.Now()
-	defer func() {
-		s.logger.Debug("fetchAndCacheBlock completed", "block", blockNum, "duration", time.Since(start))
-	}()
-
-	// Fetch by hash to prevent TOCTOU race condition.
-	// If we fetched by number, a reorg between receiving the header and fetching
-	// could cause us to cache data for the wrong block.
-	data, err := s.client.GetFullBlockByHash(ctx, blockHash, true)
-	if err != nil {
-		return fmt.Errorf("failed to fetch block %d by hash %s: %w", blockNum, blockHash, err)
-	}
-
-	if err := s.cache.SetBlock(ctx, chainID, blockNum, version, data); err != nil {
-		return fmt.Errorf("failed to cache block %d: %w", blockNum, err)
-	}
-
-	return nil
 }
 
 func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum int64, version int, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg bool) error {
@@ -636,69 +655,6 @@ func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum i
 	// Mark block publish as complete in DB for crash recovery
 	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlock); err != nil {
 		s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
-	}
-
-	return nil
-}
-
-func (s *LiveService) fetchAndCacheReceipts(ctx context.Context, chainID, blockNum int64, version int, blockHash string) error {
-	start := time.Now()
-	defer func() {
-		s.logger.Debug("fetchAndCacheReceipts completed", "block", blockNum, "duration", time.Since(start))
-	}()
-
-	// Fetch by hash to prevent TOCTOU race condition.
-	// If we fetched by number, a reorg between receiving the header and fetching
-	// could cause us to cache receipts for the wrong block.
-	data, err := s.client.GetBlockReceiptsByHash(ctx, blockHash)
-	if err != nil {
-		return fmt.Errorf("failed to fetch receipts for block %d by hash %s: %w", blockNum, blockHash, err)
-	}
-
-	if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, data); err != nil {
-		return fmt.Errorf("failed to cache receipts for block %d: %w", blockNum, err)
-	}
-
-	return nil
-}
-
-func (s *LiveService) fetchAndCacheTraces(ctx context.Context, chainID, blockNum int64, version int, blockHash string) error {
-	start := time.Now()
-	defer func() {
-		s.logger.Debug("fetchAndCacheTraces completed", "block", blockNum, "duration", time.Since(start))
-	}()
-
-	// Fetch by hash to prevent TOCTOU race condition.
-	// If we fetched by number, a reorg between receiving the header and fetching
-	// could cause us to cache traces for the wrong block.
-	data, err := s.client.GetBlockTracesByHash(ctx, blockHash)
-	if err != nil {
-		return fmt.Errorf("failed to fetch traces for block %d by hash %s: %w", blockNum, blockHash, err)
-	}
-
-	if err := s.cache.SetTraces(ctx, chainID, blockNum, version, data); err != nil {
-		return fmt.Errorf("failed to cache traces for block %d: %w", blockNum, err)
-	}
-
-	return nil
-}
-
-func (s *LiveService) fetchAndCacheBlobs(ctx context.Context, chainID, blockNum int64, version int, blockHash string) error {
-	start := time.Now()
-	defer func() {
-		s.logger.Debug("fetchAndCacheBlobs completed", "block", blockNum, "duration", time.Since(start))
-	}()
-
-	// Fetch by hash to prevent TOCTOU race condition.
-	// If we fetched by number, a reorg between receiving the header and fetching
-	// could cause us to cache blobs for the wrong block.
-	data, err := s.client.GetBlobSidecarsByHash(ctx, blockHash)
-	if err != nil {
-		return fmt.Errorf("failed to fetch blobs for block %d by hash %s: %w", blockNum, blockHash, err)
-	}
-
-	if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, data); err != nil {
-		return fmt.Errorf("failed to cache blobs for block %d: %w", blockNum, err)
 	}
 
 	return nil

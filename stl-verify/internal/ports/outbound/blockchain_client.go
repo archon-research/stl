@@ -70,4 +70,10 @@ type BlockchainClient interface {
 	// Use BlockData.HasErrors() to check if any data fetch failed for a block.
 	// Only returns an error if the entire batch request fails (network error, etc.).
 	GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx bool) ([]BlockData, error)
+
+	// GetBlockDataByHash fetches all data for a single block by hash in a single batched RPC call.
+	// This is TOCTOU-safe for live data processing - fetching by hash ensures we get data for
+	// the exact block we received via subscription, even if a reorg occurs.
+	// Per-data-type errors are reported in the BlockData error fields (BlockErr, ReceiptsErr, etc.).
+	GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (BlockData, error)
 }

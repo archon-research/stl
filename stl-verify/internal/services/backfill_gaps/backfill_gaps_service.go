@@ -36,6 +36,9 @@ type BackfillConfig struct {
 	// This detects reorgs that happened while the service was down.
 	BoundaryCheckDepth int
 
+	// DisableBlobs disables caching blob sidecars (useful for pre-Dencun blocks or unsupported nodes).
+	DisableBlobs bool
+
 	// Logger is the structured logger.
 	Logger *slog.Logger
 }
@@ -599,7 +602,8 @@ func (s *BackfillService) recoverFromStaleChain(ctx context.Context, staleBlocks
 	return nil
 }
 
-// cacheAndPublishBlockData caches pre-fetched data and publishes events.
+// cacheAndPublishBlockData caches all pre-fetched data types and publishes a block event.
+// All data must be cached successfully before the event is published.
 func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbound.BlockData, header outbound.BlockHeader, version int, receivedAt time.Time) {
 	chainID := s.config.ChainID
 	blockNum := bd.BlockNumber
@@ -607,31 +611,71 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 	parentHash := header.ParentHash
 	blockTimestamp, _ := shared.ParseBlockNumber(header.Timestamp)
 
-	// Cache and publish block
-	if bd.Block != nil {
-		if err := s.cache.SetBlock(ctx, chainID, blockNum, version, bd.Block); err != nil {
-			s.logger.Warn("failed to cache block", "block", blockNum, "error", err)
+	// Cache block data
+	if bd.Block == nil {
+		s.logger.Warn("missing block data, skipping", "block", blockNum)
+		return
+	}
+	if err := s.cache.SetBlock(ctx, chainID, blockNum, version, bd.Block); err != nil {
+		s.logger.Warn("failed to cache block", "block", blockNum, "error", err)
+		return
+	}
+
+	// Cache receipts
+	if bd.Receipts != nil {
+		if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, bd.Receipts); err != nil {
+			s.logger.Warn("failed to cache receipts", "block", blockNum, "error", err)
 			return
 		}
-		event := outbound.BlockEvent{
-			ChainID:        chainID,
-			BlockNumber:    blockNum,
-			Version:        version,
-			BlockHash:      blockHash,
-			ParentHash:     parentHash,
-			BlockTimestamp: blockTimestamp,
-			ReceivedAt:     receivedAt,
-			CacheKey:       shared.CacheKey(chainID, blockNum, version, "block"),
-			IsBackfill:     true,
-		}
-		if err := s.eventSink.Publish(ctx, event); err != nil {
-			s.logger.Warn("failed to publish block event", "block", blockNum, "error", err)
+	} else if bd.ReceiptsErr != nil {
+		s.logger.Warn("receipts fetch failed, skipping cache", "block", blockNum, "error", bd.ReceiptsErr)
+		return
+	}
+
+	// Cache traces
+	if bd.Traces != nil {
+		if err := s.cache.SetTraces(ctx, chainID, blockNum, version, bd.Traces); err != nil {
+			s.logger.Warn("failed to cache traces", "block", blockNum, "error", err)
 			return
 		}
-		// Mark block publish complete for crash recovery tracking
-		if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlock); err != nil {
-			s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
+	} else if bd.TracesErr != nil {
+		s.logger.Warn("traces fetch failed, skipping cache", "block", blockNum, "error", bd.TracesErr)
+		return
+	}
+
+	// Cache blobs (if enabled)
+	if !s.config.DisableBlobs {
+		if bd.Blobs != nil {
+			if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, bd.Blobs); err != nil {
+				s.logger.Warn("failed to cache blobs", "block", blockNum, "error", err)
+				return
+			}
+		} else if bd.BlobsErr != nil {
+			s.logger.Warn("blobs fetch failed, skipping cache", "block", blockNum, "error", bd.BlobsErr)
+			return
 		}
+	}
+
+	// All data cached successfully - now publish the block event
+	event := outbound.BlockEvent{
+		ChainID:        chainID,
+		BlockNumber:    blockNum,
+		Version:        version,
+		BlockHash:      blockHash,
+		ParentHash:     parentHash,
+		BlockTimestamp: blockTimestamp,
+		ReceivedAt:     receivedAt,
+		CacheKey:       shared.CacheKey(chainID, blockNum, version, "block"),
+		IsBackfill:     true,
+	}
+	if err := s.eventSink.Publish(ctx, event); err != nil {
+		s.logger.Warn("failed to publish block event", "block", blockNum, "error", err)
+		return
+	}
+
+	// Mark block publish complete for crash recovery tracking
+	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlock); err != nil {
+		s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
 	}
 }
 

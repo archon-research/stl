@@ -192,6 +192,25 @@ func (m *benchmarkBlockchainClient) GetBlocksBatch(ctx context.Context, blockNum
 	return result, nil
 }
 
+func (m *benchmarkBlockchainClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			blockJSON, _ := json.Marshal(bd.header)
+			return outbound.BlockData{
+				BlockNumber: blockNum,
+				Block:       blockJSON,
+				Receipts:    bd.receipts,
+				Traces:      bd.traces,
+				Blobs:       bd.blobs,
+			}, nil
+		}
+	}
+	return outbound.BlockData{}, fmt.Errorf("block %s not found", hash)
+}
+
 // resettableBlockStateRepository wraps memory.BlockStateRepository and adds a Reset method.
 type resettableBlockStateRepository struct {
 	*memory.BlockStateRepository

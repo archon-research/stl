@@ -286,6 +286,90 @@ func (c *Client) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.R
 	return resp.Result, nil
 }
 
+// GetBlockDataByHash fetches all data for a single block by hash in a single batched RPC call.
+// This is TOCTOU-safe - fetching by hash ensures we get data for the exact block we want.
+func (c *Client) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	// Build batch request: 3-4 calls (block, receipts, traces, and optionally blobs)
+	callsCount := 3
+	if !c.config.DisableBlobs {
+		callsCount = 4
+	}
+	requests := make([]jsonRPCRequest, 0, callsCount)
+
+	requests = append(requests,
+		jsonRPCRequest{JSONRPC: "2.0", ID: 0, Method: "eth_getBlockByHash", Params: []interface{}{hash, fullTx}},
+		jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "eth_getBlockReceipts", Params: []interface{}{hash}},
+		jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []interface{}{hash}},
+	)
+	if !c.config.DisableBlobs {
+		requests = append(requests,
+			jsonRPCRequest{JSONRPC: "2.0", ID: 3, Method: "eth_getBlobSidecars", Params: []interface{}{hash}},
+		)
+	}
+
+	responses, err := c.callBatch(ctx, requests)
+	if err != nil {
+		return outbound.BlockData{}, err
+	}
+
+	// Build a map of ID -> response for easy lookup
+	respMap := make(map[int]*jsonRPCResponse, len(responses))
+	for i := range responses {
+		respMap[responses[i].ID] = &responses[i]
+	}
+
+	// Assemble result
+	result := outbound.BlockData{BlockNumber: blockNum}
+
+	// Block data
+	if resp := respMap[0]; resp != nil {
+		if resp.Error != nil {
+			result.BlockErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+		} else {
+			result.Block = resp.Result
+		}
+	} else {
+		result.BlockErr = fmt.Errorf("missing response for block %d", blockNum)
+	}
+
+	// Receipts
+	if resp := respMap[1]; resp != nil {
+		if resp.Error != nil {
+			result.ReceiptsErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+		} else {
+			result.Receipts = resp.Result
+		}
+	} else {
+		result.ReceiptsErr = fmt.Errorf("missing response for receipts of block %d", blockNum)
+	}
+
+	// Traces
+	if resp := respMap[2]; resp != nil {
+		if resp.Error != nil {
+			result.TracesErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+		} else {
+			result.Traces = resp.Result
+		}
+	} else {
+		result.TracesErr = fmt.Errorf("missing response for traces of block %d", blockNum)
+	}
+
+	// Blobs (only if enabled)
+	if !c.config.DisableBlobs {
+		if resp := respMap[3]; resp != nil {
+			if resp.Error != nil {
+				result.BlobsErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+			} else {
+				result.Blobs = resp.Result
+			}
+		} else {
+			result.BlobsErr = fmt.Errorf("missing response for blobs of block %d", blockNum)
+		}
+	}
+
+	return result, nil
+}
+
 // GetCurrentBlockNumber fetches the latest block number.
 func (c *Client) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
 	req := jsonRPCRequest{
