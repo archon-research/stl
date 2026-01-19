@@ -1,4 +1,4 @@
-package main
+package borrow_processor
 
 import (
 	"context"
