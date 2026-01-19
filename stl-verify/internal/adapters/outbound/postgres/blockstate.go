@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -59,13 +60,53 @@ func (r *BlockStateRepository) Migrate(ctx context.Context) error {
 }
 
 // SaveBlock persists a block's state with atomic version assignment.
-// The version is automatically assigned by a database trigger, ensuring uniqueness.
+// Uses INSERT ... ON CONFLICT DO NOTHING to handle concurrent inserts safely.
+// If the block already exists (by hash), returns its existing version.
+// If it's a new block, the database trigger assigns the version atomically.
 // The provided state.Version is ignored; the actual assigned version is returned.
 func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
+	const maxRetries = 10
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		version, err := r.saveBlockOnce(ctx, state)
+		if err == nil {
+			return version, nil
+		}
+
+		// Check if this is a serialization failure (SQLSTATE 40001)
+		// These are expected with concurrent transactions and should be retried
+		if isSerializationFailure(err) {
+			r.logger.Debug("serialization failure, retrying",
+				"attempt", attempt+1,
+				"maxRetries", maxRetries,
+				"block", state.Number,
+				"hash", state.Hash)
+			// Small exponential backoff: 1ms, 2ms, 4ms, 8ms, 16ms...
+			time.Sleep(time.Duration(1<<attempt) * time.Millisecond)
+			continue
+		}
+
+		// For other errors, return immediately
+		return 0, err
+	}
+
+	return 0, fmt.Errorf("failed to save block after %d retries due to serialization conflicts", maxRetries)
+}
+
+// saveBlockOnce attempts a single save operation with serializable isolation.
+func (r *BlockStateRepository) saveBlockOnce(ctx context.Context, state outbound.BlockState) (int, error) {
+	// Use a transaction with SERIALIZABLE isolation to prevent version race conditions.
+	// This ensures that concurrent SaveBlock calls for the same block number will be serialized.
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// Check if a block with this hash already exists (duplicate detection).
-	// If so, return the existing version without modifying the data.
+	// Done inside the serializable transaction to prevent TOCTOU races.
 	var existingVersion int
-	err := r.db.QueryRowContext(ctx, `SELECT version FROM block_states WHERE hash = $1`, state.Hash).Scan(&existingVersion)
+	err = tx.QueryRowContext(ctx, `SELECT version FROM block_states WHERE hash = $1`, state.Hash).Scan(&existingVersion)
 	if err == nil {
 		// Block already exists - return its version without updating
 		return existingVersion, nil
@@ -81,12 +122,26 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 		RETURNING version
 	`
 	var version int
-	err = r.db.QueryRowContext(ctx, query, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned).Scan(&version)
+	err = tx.QueryRowContext(ctx, query, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("failed to save block state: %w", err)
 	}
 
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
 	return version, nil
+}
+
+// isSerializationFailure checks if the error is a PostgreSQL serialization failure (SQLSTATE 40001).
+func isSerializationFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	// PostgreSQL serialization failures contain "40001" or "could not serialize access"
+	errStr := err.Error()
+	return strings.Contains(errStr, "40001") || strings.Contains(errStr, "could not serialize access")
 }
 
 // GetLastBlock retrieves the most recently saved canonical (non-orphaned) block state.

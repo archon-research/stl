@@ -2,6 +2,7 @@
 # Go 1.25+ best practices
 
 .PHONY: all test lint vet fmt tidy check clean cover run help \
+        dev-up dev-down dev-ips \
         tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
         tf-init-staging tf-validate-staging tf-plan-staging tf-apply-staging tf-check-staging
 
@@ -80,6 +81,37 @@ tools:
 
 # CI target: everything with strict checks
 ci: test-race vet fmt-check tidy staticcheck vulncheck golangci-lint
+
+# =============================================================================
+# Local Development
+# =============================================================================
+
+# Start all local services (Postgres, Redis, LocalStack, Jaeger)
+dev-up:
+	@echo "==> Starting local services..."
+	docker compose up -d
+	@echo "==> Waiting for LocalStack to be healthy..."
+	@until docker inspect stl-verify-localstack --format '{{.State.Health.Status}}' 2>/dev/null | grep -q healthy; do \
+		echo "Waiting for LocalStack..."; \
+		sleep 2; \
+	done
+	@echo "==> Initializing LocalStack resources..."
+	@LOCALSTACK_IP=$$(docker inspect stl-verify-localstack --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'); \
+	AWS_ENDPOINT_URL=http://$$LOCALSTACK_IP:4566 ./localstack-init/init-aws.sh
+	@echo "==> Local services ready!"
+
+# Stop all local services
+dev-down:
+	@echo "==> Stopping local services..."
+	docker compose down
+
+# Show service IPs (useful for devcontainer)
+dev-ips:
+	@echo "=== Service IPs ==="
+	@docker inspect stl-verify-postgres --format 'Postgres:    {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "Postgres: not running"
+	@docker inspect stl-verify-redis --format 'Redis:       {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "Redis: not running"
+	@docker inspect stl-verify-localstack --format 'LocalStack:  {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "LocalStack: not running"
+	@docker inspect stl-verify-jaeger --format 'Jaeger:      {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "Jaeger: not running"
 
 # =============================================================================
 # Terraform Commands

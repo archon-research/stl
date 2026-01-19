@@ -44,9 +44,9 @@ func main() {
 	}))
 
 	// Configuration
-	sqsEndpoint := getEnv("AWS_SQS_ENDPOINT", "http://localhost:4566")
-	sqsQueueURL := getEnv("SQS_QUEUE_URL", "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-block-events-queue")
-	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
+	sqsEndpoint := getEnv("AWS_SQS_ENDPOINT", "http://172.19.0.5:4566")
+	sqsQueueURL := getEnv("SQS_QUEUE_URL", "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo")
+	redisAddr := getEnv("REDIS_ADDR", "172.19.0.4:6379")
 
 	// Set up AWS SDK for LocalStack
 	cfg, err := config.LoadDefaultConfig(context.Background(),
@@ -116,18 +116,20 @@ func main() {
 		}
 
 		for _, msg := range result.Messages {
-			// Parse SNS wrapper
-			var snsMsg SNSMessage
-			if err := json.Unmarshal([]byte(*msg.Body), &snsMsg); err != nil {
-				logger.Error("failed to parse SNS message", "error", err)
-				continue
-			}
-
-			// Parse block event
+			// With RawMessageDelivery=true, the message body is the raw content
+			// Try parsing as raw BlockEvent first, fall back to SNS wrapper
 			var event BlockEvent
-			if err := json.Unmarshal([]byte(snsMsg.Message), &event); err != nil {
-				logger.Error("failed to parse block event", "error", err)
-				continue
+			if err := json.Unmarshal([]byte(*msg.Body), &event); err != nil {
+				// Try SNS wrapper format
+				var snsMsg SNSMessage
+				if err := json.Unmarshal([]byte(*msg.Body), &snsMsg); err != nil {
+					logger.Error("failed to parse message", "error", err, "body", *msg.Body)
+					continue
+				}
+				if err := json.Unmarshal([]byte(snsMsg.Message), &event); err != nil {
+					logger.Error("failed to parse block event from SNS wrapper", "error", err)
+					continue
+				}
 			}
 
 			logger.Info("received block event",

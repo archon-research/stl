@@ -543,7 +543,8 @@ func (s *LiveService) restoreInMemoryChain() error {
 	return nil
 }
 
-// fetchAndPublishBlockData fetches all data types concurrently and publishes events.
+// fetchAndPublishBlockData fetches all data types concurrently, caches them, and publishes a single block event
+// only after all data has been successfully cached.
 func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbound.BlockHeader, blockNum int64, version int, receivedAt time.Time, isReorg bool) error {
 	chainID := s.config.ChainID
 	blockHash := header.Hash
@@ -556,29 +557,29 @@ func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbo
 	}
 	errCh := make(chan error, numWorkers)
 
-	// Fetch and publish block
+	// Fetch and cache block data (no event published yet)
 	go func() {
-		errCh <- s.fetchCacheAndPublishBlock(ctx, chainID, blockNum, version, blockHash, parentHash, blockTimestamp, receivedAt, isReorg)
+		errCh <- s.fetchAndCacheBlock(ctx, chainID, blockNum, version, blockHash)
 	}()
 
-	// Fetch and publish receipts
+	// Fetch and cache receipts
 	go func() {
-		errCh <- s.fetchCacheAndPublishReceipts(ctx, chainID, blockNum, version, blockHash, receivedAt, isReorg)
+		errCh <- s.fetchAndCacheReceipts(ctx, chainID, blockNum, version, blockHash)
 	}()
 
-	// Fetch and publish traces
+	// Fetch and cache traces
 	go func() {
-		errCh <- s.fetchCacheAndPublishTraces(ctx, chainID, blockNum, version, blockHash, receivedAt, isReorg)
+		errCh <- s.fetchAndCacheTraces(ctx, chainID, blockNum, version, blockHash)
 	}()
 
-	// Fetch and publish blobs (if enabled)
+	// Fetch and cache blobs (if enabled)
 	if !s.config.DisableBlobs {
 		go func() {
-			errCh <- s.fetchCacheAndPublishBlobs(ctx, chainID, blockNum, version, blockHash, receivedAt, isReorg)
+			errCh <- s.fetchAndCacheBlobs(ctx, chainID, blockNum, version, blockHash)
 		}()
 	}
 
-	// Collect errors from all workers
+	// Wait for all caching to complete
 	var errs []error
 	for i := 0; i < numWorkers; i++ {
 		if err := <-errCh; err != nil {
@@ -589,13 +590,15 @@ func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbo
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
-	return nil
+
+	// All data cached successfully - now publish the block event
+	return s.publishBlockEvent(ctx, chainID, blockNum, version, blockHash, parentHash, blockTimestamp, receivedAt, isReorg)
 }
 
-func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, blockNum int64, version int, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg bool) error {
+func (s *LiveService) fetchAndCacheBlock(ctx context.Context, chainID, blockNum int64, version int, blockHash string) error {
 	start := time.Now()
 	defer func() {
-		s.logger.Debug("fetchCacheAndPublishBlock completed", "block", blockNum, "duration", time.Since(start))
+		s.logger.Debug("fetchAndCacheBlock completed", "block", blockNum, "duration", time.Since(start))
 	}()
 
 	// Fetch by hash to prevent TOCTOU race condition.
@@ -610,6 +613,10 @@ func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, bl
 		return fmt.Errorf("failed to cache block %d: %w", blockNum, err)
 	}
 
+	return nil
+}
+
+func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum int64, version int, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg bool) error {
 	event := outbound.BlockEvent{
 		ChainID:        chainID,
 		BlockNumber:    blockNum,
@@ -634,10 +641,10 @@ func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, bl
 	return nil
 }
 
-func (s *LiveService) fetchCacheAndPublishReceipts(ctx context.Context, chainID, blockNum int64, version int, blockHash string, receivedAt time.Time, isReorg bool) error {
+func (s *LiveService) fetchAndCacheReceipts(ctx context.Context, chainID, blockNum int64, version int, blockHash string) error {
 	start := time.Now()
 	defer func() {
-		s.logger.Debug("fetchCacheAndPublishReceipts completed", "block", blockNum, "duration", time.Since(start))
+		s.logger.Debug("fetchAndCacheReceipts completed", "block", blockNum, "duration", time.Since(start))
 	}()
 
 	// Fetch by hash to prevent TOCTOU race condition.
@@ -652,32 +659,13 @@ func (s *LiveService) fetchCacheAndPublishReceipts(ctx context.Context, chainID,
 		return fmt.Errorf("failed to cache receipts for block %d: %w", blockNum, err)
 	}
 
-	event := outbound.ReceiptsEvent{
-		ChainID:     chainID,
-		BlockNumber: blockNum,
-		Version:     version,
-		BlockHash:   blockHash,
-		ReceivedAt:  receivedAt,
-		CacheKey:    cacheKey(chainID, blockNum, version, "receipts"),
-		IsReorg:     isReorg,
-		IsBackfill:  false,
-	}
-	if err := s.eventSink.Publish(ctx, event); err != nil {
-		return fmt.Errorf("failed to publish receipts event for block %d: %w", blockNum, err)
-	}
-
-	// Mark receipts publish as complete in DB for crash recovery
-	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeReceipts); err != nil {
-		s.logger.Warn("failed to mark receipts publish complete", "block", blockNum, "error", err)
-	}
-
 	return nil
 }
 
-func (s *LiveService) fetchCacheAndPublishTraces(ctx context.Context, chainID, blockNum int64, version int, blockHash string, receivedAt time.Time, isReorg bool) error {
+func (s *LiveService) fetchAndCacheTraces(ctx context.Context, chainID, blockNum int64, version int, blockHash string) error {
 	start := time.Now()
 	defer func() {
-		s.logger.Debug("fetchCacheAndPublishTraces completed", "block", blockNum, "duration", time.Since(start))
+		s.logger.Debug("fetchAndCacheTraces completed", "block", blockNum, "duration", time.Since(start))
 	}()
 
 	// Fetch by hash to prevent TOCTOU race condition.
@@ -692,32 +680,13 @@ func (s *LiveService) fetchCacheAndPublishTraces(ctx context.Context, chainID, b
 		return fmt.Errorf("failed to cache traces for block %d: %w", blockNum, err)
 	}
 
-	event := outbound.TracesEvent{
-		ChainID:     chainID,
-		BlockNumber: blockNum,
-		Version:     version,
-		BlockHash:   blockHash,
-		ReceivedAt:  receivedAt,
-		CacheKey:    cacheKey(chainID, blockNum, version, "traces"),
-		IsReorg:     isReorg,
-		IsBackfill:  false,
-	}
-	if err := s.eventSink.Publish(ctx, event); err != nil {
-		return fmt.Errorf("failed to publish traces event for block %d: %w", blockNum, err)
-	}
-
-	// Mark traces publish as complete in DB for crash recovery
-	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeTraces); err != nil {
-		s.logger.Warn("failed to mark traces publish complete", "block", blockNum, "error", err)
-	}
-
 	return nil
 }
 
-func (s *LiveService) fetchCacheAndPublishBlobs(ctx context.Context, chainID, blockNum int64, version int, blockHash string, receivedAt time.Time, isReorg bool) error {
+func (s *LiveService) fetchAndCacheBlobs(ctx context.Context, chainID, blockNum int64, version int, blockHash string) error {
 	start := time.Now()
 	defer func() {
-		s.logger.Debug("fetchCacheAndPublishBlobs completed", "block", blockNum, "duration", time.Since(start))
+		s.logger.Debug("fetchAndCacheBlobs completed", "block", blockNum, "duration", time.Since(start))
 	}()
 
 	// Fetch by hash to prevent TOCTOU race condition.
@@ -730,25 +699,6 @@ func (s *LiveService) fetchCacheAndPublishBlobs(ctx context.Context, chainID, bl
 
 	if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, data); err != nil {
 		return fmt.Errorf("failed to cache blobs for block %d: %w", blockNum, err)
-	}
-
-	event := outbound.BlobsEvent{
-		ChainID:     chainID,
-		BlockNumber: blockNum,
-		Version:     version,
-		BlockHash:   blockHash,
-		ReceivedAt:  receivedAt,
-		CacheKey:    cacheKey(chainID, blockNum, version, "blobs"),
-		IsReorg:     isReorg,
-		IsBackfill:  false,
-	}
-	if err := s.eventSink.Publish(ctx, event); err != nil {
-		return fmt.Errorf("failed to publish blobs event for block %d: %w", blockNum, err)
-	}
-
-	// Mark blobs publish as complete in DB for crash recovery
-	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlobs); err != nil {
-		s.logger.Warn("failed to mark blobs publish complete", "block", blockNum, "error", err)
 	}
 
 	return nil

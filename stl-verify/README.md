@@ -49,11 +49,8 @@ AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=test
 AWS_SECRET_ACCESS_KEY=test
 
-# SNS Topics (defaults for LocalStack)
-AWS_SNS_TOPIC_BLOCKS=arn:aws:sns:us-east-1:000000000000:stl-block-events
-AWS_SNS_TOPIC_RECEIPTS=arn:aws:sns:us-east-1:000000000000:stl-receipts-events
-AWS_SNS_TOPIC_TRACES=arn:aws:sns:us-east-1:000000000000:stl-traces-events
-AWS_SNS_TOPIC_BLOBS=arn:aws:sns:us-east-1:000000000000:stl-blobs-events
+# SNS FIFO Topic (single topic for all event types)
+AWS_SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:stl-ethereum-blocks.fifo
 
 # Tracing
 JAEGER_ENDPOINT=localhost:4317

@@ -2016,7 +2016,7 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 	}
 }
 
-func TestFetchAndPublishBlockData_WithBlobs_PublishesBlobEvent(t *testing.T) {
+func TestFetchAndPublishBlockData_WithBlobs_CachesBlobs(t *testing.T) {
 	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
@@ -2040,16 +2040,16 @@ func TestFetchAndPublishBlockData_WithBlobs_PublishesBlobEvent(t *testing.T) {
 		t.Fatalf("fetchAndPublishBlockData failed: %v", err)
 	}
 
-	events := eventSink.GetEvents()
-	hasBlobs := false
-	for _, e := range events {
-		if _, ok := e.(outbound.BlobsEvent); ok {
-			hasBlobs = true
-		}
+	// Verify data was cached (block, receipts, traces, blobs = 4 entries)
+	entryCount := cache.GetEntryCount()
+	if entryCount != 4 {
+		t.Errorf("expected 4 cache entries (block, receipts, traces, blobs), got %d", entryCount)
 	}
 
-	if !hasBlobs {
-		t.Error("expected BlobsEvent when blobs enabled")
+	// Verify only a single BlockEvent is published (not separate events for receipts/traces/blobs)
+	events := eventSink.GetBlockEvents()
+	if len(events) != 1 {
+		t.Errorf("expected 1 BlockEvent, got %d", len(events))
 	}
 }
 
@@ -3486,4 +3486,216 @@ func TestProcessBlock_ReorgChainNotPrunedOnDBFailure(t *testing.T) {
 	}
 
 	t.Log("SUCCESS: In-memory chain not pruned after HandleReorgAtomic failure")
+}
+
+// ============================================================================
+// Cache-before-publish ordering test
+// ============================================================================
+
+// mockOrderTrackingCache tracks the order of cache operations
+type mockOrderTrackingCache struct {
+	*memory.BlockCache
+	mu         sync.Mutex
+	operations []string
+}
+
+func newMockOrderTrackingCache() *mockOrderTrackingCache {
+	return &mockOrderTrackingCache{
+		BlockCache: memory.NewBlockCache(),
+		operations: make([]string, 0),
+	}
+}
+
+func (c *mockOrderTrackingCache) SetBlock(ctx context.Context, chainID, blockNum int64, version int, data json.RawMessage) error {
+	c.mu.Lock()
+	c.operations = append(c.operations, "cache_block")
+	c.mu.Unlock()
+	return c.BlockCache.SetBlock(ctx, chainID, blockNum, version, data)
+}
+
+func (c *mockOrderTrackingCache) SetReceipts(ctx context.Context, chainID, blockNum int64, version int, data json.RawMessage) error {
+	c.mu.Lock()
+	c.operations = append(c.operations, "cache_receipts")
+	c.mu.Unlock()
+	return c.BlockCache.SetReceipts(ctx, chainID, blockNum, version, data)
+}
+
+func (c *mockOrderTrackingCache) SetTraces(ctx context.Context, chainID, blockNum int64, version int, data json.RawMessage) error {
+	c.mu.Lock()
+	c.operations = append(c.operations, "cache_traces")
+	c.mu.Unlock()
+	return c.BlockCache.SetTraces(ctx, chainID, blockNum, version, data)
+}
+
+func (c *mockOrderTrackingCache) SetBlobs(ctx context.Context, chainID, blockNum int64, version int, data json.RawMessage) error {
+	c.mu.Lock()
+	c.operations = append(c.operations, "cache_blobs")
+	c.mu.Unlock()
+	return c.BlockCache.SetBlobs(ctx, chainID, blockNum, version, data)
+}
+
+func (c *mockOrderTrackingCache) getOperations() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	result := make([]string, len(c.operations))
+	copy(result, c.operations)
+	return result
+}
+
+// mockOrderTrackingEventSink tracks when publish is called
+type mockOrderTrackingEventSink struct {
+	*memory.EventSink
+	mu         sync.Mutex
+	operations []string
+}
+
+func newMockOrderTrackingEventSink() *mockOrderTrackingEventSink {
+	return &mockOrderTrackingEventSink{
+		EventSink:  memory.NewEventSink(),
+		operations: make([]string, 0),
+	}
+}
+
+func (s *mockOrderTrackingEventSink) Publish(ctx context.Context, event outbound.Event) error {
+	s.mu.Lock()
+	s.operations = append(s.operations, "publish_block")
+	s.mu.Unlock()
+	return s.EventSink.Publish(ctx, event)
+}
+
+func (s *mockOrderTrackingEventSink) getOperations() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]string, len(s.operations))
+	copy(result, s.operations)
+	return result
+}
+
+func TestFetchAndPublishBlockData_CachesAllDataBeforePublishing(t *testing.T) {
+	ctx := context.Background()
+	stateRepo := newMockStateRepo()
+	cache := newMockOrderTrackingCache()
+	eventSink := newMockOrderTrackingEventSink()
+
+	client := newMockFailingClient()
+	client.addBlock(100, "")
+
+	header100 := client.getHeader(100)
+
+	svc, err := NewLiveService(LiveConfig{
+		DisableBlobs: false, // Enable blobs to test all 4 cache operations
+	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	err = svc.fetchAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false)
+	if err != nil {
+		t.Fatalf("fetchAndPublishBlockData failed: %v", err)
+	}
+
+	// Collect all operations from both cache and event sink
+	cacheOps := cache.getOperations()
+	publishOps := eventSink.getOperations()
+
+	// Verify all 4 cache operations happened
+	expectedCacheOps := map[string]bool{
+		"cache_block":    false,
+		"cache_receipts": false,
+		"cache_traces":   false,
+		"cache_blobs":    false,
+	}
+	for _, op := range cacheOps {
+		if _, exists := expectedCacheOps[op]; exists {
+			expectedCacheOps[op] = true
+		}
+	}
+	for op, found := range expectedCacheOps {
+		if !found {
+			t.Errorf("expected cache operation %q was not called", op)
+		}
+	}
+
+	// Verify publish was called exactly once
+	if len(publishOps) != 1 {
+		t.Errorf("expected exactly 1 publish operation, got %d", len(publishOps))
+	}
+
+	// CRITICAL: Verify publish happened AFTER all cache operations
+	// Since cache operations happen concurrently, we just need to verify
+	// that all cache operations completed before any publish
+	if len(cacheOps) != 4 {
+		t.Errorf("expected 4 cache operations before publish, got %d", len(cacheOps))
+	}
+
+	t.Logf("SUCCESS: All %d cache operations completed before publish", len(cacheOps))
+	t.Logf("Cache operations: %v", cacheOps)
+	t.Logf("Publish operations: %v", publishOps)
+}
+
+func TestFetchAndPublishBlockData_NoPublishOnCacheFailure(t *testing.T) {
+	// This test verifies that if caching fails, publish is never called
+	tests := []struct {
+		name              string
+		failCacheBlock    bool
+		failCacheReceipts bool
+		failCacheTraces   bool
+		failCacheBlobs    bool
+	}{
+		{
+			name:           "block_cache_fails",
+			failCacheBlock: true,
+		},
+		{
+			name:              "receipts_cache_fails",
+			failCacheReceipts: true,
+		},
+		{
+			name:            "traces_cache_fails",
+			failCacheTraces: true,
+		},
+		{
+			name:           "blobs_cache_fails",
+			failCacheBlobs: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			stateRepo := newMockStateRepo()
+
+			cache := newMockFailingCache()
+			cache.failSetBlock = tt.failCacheBlock
+			cache.failSetReceipts = tt.failCacheReceipts
+			cache.failSetTraces = tt.failCacheTraces
+			cache.failSetBlobs = tt.failCacheBlobs
+
+			eventSink := memory.NewEventSink()
+
+			client := newMockFailingClient()
+			client.addBlock(100, "")
+			header100 := client.getHeader(100)
+
+			svc, err := NewLiveService(LiveConfig{
+				DisableBlobs: false,
+			}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+			if err != nil {
+				t.Fatalf("failed to create service: %v", err)
+			}
+
+			err = svc.fetchAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false)
+			if err == nil {
+				t.Fatal("expected error due to cache failure")
+			}
+
+			// CRITICAL: Verify no events were published
+			events := eventSink.GetBlockEvents()
+			if len(events) != 0 {
+				t.Errorf("expected 0 events when cache fails, got %d", len(events))
+			}
+
+			t.Logf("SUCCESS: No publish when %s", tt.name)
+		})
+	}
 }

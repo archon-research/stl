@@ -170,13 +170,8 @@ func main() {
 	snsEndpoint := getEnv("AWS_SNS_ENDPOINT", "http://localhost:4566")
 	awsRegion := getEnv("AWS_REGION", "us-east-1")
 
-	// Configure SNS topics for each event type
-	snsTopics := snsadapter.TopicARNs{
-		Blocks:   requireEnv("AWS_SNS_TOPIC_BLOCKS"),
-		Receipts: requireEnv("AWS_SNS_TOPIC_RECEIPTS"),
-		Traces:   requireEnv("AWS_SNS_TOPIC_TRACES"),
-		Blobs:    requireEnv("AWS_SNS_TOPIC_BLOBS"),
-	}
+	// Single SNS FIFO topic for all event types
+	snsTopicARN := requireEnv("AWS_SNS_TOPIC_ARN")
 
 	// Configure AWS SDK for LocalStack or production
 	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
@@ -200,8 +195,8 @@ func main() {
 	})
 
 	eventSink, err := snsadapter.NewEventSink(snsClient, snsadapter.Config{
-		Topics: snsTopics,
-		Logger: logger,
+		TopicARN: snsTopicARN,
+		Logger:   logger,
 	})
 	if err != nil {
 		logger.Error("failed to create SNS event sink", "error", err)
@@ -214,10 +209,7 @@ func main() {
 	}()
 	logger.Info("SNS event sink created",
 		"endpoint", snsEndpoint,
-		"blocks_topic", snsTopics.Blocks,
-		"receipts_topic", snsTopics.Receipts,
-		"traces_topic", snsTopics.Traces,
-		"blobs_topic", snsTopics.Blobs,
+		"topic", snsTopicARN,
 	)
 
 	// Create LiveService (handles WebSocket subscription and reorg detection)
