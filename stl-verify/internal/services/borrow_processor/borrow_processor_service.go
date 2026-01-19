@@ -853,7 +853,7 @@ func (s *Service) saveBorrowEvent(ctx context.Context, borrowEvent *BorrowEventD
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	userID, err := s.lendingRepo.EnsureUser(ctx, tx, borrowEvent.OnBehalfOf)
 	if err != nil {
