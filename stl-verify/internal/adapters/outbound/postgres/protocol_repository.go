@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"strings"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -172,22 +173,29 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8,
 			baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14, baseIdx+15, baseIdx+16))
+		args = append(args, d.ID, d.ProtocolID, d.TokenID, d.BlockNumber)
 
-		args = append(args,
-			d.ID, d.ProtocolID, d.TokenID, d.BlockNumber,
-			bigIntToNumeric(d.Unbacked),
-			bigIntToNumeric(d.AccruedToTreasuryScaled),
-			bigIntToNumeric(d.TotalAToken),
-			bigIntToNumeric(d.TotalStableDebt),
-			bigIntToNumeric(d.TotalVariableDebt),
-			bigIntToNumeric(d.LiquidityRate),
-			bigIntToNumeric(d.VariableBorrowRate),
-			bigIntToNumeric(d.StableBorrowRate),
-			bigIntToNumeric(d.AverageStableBorrowRate),
-			bigIntToNumeric(d.LiquidityIndex),
-			bigIntToNumeric(d.VariableBorrowIndex),
-			d.LastUpdateTimestamp,
-		)
+		for _, valToConvert := range []*big.Int{
+			d.Unbacked,
+			d.AccruedToTreasuryScaled,
+			d.TotalAToken,
+			d.TotalStableDebt,
+			d.TotalVariableDebt,
+			d.LiquidityRate,
+			d.VariableBorrowRate,
+			d.StableBorrowRate,
+			d.AverageStableBorrowRate,
+			d.LiquidityIndex,
+			d.VariableBorrowIndex,
+		} {
+			convertedVal, err := bigIntToNumeric(valToConvert)
+			if err != nil {
+				return fmt.Errorf("sparklend_reserve_data[%d] (ID=%d, ProtocolID=%d, TokenID=%d): numeric fields must not be nil", i, d.ID, d.ProtocolID, d.TokenID)
+			}
+			args = append(args, convertedVal)
+		}
+
+		args = append(args, d.LastUpdateTimestamp)
 	}
 
 	sb.WriteString(`

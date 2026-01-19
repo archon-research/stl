@@ -92,8 +92,12 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, borrowers 
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8))
 
-		amount := bigIntToNumeric(b.Amount)
-		change := bigIntToNumeric(b.Change)
+		amount, err := bigIntToNumeric(b.Amount); err != nil {
+			return fmt.Errorf("borrower[%d] (ID=%d, UserID=%d): failed to convert Amount to numeric: %w", i, b.ID, b.UserID, err)
+		}
+		change, err := bigIntToNumeric(b.Change); err != nil {
+			return fmt.Errorf("borrower[%d] (ID=%d, UserID=%d): failed to convert Change to numeric: %w", i, b.ID, b.UserID, err)
+		}
 
 		args = append(args, b.ID, b.UserID, b.ProtocolID, b.TokenID, b.BlockNumber, b.BlockVersion, amount, change)
 	}
@@ -160,8 +164,12 @@ func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, 
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8))
 
-		amount := bigIntToNumeric(c.Amount)
-		change := bigIntToNumeric(c.Change)
+		amount, err := bigIntToNumeric(c.Amount); err != nil {
+			return fmt.Errorf("borrower_collateral[%d] (ID=%d, UserID=%d): failed to convert Amount to numeric: %w", i, c.ID, c.UserID, err)
+		}
+		change, err := bigIntToNumeric(c.Change); err != nil {
+			return fmt.Errorf("borrower_collateral[%d] (ID=%d, UserID=%d): failed to convert Change to numeric: %w", i, c.ID, c.UserID, err)
+		}
 
 		args = append(args, c.ID, c.UserID, c.ProtocolID, c.TokenID, c.BlockNumber, c.BlockVersion, amount, change)
 	}

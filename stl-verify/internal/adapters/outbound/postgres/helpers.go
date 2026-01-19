@@ -3,6 +3,7 @@ package postgres
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/big"
 )
 
@@ -10,8 +11,12 @@ import (
 // This function expects non-nil input. All callers must validate nil values before calling.
 // Postgres's NUMERIC type can handle arbitrary precision numbers as strings.
 // This helper ensures that we store big.Int values correctly.
-func bigIntToNumeric(b *big.Int) any {
-	return b.String()
+func bigIntToNumeric(b *big.Int) (string, error) {
+	if b == nil {
+		return "", fmt.Errorf("input big.Int is nil")
+	}
+
+	return b.String(), nil
 }
 
 // marshalMetadata safely marshals metadata to JSON, returning "{}" for nil/empty maps.

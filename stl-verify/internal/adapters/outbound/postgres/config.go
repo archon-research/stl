@@ -6,24 +6,20 @@ type RepositoryConfig struct {
 	// TokenBatchSize controls the number of token records processed in a single
 	// database operation. Tokens have complex metadata and multiple fields,
 	// so a moderate batch size helps balance memory usage and transaction overhead.
-	// Default: 500
 	TokenBatchSize int
 
 	// UserBatchSize controls the number of user records processed in a single
 	// database operation. Users have moderate complexity with metadata.
-	// Default: 500
 	UserBatchSize int
 
 	// PositionBatchSize controls the number of position records (borrowers,
 	// collateral) processed in a single database operation. Positions are
 	// simpler records with fewer fields, allowing for larger batches.
-	// Default: 1000
 	PositionBatchSize int
 
 	// ProtocolBatchSize controls the number of protocol and reserve data
 	// records processed in a single database operation. Protocols have
 	// moderate complexity similar to tokens.
-	// Default: 500
 	ProtocolBatchSize int
 }
 
