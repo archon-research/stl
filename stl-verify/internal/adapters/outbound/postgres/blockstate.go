@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -81,8 +82,11 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 				"maxRetries", maxRetries,
 				"block", state.Number,
 				"hash", state.Hash)
-			// Small exponential backoff: 1ms, 2ms, 4ms, 8ms, 16ms...
-			time.Sleep(time.Duration(1<<attempt) * time.Millisecond)
+			// Small exponential backoff with jitter: base 1ms, 2ms, 4ms, 8ms, 16ms... + random jitter
+			// Jitter prevents thundering herd when multiple goroutines retry simultaneously
+			base := time.Duration(1<<attempt) * time.Millisecond
+			jitter := time.Duration(rand.Int63n(int64(base)))
+			time.Sleep(base + jitter)
 			continue
 		}
 

@@ -324,7 +324,7 @@ func (c *Client) GetBlockDataByHash(ctx context.Context, blockNum int64, hash st
 	// Block data
 	if resp := respMap[0]; resp != nil {
 		if resp.Error != nil {
-			result.BlockErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+			result.BlockErr = fmt.Errorf("RPC error for block %s: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
 		} else {
 			result.Block = resp.Result
 		}
@@ -335,7 +335,7 @@ func (c *Client) GetBlockDataByHash(ctx context.Context, blockNum int64, hash st
 	// Receipts
 	if resp := respMap[1]; resp != nil {
 		if resp.Error != nil {
-			result.ReceiptsErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+			result.ReceiptsErr = fmt.Errorf("RPC error for block %s receipts: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
 		} else {
 			result.Receipts = resp.Result
 		}
@@ -346,7 +346,7 @@ func (c *Client) GetBlockDataByHash(ctx context.Context, blockNum int64, hash st
 	// Traces
 	if resp := respMap[2]; resp != nil {
 		if resp.Error != nil {
-			result.TracesErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+			result.TracesErr = fmt.Errorf("RPC error for block %s traces: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
 		} else {
 			result.Traces = resp.Result
 		}
@@ -358,7 +358,7 @@ func (c *Client) GetBlockDataByHash(ctx context.Context, blockNum int64, hash st
 	if !c.config.DisableBlobs {
 		if resp := respMap[3]; resp != nil {
 			if resp.Error != nil {
-				result.BlobsErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+				result.BlobsErr = fmt.Errorf("RPC error for block %s blobs: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
 			} else {
 				result.Blobs = resp.Result
 			}
@@ -440,7 +440,7 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		// Block data
 		if resp := respMap[baseID]; resp != nil {
 			if resp.Error != nil {
-				results[i].BlockErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+				results[i].BlockErr = fmt.Errorf("RPC error for block %d: %s (code: %d)", blockNum, resp.Error.Message, resp.Error.Code)
 			} else {
 				results[i].Block = resp.Result
 			}
@@ -451,7 +451,7 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		// Receipts
 		if resp := respMap[baseID+1]; resp != nil {
 			if resp.Error != nil {
-				results[i].ReceiptsErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+				results[i].ReceiptsErr = fmt.Errorf("RPC error for block %d receipts: %s (code: %d)", blockNum, resp.Error.Message, resp.Error.Code)
 			} else {
 				results[i].Receipts = resp.Result
 			}
@@ -462,7 +462,7 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		// Traces
 		if resp := respMap[baseID+2]; resp != nil {
 			if resp.Error != nil {
-				results[i].TracesErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+				results[i].TracesErr = fmt.Errorf("RPC error for block %d traces: %s (code: %d)", blockNum, resp.Error.Message, resp.Error.Code)
 			} else {
 				results[i].Traces = resp.Result
 			}
@@ -474,7 +474,7 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		if !c.config.DisableBlobs {
 			if resp := respMap[baseID+3]; resp != nil {
 				if resp.Error != nil {
-					results[i].BlobsErr = fmt.Errorf("RPC error: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+					results[i].BlobsErr = fmt.Errorf("RPC error for block %d blobs: %s (code: %d)", blockNum, resp.Error.Message, resp.Error.Code)
 				} else {
 					results[i].Blobs = resp.Result
 				}

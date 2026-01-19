@@ -132,6 +132,29 @@ make tools
 
 Open the Jaeger UI at http://localhost:16686 to view distributed traces.
 
+## Cache Key Convention
+
+Block data is cached in Redis with the following key format:
+
+```
+stl:{chainId}:{blockNumber}:{version}:{dataType}
+```
+
+Where:
+- `chainId` - The blockchain network ID (e.g., `1` for Ethereum mainnet)
+- `blockNumber` - The block height
+- `version` - Incremented on chain reorgs (starts at `0`)
+- `dataType` - One of: `block`, `receipts`, `traces`, `blobs`
+
+**Examples:**
+```
+stl:1:12345:0:block     # Block 12345, first version, block data
+stl:1:12345:0:receipts  # Block 12345, first version, transaction receipts
+stl:1:12345:1:block     # Block 12345, second version (after reorg)
+```
+
+Consumers receive `BlockEvent` messages via SNS/SQS and derive cache keys using this convention.
+
 ## Graceful Shutdown
 
 The watcher handles `SIGINT` and `SIGTERM` signals gracefully:
