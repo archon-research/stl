@@ -1,6 +1,7 @@
 package entity
 
 import (
+	"fmt"
 	"math/big"
 )
 
@@ -29,13 +30,34 @@ type SparkLendReserveData struct {
 }
 
 // NewSparkLendReserveData creates a new SparkLendReserveData entity.
-func NewSparkLendReserveData(id, protocolID, tokenID, blockNumber int64) *SparkLendReserveData {
-	return &SparkLendReserveData{
+func NewSparkLendReserveData(id, protocolID, tokenID, blockNumber int64) (*SparkLendReserveData, error) {
+	srd := &SparkLendReserveData{
 		ID:          id,
 		ProtocolID:  protocolID,
 		TokenID:     tokenID,
 		BlockNumber: blockNumber,
 	}
+	if err := srd.validate(); err != nil {
+		return nil, err
+	}
+	return srd, nil
+}
+
+// validate checks that all fields have valid values.
+func (srd *SparkLendReserveData) validate() error {
+	if srd.ID <= 0 {
+		return fmt.Errorf("id must be positive, got %d", srd.ID)
+	}
+	if srd.ProtocolID <= 0 {
+		return fmt.Errorf("protocolID must be positive, got %d", srd.ProtocolID)
+	}
+	if srd.TokenID <= 0 {
+		return fmt.Errorf("tokenID must be positive, got %d", srd.TokenID)
+	}
+	if srd.BlockNumber <= 0 {
+		return fmt.Errorf("blockNumber must be positive, got %d", srd.BlockNumber)
+	}
+	return nil
 }
 
 // WithRates sets the interest rates on the reserve data.

@@ -18,14 +18,8 @@ type DebtToken struct {
 }
 
 // NewDebtToken creates a new DebtToken entity with validation.
-func NewDebtToken(id, protocolID, underlyingTokenID int64, variableDebtAddress, stableDebtAddress []byte, variableSymbol, stableSymbol string) (*DebtToken, error) {
-	if variableDebtAddress != nil && len(variableDebtAddress) != 20 {
-		return nil, fmt.Errorf("invalid variable debt address length: expected 20, got %d", len(variableDebtAddress))
-	}
-	if stableDebtAddress != nil && len(stableDebtAddress) != 20 {
-		return nil, fmt.Errorf("invalid stable debt address length: expected 20, got %d", len(stableDebtAddress))
-	}
-	return &DebtToken{
+func NewDebtToken(id, protocolID, underlyingTokenID, createdAtBlock int64, variableDebtAddress, stableDebtAddress []byte, variableSymbol, stableSymbol string) (*DebtToken, error) {
+	dt := &DebtToken{
 		ID:                  id,
 		ProtocolID:          protocolID,
 		UnderlyingTokenID:   underlyingTokenID,
@@ -33,8 +27,42 @@ func NewDebtToken(id, protocolID, underlyingTokenID int64, variableDebtAddress, 
 		StableDebtAddress:   stableDebtAddress,
 		VariableSymbol:      variableSymbol,
 		StableSymbol:        stableSymbol,
+		CreatedAtBlock:      createdAtBlock,
 		Metadata:            make(map[string]any),
-	}, nil
+	}
+	if err := dt.validate(); err != nil {
+		return nil, err
+	}
+	return dt, nil
+}
+
+// validate checks that all fields have valid values.
+func (dt *DebtToken) validate() error {
+	if dt.ID <= 0 {
+		return fmt.Errorf("id must be positive, got %d", dt.ID)
+	}
+	if dt.ProtocolID <= 0 {
+		return fmt.Errorf("protocolID must be positive, got %d", dt.ProtocolID)
+	}
+	if dt.UnderlyingTokenID <= 0 {
+		return fmt.Errorf("underlyingTokenID must be positive, got %d", dt.UnderlyingTokenID)
+	}
+	if dt.CreatedAtBlock <= 0 {
+		return fmt.Errorf("createdAtBlock must be positive, got %d", dt.CreatedAtBlock)
+	}
+	if dt.VariableDebtAddress != nil && len(dt.VariableDebtAddress) != 20 {
+		return fmt.Errorf("invalid variable debt address length: expected 20, got %d", len(dt.VariableDebtAddress))
+	}
+	if dt.StableDebtAddress != nil && len(dt.StableDebtAddress) != 20 {
+		return fmt.Errorf("invalid stable debt address length: expected 20, got %d", len(dt.StableDebtAddress))
+	}
+	if dt.VariableDebtAddress == nil && dt.StableDebtAddress == nil {
+		return fmt.Errorf("at least one debt address must be provided")
+	}
+	if dt.VariableSymbol == "" && dt.StableSymbol == "" {
+		return fmt.Errorf("at least one symbol must be provided")
+	}
+	return nil
 }
 
 // VariableAddressHex returns the variable debt address as a hex string with 0x prefix.
