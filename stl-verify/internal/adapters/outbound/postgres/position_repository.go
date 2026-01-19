@@ -124,10 +124,12 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, exec dbExe
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
 
-		amount, err := bigIntToNumeric(b.Amount); if err != nil {
+		amount, err := bigIntToNumeric(b.Amount)
+		if err != nil {
 			return fmt.Errorf("borrower[%d] (UserID=%d): failed to convert Amount to numeric: %w", i, b.UserID, err)
 		}
-		change, err := bigIntToNumeric(b.Change); if err != nil {
+		change, err := bigIntToNumeric(b.Change)
+		if err != nil {
 			return fmt.Errorf("borrower[%d] (UserID=%d): failed to convert Change to numeric: %w", i, b.UserID, err)
 		}
 
