@@ -244,6 +244,128 @@ func BenchmarkPositionRepository_BatchSizes(b *testing.B) {
 	}
 }
 
+// generateTokens creates test token entities.
+func generateTokens(count int) []*entity.Token {
+	tokens := make([]*entity.Token, count)
+	for i := 0; i < count; i++ {
+		tokens[i] = &entity.Token{
+			ChainID:        1,
+			Address:        []byte(fmt.Sprintf("%040d", 10000+i)),
+			Symbol:         fmt.Sprintf("TKN%d", i),
+			Decimals:       18,
+			CreatedAtBlock: int64(i + 1),
+			Metadata:       map[string]any{"name": fmt.Sprintf("Token %d", i)},
+		}
+	}
+	return tokens
+}
+
+// generateSparkLendReserveData creates test SparkLend reserve data entities.
+func generateSparkLendReserveData(count int, startBlock int64) []*entity.SparkLendReserveData {
+	data := make([]*entity.SparkLendReserveData, count)
+	for i := 0; i < count; i++ {
+		data[i] = &entity.SparkLendReserveData{
+			ProtocolID:              int64((i % 10) + 1),
+			TokenID:                 int64((i % 50) + 1),
+			BlockNumber:             startBlock + int64(i/50),
+			BlockVersion:            0,
+			Unbacked:                big.NewInt(int64(i * 1000)),
+			AccruedToTreasuryScaled: big.NewInt(int64(i * 100)),
+			TotalAToken:             big.NewInt(int64(1000000 + i)),
+			TotalStableDebt:         big.NewInt(int64(500000 + i)),
+			TotalVariableDebt:       big.NewInt(int64(300000 + i)),
+			LiquidityRate:           big.NewInt(int64(i % 10000)),
+			VariableBorrowRate:      big.NewInt(int64(i % 20000)),
+			StableBorrowRate:        big.NewInt(int64(i % 15000)),
+			AverageStableBorrowRate: big.NewInt(int64(i % 12000)),
+			LiquidityIndex:          big.NewInt(int64(1000000000 + i)),
+			VariableBorrowIndex:     big.NewInt(int64(1000000000 + i*2)),
+			LastUpdateTimestamp:     int64(1700000000 + i),
+		}
+	}
+	return data
+}
+
+// BenchmarkTokenRepository_UpsertTokens benchmarks token upserts at various scales.
+func BenchmarkTokenRepository_UpsertTokens(b *testing.B) {
+	db, cleanup := setupBenchmarkPostgres(b)
+	defer cleanup()
+
+	ctx := context.Background()
+	// Seed chain for FK constraint
+	_, err := db.ExecContext(ctx, `INSERT INTO chains (chain_id, name) VALUES (1, 'mainnet') ON CONFLICT DO NOTHING`)
+	if err != nil {
+		b.Fatalf("failed to seed chain: %v", err)
+	}
+
+	repo, err := NewTokenRepository(db, nil, 1000)
+	if err != nil {
+		b.Fatalf("failed to create repository: %v", err)
+	}
+
+	testCases := []struct {
+		name  string
+		count int
+	}{
+		{"1K_rows", BenchmarkSmallRowCount},
+		{"100K_rows", BenchmarkMediumRowCount},
+	}
+
+	for _, tc := range testCases {
+		b.Run(tc.name, func(b *testing.B) {
+			tokens := generateTokens(tc.count)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := repo.UpsertTokens(ctx, tokens); err != nil {
+					b.Fatalf("upsert failed: %v", err)
+				}
+			}
+			b.StopTimer()
+
+			b.ReportMetric(float64(tc.count*b.N)/b.Elapsed().Seconds(), "rows/sec")
+		})
+	}
+}
+
+// BenchmarkProtocolRepository_UpsertSparkLendReserveData benchmarks SparkLend reserve data upserts.
+func BenchmarkProtocolRepository_UpsertSparkLendReserveData(b *testing.B) {
+	db, cleanup := setupBenchmarkPostgres(b)
+	defer cleanup()
+
+	ctx := context.Background()
+	seedReferenceData(b, db, ctx)
+
+	repo, err := NewProtocolRepository(db, nil, 1000)
+	if err != nil {
+		b.Fatalf("failed to create repository: %v", err)
+	}
+
+	testCases := []struct {
+		name  string
+		count int
+	}{
+		{"1K_rows", BenchmarkSmallRowCount},
+		{"100K_rows", BenchmarkMediumRowCount},
+	}
+
+	for _, tc := range testCases {
+		b.Run(tc.name, func(b *testing.B) {
+			data := generateSparkLendReserveData(tc.count, int64(tc.count*1000))
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := repo.UpsertSparkLendReserveData(ctx, data); err != nil {
+					b.Fatalf("upsert failed: %v", err)
+				}
+			}
+			b.StopTimer()
+
+			b.ReportMetric(float64(tc.count*b.N)/b.Elapsed().Seconds(), "rows/sec")
+		})
+	}
+}
+
 // seedReferenceData inserts the chains, protocols, tokens, and users needed for FK constraints.
 func seedReferenceData(b *testing.B, db *sql.DB, ctx context.Context) {
 	b.Helper()
