@@ -11,7 +11,7 @@ variable "project_name" {
 }
 
 variable "environment" {
-  description = "Environment name (e.g., dev, staging, prod)"
+  description = "Environment name (e.g. sentinelstaging, sentinelprod)"
   type        = string
   # No default - must be specified explicitly
 }
@@ -59,4 +59,33 @@ variable "tigerdata_ha_replicas" {
   description = "Number of HA replicas (0 for staging, 1 for prod)"
   type        = number
   default     = 0
+}
+
+# -----------------------------------------------------------------------------
+# ElastiCache Redis Configuration
+# -----------------------------------------------------------------------------
+
+variable "redis_node_type" {
+  description = "ElastiCache node type. Use cache.t4g.micro for staging, cache.r7g.large+ for prod"
+  type        = string
+}
+
+variable "redis_engine_version" {
+  description = "Redis engine version"
+  type        = string
+}
+
+variable "redis_num_cache_clusters" {
+  description = "Number of cache clusters (nodes). 1 for staging, 2+ for prod (enables HA)"
+  type        = number
+}
+
+variable "redis_transit_encryption" {
+  description = "Enable TLS for Redis connections. Recommended for prod"
+  type        = bool
+}
+
+variable "redis_snapshot_retention" {
+  description = "Number of days to retain snapshots. 0 disables snapshots"
+  type        = number
 }
