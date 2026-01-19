@@ -20,8 +20,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
-	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -82,9 +83,13 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 				"maxRetries", maxRetries,
 				"block", state.Number,
 				"hash", state.Hash)
-			// Small exponential backoff with jitter: base 1ms, 2ms, 4ms, 8ms, 16ms... + random jitter
-			// Jitter prevents thundering herd when multiple goroutines retry simultaneously
+			// Exponential backoff with jitter, capped at 100ms to prevent excessive waits
+			// Base: 1ms, 2ms, 4ms, 8ms, 16ms, 32ms, 64ms, 100ms (capped)
 			base := time.Duration(1<<attempt) * time.Millisecond
+			const maxBackoff = 100 * time.Millisecond
+			if base > maxBackoff {
+				base = maxBackoff
+			}
 			jitter := time.Duration(rand.Int63n(int64(base)))
 			time.Sleep(base + jitter)
 			continue
@@ -143,9 +148,13 @@ func isSerializationFailure(err error) bool {
 	if err == nil {
 		return false
 	}
-	// PostgreSQL serialization failures contain "40001" or "could not serialize access"
-	errStr := err.Error()
-	return strings.Contains(errStr, "40001") || strings.Contains(errStr, "could not serialize access")
+	// Use pgx's structured error type to check SQLSTATE code directly
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		// SQLSTATE 40001 = serialization_failure
+		return pgErr.Code == "40001"
+	}
+	return false
 }
 
 // GetLastBlock retrieves the most recently saved canonical (non-orphaned) block state.
