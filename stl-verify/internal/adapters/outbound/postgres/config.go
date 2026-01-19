@@ -1,3 +1,4 @@
+// Package postgres provides PostgreSQL implementations of repository interfaces.
 package postgres
 
 // RepositoryConfig holds configuration for repository batch operations.

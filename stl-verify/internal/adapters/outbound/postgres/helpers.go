@@ -20,8 +20,6 @@ func bigIntToNumeric(b *big.Int) (string, error) {
 }
 
 // marshalMetadata safely marshals metadata to JSON, returning "{}" for nil/empty maps.
-// This is safe because map[string]any can always be marshaled (unless it contains
-// channels or functions, which entity metadata should never have).
 func marshalMetadata(m map[string]any) ([]byte, error) {
 	if len(m) == 0 {
 		return []byte("{}"), nil
