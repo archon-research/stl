@@ -85,12 +85,44 @@ output "worker_security_group_id" {
   value       = aws_security_group.worker.id
 }
 
-output "rds_security_group_id" {
-  description = "ID of the RDS security group"
-  value       = aws_security_group.rds.id
+output "ethereum_redis_security_group_id" {
+  description = "ID of the Ethereum ElastiCache Redis security group"
+  value       = aws_security_group.redis.id
 }
 
-output "redis_security_group_id" {
-  description = "ID of the ElastiCache Redis security group"
-  value       = aws_security_group.redis.id
+# =============================================================================
+# TigerData (TimescaleDB) Outputs
+# =============================================================================
+
+output "tigerdata_hostname" {
+  description = "TigerData primary hostname"
+  value       = timescale_service.main.hostname
+  sensitive   = true
+}
+
+output "tigerdata_port" {
+  description = "TigerData primary port"
+  value       = timescale_service.main.port
+}
+
+output "tigerdata_pooler_hostname" {
+  description = "TigerData connection pooler hostname"
+  value       = timescale_service.main.pooler_hostname
+  sensitive   = true
+}
+
+output "tigerdata_pooler_port" {
+  description = "TigerData connection pooler port"
+  value       = timescale_service.main.pooler_port
+}
+
+output "tigerdata_replica_hostname" {
+  description = "TigerData HA replica hostname (if enabled)"
+  value       = timescale_service.main.replica_hostname
+  sensitive   = true
+}
+
+output "tigerdata_vpc_peering_id" {
+  description = "VPC peering connection ID"
+  value       = aws_vpc_peering_connection_accepter.tigerdata.id
 }

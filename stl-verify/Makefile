@@ -87,6 +87,15 @@ ci: test-race vet fmt-check tidy staticcheck vulncheck golangci-lint
 
 INFRA_DIR := ../infra
 
+# Helper to load TigerData credentials from Secrets Manager
+# This is needed because provider configuration happens before data sources are read
+define load_tigerdata_creds
+	$(eval SECRET_JSON := $(shell aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --query SecretString --output text 2>/dev/null || echo '{}'))
+	$(eval export TF_VAR_tigerdata_project_id := $(shell echo '$(SECRET_JSON)' | jq -r '.project_id // empty'))
+	$(eval export TF_VAR_tigerdata_access_key := $(shell echo '$(SECRET_JSON)' | jq -r '.access_key // empty'))
+	$(eval export TF_VAR_tigerdata_secret_key := $(shell echo '$(SECRET_JSON)' | jq -r '.secret_key // empty'))
+endef
+
 # Initialize Terraform for an environment
 # Usage: make tf-init ENV=sentinelstaging
 tf-init:
@@ -97,18 +106,21 @@ tf-init:
 # Usage: make tf-validate ENV=sentinelstaging
 tf-validate:
 	@echo "==> Validating Terraform for $(ENV)..."
+	@$(call load_tigerdata_creds)
 	cd $(INFRA_DIR) && tofu validate
 
 # Plan Terraform changes
 # Usage: make tf-plan ENV=sentinelstaging
 tf-plan:
 	@echo "==> Planning Terraform for $(ENV)..."
+	@$(call load_tigerdata_creds)
 	cd $(INFRA_DIR) && tofu plan -var-file=environments/$(ENV).tfvars
 
 # Apply Terraform changes
 # Usage: make tf-apply ENV=sentinelstaging
 tf-apply:
 	@echo "==> Applying Terraform for $(ENV)..."
+	@$(call load_tigerdata_creds)
 	cd $(INFRA_DIR) && tofu apply -var-file=environments/$(ENV).tfvars
 
 # Full Terraform workflow: init, validate, plan

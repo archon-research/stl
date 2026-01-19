@@ -67,3 +67,9 @@ resource "aws_iam_role_policy_attachment" "ethereum_raw_data_access" {
   role       = aws_iam_role.ethereum_raw_data_access.name
   policy_arn = aws_iam_policy.ethereum_raw_data_access.arn
 }
+
+# Attach TigerData secret read policy to allow ECS tasks to fetch DB credentials
+resource "aws_iam_role_policy_attachment" "tigerdata_secret_access" {
+  role       = aws_iam_role.ethereum_raw_data_access.name
+  policy_arn = aws_iam_policy.tigerdata_secret_read.arn
+}
