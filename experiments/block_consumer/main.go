@@ -50,9 +50,9 @@ func main() {
 	}))
 
 	// Configuration
-	sqsEndpoint := getEnv("AWS_SQS_ENDPOINT", "http://172.19.0.2:4566")
+	sqsEndpoint := getEnv("AWS_SQS_ENDPOINT", "localhost:4566")
 	sqsQueueURL := getEnv("SQS_QUEUE_URL", "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo")
-	redisAddr := getEnv("REDIS_ADDR", "172.19.0.3:6379")
+	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
 
 	// Set up AWS SDK for LocalStack
 	cfg, err := config.LoadDefaultConfig(context.Background(),

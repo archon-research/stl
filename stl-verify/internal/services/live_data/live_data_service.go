@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -175,7 +175,7 @@ func (s *LiveService) processHeaders(headers <-chan outbound.BlockHeader) {
 				return
 			}
 			if err := s.processBlock(header, time.Now()); err != nil {
-				blockNum, parseErr := parseBlockNumber(header.Number)
+				blockNum, parseErr := hexutil.ParseInt64(header.Number)
 				if parseErr != nil {
 					err = errors.Join(parseErr)
 				}
@@ -217,7 +217,7 @@ func (s *LiveService) isDuplicateBlock(ctx context.Context, hash string, blockNu
 // processBlock handles a single block: dedup, reorg detection, state tracking, data fetching, publishing.
 func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.Time) error {
 	start := time.Now()
-	blockNum, err := parseBlockNumber(header.Number)
+	blockNum, err := hexutil.ParseInt64(header.Number)
 	if err != nil {
 		return fmt.Errorf("failed to parse block number: %w", err)
 	}
@@ -425,7 +425,10 @@ func (s *LiveService) handleReorg(block LightBlock, receivedAt time.Time) (bool,
 
 		// Walk to parent block to continue searching for common ancestor
 		// Normalize RPC response at the point of ingestion
-		parentNum, _ := parseBlockNumber(parentHeader.Number)
+		parentNum, err := hexutil.ParseInt64(parentHeader.Number)
+		if err != nil {
+			return false, 0, 0, nil, fmt.Errorf("failed to parse parent block number %q: %w", parentHeader.Number, err)
+		}
 		walkBlock = LightBlock{
 			Number:     parentNum,
 			ParentHash: normalizeHash(parentHeader.ParentHash),
@@ -549,7 +552,10 @@ func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbo
 	chainID := s.config.ChainID
 	blockHash := header.Hash
 	parentHash := header.ParentHash
-	blockTimestamp, _ := parseBlockNumber(header.Timestamp)
+	blockTimestamp, err := hexutil.ParseInt64(header.Timestamp)
+	if err != nil {
+		return fmt.Errorf("failed to parse block timestamp %q for block %d: %w", header.Timestamp, blockNum, err)
+	}
 
 	start := time.Now()
 
@@ -656,13 +662,6 @@ func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum i
 	}
 
 	return nil
-}
-
-// Utility functions
-// parseBlockNumber parses a hex-encoded block number string to int64.
-func parseBlockNumber(hexNum string) (int64, error) {
-	hexNum = strings.TrimPrefix(hexNum, "0x")
-	return strconv.ParseInt(hexNum, 16, 64)
 }
 
 // normalizeHash normalizes a hex hash to lowercase for consistent comparisons.

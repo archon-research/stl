@@ -2143,111 +2143,6 @@ func TestFetchAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
 }
 
 // ============================================================================
-// parseBlockNumber edge case tests
-// ============================================================================
-
-func TestParseBlockNumber_ValidHex(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected int64
-	}{
-		{"0x0", 0},
-		{"0x1", 1},
-		{"0xa", 10},
-		{"0xf", 15},
-		{"0x10", 16},
-		{"0x64", 100},
-		{"0x3e8", 1000},
-		{"0x186a0", 100000},
-		{"0xffffffffff", 1099511627775}, // Large number
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.input, func(t *testing.T) {
-			result, err := parseBlockNumber(tc.input)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if result != tc.expected {
-				t.Errorf("expected %d, got %d", tc.expected, result)
-			}
-		})
-	}
-}
-
-func TestParseBlockNumber_WithoutPrefix(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected int64
-	}{
-		{"0", 0},
-		{"1", 1},
-		{"a", 10},
-		{"64", 100},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.input, func(t *testing.T) {
-			result, err := parseBlockNumber(tc.input)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if result != tc.expected {
-				t.Errorf("expected %d, got %d", tc.expected, result)
-			}
-		})
-	}
-}
-
-func TestParseBlockNumber_InvalidHex(t *testing.T) {
-	tests := []string{
-		"not_hex",
-		"0xGHI",
-		"xyz",
-	}
-
-	for _, input := range tests {
-		t.Run(input, func(t *testing.T) {
-			_, err := parseBlockNumber(input)
-			if err == nil {
-				t.Errorf("expected error for invalid input: %s", input)
-			}
-		})
-	}
-}
-
-func TestParseBlockNumber_EmptyString(t *testing.T) {
-	_, err := parseBlockNumber("")
-	if err == nil {
-		t.Error("expected error for empty string")
-	}
-}
-
-func TestParseBlockNumber_UppercaseHex(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected int64
-	}{
-		{"0xA", 10},
-		{"0xF", 15},
-		{"0xFF", 255},
-		{"0xABCD", 43981},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.input, func(t *testing.T) {
-			result, err := parseBlockNumber(tc.input)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if result != tc.expected {
-				t.Errorf("expected %d, got %d", tc.expected, result)
-			}
-		})
-	}
-}
-
-// ============================================================================
 // Start/Stop lifecycle tests
 // ============================================================================
 
@@ -2545,6 +2440,7 @@ func TestProcessBlock_WithMetrics_RecordsReorg(t *testing.T) {
 		Number:     "0x64", // 100
 		Hash:       "0x100_alt",
 		ParentHash: "0x99",
+		Timestamp:  "0x0",
 	}
 
 	err = svc.processBlock(header, time.Now())
@@ -2730,6 +2626,7 @@ func TestProcessBlock_VersionIsCorrectAfterReorg(t *testing.T) {
 		Number:     "0x64", // 100
 		Hash:       "0x100_new",
 		ParentHash: "0x99",
+		Timestamp:  "0x0",
 	}
 
 	err = svc.processBlock(header, time.Now())
@@ -2788,6 +2685,7 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 		Number:     "0x64", // 100
 		Hash:       "0x100_v0",
 		ParentHash: "0x99",
+		Timestamp:  "0x0",
 	}
 	err = svc.processBlock(header1, time.Now())
 	if err != nil {
@@ -2844,6 +2742,7 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 		Number:     "0x64", // 100
 		Hash:       "0x100_v2",
 		ParentHash: "0x99",
+		Timestamp:  "0x0",
 	}
 	err = svc.processBlock(header3, time.Now())
 	if err != nil {

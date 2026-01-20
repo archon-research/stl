@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -609,7 +610,11 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 	blockNum := bd.BlockNumber
 	blockHash := header.Hash
 	parentHash := header.ParentHash
-	blockTimestamp, _ := shared.ParseBlockNumber(header.Timestamp)
+	blockTimestamp, err := hexutil.ParseInt64(header.Timestamp)
+	if err != nil {
+		s.logger.Error("failed to parse block timestamp, skipping block", "block", blockNum, "timestamp", header.Timestamp, "error", err)
+		return
+	}
 
 	// Cache block data
 	if bd.Block == nil {

@@ -47,6 +47,13 @@ func NewBlockStateRepository(db *sql.DB, logger *slog.Logger) *BlockStateReposit
 	return &BlockStateRepository{db: db, logger: logger}
 }
 
+// closeRows closes database rows and logs any error.
+func (r *BlockStateRepository) closeRows(rows *sql.Rows) {
+	if err := rows.Close(); err != nil {
+		r.logger.Warn("failed to close database rows", "error", err)
+	}
+}
+
 // DB returns the underlying database connection for advanced queries.
 func (r *BlockStateRepository) DB() *sql.DB {
 	return r.db
@@ -110,7 +117,11 @@ func (r *BlockStateRepository) saveBlockOnce(ctx context.Context, state outbound
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			r.logger.Warn("failed to rollback transaction", "error", err)
+		}
+	}()
 
 	// Check if a block with this hash already exists (duplicate detection).
 	// Done inside the serializable transaction to prevent TOCTOU races.
@@ -248,7 +259,7 @@ func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) (
 	if err != nil {
 		return nil, fmt.Errorf("failed to get recent blocks: %w", err)
 	}
-	defer rows.Close()
+	defer r.closeRows(rows)
 
 	var states []outbound.BlockState
 	for rows.Next() {
@@ -365,7 +376,7 @@ func (r *BlockStateRepository) GetReorgEvents(ctx context.Context, limit int) ([
 	if err != nil {
 		return nil, fmt.Errorf("failed to get reorg events: %w", err)
 	}
-	defer rows.Close()
+	defer r.closeRows(rows)
 
 	var events []outbound.ReorgEvent
 	for rows.Next() {
@@ -393,7 +404,7 @@ func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, f
 	if err != nil {
 		return nil, fmt.Errorf("failed to get reorg events by block range: %w", err)
 	}
-	defer rows.Close()
+	defer r.closeRows(rows)
 
 	var events []outbound.ReorgEvent
 	for rows.Next() {
@@ -423,7 +434,7 @@ func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get orphaned blocks: %w", err)
 	}
-	defer rows.Close()
+	defer r.closeRows(rows)
 
 	var states []outbound.BlockState
 	for rows.Next() {
@@ -557,7 +568,7 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 	if err != nil {
 		return nil, fmt.Errorf("failed to find gaps: %w", err)
 	}
-	defer rows.Close()
+	defer r.closeRows(rows)
 
 	var gaps []outbound.BlockRange
 	for rows.Next() {
@@ -691,7 +702,7 @@ func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Contex
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blocks with incomplete publish: %w", err)
 	}
-	defer rows.Close()
+	defer r.closeRows(rows)
 
 	var states []outbound.BlockState
 	for rows.Next() {

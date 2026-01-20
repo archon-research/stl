@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -389,7 +390,7 @@ func (c *Client) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("failed to parse block number: %w", err)
 	}
 
-	return parseBlockNumber(result)
+	return hexutil.ParseInt64(result)
 }
 
 // GetBlocksBatch fetches all data for multiple blocks in a single batched RPC call.
@@ -518,7 +519,11 @@ func (c *Client) callBatch(ctx context.Context, requests []jsonRPCRequest) ([]js
 		if err != nil {
 			return fmt.Errorf("HTTP request failed: %w", err)
 		}
-		defer httpResp.Body.Close()
+		defer func() {
+			if err := httpResp.Body.Close(); err != nil {
+				c.logger.Warn("failed to close HTTP response body", "error", err)
+			}
+		}()
 
 		// Check for retryable HTTP status codes
 		if httpResp.StatusCode >= 500 || httpResp.StatusCode == 429 {
@@ -578,7 +583,11 @@ func (c *Client) call(ctx context.Context, req jsonRPCRequest) (*jsonRPCResponse
 		if err != nil {
 			return fmt.Errorf("HTTP request failed: %w", err)
 		}
-		defer httpResp.Body.Close()
+		defer func() {
+			if err := httpResp.Body.Close(); err != nil {
+				c.logger.Warn("failed to close HTTP response body", "error", err)
+			}
+		}()
 
 		// Check for retryable HTTP status codes
 		if httpResp.StatusCode >= 500 || httpResp.StatusCode == 429 {

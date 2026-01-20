@@ -95,7 +95,11 @@ func main() {
 		logger.Error("failed to connect to PostgreSQL", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			logger.Error("failed to close database connection", "error", err)
+		}
+	}()
 
 	blockStateRepo := postgres.NewBlockStateRepository(db, logger)
 

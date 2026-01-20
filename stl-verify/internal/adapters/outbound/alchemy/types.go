@@ -3,13 +3,11 @@
 // This file contains:
 //   - jsonRPCRequest/jsonRPCResponse: Standard JSON-RPC 2.0 message structures
 //   - subscriptionParams: WebSocket subscription notification parsing
-//   - Utility functions for parsing hex block numbers and truncating hashes
+//   - Utility functions for truncating hashes
 package alchemy
 
 import (
 	"encoding/json"
-	"strconv"
-	"strings"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -42,12 +40,6 @@ type jsonRPCError struct {
 type subscriptionParams struct {
 	Subscription string               `json:"subscription"`
 	Result       outbound.BlockHeader `json:"result"`
-}
-
-// parseBlockNumber parses a hex block number string to int64.
-func parseBlockNumber(hexNum string) (int64, error) {
-	hexNum = strings.TrimPrefix(hexNum, "0x")
-	return strconv.ParseInt(hexNum, 16, 64)
 }
 
 // truncateHash shortens a hash for logging purposes.

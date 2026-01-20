@@ -4,6 +4,7 @@ package s3
 import (
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -93,8 +94,8 @@ func (r *Reader) StreamFile(ctx context.Context, bucket, key string) (io.ReadClo
 	if strings.HasSuffix(key, ".gz") {
 		gzReader, err := gzip.NewReader(result.Body)
 		if err != nil {
-			result.Body.Close()
-			return nil, fmt.Errorf("failed to create gzip reader for %s: %w", key, err)
+			closeErr := result.Body.Close()
+			return nil, errors.Join(fmt.Errorf("failed to create gzip reader for %s: %w", key, err), closeErr)
 		}
 		return &gzipReadCloser{
 			gzReader: gzReader,
