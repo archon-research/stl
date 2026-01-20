@@ -445,3 +445,177 @@ func TestPublish_MessageContainsAllFields(t *testing.T) {
 		t.Error("expected IsBackfill=false")
 	}
 }
+
+// unknownEvent is a mock event with an unknown event type for testing.
+type unknownEvent struct{}
+
+func (e unknownEvent) EventType() outbound.EventType { return "unknown" }
+func (e unknownEvent) GetBlockNumber() int64         { return 100 }
+func (e unknownEvent) GetChainID() int64             { return 1 }
+func (e unknownEvent) GetCacheKey() string           { return "unknown:1:100" }
+
+func TestPublish_UnknownEventType(t *testing.T) {
+	client := &mockSNSClient{}
+	sink, err := NewEventSink(client, Config{
+		Topics: testTopics(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	err = sink.Publish(context.Background(), unknownEvent{})
+	if err == nil {
+		t.Fatal("expected error for unknown event type")
+	}
+	if err.Error() != "no topic ARN configured for event type: unknown" {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if len(client.calls) != 0 {
+		t.Errorf("expected 0 SNS calls, got %d", len(client.calls))
+	}
+}
+
+// unmarshalableEvent is a mock event that fails JSON marshaling.
+type unmarshalableEvent struct {
+	BadField chan int // channels cannot be marshaled to JSON
+}
+
+func (e unmarshalableEvent) EventType() outbound.EventType { return outbound.EventTypeBlock }
+func (e unmarshalableEvent) GetBlockNumber() int64         { return 100 }
+func (e unmarshalableEvent) GetChainID() int64             { return 1 }
+func (e unmarshalableEvent) GetCacheKey() string           { return "block:1:100" }
+
+func TestPublish_MarshalError(t *testing.T) {
+	client := &mockSNSClient{}
+	sink, err := NewEventSink(client, Config{
+		Topics: testTopics(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Create event with a field that cannot be marshaled
+	event := unmarshalableEvent{BadField: make(chan int)}
+
+	err = sink.Publish(context.Background(), event)
+	if err == nil {
+		t.Fatal("expected error for marshal failure")
+	}
+	// Verify this is a JSON marshaling error (chan types cannot be marshaled)
+	var unsupportedTypeErr *json.UnsupportedTypeError
+	if !errors.As(err, &unsupportedTypeErr) {
+		t.Errorf("expected json.UnsupportedTypeError, got: %v", err)
+	}
+
+	if len(client.calls) != 0 {
+		t.Errorf("expected 0 SNS calls, got %d", len(client.calls))
+	}
+}
+
+func TestPublish_NonRetryableError(t *testing.T) {
+	client := &mockSNSClient{
+		publishFunc: func(ctx context.Context, params *sns.PublishInput, optFns ...func(*sns.Options)) (*sns.PublishOutput, error) {
+			// Return context.Canceled which is not retryable
+			return nil, context.Canceled
+		},
+	}
+
+	sink, err := NewEventSink(client, Config{
+		Topics:         testTopics(),
+		MaxRetries:     3,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     10 * time.Millisecond,
+		BackoffFactor:  2.0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100}
+	err = sink.Publish(context.Background(), event)
+	if err == nil {
+		t.Fatal("expected error for non-retryable failure")
+	}
+
+	// Should fail immediately without retrying
+	if len(client.calls) != 1 {
+		t.Errorf("expected 1 call (no retries for non-retryable error), got %d", len(client.calls))
+	}
+
+	// Error should wrap the original error
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected error to wrap context.Canceled, got: %v", err)
+	}
+}
+
+func TestPublish_BackoffCappedAtMax(t *testing.T) {
+	callCount := 0
+	client := &mockSNSClient{
+		publishFunc: func(ctx context.Context, params *sns.PublishInput, optFns ...func(*sns.Options)) (*sns.PublishOutput, error) {
+			callCount++
+			if callCount < 5 {
+				return nil, &types.ThrottledException{Message: aws.String("throttled")}
+			}
+			return &sns.PublishOutput{MessageId: aws.String("success")}, nil
+		},
+	}
+
+	// Set MaxBackoff very low so it gets capped during retries
+	sink, err := NewEventSink(client, Config{
+		Topics:         testTopics(),
+		MaxRetries:     5,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     2 * time.Millisecond, // Very low max
+		BackoffFactor:  10.0,                 // High factor to quickly exceed max
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100}
+	err = sink.Publish(context.Background(), event)
+	if err != nil {
+		t.Fatalf("expected success after retry, got: %v", err)
+	}
+
+	if callCount != 5 {
+		t.Errorf("expected 5 calls, got %d", callCount)
+	}
+}
+
+func TestPublish_DeadlineExceededNotRetryable(t *testing.T) {
+	callCount := 0
+	client := &mockSNSClient{
+		publishFunc: func(ctx context.Context, params *sns.PublishInput, optFns ...func(*sns.Options)) (*sns.PublishOutput, error) {
+			callCount++
+			return nil, context.DeadlineExceeded
+		},
+	}
+
+	sink, err := NewEventSink(client, Config{
+		Topics:         testTopics(),
+		MaxRetries:     3,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     10 * time.Millisecond,
+		BackoffFactor:  2.0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100}
+	err = sink.Publish(context.Background(), event)
+	if err == nil {
+		t.Fatal("expected error for deadline exceeded")
+	}
+
+	// Should fail immediately without retrying
+	if callCount != 1 {
+		t.Errorf("expected 1 call (no retries for deadline exceeded), got %d", callCount)
+	}
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected error to wrap context.DeadlineExceeded, got: %v", err)
+	}
+}
