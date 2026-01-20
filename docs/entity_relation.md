@@ -1,4 +1,4 @@
-erDiagram
+```mermaid
     Chain {
         int chain_id PK
         varchar name UK
