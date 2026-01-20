@@ -149,3 +149,45 @@ output "tigerdata_vpc_peering_id" {
   description = "VPC peering connection ID"
   value       = aws_vpc_peering_connection_accepter.tigerdata.id
 }
+
+# =============================================================================
+# ECS Cluster Outputs
+# =============================================================================
+
+output "ecs_cluster_name" {
+  description = "Name of the ECS cluster"
+  value       = aws_ecs_cluster.main.name
+}
+
+output "ecs_cluster_arn" {
+  description = "ARN of the ECS cluster"
+  value       = aws_ecs_cluster.main.arn
+}
+
+# =============================================================================
+# ECR Repository Outputs
+# =============================================================================
+
+output "watcher_ecr_repository_url" {
+  description = "URL of the Watcher ECR repository"
+  value       = aws_ecr_repository.watcher.repository_url
+}
+
+output "watcher_ecr_repository_arn" {
+  description = "ARN of the Watcher ECR repository"
+  value       = aws_ecr_repository.watcher.arn
+}
+
+# =============================================================================
+# ECS Service Outputs
+# =============================================================================
+
+output "watcher_service_name" {
+  description = "Name of the Watcher ECS service"
+  value       = aws_ecs_service.watcher.name
+}
+
+output "watcher_task_definition_arn" {
+  description = "ARN of the Watcher task definition"
+  value       = aws_ecs_task_definition.watcher.arn
+}
