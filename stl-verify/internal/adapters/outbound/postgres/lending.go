@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	_ "embed"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -32,7 +31,7 @@ func (r *LendingRepository) BeginTx(ctx context.Context) (*sql.Tx, error) {
 	return r.db.BeginTx(ctx, nil)
 }
 
-func (r *LendingRepository) EnsureUser(ctx context.Context, tx *sql.Tx, address common.Address) (int64, error) {
+func (r *LendingRepository) GetOrCreateUser(ctx context.Context, tx *sql.Tx, address common.Address) (int64, error) {
 	var userID int64
 	addressHex := strings.ToLower(address.Hex())
 
@@ -57,7 +56,7 @@ func (r *LendingRepository) EnsureUser(ctx context.Context, tx *sql.Tx, address 
 	return userID, nil
 }
 
-func (r *LendingRepository) GetOrCreateToken(ctx context.Context, tx *sql.Tx, address common.Address, decimals int) (int64, error) {
+func (r *LendingRepository) GetOrCreateToken(ctx context.Context, tx *sql.Tx, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
 	var tokenID int64
 	addressHex := strings.ToLower(address.Hex())
 
@@ -66,16 +65,19 @@ func (r *LendingRepository) GetOrCreateToken(ctx context.Context, tx *sql.Tx, ad
 		r.chainID, addressHex).Scan(&tokenID)
 
 	if err == sql.ErrNoRows {
-		r.logger.Info("auto-creating token", "address", address.Hex(), "decimals", decimals)
+		if symbol == "" {
+			symbol = "UNKNOWN"
+		}
+		r.logger.Info("auto-creating token", "address", address.Hex(), "symbol", symbol, "decimals", decimals)
 		err = tx.QueryRowContext(ctx,
 			`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block)
 			 VALUES ($1, $2, $3, $4, $5)
 			 RETURNING id`,
-			r.chainID, addressHex, "UNKNOWN", decimals, 0).Scan(&tokenID)
+			r.chainID, addressHex, symbol, decimals, createdAtBlock).Scan(&tokenID)
 		if err != nil {
 			return 0, fmt.Errorf("failed to create token: %w", err)
 		}
-		r.logger.Info("token auto-created", "address", address.Hex(), "id", tokenID, "decimals", decimals)
+		r.logger.Debug("token created", "address", address.Hex(), "id", tokenID, "symbol", symbol, "decimals", decimals)
 		return tokenID, nil
 	} else if err != nil {
 		return 0, fmt.Errorf("failed to get token: %w", err)
@@ -84,7 +86,7 @@ func (r *LendingRepository) GetOrCreateToken(ctx context.Context, tx *sql.Tx, ad
 	return tokenID, nil
 }
 
-func (r *LendingRepository) GetOrCreateProtocol(ctx context.Context, tx *sql.Tx, address common.Address) (int64, error) {
+func (r *LendingRepository) GetOrCreateProtocol(ctx context.Context, tx *sql.Tx, address common.Address, createdAtBlock int64) (int64, error) {
 	var protocolID int64
 	addressHex := strings.ToLower(address.Hex())
 
@@ -98,11 +100,11 @@ func (r *LendingRepository) GetOrCreateProtocol(ctx context.Context, tx *sql.Tx,
 			`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
 			 VALUES ($1, $2, $3, $4, $5)
 			 RETURNING id`,
-			r.chainID, addressHex, "UNKNOWN-"+address.Hex()[:10], "lending", 0).Scan(&protocolID)
+			r.chainID, addressHex, "UNKNOWN-"+address.Hex()[:10], "lending", createdAtBlock).Scan(&protocolID)
 		if err != nil {
 			return 0, fmt.Errorf("failed to create protocol: %w", err)
 		}
-		r.logger.Info("protocol auto-created", "address", address.Hex(), "id", protocolID)
+		r.logger.Debug("protocol created", "address", address.Hex(), "id", protocolID)
 		return protocolID, nil
 	} else if err != nil {
 		return 0, fmt.Errorf("failed to get protocol: %w", err)

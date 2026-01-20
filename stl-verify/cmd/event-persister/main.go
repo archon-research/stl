@@ -1,3 +1,7 @@
+// Package main implements a borrow event processor that monitors lending protocol
+// activity on Ethereum. It processes transaction receipts from Redis (triggered by SQS
+// messages), extracts borrow events with collateral data, and stores the results in
+// PostgreSQL for downstream analysis.
 package main
 
 import (
@@ -47,7 +51,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	if *queueURL == "" {
-		*queueURL = getEnv("AWS_SQS_QUEUE_RECEIPTS", "")
+		*queueURL = getEnv("AWS_SQS_QUEUE_URL", "")
 	}
 	if *queueURL == "" {
 		logger.Error("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_RECEIPTS env var)")
@@ -67,7 +71,7 @@ func main() {
 	fullAlchemyURL := fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
 
 	if *redisAddr == "" {
-		*redisAddr = getEnv("REDIS_ADDR", "")
+		*redisAddr = requireEnv("REDIS_ADDR", logger)
 	}
 	if *redisAddr == "" {
 		logger.Error("Redis address not provided (use -redis flag or REDIS_ADDR env var)")
