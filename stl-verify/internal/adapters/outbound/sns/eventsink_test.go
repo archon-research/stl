@@ -447,32 +447,38 @@ func TestPublish_MessageContainsAllFields(t *testing.T) {
 }
 
 // unknownEvent is a mock event with an unknown event type for testing.
+// With a single topic, all events go to the same topic regardless of type.
 type unknownEvent struct{}
 
 func (e unknownEvent) EventType() outbound.EventType { return "unknown" }
 func (e unknownEvent) GetBlockNumber() int64         { return 100 }
 func (e unknownEvent) GetChainID() int64             { return 1 }
-func (e unknownEvent) GetCacheKey() string           { return "unknown:1:100" }
 
 func TestPublish_UnknownEventType(t *testing.T) {
+	// With single topic architecture, all events (including unknown types) are published
+	// to the same topic. The eventType is just a message attribute for filtering.
 	client := &mockSNSClient{}
 	sink, err := NewEventSink(client, Config{
-		Topics: testTopics(),
+		TopicARN: testTopicARN,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// Unknown event types should still publish successfully
 	err = sink.Publish(context.Background(), unknownEvent{})
-	if err == nil {
-		t.Fatal("expected error for unknown event type")
-	}
-	if err.Error() != "no topic ARN configured for event type: unknown" {
-		t.Errorf("unexpected error: %v", err)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(client.calls) != 0 {
-		t.Errorf("expected 0 SNS calls, got %d", len(client.calls))
+	if len(client.calls) != 1 {
+		t.Errorf("expected 1 SNS call, got %d", len(client.calls))
+	}
+
+	// Verify the event type attribute is set
+	if client.calls[0].MessageAttributes["eventType"].StringValue == nil ||
+		*client.calls[0].MessageAttributes["eventType"].StringValue != "unknown" {
+		t.Error("expected eventType attribute to be 'unknown'")
 	}
 }
 
@@ -484,12 +490,11 @@ type unmarshalableEvent struct {
 func (e unmarshalableEvent) EventType() outbound.EventType { return outbound.EventTypeBlock }
 func (e unmarshalableEvent) GetBlockNumber() int64         { return 100 }
 func (e unmarshalableEvent) GetChainID() int64             { return 1 }
-func (e unmarshalableEvent) GetCacheKey() string           { return "block:1:100" }
 
 func TestPublish_MarshalError(t *testing.T) {
 	client := &mockSNSClient{}
 	sink, err := NewEventSink(client, Config{
-		Topics: testTopics(),
+		TopicARN: testTopicARN,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -522,7 +527,7 @@ func TestPublish_NonRetryableError(t *testing.T) {
 	}
 
 	sink, err := NewEventSink(client, Config{
-		Topics:         testTopics(),
+		TopicARN:       testTopicARN,
 		MaxRetries:     3,
 		InitialBackoff: 1 * time.Millisecond,
 		MaxBackoff:     10 * time.Millisecond,
@@ -563,7 +568,7 @@ func TestPublish_BackoffCappedAtMax(t *testing.T) {
 
 	// Set MaxBackoff very low so it gets capped during retries
 	sink, err := NewEventSink(client, Config{
-		Topics:         testTopics(),
+		TopicARN:       testTopicARN,
 		MaxRetries:     5,
 		InitialBackoff: 1 * time.Millisecond,
 		MaxBackoff:     2 * time.Millisecond, // Very low max
@@ -594,7 +599,7 @@ func TestPublish_DeadlineExceededNotRetryable(t *testing.T) {
 	}
 
 	sink, err := NewEventSink(client, Config{
-		Topics:         testTopics(),
+		TopicARN:       testTopicARN,
 		MaxRetries:     3,
 		InitialBackoff: 1 * time.Millisecond,
 		MaxBackoff:     10 * time.Millisecond,
