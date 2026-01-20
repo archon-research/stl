@@ -3,6 +3,7 @@ package entity
 import (
 	"math/big"
 	"testing"
+	"strings"
 )
 
 func TestNewBorrowerCollateral(t *testing.T) {
@@ -198,7 +199,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 					t.Errorf("NewBorrowerCollateral() expected error, got nil")
 					return
 				}
-				if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("NewBorrowerCollateral() error = %v, want error containing %v", err, tt.errContains)
 				}
 				return

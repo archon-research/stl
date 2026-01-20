@@ -2,6 +2,7 @@ package entity
 
 import (
 	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -78,7 +79,7 @@ func TestNewSparkLendReserveData(t *testing.T) {
 					t.Errorf("NewSparkLendReserveData() expected error, got nil")
 					return
 				}
-				if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("NewSparkLendReserveData() error = %v, want error containing %v", err, tt.errContains)
 				}
 				return

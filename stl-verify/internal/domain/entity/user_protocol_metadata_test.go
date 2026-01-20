@@ -1,6 +1,9 @@
 package entity
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNewUserProtocolMetadata(t *testing.T) {
 	tests := []struct {
@@ -76,7 +79,7 @@ func TestNewUserProtocolMetadata(t *testing.T) {
 					t.Errorf("NewUserProtocolMetadata() expected error, got nil")
 					return
 				}
-				if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("NewUserProtocolMetadata() error = %v, want error containing %v", err, tt.errContains)
 				}
 				return

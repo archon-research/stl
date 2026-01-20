@@ -3,6 +3,7 @@ package entity
 import (
 	"math/big"
 	"testing"
+	"strings"
 )
 
 func TestNewBorrower(t *testing.T) {
@@ -198,7 +199,7 @@ func TestNewBorrower(t *testing.T) {
 					t.Errorf("NewBorrower() expected error, got nil")
 					return
 				}
-				if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("NewBorrower() error = %v, want error containing %v", err, tt.errContains)
 				}
 				return
@@ -237,10 +238,6 @@ func TestNewBorrower(t *testing.T) {
 			}
 		})
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || (len(s) > 0 && len(substr) > 0 && hasSubstring(s, substr)))
 }
 
 func hasSubstring(s, substr string) bool {

@@ -1,6 +1,9 @@
 package entity
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNewToken(t *testing.T) {
 	validAddr := make([]byte, 20)
@@ -147,7 +150,7 @@ func TestNewToken(t *testing.T) {
 					t.Errorf("NewToken() expected error, got nil")
 					return
 				}
-				if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("NewToken() error = %v, want error containing %v", err, tt.errContains)
 				}
 				return

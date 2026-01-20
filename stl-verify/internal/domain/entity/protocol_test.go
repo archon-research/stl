@@ -1,6 +1,9 @@
 package entity
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNewProtocol(t *testing.T) {
 	validAddr := make([]byte, 20)
@@ -137,7 +140,7 @@ func TestNewProtocol(t *testing.T) {
 					t.Errorf("NewProtocol() expected error, got nil")
 					return
 				}
-				if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("NewProtocol() error = %v, want error containing %v", err, tt.errContains)
 				}
 				return

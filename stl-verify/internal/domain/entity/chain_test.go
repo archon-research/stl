@@ -1,6 +1,9 @@
 package entity
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNewChain(t *testing.T) {
 	tests := []struct {
@@ -59,7 +62,7 @@ func TestNewChain(t *testing.T) {
 					t.Errorf("NewChain() expected error, got nil")
 					return
 				}
-				if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("NewChain() error = %v, want error containing %v", err, tt.errContains)
 				}
 				return
