@@ -2,8 +2,8 @@ package entity
 
 import (
 	"math/big"
-	"testing"
 	"strings"
+	"testing"
 )
 
 func TestNewBorrowerCollateral(t *testing.T) {
