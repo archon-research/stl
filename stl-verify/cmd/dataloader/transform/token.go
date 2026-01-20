@@ -84,12 +84,11 @@ func TransformToken(row *TokenRow) (*entity.Token, error) {
 		address,
 		row.Symbol,
 		int16(row.Decimals),
+		row.FirstSeenBlock,
 	)
 	if err != nil {
 		return nil, err
 	}
-
-	token.CreatedAtBlock = row.FirstSeenBlock
 	if row.Name != "" {
 		token.Metadata["name"] = row.Name
 	}

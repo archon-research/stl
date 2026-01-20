@@ -64,12 +64,10 @@ func TransformUser(row *UserRow) (*entity.User, error) {
 
 	userID := GenerateUserID(chainID, NormalizeAddress(row.Address))
 
-	user, err := entity.NewUser(userID, chainID, address)
+	user, err := entity.NewUser(userID, chainID, address, row.FirstSeenBlock)
 	if err != nil {
 		return nil, err
 	}
-
-	user.FirstSeenBlock = row.FirstSeenBlock
 
 	return user, nil
 }
@@ -94,5 +92,7 @@ func CreateUserFromUserID(userIDStr string) (*entity.User, error) {
 
 	userID := GenerateUserID(chainID, NormalizeAddress(addressStr))
 
-	return entity.NewUser(userID, chainID, address)
+	// Use 0 as firstSeenBlock since we don't have that information in this context
+	// It should be updated by the caller if needed
+	return entity.NewUser(userID, chainID, address, 0)
 }

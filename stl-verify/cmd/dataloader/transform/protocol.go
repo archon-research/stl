@@ -76,12 +76,11 @@ func TransformProtocol(row *ProtocolRow) (*entity.Protocol, error) {
 		address,
 		row.Name,
 		row.ProtocolType,
+		row.FirstSeenBlock,
 	)
 	if err != nil {
 		return nil, err
 	}
-
-	protocol.CreatedAtBlock = row.FirstSeenBlock
 
 	return protocol, nil
 }
@@ -104,5 +103,6 @@ func CreateSparkLendProtocol() (*entity.Protocol, error) {
 		address,
 		"SparkLend",
 		"lending",
+		19463078, // SparkLend deployment block on mainnet
 	)
 }

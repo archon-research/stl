@@ -230,9 +230,12 @@ func ParseUserAccountSnapshotRow(row []string, colIndex map[string]int) (*UserAc
 func TransformUserAccountSnapshotToMetadata(
 	row *UserAccountSnapshotRow,
 	userID, protocolID int64,
-) *entity.UserProtocolMetadata {
+) (*entity.UserProtocolMetadata, error) {
 	metadataID := GenerateUserProtocolMetadataID(userID, protocolID)
-	metadata := entity.NewUserProtocolMetadata(metadataID, userID, protocolID)
+	metadata, err := entity.NewUserProtocolMetadata(metadataID, userID, protocolID)
+	if err != nil {
+		return nil, err
+	}
 
 	// Store account-level metrics in metadata
 	if row.HealthFactor != nil {
@@ -255,5 +258,5 @@ func TransformUserAccountSnapshotToMetadata(
 	}
 	metadata.SetMetadata("last_snapshot_block", row.BlockNumber)
 
-	return metadata
+	return metadata, nil
 }

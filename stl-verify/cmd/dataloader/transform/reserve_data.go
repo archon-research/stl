@@ -89,10 +89,13 @@ func ParseReserveMarketSnapshotRow(row []string, colIndex map[string]int) (*Rese
 func TransformReserveMarketSnapshot(
 	row *ReserveMarketSnapshotRow,
 	protocolID, tokenID int64,
-) *entity.SparkLendReserveData {
+) (*entity.SparkLendReserveData, error) {
 	dataID := GenerateSparkLendReserveDataID(protocolID, tokenID, row.BlockNumber)
 
-	data := entity.NewSparkLendReserveData(dataID, protocolID, tokenID, row.BlockNumber)
+	data, err := entity.NewSparkLendReserveData(dataID, protocolID, tokenID, row.BlockNumber)
+	if err != nil {
+		return nil, err
+	}
 
 	// Set rates
 	data.WithRates(
@@ -119,7 +122,7 @@ func TransformReserveMarketSnapshot(
 
 	data.LastUpdateTimestamp = row.Timestamp
 
-	return data
+	return data, nil
 }
 
 // ReserveRow represents a row from the source Reserve table.
@@ -183,6 +186,7 @@ func TransformReserveToReceiptToken(row *ReserveRow, protocolID, underlyingToken
 		receiptTokenID,
 		protocolID,
 		underlyingTokenID,
+		row.FirstSeenBlock, // TODO FIX
 		aTokenAddr,
 		"sp"+row.Symbol, // SparkLend uses sp prefix
 	)
@@ -219,6 +223,7 @@ func TransformReserveToDebtToken(row *ReserveRow, protocolID, underlyingTokenID 
 		debtTokenID,
 		protocolID,
 		underlyingTokenID,
+		row.FirstSeenBlock, // TODO FIX
 		variableDebtAddr,
 		stableDebtAddr,
 		variableSymbol,
