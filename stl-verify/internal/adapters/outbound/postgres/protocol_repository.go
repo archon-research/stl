@@ -118,7 +118,7 @@ func (r *ProtocolRepository) upsertProtocolBatch(ctx context.Context, tx *sql.Tx
 	return nil
 }
 
-// UpsertSparkLendReserveData upserts SparkLend reserve data records atomically atomically.
+// UpsertSparkLendReserveData upserts SparkLend reserve data records atomically.
 // All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
 func (r *ProtocolRepository) UpsertSparkLendReserveData(ctx context.Context, data []*entity.SparkLendReserveData) error {
 	if len(data) == 0 {
