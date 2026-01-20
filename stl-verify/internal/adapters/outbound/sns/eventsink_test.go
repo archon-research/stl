@@ -30,18 +30,11 @@ func (m *mockSNSClient) Publish(ctx context.Context, params *sns.PublishInput, o
 	}, nil
 }
 
-// testTopics returns a TopicARNs struct with test values for all event types.
-func testTopics() TopicARNs {
-	return TopicARNs{
-		Blocks:   "arn:aws:sns:us-east-1:123456789:blocks",
-		Receipts: "arn:aws:sns:us-east-1:123456789:receipts",
-		Traces:   "arn:aws:sns:us-east-1:123456789:traces",
-		Blobs:    "arn:aws:sns:us-east-1:123456789:blobs",
-	}
-}
+// testTopicARN returns a test topic ARN.
+const testTopicARN = "arn:aws:sns:us-east-1:123456789:ethereum-blocks.fifo"
 
 func TestNewEventSink_RequiresClient(t *testing.T) {
-	_, err := NewEventSink(nil, Config{Topics: testTopics()})
+	_, err := NewEventSink(nil, Config{TopicARN: testTopicARN})
 	if err == nil {
 		t.Error("expected error for nil client")
 	}
@@ -51,50 +44,19 @@ func TestNewEventSink_RequiresClient(t *testing.T) {
 }
 
 func TestNewEventSink_RequiresTopicARN(t *testing.T) {
-	tests := []struct {
-		name    string
-		topics  TopicARNs
-		wantErr string
-	}{
-		{
-			name:    "missing blocks topic",
-			topics:  TopicARNs{Receipts: "x", Traces: "x", Blobs: "x"},
-			wantErr: "blocks topic ARN is required",
-		},
-		{
-			name:    "missing receipts topic",
-			topics:  TopicARNs{Blocks: "x", Traces: "x", Blobs: "x"},
-			wantErr: "receipts topic ARN is required",
-		},
-		{
-			name:    "missing traces topic",
-			topics:  TopicARNs{Blocks: "x", Receipts: "x", Blobs: "x"},
-			wantErr: "traces topic ARN is required",
-		},
-		{
-			name:    "missing blobs topic",
-			topics:  TopicARNs{Blocks: "x", Receipts: "x", Traces: "x"},
-			wantErr: "blobs topic ARN is required",
-		},
+	_, err := NewEventSink(&mockSNSClient{}, Config{TopicARN: ""})
+	if err == nil {
+		t.Error("expected error for missing topic ARN")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewEventSink(&mockSNSClient{}, Config{Topics: tt.topics})
-			if err == nil {
-				t.Error("expected error for missing topic ARN")
-			}
-			if err.Error() != tt.wantErr {
-				t.Errorf("expected error %q, got %q", tt.wantErr, err.Error())
-			}
-		})
+	if err.Error() != "topic ARN is required" {
+		t.Errorf("expected error %q, got %q", "topic ARN is required", err.Error())
 	}
 }
 
 func TestNewEventSink_AppliesDefaults(t *testing.T) {
 	client := &mockSNSClient{}
 	sink, err := NewEventSink(client, Config{
-		Topics: testTopics(),
+		TopicARN: testTopicARN,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -116,9 +78,8 @@ func TestNewEventSink_AppliesDefaults(t *testing.T) {
 
 func TestPublish_Success(t *testing.T) {
 	client := &mockSNSClient{}
-	topics := testTopics()
 	sink, err := NewEventSink(client, Config{
-		Topics: topics,
+		TopicARN: testTopicARN,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -130,7 +91,6 @@ func TestPublish_Success(t *testing.T) {
 		BlockHash:   "0xabc123",
 		ParentHash:  "0xdef456",
 		ReceivedAt:  time.Now(),
-		CacheKey:    "block:1:12345",
 	}
 
 	err = sink.Publish(context.Background(), event)
@@ -143,8 +103,13 @@ func TestPublish_Success(t *testing.T) {
 	}
 
 	call := client.calls[0]
-	if *call.TopicArn != topics.Blocks {
-		t.Errorf("unexpected topic ARN: %s, expected %s", *call.TopicArn, topics.Blocks)
+	if *call.TopicArn != testTopicARN {
+		t.Errorf("unexpected topic ARN: %s, expected %s", *call.TopicArn, testTopicARN)
+	}
+
+	// Verify FIFO attributes
+	if call.MessageGroupId == nil || *call.MessageGroupId != "1" {
+		t.Errorf("expected MessageGroupId=1 (chainId), got %v", call.MessageGroupId)
 	}
 
 	// Verify message is valid JSON
@@ -171,87 +136,6 @@ func TestPublish_Success(t *testing.T) {
 	}
 }
 
-func TestPublish_AllEventTypes(t *testing.T) {
-	topics := testTopics()
-
-	tests := []struct {
-		name        string
-		event       outbound.Event
-		eventType   string
-		expectedARN string
-	}{
-		{
-			name: "BlockEvent",
-			event: outbound.BlockEvent{
-				ChainID:     1,
-				BlockNumber: 100,
-				CacheKey:    "block:1:100",
-			},
-			eventType:   "block",
-			expectedARN: topics.Blocks,
-		},
-		{
-			name: "ReceiptsEvent",
-			event: outbound.ReceiptsEvent{
-				ChainID:     1,
-				BlockNumber: 100,
-				CacheKey:    "receipts:1:100",
-			},
-			eventType:   "receipts",
-			expectedARN: topics.Receipts,
-		},
-		{
-			name: "TracesEvent",
-			event: outbound.TracesEvent{
-				ChainID:     1,
-				BlockNumber: 100,
-				CacheKey:    "traces:1:100",
-			},
-			eventType:   "traces",
-			expectedARN: topics.Traces,
-		},
-		{
-			name: "BlobsEvent",
-			event: outbound.BlobsEvent{
-				ChainID:     1,
-				BlockNumber: 100,
-				CacheKey:    "blobs:1:100",
-			},
-			eventType:   "blobs",
-			expectedARN: topics.Blobs,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			client := &mockSNSClient{}
-			sink, err := NewEventSink(client, Config{
-				Topics: topics,
-			})
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			err = sink.Publish(context.Background(), tt.event)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			if len(client.calls) != 1 {
-				t.Fatalf("expected 1 call, got %d", len(client.calls))
-			}
-
-			call := client.calls[0]
-			if *call.TopicArn != tt.expectedARN {
-				t.Errorf("expected topic ARN=%s, got %s", tt.expectedARN, *call.TopicArn)
-			}
-			if *call.MessageAttributes["eventType"].StringValue != tt.eventType {
-				t.Errorf("expected eventType=%s, got %s", tt.eventType, *call.MessageAttributes["eventType"].StringValue)
-			}
-		})
-	}
-}
-
 func TestPublish_RetryOnThrottling(t *testing.T) {
 	callCount := 0
 	client := &mockSNSClient{
@@ -265,7 +149,7 @@ func TestPublish_RetryOnThrottling(t *testing.T) {
 	}
 
 	sink, err := NewEventSink(client, Config{
-		Topics:         testTopics(),
+		TopicARN:       testTopicARN,
 		MaxRetries:     3,
 		InitialBackoff: 1 * time.Millisecond,
 		MaxBackoff:     10 * time.Millisecond,
@@ -296,7 +180,7 @@ func TestPublish_RetriesExhausted(t *testing.T) {
 	}
 
 	sink, err := NewEventSink(client, Config{
-		Topics:         testTopics(),
+		TopicARN:       testTopicARN,
 		MaxRetries:     2,
 		InitialBackoff: 1 * time.Millisecond,
 		MaxBackoff:     10 * time.Millisecond,
@@ -326,7 +210,7 @@ func TestPublish_ContextCancelled(t *testing.T) {
 	}
 
 	sink, err := NewEventSink(client, Config{
-		Topics:         testTopics(),
+		TopicARN:       testTopicARN,
 		MaxRetries:     10,
 		InitialBackoff: 100 * time.Millisecond,
 		MaxBackoff:     1 * time.Second,
@@ -353,7 +237,7 @@ func TestPublish_ContextCancelled(t *testing.T) {
 func TestPublish_AfterClose(t *testing.T) {
 	client := &mockSNSClient{}
 	sink, err := NewEventSink(client, Config{
-		Topics: testTopics(),
+		TopicARN: testTopicARN,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -381,7 +265,7 @@ func TestPublish_AfterClose(t *testing.T) {
 func TestClose_Idempotent(t *testing.T) {
 	client := &mockSNSClient{}
 	sink, err := NewEventSink(client, Config{
-		Topics: testTopics(),
+		TopicARN: testTopicARN,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -482,7 +366,7 @@ func TestPublish_RetryOnInternalError(t *testing.T) {
 	}
 
 	sink, err := NewEventSink(client, Config{
-		Topics:         testTopics(),
+		TopicARN:       testTopicARN,
 		MaxRetries:     3,
 		InitialBackoff: 1 * time.Millisecond,
 		MaxBackoff:     10 * time.Millisecond,
@@ -506,7 +390,7 @@ func TestPublish_RetryOnInternalError(t *testing.T) {
 func TestPublish_MessageContainsAllFields(t *testing.T) {
 	client := &mockSNSClient{}
 	sink, err := NewEventSink(client, Config{
-		Topics: testTopics(),
+		TopicARN: testTopicARN,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -521,7 +405,6 @@ func TestPublish_MessageContainsAllFields(t *testing.T) {
 		ParentHash:     "0xdef456",
 		BlockTimestamp: 1704067200,
 		ReceivedAt:     now,
-		CacheKey:       "block:1:12345",
 		IsReorg:        true,
 		IsBackfill:     false,
 	}
@@ -555,9 +438,6 @@ func TestPublish_MessageContainsAllFields(t *testing.T) {
 	if decoded.BlockTimestamp != 1704067200 {
 		t.Errorf("expected BlockTimestamp=1704067200, got %d", decoded.BlockTimestamp)
 	}
-	if decoded.CacheKey != "block:1:12345" {
-		t.Errorf("expected CacheKey=block:1:12345, got %s", decoded.CacheKey)
-	}
 	if !decoded.IsReorg {
 		t.Error("expected IsReorg=true")
 	}
@@ -567,32 +447,38 @@ func TestPublish_MessageContainsAllFields(t *testing.T) {
 }
 
 // unknownEvent is a mock event with an unknown event type for testing.
+// With a single topic, all events go to the same topic regardless of type.
 type unknownEvent struct{}
 
 func (e unknownEvent) EventType() outbound.EventType { return "unknown" }
 func (e unknownEvent) GetBlockNumber() int64         { return 100 }
 func (e unknownEvent) GetChainID() int64             { return 1 }
-func (e unknownEvent) GetCacheKey() string           { return "unknown:1:100" }
 
 func TestPublish_UnknownEventType(t *testing.T) {
+	// With single topic architecture, all events (including unknown types) are published
+	// to the same topic. The eventType is just a message attribute for filtering.
 	client := &mockSNSClient{}
 	sink, err := NewEventSink(client, Config{
-		Topics: testTopics(),
+		TopicARN: testTopicARN,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// Unknown event types should still publish successfully
 	err = sink.Publish(context.Background(), unknownEvent{})
-	if err == nil {
-		t.Fatal("expected error for unknown event type")
-	}
-	if err.Error() != "no topic ARN configured for event type: unknown" {
-		t.Errorf("unexpected error: %v", err)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(client.calls) != 0 {
-		t.Errorf("expected 0 SNS calls, got %d", len(client.calls))
+	if len(client.calls) != 1 {
+		t.Errorf("expected 1 SNS call, got %d", len(client.calls))
+	}
+
+	// Verify the event type attribute is set
+	if client.calls[0].MessageAttributes["eventType"].StringValue == nil ||
+		*client.calls[0].MessageAttributes["eventType"].StringValue != "unknown" {
+		t.Error("expected eventType attribute to be 'unknown'")
 	}
 }
 
@@ -604,12 +490,11 @@ type unmarshalableEvent struct {
 func (e unmarshalableEvent) EventType() outbound.EventType { return outbound.EventTypeBlock }
 func (e unmarshalableEvent) GetBlockNumber() int64         { return 100 }
 func (e unmarshalableEvent) GetChainID() int64             { return 1 }
-func (e unmarshalableEvent) GetCacheKey() string           { return "block:1:100" }
 
 func TestPublish_MarshalError(t *testing.T) {
 	client := &mockSNSClient{}
 	sink, err := NewEventSink(client, Config{
-		Topics: testTopics(),
+		TopicARN: testTopicARN,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -642,7 +527,7 @@ func TestPublish_NonRetryableError(t *testing.T) {
 	}
 
 	sink, err := NewEventSink(client, Config{
-		Topics:         testTopics(),
+		TopicARN:       testTopicARN,
 		MaxRetries:     3,
 		InitialBackoff: 1 * time.Millisecond,
 		MaxBackoff:     10 * time.Millisecond,
@@ -683,7 +568,7 @@ func TestPublish_BackoffCappedAtMax(t *testing.T) {
 
 	// Set MaxBackoff very low so it gets capped during retries
 	sink, err := NewEventSink(client, Config{
-		Topics:         testTopics(),
+		TopicARN:       testTopicARN,
 		MaxRetries:     5,
 		InitialBackoff: 1 * time.Millisecond,
 		MaxBackoff:     2 * time.Millisecond, // Very low max
@@ -714,7 +599,7 @@ func TestPublish_DeadlineExceededNotRetryable(t *testing.T) {
 	}
 
 	sink, err := NewEventSink(client, Config{
-		Topics:         testTopics(),
+		TopicARN:       testTopicARN,
 		MaxRetries:     3,
 		InitialBackoff: 1 * time.Millisecond,
 		MaxBackoff:     10 * time.Millisecond,

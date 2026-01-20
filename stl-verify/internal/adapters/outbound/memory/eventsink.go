@@ -99,45 +99,6 @@ func (s *EventSink) GetBlockEvents() []outbound.BlockEvent {
 	return result
 }
 
-// GetReceiptsEvents returns all receipts events.
-func (s *EventSink) GetReceiptsEvents() []outbound.ReceiptsEvent {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]outbound.ReceiptsEvent, 0)
-	for _, e := range s.events {
-		if re, ok := e.(outbound.ReceiptsEvent); ok {
-			result = append(result, re)
-		}
-	}
-	return result
-}
-
-// GetTracesEvents returns all traces events.
-func (s *EventSink) GetTracesEvents() []outbound.TracesEvent {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]outbound.TracesEvent, 0)
-	for _, e := range s.events {
-		if te, ok := e.(outbound.TracesEvent); ok {
-			result = append(result, te)
-		}
-	}
-	return result
-}
-
-// GetBlobsEvents returns all blobs events.
-func (s *EventSink) GetBlobsEvents() []outbound.BlobsEvent {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]outbound.BlobsEvent, 0)
-	for _, e := range s.events {
-		if be, ok := e.(outbound.BlobsEvent); ok {
-			result = append(result, be)
-		}
-	}
-	return result
-}
-
 // GetEventCount returns the number of published events.
 func (s *EventSink) GetEventCount() int {
 	s.mu.RLock()

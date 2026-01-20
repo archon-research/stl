@@ -2,11 +2,14 @@ package postgres
 
 import (
 	"errors"
+	"fmt"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// TestIsUniqueViolation tests the isUniqueViolation helper function.
-func TestIsUniqueViolation(t *testing.T) {
+// TestIsSerializationFailure tests the isSerializationFailure helper function.
+func TestIsSerializationFailure(t *testing.T) {
 	tests := []struct {
 		name     string
 		err      error
@@ -18,37 +21,62 @@ func TestIsUniqueViolation(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "unique constraint error with 23505",
-			err:      errors.New("ERROR: duplicate key value violates unique constraint \"unique_block_number_version\" (SQLSTATE 23505)"),
+			name: "serialization failure SQLSTATE 40001",
+			err: &pgconn.PgError{
+				Code:    "40001",
+				Message: "could not serialize access due to concurrent update",
+			},
 			expected: true,
 		},
 		{
-			name:     "unique constraint error with text",
-			err:      errors.New("failed to save block: unique constraint violation on hash"),
+			name: "wrapped serialization failure",
+			err: fmt.Errorf("failed to save block: %w", &pgconn.PgError{
+				Code:    "40001",
+				Message: "could not serialize access due to concurrent update",
+			}),
 			expected: true,
 		},
 		{
-			name:     "other database error",
+			name: "unique violation SQLSTATE 23505",
+			err: &pgconn.PgError{
+				Code:    "23505",
+				Message: "duplicate key value violates unique constraint",
+			},
+			expected: false,
+		},
+		{
+			name: "foreign key violation SQLSTATE 23503",
+			err: &pgconn.PgError{
+				Code:    "23503",
+				Message: "foreign key violation",
+			},
+			expected: false,
+		},
+		{
+			name: "deadlock detected SQLSTATE 40P01",
+			err: &pgconn.PgError{
+				Code:    "40P01",
+				Message: "deadlock detected",
+			},
+			expected: false,
+		},
+		{
+			name:     "generic error without pgconn.PgError",
 			err:      errors.New("connection refused"),
 			expected: false,
 		},
 		{
-			name:     "wrapped error with 23505",
-			err:      errors.New("failed to insert: SQLSTATE 23505"),
-			expected: true,
-		},
-		{
-			name:     "foreign key violation 23503",
-			err:      errors.New("SQLSTATE 23503"),
+			name:     "wrapped generic error",
+			err:      fmt.Errorf("database error: %w", errors.New("connection refused")),
 			expected: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isUniqueViolation(tt.err)
+			result := isSerializationFailure(tt.err)
 			if result != tt.expected {
-				t.Errorf("isUniqueViolation(%v) = %v, want %v", tt.err, result, tt.expected)
+				t.Errorf("isSerializationFailure(%v) = %v, want %v", tt.err, result, tt.expected)
 			}
 		})
 	}

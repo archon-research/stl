@@ -49,11 +49,8 @@ AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=test
 AWS_SECRET_ACCESS_KEY=test
 
-# SNS Topics (defaults for LocalStack)
-AWS_SNS_TOPIC_BLOCKS=arn:aws:sns:us-east-1:000000000000:stl-block-events
-AWS_SNS_TOPIC_RECEIPTS=arn:aws:sns:us-east-1:000000000000:stl-receipts-events
-AWS_SNS_TOPIC_TRACES=arn:aws:sns:us-east-1:000000000000:stl-traces-events
-AWS_SNS_TOPIC_BLOBS=arn:aws:sns:us-east-1:000000000000:stl-blobs-events
+# SNS FIFO Topic (single topic for all event types)
+AWS_SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:stl-ethereum-blocks.fifo
 
 # Tracing
 JAEGER_ENDPOINT=localhost:4317
@@ -134,6 +131,29 @@ make tools
 ### View Traces
 
 Open the Jaeger UI at http://localhost:16686 to view distributed traces.
+
+## Cache Key Convention
+
+Block data is cached in Redis with the following key format:
+
+```
+stl:{chainId}:{blockNumber}:{version}:{dataType}
+```
+
+Where:
+- `chainId` - The blockchain network ID (e.g., `1` for Ethereum mainnet)
+- `blockNumber` - The block height
+- `version` - Incremented on chain reorgs (starts at `0`)
+- `dataType` - One of: `block`, `receipts`, `traces`, `blobs`
+
+**Examples:**
+```
+stl:1:12345:0:block     # Block 12345, first version, block data
+stl:1:12345:0:receipts  # Block 12345, first version, transaction receipts
+stl:1:12345:1:block     # Block 12345, second version (after reorg)
+```
+
+Consumers receive `BlockEvent` messages via SNS/SQS and derive cache keys using this convention.
 
 ## Graceful Shutdown
 

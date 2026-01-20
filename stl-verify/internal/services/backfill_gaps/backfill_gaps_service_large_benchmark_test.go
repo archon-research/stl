@@ -282,6 +282,23 @@ func (m *largeBenchmarkClient) GetBlocksBatch(ctx context.Context, blockNums []i
 	return result, nil
 }
 
+func (m *largeBenchmarkClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	header := outbound.BlockHeader{
+		Number:     fmt.Sprintf("0x%x", blockNum),
+		Hash:       hash,
+		ParentHash: fmt.Sprintf("0x%064x", blockNum-1),
+		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
+	}
+	blockJSON, _ := json.Marshal(header)
+	return outbound.BlockData{
+		BlockNumber: blockNum,
+		Block:       blockJSON,
+		Receipts:    json.RawMessage(`[]`),
+		Traces:      json.RawMessage(`[]`),
+		Blobs:       json.RawMessage(`[]`),
+	}, nil
+}
+
 // BenchmarkLargePostgres_FindGaps benchmarks gap detection on a 10M row table.
 func BenchmarkLargePostgres_FindGaps(b *testing.B) {
 	db, repo, cleanup := setupLargePostgres(b)

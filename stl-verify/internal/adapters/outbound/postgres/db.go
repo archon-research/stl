@@ -4,6 +4,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -69,8 +70,8 @@ func OpenDB(ctx context.Context, cfg DBConfig) (*sql.DB, error) {
 
 	// Verify connectivity
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to ping database: %w", err)
+		closeErr := db.Close()
+		return nil, errors.Join(fmt.Errorf("failed to ping database: %w", err), closeErr)
 	}
 
 	return db, nil

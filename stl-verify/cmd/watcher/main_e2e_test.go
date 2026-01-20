@@ -263,6 +263,25 @@ func (m *mockBlockchainClient) GetBlocksBatch(ctx context.Context, blockNums []i
 	return results, nil
 }
 
+func (m *mockBlockchainClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			data, _ := json.Marshal(bd.header)
+			return outbound.BlockData{
+				BlockNumber: blockNum,
+				Block:       data,
+				Receipts:    bd.receipts,
+				Traces:      bd.traces,
+				Blobs:       bd.blobs,
+			}, nil
+		}
+	}
+	return outbound.BlockData{}, fmt.Errorf("block %s not found", hash)
+}
+
 // =============================================================================
 // Test Cases
 // =============================================================================
@@ -337,21 +356,9 @@ func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
 		}
 	})
 
-	t.Run("receipts_published", func(t *testing.T) {
-		msg := infra.WaitForMessage(t, infra.ReceiptsQueueURL, messageTimeout)
-		if msg == "" {
-			t.Fatal("expected receipts message, got none")
-		}
-		t.Logf("Received receipts message: %s", truncate(msg, 200))
-	})
-
-	t.Run("traces_published", func(t *testing.T) {
-		msg := infra.WaitForMessage(t, infra.TracesQueueURL, messageTimeout)
-		if msg == "" {
-			t.Fatal("expected traces message, got none")
-		}
-		t.Logf("Received traces message: %s", truncate(msg, 200))
-	})
+	// Note: With the new unified topic architecture, we only publish a single block event
+	// that includes references to block/receipts/traces/blobs data in cache.
+	// The separate receipts/traces topics are no longer used.
 
 	t.Run("block_state_saved", func(t *testing.T) {
 		// Poll for block state with timeout instead of static sleep
@@ -597,13 +604,8 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 
 	// Create event sink
 	eventSink, err := snsadapter.NewEventSink(snsClient, snsadapter.Config{
-		Topics: snsadapter.TopicARNs{
-			Blocks:   topics["blocks"],
-			Receipts: topics["receipts"],
-			Traces:   topics["traces"],
-			Blobs:    topics["blobs"],
-		},
-		Logger: logger,
+		TopicARN: topics["blocks"],
+		Logger:   logger,
 	})
 	if err != nil {
 		t.Fatalf("failed to create event sink: %v", err)

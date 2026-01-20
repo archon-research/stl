@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -175,7 +175,7 @@ func (s *LiveService) processHeaders(headers <-chan outbound.BlockHeader) {
 				return
 			}
 			if err := s.processBlock(header, time.Now()); err != nil {
-				blockNum, parseErr := parseBlockNumber(header.Number)
+				blockNum, parseErr := hexutil.ParseInt64(header.Number)
 				if parseErr != nil {
 					err = errors.Join(parseErr)
 				}
@@ -217,7 +217,7 @@ func (s *LiveService) isDuplicateBlock(ctx context.Context, hash string, blockNu
 // processBlock handles a single block: dedup, reorg detection, state tracking, data fetching, publishing.
 func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.Time) error {
 	start := time.Now()
-	blockNum, err := parseBlockNumber(header.Number)
+	blockNum, err := hexutil.ParseInt64(header.Number)
 	if err != nil {
 		return fmt.Errorf("failed to parse block number: %w", err)
 	}
@@ -425,7 +425,10 @@ func (s *LiveService) handleReorg(block LightBlock, receivedAt time.Time) (bool,
 
 		// Walk to parent block to continue searching for common ancestor
 		// Normalize RPC response at the point of ingestion
-		parentNum, _ := parseBlockNumber(parentHeader.Number)
+		parentNum, err := hexutil.ParseInt64(parentHeader.Number)
+		if err != nil {
+			return false, 0, 0, nil, fmt.Errorf("failed to parse parent block number %q: %w", parentHeader.Number, err)
+		}
 		walkBlock = LightBlock{
 			Number:     parentNum,
 			ParentHash: normalizeHash(parentHeader.ParentHash),
@@ -542,42 +545,84 @@ func (s *LiveService) restoreInMemoryChain() error {
 	return nil
 }
 
-// fetchAndPublishBlockData fetches all data types concurrently and publishes events.
+// fetchAndPublishBlockData fetches all data types in a single batched RPC call by hash,
+// caches them in parallel, and publishes a single block event only after all data has been successfully cached.
+// Fetching by hash is TOCTOU-safe - it ensures we get data for the exact block we received.
 func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbound.BlockHeader, blockNum int64, version int, receivedAt time.Time, isReorg bool) error {
 	chainID := s.config.ChainID
 	blockHash := header.Hash
 	parentHash := header.ParentHash
-	blockTimestamp, _ := parseBlockNumber(header.Timestamp)
+	blockTimestamp, err := hexutil.ParseInt64(header.Timestamp)
+	if err != nil {
+		return fmt.Errorf("failed to parse block timestamp %q for block %d: %w", header.Timestamp, blockNum, err)
+	}
 
+	start := time.Now()
+
+	// Fetch all data in a single batched HTTP request (by hash for TOCTOU safety)
+	bd, err := s.client.GetBlockDataByHash(ctx, blockNum, blockHash, true)
+	if err != nil {
+		return fmt.Errorf("failed to fetch block data for block %d: %w", blockNum, err)
+	}
+
+	s.logger.Debug("fetched block data", "block", blockNum, "duration", time.Since(start))
+
+	// Check for fetch errors before caching
+	if bd.BlockErr != nil {
+		return fmt.Errorf("failed to fetch block %d: %w", blockNum, bd.BlockErr)
+	}
+	if bd.ReceiptsErr != nil {
+		return fmt.Errorf("failed to fetch receipts for block %d: %w", blockNum, bd.ReceiptsErr)
+	}
+	if bd.TracesErr != nil {
+		return fmt.Errorf("failed to fetch traces for block %d: %w", blockNum, bd.TracesErr)
+	}
+	if !s.config.DisableBlobs && bd.BlobsErr != nil {
+		return fmt.Errorf("failed to fetch blobs for block %d: %w", blockNum, bd.BlobsErr)
+	}
+
+	// Cache all data types in parallel
 	numWorkers := 3
 	if !s.config.DisableBlobs {
 		numWorkers = 4
 	}
 	errCh := make(chan error, numWorkers)
 
-	// Fetch and publish block
 	go func() {
-		errCh <- s.fetchCacheAndPublishBlock(ctx, chainID, blockNum, version, blockHash, parentHash, blockTimestamp, receivedAt, isReorg)
+		if err := s.cache.SetBlock(ctx, chainID, blockNum, version, bd.Block); err != nil {
+			errCh <- fmt.Errorf("failed to cache block %d: %w", blockNum, err)
+		} else {
+			errCh <- nil
+		}
 	}()
 
-	// Fetch and publish receipts
 	go func() {
-		errCh <- s.fetchCacheAndPublishReceipts(ctx, chainID, blockNum, version, blockHash, receivedAt, isReorg)
+		if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, bd.Receipts); err != nil {
+			errCh <- fmt.Errorf("failed to cache receipts for block %d: %w", blockNum, err)
+		} else {
+			errCh <- nil
+		}
 	}()
 
-	// Fetch and publish traces
 	go func() {
-		errCh <- s.fetchCacheAndPublishTraces(ctx, chainID, blockNum, version, blockHash, receivedAt, isReorg)
+		if err := s.cache.SetTraces(ctx, chainID, blockNum, version, bd.Traces); err != nil {
+			errCh <- fmt.Errorf("failed to cache traces for block %d: %w", blockNum, err)
+		} else {
+			errCh <- nil
+		}
 	}()
 
-	// Fetch and publish blobs (if enabled)
 	if !s.config.DisableBlobs {
 		go func() {
-			errCh <- s.fetchCacheAndPublishBlobs(ctx, chainID, blockNum, version, blockHash, receivedAt, isReorg)
+			if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, bd.Blobs); err != nil {
+				errCh <- fmt.Errorf("failed to cache blobs for block %d: %w", blockNum, err)
+			} else {
+				errCh <- nil
+			}
 		}()
 	}
 
-	// Collect errors from all workers
+	// Wait for all caching to complete
 	var errs []error
 	for i := 0; i < numWorkers; i++ {
 		if err := <-errCh; err != nil {
@@ -588,27 +633,14 @@ func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbo
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
-	return nil
+
+	s.logger.Debug("cached all block data", "block", blockNum, "duration", time.Since(start))
+
+	// All data cached successfully - now publish the block event
+	return s.publishBlockEvent(ctx, chainID, blockNum, version, blockHash, parentHash, blockTimestamp, receivedAt, isReorg)
 }
 
-func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, blockNum int64, version int, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg bool) error {
-	start := time.Now()
-	defer func() {
-		s.logger.Debug("fetchCacheAndPublishBlock completed", "block", blockNum, "duration", time.Since(start))
-	}()
-
-	// Fetch by hash to prevent TOCTOU race condition.
-	// If we fetched by number, a reorg between receiving the header and fetching
-	// could cause us to cache data for the wrong block.
-	data, err := s.client.GetFullBlockByHash(ctx, blockHash, true)
-	if err != nil {
-		return fmt.Errorf("failed to fetch block %d by hash %s: %w", blockNum, blockHash, err)
-	}
-
-	if err := s.cache.SetBlock(ctx, chainID, blockNum, version, data); err != nil {
-		return fmt.Errorf("failed to cache block %d: %w", blockNum, err)
-	}
-
+func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum int64, version int, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg bool) error {
 	event := outbound.BlockEvent{
 		ChainID:        chainID,
 		BlockNumber:    blockNum,
@@ -617,7 +649,6 @@ func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, bl
 		ParentHash:     parentHash,
 		BlockTimestamp: blockTimestamp,
 		ReceivedAt:     receivedAt,
-		CacheKey:       cacheKey(chainID, blockNum, version, "block"),
 		IsReorg:        isReorg,
 		IsBackfill:     false,
 	}
@@ -633,144 +664,9 @@ func (s *LiveService) fetchCacheAndPublishBlock(ctx context.Context, chainID, bl
 	return nil
 }
 
-func (s *LiveService) fetchCacheAndPublishReceipts(ctx context.Context, chainID, blockNum int64, version int, blockHash string, receivedAt time.Time, isReorg bool) error {
-	start := time.Now()
-	defer func() {
-		s.logger.Debug("fetchCacheAndPublishReceipts completed", "block", blockNum, "duration", time.Since(start))
-	}()
-
-	// Fetch by hash to prevent TOCTOU race condition.
-	// If we fetched by number, a reorg between receiving the header and fetching
-	// could cause us to cache receipts for the wrong block.
-	data, err := s.client.GetBlockReceiptsByHash(ctx, blockHash)
-	if err != nil {
-		return fmt.Errorf("failed to fetch receipts for block %d by hash %s: %w", blockNum, blockHash, err)
-	}
-
-	if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, data); err != nil {
-		return fmt.Errorf("failed to cache receipts for block %d: %w", blockNum, err)
-	}
-
-	event := outbound.ReceiptsEvent{
-		ChainID:     chainID,
-		BlockNumber: blockNum,
-		Version:     version,
-		BlockHash:   blockHash,
-		ReceivedAt:  receivedAt,
-		CacheKey:    cacheKey(chainID, blockNum, version, "receipts"),
-		IsReorg:     isReorg,
-		IsBackfill:  false,
-	}
-	if err := s.eventSink.Publish(ctx, event); err != nil {
-		return fmt.Errorf("failed to publish receipts event for block %d: %w", blockNum, err)
-	}
-
-	// Mark receipts publish as complete in DB for crash recovery
-	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeReceipts); err != nil {
-		s.logger.Warn("failed to mark receipts publish complete", "block", blockNum, "error", err)
-	}
-
-	return nil
-}
-
-func (s *LiveService) fetchCacheAndPublishTraces(ctx context.Context, chainID, blockNum int64, version int, blockHash string, receivedAt time.Time, isReorg bool) error {
-	start := time.Now()
-	defer func() {
-		s.logger.Debug("fetchCacheAndPublishTraces completed", "block", blockNum, "duration", time.Since(start))
-	}()
-
-	// Fetch by hash to prevent TOCTOU race condition.
-	// If we fetched by number, a reorg between receiving the header and fetching
-	// could cause us to cache traces for the wrong block.
-	data, err := s.client.GetBlockTracesByHash(ctx, blockHash)
-	if err != nil {
-		return fmt.Errorf("failed to fetch traces for block %d by hash %s: %w", blockNum, blockHash, err)
-	}
-
-	if err := s.cache.SetTraces(ctx, chainID, blockNum, version, data); err != nil {
-		return fmt.Errorf("failed to cache traces for block %d: %w", blockNum, err)
-	}
-
-	event := outbound.TracesEvent{
-		ChainID:     chainID,
-		BlockNumber: blockNum,
-		Version:     version,
-		BlockHash:   blockHash,
-		ReceivedAt:  receivedAt,
-		CacheKey:    cacheKey(chainID, blockNum, version, "traces"),
-		IsReorg:     isReorg,
-		IsBackfill:  false,
-	}
-	if err := s.eventSink.Publish(ctx, event); err != nil {
-		return fmt.Errorf("failed to publish traces event for block %d: %w", blockNum, err)
-	}
-
-	// Mark traces publish as complete in DB for crash recovery
-	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeTraces); err != nil {
-		s.logger.Warn("failed to mark traces publish complete", "block", blockNum, "error", err)
-	}
-
-	return nil
-}
-
-func (s *LiveService) fetchCacheAndPublishBlobs(ctx context.Context, chainID, blockNum int64, version int, blockHash string, receivedAt time.Time, isReorg bool) error {
-	start := time.Now()
-	defer func() {
-		s.logger.Debug("fetchCacheAndPublishBlobs completed", "block", blockNum, "duration", time.Since(start))
-	}()
-
-	// Fetch by hash to prevent TOCTOU race condition.
-	// If we fetched by number, a reorg between receiving the header and fetching
-	// could cause us to cache blobs for the wrong block.
-	data, err := s.client.GetBlobSidecarsByHash(ctx, blockHash)
-	if err != nil {
-		return fmt.Errorf("failed to fetch blobs for block %d by hash %s: %w", blockNum, blockHash, err)
-	}
-
-	if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, data); err != nil {
-		return fmt.Errorf("failed to cache blobs for block %d: %w", blockNum, err)
-	}
-
-	event := outbound.BlobsEvent{
-		ChainID:     chainID,
-		BlockNumber: blockNum,
-		Version:     version,
-		BlockHash:   blockHash,
-		ReceivedAt:  receivedAt,
-		CacheKey:    cacheKey(chainID, blockNum, version, "blobs"),
-		IsReorg:     isReorg,
-		IsBackfill:  false,
-	}
-	if err := s.eventSink.Publish(ctx, event); err != nil {
-		return fmt.Errorf("failed to publish blobs event for block %d: %w", blockNum, err)
-	}
-
-	// Mark blobs publish as complete in DB for crash recovery
-	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlobs); err != nil {
-		s.logger.Warn("failed to mark blobs publish complete", "block", blockNum, "error", err)
-	}
-
-	return nil
-}
-
-// Utility functions
-// parseBlockNumber parses a hex-encoded block number string to int64.
-func parseBlockNumber(hexNum string) (int64, error) {
-	hexNum = strings.TrimPrefix(hexNum, "0x")
-	return strconv.ParseInt(hexNum, 16, 64)
-}
-
 // normalizeHash normalizes a hex hash to lowercase for consistent comparisons.
 // Ethereum hashes are case-insensitive (0xAAA == 0xaaa), but Go string comparison
 // is case-sensitive. Normalizing to lowercase prevents false mismatches.
 func normalizeHash(hash string) string {
 	return strings.ToLower(hash)
-}
-
-// cacheKey generates the cache key for a given data type.
-// Format: {chainID}:{blockNumber}:{version}:{dataType}
-// The version is incremented each time the watcher sees the same block after a reorg.
-// This ensures data will be eventually correct after reorgs.
-func cacheKey(chainID, blockNumber int64, version int, dataType string) string {
-	return fmt.Sprintf("stl:%d:%d:%d:%s", chainID, blockNumber, version, dataType)
 }

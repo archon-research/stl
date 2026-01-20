@@ -207,6 +207,29 @@ func (m *mockBlockchainClient) GetBlocksBatch(ctx context.Context, blockNums []i
 	return result, nil
 }
 
+func (m *mockBlockchainClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.delay > 0 {
+		time.Sleep(m.delay)
+	}
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			blockJSON, _ := json.Marshal(bd.header)
+			return outbound.BlockData{
+				BlockNumber: blockNum,
+				Block:       blockJSON,
+				Receipts:    bd.receipts,
+				Traces:      bd.traces,
+				Blobs:       bd.blobs,
+			}, nil
+		}
+	}
+	return outbound.BlockData{}, fmt.Errorf("block %s not found", hash)
+}
+
 // setBlockHeader allows setting or overriding a block's header data.
 func (m *mockBlockchainClient) setBlockHeader(num int64, hash, parentHash string) {
 	m.mu.Lock()
@@ -382,12 +405,6 @@ func TestBackfillService_VersionIsSavedToDatabase(t *testing.T) {
 	if block5Event.Version != backfilledBlock.Version {
 		t.Errorf("event version (%d) doesn't match saved block version (%d) - bug: version mismatch between DB and published event",
 			block5Event.Version, backfilledBlock.Version)
-	}
-
-	// The cache key should match the saved version
-	expectedCacheKey := fmt.Sprintf("stl:1:5:%d:block", backfilledBlock.Version)
-	if block5Event.CacheKey != expectedCacheKey {
-		t.Errorf("expected cache key %q, got %q", expectedCacheKey, block5Event.CacheKey)
 	}
 }
 
@@ -806,6 +823,201 @@ func saveBlockState(t *testing.T, ctx context.Context, repo outbound.BlockStateR
 		ReceivedAt: time.Now().Unix(),
 	}); err != nil {
 		t.Fatalf("failed to save block %d: %v", num, err)
+	}
+}
+
+// TestBackfillService_HighestVersionIsCanonicalAfterRecovery verifies that after
+// recovering from stale blocks, the highest version at each block height is
+// always the canonical (non-orphaned) block.
+//
+// This is critical for consumers who rely on: highest version = correct block.
+func TestBackfillService_HighestVersionIsCanonicalAfterRecovery(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+	client := newMockClient()
+
+	// Arrange: DB has blocks 100-105 on an old chain (version 0 for each)
+	for i := int64(100); i <= 105; i++ {
+		parentHash := hashWithSuffix(i-1, "_old")
+		saveBlockState(t, ctx, stateRepo, i, hashWithSuffix(i, "_old"), parentHash)
+	}
+
+	// RPC: 100-102 unchanged (same as DB)
+	for i := int64(100); i <= 102; i++ {
+		parentHash := hashWithSuffix(i-1, "_old")
+		client.setBlockHeader(i, hashWithSuffix(i, "_old"), parentHash)
+	}
+
+	// RPC: 103-105 are on a new chain (different hashes - simulating reorg during downtime)
+	for i := int64(103); i <= 105; i++ {
+		newParentHash := hashWithSuffix(i-1, "_new")
+		if i == 103 {
+			newParentHash = hashWithSuffix(102, "_old") // Links to existing chain
+		}
+		client.setBlockHeader(i, hashWithSuffix(i, "_new"), newParentHash)
+	}
+
+	config := BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		BoundaryCheckDepth: 10,
+		Logger:             slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Act
+	err = service.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+
+	// Assert: For blocks 103-105, verify highest version is the canonical block
+	for i := int64(103); i <= 105; i++ {
+		// Get all versions at this block number
+		maxVersion, err := stateRepo.GetBlockVersionCount(ctx, i)
+		if err != nil {
+			t.Fatalf("failed to get version count for block %d: %v", i, err)
+		}
+
+		// Should have 2 versions: 0 (orphaned) and 1 (canonical)
+		if maxVersion != 2 {
+			t.Errorf("block %d: expected 2 versions, got %d", i, maxVersion)
+		}
+
+		// Get the canonical block (non-orphaned)
+		canonicalBlock, err := stateRepo.GetBlockByNumber(ctx, i)
+		if err != nil {
+			t.Fatalf("failed to get canonical block %d: %v", i, err)
+		}
+		if canonicalBlock == nil {
+			t.Fatalf("block %d: no canonical block found", i)
+		}
+
+		// Verify canonical block has the highest version
+		if canonicalBlock.Version != maxVersion-1 {
+			t.Errorf("block %d: canonical block has version %d, but highest version is %d; highest version should be canonical",
+				i, canonicalBlock.Version, maxVersion-1)
+		}
+
+		// Verify canonical block has the new hash
+		expectedHash := hashWithSuffix(i, "_new")
+		if canonicalBlock.Hash != expectedHash {
+			t.Errorf("block %d: canonical block has wrong hash: got %s, want %s",
+				i, truncateHashForTest(canonicalBlock.Hash), truncateHashForTest(expectedHash))
+		}
+
+		// Verify old block (version 0) is orphaned
+		oldHash := hashWithSuffix(i, "_old")
+		oldBlock, err := stateRepo.GetBlockByHash(ctx, oldHash)
+		if err != nil {
+			t.Fatalf("failed to get old block %d: %v", i, err)
+		}
+		if oldBlock == nil {
+			t.Errorf("block %d: old block not found", i)
+		} else {
+			if !oldBlock.IsOrphaned {
+				t.Errorf("block %d: old block (version %d) should be orphaned", i, oldBlock.Version)
+			}
+			if oldBlock.Version != 0 {
+				t.Errorf("block %d: old block should have version 0, got %d", i, oldBlock.Version)
+			}
+		}
+	}
+}
+
+// TestBackfillService_SkipsStaleBlockWhenLiveAlreadyProcessed verifies that backfill
+// won't save a stale block if live service has already saved a different (canonical)
+// block at the same height.
+//
+// Race condition scenario:
+// 1. Backfill fetches block 100 (hash A) at time T1
+// 2. Reorg happens - block 100 is now hash B
+// 3. Live service processes block 100 (hash B) → saved with version 0
+// 4. Backfill tries to save block 100 (hash A)
+// 5. Without the fix, backfill would save hash A with version 1, breaking the invariant
+// 6. With the fix, backfill detects a different block exists and skips
+func TestBackfillService_SkipsStaleBlockWhenLiveAlreadyProcessed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+	client := newMockClient()
+
+	// Setup: blocks 1-99 exist in DB and client
+	for i := int64(1); i <= 99; i++ {
+		client.addBlock(i, "")
+		saveBlockState(t, ctx, stateRepo, i, fmt.Sprintf("0x%064x", i), fmt.Sprintf("0x%064x", i-1))
+	}
+
+	// Block 100 - Live service has already processed the CANONICAL block (hash B)
+	canonicalHash := "0xCANONICAL_HASH_B_SAVED_BY_LIVE_SERVICE"
+	saveBlockState(t, ctx, stateRepo, 100, canonicalHash, fmt.Sprintf("0x%064x", 99))
+
+	// But the RPC returns a STALE block (hash A) - simulating a slow/stale RPC node
+	staleHash := "0xSTALE_HASH_A_FROM_SLOW_RPC_NODE"
+	client.setBlockHeader(100, staleHash, fmt.Sprintf("0x%064x", 99))
+
+	config := BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		BoundaryCheckDepth: 0, // Disable boundary check for this test
+		Logger:             slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Simulate backfill trying to process the stale block
+	// This would happen if backfill fetched block 100 before live service saved it,
+	// but processes it after live service has already saved the canonical block.
+	staleBlockData := outbound.BlockData{
+		BlockNumber: 100,
+		Block:       []byte(fmt.Sprintf(`{"number":"0x64","hash":"%s","parentHash":"0x%064x","timestamp":"0x0"}`, staleHash, 99)),
+	}
+
+	// This should skip the block, not save it
+	err = service.processBlockData(ctx, staleBlockData)
+	if err != nil {
+		t.Fatalf("processBlockData should not error when skipping stale block: %v", err)
+	}
+
+	// Verify only ONE block exists at height 100 (the canonical one)
+	versionCount, err := stateRepo.GetBlockVersionCount(ctx, 100)
+	if err != nil {
+		t.Fatalf("failed to get version count: %v", err)
+	}
+	if versionCount != 1 {
+		t.Errorf("expected 1 version at block 100, got %d (stale block was incorrectly saved)", versionCount)
+	}
+
+	// Verify the block at height 100 is still the canonical one
+	block, err := stateRepo.GetBlockByNumber(ctx, 100)
+	if err != nil {
+		t.Fatalf("failed to get block: %v", err)
+	}
+	if block.Hash != canonicalHash {
+		t.Errorf("block 100 has wrong hash: got %s, want %s", block.Hash, canonicalHash)
+	}
+
+	// Verify the stale block was NOT saved
+	staleBlock, err := stateRepo.GetBlockByHash(ctx, staleHash)
+	if err != nil {
+		t.Fatalf("failed to check for stale block: %v", err)
+	}
+	if staleBlock != nil {
+		t.Errorf("stale block should NOT have been saved, but it was (version=%d)", staleBlock.Version)
 	}
 }
 

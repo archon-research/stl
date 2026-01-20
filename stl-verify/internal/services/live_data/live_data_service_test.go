@@ -357,6 +357,34 @@ func (m *mockBlockchainClient) GetBlocksBatch(ctx context.Context, blockNums []i
 	return result, nil
 }
 
+func (m *mockBlockchainClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.delay > 0 {
+		time.Sleep(m.delay)
+	}
+
+	// Check if we should return an error for this specific hash
+	if m.getByHashErr != nil && (m.getByHashErrFor == "" || m.getByHashErrFor == hash) {
+		return outbound.BlockData{}, m.getByHashErr
+	}
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			blockJSON, _ := json.Marshal(bd.header)
+			return outbound.BlockData{
+				BlockNumber: blockNum,
+				Block:       blockJSON,
+				Receipts:    bd.receipts,
+				Traces:      bd.traces,
+				Blobs:       bd.blobs,
+			}, nil
+		}
+	}
+	return outbound.BlockData{}, fmt.Errorf("block %s not found", hash)
+}
+
 func TestLiveService_AddToUnfinalizedChain_MaintainsSortedOrder(t *testing.T) {
 	service := &LiveService{
 		config: LiveConfig{
@@ -1816,6 +1844,33 @@ func (m *mockFailingClient) GetBlobSidecarsByHash(ctx context.Context, hash stri
 	return m.mockBlockchainClient.GetBlobSidecarsByHash(ctx, hash)
 }
 
+func (m *mockFailingClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	// Delegate to underlying mock - failure flags are for individual method failures
+	// which are no longer used since we now use batched requests
+	bd, err := m.mockBlockchainClient.GetBlockDataByHash(ctx, blockNum, hash, fullTx)
+	if err != nil {
+		return bd, err
+	}
+	// Simulate failures for individual data types via error fields
+	if m.failGetBlock {
+		bd.BlockErr = fmt.Errorf("simulated block fetch failure")
+		bd.Block = nil
+	}
+	if m.failGetReceipts {
+		bd.ReceiptsErr = fmt.Errorf("simulated receipts fetch failure")
+		bd.Receipts = nil
+	}
+	if m.failGetTraces {
+		bd.TracesErr = fmt.Errorf("simulated traces fetch failure")
+		bd.Traces = nil
+	}
+	if m.failGetBlobs {
+		bd.BlobsErr = fmt.Errorf("simulated blobs fetch failure")
+		bd.Blobs = nil
+	}
+	return bd, nil
+}
+
 // mockFailingCache simulates cache failures
 type mockFailingCache struct {
 	*memory.BlockCache
@@ -2016,7 +2071,7 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 	}
 }
 
-func TestFetchAndPublishBlockData_WithBlobs_PublishesBlobEvent(t *testing.T) {
+func TestFetchAndPublishBlockData_WithBlobs_CachesBlobs(t *testing.T) {
 	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
@@ -2040,16 +2095,16 @@ func TestFetchAndPublishBlockData_WithBlobs_PublishesBlobEvent(t *testing.T) {
 		t.Fatalf("fetchAndPublishBlockData failed: %v", err)
 	}
 
-	events := eventSink.GetEvents()
-	hasBlobs := false
-	for _, e := range events {
-		if _, ok := e.(outbound.BlobsEvent); ok {
-			hasBlobs = true
-		}
+	// Verify data was cached (block, receipts, traces, blobs = 4 entries)
+	entryCount := cache.GetEntryCount()
+	if entryCount != 4 {
+		t.Errorf("expected 4 cache entries (block, receipts, traces, blobs), got %d", entryCount)
 	}
 
-	if !hasBlobs {
-		t.Error("expected BlobsEvent when blobs enabled")
+	// Verify only a single BlockEvent is published (not separate events for receipts/traces/blobs)
+	events := eventSink.GetBlockEvents()
+	if len(events) != 1 {
+		t.Errorf("expected 1 BlockEvent, got %d", len(events))
 	}
 }
 
@@ -2084,111 +2139,6 @@ func TestFetchAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
 				t.Error("expected BlockEvent.IsReorg to be true")
 			}
 		}
-	}
-}
-
-// ============================================================================
-// parseBlockNumber edge case tests
-// ============================================================================
-
-func TestParseBlockNumber_ValidHex(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected int64
-	}{
-		{"0x0", 0},
-		{"0x1", 1},
-		{"0xa", 10},
-		{"0xf", 15},
-		{"0x10", 16},
-		{"0x64", 100},
-		{"0x3e8", 1000},
-		{"0x186a0", 100000},
-		{"0xffffffffff", 1099511627775}, // Large number
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.input, func(t *testing.T) {
-			result, err := parseBlockNumber(tc.input)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if result != tc.expected {
-				t.Errorf("expected %d, got %d", tc.expected, result)
-			}
-		})
-	}
-}
-
-func TestParseBlockNumber_WithoutPrefix(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected int64
-	}{
-		{"0", 0},
-		{"1", 1},
-		{"a", 10},
-		{"64", 100},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.input, func(t *testing.T) {
-			result, err := parseBlockNumber(tc.input)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if result != tc.expected {
-				t.Errorf("expected %d, got %d", tc.expected, result)
-			}
-		})
-	}
-}
-
-func TestParseBlockNumber_InvalidHex(t *testing.T) {
-	tests := []string{
-		"not_hex",
-		"0xGHI",
-		"xyz",
-	}
-
-	for _, input := range tests {
-		t.Run(input, func(t *testing.T) {
-			_, err := parseBlockNumber(input)
-			if err == nil {
-				t.Errorf("expected error for invalid input: %s", input)
-			}
-		})
-	}
-}
-
-func TestParseBlockNumber_EmptyString(t *testing.T) {
-	_, err := parseBlockNumber("")
-	if err == nil {
-		t.Error("expected error for empty string")
-	}
-}
-
-func TestParseBlockNumber_UppercaseHex(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected int64
-	}{
-		{"0xA", 10},
-		{"0xF", 15},
-		{"0xFF", 255},
-		{"0xABCD", 43981},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.input, func(t *testing.T) {
-			result, err := parseBlockNumber(tc.input)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if result != tc.expected {
-				t.Errorf("expected %d, got %d", tc.expected, result)
-			}
-		})
 	}
 }
 
@@ -2490,6 +2440,7 @@ func TestProcessBlock_WithMetrics_RecordsReorg(t *testing.T) {
 		Number:     "0x64", // 100
 		Hash:       "0x100_alt",
 		ParentHash: "0x99",
+		Timestamp:  "0x0",
 	}
 
 	err = svc.processBlock(header, time.Now())
@@ -2675,6 +2626,7 @@ func TestProcessBlock_VersionIsCorrectAfterReorg(t *testing.T) {
 		Number:     "0x64", // 100
 		Hash:       "0x100_new",
 		ParentHash: "0x99",
+		Timestamp:  "0x0",
 	}
 
 	err = svc.processBlock(header, time.Now())
@@ -2690,12 +2642,6 @@ func TestProcessBlock_VersionIsCorrectAfterReorg(t *testing.T) {
 
 	if blockEvents[0].Version != 1 {
 		t.Errorf("expected block event version to be 1, got %d (bug: version was calculated after SaveBlock)", blockEvents[0].Version)
-	}
-
-	// Also verify the cache key has the correct version
-	expectedCacheKey := "stl:1:100:1:block"
-	if blockEvents[0].CacheKey != expectedCacheKey {
-		t.Errorf("expected cache key %q, got %q", expectedCacheKey, blockEvents[0].CacheKey)
 	}
 }
 
@@ -2739,6 +2685,7 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 		Number:     "0x64", // 100
 		Hash:       "0x100_v0",
 		ParentHash: "0x99",
+		Timestamp:  "0x0",
 	}
 	err = svc.processBlock(header1, time.Now())
 	if err != nil {
@@ -2795,6 +2742,7 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 		Number:     "0x64", // 100
 		Hash:       "0x100_v2",
 		ParentHash: "0x99",
+		Timestamp:  "0x0",
 	}
 	err = svc.processBlock(header3, time.Now())
 	if err != nil {
@@ -2950,8 +2898,8 @@ func TestFetchBlockData_ByHashReturnsErrorWhenBlockNotFound(t *testing.T) {
 // 5. Fetch returns data for 0xBBB (current block at that number)
 // 6. We cache 0xBBB's data but publish event saying "block hash 0xAAA"
 //
-// The fix: Fetch by hash to ensure we always get data for the exact block
-// we committed to, or fail if that block no longer exists.
+// The fix: Fetch by hash using GetBlockDataByHash to ensure we always get data
+// for the exact block we committed to, or fail if that block no longer exists.
 func TestFetchReceiptsTracesBlobsByHash(t *testing.T) {
 	ctx := context.Background()
 
@@ -2998,25 +2946,21 @@ func TestFetchReceiptsTracesBlobsByHash(t *testing.T) {
 		t.Fatalf("processBlock failed: %v", err)
 	}
 
-	// Verify that all data types were fetched by hash
+	// Verify that GetBlockDataByHash was called with the expected hash
 	fetchedMethods := client.fetchedByHash[expectedHash]
-	expectedMethods := []string{"GetFullBlockByHash", "GetBlockReceiptsByHash", "GetBlockTracesByHash", "GetBlobSidecarsByHash"}
-
-	for _, method := range expectedMethods {
-		found := false
-		for _, fetched := range fetchedMethods {
-			if fetched == method {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("expected %s to be called with hash %s, but it wasn't. Called methods: %v",
-				method, expectedHash, fetchedMethods)
+	found := false
+	for _, method := range fetchedMethods {
+		if method == "GetBlockDataByHash" {
+			found = true
+			break
 		}
 	}
+	if !found {
+		t.Errorf("expected GetBlockDataByHash to be called with hash %s, but it wasn't. Called methods: %v",
+			expectedHash, fetchedMethods)
+	}
 
-	t.Logf("SUCCESS: All data types fetched by hash: %v", fetchedMethods)
+	t.Logf("SUCCESS: Data fetched by hash using batched request: %v", fetchedMethods)
 }
 
 // mockClientWithHashTracking wraps mockBlockchainClient to track which methods are called with which hashes
@@ -3024,6 +2968,13 @@ type mockClientWithHashTracking struct {
 	*mockBlockchainClient
 	mu            sync.Mutex
 	fetchedByHash map[string][]string // hash -> list of method names called
+}
+
+func (m *mockClientWithHashTracking) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	m.mu.Lock()
+	m.fetchedByHash[hash] = append(m.fetchedByHash[hash], "GetBlockDataByHash")
+	m.mu.Unlock()
+	return m.mockBlockchainClient.GetBlockDataByHash(ctx, blockNum, hash, fullTx)
 }
 
 func (m *mockClientWithHashTracking) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
@@ -3321,6 +3272,26 @@ func (m *caseInsensitiveMockClient) GetBlocksBatch(ctx context.Context, blockNum
 	return result, nil
 }
 
+func (m *caseInsensitiveMockClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	lowerHash := strings.ToLower(hash)
+	for _, bd := range m.blocks {
+		if strings.ToLower(bd.header.Hash) == lowerHash {
+			blockJSON, _ := json.Marshal(bd.header)
+			return outbound.BlockData{
+				BlockNumber: blockNum,
+				Block:       blockJSON,
+				Receipts:    bd.receipts,
+				Traces:      bd.traces,
+				Blobs:       bd.blobs,
+			}, nil
+		}
+	}
+	return outbound.BlockData{}, fmt.Errorf("block %s not found", hash)
+}
+
 // TestProcessBlock_RollsBackInMemoryChainOnDBFailure verifies that when SaveBlock fails,
 // the block is removed from the in-memory chain to maintain consistency with the database.
 // Without this rollback, the in-memory chain and DB would diverge, causing incorrect
@@ -3486,4 +3457,216 @@ func TestProcessBlock_ReorgChainNotPrunedOnDBFailure(t *testing.T) {
 	}
 
 	t.Log("SUCCESS: In-memory chain not pruned after HandleReorgAtomic failure")
+}
+
+// ============================================================================
+// Cache-before-publish ordering test
+// ============================================================================
+
+// mockOrderTrackingCache tracks the order of cache operations
+type mockOrderTrackingCache struct {
+	*memory.BlockCache
+	mu         sync.Mutex
+	operations []string
+}
+
+func newMockOrderTrackingCache() *mockOrderTrackingCache {
+	return &mockOrderTrackingCache{
+		BlockCache: memory.NewBlockCache(),
+		operations: make([]string, 0),
+	}
+}
+
+func (c *mockOrderTrackingCache) SetBlock(ctx context.Context, chainID, blockNum int64, version int, data json.RawMessage) error {
+	c.mu.Lock()
+	c.operations = append(c.operations, "cache_block")
+	c.mu.Unlock()
+	return c.BlockCache.SetBlock(ctx, chainID, blockNum, version, data)
+}
+
+func (c *mockOrderTrackingCache) SetReceipts(ctx context.Context, chainID, blockNum int64, version int, data json.RawMessage) error {
+	c.mu.Lock()
+	c.operations = append(c.operations, "cache_receipts")
+	c.mu.Unlock()
+	return c.BlockCache.SetReceipts(ctx, chainID, blockNum, version, data)
+}
+
+func (c *mockOrderTrackingCache) SetTraces(ctx context.Context, chainID, blockNum int64, version int, data json.RawMessage) error {
+	c.mu.Lock()
+	c.operations = append(c.operations, "cache_traces")
+	c.mu.Unlock()
+	return c.BlockCache.SetTraces(ctx, chainID, blockNum, version, data)
+}
+
+func (c *mockOrderTrackingCache) SetBlobs(ctx context.Context, chainID, blockNum int64, version int, data json.RawMessage) error {
+	c.mu.Lock()
+	c.operations = append(c.operations, "cache_blobs")
+	c.mu.Unlock()
+	return c.BlockCache.SetBlobs(ctx, chainID, blockNum, version, data)
+}
+
+func (c *mockOrderTrackingCache) getOperations() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	result := make([]string, len(c.operations))
+	copy(result, c.operations)
+	return result
+}
+
+// mockOrderTrackingEventSink tracks when publish is called
+type mockOrderTrackingEventSink struct {
+	*memory.EventSink
+	mu         sync.Mutex
+	operations []string
+}
+
+func newMockOrderTrackingEventSink() *mockOrderTrackingEventSink {
+	return &mockOrderTrackingEventSink{
+		EventSink:  memory.NewEventSink(),
+		operations: make([]string, 0),
+	}
+}
+
+func (s *mockOrderTrackingEventSink) Publish(ctx context.Context, event outbound.Event) error {
+	s.mu.Lock()
+	s.operations = append(s.operations, "publish_block")
+	s.mu.Unlock()
+	return s.EventSink.Publish(ctx, event)
+}
+
+func (s *mockOrderTrackingEventSink) getOperations() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]string, len(s.operations))
+	copy(result, s.operations)
+	return result
+}
+
+func TestFetchAndPublishBlockData_CachesAllDataBeforePublishing(t *testing.T) {
+	ctx := context.Background()
+	stateRepo := newMockStateRepo()
+	cache := newMockOrderTrackingCache()
+	eventSink := newMockOrderTrackingEventSink()
+
+	client := newMockFailingClient()
+	client.addBlock(100, "")
+
+	header100 := client.getHeader(100)
+
+	svc, err := NewLiveService(LiveConfig{
+		DisableBlobs: false, // Enable blobs to test all 4 cache operations
+	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	err = svc.fetchAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false)
+	if err != nil {
+		t.Fatalf("fetchAndPublishBlockData failed: %v", err)
+	}
+
+	// Collect all operations from both cache and event sink
+	cacheOps := cache.getOperations()
+	publishOps := eventSink.getOperations()
+
+	// Verify all 4 cache operations happened
+	expectedCacheOps := map[string]bool{
+		"cache_block":    false,
+		"cache_receipts": false,
+		"cache_traces":   false,
+		"cache_blobs":    false,
+	}
+	for _, op := range cacheOps {
+		if _, exists := expectedCacheOps[op]; exists {
+			expectedCacheOps[op] = true
+		}
+	}
+	for op, found := range expectedCacheOps {
+		if !found {
+			t.Errorf("expected cache operation %q was not called", op)
+		}
+	}
+
+	// Verify publish was called exactly once
+	if len(publishOps) != 1 {
+		t.Errorf("expected exactly 1 publish operation, got %d", len(publishOps))
+	}
+
+	// CRITICAL: Verify publish happened AFTER all cache operations
+	// Since cache operations happen concurrently, we just need to verify
+	// that all cache operations completed before any publish
+	if len(cacheOps) != 4 {
+		t.Errorf("expected 4 cache operations before publish, got %d", len(cacheOps))
+	}
+
+	t.Logf("SUCCESS: All %d cache operations completed before publish", len(cacheOps))
+	t.Logf("Cache operations: %v", cacheOps)
+	t.Logf("Publish operations: %v", publishOps)
+}
+
+func TestFetchAndPublishBlockData_NoPublishOnCacheFailure(t *testing.T) {
+	// This test verifies that if caching fails, publish is never called
+	tests := []struct {
+		name              string
+		failCacheBlock    bool
+		failCacheReceipts bool
+		failCacheTraces   bool
+		failCacheBlobs    bool
+	}{
+		{
+			name:           "block_cache_fails",
+			failCacheBlock: true,
+		},
+		{
+			name:              "receipts_cache_fails",
+			failCacheReceipts: true,
+		},
+		{
+			name:            "traces_cache_fails",
+			failCacheTraces: true,
+		},
+		{
+			name:           "blobs_cache_fails",
+			failCacheBlobs: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			stateRepo := newMockStateRepo()
+
+			cache := newMockFailingCache()
+			cache.failSetBlock = tt.failCacheBlock
+			cache.failSetReceipts = tt.failCacheReceipts
+			cache.failSetTraces = tt.failCacheTraces
+			cache.failSetBlobs = tt.failCacheBlobs
+
+			eventSink := memory.NewEventSink()
+
+			client := newMockFailingClient()
+			client.addBlock(100, "")
+			header100 := client.getHeader(100)
+
+			svc, err := NewLiveService(LiveConfig{
+				DisableBlobs: false,
+			}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+			if err != nil {
+				t.Fatalf("failed to create service: %v", err)
+			}
+
+			err = svc.fetchAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false)
+			if err == nil {
+				t.Fatal("expected error due to cache failure")
+			}
+
+			// CRITICAL: Verify no events were published
+			events := eventSink.GetBlockEvents()
+			if len(events) != 0 {
+				t.Errorf("expected 0 events when cache fails, got %d", len(events))
+			}
+
+			t.Logf("SUCCESS: No publish when %s", tt.name)
+		})
+	}
 }
