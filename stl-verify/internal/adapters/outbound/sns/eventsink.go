@@ -67,6 +67,10 @@ type Config struct {
 	// BackoffFactor is the multiplier applied to backoff after each retry.
 	BackoffFactor float64
 
+	// PublishTimeout is the maximum time to wait for a single publish operation.
+	// If zero, defaults to 10 seconds.
+	PublishTimeout time.Duration
+
 	// Logger is the structured logger for the sink.
 	Logger *slog.Logger
 }
@@ -78,6 +82,7 @@ func ConfigDefaults() Config {
 		InitialBackoff: 100 * time.Millisecond,
 		MaxBackoff:     5 * time.Second,
 		BackoffFactor:  2.0,
+		PublishTimeout: 10 * time.Second,
 		Logger:         slog.Default(),
 	}
 }
@@ -114,6 +119,9 @@ func NewEventSink(client SNSPublisher, config Config) (*EventSink, error) {
 	}
 	if config.BackoffFactor == 0 {
 		config.BackoffFactor = defaults.BackoffFactor
+	}
+	if config.PublishTimeout == 0 {
+		config.PublishTimeout = defaults.PublishTimeout
 	}
 	if config.Logger == nil {
 		config.Logger = defaults.Logger
@@ -202,15 +210,22 @@ func (s *EventSink) publishWithRetry(ctx context.Context, input *sns.PublishInpu
 			}
 		}
 
-		_, err := s.client.Publish(ctx, input)
+		// Create a timeout context for this publish attempt to prevent indefinite blocking
+		publishCtx, cancel := context.WithTimeout(ctx, s.config.PublishTimeout)
+		_, err := s.client.Publish(publishCtx, input)
+		cancel()
+
 		if err == nil {
 			return nil
 		}
 
 		lastErr = err
 
+		// Check if parent context was cancelled (shutdown signal)
+		parentCanceled := ctx.Err() != nil
+
 		// Check if error is retryable
-		if !isRetryableError(err) {
+		if !isRetryableError(err, parentCanceled) {
 			return fmt.Errorf("failed to publish to SNS: %w", err)
 		}
 	}
@@ -226,13 +241,25 @@ func (s *EventSink) publishWithRetry(ctx context.Context, input *sns.PublishInpu
 }
 
 // isRetryableError determines if an error should trigger a retry.
-func isRetryableError(err error) bool {
+// parentCtxCanceled indicates if the parent context (not the publish timeout) was cancelled.
+func isRetryableError(err error, parentCtxCanceled bool) bool {
 	if err == nil {
 		return false
 	}
 
-	// Context errors are not retryable
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	// If parent context was cancelled (shutdown signal), don't retry
+	if parentCtxCanceled {
+		return false
+	}
+
+	// Publish timeout (DeadlineExceeded from our timeout context) IS retryable
+	// as it indicates a transient network issue
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	// Parent context cancellation is not retryable
+	if errors.Is(err, context.Canceled) {
 		return false
 	}
 
