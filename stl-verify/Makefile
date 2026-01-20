@@ -66,12 +66,12 @@ tidy-check:
 
 # Run staticcheck with all checks (install if needed)
 staticcheck:
-	@echo "==> Running staticcheck with all checks..."
+	@echo "==> Running staticcheck..."
 	$(GOBIN)/staticcheck ./...
 
 # Run golangci-lint with all linters (install if needed)
 golangci-lint:
-	@echo "==> Running golangci-lint with all linters..."
+	@echo "==> Running golangci-lint..."
 	$(GOBIN)/golangci-lint run
 
 # Run govulncheck for security vulnerabilities (install if needed)
