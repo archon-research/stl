@@ -178,14 +178,29 @@ func main() {
 	snsTopicARN := requireEnv("AWS_SNS_TOPIC_ARN")
 
 	// Configure AWS SDK for LocalStack or production
-	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+	// In production (ECS/Fargate), use the default credential chain which picks up IAM role credentials.
+	// For local development with LocalStack, use static credentials from environment variables.
+	awsConfigOptions := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(awsRegion),
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			getEnv("AWS_ACCESS_KEY_ID", "test"),
-			getEnv("AWS_SECRET_ACCESS_KEY", "test"),
-			"",
-		)),
-	)
+	}
+
+	// Only use static credentials if explicitly set (for LocalStack)
+	// In ECS/Fargate, these won't be set and the SDK will use the IAM role
+	if accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID"); accessKeyID != "" {
+		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+		awsConfigOptions = append(awsConfigOptions,
+			awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+				accessKeyID,
+				secretKey,
+				"",
+			)),
+		)
+		logger.Debug("using static AWS credentials from environment")
+	} else {
+		logger.Debug("using default AWS credential chain (IAM role)")
+	}
+
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), awsConfigOptions...)
 	if err != nil {
 		logger.Error("failed to load AWS config", "error", err)
 		os.Exit(1)
