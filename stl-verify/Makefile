@@ -221,7 +221,6 @@ AWS_ACCOUNT_ID ?= $(shell aws sts get-caller-identity --query Account --output t
 AWS_REGION ?= eu-west-1
 
 # ECR repository URL
-# TODO: Dont hardcode ENV
 ECR_REPO = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-watcher
 
 # Git info for image tagging and build metadata
