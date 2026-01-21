@@ -139,8 +139,9 @@ func Main() {
 
 	// Create Redis cache
 	cache, err := rediscache.NewBlockCache(rediscache.Config{
-		Addr:     redisAddr,
-		Password: redisPassword,
+		Addr:      redisAddr,
+		Password:  redisPassword,
+		KeyPrefix: "stl",
 	}, logger)
 	if err != nil {
 		logger.Error("failed to create Redis cache", "error", err)
