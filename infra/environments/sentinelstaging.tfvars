@@ -42,3 +42,14 @@ chain_id         = 1
 alchemy_http_url = "https://eth-mainnet.g.alchemy.com/v2"
 alchemy_ws_url   = "wss://eth-mainnet.g.alchemy.com/v2"
 # alchemy_api_key - set via TF_VAR_alchemy_api_key environment variable
+
+# -----------------------------------------------------------------------------
+# ECS Backup Worker Configuration
+# -----------------------------------------------------------------------------
+
+# Staging: minimal resources for backup worker
+backup_worker_cpu           = 256      # 0.25 vCPU
+backup_worker_memory        = 512      # 512 MB
+backup_worker_desired_count = 1        # Single instance
+backup_worker_image_tag     = "latest" # Override in CI/CD
+backup_worker_workers       = 2        # Concurrent workers per task

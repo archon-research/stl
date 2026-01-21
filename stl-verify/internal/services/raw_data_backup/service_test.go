@@ -585,10 +585,10 @@ func TestProcessMessage_Success(t *testing.T) {
 
 	// Check specific keys
 	expectedKeys := []string{
-		"test-bucket/1/0-1000/100_0_block.json.gz",
-		"test-bucket/1/0-1000/100_0_receipts.json.gz",
-		"test-bucket/1/0-1000/100_0_traces.json.gz",
-		"test-bucket/1/0-1000/100_0_blobs.json.gz",
+		"test-bucket/0-1000/100_0_block.json.gz",
+		"test-bucket/0-1000/100_0_receipts.json.gz",
+		"test-bucket/0-1000/100_0_traces.json.gz",
+		"test-bucket/0-1000/100_0_blobs.json.gz",
 	}
 
 	for _, expectedKey := range expectedKeys {
@@ -633,7 +633,7 @@ func TestProcessMessage_SNSWrapped(t *testing.T) {
 	}
 
 	// Verify file was written
-	_, exists := writer.GetFile("test-bucket", "1/0-1000/100_0_block.json.gz")
+	_, exists := writer.GetFile("test-bucket", "0-1000/100_0_block.json.gz")
 	if !exists {
 		t.Error("expected block file to be written")
 	}
@@ -846,7 +846,7 @@ func TestProcessMessage_S3WriteError(t *testing.T) {
 	ctx := context.Background()
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{}`))
 
-	writer.SetWriteError("test-bucket/1/0-1000/100_0_block.json.gz", errors.New("S3 access denied"))
+	writer.SetWriteError("test-bucket/0-1000/100_0_block.json.gz", errors.New("S3 access denied"))
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)
@@ -875,7 +875,7 @@ func TestProcessMessage_S3ExistsError(t *testing.T) {
 	ctx := context.Background()
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{}`))
 
-	writer.SetExistsError("test-bucket/1/0-1000/100_0_block.json.gz", errors.New("S3 service unavailable"))
+	writer.SetExistsError("test-bucket/0-1000/100_0_block.json.gz", errors.New("S3 service unavailable"))
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)
@@ -905,7 +905,7 @@ func TestProcessMessage_Idempotent_SkipsExistingFile(t *testing.T) {
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{}`))
 
 	// Pre-populate S3 with existing file
-	writer.PresetFileExists("test-bucket", "1/0-1000/100_0_block.json.gz")
+	writer.PresetFileExists("test-bucket", "0-1000/100_0_block.json.gz")
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)
@@ -948,8 +948,8 @@ func TestProcessMessage_DifferentVersionsAreSeparate(t *testing.T) {
 	_ = svc.processMessage(ctx, msg1)
 
 	// Both files should exist
-	_, exists0 := writer.GetFile("test-bucket", "1/0-1000/100_0_block.json.gz")
-	_, exists1 := writer.GetFile("test-bucket", "1/0-1000/100_1_block.json.gz")
+	_, exists0 := writer.GetFile("test-bucket", "0-1000/100_0_block.json.gz")
+	_, exists1 := writer.GetFile("test-bucket", "0-1000/100_1_block.json.gz")
 
 	if !exists0 {
 		t.Error("expected version 0 file to exist")
@@ -959,41 +959,41 @@ func TestProcessMessage_DifferentVersionsAreSeparate(t *testing.T) {
 	}
 }
 
-func TestProcessMessage_DifferentChainsAreSeparate(t *testing.T) {
+// TestProcessMessage_SameBlockNumberDifferentBucket verifies that the same block number
+// from different chains would use the same key pattern (since each chain has its own bucket).
+func TestProcessMessage_SameBlockNumberSameKeyPattern(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
 	writer := newMockS3Writer()
 
+	// A service configured for mainnet
 	svc, _ := NewService(Config{
 		ChainID:           1,
-		Bucket:            "test-bucket",
+		Bucket:            "mainnet-bucket",
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
 
-	// Mainnet (chain 1)
+	// Process a mainnet block
 	event1 := createBlockEvent(1, 100, 0)
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{"chain": 1}`))
 	msg1 := createSQSMessage("msg1", event1)
 	_ = svc.processMessage(ctx, msg1)
 
-	// Arbitrum (chain 42161)
-	event42161 := createBlockEvent(42161, 100, 0)
-	_ = cache.SetBlock(ctx, 42161, 100, 0, json.RawMessage(`{"chain": 42161}`))
-	msg42161 := createSQSMessage("msg42161", event42161)
-	_ = svc.processMessage(ctx, msg42161)
-
-	// Both files should exist in different chain directories
-	_, existsMainnet := writer.GetFile("test-bucket", "1/0-1000/100_0_block.json.gz")
-	_, existsArbitrum := writer.GetFile("test-bucket", "42161/0-1000/100_0_block.json.gz")
+	// Verify the key structure doesn't include chain ID
+	// (chain separation is done via different buckets)
+	_, existsMainnet := writer.GetFile("mainnet-bucket", "0-1000/100_0_block.json.gz")
 
 	if !existsMainnet {
-		t.Error("expected mainnet file to exist")
+		t.Error("expected file with partition-based key (no chain ID prefix)")
 	}
-	if !existsArbitrum {
-		t.Error("expected arbitrum file to exist")
+
+	// Confirm no file with old chain-prefixed format exists
+	_, existsOldFormat := writer.GetFile("mainnet-bucket", "1/0-1000/100_0_block.json.gz")
+	if existsOldFormat {
+		t.Error("unexpected file with chain ID prefix - format should be {partition}/{block}_{version}_{type}.json.gz")
 	}
 }
 
@@ -1449,7 +1449,7 @@ func TestProcessMessage_ZeroBlockNumber(t *testing.T) {
 	}
 
 	// Should be in partition 0-1000
-	_, exists := writer.GetFile("test-bucket", "1/0-1000/0_0_block.json.gz")
+	_, exists := writer.GetFile("test-bucket", "0-1000/0_0_block.json.gz")
 	if !exists {
 		t.Error("expected block 0 file to exist")
 	}
@@ -1481,7 +1481,7 @@ func TestProcessMessage_LargeBlockNumber(t *testing.T) {
 
 	// Check partition calculation
 	expectedPartition := "19999001-20000000"
-	expectedKey := fmt.Sprintf("1/%s/%d_0_block.json.gz", expectedPartition, blockNum)
+	expectedKey := fmt.Sprintf("%s/%d_0_block.json.gz", expectedPartition, blockNum)
 	_, exists := writer.GetFile("test-bucket", expectedKey)
 	if !exists {
 		t.Errorf("expected file at %s", expectedKey)
@@ -1512,7 +1512,7 @@ func TestProcessMessage_HighVersion(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, exists := writer.GetFile("test-bucket", "1/0-1000/100_999_block.json.gz")
+	_, exists := writer.GetFile("test-bucket", "0-1000/100_999_block.json.gz")
 	if !exists {
 		t.Error("expected high version file to exist")
 	}
@@ -1574,7 +1574,7 @@ func TestProcessMessage_LargeBlockData(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	data, exists := writer.GetFile("test-bucket", "1/0-1000/100_0_block.json.gz")
+	data, exists := writer.GetFile("test-bucket", "0-1000/100_0_block.json.gz")
 	if !exists {
 		t.Error("expected file to exist")
 	}
@@ -1673,7 +1673,7 @@ func TestProcessMessage_ReceiptsWriteError(t *testing.T) {
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{}`))
 	_ = cache.SetReceipts(ctx, 1, 100, 0, json.RawMessage(`[]`))
 
-	writer.SetWriteError("test-bucket/1/0-1000/100_0_receipts.json.gz", errors.New("S3 error"))
+	writer.SetWriteError("test-bucket/0-1000/100_0_receipts.json.gz", errors.New("S3 error"))
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)
@@ -1705,7 +1705,7 @@ func TestProcessMessage_TracesWriteError(t *testing.T) {
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{}`))
 	_ = cache.SetTraces(ctx, 1, 100, 0, json.RawMessage(`[]`))
 
-	writer.SetWriteError("test-bucket/1/0-1000/100_0_traces.json.gz", errors.New("S3 error"))
+	writer.SetWriteError("test-bucket/0-1000/100_0_traces.json.gz", errors.New("S3 error"))
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)
@@ -1737,7 +1737,7 @@ func TestProcessMessage_BlobsWriteError(t *testing.T) {
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{}`))
 	_ = cache.SetBlobs(ctx, 1, 100, 0, json.RawMessage(`[]`))
 
-	writer.SetWriteError("test-bucket/1/0-1000/100_0_blobs.json.gz", errors.New("S3 error"))
+	writer.SetWriteError("test-bucket/0-1000/100_0_blobs.json.gz", errors.New("S3 error"))
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)

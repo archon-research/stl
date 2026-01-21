@@ -518,7 +518,7 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 
 	// Wait for S3 objects to be created (4 files: block, receipts, traces, blobs)
 	partition := "12001-13000" // Block 12345 falls in this partition
-	prefix := fmt.Sprintf("%d/%s/", chainID, partition)
+	prefix := fmt.Sprintf("%s/", partition)
 	objects := waitForS3Objects(t, ctx, infra, prefix, 4, 10*time.Second)
 
 	// Stop service
@@ -529,10 +529,10 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 	t.Logf("S3 objects created: %v", objects)
 
 	expectedFiles := []string{
-		fmt.Sprintf("%d/%s/%d_%d_block.json.gz", chainID, partition, blockNumber, version),
-		fmt.Sprintf("%d/%s/%d_%d_receipts.json.gz", chainID, partition, blockNumber, version),
-		fmt.Sprintf("%d/%s/%d_%d_traces.json.gz", chainID, partition, blockNumber, version),
-		fmt.Sprintf("%d/%s/%d_%d_blobs.json.gz", chainID, partition, blockNumber, version),
+		fmt.Sprintf("%s/%d_%d_block.json.gz", partition, blockNumber, version),
+		fmt.Sprintf("%s/%d_%d_receipts.json.gz", partition, blockNumber, version),
+		fmt.Sprintf("%s/%d_%d_traces.json.gz", partition, blockNumber, version),
+		fmt.Sprintf("%s/%d_%d_blobs.json.gz", partition, blockNumber, version),
 	}
 
 	for _, expected := range expectedFiles {
@@ -549,7 +549,7 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 	}
 
 	// Verify content of block file
-	blockKey := fmt.Sprintf("%d/%s/%d_%d_block.json.gz", chainID, partition, blockNumber, version)
+	blockKey := fmt.Sprintf("%s/%d_%d_block.json.gz", partition, blockNumber, version)
 	content := getS3Object(t, ctx, infra, blockKey)
 	t.Logf("Block content: %s", string(content))
 

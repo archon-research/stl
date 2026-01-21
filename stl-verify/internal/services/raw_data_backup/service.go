@@ -341,10 +341,10 @@ func (s *Service) getPartition(blockNumber int64) string {
 }
 
 // writeToS3 writes data to S3 with the appropriate key structure.
-// Key format: chainID/{partition}/{blockNumber}_{version}_{dataType}.json.gz
+// Key format: {partition}/{blockNumber}_{version}_{dataType}.json.gz
+// Note: Each chain has its own S3 bucket, so chainID is not part of the key.
 func (s *Service) writeToS3(ctx context.Context, partition string, event outbound.BlockEvent, dataType string, data json.RawMessage) error {
-	key := fmt.Sprintf("%d/%s/%d_%d_%s.json.gz",
-		event.ChainID,
+	key := fmt.Sprintf("%s/%d_%d_%s.json.gz",
 		partition,
 		event.BlockNumber,
 		event.Version,
