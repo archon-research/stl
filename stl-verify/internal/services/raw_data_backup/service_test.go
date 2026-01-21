@@ -1596,19 +1596,6 @@ func TestConfigDefaults(t *testing.T) {
 // Benchmark Tests
 // =============================================================================
 
-func BenchmarkGetPartition(b *testing.B) {
-	svc := &Service{}
-	blockNumbers := []int64{0, 500, 1000, 1001, 5000, 1000000, 20000000}
-
-	for _, bn := range blockNumbers {
-		b.Run(fmt.Sprintf("block_%d", bn), func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
-				_ = svc.getPartition(bn)
-			}
-		})
-	}
-}
-
 func BenchmarkProcessMessage(b *testing.B) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
