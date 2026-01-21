@@ -313,9 +313,29 @@ docker-push-backup: ecr-login
 	docker push $(ECR_REPO_BACKUP):$(IMAGE_TAG)
 	docker push $(ECR_REPO_BACKUP):latest
 
-# Build and push backup worker in one step
-docker-release-backup: docker-build-backup docker-push-backup
-	@echo "==> Backup Worker Docker image released: $(ECR_REPO_BACKUP):$(IMAGE_TAG)"
+# Build and push backup worker in one step (captures tag at start to ensure consistency)
+docker-release-backup: ecr-login
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Backup Worker Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_BACKUP)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.backup \
+		-t $(ECR_REPO_BACKUP):$$TAG \
+		-t $(ECR_REPO_BACKUP):latest \
+		--load . && \
+	echo "==> Pushing Backup Worker Docker image to ECR..." && \
+	docker push $(ECR_REPO_BACKUP):$$TAG && \
+	docker push $(ECR_REPO_BACKUP):latest && \
+	echo "==> Backup Worker Docker image released: $(ECR_REPO_BACKUP):$$TAG"
 
 # =============================================================================
 # Sentinelstaging Backup Worker Docker Shortcuts
@@ -329,3 +349,4 @@ docker-push-backup-staging:
 
 docker-release-backup-staging:
 	@$(MAKE) docker-release-backup ENV=sentinelstaging
+
