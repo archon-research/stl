@@ -624,7 +624,7 @@ func TestIntegration_MultipleBlocksProcessedConcurrently(t *testing.T) {
 
 	// Wait for all blocks to be backed up (10 block files expected)
 	// Blocks 100-109 all fall in partition 0-1000
-	prefix := fmt.Sprintf("%d/0-1000/", chainID)
+	prefix := "0-1000/"
 	objects := waitForS3Objects(t, ctx, infra, prefix, numBlocks, 15*time.Second)
 
 	svc.Stop()
@@ -688,7 +688,7 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 		Version:     0,
 		BlockHash:   "0xfirst",
 	}
-	key := fmt.Sprintf("%d/0-1000/%d_0_block.json.gz", chainID, blockNumber)
+	key := fmt.Sprintf("0-1000/%d_0_block.json.gz", blockNumber)
 
 	publishBlockEvent(t, ctx, infra, event)
 
@@ -794,7 +794,7 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event0)
 
 	// Wait for version 0 to be written
-	keyV0 := fmt.Sprintf("%d/1001-2000/%d_0_block.json.gz", chainID, blockNumber)
+	keyV0 := fmt.Sprintf("1001-2000/%d_0_block.json.gz", blockNumber)
 	waitForS3Object(t, ctx, infra, keyV0, 10*time.Second)
 
 	// Publish version 1
@@ -807,7 +807,7 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event1)
 
 	// Wait for version 1 to be written
-	keyV1 := fmt.Sprintf("%d/1001-2000/%d_1_block.json.gz", chainID, blockNumber)
+	keyV1 := fmt.Sprintf("1001-2000/%d_1_block.json.gz", blockNumber)
 	waitForS3Object(t, ctx, infra, keyV1, 10*time.Second)
 
 	svc.Stop()
@@ -815,12 +815,12 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 	<-done
 
 	// Verify both versions exist
-	prefix := fmt.Sprintf("%d/1001-2000/", chainID)
+	prefix := "1001-2000/"
 	objects := listS3Objects(t, ctx, infra, prefix)
 	t.Logf("S3 objects: %v", objects)
 
-	expectedV0 := fmt.Sprintf("%d/1001-2000/%d_0_block.json.gz", chainID, blockNumber)
-	expectedV1 := fmt.Sprintf("%d/1001-2000/%d_1_block.json.gz", chainID, blockNumber)
+	expectedV0 := fmt.Sprintf("1001-2000/%d_0_block.json.gz", blockNumber)
+	expectedV1 := fmt.Sprintf("1001-2000/%d_1_block.json.gz", blockNumber)
 
 	foundV0, foundV1 := false, false
 	for _, obj := range objects {
@@ -911,7 +911,7 @@ func TestIntegration_LargeBlockData(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event)
 
 	// Wait for file to be created
-	key := fmt.Sprintf("%d/2001-3000/%d_0_block.json.gz", chainID, blockNumber)
+	key := fmt.Sprintf("2001-3000/%d_0_block.json.gz", blockNumber)
 	waitForS3Object(t, ctx, infra, key, 15*time.Second)
 
 	svc.Stop()
@@ -977,7 +977,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	}
 
 	// Wait for at least one block to be processed before stopping
-	prefix := fmt.Sprintf("%d/3001-4000/", chainID)
+	prefix := "3001-4000/"
 	waitForS3Objects(t, ctx, infra, prefix, 1, 10*time.Second)
 
 	// Stop gracefully using the Stop() method (not context cancellation)
@@ -1057,7 +1057,7 @@ func TestIntegration_RaceConditionIdempotency(t *testing.T) {
 	}
 
 	// Wait for at least one file to be created
-	key := fmt.Sprintf("%d/7001-8000/%d_%d_block.json.gz", chainID, blockNumber, version)
+	key := fmt.Sprintf("7001-8000/%d_%d_block.json.gz", blockNumber, version)
 	waitForS3Object(t, ctx, infra, key, 15*time.Second)
 
 	// Wait a bit for any concurrent writes to complete
@@ -1078,7 +1078,7 @@ func TestIntegration_RaceConditionIdempotency(t *testing.T) {
 	<-done
 
 	// Verify only ONE file exists (no duplicates with different content)
-	prefix := fmt.Sprintf("%d/7001-8000/%d_%d_", chainID, blockNumber, version)
+	prefix := fmt.Sprintf("7001-8000/%d_%d_", blockNumber, version)
 	objects := listS3Objects(t, ctx, infra, prefix)
 
 	// Count how many block files exist
@@ -1159,7 +1159,7 @@ func TestIntegration_PartialWriteFailure(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event)
 
 	// Wait for block file to be created
-	key := fmt.Sprintf("%d/8001-9000/%d_%d_block.json.gz", chainID, blockNumber, version)
+	key := fmt.Sprintf("8001-9000/%d_%d_block.json.gz", blockNumber, version)
 	waitForS3Object(t, ctx, infra, key, 10*time.Second)
 
 	svc.Stop()
@@ -1167,7 +1167,7 @@ func TestIntegration_PartialWriteFailure(t *testing.T) {
 	<-done
 
 	// Verify only block file exists (receipts/traces/blobs should be skipped)
-	prefix := fmt.Sprintf("%d/8001-9000/%d_%d_", chainID, blockNumber, version)
+	prefix := fmt.Sprintf("8001-9000/%d_%d_", blockNumber, version)
 	objects := listS3Objects(t, ctx, infra, prefix)
 
 	t.Logf("Files created: %v", objects)
@@ -1232,7 +1232,7 @@ func TestIntegration_CacheMissBlockData(t *testing.T) {
 	<-done
 
 	// Verify NO files were created (block data was missing)
-	prefix := fmt.Sprintf("%d/9001-10000/%d_", chainID, blockNumber)
+	prefix := fmt.Sprintf("9001-10000/%d_", blockNumber)
 	objects := listS3Objects(t, ctx, infra, prefix)
 
 	if len(objects) != 0 {
@@ -1242,6 +1242,9 @@ func TestIntegration_CacheMissBlockData(t *testing.T) {
 
 // TestIntegration_ChainIDMismatch tests that events with wrong ChainID
 // are handled correctly.
+// TestIntegration_ChainIDMismatch tests that events are processed based on
+// the event's chainID for cache lookups, but the S3 key doesn't include chainID
+// (since each chain has its own bucket).
 func TestIntegration_ChainIDMismatch(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -1259,7 +1262,8 @@ func TestIntegration_ChainIDMismatch(t *testing.T) {
 	eventChainID := int64(137) // Event is for Polygon (chain 137)
 
 	// Set up block data for the EVENT's chainID (not service's)
-	blockData := json.RawMessage(`{"number":"0x15b3","hash":"0xwrongchain"}`)
+	// The cache key uses chainID, so we need to set it for the correct chain
+	blockData := json.RawMessage(`{"number":"0x15b3","hash":"0xpolygon"}`)
 	err := infra.Cache.SetBlock(ctx, eventChainID, blockNumber, version, blockData)
 	if err != nil {
 		t.Fatalf("failed to set block in cache: %v", err)
@@ -1285,36 +1289,30 @@ func TestIntegration_ChainIDMismatch(t *testing.T) {
 		done <- svc.Run(svcCtx)
 	}()
 
-	// Publish event with DIFFERENT chainID than service
+	// Publish event with DIFFERENT chainID than service config
+	// The cache lookup will use event.ChainID, not config.ChainID
 	event := outbound.BlockEvent{
 		ChainID:     eventChainID, // Chain 137, not 1
 		BlockNumber: blockNumber,
 		Version:     version,
-		BlockHash:   "0xwrongchain",
+		BlockHash:   "0xpolygon",
 	}
 	publishBlockEvent(t, ctx, infra, event)
 
-	// Wait for file to be created
-	// The file should be written under the EVENT's chainID (137), not service's (1)
-	key := fmt.Sprintf("%d/5001-6000/%d_%d_block.json.gz", eventChainID, blockNumber, version)
+	// The S3 key no longer includes chainID (bucket is chain-specific)
+	key := fmt.Sprintf("5001-6000/%d_%d_block.json.gz", blockNumber, version)
 	waitForS3Object(t, ctx, infra, key, 10*time.Second)
 
 	svc.Stop()
 	svcCancel()
 	<-done
 
-	// Verify file was written under the EVENT's chainID path
-	objects := listS3Objects(t, ctx, infra, fmt.Sprintf("%d/", eventChainID))
-	t.Logf("Objects under chain %d: %v", eventChainID, objects)
+	// Verify file was written (without chainID prefix)
+	objects := listS3Objects(t, ctx, infra, "5001-6000/")
+	t.Logf("Objects in bucket: %v", objects)
 
 	if len(objects) == 0 {
-		t.Error("expected file to be written under event's chainID")
-	}
-
-	// Verify NO files under service's chainID
-	objectsChain1 := listS3Objects(t, ctx, infra, fmt.Sprintf("%d/5001-6000/", serviceChainID))
-	if len(objectsChain1) != 0 {
-		t.Errorf("expected no files under service chainID, got %v", objectsChain1)
+		t.Error("expected file to be written")
 	}
 }
 
@@ -1383,7 +1381,7 @@ func TestIntegration_GzipContentIntegrity(t *testing.T) {
 	}
 	publishBlockEvent(t, ctx, infra, event)
 
-	key := fmt.Sprintf("%d/6001-7000/%d_%d_block.json.gz", chainID, blockNumber, version)
+	key := fmt.Sprintf("6001-7000/%d_%d_block.json.gz", blockNumber, version)
 	waitForS3Object(t, ctx, infra, key, 10*time.Second)
 
 	svc.Stop()
@@ -1477,7 +1475,7 @@ func TestIntegration_ChainExpectationsMismatch(t *testing.T) {
 	<-done
 
 	// Verify NO files were created (expectations not met = error)
-	prefix := fmt.Sprintf("%d/4001-5000/%d_", chainID, blockNumber)
+	prefix := fmt.Sprintf("4001-5000/%d_", blockNumber)
 	objects := listS3Objects(t, ctx, infra, prefix)
 
 	if len(objects) != 0 {
@@ -1571,7 +1569,7 @@ func TestIntegration_ChainExpectationsMetSuccessfully(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event)
 
 	// Wait for all 3 files (block, receipts, traces)
-	prefix := fmt.Sprintf("%d/3001-4000/%d_%d_", chainID, blockNumber, version)
+	prefix := fmt.Sprintf("3001-4000/%d_%d_", blockNumber, version)
 	objects := waitForS3Objects(t, ctx, infra, prefix, 3, 10*time.Second)
 
 	svc.Stop()
@@ -1582,9 +1580,9 @@ func TestIntegration_ChainExpectationsMetSuccessfully(t *testing.T) {
 
 	// Verify all expected files exist
 	expectedFiles := map[string]bool{
-		fmt.Sprintf("%d/3001-4000/%d_%d_block.json.gz", chainID, blockNumber, version):    false,
-		fmt.Sprintf("%d/3001-4000/%d_%d_receipts.json.gz", chainID, blockNumber, version): false,
-		fmt.Sprintf("%d/3001-4000/%d_%d_traces.json.gz", chainID, blockNumber, version):   false,
+		fmt.Sprintf("3001-4000/%d_%d_block.json.gz", blockNumber, version):    false,
+		fmt.Sprintf("3001-4000/%d_%d_receipts.json.gz", blockNumber, version): false,
+		fmt.Sprintf("3001-4000/%d_%d_traces.json.gz", blockNumber, version):   false,
 	}
 
 	for _, obj := range objects {
@@ -1659,7 +1657,7 @@ func TestIntegration_UnknownChainNoExpectations(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event)
 
 	// Wait for block file to be created
-	key := fmt.Sprintf("%d/2001-3000/%d_%d_block.json.gz", chainID, blockNumber, version)
+	key := fmt.Sprintf("2001-3000/%d_%d_block.json.gz", blockNumber, version)
 	waitForS3Object(t, ctx, infra, key, 10*time.Second)
 
 	svc.Stop()
@@ -1667,7 +1665,7 @@ func TestIntegration_UnknownChainNoExpectations(t *testing.T) {
 	<-done
 
 	// Verify only block file was created (no expectations for chain 999)
-	prefix := fmt.Sprintf("%d/2001-3000/%d_%d_", chainID, blockNumber, version)
+	prefix := fmt.Sprintf("2001-3000/%d_%d_", blockNumber, version)
 	objects := listS3Objects(t, ctx, infra, prefix)
 
 	t.Logf("Files created for unknown chain: %v", objects)
