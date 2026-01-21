@@ -18,6 +18,29 @@ import (
 // Blocks 0-1000 go in partition "0-1000", blocks 1001-2000 go in "1001-2000", etc.
 const BlockRangeSize = 1000
 
+// ChainExpectation defines what data is expected for a specific chain.
+// If a data type is expected but missing from cache, the message will error
+// and go to DLQ rather than retry infinitely.
+type ChainExpectation struct {
+	// ExpectReceipts indicates receipts data is required for this chain.
+	ExpectReceipts bool
+	// ExpectTraces indicates traces data is required for this chain.
+	ExpectTraces bool
+	// ExpectBlobs indicates blobs data is required for this chain.
+	ExpectBlobs bool
+}
+
+// DefaultChainExpectations returns the default expectations for known chains.
+func DefaultChainExpectations() map[int64]ChainExpectation {
+	return map[int64]ChainExpectation{
+		1: { // Ethereum Mainnet
+			ExpectReceipts: true,
+			ExpectTraces:   true,
+			ExpectBlobs:    false, // Blobs are optional (post-Dencun)
+		},
+	}
+}
+
 // Config holds configuration for the backup service.
 type Config struct {
 	// ChainID is the blockchain chain ID (used for cache key prefix).
@@ -31,6 +54,10 @@ type Config struct {
 
 	// BatchSize is how many messages to fetch at once (max 10).
 	BatchSize int
+
+	// ChainExpectations maps chain IDs to their data expectations.
+	// If not set, DefaultChainExpectations() is used.
+	ChainExpectations map[int64]ChainExpectation
 
 	// Logger for the service.
 	Logger *slog.Logger
@@ -48,14 +75,15 @@ func ConfigDefaults() Config {
 
 // Service is the raw data backup service.
 type Service struct {
-	config    Config
-	consumer  outbound.SQSConsumer
-	cache     outbound.BlockCache
-	writer    outbound.S3Writer
-	logger    *slog.Logger
-	closeOnce sync.Once
-	stopCh    chan struct{}
-	wg        sync.WaitGroup
+	config            Config
+	chainExpectations map[int64]ChainExpectation
+	consumer          outbound.SQSConsumer
+	cache             outbound.BlockCache
+	writer            outbound.S3Writer
+	logger            *slog.Logger
+	closeOnce         sync.Once
+	stopCh            chan struct{}
+	wg                sync.WaitGroup
 }
 
 // NewService creates a new backup service.
@@ -90,13 +118,20 @@ func NewService(
 		config.Logger = defaults.Logger
 	}
 
+	// Set up chain expectations
+	chainExpectations := config.ChainExpectations
+	if chainExpectations == nil {
+		chainExpectations = DefaultChainExpectations()
+	}
+
 	return &Service{
-		config:   config,
-		consumer: consumer,
-		cache:    cache,
-		writer:   writer,
-		logger:   config.Logger.With("component", "raw-data-backup"),
-		stopCh:   make(chan struct{}),
+		config:            config,
+		chainExpectations: chainExpectations,
+		consumer:          consumer,
+		cache:             cache,
+		writer:            writer,
+		logger:            config.Logger.With("component", "raw-data-backup"),
+		stopCh:            make(chan struct{}),
 	}, nil
 }
 
@@ -237,9 +272,22 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) e
 		return fmt.Errorf("failed to get blobs from cache: %w", err)
 	}
 
-	// Check if we have at least block data
+	// Check if we have at least block data (always required)
 	if blockData == nil {
 		return fmt.Errorf("block data not found in cache for block %d", event.BlockNumber)
+	}
+
+	// Validate against chain expectations
+	if expectation, ok := s.chainExpectations[event.ChainID]; ok {
+		if expectation.ExpectReceipts && receiptsData == nil {
+			return fmt.Errorf("receipts data expected but not found in cache for chain %d block %d", event.ChainID, event.BlockNumber)
+		}
+		if expectation.ExpectTraces && tracesData == nil {
+			return fmt.Errorf("traces data expected but not found in cache for chain %d block %d", event.ChainID, event.BlockNumber)
+		}
+		if expectation.ExpectBlobs && blobsData == nil {
+			return fmt.Errorf("blobs data expected but not found in cache for chain %d block %d", event.ChainID, event.BlockNumber)
+		}
 	}
 
 	// Calculate the partition (block range)

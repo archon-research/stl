@@ -337,6 +337,15 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// blockOnlyExpectations returns chain expectations where only block data is required.
+// Use this for unit tests that only set block data in cache.
+func blockOnlyExpectations() map[int64]ChainExpectation {
+	return map[int64]ChainExpectation{
+		1:     {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+		42161: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+	}
+}
+
 func createBlockEvent(chainID, blockNumber int64, version int) outbound.BlockEvent {
 	return outbound.BlockEvent{
 		ChainID:        chainID,
@@ -602,9 +611,10 @@ func TestProcessMessage_SNSWrapped(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	// Set up cache with block data
@@ -635,9 +645,10 @@ func TestProcessMessage_BlockOnlyNoOptionalData(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	// Set up cache with ONLY block data (no receipts, traces, blobs)
@@ -825,9 +836,10 @@ func TestProcessMessage_S3WriteError(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -853,9 +865,10 @@ func TestProcessMessage_S3ExistsError(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -881,9 +894,10 @@ func TestProcessMessage_Idempotent_SkipsExistingFile(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -913,9 +927,10 @@ func TestProcessMessage_DifferentVersionsAreSeparate(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -950,9 +965,10 @@ func TestProcessMessage_DifferentChainsAreSeparate(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -991,11 +1007,12 @@ func TestRun_ProcessesMessages(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID:   1,
-		Bucket:    "test-bucket",
-		Workers:   1,
-		BatchSize: 1,
-		Logger:    testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		Workers:           1,
+		BatchSize:         1,
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -1225,11 +1242,12 @@ func TestRun_DeletesMessageOnSuccess(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID:   1,
-		Bucket:    "test-bucket",
-		Workers:   1,
-		BatchSize: 1,
-		Logger:    testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		Workers:           1,
+		BatchSize:         1,
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -1277,11 +1295,12 @@ func TestRun_HandlesDeleteMessageError(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID:   1,
-		Bucket:    "test-bucket",
-		Workers:   1,
-		BatchSize: 1,
-		Logger:    testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		Workers:           1,
+		BatchSize:         1,
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -1338,11 +1357,12 @@ func TestRun_MultipleWorkersProcessConcurrently(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID:   1,
-		Bucket:    "test-bucket",
-		Workers:   4,
-		BatchSize: 10,
-		Logger:    testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		Workers:           4,
+		BatchSize:         10,
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -1411,9 +1431,10 @@ func TestProcessMessage_ZeroBlockNumber(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 0, 0)
@@ -1440,9 +1461,10 @@ func TestProcessMessage_LargeBlockNumber(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	blockNum := int64(20000000) // Block 20 million
@@ -1472,9 +1494,10 @@ func TestProcessMessage_HighVersion(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	// High version number (many reorgs)
@@ -1501,9 +1524,10 @@ func TestProcessMessage_EmptyBlockData(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -1525,9 +1549,10 @@ func TestProcessMessage_LargeBlockData(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -1602,9 +1627,10 @@ func BenchmarkProcessMessage(b *testing.B) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            testLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -1636,7 +1662,10 @@ func TestProcessMessage_ReceiptsWriteError(t *testing.T) {
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainExpectations: map[int64]ChainExpectation{
+			1: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false},
+		},
+		Logger: testLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -1665,7 +1694,10 @@ func TestProcessMessage_TracesWriteError(t *testing.T) {
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainExpectations: map[int64]ChainExpectation{
+			1: {ExpectReceipts: false, ExpectTraces: true, ExpectBlobs: false},
+		},
+		Logger: testLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -1694,7 +1726,10 @@ func TestProcessMessage_BlobsWriteError(t *testing.T) {
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		ChainExpectations: map[int64]ChainExpectation{
+			1: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: true},
+		},
+		Logger: testLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)

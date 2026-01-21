@@ -76,7 +76,8 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	redisContainer, redisCfg := startRedis(t, ctx)
 	infra.containers = append(infra.containers, redisContainer)
 	cleanupFuncs = append(cleanupFuncs, func() {
-		if err := redisContainer.Terminate(ctx); err != nil {
+		// Use background context for cleanup since test context may be canceled
+		if err := redisContainer.Terminate(context.Background()); err != nil {
 			logger.Error("failed to terminate redis container", "error", err)
 		}
 	})
@@ -102,7 +103,8 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	localstackContainer, localstackCfg := startLocalStack(t, ctx)
 	infra.containers = append(infra.containers, localstackContainer)
 	cleanupFuncs = append(cleanupFuncs, func() {
-		if err := localstackContainer.Terminate(ctx); err != nil {
+		// Use background context for cleanup since test context may be canceled
+		if err := localstackContainer.Terminate(context.Background()); err != nil {
 			logger.Error("failed to terminate localstack container", "error", err)
 		}
 	})
@@ -585,13 +587,16 @@ func TestIntegration_MultipleBlocksProcessedConcurrently(t *testing.T) {
 		}
 	}
 
-	// Create service with multiple workers
+	// Create service with multiple workers - only expect block data
 	svc, err := NewService(Config{
 		ChainID:   chainID,
 		Bucket:    infra.BucketName,
 		Workers:   4,
 		BatchSize: 10,
-		Logger:    infra.Logger,
+		ChainExpectations: map[int64]ChainExpectation{
+			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+		},
+		Logger: infra.Logger,
 	}, infra.Consumer, infra.Cache, infra.Writer)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -661,7 +666,10 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 		Bucket:    infra.BucketName,
 		Workers:   1,
 		BatchSize: 10,
-		Logger:    infra.Logger,
+		ChainExpectations: map[int64]ChainExpectation{
+			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+		},
+		Logger: infra.Logger,
 	}, infra.Consumer, infra.Cache, infra.Writer)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -761,7 +769,10 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 		Bucket:    infra.BucketName,
 		Workers:   2,
 		BatchSize: 10,
-		Logger:    infra.Logger,
+		ChainExpectations: map[int64]ChainExpectation{
+			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+		},
+		Logger: infra.Logger,
 	}, infra.Consumer, infra.Cache, infra.Writer)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -876,7 +887,10 @@ func TestIntegration_LargeBlockData(t *testing.T) {
 		Bucket:    infra.BucketName,
 		Workers:   1,
 		BatchSize: 10,
-		Logger:    infra.Logger,
+		ChainExpectations: map[int64]ChainExpectation{
+			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+		},
+		Logger: infra.Logger,
 	}, infra.Consumer, infra.Cache, infra.Writer)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -936,7 +950,10 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 		Bucket:    infra.BucketName,
 		Workers:   2,
 		BatchSize: 10,
-		Logger:    infra.Logger,
+		ChainExpectations: map[int64]ChainExpectation{
+			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+		},
+		Logger: infra.Logger,
 	}, infra.Consumer, infra.Cache, infra.Writer)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -1012,7 +1029,10 @@ func TestIntegration_RaceConditionIdempotency(t *testing.T) {
 		Bucket:    infra.BucketName,
 		Workers:   8, // Many workers to maximize race chances
 		BatchSize: 10,
-		Logger:    infra.Logger,
+		ChainExpectations: map[int64]ChainExpectation{
+			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+		},
+		Logger: infra.Logger,
 	}, infra.Consumer, infra.Cache, infra.Writer)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -1115,7 +1135,10 @@ func TestIntegration_PartialWriteFailure(t *testing.T) {
 		Bucket:    infra.BucketName,
 		Workers:   1,
 		BatchSize: 10,
-		Logger:    infra.Logger,
+		ChainExpectations: map[int64]ChainExpectation{
+			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+		},
+		Logger: infra.Logger,
 	}, infra.Consumer, infra.Cache, infra.Writer)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -1178,7 +1201,10 @@ func TestIntegration_CacheMissBlockData(t *testing.T) {
 		Bucket:    infra.BucketName,
 		Workers:   1,
 		BatchSize: 10,
-		Logger:    infra.Logger,
+		ChainExpectations: map[int64]ChainExpectation{
+			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+		},
+		Logger: infra.Logger,
 	}, infra.Consumer, infra.Cache, infra.Writer)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -1244,7 +1270,10 @@ func TestIntegration_ChainIDMismatch(t *testing.T) {
 		Bucket:    infra.BucketName,
 		Workers:   1,
 		BatchSize: 10,
-		Logger:    infra.Logger,
+		ChainExpectations: map[int64]ChainExpectation{
+			eventChainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+		},
+		Logger: infra.Logger,
 	}, infra.Consumer, infra.Cache, infra.Writer)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -1331,7 +1360,10 @@ func TestIntegration_GzipContentIntegrity(t *testing.T) {
 		Bucket:    infra.BucketName,
 		Workers:   1,
 		BatchSize: 10,
-		Logger:    infra.Logger,
+		ChainExpectations: map[int64]ChainExpectation{
+			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+		},
+		Logger: infra.Logger,
 	}, infra.Consumer, infra.Cache, infra.Writer)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -1375,5 +1407,272 @@ func TestIntegration_GzipContentIntegrity(t *testing.T) {
 	txs, ok := recovered["transactions"].([]interface{})
 	if !ok || len(txs) != 2 {
 		t.Errorf("transactions mismatch: expected 2, got %v", recovered["transactions"])
+	}
+}
+
+// TestIntegration_ChainExpectationsMismatch tests that when chain expectations
+// are not met (e.g., receipts expected but missing), the message errors and
+// goes to DLQ rather than retrying infinitely.
+func TestIntegration_ChainExpectationsMismatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupIntegrationInfra(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	blockNumber := int64(4444)
+	version := 0
+	chainID := int64(1) // Chain 1 expects receipts and traces by default
+
+	// Set up ONLY block data - missing receipts and traces that chain 1 expects
+	blockData := json.RawMessage(`{"number":"0x115c","hash":"0xexpectfail"}`)
+	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, version, blockData)
+	if err != nil {
+		t.Fatalf("failed to set block in cache: %v", err)
+	}
+	// Intentionally NOT setting receipts or traces
+
+	// Create service with explicit chain expectations
+	svc, err := NewService(Config{
+		ChainID:   chainID,
+		Bucket:    infra.BucketName,
+		Workers:   1,
+		BatchSize: 10,
+		ChainExpectations: map[int64]ChainExpectation{
+			1: {
+				ExpectReceipts: true,
+				ExpectTraces:   true,
+				ExpectBlobs:    false,
+			},
+		},
+		Logger: infra.Logger,
+	}, infra.Consumer, infra.Cache, infra.Writer)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	svcCtx, svcCancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.Run(svcCtx)
+	}()
+
+	event := outbound.BlockEvent{
+		ChainID:     chainID,
+		BlockNumber: blockNumber,
+		Version:     version,
+		BlockHash:   "0xexpectfail",
+	}
+	publishBlockEvent(t, ctx, infra, event)
+
+	// Wait for processing attempt - message should fail and NOT be deleted
+	time.Sleep(2 * time.Second)
+
+	svc.Stop()
+	svcCancel()
+	<-done
+
+	// Verify NO files were created (expectations not met = error)
+	prefix := fmt.Sprintf("%d/4001-5000/%d_", chainID, blockNumber)
+	objects := listS3Objects(t, ctx, infra, prefix)
+
+	if len(objects) != 0 {
+		t.Errorf("expected 0 files (expectations not met), got %d: %v", len(objects), objects)
+	}
+
+	// Verify the message is still in the queue (not acknowledged)
+	// It would go to DLQ after max receives in production
+	attrs, err := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl: aws.String(infra.BackupQueueURL),
+		AttributeNames: []sqstypes.QueueAttributeName{
+			sqstypes.QueueAttributeNameApproximateNumberOfMessagesNotVisible,
+		},
+	})
+	if err != nil {
+		t.Logf("Could not check queue attributes: %v", err)
+	} else {
+		notVisible := attrs.Attributes["ApproximateNumberOfMessagesNotVisible"]
+		t.Logf("Messages not visible (in flight/failed): %s", notVisible)
+		// Message should be in flight (not visible) since it wasn't deleted
+	}
+}
+
+// TestIntegration_ChainExpectationsMetSuccessfully tests that when all chain
+// expectations are met, the backup succeeds.
+func TestIntegration_ChainExpectationsMetSuccessfully(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupIntegrationInfra(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	blockNumber := int64(3333)
+	version := 0
+	chainID := int64(1)
+
+	// Set up ALL expected data for chain 1
+	blockData := json.RawMessage(`{"number":"0xd05","hash":"0xexpectsuccess"}`)
+	receiptsData := json.RawMessage(`[{"status":"0x1"}]`)
+	tracesData := json.RawMessage(`[{"action":{"callType":"call"}}]`)
+
+	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, version, blockData)
+	if err != nil {
+		t.Fatalf("failed to set block in cache: %v", err)
+	}
+	err = infra.Cache.SetReceipts(ctx, chainID, blockNumber, version, receiptsData)
+	if err != nil {
+		t.Fatalf("failed to set receipts in cache: %v", err)
+	}
+	err = infra.Cache.SetTraces(ctx, chainID, blockNumber, version, tracesData)
+	if err != nil {
+		t.Fatalf("failed to set traces in cache: %v", err)
+	}
+	// Note: NOT setting blobs since ExpectBlobs=false for chain 1
+
+	// Create service with chain expectations
+	svc, err := NewService(Config{
+		ChainID:   chainID,
+		Bucket:    infra.BucketName,
+		Workers:   1,
+		BatchSize: 10,
+		ChainExpectations: map[int64]ChainExpectation{
+			1: {
+				ExpectReceipts: true,
+				ExpectTraces:   true,
+				ExpectBlobs:    false,
+			},
+		},
+		Logger: infra.Logger,
+	}, infra.Consumer, infra.Cache, infra.Writer)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	svcCtx, svcCancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.Run(svcCtx)
+	}()
+
+	event := outbound.BlockEvent{
+		ChainID:     chainID,
+		BlockNumber: blockNumber,
+		Version:     version,
+		BlockHash:   "0xexpectsuccess",
+	}
+	publishBlockEvent(t, ctx, infra, event)
+
+	// Wait for all 3 files (block, receipts, traces)
+	prefix := fmt.Sprintf("%d/3001-4000/%d_%d_", chainID, blockNumber, version)
+	objects := waitForS3Objects(t, ctx, infra, prefix, 3, 10*time.Second)
+
+	svc.Stop()
+	svcCancel()
+	<-done
+
+	t.Logf("Files created: %v", objects)
+
+	// Verify all expected files exist
+	expectedFiles := map[string]bool{
+		fmt.Sprintf("%d/3001-4000/%d_%d_block.json.gz", chainID, blockNumber, version):    false,
+		fmt.Sprintf("%d/3001-4000/%d_%d_receipts.json.gz", chainID, blockNumber, version): false,
+		fmt.Sprintf("%d/3001-4000/%d_%d_traces.json.gz", chainID, blockNumber, version):   false,
+	}
+
+	for _, obj := range objects {
+		if _, ok := expectedFiles[obj]; ok {
+			expectedFiles[obj] = true
+		}
+	}
+
+	for file, found := range expectedFiles {
+		if !found {
+			t.Errorf("expected file not found: %s", file)
+		}
+	}
+}
+
+// TestIntegration_UnknownChainNoExpectations tests that chains without
+// explicit expectations only require block data.
+func TestIntegration_UnknownChainNoExpectations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupIntegrationInfra(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	blockNumber := int64(2222)
+	version := 0
+	chainID := int64(999) // Unknown chain - no expectations defined
+
+	// Set up ONLY block data
+	blockData := json.RawMessage(`{"number":"0x8ae","hash":"0xunknownchain"}`)
+	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, version, blockData)
+	if err != nil {
+		t.Fatalf("failed to set block in cache: %v", err)
+	}
+	// No receipts, traces, or blobs - should still succeed for unknown chain
+
+	// Create service with expectations only for chain 1
+	svc, err := NewService(Config{
+		ChainID:   chainID,
+		Bucket:    infra.BucketName,
+		Workers:   1,
+		BatchSize: 10,
+		ChainExpectations: map[int64]ChainExpectation{
+			1: { // Only chain 1 has expectations
+				ExpectReceipts: true,
+				ExpectTraces:   true,
+				ExpectBlobs:    false,
+			},
+		},
+		Logger: infra.Logger,
+	}, infra.Consumer, infra.Cache, infra.Writer)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	svcCtx, svcCancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.Run(svcCtx)
+	}()
+
+	event := outbound.BlockEvent{
+		ChainID:     chainID,
+		BlockNumber: blockNumber,
+		Version:     version,
+		BlockHash:   "0xunknownchain",
+	}
+	publishBlockEvent(t, ctx, infra, event)
+
+	// Wait for block file to be created
+	key := fmt.Sprintf("%d/2001-3000/%d_%d_block.json.gz", chainID, blockNumber, version)
+	waitForS3Object(t, ctx, infra, key, 10*time.Second)
+
+	svc.Stop()
+	svcCancel()
+	<-done
+
+	// Verify only block file was created (no expectations for chain 999)
+	prefix := fmt.Sprintf("%d/2001-3000/%d_%d_", chainID, blockNumber, version)
+	objects := listS3Objects(t, ctx, infra, prefix)
+
+	t.Logf("Files created for unknown chain: %v", objects)
+
+	if len(objects) != 1 {
+		t.Errorf("expected 1 file (block only), got %d: %v", len(objects), objects)
 	}
 }
