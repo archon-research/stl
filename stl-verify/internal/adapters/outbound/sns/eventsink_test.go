@@ -302,50 +302,70 @@ func TestConfigDefaults(t *testing.T) {
 
 func TestIsRetryableError(t *testing.T) {
 	tests := []struct {
-		name      string
-		err       error
-		retryable bool
+		name           string
+		err            error
+		parentCanceled bool
+		retryable      bool
 	}{
 		{
-			name:      "nil error",
-			err:       nil,
-			retryable: false,
+			name:           "nil error",
+			err:            nil,
+			parentCanceled: false,
+			retryable:      false,
 		},
 		{
-			name:      "context cancelled",
-			err:       context.Canceled,
-			retryable: false,
+			name:           "context cancelled",
+			err:            context.Canceled,
+			parentCanceled: false,
+			retryable:      false,
 		},
 		{
-			name:      "context deadline exceeded",
-			err:       context.DeadlineExceeded,
-			retryable: false,
+			name:           "context deadline exceeded - publish timeout",
+			err:            context.DeadlineExceeded,
+			parentCanceled: false,
+			retryable:      true, // Publish timeout IS retryable
 		},
 		{
-			name:      "throttle exception",
-			err:       &types.ThrottledException{Message: aws.String("throttled")},
-			retryable: true,
+			name:           "context deadline exceeded - parent cancelled",
+			err:            context.DeadlineExceeded,
+			parentCanceled: true,
+			retryable:      false, // Parent cancelled is NOT retryable
 		},
 		{
-			name:      "internal error",
-			err:       &types.InternalErrorException{Message: aws.String("internal")},
-			retryable: true,
+			name:           "throttle exception",
+			err:            &types.ThrottledException{Message: aws.String("throttled")},
+			parentCanceled: false,
+			retryable:      true,
 		},
 		{
-			name:      "KMS throttling",
-			err:       &types.KMSThrottlingException{Message: aws.String("kms throttled")},
-			retryable: true,
+			name:           "internal error",
+			err:            &types.InternalErrorException{Message: aws.String("internal")},
+			parentCanceled: false,
+			retryable:      true,
 		},
 		{
-			name:      "generic error",
-			err:       errors.New("some error"),
-			retryable: true,
+			name:           "KMS throttling",
+			err:            &types.KMSThrottlingException{Message: aws.String("kms throttled")},
+			parentCanceled: false,
+			retryable:      true,
+		},
+		{
+			name:           "generic error",
+			err:            errors.New("some error"),
+			parentCanceled: false,
+			retryable:      true,
+		},
+		{
+			name:           "generic error - but parent cancelled",
+			err:            errors.New("some error"),
+			parentCanceled: true,
+			retryable:      false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isRetryableError(tt.err)
+			result := isRetryableError(tt.err, tt.parentCanceled)
 			if result != tt.retryable {
 				t.Errorf("expected isRetryableError=%v, got %v", tt.retryable, result)
 			}
@@ -589,12 +609,17 @@ func TestPublish_BackoffCappedAtMax(t *testing.T) {
 	}
 }
 
-func TestPublish_DeadlineExceededNotRetryable(t *testing.T) {
+func TestPublish_DeadlineExceededIsRetryable(t *testing.T) {
+	// Publish timeout (DeadlineExceeded) IS retryable because it indicates
+	// a transient network issue with the SNS endpoint
 	callCount := 0
 	client := &mockSNSClient{
 		publishFunc: func(ctx context.Context, params *sns.PublishInput, optFns ...func(*sns.Options)) (*sns.PublishOutput, error) {
 			callCount++
-			return nil, context.DeadlineExceeded
+			if callCount < 3 {
+				return nil, context.DeadlineExceeded
+			}
+			return &sns.PublishOutput{MessageId: aws.String("success")}, nil
 		},
 	}
 
@@ -611,16 +636,49 @@ func TestPublish_DeadlineExceededNotRetryable(t *testing.T) {
 
 	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100}
 	err = sink.Publish(context.Background(), event)
+	if err != nil {
+		t.Fatalf("expected success after retry, got error: %v", err)
+	}
+
+	// Should retry and succeed on 3rd call
+	if callCount != 3 {
+		t.Errorf("expected 3 calls (2 retries before success), got %d", callCount)
+	}
+}
+
+func TestPublish_ParentContextCancelledNotRetryable(t *testing.T) {
+	// When parent context is cancelled (shutdown signal), we should NOT retry
+	callCount := 0
+	ctx, cancel := context.WithCancel(context.Background())
+
+	client := &mockSNSClient{
+		publishFunc: func(ctx context.Context, params *sns.PublishInput, optFns ...func(*sns.Options)) (*sns.PublishOutput, error) {
+			callCount++
+			// Cancel the parent context to simulate shutdown
+			cancel()
+			return nil, context.DeadlineExceeded
+		},
+	}
+
+	sink, err := NewEventSink(client, Config{
+		TopicARN:       testTopicARN,
+		MaxRetries:     3,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     10 * time.Millisecond,
+		BackoffFactor:  2.0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100}
+	err = sink.Publish(ctx, event)
 	if err == nil {
-		t.Fatal("expected error for deadline exceeded")
+		t.Fatal("expected error when parent context is cancelled")
 	}
 
-	// Should fail immediately without retrying
+	// Should fail immediately without retrying because parent context is cancelled
 	if callCount != 1 {
-		t.Errorf("expected 1 call (no retries for deadline exceeded), got %d", callCount)
-	}
-
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("expected error to wrap context.DeadlineExceeded, got: %v", err)
+		t.Errorf("expected 1 call (no retries when parent cancelled), got %d", callCount)
 	}
 }

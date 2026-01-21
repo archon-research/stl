@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"syscall"
 	"time"
@@ -29,17 +30,59 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
 )
 
+// Build-time variables - can be set via ldflags, otherwise populated from Go's build info
+var (
+	GitCommit string
+	GitBranch string
+	BuildTime string
+)
+
+func init() {
+	// Use Go's built-in build info (Go 1.18+) if ldflags weren't provided
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				if GitCommit == "" {
+					GitCommit = setting.Value
+				}
+			case "vcs.time":
+				if BuildTime == "" {
+					BuildTime = setting.Value
+				}
+			}
+		}
+	}
+}
+
 func main() {
 	// Parse command-line flags
 	disableBlobs := flag.Bool("disable-blobs", false, "Disable fetching blob sidecars")
 	pprofAddr := flag.String("pprof", "", "Enable pprof profiling server (e.g., ':6060')")
+	showVersion := flag.Bool("version", false, "Show version information and exit")
 	flag.Parse()
+
+	// Show version if requested
+	if *showVersion {
+		fmt.Printf("stl-watcher\n")
+		fmt.Printf("  Commit:     %s\n", GitCommit)
+		fmt.Printf("  Branch:     %s\n", GitBranch)
+		fmt.Printf("  Build Time: %s\n", BuildTime)
+		os.Exit(0)
+	}
 
 	// Set up structured logging
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(logger)
+
+	// Log version info on startup
+	logger.Info("starting stl-watcher",
+		"commit", GitCommit,
+		"branch", GitBranch,
+		"buildTime", BuildTime,
+	)
 
 	// Start pprof server if enabled
 	if *pprofAddr != "" {
@@ -178,14 +221,29 @@ func main() {
 	snsTopicARN := requireEnv("AWS_SNS_TOPIC_ARN")
 
 	// Configure AWS SDK for LocalStack or production
-	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+	// In production (ECS/Fargate), use the default credential chain which picks up IAM role credentials.
+	// For local development with LocalStack, use static credentials from environment variables.
+	awsConfigOptions := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(awsRegion),
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			getEnv("AWS_ACCESS_KEY_ID", "test"),
-			getEnv("AWS_SECRET_ACCESS_KEY", "test"),
-			"",
-		)),
-	)
+	}
+
+	// Only use static credentials if explicitly set (for LocalStack)
+	// In ECS/Fargate, these won't be set and the SDK will use the IAM role
+	if accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID"); accessKeyID != "" {
+		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+		awsConfigOptions = append(awsConfigOptions,
+			awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+				accessKeyID,
+				secretKey,
+				"",
+			)),
+		)
+		logger.Debug("using static AWS credentials from environment")
+	} else {
+		logger.Debug("using default AWS credential chain (IAM role)")
+	}
+
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), awsConfigOptions...)
 	if err != nil {
 		logger.Error("failed to load AWS config", "error", err)
 		os.Exit(1)

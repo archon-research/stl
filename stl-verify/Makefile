@@ -4,7 +4,9 @@
 .PHONY: all test lint vet fmt tidy check clean cover run help \
         dev-up dev-down dev-ips \
         tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
-        tf-init-staging tf-validate-staging tf-plan-staging tf-apply-staging tf-check-staging
+        tf-init-staging tf-validate-staging tf-plan-staging tf-apply-staging tf-check-staging \
+        ecr-login docker-build docker-push docker-release \
+        docker-build-staging docker-push-staging docker-release-staging
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -154,13 +156,14 @@ dev-ips:
 
 INFRA_DIR := ../infra
 
-# Helper to load TigerData credentials from Secrets Manager
-# This is needed because provider configuration happens before data sources are read
-define load_tigerdata_creds
-	$(eval SECRET_JSON := $(shell aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --query SecretString --output text 2>/dev/null || echo '{}'))
-	$(eval export TF_VAR_tigerdata_project_id := $(shell echo '$(SECRET_JSON)' | jq -r '.project_id // empty'))
-	$(eval export TF_VAR_tigerdata_access_key := $(shell echo '$(SECRET_JSON)' | jq -r '.access_key // empty'))
-	$(eval export TF_VAR_tigerdata_secret_key := $(shell echo '$(SECRET_JSON)' | jq -r '.secret_key // empty'))
+# Helper script to load TigerData credentials and run tofu
+# This exports credentials directly in the shell to ensure they're passed to tofu
+define run_tofu_with_creds
+	@SECRET_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --query SecretString --output text 2>/dev/null || echo '{}') && \
+	export TF_VAR_tigerdata_project_id=$$(echo "$$SECRET_JSON" | jq -r '.project_id // empty') && \
+	export TF_VAR_tigerdata_access_key=$$(echo "$$SECRET_JSON" | jq -r '.access_key // empty') && \
+	export TF_VAR_tigerdata_secret_key=$$(echo "$$SECRET_JSON" | jq -r '.secret_key // empty') && \
+	cd $(INFRA_DIR) && $(1)
 endef
 
 # Initialize Terraform for an environment
@@ -173,22 +176,19 @@ tf-init:
 # Usage: make tf-validate ENV=sentinelstaging
 tf-validate:
 	@echo "==> Validating Terraform for $(ENV)..."
-	@$(call load_tigerdata_creds)
-	cd $(INFRA_DIR) && tofu validate
+	$(call run_tofu_with_creds,tofu validate)
 
 # Plan Terraform changes
 # Usage: make tf-plan ENV=sentinelstaging
 tf-plan:
 	@echo "==> Planning Terraform for $(ENV)..."
-	@$(call load_tigerdata_creds)
-	cd $(INFRA_DIR) && tofu plan -var-file=environments/$(ENV).tfvars
+	$(call run_tofu_with_creds,tofu plan -var-file=environments/$(ENV).tfvars)
 
 # Apply Terraform changes
 # Usage: make tf-apply ENV=sentinelstaging
 tf-apply:
 	@echo "==> Applying Terraform for $(ENV)..."
-	@$(call load_tigerdata_creds)
-	cd $(INFRA_DIR) && tofu apply -var-file=environments/$(ENV).tfvars
+	$(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars)
 
 # Full Terraform workflow: init, validate, plan
 # Usage: make tf-check ENV=sentinelstaging
@@ -211,3 +211,73 @@ tf-apply-staging:
 	@$(MAKE) tf-apply ENV=sentinelstaging
 
 tf-check-staging: tf-init-staging tf-validate-staging tf-plan-staging
+
+# =============================================================================
+# Docker Build & Push
+# =============================================================================
+
+# AWS Account ID and Region (override via environment or command line)
+AWS_ACCOUNT_ID ?= $(shell aws sts get-caller-identity --query Account --output text 2>/dev/null)
+AWS_REGION ?= eu-west-1
+
+# ECR repository URL
+ECR_REPO = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-watcher
+
+# Git info for image tagging and build metadata
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+GIT_COMMIT_FULL ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
+GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Image tag (default to git sha, can override)
+IMAGE_TAG ?= $(GIT_COMMIT)
+
+# Login to ECR
+ecr-login:
+	@echo "==> Logging in to ECR..."
+	aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
+
+# Build Docker image for ARM64 (Fargate Graviton)
+docker-build:
+	@echo "==> Building Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-t $(ECR_REPO):$(IMAGE_TAG) \
+		-t $(ECR_REPO):latest \
+		--load .
+
+# Push Docker image to ECR
+docker-push: ecr-login
+	@echo "==> Pushing Docker image to ECR..."
+	docker push $(ECR_REPO):$(IMAGE_TAG)
+	docker push $(ECR_REPO):latest
+
+# Build and push in one step
+docker-release: docker-build docker-push
+	@echo "==> Docker image released: $(ECR_REPO):$(IMAGE_TAG)"
+
+# Clean up local Docker images
+docker-clean:
+	@echo "==> Cleaning up Docker images..."
+	-docker rmi $$(docker images --filter=reference='*stl-*-watcher*' -q) 2>/dev/null || true
+	-docker builder prune -f
+	@echo "==> Docker cleanup complete"
+
+# =============================================================================
+# Sentinelstaging Docker Shortcuts
+# =============================================================================
+
+docker-build-staging:
+	@$(MAKE) docker-build ENV=sentinelstaging
+
+docker-push-staging:
+	@$(MAKE) docker-push ENV=sentinelstaging
+
+docker-release-staging:
+	@$(MAKE) docker-release ENV=sentinelstaging

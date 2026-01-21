@@ -89,3 +89,56 @@ variable "redis_snapshot_retention" {
   description = "Number of days to retain snapshots. 0 disables snapshots"
   type        = number
 }
+
+# -----------------------------------------------------------------------------
+# ECS Watcher Configuration
+# -----------------------------------------------------------------------------
+
+variable "watcher_cpu" {
+  description = "CPU units for Watcher task (256, 512, 1024, 2048, 4096)"
+  type        = number
+  default     = 256
+}
+
+variable "watcher_memory" {
+  description = "Memory for Watcher task in MB (512, 1024, 2048, etc.)"
+  type        = number
+  default     = 512
+}
+
+variable "watcher_desired_count" {
+  description = "Number of Watcher tasks to run (should be 1 - singleton)"
+  type        = number
+  default     = 1
+}
+
+variable "watcher_image_tag" {
+  description = "Docker image tag for Watcher"
+  type        = string
+  default     = "latest"
+}
+
+variable "chain_id" {
+  description = "Blockchain chain ID (1 = Ethereum mainnet)"
+  type        = number
+  default     = 1
+}
+
+variable "alchemy_api_key" {
+  description = "Alchemy API key. Set via TF_VAR_alchemy_api_key env var."
+  type        = string
+  sensitive   = true
+  default     = "placeholder" # Will be updated in Secrets Manager
+}
+
+variable "alchemy_http_url" {
+  description = "Alchemy HTTP RPC base URL"
+  type        = string
+  default     = "https://eth-mainnet.g.alchemy.com/v2"
+}
+
+variable "alchemy_ws_url" {
+  description = "Alchemy WebSocket RPC base URL"
+  type        = string
+  default     = "wss://eth-mainnet.g.alchemy.com/v2"
+}
