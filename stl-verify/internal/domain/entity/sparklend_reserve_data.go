@@ -7,10 +7,11 @@ import (
 
 // SparkLendReserveData represents the state of a SparkLend reserve at a specific block.
 type SparkLendReserveData struct {
-	ID          int64
-	ProtocolID  int64
-	TokenID     int64
-	BlockNumber int64
+	ID           int64
+	ProtocolID   int64
+	TokenID      int64
+	BlockNumber  int64
+	BlockVersion int
 	// Reserve state
 	Unbacked                *big.Int
 	AccruedToTreasuryScaled *big.Int

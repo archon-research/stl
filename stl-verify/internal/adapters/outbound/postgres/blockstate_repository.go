@@ -1,4 +1,4 @@
-// blockstate.go provides a PostgreSQL implementation of BlockStateRepository.
+// blockstate_repository.go provides a PostgreSQL implementation of BlockStateRepository.
 //
 // This adapter persists block states and reorg events to PostgreSQL for
 // durable storage. It supports:
