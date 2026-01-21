@@ -6,7 +6,9 @@
         tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
         tf-init-staging tf-validate-staging tf-plan-staging tf-apply-staging tf-check-staging \
         ecr-login docker-build docker-push docker-release \
-        docker-build-staging docker-push-staging docker-release-staging
+        docker-build-staging docker-push-staging docker-release-staging \
+        docker-build-backup docker-push-backup docker-release-backup \
+        docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -281,3 +283,49 @@ docker-push-staging:
 
 docker-release-staging:
 	@$(MAKE) docker-release ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - Backup Worker
+# =============================================================================
+
+# ECR repository URL for backup worker
+ECR_REPO_BACKUP = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-backup-worker
+
+# Build Docker image for backup worker (ARM64 for Fargate Graviton)
+docker-build-backup:
+	@echo "==> Building Backup Worker Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_BACKUP)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.backup \
+		-t $(ECR_REPO_BACKUP):$(IMAGE_TAG) \
+		-t $(ECR_REPO_BACKUP):latest \
+		--load .
+
+# Push backup worker Docker image to ECR
+docker-push-backup: ecr-login
+	@echo "==> Pushing Backup Worker Docker image to ECR..."
+	docker push $(ECR_REPO_BACKUP):$(IMAGE_TAG)
+	docker push $(ECR_REPO_BACKUP):latest
+
+# Build and push backup worker in one step
+docker-release-backup: docker-build-backup docker-push-backup
+	@echo "==> Backup Worker Docker image released: $(ECR_REPO_BACKUP):$(IMAGE_TAG)"
+
+# =============================================================================
+# Sentinelstaging Backup Worker Docker Shortcuts
+# =============================================================================
+
+docker-build-backup-staging:
+	@$(MAKE) docker-build-backup ENV=sentinelstaging
+
+docker-push-backup-staging:
+	@$(MAKE) docker-push-backup ENV=sentinelstaging
+
+docker-release-backup-staging:
+	@$(MAKE) docker-release-backup ENV=sentinelstaging
