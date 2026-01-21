@@ -48,8 +48,8 @@ alchemy_ws_url   = "wss://eth-mainnet.g.alchemy.com/v2"
 # -----------------------------------------------------------------------------
 
 # Staging: minimal resources for backup worker
-backup_worker_cpu           = 256      # 0.25 vCPU
-backup_worker_memory        = 512      # 512 MB
+backup_worker_cpu           = 2048     # 2 vCPU
+backup_worker_memory        = 4096     # 4 GB
 backup_worker_desired_count = 1        # Single instance
 backup_worker_image_tag     = "latest" # Override in CI/CD
 backup_worker_workers       = 2        # Concurrent workers per task
