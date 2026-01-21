@@ -2815,7 +2815,10 @@ func TestFetchBlockData_ReorgBetweenHeaderAndFetch(t *testing.T) {
 	}
 
 	// Verify the cached block has the correct hash
-	cachedData := cache.GetBlock(1, 100, 0)
+	cachedData, err := cache.GetBlock(context.Background(), 1, 100, 0)
+	if err != nil {
+		t.Fatalf("GetBlock failed: %v", err)
+	}
 	if cachedData == nil {
 		t.Fatal("expected block to be cached")
 	}

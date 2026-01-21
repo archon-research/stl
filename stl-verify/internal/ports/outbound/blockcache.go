@@ -21,6 +21,22 @@ type BlockCache interface {
 	// SetBlobs stores blob sidecars for a block.
 	SetBlobs(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error
 
+	// GetBlock retrieves the full block with transactions.
+	// Returns nil, nil if the block is not in cache.
+	GetBlock(ctx context.Context, chainID int64, blockNumber int64, version int) (json.RawMessage, error)
+
+	// GetReceipts retrieves transaction receipts for a block.
+	// Returns nil, nil if the receipts are not in cache.
+	GetReceipts(ctx context.Context, chainID int64, blockNumber int64, version int) (json.RawMessage, error)
+
+	// GetTraces retrieves execution traces for a block.
+	// Returns nil, nil if the traces are not in cache.
+	GetTraces(ctx context.Context, chainID int64, blockNumber int64, version int) (json.RawMessage, error)
+
+	// GetBlobs retrieves blob sidecars for a block.
+	// Returns nil, nil if the blobs are not in cache.
+	GetBlobs(ctx context.Context, chainID int64, blockNumber int64, version int) (json.RawMessage, error)
+
 	// DeleteBlock removes all cached data for a block (used on reorg).
 	DeleteBlock(ctx context.Context, chainID int64, blockNumber int64, version int) error
 
