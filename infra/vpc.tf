@@ -135,17 +135,21 @@ resource "aws_route_table_association" "public" {
 }
 
 # Private Route Table - routes to NAT Gateway
+# NOTE: Routes are managed separately via aws_route resources to avoid conflicts
+# with VPC peering routes managed in tigerdata.tf
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main.id
-  }
 
   tags = {
     Name = "${local.prefix}-private-rt"
   }
+}
+
+# Default route to NAT Gateway for internet access
+resource "aws_route" "private_to_nat" {
+  route_table_id         = aws_route_table.private.id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.main.id
 }
 
 resource "aws_route_table_association" "private" {

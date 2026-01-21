@@ -108,6 +108,12 @@ resource "aws_iam_role_policy_attachment" "watcher_sns_publish" {
   policy_arn = aws_iam_policy.ethereum_sns_publish.arn
 }
 
+# Watcher gets X-Ray write access for ADOT collector
+resource "aws_iam_role_policy_attachment" "watcher_xray" {
+  role       = aws_iam_role.ethereum_watcher.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+}
+
 # -----------------------------------------------------------------------------
 # Worker Role
 # -----------------------------------------------------------------------------

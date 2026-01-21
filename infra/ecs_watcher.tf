@@ -98,6 +98,10 @@ resource "aws_ecs_task_definition" "watcher" {
           name  = "ENABLE_BACKFILL"
           value = "false"
         },
+        {
+          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
+          value = "http://localhost:4317"
+        },
       ]
 
       # Secrets from AWS Secrets Manager
@@ -129,6 +133,38 @@ resource "aws_ecs_task_definition" "watcher" {
         timeout     = 5
         retries     = 3
         startPeriod = 60
+      }
+    },
+    # ADOT Collector sidecar for X-Ray tracing
+    {
+      name      = "adot-collector"
+      image     = "public.ecr.aws/aws-observability/aws-otel-collector:v0.40.0"
+      essential = false # Don't kill the task if collector fails
+
+      # Use the ECS-optimized config that exports to X-Ray
+      command = ["--config=/etc/ecs/ecs-xray.yaml"]
+
+      # Resource limits for sidecar
+      cpu    = 256
+      memory = 512
+
+      # Logging configuration
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.watcher.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "adot"
+        }
+      }
+
+      # Health check for ADOT
+      healthCheck = {
+        command     = ["CMD", "/healthcheck"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 10
       }
     }
   ])
