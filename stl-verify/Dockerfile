@@ -6,7 +6,7 @@
 # -----------------------------------------------------------------------------
 # Build Stage
 # -----------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
 # Build arguments for cross-compilation and versioning
 ARG TARGETARCH
@@ -35,7 +35,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
 # -----------------------------------------------------------------------------
 # Runtime Stage
 # -----------------------------------------------------------------------------
-FROM --platform=linux/arm64 alpine:3.21
+FROM --platform=$BUILDPLATFORM alpine:3.21
 
 # Install runtime dependencies
 RUN apk add --no-cache ca-certificates tzdata

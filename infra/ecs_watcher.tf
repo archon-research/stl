@@ -45,6 +45,12 @@ resource "aws_ecs_task_definition" "watcher" {
   execution_role_arn       = aws_iam_role.ecs_task_execution.arn
   task_role_arn            = aws_iam_role.ethereum_watcher.arn
 
+  # Use ARM64 for Graviton (cost-effective)
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "ARM64"
+  }
+
   container_definitions = jsonencode([
     {
       name      = "watcher"
@@ -75,6 +81,10 @@ resource "aws_ecs_task_definition" "watcher" {
         {
           name  = "AWS_SNS_TOPIC_ARN"
           value = aws_sns_topic.ethereum_blocks.arn
+        },
+        {
+          name  = "AWS_SNS_ENDPOINT"
+          value = "https://sns.${var.aws_region}.amazonaws.com"
         },
         {
           name  = "REDIS_ADDR"
