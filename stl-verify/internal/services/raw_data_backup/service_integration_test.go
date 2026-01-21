@@ -370,32 +370,74 @@ func listS3Objects(t *testing.T, ctx context.Context, infra *IntegrationTestInfr
 	return keys
 }
 
-func waitForQueueEmpty(t *testing.T, ctx context.Context, infra *IntegrationTestInfra, timeout time.Duration) {
+// waitForS3Objects polls until at least minCount S3 objects exist with the given prefix.
+func waitForS3Objects(t *testing.T, ctx context.Context, infra *IntegrationTestInfra, prefix string, minCount int, timeout time.Duration) []string {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
+	var objects []string
+
 	for time.Now().Before(deadline) {
-		attrs, err := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
-			QueueUrl: aws.String(infra.BackupQueueURL),
-			AttributeNames: []sqstypes.QueueAttributeName{
-				sqstypes.QueueAttributeNameApproximateNumberOfMessages,
-				sqstypes.QueueAttributeNameApproximateNumberOfMessagesNotVisible,
-			},
-		})
-		if err != nil {
-			t.Logf("failed to get queue attributes: %v", err)
-			time.Sleep(500 * time.Millisecond)
-			continue
+		objects = listS3Objects(t, ctx, infra, prefix)
+		if len(objects) >= minCount {
+			return objects
 		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context cancelled while waiting for S3 objects")
+		case <-time.After(100 * time.Millisecond):
+			// continue polling
+		}
+	}
 
-		visible := attrs.Attributes[string(sqstypes.QueueAttributeNameApproximateNumberOfMessages)]
-		notVisible := attrs.Attributes[string(sqstypes.QueueAttributeNameApproximateNumberOfMessagesNotVisible)]
+	t.Fatalf("timed out waiting for %d S3 objects with prefix %q, got %d: %v", minCount, prefix, len(objects), objects)
+	return nil
+}
 
-		if visible == "0" && notVisible == "0" {
+// waitForS3Object polls until a specific S3 object exists.
+func waitForS3Object(t *testing.T, ctx context.Context, infra *IntegrationTestInfra, key string, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		_, err := infra.S3Client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(infra.BucketName),
+			Key:    aws.String(key),
+		})
+		if err == nil {
 			return
 		}
-		time.Sleep(200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context cancelled while waiting for S3 object %q", key)
+		case <-time.After(100 * time.Millisecond):
+			// continue polling
+		}
 	}
+
+	t.Fatalf("timed out waiting for S3 object %q", key)
+}
+
+// waitForCondition polls until the condition function returns true.
+func waitForCondition(t *testing.T, ctx context.Context, timeout, interval time.Duration, condition func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context cancelled while waiting for condition")
+		case <-time.After(interval):
+			// continue polling
+		}
+	}
+
+	t.Fatalf("timed out waiting for condition")
 }
 
 // =============================================================================
@@ -472,18 +514,15 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 	}
 	publishBlockEvent(t, ctx, infra, event)
 
-	// Wait for processing
-	time.Sleep(3 * time.Second)
+	// Wait for S3 objects to be created (4 files: block, receipts, traces, blobs)
+	partition := "12001-13000" // Block 12345 falls in this partition
+	prefix := fmt.Sprintf("%d/%s/", chainID, partition)
+	objects := waitForS3Objects(t, ctx, infra, prefix, 4, 10*time.Second)
 
 	// Stop service
 	svc.Stop()
 	svcCancel()
 	<-done
-
-	// Verify S3 objects were created
-	partition := "12001-13000" // Block 12345 falls in this partition
-	prefix := fmt.Sprintf("%d/%s/", chainID, partition)
-	objects := listS3Objects(t, ctx, infra, prefix)
 
 	t.Logf("S3 objects created: %v", objects)
 
@@ -578,17 +617,14 @@ func TestIntegration_MultipleBlocksProcessedConcurrently(t *testing.T) {
 		publishBlockEvent(t, ctx, infra, event)
 	}
 
-	// Wait for processing
-	time.Sleep(5 * time.Second)
+	// Wait for all blocks to be backed up (10 block files expected)
+	// Blocks 100-109 all fall in partition 0-1000
+	prefix := fmt.Sprintf("%d/0-1000/", chainID)
+	objects := waitForS3Objects(t, ctx, infra, prefix, numBlocks, 15*time.Second)
 
 	svc.Stop()
 	svcCancel()
 	<-done
-
-	// Verify all blocks were backed up
-	// Blocks 100-109 all fall in partition 0-1000
-	prefix := fmt.Sprintf("%d/0-1000/", chainID)
-	objects := listS3Objects(t, ctx, infra, prefix)
 
 	t.Logf("Created %d S3 objects", len(objects))
 
@@ -644,23 +680,40 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 		Version:     0,
 		BlockHash:   "0xfirst",
 	}
+	key := fmt.Sprintf("%d/0-1000/%d_0_block.json.gz", chainID, blockNumber)
+
 	publishBlockEvent(t, ctx, infra, event)
-	time.Sleep(2 * time.Second)
+
+	// Wait for first file to be written
+	waitForS3Object(t, ctx, infra, key, 10*time.Second)
 
 	// Update cache with different data (simulating reprocessing scenario)
 	blockData2 := json.RawMessage(`{"number":"0x1f4","hash":"0xsecond"}`)
 	_ = infra.Cache.SetBlock(ctx, chainID, blockNumber, 0, blockData2)
 
-	// Publish again
+	// Publish again - the service should skip due to idempotency
 	publishBlockEvent(t, ctx, infra, event)
-	time.Sleep(2 * time.Second)
+
+	// Wait a short time for the second message to be processed
+	// (it should be skipped, but we need to give it time to process)
+	waitForCondition(t, ctx, 5*time.Second, 100*time.Millisecond, func() bool {
+		// Check queue is empty (message was processed)
+		attrs, _ := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+			QueueUrl:       aws.String(infra.BackupQueueURL),
+			AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameApproximateNumberOfMessages},
+		})
+		if attrs != nil {
+			count := attrs.Attributes["ApproximateNumberOfMessages"]
+			return count == "0"
+		}
+		return false
+	})
 
 	svc.Stop()
 	svcCancel()
 	<-done
 
 	// Verify only one file exists and has original content
-	key := fmt.Sprintf("%d/0-1000/%d_0_block.json.gz", chainID, blockNumber)
 	content := getS3Object(t, ctx, infra, key)
 
 	var savedBlock map[string]interface{}
@@ -728,7 +781,10 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 		BlockHash:   "0xv0",
 	}
 	publishBlockEvent(t, ctx, infra, event0)
-	time.Sleep(2 * time.Second)
+
+	// Wait for version 0 to be written
+	keyV0 := fmt.Sprintf("%d/1001-2000/%d_0_block.json.gz", chainID, blockNumber)
+	waitForS3Object(t, ctx, infra, keyV0, 10*time.Second)
 
 	// Publish version 1
 	event1 := outbound.BlockEvent{
@@ -738,7 +794,10 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 		BlockHash:   "0xv1",
 	}
 	publishBlockEvent(t, ctx, infra, event1)
-	time.Sleep(2 * time.Second)
+
+	// Wait for version 1 to be written
+	keyV1 := fmt.Sprintf("%d/1001-2000/%d_1_block.json.gz", chainID, blockNumber)
+	waitForS3Object(t, ctx, infra, keyV1, 10*time.Second)
 
 	svc.Stop()
 	svcCancel()
@@ -836,14 +895,14 @@ func TestIntegration_LargeBlockData(t *testing.T) {
 		BlockHash:   "0xlarge",
 	}
 	publishBlockEvent(t, ctx, infra, event)
-	time.Sleep(5 * time.Second)
+
+	// Wait for file to be created
+	key := fmt.Sprintf("%d/2001-3000/%d_0_block.json.gz", chainID, blockNumber)
+	waitForS3Object(t, ctx, infra, key, 15*time.Second)
 
 	svc.Stop()
 	svcCancel()
 	<-done
-
-	// Verify file exists and content is correct
-	key := fmt.Sprintf("%d/2001-3000/%d_0_block.json.gz", chainID, blockNumber)
 	content := getS3Object(t, ctx, infra, key)
 
 	if len(content) < 1024*1024 {
@@ -900,8 +959,9 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 		publishBlockEvent(t, ctx, infra, event)
 	}
 
-	// Wait a bit for processing to start
-	time.Sleep(1 * time.Second)
+	// Wait for at least one block to be processed before stopping
+	prefix := fmt.Sprintf("%d/3001-4000/", chainID)
+	waitForS3Objects(t, ctx, infra, prefix, 1, 10*time.Second)
 
 	// Stop gracefully using the Stop() method (not context cancellation)
 	svc.Stop()
