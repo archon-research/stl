@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 // BlockRangeSize is the number of blocks per S3 partition.
@@ -274,7 +275,8 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) e
 
 	// Check if we have at least block data (always required)
 	if blockData == nil {
-		return fmt.Errorf("block data not found in cache for block %d", event.BlockNumber)
+		cacheKey := shared.CacheKey(event.ChainID, event.BlockNumber, event.Version, "block")
+		return fmt.Errorf("block data not found in cache for block %d (cacheKey=%s)", event.BlockNumber, cacheKey)
 	}
 
 	// Validate against chain expectations
