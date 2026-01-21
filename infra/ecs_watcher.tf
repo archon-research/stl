@@ -141,8 +141,56 @@ resource "aws_ecs_task_definition" "watcher" {
       image     = "public.ecr.aws/aws-observability/aws-otel-collector:v0.40.0"
       essential = false # Don't kill the task if collector fails
 
-      # Use the ECS-optimized config that exports to X-Ray
-      command = ["--config=/etc/ecs/ecs-xray.yaml"]
+      # Use custom config that binds to localhost only
+      command = ["--config=env:AOT_CONFIG_CONTENT"]
+
+      environment = [
+        {
+          name = "AOT_CONFIG_CONTENT"
+          value = yamlencode({
+            extensions = {
+              health_check = {
+                endpoint = "localhost:13133"
+              }
+            }
+            receivers = {
+              otlp = {
+                protocols = {
+                  grpc = {
+                    endpoint = "localhost:4317"
+                  }
+                  http = {
+                    endpoint = "localhost:4318"
+                  }
+                }
+              }
+            }
+            processors = {
+              batch = {}
+              resourcedetection = {
+                detectors = ["env", "ecs"]
+                timeout   = "5s"
+                override  = false
+              }
+            }
+            exporters = {
+              awsxray = {
+                region = var.aws_region
+              }
+            }
+            service = {
+              extensions = ["health_check"]
+              pipelines = {
+                traces = {
+                  receivers  = ["otlp"]
+                  processors = ["resourcedetection", "batch"]
+                  exporters  = ["awsxray"]
+                }
+              }
+            }
+          })
+        }
+      ]
 
       # Resource limits for sidecar
       cpu    = 256
@@ -195,11 +243,6 @@ resource "aws_ecs_service" "watcher" {
     subnets          = [aws_subnet.private.id]
     security_groups  = [aws_security_group.watcher.id]
     assign_public_ip = false
-  }
-
-  # Prevent Terraform from reverting to old task definition during updates
-  lifecycle {
-    ignore_changes = [task_definition]
   }
 
   tags = {
