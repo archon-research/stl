@@ -260,9 +260,26 @@ docker-push: ecr-login
 	docker push $(ECR_REPO):$(IMAGE_TAG)
 	docker push $(ECR_REPO):latest
 
-# Build and push in one step
-docker-release: docker-build docker-push
-	@echo "==> Docker image released: $(ECR_REPO):$(IMAGE_TAG)"
+# Build and push in one step (single recipe to ensure consistent IMAGE_TAG)
+docker-release: ecr-login
+	@IMAGE_TAG=$$(git rev-parse --short HEAD) && \
+	GIT_COMMIT_FULL=$$(git rev-parse HEAD) && \
+	GIT_BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	BUILD_TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO)" && \
+	echo "    Tag: $$IMAGE_TAG" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$GIT_COMMIT_FULL \
+		--build-arg GIT_BRANCH=$$GIT_BRANCH \
+		--build-arg BUILD_TIME=$$BUILD_TIME \
+		-t $(ECR_REPO):$$IMAGE_TAG \
+		-t $(ECR_REPO):latest \
+		--load . && \
+	echo "==> Pushing Docker image to ECR..." && \
+	docker push $(ECR_REPO):$$IMAGE_TAG && \
+	docker push $(ECR_REPO):latest && \
+	echo "==> Docker image released: $(ECR_REPO):$$IMAGE_TAG"
 
 # Clean up local Docker images
 docker-clean:
