@@ -222,7 +222,7 @@ AWS_REGION ?= eu-west-1
 
 # ECR repository URL
 # TODO: Dont hardcode ENV
-ECR_REPO = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-sentinelstaging-watcher
+ECR_REPO = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-watcher
 
 # Git info for image tagging and build metadata
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
