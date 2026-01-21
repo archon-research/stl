@@ -195,7 +195,7 @@ func main() {
 		Addr:      redisAddr,
 		Password:  getEnv("REDIS_PASSWORD", ""),
 		DB:        0,
-		TTL:       24 * time.Hour,
+		TTL:       7 * 24 * time.Hour, // 7 days - allows backfill and retry of failed backups
 		KeyPrefix: "stl",
 	}, logger)
 	if err != nil {
