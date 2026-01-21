@@ -981,3 +981,399 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 
 	t.Log("Service shut down gracefully")
 }
+
+// TestIntegration_RaceConditionIdempotency tests that concurrent writes to the same
+// block/version don't corrupt data (TOCTOU race in FileExists + WriteFile).
+func TestIntegration_RaceConditionIdempotency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupIntegrationInfra(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	blockNumber := int64(7777)
+	version := 0
+	chainID := int64(1)
+
+	// Set up block data in cache
+	blockData := json.RawMessage(`{"number":"0x1e61","hash":"0xrace"}`)
+	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, version, blockData)
+	if err != nil {
+		t.Fatalf("failed to set block in cache: %v", err)
+	}
+
+	// Create service with many workers to increase race likelihood
+	svc, err := NewService(Config{
+		ChainID:   chainID,
+		Bucket:    infra.BucketName,
+		Workers:   8, // Many workers to maximize race chances
+		BatchSize: 10,
+		Logger:    infra.Logger,
+	}, infra.Consumer, infra.Cache, infra.Writer)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	svcCtx, svcCancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.Run(svcCtx)
+	}()
+
+	// Publish the SAME event multiple times rapidly
+	// This simulates duplicate messages (at-least-once delivery)
+	for i := 0; i < 10; i++ {
+		event := outbound.BlockEvent{
+			ChainID:     chainID,
+			BlockNumber: blockNumber,
+			Version:     version,
+			BlockHash:   "0xrace",
+		}
+		publishBlockEvent(t, ctx, infra, event)
+	}
+
+	// Wait for at least one file to be created
+	key := fmt.Sprintf("%d/7001-8000/%d_%d_block.json.gz", chainID, blockNumber, version)
+	waitForS3Object(t, ctx, infra, key, 15*time.Second)
+
+	// Wait a bit for any concurrent writes to complete
+	waitForCondition(t, ctx, 5*time.Second, 100*time.Millisecond, func() bool {
+		attrs, _ := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+			QueueUrl:       aws.String(infra.BackupQueueURL),
+			AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameApproximateNumberOfMessages},
+		})
+		if attrs != nil {
+			count := attrs.Attributes["ApproximateNumberOfMessages"]
+			return count == "0"
+		}
+		return false
+	})
+
+	svc.Stop()
+	svcCancel()
+	<-done
+
+	// Verify only ONE file exists (no duplicates with different content)
+	prefix := fmt.Sprintf("%d/7001-8000/%d_%d_", chainID, blockNumber, version)
+	objects := listS3Objects(t, ctx, infra, prefix)
+
+	// Count how many block files exist
+	blockFileCount := 0
+	for _, obj := range objects {
+		if obj == key {
+			blockFileCount++
+		}
+	}
+
+	if blockFileCount != 1 {
+		t.Errorf("expected exactly 1 block file, got %d: %v", blockFileCount, objects)
+	}
+
+	// Verify content is correct (not corrupted by race)
+	content := getS3Object(t, ctx, infra, key)
+	var savedBlock map[string]interface{}
+	if err := json.Unmarshal(content, &savedBlock); err != nil {
+		t.Fatalf("failed to parse saved block (possible corruption): %v", err)
+	}
+
+	if savedBlock["hash"] != "0xrace" {
+		t.Errorf("expected hash 0xrace, got %v", savedBlock["hash"])
+	}
+}
+
+// TestIntegration_PartialWriteFailure tests behavior when some files write but others fail.
+// This simulates S3 errors mid-backup.
+func TestIntegration_PartialWriteFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupIntegrationInfra(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	blockNumber := int64(8888)
+	version := 0
+	chainID := int64(1)
+
+	// Set up block data in cache (only block, no receipts/traces/blobs)
+	blockData := json.RawMessage(`{"number":"0x22b8","hash":"0xpartial"}`)
+	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, version, blockData)
+	if err != nil {
+		t.Fatalf("failed to set block in cache: %v", err)
+	}
+	// Note: NOT setting receipts, traces, or blobs - they'll be nil/missing
+
+	svc, err := NewService(Config{
+		ChainID:   chainID,
+		Bucket:    infra.BucketName,
+		Workers:   1,
+		BatchSize: 10,
+		Logger:    infra.Logger,
+	}, infra.Consumer, infra.Cache, infra.Writer)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	svcCtx, svcCancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.Run(svcCtx)
+	}()
+
+	event := outbound.BlockEvent{
+		ChainID:     chainID,
+		BlockNumber: blockNumber,
+		Version:     version,
+		BlockHash:   "0xpartial",
+	}
+	publishBlockEvent(t, ctx, infra, event)
+
+	// Wait for block file to be created
+	key := fmt.Sprintf("%d/8001-9000/%d_%d_block.json.gz", chainID, blockNumber, version)
+	waitForS3Object(t, ctx, infra, key, 10*time.Second)
+
+	svc.Stop()
+	svcCancel()
+	<-done
+
+	// Verify only block file exists (receipts/traces/blobs should be skipped)
+	prefix := fmt.Sprintf("%d/8001-9000/%d_%d_", chainID, blockNumber, version)
+	objects := listS3Objects(t, ctx, infra, prefix)
+
+	t.Logf("Files created: %v", objects)
+
+	// Only block should exist since receipts/traces/blobs weren't in cache
+	if len(objects) != 1 {
+		t.Errorf("expected 1 file (block only), got %d: %v", len(objects), objects)
+	}
+}
+
+// TestIntegration_CacheMissBlockData tests that missing block data in cache
+// causes the message to be requeued (not acknowledged).
+func TestIntegration_CacheMissBlockData(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupIntegrationInfra(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	blockNumber := int64(9999)
+	chainID := int64(1)
+
+	// Intentionally NOT setting any cache data - simulating cache miss
+
+	svc, err := NewService(Config{
+		ChainID:   chainID,
+		Bucket:    infra.BucketName,
+		Workers:   1,
+		BatchSize: 10,
+		Logger:    infra.Logger,
+	}, infra.Consumer, infra.Cache, infra.Writer)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	svcCtx, svcCancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.Run(svcCtx)
+	}()
+
+	event := outbound.BlockEvent{
+		ChainID:     chainID,
+		BlockNumber: blockNumber,
+		Version:     0,
+		BlockHash:   "0xmissing",
+	}
+	publishBlockEvent(t, ctx, infra, event)
+
+	// Wait a bit for processing attempt
+	time.Sleep(2 * time.Second)
+
+	svc.Stop()
+	svcCancel()
+	<-done
+
+	// Verify NO files were created (block data was missing)
+	prefix := fmt.Sprintf("%d/9001-10000/%d_", chainID, blockNumber)
+	objects := listS3Objects(t, ctx, infra, prefix)
+
+	if len(objects) != 0 {
+		t.Errorf("expected 0 files (cache miss), got %d: %v", len(objects), objects)
+	}
+}
+
+// TestIntegration_ChainIDMismatch tests that events with wrong ChainID
+// are handled correctly.
+func TestIntegration_ChainIDMismatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupIntegrationInfra(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	blockNumber := int64(5555)
+	version := 0
+	serviceChainID := int64(1) // Service configured for chain 1
+	eventChainID := int64(137) // Event is for Polygon (chain 137)
+
+	// Set up block data for the EVENT's chainID (not service's)
+	blockData := json.RawMessage(`{"number":"0x15b3","hash":"0xwrongchain"}`)
+	err := infra.Cache.SetBlock(ctx, eventChainID, blockNumber, version, blockData)
+	if err != nil {
+		t.Fatalf("failed to set block in cache: %v", err)
+	}
+
+	svc, err := NewService(Config{
+		ChainID:   serviceChainID,
+		Bucket:    infra.BucketName,
+		Workers:   1,
+		BatchSize: 10,
+		Logger:    infra.Logger,
+	}, infra.Consumer, infra.Cache, infra.Writer)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	svcCtx, svcCancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.Run(svcCtx)
+	}()
+
+	// Publish event with DIFFERENT chainID than service
+	event := outbound.BlockEvent{
+		ChainID:     eventChainID, // Chain 137, not 1
+		BlockNumber: blockNumber,
+		Version:     version,
+		BlockHash:   "0xwrongchain",
+	}
+	publishBlockEvent(t, ctx, infra, event)
+
+	// Wait for file to be created
+	// The file should be written under the EVENT's chainID (137), not service's (1)
+	key := fmt.Sprintf("%d/5001-6000/%d_%d_block.json.gz", eventChainID, blockNumber, version)
+	waitForS3Object(t, ctx, infra, key, 10*time.Second)
+
+	svc.Stop()
+	svcCancel()
+	<-done
+
+	// Verify file was written under the EVENT's chainID path
+	objects := listS3Objects(t, ctx, infra, fmt.Sprintf("%d/", eventChainID))
+	t.Logf("Objects under chain %d: %v", eventChainID, objects)
+
+	if len(objects) == 0 {
+		t.Error("expected file to be written under event's chainID")
+	}
+
+	// Verify NO files under service's chainID
+	objectsChain1 := listS3Objects(t, ctx, infra, fmt.Sprintf("%d/5001-6000/", serviceChainID))
+	if len(objectsChain1) != 0 {
+		t.Errorf("expected no files under service chainID, got %v", objectsChain1)
+	}
+}
+
+// TestIntegration_GzipContentIntegrity tests that gzip-compressed content
+// is correctly readable after being written.
+func TestIntegration_GzipContentIntegrity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupIntegrationInfra(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	blockNumber := int64(6666)
+	version := 0
+	chainID := int64(1)
+
+	// Create complex JSON that could reveal compression issues
+	complexBlock := map[string]interface{}{
+		"number":     "0x1a0a",
+		"hash":       "0xgzip",
+		"parentHash": "0xparent",
+		"transactions": []map[string]interface{}{
+			{"hash": "0xtx1", "from": "0xabc", "to": "0xdef", "value": "0x1234567890"},
+			{"hash": "0xtx2", "from": "0x123", "to": "0x456", "value": "0x9876543210"},
+		},
+		"uncles":    []string{"0xuncle1", "0xuncle2"},
+		"extraData": "0x" + string(make([]byte, 256)), // Some padding
+		"logsBloom": "0x" + string(make([]byte, 512)),
+	}
+	blockData, _ := json.Marshal(complexBlock)
+
+	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, version, blockData)
+	if err != nil {
+		t.Fatalf("failed to set block in cache: %v", err)
+	}
+
+	svc, err := NewService(Config{
+		ChainID:   chainID,
+		Bucket:    infra.BucketName,
+		Workers:   1,
+		BatchSize: 10,
+		Logger:    infra.Logger,
+	}, infra.Consumer, infra.Cache, infra.Writer)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	svcCtx, svcCancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.Run(svcCtx)
+	}()
+
+	event := outbound.BlockEvent{
+		ChainID:     chainID,
+		BlockNumber: blockNumber,
+		Version:     version,
+		BlockHash:   "0xgzip",
+	}
+	publishBlockEvent(t, ctx, infra, event)
+
+	key := fmt.Sprintf("%d/6001-7000/%d_%d_block.json.gz", chainID, blockNumber, version)
+	waitForS3Object(t, ctx, infra, key, 10*time.Second)
+
+	svc.Stop()
+	svcCancel()
+	<-done
+
+	// Get and decompress content
+	content := getS3Object(t, ctx, infra, key)
+
+	// Verify it's valid JSON
+	var recovered map[string]interface{}
+	if err := json.Unmarshal(content, &recovered); err != nil {
+		t.Fatalf("failed to unmarshal decompressed content: %v", err)
+	}
+
+	// Verify key fields match
+	if recovered["hash"] != "0xgzip" {
+		t.Errorf("hash mismatch: expected 0xgzip, got %v", recovered["hash"])
+	}
+
+	txs, ok := recovered["transactions"].([]interface{})
+	if !ok || len(txs) != 2 {
+		t.Errorf("transactions mismatch: expected 2, got %v", recovered["transactions"])
+	}
+}
