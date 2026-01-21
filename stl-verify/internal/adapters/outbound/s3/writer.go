@@ -34,11 +34,16 @@ type Writer struct {
 
 // NewWriter creates a new S3 Writer with the given AWS config.
 func NewWriter(cfg aws.Config, logger *slog.Logger) *Writer {
+	return NewWriterWithOptions(cfg, logger)
+}
+
+// NewWriterWithOptions creates a new S3 Writer with optional S3 client options.
+func NewWriterWithOptions(cfg aws.Config, logger *slog.Logger, optFns ...func(*s3.Options)) *Writer {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Writer{
-		client: s3.NewFromConfig(cfg),
+		client: s3.NewFromConfig(cfg, optFns...),
 		logger: logger.With("component", "s3-writer"),
 	}
 }

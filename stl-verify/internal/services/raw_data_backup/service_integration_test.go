@@ -11,7 +11,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +25,8 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
+	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -188,20 +189,24 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	}
 	t.Logf("Subscribed queue to topic")
 
-	// Create SQS consumer adapter using LocalStack wrapper
-	infra.Consumer = &localstackConsumerWrapper{
-		sqsClient:  sqsClient,
-		queueURL:   infra.BackupQueueURL,
-		logger:     logger,
-		waitTime:   1,
-		visibility: 30,
+	// Create SQS consumer adapter using the real adapter with LocalStack endpoint
+	consumer, err := sqsadapter.NewConsumerWithOptions(awsCfg, sqsadapter.Config{
+		QueueURL:          infra.BackupQueueURL,
+		WaitTimeSeconds:   1, // Short for tests
+		VisibilityTimeout: 30,
+	}, logger, func(o *sqs.Options) {
+		o.BaseEndpoint = aws.String(localstackCfg.Endpoint)
+	})
+	if err != nil {
+		t.Fatalf("failed to create SQS consumer: %v", err)
 	}
+	infra.Consumer = consumer
 
-	// Create S3 writer adapter
-	infra.Writer = &localstackS3WriterWrapper{
-		client: s3Client,
-		logger: logger,
-	}
+	// Create S3 writer adapter using the real adapter with LocalStack endpoint
+	infra.Writer = s3adapter.NewWriterWithOptions(awsCfg, logger, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(localstackCfg.Endpoint)
+		o.UsePathStyle = true // Required for LocalStack
+	})
 
 	infra.Cleanup = func() {
 		for i := len(cleanupFuncs) - 1; i >= 0; i-- {
@@ -210,119 +215,6 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	}
 
 	return infra
-}
-
-// localstackConsumerWrapper wraps SQS operations for LocalStack.
-type localstackConsumerWrapper struct {
-	sqsClient  *sqs.Client
-	queueURL   string
-	logger     *slog.Logger
-	waitTime   int32
-	visibility int32
-}
-
-func (w *localstackConsumerWrapper) ReceiveMessages(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error) {
-	if maxMessages < 1 {
-		maxMessages = 1
-	}
-	if maxMessages > 10 {
-		maxMessages = 10
-	}
-
-	result, err := w.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-		QueueUrl:            aws.String(w.queueURL),
-		MaxNumberOfMessages: int32(maxMessages),
-		WaitTimeSeconds:     w.waitTime,
-		VisibilityTimeout:   w.visibility,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to receive messages: %w", err)
-	}
-
-	messages := make([]outbound.SQSMessage, 0, len(result.Messages))
-	for _, msg := range result.Messages {
-		if msg.MessageId == nil || msg.ReceiptHandle == nil || msg.Body == nil {
-			continue
-		}
-		messages = append(messages, outbound.SQSMessage{
-			MessageID:     *msg.MessageId,
-			ReceiptHandle: *msg.ReceiptHandle,
-			Body:          *msg.Body,
-		})
-	}
-
-	return messages, nil
-}
-
-func (w *localstackConsumerWrapper) DeleteMessage(ctx context.Context, receiptHandle string) error {
-	_, err := w.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-		QueueUrl:      aws.String(w.queueURL),
-		ReceiptHandle: aws.String(receiptHandle),
-	})
-	return err
-}
-
-func (w *localstackConsumerWrapper) Close() error {
-	return nil
-}
-
-// localstackS3WriterWrapper wraps S3 operations for LocalStack.
-type localstackS3WriterWrapper struct {
-	client *s3.Client
-	logger *slog.Logger
-}
-
-func (w *localstackS3WriterWrapper) WriteFile(ctx context.Context, bucket, key string, content io.Reader, compressGzip bool) error {
-	var body io.Reader = content
-	var contentEncoding *string
-
-	if compressGzip {
-		data, err := io.ReadAll(content)
-		if err != nil {
-			return fmt.Errorf("failed to read content: %w", err)
-		}
-
-		var buf bytes.Buffer
-		gzWriter := gzip.NewWriter(&buf)
-		if _, err := gzWriter.Write(data); err != nil {
-			return fmt.Errorf("failed to compress content: %w", err)
-		}
-		if err := gzWriter.Close(); err != nil {
-			return fmt.Errorf("failed to close gzip writer: %w", err)
-		}
-
-		body = bytes.NewReader(buf.Bytes())
-		contentEncoding = aws.String("gzip")
-	}
-
-	_, err := w.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:          aws.String(bucket),
-		Key:             aws.String(key),
-		Body:            body,
-		ContentType:     aws.String("application/json"),
-		ContentEncoding: contentEncoding,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to write to S3: %w", err)
-	}
-
-	w.logger.Debug("wrote file to S3", "bucket", bucket, "key", key)
-	return nil
-}
-
-func (w *localstackS3WriterWrapper) FileExists(ctx context.Context, bucket, key string) (bool, error) {
-	_, err := w.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		// Check if not found
-		if strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "404") {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
 }
 
 // =============================================================================

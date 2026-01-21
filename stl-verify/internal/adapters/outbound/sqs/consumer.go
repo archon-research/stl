@@ -53,6 +53,11 @@ type Consumer struct {
 
 // NewConsumer creates a new SQS consumer.
 func NewConsumer(cfg aws.Config, sqsConfig Config, logger *slog.Logger) (*Consumer, error) {
+	return NewConsumerWithOptions(cfg, sqsConfig, logger)
+}
+
+// NewConsumerWithOptions creates a new SQS consumer with optional SQS client options.
+func NewConsumerWithOptions(cfg aws.Config, sqsConfig Config, logger *slog.Logger, optFns ...func(*sqs.Options)) (*Consumer, error) {
 	if sqsConfig.QueueURL == "" {
 		return nil, fmt.Errorf("queue URL is required")
 	}
@@ -72,7 +77,7 @@ func NewConsumer(cfg aws.Config, sqsConfig Config, logger *slog.Logger) (*Consum
 	}
 
 	return &Consumer{
-		client:   sqs.NewFromConfig(cfg),
+		client:   sqs.NewFromConfig(cfg, optFns...),
 		queueURL: sqsConfig.QueueURL,
 		config:   sqsConfig,
 		logger:   logger,
