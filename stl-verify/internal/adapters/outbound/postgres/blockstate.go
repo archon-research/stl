@@ -337,19 +337,17 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 		return 0, fmt.Errorf("failed to mark blocks orphaned: %w", err)
 	}
 
-	// 5. Calculate version for new block
-	var version int
-	err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), -1) + 1 FROM block_states WHERE number = $1`, newBlock.Number).Scan(&version)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get next version: %w", err)
-	}
-
-	// 6. Insert new canonical block
+	// 5. Insert new canonical block
+	// We pass 0 as the version; the BEFORE INSERT trigger will automatically assign
+	// the correct version (MAX(version) + 1) atomically.
+	// We use RETURNING version to get the actually assigned version.
 	insertQuery := `
 		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned, version)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		VALUES ($1, $2, $3, $4, $5, 0)
+		RETURNING version
 	`
-	_, err = tx.ExecContext(ctx, insertQuery, newBlock.Number, newBlock.Hash, newBlock.ParentHash, newBlock.ReceivedAt, newBlock.IsOrphaned, version)
+	var version int
+	err = tx.QueryRowContext(ctx, insertQuery, newBlock.Number, newBlock.Hash, newBlock.ParentHash, newBlock.ReceivedAt, newBlock.IsOrphaned).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("failed to save new block state: %w", err)
 	}

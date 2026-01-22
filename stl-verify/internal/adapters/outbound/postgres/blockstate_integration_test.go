@@ -1413,7 +1413,7 @@ func TestHandleReorgAtomic_ShortNewChainPreservesCommonAncestor(t *testing.T) {
 	// Old Chain: 100 -> 101 -> 102 (Tip 102). Depth=2 (orphaning 101, 102).
 	// New Chain: 100 -> 101' (Tip 101').
 	// Common Ancestor: 100.
-	
+
 	newBlock := outbound.BlockState{
 		Number:     101,
 		Hash:       "0xhash101_prime",
@@ -1474,7 +1474,7 @@ func TestHandleReorgAtomic_MultiBlockReorgGap(t *testing.T) {
 	// New Chain: 100 -> 101' -> 102'
 	// Tip: 102'. Common Ancestor: 100.
 	// We receive 102' as the new head. Intermediate 101' is implicitly part of the chain but not sent in the call.
-	
+
 	newBlock := outbound.BlockState{
 		Number:     102,
 		Hash:       "0xhash102_prime",
@@ -1485,7 +1485,7 @@ func TestHandleReorgAtomic_MultiBlockReorgGap(t *testing.T) {
 	event := outbound.ReorgEvent{
 		DetectedAt:  time.Now(),
 		BlockNumber: newBlock.Number, // 102
-		OldHash:     "0xhash102",  
+		OldHash:     "0xhash102",
 		NewHash:     newBlock.Hash,
 		Depth:       2, // 101, 102 replaced
 	}
@@ -1516,9 +1516,70 @@ func TestHandleReorgAtomic_MultiBlockReorgGap(t *testing.T) {
 		// if errors.Is(err, sql.ErrNoRows) { return nil, nil }
 		// so err should be nil if missing.
 	}
-	
+
 	// Double check we have a gap
 	if b101 == nil {
 		t.Log("Confirmed: Gap exists at block 101")
+	}
+}
+
+// TestFindGaps_DetectsReorgGap confirms that the gap created by HandleReorgAtomic
+// (when it doesn't save intermediate blocks) is correctly detected by FindGaps.
+// This confirms the BackfillService will eventually repair the state.
+func TestFindGaps_DetectsReorgGap(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	// 1. Create the scenario with a gap (same as TestHandleReorgAtomic_MultiBlockReorgGap)
+	// Initial: 100, 101, 102
+	for i := int64(100); i <= 102; i++ {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0xhash%d", i),
+			ParentHash: fmt.Sprintf("0xhash%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save setup block %d: %v", i, err)
+		}
+	}
+
+	// Reorg: 100 -> [GAP 101'] -> 102'
+	// HandleReorgAtomic only saves 102', leaving 101' missing.
+	newBlock := outbound.BlockState{
+		Number:     102,
+		Hash:       "0xhash102_prime",
+		ParentHash: "0xhash101_prime",
+		ReceivedAt: time.Now().Unix(),
+	}
+	event := outbound.ReorgEvent{
+		DetectedAt:  time.Now(),
+		BlockNumber: newBlock.Number,
+		OldHash:     "0xhash102",
+		NewHash:     newBlock.Hash,
+		Depth:       2,
+	}
+
+	_, err := repo.HandleReorgAtomic(ctx, 100, event, newBlock)
+	if err != nil {
+		t.Fatalf("HandleReorgAtomic failed: %v", err)
+	}
+
+	// 2. Run FindGaps looking at range 100-102
+	gaps, err := repo.FindGaps(ctx, 100, 102)
+	if err != nil {
+		t.Fatalf("FindGaps failed: %v", err)
+	}
+
+	// 3. Verify it found gap at 101
+	if len(gaps) != 1 {
+		t.Fatalf("Expected 1 gap, got %d", len(gaps))
+	}
+
+	gap := gaps[0]
+	if gap.From != 101 || gap.To != 101 {
+		t.Errorf("Expected gap at 101-101, got %d-%d", gap.From, gap.To)
 	}
 }
