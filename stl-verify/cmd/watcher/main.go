@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -195,7 +197,7 @@ func main() {
 		Addr:      redisAddr,
 		Password:  getEnv("REDIS_PASSWORD", ""),
 		DB:        0,
-		TTL:       7 * 24 * time.Hour, // 7 days - allows backfill and retry of failed backups
+		TTL:       2 * 24 * time.Hour, // 2 days - allows retry of failed backups
 		KeyPrefix: "stl",
 	}, logger)
 	if err != nil {
@@ -329,6 +331,20 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	// Start health server for ECS rolling deployments
+	// Readiness: Returns 200 only after first block is processed (prevents gaps)
+	// Liveness: Returns 200 if service is running and processing blocks
+	healthAddr := getEnv("HEALTH_ADDR", ":8080")
+	var shuttingDown atomic.Bool
+	healthServer := startHealthServer(healthAddr, liveService, &shuttingDown, logger)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := healthServer.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("health server shutdown error", "error", err)
+		}
+	}()
+
 	// Start both services
 	logger.Info("starting live service...")
 	if err := liveService.Start(ctx); err != nil {
@@ -349,6 +365,10 @@ func main() {
 	// Wait for shutdown signal
 	sig := <-sigChan
 	logger.Info("received signal, shutting down...", "signal", sig)
+
+	// Mark as shutting down - health checks will start returning unhealthy
+	// This tells ECS to stop routing traffic before we actually stop
+	shuttingDown.Store(true)
 
 	// Cancel context first to signal all goroutines to stop
 	cancel()
@@ -397,4 +417,107 @@ func requireEnv(key string) string {
 		os.Exit(1)
 	}
 	return value
+}
+
+// HealthChecker interface for services that can report readiness/liveness
+type HealthChecker interface {
+	IsReady() bool
+	IsHealthy() bool
+}
+
+// startHealthServer starts an HTTP server with health check endpoints.
+// This enables zero-downtime rolling deployments in ECS:
+//   - /health/ready  - Returns 200 only after first block processed (readiness)
+//   - /health/live   - Returns 200 if service is processing blocks (liveness)
+//   - /health        - Combined health check for simple monitoring
+//
+// During deployment:
+//  1. ECS starts new task
+//  2. New task's /health/ready returns 503 until first block is processed
+//  3. Once ready (200), ECS marks new task as healthy
+//  4. ECS sends SIGTERM to old task
+//  5. Old task marks shuttingDown=true, health checks return 503
+//  6. Old task gracefully shuts down
+//  7. No gap because new task was processing before old stopped
+func startHealthServer(addr string, checker HealthChecker, shuttingDown *atomic.Bool, logger *slog.Logger) *http.Server {
+	mux := http.NewServeMux()
+
+	// Readiness probe - only ready after first block processed
+	// ECS uses this to decide when to stop the old task
+	mux.HandleFunc("/health/ready", func(w http.ResponseWriter, r *http.Request) {
+		if shuttingDown.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"status": "shutting_down"})
+			return
+		}
+		if checker.IsReady() {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"status": "not_ready"})
+		}
+	})
+
+	// Liveness probe - healthy if processing blocks recently
+	// ECS uses this to decide if task needs to be restarted
+	mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
+		if shuttingDown.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"status": "shutting_down"})
+			return
+		}
+		if checker.IsHealthy() {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy"})
+		}
+	})
+
+	// Combined health check (for simple monitoring/ALB)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if shuttingDown.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]any{
+				"status":       "shutting_down",
+				"ready":        false,
+				"healthy":      false,
+				"shuttingDown": true,
+			})
+			return
+		}
+		ready := checker.IsReady()
+		healthy := checker.IsHealthy()
+		status := "ok"
+		statusCode := http.StatusOK
+		if !ready || !healthy {
+			status = "degraded"
+			statusCode = http.StatusServiceUnavailable
+		}
+		w.WriteHeader(statusCode)
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":       status,
+			"ready":        ready,
+			"healthy":      healthy,
+			"shuttingDown": false,
+		})
+	})
+
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	}
+
+	go func() {
+		logger.Info("starting health server", "addr", addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("health server failed", "error", err)
+		}
+	}()
+
+	return server
 }

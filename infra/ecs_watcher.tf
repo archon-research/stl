@@ -126,13 +126,15 @@ resource "aws_ecs_task_definition" "watcher" {
         }
       }
 
-      # Health check - the watcher is long-running, basic health check
+      # Health check - HTTP endpoint for rolling deployments
+      # Returns healthy only after first block is processed, enabling
+      # zero-downtime deployments without data gaps
       healthCheck = {
-        command     = ["CMD-SHELL", "pgrep watcher || exit 1"]
-        interval    = 30
+        command     = ["CMD-SHELL", "wget -q --spider http://localhost:8080/health/ready || exit 1"]
+        interval    = 15
         timeout     = 5
         retries     = 3
-        startPeriod = 60
+        startPeriod = 120 # 2 minutes for WebSocket connection + first block
       }
     },
     # ADOT Collector sidecar for X-Ray tracing
@@ -234,9 +236,11 @@ resource "aws_ecs_service" "watcher" {
   desired_count   = var.watcher_desired_count
   launch_type     = "FARGATE"
 
-  # Deployment configuration
-  deployment_minimum_healthy_percent = 0   # Allow stopping old task first
-  deployment_maximum_percent         = 100 # Only one task at a time (singleton)
+  # Deployment configuration for zero-downtime rolling updates
+  # New task must pass health check (first block processed) before old task stops
+  # This prevents data gaps during deployments
+  deployment_minimum_healthy_percent = 100 # Keep old task running until new is ready
+  deployment_maximum_percent         = 200 # Allow 2 tasks briefly during deployment
 
   # Network configuration
   network_configuration {
