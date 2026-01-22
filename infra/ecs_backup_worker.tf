@@ -117,7 +117,7 @@ resource "aws_iam_role_policy_attachment" "backup_worker_sqs" {
 data "aws_iam_policy_document" "backup_worker_s3" {
   # Check if file exists (for idempotency)
   statement {
-    sid    = "HeadObjects"
+    sid    = "GetObjects"
     effect = "Allow"
     actions = [
       "s3:GetObject",
