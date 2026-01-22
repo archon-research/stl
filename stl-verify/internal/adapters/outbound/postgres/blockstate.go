@@ -290,7 +290,7 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 // HandleReorgAtomic atomically performs all reorg-related database operations in a single transaction.
 // This ensures consistency: either all operations succeed, or none do.
 // The commonAncestor is derived from the ReorgEvent (BlockNumber - Depth).
-func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
@@ -300,9 +300,6 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outb
 			r.logger.Error("failed to rollback transaction", "error", err)
 		}
 	}()
-
-	// Calculate common ancestor from event
-	commonAncestor := event.BlockNumber - int64(event.Depth)
 
 	// 1. Acquire advisory lock for the new block number
 	_, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, newBlock.Number)

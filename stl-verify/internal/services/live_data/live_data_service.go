@@ -323,7 +323,7 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 	var version int
 	if isReorg && reorgEvent != nil {
 		// Atomically: save reorg event + mark orphans + save new block
-		version, err = s.stateRepo.HandleReorgAtomic(ctx, *reorgEvent, state)
+		version, err = s.stateRepo.HandleReorgAtomic(ctx, commonAncestor, *reorgEvent, state)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "failed to handle reorg atomically")
