@@ -96,7 +96,7 @@ resource "aws_ecs_task_definition" "watcher" {
         },
         {
           name  = "ENABLE_BACKFILL"
-          value = "false"
+          value = "true"
         },
         {
           name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
@@ -236,11 +236,15 @@ resource "aws_ecs_service" "watcher" {
   desired_count   = var.watcher_desired_count
   launch_type     = "FARGATE"
 
-  # Deployment configuration for zero-downtime rolling updates
-  # New task must pass health check (first block processed) before old task stops
-  # This prevents data gaps during deployments
-  deployment_minimum_healthy_percent = 100 # Keep old task running until new is ready
-  deployment_maximum_percent         = 200 # Allow 2 tasks briefly during deployment
+  # Deployment configuration
+  # STRATEGY: Recreate (Stop-then-Start)
+  # ---------------------------------------------------------------------------
+  # We switch to a "Recreate" strategy (Min 0 / Max 100) which guarantees only
+  # one writer exists at a time. The ENABLE_BACKFILL=true setting ensures that
+  # the gap created during this restart is automatically filled by the new task.
+  deployment_minimum_healthy_percent = 0   # Stop old task before starting new one
+  deployment_maximum_percent         = 100 # Never allow more than 1 task
+
 
   # Network configuration
   network_configuration {
