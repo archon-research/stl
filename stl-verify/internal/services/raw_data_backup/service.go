@@ -408,8 +408,8 @@ func (s *Service) generateKey(partition string, event outbound.BlockEvent, dataT
 func (s *Service) writeToS3(ctx context.Context, partition string, event outbound.BlockEvent, dataType string, data json.RawMessage) error {
 	key := s.generateKey(partition, event, dataType)
 
-	// Write to S3 with gzip compression
-	if err := s.writer.WriteFile(ctx, s.config.Bucket, key, bytes.NewReader(data), true); err != nil {
+	// Write to S3 with gzip compression, only if not exists to avoid overwritten races
+	if _, err := s.writer.WriteFileIfNotExists(ctx, s.config.Bucket, key, bytes.NewReader(data), true); err != nil {
 		return fmt.Errorf("failed to write %s to S3: %w", dataType, err)
 	}
 

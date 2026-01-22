@@ -251,7 +251,7 @@ func newMockS3Writer() *mockS3Writer {
 	}
 }
 
-func (m *mockS3Writer) WriteFile(ctx context.Context, bucket, key string, content io.Reader, compressGzip bool) error {
+func (m *mockS3Writer) WriteFileIfNotExists(ctx context.Context, bucket, key string, content io.Reader, compressGzip bool) (bool, error) {
 	m.writeCalled.Add(1)
 
 	fullKey := bucket + "/" + key
@@ -260,19 +260,23 @@ func (m *mockS3Writer) WriteFile(ctx context.Context, bucket, key string, conten
 	defer m.mu.Unlock()
 
 	if err, ok := m.writeErrors[fullKey]; ok {
-		return err
+		return false, err
 	}
 	if err, ok := m.writeErrors[key]; ok {
-		return err
+		return false, err
+	}
+
+	if _, exists := m.files[fullKey]; exists {
+		return false, nil
 	}
 
 	data, err := io.ReadAll(content)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	m.files[fullKey] = data
-	return nil
+	return true, nil
 }
 
 func (m *mockS3Writer) FileExists(ctx context.Context, bucket, key string) (bool, error) {

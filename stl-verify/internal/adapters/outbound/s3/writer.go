@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -49,29 +50,35 @@ func NewWriterWithOptions(cfg aws.Config, logger *slog.Logger, optFns ...func(*s
 	}
 }
 
-// WriteFile writes content to the specified key in the bucket.
-func (w *Writer) WriteFile(ctx context.Context, bucket, key string, content io.Reader, compressGzip bool) error {
-	var body io.Reader = content
-	var contentEncoding *string
+// prepareBody handles optional gzip compression for the upload body.
+func (w *Writer) prepareBody(content io.Reader, compressGzip bool) (io.Reader, *string, error) {
+	if !compressGzip {
+		return content, nil, nil
+	}
 
-	if compressGzip {
-		// Read all content and compress
-		data, err := io.ReadAll(content)
-		if err != nil {
-			return fmt.Errorf("failed to read content: %w", err)
-		}
+	// Read all content and compress
+	data, err := io.ReadAll(content)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read content: %w", err)
+	}
 
-		var buf bytes.Buffer
-		gzWriter := gzip.NewWriter(&buf)
-		if _, err := gzWriter.Write(data); err != nil {
-			return fmt.Errorf("failed to compress content: %w", err)
-		}
-		if err := gzWriter.Close(); err != nil {
-			return fmt.Errorf("failed to close gzip writer: %w", err)
-		}
+	var buf bytes.Buffer
+	gzWriter := gzip.NewWriter(&buf)
+	if _, err := gzWriter.Write(data); err != nil {
+		return nil, nil, fmt.Errorf("failed to compress content: %w", err)
+	}
+	if err := gzWriter.Close(); err != nil {
+		return nil, nil, fmt.Errorf("failed to close gzip writer: %w", err)
+	}
 
-		body = bytes.NewReader(buf.Bytes())
-		contentEncoding = aws.String("gzip")
+	return bytes.NewReader(buf.Bytes()), aws.String("gzip"), nil
+}
+
+// WriteFileIfNotExists writes content to the specified key in the bucket only if it does not exist.
+func (w *Writer) WriteFileIfNotExists(ctx context.Context, bucket, key string, content io.Reader, compressGzip bool) (bool, error) {
+	body, contentEncoding, err := w.prepareBody(content, compressGzip)
+	if err != nil {
+		return false, err
 	}
 
 	input := &s3.PutObjectInput{
@@ -80,15 +87,20 @@ func (w *Writer) WriteFile(ctx context.Context, bucket, key string, content io.R
 		Body:            body,
 		ContentType:     aws.String("application/json"),
 		ContentEncoding: contentEncoding,
+		IfNoneMatch:     aws.String("*"),
 	}
 
-	_, err := w.client.PutObject(ctx, input)
+	_, err = w.client.PutObject(ctx, input)
 	if err != nil {
-		return fmt.Errorf("failed to write to S3: %w", err)
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "PreconditionFailed" || apiErr.ErrorCode() == "412") {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to write to S3: %w", err)
 	}
 
-	w.logger.Debug("wrote file to S3", "bucket", bucket, "key", key, "compressed", compressGzip)
-	return nil
+	w.logger.Debug("wrote file to S3 (new)", "bucket", bucket, "key", key, "compressed", compressGzip)
+	return true, nil
 }
 
 // FileExists checks if a file already exists at the given key.
