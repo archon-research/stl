@@ -1,7 +1,7 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test lint vet fmt tidy check clean cover run help \
+.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run help \
         dev-up dev-down dev-ips \
         tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
         tf-init-staging tf-validate-staging tf-plan-staging tf-apply-staging tf-check-staging \
@@ -22,6 +22,16 @@ run:
 test-race:
 	@echo "==> Running tests with race detector..."
 	go test -race -v ./...
+
+# Run unit tests only (default, no build tags)
+test:
+	@echo "==> Running unit tests..."
+	go test -v ./...
+
+# Run integration tests (requires integration build tag)
+test-integration:
+	@echo "==> Running integration tests..."
+	go test -tags=integration -v -timeout=5m ./...
 
 # Run tests with coverage
 cover:

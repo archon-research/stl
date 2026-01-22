@@ -73,6 +73,10 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Set up context with cancellation (created early for consistent use throughout init)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Set up structured logging
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
@@ -101,12 +105,13 @@ func main() {
 	}
 
 	// Initialize OpenTelemetry tracer
-	jaegerEndpoint := getEnv("JAEGER_ENDPOINT", "localhost:4317")
-	shutdownTracer, err := telemetry.InitTracer(context.Background(), telemetry.TracerConfig{
+	// JAEGER_ENDPOINT is the OTLP endpoint - works with ADOT/X-Ray in AWS or Jaeger locally
+	traceEndpoint := getEnv("JAEGER_ENDPOINT", "localhost:4317")
+	shutdownTracer, err := telemetry.InitTracer(ctx, telemetry.TracerConfig{
 		ServiceName:    "stl-watcher",
 		ServiceVersion: "0.1.0",
 		Environment:    getEnv("ENVIRONMENT", "development"),
-		JaegerEndpoint: jaegerEndpoint,
+		JaegerEndpoint: traceEndpoint,
 	})
 	if err != nil {
 		logger.Warn("failed to init tracer, continuing without tracing", "error", err)
@@ -116,7 +121,28 @@ func main() {
 				logger.Warn("failed to shutdown tracer", "error", err)
 			}
 		}()
-		logger.Info("tracer initialized", "endpoint", jaegerEndpoint)
+		logger.Info("tracer initialized", "endpoint", traceEndpoint)
+	}
+
+	// Initialize OpenTelemetry metrics
+	otelEndpoint := getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	shutdownMetrics, err := telemetry.InitMetrics(ctx, telemetry.MetricConfig{
+		ServiceName:    "stl-watcher",
+		ServiceVersion: "0.1.0",
+		Environment:    getEnv("ENVIRONMENT", "development"),
+		OTLPEndpoint:   otelEndpoint,
+	})
+	if err != nil {
+		logger.Warn("failed to init metrics, continuing without metrics export", "error", err)
+	} else {
+		defer func() {
+			if err := shutdownMetrics(context.Background()); err != nil {
+				logger.Warn("failed to shutdown metrics", "error", err)
+			}
+		}()
+		if otelEndpoint != "" {
+			logger.Info("metrics initialized", "endpoint", otelEndpoint)
+		}
 	}
 
 	// Get configuration from environment
@@ -135,7 +161,7 @@ func main() {
 	postgresURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
 
 	// Set up PostgreSQL connection pool for block state tracking
-	db, err := postgres.OpenDB(context.Background(), postgres.DefaultDBConfig(postgresURL))
+	db, err := postgres.OpenDB(ctx, postgres.DefaultDBConfig(postgresURL))
 	if err != nil {
 		logger.Error("failed to connect to PostgreSQL", "error", err)
 		os.Exit(1)
@@ -149,7 +175,7 @@ func main() {
 	blockStateRepo := postgres.NewBlockStateRepository(db, logger)
 
 	// Run migration
-	if err := blockStateRepo.Migrate(context.Background()); err != nil {
+	if err := blockStateRepo.Migrate(ctx); err != nil {
 		logger.Error("failed to migrate block_states table", "error", err)
 		os.Exit(1)
 	}
@@ -322,10 +348,6 @@ func main() {
 			os.Exit(1)
 		}
 	}
-
-	// Set up context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Handle shutdown signals
 	sigChan := make(chan os.Signal, 1)

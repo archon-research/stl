@@ -644,11 +644,14 @@ func (r *RaceConditionRepo) GetBlockByNumber(ctx context.Context, number int64) 
 	return block, err
 }
 
-// Mock EventSink for integration tests that don't need a real one
-type mockEventSink struct{}
+// integrationMockEventSink is a mock EventSink for integration tests that don't need a real one.
+// Named differently from mockEventSink in unit tests to avoid redeclaration when both are compiled.
+type integrationMockEventSink struct{}
 
-func (m *mockEventSink) Publish(ctx context.Context, event outbound.Event) error { return nil }
-func (m *mockEventSink) Close() error                                            { return nil }
+func (m *integrationMockEventSink) Publish(ctx context.Context, event outbound.Event) error {
+	return nil
+}
+func (m *integrationMockEventSink) Close() error { return nil }
 
 func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
 	// 1. Setup
@@ -663,7 +666,7 @@ func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
 	// not involved in the DB consistency logic being tested.
 	mockClient := newMockClient()
 	mockCache := memory.NewBlockCache()
-	mockSink := &mockEventSink{}
+	mockSink := &integrationMockEventSink{}
 
 	// Create service
 	svc, err := NewBackfillService(BackfillConfigDefaults(), mockClient, raceRepo, mockCache, mockSink)

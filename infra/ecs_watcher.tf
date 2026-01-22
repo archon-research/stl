@@ -179,6 +179,12 @@ resource "aws_ecs_task_definition" "watcher" {
               awsxray = {
                 region = var.aws_region
               }
+              awsemf = {
+                namespace               = "STL/Watcher"
+                region                  = var.aws_region
+                log_group_name          = "/ecs/${local.prefix}-watcher/metrics"
+                dimension_rollup_option = "ZeroAndSingleDimensionRollup"
+              }
             }
             service = {
               extensions = ["health_check"]
@@ -187,6 +193,11 @@ resource "aws_ecs_task_definition" "watcher" {
                   receivers  = ["otlp"]
                   processors = ["resourcedetection", "batch"]
                   exporters  = ["awsxray"]
+                }
+                metrics = {
+                  receivers  = ["otlp"]
+                  processors = ["batch"]
+                  exporters  = ["awsemf"]
                 }
               }
             }

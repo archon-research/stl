@@ -158,6 +158,12 @@ resource "aws_iam_role_policy_attachment" "backup_worker_s3" {
   policy_arn = aws_iam_policy.backup_worker_s3.arn
 }
 
+# Backup worker gets CloudWatch write access for ADOT metrics
+resource "aws_iam_role_policy_attachment" "backup_worker_cloudwatch" {
+  role       = aws_iam_role.backup_worker.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
 # -----------------------------------------------------------------------------
 # ECS Task Definition - Backup Worker
 # -----------------------------------------------------------------------------
@@ -209,6 +215,10 @@ resource "aws_ecs_task_definition" "backup_worker" {
           name  = "WORKERS"
           value = tostring(var.backup_worker_workers)
         },
+        {
+          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
+          value = "http://localhost:4317"
+        },
       ]
 
       # Logging configuration
@@ -228,6 +238,89 @@ resource "aws_ecs_task_definition" "backup_worker" {
         timeout     = 5
         retries     = 3
         startPeriod = 60
+      }
+    },
+    # ADOT Collector sidecar for CloudWatch metrics
+    {
+      name      = "adot-collector"
+      image     = "public.ecr.aws/aws-observability/aws-otel-collector:v0.40.0"
+      essential = false # Don't kill the task if collector fails
+
+      # Use custom config that binds to localhost only
+      command = ["--config=env:AOT_CONFIG_CONTENT"]
+
+      environment = [
+        {
+          name = "AOT_CONFIG_CONTENT"
+          value = yamlencode({
+            extensions = {
+              health_check = {
+                endpoint = "localhost:13133"
+              }
+            }
+            receivers = {
+              otlp = {
+                protocols = {
+                  grpc = {
+                    endpoint = "localhost:4317"
+                  }
+                  http = {
+                    endpoint = "localhost:4318"
+                  }
+                }
+              }
+            }
+            processors = {
+              batch = {}
+              resourcedetection = {
+                detectors = ["env", "ecs"]
+                timeout   = "5s"
+                override  = false
+              }
+            }
+            exporters = {
+              awsemf = {
+                namespace               = "STL/Backup"
+                region                  = var.aws_region
+                log_group_name          = "/ecs/${local.prefix}-backup-worker/metrics"
+                dimension_rollup_option = "ZeroAndSingleDimensionRollup"
+              }
+            }
+            service = {
+              extensions = ["health_check"]
+              pipelines = {
+                metrics = {
+                  receivers  = ["otlp"]
+                  processors = ["resourcedetection", "batch"]
+                  exporters  = ["awsemf"]
+                }
+              }
+            }
+          })
+        }
+      ]
+
+      # Resource limits for sidecar
+      cpu    = 256
+      memory = 512
+
+      # Logging configuration
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.backup_worker.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "adot"
+        }
+      }
+
+      # Health check for ADOT
+      healthCheck = {
+        command     = ["CMD", "/healthcheck"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 10
       }
     }
   ])
