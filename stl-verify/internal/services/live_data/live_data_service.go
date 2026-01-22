@@ -42,7 +42,7 @@ type LiveConfig struct {
 	Logger *slog.Logger
 
 	// Metrics is the metrics recorder for telemetry (optional).
-	Metrics outbound.MetricsRecorder
+	Metrics outbound.ReorgRecorder
 }
 
 // LiveConfigDefaults returns default configuration.
@@ -72,7 +72,7 @@ type LiveService struct {
 	stateRepo  outbound.BlockStateRepository
 	cache      outbound.BlockCache
 	eventSink  outbound.EventSink
-	metrics    outbound.MetricsRecorder
+	metrics    outbound.ReorgRecorder
 
 	// In-memory chain state for reorg detection (single-goroutine access)
 	unfinalizedBlocks []LightBlock

@@ -19,6 +19,7 @@ import (
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/telemetry"
 	rawdatabackup "github.com/archon-research/stl/stl-verify/internal/services/raw_data_backup"
 )
 
@@ -168,12 +169,36 @@ func Main() {
 	writer := s3.NewWriter(awsCfg, logger)
 	logger.Info("S3 writer created", "bucket", bucket)
 
+	// Initialize OpenTelemetry Metrics
+	shutdownMetrics, err := telemetry.InitMetrics(ctx, telemetry.MetricConfig{
+		ServiceName:    "raw_data_backup",
+		ServiceVersion: GitCommit,
+		Environment:    "production", // Or invoke from env var
+		OTLPEndpoint:   os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+	})
+	if err != nil {
+		logger.Error("failed to initialize metrics", "error", err)
+	} else {
+		defer func() {
+			if err := shutdownMetrics(context.Background()); err != nil {
+				logger.Error("failed to shutdown metrics", "error", err)
+			}
+		}()
+	}
+
+	metricsRec, err := telemetry.NewMetrics("stl-verify/raw_data_backup")
+	if err != nil {
+		logger.Error("failed to update metrics recorder", "error", err)
+		// Proceed without metrics
+	}
+
 	// Create and run the backup service
 	service, err := rawdatabackup.NewService(rawdatabackup.Config{
 		ChainID: chainID,
 		Bucket:  bucket,
 		Workers: *workers,
 		Logger:  logger,
+		Metrics: metricsRec,
 	}, consumer, cache, writer)
 	if err != nil {
 		logger.Error("failed to create backup service", "error", err)

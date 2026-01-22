@@ -60,6 +60,9 @@ type Config struct {
 	// If not set, DefaultChainExpectations() is used.
 	ChainExpectations map[int64]ChainExpectation
 
+	// Metrics is the metrics recorder (optional).
+	Metrics outbound.BackupMetricsRecorder
+
 	// Logger for the service.
 	Logger *slog.Logger
 }
@@ -81,6 +84,7 @@ type Service struct {
 	consumer          outbound.SQSConsumer
 	cache             outbound.BlockCache
 	writer            outbound.S3Writer
+	metrics           outbound.BackupMetricsRecorder
 	logger            *slog.Logger
 	closeOnce         sync.Once
 	stopCh            chan struct{}
@@ -131,6 +135,7 @@ func NewService(
 		consumer:          consumer,
 		cache:             cache,
 		writer:            writer,
+		metrics:           config.Metrics,
 		logger:            config.Logger.With("component", "raw-data-backup"),
 		stopCh:            make(chan struct{}),
 	}, nil
@@ -208,7 +213,20 @@ func (s *Service) worker(ctx context.Context, id int, msgCh <-chan outbound.SQSM
 	logger := s.logger.With("worker", id)
 
 	for msg := range msgCh {
-		if err := s.processMessage(ctx, msg); err != nil {
+		start := time.Now()
+		err := s.processMessage(ctx, msg)
+		duration := time.Since(start)
+
+		if s.metrics != nil {
+			status := "success"
+			if err != nil {
+				status = "error"
+			}
+			s.metrics.RecordProcessingLatency(ctx, duration, status)
+			s.metrics.RecordBlockProcessed(ctx, status)
+		}
+
+		if err != nil {
 			logger.Error("failed to process message",
 				"messageID", msg.MessageID,
 				"error", err,

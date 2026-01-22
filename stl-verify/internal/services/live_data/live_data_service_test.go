@@ -2465,8 +2465,6 @@ func (m *mockMetrics) RecordReorg(ctx context.Context, depth int, commonAncestor
 	m.mu.Unlock()
 }
 
-func (m *mockMetrics) RecordBlockProcessed(ctx context.Context, blockNum int64, durationMs int64) {}
-
 func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()

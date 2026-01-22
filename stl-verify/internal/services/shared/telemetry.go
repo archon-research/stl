@@ -10,8 +10,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// Compile-time assertion that ServiceTelemetry implements MetricsRecorder.
-var _ outbound.MetricsRecorder = (*ServiceTelemetry)(nil)
+// Compile-time assertion that ServiceTelemetry implements ReorgRecorder.
+var _ outbound.ReorgRecorder = (*ServiceTelemetry)(nil)
 
 const (
 	// instrumentationName is the name used for OpenTelemetry instrumentation.
