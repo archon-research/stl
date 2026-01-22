@@ -102,14 +102,11 @@ func Main() {
 		logger.Error("CHAIN_ID environment variable is required")
 		os.Exit(1)
 	}
-	chainID := int64(0) // Default to Ethereum mainnet
-	if chainIDStr != "" {
-		var err error
-		chainID, err = strconv.ParseInt(chainIDStr, 10, 64)
-		if err != nil {
-			logger.Error("invalid CHAIN_ID", "value", chainIDStr, "error", err)
-			os.Exit(1)
-		}
+
+	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	if err != nil {
+		logger.Error("invalid CHAIN_ID", "value", chainIDStr, "error", err)
+		os.Exit(1)
 	}
 
 	awsRegion := os.Getenv("AWS_REGION")
