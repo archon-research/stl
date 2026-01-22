@@ -883,7 +883,7 @@ func TestProcessMessage_S3ExistsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for S3 exists check failure")
 	}
-	if !strings.Contains(err.Error(), "failed to check if") {
+	if !strings.Contains(err.Error(), "failed to check") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }

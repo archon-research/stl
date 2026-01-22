@@ -228,7 +228,7 @@ func (s *Service) worker(ctx context.Context, id int, msgCh <-chan outbound.SQSM
 }
 
 // processMessage handles a single SQS message.
-func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) error {
+func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (retErr error) {
 	// Parse the SNS wrapper if present (SQS messages from SNS have an envelope)
 	var event outbound.BlockEvent
 	body := msg.Body
@@ -295,7 +295,40 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) e
 	// Calculate the partition (block range)
 	partition := s.getPartition(event.BlockNumber)
 
-	// Write each data type to S3
+	// Determine which files are expected for a complete backup
+	expectedTypes := []string{"block"}
+	if expectation, ok := s.chainExpectations[event.ChainID]; ok {
+		if expectation.ExpectReceipts {
+			expectedTypes = append(expectedTypes, "receipts")
+		}
+		if expectation.ExpectTraces {
+			expectedTypes = append(expectedTypes, "traces")
+		}
+		if expectation.ExpectBlobs {
+			expectedTypes = append(expectedTypes, "blobs")
+		}
+	}
+
+	// Check if all expected files already exist
+	allExist := true
+	for _, dataType := range expectedTypes {
+		key := s.generateKey(partition, event, dataType)
+		exists, err := s.writer.FileExists(ctx, s.config.Bucket, key)
+		if err != nil {
+			return fmt.Errorf("failed to check existence of %s: %w", key, err)
+		}
+		if !exists {
+			allExist = false
+			break
+		}
+	}
+
+	if allExist {
+		s.logger.Debug("all expected files exist, skipping backup", "block", event.BlockNumber)
+		return nil
+	}
+
+	// Write all available data to S3 (overwriting if necessary to ensure consistency)
 	if err := s.writeToS3(ctx, partition, event, "block", blockData); err != nil {
 		return err
 	}
@@ -342,26 +375,20 @@ func (s *Service) getPartition(blockNumber int64) string {
 	return fmt.Sprintf("%d-%d", start, end)
 }
 
-// writeToS3 writes data to S3 with the appropriate key structure.
-// Key format: {partition}/{blockNumber}_{version}_{dataType}.json.gz
-// Note: Each chain has its own S3 bucket, so chainID is not part of the key.
-func (s *Service) writeToS3(ctx context.Context, partition string, event outbound.BlockEvent, dataType string, data json.RawMessage) error {
-	key := fmt.Sprintf("%s/%d_%d_%s.json.gz",
+// generateKey creates the S3 key for a given data type.
+func (s *Service) generateKey(partition string, event outbound.BlockEvent, dataType string) string {
+	return fmt.Sprintf("%s/%d_%d_%s.json.gz",
 		partition,
 		event.BlockNumber,
 		event.Version,
 		dataType,
 	)
+}
 
-	// Check if file already exists (idempotency)
-	exists, err := s.writer.FileExists(ctx, s.config.Bucket, key)
-	if err != nil {
-		return fmt.Errorf("failed to check if %s exists: %w", key, err)
-	}
-	if exists {
-		s.logger.Debug("file already exists, skipping", "key", key)
-		return nil
-	}
+// writeToS3 writes data to S3 with the appropriate key structure.
+// Key format: {partition}/{blockNumber}_{version}_{dataType}.json.gz
+func (s *Service) writeToS3(ctx context.Context, partition string, event outbound.BlockEvent, dataType string, data json.RawMessage) error {
+	key := s.generateKey(partition, event, dataType)
 
 	// Write to S3 with gzip compression
 	if err := s.writer.WriteFile(ctx, s.config.Bucket, key, bytes.NewReader(data), true); err != nil {
