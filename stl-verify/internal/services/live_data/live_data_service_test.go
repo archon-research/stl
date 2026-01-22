@@ -127,7 +127,7 @@ func (m *mockStateRepo) GetBlockVersionCount(ctx context.Context, number int64) 
 	return m.BlockStateRepository.GetBlockVersionCount(ctx, number)
 }
 
-func (m *mockStateRepo) HandleReorgAtomic(ctx context.Context, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+func (m *mockStateRepo) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	m.mu.RLock()
 	err := m.handleReorgAtomicErr
 	m.mu.RUnlock()
@@ -135,7 +135,7 @@ func (m *mockStateRepo) HandleReorgAtomic(ctx context.Context, event outbound.Re
 	if err != nil {
 		return 0, err
 	}
-	return m.BlockStateRepository.HandleReorgAtomic(ctx, event, newBlock)
+	return m.BlockStateRepository.HandleReorgAtomic(ctx, commonAncestor, event, newBlock)
 }
 
 // mockBlockchainClient provides predictable block data for testing.
