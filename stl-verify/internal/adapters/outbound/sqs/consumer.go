@@ -29,17 +29,12 @@ type Config struct {
 	// WaitTimeSeconds is how long to wait for messages (long polling).
 	// Max is 20 seconds.
 	WaitTimeSeconds int32
-
-	// VisibilityTimeout is how long a message is hidden from other consumers
-	// after being received. Should be long enough to process the message.
-	VisibilityTimeout int32
 }
 
 // ConfigDefaults returns sensible defaults for SQS consumer configuration.
 func ConfigDefaults() Config {
 	return Config{
-		WaitTimeSeconds:   20,
-		VisibilityTimeout: 300, // 5 minutes
+		WaitTimeSeconds: 20,
 	}
 }
 
@@ -72,9 +67,6 @@ func NewConsumerWithOptions(cfg aws.Config, sqsConfig Config, logger *slog.Logge
 	if sqsConfig.WaitTimeSeconds == 0 {
 		sqsConfig.WaitTimeSeconds = defaults.WaitTimeSeconds
 	}
-	if sqsConfig.VisibilityTimeout == 0 {
-		sqsConfig.VisibilityTimeout = defaults.VisibilityTimeout
-	}
 
 	return &Consumer{
 		client:   sqs.NewFromConfig(cfg, optFns...),
@@ -97,7 +89,6 @@ func (c *Consumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outb
 		QueueUrl:            aws.String(c.queueURL),
 		MaxNumberOfMessages: int32(maxMessages),
 		WaitTimeSeconds:     c.config.WaitTimeSeconds,
-		VisibilityTimeout:   c.config.VisibilityTimeout,
 		// Request all message attributes
 		MessageAttributeNames: []string{"All"},
 	})
