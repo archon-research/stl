@@ -57,6 +57,13 @@ func Main() {
 	workers := flag.Int("workers", 2, "Number of concurrent workers")
 	flag.Parse()
 
+	// Override workers from environment variable if set (for ECS/container deployments)
+	if workersEnv := os.Getenv("WORKERS"); workersEnv != "" {
+		if w, err := strconv.Atoi(workersEnv); err == nil && w > 0 {
+			*workers = w
+		}
+	}
+
 	if *showVersion {
 		fmt.Printf("stl-raw-data-backup\n")
 		fmt.Printf("  Commit:     %s\n", GitCommit)
