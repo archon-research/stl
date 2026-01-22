@@ -15,9 +15,10 @@ import (
 
 // mockBlockchainClient provides predictable block data for testing.
 type mockBlockchainClient struct {
-	mu     sync.RWMutex
-	blocks map[int64]blockTestData
-	delay  time.Duration
+	mu          sync.RWMutex
+	blocks      map[int64]blockTestData
+	extraBlocks map[string]blockTestData // Uncles/orphans accessible by hash only
+	delay       time.Duration
 }
 
 type blockTestData struct {
@@ -29,7 +30,28 @@ type blockTestData struct {
 
 func newMockClient() *mockBlockchainClient {
 	return &mockBlockchainClient{
-		blocks: make(map[int64]blockTestData),
+		blocks:      make(map[int64]blockTestData),
+		extraBlocks: make(map[string]blockTestData),
+	}
+}
+
+// addUncle adds a block that is accessible by hash but is NOT the canonical block at that number
+func (m *mockBlockchainClient) addUncle(num int64, hash string, parentHash string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	header := outbound.BlockHeader{
+		Number:     fmt.Sprintf("0x%x", num),
+		Hash:       hash,
+		ParentHash: parentHash,
+		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
+	}
+
+	m.extraBlocks[hash] = blockTestData{
+		header:   header,
+		receipts: json.RawMessage(`[]`),
+		traces:   json.RawMessage(`[]`),
+		blobs:    json.RawMessage(`[]`),
 	}
 }
 
@@ -82,12 +104,20 @@ func (m *mockBlockchainClient) GetBlockByHash(ctx context.Context, hash string, 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// Check main canonical chain
 	for _, bd := range m.blocks {
 		if bd.header.Hash == hash {
 			h := bd.header
 			return &h, nil
 		}
 	}
+
+	// Check extra blocks (uncles/history) - simulating node that keeps old blocks
+	if bd, ok := m.extraBlocks[hash]; ok {
+		h := bd.header
+		return &h, nil
+	}
+
 	// Return nil, nil when block not found (not an error - just doesn't exist)
 	// This matches real RPC behavior where eth_getBlockByHash returns null for unknown hashes
 	return nil, nil
@@ -1032,5 +1062,185 @@ func assertBlocksMissing(t *testing.T, ctx context.Context, repo outbound.BlockS
 		if block != nil {
 			t.Fatalf("expected block %d to be missing, got hash=%s", i, truncateHashForTest(block.Hash))
 		}
+	}
+}
+
+// Mock EventSink for unit tests
+type mockEventSink struct{}
+
+func (m *mockEventSink) Publish(ctx context.Context, event outbound.Event) error { return nil }
+func (m *mockEventSink) Close() error                                            { return nil }
+
+func TestVerifyBoundaryBlocks_DetectsUncleReorg(t *testing.T) {
+	// 1. Setup
+	repo := memory.NewBlockStateRepository()
+	client := newMockClient()
+	cache := memory.NewBlockCache()
+	sink := &mockEventSink{}
+
+	cfg := BackfillConfigDefaults()
+	cfg.ChainID = 1
+	cfg.BoundaryCheckDepth = 5
+
+	svc, err := NewBackfillService(cfg, client, repo, cache, sink)
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// 2. Initial State: Repo has Block 100 (Hash A)
+	block100 := outbound.BlockState{
+		Number:     100,
+		Hash:       "0xHASH_A",
+		ParentHash: "0xHASH_99",
+		Version:    0,
+	}
+	if _, err := repo.SaveBlock(ctx, block100); err != nil {
+		t.Fatalf("failed to save block: %v", err)
+	}
+
+	// 3. Client State:
+	// Canonical Block 100 is Hash B
+	client.addBlock(100, "0xHASH_99") // This sets Hash to auto-generated "0x...064"
+	// Let's force it to Hash B for clarity, but addBlock auto-generates hash.
+	// client.blocks[100].header.Hash = "0xHASH_B"
+	// But  generates "0x000...64" for 100.
+	// Let's rely on addBlock behavior.
+	// addBlock(100) -> Hash "0x00...0064" (Canonical)
+
+	// But we need the Repo to hold a DIFFERENT hash.
+	// "0xHASH_A" != "0x00...0064". So we are good there.
+
+	// CRITICAL: We also add "0xHASH_A" as an UNCLE to the client.
+	// This simulates the node still having the old block data available by hash
+	// even though it's not in the canonical chain.
+	client.addUncle(100, "0xHASH_A", "0xHASH_99")
+
+	// 4. Verify Boundary Blocks
+	// Current Implementation: Calls GetBlockByHash("0xHASH_A").
+	// Mock returns the uncle block (NOT nil).
+	// Verify says "Exists -> Valid".
+	// Test should FAIL if we expect reorg detection.
+
+	staleBlocks, err := svc.verifyBoundaryBlocks(ctx)
+	if err != nil {
+		t.Fatalf("verifyBoundaryBlocks failed: %v", err)
+	}
+
+	// 5. Assertions
+	// We expect Hash A to be detected as stale.
+	if len(staleBlocks) == 0 {
+		t.Errorf("FAIL: Failed to detect stale block 100 (Hash A) because it exists as an uncle")
+	} else {
+		t.Logf("PASS: Detected %d stale blocks", len(staleBlocks))
+		if staleBlocks[0].Hash != "0xHASH_A" {
+			t.Errorf("Expected stale block hash 0xHASH_A, got %s", staleBlocks[0].Hash)
+		}
+	}
+}
+
+func TestVerifyBoundaryBlocks_RecoverFromDeepReorgCorrected(t *testing.T) {
+	ctx := context.Background()
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	service, err := NewBackfillService(BackfillConfig{
+		BatchSize:          10,
+		BoundaryCheckDepth: 10,
+	}, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Setup Initial State: Chain A (100A -> 101A)
+	// Canonical: 100A, 101A
+	block100A := outbound.BlockState{
+		Number: 100, Hash: "0xHASH_100A", ParentHash: "0xHASH_99",
+		IsOrphaned: false, ReceivedAt: time.Now().Unix(),
+	}
+	block101A := outbound.BlockState{
+		Number: 101, Hash: "0xHASH_101A", ParentHash: "0xHASH_100A",
+		IsOrphaned: false, ReceivedAt: time.Now().Unix(),
+	}
+
+	if _, err := stateRepo.SaveBlock(ctx, block100A); err != nil {
+		t.Fatalf("failed to save block: %v", err)
+	}
+	if _, err := stateRepo.SaveBlock(ctx, block101A); err != nil {
+		t.Fatalf("failed to save block: %v", err)
+	}
+
+	// Setup RPC State: Chain B (100B -> 101B)
+	// We simulate a reorg where 100A and 101A are replaced by 100B and 101B
+	// 99 is common ancestor
+	client.setBlockHeader(100, "0xHASH_100B", "0xHASH_99")
+	client.setBlockHeader(101, "0xHASH_101B", "0xHASH_100B")
+
+	// Pre-populate ancestor 99 in DB so 100B binds correctly
+	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:     99,
+		Hash:       "0xHASH_99",
+		ParentHash: "0xHASH_98",
+		IsOrphaned: false,
+	}); err != nil {
+		t.Fatalf("failed to save block: %v", err)
+	}
+
+	// Run verification
+	// We need to export verifyBoundaryBlocks or call it via reflection if it is private.
+	// But since this is package backfill_gaps, we have access to unexported methods!
+	staleBlocks, err := service.verifyBoundaryBlocks(ctx)
+	if err != nil {
+		t.Fatalf("verifyBoundaryBlocks failed: %v", err)
+	}
+
+	if len(staleBlocks) != 2 {
+		t.Fatalf("Expected 2 stale blocks, got %d", len(staleBlocks))
+	}
+
+	// Recover
+	err = service.recoverFromStaleChain(ctx, staleBlocks)
+	if err != nil {
+		t.Logf("recoverFromStaleChain returned error (possibly expected in failing test): %v", err)
+		// We don't fail immediately because we want to see if the state is broken or if it failed
+		// due to the bug we are testing for.
+		// The bug hypothesis: recoverFromStaleChain will fail validation and orphan correct blocks
+		// OR it will succeed but leave orphans.
+	}
+
+	// 1. Old blocks should be orphaned
+	old100, _ := stateRepo.GetBlockByHash(ctx, "0xHASH_100A")
+	if !old100.IsOrphaned {
+		t.Errorf("Block 100A should be orphaned")
+	}
+	old101, _ := stateRepo.GetBlockByHash(ctx, "0xHASH_101A")
+	if !old101.IsOrphaned {
+		t.Errorf("Block 101A should be orphaned")
+	}
+
+	// 2. New blocks should be PRESENT and NOT ORPHANED
+	new100, err := stateRepo.GetBlockByNumber(ctx, 100)
+	if err != nil {
+		t.Fatalf("Failed to retrieve new canonical block 100: %v", err)
+	}
+	if new100.Hash != "0xHASH_100B" {
+		t.Errorf("Canonical block 100 should be 100B, got %s", new100.Hash)
+	}
+	if new100.IsOrphaned {
+		t.Errorf("New block 100B should NOT be orphaned")
+	}
+
+	new101, err := stateRepo.GetBlockByNumber(ctx, 101)
+	if err != nil {
+		t.Fatalf("Failed to retrieve new canonical block 101: %v", err)
+	}
+	if new101.Hash != "0xHASH_101B" {
+		t.Errorf("Canonical block 101 should be 101B, got %s", new101.Hash)
+	}
+	if new101.IsOrphaned {
+		t.Errorf("New block 101B should NOT be orphaned")
 	}
 }

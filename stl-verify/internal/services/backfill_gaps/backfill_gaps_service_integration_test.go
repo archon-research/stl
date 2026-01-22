@@ -658,8 +658,8 @@ func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
 
 	// Wrap the real Postgres repo to inject the race condition
 	raceRepo := &RaceConditionRepo{BlockStateRepository: pgRepo}
-	
-	// We keep mocks for Client/Cache/Sink as they are external dependencies 
+
+	// We keep mocks for Client/Cache/Sink as they are external dependencies
 	// not involved in the DB consistency logic being tested.
 	mockClient := newMockClient()
 	mockCache := memory.NewBlockCache()
@@ -696,7 +696,7 @@ func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
 		if num == 99 {
 			// Simulate concurrent reorg: Replace Block 99 with Hash C
 			// This mimics another service (LiveData) modifying the DB between our read and our write.
-			
+
 			// Force update Block 99 to "0xCCCCCCCCCCCCCCCC" (Hash C)
 			pgRepo.MarkBlockOrphaned(ctx, "0xAAAAAAAAAAAAAAAA") // Orphan A
 			pgRepo.SaveBlock(ctx, outbound.BlockState{          // Save C
