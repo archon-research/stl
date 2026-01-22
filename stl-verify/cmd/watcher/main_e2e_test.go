@@ -800,7 +800,11 @@ func createSNSTopics(t *testing.T, ctx context.Context, client *sns.Client) map[
 
 	for _, name := range []string{"blocks", "receipts", "traces", "blobs"} {
 		result, err := client.CreateTopic(ctx, &sns.CreateTopicInput{
-			Name: aws.String(fmt.Sprintf("test-%s", name)),
+			Name: aws.String(fmt.Sprintf("test-%s.fifo", name)),
+			Attributes: map[string]string{
+				"FifoTopic":                 "true",
+				"ContentBasedDeduplication": "false",
+			},
 		})
 		if err != nil {
 			t.Fatalf("failed to create topic %s: %v", name, err)
@@ -817,9 +821,10 @@ func createSQSQueues(t *testing.T, ctx context.Context, client *sqs.Client) map[
 
 	for _, name := range []string{"blocks", "receipts", "traces", "blobs"} {
 		result, err := client.CreateQueue(ctx, &sqs.CreateQueueInput{
-			QueueName: aws.String(fmt.Sprintf("test-%s-queue", name)),
+			QueueName: aws.String(fmt.Sprintf("test-%s-queue.fifo", name)),
 			Attributes: map[string]string{
 				string(sqstypes.QueueAttributeNameVisibilityTimeout): "30",
+				string(sqstypes.QueueAttributeNameFifoQueue):         "true",
 			},
 		})
 		if err != nil {
@@ -836,8 +841,8 @@ func subscribeQueuesToTopics(t *testing.T, ctx context.Context, snsClient *sns.C
 
 	for name, topicARN := range topics {
 		queueURL := queues[name]
-		// Get queue ARN from URL (LocalStack pattern)
-		queueARN := fmt.Sprintf("arn:aws:sqs:us-east-1:000000000000:test-%s-queue", name)
+		// Get queue ARN from URL (LocalStack pattern for FIFO queues)
+		queueARN := fmt.Sprintf("arn:aws:sqs:us-east-1:000000000000:test-%s-queue.fifo", name)
 
 		_, err := snsClient.Subscribe(ctx, &sns.SubscribeInput{
 			TopicArn: aws.String(topicARN),
