@@ -103,8 +103,6 @@ func Main() {
 		os.Exit(1)
 	}
 
-	redisPassword := os.Getenv("REDIS_PASSWORD")
-
 	chainIDStr := os.Getenv("CHAIN_ID")
 	if chainIDStr == "" {
 		logger.Error("CHAIN_ID environment variable is required")
@@ -145,7 +143,6 @@ func Main() {
 	// Create Redis cache
 	cache, err := rediscache.NewBlockCache(rediscache.Config{
 		Addr:      redisAddr,
-		Password:  redisPassword,
 		KeyPrefix: "stl",
 	}, logger)
 	if err != nil {
