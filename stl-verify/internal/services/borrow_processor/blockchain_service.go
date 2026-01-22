@@ -31,8 +31,8 @@ type Multicall3Request struct {
 }
 
 type Multicall3Result struct {
-	Success    bool
-	ReturnData []byte
+	Success    bool   `json:"success"`
+	ReturnData []byte `json:"returnData"`
 }
 
 type TokenMetadata struct {
@@ -333,10 +333,7 @@ func (s *blockchainService) executeMulticall(ctx context.Context, calls []Multic
 		return nil, fmt.Errorf("failed to unpack multicall response: %w", err)
 	}
 
-	resultsRaw := unpacked[0].([]struct {
-		Success    bool   `json:"success"`
-		ReturnData []byte `json:"returnData"`
-	})
+	resultsRaw := unpacked[0].([]Multicall3Result)
 
 	results := make([]Multicall3Result, len(resultsRaw))
 	for i, r := range resultsRaw {
