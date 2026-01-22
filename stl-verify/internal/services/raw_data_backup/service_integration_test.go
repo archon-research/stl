@@ -193,9 +193,8 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 
 	// Create SQS consumer adapter using the real adapter with LocalStack endpoint
 	consumer, err := sqsadapter.NewConsumerWithOptions(awsCfg, sqsadapter.Config{
-		QueueURL:          infra.BackupQueueURL,
-		WaitTimeSeconds:   1, // Short for tests
-		VisibilityTimeout: 30,
+		QueueURL:        infra.BackupQueueURL,
+		WaitTimeSeconds: 1, // Short for tests
 	}, logger, func(o *sqs.Options) {
 		o.BaseEndpoint = aws.String(localstackCfg.Endpoint)
 	})
