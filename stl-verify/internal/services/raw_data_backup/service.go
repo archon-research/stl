@@ -378,17 +378,12 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (
 }
 
 // getPartition returns the partition string for a block number.
-// Block 0-1000 -> "0-1000", block 1001-2000 -> "1001-2000", etc.
+// Each partition contains exactly BlockRangeSize (1000) blocks:
+// Block 0-999 -> "0-999", block 1000-1999 -> "1000-1999", etc.
 func (s *Service) getPartition(blockNumber int64) string {
-	// Calculate which partition this block belongs to
-	// Block 0-1000 is partition 0, block 1001-2000 is partition 1, etc.
-	if blockNumber <= BlockRangeSize {
-		return fmt.Sprintf("0-%d", BlockRangeSize)
-	}
-
-	partitionIndex := (blockNumber - 1) / BlockRangeSize
-	start := partitionIndex*BlockRangeSize + 1
-	end := (partitionIndex + 1) * BlockRangeSize
+	partitionIndex := blockNumber / BlockRangeSize
+	start := partitionIndex * BlockRangeSize
+	end := start + BlockRangeSize - 1
 
 	return fmt.Sprintf("%d-%d", start, end)
 }

@@ -509,31 +509,30 @@ func TestGetPartition(t *testing.T) {
 		blockNumber int64
 		expected    string
 	}{
-		// First partition: 0-1000
-		{0, "0-1000"},
-		{1, "0-1000"},
-		{500, "0-1000"},
-		{999, "0-1000"},
-		{1000, "0-1000"},
+		// First partition: 0-999 (1000 blocks)
+		{0, "0-999"},
+		{1, "0-999"},
+		{500, "0-999"},
+		{999, "0-999"},
 
-		// Second partition: 1001-2000
-		{1001, "1001-2000"},
-		{1500, "1001-2000"},
-		{2000, "1001-2000"},
+		// Second partition: 1000-1999 (1000 blocks)
+		{1000, "1000-1999"},
+		{1500, "1000-1999"},
+		{1999, "1000-1999"},
 
-		// Third partition: 2001-3000
-		{2001, "2001-3000"},
-		{3000, "2001-3000"},
+		// Third partition: 2000-2999 (1000 blocks)
+		{2000, "2000-2999"},
+		{2999, "2000-2999"},
 
 		// Large block numbers
-		{10000, "9001-10000"},
-		{10001, "10001-11000"},
-		{1000000, "999001-1000000"},
-		{1000001, "1000001-1001000"},
+		{10000, "10000-10999"},
+		{10999, "10000-10999"},
+		{1000000, "1000000-1000999"},
+		{1000999, "1000000-1000999"},
 
-		// Edge cases
-		{BlockRangeSize, "0-1000"},
-		{BlockRangeSize + 1, "1001-2000"},
+		// Edge cases at partition boundaries
+		{BlockRangeSize - 1, "0-999"},
+		{BlockRangeSize, "1000-1999"},
 	}
 
 	for _, tt := range tests {
@@ -589,10 +588,10 @@ func TestProcessMessage_Success(t *testing.T) {
 
 	// Check specific keys
 	expectedKeys := []string{
-		"test-bucket/0-1000/100_0_block.json.gz",
-		"test-bucket/0-1000/100_0_receipts.json.gz",
-		"test-bucket/0-1000/100_0_traces.json.gz",
-		"test-bucket/0-1000/100_0_blobs.json.gz",
+		"test-bucket/0-999/100_0_block.json.gz",
+		"test-bucket/0-999/100_0_receipts.json.gz",
+		"test-bucket/0-999/100_0_traces.json.gz",
+		"test-bucket/0-999/100_0_blobs.json.gz",
 	}
 
 	for _, expectedKey := range expectedKeys {
@@ -637,7 +636,7 @@ func TestProcessMessage_SNSWrapped(t *testing.T) {
 	}
 
 	// Verify file was written
-	_, exists := writer.GetFile("test-bucket", "0-1000/100_0_block.json.gz")
+	_, exists := writer.GetFile("test-bucket", "0-999/100_0_block.json.gz")
 	if !exists {
 		t.Error("expected block file to be written")
 	}
@@ -850,7 +849,7 @@ func TestProcessMessage_S3WriteError(t *testing.T) {
 	ctx := context.Background()
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{}`))
 
-	writer.SetWriteError("test-bucket/0-1000/100_0_block.json.gz", errors.New("S3 access denied"))
+	writer.SetWriteError("test-bucket/0-999/100_0_block.json.gz", errors.New("S3 access denied"))
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)
@@ -879,7 +878,7 @@ func TestProcessMessage_S3ExistsError(t *testing.T) {
 	ctx := context.Background()
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{}`))
 
-	writer.SetExistsError("test-bucket/0-1000/100_0_block.json.gz", errors.New("S3 service unavailable"))
+	writer.SetExistsError("test-bucket/0-999/100_0_block.json.gz", errors.New("S3 service unavailable"))
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)
@@ -909,7 +908,7 @@ func TestProcessMessage_Idempotent_SkipsExistingFile(t *testing.T) {
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{}`))
 
 	// Pre-populate S3 with existing file
-	writer.PresetFileExists("test-bucket", "0-1000/100_0_block.json.gz")
+	writer.PresetFileExists("test-bucket", "0-999/100_0_block.json.gz")
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)
@@ -952,8 +951,8 @@ func TestProcessMessage_DifferentVersionsAreSeparate(t *testing.T) {
 	_ = svc.processMessage(ctx, msg1)
 
 	// Both files should exist
-	_, exists0 := writer.GetFile("test-bucket", "0-1000/100_0_block.json.gz")
-	_, exists1 := writer.GetFile("test-bucket", "0-1000/100_1_block.json.gz")
+	_, exists0 := writer.GetFile("test-bucket", "0-999/100_0_block.json.gz")
+	_, exists1 := writer.GetFile("test-bucket", "0-999/100_1_block.json.gz")
 
 	if !exists0 {
 		t.Error("expected version 0 file to exist")
@@ -988,14 +987,14 @@ func TestProcessMessage_SameBlockNumberSameKeyPattern(t *testing.T) {
 
 	// Verify the key structure doesn't include chain ID
 	// (chain separation is done via different buckets)
-	_, existsMainnet := writer.GetFile("mainnet-bucket", "0-1000/100_0_block.json.gz")
+	_, existsMainnet := writer.GetFile("mainnet-bucket", "0-999/100_0_block.json.gz")
 
 	if !existsMainnet {
 		t.Error("expected file with partition-based key (no chain ID prefix)")
 	}
 
 	// Confirm no file with old chain-prefixed format exists
-	_, existsOldFormat := writer.GetFile("mainnet-bucket", "1/0-1000/100_0_block.json.gz")
+	_, existsOldFormat := writer.GetFile("mainnet-bucket", "1/0-999/100_0_block.json.gz")
 	if existsOldFormat {
 		t.Error("unexpected file with chain ID prefix - format should be {partition}/{block}_{version}_{type}.json.gz")
 	}
@@ -1452,8 +1451,8 @@ func TestProcessMessage_ZeroBlockNumber(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Should be in partition 0-1000
-	_, exists := writer.GetFile("test-bucket", "0-1000/0_0_block.json.gz")
+	// Should be in partition 0-999
+	_, exists := writer.GetFile("test-bucket", "0-999/0_0_block.json.gz")
 	if !exists {
 		t.Error("expected block 0 file to exist")
 	}
@@ -1483,8 +1482,8 @@ func TestProcessMessage_LargeBlockNumber(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Check partition calculation
-	expectedPartition := "19999001-20000000"
+	// Check partition calculation (20000000 / 1000 = 20000, start = 20000000, end = 20000999)
+	expectedPartition := "20000000-20000999"
 	expectedKey := fmt.Sprintf("%s/%d_0_block.json.gz", expectedPartition, blockNum)
 	_, exists := writer.GetFile("test-bucket", expectedKey)
 	if !exists {
@@ -1516,7 +1515,7 @@ func TestProcessMessage_HighVersion(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, exists := writer.GetFile("test-bucket", "0-1000/100_999_block.json.gz")
+	_, exists := writer.GetFile("test-bucket", "0-999/100_999_block.json.gz")
 	if !exists {
 		t.Error("expected high version file to exist")
 	}
@@ -1578,7 +1577,7 @@ func TestProcessMessage_LargeBlockData(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	data, exists := writer.GetFile("test-bucket", "0-1000/100_0_block.json.gz")
+	data, exists := writer.GetFile("test-bucket", "0-999/100_0_block.json.gz")
 	if !exists {
 		t.Error("expected file to exist")
 	}
@@ -1677,7 +1676,7 @@ func TestProcessMessage_ReceiptsWriteError(t *testing.T) {
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{}`))
 	_ = cache.SetReceipts(ctx, 1, 100, 0, json.RawMessage(`[]`))
 
-	writer.SetWriteError("test-bucket/0-1000/100_0_receipts.json.gz", errors.New("S3 error"))
+	writer.SetWriteError("test-bucket/0-999/100_0_receipts.json.gz", errors.New("S3 error"))
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)
@@ -1709,7 +1708,7 @@ func TestProcessMessage_TracesWriteError(t *testing.T) {
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{}`))
 	_ = cache.SetTraces(ctx, 1, 100, 0, json.RawMessage(`[]`))
 
-	writer.SetWriteError("test-bucket/0-1000/100_0_traces.json.gz", errors.New("S3 error"))
+	writer.SetWriteError("test-bucket/0-999/100_0_traces.json.gz", errors.New("S3 error"))
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)
@@ -1741,7 +1740,7 @@ func TestProcessMessage_BlobsWriteError(t *testing.T) {
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{}`))
 	_ = cache.SetBlobs(ctx, 1, 100, 0, json.RawMessage(`[]`))
 
-	writer.SetWriteError("test-bucket/0-1000/100_0_blobs.json.gz", errors.New("S3 error"))
+	writer.SetWriteError("test-bucket/0-999/100_0_blobs.json.gz", errors.New("S3 error"))
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)
@@ -1892,28 +1891,28 @@ func TestProcessMessage_PartitionBoundariesComprehensive(t *testing.T) {
 		blockNumber int64
 		expected    string
 	}{
-		// First partition boundaries
-		{0, "0-1000"},
-		{1, "0-1000"},
-		{999, "0-1000"},
-		{1000, "0-1000"},
+		// First partition boundaries (0-999)
+		{0, "0-999"},
+		{1, "0-999"},
+		{999, "0-999"},
 
-		// Second partition boundaries
-		{1001, "1001-2000"},
-		{1002, "1001-2000"},
-		{1999, "1001-2000"},
-		{2000, "1001-2000"},
+		// Second partition boundaries (1000-1999)
+		{1000, "1000-1999"},
+		{1001, "1000-1999"},
+		{1999, "1000-1999"},
 
-		// Third partition boundaries
-		{2001, "2001-3000"},
-		{2002, "2001-3000"},
-		{2999, "2001-3000"},
-		{3000, "2001-3000"},
+		// Third partition boundaries (2000-2999)
+		{2000, "2000-2999"},
+		{2001, "2000-2999"},
+		{2999, "2000-2999"},
+
+		// Fourth partition boundary
+		{3000, "3000-3999"},
 
 		// Large number boundaries
-		{9999999, "9999001-10000000"},
-		{10000000, "9999001-10000000"},
-		{10000001, "10000001-10001000"},
+		{9999999, "9999000-9999999"},
+		{10000000, "10000000-10000999"},
+		{10000999, "10000000-10000999"},
 	}
 
 	for _, tc := range testCases {
