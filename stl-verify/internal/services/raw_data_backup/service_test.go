@@ -371,21 +371,6 @@ func createSQSMessage(id string, event outbound.BlockEvent) outbound.SQSMessage 
 	}
 }
 
-func createSNSWrappedMessage(id string, event outbound.BlockEvent) outbound.SQSMessage {
-	innerBody, _ := json.Marshal(event)
-	wrapper := struct {
-		Message string `json:"Message"`
-	}{
-		Message: string(innerBody),
-	}
-	body, _ := json.Marshal(wrapper)
-	return outbound.SQSMessage{
-		MessageID:     id,
-		ReceiptHandle: "receipt-" + id,
-		Body:          string(body),
-	}
-}
-
 // =============================================================================
 // Tests: NewService
 // =============================================================================
@@ -605,40 +590,6 @@ func TestProcessMessage_Success(t *testing.T) {
 		if !found {
 			t.Errorf("expected key %s not found in %v", expectedKey, keys)
 		}
-	}
-}
-
-func TestProcessMessage_SNSWrapped(t *testing.T) {
-	consumer := newMockSQSConsumer()
-	cache := newMockBlockCache()
-	writer := newMockS3Writer()
-
-	svc, _ := NewService(Config{
-		ChainID:           1,
-		Bucket:            "test-bucket",
-		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
-	}, consumer, cache, writer)
-
-	// Set up cache with block data
-	event := createBlockEvent(1, 100, 0)
-	blockData := json.RawMessage(`{"number": 100}`)
-
-	ctx := context.Background()
-	_ = cache.SetBlock(ctx, 1, 100, 0, blockData)
-
-	// Create SNS-wrapped message
-	msg := createSNSWrappedMessage("msg1", event)
-	err := svc.processMessage(ctx, msg)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Verify file was written
-	_, exists := writer.GetFile("test-bucket", "0-999/100_0_block.json.gz")
-	if !exists {
-		t.Error("expected block file to be written")
 	}
 }
 

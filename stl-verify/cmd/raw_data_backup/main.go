@@ -198,11 +198,12 @@ func Main() {
 
 	// Create and run the backup service
 	service, err := rawdatabackup.NewService(rawdatabackup.Config{
-		ChainID: chainID,
-		Bucket:  bucket,
-		Workers: *workers,
-		Logger:  logger,
-		Metrics: metricsRec,
+		ChainID:   chainID,
+		Bucket:    bucket,
+		Workers:   *workers,
+		BatchSize: 10, // Max messages per SQS receive call
+		Logger:    logger,
+		Metrics:   metricsRec,
 	}, consumer, cache, writer)
 	if err != nil {
 		logger.Error("failed to create backup service", "error", err)

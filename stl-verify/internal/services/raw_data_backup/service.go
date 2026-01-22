@@ -247,20 +247,8 @@ func (s *Service) worker(ctx context.Context, id int, msgCh <-chan outbound.SQSM
 
 // processMessage handles a single SQS message.
 func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (retErr error) {
-	// Parse the SNS wrapper if present (SQS messages from SNS have an envelope)
 	var event outbound.BlockEvent
-	body := msg.Body
-
-	// Try to parse as SNS notification first
-	var snsWrapper struct {
-		Message string `json:"Message"`
-	}
-	if err := json.Unmarshal([]byte(body), &snsWrapper); err == nil && snsWrapper.Message != "" {
-		body = snsWrapper.Message
-	}
-
-	// Parse the block event
-	if err := json.Unmarshal([]byte(body), &event); err != nil {
+	if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
 		return fmt.Errorf("failed to parse block event: %w", err)
 	}
 
