@@ -152,6 +152,14 @@ func (s *Service) Run(ctx context.Context) error {
 	// Create a channel for messages to process
 	msgCh := make(chan outbound.SQSMessage, s.config.Workers*2)
 
+	// Use sync.Once to ensure msgCh is closed exactly once, preventing panic from double-close race
+	var closeMsgChOnce sync.Once
+	closeMsgCh := func() {
+		closeMsgChOnce.Do(func() {
+			close(msgCh)
+		})
+	}
+
 	// Start worker goroutines
 	for i := 0; i < s.config.Workers; i++ {
 		s.wg.Add(1)
@@ -163,12 +171,12 @@ func (s *Service) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			s.logger.Info("context cancelled, stopping message fetcher")
-			close(msgCh)
+			closeMsgCh()
 			s.wg.Wait()
 			return ctx.Err()
 		case <-s.stopCh:
 			s.logger.Info("stop signal received, stopping message fetcher")
-			close(msgCh)
+			closeMsgCh()
 			s.wg.Wait()
 			return nil
 		default:
@@ -178,7 +186,7 @@ func (s *Service) Run(ctx context.Context) error {
 		messages, err := s.consumer.ReceiveMessages(ctx, s.config.BatchSize)
 		if err != nil {
 			if ctx.Err() != nil {
-				close(msgCh)
+				closeMsgCh()
 				s.wg.Wait()
 				return ctx.Err()
 			}
@@ -192,7 +200,7 @@ func (s *Service) Run(ctx context.Context) error {
 			select {
 			case msgCh <- msg:
 			case <-ctx.Done():
-				close(msgCh)
+				closeMsgCh()
 				s.wg.Wait()
 				return ctx.Err()
 			}
