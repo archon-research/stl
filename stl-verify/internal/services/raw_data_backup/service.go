@@ -264,6 +264,11 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (
 		return fmt.Errorf("failed to parse block event: %w", err)
 	}
 
+	// Validate that the event's chainID matches our configured chainID
+	if event.ChainID != s.config.ChainID {
+		return fmt.Errorf("chain ID mismatch: event has %d, expected %d", event.ChainID, s.config.ChainID)
+	}
+
 	s.logger.Debug("processing block",
 		"blockNumber", event.BlockNumber,
 		"version", event.Version,

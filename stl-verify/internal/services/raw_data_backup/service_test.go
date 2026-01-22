@@ -727,6 +727,44 @@ func TestProcessMessage_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestProcessMessage_ChainIDMismatch(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+
+	// Service configured for chain 1
+	svc, _ := NewService(Config{
+		ChainID: 1,
+		Bucket:  "test-bucket",
+		Logger:  testLogger(),
+	}, consumer, cache, writer)
+
+	// Event comes from chain 137 (Polygon)
+	event := createBlockEvent(137, 100, 0)
+	msg := createSQSMessage("msg1", event)
+
+	err := svc.processMessage(context.Background(), msg)
+
+	if err == nil {
+		t.Fatal("expected error for chain ID mismatch")
+	}
+	if !strings.Contains(err.Error(), "chain ID mismatch") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	if !strings.Contains(err.Error(), "event has 137") {
+		t.Errorf("error should include event chain ID: %v", err)
+	}
+	if !strings.Contains(err.Error(), "expected 1") {
+		t.Errorf("error should include expected chain ID: %v", err)
+	}
+
+	// Verify nothing was written to S3
+	keys := writer.GetAllKeys()
+	if len(keys) != 0 {
+		t.Errorf("expected no files written, got %d: %v", len(keys), keys)
+	}
+}
+
 func TestProcessMessage_CacheGetBlockError(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
