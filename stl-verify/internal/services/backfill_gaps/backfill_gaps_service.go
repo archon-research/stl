@@ -442,6 +442,23 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 		return fmt.Errorf("failed to save block state: %w", err)
 	}
 
+	// Re-validate linkage AFTER save to catch reorgs that happened between check and save.
+	// This closes the TOCTOU (Time-of-Check to Time-of-Use) window.
+	if err := s.validateBlockLinkage(ctx, blockNum, header.Hash, header.ParentHash); err != nil {
+		s.logger.Warn("post-save linkage validation failed (race condition detected), orphaning block",
+			"block", blockNum,
+			"hash", truncateHash(header.Hash),
+			"error", err)
+
+		// Mark the invalid block we just saved as orphaned so it doesn't break the chain
+		if orphanErr := s.stateRepo.MarkBlockOrphaned(ctx, header.Hash); orphanErr != nil {
+			s.logger.Error("failed to orphan invalid block after race detected",
+				"block", blockNum, "error", orphanErr)
+		}
+
+		return fmt.Errorf("post-save linkage validation failed: %w", err)
+	}
+
 	// Cache and publish the data
 	s.cacheAndPublishBlockData(ctx, bd, header, version, receivedAt)
 
