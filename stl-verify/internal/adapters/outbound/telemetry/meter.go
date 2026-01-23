@@ -3,7 +3,6 @@ package telemetry
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -49,15 +48,10 @@ func InitMetrics(ctx context.Context, config MetricConfig) (shutdown func(contex
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
 
-	// Strip http:// or https:// scheme if present - WithEndpoint expects just host:port
-	// The standard OTEL_EXPORTER_OTLP_ENDPOINT env var includes the scheme,
-	// but otlpmetricgrpc.WithEndpoint() expects just "host:port"
-	endpoint := config.OTLPEndpoint
-	endpoint = strings.TrimPrefix(endpoint, "http://")
-	endpoint = strings.TrimPrefix(endpoint, "https://")
-
+	// Use WithEndpointURL which accepts full URL with scheme (e.g., "http://localhost:4317")
+	// This is the proper way to handle OTEL_EXPORTER_OTLP_ENDPOINT which includes the scheme
 	exporter, err := otlpmetricgrpc.New(ctx,
-		otlpmetricgrpc.WithEndpoint(endpoint),
+		otlpmetricgrpc.WithEndpointURL(config.OTLPEndpoint),
 		otlpmetricgrpc.WithInsecure(), // Assuming internal communication
 	)
 	if err != nil {
