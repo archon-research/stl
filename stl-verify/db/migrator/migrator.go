@@ -2,6 +2,7 @@ package migrator
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"os"
@@ -35,6 +36,9 @@ func (m *Migrator) ApplyAll(ctx context.Context) error {
 
 	for _, filename := range files {
 		if applied[filename] {
+			if err := m.verifyChecksum(ctx, filename); err != nil {
+				return fmt.Errorf("checksum verification failed for %s: %w", filename, err)
+			}
 			continue
 		}
 
@@ -102,6 +106,32 @@ func (m *Migrator) getMigrationFiles() ([]string, error) {
 	return files, nil
 }
 
+func (m *Migrator) verifyChecksum(ctx context.Context, filename string) error {
+	path := filepath.Join(m.migrationsDir, filename)
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	currentChecksum := fmt.Sprintf("%x", sha256.Sum256(content))
+
+	var storedChecksum sql.NullString
+	err = m.db.QueryRowContext(ctx,
+		"SELECT checksum FROM migrations WHERE filename = $1",
+		filename).Scan(&storedChecksum)
+	if err != nil {
+		return err
+	}
+
+	if storedChecksum.Valid && storedChecksum.String != currentChecksum {
+		return fmt.Errorf("migration has been modified (expected checksum %s, got %s)",
+			storedChecksum.String, currentChecksum)
+	}
+
+	return nil
+}
+
 func (m *Migrator) applyMigration(ctx context.Context, filename string) error {
 	path := filepath.Join(m.migrationsDir, filename)
 
@@ -109,6 +139,8 @@ func (m *Migrator) applyMigration(ctx context.Context, filename string) error {
 	if err != nil {
 		return err
 	}
+
+	checksum := fmt.Sprintf("%x", sha256.Sum256(content))
 
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -124,11 +156,18 @@ func (m *Migrator) applyMigration(ctx context.Context, filename string) error {
 		return fmt.Errorf("failed to execute migration SQL: %w", err)
 	}
 
+	_, err = tx.ExecContext(ctx,
+		"UPDATE migrations SET checksum = $1 WHERE filename = $2",
+		checksum, filename)
+	if err != nil {
+		return fmt.Errorf("failed to update checksum: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 
-	fmt.Printf("✓ Applied migration: %s\n", filename)
+	fmt.Printf("✓ Applied migration: %s (checksum: %s)\n", filename, checksum[:8])
 	return nil
 }
 
