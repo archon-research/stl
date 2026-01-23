@@ -114,7 +114,11 @@ func (m *Migrator) applyMigration(ctx context.Context, filename string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() {
+		if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+			fmt.Printf("warning: failed to rollback transaction: %v\n", err)
+		}
+	}()
 
 	if _, err := tx.ExecContext(ctx, string(content)); err != nil {
 		return fmt.Errorf("failed to execute migration SQL: %w", err)
