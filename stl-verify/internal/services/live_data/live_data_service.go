@@ -904,14 +904,21 @@ func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum i
 		IsReorg:        isReorg,
 		IsBackfill:     false,
 	}
+
+	snsStart := time.Now()
 	if err := s.eventSink.Publish(ctx, event); err != nil {
 		return fmt.Errorf("failed to publish block event for block %d: %w", blockNum, err)
 	}
+	snsDuration := time.Since(snsStart)
 
 	// Mark block publish as complete in DB for crash recovery
+	dbStart := time.Now()
 	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlock); err != nil {
 		s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
 	}
+	dbDuration := time.Since(dbStart)
+
+	s.logger.Debug("published block event", "block", blockNum, "sns_ms", snsDuration.Milliseconds(), "db_mark_ms", dbDuration.Milliseconds())
 
 	return nil
 }
@@ -927,7 +934,7 @@ func (s *LiveService) cacheAndPublishBlockData(ctx context.Context, header outbo
 		return fmt.Errorf("failed to parse block timestamp %q for block %d: %w", header.Timestamp, blockNum, err)
 	}
 
-	start := time.Now()
+	cacheStart := time.Now()
 
 	// Check for fetch errors before caching
 	if bd.BlockErr != nil {
@@ -943,60 +950,22 @@ func (s *LiveService) cacheAndPublishBlockData(ctx context.Context, header outbo
 		return fmt.Errorf("failed to fetch blobs for block %d: %w", blockNum, bd.BlobsErr)
 	}
 
-	// Cache all data types in parallel
-	numWorkers := 3
+	// Cache all data types in a single pipelined operation (single network round-trip)
+	cacheInput := outbound.BlockDataInput{
+		Block:    bd.Block,
+		Receipts: bd.Receipts,
+		Traces:   bd.Traces,
+	}
 	if !s.config.DisableBlobs {
-		numWorkers = 4
-	}
-	errCh := make(chan error, numWorkers)
-
-	go func() {
-		if err := s.cache.SetBlock(ctx, chainID, blockNum, version, bd.Block); err != nil {
-			errCh <- fmt.Errorf("failed to cache block %d: %w", blockNum, err)
-		} else {
-			errCh <- nil
-		}
-	}()
-
-	go func() {
-		if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, bd.Receipts); err != nil {
-			errCh <- fmt.Errorf("failed to cache receipts for block %d: %w", blockNum, err)
-		} else {
-			errCh <- nil
-		}
-	}()
-
-	go func() {
-		if err := s.cache.SetTraces(ctx, chainID, blockNum, version, bd.Traces); err != nil {
-			errCh <- fmt.Errorf("failed to cache traces for block %d: %w", blockNum, err)
-		} else {
-			errCh <- nil
-		}
-	}()
-
-	if !s.config.DisableBlobs {
-		go func() {
-			if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, bd.Blobs); err != nil {
-				errCh <- fmt.Errorf("failed to cache blobs for block %d: %w", blockNum, err)
-			} else {
-				errCh <- nil
-			}
-		}()
+		cacheInput.Blobs = bd.Blobs
 	}
 
-	// Wait for all caching to complete
-	var errs []error
-	for i := 0; i < numWorkers; i++ {
-		if err := <-errCh; err != nil {
-			errs = append(errs, err)
-		}
+	if err := s.cache.SetBlockData(ctx, chainID, blockNum, version, cacheInput); err != nil {
+		return fmt.Errorf("failed to cache block data for block %d: %w", blockNum, err)
 	}
 
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-
-	s.logger.Debug("cached all block data", "block", blockNum, "duration", time.Since(start))
+	cacheDuration := time.Since(cacheStart)
+	s.logger.Debug("cached all block data", "block", blockNum, "cache_ms", cacheDuration.Milliseconds())
 
 	// All data cached successfully - now publish the block event
 	return s.publishBlockEvent(ctx, chainID, blockNum, version, blockHash, parentHash, blockTimestamp, receivedAt, isReorg)

@@ -5,10 +5,22 @@ import (
 	"encoding/json"
 )
 
+// BlockDataInput holds all data types to cache for a block.
+type BlockDataInput struct {
+	Block    json.RawMessage // Full block with transactions (required)
+	Receipts json.RawMessage // Transaction receipts (required)
+	Traces   json.RawMessage // Execution traces (required)
+	Blobs    json.RawMessage // Blob sidecars (optional, nil to skip)
+}
+
 // BlockCache defines the interface for caching block data.
 // Each data type is stored separately and keyed by chain ID, block number, and version.
 // The version is incremented each time a block at the same height is reorged.
 type BlockCache interface {
+	// SetBlockData stores all block data types in a single pipelined operation.
+	// This is more efficient than calling SetBlock, SetReceipts, SetTraces, SetBlobs separately.
+	SetBlockData(ctx context.Context, chainID int64, blockNumber int64, version int, data BlockDataInput) error
+
 	// SetBlock stores the full block with transactions.
 	SetBlock(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error
 
