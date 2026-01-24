@@ -426,16 +426,6 @@ func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, bloc
 	return nil
 }
 
-// processBlockWithPrefetchResult processes a block using an already-received prefetch result.
-// This variant is used when the prefetch result was read earlier (e.g., during a non-blocking check).
-func (s *LiveService) processBlockWithPrefetchResult(header outbound.BlockHeader, blockNum int64, receivedAt time.Time, prefetch prefetchResult) error {
-	// Create a closed channel with the result to reuse the main processing logic
-	resultCh := make(chan prefetchResult, 1)
-	resultCh <- prefetch
-	close(resultCh)
-	return s.processBlockWithPrefetch(header, blockNum, receivedAt, resultCh)
-}
-
 // isDuplicateBlock checks if a block has already been processed.
 // It first does a quick in-memory check, then falls back to DB lookup.
 func (s *LiveService) isDuplicateBlock(ctx context.Context, hash string, blockNum int64) (bool, error) {
