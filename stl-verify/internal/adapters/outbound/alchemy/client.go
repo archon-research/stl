@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
@@ -48,6 +49,10 @@ type ClientConfig struct {
 
 	// DisableBlobs disables fetching blob sidecars (useful for pre-Dencun blocks or unsupported nodes).
 	DisableBlobs bool
+
+	// ParallelRPC uses separate goroutines for each RPC call instead of batching.
+	// This uses more credits but may be faster due to parallel execution.
+	ParallelRPC bool
 
 	// Logger is the structured logger for the client.
 	Logger *slog.Logger
@@ -287,9 +292,102 @@ func (c *Client) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.R
 	return resp.Result, nil
 }
 
-// GetBlockDataByHash fetches all data for a single block by hash in a single batched RPC call.
+// GetBlockDataByHash fetches all data for a single block by hash.
 // This is TOCTOU-safe - fetching by hash ensures we get data for the exact block we want.
+// When ParallelRPC is enabled, each RPC call runs in a separate goroutine for lower latency.
+// Otherwise, all calls are batched into a single HTTP request.
 func (c *Client) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	if c.config.ParallelRPC {
+		return c.getBlockDataByHashParallel(ctx, blockNum, hash, fullTx)
+	}
+	return c.getBlockDataByHashBatched(ctx, blockNum, hash, fullTx)
+}
+
+// getBlockDataByHashParallel fetches block data using parallel goroutines for each RPC call.
+// This uses more API credits but may be faster due to parallel network requests.
+func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	result := outbound.BlockData{BlockNumber: blockNum}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	// Fetch block
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		req := jsonRPCRequest{JSONRPC: "2.0", ID: 0, Method: "eth_getBlockByHash", Params: []interface{}{hash, fullTx}}
+		resp, err := c.call(ctx, req)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			result.BlockErr = err
+		} else if resp.Error != nil {
+			result.BlockErr = fmt.Errorf("RPC error for block %s: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
+		} else {
+			result.Block = resp.Result
+		}
+	}()
+
+	// Fetch receipts
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		req := jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "eth_getBlockReceipts", Params: []interface{}{hash}}
+		resp, err := c.call(ctx, req)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			result.ReceiptsErr = err
+		} else if resp.Error != nil {
+			result.ReceiptsErr = fmt.Errorf("RPC error for block %s receipts: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
+		} else {
+			result.Receipts = resp.Result
+		}
+	}()
+
+	// Fetch traces
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		req := jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []interface{}{hash}}
+		resp, err := c.call(ctx, req)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			result.TracesErr = err
+		} else if resp.Error != nil {
+			result.TracesErr = fmt.Errorf("RPC error for block %s traces: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
+		} else {
+			result.Traces = resp.Result
+		}
+	}()
+
+	// Fetch blobs (only if enabled)
+	if !c.config.DisableBlobs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := jsonRPCRequest{JSONRPC: "2.0", ID: 3, Method: "eth_getBlobSidecars", Params: []interface{}{hash}}
+			resp, err := c.call(ctx, req)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				result.BlobsErr = err
+			} else if resp.Error != nil {
+				result.BlobsErr = fmt.Errorf("RPC error for block %s blobs: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
+			} else {
+				result.Blobs = resp.Result
+			}
+		}()
+	}
+
+	wg.Wait()
+	return result, nil
+}
+
+// getBlockDataByHashBatched fetches block data using a single batched RPC call.
+// This uses fewer API credits but all calls share a single HTTP round-trip.
+func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
 	// Build batch request: 3-4 calls (block, receipts, traces, and optionally blobs)
 	callsCount := 3
 	if !c.config.DisableBlobs {

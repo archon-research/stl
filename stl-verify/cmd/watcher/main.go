@@ -60,6 +60,7 @@ func init() {
 func main() {
 	// Parse command-line flags
 	disableBlobs := flag.Bool("disable-blobs", false, "Disable fetching blob sidecars")
+	parallelRPC := flag.Bool("parallel-rpc", true, "Use parallel goroutines for RPC calls instead of batching (faster but uses more credits)")
 	pprofAddr := flag.String("pprof", "", "Enable pprof profiling server (e.g., ':6060')")
 	showVersion := flag.Bool("version", false, "Show version information and exit")
 	flag.Parse()
@@ -158,6 +159,13 @@ func main() {
 		logger.Error("CHAIN_ID must be a valid integer", "error", err)
 		os.Exit(1)
 	}
+
+	// Auto-disable blobs for Ethereum mainnet (chain ID 1) since eth_getBlobSidecars is not supported
+	if chainID == 1 && !*disableBlobs {
+		logger.Info("auto-disabling blobs for Ethereum mainnet (eth_getBlobSidecars not supported)")
+		*disableBlobs = true
+	}
+
 	postgresURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
 
 	// Set up PostgreSQL connection pool for block state tracking
@@ -209,6 +217,7 @@ func main() {
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
 		HTTPURL:      fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
 		DisableBlobs: *disableBlobs,
+		ParallelRPC:  *parallelRPC,
 		Logger:       logger,
 		Telemetry:    alchemyTelemetry,
 	})
