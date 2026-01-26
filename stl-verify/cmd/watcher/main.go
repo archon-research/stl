@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
@@ -12,6 +13,7 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"runtime/trace"
 	"strconv"
 	"sync/atomic"
 	"syscall"
@@ -62,8 +64,21 @@ func main() {
 	disableBlobs := flag.Bool("disable-blobs", false, "Disable fetching blob sidecars")
 	parallelRPC := flag.Bool("parallel-rpc", true, "Use parallel goroutines for RPC calls instead of batching (faster but uses more credits)")
 	pprofAddr := flag.String("pprof", "", "Enable pprof profiling server (e.g., ':6060')")
+	traceFile := flag.String("trace", "", "Write execution trace to file")
 	showVersion := flag.Bool("version", false, "Show version information and exit")
 	flag.Parse()
+
+	if *traceFile != "" {
+		f, err := os.Create(*traceFile)
+		if err != nil {
+			log.Fatalf("failed to create trace file: %v", err)
+		}
+		defer f.Close()
+		if err := trace.Start(f); err != nil {
+			log.Fatalf("failed to start trace: %v", err)
+		}
+		defer trace.Stop()
+	}
 
 	// Show version if requested
 	if *showVersion {
@@ -225,6 +240,12 @@ func main() {
 		logger.Error("failed to create client", "error", err)
 		os.Exit(1)
 	}
+
+	logger.Info("alchemy client configured",
+		"disableBlobs", *disableBlobs,
+		"parallelRPC", *parallelRPC,
+		"chainID", chainID,
+	)
 
 	// Create Redis cache
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
