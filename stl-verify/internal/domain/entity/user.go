@@ -14,16 +14,35 @@ type User struct {
 }
 
 // NewUser creates a new User entity with validation.
-func NewUser(id int64, chainID int, address []byte) (*User, error) {
-	if len(address) != 20 {
-		return nil, fmt.Errorf("invalid address length: expected 20, got %d", len(address))
+func NewUser(id int64, chainID int, address []byte, firstSeenBlock int64) (*User, error) {
+	u := &User{
+		ID:             id,
+		ChainID:        chainID,
+		Address:        address,
+		FirstSeenBlock: firstSeenBlock,
+		Metadata:       make(map[string]any),
 	}
-	return &User{
-		ID:       id,
-		ChainID:  chainID,
-		Address:  address,
-		Metadata: make(map[string]any),
-	}, nil
+	if err := u.validate(); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// validate checks that all fields have valid values.
+func (u *User) validate() error {
+	if u.ID <= 0 {
+		return fmt.Errorf("id must be positive, got %d", u.ID)
+	}
+	if u.ChainID <= 0 {
+		return fmt.Errorf("chainID must be positive, got %d", u.ChainID)
+	}
+	if len(u.Address) != 20 {
+		return fmt.Errorf("invalid address length: expected 20, got %d", len(u.Address))
+	}
+	if u.FirstSeenBlock <= 0 {
+		return fmt.Errorf("firstSeenBlock must be positive, got %d", u.FirstSeenBlock)
+	}
+	return nil
 }
 
 // AddressHex returns the address as a hex string with 0x prefix.

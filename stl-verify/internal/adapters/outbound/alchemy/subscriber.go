@@ -26,6 +26,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -262,8 +263,8 @@ func (s *Subscriber) connectAndSubscribe() error {
 	}
 
 	if err := conn.SetReadDeadline(time.Now().Add(s.config.ReadTimeout)); err != nil {
-		conn.Close()
-		return fmt.Errorf("failed to set read deadline: %w", err)
+		closeErr := conn.Close()
+		return errors.Join(fmt.Errorf("failed to set read deadline: %w", err), closeErr)
 	}
 
 	conn.SetPongHandler(func(string) error {
@@ -281,22 +282,22 @@ func (s *Subscriber) connectAndSubscribe() error {
 	}
 
 	if err := conn.WriteJSON(subscribeReq); err != nil {
-		conn.Close()
+		closeErr := conn.Close()
 		s.conn = nil
-		return fmt.Errorf("failed to send subscription: %w", err)
+		return errors.Join(fmt.Errorf("failed to send subscription: %w", err), closeErr)
 	}
 
 	var response jsonRPCResponse
 	if err := conn.ReadJSON(&response); err != nil {
-		conn.Close()
+		closeErr := conn.Close()
 		s.conn = nil
-		return fmt.Errorf("failed to read response: %w", err)
+		return errors.Join(fmt.Errorf("failed to read response: %w", err), closeErr)
 	}
 
 	if response.Error != nil {
-		conn.Close()
+		closeErr := conn.Close()
 		s.conn = nil
-		return fmt.Errorf("subscription failed: %s", response.Error.Message)
+		return errors.Join(fmt.Errorf("subscription failed: %s", response.Error.Message), closeErr)
 	}
 
 	return nil
@@ -385,7 +386,11 @@ func (s *Subscriber) readLoop(logger *slog.Logger) error {
 			s.closeConnection()
 			return fmt.Errorf("read error: %w", err)
 		case header := <-blockChan:
-			blockNum, _ := parseBlockNumber(header.Number)
+			blockNum, err := hexutil.ParseInt64(header.Number)
+			if err != nil {
+				logger.Error("failed to parse block number, ignoring block", "raw", header.Number, "hash", header.Hash, "error", err)
+				continue
+			}
 			select {
 			case s.headers <- header:
 				s.lastBlockTime.Store(time.Now().Unix())
@@ -418,7 +423,9 @@ func (s *Subscriber) closeConnection() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.conn != nil {
-		s.conn.Close()
+		if err := s.conn.Close(); err != nil {
+			s.config.Logger.Warn("error closing WebSocket connection", "error", err)
+		}
 		s.conn = nil
 		// Track when we became disconnected
 		s.disconnectedSince.Store(time.Now().Unix())

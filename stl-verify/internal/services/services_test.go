@@ -251,6 +251,29 @@ func (m *mockBlockchainClient) GetBlocksBatch(ctx context.Context, blockNums []i
 	return result, nil
 }
 
+func (m *mockBlockchainClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.delay > 0 {
+		time.Sleep(m.delay)
+	}
+
+	for _, bd := range m.blocks {
+		if bd.header.Hash == hash {
+			blockJSON, _ := json.Marshal(bd.header)
+			return outbound.BlockData{
+				BlockNumber: blockNum,
+				Block:       blockJSON,
+				Receipts:    bd.receipts,
+				Traces:      bd.traces,
+				Blobs:       bd.blobs,
+			}, nil
+		}
+	}
+	return outbound.BlockData{}, fmt.Errorf("block %s not found", hash)
+}
+
 // TestConcurrentLiveAndBackfill is an integration test that verifies
 // LiveService and BackfillService work correctly when running together.
 func TestConcurrentLiveAndBackfill(t *testing.T) {
@@ -328,8 +351,24 @@ func TestConcurrentLiveAndBackfill(t *testing.T) {
 	// Wait for live to complete
 	wg.Wait()
 
-	// Give time for backfill to fill gaps
-	time.Sleep(500 * time.Millisecond)
+	// Poll until backfill fills the gaps (blocks 2-149) or timeout
+	deadline := time.Now().Add(10 * time.Second)
+	gapsFilled := false
+	for time.Now().Before(deadline) {
+		gapsFilled = true
+		// Check a sample of gap blocks to see if backfill is done
+		for _, blockNum := range []int64{2, 50, 100, 149} {
+			block, _ := stateRepo.GetBlockByNumber(ctx, blockNum)
+			if block == nil {
+				gapsFilled = false
+				break
+			}
+		}
+		if gapsFilled {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	// Stop both services
 	if err := backfillService.Stop(); err != nil {

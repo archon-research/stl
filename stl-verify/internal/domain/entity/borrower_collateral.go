@@ -19,13 +19,7 @@ type BorrowerCollateral struct {
 
 // NewBorrowerCollateral creates a new BorrowerCollateral entity.
 func NewBorrowerCollateral(id, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int) (*BorrowerCollateral, error) {
-	if amount == nil {
-		return nil, fmt.Errorf("amount must not be nil")
-	}
-	if change == nil {
-		return nil, fmt.Errorf("change must not be nil")
-	}
-	return &BorrowerCollateral{
+	bc := &BorrowerCollateral{
 		ID:           id,
 		UserID:       userID,
 		ProtocolID:   protocolID,
@@ -34,5 +28,41 @@ func NewBorrowerCollateral(id, userID, protocolID, tokenID, blockNumber int64, b
 		BlockVersion: blockVersion,
 		Amount:       amount,
 		Change:       change,
-	}, nil
+	}
+	if err := bc.validate(); err != nil {
+		return nil, err
+	}
+	return bc, nil
+}
+
+// validate checks that all fields have valid values.
+func (bc *BorrowerCollateral) validate() error {
+	if bc.ID <= 0 {
+		return fmt.Errorf("id must be positive, got %d", bc.ID)
+	}
+	if bc.UserID <= 0 {
+		return fmt.Errorf("userID must be positive, got %d", bc.UserID)
+	}
+	if bc.ProtocolID <= 0 {
+		return fmt.Errorf("protocolID must be positive, got %d", bc.ProtocolID)
+	}
+	if bc.TokenID <= 0 {
+		return fmt.Errorf("tokenID must be positive, got %d", bc.TokenID)
+	}
+	if bc.BlockNumber <= 0 {
+		return fmt.Errorf("blockNumber must be positive, got %d", bc.BlockNumber)
+	}
+	if bc.BlockVersion < 0 {
+		return fmt.Errorf("blockVersion must be non-negative, got %d", bc.BlockVersion)
+	}
+	if bc.Amount == nil {
+		return fmt.Errorf("amount must not be nil")
+	}
+	if bc.Amount.Sign() < 0 {
+		return fmt.Errorf("amount must be non-negative")
+	}
+	if bc.Change == nil {
+		return fmt.Errorf("change must not be nil")
+	}
+	return nil
 }

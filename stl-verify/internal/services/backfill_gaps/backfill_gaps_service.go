@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -35,6 +37,9 @@ type BackfillConfig struct {
 	// BoundaryCheckDepth is how many recent blocks to verify against RPC before backfilling.
 	// This detects reorgs that happened while the service was down.
 	BoundaryCheckDepth int
+
+	// DisableBlobs disables caching blob sidecars (useful for pre-Dencun blocks or unsupported nodes).
+	DisableBlobs bool
 
 	// Logger is the structured logger.
 	Logger *slog.Logger
@@ -396,6 +401,21 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 		return nil
 	}
 
+	// Check if a DIFFERENT block already exists at this height (live service may have
+	// already processed a newer canonical block while we were fetching).
+	// This prevents the race: backfill fetches stale block A, live saves canonical block B,
+	// then backfill saves A with higher version - breaking "highest version = canonical".
+	existingAtHeight, err := s.stateRepo.GetBlockByNumber(ctx, blockNum)
+	if err != nil {
+		s.logger.Warn("failed to check existing block at height", "block", blockNum, "error", err)
+	} else if existingAtHeight != nil && existingAtHeight.Hash != header.Hash {
+		s.logger.Debug("different block already exists at this height, skipping stale block",
+			"block", blockNum,
+			"existingHash", truncateHash(existingAtHeight.Hash),
+			"fetchedHash", truncateHash(header.Hash))
+		return nil
+	}
+
 	// Validate that fetched block matches the expected chain.
 	// This prevents caching/publishing data for a reorged block that doesn't
 	// link correctly with blocks we've already processed.
@@ -421,6 +441,23 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 	version, err := s.stateRepo.SaveBlock(ctx, state)
 	if err != nil {
 		return fmt.Errorf("failed to save block state: %w", err)
+	}
+
+	// Re-validate linkage AFTER save to catch reorgs that happened between check and save.
+	// This closes the TOCTOU (Time-of-Check to Time-of-Use) window.
+	if err := s.validateBlockLinkage(ctx, blockNum, header.Hash, header.ParentHash); err != nil {
+		s.logger.Warn("post-save linkage validation failed (race condition detected), orphaning block",
+			"block", blockNum,
+			"hash", truncateHash(header.Hash),
+			"error", err)
+
+		// Mark the invalid block we just saved as orphaned so it doesn't break the chain
+		if orphanErr := s.stateRepo.MarkBlockOrphaned(ctx, header.Hash); orphanErr != nil {
+			s.logger.Error("failed to orphan invalid block after race detected",
+				"block", blockNum, "error", orphanErr)
+		}
+
+		return fmt.Errorf("post-save linkage validation failed: %w", err)
 	}
 
 	// Cache and publish the data
@@ -497,10 +534,12 @@ func (s *BackfillService) verifyBoundaryBlocks(ctx context.Context) ([]outbound.
 
 	var staleBlocks []outbound.BlockState
 
-	// Check each block against RPC - if the hash doesn't exist, the block is stale
+	// Check each block against RPC - if the hash doesn't match CANONICAL chain, the block is stale
 	for _, dbBlock := range recentBlocks {
-		// Query RPC for this block's hash
-		rpcHeader, err := s.client.GetBlockByHash(ctx, dbBlock.Hash, false)
+		// Query RPC for the CANONICAL block at this height.
+		// We use GetBlockByNumber because GetBlockByHash might return "Uncle" blocks
+		// that are present on the node but not canonical.
+		blockJSON, err := s.client.GetBlockByNumber(ctx, dbBlock.Number, false)
 		if err != nil {
 			// RPC error - log and continue checking other blocks
 			s.logger.Warn("failed to verify block against RPC",
@@ -510,11 +549,21 @@ func (s *BackfillService) verifyBoundaryBlocks(ctx context.Context) ([]outbound.
 			continue
 		}
 
-		if rpcHeader == nil {
-			// Block hash doesn't exist on canonical chain - it's stale!
-			s.logger.Info("detected stale block (hash not found on canonical chain)",
+		var header outbound.BlockHeader
+		if err := shared.ParseBlockHeader(blockJSON, &header); err != nil {
+			s.logger.Warn("failed to parse RPC block for verification",
+				"block", dbBlock.Number, "error", err)
+			continue
+		}
+
+		// Compare Hash: Canonical (RPC) vs Database
+		// Note: Case-insensitive comparison is safer for hex strings
+		if header.Hash != dbBlock.Hash {
+			// Block hash doesn't match canonical chain - it's stale!
+			s.logger.Info("detected stale block (hash mismatch with canonical chain)",
 				"block", dbBlock.Number,
-				"hash", truncateHash(dbBlock.Hash))
+				"dbHash", truncateHash(dbBlock.Hash),
+				"canonicalHash", truncateHash(header.Hash))
 			staleBlocks = append(staleBlocks, dbBlock)
 		}
 	}
@@ -525,28 +574,27 @@ func (s *BackfillService) verifyBoundaryBlocks(ctx context.Context) ([]outbound.
 // recoverFromStaleChain handles recovery when we detect blocks that are no longer
 // on the canonical chain (due to a reorg that happened while we were offline).
 //
-// This method only marks stale blocks as orphaned. The actual re-fetching of
-// canonical blocks is handled by the normal gap-filling logic in findAndFillGaps,
-// since orphaned blocks are excluded from canonical queries and will appear as gaps.
+// This method marks stale blocks as orphaned AND immediately fetches and saves
+// the canonical replacement blocks. This ensures the highest version at each
+// block height is always the canonical block.
 func (s *BackfillService) recoverFromStaleChain(ctx context.Context, staleBlocks []outbound.BlockState) error {
 	if len(staleBlocks) == 0 {
 		return nil
 	}
 
-	// Find the lowest stale block number for logging
-	lowestStale := staleBlocks[0].Number
-	for _, block := range staleBlocks {
-		if block.Number < lowestStale {
-			lowestStale = block.Number
-		}
-	}
+	// Sort blocks by height (ascending) to ensure deterministic recovery
+	sort.Slice(staleBlocks, func(i, j int) bool {
+		return staleBlocks[i].Number < staleBlocks[j].Number
+	})
 
+	lowestStale := staleBlocks[0].Number
 	s.logger.Info("recovering from stale chain",
 		"lowestStaleBlock", lowestStale,
 		"staleBlockCount", len(staleBlocks))
 
-	// Mark all stale blocks as orphaned
-	// After this, FindGaps will detect these block numbers as missing
+	// Phase 1: Orphan ALL stale blocks first.
+	// This is crucial! We must clear the "next" references in the DB before inserting new blocks,
+	// otherwise validateBlockLinkage will fail when checking against the yet-to-be-orphaned 'next' block.
 	for _, staleBlock := range staleBlocks {
 		if err := s.stateRepo.MarkBlockOrphaned(ctx, staleBlock.Hash); err != nil {
 			return fmt.Errorf("failed to mark block %d as orphaned: %w", staleBlock.Number, err)
@@ -556,141 +604,115 @@ func (s *BackfillService) recoverFromStaleChain(ctx context.Context, staleBlocks
 			"hash", truncateHash(staleBlock.Hash))
 	}
 
-	s.logger.Info("stale blocks marked as orphaned, gap filling will re-fetch canonical blocks",
+	// Phase 2: Fetch and save canonical replacements
+	for _, staleBlock := range staleBlocks {
+		// Immediately fetch the canonical block at this height
+		blockDataList, err := s.client.GetBlocksBatch(ctx, []int64{staleBlock.Number}, true)
+		if err != nil || len(blockDataList) == 0 {
+			s.logger.Warn("failed to fetch canonical replacement block",
+				"block", staleBlock.Number,
+				"error", err)
+			// Continue - gap-filling will pick this up later
+			continue
+		}
+
+		// Process and save the canonical block (assigns new version)
+		if err := s.processBlockData(ctx, blockDataList[0]); err != nil {
+			s.logger.Warn("failed to process canonical replacement block",
+				"block", staleBlock.Number,
+				"error", err)
+			// Continue - gap-filling will pick this up later
+			continue
+		}
+
+		s.logger.Info("replaced stale block with canonical block",
+			"block", staleBlock.Number)
+	}
+
+	s.logger.Info("stale chain recovery complete",
 		"staleBlockCount", len(staleBlocks))
 
 	return nil
 }
 
-// cacheAndPublishBlockData caches pre-fetched data and publishes events.
+// cacheAndPublishBlockData caches all pre-fetched data types and publishes a block event.
+// All data must be cached successfully before the event is published.
 func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbound.BlockData, header outbound.BlockHeader, version int, receivedAt time.Time) {
 	chainID := s.config.ChainID
 	blockNum := bd.BlockNumber
 	blockHash := header.Hash
 	parentHash := header.ParentHash
-	blockTimestamp, _ := shared.ParseBlockNumber(header.Timestamp)
-
-	var wg sync.WaitGroup
-
-	// Cache and publish block
-	if bd.Block != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := s.cache.SetBlock(ctx, chainID, blockNum, version, bd.Block); err != nil {
-				s.logger.Warn("failed to cache block", "block", blockNum, "error", err)
-				return
-			}
-			event := outbound.BlockEvent{
-				ChainID:        chainID,
-				BlockNumber:    blockNum,
-				Version:        version,
-				BlockHash:      blockHash,
-				ParentHash:     parentHash,
-				BlockTimestamp: blockTimestamp,
-				ReceivedAt:     receivedAt,
-				CacheKey:       shared.CacheKey(chainID, blockNum, version, "block"),
-				IsBackfill:     true,
-			}
-			if err := s.eventSink.Publish(ctx, event); err != nil {
-				s.logger.Warn("failed to publish block event", "block", blockNum, "error", err)
-				return
-			}
-			// Mark block publish complete for crash recovery tracking
-			if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlock); err != nil {
-				s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
-			}
-		}()
+	blockTimestamp, err := hexutil.ParseInt64(header.Timestamp)
+	if err != nil {
+		s.logger.Error("failed to parse block timestamp, skipping block", "block", blockNum, "timestamp", header.Timestamp, "error", err)
+		return
 	}
 
-	// Cache and publish receipts
+	// Cache block data
+	if bd.Block == nil {
+		s.logger.Warn("missing block data, skipping", "block", blockNum)
+		return
+	}
+	if err := s.cache.SetBlock(ctx, chainID, blockNum, version, bd.Block); err != nil {
+		s.logger.Warn("failed to cache block", "block", blockNum, "error", err)
+		return
+	}
+
+	// Cache receipts
 	if bd.Receipts != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, bd.Receipts); err != nil {
-				s.logger.Warn("failed to cache receipts", "block", blockNum, "error", err)
-				return
-			}
-			event := outbound.ReceiptsEvent{
-				ChainID:     chainID,
-				BlockNumber: blockNum,
-				Version:     version,
-				BlockHash:   blockHash,
-				ReceivedAt:  receivedAt,
-				CacheKey:    shared.CacheKey(chainID, blockNum, version, "receipts"),
-				IsBackfill:  true,
-			}
-			if err := s.eventSink.Publish(ctx, event); err != nil {
-				s.logger.Warn("failed to publish receipts event", "block", blockNum, "error", err)
-				return
-			}
-			// Mark receipts publish complete for crash recovery tracking
-			if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeReceipts); err != nil {
-				s.logger.Warn("failed to mark receipts publish complete", "block", blockNum, "error", err)
-			}
-		}()
+		if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, bd.Receipts); err != nil {
+			s.logger.Warn("failed to cache receipts", "block", blockNum, "error", err)
+			return
+		}
+	} else if bd.ReceiptsErr != nil {
+		s.logger.Warn("receipts fetch failed, skipping cache", "block", blockNum, "error", bd.ReceiptsErr)
+		return
 	}
 
-	// Cache and publish traces
+	// Cache traces
 	if bd.Traces != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := s.cache.SetTraces(ctx, chainID, blockNum, version, bd.Traces); err != nil {
-				s.logger.Warn("failed to cache traces", "block", blockNum, "error", err)
-				return
-			}
-			event := outbound.TracesEvent{
-				ChainID:     chainID,
-				BlockNumber: blockNum,
-				Version:     version,
-				BlockHash:   blockHash,
-				ReceivedAt:  receivedAt,
-				CacheKey:    shared.CacheKey(chainID, blockNum, version, "traces"),
-				IsBackfill:  true,
-			}
-			if err := s.eventSink.Publish(ctx, event); err != nil {
-				s.logger.Warn("failed to publish traces event", "block", blockNum, "error", err)
-				return
-			}
-			// Mark traces publish complete for crash recovery tracking
-			if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeTraces); err != nil {
-				s.logger.Warn("failed to mark traces publish complete", "block", blockNum, "error", err)
-			}
-		}()
+		if err := s.cache.SetTraces(ctx, chainID, blockNum, version, bd.Traces); err != nil {
+			s.logger.Warn("failed to cache traces", "block", blockNum, "error", err)
+			return
+		}
+	} else if bd.TracesErr != nil {
+		s.logger.Warn("traces fetch failed, skipping cache", "block", blockNum, "error", bd.TracesErr)
+		return
 	}
 
-	// Cache and publish blobs
-	if bd.Blobs != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	// Cache blobs (if enabled)
+	if !s.config.DisableBlobs {
+		if bd.Blobs != nil {
 			if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, bd.Blobs); err != nil {
 				s.logger.Warn("failed to cache blobs", "block", blockNum, "error", err)
 				return
 			}
-			event := outbound.BlobsEvent{
-				ChainID:     chainID,
-				BlockNumber: blockNum,
-				Version:     version,
-				BlockHash:   blockHash,
-				ReceivedAt:  receivedAt,
-				CacheKey:    shared.CacheKey(chainID, blockNum, version, "blobs"),
-				IsBackfill:  true,
-			}
-			if err := s.eventSink.Publish(ctx, event); err != nil {
-				s.logger.Warn("failed to publish blobs event", "block", blockNum, "error", err)
-				return
-			}
-			// Mark blobs publish complete for crash recovery tracking
-			if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlobs); err != nil {
-				s.logger.Warn("failed to mark blobs publish complete", "block", blockNum, "error", err)
-			}
-		}()
+		} else if bd.BlobsErr != nil {
+			s.logger.Warn("blobs fetch failed, skipping cache", "block", blockNum, "error", bd.BlobsErr)
+			return
+		}
 	}
 
-	wg.Wait()
+	// All data cached successfully - now publish the block event
+	event := outbound.BlockEvent{
+		ChainID:        chainID,
+		BlockNumber:    blockNum,
+		Version:        version,
+		BlockHash:      blockHash,
+		ParentHash:     parentHash,
+		BlockTimestamp: blockTimestamp,
+		ReceivedAt:     receivedAt,
+		IsBackfill:     true,
+	}
+	if err := s.eventSink.Publish(ctx, event); err != nil {
+		s.logger.Warn("failed to publish block event", "block", blockNum, "error", err)
+		return
+	}
+
+	// Mark block publish complete for crash recovery tracking
+	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlock); err != nil {
+		s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
+	}
 }
 
 // advanceWatermark updates the backfill watermark to the highest contiguous block.

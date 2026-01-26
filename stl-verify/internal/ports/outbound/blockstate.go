@@ -115,24 +115,7 @@ type BlockStateRepository interface {
 	// 3. Saves the new canonical block
 	// This prevents inconsistent state if a crash occurs mid-reorg.
 	// Returns the version assigned to the new block.
-	HandleReorgAtomic(ctx context.Context, event ReorgEvent, newBlock BlockState) (int, error)
-
-	// GetReorgEvents retrieves reorg events, ordered by detection time descending.
-	GetReorgEvents(ctx context.Context, limit int) ([]ReorgEvent, error)
-
-	// GetReorgEventsByBlockRange retrieves reorg events within a block number range.
-	GetReorgEventsByBlockRange(ctx context.Context, fromBlock, toBlock int64) ([]ReorgEvent, error)
-
-	// GetOrphanedBlocks retrieves orphaned blocks for analysis.
-	GetOrphanedBlocks(ctx context.Context, limit int) ([]BlockState, error)
-
-	// PruneOldBlocks deletes blocks older than the given number.
-	// Used to prevent unbounded growth of the block state table.
-	// Only prunes non-orphaned blocks; orphaned blocks are kept for history.
-	PruneOldBlocks(ctx context.Context, keepAfter int64) error
-
-	// PruneOldReorgEvents deletes reorg events older than the given time.
-	PruneOldReorgEvents(ctx context.Context, olderThan time.Time) error
+	HandleReorgAtomic(ctx context.Context, commonAncestor int64, event ReorgEvent, newBlock BlockState) (int, error)
 
 	// GetMinBlockNumber returns the lowest canonical block number in the repository.
 	// Returns 0 if no blocks exist.

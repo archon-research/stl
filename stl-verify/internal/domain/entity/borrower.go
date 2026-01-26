@@ -19,13 +19,7 @@ type Borrower struct {
 
 // NewBorrower creates a new Borrower entity.
 func NewBorrower(id, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int) (*Borrower, error) {
-	if amount == nil {
-		return nil, fmt.Errorf("amount must not be nil")
-	}
-	if change == nil {
-		return nil, fmt.Errorf("change must not be nil")
-	}
-	return &Borrower{
+	b := &Borrower{
 		ID:           id,
 		UserID:       userID,
 		ProtocolID:   protocolID,
@@ -34,5 +28,41 @@ func NewBorrower(id, userID, protocolID, tokenID, blockNumber int64, blockVersio
 		BlockVersion: blockVersion,
 		Amount:       amount,
 		Change:       change,
-	}, nil
+	}
+	if err := b.validate(); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// validate checks that all fields have valid values.
+func (b *Borrower) validate() error {
+	if b.ID <= 0 {
+		return fmt.Errorf("id must be positive, got %d", b.ID)
+	}
+	if b.UserID <= 0 {
+		return fmt.Errorf("userID must be positive, got %d", b.UserID)
+	}
+	if b.ProtocolID <= 0 {
+		return fmt.Errorf("protocolID must be positive, got %d", b.ProtocolID)
+	}
+	if b.TokenID <= 0 {
+		return fmt.Errorf("tokenID must be positive, got %d", b.TokenID)
+	}
+	if b.BlockNumber <= 0 {
+		return fmt.Errorf("blockNumber must be positive, got %d", b.BlockNumber)
+	}
+	if b.BlockVersion < 0 {
+		return fmt.Errorf("blockVersion must be non-negative, got %d", b.BlockVersion)
+	}
+	if b.Amount == nil {
+		return fmt.Errorf("amount must not be nil")
+	}
+	if b.Amount.Sign() < 0 {
+		return fmt.Errorf("amount must be non-negative")
+	}
+	if b.Change == nil {
+		return fmt.Errorf("change must not be nil")
+	}
+	return nil
 }

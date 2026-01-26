@@ -38,7 +38,7 @@ func setupLargePostgres(b *testing.B) (*sql.DB, *postgres.BlockStateRepository, 
 
 	// Use a more performant PostgreSQL configuration for benchmarking
 	req := testcontainers.ContainerRequest{
-		Image:        "postgres:16-alpine",
+		Image:        "postgres:18",
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "bench",
@@ -282,10 +282,27 @@ func (m *largeBenchmarkClient) GetBlocksBatch(ctx context.Context, blockNums []i
 	return result, nil
 }
 
+func (m *largeBenchmarkClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	header := outbound.BlockHeader{
+		Number:     fmt.Sprintf("0x%x", blockNum),
+		Hash:       hash,
+		ParentHash: fmt.Sprintf("0x%064x", blockNum-1),
+		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
+	}
+	blockJSON, _ := json.Marshal(header)
+	return outbound.BlockData{
+		BlockNumber: blockNum,
+		Block:       blockJSON,
+		Receipts:    json.RawMessage(`[]`),
+		Traces:      json.RawMessage(`[]`),
+		Blobs:       json.RawMessage(`[]`),
+	}, nil
+}
+
 // BenchmarkLargePostgres_FindGaps benchmarks gap detection on a 10M row table.
 func BenchmarkLargePostgres_FindGaps(b *testing.B) {
 	db, repo, cleanup := setupLargePostgres(b)
-	defer cleanup()
+	b.Cleanup(cleanup)
 
 	// Define gap ranges scattered throughout the dataset
 	gapRanges := []outbound.BlockRange{
@@ -428,7 +445,7 @@ func BenchmarkLargePostgres_FindGaps(b *testing.B) {
 // BenchmarkLargePostgres_BackfillService benchmarks the full backfill service on 10M rows.
 func BenchmarkLargePostgres_BackfillService(b *testing.B) {
 	db, repo, cleanup := setupLargePostgres(b)
-	defer cleanup()
+	b.Cleanup(cleanup)
 
 	// Create a small gap to backfill (we don't want to backfill thousands of blocks each iteration)
 	gapRanges := []outbound.BlockRange{
@@ -510,7 +527,7 @@ func BenchmarkLargePostgres_BackfillService(b *testing.B) {
 // This is not a traditional benchmark but provides query planning insights.
 func BenchmarkLargePostgres_QueryAnalysis(b *testing.B) {
 	db, repo, cleanup := setupLargePostgres(b)
-	defer cleanup()
+	b.Cleanup(cleanup)
 
 	gapRanges := []outbound.BlockRange{
 		{From: 5_000_000, To: 5_000_099},

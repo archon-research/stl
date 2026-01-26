@@ -20,6 +20,8 @@ import (
 )
 
 // BlockEvent represents the event published by the watcher.
+// Cache keys are derived by convention: stl:{chainId}:{blockNumber}:{version}:{dataType}
+// where dataType is one of: block, receipts, traces, blobs
 type BlockEvent struct {
 	ChainID        int64  `json:"chainId"`
 	BlockNumber    int64  `json:"blockNumber"`
@@ -28,9 +30,13 @@ type BlockEvent struct {
 	ParentHash     string `json:"parentHash"`
 	BlockTimestamp int64  `json:"blockTimestamp"`
 	ReceivedAt     string `json:"receivedAt"`
-	CacheKey       string `json:"cacheKey"`
 	IsBackfill     bool   `json:"isBackfill"`
 	IsReorg        bool   `json:"isReorg"`
+}
+
+// CacheKey derives the cache key for a given data type.
+func (e BlockEvent) CacheKey(dataType string) string {
+	return fmt.Sprintf("stl:%d:%d:%d:%s", e.ChainID, e.BlockNumber, e.Version, dataType)
 }
 
 // SNSMessage wraps the actual message from SNS->SQS.
@@ -44,8 +50,8 @@ func main() {
 	}))
 
 	// Configuration
-	sqsEndpoint := getEnv("AWS_SQS_ENDPOINT", "http://localhost:4566")
-	sqsQueueURL := getEnv("SQS_QUEUE_URL", "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-block-events-queue")
+	sqsEndpoint := getEnv("AWS_SQS_ENDPOINT", "localhost:4566")
+	sqsQueueURL := getEnv("SQS_QUEUE_URL", "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo")
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
 
 	// Set up AWS SDK for LocalStack
@@ -116,35 +122,37 @@ func main() {
 		}
 
 		for _, msg := range result.Messages {
-			// Parse SNS wrapper
-			var snsMsg SNSMessage
-			if err := json.Unmarshal([]byte(*msg.Body), &snsMsg); err != nil {
-				logger.Error("failed to parse SNS message", "error", err)
-				continue
-			}
-
-			// Parse block event
+			// With RawMessageDelivery=true, the message body is the raw content
+			// Try parsing as raw BlockEvent first, fall back to SNS wrapper
 			var event BlockEvent
-			if err := json.Unmarshal([]byte(snsMsg.Message), &event); err != nil {
-				logger.Error("failed to parse block event", "error", err)
-				continue
+			if err := json.Unmarshal([]byte(*msg.Body), &event); err != nil {
+				// Try SNS wrapper format
+				var snsMsg SNSMessage
+				if err := json.Unmarshal([]byte(*msg.Body), &snsMsg); err != nil {
+					logger.Error("failed to parse message", "error", err, "body", *msg.Body)
+					continue
+				}
+				if err := json.Unmarshal([]byte(snsMsg.Message), &event); err != nil {
+					logger.Error("failed to parse block event from SNS wrapper", "error", err)
+					continue
+				}
 			}
 
 			logger.Info("received block event",
 				"block", event.BlockNumber,
 				"hash", truncate(event.BlockHash, 16),
 				"version", event.Version,
-				"cacheKey", event.CacheKey,
 				"isBackfill", event.IsBackfill,
 				"isReorg", event.IsReorg,
 			)
 
-			// Fetch block data from Redis using the cache key
-			blockData, err := redisClient.Get(ctx, event.CacheKey).Result()
+			// Fetch block data from Redis using derived cache key
+			blockCacheKey := event.CacheKey("block")
+			blockData, err := redisClient.Get(ctx, blockCacheKey).Result()
 			if err == redis.Nil {
-				logger.Warn("block not found in cache", "cacheKey", event.CacheKey)
+				logger.Warn("block not found in cache", "cacheKey", blockCacheKey)
 			} else if err != nil {
-				logger.Error("failed to fetch from Redis", "error", err, "cacheKey", event.CacheKey)
+				logger.Error("failed to fetch from Redis", "error", err, "cacheKey", blockCacheKey)
 			} else {
 				// Parse and display some block info
 				var block map[string]interface{}

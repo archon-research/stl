@@ -19,7 +19,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -44,6 +47,13 @@ func NewBlockStateRepository(db *sql.DB, logger *slog.Logger) *BlockStateReposit
 	return &BlockStateRepository{db: db, logger: logger}
 }
 
+// closeRows closes database rows and logs any error.
+func (r *BlockStateRepository) closeRows(rows *sql.Rows) {
+	if err := rows.Close(); err != nil {
+		r.logger.Warn("failed to close database rows", "error", err)
+	}
+}
+
 // DB returns the underlying database connection for advanced queries.
 func (r *BlockStateRepository) DB() *sql.DB {
 	return r.db
@@ -59,13 +69,64 @@ func (r *BlockStateRepository) Migrate(ctx context.Context) error {
 }
 
 // SaveBlock persists a block's state with atomic version assignment.
-// The version is automatically assigned by a database trigger, ensuring uniqueness.
+// Uses INSERT ... ON CONFLICT DO NOTHING to handle concurrent inserts safely.
+// If the block already exists (by hash), returns its existing version.
+// If it's a new block, the database trigger assigns the version atomically.
 // The provided state.Version is ignored; the actual assigned version is returned.
 func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
+	const maxRetries = 10
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		version, err := r.saveBlockOnce(ctx, state)
+		if err == nil {
+			return version, nil
+		}
+
+		// Check if this is a serialization failure (SQLSTATE 40001)
+		// These are expected with concurrent transactions and should be retried
+		if isSerializationFailure(err) {
+			r.logger.Debug("serialization failure, retrying",
+				"attempt", attempt+1,
+				"maxRetries", maxRetries,
+				"block", state.Number,
+				"hash", state.Hash)
+			// Exponential backoff with jitter, capped at 100ms to prevent excessive waits
+			// Base: 1ms, 2ms, 4ms, 8ms, 16ms, 32ms, 64ms, 100ms (capped)
+			base := time.Duration(1<<attempt) * time.Millisecond
+			const maxBackoff = 100 * time.Millisecond
+			if base > maxBackoff {
+				base = maxBackoff
+			}
+			jitter := time.Duration(rand.Int63n(int64(base)))
+			time.Sleep(base + jitter)
+			continue
+		}
+
+		// For other errors, return immediately
+		return 0, err
+	}
+
+	return 0, fmt.Errorf("failed to save block after %d retries due to serialization conflicts", maxRetries)
+}
+
+// saveBlockOnce attempts a single save operation with serializable isolation.
+func (r *BlockStateRepository) saveBlockOnce(ctx context.Context, state outbound.BlockState) (int, error) {
+	// Use a transaction with SERIALIZABLE isolation to prevent version race conditions.
+	// This ensures that concurrent SaveBlock calls for the same block number will be serialized.
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			r.logger.Warn("failed to rollback transaction", "error", err)
+		}
+	}()
+
 	// Check if a block with this hash already exists (duplicate detection).
-	// If so, return the existing version without modifying the data.
+	// Done inside the serializable transaction to prevent TOCTOU races.
 	var existingVersion int
-	err := r.db.QueryRowContext(ctx, `SELECT version FROM block_states WHERE hash = $1`, state.Hash).Scan(&existingVersion)
+	err = tx.QueryRowContext(ctx, `SELECT version FROM block_states WHERE hash = $1`, state.Hash).Scan(&existingVersion)
 	if err == nil {
 		// Block already exists - return its version without updating
 		return existingVersion, nil
@@ -81,12 +142,30 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 		RETURNING version
 	`
 	var version int
-	err = r.db.QueryRowContext(ctx, query, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned).Scan(&version)
+	err = tx.QueryRowContext(ctx, query, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("failed to save block state: %w", err)
 	}
 
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
 	return version, nil
+}
+
+// isSerializationFailure checks if the error is a PostgreSQL serialization failure (SQLSTATE 40001).
+func isSerializationFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Use pgx's structured error type to check SQLSTATE code directly
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		// SQLSTATE 40001 = serialization_failure
+		return pgErr.Code == "40001"
+	}
+	return false
 }
 
 // GetLastBlock retrieves the most recently saved canonical (non-orphaned) block state.
@@ -180,7 +259,7 @@ func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) (
 	if err != nil {
 		return nil, fmt.Errorf("failed to get recent blocks: %w", err)
 	}
-	defer rows.Close()
+	defer r.closeRows(rows)
 
 	var states []outbound.BlockState
 	for rows.Next() {
@@ -211,7 +290,7 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 // HandleReorgAtomic atomically performs all reorg-related database operations in a single transaction.
 // This ensures consistency: either all operations succeed, or none do.
 // The commonAncestor is derived from the ReorgEvent (BlockNumber - Depth).
-func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
@@ -221,9 +300,6 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outb
 			r.logger.Error("failed to rollback transaction", "error", err)
 		}
 	}()
-
-	// Calculate common ancestor from event
-	commonAncestor := event.BlockNumber - int64(event.Depth)
 
 	// 1. Acquire advisory lock for the new block number
 	_, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, newBlock.Number)
@@ -261,19 +337,17 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outb
 		return 0, fmt.Errorf("failed to mark blocks orphaned: %w", err)
 	}
 
-	// 5. Calculate version for new block
-	var version int
-	err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), -1) + 1 FROM block_states WHERE number = $1`, newBlock.Number).Scan(&version)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get next version: %w", err)
-	}
-
-	// 6. Insert new canonical block
+	// 5. Insert new canonical block
+	// We pass 0 as the version; the BEFORE INSERT trigger will automatically assign
+	// the correct version (MAX(version) + 1) atomically.
+	// We use RETURNING version to get the actually assigned version.
 	insertQuery := `
 		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned, version)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		VALUES ($1, $2, $3, $4, $5, 0)
+		RETURNING version
 	`
-	_, err = tx.ExecContext(ctx, insertQuery, newBlock.Number, newBlock.Hash, newBlock.ParentHash, newBlock.ReceivedAt, newBlock.IsOrphaned, version)
+	var version int
+	err = tx.QueryRowContext(ctx, insertQuery, newBlock.Number, newBlock.Hash, newBlock.ParentHash, newBlock.ReceivedAt, newBlock.IsOrphaned).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("failed to save new block state: %w", err)
 	}
@@ -297,7 +371,7 @@ func (r *BlockStateRepository) GetReorgEvents(ctx context.Context, limit int) ([
 	if err != nil {
 		return nil, fmt.Errorf("failed to get reorg events: %w", err)
 	}
-	defer rows.Close()
+	defer r.closeRows(rows)
 
 	var events []outbound.ReorgEvent
 	for rows.Next() {
@@ -325,7 +399,7 @@ func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, f
 	if err != nil {
 		return nil, fmt.Errorf("failed to get reorg events by block range: %w", err)
 	}
-	defer rows.Close()
+	defer r.closeRows(rows)
 
 	var events []outbound.ReorgEvent
 	for rows.Next() {
@@ -355,7 +429,7 @@ func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get orphaned blocks: %w", err)
 	}
-	defer rows.Close()
+	defer r.closeRows(rows)
 
 	var states []outbound.BlockState
 	for rows.Next() {
@@ -489,7 +563,7 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 	if err != nil {
 		return nil, fmt.Errorf("failed to find gaps: %w", err)
 	}
-	defer rows.Close()
+	defer r.closeRows(rows)
 
 	var gaps []outbound.BlockRange
 	for rows.Next() {
@@ -623,7 +697,7 @@ func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Contex
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blocks with incomplete publish: %w", err)
 	}
-	defer rows.Close()
+	defer r.closeRows(rows)
 
 	var states []outbound.BlockState
 	for rows.Next() {

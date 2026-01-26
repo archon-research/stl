@@ -228,5 +228,6 @@ CREATE TABLE IF NOT EXISTS sparklend_reserve_data (
     tsdb.partition_column = 'block_number',
     tsdb.chunk_interval = 100000
 );
+
 INSERT INTO chain (chain_id, name) VALUES (1, 'Ethereum Mainnet')
 ON CONFLICT (chain_id) DO NOTHING;

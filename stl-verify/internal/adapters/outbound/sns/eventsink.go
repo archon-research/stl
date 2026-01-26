@@ -1,17 +1,25 @@
 // Package sns implements the EventSink interface using AWS SNS.
 //
-// This adapter publishes block data events to an SNS topic, where downstream
-// consumers can subscribe to receive notifications when new block data is
-// available in the cache. Events are serialized as JSON messages.
+// This adapter publishes block data events to an SNS FIFO topic, where downstream
+// consumers receive messages via subscribed SQS FIFO queues. Events are serialized
+// as JSON messages with message attributes for filtering.
 //
-// Features:
-//   - Automatic retry logic with exponential backoff for transient failures
-//   - Configurable timeouts and backoff parameters
-//   - Message attributes for filtering by event type, chain ID, and block number
-//   - Graceful shutdown with context cancellation
+// Architecture:
+//
+// SNS FIFO Topic (single topic for all event types)
+//
+//	├── SQS FIFO Queue (transformer) - processes block data
+//	└── SQS FIFO Queue (backup) - stores for replay
+//
+// FIFO Ordering & Deduplication:
+//   - MessageGroupId: chainId (ensures per-chain ordering)
+//   - MessageDeduplicationId: {chainId}:{blockHash}:{version}
+//     This explicit dedup ID enables safe rolling deployments where two watcher
+//     instances may briefly run simultaneously - SNS will deduplicate based on
+//     the deterministic ID rather than message content.
 //
 // Message Attributes:
-//   - eventType: "block", "receipts", "traces", or "blobs"
+//   - eventType: "block"
 //   - chainId: The blockchain chain ID as a string
 //   - blockNumber: The block number as a string
 //
@@ -44,23 +52,11 @@ type SNSPublisher interface {
 	Publish(ctx context.Context, params *sns.PublishInput, optFns ...func(*sns.Options)) (*sns.PublishOutput, error)
 }
 
-// TopicARNs holds the ARNs of the SNS topics to publish events to.
-// Each event type is published to its own topic.
-type TopicARNs struct {
-	// Blocks is the ARN for block events.
-	Blocks string
-	// Receipts is the ARN for receipts events.
-	Receipts string
-	// Traces is the ARN for traces events.
-	Traces string
-	// Blobs is the ARN for blob events.
-	Blobs string
-}
-
 // Config holds configuration for the SNS event sink.
 type Config struct {
-	// Topics contains the ARNs of the SNS topics for each event type.
-	Topics TopicARNs
+	// TopicARN is the ARN of the SNS FIFO topic to publish all events to.
+	// All event types (blocks, receipts, traces, blobs) go to this single topic.
+	TopicARN string
 
 	// MaxRetries is the maximum number of retry attempts for transient failures.
 	// Set to 0 to disable retries.
@@ -75,6 +71,10 @@ type Config struct {
 	// BackoffFactor is the multiplier applied to backoff after each retry.
 	BackoffFactor float64
 
+	// PublishTimeout is the maximum time to wait for a single publish operation.
+	// If zero, defaults to 10 seconds.
+	PublishTimeout time.Duration
+
 	// Logger is the structured logger for the sink.
 	Logger *slog.Logger
 }
@@ -86,6 +86,7 @@ func ConfigDefaults() Config {
 		InitialBackoff: 100 * time.Millisecond,
 		MaxBackoff:     5 * time.Second,
 		BackoffFactor:  2.0,
+		PublishTimeout: 10 * time.Second,
 		Logger:         slog.Default(),
 	}
 }
@@ -105,17 +106,8 @@ func NewEventSink(client SNSPublisher, config Config) (*EventSink, error) {
 	if client == nil {
 		return nil, errors.New("sns client is required")
 	}
-	if config.Topics.Blocks == "" {
-		return nil, errors.New("blocks topic ARN is required")
-	}
-	if config.Topics.Receipts == "" {
-		return nil, errors.New("receipts topic ARN is required")
-	}
-	if config.Topics.Traces == "" {
-		return nil, errors.New("traces topic ARN is required")
-	}
-	if config.Topics.Blobs == "" {
-		return nil, errors.New("blobs topic ARN is required")
+	if config.TopicARN == "" {
+		return nil, errors.New("topic ARN is required")
 	}
 
 	// Apply defaults for unset values
@@ -132,6 +124,9 @@ func NewEventSink(client SNSPublisher, config Config) (*EventSink, error) {
 	if config.BackoffFactor == 0 {
 		config.BackoffFactor = defaults.BackoffFactor
 	}
+	if config.PublishTimeout == 0 {
+		config.PublishTimeout = defaults.PublishTimeout
+	}
 	if config.Logger == nil {
 		config.Logger = defaults.Logger
 	}
@@ -143,7 +138,7 @@ func NewEventSink(client SNSPublisher, config Config) (*EventSink, error) {
 	}, nil
 }
 
-// Publish publishes an event to SNS.
+// Publish publishes an event to the SNS FIFO topic.
 func (s *EventSink) Publish(ctx context.Context, event outbound.Event) error {
 	s.mu.RLock()
 	if s.closed {
@@ -151,12 +146,6 @@ func (s *EventSink) Publish(ctx context.Context, event outbound.Event) error {
 		return errors.New("event sink is closed")
 	}
 	s.mu.RUnlock()
-
-	// Get the topic ARN for this event type
-	topicARN := s.getTopicARN(event.EventType())
-	if topicARN == "" {
-		return fmt.Errorf("no topic ARN configured for event type: %s", event.EventType())
-	}
 
 	// Serialize event to JSON
 	messageBytes, err := json.Marshal(event)
@@ -181,30 +170,22 @@ func (s *EventSink) Publish(ctx context.Context, event outbound.Event) error {
 		},
 	}
 
+	// FIFO: Use chainId as MessageGroupId to ensure per-chain ordering
+	// Use explicit MessageDeduplicationId for deterministic deduplication
+	// (content-based dedup would fail due to ReceivedAt timestamp differences)
+	messageGroupID := strconv.FormatInt(event.GetChainID(), 10)
+	deduplicationID := event.DeduplicationID()
+
 	input := &sns.PublishInput{
-		TopicArn:          aws.String(topicARN),
-		Message:           aws.String(message),
-		MessageAttributes: attributes,
+		TopicArn:               aws.String(s.config.TopicARN),
+		Message:                aws.String(message),
+		MessageAttributes:      attributes,
+		MessageGroupId:         aws.String(messageGroupID),
+		MessageDeduplicationId: aws.String(deduplicationID),
 	}
 
 	// Publish with retry logic
 	return s.publishWithRetry(ctx, input, event)
-}
-
-// getTopicARN returns the topic ARN for the given event type.
-func (s *EventSink) getTopicARN(eventType outbound.EventType) string {
-	switch eventType {
-	case outbound.EventTypeBlock:
-		return s.config.Topics.Blocks
-	case outbound.EventTypeReceipts:
-		return s.config.Topics.Receipts
-	case outbound.EventTypeTraces:
-		return s.config.Topics.Traces
-	case outbound.EventTypeBlobs:
-		return s.config.Topics.Blobs
-	default:
-		return ""
-	}
 }
 
 // publishWithRetry attempts to publish with exponential backoff on transient failures.
@@ -236,15 +217,22 @@ func (s *EventSink) publishWithRetry(ctx context.Context, input *sns.PublishInpu
 			}
 		}
 
-		_, err := s.client.Publish(ctx, input)
+		// Create a timeout context for this publish attempt to prevent indefinite blocking
+		publishCtx, cancel := context.WithTimeout(ctx, s.config.PublishTimeout)
+		_, err := s.client.Publish(publishCtx, input)
+		cancel()
+
 		if err == nil {
 			return nil
 		}
 
 		lastErr = err
 
+		// Check if parent context was cancelled (shutdown signal)
+		parentCanceled := ctx.Err() != nil
+
 		// Check if error is retryable
-		if !isRetryableError(err) {
+		if !isRetryableError(err, parentCanceled) {
 			return fmt.Errorf("failed to publish to SNS: %w", err)
 		}
 	}
@@ -260,13 +248,25 @@ func (s *EventSink) publishWithRetry(ctx context.Context, input *sns.PublishInpu
 }
 
 // isRetryableError determines if an error should trigger a retry.
-func isRetryableError(err error) bool {
+// parentCtxCanceled indicates if the parent context (not the publish timeout) was cancelled.
+func isRetryableError(err error, parentCtxCanceled bool) bool {
 	if err == nil {
 		return false
 	}
 
-	// Context errors are not retryable
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	// If parent context was cancelled (shutdown signal), don't retry
+	if parentCtxCanceled {
+		return false
+	}
+
+	// Publish timeout (DeadlineExceeded from our timeout context) IS retryable
+	// as it indicates a transient network issue
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	// Parent context cancellation is not retryable
+	if errors.Is(err, context.Canceled) {
 		return false
 	}
 

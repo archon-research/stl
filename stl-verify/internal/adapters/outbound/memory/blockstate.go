@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -160,11 +159,9 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 
 // HandleReorgAtomic atomically performs all reorg-related operations.
 // In the memory implementation, this is naturally atomic since we hold the lock.
-func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	commonAncestor := event.BlockNumber - int64(event.Depth)
 
 	// Check if block already exists (idempotency)
 	if existing, ok := r.blocks[newBlock.Hash]; ok {
@@ -197,85 +194,6 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outb
 	r.blocks[newBlock.Hash] = newBlock
 
 	return version, nil
-}
-
-// GetReorgEvents retrieves reorg events, ordered by detection time descending.
-func (r *BlockStateRepository) GetReorgEvents(ctx context.Context, limit int) ([]outbound.ReorgEvent, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	result := make([]outbound.ReorgEvent, len(r.reorgEvents))
-	copy(result, r.reorgEvents)
-
-	// Sort by detection time descending
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].DetectedAt.After(result[j].DetectedAt)
-	})
-
-	if len(result) > limit {
-		result = result[:limit]
-	}
-	return result, nil
-}
-
-// GetReorgEventsByBlockRange retrieves reorg events within a block number range.
-func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, fromBlock, toBlock int64) ([]outbound.ReorgEvent, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	result := make([]outbound.ReorgEvent, 0)
-	for _, e := range r.reorgEvents {
-		if e.BlockNumber >= fromBlock && e.BlockNumber <= toBlock {
-			result = append(result, e)
-		}
-	}
-	return result, nil
-}
-
-// GetOrphanedBlocks retrieves orphaned blocks for analysis.
-func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int) ([]outbound.BlockState, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	orphaned := make([]outbound.BlockState, 0)
-	for _, b := range r.blocks {
-		if b.IsOrphaned {
-			orphaned = append(orphaned, b)
-		}
-	}
-
-	if len(orphaned) > limit {
-		orphaned = orphaned[:limit]
-	}
-	return orphaned, nil
-}
-
-// PruneOldBlocks deletes blocks older than the given number.
-func (r *BlockStateRepository) PruneOldBlocks(ctx context.Context, keepAfter int64) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	for hash, b := range r.blocks {
-		if b.Number < keepAfter && !b.IsOrphaned {
-			delete(r.blocks, hash)
-		}
-	}
-	return nil
-}
-
-// PruneOldReorgEvents deletes reorg events older than the given time.
-func (r *BlockStateRepository) PruneOldReorgEvents(ctx context.Context, olderThan time.Time) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	newEvents := make([]outbound.ReorgEvent, 0)
-	for _, e := range r.reorgEvents {
-		if !e.DetectedAt.Before(olderThan) {
-			newEvents = append(newEvents, e)
-		}
-	}
-	r.reorgEvents = newEvents
-	return nil
 }
 
 // GetBlockCount returns the total number of blocks (for testing).

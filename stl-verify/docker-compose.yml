@@ -37,10 +37,7 @@ services:
     environment:
       SERVICES: sns,sqs
       DEBUG: 0
-      PERSISTENCE: 1
-    volumes:
-      - "./localstack-init:/etc/localstack/init/ready.d"
-      - "localstack_data:/var/lib/localstack"
+      PERSISTENCE: 0
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
       interval: 5s

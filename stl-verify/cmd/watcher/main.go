@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/debug"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 
+	httpinbound "github.com/archon-research/stl/stl-verify/internal/adapters/inbound/http"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
@@ -29,17 +32,63 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
 )
 
+// Build-time variables - can be set via ldflags, otherwise populated from Go's build info
+var (
+	GitCommit string
+	GitBranch string
+	BuildTime string
+)
+
+func init() {
+	// Use Go's built-in build info (Go 1.18+) if ldflags weren't provided
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				if GitCommit == "" {
+					GitCommit = setting.Value
+				}
+			case "vcs.time":
+				if BuildTime == "" {
+					BuildTime = setting.Value
+				}
+			}
+		}
+	}
+}
+
 func main() {
 	// Parse command-line flags
 	disableBlobs := flag.Bool("disable-blobs", false, "Disable fetching blob sidecars")
 	pprofAddr := flag.String("pprof", "", "Enable pprof profiling server (e.g., ':6060')")
+	showVersion := flag.Bool("version", false, "Show version information and exit")
 	flag.Parse()
+
+	// Show version if requested
+	if *showVersion {
+		fmt.Printf("stl-watcher\n")
+		fmt.Printf("  Commit:     %s\n", GitCommit)
+		fmt.Printf("  Branch:     %s\n", GitBranch)
+		fmt.Printf("  Build Time: %s\n", BuildTime)
+		os.Exit(0)
+	}
+
+	// Set up context with cancellation (created early for consistent use throughout init)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Set up structured logging
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(logger)
+
+	// Log version info on startup
+	logger.Info("starting stl-watcher",
+		"commit", GitCommit,
+		"branch", GitBranch,
+		"buildTime", BuildTime,
+	)
 
 	// Start pprof server if enabled
 	if *pprofAddr != "" {
@@ -56,12 +105,13 @@ func main() {
 	}
 
 	// Initialize OpenTelemetry tracer
-	jaegerEndpoint := getEnv("JAEGER_ENDPOINT", "localhost:4317")
-	shutdownTracer, err := telemetry.InitTracer(context.Background(), telemetry.TracerConfig{
+	// JAEGER_ENDPOINT is the OTLP endpoint - works with ADOT/X-Ray in AWS or Jaeger locally
+	traceEndpoint := getEnv("JAEGER_ENDPOINT", "localhost:4317")
+	shutdownTracer, err := telemetry.InitTracer(ctx, telemetry.TracerConfig{
 		ServiceName:    "stl-watcher",
 		ServiceVersion: "0.1.0",
 		Environment:    getEnv("ENVIRONMENT", "development"),
-		JaegerEndpoint: jaegerEndpoint,
+		JaegerEndpoint: traceEndpoint,
 	})
 	if err != nil {
 		logger.Warn("failed to init tracer, continuing without tracing", "error", err)
@@ -71,7 +121,28 @@ func main() {
 				logger.Warn("failed to shutdown tracer", "error", err)
 			}
 		}()
-		logger.Info("tracer initialized", "endpoint", jaegerEndpoint)
+		logger.Info("tracer initialized", "endpoint", traceEndpoint)
+	}
+
+	// Initialize OpenTelemetry metrics
+	otelEndpoint := getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	shutdownMetrics, err := telemetry.InitMetrics(ctx, telemetry.MetricConfig{
+		ServiceName:    "stl-watcher",
+		ServiceVersion: "0.1.0",
+		Environment:    getEnv("ENVIRONMENT", "development"),
+		OTLPEndpoint:   otelEndpoint,
+	})
+	if err != nil {
+		logger.Warn("failed to init metrics, continuing without metrics export", "error", err)
+	} else {
+		defer func() {
+			if err := shutdownMetrics(context.Background()); err != nil {
+				logger.Warn("failed to shutdown metrics", "error", err)
+			}
+		}()
+		if otelEndpoint != "" {
+			logger.Info("metrics initialized", "endpoint", otelEndpoint)
+		}
 	}
 
 	// Get configuration from environment
@@ -90,17 +161,21 @@ func main() {
 	postgresURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
 
 	// Set up PostgreSQL connection pool for block state tracking
-	db, err := postgres.OpenDB(context.Background(), postgres.DefaultDBConfig(postgresURL))
+	db, err := postgres.OpenDB(ctx, postgres.DefaultDBConfig(postgresURL))
 	if err != nil {
 		logger.Error("failed to connect to PostgreSQL", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			logger.Error("failed to close database connection", "error", err)
+		}
+	}()
 
 	blockStateRepo := postgres.NewBlockStateRepository(db, logger)
 
 	// Run migration
-	if err := blockStateRepo.Migrate(context.Background()); err != nil {
+	if err := blockStateRepo.Migrate(ctx); err != nil {
 		logger.Error("failed to migrate block_states table", "error", err)
 		os.Exit(1)
 	}
@@ -148,7 +223,7 @@ func main() {
 		Addr:      redisAddr,
 		Password:  getEnv("REDIS_PASSWORD", ""),
 		DB:        0,
-		TTL:       24 * time.Hour,
+		TTL:       2 * 24 * time.Hour, // 2 days - allows retry of failed backups
 		KeyPrefix: "stl",
 	}, logger)
 	if err != nil {
@@ -170,23 +245,33 @@ func main() {
 	snsEndpoint := getEnv("AWS_SNS_ENDPOINT", "http://localhost:4566")
 	awsRegion := getEnv("AWS_REGION", "us-east-1")
 
-	// Configure SNS topics for each event type
-	snsTopics := snsadapter.TopicARNs{
-		Blocks:   requireEnv("AWS_SNS_TOPIC_BLOCKS"),
-		Receipts: requireEnv("AWS_SNS_TOPIC_RECEIPTS"),
-		Traces:   requireEnv("AWS_SNS_TOPIC_TRACES"),
-		Blobs:    requireEnv("AWS_SNS_TOPIC_BLOBS"),
-	}
+	// Single SNS FIFO topic for all event types
+	snsTopicARN := requireEnv("AWS_SNS_TOPIC_ARN")
 
 	// Configure AWS SDK for LocalStack or production
-	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+	// In production (ECS/Fargate), use the default credential chain which picks up IAM role credentials.
+	// For local development with LocalStack, use static credentials from environment variables.
+	awsConfigOptions := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(awsRegion),
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			getEnv("AWS_ACCESS_KEY_ID", "test"),
-			getEnv("AWS_SECRET_ACCESS_KEY", "test"),
-			"",
-		)),
-	)
+	}
+
+	// Only use static credentials if explicitly set (for LocalStack)
+	// In ECS/Fargate, these won't be set and the SDK will use the IAM role
+	if accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID"); accessKeyID != "" {
+		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+		awsConfigOptions = append(awsConfigOptions,
+			awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+				accessKeyID,
+				secretKey,
+				"",
+			)),
+		)
+		logger.Debug("using static AWS credentials from environment")
+	} else {
+		logger.Debug("using default AWS credential chain (IAM role)")
+	}
+
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), awsConfigOptions...)
 	if err != nil {
 		logger.Error("failed to load AWS config", "error", err)
 		os.Exit(1)
@@ -200,8 +285,8 @@ func main() {
 	})
 
 	eventSink, err := snsadapter.NewEventSink(snsClient, snsadapter.Config{
-		Topics: snsTopics,
-		Logger: logger,
+		TopicARN: snsTopicARN,
+		Logger:   logger,
 	})
 	if err != nil {
 		logger.Error("failed to create SNS event sink", "error", err)
@@ -214,10 +299,7 @@ func main() {
 	}()
 	logger.Info("SNS event sink created",
 		"endpoint", snsEndpoint,
-		"blocks_topic", snsTopics.Blocks,
-		"receipts_topic", snsTopics.Receipts,
-		"traces_topic", snsTopics.Traces,
-		"blobs_topic", snsTopics.Blobs,
+		"topic", snsTopicARN,
 	)
 
 	// Create LiveService (handles WebSocket subscription and reorg detection)
@@ -250,6 +332,7 @@ func main() {
 			ChainID:      chainID,
 			BatchSize:    10,
 			PollInterval: 30 * time.Second,
+			DisableBlobs: *disableBlobs,
 			Logger:       logger,
 		}
 
@@ -266,13 +349,25 @@ func main() {
 		}
 	}
 
-	// Set up context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	// Handle shutdown signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Start health server for ECS rolling deployments
+	// Readiness: Returns 200 only after first block is processed (prevents gaps)
+	// Liveness: Returns 200 if service is running and processing blocks
+	healthAddr := getEnv("HEALTH_ADDR", ":8080")
+	var shuttingDown atomic.Bool
+	healthServer := httpinbound.NewHealthServer(httpinbound.HealthServerConfig{
+		Addr:   healthAddr,
+		Logger: logger,
+	}, liveService, &shuttingDown)
+	healthServer.Start()
+	defer func() {
+		if err := healthServer.Shutdown(5 * time.Second); err != nil {
+			logger.Warn("health server shutdown error", "error", err)
+		}
+	}()
 
 	// Start both services
 	logger.Info("starting live service...")
@@ -294,6 +389,10 @@ func main() {
 	// Wait for shutdown signal
 	sig := <-sigChan
 	logger.Info("received signal, shutting down...", "signal", sig)
+
+	// Mark as shutting down - health checks will start returning unhealthy
+	// This tells ECS to stop routing traffic before we actually stop
+	shuttingDown.Store(true)
 
 	// Cancel context first to signal all goroutines to stop
 	cancel()

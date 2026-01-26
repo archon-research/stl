@@ -4,8 +4,8 @@
 // It provides helper methods for inspecting events during tests:
 //   - GetEvents(): Returns all published events
 //   - GetEventsByType(): Filters events by type
-//   - GetBlockEvents()/GetReorgEvents(): Type-specific event retrieval
-//   - SetOnPublish(): Register callback for event assertions
+//   - GetBlockEvents()/GetReceiptsEvents()/GetTracesEvents()/GetBlobsEvents(): Type-specific retrieval
+//   - OnPublish(): Register callback for event assertions
 //
 // All operations are thread-safe. For production, use a message queue adapter.
 package memory
@@ -93,45 +93,6 @@ func (s *EventSink) GetBlockEvents() []outbound.BlockEvent {
 	result := make([]outbound.BlockEvent, 0)
 	for _, e := range s.events {
 		if be, ok := e.(outbound.BlockEvent); ok {
-			result = append(result, be)
-		}
-	}
-	return result
-}
-
-// GetReceiptsEvents returns all receipts events.
-func (s *EventSink) GetReceiptsEvents() []outbound.ReceiptsEvent {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]outbound.ReceiptsEvent, 0)
-	for _, e := range s.events {
-		if re, ok := e.(outbound.ReceiptsEvent); ok {
-			result = append(result, re)
-		}
-	}
-	return result
-}
-
-// GetTracesEvents returns all traces events.
-func (s *EventSink) GetTracesEvents() []outbound.TracesEvent {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]outbound.TracesEvent, 0)
-	for _, e := range s.events {
-		if te, ok := e.(outbound.TracesEvent); ok {
-			result = append(result, te)
-		}
-	}
-	return result
-}
-
-// GetBlobsEvents returns all blobs events.
-func (s *EventSink) GetBlobsEvents() []outbound.BlobsEvent {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]outbound.BlobsEvent, 0)
-	for _, e := range s.events {
-		if be, ok := e.(outbound.BlobsEvent); ok {
 			result = append(result, be)
 		}
 	}
