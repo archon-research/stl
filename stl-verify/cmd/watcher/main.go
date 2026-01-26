@@ -15,7 +15,6 @@ import (
 	"runtime/debug"
 	"runtime/trace"
 	"strconv"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,7 +23,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 
-	httpinbound "github.com/archon-research/stl/stl-verify/internal/adapters/inbound/http"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
@@ -378,22 +376,6 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start health server for ECS rolling deployments
-	// Readiness: Returns 200 only after first block is processed (prevents gaps)
-	// Liveness: Returns 200 if service is running and processing blocks
-	healthAddr := getEnv("HEALTH_ADDR", ":8080")
-	var shuttingDown atomic.Bool
-	healthServer := httpinbound.NewHealthServer(httpinbound.HealthServerConfig{
-		Addr:   healthAddr,
-		Logger: logger,
-	}, liveService, &shuttingDown)
-	healthServer.Start()
-	defer func() {
-		if err := healthServer.Shutdown(5 * time.Second); err != nil {
-			logger.Warn("health server shutdown error", "error", err)
-		}
-	}()
-
 	// Start both services
 	logger.Info("starting live service...")
 	if err := liveService.Start(ctx); err != nil {
@@ -414,10 +396,6 @@ func main() {
 	// Wait for shutdown signal
 	sig := <-sigChan
 	logger.Info("received signal, shutting down...", "signal", sig)
-
-	// Mark as shutting down - health checks will start returning unhealthy
-	// This tells ECS to stop routing traffic before we actually stop
-	shuttingDown.Store(true)
 
 	// Cancel context first to signal all goroutines to stop
 	cancel()

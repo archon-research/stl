@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -88,13 +87,6 @@ type LiveService struct {
 	// In-memory chain state for reorg detection (single-goroutine access)
 	unfinalizedBlocks []LightBlock
 	finalizedBlock    *LightBlock
-
-	// Readiness state for health checks during rolling deployments
-	// Set to 1 after first block is successfully processed
-	ready atomic.Int32
-
-	// Last block processed timestamp for liveness checks
-	lastBlockTime atomic.Int64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -181,27 +173,6 @@ func (s *LiveService) Stop() error {
 		s.cancel()
 	}
 	return s.subscriber.Unsubscribe()
-}
-
-// IsReady returns true if the service has processed at least one block.
-// Used for Kubernetes/ECS readiness probes during rolling deployments.
-// The new instance must be ready before the old one is stopped to prevent gaps.
-func (s *LiveService) IsReady() bool {
-	return s.ready.Load() == 1
-}
-
-// IsHealthy returns true if the service has processed a block recently.
-// Used for Kubernetes/ECS liveness probes. If no block has been processed
-// in the last 5 minutes, the service is considered unhealthy (Ethereum produces
-// blocks every ~12 seconds, so 5 minutes without a block indicates a problem).
-func (s *LiveService) IsHealthy() bool {
-	lastBlock := s.lastBlockTime.Load()
-	if lastBlock == 0 {
-		// Not yet processed any blocks, but might still be starting up
-		return true
-	}
-	// Consider unhealthy if no block processed in 5 minutes
-	return time.Since(time.Unix(lastBlock, 0)) < 5*time.Minute
 }
 
 // processHeaders processes incoming block headers using a prefetch pipeline.
@@ -433,10 +404,6 @@ func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, bloc
 	// Update finalized block pointer
 	s.updateFinalizedBlock(blockNum)
 
-	// Mark service as ready
-	s.ready.Store(1)
-	s.lastBlockTime.Store(time.Now().Unix())
-
 	return nil
 }
 
@@ -509,11 +476,6 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 
 	// Update finalized block pointer after successful publishing
 	s.updateFinalizedBlock(blockNum)
-
-	// Mark service as ready after first successful block processing
-	// This enables rolling deployments: new instance becomes ready before old one stops
-	s.ready.Store(1)
-	s.lastBlockTime.Store(time.Now().Unix())
 
 	return nil
 }
