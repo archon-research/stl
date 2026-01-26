@@ -124,7 +124,8 @@ func main() {
 	traceEndpoint := getEnv("JAEGER_ENDPOINT", "localhost:4317")
 	shutdownTracer, err := telemetry.InitTracer(ctx, telemetry.TracerConfig{
 		ServiceName:    "stl-watcher",
-		ServiceVersion: "0.1.0",
+		ServiceVersion: GitCommit,
+		BuildTime:      BuildTime,
 		Environment:    getEnv("ENVIRONMENT", "development"),
 		JaegerEndpoint: traceEndpoint,
 	})

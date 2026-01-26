@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/propagation"
@@ -39,8 +40,11 @@ type TracerConfig struct {
 	// ServiceName is the name of the service (e.g., "stl-watcher").
 	ServiceName string
 
-	// ServiceVersion is the version of the service.
+	// ServiceVersion is the version of the service (typically git commit hash).
 	ServiceVersion string
+
+	// BuildTime is the build timestamp (e.g., "2024-01-15T10:30:00Z").
+	BuildTime string
 
 	// Environment is the deployment environment (e.g., "development", "production").
 	Environment string
@@ -77,14 +81,18 @@ func InitTracer(ctx context.Context, config TracerConfig) (shutdown func(context
 	}
 
 	// Create resource with service information
+	attrs := []attribute.KeyValue{
+		semconv.ServiceName(config.ServiceName),
+		semconv.ServiceVersion(config.ServiceVersion),
+		semconv.DeploymentEnvironmentName(config.Environment),
+	}
+	if config.BuildTime != "" {
+		attrs = append(attrs, attribute.String("service.build_time", config.BuildTime))
+	}
+
 	res, err := resource.Merge(
 		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
-			semconv.ServiceName(config.ServiceName),
-			semconv.ServiceVersion(config.ServiceVersion),
-			semconv.DeploymentEnvironmentName(config.Environment),
-		),
+		resource.NewWithAttributes(semconv.SchemaURL, attrs...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
