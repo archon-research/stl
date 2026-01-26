@@ -61,7 +61,7 @@ func init() {
 
 func main() {
 	// Parse command-line flags
-	disableBlobs := flag.Bool("disable-blobs", false, "Disable fetching blob sidecars")
+	enableBlobs := flag.Bool("enable-blobs", false, "Enable fetching blob sidecars")
 	parallelRPC := flag.Bool("parallel-rpc", true, "Use parallel goroutines for RPC calls instead of batching (faster but uses more credits)")
 	pprofAddr := flag.String("pprof", "", "Enable pprof profiling server (e.g., ':6060')")
 	traceFile := flag.String("trace", "", "Write execution trace to file")
@@ -111,6 +111,7 @@ func main() {
 		// Enable block and mutex profiling
 		runtime.SetBlockProfileRate(1)
 		runtime.SetMutexProfileFraction(1)
+		runtime.SetCPUProfileRate(1)
 
 		go func() {
 			logger.Info("starting pprof server", "addr", *pprofAddr)
@@ -175,12 +176,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Auto-disable blobs for Ethereum mainnet (chain ID 1) since eth_getBlobSidecars is not supported
-	if chainID == 1 && !*disableBlobs {
-		logger.Info("auto-disabling blobs for Ethereum mainnet (eth_getBlobSidecars not supported)")
-		*disableBlobs = true
-	}
-
 	postgresURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
 
 	// Set up PostgreSQL connection pool for block state tracking
@@ -230,11 +225,11 @@ func main() {
 
 	// Create Alchemy HTTP client
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
-		HTTPURL:      fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
-		DisableBlobs: *disableBlobs,
-		ParallelRPC:  *parallelRPC,
-		Logger:       logger,
-		Telemetry:    alchemyTelemetry,
+		HTTPURL:     fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
+		EnableBlobs: *enableBlobs,
+		ParallelRPC: *parallelRPC,
+		Logger:      logger,
+		Telemetry:   alchemyTelemetry,
 	})
 	if err != nil {
 		logger.Error("failed to create client", "error", err)
@@ -242,7 +237,7 @@ func main() {
 	}
 
 	logger.Info("alchemy client configured",
-		"disableBlobs", *disableBlobs,
+		"enableBlobs", enableBlobs,
 		"parallelRPC", *parallelRPC,
 		"chainID", chainID,
 	)
@@ -337,7 +332,7 @@ func main() {
 		ChainID:              chainID,
 		FinalityBlockCount:   64,
 		MaxUnfinalizedBlocks: 128,
-		DisableBlobs:         *disableBlobs,
+		EnableBlobs:          *enableBlobs,
 		Logger:               logger,
 	}
 
@@ -362,7 +357,7 @@ func main() {
 			ChainID:      chainID,
 			BatchSize:    10,
 			PollInterval: 30 * time.Second,
-			DisableBlobs: *disableBlobs,
+			EnableBlobs:  *enableBlobs,
 			Logger:       logger,
 		}
 

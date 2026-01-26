@@ -35,8 +35,8 @@ type LiveConfig struct {
 	// MaxUnfinalizedBlocks is the max number of unfinalized blocks to keep in memory.
 	MaxUnfinalizedBlocks int
 
-	// DisableBlobs disables fetching blob sidecars (useful for pre-Dencun blocks or unsupported nodes).
-	DisableBlobs bool
+	// EnableBlobs enables fetching blob sidecars (post-Dencun blocks on supported nodes).
+	EnableBlobs bool
 
 	// Logger is the structured logger.
 	Logger *slog.Logger
@@ -211,15 +211,8 @@ func (s *LiveService) IsHealthy() bool {
 //
 //	Header arrives → Start prefetch (async) → Do state ops → Wait for prefetch → Cache/Publish
 //
-// Since blocks arrive ~12s apart and RPC takes ~150ms, the prefetch will complete
-// long before the next header arrives. The key optimization is that the prefetch
-// runs concurrently with state operations (dedup check, reorg detection, DB save),
-// which take ~30-50ms. This hides most of the RPC latency within the state ops time.
-//
 // Without prefetch:  [state: 30ms] → [RPC: 150ms] → [cache: 50ms] = 230ms total
 // With prefetch:     [state: 30ms ─────────────────] → [cache: 50ms] = 80ms total
-//
-//	└─ [RPC: 150ms runs in parallel] ─┘
 //
 // The prefetch completes during state ops, so we only wait ~120ms (150ms - 30ms).
 func (s *LiveService) processHeaders(headers <-chan outbound.BlockHeader) {
@@ -819,13 +812,13 @@ func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbo
 	if bd.TracesErr != nil {
 		return fmt.Errorf("failed to fetch traces for block %d: %w", blockNum, bd.TracesErr)
 	}
-	if !s.config.DisableBlobs && bd.BlobsErr != nil {
+	if s.config.EnableBlobs && bd.BlobsErr != nil {
 		return fmt.Errorf("failed to fetch blobs for block %d: %w", blockNum, bd.BlobsErr)
 	}
 
 	// Cache all data types in parallel
 	numWorkers := 3
-	if !s.config.DisableBlobs {
+	if s.config.EnableBlobs {
 		numWorkers = 4
 	}
 	errCh := make(chan error, numWorkers)
@@ -854,7 +847,7 @@ func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbo
 		}
 	}()
 
-	if !s.config.DisableBlobs {
+	if s.config.EnableBlobs {
 		go func() {
 			if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, bd.Blobs); err != nil {
 				errCh <- fmt.Errorf("failed to cache blobs for block %d: %w", blockNum, err)
@@ -936,7 +929,7 @@ func (s *LiveService) cacheAndPublishBlockData(ctx context.Context, header outbo
 	if bd.TracesErr != nil {
 		return fmt.Errorf("failed to fetch traces for block %d: %w", blockNum, bd.TracesErr)
 	}
-	if !s.config.DisableBlobs && bd.BlobsErr != nil {
+	if s.config.EnableBlobs && bd.BlobsErr != nil {
 		return fmt.Errorf("failed to fetch blobs for block %d: %w", blockNum, bd.BlobsErr)
 	}
 
@@ -946,7 +939,7 @@ func (s *LiveService) cacheAndPublishBlockData(ctx context.Context, header outbo
 		Receipts: bd.Receipts,
 		Traces:   bd.Traces,
 	}
-	if !s.config.DisableBlobs {
+	if s.config.EnableBlobs {
 		cacheInput.Blobs = bd.Blobs
 	}
 

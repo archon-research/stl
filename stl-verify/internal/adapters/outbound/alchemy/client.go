@@ -47,8 +47,8 @@ type ClientConfig struct {
 	// BackoffFactor is the multiplier applied to backoff after each retry.
 	BackoffFactor float64
 
-	// DisableBlobs disables fetching blob sidecars (useful for pre-Dencun blocks or unsupported nodes).
-	DisableBlobs bool
+	// EnableBlobs enables fetching blob sidecars (post-Dencun blocks on supported nodes).
+	EnableBlobs bool
 
 	// ParallelRPC uses separate goroutines for each RPC call instead of batching.
 	// This uses more credits but may be faster due to parallel execution.
@@ -363,7 +363,7 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 	}()
 
 	// Fetch blobs (only if enabled)
-	if !c.config.DisableBlobs {
+	if c.config.EnableBlobs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -390,7 +390,7 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
 	// Build batch request: 3-4 calls (block, receipts, traces, and optionally blobs)
 	callsCount := 3
-	if !c.config.DisableBlobs {
+	if c.config.EnableBlobs {
 		callsCount = 4
 	}
 	requests := make([]jsonRPCRequest, 0, callsCount)
@@ -400,7 +400,7 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 		jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "eth_getBlockReceipts", Params: []interface{}{hash}},
 		jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []interface{}{hash}},
 	)
-	if !c.config.DisableBlobs {
+	if c.config.EnableBlobs {
 		requests = append(requests,
 			jsonRPCRequest{JSONRPC: "2.0", ID: 3, Method: "eth_getBlobSidecars", Params: []interface{}{hash}},
 		)
@@ -454,7 +454,7 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 	}
 
 	// Blobs (only if enabled)
-	if !c.config.DisableBlobs {
+	if c.config.EnableBlobs {
 		if resp := respMap[3]; resp != nil {
 			if resp.Error != nil {
 				result.BlobsErr = fmt.Errorf("RPC error for block %s blobs: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
@@ -499,7 +499,7 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 
 	// Build batch request: 3-4 calls per block (block, receipts, traces, and optionally blobs)
 	callsPerBlock := 3
-	if !c.config.DisableBlobs {
+	if c.config.EnableBlobs {
 		callsPerBlock = 4
 	}
 	requests := make([]jsonRPCRequest, 0, len(blockNums)*callsPerBlock)
@@ -512,7 +512,7 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 1, Method: "eth_getBlockReceipts", Params: []interface{}{hexNum}},
 			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 2, Method: "trace_block", Params: []interface{}{hexNum}},
 		)
-		if !c.config.DisableBlobs {
+		if c.config.EnableBlobs {
 			requests = append(requests,
 				jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 3, Method: "eth_getBlobSidecars", Params: []interface{}{hexNum}},
 			)
@@ -570,7 +570,7 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		}
 
 		// Blobs (only if enabled)
-		if !c.config.DisableBlobs {
+		if c.config.EnableBlobs {
 			if resp := respMap[baseID+3]; resp != nil {
 				if resp.Error != nil {
 					results[i].BlobsErr = fmt.Errorf("RPC error for block %d blobs: %s (code: %d)", blockNum, resp.Error.Message, resp.Error.Code)

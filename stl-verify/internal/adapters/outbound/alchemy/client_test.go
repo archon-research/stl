@@ -20,6 +20,16 @@ func testClient(t *testing.T, url string) *Client {
 	return client
 }
 
+// testClientWithBlobs creates a client for testing with blobs enabled.
+func testClientWithBlobs(t *testing.T, url string) *Client {
+	t.Helper()
+	client, err := NewClient(ClientConfig{HTTPURL: url, EnableBlobs: true})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	return client
+}
+
 // --- Test: NewClient ---
 
 func TestNewClient_CreatesClientWithConfig(t *testing.T) {
@@ -527,7 +537,7 @@ func TestGetBlocksBatch_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := testClient(t, server.URL)
+	client := testClientWithBlobs(t, server.URL)
 	ctx := context.Background()
 
 	results, err := client.GetBlocksBatch(ctx, []int64{100, 101}, false)
@@ -595,7 +605,7 @@ func TestGetBlocksBatch_PartialErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := testClient(t, server.URL)
+	client := testClientWithBlobs(t, server.URL)
 	ctx := context.Background()
 
 	results, err := client.GetBlocksBatch(ctx, []int64{100}, false)
@@ -669,7 +679,7 @@ func TestGetBlocksBatch_AllSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := testClient(t, server.URL)
+	client := testClientWithBlobs(t, server.URL)
 	ctx := context.Background()
 
 	results, err := client.GetBlocksBatch(ctx, []int64{100}, false)
@@ -727,7 +737,7 @@ func TestGetBlocksBatch_AllErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := testClient(t, server.URL)
+	client := testClientWithBlobs(t, server.URL)
 	ctx := context.Background()
 
 	results, err := client.GetBlocksBatch(ctx, []int64{999999999}, false)
