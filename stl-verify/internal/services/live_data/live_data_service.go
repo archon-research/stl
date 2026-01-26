@@ -274,6 +274,104 @@ func (s *LiveService) startPrefetch(header outbound.BlockHeader, blockNum int64)
 	return resultCh
 }
 
+// stateOpsResult holds the results from processStateOperations.
+type stateOpsResult struct {
+	version int
+	isReorg bool
+	skip    bool // true if block was duplicate and should be skipped
+}
+
+// processStateOperations handles dedup checking, reorg detection, and block state persistence.
+// This runs concurrently with data prefetching to minimize total processing time.
+// Returns skip=true if the block is a duplicate and should not be processed further.
+func (s *LiveService) processStateOperations(ctx context.Context, span trace.Span, header outbound.BlockHeader, blockNum int64, receivedAt time.Time) (stateOpsResult, error) {
+	// Normalize hashes once at the entry point
+	normalizedHash := normalizeHash(header.Hash)
+	normalizedParentHash := normalizeHash(header.ParentHash)
+
+	block := LightBlock{
+		Number:     blockNum,
+		Hash:       normalizedHash,
+		ParentHash: normalizedParentHash,
+	}
+
+	// Check if we've already processed this block
+	isDuplicate, err := s.isDuplicateBlock(ctx, normalizedHash, blockNum)
+	if err != nil {
+		return stateOpsResult{}, fmt.Errorf("failed to check for duplicate block: %w", err)
+	}
+	if isDuplicate {
+		span.SetAttributes(attribute.Bool("block.duplicate", true))
+		return stateOpsResult{skip: true}, nil
+	}
+
+	// Detect reorg BEFORE adding to chain
+	isReorg, reorgDepth, commonAncestor, reorgEvent, err := s.detectReorg(block, receivedAt)
+	if err != nil {
+		return stateOpsResult{}, fmt.Errorf("reorg detection failed: %w", err)
+	}
+	if isReorg {
+		span.SetAttributes(
+			attribute.Bool("block.reorg", true),
+			attribute.Int("block.reorg_depth", reorgDepth),
+			attribute.Int64("block.common_ancestor", commonAncestor),
+		)
+		s.logger.Warn("reorg detected", "block", blockNum, "depth", reorgDepth, "commonAncestor", commonAncestor)
+		if s.metrics != nil {
+			s.metrics.RecordReorg(ctx, reorgDepth, commonAncestor, blockNum)
+		}
+	}
+
+	// Build block state for DB
+	state := outbound.BlockState{
+		Number:     block.Number,
+		Hash:       block.Hash,
+		ParentHash: block.ParentHash,
+		ReceivedAt: receivedAt.Unix(),
+		IsOrphaned: false,
+	}
+
+	// Save block state to DB
+	var version int
+	if isReorg && reorgEvent != nil {
+		version, err = s.stateRepo.HandleReorgAtomic(ctx, commonAncestor, *reorgEvent, state)
+		if err != nil {
+			return stateOpsResult{}, fmt.Errorf("failed to handle reorg atomically: %w", err)
+		}
+		s.pruneReorgedBlocks(commonAncestor)
+	} else {
+		version, err = s.stateRepo.SaveBlock(ctx, state)
+		if err != nil {
+			return stateOpsResult{}, fmt.Errorf("failed to save block state: %w", err)
+		}
+	}
+
+	// Add block to in-memory chain AFTER successful DB save
+	s.addBlock(block)
+
+	return stateOpsResult{version: version, isReorg: isReorg}, nil
+}
+
+// waitForPrefetch waits for the prefetch goroutine to complete and returns the result.
+func (s *LiveService) waitForPrefetch(ctx context.Context, span trace.Span, prefetchCh <-chan prefetchResult, blockNum int64) (outbound.BlockData, error) {
+	prefetchWaitStart := time.Now()
+	var prefetch prefetchResult
+	select {
+	case prefetch = <-prefetchCh:
+		// Got the prefetched data
+		prefetchWaitDuration := time.Since(prefetchWaitStart)
+		span.SetAttributes(attribute.Int64("block.prefetch_wait_ms", prefetchWaitDuration.Milliseconds()))
+	case <-ctx.Done():
+		return outbound.BlockData{}, ctx.Err()
+	}
+
+	if prefetch.err != nil {
+		return outbound.BlockData{}, fmt.Errorf("failed to fetch block data for block %d: %w", blockNum, prefetch.err)
+	}
+
+	return prefetch.blockData, nil
+}
+
 // processBlockWithPrefetch processes a block with RPC data being fetched concurrently.
 // State operations run while the prefetch happens in the background, then we wait
 // for the prefetch and proceed to cache/publish.
@@ -305,105 +403,28 @@ func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, bloc
 		s.logger.Info("processBlock completed", "block", blockNum, "duration", time.Since(start))
 	}()
 
-	// === PHASE 1: State Operations (runs while prefetch is in progress) ===
-
-	// Normalize hashes once at the entry point
-	normalizedHash := normalizeHash(header.Hash)
-	normalizedParentHash := normalizeHash(header.ParentHash)
-
-	block := LightBlock{
-		Number:     blockNum,
-		Hash:       normalizedHash,
-		ParentHash: normalizedParentHash,
-	}
-
-	// Check if we've already processed this block
-	isDuplicate, err := s.isDuplicateBlock(ctx, normalizedHash, blockNum)
+	// State operations: dedup check, reorg detection, DB save (runs while prefetch is in progress)
+	stateResult, err := s.processStateOperations(ctx, span, header, blockNum, receivedAt)
 	if err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to check for duplicate block")
-		return fmt.Errorf("failed to check for duplicate block: %w", err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
 	}
-	if isDuplicate {
-		span.SetAttributes(attribute.Bool("block.duplicate", true))
+	if stateResult.skip {
 		return nil
 	}
+	span.SetAttributes(attribute.Int64("block.state_ops_ms", time.Since(start).Milliseconds()))
 
-	// Detect reorg BEFORE adding to chain
-	isReorg, reorgDepth, commonAncestor, reorgEvent, err := s.detectReorg(block, receivedAt)
+	// Wait for prefetch to complete (should be mostly done by now)
+	blockData, err := s.waitForPrefetch(ctx, span, prefetchCh, blockNum)
 	if err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "reorg detection failed")
-		return fmt.Errorf("reorg detection failed: %w", err)
-	}
-	if isReorg {
-		span.SetAttributes(
-			attribute.Bool("block.reorg", true),
-			attribute.Int("block.reorg_depth", reorgDepth),
-			attribute.Int64("block.common_ancestor", commonAncestor),
-		)
-		s.logger.Warn("reorg detected", "block", blockNum, "depth", reorgDepth, "commonAncestor", commonAncestor)
-		if s.metrics != nil {
-			s.metrics.RecordReorg(ctx, reorgDepth, commonAncestor, blockNum)
-		}
-	}
-
-	// Build block state for DB
-	state := outbound.BlockState{
-		Number:     block.Number,
-		Hash:       block.Hash,
-		ParentHash: block.ParentHash,
-		ReceivedAt: receivedAt.Unix(),
-		IsOrphaned: false,
-	}
-
-	// Save block state to DB
-	var version int
-	if isReorg && reorgEvent != nil {
-		version, err = s.stateRepo.HandleReorgAtomic(ctx, commonAncestor, *reorgEvent, state)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to handle reorg atomically")
-			return fmt.Errorf("failed to handle reorg atomically: %w", err)
-		}
-		s.pruneReorgedBlocks(commonAncestor)
-	} else {
-		version, err = s.stateRepo.SaveBlock(ctx, state)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to save block state")
-			return fmt.Errorf("failed to save block state: %w", err)
-		}
-	}
-
-	// Add block to in-memory chain AFTER successful DB save
-	s.addBlock(block)
-
-	stateOpsDuration := time.Since(start)
-	span.SetAttributes(attribute.Int64("block.state_ops_ms", stateOpsDuration.Milliseconds()))
-
-	// === PHASE 2: Wait for Prefetch (should be mostly done by now) ===
-
-	prefetchWaitStart := time.Now()
-	var prefetch prefetchResult
-	select {
-	case prefetch = <-prefetchCh:
-		// Got the prefetched data
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	prefetchWaitDuration := time.Since(prefetchWaitStart)
-	span.SetAttributes(attribute.Int64("block.prefetch_wait_ms", prefetchWaitDuration.Milliseconds()))
-
-	if prefetch.err != nil {
-		span.RecordError(prefetch.err)
 		span.SetStatus(codes.Error, "prefetch failed")
-		return fmt.Errorf("failed to fetch block data for block %d: %w", blockNum, prefetch.err)
+		return err
 	}
 
-	// === PHASE 3: Cache and Publish ===
-
-	if err := s.cacheAndPublishBlockData(ctx, header, blockNum, version, receivedAt, isReorg, prefetch.blockData); err != nil {
+	// Cache and publish block data
+	if err := s.cacheAndPublishBlockData(ctx, header, blockNum, stateResult.version, receivedAt, stateResult.isReorg, blockData); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to cache and publish block data")
 		return fmt.Errorf("failed to cache and publish block data: %w", err)
@@ -468,87 +489,19 @@ func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.
 		s.logger.Info("processBlock completed", "block", blockNum, "duration", time.Since(start))
 	}()
 
-	// Normalize hashes once at the entry point (from WebSocket/RPC)
-	normalizedHash := normalizeHash(header.Hash)
-	normalizedParentHash := normalizeHash(header.ParentHash)
-
-	block := LightBlock{
-		Number:     blockNum,
-		Hash:       normalizedHash,
-		ParentHash: normalizedParentHash,
-	}
-
-	// Check if we've already processed this block
-	isDuplicate, err := s.isDuplicateBlock(ctx, normalizedHash, blockNum)
+	// State operations: dedup check, reorg detection, DB save
+	stateResult, err := s.processStateOperations(ctx, span, header, blockNum, receivedAt)
 	if err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to check for duplicate block")
-		return fmt.Errorf("failed to check for duplicate block: %w", err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
 	}
-	if isDuplicate {
-		span.SetAttributes(attribute.Bool("block.duplicate", true))
+	if stateResult.skip {
 		return nil
 	}
 
-	// Detect reorg BEFORE adding to chain
-	isReorg, reorgDepth, commonAncestor, reorgEvent, err := s.detectReorg(block, receivedAt)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "reorg detection failed")
-		return fmt.Errorf("reorg detection failed: %w", err)
-	}
-	if isReorg {
-		span.SetAttributes(
-			attribute.Bool("block.reorg", true),
-			attribute.Int("block.reorg_depth", reorgDepth),
-			attribute.Int64("block.common_ancestor", commonAncestor),
-		)
-		s.logger.Warn("reorg detected", "block", blockNum, "depth", reorgDepth, "commonAncestor", commonAncestor)
-		if s.metrics != nil {
-			s.metrics.RecordReorg(ctx, reorgDepth, commonAncestor, blockNum)
-		}
-	}
-
-	// Build block state for DB
-	state := outbound.BlockState{
-		Number:     block.Number,
-		Hash:       block.Hash,
-		ParentHash: block.ParentHash,
-		ReceivedAt: receivedAt.Unix(),
-		IsOrphaned: false,
-	}
-
-	// Save block state to DB - use atomic reorg handling if this is a reorg
-	// NOTE: We save to DB BEFORE adding to in-memory chain to ensure consistency.
-	// If DB save fails, we don't want a "ghost" block in memory that doesn't exist in DB.
-	var version int
-	if isReorg && reorgEvent != nil {
-		// Atomically: save reorg event + mark orphans + save new block
-		version, err = s.stateRepo.HandleReorgAtomic(ctx, commonAncestor, *reorgEvent, state)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to handle reorg atomically")
-			return fmt.Errorf("failed to handle reorg atomically: %w", err)
-		}
-		// Prune reorged blocks from in-memory chain AFTER successful DB save
-		// This ensures memory and DB stay in sync
-		s.pruneReorgedBlocks(commonAncestor)
-	} else {
-		// Normal block save
-		version, err = s.stateRepo.SaveBlock(ctx, state)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to save block state")
-			return fmt.Errorf("failed to save block state: %w", err)
-		}
-	}
-
-	// Add block to in-memory chain AFTER successful DB save
-	// This ensures memory and DB stay in sync
-	s.addBlock(block)
-
 	// Fetch all data types concurrently, cache, and publish events
-	if err := s.fetchAndPublishBlockData(ctx, header, blockNum, version, receivedAt, isReorg); err != nil {
+	if err := s.fetchAndPublishBlockData(ctx, header, blockNum, stateResult.version, receivedAt, stateResult.isReorg); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to fetch and publish block data")
 		return fmt.Errorf("failed to fetch and publish block data: %w", err)
