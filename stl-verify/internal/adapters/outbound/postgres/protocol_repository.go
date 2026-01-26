@@ -45,77 +45,29 @@ func NewProtocolRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*Pro
 	}, nil
 }
 
-// UpsertProtocols upserts protocol records atomically.
-// All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
-func (r *ProtocolRepository) UpsertProtocols(ctx context.Context, protocols []*entity.Protocol) error {
-	if len(protocols) == 0 {
-		return nil
-	}
-
-	tx, err := r.db.BeginTx(ctx, nil)
+// GetProtocolByAddress retrieves a protocol by its chain ID and address.
+func (r *ProtocolRepository) GetProtocolByAddress(ctx context.Context, chainID int64, address string) (*entity.Protocol, error) {
+	var protocol entity.Protocol
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, chain_id, address, name, protocol_type, created_at_block
+		 FROM protocol
+		 WHERE chain_id = $1 AND address = $2`,
+		chainID, address).Scan(
+		&protocol.ID,
+		&protocol.ChainID,
+		&protocol.Address,
+		&protocol.Name,
+		&protocol.ProtocolType,
+		&protocol.CreatedAtBlock,
+	)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer rollback(tx, r.logger)
-
-	for i := 0; i < len(protocols); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(protocols) {
-			end = len(protocols)
+		if err == sql.ErrNoRows {
+			return nil, nil // Protocol not found
 		}
-		batch := protocols[i:end]
-
-		if err := r.upsertProtocolBatch(ctx, tx, batch); err != nil {
-			return err
-		}
+		return nil, fmt.Errorf("failed to get protocol by address: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	return nil
-}
-
-func (r *ProtocolRepository) upsertProtocolBatch(ctx context.Context, tx *sql.Tx, protocols []*entity.Protocol) error {
-	if len(protocols) == 0 {
-		return nil
-	}
-
-	var sb strings.Builder
-	sb.WriteString(`
-		INSERT INTO protocols (chain_id, address, name, protocol_type, created_at_block, metadata, updated_at)
-		VALUES `)
-
-	args := make([]any, 0, len(protocols)*6)
-	for i, protocol := range protocols {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		baseIdx := i * 6
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, NOW())",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6))
-
-		metadata, err := marshalMetadata(protocol.Metadata)
-		if err != nil {
-			return fmt.Errorf("failed to marshal protocol metadata for chain %d, address %x: %w", protocol.ChainID, protocol.Address, err)
-		}
-
-		args = append(args, protocol.ChainID, protocol.Address, protocol.Name, protocol.ProtocolType, protocol.CreatedAtBlock, metadata)
-	}
-
-	sb.WriteString(`
-		ON CONFLICT (chain_id, address) DO UPDATE SET
-			name = EXCLUDED.name,
-			protocol_type = EXCLUDED.protocol_type,
-			metadata = EXCLUDED.metadata,
-			updated_at = NOW()
-	`)
-
-	_, err := tx.ExecContext(ctx, sb.String(), args...)
-	if err != nil {
-		return fmt.Errorf("failed to upsert protocol batch: %w", err)
-	}
-	return nil
+	return &protocol, nil
 }
 
 // UpsertSparkLendReserveData upserts SparkLend reserve data records atomically.

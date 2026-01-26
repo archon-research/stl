@@ -150,7 +150,35 @@ func main() {
 	}
 	logger.Info("PostgreSQL connected")
 
-	lendingRepo := postgres.NewLendingRepository(db, chainID, logger)
+	txManager, err := postgres.NewTxManager(db, logger)
+	if err != nil {
+		logger.Error("failed to create transaction manager", "error", err)
+		os.Exit(1)
+	}
+
+	userRepo, err := postgres.NewUserRepository(db, logger, 0)
+	if err != nil {
+		logger.Error("failed to create user repository", "error", err)
+		os.Exit(1)
+	}
+
+	protocolRepo, err := postgres.NewProtocolRepository(db, logger, 0)
+	if err != nil {
+		logger.Error("failed to create protocol repository", "error", err)
+		os.Exit(1)
+	}
+
+	tokenRepo, err := postgres.NewTokenRepository(db, logger, 0)
+	if err != nil {
+		logger.Error("failed to create token repository", "error", err)
+		os.Exit(1)
+	}
+
+	positionRepo, err := postgres.NewPositionRepository(db, logger, 0)
+	if err != nil {
+		logger.Error("failed to create position repository", "error", err)
+		os.Exit(1)
+	}
 
 	processorConfig := borrow_processor.Config{
 		QueueURL:        *queueURL,
@@ -167,7 +195,11 @@ func main() {
 		common.HexToAddress(Multicall3Address),
 		common.HexToAddress("0x56b7A1012765C285afAC8b8F25C69Bf10ccfE978"),
 		common.HexToAddress("0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e"),
-		lendingRepo,
+		txManager,
+		userRepo,
+		protocolRepo,
+		tokenRepo,
+		positionRepo,
 	)
 	if err != nil {
 		logger.Error("failed to create processor", "error", err)

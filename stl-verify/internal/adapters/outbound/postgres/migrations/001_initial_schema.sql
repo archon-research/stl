@@ -91,26 +91,26 @@ CREATE TABLE IF NOT EXISTS token (
 
 
 -- Receipt tokens (aTokens, spTokens, cTokens, etc.)
-CREATE TABLE IF NOT EXISTS receipt_tokens (
+CREATE TABLE IF NOT EXISTS receipt_token (
     id BIGSERIAL PRIMARY KEY,
-    protocol_id BIGINT NOT NULL REFERENCES protocols(id),
-    underlying_token_id BIGINT NOT NULL REFERENCES tokens(id),
+    protocol_id BIGINT NOT NULL REFERENCES protocol(id),
+    underlying_token_id BIGINT NOT NULL REFERENCES token(id),
     receipt_token_address BYTEA NOT NULL,
     symbol VARCHAR(50),
     created_at_block BIGINT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     metadata JSONB,
-    CONSTRAINT receipt_tokens_protocol_underlying_unique UNIQUE (protocol_id, underlying_token_id)
+    CONSTRAINT receipt_token_protocol_underlying_unique UNIQUE (protocol_id, underlying_token_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_receipt_tokens_protocol_id ON receipt_tokens(protocol_id);
-CREATE INDEX IF NOT EXISTS idx_receipt_tokens_underlying_token_id ON receipt_tokens(underlying_token_id);
+CREATE INDEX IF NOT EXISTS idx_receipt_token_protocol_id ON receipt_token(protocol_id);
+CREATE INDEX IF NOT EXISTS idx_receipt_token_underlying_token_id ON receipt_token(underlying_token_id);
 
 -- Debt tokens (variable and stable debt tokens)
-CREATE TABLE IF NOT EXISTS debt_tokens (
+CREATE TABLE IF NOT EXISTS debt_token (
     id BIGSERIAL PRIMARY KEY,
-    protocol_id BIGINT NOT NULL REFERENCES protocols(id),
-    underlying_token_id BIGINT NOT NULL REFERENCES tokens(id),
+    protocol_id BIGINT NOT NULL REFERENCES protocol(id),
+    underlying_token_id BIGINT NOT NULL REFERENCES token(id),
     variable_debt_address BYTEA,
     stable_debt_address BYTEA,
     variable_symbol VARCHAR(50),
@@ -118,11 +118,11 @@ CREATE TABLE IF NOT EXISTS debt_tokens (
     created_at_block BIGINT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     metadata JSONB,
-    CONSTRAINT debt_tokens_protocol_underlying_unique UNIQUE (protocol_id, underlying_token_id)
+    CONSTRAINT debt_token_protocol_underlying_unique UNIQUE (protocol_id, underlying_token_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_debt_tokens_protocol_id ON debt_tokens(protocol_id);
-CREATE INDEX IF NOT EXISTS idx_debt_tokens_underlying_token_id ON debt_tokens(underlying_token_id);
+CREATE INDEX IF NOT EXISTS idx_debt_token_protocol_id ON debt_token(protocol_id);
+CREATE INDEX IF NOT EXISTS idx_debt_token_underlying_token_id ON debt_token(underlying_token_id);
 
 
 CREATE INDEX IF NOT EXISTS idx_token_chain_address ON token(chain_id, address);
@@ -141,10 +141,10 @@ CREATE TABLE IF NOT EXISTS protocol (
 
 CREATE INDEX IF NOT EXISTS idx_protocol_chain_address ON protocol(chain_id, address);
 
-CREATE TABLE IF NOT EXISTS users (
+CREATE TABLE IF NOT EXISTS user (
                                      id BIGSERIAL PRIMARY KEY,
                                      chain_id INT NOT NULL REFERENCES chain(chain_id),
-                                     address TEXT NOT NULL,
+                                     address BYTEA NOT NULL,
                                      first_seen_block BIGINT,
                                      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                                      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -152,11 +152,11 @@ CREATE TABLE IF NOT EXISTS users (
                                      UNIQUE(chain_id, address)
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_chain_address ON users(chain_id, address);
+CREATE INDEX IF NOT EXISTS idx_user_chain_address ON user(chain_id, address);
 
-CREATE TABLE IF NOT EXISTS borrowers (
+CREATE TABLE IF NOT EXISTS borrower (
                                          id BIGSERIAL PRIMARY KEY,
-                                         user_id BIGINT NOT NULL REFERENCES users(id),
+                                         user_id BIGINT NOT NULL REFERENCES user(id),
                                          protocol_id BIGINT NOT NULL REFERENCES protocol(id),
                                          token_id BIGINT NOT NULL REFERENCES token(id),
                                          block_number BIGINT NOT NULL,
@@ -167,16 +167,16 @@ CREATE TABLE IF NOT EXISTS borrowers (
                                          UNIQUE(user_id, protocol_id, token_id, block_number, block_version)
 );
 
-CREATE INDEX IF NOT EXISTS idx_borrowers_user ON borrowers(user_id);
-CREATE INDEX IF NOT EXISTS idx_borrowers_protocol ON borrowers(protocol_id);
-CREATE INDEX IF NOT EXISTS idx_borrowers_token ON borrowers(token_id);
-CREATE INDEX IF NOT EXISTS idx_borrowers_block ON borrowers(block_number);
-CREATE INDEX IF NOT EXISTS idx_borrowers_user_protocol ON borrowers(user_id, protocol_id);
-CREATE INDEX IF NOT EXISTS idx_borrowers_block_version ON borrowers(block_number, block_version);
+CREATE INDEX IF NOT EXISTS idx_borrower_user ON borrower(user_id);
+CREATE INDEX IF NOT EXISTS idx_borrower_protocol ON borrower(protocol_id);
+CREATE INDEX IF NOT EXISTS idx_borrower_token ON borrower(token_id);
+CREATE INDEX IF NOT EXISTS idx_borrower_block ON borrower(block_number);
+CREATE INDEX IF NOT EXISTS idx_borrower_user_protocol ON borrower(user_id, protocol_id);
+CREATE INDEX IF NOT EXISTS idx_borrower_block_version ON borrower(block_number, block_version);
 
 CREATE TABLE IF NOT EXISTS borrower_collateral (
                                                    id BIGSERIAL PRIMARY KEY,
-                                                   user_id BIGINT NOT NULL REFERENCES users(id),
+                                                   user_id BIGINT NOT NULL REFERENCES user(id),
                                                    protocol_id BIGINT NOT NULL REFERENCES protocol(id),
                                                    token_id BIGINT NOT NULL REFERENCES token(id),
                                                    block_number BIGINT NOT NULL,
@@ -200,8 +200,8 @@ CREATE INDEX IF NOT EXISTS idx_borrower_collateral_block_version ON borrower_col
 -- Uses block_number as the partition column with chunks of 100,000 blocks (~2 weeks at ~12s/block).
 CREATE TABLE IF NOT EXISTS sparklend_reserve_data (
     id BIGSERIAL,
-    protocol_id BIGINT NOT NULL REFERENCES protocols(id),
-    token_id BIGINT NOT NULL REFERENCES tokens(id),
+    protocol_id BIGINT NOT NULL REFERENCES protocol(id),
+    token_id BIGINT NOT NULL REFERENCES token(id),
     block_number BIGINT NOT NULL,
     block_version INTEGER NOT NULL DEFAULT 0,
     -- Reserve state

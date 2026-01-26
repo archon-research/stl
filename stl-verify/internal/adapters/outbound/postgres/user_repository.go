@@ -44,6 +44,31 @@ func NewUserRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*UserRep
 	}, nil
 }
 
+func (r *UserRepository) GetOrCreateUserWithTX(ctx context.Context, tx *sql.Tx, user entity.User) (int64, error) {
+	var userID int64
+
+	err := tx.QueryRowContext(ctx,
+		`SELECT id FROM user WHERE chain_id = $1 AND address = $2`,
+		user.ChainID, user.Address.Bytes()).Scan(&userID)
+
+	if err == sql.ErrNoRows {
+		err = tx.QueryRowContext(ctx,
+			`INSERT INTO user (chain_id, address, first_seen_block, created_at, updated_at, metadata)
+			 VALUES ($1, $2, $3, NOW(), NOW(), $4)
+			 RETURNING id`,
+			user.ChainID, user.Address.Bytes(), user.FirstSeenBlock, user.Metadata).Scan(&userID)
+		if err != nil {
+			return 0, fmt.Errorf("failed to create user: %w", err)
+		}
+
+		r.logger.Debug("user created", "address", user.Address.Hex(), "id", userID)
+	} else if err != nil {
+		return 0, fmt.Errorf("failed to get user: %w", err)
+	}
+
+	return userID, nil
+}
+
 // UpsertUsers upserts user records atomically.
 // All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
 func (r *UserRepository) UpsertUsers(ctx context.Context, users []*entity.User) error {
@@ -82,7 +107,7 @@ func (r *UserRepository) upsertUserBatch(ctx context.Context, tx *sql.Tx, users 
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO users (chain_id, address, first_seen_block, metadata, updated_at)
+		INSERT INTO user (chain_id, address, first_seen_block, metadata, updated_at)
 		VALUES `)
 
 	args := make([]any, 0, len(users)*4)
@@ -98,7 +123,7 @@ func (r *UserRepository) upsertUserBatch(ctx context.Context, tx *sql.Tx, users 
 		if err != nil {
 			return fmt.Errorf("failed to marshal user metadata for chain %d, address %x: %w", user.ChainID, user.Address, err)
 		}
-		args = append(args, user.ChainID, user.Address, user.FirstSeenBlock, metadata)
+		args = append(args, user.ChainID, user.Address.Bytes(), user.FirstSeenBlock, metadata)
 	}
 
 	sb.WriteString(`

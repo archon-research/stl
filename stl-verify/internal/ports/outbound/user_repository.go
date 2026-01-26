@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
@@ -13,6 +14,9 @@ type UserRepository interface {
 	// Conflict resolution: ON CONFLICT (chain_id, address) DO UPDATE
 	// first_seen_block uses LEAST to keep the earliest block number.
 	UpsertUsers(ctx context.Context, users []*entity.User) error
+
+	// GetOrCreateUserWithTX retrieves a user by address, or creates it if it doesn't exist
+	GetOrCreateUserWithTX(ctx context.Context, tx *sql.Tx, user entity.User) (int64, error)
 
 	// UpsertUserProtocolMetadata upserts user protocol metadata records.
 	// This stores protocol-specific data like health factors, LTV, etc.

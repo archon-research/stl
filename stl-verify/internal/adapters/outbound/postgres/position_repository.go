@@ -44,6 +44,38 @@ func NewPositionRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*Pos
 	}, nil
 }
 
+// SaveBorrowerWithTX saves a single borrower (debt) position record within an external transaction.
+// Uses upsert semantics: ON CONFLICT updates the existing record.
+func (r *PositionRepository) SaveBorrowerWithTX(ctx context.Context, tx *sql.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount string) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change)
+		 VALUES ($1, $2, $3, $4, $5, $6, $6)
+		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version)
+		 DO UPDATE SET amount = EXCLUDED.amount, change = EXCLUDED.change`,
+		userID, protocolID, tokenID, blockNumber, blockVersion, amount)
+
+	if err != nil {
+		return fmt.Errorf("failed to save borrower: %w", err)
+	}
+	return nil
+}
+
+// SaveBorrowerCollateralWithTX saves a single collateral position record within an external transaction.
+// Uses upsert semantics: ON CONFLICT updates the existing record.
+func (r *PositionRepository) SaveBorrowerCollateralWithTX(ctx context.Context, tx *sql.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount string) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change)
+		 VALUES ($1, $2, $3, $4, $5, $6, $6)
+		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version)
+		 DO UPDATE SET amount = EXCLUDED.amount, change = EXCLUDED.change`,
+		userID, protocolID, tokenID, blockNumber, blockVersion, amount)
+
+	if err != nil {
+		return fmt.Errorf("failed to save collateral: %w", err)
+	}
+	return nil
+}
+
 // UpsertBorrowers upserts borrower (debt) position records atomically.
 // All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
 func (r *PositionRepository) UpsertBorrowers(ctx context.Context, borrowers []*entity.Borrower) error {
@@ -82,7 +114,7 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, tx *sql.Tx
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO borrowers (user_id, protocol_id, token_id, block_number, block_version, amount, change)
+		INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change)
 		VALUES `)
 
 	args := make([]any, 0, len(borrowers)*7)

@@ -9,6 +9,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // Compile-time check that TokenRepository implements outbound.TokenRepository
@@ -42,6 +43,37 @@ func NewTokenRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*TokenR
 		logger:    logger,
 		batchSize: batchSize,
 	}, nil
+}
+
+// GetOrCreateTokenWithTX retrieves a token by address or creates it if it doesn't exist.
+// This method participates in an external transaction.
+func (r *TokenRepository) GetOrCreateTokenWithTX(ctx context.Context, tx *sql.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
+	var tokenID int64
+
+	err := tx.QueryRowContext(ctx,
+		`SELECT id FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, address.Bytes()).Scan(&tokenID)
+
+	if err == sql.ErrNoRows {
+		if symbol == "" {
+			symbol = "UNKNOWN"
+		}
+		r.logger.Info("auto-creating token", "address", address.Hex(), "symbol", symbol, "decimals", decimals)
+		err = tx.QueryRowContext(ctx,
+			`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, '{}', NOW())
+			 RETURNING id`,
+			chainID, address.Bytes(), symbol, decimals, createdAtBlock).Scan(&tokenID)
+		if err != nil {
+			return 0, fmt.Errorf("failed to create token: %w", err)
+		}
+		r.logger.Debug("token created", "address", address.Hex(), "id", tokenID, "symbol", symbol, "decimals", decimals)
+		return tokenID, nil
+	} else if err != nil {
+		return 0, fmt.Errorf("failed to get token: %w", err)
+	}
+
+	return tokenID, nil
 }
 
 // UpsertTokens upserts token records in batches atomically.
@@ -82,7 +114,7 @@ func (r *TokenRepository) upsertTokenBatch(ctx context.Context, tx *sql.Tx, toke
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO tokens (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
+		INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
 		VALUES `)
 
 	args := make([]any, 0, len(tokens)*6)
@@ -154,7 +186,7 @@ func (r *TokenRepository) upsertReceiptTokenBatch(ctx context.Context, tx *sql.T
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO receipt_tokens (protocol_id, underlying_token_id, receipt_token_address, symbol, created_at_block, metadata, updated_at)
+		INSERT INTO receipt_token (protocol_id, underlying_token_id, receipt_token_address, symbol, created_at_block, metadata, updated_at)
 		VALUES `)
 
 	args := make([]any, 0, len(tokens)*6)
@@ -226,7 +258,7 @@ func (r *TokenRepository) upsertDebtTokenBatch(ctx context.Context, tx *sql.Tx, 
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO debt_tokens (protocol_id, underlying_token_id, variable_debt_address, stable_debt_address, variable_symbol, stable_symbol, created_at_block, metadata, updated_at)
+		INSERT INTO debt_token (protocol_id, underlying_token_id, variable_debt_address, stable_debt_address, variable_symbol, stable_symbol, created_at_block, metadata, updated_at)
 		VALUES `)
 
 	args := make([]any, 0, len(tokens)*8)
