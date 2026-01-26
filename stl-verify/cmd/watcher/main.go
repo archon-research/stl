@@ -235,7 +235,7 @@ func main() {
 	}
 
 	logger.Info("alchemy client configured",
-		"enableBlobs", enableBlobs,
+		"enableBlobs", *enableBlobs,
 		"parallelRPC", *parallelRPC,
 		"chainID", chainID,
 	)
