@@ -191,11 +191,6 @@ func main() {
 
 	blockStateRepo := postgres.NewBlockStateRepository(db, logger)
 
-	// Run migration
-	if err := blockStateRepo.Migrate(ctx); err != nil {
-		logger.Error("failed to migrate block_states table", "error", err)
-		os.Exit(1)
-	}
 	logger.Info("PostgreSQL connected, block state tracking enabled")
 
 	// Create Alchemy subscriber (WebSocket only)
