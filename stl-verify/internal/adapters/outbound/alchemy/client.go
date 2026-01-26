@@ -20,6 +20,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -113,6 +114,11 @@ func NewClient(config ClientConfig) (*Client, error) {
 		config: config,
 		httpClient: &http.Client{
 			Timeout: config.Timeout,
+			Transport: otelhttp.NewTransport(http.DefaultTransport,
+				otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+					return "alchemy.http"
+				}),
+			),
 		},
 		logger:    config.Logger.With("component", "alchemy-client"),
 		telemetry: config.Telemetry,

@@ -386,6 +386,7 @@ func (m *mockBlockchainClient) GetBlockDataByHash(ctx context.Context, blockNum 
 }
 
 func TestLiveService_AddToUnfinalizedChain_MaintainsSortedOrder(t *testing.T) {
+	ctx := context.Background()
 	service := &LiveService{
 		config: LiveConfig{
 			MaxUnfinalizedBlocks: 100,
@@ -405,7 +406,7 @@ func TestLiveService_AddToUnfinalizedChain_MaintainsSortedOrder(t *testing.T) {
 	}
 
 	for _, b := range blocks {
-		service.addBlock(b)
+		service.addBlock(ctx, b)
 	}
 
 	// Verify sorted order
@@ -423,6 +424,7 @@ func TestLiveService_AddToUnfinalizedChain_MaintainsSortedOrder(t *testing.T) {
 }
 
 func TestLiveService_AddBlock_HandlesForks(t *testing.T) {
+	ctx := context.Background()
 	service := &LiveService{
 		config: LiveConfig{
 			MaxUnfinalizedBlocks: 100,
@@ -434,8 +436,8 @@ func TestLiveService_AddBlock_HandlesForks(t *testing.T) {
 	block1 := LightBlock{Number: 5, Hash: "0x5a", ParentHash: "0x4"}
 	block2 := LightBlock{Number: 5, Hash: "0x5b", ParentHash: "0x4"}
 
-	service.addBlock(block1)
-	service.addBlock(block2)
+	service.addBlock(ctx, block1)
+	service.addBlock(ctx, block2)
 
 	// Both should be present (reorg handling will clean up later)
 	if len(service.unfinalizedBlocks) != 2 {
@@ -789,6 +791,7 @@ func TestIsDuplicateBlock_ChecksMemoryBeforeDB(t *testing.T) {
 // ============================================================================
 
 func TestDetectReorg_EmptyChain_NoReorg(t *testing.T) {
+	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
@@ -807,7 +810,7 @@ func TestDetectReorg_EmptyChain_NoReorg(t *testing.T) {
 		ParentHash: "0xparent",
 	}
 
-	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(block, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -823,6 +826,7 @@ func TestDetectReorg_EmptyChain_NoReorg(t *testing.T) {
 }
 
 func TestDetectReorg_NextBlock_ParentMatches_NoReorg(t *testing.T) {
+	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
@@ -851,7 +855,7 @@ func TestDetectReorg_NextBlock_ParentMatches_NoReorg(t *testing.T) {
 		ParentHash: "0xblock100", // Matches latest
 	}
 
-	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(block, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -867,6 +871,7 @@ func TestDetectReorg_NextBlock_ParentMatches_NoReorg(t *testing.T) {
 }
 
 func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
+	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
@@ -902,7 +907,7 @@ func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
 		ParentHash: "0xblock100_alt", // Different parent - triggers reorg
 	}
 
-	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(block, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -924,6 +929,7 @@ func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
 }
 
 func TestDetectReorg_LowerBlockNumber_Reorg(t *testing.T) {
+	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
@@ -957,7 +963,7 @@ func TestDetectReorg_LowerBlockNumber_Reorg(t *testing.T) {
 		ParentHash: "0xblock98", // Same ancestor
 	}
 
-	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(block, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -977,6 +983,7 @@ func TestDetectReorg_LowerBlockNumber_Reorg(t *testing.T) {
 }
 
 func TestDetectReorg_Gap_NoReorg(t *testing.T) {
+	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
@@ -998,7 +1005,7 @@ func TestDetectReorg_Gap_NoReorg(t *testing.T) {
 		ParentHash: "0xblock104",
 	}
 
-	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(block, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1018,6 +1025,7 @@ func TestDetectReorg_Gap_NoReorg(t *testing.T) {
 // ============================================================================
 
 func TestHandleReorg_FindsCommonAncestorInMemory(t *testing.T) {
+	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
@@ -1044,7 +1052,7 @@ func TestHandleReorg_FindsCommonAncestorInMemory(t *testing.T) {
 		ParentHash: "0xblock98", // Matches our block 98
 	}
 
-	isReorg, depth, ancestor, reorgEvent, err := svc.handleReorg(block, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.handleReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1068,13 +1076,14 @@ func TestHandleReorg_FindsCommonAncestorInMemory(t *testing.T) {
 		t.Errorf("expected 6 blocks still in chain (not pruned by handleReorg), got %d", len(svc.unfinalizedBlocks))
 	}
 	// Verify pruneReorgedBlocks works correctly when called separately
-	svc.pruneReorgedBlocks(ancestor)
+	svc.pruneReorgedBlocks(ctx, ancestor)
 	if len(svc.unfinalizedBlocks) != 4 {
 		t.Errorf("expected 4 blocks after pruneReorgedBlocks, got %d", len(svc.unfinalizedBlocks))
 	}
 }
 
 func TestHandleReorg_WalksBackViaNetwork(t *testing.T) {
+	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
@@ -1120,7 +1129,7 @@ func TestHandleReorg_WalksBackViaNetwork(t *testing.T) {
 		ParentHash: "0xblock98_alt", // Not in our chain
 	}
 
-	isReorg, depth, ancestor, _, err := svc.handleReorg(block, time.Now())
+	isReorg, depth, ancestor, _, err := svc.handleReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1213,6 +1222,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
 			stateRepo := newMockStateRepo()
 			cache := memory.NewBlockCache()
 			eventSink := memory.NewEventSink()
@@ -1231,7 +1241,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 				tt.setupChain(svc)
 			}
 
-			_, _, _, _, err = svc.handleReorg(tt.block, time.Now())
+			_, _, _, _, err = svc.handleReorg(ctx, tt.block, time.Now())
 
 			if tt.wantErr {
 				if err == nil {
@@ -1249,6 +1259,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 }
 
 func TestHandleReorg_ReturnsReorgEvent(t *testing.T) {
+	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
@@ -1272,7 +1283,7 @@ func TestHandleReorg_ReturnsReorgEvent(t *testing.T) {
 		ParentHash: "0xblock98",
 	}
 
-	_, depth, _, reorgEvent, err := svc.handleReorg(block, time.Now())
+	_, depth, _, reorgEvent, err := svc.handleReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1675,7 +1686,7 @@ func TestProcessBlock_Errors(t *testing.T) {
 				tt.setupChain(svc)
 			}
 
-			err = svc.processBlock(tt.header, time.Now())
+			err = svc.processBlockWithPrefetch(tt.header, time.Now())
 
 			if tt.wantErr {
 				if err == nil {
@@ -1720,7 +1731,7 @@ func TestProcessBlock_SkipsDuplicate(t *testing.T) {
 	}
 
 	// Should succeed but not add duplicate
-	err = svc.processBlock(header, time.Now())
+	err = svc.processBlockWithPrefetch(header, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1758,7 +1769,7 @@ func TestProcessBlock_AddsBlockToChain(t *testing.T) {
 	}
 
 	// Process block 101 using actual header
-	err = svc.processBlock(header101, time.Now())
+	err = svc.processBlockWithPrefetch(header101, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2366,6 +2377,7 @@ func TestProcessHeaders_ChannelClosed(t *testing.T) {
 }
 
 func TestAddBlock_TrimsToMaxSize(t *testing.T) {
+	ctx := context.Background()
 	svc := &LiveService{
 		config: LiveConfig{
 			MaxUnfinalizedBlocks: 5,
@@ -2375,7 +2387,7 @@ func TestAddBlock_TrimsToMaxSize(t *testing.T) {
 
 	// Add 7 blocks - should trim to 5
 	for i := int64(1); i <= 7; i++ {
-		svc.addBlock(LightBlock{
+		svc.addBlock(ctx, LightBlock{
 			Number:     i,
 			Hash:       fmt.Sprintf("0x%d", i),
 			ParentHash: fmt.Sprintf("0x%d", i-1),
@@ -2445,7 +2457,7 @@ func TestProcessBlock_WithMetrics_RecordsReorg(t *testing.T) {
 		Timestamp:  "0x0",
 	}
 
-	err = svc.processBlock(header, time.Now())
+	err = svc.processBlockWithPrefetch(header, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2468,6 +2480,7 @@ func (m *mockMetrics) RecordReorg(ctx context.Context, depth int, commonAncestor
 }
 
 func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
+	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
@@ -2498,7 +2511,7 @@ func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
 		ParentHash: "0xunknown_parent",
 	}
 
-	_, _, _, _, err = svc.handleReorg(block, time.Now())
+	_, _, _, _, err = svc.handleReorg(ctx, block, time.Now())
 	if err == nil {
 		t.Error("expected error when fetching parent fails")
 	}
@@ -2564,11 +2577,11 @@ func TestProcessBlock_FetchAndPublishError_ReturnsError(t *testing.T) {
 		ParentHash: "0x99",
 	}
 
-	err = svc.processBlock(header, time.Now())
+	err = svc.processBlockWithPrefetch(header, time.Now())
 	if err == nil {
 		t.Error("expected error when fetchAndPublishBlockData fails")
 	}
-	if !strings.Contains(err.Error(), "failed to fetch and publish block data") {
+	if !strings.Contains(err.Error(), "failed to fetch block data for block") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -2629,7 +2642,7 @@ func TestProcessBlock_VersionIsCorrectAfterReorg(t *testing.T) {
 		Timestamp:  "0x0",
 	}
 
-	err = svc.processBlock(header, time.Now())
+	err = svc.processBlockWithPrefetch(header, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2687,7 +2700,7 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 		ParentHash: "0x99",
 		Timestamp:  "0x0",
 	}
-	err = svc.processBlock(header1, time.Now())
+	err = svc.processBlockWithPrefetch(header1, time.Now())
 	if err != nil {
 		t.Fatalf("failed to process first block: %v", err)
 	}
@@ -2744,7 +2757,7 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 		ParentHash: "0x99",
 		Timestamp:  "0x0",
 	}
-	err = svc.processBlock(header3, time.Now())
+	err = svc.processBlockWithPrefetch(header3, time.Now())
 	if err != nil {
 		t.Fatalf("failed to process third block: %v", err)
 	}
@@ -2809,7 +2822,7 @@ func TestFetchBlockData_ReorgBetweenHeaderAndFetch(t *testing.T) {
 	}
 
 	// Process the block - now fetches by hash instead of number
-	err = svc.processBlock(header, time.Now())
+	err = svc.processBlockWithPrefetch(header, time.Now())
 	if err != nil {
 		t.Fatalf("processBlock failed: %v", err)
 	}
@@ -2876,7 +2889,7 @@ func TestFetchBlockData_ByHashReturnsErrorWhenBlockNotFound(t *testing.T) {
 	}
 
 	// Process should fail because we can't fetch the block by hash
-	err = svc.processBlock(header, time.Now())
+	err = svc.processBlockWithPrefetch(header, time.Now())
 	if err == nil {
 		t.Fatal("expected error when fetching non-existent block by hash")
 	}
@@ -2944,7 +2957,7 @@ func TestFetchReceiptsTracesBlobsByHash(t *testing.T) {
 		Timestamp:  block100Header.Timestamp,
 	}
 
-	err = svc.processBlock(header, time.Now())
+	err = svc.processBlockWithPrefetch(header, time.Now())
 	if err != nil {
 		t.Fatalf("processBlock failed: %v", err)
 	}
@@ -3064,7 +3077,7 @@ func TestHashComparisonCaseInsensitive(t *testing.T) {
 	svc.ctx = ctx
 
 	// Test 1: Process block 99 with UPPERCASE hash
-	err = svc.processBlock(outbound.BlockHeader{
+	err = svc.processBlockWithPrefetch(outbound.BlockHeader{
 		Number:     "0x63",
 		Hash:       "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		ParentHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -3086,7 +3099,7 @@ func TestHashComparisonCaseInsensitive(t *testing.T) {
 
 	// Test 2: Send same block with LOWERCASE hash - should be detected as duplicate
 	initialBlockCount := len(svc.unfinalizedBlocks)
-	err = svc.processBlock(outbound.BlockHeader{
+	err = svc.processBlockWithPrefetch(outbound.BlockHeader{
 		Number:     "0x63",
 		Hash:       "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // lowercase
 		ParentHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -3103,7 +3116,7 @@ func TestHashComparisonCaseInsensitive(t *testing.T) {
 	}
 
 	// Test 3: Process block 100 with lowercase parentHash - should chain correctly
-	err = svc.processBlock(outbound.BlockHeader{
+	err = svc.processBlockWithPrefetch(outbound.BlockHeader{
 		Number:     "0x64",
 		Hash:       "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
 		ParentHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // lowercase parent
@@ -3340,7 +3353,7 @@ func TestProcessBlock_RollsBackInMemoryChainOnDBFailure(t *testing.T) {
 	stateRepo.mu.Unlock()
 
 	// Try to process block 100 - should fail
-	err = svc.processBlock(block100Header, time.Now())
+	err = svc.processBlockWithPrefetch(block100Header, time.Now())
 	if err == nil {
 		t.Fatal("expected error when SaveBlock fails")
 	}
@@ -3423,7 +3436,7 @@ func TestProcessBlock_ReorgChainNotPrunedOnDBFailure(t *testing.T) {
 	stateRepo.mu.Unlock()
 
 	// Try to process the reorg block - should fail
-	err = svc.processBlock(reorgBlock100Header, time.Now())
+	err = svc.processBlockWithPrefetch(reorgBlock100Header, time.Now())
 	if err == nil {
 		t.Fatal("expected error when HandleReorgAtomic fails")
 	}
