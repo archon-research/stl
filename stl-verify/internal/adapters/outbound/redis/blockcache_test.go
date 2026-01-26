@@ -355,3 +355,118 @@ func TestConfig_Validation(t *testing.T) {
 		})
 	}
 }
+
+// --- Test: Compression functions ---
+
+func TestCompress_ProducesGzipData(t *testing.T) {
+	input := []byte(`{"block": {"number": "0x12345"}, "transactions": []}`)
+
+	compressed, err := compress(input)
+	if err != nil {
+		t.Fatalf("compress failed: %v", err)
+	}
+
+	// Verify gzip magic bytes
+	if len(compressed) < 2 {
+		t.Fatalf("compressed data too short: %d bytes", len(compressed))
+	}
+	if compressed[0] != 0x1f || compressed[1] != 0x8b {
+		t.Errorf("expected gzip magic bytes 0x1f 0x8b, got 0x%02x 0x%02x", compressed[0], compressed[1])
+	}
+
+	// Verify compression actually reduced size (for typical JSON)
+	if len(compressed) >= len(input) {
+		t.Logf("warning: compressed size (%d) >= original size (%d)", len(compressed), len(input))
+	}
+}
+
+func TestDecompress_DecompressesGzipData(t *testing.T) {
+	original := []byte(`{"block": {"number": "0x12345"}, "transactions": [1,2,3]}`)
+
+	compressed, err := compress(original)
+	if err != nil {
+		t.Fatalf("compress failed: %v", err)
+	}
+
+	decompressed, err := decompress(compressed)
+	if err != nil {
+		t.Fatalf("decompress failed: %v", err)
+	}
+
+	if string(decompressed) != string(original) {
+		t.Errorf("round-trip failed: got %q, want %q", decompressed, original)
+	}
+}
+
+func TestDecompress_BackwardCompatibility_UncompressedData(t *testing.T) {
+	// Simulate uncompressed JSON data that might exist in Redis before compression rollout
+	uncompressedJSON := []byte(`{"block": {"number": "0x12345"}, "receipts": []}`)
+
+	// decompress should detect it's not gzipped and return as-is
+	result, err := decompress(uncompressedJSON)
+	if err != nil {
+		t.Fatalf("decompress should not fail on uncompressed data: %v", err)
+	}
+
+	if string(result) != string(uncompressedJSON) {
+		t.Errorf("expected uncompressed data returned as-is, got %q, want %q", result, uncompressedJSON)
+	}
+}
+
+func TestIsGzipped_DetectsMagicBytes(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     []byte
+		expected bool
+	}{
+		{"gzip data", []byte{0x1f, 0x8b, 0x08, 0x00}, true},
+		{"json data", []byte(`{"key": "value"}`), false},
+		{"empty data", []byte{}, false},
+		{"single byte", []byte{0x1f}, false},
+		{"wrong magic", []byte{0x1f, 0x00}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isGzipped(tt.data)
+			if result != tt.expected {
+				t.Errorf("isGzipped(%v) = %v, want %v", tt.data, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestCompressDecompress_LargeData(t *testing.T) {
+	// Create a large JSON-like payload similar to actual block data
+	largeData := make([]byte, 100000)
+	startData := `{"transactions":[`
+	copy(largeData, startData)
+	for i := len(startData); i < 99990; i++ {
+		largeData[i] = 'x'
+	}
+	copy(largeData[99990:], `]}`)
+
+	compressed, err := compress(largeData)
+	if err != nil {
+		t.Fatalf("compress failed: %v", err)
+	}
+
+	// Large repetitive data should compress very well
+	compressionRatio := float64(len(compressed)) / float64(len(largeData))
+	t.Logf("Compression ratio: %.2f%% (original: %d, compressed: %d)",
+		compressionRatio*100, len(largeData), len(compressed))
+
+	if compressionRatio > 0.1 {
+		t.Logf("warning: compression ratio %.2f%% is higher than expected for repetitive data", compressionRatio*100)
+	}
+
+	// Verify round-trip
+	decompressed, err := decompress(compressed)
+	if err != nil {
+		t.Fatalf("decompress failed: %v", err)
+	}
+
+	if len(decompressed) != len(largeData) {
+		t.Errorf("round-trip size mismatch: got %d, want %d", len(decompressed), len(largeData))
+	}
+}

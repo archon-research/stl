@@ -69,6 +69,20 @@ func (c *BlockCache) SetBlobs(ctx context.Context, chainID int64, blockNumber in
 	return nil
 }
 
+// SetBlockData stores all block data types in a single operation.
+// For the in-memory cache, this is equivalent to calling SetBlock, SetReceipts, SetTraces, SetBlobs separately.
+func (c *BlockCache) SetBlockData(ctx context.Context, chainID int64, blockNumber int64, version int, data outbound.BlockDataInput) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.blocks[c.key(chainID, blockNumber, version, "block")] = data.Block
+	c.blocks[c.key(chainID, blockNumber, version, "receipts")] = data.Receipts
+	c.blocks[c.key(chainID, blockNumber, version, "traces")] = data.Traces
+	if data.Blobs != nil {
+		c.blocks[c.key(chainID, blockNumber, version, "blobs")] = data.Blobs
+	}
+	return nil
+}
+
 // DeleteBlock removes all cached data for a block at a specific version.
 func (c *BlockCache) DeleteBlock(ctx context.Context, chainID int64, blockNumber int64, version int) error {
 	c.mu.Lock()

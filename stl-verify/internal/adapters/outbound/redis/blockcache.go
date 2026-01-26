@@ -3,12 +3,18 @@
 // This adapter stores block data in Redis with configurable TTL for
 // automatic expiration. It uses a key format of chainID:blockNumber:version:dataType
 // to organize cached data.
+//
+// Data is compressed using gzip before storing to reduce network transfer time
+// and Redis memory usage. Decompression is handled transparently on read.
 package redis
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"time"
 
@@ -88,48 +94,145 @@ func (c *BlockCache) Close() error {
 	return c.client.Close()
 }
 
+// SetBlockData stores all block data types in a single pipelined operation.
+// This is more efficient than calling SetBlock, SetReceipts, SetTraces, SetBlobs separately
+// as it batches all commands into a single network round-trip.
+// Data is compressed using gzip before storing.
+func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int64, version int, data outbound.BlockDataInput) error {
+	// Compress all data
+	blockCompressed, err := compress(data.Block)
+	if err != nil {
+		return fmt.Errorf("failed to compress block: %w", err)
+	}
+	receiptsCompressed, err := compress(data.Receipts)
+	if err != nil {
+		return fmt.Errorf("failed to compress receipts: %w", err)
+	}
+	tracesCompressed, err := compress(data.Traces)
+	if err != nil {
+		return fmt.Errorf("failed to compress traces: %w", err)
+	}
+
+	pipe := c.client.Pipeline()
+
+	// Queue all SET commands with compressed data
+	pipe.Set(ctx, c.key(chainID, blockNumber, version, "block"), blockCompressed, c.ttl)
+	pipe.Set(ctx, c.key(chainID, blockNumber, version, "receipts"), receiptsCompressed, c.ttl)
+	pipe.Set(ctx, c.key(chainID, blockNumber, version, "traces"), tracesCompressed, c.ttl)
+
+	if data.Blobs != nil {
+		blobsCompressed, err := compress(data.Blobs)
+		if err != nil {
+			return fmt.Errorf("failed to compress blobs: %w", err)
+		}
+		pipe.Set(ctx, c.key(chainID, blockNumber, version, "blobs"), blobsCompressed, c.ttl)
+	}
+
+	// Execute all commands in one round-trip
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to pipeline cache block data: %w", err)
+	}
+	return nil
+}
+
 // key generates a cache key in the format prefix:chainID:blockNumber:version:dataType
 func (c *BlockCache) key(chainID, blockNumber int64, version int, dataType string) string {
 	return fmt.Sprintf("%s:%d:%d:%d:%s", c.keyPrefix, chainID, blockNumber, version, dataType)
 }
 
-// SetBlock caches block data.
+// compress compresses data using gzip level 1 (fastest).
+// Returns the compressed data or an error.
+func compress(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w, err := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip writer: %w", err)
+	}
+	if _, err := w.Write(data); err != nil {
+		w.Close()
+		return nil, fmt.Errorf("failed to write compressed data: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close gzip writer: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// isGzipped checks if data is gzip-compressed by looking for the gzip magic bytes.
+// Gzip data always starts with 0x1f 0x8b.
+func isGzipped(data []byte) bool {
+	return len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b
+}
+
+// decompress decompresses gzip data if compressed, otherwise returns data as-is.
+// This provides backward compatibility with uncompressed data in the cache.
+func decompress(data []byte) ([]byte, error) {
+	if !isGzipped(data) {
+		// Data is not compressed, return as-is (backward compatibility)
+		return data, nil
+	}
+	r, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer r.Close()
+	return io.ReadAll(r)
+}
+
+// SetBlock caches block data (compressed).
 func (c *BlockCache) SetBlock(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
+	compressed, err := compress(data)
+	if err != nil {
+		return fmt.Errorf("failed to compress block: %w", err)
+	}
 	key := c.key(chainID, blockNumber, version, "block")
-	if err := c.client.Set(ctx, key, []byte(data), c.ttl).Err(); err != nil {
+	if err := c.client.Set(ctx, key, compressed, c.ttl).Err(); err != nil {
 		return fmt.Errorf("failed to cache block: %w", err)
 	}
 	return nil
 }
 
-// SetReceipts caches receipt data.
+// SetReceipts caches receipt data (compressed).
 func (c *BlockCache) SetReceipts(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
+	compressed, err := compress(data)
+	if err != nil {
+		return fmt.Errorf("failed to compress receipts: %w", err)
+	}
 	key := c.key(chainID, blockNumber, version, "receipts")
-	if err := c.client.Set(ctx, key, []byte(data), c.ttl).Err(); err != nil {
+	if err := c.client.Set(ctx, key, compressed, c.ttl).Err(); err != nil {
 		return fmt.Errorf("failed to cache receipts: %w", err)
 	}
 	return nil
 }
 
-// SetTraces caches trace data.
+// SetTraces caches trace data (compressed).
 func (c *BlockCache) SetTraces(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
+	compressed, err := compress(data)
+	if err != nil {
+		return fmt.Errorf("failed to compress traces: %w", err)
+	}
 	key := c.key(chainID, blockNumber, version, "traces")
-	if err := c.client.Set(ctx, key, []byte(data), c.ttl).Err(); err != nil {
+	if err := c.client.Set(ctx, key, compressed, c.ttl).Err(); err != nil {
 		return fmt.Errorf("failed to cache traces: %w", err)
 	}
 	return nil
 }
 
-// SetBlobs caches blob data.
+// SetBlobs caches blob data (compressed).
 func (c *BlockCache) SetBlobs(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
+	compressed, err := compress(data)
+	if err != nil {
+		return fmt.Errorf("failed to compress blobs: %w", err)
+	}
 	key := c.key(chainID, blockNumber, version, "blobs")
-	if err := c.client.Set(ctx, key, []byte(data), c.ttl).Err(); err != nil {
+	if err := c.client.Set(ctx, key, compressed, c.ttl).Err(); err != nil {
 		return fmt.Errorf("failed to cache blobs: %w", err)
 	}
 	return nil
 }
 
-// GetBlock retrieves cached block data.
+// GetBlock retrieves cached block data (decompressed).
 func (c *BlockCache) GetBlock(ctx context.Context, chainID, blockNumber int64, version int) (json.RawMessage, error) {
 	key := c.key(chainID, blockNumber, version, "block")
 	data, err := c.client.Get(ctx, key).Bytes()
@@ -139,10 +242,14 @@ func (c *BlockCache) GetBlock(ctx context.Context, chainID, blockNumber int64, v
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block: %w", err)
 	}
-	return data, nil
+	decompressed, err := decompress(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress block: %w", err)
+	}
+	return decompressed, nil
 }
 
-// GetReceipts retrieves cached receipt data.
+// GetReceipts retrieves cached receipt data (decompressed).
 func (c *BlockCache) GetReceipts(ctx context.Context, chainID, blockNumber int64, version int) (json.RawMessage, error) {
 	key := c.key(chainID, blockNumber, version, "receipts")
 	data, err := c.client.Get(ctx, key).Bytes()
@@ -152,10 +259,14 @@ func (c *BlockCache) GetReceipts(ctx context.Context, chainID, blockNumber int64
 	if err != nil {
 		return nil, fmt.Errorf("failed to get receipts: %w", err)
 	}
-	return data, nil
+	decompressed, err := decompress(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress receipts: %w", err)
+	}
+	return decompressed, nil
 }
 
-// GetTraces retrieves cached trace data.
+// GetTraces retrieves cached trace data (decompressed).
 func (c *BlockCache) GetTraces(ctx context.Context, chainID, blockNumber int64, version int) (json.RawMessage, error) {
 	key := c.key(chainID, blockNumber, version, "traces")
 	data, err := c.client.Get(ctx, key).Bytes()
@@ -165,10 +276,14 @@ func (c *BlockCache) GetTraces(ctx context.Context, chainID, blockNumber int64, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get traces: %w", err)
 	}
-	return data, nil
+	decompressed, err := decompress(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress traces: %w", err)
+	}
+	return decompressed, nil
 }
 
-// GetBlobs retrieves cached blob data.
+// GetBlobs retrieves cached blob data (decompressed).
 func (c *BlockCache) GetBlobs(ctx context.Context, chainID, blockNumber int64, version int) (json.RawMessage, error) {
 	key := c.key(chainID, blockNumber, version, "blobs")
 	data, err := c.client.Get(ctx, key).Bytes()
@@ -178,7 +293,11 @@ func (c *BlockCache) GetBlobs(ctx context.Context, chainID, blockNumber int64, v
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blobs: %w", err)
 	}
-	return data, nil
+	decompressed, err := decompress(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress blobs: %w", err)
+	}
+	return decompressed, nil
 }
 
 // DeleteBlock removes all cached data for a block.

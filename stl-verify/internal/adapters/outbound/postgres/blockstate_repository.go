@@ -668,9 +668,19 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 
 // GetBlocksWithIncompletePublish returns canonical blocks that have at least one
 // publish type incomplete. Used by backfill to recover from crashes.
-func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int, disableBlobs bool) ([]outbound.BlockState, error) {
+func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int, enableBlobs bool) ([]outbound.BlockState, error) {
 	var query string
-	if disableBlobs {
+	if enableBlobs {
+		query = `
+			SELECT number, hash, parent_hash, received_at, is_orphaned, version,
+			       block_published, receipts_published, traces_published, blobs_published
+			FROM block_states
+			WHERE NOT is_orphaned
+			  AND (NOT block_published OR NOT receipts_published OR NOT traces_published OR NOT blobs_published)
+			ORDER BY number ASC
+			LIMIT $1
+		`
+	} else {
 		// Don't consider blobs_published when blobs are disabled
 		query = `
 			SELECT number, hash, parent_hash, received_at, is_orphaned, version,
@@ -678,16 +688,6 @@ func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Contex
 			FROM block_states
 			WHERE NOT is_orphaned
 			  AND (NOT block_published OR NOT receipts_published OR NOT traces_published)
-			ORDER BY number ASC
-			LIMIT $1
-		`
-	} else {
-		query = `
-			SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-			       block_published, receipts_published, traces_published, blobs_published
-			FROM block_states
-			WHERE NOT is_orphaned
-			  AND (NOT block_published OR NOT receipts_published OR NOT traces_published OR NOT blobs_published)
 			ORDER BY number ASC
 			LIMIT $1
 		`

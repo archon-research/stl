@@ -154,7 +154,7 @@ type BlockStateRepository interface {
 
 	// GetBlocksWithIncompletePublish returns canonical blocks that have at least one
 	// publish type incomplete. Used by backfill to recover from crashes.
-	// The disableBlobs flag indicates whether blob publishing is disabled (and thus
-	// should not be considered incomplete).
-	GetBlocksWithIncompletePublish(ctx context.Context, limit int, disableBlobs bool) ([]BlockState, error)
+	// The enableBlobs flag indicates whether blob publishing is enabled (when false,
+	// missing blobs should not be considered incomplete).
+	GetBlocksWithIncompletePublish(ctx context.Context, limit int, enableBlobs bool) ([]BlockState, error)
 }

@@ -758,13 +758,13 @@ func TestGetBlocksWithIncompletePublish(t *testing.T) {
 		}
 	})
 
-	t.Run("disableBlobs ignores blob status", func(t *testing.T) {
+	t.Run("enableBlobs=false ignores blob status", func(t *testing.T) {
 		// Mark block 2's traces complete - now only blobs is missing
 		repo.MarkPublishComplete(ctx, "0xblock_2", outbound.PublishTypeTraces)
 
-		blocks, err := repo.GetBlocksWithIncompletePublish(ctx, 10, true)
+		blocks, err := repo.GetBlocksWithIncompletePublish(ctx, 10, false)
 		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Fatalf("unexpected error: %v\"", err)
 		}
 		// Only block 3 should be returned (block 2's missing blobs is ignored)
 		if len(blocks) != 1 {

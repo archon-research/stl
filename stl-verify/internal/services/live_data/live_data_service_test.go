@@ -622,7 +622,7 @@ func TestNewLiveService_UsesProvidedConfig(t *testing.T) {
 		ChainID:              42,
 		FinalityBlockCount:   128,
 		MaxUnfinalizedBlocks: 500,
-		DisableBlobs:         true,
+		EnableBlobs:          false,
 		Logger:               customLogger,
 	}
 
@@ -640,8 +640,8 @@ func TestNewLiveService_UsesProvidedConfig(t *testing.T) {
 	if svc.config.MaxUnfinalizedBlocks != 500 {
 		t.Errorf("expected MaxUnfinalizedBlocks 500, got %d", svc.config.MaxUnfinalizedBlocks)
 	}
-	if !svc.config.DisableBlobs {
-		t.Error("expected DisableBlobs to be true")
+	if svc.config.EnableBlobs {
+		t.Error("expected EnableBlobs to be false")
 	}
 }
 
@@ -1945,7 +1945,7 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 		failCacheTraces   bool
 		failCacheBlobs    bool
 		failPublish       bool
-		disableBlobs      bool
+		enableBlobs       bool
 		wantErr           bool
 		errContains       string
 	}{
@@ -1974,6 +1974,7 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 		{
 			name:         "blobs_fetch_fails",
 			failGetBlobs: true,
+			enableBlobs:  true,
 			wantErr:      true,
 			errContains:  "failed to fetch blobs",
 		},
@@ -1998,6 +1999,7 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 		{
 			name:           "blobs_cache_fails",
 			failCacheBlobs: true,
+			enableBlobs:    true,
 			wantErr:        true,
 			errContains:    "failed to cache blobs",
 		},
@@ -2010,7 +2012,7 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 		{
 			name:         "blobs_disabled_blobs_error_ignored",
 			failGetBlobs: true,
-			disableBlobs: true,
+			enableBlobs:  false,
 			wantErr:      false,
 		},
 		{
@@ -2047,7 +2049,7 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 			eventSink.failPublish = tt.failPublish
 
 			svc, err := NewLiveService(LiveConfig{
-				DisableBlobs: tt.disableBlobs,
+				EnableBlobs: tt.enableBlobs,
 			}, newMockSubscriber(), client, stateRepo, cache, eventSink)
 			if err != nil {
 				t.Fatalf("failed to create service: %v", err)
@@ -2084,7 +2086,7 @@ func TestFetchAndPublishBlockData_WithBlobs_CachesBlobs(t *testing.T) {
 	header100 := client.getHeader(100)
 
 	svc, err := NewLiveService(LiveConfig{
-		DisableBlobs: false, // Enable blobs
+		EnableBlobs: true, // Enable blobs
 	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -2121,7 +2123,7 @@ func TestFetchAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
 	header100 := client.getHeader(100)
 
 	svc, err := NewLiveService(LiveConfig{
-		DisableBlobs: true,
+		EnableBlobs: false,
 	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -2419,8 +2421,8 @@ func TestProcessBlock_WithMetrics_RecordsReorg(t *testing.T) {
 	metrics := &mockMetrics{}
 
 	svc, err := NewLiveService(LiveConfig{
-		DisableBlobs: true,
-		Metrics:      metrics,
+		EnableBlobs: false,
+		Metrics:     metrics,
 	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -2548,7 +2550,7 @@ func TestProcessBlock_FetchAndPublishError_ReturnsError(t *testing.T) {
 	client := newMockClient()
 
 	svc, err := NewLiveService(LiveConfig{
-		DisableBlobs: true,
+		EnableBlobs: false,
 	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -2597,7 +2599,7 @@ func TestProcessBlock_VersionIsCorrectAfterReorg(t *testing.T) {
 	}
 
 	svc, err := NewLiveService(LiveConfig{
-		DisableBlobs: true,
+		EnableBlobs: false,
 	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -2670,7 +2672,7 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 	}
 
 	svc, err := NewLiveService(LiveConfig{
-		DisableBlobs: true,
+		EnableBlobs: false,
 	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -2788,7 +2790,7 @@ func TestFetchBlockData_ReorgBetweenHeaderAndFetch(t *testing.T) {
 		ChainID:              1,
 		FinalityBlockCount:   64,
 		MaxUnfinalizedBlocks: 200,
-		DisableBlobs:         true, // Simplify test
+		EnableBlobs:          false, // Simplify test
 		Logger:               slog.Default(),
 	}
 
@@ -2853,7 +2855,7 @@ func TestFetchBlockData_ByHashReturnsErrorWhenBlockNotFound(t *testing.T) {
 		ChainID:              1,
 		FinalityBlockCount:   64,
 		MaxUnfinalizedBlocks: 200,
-		DisableBlobs:         true,
+		EnableBlobs:          false,
 		Logger:               slog.Default(),
 	}
 
@@ -2924,7 +2926,7 @@ func TestFetchReceiptsTracesBlobsByHash(t *testing.T) {
 		ChainID:              1,
 		FinalityBlockCount:   64,
 		MaxUnfinalizedBlocks: 200,
-		DisableBlobs:         false, // Enable blobs to test all data types
+		EnableBlobs:          true, // Enable blobs to test all data types
 		Logger:               slog.Default(),
 	}
 
@@ -3051,7 +3053,7 @@ func TestHashComparisonCaseInsensitive(t *testing.T) {
 		ChainID:              1,
 		FinalityBlockCount:   64,
 		MaxUnfinalizedBlocks: 200,
-		DisableBlobs:         true,
+		EnableBlobs:          false,
 		Logger:               slog.Default(),
 	}
 
@@ -3313,7 +3315,7 @@ func TestProcessBlock_RollsBackInMemoryChainOnDBFailure(t *testing.T) {
 		ChainID:              1,
 		FinalityBlockCount:   64,
 		MaxUnfinalizedBlocks: 200,
-		DisableBlobs:         true,
+		EnableBlobs:          false,
 		Logger:               slog.Default(),
 	}
 
@@ -3385,7 +3387,7 @@ func TestProcessBlock_ReorgChainNotPrunedOnDBFailure(t *testing.T) {
 		ChainID:              1,
 		FinalityBlockCount:   64,
 		MaxUnfinalizedBlocks: 200,
-		DisableBlobs:         true,
+		EnableBlobs:          false,
 		Logger:               slog.Default(),
 	}
 
@@ -3555,7 +3557,7 @@ func TestFetchAndPublishBlockData_CachesAllDataBeforePublishing(t *testing.T) {
 	header100 := client.getHeader(100)
 
 	svc, err := NewLiveService(LiveConfig{
-		DisableBlobs: false, // Enable blobs to test all 4 cache operations
+		EnableBlobs: true, // Enable blobs to test all 4 cache operations
 	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -3650,7 +3652,7 @@ func TestFetchAndPublishBlockData_NoPublishOnCacheFailure(t *testing.T) {
 			header100 := client.getHeader(100)
 
 			svc, err := NewLiveService(LiveConfig{
-				DisableBlobs: false,
+				EnableBlobs: true,
 			}, newMockSubscriber(), client, stateRepo, cache, eventSink)
 			if err != nil {
 				t.Fatalf("failed to create service: %v", err)

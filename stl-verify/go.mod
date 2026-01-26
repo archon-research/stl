@@ -1,6 +1,6 @@
 module github.com/archon-research/stl/stl-verify
 
-go 1.25.5
+go 1.25.4
 
 require github.com/gorilla/websocket v1.5.3
 

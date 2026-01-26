@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
@@ -12,8 +13,8 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"runtime/trace"
 	"strconv"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,7 +23,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 
-	httpinbound "github.com/archon-research/stl/stl-verify/internal/adapters/inbound/http"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
@@ -59,10 +59,24 @@ func init() {
 
 func main() {
 	// Parse command-line flags
-	disableBlobs := flag.Bool("disable-blobs", false, "Disable fetching blob sidecars")
+	enableBlobs := flag.Bool("enable-blobs", false, "Enable fetching blob sidecars")
+	parallelRPC := flag.Bool("parallel-rpc", true, "Use parallel goroutines for RPC calls instead of batching (faster but uses more credits)")
 	pprofAddr := flag.String("pprof", "", "Enable pprof profiling server (e.g., ':6060')")
+	traceFile := flag.String("trace", "", "Write execution trace to file")
 	showVersion := flag.Bool("version", false, "Show version information and exit")
 	flag.Parse()
+
+	if *traceFile != "" {
+		f, err := os.Create(*traceFile)
+		if err != nil {
+			log.Fatalf("failed to create trace file: %v", err)
+		}
+		defer f.Close()
+		if err := trace.Start(f); err != nil {
+			log.Fatalf("failed to start trace: %v", err)
+		}
+		defer trace.Stop()
+	}
 
 	// Show version if requested
 	if *showVersion {
@@ -95,6 +109,7 @@ func main() {
 		// Enable block and mutex profiling
 		runtime.SetBlockProfileRate(1)
 		runtime.SetMutexProfileFraction(1)
+		runtime.SetCPUProfileRate(1)
 
 		go func() {
 			logger.Info("starting pprof server", "addr", *pprofAddr)
@@ -158,6 +173,7 @@ func main() {
 		logger.Error("CHAIN_ID must be a valid integer", "error", err)
 		os.Exit(1)
 	}
+
 	postgresURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
 
 	// Set up PostgreSQL connection pool for block state tracking
@@ -207,15 +223,22 @@ func main() {
 
 	// Create Alchemy HTTP client
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
-		HTTPURL:      fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
-		DisableBlobs: *disableBlobs,
-		Logger:       logger,
-		Telemetry:    alchemyTelemetry,
+		HTTPURL:     fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
+		EnableBlobs: *enableBlobs,
+		ParallelRPC: *parallelRPC,
+		Logger:      logger,
+		Telemetry:   alchemyTelemetry,
 	})
 	if err != nil {
 		logger.Error("failed to create client", "error", err)
 		os.Exit(1)
 	}
+
+	logger.Info("alchemy client configured",
+		"enableBlobs", enableBlobs,
+		"parallelRPC", *parallelRPC,
+		"chainID", chainID,
+	)
 
 	// Create Redis cache
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
@@ -307,7 +330,7 @@ func main() {
 		ChainID:              chainID,
 		FinalityBlockCount:   64,
 		MaxUnfinalizedBlocks: 128,
-		DisableBlobs:         *disableBlobs,
+		EnableBlobs:          *enableBlobs,
 		Logger:               logger,
 	}
 
@@ -332,7 +355,7 @@ func main() {
 			ChainID:      chainID,
 			BatchSize:    10,
 			PollInterval: 30 * time.Second,
-			DisableBlobs: *disableBlobs,
+			EnableBlobs:  *enableBlobs,
 			Logger:       logger,
 		}
 
@@ -352,22 +375,6 @@ func main() {
 	// Handle shutdown signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// Start health server for ECS rolling deployments
-	// Readiness: Returns 200 only after first block is processed (prevents gaps)
-	// Liveness: Returns 200 if service is running and processing blocks
-	healthAddr := getEnv("HEALTH_ADDR", ":8080")
-	var shuttingDown atomic.Bool
-	healthServer := httpinbound.NewHealthServer(httpinbound.HealthServerConfig{
-		Addr:   healthAddr,
-		Logger: logger,
-	}, liveService, &shuttingDown)
-	healthServer.Start()
-	defer func() {
-		if err := healthServer.Shutdown(5 * time.Second); err != nil {
-			logger.Warn("health server shutdown error", "error", err)
-		}
-	}()
 
 	// Start both services
 	logger.Info("starting live service...")
@@ -389,10 +396,6 @@ func main() {
 	// Wait for shutdown signal
 	sig := <-sigChan
 	logger.Info("received signal, shutting down...", "signal", sig)
-
-	// Mark as shutting down - health checks will start returning unhealthy
-	// This tells ECS to stop routing traffic before we actually stop
-	shuttingDown.Store(true)
 
 	// Cancel context first to signal all goroutines to stop
 	cancel()
