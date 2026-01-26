@@ -21,7 +21,7 @@ run:
 # Run the watcher (requires dev-up first)
 run-watcher:
 	@echo "==> Running watcher..."
-	@set -a && . cmd/watcher/.env && set +a && go run ./cmd/watcher
+	@set -a && . cmd/watcher/.env && [ -f cmd/watcher/.env.local ] && . cmd/watcher/.env.local; set +a && go run ./cmd/watcher
 
 # Run tests with race detector
 test-race:
