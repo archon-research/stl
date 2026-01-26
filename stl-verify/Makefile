@@ -1,7 +1,7 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run help \
+.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher help \
         dev-up dev-down dev-ips \
         tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
         tf-init-staging tf-validate-staging tf-plan-staging tf-apply-staging tf-check-staging \
@@ -17,6 +17,11 @@ GOBIN := $(shell go env GOPATH)/bin
 run:
 	@echo "==> Running..."
 	go run ./cmd/server
+
+# Run the watcher (requires dev-up first)
+run-watcher:
+	@echo "==> Running watcher..."
+	@set -a && . cmd/watcher/.env && set +a && go run ./cmd/watcher
 
 # Run tests with race detector
 test-race:
