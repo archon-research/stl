@@ -55,7 +55,7 @@ func (r *PositionRepository) UpsertBorrowers(ctx context.Context, borrowers []*e
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer rollback(tx, r.logger)
 
 	for i := 0; i < len(borrowers); i += r.batchSize {
 		end := i + r.batchSize
@@ -130,7 +130,7 @@ func (r *PositionRepository) UpsertBorrowerCollateral(ctx context.Context, colla
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer rollback(tx, r.logger)
 
 	for i := 0; i < len(collateral); i += r.batchSize {
 		end := i + r.batchSize

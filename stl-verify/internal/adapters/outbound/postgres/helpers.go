@@ -2,10 +2,20 @@
 package postgres
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 )
+
+// rollback rolls back the transaction and logs the error if it is not sql.ErrTxDone.
+func rollback(tx *sql.Tx, logger *slog.Logger) {
+	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		logger.Error("failed to rollback transaction", "error", err)
+	}
+}
 
 // bigIntToNumeric converts a *big.Int to a string for NUMERIC column storage.
 // This function expects non-nil input. All callers must validate nil values before calling.

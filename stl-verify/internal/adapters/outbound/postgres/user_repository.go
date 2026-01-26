@@ -55,7 +55,7 @@ func (r *UserRepository) UpsertUsers(ctx context.Context, users []*entity.User) 
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer rollback(tx, r.logger)
 
 	for i := 0; i < len(users); i += r.batchSize {
 		end := i + r.batchSize
@@ -126,7 +126,7 @@ func (r *UserRepository) UpsertUserProtocolMetadata(ctx context.Context, metadat
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer rollback(tx, r.logger)
 
 	for i := 0; i < len(metadata); i += r.batchSize {
 		end := i + r.batchSize

@@ -55,7 +55,7 @@ func (r *TokenRepository) UpsertTokens(ctx context.Context, tokens []*entity.Tok
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer rollback(tx, r.logger)
 
 	for i := 0; i < len(tokens); i += r.batchSize {
 		end := i + r.batchSize
@@ -127,7 +127,7 @@ func (r *TokenRepository) UpsertReceiptTokens(ctx context.Context, tokens []*ent
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer rollback(tx, r.logger)
 
 	for i := 0; i < len(tokens); i += r.batchSize {
 		end := i + r.batchSize
@@ -199,7 +199,7 @@ func (r *TokenRepository) UpsertDebtTokens(ctx context.Context, tokens []*entity
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer rollback(tx, r.logger)
 
 	for i := 0; i < len(tokens); i += r.batchSize {
 		end := i + r.batchSize

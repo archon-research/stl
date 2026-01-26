@@ -56,7 +56,7 @@ func (r *ProtocolRepository) UpsertProtocols(ctx context.Context, protocols []*e
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer rollback(tx, r.logger)
 
 	for i := 0; i < len(protocols); i += r.batchSize {
 		end := i + r.batchSize
@@ -129,7 +129,7 @@ func (r *ProtocolRepository) UpsertSparkLendReserveData(ctx context.Context, dat
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer rollback(tx, r.logger)
 
 	for i := 0; i < len(data); i += r.batchSize {
 		end := i + r.batchSize
