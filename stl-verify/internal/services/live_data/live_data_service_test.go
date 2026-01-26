@@ -127,7 +127,7 @@ func (m *mockStateRepo) GetBlockVersionCount(ctx context.Context, number int64) 
 	return m.BlockStateRepository.GetBlockVersionCount(ctx, number)
 }
 
-func (m *mockStateRepo) HandleReorgAtomic(ctx context.Context, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+func (m *mockStateRepo) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	m.mu.RLock()
 	err := m.handleReorgAtomicErr
 	m.mu.RUnlock()
@@ -135,7 +135,7 @@ func (m *mockStateRepo) HandleReorgAtomic(ctx context.Context, event outbound.Re
 	if err != nil {
 		return 0, err
 	}
-	return m.BlockStateRepository.HandleReorgAtomic(ctx, event, newBlock)
+	return m.BlockStateRepository.HandleReorgAtomic(ctx, commonAncestor, event, newBlock)
 }
 
 // mockBlockchainClient provides predictable block data for testing.
@@ -2465,8 +2465,6 @@ func (m *mockMetrics) RecordReorg(ctx context.Context, depth int, commonAncestor
 	m.mu.Unlock()
 }
 
-func (m *mockMetrics) RecordBlockProcessed(ctx context.Context, blockNum int64, durationMs int64) {}
-
 func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
@@ -2815,7 +2813,10 @@ func TestFetchBlockData_ReorgBetweenHeaderAndFetch(t *testing.T) {
 	}
 
 	// Verify the cached block has the correct hash
-	cachedData := cache.GetBlock(1, 100, 0)
+	cachedData, err := cache.GetBlock(context.Background(), 1, 100, 0)
+	if err != nil {
+		t.Fatalf("GetBlock failed: %v", err)
+	}
 	if cachedData == nil {
 		t.Fatal("expected block to be cached")
 	}

@@ -187,7 +187,7 @@ func TestHandleReorgAtomic_AllOrNothingSemantics(t *testing.T) {
 	}
 
 	// Execute atomic reorg
-	version, err := repo.HandleReorgAtomic(ctx, reorgEvent, newBlock)
+	version, err := repo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock)
 	if err != nil {
 		t.Fatalf("HandleReorgAtomic failed: %v", err)
 	}
@@ -810,13 +810,13 @@ func TestHandleReorgAtomic_Idempotency(t *testing.T) {
 	}
 
 	// First call
-	version1, err := repo.HandleReorgAtomic(ctx, reorgEvent, newBlock)
+	version1, err := repo.HandleReorgAtomic(ctx, 99, reorgEvent, newBlock)
 	if err != nil {
 		t.Fatalf("first HandleReorgAtomic failed: %v", err)
 	}
 
 	// Second call with same block hash should be idempotent
-	version2, err := repo.HandleReorgAtomic(ctx, reorgEvent, newBlock)
+	version2, err := repo.HandleReorgAtomic(ctx, 99, reorgEvent, newBlock)
 	if err != nil {
 		t.Fatalf("second HandleReorgAtomic failed: %v", err)
 	}
@@ -1362,7 +1362,7 @@ func TestHandleReorgAtomic_MultipleBlocksOrphaned(t *testing.T) {
 		ReceivedAt: time.Now().Unix(),
 	}
 
-	_, err := repo.HandleReorgAtomic(ctx, reorgEvent, newBlock)
+	_, err := repo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock)
 	if err != nil {
 		t.Fatalf("HandleReorgAtomic failed: %v", err)
 	}
@@ -1385,5 +1385,201 @@ func TestHandleReorgAtomic_MultipleBlocksOrphaned(t *testing.T) {
 	}
 	if canonical.Hash != "0xnew_105" {
 		t.Errorf("expected new canonical block, got %s", canonical.Hash)
+	}
+}
+
+// TestHandleReorgAtomic_ShortNewChainPreservesCommonAncestor prevents regression of a bug
+// where a shorter new chain caused the common ancestor to be incorrectly orphaned.
+func TestHandleReorgAtomic_ShortNewChainPreservesCommonAncestor(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	// 1. Setup initial chain: 100 -> 101 -> 102
+	blocks := []outbound.BlockState{
+		{Number: 100, Hash: "0xhash100", ParentHash: "0xhash99", ReceivedAt: time.Now().Unix()},
+		{Number: 101, Hash: "0xhash101", ParentHash: "0xhash100", ReceivedAt: time.Now().Unix()},
+		{Number: 102, Hash: "0xhash102", ParentHash: "0xhash101", ReceivedAt: time.Now().Unix()},
+	}
+
+	for _, b := range blocks {
+		if _, err := repo.SaveBlock(ctx, b); err != nil {
+			t.Fatalf("failed to save setup block %d: %v", b.Number, err)
+		}
+	}
+
+	// 2. Simulate Reorg
+	// Old Chain: 100 -> 101 -> 102 (Tip 102). Depth=2 (orphaning 101, 102).
+	// New Chain: 100 -> 101' (Tip 101').
+	// Common Ancestor: 100.
+
+	newBlock := outbound.BlockState{
+		Number:     101,
+		Hash:       "0xhash101_prime",
+		ParentHash: "0xhash100",
+		ReceivedAt: time.Now().Unix(),
+	}
+
+	event := outbound.ReorgEvent{
+		DetectedAt:  time.Now(),
+		BlockNumber: newBlock.Number, // 101
+		OldHash:     "0xhash102",     // Tip of old chain
+		NewHash:     newBlock.Hash,
+		Depth:       2, // 101 and 102 are orphaned
+	}
+
+	// We pass commonAncestor=100 explicitly.
+	// Previous buggy logic calculated: 101 - 2 = 99. Orphans > 99 (orphans 100).
+	// Correct logic: Orphans > 100.
+	_, err := repo.HandleReorgAtomic(ctx, 100, event, newBlock)
+	if err != nil {
+		t.Fatalf("HandleReorgAtomic failed: %v", err)
+	}
+
+	// 3. Verify: Check if 100 is still canonical
+	state100, err := repo.GetBlockByHash(ctx, "0xhash100")
+	if err != nil {
+		t.Fatalf("failed to retrieve block 100: %v", err)
+	}
+
+	if state100.IsOrphaned {
+		t.Errorf("REGRESSION: Common ancestor block 100 was incorrectly orphaned!")
+	}
+}
+
+// TestHandleReorgAtomic_MultiBlockReorgGap demonstrates that HandleReorgAtomic
+// creates a gap if the new chain has multiple blocks but valid intermediate blocks are not provided.
+// This is not a bug in HandleReorgAtomic itself, but a system behavior validation.
+func TestHandleReorgAtomic_MultiBlockReorgGap(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	// 1. Setup initial chain: ... -> 100 -> 101 -> 102
+	blocks := []outbound.BlockState{
+		{Number: 100, Hash: "0xhash100", ParentHash: "0xhash99", ReceivedAt: time.Now().Unix()},
+		{Number: 101, Hash: "0xhash101", ParentHash: "0xhash100", ReceivedAt: time.Now().Unix()},
+		{Number: 102, Hash: "0xhash102", ParentHash: "0xhash101", ReceivedAt: time.Now().Unix()},
+	}
+
+	for _, b := range blocks {
+		if _, err := repo.SaveBlock(ctx, b); err != nil {
+			t.Fatalf("failed to save setup block %d: %v", b.Number, err)
+		}
+	}
+
+	// 2. Simulate Reorg
+	// New Chain: 100 -> 101' -> 102'
+	// Tip: 102'. Common Ancestor: 100.
+	// We receive 102' as the new head. Intermediate 101' is implicitly part of the chain but not sent in the call.
+
+	newBlock := outbound.BlockState{
+		Number:     102,
+		Hash:       "0xhash102_prime",
+		ParentHash: "0xhash101_prime", // Parent is MISSING from DB
+		ReceivedAt: time.Now().Unix(),
+	}
+
+	event := outbound.ReorgEvent{
+		DetectedAt:  time.Now(),
+		BlockNumber: newBlock.Number, // 102
+		OldHash:     "0xhash102",
+		NewHash:     newBlock.Hash,
+		Depth:       2, // 101, 102 replaced
+	}
+
+	// Executing atomic reorg for the tip 102'
+	_, err := repo.HandleReorgAtomic(ctx, 100, event, newBlock)
+	if err != nil {
+		t.Fatalf("HandleReorgAtomic failed: %v", err)
+	}
+
+	// 3. Verify Gap
+	// Block 102' should exist
+	b102, err := repo.GetBlockByNumber(ctx, 102)
+	if err != nil {
+		t.Fatalf("failed to get block 102: %v", err)
+	}
+	if b102.Hash != "0xhash102_prime" {
+		t.Errorf("block 102 mismatch")
+	}
+
+	// Block 101' should be missing (or we find the orphaned one, but GetBlockByNumber filters orphans)
+	b101, err := repo.GetBlockByNumber(ctx, 101)
+	if b101 != nil {
+		t.Errorf("expected gap at 101, but found block: %s", b101.Hash)
+	} else if err != nil {
+		// pgx might return nil for NoRows depending on impl, but our repo returns (nil, nil) for NoRows usually
+		// checking impl:
+		// if errors.Is(err, sql.ErrNoRows) { return nil, nil }
+		// so err should be nil if missing.
+	}
+
+	// Double check we have a gap
+	if b101 == nil {
+		t.Log("Confirmed: Gap exists at block 101")
+	}
+}
+
+// TestFindGaps_DetectsReorgGap confirms that the gap created by HandleReorgAtomic
+// (when it doesn't save intermediate blocks) is correctly detected by FindGaps.
+// This confirms the BackfillService will eventually repair the state.
+func TestFindGaps_DetectsReorgGap(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	// 1. Create the scenario with a gap (same as TestHandleReorgAtomic_MultiBlockReorgGap)
+	// Initial: 100, 101, 102
+	for i := int64(100); i <= 102; i++ {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0xhash%d", i),
+			ParentHash: fmt.Sprintf("0xhash%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save setup block %d: %v", i, err)
+		}
+	}
+
+	// Reorg: 100 -> [GAP 101'] -> 102'
+	// HandleReorgAtomic only saves 102', leaving 101' missing.
+	newBlock := outbound.BlockState{
+		Number:     102,
+		Hash:       "0xhash102_prime",
+		ParentHash: "0xhash101_prime",
+		ReceivedAt: time.Now().Unix(),
+	}
+	event := outbound.ReorgEvent{
+		DetectedAt:  time.Now(),
+		BlockNumber: newBlock.Number,
+		OldHash:     "0xhash102",
+		NewHash:     newBlock.Hash,
+		Depth:       2,
+	}
+
+	_, err := repo.HandleReorgAtomic(ctx, 100, event, newBlock)
+	if err != nil {
+		t.Fatalf("HandleReorgAtomic failed: %v", err)
+	}
+
+	// 2. Run FindGaps looking at range 100-102
+	gaps, err := repo.FindGaps(ctx, 100, 102)
+	if err != nil {
+		t.Fatalf("FindGaps failed: %v", err)
+	}
+
+	// 3. Verify it found gap at 101
+	if len(gaps) != 1 {
+		t.Fatalf("Expected 1 gap, got %d", len(gaps))
+	}
+
+	gap := gaps[0]
+	if gap.From != 101 || gap.To != 101 {
+		t.Errorf("Expected gap at 101-101, got %d-%d", gap.From, gap.To)
 	}
 }

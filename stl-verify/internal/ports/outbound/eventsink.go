@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -21,6 +22,10 @@ type Event interface {
 	GetBlockNumber() int64
 	// GetChainID returns the chain ID.
 	GetChainID() int64
+	// DeduplicationID returns a deterministic ID for SNS FIFO deduplication.
+	// This must be based only on immutable block properties (hash, version),
+	// NOT timestamps or other instance-specific values.
+	DeduplicationID() string
 }
 
 // BlockEvent is published when block data is ready in cache.
@@ -64,6 +69,14 @@ type BlockEvent struct {
 func (e BlockEvent) EventType() EventType  { return EventTypeBlock }
 func (e BlockEvent) GetBlockNumber() int64 { return e.BlockNumber }
 func (e BlockEvent) GetChainID() int64     { return e.ChainID }
+
+// DeduplicationID returns a deterministic ID for SNS FIFO deduplication.
+// Format: {chainId}:{blockHash}:{version}
+// This ensures that if two watcher instances process the same block,
+// only one message is delivered to consumers.
+func (e BlockEvent) DeduplicationID() string {
+	return fmt.Sprintf("%d:%s:%d", e.ChainID, e.BlockHash, e.Version)
+}
 
 // EventSink defines the interface for publishing block data events.
 // Events contain only metadata; actual data is in the cache.

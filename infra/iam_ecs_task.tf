@@ -114,6 +114,12 @@ resource "aws_iam_role_policy_attachment" "watcher_xray" {
   policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
 }
 
+# Watcher gets CloudWatch write access for ADOT metrics
+resource "aws_iam_role_policy_attachment" "watcher_cloudwatch" {
+  role       = aws_iam_role.ethereum_watcher.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
 # -----------------------------------------------------------------------------
 # Worker Role
 # -----------------------------------------------------------------------------

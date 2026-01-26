@@ -290,7 +290,7 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 // HandleReorgAtomic atomically performs all reorg-related database operations in a single transaction.
 // This ensures consistency: either all operations succeed, or none do.
 // The commonAncestor is derived from the ReorgEvent (BlockNumber - Depth).
-func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
@@ -300,9 +300,6 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outb
 			r.logger.Error("failed to rollback transaction", "error", err)
 		}
 	}()
-
-	// Calculate common ancestor from event
-	commonAncestor := event.BlockNumber - int64(event.Depth)
 
 	// 1. Acquire advisory lock for the new block number
 	_, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, newBlock.Number)
@@ -340,19 +337,17 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outb
 		return 0, fmt.Errorf("failed to mark blocks orphaned: %w", err)
 	}
 
-	// 5. Calculate version for new block
-	var version int
-	err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), -1) + 1 FROM block_states WHERE number = $1`, newBlock.Number).Scan(&version)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get next version: %w", err)
-	}
-
-	// 6. Insert new canonical block
+	// 5. Insert new canonical block
+	// We pass 0 as the version; the BEFORE INSERT trigger will automatically assign
+	// the correct version (MAX(version) + 1) atomically.
+	// We use RETURNING version to get the actually assigned version.
 	insertQuery := `
 		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned, version)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		VALUES ($1, $2, $3, $4, $5, 0)
+		RETURNING version
 	`
-	_, err = tx.ExecContext(ctx, insertQuery, newBlock.Number, newBlock.Hash, newBlock.ParentHash, newBlock.ReceivedAt, newBlock.IsOrphaned, version)
+	var version int
+	err = tx.QueryRowContext(ctx, insertQuery, newBlock.Number, newBlock.Hash, newBlock.ParentHash, newBlock.ReceivedAt, newBlock.IsOrphaned).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("failed to save new block state: %w", err)
 	}

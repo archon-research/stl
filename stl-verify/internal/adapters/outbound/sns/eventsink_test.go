@@ -464,6 +464,15 @@ func TestPublish_MessageContainsAllFields(t *testing.T) {
 	if decoded.IsBackfill {
 		t.Error("expected IsBackfill=false")
 	}
+
+	// Verify MessageDeduplicationId is set correctly for FIFO deduplication
+	expectedDedupID := "1:0xabc123:2" // {chainId}:{blockHash}:{version}
+	if call.MessageDeduplicationId == nil {
+		t.Fatal("expected MessageDeduplicationId to be set")
+	}
+	if *call.MessageDeduplicationId != expectedDedupID {
+		t.Errorf("expected MessageDeduplicationId=%q, got %q", expectedDedupID, *call.MessageDeduplicationId)
+	}
 }
 
 // unknownEvent is a mock event with an unknown event type for testing.
@@ -473,6 +482,7 @@ type unknownEvent struct{}
 func (e unknownEvent) EventType() outbound.EventType { return "unknown" }
 func (e unknownEvent) GetBlockNumber() int64         { return 100 }
 func (e unknownEvent) GetChainID() int64             { return 1 }
+func (e unknownEvent) DeduplicationID() string       { return "1:0xtest:0" }
 
 func TestPublish_UnknownEventType(t *testing.T) {
 	// With single topic architecture, all events (including unknown types) are published
@@ -510,6 +520,7 @@ type unmarshalableEvent struct {
 func (e unmarshalableEvent) EventType() outbound.EventType { return outbound.EventTypeBlock }
 func (e unmarshalableEvent) GetBlockNumber() int64         { return 100 }
 func (e unmarshalableEvent) GetChainID() int64             { return 1 }
+func (e unmarshalableEvent) DeduplicationID() string       { return "1:0xtest:0" }
 
 func TestPublish_MarshalError(t *testing.T) {
 	client := &mockSNSClient{}

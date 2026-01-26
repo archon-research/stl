@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -442,6 +443,23 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 		return fmt.Errorf("failed to save block state: %w", err)
 	}
 
+	// Re-validate linkage AFTER save to catch reorgs that happened between check and save.
+	// This closes the TOCTOU (Time-of-Check to Time-of-Use) window.
+	if err := s.validateBlockLinkage(ctx, blockNum, header.Hash, header.ParentHash); err != nil {
+		s.logger.Warn("post-save linkage validation failed (race condition detected), orphaning block",
+			"block", blockNum,
+			"hash", truncateHash(header.Hash),
+			"error", err)
+
+		// Mark the invalid block we just saved as orphaned so it doesn't break the chain
+		if orphanErr := s.stateRepo.MarkBlockOrphaned(ctx, header.Hash); orphanErr != nil {
+			s.logger.Error("failed to orphan invalid block after race detected",
+				"block", blockNum, "error", orphanErr)
+		}
+
+		return fmt.Errorf("post-save linkage validation failed: %w", err)
+	}
+
 	// Cache and publish the data
 	s.cacheAndPublishBlockData(ctx, bd, header, version, receivedAt)
 
@@ -516,10 +534,12 @@ func (s *BackfillService) verifyBoundaryBlocks(ctx context.Context) ([]outbound.
 
 	var staleBlocks []outbound.BlockState
 
-	// Check each block against RPC - if the hash doesn't exist, the block is stale
+	// Check each block against RPC - if the hash doesn't match CANONICAL chain, the block is stale
 	for _, dbBlock := range recentBlocks {
-		// Query RPC for this block's hash
-		rpcHeader, err := s.client.GetBlockByHash(ctx, dbBlock.Hash, false)
+		// Query RPC for the CANONICAL block at this height.
+		// We use GetBlockByNumber because GetBlockByHash might return "Uncle" blocks
+		// that are present on the node but not canonical.
+		blockJSON, err := s.client.GetBlockByNumber(ctx, dbBlock.Number, false)
 		if err != nil {
 			// RPC error - log and continue checking other blocks
 			s.logger.Warn("failed to verify block against RPC",
@@ -529,11 +549,21 @@ func (s *BackfillService) verifyBoundaryBlocks(ctx context.Context) ([]outbound.
 			continue
 		}
 
-		if rpcHeader == nil {
-			// Block hash doesn't exist on canonical chain - it's stale!
-			s.logger.Info("detected stale block (hash not found on canonical chain)",
+		var header outbound.BlockHeader
+		if err := shared.ParseBlockHeader(blockJSON, &header); err != nil {
+			s.logger.Warn("failed to parse RPC block for verification",
+				"block", dbBlock.Number, "error", err)
+			continue
+		}
+
+		// Compare Hash: Canonical (RPC) vs Database
+		// Note: Case-insensitive comparison is safer for hex strings
+		if header.Hash != dbBlock.Hash {
+			// Block hash doesn't match canonical chain - it's stale!
+			s.logger.Info("detected stale block (hash mismatch with canonical chain)",
 				"block", dbBlock.Number,
-				"hash", truncateHash(dbBlock.Hash))
+				"dbHash", truncateHash(dbBlock.Hash),
+				"canonicalHash", truncateHash(header.Hash))
 			staleBlocks = append(staleBlocks, dbBlock)
 		}
 	}
@@ -552,29 +582,31 @@ func (s *BackfillService) recoverFromStaleChain(ctx context.Context, staleBlocks
 		return nil
 	}
 
-	// Find the lowest stale block number for logging
-	lowestStale := staleBlocks[0].Number
-	for _, block := range staleBlocks {
-		if block.Number < lowestStale {
-			lowestStale = block.Number
-		}
-	}
+	// Sort blocks by height (ascending) to ensure deterministic recovery
+	sort.Slice(staleBlocks, func(i, j int) bool {
+		return staleBlocks[i].Number < staleBlocks[j].Number
+	})
 
+	lowestStale := staleBlocks[0].Number
 	s.logger.Info("recovering from stale chain",
 		"lowestStaleBlock", lowestStale,
 		"staleBlockCount", len(staleBlocks))
 
-	// Process each stale block: mark as orphaned, then immediately fetch and save canonical replacement
+	// Phase 1: Orphan ALL stale blocks first.
+	// This is crucial! We must clear the "next" references in the DB before inserting new blocks,
+	// otherwise validateBlockLinkage will fail when checking against the yet-to-be-orphaned 'next' block.
 	for _, staleBlock := range staleBlocks {
-		// 1. Mark the stale block as orphaned
 		if err := s.stateRepo.MarkBlockOrphaned(ctx, staleBlock.Hash); err != nil {
 			return fmt.Errorf("failed to mark block %d as orphaned: %w", staleBlock.Number, err)
 		}
 		s.logger.Info("marked stale block as orphaned",
 			"block", staleBlock.Number,
 			"hash", truncateHash(staleBlock.Hash))
+	}
 
-		// 2. Immediately fetch the canonical block at this height
+	// Phase 2: Fetch and save canonical replacements
+	for _, staleBlock := range staleBlocks {
+		// Immediately fetch the canonical block at this height
 		blockDataList, err := s.client.GetBlocksBatch(ctx, []int64{staleBlock.Number}, true)
 		if err != nil || len(blockDataList) == 0 {
 			s.logger.Warn("failed to fetch canonical replacement block",
@@ -584,7 +616,7 @@ func (s *BackfillService) recoverFromStaleChain(ctx context.Context, staleBlocks
 			continue
 		}
 
-		// 3. Process and save the canonical block (assigns new version)
+		// Process and save the canonical block (assigns new version)
 		if err := s.processBlockData(ctx, blockDataList[0]); err != nil {
 			s.logger.Warn("failed to process canonical replacement block",
 				"block", staleBlock.Number,

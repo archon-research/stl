@@ -115,7 +115,7 @@ type BlockStateRepository interface {
 	// 3. Saves the new canonical block
 	// This prevents inconsistent state if a crash occurs mid-reorg.
 	// Returns the version assigned to the new block.
-	HandleReorgAtomic(ctx context.Context, event ReorgEvent, newBlock BlockState) (int, error)
+	HandleReorgAtomic(ctx context.Context, commonAncestor int64, event ReorgEvent, newBlock BlockState) (int, error)
 
 	// GetMinBlockNumber returns the lowest canonical block number in the repository.
 	// Returns 0 if no blocks exist.

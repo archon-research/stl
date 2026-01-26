@@ -6,16 +6,20 @@
 //
 // Architecture:
 //
-//	SNS FIFO Topic (single topic for all event types)
-//	  ├── SQS FIFO Queue (transformer) - processes block data
-//	  └── SQS FIFO Queue (backup) - stores for replay
+// SNS FIFO Topic (single topic for all event types)
 //
-// FIFO Ordering:
+//	├── SQS FIFO Queue (transformer) - processes block data
+//	└── SQS FIFO Queue (backup) - stores for replay
+//
+// FIFO Ordering & Deduplication:
 //   - MessageGroupId: chainId (ensures per-chain ordering)
-//   - Content-based deduplication enabled on topic
+//   - MessageDeduplicationId: {chainId}:{blockHash}:{version}
+//     This explicit dedup ID enables safe rolling deployments where two watcher
+//     instances may briefly run simultaneously - SNS will deduplicate based on
+//     the deterministic ID rather than message content.
 //
 // Message Attributes:
-//   - eventType: "block", "receipts", "traces", or "blobs"
+//   - eventType: "block"
 //   - chainId: The blockchain chain ID as a string
 //   - blockNumber: The block number as a string
 //
@@ -167,14 +171,17 @@ func (s *EventSink) Publish(ctx context.Context, event outbound.Event) error {
 	}
 
 	// FIFO: Use chainId as MessageGroupId to ensure per-chain ordering
-	// Content-based deduplication is enabled on the topic
+	// Use explicit MessageDeduplicationId for deterministic deduplication
+	// (content-based dedup would fail due to ReceivedAt timestamp differences)
 	messageGroupID := strconv.FormatInt(event.GetChainID(), 10)
+	deduplicationID := event.DeduplicationID()
 
 	input := &sns.PublishInput{
-		TopicArn:          aws.String(s.config.TopicARN),
-		Message:           aws.String(message),
-		MessageAttributes: attributes,
-		MessageGroupId:    aws.String(messageGroupID),
+		TopicArn:               aws.String(s.config.TopicARN),
+		Message:                aws.String(message),
+		MessageAttributes:      attributes,
+		MessageGroupId:         aws.String(messageGroupID),
+		MessageDeduplicationId: aws.String(deduplicationID),
 	}
 
 	// Publish with retry logic

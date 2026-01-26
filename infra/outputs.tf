@@ -191,3 +191,37 @@ output "watcher_task_definition_arn" {
   description = "ARN of the Watcher task definition"
   value       = aws_ecs_task_definition.watcher.arn
 }
+
+# =============================================================================
+# Backup Worker Outputs
+# =============================================================================
+
+output "backup_worker_ecr_repository_url" {
+  description = "URL of the Backup Worker ECR repository"
+  value       = aws_ecr_repository.backup_worker.repository_url
+}
+
+output "backup_worker_ecr_repository_arn" {
+  description = "ARN of the Backup Worker ECR repository"
+  value       = aws_ecr_repository.backup_worker.arn
+}
+
+output "backup_worker_role_arn" {
+  description = "ARN of the Backup Worker ECS task role"
+  value       = aws_iam_role.backup_worker.arn
+}
+
+output "backup_worker_role_name" {
+  description = "Name of the Backup Worker ECS task role"
+  value       = aws_iam_role.backup_worker.name
+}
+
+output "backup_worker_service_name" {
+  description = "Name of the Backup Worker ECS service"
+  value       = aws_ecs_service.backup_worker.name
+}
+
+output "backup_worker_task_definition_arn" {
+  description = "ARN of the Backup Worker task definition"
+  value       = aws_ecs_task_definition.backup_worker.arn
+}

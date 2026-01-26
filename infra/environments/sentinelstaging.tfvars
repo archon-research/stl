@@ -20,12 +20,12 @@ tigerdata_ha_replicas = 0   # No HA for staging
 # ElastiCache Redis Configuration
 # -----------------------------------------------------------------------------
 
-# Staging: minimal single-node setup
-redis_node_type          = "cache.t4g.micro" # ~$12/month
-redis_engine_version     = "8.0"             # Valkey 8.0 (AWS Redis-compatible fork)
-redis_num_cache_clusters = 1                 # Single node, no HA
-redis_transit_encryption = false             # No TLS for simplicity
-redis_snapshot_retention = 0                 # No backups
+# Staging: memory-optimized for 2-day block cache (~20GB needed)
+redis_node_type          = "cache.r7g.xlarge" # 26.32 GB, ~$300/month
+redis_engine_version     = "8.0"              # Valkey 8.0 (AWS Redis-compatible fork)
+redis_num_cache_clusters = 1                  # Single node, no HA
+redis_transit_encryption = false              # No TLS for simplicity
+redis_snapshot_retention = 0                  # No backups
 
 # -----------------------------------------------------------------------------
 # ECS Watcher Configuration
@@ -42,3 +42,14 @@ chain_id         = 1
 alchemy_http_url = "https://eth-mainnet.g.alchemy.com/v2"
 alchemy_ws_url   = "wss://eth-mainnet.g.alchemy.com/v2"
 # alchemy_api_key - set via TF_VAR_alchemy_api_key environment variable
+
+# -----------------------------------------------------------------------------
+# ECS Backup Worker Configuration
+# -----------------------------------------------------------------------------
+
+# Staging: minimal resources for backup worker
+backup_worker_cpu           = 2048     # 2 vCPU
+backup_worker_memory        = 4096     # 4 GB
+backup_worker_desired_count = 1        # Single instance
+backup_worker_image_tag     = "latest" # Override in CI/CD
+backup_worker_workers       = 2        # Concurrent workers per task

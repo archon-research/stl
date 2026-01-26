@@ -5,6 +5,7 @@ package backfill_gaps
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -621,5 +623,123 @@ func TestVerifyChainIntegrity_WithGaps(t *testing.T) {
 	err := repo.VerifyChainIntegrity(ctx, 1, 6)
 	if err != nil {
 		t.Errorf("expected valid chain with gaps (only consecutive blocks checked), got: %v", err)
+	}
+}
+
+// RaceConditionRepo wraps a real repository to inject side effects for testing race conditions.
+type RaceConditionRepo struct {
+	outbound.BlockStateRepository
+	onGetBlockByNumber func(int64)
+}
+
+func (r *RaceConditionRepo) GetBlockByNumber(ctx context.Context, number int64) (*outbound.BlockState, error) {
+	// Call the underlying repo first
+	block, err := r.BlockStateRepository.GetBlockByNumber(ctx, number)
+
+	// Trigger the hook if defined
+	if r.onGetBlockByNumber != nil {
+		r.onGetBlockByNumber(number)
+	}
+
+	return block, err
+}
+
+// integrationMockEventSink is a mock EventSink for integration tests that don't need a real one.
+// Named differently from mockEventSink in unit tests to avoid redeclaration when both are compiled.
+type integrationMockEventSink struct{}
+
+func (m *integrationMockEventSink) Publish(ctx context.Context, event outbound.Event) error {
+	return nil
+}
+func (m *integrationMockEventSink) Close() error { return nil }
+
+func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
+	// 1. Setup
+	// Use the real Postgres repository to confirm the race condition affects the production implementation.
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	// Wrap the real Postgres repo to inject the race condition
+	raceRepo := &RaceConditionRepo{BlockStateRepository: pgRepo}
+
+	// We keep mocks for Client/Cache/Sink as they are external dependencies
+	// not involved in the DB consistency logic being tested.
+	mockClient := newMockClient()
+	mockCache := memory.NewBlockCache()
+	mockSink := &integrationMockEventSink{}
+
+	// Create service
+	svc, err := NewBackfillService(BackfillConfigDefaults(), mockClient, raceRepo, mockCache, mockSink)
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// 2. Initial State: Block 99 exists with Hash A
+	block99 := outbound.BlockState{
+		Number:  99,
+		Hash:    "0xAAAAAAAAAAAAAAAA",
+		Version: 0,
+	}
+	if _, err := pgRepo.SaveBlock(ctx, block99); err != nil {
+		t.Fatalf("failed to save initial block: %v", err)
+	}
+
+	// 3. Prepare Block 100 on Client (Parent = Hash A)
+	block100Data := outbound.BlockData{
+		BlockNumber: 100,
+		Block:       json.RawMessage(`{"number":"0x64","hash":"0xBBBBBBBBBBBBBBBB","parentHash":"0xAAAAAAAAAAAAAAAA","timestamp":"0x123456"}`),
+	}
+
+	// 4. Inject Race Condition
+	// When validation checks Block 99, it sees Hash A.
+	// Immediately after check, we simulate a reorg of Block 99 to Hash C.
+	raceRepo.onGetBlockByNumber = func(num int64) {
+		if num == 99 {
+			// Simulate concurrent reorg: Replace Block 99 with Hash C
+			// This mimics another service (LiveData) modifying the DB between our read and our write.
+
+			// Force update Block 99 to "0xCCCCCCCCCCCCCCCC" (Hash C)
+			pgRepo.MarkBlockOrphaned(ctx, "0xAAAAAAAAAAAAAAAA") // Orphan A
+			pgRepo.SaveBlock(ctx, outbound.BlockState{          // Save C
+				Number:     99,
+				Hash:       "0xCCCCCCCCCCCCCCCC",
+				ParentHash: "0xOLD_PARENT",
+			})
+		}
+	}
+
+	// 5. Execute processBlockData for Block 100
+	err = svc.processBlockData(ctx, block100Data)
+
+	// 6. Assertions
+
+	// With the FIX, this SHOULD return an error (post-save validation failure)
+	if err == nil {
+		t.Errorf("ProcessBlockData should have returned a post-save validation error")
+	} else {
+		t.Logf("ProcessBlockData correctly returned error: %v", err)
+	}
+
+	// Verify DB state
+	// saved100 should be NIL (canonical query) because it was orphaned by the fix
+	saved100, _ := pgRepo.GetBlockByNumber(ctx, 100)
+	current99, _ := pgRepo.GetBlockByNumber(ctx, 99)
+
+	if saved100 != nil {
+		t.Errorf("Block 100 should NOT be canonical (should be orphaned), but got: %+v", saved100)
+	} else {
+		t.Logf("Block 100 was correctly orphaned/removed from canonical chain")
+	}
+
+	if current99.Hash != "0xCCCCCCCCCCCCCCCC" {
+		t.Fatalf("Block 99 should have been reorged to Hash C")
+	}
+
+	// Double check it exists as an orphan
+	orphaned100Val, _ := pgRepo.GetBlockByHash(ctx, "0xBBBBBBBBBBBBBBBB")
+	if orphaned100Val != nil && !orphaned100Val.IsOrphaned {
+		t.Errorf("Block 100 should reside in DB as orphaned")
 	}
 }

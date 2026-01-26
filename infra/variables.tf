@@ -142,3 +142,37 @@ variable "alchemy_ws_url" {
   type        = string
   default     = "wss://eth-mainnet.g.alchemy.com/v2"
 }
+
+# -----------------------------------------------------------------------------
+# ECS Backup Worker Configuration
+# -----------------------------------------------------------------------------
+
+variable "backup_worker_cpu" {
+  description = "CPU units for Backup Worker task (256, 512, 1024, 2048, 4096)"
+  type        = number
+  default     = 256
+}
+
+variable "backup_worker_memory" {
+  description = "Memory for Backup Worker task in MB (512, 1024, 2048, etc.)"
+  type        = number
+  default     = 512
+}
+
+variable "backup_worker_desired_count" {
+  description = "Number of Backup Worker tasks to run"
+  type        = number
+  default     = 1
+}
+
+variable "backup_worker_image_tag" {
+  description = "Docker image tag for Backup Worker"
+  type        = string
+  default     = "latest"
+}
+
+variable "backup_worker_workers" {
+  description = "Number of concurrent workers within each Backup Worker task"
+  type        = number
+  default     = 2
+}

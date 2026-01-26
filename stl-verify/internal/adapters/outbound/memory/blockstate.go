@@ -159,11 +159,9 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 
 // HandleReorgAtomic atomically performs all reorg-related operations.
 // In the memory implementation, this is naturally atomic since we hold the lock.
-func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	commonAncestor := event.BlockNumber - int64(event.Depth)
 
 	// Check if block already exists (idempotency)
 	if existing, ok := r.blocks[newBlock.Hash]; ok {

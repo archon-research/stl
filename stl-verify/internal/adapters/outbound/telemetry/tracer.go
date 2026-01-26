@@ -1,7 +1,7 @@
 // tracer.go provides OpenTelemetry tracing initialization and configuration.
 //
 // This adapter sets up distributed tracing with support for:
-//   - OTLP gRPC export to Jaeger or other collectors
+//   - OTLP gRPC export to collectors (ADOT, Jaeger, etc.)
 //   - Stdout export for local development/debugging
 //   - Configurable sampling rates
 //   - Service metadata (name, version, environment)
@@ -9,8 +9,8 @@
 // Usage:
 //
 //	shutdown, err := telemetry.InitTracer(ctx, telemetry.TracerConfig{
-//	    ServiceName:    "stl-watcher",
-//	    JaegerEndpoint: "localhost:4317",
+//	    ServiceName:  "stl-watcher",
+//	    OTLPEndpoint: "localhost:4317",
 //	})
 //	defer shutdown(ctx)
 //
@@ -45,7 +45,8 @@ type TracerConfig struct {
 	// Environment is the deployment environment (e.g., "development", "production").
 	Environment string
 
-	// JaegerEndpoint is the OTLP gRPC endpoint for Jaeger (e.g., "localhost:4317").
+	// JaegerEndpoint is the OTLP gRPC endpoint (e.g., "localhost:4317").
+	// Works with any OTLP-compatible collector (ADOT, Jaeger, etc.).
 	// If empty, traces are exported to stdout.
 	JaegerEndpoint string
 
@@ -64,7 +65,7 @@ func TracerConfigDefaults() TracerConfig {
 	}
 }
 
-// InitTracer initializes the OpenTelemetry tracer with Jaeger exporter.
+// InitTracer initializes the OpenTelemetry tracer with OTLP exporter.
 // Returns a shutdown function that should be called on application exit.
 func InitTracer(ctx context.Context, config TracerConfig) (shutdown func(context.Context) error, err error) {
 	// Apply defaults
@@ -92,7 +93,7 @@ func InitTracer(ctx context.Context, config TracerConfig) (shutdown func(context
 	// Create exporter
 	var exporter trace.SpanExporter
 	if config.JaegerEndpoint != "" {
-		// OTLP gRPC exporter for Jaeger
+		// OTLP gRPC exporter for trace collectors (ADOT, Jaeger, etc.)
 		conn, err := grpc.NewClient(
 			config.JaegerEndpoint,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),

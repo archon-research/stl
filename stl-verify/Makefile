@@ -1,12 +1,14 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test lint vet fmt tidy check clean cover run help \
+.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run help \
         dev-up dev-down dev-ips \
         tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
         tf-init-staging tf-validate-staging tf-plan-staging tf-apply-staging tf-check-staging \
         ecr-login docker-build docker-push docker-release \
-        docker-build-staging docker-push-staging docker-release-staging
+        docker-build-staging docker-push-staging docker-release-staging \
+        docker-build-backup docker-push-backup docker-release-backup \
+        docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -20,6 +22,16 @@ run:
 test-race:
 	@echo "==> Running tests with race detector..."
 	go test -race -v ./...
+
+# Run unit tests only (default, no build tags)
+test:
+	@echo "==> Running unit tests..."
+	go test -v ./...
+
+# Run integration tests (requires integration build tag)
+test-integration:
+	@echo "==> Running integration tests..."
+	go test -tags=integration -v -timeout=5m ./...
 
 # Run tests with coverage
 cover:
@@ -258,9 +270,26 @@ docker-push: ecr-login
 	docker push $(ECR_REPO):$(IMAGE_TAG)
 	docker push $(ECR_REPO):latest
 
-# Build and push in one step
-docker-release: docker-build docker-push
-	@echo "==> Docker image released: $(ECR_REPO):$(IMAGE_TAG)"
+# Build and push in one step (single recipe to ensure consistent IMAGE_TAG)
+docker-release: ecr-login
+	@IMAGE_TAG=$$(git rev-parse --short HEAD) && \
+	GIT_COMMIT_FULL=$$(git rev-parse HEAD) && \
+	GIT_BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	BUILD_TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO)" && \
+	echo "    Tag: $$IMAGE_TAG" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$GIT_COMMIT_FULL \
+		--build-arg GIT_BRANCH=$$GIT_BRANCH \
+		--build-arg BUILD_TIME=$$BUILD_TIME \
+		-t $(ECR_REPO):$$IMAGE_TAG \
+		-t $(ECR_REPO):latest \
+		--load . && \
+	echo "==> Pushing Docker image to ECR..." && \
+	docker push $(ECR_REPO):$$IMAGE_TAG && \
+	docker push $(ECR_REPO):latest && \
+	echo "==> Docker image released: $(ECR_REPO):$$IMAGE_TAG"
 
 # Clean up local Docker images
 docker-clean:
@@ -281,3 +310,70 @@ docker-push-staging:
 
 docker-release-staging:
 	@$(MAKE) docker-release ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - Backup Worker
+# =============================================================================
+
+# ECR repository URL for backup worker
+ECR_REPO_BACKUP = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-backup-worker
+
+# Build Docker image for backup worker (ARM64 for Fargate Graviton)
+docker-build-backup:
+	@echo "==> Building Backup Worker Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_BACKUP)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.backup \
+		-t $(ECR_REPO_BACKUP):$(IMAGE_TAG) \
+		-t $(ECR_REPO_BACKUP):latest \
+		--load .
+
+# Push backup worker Docker image to ECR
+docker-push-backup: ecr-login
+	@echo "==> Pushing Backup Worker Docker image to ECR..."
+	docker push $(ECR_REPO_BACKUP):$(IMAGE_TAG)
+	docker push $(ECR_REPO_BACKUP):latest
+
+# Build and push backup worker in one step (captures tag at start to ensure consistency)
+docker-release-backup: ecr-login
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Backup Worker Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_BACKUP)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.backup \
+		-t $(ECR_REPO_BACKUP):$$TAG \
+		-t $(ECR_REPO_BACKUP):latest \
+		--load . && \
+	echo "==> Pushing Backup Worker Docker image to ECR..." && \
+	docker push $(ECR_REPO_BACKUP):$$TAG && \
+	docker push $(ECR_REPO_BACKUP):latest && \
+	echo "==> Backup Worker Docker image released: $(ECR_REPO_BACKUP):$$TAG"
+
+# =============================================================================
+# Sentinelstaging Backup Worker Docker Shortcuts
+# =============================================================================
+
+docker-build-backup-staging:
+	@$(MAKE) docker-build-backup ENV=sentinelstaging
+
+docker-push-backup-staging:
+	@$(MAKE) docker-push-backup ENV=sentinelstaging
+
+docker-release-backup-staging:
+	@$(MAKE) docker-release-backup ENV=sentinelstaging
+

@@ -113,9 +113,30 @@ func (c *BlockCache) Clear() {
 	c.blocks = make(map[string]json.RawMessage)
 }
 
-// GetBlock retrieves cached block data (for testing).
-func (c *BlockCache) GetBlock(chainID int64, blockNumber int64, version int) json.RawMessage {
+// GetBlock retrieves cached block data.
+func (c *BlockCache) GetBlock(ctx context.Context, chainID int64, blockNumber int64, version int) (json.RawMessage, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.blocks[c.key(chainID, blockNumber, version, "block")]
+	return c.blocks[c.key(chainID, blockNumber, version, "block")], nil
+}
+
+// GetReceipts retrieves cached receipts data.
+func (c *BlockCache) GetReceipts(ctx context.Context, chainID int64, blockNumber int64, version int) (json.RawMessage, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.blocks[c.key(chainID, blockNumber, version, "receipts")], nil
+}
+
+// GetTraces retrieves cached traces data.
+func (c *BlockCache) GetTraces(ctx context.Context, chainID int64, blockNumber int64, version int) (json.RawMessage, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.blocks[c.key(chainID, blockNumber, version, "traces")], nil
+}
+
+// GetBlobs retrieves cached blobs data.
+func (c *BlockCache) GetBlobs(ctx context.Context, chainID int64, blockNumber int64, version int) (json.RawMessage, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.blocks[c.key(chainID, blockNumber, version, "blobs")], nil
 }
