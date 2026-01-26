@@ -1,6 +1,9 @@
 -- 001_initial_schema.sql
 -- Creates the core tables for block state tracking
 
+-- Enable TimescaleDB extension for time-series data
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
 -- Block states table tracks all blocks seen (both canonical and orphaned)
 CREATE TABLE IF NOT EXISTS block_states (
     number BIGINT NOT NULL,
@@ -77,7 +80,7 @@ CREATE TABLE IF NOT EXISTS chain (
 CREATE TABLE IF NOT EXISTS token (
                                      id BIGSERIAL PRIMARY KEY,
                                      chain_id INT NOT NULL REFERENCES chain(chain_id),
-                                     address TEXT NOT NULL,
+                                     address BYTEA NOT NULL,
                                      symbol VARCHAR(50),
                                      decimals SMALLINT,
                                      created_at_block BIGINT,
@@ -86,13 +89,49 @@ CREATE TABLE IF NOT EXISTS token (
                                      UNIQUE(chain_id, address)
 );
 
+
+-- Receipt tokens (aTokens, spTokens, cTokens, etc.)
+CREATE TABLE IF NOT EXISTS receipt_tokens (
+    id BIGSERIAL PRIMARY KEY,
+    protocol_id BIGINT NOT NULL REFERENCES protocols(id),
+    underlying_token_id BIGINT NOT NULL REFERENCES tokens(id),
+    receipt_token_address BYTEA NOT NULL,
+    symbol VARCHAR(50),
+    created_at_block BIGINT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata JSONB,
+    CONSTRAINT receipt_tokens_protocol_underlying_unique UNIQUE (protocol_id, underlying_token_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_receipt_tokens_protocol_id ON receipt_tokens(protocol_id);
+CREATE INDEX IF NOT EXISTS idx_receipt_tokens_underlying_token_id ON receipt_tokens(underlying_token_id);
+
+-- Debt tokens (variable and stable debt tokens)
+CREATE TABLE IF NOT EXISTS debt_tokens (
+    id BIGSERIAL PRIMARY KEY,
+    protocol_id BIGINT NOT NULL REFERENCES protocols(id),
+    underlying_token_id BIGINT NOT NULL REFERENCES tokens(id),
+    variable_debt_address BYTEA,
+    stable_debt_address BYTEA,
+    variable_symbol VARCHAR(50),
+    stable_symbol VARCHAR(50),
+    created_at_block BIGINT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata JSONB,
+    CONSTRAINT debt_tokens_protocol_underlying_unique UNIQUE (protocol_id, underlying_token_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_debt_tokens_protocol_id ON debt_tokens(protocol_id);
+CREATE INDEX IF NOT EXISTS idx_debt_tokens_underlying_token_id ON debt_tokens(underlying_token_id);
+
+
 CREATE INDEX IF NOT EXISTS idx_token_chain_address ON token(chain_id, address);
 
 CREATE TABLE IF NOT EXISTS protocol (
                                         id BIGSERIAL PRIMARY KEY,
                                         chain_id INT NOT NULL REFERENCES chain(chain_id),
-                                        address TEXT NOT NULL,
-                                        name VARCHAR(255),
+                                        address BYTEA NOT NULL,
+                                        name VARCHAR(255) NOT NULL,
                                         protocol_type VARCHAR(50), -- 'lending', 'rwa', etc.
                                         created_at_block BIGINT,
                                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -154,6 +193,41 @@ CREATE INDEX IF NOT EXISTS idx_borrower_collateral_token ON borrower_collateral(
 CREATE INDEX IF NOT EXISTS idx_borrower_collateral_block ON borrower_collateral(block_number);
 CREATE INDEX IF NOT EXISTS idx_borrower_collateral_user_protocol ON borrower_collateral(user_id, protocol_id);
 CREATE INDEX IF NOT EXISTS idx_borrower_collateral_block_version ON borrower_collateral(block_number, block_version);
+
+
+-- SparkLend reserve data - protocol reserve state snapshots
+-- Created as a TimescaleDB hypertable for efficient time-series queries.
+-- Uses block_number as the partition column with chunks of 100,000 blocks (~2 weeks at ~12s/block).
+CREATE TABLE IF NOT EXISTS sparklend_reserve_data (
+    id BIGSERIAL,
+    protocol_id BIGINT NOT NULL REFERENCES protocols(id),
+    token_id BIGINT NOT NULL REFERENCES tokens(id),
+    block_number BIGINT NOT NULL,
+    block_version INTEGER NOT NULL DEFAULT 0,
+    -- Reserve state
+    unbacked NUMERIC,
+    accrued_to_treasury_scaled NUMERIC,
+    total_a_token NUMERIC,
+    total_stable_debt NUMERIC,
+    total_variable_debt NUMERIC,
+    -- Interest rates (ray - 27 decimals)
+    liquidity_rate NUMERIC,
+    variable_borrow_rate NUMERIC,
+    stable_borrow_rate NUMERIC,
+    average_stable_borrow_rate NUMERIC,
+    -- Indexes (ray - 27 decimals)
+    liquidity_index NUMERIC,
+    variable_borrow_index NUMERIC,
+    -- Timestamps
+    last_update_timestamp BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (id, block_number),
+    CONSTRAINT sparklend_reserve_data_unique UNIQUE (protocol_id, token_id, block_number, block_version)
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'block_number',
+    tsdb.chunk_interval = 100000
+);
 
 INSERT INTO chain (chain_id, name) VALUES (1, 'Ethereum Mainnet')
 ON CONFLICT (chain_id) DO NOTHING;

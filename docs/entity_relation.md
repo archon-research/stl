@@ -1,4 +1,5 @@
 ```mermaid
+erDiagram
     Chain {
         int chain_id PK
         varchar name UK
@@ -65,6 +66,7 @@
         bigint protocol_id FK "UK1"
         bigint token_id FK "UK1"
         bigint block_number "UK1"
+        int block_version
         numeric unbacked
         numeric accruedToTreasuryScaled
         numeric totalAToken
@@ -129,3 +131,4 @@
     Token ||--o{ BorrowerCollateral : ""
     Users ||--o{ UserProtocolMetadata : ""
     Protocol ||--o{ UserProtocolMetadata : ""
+```
