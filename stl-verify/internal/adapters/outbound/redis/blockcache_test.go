@@ -439,8 +439,9 @@ func TestIsGzipped_DetectsMagicBytes(t *testing.T) {
 func TestCompressDecompress_LargeData(t *testing.T) {
 	// Create a large JSON-like payload similar to actual block data
 	largeData := make([]byte, 100000)
-	copy(largeData, `{"transactions":[`)
-	for i := 17; i < 99990; i++ {
+	startData = := `{"transactions":[`
+	copy(largeData, startData)
+	for i := len(startData); i < 99990; i++ {
 		largeData[i] = 'x'
 	}
 	copy(largeData[99990:], `]}`)
