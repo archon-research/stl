@@ -306,6 +306,14 @@ func (c *Client) GetBlockDataByHash(ctx context.Context, blockNum int64, hash st
 // getBlockDataByHashParallel fetches block data using parallel goroutines for each RPC call.
 // This uses more API credits but may be faster due to parallel network requests.
 func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	// Create a parent span for the parallel fetch operation
+	// This ensures all child RPC spans are properly linked
+	var span trace.Span
+	if c.telemetry != nil {
+		ctx, span = c.telemetry.StartSpan(ctx, "parallel_fetch")
+		defer span.End()
+	}
+
 	result := outbound.BlockData{BlockNumber: blockNum}
 
 	var wg sync.WaitGroup

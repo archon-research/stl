@@ -6,7 +6,7 @@
         tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
         tf-init-staging tf-validate-staging tf-plan-staging tf-apply-staging tf-check-staging \
         ecr-login docker-build docker-push docker-release \
-        docker-build-staging docker-push-staging docker-release-staging \
+        docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
         docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging
 
@@ -361,13 +361,13 @@ docker-clean:
 # Sentinelstaging Docker Shortcuts
 # =============================================================================
 
-docker-build-staging:
+docker-build-watcher-staging:
 	@$(MAKE) docker-build ENV=sentinelstaging
 
-docker-push-staging:
+docker-push-watcher-staging:
 	@$(MAKE) docker-push ENV=sentinelstaging
 
-docker-release-staging:
+docker-release-watcher-staging:
 	@$(MAKE) docker-release ENV=sentinelstaging
 
 # =============================================================================

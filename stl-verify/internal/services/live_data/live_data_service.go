@@ -232,11 +232,8 @@ func (s *LiveService) processHeaders(headers <-chan outbound.BlockHeader) {
 				continue
 			}
 
-			// Start prefetching RPC data immediately (runs async while we do state ops)
-			prefetchCh := s.startPrefetch(header, blockNum)
-
-			// Process the block - state ops run while prefetch happens in background
-			if err := s.processBlockWithPrefetch(header, blockNum, receivedAt, prefetchCh); err != nil {
+			// Process the block with prefetch
+			if err := s.processBlockWithPrefetch(header, blockNum, receivedAt); err != nil {
 				s.logger.Warn("failed to process live block",
 					"block", blockNum,
 					"hash", header.Hash,
@@ -248,15 +245,16 @@ func (s *LiveService) processHeaders(headers <-chan outbound.BlockHeader) {
 }
 
 // startPrefetch starts an async RPC fetch for a block's data.
+// The provided context should contain trace information so RPC spans are linked to the parent trace.
 // Returns a channel that will receive the result when complete.
-func (s *LiveService) startPrefetch(header outbound.BlockHeader, blockNum int64) <-chan prefetchResult {
+func (s *LiveService) startPrefetch(ctx context.Context, header outbound.BlockHeader, blockNum int64) <-chan prefetchResult {
 	resultCh := make(chan prefetchResult, 1)
 
 	go func() {
 		start := time.Now()
-		ctx := s.ctx // Use service context for cancellation
 
 		// Fetch all data in a single batched HTTP request
+		// Use the provided context which carries trace information
 		bd, err := s.client.GetBlockDataByHash(ctx, blockNum, header.Hash, true)
 
 		resultCh <- prefetchResult{
@@ -285,10 +283,11 @@ func (s *LiveService) startPrefetch(header outbound.BlockHeader, blockNum int64)
 //	t=0-150ms: Prefetch running in background
 //	t=150ms: Prefetch complete (waited ~120ms if state ops took 30ms)
 //	t=200ms: Cache/publish complete
-func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, blockNum int64, receivedAt time.Time, prefetchCh <-chan prefetchResult) error {
+func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, blockNum int64, receivedAt time.Time) error {
 	start := time.Now()
 
-	// Start span for the entire block processing
+	// Start span for the entire block processing FIRST
+	// This ensures the prefetch RPC calls are children of this span
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(s.ctx, "live.processBlock",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -299,7 +298,18 @@ func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, bloc
 			attribute.Bool("block.prefetched", true),
 		),
 	)
+
+	// Create a cancellable context for the prefetch
+	// This allows us to cancel the prefetch if we return early (e.g., duplicate block)
+	prefetchCtx, cancelPrefetch := context.WithCancel(ctx)
+
+	// Start prefetching RPC data immediately with the traced context
+	// This ensures Alchemy RPC spans are linked to this parent span
+	prefetchCh := s.startPrefetch(prefetchCtx, header, blockNum)
+
+	// Ensure we always clean up: cancel prefetch context and end span
 	defer func() {
+		cancelPrefetch()
 		span.SetAttributes(attribute.Int64("block.duration_ms", time.Since(start).Milliseconds()))
 		span.End()
 		s.logger.Info("processBlock completed", "block", blockNum, "duration", time.Since(start))
