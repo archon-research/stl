@@ -33,3 +33,6 @@ override.tf.json
 *_override.tf.json
 *.tfplan
 *.pprof
+
+# Git worktrees
+.worktrees/
