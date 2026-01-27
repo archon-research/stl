@@ -16,8 +16,8 @@ type UserRepository interface {
 	// first_seen_block uses LEAST to keep the earliest block number.
 	UpsertUsers(ctx context.Context, users []*entity.User) error
 
-	// GetOrCreateUserWithTX retrieves a user by address, or creates it if it doesn't exist
-	GetOrCreateUserWithTX(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error)
+	// GetOrCreateUser retrieves a user by address, or creates it if it doesn't exist
+	GetOrCreateUser(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error)
 
 	// UpsertUserProtocolMetadata upserts user protocol metadata records.
 	// This stores protocol-specific data like health factors, LTV, etc.

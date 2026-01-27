@@ -539,7 +539,7 @@ func (s *Service) extractCollateralData(ctx context.Context, user common.Address
 
 func (s *Service) saveBorrowEvent(ctx context.Context, borrowEvent *BorrowEventData, collaterals []CollateralData, borrowTokenMetadata TokenMetadata, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
 	err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		userID, err := s.userRepo.GetOrCreateUserWithTX(ctx, tx, entity.User{
+		userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 			ChainID:        chainID,
 			Address:        borrowEvent.OnBehalfOf,
 			FirstSeenBlock: blockNumber,
@@ -556,24 +556,24 @@ func (s *Service) saveBorrowEvent(ctx context.Context, borrowEvent *BorrowEventD
 			return fmt.Errorf("protocol not found for address %s on chain %d", protocolAddress.Hex(), chainID)
 		}
 
-		borrowTokenID, err := s.tokenRepo.GetOrCreateTokenWithTX(ctx, tx, chainID, borrowEvent.Reserve, borrowTokenMetadata.Symbol, borrowTokenMetadata.Decimals, blockNumber)
+		borrowTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, borrowEvent.Reserve, borrowTokenMetadata.Symbol, borrowTokenMetadata.Decimals, blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get borrow token: %w", err)
 		}
 		decimalAdjustedAmount := s.convertToDecimalAdjusted(borrowEvent.Amount, borrowTokenMetadata.Decimals)
-		if err := s.positionRepo.SaveBorrowerWithTX(ctx, tx, userID, protocolID.ID, borrowTokenID, blockNumber, blockVersion, decimalAdjustedAmount); err != nil {
+		if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID.ID, borrowTokenID, blockNumber, blockVersion, decimalAdjustedAmount); err != nil {
 			return fmt.Errorf("failed to insert borrower: %w", err)
 		}
 
 		for _, col := range collaterals {
-			tokenID, err := s.tokenRepo.GetOrCreateTokenWithTX(ctx, tx, chainID, col.Asset, col.Symbol, col.Decimals, blockNumber)
+			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, col.Symbol, col.Decimals, blockNumber)
 			if err != nil {
 				s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err, "tx", borrowEvent.TxHash)
 				continue
 			}
 
 			decimalAdjustedCollateral := s.convertToDecimalAdjusted(col.ActualBalance, col.Decimals)
-			if err := s.positionRepo.SaveBorrowerCollateralWithTX(ctx, tx, userID, protocolID.ID, tokenID, blockNumber, blockVersion, decimalAdjustedCollateral); err != nil {
+			if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID.ID, tokenID, blockNumber, blockVersion, decimalAdjustedCollateral); err != nil {
 				s.logger.Warn("failed to insert collateral", "error", err, "tx", borrowEvent.TxHash)
 			}
 		}

@@ -48,9 +48,9 @@ func NewTokenRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) 
 	}, nil
 }
 
-// GetOrCreateTokenWithTX retrieves a token by address or creates it if it doesn't exist.
+// GetOrCreateToken retrieves a token by address or creates it if it doesn't exist.
 // This method participates in an external transaction.
-func (r *TokenRepository) GetOrCreateTokenWithTX(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
+func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
 	var tokenID int64
 
 	err := tx.QueryRow(ctx,

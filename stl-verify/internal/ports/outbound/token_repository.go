@@ -24,7 +24,7 @@ type TokenRepository interface {
 	// Conflict resolution: ON CONFLICT (protocol_id, underlying_token_id) DO UPDATE
 	UpsertDebtTokens(ctx context.Context, tokens []*entity.DebtToken) error
 
-	// GetOrCreateTokenWithTX retrieves a token by address or creates it if it doesn't exist.
+	// GetOrCreateToken retrieves a token by address or creates it if it doesn't exist.
 	// This method participates in an external transaction.
-	GetOrCreateTokenWithTX(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error)
+	GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error)
 }

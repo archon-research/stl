@@ -47,7 +47,7 @@ func NewUserRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (
 	}, nil
 }
 
-func (r *UserRepository) GetOrCreateUserWithTX(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error) {
+func (r *UserRepository) GetOrCreateUser(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error) {
 	var userID int64
 
 	err := tx.QueryRow(ctx,

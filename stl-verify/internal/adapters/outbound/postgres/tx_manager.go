@@ -22,11 +22,11 @@ var _ outbound.TxManager = (*TxManager)(nil)
 //
 //	txm := postgres.NewTxManager(pool, logger)
 //	err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
-//	    userID, err := userRepo.GetOrCreateUserWithTX(ctx, tx, user)
+//	    userID, err := userRepo.GetOrCreateUser(ctx, tx, user)
 //	    if err != nil {
 //	        return err // triggers rollback
 //	    }
-//	    return tokenRepo.UpsertTokenWithTX(ctx, tx, token)
+//	    return tokenRepo.UpsertToken(ctx, tx, token)
 //	})
 type TxManager struct {
 	pool   *pgxpool.Pool
