@@ -145,7 +145,7 @@ func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int6
 	pipe.Set(ctx, c.key(chainID, blockNumber, version, "receipts"), receiptsCompressed, c.ttl)
 	pipe.Set(ctx, c.key(chainID, blockNumber, version, "traces"), tracesCompressed, c.ttl)
 
-	numKeys := 3
+	totalCommands := 3
 	if data.Blobs != nil {
 		blobsCompressed, err := compress(data.Blobs)
 		if err != nil {
@@ -154,10 +154,10 @@ func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int6
 			return fmt.Errorf("failed to compress blobs: %w", err)
 		}
 		pipe.Set(ctx, c.key(chainID, blockNumber, version, "blobs"), blobsCompressed, c.ttl)
-		numKeys = 4
+		totalCommands = 4
 	}
 
-	span.SetAttributes(attribute.Int("redis.pipeline_commands", numKeys))
+	span.SetAttributes(attribute.Int("redis.pipeline_commands", totalCommands))
 
 	// Execute all commands in one round-trip
 	_, err = pipe.Exec(ctx)
