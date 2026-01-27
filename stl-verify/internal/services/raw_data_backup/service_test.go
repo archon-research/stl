@@ -168,6 +168,19 @@ func (m *mockBlockCache) SetBlobs(ctx context.Context, chainID, blockNumber int6
 	return nil
 }
 
+func (m *mockBlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int64, version int, data outbound.BlockDataInput) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := m.key(chainID, blockNumber, version)
+	m.blocks[key] = data.Block
+	m.receipts[key] = data.Receipts
+	m.traces[key] = data.Traces
+	if data.Blobs != nil {
+		m.blobs[key] = data.Blobs
+	}
+	return nil
+}
+
 func (m *mockBlockCache) GetBlock(ctx context.Context, chainID, blockNumber int64, version int) (json.RawMessage, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

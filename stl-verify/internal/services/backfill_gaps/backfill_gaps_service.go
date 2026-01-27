@@ -38,8 +38,8 @@ type BackfillConfig struct {
 	// This detects reorgs that happened while the service was down.
 	BoundaryCheckDepth int
 
-	// DisableBlobs disables caching blob sidecars (useful for pre-Dencun blocks or unsupported nodes).
-	DisableBlobs bool
+	// EnableBlobs enables caching blob sidecars (post-Dencun blocks on supported nodes).
+	EnableBlobs bool
 
 	// Logger is the structured logger.
 	Logger *slog.Logger
@@ -681,7 +681,7 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 	}
 
 	// Cache blobs (if enabled)
-	if !s.config.DisableBlobs {
+	if s.config.EnableBlobs {
 		if bd.Blobs != nil {
 			if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, bd.Blobs); err != nil {
 				s.logger.Warn("failed to cache blobs", "block", blockNum, "error", err)

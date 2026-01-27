@@ -125,17 +125,6 @@ resource "aws_ecs_task_definition" "watcher" {
           "awslogs-stream-prefix" = "ecs"
         }
       }
-
-      # Health check - HTTP endpoint for rolling deployments
-      # Returns healthy only after first block is processed, enabling
-      # zero-downtime deployments without data gaps
-      healthCheck = {
-        command     = ["CMD-SHELL", "wget -q --spider http://localhost:8080/health/ready || exit 1"]
-        interval    = 15
-        timeout     = 5
-        retries     = 3
-        startPeriod = 120 # 2 minutes for WebSocket connection + first block
-      }
     },
     # ADOT Collector sidecar for X-Ray tracing
     {

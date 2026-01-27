@@ -401,7 +401,7 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 
 // GetBlocksWithIncompletePublish returns canonical blocks that have at least one
 // publish type incomplete. Used by backfill to recover from crashes.
-func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int, disableBlobs bool) ([]outbound.BlockState, error) {
+func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int, enableBlobs bool) ([]outbound.BlockState, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -412,7 +412,7 @@ func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Contex
 		}
 
 		hasIncomplete := !b.BlockPublished || !b.ReceiptsPublished || !b.TracesPublished
-		if !disableBlobs {
+		if enableBlobs {
 			hasIncomplete = hasIncomplete || !b.BlobsPublished
 		}
 

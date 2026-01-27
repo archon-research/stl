@@ -211,9 +211,9 @@ func TestLargeDataset_QueryPerformance(t *testing.T) {
 		})
 	})
 
-	t.Run("GetBlocksWithIncompletePublish_DisableBlobs", func(t *testing.T) {
-		runQueryBenchmark(t, "GetBlocksWithIncompletePublish(100, disableBlobs=true)", 50, func() error {
-			_, err := repo.GetBlocksWithIncompletePublish(ctx, 100, true)
+	t.Run("GetBlocksWithIncompletePublish_EnableBlobs", func(t *testing.T) {
+		runQueryBenchmark(t, "GetBlocksWithIncompletePublish(100, enableBlobs=false)", 50, func() error {
+			_, err := repo.GetBlocksWithIncompletePublish(ctx, 100, false)
 			return err
 		})
 	})

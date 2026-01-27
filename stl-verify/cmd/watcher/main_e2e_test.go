@@ -310,7 +310,7 @@ func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
 		ChainID:              1,
 		FinalityBlockCount:   2, // Use small finality for faster tests
 		MaxUnfinalizedBlocks: 10,
-		DisableBlobs:         true,
+		EnableBlobs:          false,
 		Logger:               slog.Default(),
 	}
 
@@ -404,7 +404,7 @@ func TestEndToEnd_MultipleBlocksInSequence(t *testing.T) {
 		ChainID:              1,
 		FinalityBlockCount:   3,
 		MaxUnfinalizedBlocks: 10,
-		DisableBlobs:         true,
+		EnableBlobs:          false,
 		Logger:               slog.Default(),
 	}
 

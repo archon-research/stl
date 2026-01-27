@@ -1,6 +1,6 @@
 module github.com/archon-research/stl/stl-verify
 
-go 1.25.5
+go 1.25.4
 
 require github.com/gorilla/websocket v1.5.3
 
@@ -13,7 +13,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.21
 	github.com/aws/smithy-go v1.24.0
 	github.com/ethereum/go-ethereum v1.16.8
-	github.com/jackc/pgx/v5 v5.7.6
+	github.com/jackc/pgx/v5 v5.8.0
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/testcontainers/testcontainers-go v0.40.0
 	go.opentelemetry.io/otel v1.39.0
