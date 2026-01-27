@@ -6,8 +6,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +16,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testing/migrations"
 )
 
 // setupPostgres creates a TimescaleDB container and returns a connected repository.
@@ -73,10 +72,8 @@ func setupPostgres(t *testing.T) (*BlockStateRepository, func()) {
 
 	repo := NewBlockStateRepository(db, nil)
 
-	// Run migrations
-	_, currentFile, _, _ := runtime.Caller(0)
-	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../../db/migrations")
-	m := migrator.New(db, migrationsDir)
+	// Run migrations using embedded migration files
+	m := migrator.NewWithFS(db, migrations.FS())
 	if err := m.ApplyAll(ctx); err != nil {
 		t.Fatalf("failed to apply migrations: %v", err)
 	}

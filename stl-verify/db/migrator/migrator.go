@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,12 +15,22 @@ import (
 type Migrator struct {
 	db            *sql.DB
 	migrationsDir string
+	migrationsFS  fs.FS
 }
 
 func New(db *sql.DB, migrationsDir string) *Migrator {
 	return &Migrator{
 		db:            db,
 		migrationsDir: migrationsDir,
+	}
+}
+
+// NewWithFS creates a new Migrator that reads migrations from an fs.FS.
+// This is useful for embedding migrations in tests or binaries.
+func NewWithFS(db *sql.DB, migrationsFS fs.FS) *Migrator {
+	return &Migrator{
+		db:           db,
+		migrationsFS: migrationsFS,
 	}
 }
 
@@ -85,7 +96,14 @@ func (m *Migrator) getAppliedMigrations(ctx context.Context) (map[string]bool, e
 }
 
 func (m *Migrator) getMigrationFiles() ([]string, error) {
-	entries, err := os.ReadDir(m.migrationsDir)
+	var entries []fs.DirEntry
+	var err error
+
+	if m.migrationsFS != nil {
+		entries, err = fs.ReadDir(m.migrationsFS, ".")
+	} else {
+		entries, err = os.ReadDir(m.migrationsDir)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -107,9 +125,15 @@ func (m *Migrator) getMigrationFiles() ([]string, error) {
 }
 
 func (m *Migrator) verifyChecksum(ctx context.Context, filename string) error {
-	path := filepath.Join(m.migrationsDir, filename)
+	var content []byte
+	var err error
 
-	content, err := os.ReadFile(path)
+	if m.migrationsFS != nil {
+		content, err = fs.ReadFile(m.migrationsFS, filename)
+	} else {
+		path := filepath.Join(m.migrationsDir, filename)
+		content, err = os.ReadFile(path)
+	}
 	if err != nil {
 		return err
 	}
@@ -133,9 +157,15 @@ func (m *Migrator) verifyChecksum(ctx context.Context, filename string) error {
 }
 
 func (m *Migrator) applyMigration(ctx context.Context, filename string) error {
-	path := filepath.Join(m.migrationsDir, filename)
+	var content []byte
+	var err error
 
-	content, err := os.ReadFile(path)
+	if m.migrationsFS != nil {
+		content, err = fs.ReadFile(m.migrationsFS, filename)
+	} else {
+		path := filepath.Join(m.migrationsDir, filename)
+		content, err = os.ReadFile(path)
+	}
 	if err != nil {
 		return err
 	}

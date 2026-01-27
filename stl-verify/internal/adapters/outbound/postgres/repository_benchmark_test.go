@@ -7,8 +7,6 @@ import (
 	"database/sql"
 	"fmt"
 	"math/big"
-	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -18,6 +16,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testing/migrations"
 )
 
 // Benchmark row counts
@@ -88,10 +87,8 @@ func setupBenchmarkPostgres(b *testing.B) (*sql.DB, func()) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// Run migrations
-	_, currentFile, _, _ := runtime.Caller(0)
-	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../../db/migrations")
-	m := migrator.New(db, migrationsDir)
+	// Run migrations using embedded migration files
+	m := migrator.NewWithFS(db, migrations.FS())
 	if err := m.ApplyAll(ctx); err != nil {
 		b.Fatalf("failed to apply migrations: %v", err)
 	}
