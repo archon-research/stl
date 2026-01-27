@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS protocol
 
 CREATE INDEX IF NOT EXISTS idx_protocol_chain_address ON protocol (chain_id, address);
 
-CREATE TABLE IF NOT EXISTS user
+CREATE TABLE IF NOT EXISTS "user"
 (
     id               BIGSERIAL PRIMARY KEY,
     chain_id         INT         NOT NULL REFERENCES chain (chain_id),
@@ -115,12 +115,12 @@ CREATE TABLE IF NOT EXISTS user
     UNIQUE (chain_id, address)
 );
 
-CREATE INDEX IF NOT EXISTS idx_user_chain_address ON user (chain_id, address);
+CREATE INDEX IF NOT EXISTS idx_user_chain_address ON "user" (chain_id, address);
 
 CREATE TABLE IF NOT EXISTS borrowers
 (
     id            BIGSERIAL PRIMARY KEY,
-    user_id       BIGINT      NOT NULL REFERENCES user (id),
+    user_id       BIGINT      NOT NULL REFERENCES "user" (id),
     protocol_id   BIGINT      NOT NULL REFERENCES protocol (id),
     token_id      BIGINT      NOT NULL REFERENCES token (id),
     block_number  BIGINT      NOT NULL,
@@ -141,7 +141,7 @@ CREATE INDEX IF NOT EXISTS idx_borrowers_block_version ON borrowers (block_numbe
 CREATE TABLE IF NOT EXISTS borrower_collateral
 (
     id            BIGSERIAL PRIMARY KEY,
-    user_id       BIGINT      NOT NULL REFERENCES user (id),
+    user_id       BIGINT      NOT NULL REFERENCES "user" (id),
     protocol_id   BIGINT      NOT NULL REFERENCES protocol (id),
     token_id      BIGINT      NOT NULL REFERENCES token (id),
     block_number  BIGINT      NOT NULL,

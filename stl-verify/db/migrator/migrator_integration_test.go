@@ -24,7 +24,7 @@ func getMigrationsPath() string {
 
 func setupPostgres(ctx context.Context, t *testing.T) (*sql.DB, func()) {
 	req := testcontainers.ContainerRequest{
-		Image:        "postgres:18-alpine",
+		Image:        "timescale/timescaledb:latest-pg17",
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "postgres",
