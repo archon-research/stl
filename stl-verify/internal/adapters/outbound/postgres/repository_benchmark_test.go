@@ -298,7 +298,7 @@ func BenchmarkTokenRepository_UpsertTokens(b *testing.B) {
 
 	ctx := context.Background()
 	// Seed chain for FK constraint
-	_, err := db.ExecContext(ctx, `INSERT INTO chains (chain_id, name) VALUES (1, 'mainnet') ON CONFLICT DO NOTHING`)
+	_, err := db.ExecContext(ctx, `INSERT INTO "chain" (chain_id, name) VALUES (1, 'mainnet') ON CONFLICT DO NOTHING`)
 	if err != nil {
 		b.Fatalf("failed to seed chain: %v", err)
 	}
@@ -375,16 +375,16 @@ func BenchmarkProtocolRepository_UpsertSparkLendReserveData(b *testing.B) {
 func seedReferenceData(b *testing.B, db *sql.DB, ctx context.Context) {
 	b.Helper()
 
-	// Insert chains
-	_, err := db.ExecContext(ctx, `INSERT INTO chains (chain_id, name) VALUES (1, 'mainnet') ON CONFLICT DO NOTHING`)
+	// Insert chain
+	_, err := db.ExecContext(ctx, `INSERT INTO "chain" (chain_id, name) VALUES (1, 'mainnet') ON CONFLICT DO NOTHING`)
 	if err != nil {
-		b.Fatalf("failed to seed chains: %v", err)
+		b.Fatalf("failed to seed chain: %v", err)
 	}
 
 	// Insert protocols
 	for i := 1; i <= 10; i++ {
 		_, err := db.ExecContext(ctx, `
-			INSERT INTO protocols (id, chain_id, address, name, protocol_type, metadata)
+			INSERT INTO protocol (id, chain_id, address, name, protocol_type, metadata)
 			VALUES ($1, 1, $2, $3, 'lending', '{}')
 			ON CONFLICT DO NOTHING`,
 			i, fmt.Sprintf("\\x%040d", i), fmt.Sprintf("Protocol %d", i))
@@ -396,7 +396,7 @@ func seedReferenceData(b *testing.B, db *sql.DB, ctx context.Context) {
 	// Insert tokens
 	for i := 1; i <= 50; i++ {
 		_, err := db.ExecContext(ctx, `
-			INSERT INTO tokens (id, chain_id, address, symbol, decimals, metadata)
+			INSERT INTO token (id, chain_id, address, symbol, decimals, metadata)
 			VALUES ($1, 1, $2, $3, 18, '{}')
 			ON CONFLICT DO NOTHING`,
 			i, fmt.Sprintf("\\x%040d", i), fmt.Sprintf("TKN%d", i))
@@ -408,7 +408,7 @@ func seedReferenceData(b *testing.B, db *sql.DB, ctx context.Context) {
 	// Insert users
 	for i := 1; i <= 1000; i++ {
 		_, err := db.ExecContext(ctx, `
-			INSERT INTO users (id, chain_id, address, metadata)
+			INSERT INTO "user" (id, chain_id, address, metadata)
 			VALUES ($1, 1, $2, '{}')
 			ON CONFLICT DO NOTHING`,
 			i, fmt.Sprintf("\\x%040d", i))

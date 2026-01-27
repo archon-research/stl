@@ -27,7 +27,7 @@ erDiagram
         jsonb metadata "protocol-specific config"
     }
 
-    ReceiptTokens {
+    ReceiptToken {
         bigint id PK
         bigint protocol_id FK "UK1"
         bigint underlying_token_id FK "UK1"
@@ -38,7 +38,7 @@ erDiagram
         jsonb metadata "protocol-specific fields"
     }
 
-    DebtTokens {
+    DebtToken {
         bigint id PK
         bigint protocol_id FK "UK1"
         bigint underlying_token_id FK "UK1"
@@ -51,7 +51,7 @@ erDiagram
         jsonb metadata "protocol-specific fields"
     }
 
-    Users {
+    User {
         bigint id PK
         int chain_id FK "UK1"
         bytea address "UK1"
@@ -81,7 +81,7 @@ erDiagram
         bigint lastUpdateTimestamp
     }
 
-    Borrowers {
+    Borrower {
         bigint id PK
         bigint user_id FK "UK1"
         bigint protocol_id FK "UK1"
@@ -116,19 +116,19 @@ erDiagram
 
     Chain ||--o{ Token : ""
     Chain ||--o{ Protocol : ""
-    Chain ||--o{ Users : ""
-    Protocol ||--o{ ReceiptTokens : ""
-    Protocol ||--o{ DebtTokens : ""
+    Chain ||--o{ User : ""
+    Protocol ||--o{ ReceiptToken : ""
+    Protocol ||--o{ DebtToken : ""
     Protocol ||--o{ SparkLendReserveData : ""
-    Token ||--o{ ReceiptTokens : ""
-    Token ||--o{ DebtTokens : ""
+    Token ||--o{ ReceiptToken : ""
+    Token ||--o{ DebtToken : ""
     Token ||--o{ SparkLendReserveData : ""
-    Users ||--o{ Borrowers : ""
-    Users ||--o{ BorrowerCollateral : ""
-    Protocol ||--o{ Borrowers : ""
+    User ||--o{ Borrower : ""
+    User ||--o{ BorrowerCollateral : ""
+    Protocol ||--o{ Borrower : ""
     Protocol ||--o{ BorrowerCollateral : ""
-    Token ||--o{ Borrowers : ""
+    Token ||--o{ Borrower : ""
     Token ||--o{ BorrowerCollateral : ""
-    Users ||--o{ UserProtocolMetadata : ""
+    User ||--o{ UserProtocolMetadata : ""
     Protocol ||--o{ UserProtocolMetadata : ""
 ```

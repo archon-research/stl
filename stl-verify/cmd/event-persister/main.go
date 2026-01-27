@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -20,7 +19,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -133,24 +131,43 @@ func main() {
 	}
 	logger.Info("Ethereum node connected")
 
-	db, err := sql.Open("pgx", *dbURL)
+	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(*dbURL))
 	if err != nil {
 		logger.Error("failed to open database", "error", err)
 		os.Exit(1)
 	}
-	defer func() {
-		if err := db.Close(); err != nil {
-			logger.Warn("failed to close database connection", "error", err)
-		}
-	}()
-
-	if err := db.Ping(); err != nil {
-		logger.Error("failed to ping database", "error", err)
-		os.Exit(1)
-	}
+	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	lendingRepo := postgres.NewLendingRepository(db, chainID, logger)
+	txManager, err := postgres.NewTxManager(pool, logger)
+	if err != nil {
+		logger.Error("failed to create transaction manager", "error", err)
+		os.Exit(1)
+	}
+
+	userRepo, err := postgres.NewUserRepository(pool, logger, 0)
+	if err != nil {
+		logger.Error("failed to create user repository", "error", err)
+		os.Exit(1)
+	}
+
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0)
+	if err != nil {
+		logger.Error("failed to create protocol repository", "error", err)
+		os.Exit(1)
+	}
+
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0)
+	if err != nil {
+		logger.Error("failed to create token repository", "error", err)
+		os.Exit(1)
+	}
+
+	positionRepo, err := postgres.NewPositionRepository(pool, logger, 0)
+	if err != nil {
+		logger.Error("failed to create position repository", "error", err)
+		os.Exit(1)
+	}
 
 	processorConfig := borrow_processor.Config{
 		QueueURL:        *queueURL,
@@ -167,7 +184,11 @@ func main() {
 		common.HexToAddress(Multicall3Address),
 		common.HexToAddress("0x56b7A1012765C285afAC8b8F25C69Bf10ccfE978"),
 		common.HexToAddress("0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e"),
-		lendingRepo,
+		txManager,
+		userRepo,
+		protocolRepo,
+		tokenRepo,
+		positionRepo,
 	)
 	if err != nil {
 		logger.Error("failed to create processor", "error", err)

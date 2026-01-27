@@ -2,11 +2,14 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -17,20 +20,20 @@ var _ outbound.ProtocolRepository = (*ProtocolRepository)(nil)
 
 // ProtocolRepository is a PostgreSQL implementation of the outbound.ProtocolRepository port.
 type ProtocolRepository struct {
-	db        *sql.DB
+	pool      *pgxpool.Pool
 	logger    *slog.Logger
 	batchSize int
 }
 
 // NewProtocolRepository creates a new PostgreSQL Protocol repository.
 // If batchSize is <= 0, the default batch size from DefaultRepositoryConfig() is used.
-// Returns an error if the database connection is nil.
+// Returns an error if the database pool is nil.
 //
 // Note: This function does not verify that the database connection is alive.
-// Use a separate health check or call db.Ping() if connection validation is needed.
-func NewProtocolRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*ProtocolRepository, error) {
-	if db == nil {
-		return nil, fmt.Errorf("database connection cannot be nil")
+// Use a separate health check or call pool.Ping() if connection validation is needed.
+func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (*ProtocolRepository, error) {
+	if pool == nil {
+		return nil, fmt.Errorf("database pool cannot be nil")
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -39,83 +42,35 @@ func NewProtocolRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*Pro
 		batchSize = DefaultRepositoryConfig().ProtocolBatchSize
 	}
 	return &ProtocolRepository{
-		db:        db,
+		pool:      pool,
 		logger:    logger,
 		batchSize: batchSize,
 	}, nil
 }
 
-// UpsertProtocols upserts protocol records atomically.
-// All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
-func (r *ProtocolRepository) UpsertProtocols(ctx context.Context, protocols []*entity.Protocol) error {
-	if len(protocols) == 0 {
-		return nil
-	}
-
-	tx, err := r.db.BeginTx(ctx, nil)
+// GetProtocolByAddress retrieves a protocol by its chain ID and address.
+func (r *ProtocolRepository) GetProtocolByAddress(ctx context.Context, chainID int64, address string) (*entity.Protocol, error) {
+	var protocol entity.Protocol
+	err := r.pool.QueryRow(ctx,
+		`SELECT id, chain_id, address, name, protocol_type, created_at_block
+		 FROM protocol
+		 WHERE chain_id = $1 AND address = $2`,
+		chainID, address).Scan(
+		&protocol.ID,
+		&protocol.ChainID,
+		&protocol.Address,
+		&protocol.Name,
+		&protocol.ProtocolType,
+		&protocol.CreatedAtBlock,
+	)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer rollback(tx, r.logger)
-
-	for i := 0; i < len(protocols); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(protocols) {
-			end = len(protocols)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil // Protocol not found
 		}
-		batch := protocols[i:end]
-
-		if err := r.upsertProtocolBatch(ctx, tx, batch); err != nil {
-			return err
-		}
+		return nil, fmt.Errorf("failed to get protocol by address: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	return nil
-}
-
-func (r *ProtocolRepository) upsertProtocolBatch(ctx context.Context, tx *sql.Tx, protocols []*entity.Protocol) error {
-	if len(protocols) == 0 {
-		return nil
-	}
-
-	var sb strings.Builder
-	sb.WriteString(`
-		INSERT INTO protocols (chain_id, address, name, protocol_type, created_at_block, metadata, updated_at)
-		VALUES `)
-
-	args := make([]any, 0, len(protocols)*6)
-	for i, protocol := range protocols {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		baseIdx := i * 6
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, NOW())",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6))
-
-		metadata, err := marshalMetadata(protocol.Metadata)
-		if err != nil {
-			return fmt.Errorf("failed to marshal protocol metadata for chain %d, address %x: %w", protocol.ChainID, protocol.Address, err)
-		}
-
-		args = append(args, protocol.ChainID, protocol.Address, protocol.Name, protocol.ProtocolType, protocol.CreatedAtBlock, metadata)
-	}
-
-	sb.WriteString(`
-		ON CONFLICT (chain_id, address) DO UPDATE SET
-			name = EXCLUDED.name,
-			protocol_type = EXCLUDED.protocol_type,
-			metadata = EXCLUDED.metadata,
-			updated_at = NOW()
-	`)
-
-	_, err := tx.ExecContext(ctx, sb.String(), args...)
-	if err != nil {
-		return fmt.Errorf("failed to upsert protocol batch: %w", err)
-	}
-	return nil
+	return &protocol, nil
 }
 
 // UpsertSparkLendReserveData upserts SparkLend reserve data records atomically.
@@ -125,11 +80,11 @@ func (r *ProtocolRepository) UpsertSparkLendReserveData(ctx context.Context, dat
 		return nil
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer rollback(tx, r.logger)
+	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(data); i += r.batchSize {
 		end := i + r.batchSize
@@ -143,13 +98,13 @@ func (r *ProtocolRepository) UpsertSparkLendReserveData(ctx context.Context, dat
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context, tx *sql.Tx, data []*entity.SparkLendReserveData) error {
+func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context, tx pgx.Tx, data []*entity.SparkLendReserveData) error {
 	if len(data) == 0 {
 		return nil
 	}
@@ -213,7 +168,7 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 			last_update_timestamp = EXCLUDED.last_update_timestamp
 	`)
 
-	_, err := tx.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert sparklend reserve data batch: %w", err)
 	}

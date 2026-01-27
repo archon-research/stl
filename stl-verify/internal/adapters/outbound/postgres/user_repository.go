@@ -2,10 +2,13 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -16,20 +19,20 @@ var _ outbound.UserRepository = (*UserRepository)(nil)
 
 // UserRepository is a PostgreSQL implementation of the outbound.UserRepository port.
 type UserRepository struct {
-	db        *sql.DB
+	pool      *pgxpool.Pool
 	logger    *slog.Logger
 	batchSize int
 }
 
 // NewUserRepository creates a new PostgreSQL User repository.
 // If batchSize is <= 0, the default batch size from DefaultRepositoryConfig() is used.
-// Returns an error if the database connection is nil.
+// Returns an error if the database pool is nil.
 //
 // Note: This function does not verify that the database connection is alive.
-// Use a separate health check or call db.Ping() if connection validation is needed.
-func NewUserRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*UserRepository, error) {
-	if db == nil {
-		return nil, fmt.Errorf("database connection cannot be nil")
+// Use a separate health check or call pool.Ping() if connection validation is needed.
+func NewUserRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (*UserRepository, error) {
+	if pool == nil {
+		return nil, fmt.Errorf("database pool cannot be nil")
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -38,10 +41,35 @@ func NewUserRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*UserRep
 		batchSize = DefaultRepositoryConfig().UserBatchSize
 	}
 	return &UserRepository{
-		db:        db,
+		pool:      pool,
 		logger:    logger,
 		batchSize: batchSize,
 	}, nil
+}
+
+func (r *UserRepository) GetOrCreateUser(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error) {
+	var userID int64
+
+	err := tx.QueryRow(ctx,
+		`SELECT id FROM "user" WHERE chain_id = $1 AND address = $2`,
+		user.ChainID, user.Address.Bytes()).Scan(&userID)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx,
+			`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
+			 VALUES ($1, $2, $3, NOW(), NOW(), $4)
+			 RETURNING id`,
+			user.ChainID, user.Address.Bytes(), user.FirstSeenBlock, user.Metadata).Scan(&userID)
+		if err != nil {
+			return 0, fmt.Errorf("failed to create user: %w", err)
+		}
+
+		r.logger.Debug("user created", "address", user.Address.Hex(), "id", userID)
+	} else if err != nil {
+		return 0, fmt.Errorf("failed to get user: %w", err)
+	}
+
+	return userID, nil
 }
 
 // UpsertUsers upserts user records atomically.
@@ -51,11 +79,11 @@ func (r *UserRepository) UpsertUsers(ctx context.Context, users []*entity.User) 
 		return nil
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer rollback(tx, r.logger)
+	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(users); i += r.batchSize {
 		end := i + r.batchSize
@@ -69,20 +97,20 @@ func (r *UserRepository) UpsertUsers(ctx context.Context, users []*entity.User) 
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *UserRepository) upsertUserBatch(ctx context.Context, tx *sql.Tx, users []*entity.User) error {
+func (r *UserRepository) upsertUserBatch(ctx context.Context, tx pgx.Tx, users []*entity.User) error {
 	if len(users) == 0 {
 		return nil
 	}
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO users (chain_id, address, first_seen_block, metadata, updated_at)
+		INSERT INTO "user" (chain_id, address, first_seen_block, metadata, updated_at)
 		VALUES `)
 
 	args := make([]any, 0, len(users)*4)
@@ -98,17 +126,17 @@ func (r *UserRepository) upsertUserBatch(ctx context.Context, tx *sql.Tx, users 
 		if err != nil {
 			return fmt.Errorf("failed to marshal user metadata for chain %d, address %x: %w", user.ChainID, user.Address, err)
 		}
-		args = append(args, user.ChainID, user.Address, user.FirstSeenBlock, metadata)
+		args = append(args, user.ChainID, user.Address.Bytes(), user.FirstSeenBlock, metadata)
 	}
 
 	sb.WriteString(`
 		ON CONFLICT (chain_id, address) DO UPDATE SET
-			first_seen_block = LEAST(users.first_seen_block, EXCLUDED.first_seen_block),
+			first_seen_block = LEAST("user".first_seen_block, EXCLUDED.first_seen_block),
 			metadata = EXCLUDED.metadata,
 			updated_at = NOW()
 	`)
 
-	_, err := tx.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert user batch: %w", err)
 	}
@@ -122,11 +150,11 @@ func (r *UserRepository) UpsertUserProtocolMetadata(ctx context.Context, metadat
 		return nil
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer rollback(tx, r.logger)
+	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(metadata); i += r.batchSize {
 		end := i + r.batchSize
@@ -140,13 +168,13 @@ func (r *UserRepository) UpsertUserProtocolMetadata(ctx context.Context, metadat
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *UserRepository) upsertUserProtocolMetadataBatch(ctx context.Context, tx *sql.Tx, metadata []*entity.UserProtocolMetadata) error {
+func (r *UserRepository) upsertUserProtocolMetadataBatch(ctx context.Context, tx pgx.Tx, metadata []*entity.UserProtocolMetadata) error {
 	if len(metadata) == 0 {
 		return nil
 	}
@@ -179,7 +207,7 @@ func (r *UserRepository) upsertUserProtocolMetadataBatch(ctx context.Context, tx
 			updated_at = NOW()
 	`)
 
-	_, err := tx.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert user protocol metadata batch: %w", err)
 	}

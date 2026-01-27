@@ -1,3 +1,6 @@
+-- Enable TimescaleDB extension for time-series data
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
 CREATE TABLE IF NOT EXISTS block_states
 (
     number             BIGINT  NOT NULL,
@@ -74,7 +77,7 @@ CREATE TABLE IF NOT EXISTS token
 (
     id               BIGSERIAL PRIMARY KEY,
     chain_id         INT         NOT NULL REFERENCES chain (chain_id),
-    address          TEXT        NOT NULL,
+    address          BYTEA       NOT NULL,
     symbol           VARCHAR(50),
     decimals         SMALLINT,
     created_at_block BIGINT,
@@ -89,7 +92,7 @@ CREATE TABLE IF NOT EXISTS protocol
 (
     id               BIGSERIAL PRIMARY KEY,
     chain_id         INT         NOT NULL REFERENCES chain (chain_id),
-    address          TEXT        NOT NULL,
+    address          BYTEA       NOT NULL,
     name             VARCHAR(255),
     protocol_type    VARCHAR(50),
     created_at_block BIGINT,
@@ -100,11 +103,11 @@ CREATE TABLE IF NOT EXISTS protocol
 
 CREATE INDEX IF NOT EXISTS idx_protocol_chain_address ON protocol (chain_id, address);
 
-CREATE TABLE IF NOT EXISTS users
+CREATE TABLE IF NOT EXISTS "user"
 (
     id               BIGSERIAL PRIMARY KEY,
     chain_id         INT         NOT NULL REFERENCES chain (chain_id),
-    address          TEXT        NOT NULL,
+    address          BYTEA       NOT NULL,
     first_seen_block BIGINT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -112,12 +115,12 @@ CREATE TABLE IF NOT EXISTS users
     UNIQUE (chain_id, address)
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_chain_address ON users (chain_id, address);
+CREATE INDEX IF NOT EXISTS idx_user_chain_address ON "user" (chain_id, address);
 
-CREATE TABLE IF NOT EXISTS borrowers
+CREATE TABLE IF NOT EXISTS borrower
 (
     id            BIGSERIAL PRIMARY KEY,
-    user_id       BIGINT      NOT NULL REFERENCES users (id),
+    user_id       BIGINT      NOT NULL REFERENCES "user" (id),
     protocol_id   BIGINT      NOT NULL REFERENCES protocol (id),
     token_id      BIGINT      NOT NULL REFERENCES token (id),
     block_number  BIGINT      NOT NULL,
@@ -128,17 +131,17 @@ CREATE TABLE IF NOT EXISTS borrowers
     UNIQUE (user_id, protocol_id, token_id, block_number, block_version)
 );
 
-CREATE INDEX IF NOT EXISTS idx_borrowers_user ON borrowers (user_id);
-CREATE INDEX IF NOT EXISTS idx_borrowers_protocol ON borrowers (protocol_id);
-CREATE INDEX IF NOT EXISTS idx_borrowers_token ON borrowers (token_id);
-CREATE INDEX IF NOT EXISTS idx_borrowers_block ON borrowers (block_number);
-CREATE INDEX IF NOT EXISTS idx_borrowers_user_protocol ON borrowers (user_id, protocol_id);
-CREATE INDEX IF NOT EXISTS idx_borrowers_block_version ON borrowers (block_number, block_version);
+CREATE INDEX IF NOT EXISTS idx_borrower_user ON borrower (user_id);
+CREATE INDEX IF NOT EXISTS idx_borrower_protocol ON borrower (protocol_id);
+CREATE INDEX IF NOT EXISTS idx_borrower_token ON borrower (token_id);
+CREATE INDEX IF NOT EXISTS idx_borrower_block ON borrower (block_number);
+CREATE INDEX IF NOT EXISTS idx_borrower_user_protocol ON borrower (user_id, protocol_id);
+CREATE INDEX IF NOT EXISTS idx_borrower_block_version ON borrower (block_number, block_version);
 
 CREATE TABLE IF NOT EXISTS borrower_collateral
 (
     id            BIGSERIAL PRIMARY KEY,
-    user_id       BIGINT      NOT NULL REFERENCES users (id),
+    user_id       BIGINT      NOT NULL REFERENCES "user" (id),
     protocol_id   BIGINT      NOT NULL REFERENCES protocol (id),
     token_id      BIGINT      NOT NULL REFERENCES token (id),
     block_number  BIGINT      NOT NULL,
@@ -155,6 +158,60 @@ CREATE INDEX IF NOT EXISTS idx_borrower_collateral_token ON borrower_collateral 
 CREATE INDEX IF NOT EXISTS idx_borrower_collateral_block ON borrower_collateral (block_number);
 CREATE INDEX IF NOT EXISTS idx_borrower_collateral_user_protocol ON borrower_collateral (user_id, protocol_id);
 CREATE INDEX IF NOT EXISTS idx_borrower_collateral_block_version ON borrower_collateral (block_number, block_version);
+
+CREATE TABLE IF NOT EXISTS receipt_token (
+    id BIGSERIAL PRIMARY KEY,
+    protocol_id BIGINT NOT NULL REFERENCES protocol(id),
+    underlying_token_id BIGINT NOT NULL REFERENCES token(id),
+    receipt_token_address BYTEA NOT NULL,
+    symbol VARCHAR(50),
+    created_at_block BIGINT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata JSONB,
+    CONSTRAINT receipt_token_protocol_underlying_unique UNIQUE (protocol_id, underlying_token_id)
+);
+
+CREATE TABLE IF NOT EXISTS debt_token (
+    id BIGSERIAL PRIMARY KEY,
+    protocol_id BIGINT NOT NULL REFERENCES protocol(id),
+    underlying_token_id BIGINT NOT NULL REFERENCES token(id),
+    variable_debt_address BYTEA,
+    stable_debt_address BYTEA,
+    variable_symbol VARCHAR(50),
+    stable_symbol VARCHAR(50),
+    created_at_block BIGINT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata JSONB,
+    CONSTRAINT debt_token_protocol_underlying_unique UNIQUE (protocol_id, underlying_token_id)
+);
+
+CREATE TABLE IF NOT EXISTS sparklend_reserve_data (
+    id BIGSERIAL,
+    protocol_id BIGINT NOT NULL REFERENCES protocol(id),
+    token_id BIGINT NOT NULL REFERENCES token(id),
+    block_number BIGINT NOT NULL,
+    block_version INTEGER NOT NULL DEFAULT 0,
+    unbacked NUMERIC,
+    accrued_to_treasury_scaled NUMERIC,
+    total_a_token NUMERIC,
+    total_stable_debt NUMERIC,
+    total_variable_debt NUMERIC,
+    liquidity_rate NUMERIC,
+    variable_borrow_rate NUMERIC,
+    stable_borrow_rate NUMERIC,
+    average_stable_borrow_rate NUMERIC,
+    liquidity_index NUMERIC,
+    variable_borrow_index NUMERIC,
+    last_update_timestamp BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (id, block_number),
+    CONSTRAINT sparklend_reserve_data_unique UNIQUE (protocol_id, token_id, block_number, block_version)
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'block_number',
+    tsdb.chunk_interval = 100000
+);
+
 
 INSERT INTO chain (chain_id, name)
 VALUES (1, 'Ethereum Mainnet')

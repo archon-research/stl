@@ -3,19 +3,18 @@ package entity
 import (
 	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestNewUser(t *testing.T) {
-	validAddr := make([]byte, 20)
-	for i := range validAddr {
-		validAddr[i] = byte(i)
-	}
+	validAddr := common.HexToAddress("0x0102030405060708090a0b0c0d0e0f1011121314")
 
 	tests := []struct {
 		name           string
 		id             int64
-		chainID        int
-		address        []byte
+		chainID        int64
+		address        common.Address
 		firstSeenBlock int64
 		wantErr        bool
 		errContains    string
@@ -56,24 +55,6 @@ func TestNewUser(t *testing.T) {
 			errContains:    "chainID must be positive",
 		},
 		{
-			name:           "invalid address length - too short",
-			id:             1,
-			chainID:        1,
-			address:        make([]byte, 19),
-			firstSeenBlock: 1000,
-			wantErr:        true,
-			errContains:    "invalid address length",
-		},
-		{
-			name:           "invalid address length - too long",
-			id:             1,
-			chainID:        1,
-			address:        make([]byte, 21),
-			firstSeenBlock: 1000,
-			wantErr:        true,
-			errContains:    "invalid address length",
-		},
-		{
 			name:           "zero firstSeenBlock",
 			id:             1,
 			chainID:        1,
@@ -98,6 +79,15 @@ func TestNewUser(t *testing.T) {
 			address:        validAddr,
 			firstSeenBlock: 5000,
 			wantErr:        false,
+		},
+		{
+			name:           "empty address",
+			id:             1,
+			chainID:        1,
+			address:        common.Address{},
+			firstSeenBlock: 1000,
+			wantErr:        true,
+			errContains:    "address cannot be empty",
 		},
 	}
 
@@ -139,11 +129,7 @@ func TestNewUser(t *testing.T) {
 }
 
 func TestUser_AddressHex(t *testing.T) {
-	addr := make([]byte, 20)
-	for i := range addr {
-		addr[i] = byte(i)
-	}
-
+	addr := common.HexToAddress("0x0102030405060708090a0b0c0d0e0f1011121314")
 	user := &User{Address: addr}
 	hex := user.AddressHex()
 	if hex == "" {
