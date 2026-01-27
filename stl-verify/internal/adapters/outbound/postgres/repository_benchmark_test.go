@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"fmt"
 	"math/big"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
@@ -86,9 +89,11 @@ func setupBenchmarkPostgres(b *testing.B) (*sql.DB, func()) {
 	}
 
 	// Run migrations
-	repo := NewBlockStateRepository(db, nil)
-	if err := repo.Migrate(ctx); err != nil {
-		b.Fatalf("failed to migrate: %v", err)
+	_, currentFile, _, _ := runtime.Caller(0)
+	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../../db/migrations")
+	m := migrator.New(db, migrationsDir)
+	if err := m.ApplyAll(ctx); err != nil {
+		b.Fatalf("failed to apply migrations: %v", err)
 	}
 
 	cleanup := func() {

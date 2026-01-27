@@ -197,17 +197,10 @@ func (s *LiveService) processHeaders(headers <-chan outbound.BlockHeader) {
 			}
 
 			receivedAt := time.Now()
-			blockNum, err := hexutil.ParseInt64(header.Number)
-			if err != nil {
-				s.logger.Warn("failed to parse block number", "error", err)
-				continue
-			}
 
-			// Start prefetching RPC data immediately (runs async while we do state ops)
-			prefetchCh := s.startPrefetch(header, blockNum)
-
-			// Process the block - state ops run while prefetch happens in background
-			if err := s.processBlockWithPrefetch(header, blockNum, receivedAt, prefetchCh); err != nil {
+			// Process the block with prefetch
+			if err := s.processBlockWithPrefetch(header, receivedAt); err != nil {
+				blockNum, _ := hexutil.ParseInt64(header.Number)
 				s.logger.Warn("failed to process live block",
 					"block", blockNum,
 					"hash", header.Hash,
@@ -219,15 +212,16 @@ func (s *LiveService) processHeaders(headers <-chan outbound.BlockHeader) {
 }
 
 // startPrefetch starts an async RPC fetch for a block's data.
+// The provided context should contain trace information so RPC spans are linked to the parent trace.
 // Returns a channel that will receive the result when complete.
-func (s *LiveService) startPrefetch(header outbound.BlockHeader, blockNum int64) <-chan prefetchResult {
+func (s *LiveService) startPrefetch(ctx context.Context, header outbound.BlockHeader, blockNum int64) <-chan prefetchResult {
 	resultCh := make(chan prefetchResult, 1)
 
 	go func() {
 		start := time.Now()
-		ctx := s.ctx // Use service context for cancellation
 
 		// Fetch all data in a single batched HTTP request
+		// Use the provided context which carries trace information
 		bd, err := s.client.GetBlockDataByHash(ctx, blockNum, header.Hash, true)
 
 		resultCh <- prefetchResult{
@@ -245,17 +239,56 @@ func (s *LiveService) startPrefetch(header outbound.BlockHeader, blockNum int64)
 	return resultCh
 }
 
-// stateOpsResult holds the results from processStateOperations.
-type stateOpsResult struct {
-	version int
-	isReorg bool
-	skip    bool // true if block was duplicate and should be skipped
-}
+// processBlockWithPrefetch processes a block with RPC data being fetched concurrently.
+// State operations run while the prefetch happens in the background, then we wait
+// for the prefetch and proceed to cache/publish.
+//
+// Timeline:
+//
+//	t=0ms:  Start prefetch (async), begin state ops
+//	t=30ms: State ops complete, wait for prefetch
+//	t=0-150ms: Prefetch running in background
+//	t=150ms: Prefetch complete (waited ~120ms if state ops took 30ms)
+//	t=200ms: Cache/publish complete
+func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, receivedAt time.Time) error {
+	blockNum, err := hexutil.ParseInt64(header.Number)
+	if err != nil {
+		return fmt.Errorf("failed to parse block number: %w", err)
+	}
 
-// processStateOperations handles dedup checking, reorg detection, and block state persistence.
-// This runs concurrently with data prefetching to minimize total processing time.
-// Returns skip=true if the block is a duplicate and should not be processed further.
-func (s *LiveService) processStateOperations(ctx context.Context, span trace.Span, header outbound.BlockHeader, blockNum int64, receivedAt time.Time) (stateOpsResult, error) {
+	start := time.Now()
+
+	// Start span for the entire block processing FIRST
+	// This ensures the prefetch RPC calls are children of this span
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(s.ctx, "live.processBlock",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("block.number", blockNum),
+			attribute.String("block.hash", header.Hash),
+			attribute.String("block.parent_hash", header.ParentHash),
+			attribute.Bool("block.prefetched", true),
+		),
+	)
+
+	// Create a cancellable context for the prefetch
+	// This allows us to cancel the prefetch if we return early (e.g., duplicate block)
+	prefetchCtx, cancelPrefetch := context.WithCancel(ctx)
+
+	// Start prefetching RPC data immediately with the traced context
+	// This ensures Alchemy RPC spans are linked to this parent span
+	prefetchCh := s.startPrefetch(prefetchCtx, header, blockNum)
+
+	// Ensure we always clean up: cancel prefetch context and end span
+	defer func() {
+		cancelPrefetch()
+		span.SetAttributes(attribute.Int64("block.duration_ms", time.Since(start).Milliseconds()))
+		span.End()
+		s.logger.Info("processBlock completed", "block", blockNum, "duration", time.Since(start))
+	}()
+
+	// === PHASE 1: State Operations (runs while prefetch is in progress) ===
+
 	// Normalize hashes once at the entry point
 	normalizedHash := normalizeHash(header.Hash)
 	normalizedParentHash := normalizeHash(header.ParentHash)
@@ -269,17 +302,21 @@ func (s *LiveService) processStateOperations(ctx context.Context, span trace.Spa
 	// Check if we've already processed this block
 	isDuplicate, err := s.isDuplicateBlock(ctx, normalizedHash, blockNum)
 	if err != nil {
-		return stateOpsResult{}, fmt.Errorf("failed to check for duplicate block: %w", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to check for duplicate block")
+		return fmt.Errorf("failed to check for duplicate block: %w", err)
 	}
 	if isDuplicate {
 		span.SetAttributes(attribute.Bool("block.duplicate", true))
-		return stateOpsResult{skip: true}, nil
+		return nil
 	}
 
 	// Detect reorg BEFORE adding to chain
-	isReorg, reorgDepth, commonAncestor, reorgEvent, err := s.detectReorg(block, receivedAt)
+	isReorg, reorgDepth, commonAncestor, reorgEvent, err := s.detectReorg(ctx, block, receivedAt)
 	if err != nil {
-		return stateOpsResult{}, fmt.Errorf("reorg detection failed: %w", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "reorg detection failed")
+		return fmt.Errorf("reorg detection failed: %w", err)
 	}
 	if isReorg {
 		span.SetAttributes(
@@ -307,95 +344,48 @@ func (s *LiveService) processStateOperations(ctx context.Context, span trace.Spa
 	if isReorg && reorgEvent != nil {
 		version, err = s.stateRepo.HandleReorgAtomic(ctx, commonAncestor, *reorgEvent, state)
 		if err != nil {
-			return stateOpsResult{}, fmt.Errorf("failed to handle reorg atomically: %w", err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to handle reorg atomically")
+			return fmt.Errorf("failed to handle reorg atomically: %w", err)
 		}
-		s.pruneReorgedBlocks(commonAncestor)
+		s.pruneReorgedBlocks(ctx, commonAncestor)
 	} else {
 		version, err = s.stateRepo.SaveBlock(ctx, state)
 		if err != nil {
-			return stateOpsResult{}, fmt.Errorf("failed to save block state: %w", err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to save block state")
+			return fmt.Errorf("failed to save block state: %w", err)
 		}
 	}
 
 	// Add block to in-memory chain AFTER successful DB save
-	s.addBlock(block)
+	s.addBlock(ctx, block)
 
-	return stateOpsResult{version: version, isReorg: isReorg}, nil
-}
+	stateOpsDuration := time.Since(start)
+	span.SetAttributes(attribute.Int64("block.state_ops_ms", stateOpsDuration.Milliseconds()))
 
-// waitForPrefetch waits for the prefetch goroutine to complete and returns the result.
-func (s *LiveService) waitForPrefetch(ctx context.Context, span trace.Span, prefetchCh <-chan prefetchResult, blockNum int64) (outbound.BlockData, error) {
+	// === PHASE 2: Wait for Prefetch (should be mostly done by now) ===
+
 	prefetchWaitStart := time.Now()
 	var prefetch prefetchResult
 	select {
 	case prefetch = <-prefetchCh:
 		// Got the prefetched data
-		prefetchWaitDuration := time.Since(prefetchWaitStart)
-		span.SetAttributes(attribute.Int64("block.prefetch_wait_ms", prefetchWaitDuration.Milliseconds()))
 	case <-ctx.Done():
-		return outbound.BlockData{}, ctx.Err()
+		return ctx.Err()
 	}
+	prefetchWaitDuration := time.Since(prefetchWaitStart)
+	span.SetAttributes(attribute.Int64("block.prefetch_wait_ms", prefetchWaitDuration.Milliseconds()))
 
 	if prefetch.err != nil {
-		return outbound.BlockData{}, fmt.Errorf("failed to fetch block data for block %d: %w", blockNum, prefetch.err)
-	}
-
-	return prefetch.blockData, nil
-}
-
-// processBlockWithPrefetch processes a block with RPC data being fetched concurrently.
-// State operations run while the prefetch happens in the background, then we wait
-// for the prefetch and proceed to cache/publish.
-//
-// Timeline:
-//
-//	t=0ms:  Start prefetch (async), begin state ops
-//	t=30ms: State ops complete, wait for prefetch
-//	t=0-150ms: Prefetch running in background
-//	t=150ms: Prefetch complete (waited ~120ms if state ops took 30ms)
-//	t=200ms: Cache/publish complete
-func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, blockNum int64, receivedAt time.Time, prefetchCh <-chan prefetchResult) error {
-	start := time.Now()
-
-	// Start span for the entire block processing
-	tracer := otel.Tracer(tracerName)
-	ctx, span := tracer.Start(s.ctx, "live.processBlock",
-		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(
-			attribute.Int64("block.number", blockNum),
-			attribute.String("block.hash", header.Hash),
-			attribute.String("block.parent_hash", header.ParentHash),
-			attribute.Bool("block.prefetched", true),
-		),
-	)
-	defer func() {
-		span.SetAttributes(attribute.Int64("block.duration_ms", time.Since(start).Milliseconds()))
-		span.End()
-		s.logger.Info("processBlock completed", "block", blockNum, "duration", time.Since(start))
-	}()
-
-	// State operations: dedup check, reorg detection, DB save (runs while prefetch is in progress)
-	stateResult, err := s.processStateOperations(ctx, span, header, blockNum, receivedAt)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return err
-	}
-	if stateResult.skip {
-		return nil
-	}
-	span.SetAttributes(attribute.Int64("block.state_ops_ms", time.Since(start).Milliseconds()))
-
-	// Wait for prefetch to complete (should be mostly done by now)
-	blockData, err := s.waitForPrefetch(ctx, span, prefetchCh, blockNum)
-	if err != nil {
-		span.RecordError(err)
+		span.RecordError(prefetch.err)
 		span.SetStatus(codes.Error, "prefetch failed")
-		return err
+		return fmt.Errorf("failed to fetch block data for block %d: %w", blockNum, prefetch.err)
 	}
 
-	// Cache and publish block data
-	if err := s.cacheAndPublishBlockData(ctx, header, blockNum, stateResult.version, receivedAt, stateResult.isReorg, blockData); err != nil {
+	// === PHASE 3: Cache and Publish ===
+
+	if err := s.cacheAndPublishBlockData(ctx, header, blockNum, version, receivedAt, isReorg, prefetch.blockData); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to cache and publish block data")
 		return fmt.Errorf("failed to cache and publish block data: %w", err)
@@ -410,11 +400,22 @@ func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, bloc
 // isDuplicateBlock checks if a block has already been processed.
 // It first does a quick in-memory check, then falls back to DB lookup.
 func (s *LiveService) isDuplicateBlock(ctx context.Context, hash string, blockNum int64) (bool, error) {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "live.isDuplicateBlock",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("block.number", blockNum),
+			attribute.String("block.hash", hash),
+		),
+	)
+	defer span.End()
+
 	// Quick in-memory check
 	inMemory := slices.ContainsFunc(s.unfinalizedBlocks, func(b LightBlock) bool {
 		return b.Hash == hash
 	})
 	if inMemory {
+		span.SetAttributes(attribute.Bool("duplicate.in_memory", true))
 		s.logger.Debug("duplicate block, skipping", "block", blockNum)
 		return true, nil
 	}
@@ -422,66 +423,33 @@ func (s *LiveService) isDuplicateBlock(ctx context.Context, hash string, blockNu
 	// Also check DB for duplicates (backfill may have processed this block)
 	existing, err := s.stateRepo.GetBlockByHash(ctx, hash)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to check DB for duplicate")
 		return false, fmt.Errorf("failed to check DB for duplicate: %w", err)
 	}
 	if existing != nil {
+		span.SetAttributes(attribute.Bool("duplicate.in_db", true))
 		s.logger.Debug("block already in DB, skipping", "block", blockNum)
 		return true, nil
 	}
 
+	span.SetAttributes(attribute.Bool("duplicate", false))
 	return false, nil
 }
 
-// processBlock handles a single block: dedup, reorg detection, state tracking, data fetching, publishing.
-func (s *LiveService) processBlock(header outbound.BlockHeader, receivedAt time.Time) error {
-	start := time.Now()
-	blockNum, err := hexutil.ParseInt64(header.Number)
-	if err != nil {
-		return fmt.Errorf("failed to parse block number: %w", err)
-	}
-
-	// Start span for the entire block processing
+// addBlock adds a block to the in-memory unfinalized chain.
+func (s *LiveService) addBlock(ctx context.Context, block LightBlock) {
 	tracer := otel.Tracer(tracerName)
-	ctx, span := tracer.Start(s.ctx, "live.processBlock",
+	_, span := tracer.Start(ctx, "live.addBlock",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
-			attribute.Int64("block.number", blockNum),
-			attribute.String("block.hash", header.Hash),
-			attribute.String("block.parent_hash", header.ParentHash),
+			attribute.Int64("block.number", block.Number),
+			attribute.String("block.hash", block.Hash),
+			attribute.Int("chain.size_before", len(s.unfinalizedBlocks)),
 		),
 	)
-	defer func() {
-		span.SetAttributes(attribute.Int64("block.duration_ms", time.Since(start).Milliseconds()))
-		span.End()
-		s.logger.Info("processBlock completed", "block", blockNum, "duration", time.Since(start))
-	}()
+	defer span.End()
 
-	// State operations: dedup check, reorg detection, DB save
-	stateResult, err := s.processStateOperations(ctx, span, header, blockNum, receivedAt)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return err
-	}
-	if stateResult.skip {
-		return nil
-	}
-
-	// Fetch all data types concurrently, cache, and publish events
-	if err := s.fetchAndPublishBlockData(ctx, header, blockNum, stateResult.version, receivedAt, stateResult.isReorg); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to fetch and publish block data")
-		return fmt.Errorf("failed to fetch and publish block data: %w", err)
-	}
-
-	// Update finalized block pointer after successful publishing
-	s.updateFinalizedBlock(blockNum)
-
-	return nil
-}
-
-// addBlock adds a block to the in-memory unfinalized chain.
-func (s *LiveService) addBlock(block LightBlock) {
 	// Sorted insert by block number
 	insertIdx := len(s.unfinalizedBlocks)
 	for i, b := range s.unfinalizedBlocks {
@@ -494,62 +462,118 @@ func (s *LiveService) addBlock(block LightBlock) {
 	s.unfinalizedBlocks = slices.Insert(s.unfinalizedBlocks, insertIdx, block)
 
 	// Trim to max size
+	trimmed := false
 	if len(s.unfinalizedBlocks) > s.config.MaxUnfinalizedBlocks {
 		s.unfinalizedBlocks = s.unfinalizedBlocks[1:]
+		trimmed = true
 	}
+
+	span.SetAttributes(
+		attribute.Int("chain.size_after", len(s.unfinalizedBlocks)),
+		attribute.Bool("chain.trimmed", trimmed),
+	)
 }
 
 // pruneReorgedBlocks removes blocks above the common ancestor from the in-memory chain.
 // This should only be called AFTER the reorg has been successfully persisted to the database.
-func (s *LiveService) pruneReorgedBlocks(commonAncestor int64) {
+func (s *LiveService) pruneReorgedBlocks(ctx context.Context, commonAncestor int64) {
+	tracer := otel.Tracer(tracerName)
+	_, span := tracer.Start(ctx, "live.pruneReorgedBlocks",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("reorg.common_ancestor", commonAncestor),
+			attribute.Int("chain.size_before", len(s.unfinalizedBlocks)),
+		),
+	)
+	defer span.End()
+
+	prunedCount := 0
 	newChain := make([]LightBlock, 0, len(s.unfinalizedBlocks))
 	for _, b := range s.unfinalizedBlocks {
 		if b.Number <= commonAncestor {
 			newChain = append(newChain, b)
+		} else {
+			prunedCount++
 		}
 	}
 	s.unfinalizedBlocks = newChain
+
+	span.SetAttributes(
+		attribute.Int("chain.size_after", len(s.unfinalizedBlocks)),
+		attribute.Int("chain.pruned_count", prunedCount),
+	)
 }
 
 // detectReorg detects chain reorganizations using Ponder-style parent hash chain validation.
 // Returns: isReorg, reorgDepth, commonAncestor, reorgEvent (if reorg), error
-func (s *LiveService) detectReorg(block LightBlock, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, error) {
+func (s *LiveService) detectReorg(ctx context.Context, block LightBlock, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, error) {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "live.detectReorg",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("block.number", block.Number),
+			attribute.String("block.hash", block.Hash),
+			attribute.String("block.parent_hash", block.ParentHash),
+			attribute.Int("chain.unfinalized_count", len(s.unfinalizedBlocks)),
+		),
+	)
+	defer span.End()
+
 	if len(s.unfinalizedBlocks) == 0 {
+		span.SetAttributes(attribute.Bool("reorg.detected", false))
 		return false, 0, 0, nil, nil
 	}
 
 	latestBlock := s.unfinalizedBlocks[len(s.unfinalizedBlocks)-1]
+	span.SetAttributes(
+		attribute.Int64("chain.latest_block", latestBlock.Number),
+		attribute.String("chain.latest_hash", latestBlock.Hash),
+	)
 
 	// Block number decreased - definite reorg
 	if block.Number <= latestBlock.Number {
-		return s.handleReorg(block, receivedAt)
+		return s.handleReorg(ctx, block, receivedAt)
 	}
 
 	// Block is exactly one ahead - check parent hash
 	if block.Number == latestBlock.Number+1 {
 		if block.ParentHash == latestBlock.Hash {
+			span.SetAttributes(attribute.Bool("reorg.detected", false))
 			return false, 0, 0, nil, nil
 		}
 		// Parent hash mismatch - reorg
-		return s.handleReorg(block, receivedAt)
+		return s.handleReorg(ctx, block, receivedAt)
 	}
 
 	// Gap in blocks - will be backfilled by BackfillService
+	span.SetAttributes(
+		attribute.Bool("reorg.detected", false),
+		attribute.Bool("block.gap", true),
+	)
 	return false, 0, 0, nil, nil
 }
 
 // handleReorg processes a detected reorg and returns the reorg event for atomic handling.
 // The actual database operations (save reorg event, mark orphans, save new block) are
 // done atomically in processBlock via HandleReorgAtomic.
-func (s *LiveService) handleReorg(block LightBlock, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, error) {
-	ctx := s.ctx
+func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, error) {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "live.handleReorg",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("block.number", block.Number),
+			attribute.String("block.hash", block.Hash),
+		),
+	)
+	defer span.End()
 
 	// Walk back to find common ancestor
 	// Start with the incoming block (already normalized), then walk to its parent each iteration
 	walkBlock := block
 
 	var commonAncestor int64 = -1
-	for walkCount := 0; walkCount < s.config.FinalityBlockCount; walkCount++ {
+	walkCount := 0
+	for walkCount = 0; walkCount < s.config.FinalityBlockCount; walkCount++ {
 		// Check if parent matches our chain
 		for _, b := range s.unfinalizedBlocks {
 			if b.Hash == walkBlock.ParentHash {
@@ -563,13 +587,18 @@ func (s *LiveService) handleReorg(block LightBlock, receivedAt time.Time) (bool,
 
 		// Check finality boundary
 		if s.finalizedBlock != nil && walkBlock.Number <= s.finalizedBlock.Number {
-			return false, 0, 0, nil, fmt.Errorf("block %d is at or below finalized block %d (likely late arrival after pruning)",
+			err := fmt.Errorf("block %d is at or below finalized block %d (likely late arrival after pruning)",
 				walkBlock.Number, s.finalizedBlock.Number)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "block below finality")
+			return false, 0, 0, nil, err
 		}
 
 		// Fetch parent from network
 		parentHeader, err := s.client.GetBlockByHash(ctx, walkBlock.ParentHash, false)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to fetch parent block")
 			return false, 0, 0, nil, fmt.Errorf("failed to fetch parent block %s during reorg walk: %w", walkBlock.ParentHash, err)
 		}
 
@@ -577,6 +606,8 @@ func (s *LiveService) handleReorg(block LightBlock, receivedAt time.Time) (bool,
 		// Normalize RPC response at the point of ingestion
 		parentNum, err := hexutil.ParseInt64(parentHeader.Number)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to parse parent block number")
 			return false, 0, 0, nil, fmt.Errorf("failed to parse parent block number %q: %w", parentHeader.Number, err)
 		}
 		walkBlock = LightBlock{
@@ -585,8 +616,13 @@ func (s *LiveService) handleReorg(block LightBlock, receivedAt time.Time) (bool,
 		}
 	}
 
+	span.SetAttributes(attribute.Int("reorg.walk_count", walkCount))
+
 	if commonAncestor < 0 {
-		return false, 0, 0, nil, fmt.Errorf("no common ancestor found after walking %d blocks (chain diverged beyond finality window)", s.config.FinalityBlockCount)
+		err := fmt.Errorf("no common ancestor found after walking %d blocks (chain diverged beyond finality window)", s.config.FinalityBlockCount)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "no common ancestor found")
+		return false, 0, 0, nil, err
 	}
 
 	// Collect all blocks that will be orphaned (blocks > commonAncestor)
@@ -597,6 +633,13 @@ func (s *LiveService) handleReorg(block LightBlock, receivedAt time.Time) (bool,
 		}
 	}
 	reorgDepth := len(orphanedBlocks)
+
+	span.SetAttributes(
+		attribute.Bool("reorg.detected", true),
+		attribute.Int("reorg.depth", reorgDepth),
+		attribute.Int64("reorg.common_ancestor", commonAncestor),
+		attribute.Int("reorg.orphaned_count", len(orphanedBlocks)),
+	)
 
 	// NOTE: We do NOT prune the in-memory chain here.
 	// The pruning happens in processBlock AFTER successful HandleReorgAtomic.
@@ -699,39 +742,84 @@ func (s *LiveService) restoreInMemoryChain() error {
 // caches them in parallel, and publishes a single block event only after all data has been successfully cached.
 // Fetching by hash is TOCTOU-safe - it ensures we get data for the exact block we received.
 func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbound.BlockHeader, blockNum int64, version int, receivedAt time.Time, isReorg bool) error {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "live.fetchAndPublishBlockData",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("block.number", blockNum),
+			attribute.String("block.hash", header.Hash),
+			attribute.Int("block.version", version),
+		),
+	)
+	defer span.End()
+
 	chainID := s.config.ChainID
 	blockHash := header.Hash
 	parentHash := header.ParentHash
 	blockTimestamp, err := hexutil.ParseInt64(header.Timestamp)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to parse block timestamp")
 		return fmt.Errorf("failed to parse block timestamp %q for block %d: %w", header.Timestamp, blockNum, err)
 	}
 
-	start := time.Now()
-
 	// Fetch all data in a single batched HTTP request (by hash for TOCTOU safety)
-	bd, err := s.client.GetBlockDataByHash(ctx, blockNum, blockHash, true)
+	fetchCtx, fetchSpan := tracer.Start(ctx, "live.fetchBlockData",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.Int64("block.number", blockNum),
+			attribute.String("block.hash", blockHash),
+		),
+	)
+	fetchStart := time.Now()
+
+	bd, err := s.client.GetBlockDataByHash(fetchCtx, blockNum, blockHash, true)
+	fetchDuration := time.Since(fetchStart)
+	fetchSpan.SetAttributes(attribute.Int64("fetch.duration_ms", fetchDuration.Milliseconds()))
 	if err != nil {
+		fetchSpan.RecordError(err)
+		fetchSpan.SetStatus(codes.Error, "failed to fetch block data")
+		fetchSpan.End()
 		return fmt.Errorf("failed to fetch block data for block %d: %w", blockNum, err)
 	}
+	fetchSpan.End()
 
-	s.logger.Debug("fetched block data", "block", blockNum, "duration", time.Since(start))
+	s.logger.Debug("fetched block data", "block", blockNum, "duration", fetchDuration)
 
 	// Check for fetch errors before caching
 	if bd.BlockErr != nil {
+		span.RecordError(bd.BlockErr)
+		span.SetStatus(codes.Error, "block fetch error")
 		return fmt.Errorf("failed to fetch block %d: %w", blockNum, bd.BlockErr)
 	}
 	if bd.ReceiptsErr != nil {
+		span.RecordError(bd.ReceiptsErr)
+		span.SetStatus(codes.Error, "receipts fetch error")
 		return fmt.Errorf("failed to fetch receipts for block %d: %w", blockNum, bd.ReceiptsErr)
 	}
 	if bd.TracesErr != nil {
+		span.RecordError(bd.TracesErr)
+		span.SetStatus(codes.Error, "traces fetch error")
 		return fmt.Errorf("failed to fetch traces for block %d: %w", blockNum, bd.TracesErr)
 	}
 	if s.config.EnableBlobs && bd.BlobsErr != nil {
+		span.RecordError(bd.BlobsErr)
+		span.SetStatus(codes.Error, "blobs fetch error")
 		return fmt.Errorf("failed to fetch blobs for block %d: %w", blockNum, bd.BlobsErr)
 	}
 
-	// Cache all data types in parallel
+	// Cache all data types in parallel - create a child span for the cache operation
+	cacheCtx, cacheSpan := tracer.Start(ctx, "live.cacheBlockData",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("block.number", blockNum),
+			attribute.Int64("chain.id", chainID),
+			attribute.Int("block.version", version),
+			attribute.Bool("blobs.enabled", s.config.EnableBlobs),
+		),
+	)
+	cacheStart := time.Now()
+
 	numWorkers := 3
 	if s.config.EnableBlobs {
 		numWorkers = 4
@@ -739,34 +827,90 @@ func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbo
 	errCh := make(chan error, numWorkers)
 
 	go func() {
-		if err := s.cache.SetBlock(ctx, chainID, blockNum, version, bd.Block); err != nil {
+		_, blockSpan := tracer.Start(cacheCtx, "live.cacheBlock",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(
+				attribute.Int64("block.number", blockNum),
+				attribute.String("cache.type", "block"),
+			),
+		)
+		start := time.Now()
+		err := s.cache.SetBlock(cacheCtx, chainID, blockNum, version, bd.Block)
+		blockSpan.SetAttributes(attribute.Int64("cache.duration_ms", time.Since(start).Milliseconds()))
+		if err != nil {
+			blockSpan.RecordError(err)
+			blockSpan.SetStatus(codes.Error, "failed to cache block")
+			blockSpan.End()
 			errCh <- fmt.Errorf("failed to cache block %d: %w", blockNum, err)
 		} else {
+			blockSpan.End()
 			errCh <- nil
 		}
 	}()
 
 	go func() {
-		if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, bd.Receipts); err != nil {
+		_, receiptsSpan := tracer.Start(cacheCtx, "live.cacheReceipts",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(
+				attribute.Int64("block.number", blockNum),
+				attribute.String("cache.type", "receipts"),
+			),
+		)
+		start := time.Now()
+		err := s.cache.SetReceipts(cacheCtx, chainID, blockNum, version, bd.Receipts)
+		receiptsSpan.SetAttributes(attribute.Int64("cache.duration_ms", time.Since(start).Milliseconds()))
+		if err != nil {
+			receiptsSpan.RecordError(err)
+			receiptsSpan.SetStatus(codes.Error, "failed to cache receipts")
+			receiptsSpan.End()
 			errCh <- fmt.Errorf("failed to cache receipts for block %d: %w", blockNum, err)
 		} else {
+			receiptsSpan.End()
 			errCh <- nil
 		}
 	}()
 
 	go func() {
-		if err := s.cache.SetTraces(ctx, chainID, blockNum, version, bd.Traces); err != nil {
+		_, tracesSpan := tracer.Start(cacheCtx, "live.cacheTraces",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(
+				attribute.Int64("block.number", blockNum),
+				attribute.String("cache.type", "traces"),
+			),
+		)
+		start := time.Now()
+		err := s.cache.SetTraces(cacheCtx, chainID, blockNum, version, bd.Traces)
+		tracesSpan.SetAttributes(attribute.Int64("cache.duration_ms", time.Since(start).Milliseconds()))
+		if err != nil {
+			tracesSpan.RecordError(err)
+			tracesSpan.SetStatus(codes.Error, "failed to cache traces")
+			tracesSpan.End()
 			errCh <- fmt.Errorf("failed to cache traces for block %d: %w", blockNum, err)
 		} else {
+			tracesSpan.End()
 			errCh <- nil
 		}
 	}()
 
 	if s.config.EnableBlobs {
 		go func() {
-			if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, bd.Blobs); err != nil {
+			_, blobsSpan := tracer.Start(cacheCtx, "live.cacheBlobs",
+				trace.WithSpanKind(trace.SpanKindInternal),
+				trace.WithAttributes(
+					attribute.Int64("block.number", blockNum),
+					attribute.String("cache.type", "blobs"),
+				),
+			)
+			start := time.Now()
+			err := s.cache.SetBlobs(cacheCtx, chainID, blockNum, version, bd.Blobs)
+			blobsSpan.SetAttributes(attribute.Int64("cache.duration_ms", time.Since(start).Milliseconds()))
+			if err != nil {
+				blobsSpan.RecordError(err)
+				blobsSpan.SetStatus(codes.Error, "failed to cache blobs")
+				blobsSpan.End()
 				errCh <- fmt.Errorf("failed to cache blobs for block %d: %w", blockNum, err)
 			} else {
+				blobsSpan.End()
 				errCh <- nil
 			}
 		}()
@@ -780,17 +924,37 @@ func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbo
 		}
 	}
 
+	cacheDuration := time.Since(cacheStart)
+	cacheSpan.SetAttributes(attribute.Int64("cache.duration_ms", cacheDuration.Milliseconds()))
+
 	if len(errs) > 0 {
+		cacheSpan.RecordError(errors.Join(errs...))
+		cacheSpan.SetStatus(codes.Error, "failed to cache block data")
+		cacheSpan.End()
 		return errors.Join(errs...)
 	}
+	cacheSpan.End()
 
-	s.logger.Debug("cached all block data", "block", blockNum, "duration", time.Since(start))
+	s.logger.Debug("cached all block data", "block", blockNum, "duration", time.Since(fetchStart))
 
 	// All data cached successfully - now publish the block event
 	return s.publishBlockEvent(ctx, chainID, blockNum, version, blockHash, parentHash, blockTimestamp, receivedAt, isReorg)
 }
 
 func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum int64, version int, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg bool) error {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "live.publishBlockEvent",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("block.number", blockNum),
+			attribute.String("block.hash", blockHash),
+			attribute.Int64("chain.id", chainID),
+			attribute.Int("block.version", version),
+			attribute.Bool("block.is_reorg", isReorg),
+		),
+	)
+	defer span.End()
+
 	event := outbound.BlockEvent{
 		ChainID:        chainID,
 		BlockNumber:    blockNum,
@@ -805,16 +969,21 @@ func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum i
 
 	snsStart := time.Now()
 	if err := s.eventSink.Publish(ctx, event); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to publish block event")
 		return fmt.Errorf("failed to publish block event for block %d: %w", blockNum, err)
 	}
 	snsDuration := time.Since(snsStart)
+	span.SetAttributes(attribute.Int64("sns.duration_ms", snsDuration.Milliseconds()))
 
 	// Mark block publish as complete in DB for crash recovery
 	dbStart := time.Now()
 	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlock); err != nil {
 		s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
+		// Note: We don't fail here as the publish already succeeded
 	}
 	dbDuration := time.Since(dbStart)
+	span.SetAttributes(attribute.Int64("db.mark_complete_duration_ms", dbDuration.Milliseconds()))
 
 	s.logger.Debug("published block event", "block", blockNum, "sns_ms", snsDuration.Milliseconds(), "db_mark_ms", dbDuration.Milliseconds())
 
@@ -824,29 +993,60 @@ func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum i
 // cacheAndPublishBlockData caches prefetched block data and publishes the event.
 // This is the optimized version that skips the RPC fetch (data already prefetched).
 func (s *LiveService) cacheAndPublishBlockData(ctx context.Context, header outbound.BlockHeader, blockNum int64, version int, receivedAt time.Time, isReorg bool, bd outbound.BlockData) error {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "live.cacheAndPublishBlockData",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("block.number", blockNum),
+			attribute.String("block.hash", header.Hash),
+			attribute.Int("block.version", version),
+		),
+	)
+	defer span.End()
+
 	chainID := s.config.ChainID
 	blockHash := header.Hash
 	parentHash := header.ParentHash
 	blockTimestamp, err := hexutil.ParseInt64(header.Timestamp)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to parse block timestamp")
 		return fmt.Errorf("failed to parse block timestamp %q for block %d: %w", header.Timestamp, blockNum, err)
 	}
 
-	cacheStart := time.Now()
-
 	// Check for fetch errors before caching
 	if bd.BlockErr != nil {
+		span.RecordError(bd.BlockErr)
+		span.SetStatus(codes.Error, "block fetch error")
 		return fmt.Errorf("failed to fetch block %d: %w", blockNum, bd.BlockErr)
 	}
 	if bd.ReceiptsErr != nil {
+		span.RecordError(bd.ReceiptsErr)
+		span.SetStatus(codes.Error, "receipts fetch error")
 		return fmt.Errorf("failed to fetch receipts for block %d: %w", blockNum, bd.ReceiptsErr)
 	}
 	if bd.TracesErr != nil {
+		span.RecordError(bd.TracesErr)
+		span.SetStatus(codes.Error, "traces fetch error")
 		return fmt.Errorf("failed to fetch traces for block %d: %w", blockNum, bd.TracesErr)
 	}
 	if s.config.EnableBlobs && bd.BlobsErr != nil {
+		span.RecordError(bd.BlobsErr)
+		span.SetStatus(codes.Error, "blobs fetch error")
 		return fmt.Errorf("failed to fetch blobs for block %d: %w", blockNum, bd.BlobsErr)
 	}
+
+	// Cache all data types - create a child span for the cache operation
+	cacheCtx, cacheSpan := tracer.Start(ctx, "live.cacheBlockData",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("block.number", blockNum),
+			attribute.Int64("chain.id", chainID),
+			attribute.Int("block.version", version),
+			attribute.Bool("blobs.enabled", s.config.EnableBlobs),
+		),
+	)
+	cacheStart := time.Now()
 
 	// Cache all data types in a single pipelined operation (single network round-trip)
 	cacheInput := outbound.BlockDataInput{
@@ -858,11 +1058,16 @@ func (s *LiveService) cacheAndPublishBlockData(ctx context.Context, header outbo
 		cacheInput.Blobs = bd.Blobs
 	}
 
-	if err := s.cache.SetBlockData(ctx, chainID, blockNum, version, cacheInput); err != nil {
+	if err := s.cache.SetBlockData(cacheCtx, chainID, blockNum, version, cacheInput); err != nil {
+		cacheSpan.RecordError(err)
+		cacheSpan.SetStatus(codes.Error, "failed to cache block data")
+		cacheSpan.End()
 		return fmt.Errorf("failed to cache block data for block %d: %w", blockNum, err)
 	}
 
 	cacheDuration := time.Since(cacheStart)
+	cacheSpan.SetAttributes(attribute.Int64("cache.duration_ms", cacheDuration.Milliseconds()))
+	cacheSpan.End()
 	s.logger.Debug("cached all block data", "block", blockNum, "cache_ms", cacheDuration.Milliseconds())
 
 	// All data cached successfully - now publish the block event
