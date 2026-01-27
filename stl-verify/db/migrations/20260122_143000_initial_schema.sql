@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS "user"
 
 CREATE INDEX IF NOT EXISTS idx_user_chain_address ON "user" (chain_id, address);
 
-CREATE TABLE IF NOT EXISTS borrowers
+CREATE TABLE IF NOT EXISTS borrower
 (
     id            BIGSERIAL PRIMARY KEY,
     user_id       BIGINT      NOT NULL REFERENCES "user" (id),
@@ -131,12 +131,12 @@ CREATE TABLE IF NOT EXISTS borrowers
     UNIQUE (user_id, protocol_id, token_id, block_number, block_version)
 );
 
-CREATE INDEX IF NOT EXISTS idx_borrowers_user ON borrowers (user_id);
-CREATE INDEX IF NOT EXISTS idx_borrowers_protocol ON borrowers (protocol_id);
-CREATE INDEX IF NOT EXISTS idx_borrowers_token ON borrowers (token_id);
-CREATE INDEX IF NOT EXISTS idx_borrowers_block ON borrowers (block_number);
-CREATE INDEX IF NOT EXISTS idx_borrowers_user_protocol ON borrowers (user_id, protocol_id);
-CREATE INDEX IF NOT EXISTS idx_borrowers_block_version ON borrowers (block_number, block_version);
+CREATE INDEX IF NOT EXISTS idx_borrower_user ON borrower (user_id);
+CREATE INDEX IF NOT EXISTS idx_borrower_protocol ON borrower (protocol_id);
+CREATE INDEX IF NOT EXISTS idx_borrower_token ON borrower (token_id);
+CREATE INDEX IF NOT EXISTS idx_borrower_block ON borrower (block_number);
+CREATE INDEX IF NOT EXISTS idx_borrower_user_protocol ON borrower (user_id, protocol_id);
+CREATE INDEX IF NOT EXISTS idx_borrower_block_version ON borrower (block_number, block_version);
 
 CREATE TABLE IF NOT EXISTS borrower_collateral
 (

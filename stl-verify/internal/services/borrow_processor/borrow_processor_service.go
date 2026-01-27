@@ -2,7 +2,6 @@ package borrow_processor
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -538,7 +538,7 @@ func (s *Service) extractCollateralData(ctx context.Context, user common.Address
 }
 
 func (s *Service) saveBorrowEvent(ctx context.Context, borrowEvent *BorrowEventData, collaterals []CollateralData, borrowTokenMetadata TokenMetadata, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
-	err := s.txManager.WithTransaction(ctx, func(tx *sql.Tx) error {
+	err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		userID, err := s.userRepo.GetOrCreateUserWithTX(ctx, tx, entity.User{
 			ChainID:        chainID,
 			Address:        borrowEvent.OnBehalfOf,

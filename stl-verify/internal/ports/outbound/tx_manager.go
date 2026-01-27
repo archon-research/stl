@@ -2,7 +2,8 @@ package outbound
 
 import (
 	"context"
-	"database/sql"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // TxManager defines the interface for database transaction management.
@@ -17,5 +18,5 @@ type TxManager interface {
 	// If fn returns an error, the transaction is rolled back.
 	// If fn succeeds, the transaction is committed.
 	// This is the preferred method for most use cases.
-	WithTransaction(ctx context.Context, fn func(tx *sql.Tx) error) error
+	WithTransaction(ctx context.Context, fn func(tx pgx.Tx) error) error
 }

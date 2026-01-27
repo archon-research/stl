@@ -2,10 +2,11 @@ package outbound
 
 import (
 	"context"
-	"database/sql"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/ethereum/go-ethereum/common"
 )
 
 // TokenRepository defines the interface for token-related data persistence.
@@ -25,5 +26,5 @@ type TokenRepository interface {
 
 	// GetOrCreateTokenWithTX retrieves a token by address or creates it if it doesn't exist.
 	// This method participates in an external transaction.
-	GetOrCreateTokenWithTX(ctx context.Context, tx *sql.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error)
+	GetOrCreateTokenWithTX(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error)
 }

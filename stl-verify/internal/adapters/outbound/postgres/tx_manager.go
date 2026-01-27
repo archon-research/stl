@@ -3,9 +3,11 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -18,8 +20,8 @@ var _ outbound.TxManager = (*TxManager)(nil)
 //
 // Usage:
 //
-//	txm := postgres.NewTxManager(db, logger)
-//	err := txm.WithTransaction(ctx, func(tx *sql.Tx) error {
+//	txm := postgres.NewTxManager(pool, logger)
+//	err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 //	    userID, err := userRepo.GetOrCreateUserWithTX(ctx, tx, user)
 //	    if err != nil {
 //	        return err // triggers rollback
@@ -27,33 +29,34 @@ var _ outbound.TxManager = (*TxManager)(nil)
 //	    return tokenRepo.UpsertTokenWithTX(ctx, tx, token)
 //	})
 type TxManager struct {
-	db     *sql.DB
+	pool   *pgxpool.Pool
 	logger *slog.Logger
 }
 
 // NewTxManager creates a new transaction manager.
-// Returns an error if the database connection is nil.
-func NewTxManager(db *sql.DB, logger *slog.Logger) (*TxManager, error) {
-	if db == nil {
-		return nil, fmt.Errorf("database connection cannot be nil")
+// Returns an error if the pool is nil.
+func NewTxManager(pool *pgxpool.Pool, logger *slog.Logger) (*TxManager, error) {
+	if pool == nil {
+		return nil, fmt.Errorf("database pool cannot be nil")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &TxManager{
-		db:     db,
+		pool:   pool,
 		logger: logger,
 	}, nil
 }
 
 // TxOptions configures transaction behavior.
 type TxOptions struct {
-	// Isolation sets the transaction isolation level.
+	// IsoLevel sets the transaction isolation level.
 	// Default: uses database default (typically ReadCommitted).
-	Isolation sql.IsolationLevel
-	// ReadOnly marks the transaction as read-only.
-	// Some databases can optimize read-only transactions.
-	ReadOnly bool
+	IsoLevel pgx.TxIsoLevel
+	// AccessMode sets the transaction access mode (ReadWrite or ReadOnly).
+	AccessMode pgx.TxAccessMode
+	// DeferrableMode sets the transaction deferrable mode.
+	DeferrableMode pgx.TxDeferrableMode
 }
 
 // WithTransaction executes fn within a database transaction.
@@ -64,21 +67,22 @@ type TxOptions struct {
 //   - fn returns an error
 //   - fn panics (panic is re-raised after rollback)
 //   - commit fails
-func (m *TxManager) WithTransaction(ctx context.Context, fn func(tx *sql.Tx) error) error {
+func (m *TxManager) WithTransaction(ctx context.Context, fn func(tx pgx.Tx) error) error {
 	return m.WithTransactionOptions(ctx, nil, fn)
 }
 
 // WithTransactionOptions executes fn within a database transaction with custom options.
-func (m *TxManager) WithTransactionOptions(ctx context.Context, opts *TxOptions, fn func(tx *sql.Tx) error) error {
-	var txOpts *sql.TxOptions
+func (m *TxManager) WithTransactionOptions(ctx context.Context, opts *TxOptions, fn func(tx pgx.Tx) error) error {
+	var txOpts pgx.TxOptions
 	if opts != nil {
-		txOpts = &sql.TxOptions{
-			Isolation: opts.Isolation,
-			ReadOnly:  opts.ReadOnly,
+		txOpts = pgx.TxOptions{
+			IsoLevel:       opts.IsoLevel,
+			AccessMode:     opts.AccessMode,
+			DeferrableMode: opts.DeferrableMode,
 		}
 	}
 
-	tx, err := m.db.BeginTx(ctx, txOpts)
+	tx, err := m.pool.BeginTx(ctx, txOpts)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -86,7 +90,7 @@ func (m *TxManager) WithTransactionOptions(ctx context.Context, opts *TxOptions,
 	// Handle panic by rolling back and re-raising
 	defer func() {
 		if p := recover(); p != nil {
-			if rbErr := tx.Rollback(); rbErr != nil {
+			if rbErr := tx.Rollback(ctx); rbErr != nil {
 				m.logger.Error("failed to rollback transaction after panic", "error", rbErr)
 			}
 			panic(p)
@@ -94,13 +98,13 @@ func (m *TxManager) WithTransactionOptions(ctx context.Context, opts *TxOptions,
 	}()
 
 	if err := fn(tx); err != nil {
-		if rbErr := tx.Rollback(); rbErr != nil {
+		if rbErr := tx.Rollback(ctx); rbErr != nil {
 			m.logger.Error("failed to rollback transaction", "error", rbErr, "originalError", err)
 		}
 		return err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 

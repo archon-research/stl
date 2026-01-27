@@ -177,18 +177,14 @@ func main() {
 	postgresURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
 
 	// Set up PostgreSQL connection pool for block state tracking
-	db, err := postgres.OpenDB(ctx, postgres.DefaultDBConfig(postgresURL))
+	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(postgresURL))
 	if err != nil {
 		logger.Error("failed to connect to PostgreSQL", "error", err)
 		os.Exit(1)
 	}
-	defer func() {
-		if err := db.Close(); err != nil {
-			logger.Error("failed to close database connection", "error", err)
-		}
-	}()
+	defer pool.Close()
 
-	blockStateRepo := postgres.NewBlockStateRepository(db, logger)
+	blockStateRepo := postgres.NewBlockStateRepository(pool, logger)
 
 	logger.Info("PostgreSQL connected, block state tracking enabled")
 

@@ -2,10 +2,12 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -16,20 +18,20 @@ var _ outbound.PositionRepository = (*PositionRepository)(nil)
 
 // PositionRepository is a PostgreSQL implementation of the outbound.PositionRepository port.
 type PositionRepository struct {
-	db        *sql.DB
+	pool      *pgxpool.Pool
 	logger    *slog.Logger
 	batchSize int
 }
 
 // NewPositionRepository creates a new PostgreSQL Position repository.
 // If batchSize is <= 0, the default batch size from DefaultRepositoryConfig() is used.
-// Returns an error if the database connection is nil.
+// Returns an error if the database pool is nil.
 //
 // Note: This function does not verify that the database connection is alive.
-// Use a separate health check or call db.Ping() if connection validation is needed.
-func NewPositionRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*PositionRepository, error) {
-	if db == nil {
-		return nil, fmt.Errorf("database connection cannot be nil")
+// Use a separate health check or call pool.Ping() if connection validation is needed.
+func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (*PositionRepository, error) {
+	if pool == nil {
+		return nil, fmt.Errorf("database pool cannot be nil")
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -38,7 +40,7 @@ func NewPositionRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*Pos
 		batchSize = DefaultRepositoryConfig().PositionBatchSize
 	}
 	return &PositionRepository{
-		db:        db,
+		pool:      pool,
 		logger:    logger,
 		batchSize: batchSize,
 	}, nil
@@ -46,8 +48,8 @@ func NewPositionRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*Pos
 
 // SaveBorrowerWithTX saves a single borrower (debt) position record within an external transaction.
 // Uses upsert semantics: ON CONFLICT updates the existing record.
-func (r *PositionRepository) SaveBorrowerWithTX(ctx context.Context, tx *sql.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount string) error {
-	_, err := tx.ExecContext(ctx,
+func (r *PositionRepository) SaveBorrowerWithTX(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount string) error {
+	_, err := tx.Exec(ctx,
 		`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change)
 		 VALUES ($1, $2, $3, $4, $5, $6, $6)
 		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version)
@@ -62,8 +64,8 @@ func (r *PositionRepository) SaveBorrowerWithTX(ctx context.Context, tx *sql.Tx,
 
 // SaveBorrowerCollateralWithTX saves a single collateral position record within an external transaction.
 // Uses upsert semantics: ON CONFLICT updates the existing record.
-func (r *PositionRepository) SaveBorrowerCollateralWithTX(ctx context.Context, tx *sql.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount string) error {
-	_, err := tx.ExecContext(ctx,
+func (r *PositionRepository) SaveBorrowerCollateralWithTX(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount string) error {
+	_, err := tx.Exec(ctx,
 		`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change)
 		 VALUES ($1, $2, $3, $4, $5, $6, $6)
 		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version)
@@ -83,11 +85,11 @@ func (r *PositionRepository) UpsertBorrowers(ctx context.Context, borrowers []*e
 		return nil
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer rollback(tx, r.logger)
+	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(borrowers); i += r.batchSize {
 		end := i + r.batchSize
@@ -101,13 +103,13 @@ func (r *PositionRepository) UpsertBorrowers(ctx context.Context, borrowers []*e
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, tx *sql.Tx, borrowers []*entity.Borrower) error {
+func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, tx pgx.Tx, borrowers []*entity.Borrower) error {
 	if len(borrowers) == 0 {
 		return nil
 	}
@@ -144,7 +146,7 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, tx *sql.Tx
 			change = EXCLUDED.change
 	`)
 
-	_, err := tx.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert borrower batch: %w", err)
 	}
@@ -158,11 +160,11 @@ func (r *PositionRepository) UpsertBorrowerCollateral(ctx context.Context, colla
 		return nil
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer rollback(tx, r.logger)
+	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(collateral); i += r.batchSize {
 		end := i + r.batchSize
@@ -176,13 +178,13 @@ func (r *PositionRepository) UpsertBorrowerCollateral(ctx context.Context, colla
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, tx *sql.Tx, collateral []*entity.BorrowerCollateral) error {
+func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, tx pgx.Tx, collateral []*entity.BorrowerCollateral) error {
 	if len(collateral) == 0 {
 		return nil
 	}
@@ -219,7 +221,7 @@ func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, 
 			change = EXCLUDED.change
 	`)
 
-	_, err := tx.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert borrower collateral batch: %w", err)
 	}

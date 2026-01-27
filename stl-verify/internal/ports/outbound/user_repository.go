@@ -2,7 +2,8 @@ package outbound
 
 import (
 	"context"
-	"database/sql"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
@@ -16,7 +17,7 @@ type UserRepository interface {
 	UpsertUsers(ctx context.Context, users []*entity.User) error
 
 	// GetOrCreateUserWithTX retrieves a user by address, or creates it if it doesn't exist
-	GetOrCreateUserWithTX(ctx context.Context, tx *sql.Tx, user entity.User) (int64, error)
+	GetOrCreateUserWithTX(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error)
 
 	// UpsertUserProtocolMetadata upserts user protocol metadata records.
 	// This stores protocol-specific data like health factors, LTV, etc.

@@ -2,17 +2,18 @@
 package postgres
 
 import (
-	"database/sql"
+	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
+
+	"github.com/jackc/pgx/v5"
 )
 
-// rollback rolls back the transaction and logs the error if it is not sql.ErrTxDone.
-func rollback(tx *sql.Tx, logger *slog.Logger) {
-	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+// rollback rolls back the transaction and logs the error if it fails.
+func rollback(ctx context.Context, tx pgx.Tx, logger *slog.Logger) {
+	if err := tx.Rollback(ctx); err != nil && err != pgx.ErrTxClosed {
 		logger.Error("failed to rollback transaction", "error", err)
 	}
 }
