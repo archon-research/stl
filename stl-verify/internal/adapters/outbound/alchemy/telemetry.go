@@ -143,12 +143,13 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 
 // StartSpan starts a new span for an RPC method call.
 func (t *Telemetry) StartSpan(ctx context.Context, method string) (context.Context, trace.Span) {
-	return t.tracer.Start(ctx, "alchemy.rpc."+method,
+	// Use descriptive span name that X-Ray will display
+	spanName := "alchemy." + method
+	return t.tracer.Start(ctx, spanName,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
 			attribute.String("rpc.system", "jsonrpc"),
 			attribute.String("rpc.method", method),
-			attribute.String("rpc.service", "alchemy"),
 		),
 	)
 }

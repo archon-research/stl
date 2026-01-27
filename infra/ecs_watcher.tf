@@ -57,8 +57,8 @@ resource "aws_ecs_task_definition" "watcher" {
       image     = "${aws_ecr_repository.watcher.repository_url}:${var.watcher_image_tag}"
       essential = true
 
-      # Command to run - disable blobs for mainnet (not supported by Alchemy)
-      command = ["--disable-blobs"]
+      # No command args needed - blobs disabled by default (use --enable-blobs to enable)
+      command = []
 
       # Environment variables (non-sensitive)
       environment = [

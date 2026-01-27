@@ -19,9 +19,15 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
+
+const tracerName = "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 
 // Compile-time check that BlockCache implements outbound.BlockCache
 var _ outbound.BlockCache = (*BlockCache)(nil)
@@ -99,17 +105,36 @@ func (c *BlockCache) Close() error {
 // as it batches all commands into a single network round-trip.
 // Data is compressed using gzip before storing.
 func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int64, version int, data outbound.BlockDataInput) error {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "redis.SetBlockData",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "redis"),
+			attribute.String("db.operation", "PIPELINE"),
+			attribute.Int64("block.number", blockNumber),
+			attribute.Int64("chain.id", chainID),
+			attribute.Int("block.version", version),
+		),
+	)
+	defer span.End()
+
 	// Compress all data
 	blockCompressed, err := compress(data.Block)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to compress block")
 		return fmt.Errorf("failed to compress block: %w", err)
 	}
 	receiptsCompressed, err := compress(data.Receipts)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to compress receipts")
 		return fmt.Errorf("failed to compress receipts: %w", err)
 	}
 	tracesCompressed, err := compress(data.Traces)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to compress traces")
 		return fmt.Errorf("failed to compress traces: %w", err)
 	}
 
@@ -120,17 +145,25 @@ func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int6
 	pipe.Set(ctx, c.key(chainID, blockNumber, version, "receipts"), receiptsCompressed, c.ttl)
 	pipe.Set(ctx, c.key(chainID, blockNumber, version, "traces"), tracesCompressed, c.ttl)
 
+	totalCommands := 3
 	if data.Blobs != nil {
 		blobsCompressed, err := compress(data.Blobs)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to compress blobs")
 			return fmt.Errorf("failed to compress blobs: %w", err)
 		}
 		pipe.Set(ctx, c.key(chainID, blockNumber, version, "blobs"), blobsCompressed, c.ttl)
+		totalCommands = 4
 	}
+
+	span.SetAttributes(attribute.Int("redis.pipeline_commands", totalCommands))
 
 	// Execute all commands in one round-trip
 	_, err = pipe.Exec(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to execute pipeline")
 		return fmt.Errorf("failed to pipeline cache block data: %w", err)
 	}
 	return nil
@@ -182,12 +215,28 @@ func decompress(data []byte) ([]byte, error) {
 
 // SetBlock caches block data (compressed).
 func (c *BlockCache) SetBlock(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
+	tracer := otel.Tracer(tracerName)
+	key := c.key(chainID, blockNumber, version, "block")
+	ctx, span := tracer.Start(ctx, "redis.SetBlock",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "redis"),
+			attribute.String("db.operation", "SET"),
+			attribute.String("redis.key", key),
+			attribute.Int64("block.number", blockNumber),
+		),
+	)
+	defer span.End()
+
 	compressed, err := compress(data)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to compress block")
 		return fmt.Errorf("failed to compress block: %w", err)
 	}
-	key := c.key(chainID, blockNumber, version, "block")
 	if err := c.client.Set(ctx, key, compressed, c.ttl).Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to cache block")
 		return fmt.Errorf("failed to cache block: %w", err)
 	}
 	return nil
@@ -195,12 +244,28 @@ func (c *BlockCache) SetBlock(ctx context.Context, chainID, blockNumber int64, v
 
 // SetReceipts caches receipt data (compressed).
 func (c *BlockCache) SetReceipts(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
+	tracer := otel.Tracer(tracerName)
+	key := c.key(chainID, blockNumber, version, "receipts")
+	ctx, span := tracer.Start(ctx, "redis.SetReceipts",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "redis"),
+			attribute.String("db.operation", "SET"),
+			attribute.String("redis.key", key),
+			attribute.Int64("block.number", blockNumber),
+		),
+	)
+	defer span.End()
+
 	compressed, err := compress(data)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to compress receipts")
 		return fmt.Errorf("failed to compress receipts: %w", err)
 	}
-	key := c.key(chainID, blockNumber, version, "receipts")
 	if err := c.client.Set(ctx, key, compressed, c.ttl).Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to cache receipts")
 		return fmt.Errorf("failed to cache receipts: %w", err)
 	}
 	return nil
@@ -208,12 +273,28 @@ func (c *BlockCache) SetReceipts(ctx context.Context, chainID, blockNumber int64
 
 // SetTraces caches trace data (compressed).
 func (c *BlockCache) SetTraces(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
+	tracer := otel.Tracer(tracerName)
+	key := c.key(chainID, blockNumber, version, "traces")
+	ctx, span := tracer.Start(ctx, "redis.SetTraces",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "redis"),
+			attribute.String("db.operation", "SET"),
+			attribute.String("redis.key", key),
+			attribute.Int64("block.number", blockNumber),
+		),
+	)
+	defer span.End()
+
 	compressed, err := compress(data)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to compress traces")
 		return fmt.Errorf("failed to compress traces: %w", err)
 	}
-	key := c.key(chainID, blockNumber, version, "traces")
 	if err := c.client.Set(ctx, key, compressed, c.ttl).Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to cache traces")
 		return fmt.Errorf("failed to cache traces: %w", err)
 	}
 	return nil
@@ -221,12 +302,28 @@ func (c *BlockCache) SetTraces(ctx context.Context, chainID, blockNumber int64, 
 
 // SetBlobs caches blob data (compressed).
 func (c *BlockCache) SetBlobs(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
+	tracer := otel.Tracer(tracerName)
+	key := c.key(chainID, blockNumber, version, "blobs")
+	ctx, span := tracer.Start(ctx, "redis.SetBlobs",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "redis"),
+			attribute.String("db.operation", "SET"),
+			attribute.String("redis.key", key),
+			attribute.Int64("block.number", blockNumber),
+		),
+	)
+	defer span.End()
+
 	compressed, err := compress(data)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to compress blobs")
 		return fmt.Errorf("failed to compress blobs: %w", err)
 	}
-	key := c.key(chainID, blockNumber, version, "blobs")
 	if err := c.client.Set(ctx, key, compressed, c.ttl).Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to cache blobs")
 		return fmt.Errorf("failed to cache blobs: %w", err)
 	}
 	return nil

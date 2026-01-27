@@ -39,9 +39,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sns/types"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
+
+const tracerName = "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
 
 // Compile-time check that EventSink implements outbound.EventSink
 var _ outbound.EventSink = (*EventSink)(nil)
@@ -140,16 +146,34 @@ func NewEventSink(client SNSPublisher, config Config) (*EventSink, error) {
 
 // Publish publishes an event to the SNS FIFO topic.
 func (s *EventSink) Publish(ctx context.Context, event outbound.Event) error {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "sns.Publish",
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "aws_sns"),
+			attribute.String("messaging.destination", s.config.TopicARN),
+			attribute.String("messaging.event_type", string(event.EventType())),
+			attribute.Int64("block.number", event.GetBlockNumber()),
+			attribute.Int64("chain.id", event.GetChainID()),
+		),
+	)
+	defer span.End()
+
 	s.mu.RLock()
 	if s.closed {
 		s.mu.RUnlock()
-		return errors.New("event sink is closed")
+		err := errors.New("event sink is closed")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "event sink is closed")
+		return err
 	}
 	s.mu.RUnlock()
 
 	// Serialize event to JSON
 	messageBytes, err := json.Marshal(event)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to marshal event")
 		return fmt.Errorf("failed to marshal event: %w", err)
 	}
 	message := string(messageBytes)
@@ -185,7 +209,12 @@ func (s *EventSink) Publish(ctx context.Context, event outbound.Event) error {
 	}
 
 	// Publish with retry logic
-	return s.publishWithRetry(ctx, input, event)
+	err = s.publishWithRetry(ctx, input, event)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to publish")
+	}
+	return err
 }
 
 // publishWithRetry attempts to publish with exponential backoff on transient failures.

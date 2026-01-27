@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +20,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -96,8 +99,13 @@ func setupLargePostgres(b *testing.B) (*sql.DB, *postgres.BlockStateRepository, 
 	}
 
 	repo := postgres.NewBlockStateRepository(db, nil)
-	if err := repo.Migrate(ctx); err != nil {
-		b.Fatalf("failed to migrate: %v", err)
+
+	// Run migrations
+	_, currentFile, _, _ := runtime.Caller(0)
+	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../db/migrations")
+	m := migrator.New(db, migrationsDir)
+	if err := m.ApplyAll(ctx); err != nil {
+		b.Fatalf("failed to apply migrations: %v", err)
 	}
 
 	cleanup := func() {

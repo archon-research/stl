@@ -21,9 +21,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
+
+const tracerName = "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 
 // Compile-time check that BlockStateRepository implements outbound.BlockStateRepository
 var _ outbound.BlockStateRepository = (*BlockStateRepository)(nil)
@@ -58,6 +64,19 @@ func (r *BlockStateRepository) Pool() *pgxpool.Pool {
 // If it's a new block, the database trigger assigns the version atomically.
 // The provided state.Version is ignored; the actual assigned version is returned.
 func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "postgres.SaveBlock",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "postgresql"),
+			attribute.String("db.operation", "INSERT"),
+			attribute.String("db.table", "block_states"),
+			attribute.Int64("block.number", state.Number),
+			attribute.String("block.hash", state.Hash),
+		),
+	)
+	defer span.End()
+
 	const maxRetries = 10
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -198,6 +217,18 @@ func (r *BlockStateRepository) GetBlockByNumber(ctx context.Context, number int6
 
 // GetBlockByHash retrieves a block state by its hash (includes orphaned blocks).
 func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) (*outbound.BlockState, error) {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "postgres.GetBlockByHash",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "postgresql"),
+			attribute.String("db.operation", "SELECT"),
+			attribute.String("db.table", "block_states"),
+			attribute.String("block.hash", hash),
+		),
+	)
+	defer span.End()
+
 	query := `
 		SELECT number, hash, parent_hash, received_at, is_orphaned, version,
 		       block_published, receipts_published, traces_published, blobs_published
@@ -209,11 +240,15 @@ func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) 
 		&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
 		&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished)
 	if errors.Is(err, pgx.ErrNoRows) {
+		span.SetAttributes(attribute.Bool("db.row_found", false))
 		return nil, nil
 	}
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to get block by hash")
 		return nil, fmt.Errorf("failed to get block by hash: %w", err)
 	}
+	span.SetAttributes(attribute.Bool("db.row_found", true))
 	return &state, nil
 }
 
@@ -275,8 +310,25 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 // This ensures consistency: either all operations succeed, or none do.
 // The commonAncestor is derived from the ReorgEvent (BlockNumber - Depth).
 func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "postgres.HandleReorgAtomic",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "postgresql"),
+			attribute.String("db.operation", "TRANSACTION"),
+			attribute.String("db.table", "block_states"),
+			attribute.Int64("block.number", newBlock.Number),
+			attribute.String("block.hash", newBlock.Hash),
+			attribute.Int64("reorg.common_ancestor", commonAncestor),
+			attribute.Int("reorg.depth", event.Depth),
+		),
+	)
+	defer span.End()
+
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to begin transaction")
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() {
@@ -619,6 +671,19 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 
 // MarkPublishComplete marks a specific publish type as completed for a block.
 func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash string, publishType outbound.PublishType) error {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "postgres.MarkPublishComplete",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "postgresql"),
+			attribute.String("db.operation", "UPDATE"),
+			attribute.String("db.table", "block_states"),
+			attribute.String("block.hash", hash),
+			attribute.String("publish.type", string(publishType)),
+		),
+	)
+	defer span.End()
+
 	var column string
 	switch publishType {
 	case outbound.PublishTypeBlock:
@@ -636,12 +701,17 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 	query := fmt.Sprintf(`UPDATE block_states SET %s = TRUE WHERE hash = $1`, column)
 	result, err := r.pool.Exec(ctx, query, hash)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to mark published")
 		return fmt.Errorf("failed to mark %s published: %w", publishType, err)
 	}
 
 	rowsAffected := result.RowsAffected()
 	if rowsAffected == 0 {
-		return fmt.Errorf("block with hash %s not found", hash)
+		err := fmt.Errorf("block with hash %s not found", hash)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "block not found")
+		return err
 	}
 
 	return nil

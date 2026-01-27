@@ -1,12 +1,12 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run help \
+.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher help \
         dev-up dev-down dev-ips \
         tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
         tf-init-staging tf-validate-staging tf-plan-staging tf-apply-staging tf-check-staging \
         ecr-login docker-build docker-push docker-release \
-        docker-build-staging docker-push-staging docker-release-staging \
+        docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
         docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging
 
@@ -17,6 +17,11 @@ GOBIN := $(shell go env GOPATH)/bin
 run:
 	@echo "==> Running..."
 	go run ./cmd/server
+
+# Run the watcher (requires dev-up first)
+run-watcher:
+	@echo "==> Running watcher..."
+	@set -a && . cmd/watcher/.env && [ -f cmd/watcher/.env.local ] && . cmd/watcher/.env.local; set +a && go run ./cmd/watcher
 
 # Run tests with race detector
 test-race:
@@ -356,13 +361,13 @@ docker-clean:
 # Sentinelstaging Docker Shortcuts
 # =============================================================================
 
-docker-build-staging:
+docker-build-watcher-staging:
 	@$(MAKE) docker-build ENV=sentinelstaging
 
-docker-push-staging:
+docker-push-watcher-staging:
 	@$(MAKE) docker-push ENV=sentinelstaging
 
-docker-release-staging:
+docker-release-watcher-staging:
 	@$(MAKE) docker-release ENV=sentinelstaging
 
 # =============================================================================

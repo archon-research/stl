@@ -20,6 +20,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -113,6 +114,11 @@ func NewClient(config ClientConfig) (*Client, error) {
 		config: config,
 		httpClient: &http.Client{
 			Timeout: config.Timeout,
+			Transport: otelhttp.NewTransport(http.DefaultTransport,
+				otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+					return "alchemy.http"
+				}),
+			),
 		},
 		logger:    config.Logger.With("component", "alchemy-client"),
 		telemetry: config.Telemetry,
@@ -306,6 +312,14 @@ func (c *Client) GetBlockDataByHash(ctx context.Context, blockNum int64, hash st
 // getBlockDataByHashParallel fetches block data using parallel goroutines for each RPC call.
 // This uses more API credits but may be faster due to parallel network requests.
 func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	// Create a parent span for the parallel fetch operation
+	// This ensures all child RPC spans are properly linked
+	var span trace.Span
+	if c.telemetry != nil {
+		ctx, span = c.telemetry.StartSpan(ctx, "parallel_fetch")
+		defer span.End()
+	}
+
 	result := outbound.BlockData{BlockNumber: blockNum}
 
 	var wg sync.WaitGroup
