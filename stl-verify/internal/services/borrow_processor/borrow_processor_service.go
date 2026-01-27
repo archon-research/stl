@@ -549,8 +549,11 @@ func (s *Service) saveBorrowEvent(ctx context.Context, borrowEvent *BorrowEventD
 		}
 
 		protocolID, err := s.protocolRepo.GetProtocolByAddress(ctx, chainID, protocolAddress.Hex())
-		if err != nil || protocolID == nil {
+		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
+		}
+		if protocolID == nil {
+			return fmt.Errorf("protocol not found for address %s on chain %d", protocolAddress.Hex(), chainID)
 		}
 
 		borrowTokenID, err := s.tokenRepo.GetOrCreateTokenWithTX(ctx, tx, chainID, borrowEvent.Reserve, borrowTokenMetadata.Symbol, borrowTokenMetadata.Decimals, blockNumber)
