@@ -7,9 +7,6 @@
 //   - Reorg event recording for chain reorganization history
 //   - Gap detection queries for backfill operations
 //   - Automatic schema migration via embedded SQL
-//
-// The schema is defined in migrations/001_initial_schema.sql and is
-// automatically applied via the Migrate() method.
 package postgres
 
 import (
@@ -26,9 +23,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
-
-//go:embed migrations/001_initial_schema.sql
-var initialSchema string
 
 // Compile-time check that BlockStateRepository implements outbound.BlockStateRepository
 var _ outbound.BlockStateRepository = (*BlockStateRepository)(nil)
@@ -57,15 +51,6 @@ func (r *BlockStateRepository) closeRows(rows *sql.Rows) {
 // DB returns the underlying database connection for advanced queries.
 func (r *BlockStateRepository) DB() *sql.DB {
 	return r.db
-}
-
-// Migrate creates the block_states and reorg_events tables if they don't exist.
-func (r *BlockStateRepository) Migrate(ctx context.Context) error {
-	_, err := r.db.ExecContext(ctx, initialSchema)
-	if err != nil {
-		return fmt.Errorf("failed to migrate schema: %w", err)
-	}
-	return nil
 }
 
 // SaveBlock persists a block's state with atomic version assignment.
