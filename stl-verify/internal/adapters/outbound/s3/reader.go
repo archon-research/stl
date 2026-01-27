@@ -78,6 +78,32 @@ func (r *Reader) ListFiles(ctx context.Context, bucket, prefix string) ([]outbou
 	return files, nil
 }
 
+// ListPrefix lists all keys in the bucket with the given prefix.
+// Returns a slice of key names only (lighter weight than ListFiles).
+func (r *Reader) ListPrefix(ctx context.Context, bucket, prefix string) ([]string, error) {
+	var keys []string
+
+	paginator := s3.NewListObjectsV2Paginator(r.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucket),
+		Prefix: aws.String(prefix),
+	})
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list objects with prefix %s: %w", prefix, err)
+		}
+
+		for _, obj := range page.Contents {
+			if obj.Key != nil {
+				keys = append(keys, *obj.Key)
+			}
+		}
+	}
+
+	return keys, nil
+}
+
 // StreamFile returns a reader for the file content.
 // If the file is gzipped (.gz extension), the reader automatically decompresses.
 // The caller is responsible for closing the reader.
