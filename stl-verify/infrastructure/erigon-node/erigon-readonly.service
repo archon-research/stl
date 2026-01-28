@@ -1,0 +1,48 @@
+# Erigon Read-Only Mode
+# Optimized for bulk RPC queries with no syncing overhead
+#
+# Switch to read-only mode:
+#   systemctl stop erigon && systemctl start erigon-readonly
+#
+# Switch back to syncing mode:
+#   systemctl stop erigon-readonly && systemctl start erigon
+
+[Unit]
+Description=Erigon Ethereum Archive Node (Read-Only Mode)
+After=network.target
+Conflicts=erigon.service
+
+[Service]
+Type=simple
+User=erigon
+ExecStart=/usr/local/bin/erigon \
+  --datadir=/data/erigon \
+  --chain=mainnet \
+  --prune.mode=archive \
+  --snap.keepblocks \
+  --txpool.disable \
+  --http \
+  --http.addr=0.0.0.0 \
+  --http.port=8545 \
+  --http.api=eth,debug,net,trace,web3,erigon \
+  --http.vhosts=* \
+  --http.corsdomain=* \
+  --private.api.addr=localhost:9090 \
+  --rpc.batch.limit=5000 \
+  --rpc.batch.concurrency=128 \
+  --db.read.concurrency=512 \
+  --state.cache=64GB \
+  --bodies.cache=8GB \
+  --rpc.returndata.limit=10000000 \
+  --rpc.evmtimeout=30m \
+  --db.size.limit=4TB \
+  --nodiscover \
+  --maxpeers=0 \
+  --log.console.verbosity=warn
+Restart=always
+RestartSec=10
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

@@ -1,25 +1,31 @@
 // Package main provides a CLI tool for bulk downloading Ethereum block data.
-// It fetches blocks, receipts, and traces from Alchemy and writes directly to S3.
+// It fetches blocks, receipts, and traces from a local Erigon node and writes to S3.
+//
+// Architecture:
+//   - RPC workers fetch block+receipt data from Erigon
+//   - As blocks complete, they're immediately queued for trace fetching (pipelined)
+//   - S3 uploads happen asynchronously in a separate upload pool
+//   - This decouples RPC fetching from S3 I/O for maximum throughput
 //
 // Usage:
 //
 //	./bulk-download \
-//	  --alchemy-urls="https://eth-mainnet.g.alchemy.com/v2/KEY1,https://...KEY2" \
+//	  --rpc-url=http://localhost:8545 \
 //	  --start-block=16000000 \
 //	  --end-block=21000000 \
-//	  --bucket=my-bucket \
-//	  --workers-per-key=2
+//	  --bucket=stl-sentinelstaging-ethereum-raw-89d540d0
 package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -34,31 +40,79 @@ import (
 // BlockRangeSize is the number of blocks per S3 partition.
 const BlockRangeSize = 1000
 
+// Default settings optimized for local Erigon node
+const (
+	DefaultBlockBatchSize      = 2   // Small batches maximize parallelism
+	DefaultTraceBatchSize      = 2   // Small batches maximize parallelism
+	DefaultBlockReceiptWorkers = 200 // High parallelism for RPC calls
+	DefaultTraceWorkers        = 100 // High parallelism for trace fetching
+	DefaultUploadWorkers       = 64  // S3 uploads are fast, but need enough workers
+	DefaultTimeout             = 120 * time.Second
+	DefaultMaxRetries          = 3
+)
+
 // Config holds the CLI configuration.
 type Config struct {
-	AlchemyURLs   []string
-	StartBlock    int64
-	EndBlock      int64
-	Bucket        string
-	WorkersPerKey int
-	BatchSize     int
-	DryRun        bool
+	RPCURL     string
+	StartBlock int64
+	EndBlock   int64
+	Bucket     string
+
+	BlockReceiptWorkers int
+	TraceWorkers        int
+	UploadWorkers       int
+	BlockBatchSize      int
+	TraceBatchSize      int
+
+	DryRun bool
 }
 
-// Stats tracks download progress.
+// Stats tracks download progress and timing metrics.
 type Stats struct {
-	blocksProcessed atomic.Int64
-	blocksSkipped   atomic.Int64
-	blocksFailed    atomic.Int64
-	bytesWritten    atomic.Int64
-	startTime       time.Time
+	blocksProcessed   atomic.Int64
+	blocksSkipped     atomic.Int64
+	blocksFailed      atomic.Int64
+	blockBytesWritten atomic.Int64
+
+	tracesProcessed   atomic.Int64
+	tracesSkipped     atomic.Int64
+	tracesFailed      atomic.Int64
+	traceBytesWritten atomic.Int64
+
+	uploadsQueued    atomic.Int64
+	uploadsCompleted atomic.Int64
+	uploadsFailed    atomic.Int64
+
+	// Timing metrics (in nanoseconds)
+	rpcBlockTime atomic.Int64 // Time spent in RPC calls for blocks+receipts
+	rpcTraceTime atomic.Int64 // Time spent in RPC calls for traces
+	compressTime atomic.Int64 // Time spent compressing data
+	s3UploadTime atomic.Int64 // Time spent uploading to S3
+	s3CheckTime  atomic.Int64 // Time spent checking S3 for existing files
+
+	// Counts for averaging
+	rpcBlockCalls atomic.Int64
+	rpcTraceCalls atomic.Int64
+	compressCalls atomic.Int64
+	s3UploadCalls atomic.Int64
+	s3CheckCalls  atomic.Int64
+
+	startTime time.Time
+}
+
+// UploadJob represents an S3 upload to be performed asynchronously.
+type UploadJob struct {
+	Bucket   string
+	Key      string
+	Data     []byte // Already gzip compressed
+	DataType string // "block", "receipts", or "traces"
+	BlockNum int64
 }
 
 // PartitionCache caches the list of existing keys per S3 partition.
-// This avoids repeated S3 ListObjects calls for blocks in the same partition.
 type PartitionCache struct {
 	mu        sync.RWMutex
-	cache     map[string]map[string]struct{} // partition -> set of keys
+	cache     map[string]map[string]struct{}
 	s3Reader  outbound.S3Reader
 	bucket    string
 	logger    *slog.Logger
@@ -66,7 +120,6 @@ type PartitionCache struct {
 	missCount atomic.Int64
 }
 
-// NewPartitionCache creates a new partition cache.
 func NewPartitionCache(s3Reader outbound.S3Reader, bucket string, logger *slog.Logger) *PartitionCache {
 	return &PartitionCache{
 		cache:    make(map[string]map[string]struct{}),
@@ -76,9 +129,7 @@ func NewPartitionCache(s3Reader outbound.S3Reader, bucket string, logger *slog.L
 	}
 }
 
-// loadPartition loads all keys for a partition from S3.
 func (pc *PartitionCache) loadPartition(ctx context.Context, partition string) (map[string]struct{}, error) {
-	// Check if already cached
 	pc.mu.RLock()
 	if keys, ok := pc.cache[partition]; ok {
 		pc.mu.RUnlock()
@@ -89,54 +140,52 @@ func (pc *PartitionCache) loadPartition(ctx context.Context, partition string) (
 
 	pc.missCount.Add(1)
 
-	// List all keys in the partition
 	prefix := partition + "/"
 	keyList, err := pc.s3Reader.ListPrefix(ctx, pc.bucket, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list partition %s: %w", partition, err)
 	}
 
-	// Build set of keys
 	keySet := make(map[string]struct{}, len(keyList))
 	for _, key := range keyList {
 		keySet[key] = struct{}{}
 	}
 
-	// Cache the result
 	pc.mu.Lock()
 	pc.cache[partition] = keySet
 	pc.mu.Unlock()
 
-	pc.logger.Debug("loaded partition from S3",
-		"partition", partition,
-		"keyCount", len(keySet),
-	)
-
+	pc.logger.Debug("loaded partition from S3", "partition", partition, "keyCount", len(keySet))
 	return keySet, nil
 }
 
-// BlockExists checks if all required data types exist for a block.
-func (pc *PartitionCache) BlockExists(ctx context.Context, blockNum int64) (bool, error) {
+func (pc *PartitionCache) HasBlockAndReceipts(ctx context.Context, blockNum int64) (bool, error) {
 	partition := getPartition(blockNum)
-
 	keySet, err := pc.loadPartition(ctx, partition)
 	if err != nil {
 		return false, err
 	}
 
-	// Check for all required data types
-	dataTypes := []string{"block", "receipts", "traces"}
-	for _, dataType := range dataTypes {
-		key := fmt.Sprintf("%s/%d_1_%s.json.gz", partition, blockNum, dataType)
-		if _, exists := keySet[key]; !exists {
-			return false, nil
-		}
-	}
+	blockKey := fmt.Sprintf("%s/%d_1_block.json.gz", partition, blockNum)
+	receiptsKey := fmt.Sprintf("%s/%d_1_receipts.json.gz", partition, blockNum)
 
-	return true, nil
+	_, hasBlock := keySet[blockKey]
+	_, hasReceipts := keySet[receiptsKey]
+	return hasBlock && hasReceipts, nil
 }
 
-// MarkWritten adds a key to the cache after writing.
+func (pc *PartitionCache) HasTraces(ctx context.Context, blockNum int64) (bool, error) {
+	partition := getPartition(blockNum)
+	keySet, err := pc.loadPartition(ctx, partition)
+	if err != nil {
+		return false, err
+	}
+
+	tracesKey := fmt.Sprintf("%s/%d_1_traces.json.gz", partition, blockNum)
+	_, exists := keySet[tracesKey]
+	return exists, nil
+}
+
 func (pc *PartitionCache) MarkWritten(blockNum int64, dataType string) {
 	partition := getPartition(blockNum)
 	key := fmt.Sprintf("%s/%d_1_%s.json.gz", partition, blockNum, dataType)
@@ -149,7 +198,6 @@ func (pc *PartitionCache) MarkWritten(blockNum int64, dataType string) {
 	}
 }
 
-// GetStats returns cache hit/miss statistics.
 func (pc *PartitionCache) GetStats() (hits, misses int64) {
 	return pc.hitCount.Load(), pc.missCount.Load()
 }
@@ -157,19 +205,16 @@ func (pc *PartitionCache) GetStats() (hits, misses int64) {
 func main() {
 	cfg := parseFlags()
 
-	// Set up structured logging
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
 
-	// Validate configuration
 	if err := validateConfig(cfg); err != nil {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
 
-	// Set up context with signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -181,7 +226,6 @@ func main() {
 		cancel()
 	}()
 
-	// Run the downloader
 	if err := run(ctx, cfg, logger); err != nil {
 		if ctx.Err() != nil {
 			logger.Info("shutdown complete")
@@ -196,32 +240,23 @@ func main() {
 
 func parseFlags() Config {
 	var cfg Config
-	var alchemyURLsStr string
 
-	flag.StringVar(&alchemyURLsStr, "alchemy-urls", "", "Comma-separated list of Alchemy HTTP URLs (required)")
+	flag.StringVar(&cfg.RPCURL, "rpc-url", "http://localhost:8545", "RPC endpoint URL")
 	flag.Int64Var(&cfg.StartBlock, "start-block", 0, "Starting block number (required)")
 	flag.Int64Var(&cfg.EndBlock, "end-block", 0, "Ending block number (required)")
 	flag.StringVar(&cfg.Bucket, "bucket", "", "S3 bucket name (required)")
-	flag.IntVar(&cfg.WorkersPerKey, "workers-per-key", 2, "Number of workers per Alchemy key")
-	flag.IntVar(&cfg.BatchSize, "batch-size", 10, "Number of blocks per RPC batch")
-	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Print what would be done without downloading")
+	flag.IntVar(&cfg.BlockReceiptWorkers, "block-workers", DefaultBlockReceiptWorkers, "Block+receipt worker count")
+	flag.IntVar(&cfg.TraceWorkers, "trace-workers", DefaultTraceWorkers, "Trace worker count")
+	flag.IntVar(&cfg.UploadWorkers, "upload-workers", DefaultUploadWorkers, "S3 upload worker count")
+	flag.IntVar(&cfg.BlockBatchSize, "block-batch-size", DefaultBlockBatchSize, "Blocks per batch for block+receipt fetching")
+	flag.IntVar(&cfg.TraceBatchSize, "trace-batch-size", DefaultTraceBatchSize, "Blocks per batch for trace fetching")
+	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Fetch data from RPC but skip S3 uploads (for performance testing)")
 	flag.Parse()
-
-	if alchemyURLsStr != "" {
-		cfg.AlchemyURLs = strings.Split(alchemyURLsStr, ",")
-		// Trim whitespace from each URL
-		for i := range cfg.AlchemyURLs {
-			cfg.AlchemyURLs[i] = strings.TrimSpace(cfg.AlchemyURLs[i])
-		}
-	}
 
 	return cfg
 }
 
 func validateConfig(cfg Config) error {
-	if len(cfg.AlchemyURLs) == 0 {
-		return fmt.Errorf("--alchemy-urls is required")
-	}
 	if cfg.StartBlock == 0 {
 		return fmt.Errorf("--start-block is required")
 	}
@@ -238,26 +273,21 @@ func validateConfig(cfg Config) error {
 }
 
 func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
-	// Initialize Alchemy clients (one per URL)
-	clients := make([]*alchemy.Client, 0, len(cfg.AlchemyURLs))
-	for i, url := range cfg.AlchemyURLs {
-		client, err := alchemy.NewClient(alchemy.ClientConfig{
-			HTTPURL:        url,
-			Timeout:        60 * time.Second,
-			MaxRetries:     5,
-			InitialBackoff: 500 * time.Millisecond,
-			MaxBackoff:     30 * time.Second,
-			BackoffFactor:  2.0,
-			Logger:         logger.With("client", i),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to create Alchemy client %d: %w", i, err)
-		}
-		clients = append(clients, client)
+	// Create RPC client
+	client, err := alchemy.NewClient(alchemy.ClientConfig{
+		HTTPURL:        cfg.RPCURL,
+		Timeout:        DefaultTimeout,
+		MaxRetries:     DefaultMaxRetries,
+		InitialBackoff: 100 * time.Millisecond,
+		MaxBackoff:     5 * time.Second,
+		BackoffFactor:  2.0,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create RPC client: %w", err)
 	}
-	logger.Info("initialized Alchemy clients", "count", len(clients))
 
-	// Initialize S3 writer
+	// Initialize S3
 	awsCfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
@@ -265,37 +295,27 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 
 	s3Writer := s3.NewWriter(awsCfg, logger)
 	s3Reader := s3.NewReader(awsCfg, logger)
-	logger.Info("initialized S3 writer and reader", "bucket", cfg.Bucket)
-
-	// Initialize partition cache
 	partitionCache := NewPartitionCache(s3Reader, cfg.Bucket, logger)
 
-	// Calculate total blocks and workers
 	totalBlocks := cfg.EndBlock - cfg.StartBlock + 1
-	totalWorkers := len(clients) * cfg.WorkersPerKey
 
-	// Calculate number of partitions
-	startPartition := cfg.StartBlock / BlockRangeSize
-	endPartition := cfg.EndBlock / BlockRangeSize
-	totalPartitions := endPartition - startPartition + 1
-
-	logger.Info("starting bulk download",
+	logger.Info("starting pipelined bulk download",
+		"rpcURL", cfg.RPCURL,
 		"startBlock", cfg.StartBlock,
 		"endBlock", cfg.EndBlock,
 		"totalBlocks", totalBlocks,
-		"totalPartitions", totalPartitions,
-		"alchemyKeys", len(clients),
-		"workersPerKey", cfg.WorkersPerKey,
-		"totalWorkers", totalWorkers,
-		"batchSize", cfg.BatchSize,
+		"blockWorkers", cfg.BlockReceiptWorkers,
+		"traceWorkers", cfg.TraceWorkers,
+		"uploadWorkers", cfg.UploadWorkers,
+		"blockBatchSize", cfg.BlockBatchSize,
+		"traceBatchSize", cfg.TraceBatchSize,
+		"bucket", cfg.Bucket,
 	)
 
 	if cfg.DryRun {
-		logger.Info("dry run mode - no data will be downloaded")
-		return nil
+		logger.Info("dry run mode - S3 uploads will be skipped")
 	}
 
-	// Create stats tracker
 	stats := &Stats{startTime: time.Now()}
 
 	// Start progress reporter
@@ -303,65 +323,149 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	defer progressCancel()
 	go reportProgress(progressCtx, stats, totalBlocks, partitionCache, logger)
 
-	// Create work channel
-	workCh := make(chan int64, totalWorkers*2)
+	// Create channels for pipelined processing
+	blockWorkCh := make(chan int64, cfg.BlockReceiptWorkers*2) // Block batch start numbers
+	traceWorkCh := make(chan []int64, cfg.TraceWorkers*2)      // Batches of blocks needing traces
+	uploadCh := make(chan UploadJob, cfg.UploadWorkers*4)      // S3 upload jobs
+	traceCollectorCh := make(chan int64, 10000)                // Blocks ready for trace fetching
 
-	// Start workers
 	var wg sync.WaitGroup
-	for i := 0; i < totalWorkers; i++ {
-		clientIdx := i % len(clients)
-		wg.Add(1)
-		go func(workerID int, client *alchemy.Client) {
-			defer wg.Done()
-			worker(ctx, workerID, client, s3Writer, partitionCache, cfg, workCh, stats, logger)
-		}(i, clients[clientIdx])
+
+	// Start S3 upload workers
+	var uploadWg sync.WaitGroup
+	for i := 0; i < cfg.UploadWorkers; i++ {
+		uploadWg.Add(1)
+		go func(workerID int) {
+			defer uploadWg.Done()
+			uploadWorker(ctx, workerID, s3Writer, partitionCache, uploadCh, stats, cfg.DryRun, logger)
+		}(i)
 	}
 
-	// Feed work to workers
+	// Start trace collector - batches individual blocks into trace batches
+	wg.Add(1)
 	go func() {
-		defer close(workCh)
-		for blockNum := cfg.StartBlock; blockNum <= cfg.EndBlock; blockNum += int64(cfg.BatchSize) {
+		defer wg.Done()
+		defer close(traceWorkCh)
+		traceCollector(ctx, cfg, traceCollectorCh, traceWorkCh, partitionCache, stats, logger)
+	}()
+
+	// Start block+receipt workers
+	var blockWg sync.WaitGroup
+	for i := 0; i < cfg.BlockReceiptWorkers; i++ {
+		blockWg.Add(1)
+		go func(workerID int) {
+			defer blockWg.Done()
+			blockReceiptWorker(ctx, workerID, client, partitionCache, cfg, blockWorkCh, traceCollectorCh, uploadCh, stats, logger)
+		}(i)
+	}
+
+	// Start trace workers
+	for i := 0; i < cfg.TraceWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			traceWorker(ctx, workerID, client, partitionCache, cfg.Bucket, traceWorkCh, uploadCh, stats, logger)
+		}(i)
+	}
+
+	// Feed block work
+	go func() {
+		defer close(blockWorkCh)
+		for blockNum := cfg.StartBlock; blockNum <= cfg.EndBlock; blockNum += int64(cfg.BlockBatchSize) {
 			select {
 			case <-ctx.Done():
 				return
-			case workCh <- blockNum:
+			case blockWorkCh <- blockNum:
 			}
 		}
 	}()
 
-	// Wait for workers to finish
+	// Wait for block workers to finish, then close traceCollectorCh
+	go func() {
+		blockWg.Wait()
+		close(traceCollectorCh)
+	}()
+
+	// Wait for all RPC workers to finish
 	wg.Wait()
+
+	// Close upload channel and wait for uploads to complete
+	close(uploadCh)
+	uploadWg.Wait()
 
 	// Final stats
 	elapsed := time.Since(stats.startTime)
 	hits, misses := partitionCache.GetStats()
+
+	// Calculate average times
+	avgRpcBlock := time.Duration(0)
+	if calls := stats.rpcBlockCalls.Load(); calls > 0 {
+		avgRpcBlock = time.Duration(stats.rpcBlockTime.Load() / calls)
+	}
+	avgRpcTrace := time.Duration(0)
+	if calls := stats.rpcTraceCalls.Load(); calls > 0 {
+		avgRpcTrace = time.Duration(stats.rpcTraceTime.Load() / calls)
+	}
+	avgCompress := time.Duration(0)
+	if calls := stats.compressCalls.Load(); calls > 0 {
+		avgCompress = time.Duration(stats.compressTime.Load() / calls)
+	}
+	avgUpload := time.Duration(0)
+	if calls := stats.s3UploadCalls.Load(); calls > 0 {
+		avgUpload = time.Duration(stats.s3UploadTime.Load() / calls)
+	}
+	avgS3Check := time.Duration(0)
+	if calls := stats.s3CheckCalls.Load(); calls > 0 {
+		avgS3Check = time.Duration(stats.s3CheckTime.Load() / calls)
+	}
+
 	logger.Info("download complete",
-		"processed", stats.blocksProcessed.Load(),
-		"skipped", stats.blocksSkipped.Load(),
-		"failed", stats.blocksFailed.Load(),
-		"bytesWritten", formatBytes(stats.bytesWritten.Load()),
+		"blocksProcessed", stats.blocksProcessed.Load(),
+		"blocksSkipped", stats.blocksSkipped.Load(),
+		"blocksFailed", stats.blocksFailed.Load(),
+		"tracesProcessed", stats.tracesProcessed.Load(),
+		"tracesSkipped", stats.tracesSkipped.Load(),
+		"tracesFailed", stats.tracesFailed.Load(),
+		"uploadsCompleted", stats.uploadsCompleted.Load(),
+		"uploadsFailed", stats.uploadsFailed.Load(),
+		"totalBytesWritten", formatBytes(stats.blockBytesWritten.Load()+stats.traceBytesWritten.Load()),
+		"blocksPerSec", fmt.Sprintf("%.1f", float64(stats.blocksProcessed.Load()+stats.blocksSkipped.Load())/elapsed.Seconds()),
 		"elapsed", elapsed.Round(time.Second),
-		"blocksPerSecond", fmt.Sprintf("%.1f", float64(stats.blocksProcessed.Load()+stats.blocksSkipped.Load())/elapsed.Seconds()),
 		"cacheHits", hits,
 		"cacheMisses", misses,
+	)
+
+	// Timing breakdown
+	logger.Info("timing breakdown",
+		"avgRpcBlockBatch", avgRpcBlock.Round(time.Millisecond),
+		"avgRpcTraceBatch", avgRpcTrace.Round(time.Millisecond),
+		"avgCompress", avgCompress.Round(time.Microsecond),
+		"avgS3Upload", avgUpload.Round(time.Millisecond),
+		"avgS3Check", avgS3Check.Round(time.Millisecond),
+		"totalRpcBlockTime", time.Duration(stats.rpcBlockTime.Load()).Round(time.Second),
+		"totalRpcTraceTime", time.Duration(stats.rpcTraceTime.Load()).Round(time.Second),
+		"totalCompressTime", time.Duration(stats.compressTime.Load()).Round(time.Second),
+		"totalS3UploadTime", time.Duration(stats.s3UploadTime.Load()).Round(time.Second),
+		"totalS3CheckTime", time.Duration(stats.s3CheckTime.Load()).Round(time.Second),
 	)
 
 	return nil
 }
 
-// worker processes batches of blocks from the work channel.
-func worker(
+// blockReceiptWorker fetches blocks and receipts, queues S3 uploads, and signals trace collection.
+func blockReceiptWorker(
 	ctx context.Context,
 	workerID int,
 	client *alchemy.Client,
-	s3Writer outbound.S3Writer,
 	partitionCache *PartitionCache,
 	cfg Config,
 	workCh <-chan int64,
+	traceCollectorCh chan<- int64,
+	uploadCh chan<- UploadJob,
 	stats *Stats,
 	logger *slog.Logger,
 ) {
-	logger = logger.With("worker", workerID)
+	logger = logger.With("worker", workerID, "type", "block")
 
 	for batchStart := range workCh {
 		select {
@@ -370,129 +474,347 @@ func worker(
 		default:
 		}
 
-		batchEnd := batchStart + int64(cfg.BatchSize) - 1
+		batchEnd := batchStart + int64(cfg.BlockBatchSize) - 1
 		if batchEnd > cfg.EndBlock {
 			batchEnd = cfg.EndBlock
 		}
 
-		if err := processBatch(ctx, client, s3Writer, partitionCache, cfg, batchStart, batchEnd, stats, logger); err != nil {
-			logger.Warn("batch failed", "from", batchStart, "to", batchEnd, "error", err)
+		// Check what exists and build fetch list
+		blocksToFetch := make([]int64, 0, batchEnd-batchStart+1)
+
+		// In dry-run mode, skip S3 checks and fetch all blocks
+		if cfg.DryRun {
+			for blockNum := batchStart; blockNum <= batchEnd; blockNum++ {
+				blocksToFetch = append(blocksToFetch, blockNum)
+			}
+		} else {
+			s3CheckStart := time.Now()
+			for blockNum := batchStart; blockNum <= batchEnd; blockNum++ {
+				hasBlockAndReceipts, err := partitionCache.HasBlockAndReceipts(ctx, blockNum)
+				if err != nil {
+					logger.Warn("failed to check S3", "block", blockNum, "error", err)
+					blocksToFetch = append(blocksToFetch, blockNum)
+					continue
+				}
+
+				if hasBlockAndReceipts {
+					stats.blocksSkipped.Add(1)
+					// Signal for trace check (will be filtered in collector)
+					select {
+					case traceCollectorCh <- blockNum:
+					case <-ctx.Done():
+						return
+					}
+				} else {
+					blocksToFetch = append(blocksToFetch, blockNum)
+				}
+			}
+			stats.s3CheckTime.Add(time.Since(s3CheckStart).Nanoseconds())
+			stats.s3CheckCalls.Add(1)
+		}
+
+		if len(blocksToFetch) == 0 {
+			continue
+		}
+
+		// Fetch blocks and receipts
+		rpcStart := time.Now()
+		results, err := client.GetBlocksAndReceiptsBatch(ctx, blocksToFetch, true)
+		stats.rpcBlockTime.Add(time.Since(rpcStart).Nanoseconds())
+		stats.rpcBlockCalls.Add(1)
+		if err != nil {
+			logger.Warn("batch fetch failed", "from", batchStart, "to", batchEnd, "error", err)
+			for range blocksToFetch {
+				stats.blocksFailed.Add(1)
+			}
+			continue
+		}
+
+		// Queue uploads and signal for traces
+		for _, r := range results {
+			if r.BlockErr != nil || r.ReceiptsErr != nil {
+				logger.Warn("block data has errors", "block", r.BlockNumber, "blockErr", r.BlockErr, "receiptsErr", r.ReceiptsErr)
+				stats.blocksFailed.Add(1)
+				continue
+			}
+
+			partition := getPartition(r.BlockNumber)
+
+			// Compress and queue block upload
+			if r.Block != nil {
+				compressStart := time.Now()
+				compressed, err := compressData(r.Block)
+				stats.compressTime.Add(time.Since(compressStart).Nanoseconds())
+				stats.compressCalls.Add(1)
+				if err != nil {
+					logger.Warn("failed to compress block", "block", r.BlockNumber, "error", err)
+					stats.blocksFailed.Add(1)
+					continue
+				}
+				select {
+				case uploadCh <- UploadJob{
+					Bucket:   cfg.Bucket,
+					Key:      fmt.Sprintf("%s/%d_1_block.json.gz", partition, r.BlockNumber),
+					Data:     compressed,
+					DataType: "block",
+					BlockNum: r.BlockNumber,
+				}:
+					stats.uploadsQueued.Add(1)
+				case <-ctx.Done():
+					return
+				}
+			}
+
+			// Compress and queue receipts upload
+			if r.Receipts != nil {
+				compressStart := time.Now()
+				compressed, err := compressData(r.Receipts)
+				stats.compressTime.Add(time.Since(compressStart).Nanoseconds())
+				stats.compressCalls.Add(1)
+				if err != nil {
+					logger.Warn("failed to compress receipts", "block", r.BlockNumber, "error", err)
+					stats.blocksFailed.Add(1)
+					continue
+				}
+				select {
+				case uploadCh <- UploadJob{
+					Bucket:   cfg.Bucket,
+					Key:      fmt.Sprintf("%s/%d_1_receipts.json.gz", partition, r.BlockNumber),
+					Data:     compressed,
+					DataType: "receipts",
+					BlockNum: r.BlockNumber,
+				}:
+					stats.uploadsQueued.Add(1)
+				case <-ctx.Done():
+					return
+				}
+			}
+
+			stats.blocksProcessed.Add(1)
+
+			// Signal for trace fetching
+			select {
+			case traceCollectorCh <- r.BlockNumber:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
+
+	// Signal that this worker is done sending to trace collector
+	// (handled by closing traceCollectorCh after all workers done)
 }
 
-// processBatch fetches and stores a batch of blocks.
-func processBatch(
+// traceCollector batches blocks for trace fetching.
+func traceCollector(
 	ctx context.Context,
-	client *alchemy.Client,
-	s3Writer outbound.S3Writer,
-	partitionCache *PartitionCache,
 	cfg Config,
-	batchStart, batchEnd int64,
+	inCh <-chan int64,
+	outCh chan<- []int64,
+	partitionCache *PartitionCache,
 	stats *Stats,
 	logger *slog.Logger,
-) error {
-	// Build block numbers for this batch
-	blockNums := make([]int64, 0, batchEnd-batchStart+1)
-	for blockNum := batchStart; blockNum <= batchEnd; blockNum++ {
-		blockNums = append(blockNums, blockNum)
-	}
+) {
+	batch := make([]int64, 0, cfg.TraceBatchSize)
+	flushTimer := time.NewTimer(500 * time.Millisecond)
+	defer flushTimer.Stop()
 
-	// Check which blocks already exist in S3 using partition cache
-	blocksToFetch := make([]int64, 0, len(blockNums))
-	for _, blockNum := range blockNums {
-		exists, err := partitionCache.BlockExists(ctx, blockNum)
-		if err != nil {
-			logger.Warn("failed to check S3 existence", "block", blockNum, "error", err)
-			blocksToFetch = append(blocksToFetch, blockNum)
-			continue
+	flush := func() {
+		if len(batch) == 0 {
+			return
 		}
-		if exists {
-			stats.blocksSkipped.Add(1)
+		// In dry-run mode, process all blocks without S3 checks
+		var toProcess []int64
+		if cfg.DryRun {
+			toProcess = batch
 		} else {
-			blocksToFetch = append(blocksToFetch, blockNum)
+			// Filter out blocks that already have traces
+			toProcess = make([]int64, 0, len(batch))
+			for _, blockNum := range batch {
+				hasTraces, err := partitionCache.HasTraces(ctx, blockNum)
+				if err != nil {
+					logger.Warn("failed to check traces", "block", blockNum, "error", err)
+					toProcess = append(toProcess, blockNum)
+					continue
+				}
+				if hasTraces {
+					stats.tracesSkipped.Add(1)
+				} else {
+					toProcess = append(toProcess, blockNum)
+				}
+			}
+		}
+
+		if len(toProcess) > 0 {
+			select {
+			case outCh <- toProcess:
+			case <-ctx.Done():
+				return
+			}
+		}
+		batch = make([]int64, 0, cfg.TraceBatchSize)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case blockNum, ok := <-inCh:
+			if !ok {
+				// Channel closed, flush remaining
+				flush()
+				return
+			}
+			batch = append(batch, blockNum)
+			if len(batch) >= cfg.TraceBatchSize {
+				flush()
+				flushTimer.Reset(500 * time.Millisecond)
+			}
+		case <-flushTimer.C:
+			flush()
+			flushTimer.Reset(500 * time.Millisecond)
 		}
 	}
+}
 
-	if len(blocksToFetch) == 0 {
-		return nil
-	}
+// traceWorker fetches traces and queues S3 uploads.
+func traceWorker(
+	ctx context.Context,
+	workerID int,
+	client *alchemy.Client,
+	partitionCache *PartitionCache,
+	bucket string,
+	workCh <-chan []int64,
+	uploadCh chan<- UploadJob,
+	stats *Stats,
+	logger *slog.Logger,
+) {
+	logger = logger.With("worker", workerID, "type", "trace")
 
-	// Fetch blocks from Alchemy
-	blockDataList, err := client.GetBlocksBatch(ctx, blocksToFetch, true)
-	if err != nil {
-		for range blocksToFetch {
-			stats.blocksFailed.Add(1)
+	for batch := range workCh {
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
-		return fmt.Errorf("failed to fetch batch: %w", err)
-	}
 
-	// Write each block's data to S3
-	for _, bd := range blockDataList {
-		if err := writeBlockToS3(ctx, s3Writer, partitionCache, cfg.Bucket, bd, stats); err != nil {
-			logger.Warn("failed to write block", "block", bd.BlockNumber, "error", err)
-			stats.blocksFailed.Add(1)
+		rpcStart := time.Now()
+		traces, errs := client.GetTracesBatch(ctx, batch)
+		stats.rpcTraceTime.Add(time.Since(rpcStart).Nanoseconds())
+		stats.rpcTraceCalls.Add(1)
+
+		for _, blockNum := range batch {
+			if err, hasErr := errs[blockNum]; hasErr {
+				logger.Warn("trace fetch failed", "block", blockNum, "error", err)
+				stats.tracesFailed.Add(1)
+				continue
+			}
+
+			traceData, ok := traces[blockNum]
+			if !ok {
+				logger.Warn("missing trace data", "block", blockNum)
+				stats.tracesFailed.Add(1)
+				continue
+			}
+
+			compressStart := time.Now()
+			compressed, err := compressData(traceData)
+			stats.compressTime.Add(time.Since(compressStart).Nanoseconds())
+			stats.compressCalls.Add(1)
+			if err != nil {
+				logger.Warn("failed to compress trace", "block", blockNum, "error", err)
+				stats.tracesFailed.Add(1)
+				continue
+			}
+
+			partition := getPartition(blockNum)
+			select {
+			case uploadCh <- UploadJob{
+				Bucket:   bucket,
+				Key:      fmt.Sprintf("%s/%d_1_traces.json.gz", partition, blockNum),
+				Data:     compressed,
+				DataType: "traces",
+				BlockNum: blockNum,
+			}:
+				stats.uploadsQueued.Add(1)
+			case <-ctx.Done():
+				return
+			}
+
+			stats.tracesProcessed.Add(1)
+		}
+	}
+}
+
+// uploadWorker handles async S3 uploads.
+func uploadWorker(
+	ctx context.Context,
+	workerID int,
+	s3Writer outbound.S3Writer,
+	partitionCache *PartitionCache,
+	workCh <-chan UploadJob,
+	stats *Stats,
+	dryRun bool,
+	logger *slog.Logger,
+) {
+	logger = logger.With("worker", workerID, "type", "upload")
+
+	for job := range workCh {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// In dry-run mode, skip actual S3 upload but still count the bytes
+		if dryRun {
+			switch job.DataType {
+			case "block", "receipts":
+				stats.blockBytesWritten.Add(int64(len(job.Data)))
+			case "traces":
+				stats.traceBytesWritten.Add(int64(len(job.Data)))
+			}
+			stats.uploadsCompleted.Add(1)
 			continue
 		}
-		stats.blocksProcessed.Add(1)
-	}
 
-	return nil
+		// Write pre-compressed data (pass compressGzip=false since we already compressed)
+		uploadStart := time.Now()
+		written, err := s3Writer.WriteFileIfNotExists(ctx, job.Bucket, job.Key, bytes.NewReader(job.Data), false)
+		stats.s3UploadTime.Add(time.Since(uploadStart).Nanoseconds())
+		stats.s3UploadCalls.Add(1)
+		if err != nil {
+			logger.Warn("upload failed", "key", job.Key, "error", err)
+			stats.uploadsFailed.Add(1)
+			continue
+		}
+
+		if written {
+			switch job.DataType {
+			case "block", "receipts":
+				stats.blockBytesWritten.Add(int64(len(job.Data)))
+			case "traces":
+				stats.traceBytesWritten.Add(int64(len(job.Data)))
+			}
+			partitionCache.MarkWritten(job.BlockNum, job.DataType)
+		}
+		stats.uploadsCompleted.Add(1)
+	}
 }
 
-// writeBlockToS3 writes all data types for a block to S3.
-func writeBlockToS3(ctx context.Context, s3Writer outbound.S3Writer, partitionCache *PartitionCache, bucket string, bd outbound.BlockData, stats *Stats) error {
-	partition := getPartition(bd.BlockNumber)
-
-	// Write block data
-	if bd.Block != nil {
-		key := fmt.Sprintf("%s/%d_1_block.json.gz", partition, bd.BlockNumber)
-		written, err := s3Writer.WriteFileIfNotExists(ctx, bucket, key, bytes.NewReader(bd.Block), true)
-		if err != nil {
-			return fmt.Errorf("failed to write block: %w", err)
-		}
-		if written {
-			stats.bytesWritten.Add(int64(len(bd.Block)))
-			partitionCache.MarkWritten(bd.BlockNumber, "block")
-		}
-	} else if bd.BlockErr != nil {
-		return fmt.Errorf("block fetch error: %w", bd.BlockErr)
+// compressData gzip compresses the input data.
+func compressData(data json.RawMessage) ([]byte, error) {
+	var buf bytes.Buffer
+	gzWriter := gzip.NewWriter(&buf)
+	if _, err := gzWriter.Write(data); err != nil {
+		return nil, fmt.Errorf("failed to compress: %w", err)
 	}
-
-	// Write receipts
-	if bd.Receipts != nil {
-		key := fmt.Sprintf("%s/%d_1_receipts.json.gz", partition, bd.BlockNumber)
-		written, err := s3Writer.WriteFileIfNotExists(ctx, bucket, key, bytes.NewReader(bd.Receipts), true)
-		if err != nil {
-			return fmt.Errorf("failed to write receipts: %w", err)
-		}
-		if written {
-			stats.bytesWritten.Add(int64(len(bd.Receipts)))
-			partitionCache.MarkWritten(bd.BlockNumber, "receipts")
-		}
-	} else if bd.ReceiptsErr != nil {
-		return fmt.Errorf("receipts fetch error: %w", bd.ReceiptsErr)
+	if err := gzWriter.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close gzip writer: %w", err)
 	}
-
-	// Write traces
-	if bd.Traces != nil {
-		key := fmt.Sprintf("%s/%d_1_traces.json.gz", partition, bd.BlockNumber)
-		written, err := s3Writer.WriteFileIfNotExists(ctx, bucket, key, bytes.NewReader(bd.Traces), true)
-		if err != nil {
-			return fmt.Errorf("failed to write traces: %w", err)
-		}
-		if written {
-			stats.bytesWritten.Add(int64(len(bd.Traces)))
-			partitionCache.MarkWritten(bd.BlockNumber, "traces")
-		}
-	} else if bd.TracesErr != nil {
-		return fmt.Errorf("traces fetch error: %w", bd.TracesErr)
-	}
-
-	return nil
+	return buf.Bytes(), nil
 }
 
-// getPartition returns the partition string for a block number.
 func getPartition(blockNumber int64) string {
 	partitionIndex := blockNumber / BlockRangeSize
 	start := partitionIndex * BlockRangeSize
@@ -500,9 +822,8 @@ func getPartition(blockNumber int64) string {
 	return fmt.Sprintf("%d-%d", start, end)
 }
 
-// reportProgress logs download progress periodically.
 func reportProgress(ctx context.Context, stats *Stats, totalBlocks int64, partitionCache *PartitionCache, logger *slog.Logger) {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(2 * time.Second) // More frequent updates
 	defer ticker.Stop()
 
 	for {
@@ -510,50 +831,75 @@ func reportProgress(ctx context.Context, stats *Stats, totalBlocks int64, partit
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			processed := stats.blocksProcessed.Load()
-			skipped := stats.blocksSkipped.Load()
-			failed := stats.blocksFailed.Load()
-			completed := processed + skipped + failed
+			blocksProcessed := stats.blocksProcessed.Load()
+			blocksSkipped := stats.blocksSkipped.Load()
+			blocksFailed := stats.blocksFailed.Load()
+			blocksTotal := blocksProcessed + blocksSkipped + blocksFailed
+
+			tracesProcessed := stats.tracesProcessed.Load()
+			tracesSkipped := stats.tracesSkipped.Load()
+			tracesFailed := stats.tracesFailed.Load()
+
+			uploadsQueued := stats.uploadsQueued.Load()
+			uploadsCompleted := stats.uploadsCompleted.Load()
+			uploadsFailed := stats.uploadsFailed.Load()
+			uploadsPending := uploadsQueued - uploadsCompleted - uploadsFailed
 
 			elapsed := time.Since(stats.startTime)
-			blocksPerSec := float64(completed) / elapsed.Seconds()
+			blocksPerSec := float64(blocksTotal) / elapsed.Seconds()
+			tracesPerSec := float64(tracesProcessed+tracesSkipped+tracesFailed) / elapsed.Seconds()
 
-			remaining := totalBlocks - completed
-			var eta time.Duration
-			if blocksPerSec > 0 {
-				eta = time.Duration(float64(remaining)/blocksPerSec) * time.Second
-			}
-
-			pct := float64(completed) / float64(totalBlocks) * 100
+			pct := float64(blocksTotal) / float64(totalBlocks) * 100
 
 			hits, misses := partitionCache.GetStats()
+			hitRate := float64(0)
+			if hits+misses > 0 {
+				hitRate = float64(hits) / float64(hits+misses) * 100
+			}
+
+			totalBytes := stats.blockBytesWritten.Load() + stats.traceBytesWritten.Load()
+
+			// Calculate current average times
+			avgRpcBlock := time.Duration(0)
+			if calls := stats.rpcBlockCalls.Load(); calls > 0 {
+				avgRpcBlock = time.Duration(stats.rpcBlockTime.Load() / calls)
+			}
+			avgRpcTrace := time.Duration(0)
+			if calls := stats.rpcTraceCalls.Load(); calls > 0 {
+				avgRpcTrace = time.Duration(stats.rpcTraceTime.Load() / calls)
+			}
+			avgUpload := time.Duration(0)
+			if calls := stats.s3UploadCalls.Load(); calls > 0 {
+				avgUpload = time.Duration(stats.s3UploadTime.Load() / calls)
+			}
 
 			logger.Info("progress",
-				"completed", completed,
-				"total", totalBlocks,
-				"percent", fmt.Sprintf("%.1f%%", pct),
-				"processed", processed,
-				"skipped", skipped,
-				"failed", failed,
-				"blocksPerSec", fmt.Sprintf("%.1f", blocksPerSec),
-				"eta", eta.Round(time.Second),
-				"bytesWritten", formatBytes(stats.bytesWritten.Load()),
-				"cacheHitRate", fmt.Sprintf("%.1f%%", float64(hits)/float64(hits+misses+1)*100),
+				"pct", fmt.Sprintf("%.1f%%", pct),
+				"blocks", fmt.Sprintf("%d/%d/%d", blocksProcessed, blocksSkipped, blocksFailed),
+				"traces", fmt.Sprintf("%d/%d/%d", tracesProcessed, tracesSkipped, tracesFailed),
+				"uploads", fmt.Sprintf("%d pending", uploadsPending),
+				"blk/s", fmt.Sprintf("%.1f", blocksPerSec),
+				"trc/s", fmt.Sprintf("%.1f", tracesPerSec),
+				"bytes", formatBytes(totalBytes),
+				"avgRpcBlk", avgRpcBlock.Round(time.Millisecond),
+				"avgRpcTrc", avgRpcTrace.Round(time.Millisecond),
+				"avgUpload", avgUpload.Round(time.Millisecond),
+				"cache", fmt.Sprintf("%.0f%%", hitRate),
+				"elapsed", elapsed.Round(time.Second),
 			)
 		}
 	}
 }
 
-// formatBytes formats bytes as a human-readable string.
-func formatBytes(bytes int64) string {
+func formatBytes(b int64) string {
 	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
 	}
 	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
+	for n := b / unit; n >= unit; n /= unit {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }

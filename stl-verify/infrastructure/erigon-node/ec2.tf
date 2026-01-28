@@ -137,11 +137,15 @@ resource "aws_iam_instance_profile" "erigon" {
   role = aws_iam_role.erigon.name
 }
 
-# EC2 instance in isolated subnet
-resource "aws_instance" "erigon" {
+# =============================================================================
+# c8gd.16xlarge Instance for High-Performance Bulk Downloads
+# Uses local NVMe instance store (2x 1900GB in RAID 0) for maximum I/O
+# =============================================================================
+
+resource "aws_instance" "erigon_c8gd" {
   ami                    = data.aws_ami.amazon_linux_2023.id
-  instance_type          = var.instance_type
-  key_name               = var.key_name # Optional, using Tailscale for access
+  instance_type          = "c8gd.16xlarge" # 64 vCPUs (Graviton4), 128GB RAM, 2x 1900GB NVMe
+  key_name               = var.key_name
   subnet_id              = aws_subnet.erigon.id
   vpc_security_group_ids = [aws_security_group.erigon.id]
   iam_instance_profile   = aws_iam_instance_profile.erigon.name
@@ -151,10 +155,13 @@ resource "aws_instance" "erigon" {
     volume_type = "gp3"
   }
 
-  user_data = base64encode(file("${path.module}/user-data.sh"))
+  # c8gd has local NVMe instance store - ephemeral but very fast
+  # The user-data script sets up RAID 0 on the 2x 1900GB NVMe disks
+
+  user_data = base64encode(file("${path.module}/user-data-c8gd.sh"))
 
   tags = {
-    Name = "${var.project}-erigon-node"
+    Name = "${var.project}-erigon-c8gd"
   }
 
   # Prevent accidental termination
@@ -162,32 +169,5 @@ resource "aws_instance" "erigon" {
 
   # Enable detailed monitoring
   monitoring = true
-}
-
-# EBS volume for Erigon data (separate from root for flexibility)
-# IMPORTANT: This volume contains blockchain data - protect from accidental deletion
-resource "aws_ebs_volume" "erigon_data" {
-  availability_zone = "${var.aws_region}a"  # Fixed AZ, independent of instance
-  size              = var.volume_size_gb
-  type              = "gp3"
-  iops              = var.volume_iops
-  throughput        = var.volume_throughput
-
-  tags = {
-    Name = "${var.project}-erigon-data"
-  }
-
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-
-resource "aws_volume_attachment" "erigon_data" {
-  device_name = "/dev/xvdf"
-  volume_id   = aws_ebs_volume.erigon_data.id
-  instance_id = aws_instance.erigon.id
-
-  # Don't destroy volume when instance is replaced
-  skip_destroy = true
 }
 

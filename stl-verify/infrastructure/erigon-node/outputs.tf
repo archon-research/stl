@@ -9,13 +9,18 @@ output "subnet_id" {
 }
 
 output "instance_id" {
-  description = "EC2 instance ID"
-  value       = aws_instance.erigon.id
+  description = "EC2 instance ID (c8gd.16xlarge)"
+  value       = aws_instance.erigon_c8gd.id
 }
 
 output "public_ip" {
   description = "Public IP address (dynamic, changes on stop/start)"
-  value       = aws_instance.erigon.public_ip
+  value       = aws_instance.erigon_c8gd.public_ip
+}
+
+output "private_ip" {
+  description = "Private IP address"
+  value       = aws_instance.erigon_c8gd.private_ip
 }
 
 output "tailscale_access" {
@@ -36,11 +41,6 @@ output "sync_status_command" {
 output "s3_bucket" {
   description = "S3 bucket for data export"
   value       = var.s3_bucket_name
-}
-
-output "volume_id" {
-  description = "EBS data volume ID"
-  value       = aws_ebs_volume.erigon_data.id
 }
 
 output "s3_test_command" {
