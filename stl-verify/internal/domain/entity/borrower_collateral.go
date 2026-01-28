@@ -7,27 +7,33 @@ import (
 
 // BorrowerCollateral represents a user's collateral position at a specific block.
 type BorrowerCollateral struct {
-	ID           int64
-	UserID       int64
-	ProtocolID   int64
-	TokenID      int64
-	BlockNumber  int64
-	BlockVersion int
-	Amount       *big.Int // current total collateral amount
-	Change       *big.Int // change from previous snapshot
+	ID                int64
+	UserID            int64
+	ProtocolID        int64
+	TokenID           int64
+	BlockNumber       int64
+	BlockVersion      int
+	Amount            *big.Int // current total collateral amount
+	Change            *big.Int // change from previous snapshot
+	EventType         string   // type of event that triggered this position snapshot
+	TxHash            string   // transaction hash
+	CollateralEnabled bool     // whether this asset is enabled as collateral
 }
 
 // NewBorrowerCollateral creates a new BorrowerCollateral entity.
-func NewBorrowerCollateral(id, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int) (*BorrowerCollateral, error) {
+func NewBorrowerCollateral(id, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType, txHash string, collateralEnabled bool) (*BorrowerCollateral, error) {
 	bc := &BorrowerCollateral{
-		ID:           id,
-		UserID:       userID,
-		ProtocolID:   protocolID,
-		TokenID:      tokenID,
-		BlockNumber:  blockNumber,
-		BlockVersion: blockVersion,
-		Amount:       amount,
-		Change:       change,
+		ID:                id,
+		UserID:            userID,
+		ProtocolID:        protocolID,
+		TokenID:           tokenID,
+		BlockNumber:       blockNumber,
+		BlockVersion:      blockVersion,
+		Amount:            amount,
+		Change:            change,
+		EventType:         eventType,
+		TxHash:            txHash,
+		CollateralEnabled: collateralEnabled,
 	}
 	if err := bc.validate(); err != nil {
 		return nil, err
@@ -63,6 +69,12 @@ func (bc *BorrowerCollateral) validate() error {
 	}
 	if bc.Change == nil {
 		return fmt.Errorf("change must not be nil")
+	}
+	if bc.EventType == "" {
+		return fmt.Errorf("eventType must not be empty")
+	}
+	if bc.TxHash == "" {
+		return fmt.Errorf("txHash must not be empty")
 	}
 	return nil
 }
