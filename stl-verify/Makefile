@@ -8,7 +8,8 @@
         ecr-login docker-build docker-push docker-release \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
-        docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging
+        docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging \
+        erigon-init erigon-validate erigon-plan erigon-apply erigon-apply-auto erigon-destroy erigon-check
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -435,4 +436,44 @@ docker-push-backup-staging:
 
 docker-release-backup-staging:
 	@$(MAKE) docker-release-backup ENV=sentinelstaging
+
+# =============================================================================
+# Erigon Node Terraform Commands
+# =============================================================================
+
+ERIGON_DIR := infrastructure/erigon-node
+AWS_PROFILE_ERIGON ?= AdministratorAccess-579039992622
+
+# Initialize Erigon Terraform
+erigon-init:
+	@echo "==> Initializing Erigon Terraform..."
+	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu init
+
+# Validate Erigon Terraform configuration
+erigon-validate:
+	@echo "==> Validating Erigon Terraform..."
+	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu validate
+
+# Plan Erigon Terraform changes
+erigon-plan:
+	@echo "==> Planning Erigon Terraform..."
+	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu plan
+
+# Apply Erigon Terraform changes
+erigon-apply:
+	@echo "==> Applying Erigon Terraform..."
+	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu apply
+
+# Apply Erigon Terraform changes (auto-approve)
+erigon-apply-auto:
+	@echo "==> Applying Erigon Terraform (auto-approve)..."
+	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu apply -auto-approve
+
+# Destroy Erigon infrastructure
+erigon-destroy:
+	@echo "==> Destroying Erigon infrastructure..."
+	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu destroy
+
+# Full Erigon workflow: init, validate, plan
+erigon-check: erigon-init erigon-validate erigon-plan
 

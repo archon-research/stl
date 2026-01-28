@@ -1,0 +1,16 @@
+# Copy this file to terraform.tfvars and fill in the values
+
+aws_region       = "us-east-1"
+key_name         = "your-ssh-key-name"  # Must exist in AWS
+allowed_ssh_cidr = "YOUR.IP.ADDRESS/32" # Restrict to your IP for SSH
+
+# S3 bucket for storing extracted blockchain data
+s3_bucket_name = "stl-sentinelstaging-ethereum-raw-89d540d0"
+
+# Optional overrides (defaults are good for archive node)
+# instance_type     = "r6i.4xlarge"  # 16 vCPUs, 128GB RAM
+# volume_size_gb    = 4000           # 4TB
+# volume_iops       = 16000
+# volume_throughput = 1000
+# vpc_cidr          = "10.100.0.0/16"
+# subnet_cidr       = "10.100.1.0/24"
