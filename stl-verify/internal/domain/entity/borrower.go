@@ -15,10 +15,12 @@ type Borrower struct {
 	BlockVersion int
 	Amount       *big.Int // current total debt amount
 	Change       *big.Int // change from previous snapshot
+	EventType    string   // The type of event that triggered this position snapshot (e.g., "Borrow", "Repay", "LiquidationCall")
+	TxHash       string   // The transaction hash
 }
 
 // NewBorrower creates a new Borrower entity.
-func NewBorrower(id, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int) (*Borrower, error) {
+func NewBorrower(id, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType, txHash string) (*Borrower, error) {
 	b := &Borrower{
 		ID:           id,
 		UserID:       userID,
@@ -28,6 +30,8 @@ func NewBorrower(id, userID, protocolID, tokenID, blockNumber int64, blockVersio
 		BlockVersion: blockVersion,
 		Amount:       amount,
 		Change:       change,
+		EventType:    eventType,
+		TxHash:       txHash,
 	}
 	if err := b.validate(); err != nil {
 		return nil, err
@@ -63,6 +67,12 @@ func (b *Borrower) validate() error {
 	}
 	if b.Change == nil {
 		return fmt.Errorf("change must not be nil")
+	}
+	if b.EventType == "" {
+		return fmt.Errorf("eventType must not be empty")
+	}
+	if b.TxHash == "" {
+		return fmt.Errorf("txHash must not be empty")
 	}
 	return nil
 }
