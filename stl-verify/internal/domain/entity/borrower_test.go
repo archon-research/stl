@@ -1,14 +1,19 @@
 package entity
 
 import (
+	"bytes"
 	"math/big"
 	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestNewBorrower(t *testing.T) {
 	validAmount := big.NewInt(1000)
 	validChange := big.NewInt(100)
+	validEventType := EventBorrow
+	validTxHash := common.FromHex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
 	tests := []struct {
 		name         string
@@ -20,6 +25,8 @@ func TestNewBorrower(t *testing.T) {
 		blockVersion int
 		amount       *big.Int
 		change       *big.Int
+		eventType    EventType
+		txHash       []byte
 		wantErr      bool
 		errContains  string
 	}{
@@ -33,6 +40,8 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       validAmount,
 			change:       validChange,
+			eventType:    validEventType,
+			txHash:       validTxHash,
 			wantErr:      false,
 		},
 		{
@@ -45,6 +54,8 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       validAmount,
 			change:       validChange,
+			eventType:    validEventType,
+			txHash:       validTxHash,
 			wantErr:      true,
 			errContains:  "id must be positive",
 		},
@@ -58,6 +69,8 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       validAmount,
 			change:       validChange,
+			eventType:    validEventType,
+			txHash:       validTxHash,
 			wantErr:      true,
 			errContains:  "id must be positive",
 		},
@@ -71,6 +84,8 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       validAmount,
 			change:       validChange,
+			eventType:    validEventType,
+			txHash:       validTxHash,
 			wantErr:      true,
 			errContains:  "userID must be positive",
 		},
@@ -84,6 +99,8 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       validAmount,
 			change:       validChange,
+			eventType:    validEventType,
+			txHash:       validTxHash,
 			wantErr:      true,
 			errContains:  "protocolID must be positive",
 		},
@@ -97,6 +114,8 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       validAmount,
 			change:       validChange,
+			eventType:    validEventType,
+			txHash:       validTxHash,
 			wantErr:      true,
 			errContains:  "tokenID must be positive",
 		},
@@ -110,6 +129,8 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       validAmount,
 			change:       validChange,
+			eventType:    validEventType,
+			txHash:       validTxHash,
 			wantErr:      true,
 			errContains:  "blockNumber must be positive",
 		},
@@ -123,6 +144,8 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: -1,
 			amount:       validAmount,
 			change:       validChange,
+			eventType:    validEventType,
+			txHash:       validTxHash,
 			wantErr:      true,
 			errContains:  "blockVersion must be non-negative",
 		},
@@ -136,6 +159,8 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       nil,
 			change:       validChange,
+			eventType:    validEventType,
+			txHash:       validTxHash,
 			wantErr:      true,
 			errContains:  "amount must not be nil",
 		},
@@ -149,6 +174,8 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       big.NewInt(-100),
 			change:       validChange,
+			eventType:    validEventType,
+			txHash:       validTxHash,
 			wantErr:      true,
 			errContains:  "amount must be non-negative",
 		},
@@ -162,6 +189,8 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       validAmount,
 			change:       nil,
+			eventType:    validEventType,
+			txHash:       validTxHash,
 			wantErr:      true,
 			errContains:  "change must not be nil",
 		},
@@ -175,6 +204,8 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       big.NewInt(0),
 			change:       big.NewInt(0),
+			eventType:    validEventType,
+			txHash:       validTxHash,
 			wantErr:      false,
 		},
 		{
@@ -187,13 +218,88 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       validAmount,
 			change:       big.NewInt(-50),
+			eventType:    validEventType,
+			txHash:       validTxHash,
+			wantErr:      false,
+		},
+		{
+			name:         "empty eventType",
+			id:           1,
+			userID:       10,
+			protocolID:   5,
+			tokenID:      3,
+			blockNumber:  1000,
+			blockVersion: 0,
+			amount:       validAmount,
+			change:       validChange,
+			eventType:    "",
+			txHash:       validTxHash,
+			wantErr:      true,
+			errContains:  "invalid eventType",
+		},
+		{
+			name:         "invalid eventType",
+			id:           1,
+			userID:       10,
+			protocolID:   5,
+			tokenID:      3,
+			blockNumber:  1000,
+			blockVersion: 0,
+			amount:       validAmount,
+			change:       validChange,
+			eventType:    "InvalidEvent",
+			txHash:       validTxHash,
+			wantErr:      true,
+			errContains:  "invalid eventType",
+		},
+		{
+			name:         "empty txHash",
+			id:           1,
+			userID:       10,
+			protocolID:   5,
+			tokenID:      3,
+			blockNumber:  1000,
+			blockVersion: 0,
+			amount:       validAmount,
+			change:       validChange,
+			eventType:    validEventType,
+			txHash:       nil,
+			wantErr:      true,
+			errContains:  "txHash must not be empty",
+		},
+		{
+			name:         "valid with Repay eventType",
+			id:           1,
+			userID:       10,
+			protocolID:   5,
+			tokenID:      3,
+			blockNumber:  1000,
+			blockVersion: 0,
+			amount:       validAmount,
+			change:       validChange,
+			eventType:    EventRepay,
+			txHash:       validTxHash,
+			wantErr:      false,
+		},
+		{
+			name:         "valid with LiquidationCall eventType",
+			id:           1,
+			userID:       10,
+			protocolID:   5,
+			tokenID:      3,
+			blockNumber:  1000,
+			blockVersion: 0,
+			amount:       validAmount,
+			change:       validChange,
+			eventType:    EventLiquidationCall,
+			txHash:       validTxHash,
 			wantErr:      false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			borrower, err := NewBorrower(tt.id, tt.userID, tt.protocolID, tt.tokenID, tt.blockNumber, tt.blockVersion, tt.amount, tt.change)
+			borrower, err := NewBorrower(tt.id, tt.userID, tt.protocolID, tt.tokenID, tt.blockNumber, tt.blockVersion, tt.amount, tt.change, tt.eventType, tt.txHash)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("NewBorrower() expected error, got nil")
@@ -235,6 +341,12 @@ func TestNewBorrower(t *testing.T) {
 			}
 			if borrower.Change.Cmp(tt.change) != 0 {
 				t.Errorf("NewBorrower() Change = %v, want %v", borrower.Change, tt.change)
+			}
+			if borrower.EventType != tt.eventType {
+				t.Errorf("NewBorrower() EventType = %v, want %v", borrower.EventType, tt.eventType)
+			}
+			if !bytes.Equal(borrower.TxHash, tt.txHash) {
+				t.Errorf("NewBorrower() TxHash = %v, want %v", borrower.TxHash, tt.txHash)
 			}
 		})
 	}

@@ -1,7 +1,7 @@
-// Package main implements a borrow event processor that monitors lending protocol
+// Package main implements a SparkLend position tracker that monitors lending protocol
 // activity on Ethereum. It processes transaction receipts from Redis (triggered by SQS
-// messages), extracts borrow events with collateral data, and stores the results in
-// PostgreSQL for downstream analysis.
+// messages), extracts position-changing events with collateral data, and stores the
+// results in PostgreSQL for downstream analysis.
 package main
 
 import (
@@ -22,7 +22,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/services/borrow_processor"
+	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
 )
 
 const (
@@ -80,7 +80,7 @@ func main() {
 	var chainID int64 = 1
 	_, _ = fmt.Sscanf(chainIDStr, "%d", &chainID)
 
-	logger.Info("starting borrow event processor",
+	logger.Info("starting sparklend position tracker",
 		"queue", *queueURL,
 		"redis", *redisAddr,
 		"chainID", chainID)
@@ -169,14 +169,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	processorConfig := borrow_processor.Config{
+	processorConfig := sparklend_position_tracker.Config{
 		QueueURL:        *queueURL,
 		MaxMessages:     int32(*maxMessages),
 		WaitTimeSeconds: int32(*waitTime),
 		Logger:          logger,
 	}
 
-	processor, err := borrow_processor.NewService(
+	processor, err := sparklend_position_tracker.NewService(
 		processorConfig,
 		sqsClient,
 		redisClient,

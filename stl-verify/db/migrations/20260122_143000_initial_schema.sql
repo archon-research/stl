@@ -127,6 +127,8 @@ CREATE TABLE IF NOT EXISTS borrower
     block_version INT         NOT NULL DEFAULT 0,
     amount        NUMERIC     NOT NULL,
     change        NUMERIC     NOT NULL,
+    event_type    TEXT        NOT NULL,
+    tx_hash       BYTEA       NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (user_id, protocol_id, token_id, block_number, block_version)
 );
@@ -140,15 +142,18 @@ CREATE INDEX IF NOT EXISTS idx_borrower_block_version ON borrower (block_number,
 
 CREATE TABLE IF NOT EXISTS borrower_collateral
 (
-    id            BIGSERIAL PRIMARY KEY,
-    user_id       BIGINT      NOT NULL REFERENCES "user" (id),
-    protocol_id   BIGINT      NOT NULL REFERENCES protocol (id),
-    token_id      BIGINT      NOT NULL REFERENCES token (id),
-    block_number  BIGINT      NOT NULL,
-    block_version INT         NOT NULL DEFAULT 0,
-    amount        NUMERIC     NOT NULL,
-    change        NUMERIC     NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    id                 BIGSERIAL PRIMARY KEY,
+    user_id            BIGINT      NOT NULL REFERENCES "user" (id),
+    protocol_id        BIGINT      NOT NULL REFERENCES protocol (id),
+    token_id           BIGINT      NOT NULL REFERENCES token (id),
+    block_number       BIGINT      NOT NULL,
+    block_version      INT         NOT NULL DEFAULT 0,
+    amount             NUMERIC     NOT NULL,
+    change             NUMERIC     NOT NULL,
+    event_type         TEXT        NOT NULL,
+    tx_hash            BYTEA       NOT NULL,
+    collateral_enabled BOOLEAN     NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (user_id, protocol_id, token_id, block_number, block_version)
 );
 
