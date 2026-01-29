@@ -8,6 +8,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 )
 
 func TestService_LoadBorrowABI(t *testing.T) {
@@ -173,11 +175,7 @@ func TestService_ExtractBorrowEventData(t *testing.T) {
 	}
 }
 
-func TestService_ConvertToDecimalAdjusted(t *testing.T) {
-	service := &Service{
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
-
+func TestBlockchain_ConvertToDecimalAdjusted(t *testing.T) {
 	tests := []struct {
 		name     string
 		amount   *big.Int
@@ -194,7 +192,7 @@ func TestService_ConvertToDecimalAdjusted(t *testing.T) {
 			name:     "1.5 USDC (6 decimals)",
 			amount:   big.NewInt(1500000),
 			decimals: 6,
-			want:     "1.500000",
+			want:     "1.5",
 		},
 		{
 			name:     "1 ETH (18 decimals)",
@@ -206,7 +204,7 @@ func TestService_ConvertToDecimalAdjusted(t *testing.T) {
 			name:     "0.5 ETH (18 decimals)",
 			amount:   new(big.Int).Div(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil), big.NewInt(2)),
 			decimals: 18,
-			want:     "0.500000000000000000",
+			want:     "0.5",
 		},
 		{
 			name:     "no decimals",
@@ -214,13 +212,20 @@ func TestService_ConvertToDecimalAdjusted(t *testing.T) {
 			decimals: 0,
 			want:     "12345",
 		},
+		{
+			name:     "nil amount",
+			amount:   nil,
+			decimals: 18,
+			want:     "0",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := service.convertToDecimalAdjusted(tt.amount, tt.decimals)
-			if result != tt.want {
-				t.Errorf("convertToDecimalAdjusted() = %v, want %v", result, tt.want)
+			result := blockchain.ConvertToDecimalAdjusted(tt.amount, tt.decimals)
+			resultStr := result.Text('f', -1)
+			if resultStr != tt.want {
+				t.Errorf("ConvertToDecimalAdjusted() = %v, want %v", resultStr, tt.want)
 			}
 		})
 	}
