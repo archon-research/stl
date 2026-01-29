@@ -1,10 +1,13 @@
 package borrow_processor
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"strings"
@@ -21,6 +24,9 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 )
 
 type TransactionReceipt struct {
@@ -103,15 +109,20 @@ func ConfigDefaults() Config {
 }
 
 type Service struct {
-	config          Config
-	sqsClient       *sqs.Client
-	redisClient     *redis.Client
-	blockchain      *blockchainService
-	txManager       *postgres.TxManager
-	userRepo        *postgres.UserRepository
-	protocolRepo    *postgres.ProtocolRepository
-	tokenRepo       *postgres.TokenRepository
-	positionRepo    *postgres.PositionRepository
+	config       Config
+	sqsClient    *sqs.Client
+	redisClient  *redis.Client
+	ethClient    *ethclient.Client
+	txManager    *postgres.TxManager
+	userRepo     *postgres.UserRepository
+	protocolRepo *postgres.ProtocolRepository
+	tokenRepo    *postgres.TokenRepository
+	positionRepo *postgres.PositionRepository
+
+	blockchainServices map[common.Address]*blockchainService
+	multicallClient    multicall.Multicaller
+	erc20ABI           *abi.ABI
+
 	borrowABI       *abi.ABI
 	eventSignatures map[common.Hash]*abi.Event
 
@@ -125,9 +136,6 @@ func NewService(
 	sqsClient *sqs.Client,
 	redisClient *redis.Client,
 	ethClient *ethclient.Client,
-	multicall3Addr common.Address,
-	uiPoolDataProvider common.Address,
-	poolAddressesProvider common.Address,
 	txManager *postgres.TxManager,
 	userRepo *postgres.UserRepository,
 	protocolRepo *postgres.ProtocolRepository,
@@ -155,23 +163,31 @@ func NewService(
 		config.Logger = defaults.Logger
 	}
 
-	blockchain, err := newBlockchainService(ethClient, multicall3Addr, uiPoolDataProvider, poolAddressesProvider, config.Logger)
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create blockchain service: %w", err)
+		return nil, fmt.Errorf("failed to create multicall client: %w", err)
+	}
+
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load ERC20 ABI: %w", err)
 	}
 
 	processor := &Service{
-		config:          config,
-		sqsClient:       sqsClient,
-		redisClient:     redisClient,
-		blockchain:      blockchain,
-		txManager:       txManager,
-		userRepo:        userRepo,
-		protocolRepo:    protocolRepo,
-		tokenRepo:       tokenRepo,
-		positionRepo:    positionRepo,
-		eventSignatures: make(map[common.Hash]*abi.Event),
-		logger:          config.Logger.With("component", "borrow-processor"),
+		config:             config,
+		sqsClient:          sqsClient,
+		redisClient:        redisClient,
+		ethClient:          ethClient,
+		txManager:          txManager,
+		userRepo:           userRepo,
+		protocolRepo:       protocolRepo,
+		tokenRepo:          tokenRepo,
+		positionRepo:       positionRepo,
+		blockchainServices: make(map[common.Address]*blockchainService),
+		multicallClient:    mc,
+		erc20ABI:           erc20ABI,
+		eventSignatures:    make(map[common.Hash]*abi.Event),
+		logger:             config.Logger.With("component", "borrow-processor"),
 	}
 
 	if err := processor.loadBorrowABI(); err != nil {
@@ -179,6 +195,39 @@ func NewService(
 	}
 
 	return processor, nil
+}
+
+func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (*blockchainService, error) {
+	if svc, exists := s.blockchainServices[protocolAddress]; exists {
+		return svc, nil
+	}
+
+	protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
+	if !exists {
+		return nil, fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
+	}
+
+	svc, err := newBlockchainService(
+		s.ethClient,
+		s.multicallClient,
+		s.erc20ABI,
+		protocolConfig.UIPoolDataProvider,
+		protocolConfig.PoolDataProvider,
+		protocolConfig.PoolAddressesProvider,
+		protocolConfig.UseAaveABI, // Pass the flag
+		s.logger,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create blockchain service for %s: %w", protocolConfig.Name, err)
+	}
+
+	s.blockchainServices[protocolAddress] = svc
+	s.logger.Info("created blockchain service",
+		"protocol", protocolConfig.Name,
+		"address", protocolAddress.Hex(),
+		"abiType", map[bool]string{true: "Aave", false: "Sparklend"}[protocolConfig.UseAaveABI])
+
+	return svc, nil
 }
 
 func (s *Service) loadBorrowABI() error {
@@ -309,8 +358,29 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event BlockEvent)
 		return fmt.Errorf("failed to fetch from Redis: %w", err)
 	}
 
+	data := []byte(receiptsJSON)
+	if len(data) > 2 && data[0] == 0x1f && data[1] == 0x8b {
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+
+		decompressed, err := io.ReadAll(gr)
+		closeErr := gr.Close()
+
+		if err != nil {
+			return fmt.Errorf("failed to decompress: %w", err)
+		}
+
+		if closeErr != nil {
+			return fmt.Errorf("failed to close gzip reader: %w", closeErr)
+		}
+
+		data = decompressed
+	}
+
 	var receipts []TransactionReceipt
-	if err := json.Unmarshal([]byte(receiptsJSON), &receipts); err != nil {
+	if err := json.Unmarshal(data, &receipts); err != nil {
 		return fmt.Errorf("failed to unmarshal receipts: %w", err)
 	}
 
@@ -327,14 +397,14 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event BlockEvent)
 	return nil
 }
 
-func (s *Service) processReceipt(ctx context.Context, receipt TransactionReceipt, ChainID, blockNumber int64, blockVersion int) error {
+func (s *Service) processReceipt(ctx context.Context, receipt TransactionReceipt, chainID, blockNumber int64, blockVersion int) error {
 	var errs []error
 	for _, log := range receipt.Logs {
 		if !s.isBorrowEvent(log) {
 			continue
 		}
 
-		if err := s.processBorrowLog(ctx, log, receipt.TransactionHash, ChainID, blockNumber, blockVersion); err != nil {
+		if err := s.processBorrowLog(ctx, log, receipt.TransactionHash, chainID, blockNumber, blockVersion); err != nil {
 			s.logger.Error("failed to process borrow event", "error", err, "tx", receipt.TransactionHash)
 			errs = append(errs, err)
 		}
@@ -408,7 +478,7 @@ func (s *Service) extractBorrowEventData(log Log) (*BorrowEventData, error) {
 	}, nil
 }
 
-func (s *Service) processBorrowLog(ctx context.Context, log Log, txHash string, ChainID, blockNumber int64, blockVersion int) error {
+func (s *Service) processBorrowLog(ctx context.Context, log Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("processBorrowLog completed",
@@ -424,6 +494,12 @@ func (s *Service) processBorrowLog(ctx context.Context, log Log, txHash string, 
 
 	protocolAddress := common.HexToAddress(log.Address)
 
+	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
+	if err != nil {
+		s.logger.Error("unsupported protocol", "protocol", protocolAddress.Hex(), "error", err)
+		return fmt.Errorf("unsupported protocol %s: %w", protocolAddress.Hex(), err)
+	}
+
 	s.logger.Info("Borrow event detected",
 		"user", borrowEvent.OnBehalfOf.Hex(),
 		"protocol", protocolAddress.Hex(),
@@ -436,7 +512,7 @@ func (s *Service) processBorrowLog(ctx context.Context, log Log, txHash string, 
 	tokensToFetch := make(map[common.Address]bool)
 	tokensToFetch[borrowEvent.Reserve] = true
 
-	metadataMap, err := s.blockchain.batchGetTokenMetadata(ctx, tokensToFetch)
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
 	if err != nil {
 		s.logger.Warn("failed to batch get token metadata", "error", err, "tx", txHash, "block", blockNumber)
 		metadataMap = make(map[common.Address]TokenMetadata)
@@ -453,83 +529,87 @@ func (s *Service) processBorrowLog(ctx context.Context, log Log, txHash string, 
 		return fmt.Errorf("borrow token decimals not found for %s", borrowEvent.Reserve.Hex())
 	}
 
-	collaterals, err := s.extractCollateralData(ctx, borrowEvent.OnBehalfOf, protocolAddress, ChainID, blockNumber, txHash)
+	collaterals, err := s.extractCollateralData(ctx, blockchainSvc, borrowEvent.OnBehalfOf, protocolAddress, chainID, blockNumber, txHash)
 	if err != nil {
 		s.logger.Warn("failed to extract collateral data", "error", err, "tx", txHash, "block", blockNumber)
 		collaterals = []CollateralData{}
 	}
 
-	return s.saveBorrowEvent(ctx, borrowEvent, collaterals, borrowTokenMetadata, protocolAddress, ChainID, blockNumber, blockVersion)
+	return s.saveBorrowEvent(ctx, borrowEvent, collaterals, borrowTokenMetadata, protocolAddress, chainID, blockNumber, blockVersion)
 }
 
-func (s *Service) extractCollateralData(ctx context.Context, user common.Address, protocolAddress common.Address, ChainID, blockNumber int64, txHash string) ([]CollateralData, error) {
-	reserves, err := s.blockchain.getUserReservesData(ctx, user, blockNumber)
+func (s *Service) extractCollateralData(ctx context.Context, blockchainSvc *blockchainService, user common.Address, protocolAddress common.Address, chainID, blockNumber int64, txHash string) ([]CollateralData, error) {
+	// Step 1: Get user's positions (scaled values, just for asset list)
+	reserves, err := blockchainSvc.getUserReservesData(ctx, user, blockNumber)
 	if err != nil {
 		s.logger.Warn("failed to get user reserves", "error", err, "tx", txHash, "block", blockNumber)
 		return []CollateralData{}, nil
 	}
 
-	tokensToFetch := make(map[common.Address]bool)
-	assetsForReserveData := make([]common.Address, 0)
-
+	// Step 2: Filter to get only collateral assets
+	collateralAssets := make([]common.Address, 0)
 	for _, r := range reserves {
 		if r.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && r.UsageAsCollateralEnabledOnUser {
 			if r.UnderlyingAsset != (common.Address{}) {
-				tokensToFetch[r.UnderlyingAsset] = true
-				assetsForReserveData = append(assetsForReserveData, r.UnderlyingAsset)
+				collateralAssets = append(collateralAssets, r.UnderlyingAsset)
 			}
 		}
 	}
 
-	if len(tokensToFetch) == 0 {
+	if len(collateralAssets) == 0 {
 		return []CollateralData{}, nil
 	}
 
-	metadataMap, err := s.blockchain.batchGetTokenMetadata(ctx, tokensToFetch)
+	// Step 3: Get token metadata for collateral assets
+	tokensToFetch := make(map[common.Address]bool)
+	for _, asset := range collateralAssets {
+		tokensToFetch[asset] = true
+	}
+
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
 	if err != nil {
 		s.logger.Warn("failed to batch get token metadata", "error", err, "tx", txHash, "block", blockNumber)
 		return []CollateralData{}, fmt.Errorf("failed to get token metadata: %w", err)
 	}
 
-	reserveDataMap, err := s.blockchain.batchGetReserveData(ctx, protocolAddress, assetsForReserveData, blockNumber)
+	// Step 4: Get actual balances from PoolDataProvider (unratioed)
+	actualDataMap, err := blockchainSvc.batchGetUserReserveData(ctx, collateralAssets, user, blockNumber)
 	if err != nil {
-		s.logger.Warn("failed to batch get reserve data", "error", err, "tx", txHash, "block", blockNumber)
-		reserveDataMap = make(map[common.Address]*big.Int)
+		s.logger.Warn("failed to batch get user reserve data", "error", err, "tx", txHash, "block", blockNumber)
+		return []CollateralData{}, fmt.Errorf("failed to get user reserve data: %w", err)
 	}
 
+	// Step 5: Build collateral data
 	var collaterals []CollateralData
-	for _, r := range reserves {
-		if r.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && r.UsageAsCollateralEnabledOnUser {
-			if r.UnderlyingAsset == (common.Address{}) {
-				continue
-			}
+	for _, asset := range collateralAssets {
+		metadata, ok := metadataMap[asset]
+		if !ok || metadata.Decimals == 0 {
+			s.logger.Error("SKIPPING COLLATERAL: Failed to get collateral token metadata",
+				"token", asset.Hex(),
+				"tx", txHash,
+				"block", blockNumber,
+				"user", user.Hex())
+			continue
+		}
 
-			metadata, ok := metadataMap[r.UnderlyingAsset]
-			if !ok || metadata.Decimals == 0 {
-				s.logger.Error("SKIPPING COLLATERAL: Failed to get collateral token metadata",
-					"token", r.UnderlyingAsset.Hex(),
-					"tx", txHash,
-					"block", blockNumber,
-					"user", user.Hex())
-				continue
-			}
+		actualData, ok := actualDataMap[asset]
+		if !ok {
+			s.logger.Error("SKIPPING COLLATERAL: Failed to get actual balance",
+				"token", asset.Hex(),
+				"tx", txHash,
+				"block", blockNumber,
+				"user", user.Hex())
+			continue
+		}
 
-			liquidityIndex, ok := reserveDataMap[r.UnderlyingAsset]
-			var actualBalance *big.Int
-			if ok && liquidityIndex != nil && liquidityIndex.Cmp(big.NewInt(0)) > 0 {
-				RAY := new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
-				actualBalance = new(big.Int).Mul(r.ScaledATokenBalance, liquidityIndex)
-				actualBalance.Div(actualBalance, RAY)
-			} else {
-				actualBalance = r.ScaledATokenBalance
-			}
-
+		// Only include if still has collateral enabled and balance > 0
+		if actualData.UsageAsCollateralEnabled && actualData.CurrentATokenBalance.Cmp(big.NewInt(0)) > 0 {
 			collaterals = append(collaterals, CollateralData{
-				Asset:         r.UnderlyingAsset,
+				Asset:         asset,
 				Decimals:      metadata.Decimals,
 				Symbol:        metadata.Symbol,
 				Name:          metadata.Name,
-				ActualBalance: actualBalance,
+				ActualBalance: actualData.CurrentATokenBalance,
 			})
 		}
 	}
@@ -560,8 +640,11 @@ func (s *Service) saveBorrowEvent(ctx context.Context, borrowEvent *BorrowEventD
 		if err != nil {
 			return fmt.Errorf("failed to get borrow token: %w", err)
 		}
-		decimalAdjustedAmount := s.convertToDecimalAdjusted(borrowEvent.Amount, borrowTokenMetadata.Decimals)
-		if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID.ID, borrowTokenID, blockNumber, blockVersion, decimalAdjustedAmount); err != nil {
+
+		decimalAdjusted := blockchain.ConvertToDecimalAdjusted(borrowEvent.Amount, borrowTokenMetadata.Decimals)
+		decimalAdjustedStr := decimalAdjusted.Text('f', -1)
+
+		if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID.ID, borrowTokenID, blockNumber, blockVersion, decimalAdjustedStr); err != nil {
 			return fmt.Errorf("failed to insert borrower: %w", err)
 		}
 
@@ -572,8 +655,10 @@ func (s *Service) saveBorrowEvent(ctx context.Context, borrowEvent *BorrowEventD
 				continue
 			}
 
-			decimalAdjustedCollateral := s.convertToDecimalAdjusted(col.ActualBalance, col.Decimals)
-			if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID.ID, tokenID, blockNumber, blockVersion, decimalAdjustedCollateral); err != nil {
+			decimalAdjusted := blockchain.ConvertToDecimalAdjusted(col.ActualBalance, col.Decimals)
+			decimalAdjustedStr := decimalAdjusted.Text('f', -1)
+
+			if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID.ID, tokenID, blockNumber, blockVersion, decimalAdjustedStr); err != nil {
 				s.logger.Warn("failed to insert collateral", "error", err, "tx", borrowEvent.TxHash)
 			}
 		}
@@ -586,23 +671,6 @@ func (s *Service) saveBorrowEvent(ctx context.Context, borrowEvent *BorrowEventD
 
 	s.logger.Info("Saved to database", "user", borrowEvent.OnBehalfOf.Hex(), "tx", borrowEvent.TxHash, "block", blockNumber)
 	return nil
-}
-
-func (s *Service) convertToDecimalAdjusted(rawAmount *big.Int, decimals int) string {
-	if decimals == 0 {
-		return rawAmount.String()
-	}
-
-	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
-	integerPart := new(big.Int).Div(rawAmount, divisor)
-	remainder := new(big.Int).Mod(rawAmount, divisor)
-
-	if remainder.Cmp(big.NewInt(0)) == 0 {
-		return integerPart.String()
-	}
-
-	fractionalStr := fmt.Sprintf("%0*s", decimals, remainder.String())
-	return fmt.Sprintf("%s.%s", integerPart.String(), fractionalStr)
 }
 
 func validateDependencies(
