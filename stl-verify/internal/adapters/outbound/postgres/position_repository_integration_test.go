@@ -3,6 +3,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
@@ -36,40 +38,28 @@ func setupPositionTest(t *testing.T) *positionTestFixture {
 	t.Helper()
 	ctx := context.Background()
 
-	req := testcontainers.ContainerRequest{
-		Image:        "timescale/timescaledb:latest-pg17",
-		ExposedPorts: []string{"5432/tcp"},
-		Env: map[string]string{
-			"POSTGRES_USER":     "test",
-			"POSTGRES_PASSWORD": "test",
-			"POSTGRES_DB":       "testdb",
-		},
-		WaitingFor: wait.ForLog("database system is ready to accept connections").
-			WithOccurrence(2).
-			WithStartupTimeout(60 * time.Second),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
+	// Use testcontainers postgres module with TimescaleDB image
+	container, err := postgres.Run(ctx,
+		"timescale/timescaledb:latest-pg17",
+		postgres.WithDatabase("testdb"),
+		postgres.WithUsername("test"),
+		postgres.WithPassword("test"),
+		postgres.WithSQLDriver("pgx"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60*time.Second)),
+	)
 	if err != nil {
 		t.Fatalf("failed to start container: %v", err)
 	}
 
-	host, err := container.Host(ctx)
+	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
-		t.Fatalf("failed to get container host: %v", err)
+		t.Fatalf("failed to get connection string: %v", err)
 	}
 
-	port, err := container.MappedPort(ctx, "5432")
-	if err != nil {
-		t.Fatalf("failed to get container port: %v", err)
-	}
-
-	dsn := fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
-
-	// Open database/sql connection for migrations
+	// Open database/sql connection for migrations using pgx stdlib adapter
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("failed to connect to database: %v", err)
@@ -228,7 +218,7 @@ func TestSaveBorrowerCollaterals_SingleRecord(t *testing.T) {
 		BlockVersion:      0,
 		Amount:            "123456789012345678901234567890",
 		EventType:         "Supply",
-		TxHash:            "0xabc123",
+		TxHash:            []byte{0xab, 0xc1, 0x23},
 		CollateralEnabled: true,
 	}
 
@@ -275,8 +265,8 @@ func TestSaveBorrowerCollaterals_SingleRecord(t *testing.T) {
 	if got.EventType != input.EventType {
 		t.Errorf("EventType mismatch: got %s, want %s", got.EventType, input.EventType)
 	}
-	if got.TxHash != input.TxHash {
-		t.Errorf("TxHash mismatch: got %s, want %s", got.TxHash, input.TxHash)
+	if !bytes.Equal(got.TxHash, input.TxHash) {
+		t.Errorf("TxHash mismatch: got %v, want %v", got.TxHash, input.TxHash)
 	}
 	if got.CollateralEnabled != input.CollateralEnabled {
 		t.Errorf("CollateralEnabled mismatch: got %v, want %v", got.CollateralEnabled, input.CollateralEnabled)
@@ -300,7 +290,7 @@ func TestSaveBorrowerCollaterals_TenRecords(t *testing.T) {
 			BlockVersion:      i,
 			Amount:            fmt.Sprintf("%d000000000000000000", i+1),
 			EventType:         fmt.Sprintf("Event%d", i),
-			TxHash:            fmt.Sprintf("0xtx%d", i),
+			TxHash:            []byte{0x00, 0x00, byte(i)},
 			CollateralEnabled: i%2 == 0,
 		}
 	}
@@ -360,7 +350,7 @@ func TestSaveBorrowerCollaterals_Rollback(t *testing.T) {
 			BlockVersion:      i,
 			Amount:            "1000000000000000000",
 			EventType:         "Supply",
-			TxHash:            fmt.Sprintf("0xrollback%d", i),
+			TxHash:            []byte{0x01, 0x00, byte(i)},
 			CollateralEnabled: true,
 		}
 	}
@@ -404,7 +394,7 @@ func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 			BlockVersion:      i,
 			Amount:            fmt.Sprintf("%d000000000000000000", i+1),
 			EventType:         fmt.Sprintf("Event%d", i),
-			TxHash:            fmt.Sprintf("0xdup%d", i),
+			TxHash:            []byte{0x02, 0x00, byte(i)},
 			CollateralEnabled: true,
 		}
 	}
@@ -432,11 +422,11 @@ func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 			ProtocolID:        fixture.protocolID,
 			TokenID:           fixture.tokenID,
 			BlockNumber:       4000,
-			BlockVersion:      i,                     // Same key as before
-			Amount:            "9999999999999999999", // Different amount - should be ignored
-			EventType:         "Modified",            // Different event type - should be ignored
-			TxHash:            "0xmodified",          // Different tx hash - should be ignored
-			CollateralEnabled: false,                 // Different enabled - should be ignored
+			BlockVersion:      i,                        // Same key as before
+			Amount:            "9999999999999999999",    // Different amount - should be ignored
+			EventType:         "Modified",               // Different event type - should be ignored
+			TxHash:            []byte{0xff, 0xff, 0xff}, // Different tx hash - should be ignored
+			CollateralEnabled: false,                    // Different enabled - should be ignored
 		}
 	}
 
@@ -491,7 +481,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 		BlockVersion:      0,
 		Amount:            "1000000000000000000",
 		EventType:         "Original",
-		TxHash:            "0xoriginal",
+		TxHash:            []byte{0x03, 0x00, 0x00},
 		CollateralEnabled: true,
 	}
 
@@ -517,7 +507,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 			BlockVersion:      0, // Duplicate - should be ignored
 			Amount:            "9999999999999999999",
 			EventType:         "Duplicate",
-			TxHash:            "0xduplicate",
+			TxHash:            []byte{0x04, 0x00, 0x00},
 			CollateralEnabled: false,
 		},
 		{
@@ -528,7 +518,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 			BlockVersion:      1, // New
 			Amount:            "2000000000000000000",
 			EventType:         "New1",
-			TxHash:            "0xnew1",
+			TxHash:            []byte{0x04, 0x00, 0x01},
 			CollateralEnabled: true,
 		},
 		{
@@ -539,7 +529,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 			BlockVersion:      2, // New
 			Amount:            "3000000000000000000",
 			EventType:         "New2",
-			TxHash:            "0xnew2",
+			TxHash:            []byte{0x04, 0x00, 0x02},
 			CollateralEnabled: false,
 		},
 	}
@@ -597,7 +587,7 @@ func TestSaveBorrowerCollaterals_ForeignKeyViolation(t *testing.T) {
 		BlockVersion:      0,
 		Amount:            "1000000000000000000",
 		EventType:         "Supply",
-		TxHash:            "0xinvalid",
+		TxHash:            []byte{0x05, 0x00, 0x00},
 		CollateralEnabled: true,
 	}
 
@@ -630,7 +620,7 @@ func TestSaveBorrowerCollaterals_LargeAmountPrecision(t *testing.T) {
 		BlockVersion:      0,
 		Amount:            largeAmount,
 		EventType:         "Supply",
-		TxHash:            "0xlarge",
+		TxHash:            []byte{0x06, 0x00, 0x00},
 		CollateralEnabled: true,
 	}
 
@@ -698,7 +688,7 @@ func TestSaveBorrowerCollaterals_ConcurrentTransactions(t *testing.T) {
 		BlockVersion:      0,
 		Amount:            "1000000000000000000",
 		EventType:         "Tx1",
-		TxHash:            "0xtx1",
+		TxHash:            []byte{0x07, 0x00, 0x01},
 		CollateralEnabled: true,
 	}}
 
@@ -710,7 +700,7 @@ func TestSaveBorrowerCollaterals_ConcurrentTransactions(t *testing.T) {
 		BlockVersion:      0,
 		Amount:            "2000000000000000000",
 		EventType:         "Tx2",
-		TxHash:            "0xtx2",
+		TxHash:            []byte{0x07, 0x00, 0x02},
 		CollateralEnabled: false,
 	}}
 
@@ -751,7 +741,7 @@ func TestSaveBorrowerCollaterals_TransactionIsolation(t *testing.T) {
 		BlockVersion:      0,
 		Amount:            "1000000000000000000",
 		EventType:         "Isolated",
-		TxHash:            "0xisolated",
+		TxHash:            []byte{0x08, 0x00, 0x00},
 		CollateralEnabled: true,
 	}
 

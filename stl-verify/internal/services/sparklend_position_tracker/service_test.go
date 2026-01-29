@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
 func TestEventExtractor_NewEventExtractor(t *testing.T) {
@@ -345,7 +347,7 @@ func TestEventExtractor_ProcessReceipt_MultipleEventTypes(t *testing.T) {
 func TestEventTypeConstants(t *testing.T) {
 	// Verify event type constants have expected values
 	tests := []struct {
-		eventType EventType
+		eventType entity.EventType
 		expected  string
 	}{
 		{EventBorrow, "Borrow"},
