@@ -444,35 +444,49 @@ docker-release-backup-staging:
 # =============================================================================
 
 ERIGON_DIR := infrastructure/erigon-node
-AWS_PROFILE_ERIGON ?= AdministratorAccess-579039992622
+
+# Helper to check AWS_PROFILE_ERIGON is set
+define require_aws_profile_erigon
+	@if [ -z "$(AWS_PROFILE_ERIGON)" ]; then \
+		echo "Error: AWS_PROFILE_ERIGON is required"; \
+		echo "Usage: make $@ AWS_PROFILE_ERIGON=<profile-name>"; \
+		exit 1; \
+	fi
+endef
 
 # Initialize Erigon Terraform
 erigon-init:
+	$(call require_aws_profile_erigon)
 	@echo "==> Initializing Erigon Terraform..."
 	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu init
 
 # Validate Erigon Terraform configuration
 erigon-validate:
+	$(call require_aws_profile_erigon)
 	@echo "==> Validating Erigon Terraform..."
 	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu validate
 
 # Plan Erigon Terraform changes
 erigon-plan:
+	$(call require_aws_profile_erigon)
 	@echo "==> Planning Erigon Terraform..."
 	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu plan
 
 # Apply Erigon Terraform changes
 erigon-apply:
+	$(call require_aws_profile_erigon)
 	@echo "==> Applying Erigon Terraform..."
 	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu apply
 
 # Apply Erigon Terraform changes (auto-approve)
 erigon-apply-auto:
+	$(call require_aws_profile_erigon)
 	@echo "==> Applying Erigon Terraform (auto-approve)..."
 	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu apply -auto-approve
 
 # Destroy Erigon infrastructure
 erigon-destroy:
+	$(call require_aws_profile_erigon)
 	@echo "==> Destroying Erigon infrastructure..."
 	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu destroy
 
@@ -484,7 +498,7 @@ erigon-check: erigon-init erigon-validate erigon-plan
 # =============================================================================
 
 # ERIGON_USER and ERIGON_IP are required for all erigon-* targets
-# Usage: make erigon-status ERIGON_USER=root ERIGON_IP=<tailscale-ip>
+# Usage: make erigon-status ERIGON_USER=<user> ERIGON_IP=<tailscale-ip>
 
 # Helper to check required vars are set
 define require_erigon_vars
@@ -549,7 +563,7 @@ erigon-mode:
 		fi'
 
 # Run a command on Erigon node
-# Usage: make erigon-run ERIGON_USER=root ERIGON_IP=<ip> CMD="df -h"
+# Usage: make erigon-run ERIGON_USER=<user> ERIGON_IP=<ip> CMD="df -h"
 erigon-run:
 	$(call require_erigon_vars)
 	@tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) '$(CMD)'
@@ -562,7 +576,7 @@ build-bulk-download-arm64:
 	@echo "==> Built: dist/bulk-download-linux-arm64"
 
 # Deploy bulk-download to Erigon node
-# Usage: make deploy-bulk-download ERIGON_USER=root ERIGON_IP=<ip>
+# Usage: make deploy-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip>
 deploy-bulk-download: build-bulk-download-arm64
 	$(call require_erigon_vars)
 	@echo "==> Deploying bulk-download to Erigon node..."
@@ -570,7 +584,7 @@ deploy-bulk-download: build-bulk-download-arm64
 	@echo "==> Deployed to ~/bulk-download on Erigon node."
 
 # Run bulk-download on Erigon node (dry-run by default)
-# Usage: make erigon-bulk-download ERIGON_USER=root ERIGON_IP=<ip> START=16000000 END=16001000 [DRY_RUN=false]
+# Usage: make erigon-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip> START=16000000 END=16001000 [DRY_RUN=false]
 DRY_RUN ?= true
 erigon-bulk-download:
 	$(call require_erigon_vars)
