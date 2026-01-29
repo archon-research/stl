@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -38,6 +39,20 @@ func NewReader(cfg aws.Config, logger *slog.Logger) *Reader {
 	}
 	return &Reader{
 		client: s3.NewFromConfig(cfg),
+		logger: logger,
+	}
+}
+
+// NewReaderWithHTTPClient creates a new S3 Reader with a custom HTTP client.
+// This is useful for controlling connection pooling and timeouts.
+func NewReaderWithHTTPClient(cfg aws.Config, httpClient *http.Client, logger *slog.Logger) *Reader {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Reader{
+		client: s3.NewFromConfig(cfg, func(o *s3.Options) {
+			o.HTTPClient = httpClient
+		}),
 		logger: logger,
 	}
 }

@@ -24,6 +24,8 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -130,21 +132,24 @@ func NewPartitionCache(s3Reader outbound.S3Reader, bucket string, logger *slog.L
 	}
 }
 
-func (pc *PartitionCache) loadPartition(ctx context.Context, partition string) (map[string]struct{}, error) {
+// ensurePartitionLoaded loads a partition into the cache if not already present.
+// Caller must NOT hold any lock when calling this.
+func (pc *PartitionCache) ensurePartitionLoaded(ctx context.Context, partition string) error {
 	pc.mu.RLock()
-	if keys, ok := pc.cache[partition]; ok {
-		pc.mu.RUnlock()
-		pc.hitCount.Add(1)
-		return keys, nil
-	}
+	_, ok := pc.cache[partition]
 	pc.mu.RUnlock()
+
+	if ok {
+		pc.hitCount.Add(1)
+		return nil
+	}
 
 	pc.missCount.Add(1)
 
 	prefix := partition + "/"
 	keyList, err := pc.s3Reader.ListPrefix(ctx, pc.bucket, prefix)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list partition %s: %w", partition, err)
+		return fmt.Errorf("failed to list partition %s: %w", partition, err)
 	}
 
 	keySet := make(map[string]struct{}, len(keyList))
@@ -153,36 +158,80 @@ func (pc *PartitionCache) loadPartition(ctx context.Context, partition string) (
 	}
 
 	pc.mu.Lock()
-	pc.cache[partition] = keySet
+	// Double-check in case another goroutine loaded it while we were fetching
+	if _, ok := pc.cache[partition]; !ok {
+		pc.cache[partition] = keySet
+		pc.logger.Debug("loaded partition from S3", "partition", partition, "keyCount", len(keySet))
+	}
 	pc.mu.Unlock()
 
-	pc.logger.Debug("loaded partition from S3", "partition", partition, "keyCount", len(keySet))
-	return keySet, nil
+	return nil
 }
 
 func (pc *PartitionCache) HasBlockAndReceipts(ctx context.Context, blockNum int64) (bool, error) {
 	partition := getPartition(blockNum)
-	keySet, err := pc.loadPartition(ctx, partition)
-	if err != nil {
+	if err := pc.ensurePartitionLoaded(ctx, partition); err != nil {
 		return false, err
 	}
 
 	blockKey := fmt.Sprintf("%s/%d_1_block.json.gz", partition, blockNum)
 	receiptsKey := fmt.Sprintf("%s/%d_1_receipts.json.gz", partition, blockNum)
 
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+
+	keySet, ok := pc.cache[partition]
+	if !ok {
+		return false, nil
+	}
+
 	_, hasBlock := keySet[blockKey]
 	_, hasReceipts := keySet[receiptsKey]
 	return hasBlock && hasReceipts, nil
 }
 
+// HasAllData checks if block, receipts, AND traces all exist for a block.
+// Use this to determine if a block can be completely skipped.
+func (pc *PartitionCache) HasAllData(ctx context.Context, blockNum int64) (bool, error) {
+	partition := getPartition(blockNum)
+	if err := pc.ensurePartitionLoaded(ctx, partition); err != nil {
+		return false, err
+	}
+
+	blockKey := fmt.Sprintf("%s/%d_1_block.json.gz", partition, blockNum)
+	receiptsKey := fmt.Sprintf("%s/%d_1_receipts.json.gz", partition, blockNum)
+	tracesKey := fmt.Sprintf("%s/%d_1_traces.json.gz", partition, blockNum)
+
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+
+	keySet, ok := pc.cache[partition]
+	if !ok {
+		return false, nil
+	}
+
+	_, hasBlock := keySet[blockKey]
+	_, hasReceipts := keySet[receiptsKey]
+	_, hasTraces := keySet[tracesKey]
+	return hasBlock && hasReceipts && hasTraces, nil
+}
+
 func (pc *PartitionCache) HasTraces(ctx context.Context, blockNum int64) (bool, error) {
 	partition := getPartition(blockNum)
-	keySet, err := pc.loadPartition(ctx, partition)
-	if err != nil {
+	if err := pc.ensurePartitionLoaded(ctx, partition); err != nil {
 		return false, err
 	}
 
 	tracesKey := fmt.Sprintf("%s/%d_1_traces.json.gz", partition, blockNum)
+
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+
+	keySet, ok := pc.cache[partition]
+	if !ok {
+		return false, nil
+	}
+
 	_, exists := keySet[tracesKey]
 	return exists, nil
 }
@@ -275,6 +324,28 @@ func validateConfig(cfg Config) error {
 }
 
 func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
+	// Calculate total RPC workers for connection pooling
+	totalRPCWorkers := cfg.BlockReceiptWorkers + cfg.TraceWorkers
+
+	// Create a custom HTTP client for RPC with connection limits.
+	// This prevents connection exhaustion when running many workers.
+	rpcHTTPClient := &http.Client{
+		Timeout: DefaultTimeout,
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:          totalRPCWorkers * 2,
+			MaxIdleConnsPerHost:   totalRPCWorkers,
+			MaxConnsPerHost:       totalRPCWorkers,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+
 	// Create RPC client
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
 		HTTPURL:        cfg.RPCURL,
@@ -284,6 +355,7 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		MaxBackoff:     5 * time.Second,
 		BackoffFactor:  2.0,
 		Logger:         logger,
+		HTTPClient:     rpcHTTPClient,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create RPC client: %w", err)
@@ -299,8 +371,29 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	s3Writer := s3.NewWriter(awsCfg, logger)
-	s3Reader := s3.NewReader(awsCfg, logger)
+	// Create a custom HTTP client with connection limits to prevent exhaustion.
+	// With many workers, the default transport creates too many connections.
+	// This client is shared between S3 reader and writer.
+	s3HTTPClient := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:          cfg.UploadWorkers * 2, // Allow some headroom
+			MaxIdleConnsPerHost:   cfg.UploadWorkers,     // Match upload workers
+			MaxConnsPerHost:       cfg.UploadWorkers,     // Limit concurrent connections
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
+		},
+		Timeout: 60 * time.Second, // Overall request timeout
+	}
+
+	s3Writer := s3.NewWriterWithHTTPClient(awsCfg, s3HTTPClient, logger)
+	s3Reader := s3.NewReaderWithHTTPClient(awsCfg, s3HTTPClient, logger)
 	partitionCache := NewPartitionCache(s3Reader, cfg.Bucket, logger)
 
 	totalBlocks := cfg.EndBlock - cfg.StartBlock + 1
@@ -496,23 +589,39 @@ func blockReceiptWorker(
 		} else {
 			s3CheckStart := time.Now()
 			for blockNum := batchStart; blockNum <= batchEnd; blockNum++ {
-				hasBlockAndReceipts, err := partitionCache.HasBlockAndReceipts(ctx, blockNum)
+				// Check if ALL data (block, receipts, traces) exists
+				hasAllData, err := partitionCache.HasAllData(ctx, blockNum)
 				if err != nil {
 					logger.Warn("failed to check S3", "block", blockNum, "error", err)
 					blocksToFetch = append(blocksToFetch, blockNum)
 					continue
 				}
 
-				if hasBlockAndReceipts {
+				if hasAllData {
+					// All 3 files exist - completely skip this block
 					stats.blocksSkipped.Add(1)
-					// Signal for trace check (will be filtered in collector)
-					select {
-					case traceCollectorCh <- blockNum:
-					case <-ctx.Done():
-						return
-					}
+					stats.tracesSkipped.Add(1)
 				} else {
-					blocksToFetch = append(blocksToFetch, blockNum)
+					// Check if just block+receipts exist (need traces only)
+					hasBlockAndReceipts, err := partitionCache.HasBlockAndReceipts(ctx, blockNum)
+					if err != nil {
+						logger.Warn("failed to check S3", "block", blockNum, "error", err)
+						blocksToFetch = append(blocksToFetch, blockNum)
+						continue
+					}
+
+					if hasBlockAndReceipts {
+						// Block+receipts exist but traces missing - signal for trace fetch only
+						stats.blocksSkipped.Add(1)
+						select {
+						case traceCollectorCh <- blockNum:
+						case <-ctx.Done():
+							return
+						}
+					} else {
+						// Need to fetch block+receipts (and traces)
+						blocksToFetch = append(blocksToFetch, blockNum)
+					}
 				}
 			}
 			stats.s3CheckTime.Add(time.Since(s3CheckStart).Nanoseconds())

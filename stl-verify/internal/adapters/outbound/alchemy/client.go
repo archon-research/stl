@@ -61,6 +61,11 @@ type ClientConfig struct {
 	// Telemetry is the optional OpenTelemetry instrumentation.
 	// If nil, no metrics or traces are recorded.
 	Telemetry *Telemetry
+
+	// HTTPClient is an optional custom HTTP client.
+	// If nil, a default client with OpenTelemetry instrumentation is used.
+	// Use this to configure custom transport settings like connection pooling.
+	HTTPClient *http.Client
 }
 
 // ClientConfigDefaults returns a config with default values.
@@ -110,18 +115,24 @@ func NewClient(config ClientConfig) (*Client, error) {
 		config.Logger = defaults.Logger
 	}
 
-	return &Client{
-		config: config,
-		httpClient: &http.Client{
+	// Use provided HTTP client or create a default one
+	httpClient := config.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{
 			Timeout: config.Timeout,
 			Transport: otelhttp.NewTransport(http.DefaultTransport,
 				otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 					return "alchemy.http"
 				}),
 			),
-		},
-		logger:    config.Logger.With("component", "alchemy-client"),
-		telemetry: config.Telemetry,
+		}
+	}
+
+	return &Client{
+		config:     config,
+		httpClient: httpClient,
+		logger:     config.Logger.With("component", "alchemy-client"),
+		telemetry:  config.Telemetry,
 	}, nil
 }
 

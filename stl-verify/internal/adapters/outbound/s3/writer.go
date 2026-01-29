@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -46,6 +47,20 @@ func NewWriterWithOptions(cfg aws.Config, logger *slog.Logger, optFns ...func(*s
 	}
 	return &Writer{
 		client: s3.NewFromConfig(cfg, optFns...),
+		logger: logger.With("component", "s3-writer"),
+	}
+}
+
+// NewWriterWithHTTPClient creates a new S3 Writer with a custom HTTP client.
+// This is useful for controlling connection pooling and timeouts.
+func NewWriterWithHTTPClient(cfg aws.Config, httpClient *http.Client, logger *slog.Logger) *Writer {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Writer{
+		client: s3.NewFromConfig(cfg, func(o *s3.Options) {
+			o.HTTPClient = httpClient
+		}),
 		logger: logger.With("component", "s3-writer"),
 	}
 }
