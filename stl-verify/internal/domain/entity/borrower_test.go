@@ -1,16 +1,19 @@
 package entity
 
 import (
+	"bytes"
 	"math/big"
 	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestNewBorrower(t *testing.T) {
 	validAmount := big.NewInt(1000)
 	validChange := big.NewInt(100)
-	validEventType := "Borrow"
-	validTxHash := "0x1234567890abcdef"
+	validEventType := EventBorrow
+	validTxHash := common.FromHex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
 	tests := []struct {
 		name         string
@@ -22,8 +25,8 @@ func TestNewBorrower(t *testing.T) {
 		blockVersion int
 		amount       *big.Int
 		change       *big.Int
-		eventType    string
-		txHash       string
+		eventType    EventType
+		txHash       []byte
 		wantErr      bool
 		errContains  string
 	}{
@@ -232,7 +235,22 @@ func TestNewBorrower(t *testing.T) {
 			eventType:    "",
 			txHash:       validTxHash,
 			wantErr:      true,
-			errContains:  "eventType must not be empty",
+			errContains:  "invalid eventType",
+		},
+		{
+			name:         "invalid eventType",
+			id:           1,
+			userID:       10,
+			protocolID:   5,
+			tokenID:      3,
+			blockNumber:  1000,
+			blockVersion: 0,
+			amount:       validAmount,
+			change:       validChange,
+			eventType:    "InvalidEvent",
+			txHash:       validTxHash,
+			wantErr:      true,
+			errContains:  "invalid eventType",
 		},
 		{
 			name:         "empty txHash",
@@ -245,7 +263,7 @@ func TestNewBorrower(t *testing.T) {
 			amount:       validAmount,
 			change:       validChange,
 			eventType:    validEventType,
-			txHash:       "",
+			txHash:       nil,
 			wantErr:      true,
 			errContains:  "txHash must not be empty",
 		},
@@ -259,7 +277,7 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       validAmount,
 			change:       validChange,
-			eventType:    "Repay",
+			eventType:    EventRepay,
 			txHash:       validTxHash,
 			wantErr:      false,
 		},
@@ -273,7 +291,7 @@ func TestNewBorrower(t *testing.T) {
 			blockVersion: 0,
 			amount:       validAmount,
 			change:       validChange,
-			eventType:    "LiquidationCall",
+			eventType:    EventLiquidationCall,
 			txHash:       validTxHash,
 			wantErr:      false,
 		},
@@ -327,7 +345,7 @@ func TestNewBorrower(t *testing.T) {
 			if borrower.EventType != tt.eventType {
 				t.Errorf("NewBorrower() EventType = %v, want %v", borrower.EventType, tt.eventType)
 			}
-			if borrower.TxHash != tt.txHash {
+			if !bytes.Equal(borrower.TxHash, tt.txHash) {
 				t.Errorf("NewBorrower() TxHash = %v, want %v", borrower.TxHash, tt.txHash)
 			}
 		})

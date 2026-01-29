@@ -48,7 +48,7 @@ func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 
 // SaveBorrower saves a single borrower (debt) position record within an external transaction.
 // Uses upsert semantics: ON CONFLICT updates the existing record.
-func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, eventType, txHash string) error {
+func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, eventType string, txHash []byte) error {
 	_, err := tx.Exec(ctx,
 		`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
 		 VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8)
@@ -64,7 +64,7 @@ func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID
 
 // SaveBorrowerCollateral saves a single collateral position record within an external transaction.
 // Uses upsert semantics: ON CONFLICT updates the existing record.
-func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, eventType, txHash string, collateralEnabled bool) error {
+func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, eventType string, txHash []byte, collateralEnabled bool) error {
 	_, err := tx.Exec(ctx,
 		`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
 		 VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9)
@@ -88,7 +88,7 @@ type CollateralRecord struct {
 	BlockVersion      int
 	Amount            string // decimal-adjusted amount string
 	EventType         string
-	TxHash            string
+	TxHash            []byte
 	CollateralEnabled bool
 }
 

@@ -1,16 +1,19 @@
 package entity
 
 import (
+	"bytes"
 	"math/big"
 	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestNewBorrowerCollateral(t *testing.T) {
 	validAmount := big.NewInt(1000)
 	validChange := big.NewInt(100)
-	validEventType := "Supply"
-	validTxHash := "0x1234567890abcdef"
+	validEventType := EventSupply
+	validTxHash := common.FromHex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
 	tests := []struct {
 		name              string
@@ -22,8 +25,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 		blockVersion      int
 		amount            *big.Int
 		change            *big.Int
-		eventType         string
-		txHash            string
+		eventType         EventType
+		txHash            []byte
 		collateralEnabled bool
 		wantErr           bool
 		errContains       string
@@ -53,7 +56,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			blockVersion:      0,
 			amount:            validAmount,
 			change:            validChange,
-			eventType:         "Withdraw",
+			eventType:         EventWithdraw,
 			txHash:            validTxHash,
 			collateralEnabled: false,
 			wantErr:           false,
@@ -262,7 +265,23 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			txHash:            validTxHash,
 			collateralEnabled: true,
 			wantErr:           true,
-			errContains:       "eventType must not be empty",
+			errContains:       "invalid eventType",
+		},
+		{
+			name:              "invalid eventType",
+			id:                1,
+			userID:            10,
+			protocolID:        5,
+			tokenID:           3,
+			blockNumber:       1000,
+			blockVersion:      0,
+			amount:            validAmount,
+			change:            validChange,
+			eventType:         "InvalidEvent",
+			txHash:            validTxHash,
+			collateralEnabled: true,
+			wantErr:           true,
+			errContains:       "invalid eventType",
 		},
 		{
 			name:              "empty txHash",
@@ -275,7 +294,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			amount:            validAmount,
 			change:            validChange,
 			eventType:         validEventType,
-			txHash:            "",
+			txHash:            nil,
 			collateralEnabled: true,
 			wantErr:           true,
 			errContains:       "txHash must not be empty",
@@ -290,7 +309,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			blockVersion:      0,
 			amount:            validAmount,
 			change:            validChange,
-			eventType:         "LiquidationCall",
+			eventType:         EventLiquidationCall,
 			txHash:            validTxHash,
 			collateralEnabled: true,
 			wantErr:           false,
@@ -305,7 +324,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			blockVersion:      0,
 			amount:            validAmount,
 			change:            validChange,
-			eventType:         "ReserveUsedAsCollateralEnabled",
+			eventType:         EventReserveUsedAsCollateralEnabled,
 			txHash:            validTxHash,
 			collateralEnabled: true,
 			wantErr:           false,
@@ -320,7 +339,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			blockVersion:      0,
 			amount:            validAmount,
 			change:            validChange,
-			eventType:         "ReserveUsedAsCollateralDisabled",
+			eventType:         EventReserveUsedAsCollateralDisabled,
 			txHash:            validTxHash,
 			collateralEnabled: false,
 			wantErr:           false,
@@ -375,7 +394,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			if bc.EventType != tt.eventType {
 				t.Errorf("NewBorrowerCollateral() EventType = %v, want %v", bc.EventType, tt.eventType)
 			}
-			if bc.TxHash != tt.txHash {
+			if !bytes.Equal(bc.TxHash, tt.txHash) {
 				t.Errorf("NewBorrowerCollateral() TxHash = %v, want %v", bc.TxHash, tt.txHash)
 			}
 			if bc.CollateralEnabled != tt.collateralEnabled {

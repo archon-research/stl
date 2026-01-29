@@ -21,17 +21,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
-// EventType represents the type of SparkLend position-changing event
-type EventType string
-
+// Re-export EventType constants from entity package for convenience
 const (
-	EventBorrow                          EventType = "Borrow"
-	EventRepay                           EventType = "Repay"
-	EventSupply                          EventType = "Supply"
-	EventWithdraw                        EventType = "Withdraw"
-	EventLiquidationCall                 EventType = "LiquidationCall"
-	EventReserveUsedAsCollateralEnabled  EventType = "ReserveUsedAsCollateralEnabled"
-	EventReserveUsedAsCollateralDisabled EventType = "ReserveUsedAsCollateralDisabled"
+	EventBorrow                          = entity.EventBorrow
+	EventRepay                           = entity.EventRepay
+	EventSupply                          = entity.EventSupply
+	EventWithdraw                        = entity.EventWithdraw
+	EventLiquidationCall                 = entity.EventLiquidationCall
+	EventReserveUsedAsCollateralEnabled  = entity.EventReserveUsedAsCollateralEnabled
+	EventReserveUsedAsCollateralDisabled = entity.EventReserveUsedAsCollateralDisabled
 )
 
 // ray is Aave/Spark's precision standard (10^27) used for liquidity index calculations.
@@ -70,7 +68,7 @@ type Log struct {
 
 // PositionEventData is a unified struct for all position-changing events
 type PositionEventData struct {
-	EventType EventType
+	EventType entity.EventType
 	TxHash    string
 	// User is the primary address affected (borrower, supplier, etc.)
 	User common.Address
@@ -456,7 +454,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 		}
 
 		decimalAdjustedBalance := s.convertToDecimalAdjusted(balance, metadata.Decimals)
-		if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID.ID, tokenID, blockNumber, blockVersion, decimalAdjustedBalance, string(eventData.EventType), eventData.TxHash, eventData.CollateralEnabled); err != nil {
+		if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID.ID, tokenID, blockNumber, blockVersion, decimalAdjustedBalance, string(eventData.EventType), common.FromHex(eventData.TxHash), eventData.CollateralEnabled); err != nil {
 			return fmt.Errorf("failed to save collateral toggle: %w", err)
 		}
 
@@ -468,12 +466,12 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 func (s *Service) saveLiquidationEvent(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		// Snapshot the borrower being liquidated
-		if err := s.snapshotUserPosition(ctx, tx, eventData.User, string(eventData.EventType), eventData.TxHash, protocolAddress, chainID, blockNumber, blockVersion); err != nil {
+		if err := s.snapshotUserPosition(ctx, tx, eventData.User, string(eventData.EventType), common.FromHex(eventData.TxHash), protocolAddress, chainID, blockNumber, blockVersion); err != nil {
 			return fmt.Errorf("failed to snapshot borrower: %w", err)
 		}
 
 		// Snapshot the liquidator
-		if err := s.snapshotUserPosition(ctx, tx, eventData.Liquidator, string(eventData.EventType), eventData.TxHash, protocolAddress, chainID, blockNumber, blockVersion); err != nil {
+		if err := s.snapshotUserPosition(ctx, tx, eventData.Liquidator, string(eventData.EventType), common.FromHex(eventData.TxHash), protocolAddress, chainID, blockNumber, blockVersion); err != nil {
 			return fmt.Errorf("failed to snapshot liquidator: %w", err)
 		}
 
@@ -535,7 +533,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 				return fmt.Errorf("failed to get token: %w", err)
 			}
 			decimalAdjustedAmount := s.convertToDecimalAdjusted(eventData.Amount, tokenMetadata.Decimals)
-			if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID.ID, tokenID, blockNumber, blockVersion, decimalAdjustedAmount, string(eventData.EventType), eventData.TxHash); err != nil {
+			if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID.ID, tokenID, blockNumber, blockVersion, decimalAdjustedAmount, string(eventData.EventType), common.FromHex(eventData.TxHash)); err != nil {
 				return fmt.Errorf("failed to insert borrower: %w", err)
 			}
 		}
@@ -557,7 +555,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 				BlockVersion:      blockVersion,
 				Amount:            s.convertToDecimalAdjusted(col.ActualBalance, col.Decimals),
 				EventType:         string(eventData.EventType),
-				TxHash:            eventData.TxHash,
+				TxHash:            common.FromHex(eventData.TxHash),
 				CollateralEnabled: col.CollateralEnabled,
 			})
 		}
@@ -572,7 +570,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 }
 
 // snapshotUserPosition snapshots a user's full position (used for liquidation events)
-func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user common.Address, eventType, txHash string, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
+func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user common.Address, eventType string, txHash []byte, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
 	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 		ChainID:        chainID,
 		Address:        user,
@@ -591,7 +589,8 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	}
 
 	// Get user's reserve data from chain
-	collaterals, err := s.extractCollateralData(ctx, user, protocolAddress, blockNumber, txHash)
+	txHashHex := common.BytesToHash(txHash).Hex()
+	collaterals, err := s.extractCollateralData(ctx, user, protocolAddress, blockNumber, txHashHex)
 	if err != nil {
 		s.logger.Warn("failed to extract collateral data for user", "user", user.Hex(), "error", err)
 		collaterals = []CollateralData{}
@@ -602,7 +601,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	for _, col := range collaterals {
 		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, col.Symbol, col.Decimals, blockNumber)
 		if err != nil {
-			s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err, "tx", txHash)
+			s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err, "tx", txHashHex)
 			continue
 		}
 
@@ -624,7 +623,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 		return fmt.Errorf("failed to save collaterals: %w", err)
 	}
 
-	s.logger.Info("Saved position snapshot", "user", user.Hex(), "tx", txHash, "block", blockNumber)
+	s.logger.Info("Saved position snapshot", "user", user.Hex(), "tx", txHashHex, "block", blockNumber)
 	return nil
 }
 

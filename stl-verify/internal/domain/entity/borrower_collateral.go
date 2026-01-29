@@ -13,15 +13,15 @@ type BorrowerCollateral struct {
 	TokenID           int64
 	BlockNumber       int64
 	BlockVersion      int
-	Amount            *big.Int // current total collateral amount
-	Change            *big.Int // change from previous snapshot
-	EventType         string   // type of event that triggered this position snapshot
-	TxHash            string   // transaction hash
-	CollateralEnabled bool     // whether this asset is enabled as collateral
+	Amount            *big.Int  // current total collateral amount
+	Change            *big.Int  // change from previous snapshot
+	EventType         EventType // type of event that triggered this position snapshot
+	TxHash            []byte    // transaction hash
+	CollateralEnabled bool      // whether this asset is enabled as collateral
 }
 
 // NewBorrowerCollateral creates a new BorrowerCollateral entity.
-func NewBorrowerCollateral(id, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType, txHash string, collateralEnabled bool) (*BorrowerCollateral, error) {
+func NewBorrowerCollateral(id, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType EventType, txHash []byte, collateralEnabled bool) (*BorrowerCollateral, error) {
 	bc := &BorrowerCollateral{
 		ID:                id,
 		UserID:            userID,
@@ -70,10 +70,10 @@ func (bc *BorrowerCollateral) validate() error {
 	if bc.Change == nil {
 		return fmt.Errorf("change must not be nil")
 	}
-	if bc.EventType == "" {
-		return fmt.Errorf("eventType must not be empty")
+	if !bc.EventType.IsValid() {
+		return fmt.Errorf("invalid eventType: %s", bc.EventType)
 	}
-	if bc.TxHash == "" {
+	if len(bc.TxHash) == 0 {
 		return fmt.Errorf("txHash must not be empty")
 	}
 	return nil
