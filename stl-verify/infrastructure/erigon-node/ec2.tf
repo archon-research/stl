@@ -144,7 +144,7 @@ resource "aws_iam_instance_profile" "erigon" {
 
 resource "aws_instance" "erigon_c8gd" {
   ami                    = data.aws_ami.amazon_linux_2023.id
-  instance_type          = "c8gd.16xlarge" # 64 vCPUs (Graviton4), 128GB RAM, 2x 1900GB NVMe
+  instance_type          = var.instance_type
   key_name               = var.key_name
   subnet_id              = aws_subnet.erigon.id
   vpc_security_group_ids = [aws_security_group.erigon.id]

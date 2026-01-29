@@ -5,9 +5,9 @@ variable "aws_region" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type"
+  description = "EC2 instance type (must be c8gd family for NVMe instance store)"
   type        = string
-  default     = "r7g.4xlarge" # 16 vCPUs, 128GB RAM, ARM (Graviton3)
+  default     = "c8gd.16xlarge" # 64 vCPUs (Graviton4), 128GB RAM, 2x 1900GB NVMe
 }
 
 variable "vpc_cidr" {
@@ -28,24 +28,6 @@ variable "s3_bucket_name" {
   default     = "stl-sentinelstaging-ethereum-raw-89d540d0"
 }
 
-variable "volume_size_gb" {
-  description = "EBS volume size in GB for Erigon data"
-  type        = number
-  default     = 4000 # 4TB
-}
-
-variable "volume_iops" {
-  description = "EBS volume IOPS (gp3)"
-  type        = number
-  default     = 16000
-}
-
-variable "volume_throughput" {
-  description = "EBS volume throughput in MB/s (gp3)"
-  type        = number
-  default     = 1000
-}
-
 variable "key_name" {
   description = "SSH key pair name for EC2 access (optional, using Tailscale instead)"
   type        = string
@@ -63,5 +45,3 @@ variable "project" {
   type        = string
   default     = "stl-verify"
 }
-
-
