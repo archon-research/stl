@@ -458,7 +458,7 @@ endef
 erigon-init:
 	$(call require_aws_profile_erigon)
 	@echo "==> Initializing Erigon Terraform..."
-	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu init
+	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu init -backend-config=environments/sentinelstaging.backend.hcl
 
 # Validate Erigon Terraform configuration
 erigon-validate:
@@ -584,14 +584,19 @@ deploy-bulk-download: build-bulk-download-arm64
 	@echo "==> Deployed to ~/bulk-download on Erigon node."
 
 # Run bulk-download on Erigon node (dry-run by default)
-# Usage: make erigon-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip> START=16000000 END=16001000 [DRY_RUN=false]
+# Usage: make erigon-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip> BUCKET=<bucket> START=16000000 END=16001000 [DRY_RUN=false]
 DRY_RUN ?= true
 erigon-bulk-download:
 	$(call require_erigon_vars)
+	@if [ -z "$(BUCKET)" ]; then \
+		echo "Error: BUCKET is required"; \
+		echo "Usage: make $@ ERIGON_USER=<user> ERIGON_IP=<ip> BUCKET=<bucket> START=<start> END=<end>"; \
+		exit 1; \
+	fi
 	@echo "==> Running bulk-download on Erigon node..."
 	tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) '~/bulk-download \
 		--start-block=$(START) \
 		--end-block=$(END) \
-		--bucket=stl-sentinelstaging-ethereum-raw-89d540d0 \
+		--bucket=$(BUCKET) \
 		$(if $(filter true,$(DRY_RUN)),--dry-run,)'
 
