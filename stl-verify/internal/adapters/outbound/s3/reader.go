@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -38,6 +39,20 @@ func NewReader(cfg aws.Config, logger *slog.Logger) *Reader {
 	}
 	return &Reader{
 		client: s3.NewFromConfig(cfg),
+		logger: logger,
+	}
+}
+
+// NewReaderWithHTTPClient creates a new S3 Reader with a custom HTTP client.
+// This is useful for controlling connection pooling and timeouts.
+func NewReaderWithHTTPClient(cfg aws.Config, httpClient *http.Client, logger *slog.Logger) *Reader {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Reader{
+		client: s3.NewFromConfig(cfg, func(o *s3.Options) {
+			o.HTTPClient = httpClient
+		}),
 		logger: logger,
 	}
 }
@@ -76,6 +91,32 @@ func (r *Reader) ListFiles(ctx context.Context, bucket, prefix string) ([]outbou
 
 	r.logger.Info("listed S3 files", "bucket", bucket, "prefix", prefix, "count", len(files))
 	return files, nil
+}
+
+// ListPrefix lists all keys in the bucket with the given prefix.
+// Returns a slice of key names only (lighter weight than ListFiles).
+func (r *Reader) ListPrefix(ctx context.Context, bucket, prefix string) ([]string, error) {
+	var keys []string
+
+	paginator := s3.NewListObjectsV2Paginator(r.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucket),
+		Prefix: aws.String(prefix),
+	})
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list objects with prefix %s: %w", prefix, err)
+		}
+
+		for _, obj := range page.Contents {
+			if obj.Key != nil {
+				keys = append(keys, *obj.Key)
+			}
+		}
+	}
+
+	return keys, nil
 }
 
 // StreamFile returns a reader for the file content.
