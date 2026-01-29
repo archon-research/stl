@@ -58,6 +58,7 @@ resource "aws_ecs_task_definition" "watcher" {
       essential = true
 
       # No command args needed - blobs disabled by default (use --enable-blobs to enable)
+      command = []
 
       # Environment variables (non-sensitive)
       environment = [

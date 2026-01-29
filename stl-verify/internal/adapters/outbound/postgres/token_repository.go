@@ -2,13 +2,17 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // Compile-time check that TokenRepository implements outbound.TokenRepository
@@ -16,20 +20,20 @@ var _ outbound.TokenRepository = (*TokenRepository)(nil)
 
 // TokenRepository is a PostgreSQL implementation of the outbound.TokenRepository port.
 type TokenRepository struct {
-	db        *sql.DB
+	pool      *pgxpool.Pool
 	logger    *slog.Logger
 	batchSize int
 }
 
 // NewTokenRepository creates a new PostgreSQL Token repository.
 // If batchSize is <= 0, the default batch size from DefaultRepositoryConfig() is used.
-// Returns an error if the database connection is nil.
+// Returns an error if the database pool is nil.
 //
 // Note: This function does not verify that the database connection is alive.
-// Use a separate health check or call db.Ping() if connection validation is needed.
-func NewTokenRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*TokenRepository, error) {
-	if db == nil {
-		return nil, fmt.Errorf("database connection cannot be nil")
+// Use a separate health check or call pool.Ping() if connection validation is needed.
+func NewTokenRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (*TokenRepository, error) {
+	if pool == nil {
+		return nil, fmt.Errorf("database pool cannot be nil")
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -38,10 +42,41 @@ func NewTokenRepository(db *sql.DB, logger *slog.Logger, batchSize int) (*TokenR
 		batchSize = DefaultRepositoryConfig().TokenBatchSize
 	}
 	return &TokenRepository{
-		db:        db,
+		pool:      pool,
 		logger:    logger,
 		batchSize: batchSize,
 	}, nil
+}
+
+// GetOrCreateToken retrieves a token by address or creates it if it doesn't exist.
+// This method participates in an external transaction.
+func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
+	var tokenID int64
+
+	err := tx.QueryRow(ctx,
+		`SELECT id FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, address.Bytes()).Scan(&tokenID)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		if symbol == "" {
+			symbol = "UNKNOWN"
+		}
+		r.logger.Info("auto-creating token", "address", address.Hex(), "symbol", symbol, "decimals", decimals)
+		err = tx.QueryRow(ctx,
+			`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, '{}', NOW())
+			 RETURNING id`,
+			chainID, address.Bytes(), symbol, decimals, createdAtBlock).Scan(&tokenID)
+		if err != nil {
+			return 0, fmt.Errorf("failed to create token: %w", err)
+		}
+		r.logger.Debug("token created", "address", address.Hex(), "id", tokenID, "symbol", symbol, "decimals", decimals)
+		return tokenID, nil
+	} else if err != nil {
+		return 0, fmt.Errorf("failed to get token: %w", err)
+	}
+
+	return tokenID, nil
 }
 
 // UpsertTokens upserts token records in batches atomically.
@@ -51,11 +86,11 @@ func (r *TokenRepository) UpsertTokens(ctx context.Context, tokens []*entity.Tok
 		return nil
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer rollback(tx, r.logger)
+	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(tokens); i += r.batchSize {
 		end := i + r.batchSize
@@ -69,20 +104,20 @@ func (r *TokenRepository) UpsertTokens(ctx context.Context, tokens []*entity.Tok
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *TokenRepository) upsertTokenBatch(ctx context.Context, tx *sql.Tx, tokens []*entity.Token) error {
+func (r *TokenRepository) upsertTokenBatch(ctx context.Context, tx pgx.Tx, tokens []*entity.Token) error {
 	if len(tokens) == 0 {
 		return nil
 	}
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO tokens (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
+		INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
 		VALUES `)
 
 	args := make([]any, 0, len(tokens)*6)
@@ -109,7 +144,7 @@ func (r *TokenRepository) upsertTokenBatch(ctx context.Context, tx *sql.Tx, toke
 			updated_at = NOW()
 	`)
 
-	_, err := tx.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert token batch: %w", err)
 	}
@@ -123,11 +158,11 @@ func (r *TokenRepository) UpsertReceiptTokens(ctx context.Context, tokens []*ent
 		return nil
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer rollback(tx, r.logger)
+	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(tokens); i += r.batchSize {
 		end := i + r.batchSize
@@ -141,20 +176,20 @@ func (r *TokenRepository) UpsertReceiptTokens(ctx context.Context, tokens []*ent
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *TokenRepository) upsertReceiptTokenBatch(ctx context.Context, tx *sql.Tx, tokens []*entity.ReceiptToken) error {
+func (r *TokenRepository) upsertReceiptTokenBatch(ctx context.Context, tx pgx.Tx, tokens []*entity.ReceiptToken) error {
 	if len(tokens) == 0 {
 		return nil
 	}
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO receipt_tokens (protocol_id, underlying_token_id, receipt_token_address, symbol, created_at_block, metadata, updated_at)
+		INSERT INTO receipt_token (protocol_id, underlying_token_id, receipt_token_address, symbol, created_at_block, metadata, updated_at)
 		VALUES `)
 
 	args := make([]any, 0, len(tokens)*6)
@@ -181,7 +216,7 @@ func (r *TokenRepository) upsertReceiptTokenBatch(ctx context.Context, tx *sql.T
 			updated_at = NOW()
 	`)
 
-	_, err := tx.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert receipt token batch: %w", err)
 	}
@@ -195,11 +230,11 @@ func (r *TokenRepository) UpsertDebtTokens(ctx context.Context, tokens []*entity
 		return nil
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer rollback(tx, r.logger)
+	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(tokens); i += r.batchSize {
 		end := i + r.batchSize
@@ -213,20 +248,20 @@ func (r *TokenRepository) UpsertDebtTokens(ctx context.Context, tokens []*entity
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
 
-func (r *TokenRepository) upsertDebtTokenBatch(ctx context.Context, tx *sql.Tx, tokens []*entity.DebtToken) error {
+func (r *TokenRepository) upsertDebtTokenBatch(ctx context.Context, tx pgx.Tx, tokens []*entity.DebtToken) error {
 	if len(tokens) == 0 {
 		return nil
 	}
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO debt_tokens (protocol_id, underlying_token_id, variable_debt_address, stable_debt_address, variable_symbol, stable_symbol, created_at_block, metadata, updated_at)
+		INSERT INTO debt_token (protocol_id, underlying_token_id, variable_debt_address, stable_debt_address, variable_symbol, stable_symbol, created_at_block, metadata, updated_at)
 		VALUES `)
 
 	args := make([]any, 0, len(tokens)*8)
@@ -255,7 +290,7 @@ func (r *TokenRepository) upsertDebtTokenBatch(ctx context.Context, tx *sql.Tx, 
 			updated_at = NOW()
 	`)
 
-	_, err := tx.ExecContext(ctx, sb.String(), args...)
+	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("failed to upsert debt token batch: %w", err)
 	}
