@@ -57,6 +57,7 @@ type Config struct {
 	StartBlock int64
 	EndBlock   int64
 	Bucket     string
+	Region     string
 
 	BlockReceiptWorkers int
 	TraceWorkers        int
@@ -245,6 +246,7 @@ func parseFlags() Config {
 	flag.Int64Var(&cfg.StartBlock, "start-block", 0, "Starting block number (required)")
 	flag.Int64Var(&cfg.EndBlock, "end-block", 0, "Ending block number (required)")
 	flag.StringVar(&cfg.Bucket, "bucket", "", "S3 bucket name (required)")
+	flag.StringVar(&cfg.Region, "region", "", "AWS region (e.g., eu-west-1)")
 	flag.IntVar(&cfg.BlockReceiptWorkers, "block-workers", DefaultBlockReceiptWorkers, "Block+receipt worker count")
 	flag.IntVar(&cfg.TraceWorkers, "trace-workers", DefaultTraceWorkers, "Trace worker count")
 	flag.IntVar(&cfg.UploadWorkers, "upload-workers", DefaultUploadWorkers, "S3 upload worker count")
@@ -288,7 +290,11 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	}
 
 	// Initialize S3
-	awsCfg, err := config.LoadDefaultConfig(ctx)
+	var loadOpts []func(*config.LoadOptions) error
+	if cfg.Region != "" {
+		loadOpts = append(loadOpts, config.WithRegion(cfg.Region))
+	}
+	awsCfg, err := config.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}

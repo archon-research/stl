@@ -19,6 +19,10 @@ dnf install -y git wget tmux htop nvme-cli mdadm
 echo "=== Installing Tailscale ==="
 curl -fsSL https://tailscale.com/install.sh | sh
 
+# Update Tailscale to latest version (install.sh may install an older version from repos)
+echo "=== Updating Tailscale to latest ==="
+tailscale update --yes || echo "Tailscale update not needed or failed"
+
 # Fetch Tailscale auth key from Secrets Manager
 echo "=== Fetching Tailscale auth key ==="
 TAILSCALE_AUTH_KEY=$(aws secretsmanager get-secret-value \
@@ -223,6 +227,69 @@ LimitMEMLOCK=infinity
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# =============================================================================
+# Kernel Tuning for Erigon
+# =============================================================================
+# Erigon uses MDBX (a fork of LMDB) as its database engine. MDBX memory-maps
+# the entire database file, which on a full Ethereum archive node is ~2TB.
+# These kernel settings are required/recommended for optimal performance.
+
+cat > /etc/sysctl.d/99-erigon.conf << 'EOF'
+# -----------------------------------------------------------------------------
+# vm.max_map_count = 16777216
+# -----------------------------------------------------------------------------
+# Default: 65530
+# 
+# This controls the maximum number of memory-mapped regions a process can have.
+# MDBX memory-maps the database file in chunks, and a 2TB+ database requires
+# millions of mappings. The default of 65530 is far too low and will cause
+# Erigon to fail with "mmap failed" errors.
+#
+# Why 16777216 (16M)?
+# - Each mmap region can be up to 2MB (huge pages) or 4KB (regular pages)
+# - For a 2TB database with 2MB pages: 2TB / 2MB = 1M mappings minimum
+# - We set 16M to provide headroom for growth, fragmentation, and other
+#   memory-mapped files (shared libraries, etc.)
+# - This is a common setting for large MDBX/LMDB databases
+#
+# Memory impact: Minimal. This only controls the *number* of mappings allowed,
+# not the amount of memory used. The actual memory usage is controlled by
+# available RAM and how much of the database is actively accessed.
+#
+vm.max_map_count = 16777216
+
+# -----------------------------------------------------------------------------
+# vm.overcommit_memory = 1
+# -----------------------------------------------------------------------------
+# Default: 0 (heuristic overcommit)
+#
+# Controls how the kernel handles memory allocation requests:
+#   0 = Heuristic: Kernel guesses if there's enough memory (can reject large mmaps)
+#   1 = Always overcommit: Never refuse a memory allocation request
+#   2 = Don't overcommit: Only allow allocations up to swap + (RAM * overcommit_ratio)
+#
+# Why set to 1?
+# - MDBX requests a memory mapping for the entire database file upfront (~2TB)
+# - With overcommit_memory=0, the kernel may reject this because 2TB > physical RAM
+# - Setting to 1 tells the kernel "trust the application" - it will create the
+#   mapping but only allocate physical pages when they're actually accessed
+# - This is safe because Erigon only accesses a small portion of the database
+#   at any given time (the "working set"), and Linux will page out unused data
+#
+# This is the recommended setting for:
+# - Redis (similar large memory-mapped workloads)
+# - Elasticsearch
+# - Any application using LMDB/MDBX with large databases
+#
+vm.overcommit_memory = 1
+EOF
+
+# Apply the settings immediately
+sysctl -p /etc/sysctl.d/99-erigon.conf
+
+echo "Kernel tuning applied:"
+sysctl vm.max_map_count vm.overcommit_memory
 
 systemctl daemon-reload
 systemctl enable erigon

@@ -36,6 +36,11 @@ type jsonRPCError struct {
 	Message string `json:"message"`
 }
 
+// Error implements the error interface.
+func (e *jsonRPCError) Error() string {
+	return e.Message
+}
+
 // subscriptionParams represents the params field for subscription notifications.
 type subscriptionParams struct {
 	Subscription string               `json:"subscription"`
