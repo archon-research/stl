@@ -69,12 +69,21 @@ func (c *Client) Execute(ctx context.Context, calls []Call, blockNumber *big.Int
 
 	result, err := c.ethClient.CallContract(ctx, msg, blockNumber)
 	if err != nil {
-		return nil, fmt.Errorf("failed to call multicall contract: %w", err)
+		blockStr := "latest"
+		if blockNumber != nil {
+			blockStr = blockNumber.String()
+		}
+		return nil, fmt.Errorf("failed to call multicall contract at address=%s block=%s calls=%d: %w",
+			c.address.Hex(), blockStr, len(calls), err)
 	}
 
 	unpacked, err := c.abi.Unpack("aggregate3", result)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unpack multicall response: %w", err)
+		blockStr := "latest"
+		if blockNumber != nil {
+			blockStr = blockNumber.String()
+		}
+		return nil, fmt.Errorf("failed to unpack multicall response at block=%s: %w", blockStr, err)
 	}
 
 	resultsRaw := unpacked[0].([]struct {

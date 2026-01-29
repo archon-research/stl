@@ -17,7 +17,7 @@ func GetAaveUserReservesDataABI() (*abi.ABI, error) {
 					{"name": "usageAsCollateralEnabledOnUser", "type": "bool"},
 					{"name": "scaledVariableDebt", "type": "uint256"},
 					{"name": "stableBorrowRate", "type": "uint256"},
-					{"name": "scaledVariableDebt", "type": "uint256"},
+					{"name": "principalStableDebt", "type": "uint256"},
 					{"name": "stableBorrowLastUpdateTimestamp", "type": "uint256"}
 				],
 				"type": "tuple[]"
