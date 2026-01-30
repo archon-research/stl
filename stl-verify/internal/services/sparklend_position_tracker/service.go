@@ -9,9 +9,11 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5"
@@ -19,6 +21,9 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 )
 
 // Re-export EventType constants from entity package for convenience
@@ -31,10 +36,6 @@ const (
 	EventReserveUsedAsCollateralEnabled  = entity.EventReserveUsedAsCollateralEnabled
 	EventReserveUsedAsCollateralDisabled = entity.EventReserveUsedAsCollateralDisabled
 )
-
-// ray is Aave/Spark's precision standard (10^27) used for liquidity index calculations.
-// This is a protocol-defined constant for ray math operations.
-var ray = new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
 
 type TransactionReceipt struct {
 	Type              string  `json:"type"`
@@ -129,16 +130,20 @@ func ConfigDefaults() Config {
 }
 
 type Service struct {
-	config         Config
-	sqsClient      *sqs.Client
-	redisClient    *redis.Client
-	blockchain     *blockchainService
-	txManager      *postgres.TxManager
-	userRepo       *postgres.UserRepository
-	protocolRepo   *postgres.ProtocolRepository
-	tokenRepo      *postgres.TokenRepository
-	positionRepo   *postgres.PositionRepository
-	eventExtractor *EventExtractor
+	config       Config
+	sqsClient    *sqs.Client
+	redisClient  *redis.Client
+	ethClient    *ethclient.Client
+	txManager    *postgres.TxManager
+	userRepo     *postgres.UserRepository
+	protocolRepo *postgres.ProtocolRepository
+	tokenRepo    *postgres.TokenRepository
+	positionRepo *postgres.PositionRepository
+
+	blockchainServices map[common.Address]*blockchainService
+	multicallClient    multicall.Multicaller
+	erc20ABI           *abi.ABI
+	eventExtractor     *EventExtractor
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -150,9 +155,6 @@ func NewService(
 	sqsClient *sqs.Client,
 	redisClient *redis.Client,
 	ethClient *ethclient.Client,
-	multicall3Addr common.Address,
-	uiPoolDataProvider common.Address,
-	poolAddressesProvider common.Address,
 	txManager *postgres.TxManager,
 	userRepo *postgres.UserRepository,
 	protocolRepo *postgres.ProtocolRepository,
@@ -180,9 +182,14 @@ func NewService(
 		config.Logger = defaults.Logger
 	}
 
-	blockchain, err := newBlockchainService(ethClient, multicall3Addr, uiPoolDataProvider, poolAddressesProvider, config.Logger)
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create blockchain service: %w", err)
+		return nil, fmt.Errorf("failed to create multicall client: %w", err)
+	}
+
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load ERC20 ABI: %w", err)
 	}
 
 	eventExtractor, err := NewEventExtractor()
@@ -191,20 +198,55 @@ func NewService(
 	}
 
 	processor := &Service{
-		config:         config,
-		sqsClient:      sqsClient,
-		redisClient:    redisClient,
-		blockchain:     blockchain,
-		txManager:      txManager,
-		userRepo:       userRepo,
-		protocolRepo:   protocolRepo,
-		tokenRepo:      tokenRepo,
-		positionRepo:   positionRepo,
-		eventExtractor: eventExtractor,
-		logger:         config.Logger.With("component", "sparklend-position-tracker"),
+		config:             config,
+		sqsClient:          sqsClient,
+		redisClient:        redisClient,
+		ethClient:          ethClient,
+		txManager:          txManager,
+		userRepo:           userRepo,
+		protocolRepo:       protocolRepo,
+		tokenRepo:          tokenRepo,
+		positionRepo:       positionRepo,
+		blockchainServices: make(map[common.Address]*blockchainService),
+		multicallClient:    mc,
+		erc20ABI:           erc20ABI,
+		eventExtractor:     eventExtractor,
+		logger:             config.Logger.With("component", "sparklend-position-tracker"),
 	}
 
 	return processor, nil
+}
+
+func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (*blockchainService, error) {
+	if svc, exists := s.blockchainServices[protocolAddress]; exists {
+		return svc, nil
+	}
+
+	protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
+	if !exists {
+		return nil, fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
+	}
+
+	svc, err := newBlockchainService(
+		s.ethClient,
+		s.multicallClient,
+		s.erc20ABI,
+		protocolConfig.UIPoolDataProvider,
+		protocolConfig.PoolDataProvider,
+		protocolConfig.PoolAddressesProvider,
+		protocolConfig.UseAaveABI,
+		s.logger,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create blockchain service for %s: %w", protocolConfig.Name, err)
+	}
+
+	s.blockchainServices[protocolAddress] = svc
+	s.logger.Info("created blockchain service",
+		"protocol", protocolConfig.Name,
+		"address", protocolAddress.Hex())
+
+	return svc, nil
 }
 
 func (s *Service) Start(ctx context.Context) error {
@@ -319,7 +361,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event BlockEvent)
 	}
 
 	var receipts []TransactionReceipt
-	if err := json.Unmarshal([]byte(receiptsJSON), &receipts); err != nil {
+	if err := shared.ParseCompressedJSON([]byte(receiptsJSON), &receipts); err != nil {
 		return fmt.Errorf("failed to unmarshal receipts: %w", err)
 	}
 
@@ -399,9 +441,13 @@ func (s *Service) processEventLog(ctx context.Context, log Log, txHash string, c
 
 // saveCollateralToggleEvent handles ReserveUsedAsCollateralEnabled/Disabled events
 func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
-	// Get token metadata for the reserve
+	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
+	if err != nil {
+		return fmt.Errorf("failed to get blockchain service: %w", err)
+	}
+
 	tokensToFetch := map[common.Address]bool{eventData.Reserve: true}
-	metadataMap, err := s.blockchain.batchGetTokenMetadata(ctx, tokensToFetch)
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
 	if err != nil {
 		return fmt.Errorf("failed to get token metadata: %w", err)
 	}
@@ -481,9 +527,13 @@ func (s *Service) saveLiquidationEvent(ctx context.Context, eventData *PositionE
 
 // savePositionSnapshot handles standard position events (Borrow, Repay, Supply, Withdraw)
 func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
-	// Get metadata for the reserve token
+	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
+	if err != nil {
+		return fmt.Errorf("failed to get blockchain service: %w", err)
+	}
+
 	tokensToFetch := map[common.Address]bool{eventData.Reserve: true}
-	metadataMap, err := s.blockchain.batchGetTokenMetadata(ctx, tokensToFetch)
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
 	if err != nil {
 		s.logger.Warn("failed to batch get token metadata", "error", err, "tx", eventData.TxHash, "block", blockNumber)
 		metadataMap = make(map[common.Address]TokenMetadata)
@@ -628,74 +678,79 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 }
 
 func (s *Service) extractCollateralData(ctx context.Context, user common.Address, protocolAddress common.Address, blockNumber int64, txHash string) ([]CollateralData, error) {
-	reserves, err := s.blockchain.getUserReservesData(ctx, user, blockNumber)
+	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get blockchain service: %w", err)
+	}
+
+	reserves, err := blockchainSvc.getUserReservesData(ctx, user, blockNumber)
 	if err != nil {
 		s.logger.Warn("failed to get user reserves", "error", err, "tx", txHash, "block", blockNumber)
 		return []CollateralData{}, nil
 	}
 
-	tokensToFetch := make(map[common.Address]bool)
-	assetsForReserveData := make([]common.Address, 0)
-
+	collateralAssets := make([]common.Address, 0)
 	for _, r := range reserves {
 		if r.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && r.UsageAsCollateralEnabledOnUser {
 			if r.UnderlyingAsset != (common.Address{}) {
-				tokensToFetch[r.UnderlyingAsset] = true
-				assetsForReserveData = append(assetsForReserveData, r.UnderlyingAsset)
+				collateralAssets = append(collateralAssets, r.UnderlyingAsset)
 			}
 		}
 	}
 
-	if len(tokensToFetch) == 0 {
+	if len(collateralAssets) == 0 {
 		return []CollateralData{}, nil
 	}
 
-	metadataMap, err := s.blockchain.batchGetTokenMetadata(ctx, tokensToFetch)
+	tokensToFetch := make(map[common.Address]bool)
+	for _, asset := range collateralAssets {
+		tokensToFetch[asset] = true
+	}
+
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
 	if err != nil {
 		s.logger.Warn("failed to batch get token metadata", "error", err, "tx", txHash, "block", blockNumber)
 		return []CollateralData{}, fmt.Errorf("failed to get token metadata: %w", err)
 	}
 
-	reserveDataMap, err := s.blockchain.batchGetReserveData(ctx, protocolAddress, assetsForReserveData, blockNumber)
+	actualDataMap, err := blockchainSvc.batchGetUserReserveData(ctx, collateralAssets, user, blockNumber)
 	if err != nil {
-		s.logger.Warn("failed to batch get reserve data", "error", err, "tx", txHash, "block", blockNumber)
-		reserveDataMap = make(map[common.Address]*big.Int)
+		s.logger.Warn("failed to batch get user reserve data", "error", err, "tx", txHash, "block", blockNumber)
+		return []CollateralData{}, fmt.Errorf("failed to get user reserve data: %w", err)
 	}
 
 	var collaterals []CollateralData
-	for _, r := range reserves {
-		if r.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && r.UsageAsCollateralEnabledOnUser {
-			if r.UnderlyingAsset == (common.Address{}) {
-				continue
-			}
+	for _, asset := range collateralAssets {
+		metadata, ok := metadataMap[asset]
+		if !ok || metadata.Decimals == 0 {
+			s.logger.Error("Failed to get collateral token metadata",
+				"action", "skipped",
+				"token", asset.Hex(),
+				"tx", txHash,
+				"block", blockNumber,
+				"user", user.Hex())
+			continue
+		}
 
-			metadata, ok := metadataMap[r.UnderlyingAsset]
-			if !ok || metadata.Decimals == 0 {
-				s.logger.Error("Failed to get collateral token metadata",
-					"action", "skipped",
-					"token", r.UnderlyingAsset.Hex(),
-					"tx", txHash,
-					"block", blockNumber,
-					"user", user.Hex())
-				continue
-			}
+		actualData, ok := actualDataMap[asset]
+		if !ok {
+			s.logger.Error("Failed to get actual balance",
+				"action", "skipped",
+				"token", asset.Hex(),
+				"tx", txHash,
+				"block", blockNumber,
+				"user", user.Hex())
+			continue
+		}
 
-			liquidityIndex, ok := reserveDataMap[r.UnderlyingAsset]
-			var actualBalance *big.Int
-			if ok && liquidityIndex != nil && liquidityIndex.Cmp(big.NewInt(0)) > 0 {
-				actualBalance = new(big.Int).Mul(r.ScaledATokenBalance, liquidityIndex)
-				actualBalance.Div(actualBalance, ray)
-			} else {
-				actualBalance = r.ScaledATokenBalance
-			}
-
+		if actualData.UsageAsCollateralEnabled && actualData.CurrentATokenBalance.Cmp(big.NewInt(0)) > 0 {
 			collaterals = append(collaterals, CollateralData{
-				Asset:             r.UnderlyingAsset,
+				Asset:             asset,
 				Decimals:          metadata.Decimals,
 				Symbol:            metadata.Symbol,
 				Name:              metadata.Name,
-				ActualBalance:     actualBalance,
-				CollateralEnabled: r.UsageAsCollateralEnabledOnUser,
+				ActualBalance:     actualData.CurrentATokenBalance,
+				CollateralEnabled: actualData.UsageAsCollateralEnabled,
 			})
 		}
 	}
