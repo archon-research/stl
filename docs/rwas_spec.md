@@ -657,19 +657,6 @@ const tvlUsd = Number(totalAssets) / 1e6;  // Assuming 6 decimal stablecoin
 // Multi-chain: Query each chain separately and sum
 ```
 
-### Data Sources Summary
-
-| Data Type | Method | Update Frequency | Best For |
-|-----------|--------|------------------|----------|
-| Position Value | On-chain (ERC-4626) | Real-time | Live user balances |
-| Position Value | SDK | Real-time | Complex queries, pending orders |
-| Position Value | GraphQL API | ~1-2 min lag | Historical analysis |
-| Share Price | On-chain | Real-time | Most accurate, current price |
-| Share Price History | GraphQL snapshots | Daily or on events | APY calculation |
-| APY | Calculated from snapshots | Daily | Historical performance |
-| Asset Backing | GraphQL holdings | Daily snapshots | Understanding composition |
-| Asset Backing | On-chain registry | Real-time | Current registered assets |
-
 ### Finding Asset Documentation
 
 For detailed information about a specific Centrifuge pool's underlying assets:
@@ -869,10 +856,7 @@ Example tokens with RedStone oracles:
 - `STAC_FUNDAMENTAL`: 0xEdC6287D3D41b322AF600317628D7E226DD3add4
 - `iBENJI_ETHEREUM_FUNDAMENTAL`: 0x009119Cd7eB8912863c30362CfdCe0B2F8a52D6C
 - `SIERRA_FUNDAMENTAL`: 0x9269127F104C040AB526575573c23F3e67401aD9
-- `MSUSD_FUNDAMENTAL`: 0xdC3FE501c1842953b85f5208dA69dc84Ff71A311
-- `MSY_FUNDAMENTAL/USD`: 0xcB62f468B5724B7748293fc78E42C3DA840a8338
-- `syzUSD_FUNDAMENTAL/USD`: 0x354D1E7D9CF90841DFA252547881DB96af2AaE3e
-- `BUCK_FUNDAMENTAL/USD`: 0x6e7407fcd5021e3FE5f75959575b20C85231562d
+
 
 #### Position Value
 
@@ -989,7 +973,7 @@ for (const event of events) {
 const yieldFormatted = totalYield / (10 ** decimals);
 ```
 
-**For accurate APY**: Consult Securitize's published APY rates, which may differ by:
+**For accurate APY**: Consult Securitize's published APY rates in their private API, which may differ by:
 - Chain (Ethereum, Arbitrum, Avalanche, Polygon, Solana, etc.)
 - Token variant (BUIDL_I, BUIDL)
 

@@ -631,29 +631,68 @@ function getUserReservesData(address provider, address user) returns (
 ```solidity
 struct AggregatedReserveData {
     address underlyingAsset;
-    // Interest rates (ray precision - 27 decimals)
-    uint256 liquidityRate;              // Supply APY
-    uint256 variableBorrowRate;         // Variable borrow APY
-    uint256 stableBorrowRate;           // Stable borrow APY
-    // Indexes (ray precision)
-    uint256 liquidityIndex;             // Cumulative liquidity index
-    uint256 variableBorrowIndex;        // Cumulative variable borrow index
+    string name;                        // Token name
+    string symbol;                      // Token symbol
+    uint256 decimals;                   // Token decimals
     // Risk parameters (basis points - 4 decimals)
     uint256 baseLTVasCollateral;        // Max LTV (e.g., 8000 = 80%)
     uint256 reserveLiquidationThreshold; // Liquidation trigger (e.g., 8500 = 85%)
     uint256 reserveLiquidationBonus;     // Liquidator bonus (e.g., 10500 = 105% = 5% bonus)
-    // Market state
-    uint256 availableLiquidity;         // Total available to borrow
-    uint256 totalScaledVariableDebt;    // Total variable debt (scaled)
-    uint256 totalPrincipalStableDebt;   // Total stable debt (principal)
-    uint256 priceInMarketReferenceCurrency; // Asset price (8 decimals in USD)
+    uint256 reserveFactor;              // Protocol fee (e.g., 1000 = 10%)
     // Operational flags
-    bool isActive;
-    bool isFrozen;
-    bool isPaused;
-    bool borrowingEnabled;
-    // ... additional fields
+    bool usageAsCollateralEnabled;      // Can be used as collateral
+    bool borrowingEnabled;              // Borrowing is enabled
+    bool isActive;                      // Reserve is active
+    bool isFrozen;                      // Reserve is frozen
+    // Indexes (ray precision - 27 decimals but stored as uint128)
+    uint128 liquidityIndex;             // Cumulative liquidity index
+    uint128 variableBorrowIndex;        // Cumulative variable borrow index
+    // Interest rates (ray precision - 27 decimals but stored as uint128)
+    uint128 liquidityRate;              // Supply APY
+    uint128 variableBorrowRate;         // Variable borrow APY
+    uint40 lastUpdateTimestamp;         // Last index/rate update
+    // Contract addresses
+    address aTokenAddress;              // aToken contract
+    address variableDebtTokenAddress;   // Variable debt token contract
+    address interestRateStrategyAddress; // Interest rate strategy contract
+    // Market state - KEY FIELDS FOR TOTAL SUPPLY/BORROW CALCULATION
+    uint256 availableLiquidity;         // Total available to borrow
+    uint256 totalScaledVariableDebt;    // Total variable debt (SCALED - needs calculation)
+    uint256 priceInMarketReferenceCurrency; // Asset price (8 decimals in USD)
+    address priceOracle;                // Oracle address
+    // Interest rate model parameters
+    uint256 variableRateSlope1;         // Rate slope 1
+    uint256 variableRateSlope2;         // Rate slope 2
+    uint256 baseVariableBorrowRate;     // Base rate
+    uint256 optimalUsageRatio;          // Optimal utilization
+    // Additional operational flags
+    bool isPaused;                      // Reserve is paused
+    bool isSiloedBorrowing;             // Siloed borrowing mode
+    uint128 accruedToTreasury;          // Accrued to treasury
+    uint128 isolationModeTotalDebt;     // Isolation mode debt
+    bool flashLoanEnabled;              // Flash loans enabled
+    // Caps and limits
+    uint256 debtCeiling;                // Isolation mode debt ceiling
+    uint256 debtCeilingDecimals;        // Debt ceiling decimals
+    uint256 borrowCap;                  // Max total borrows
+    uint256 supplyCap;                  // Max total supply
+    bool borrowableInIsolation;         // Can be borrowed in isolation
+    // Additional fields (may vary by version)
+    uint128 virtualUnderlyingBalance;   // Virtual balance (if applicable)
+    uint128 deficit;                    // Deficit (if applicable)
 }
+```
+
+**Important: Calculating Total Supply and Total Borrow**
+
+The struct provides `totalScaledVariableDebt` (scaled value) and `availableLiquidity` (direct value). To get actual totals, you MUST calculate:
+
+```
+Total Borrowed = totalScaledVariableDebt × variableBorrowIndex / 1e27
+Total Supply = Total Borrowed + availableLiquidity
+```
+
+There are NO pre-calculated `totalDebt` or `totalSupply` fields - you must derive them from the scaled values.
 ```
 
 **UserReserveData Structure:**
@@ -827,6 +866,42 @@ These events are only present in certain Aave V3 markets (not universal across a
 | `BackUnbacked` | Horizon | Unbacked backed | reserve, backer, amount, fee |
 | `MintUnbacked` | Horizon | Unbacked minted | reserve, user, onBehalfOf, amount, referralCode |
 
+#### aToken Events
+
+**Critical for Complete User Discovery:** Track `Transfer` events on all aToken contracts to discover users who receive tokens via direct transfers (not through Pool interactions).
+
+| Event | Contract | Emitted When | Key Data |
+|-------|----------|--------------|----------|
+| `Transfer` | aToken | aTokens transferred between addresses | from, to, value |
+| `Mint` | aToken | aTokens minted (supply) | from (0x0), to, value, index |
+| `Burn` | aToken | aTokens burned (withdraw) | from, to (0x0), value, index |
+
+**Why These Matter:**
+- **Transfer**: Users can receive supply positions without calling `supply()` - critical for complete user discovery
+- **Mint/Burn**: Alternative to tracking Pool `Supply`/`Withdraw` events (see note below)
+
+**Filter addresses to ignore:**
+- Zero address (`0x000...000`) for Mint/Burn
+- Pool contract address (internal accounting)
+- Gateway contracts (e.g., WrappedTokenGatewayV3)
+
+**Alternative Approach: Track aToken Events Instead of Pool Events**
+
+Instead of (or in addition to) tracking Pool events for supply/withdraw operations, you can track aToken Mint/Burn/Transfer events:
+
+**Benefits:**
+- **Single source of truth**: aToken balance changes are the ground truth for supply positions
+- **Simpler logic**: No need to reconcile Pool events with aToken state
+- **Catches edge cases**: Captures all balance changes including rare internal operations
+
+**Trade-offs:**
+- **Missing context**: Mint/Burn events don't include `onBehalfOf` or `referralCode` parameters
+- **Multiple contracts**: Must listen to events from all aToken contracts (discovered via `ReserveInitialized`)
+- **Index parameter**: Mint/Burn include the `index` at time of operation, useful for scaled balance tracking
+
+**Recommended Approach:**
+Track both Pool events (for complete transaction context) AND aToken Transfer events (for user discovery). This provides complete coverage with full context.
+
 **Implementation:**
 
 For each event, the indexer should:
@@ -841,32 +916,59 @@ For each event, the indexer should:
 - Real-time position updates
 - Liquidation events
 - Reserve parameter changes
+- All supply position transfers between users
 
 ### aToken Transfer Tracking
 
-**Critical Issue:** Event-based indexing alone misses users who receive aTokens without calling `supply()`.
+**See Also:** The complete list of aToken events (Transfer, Mint, Burn) is documented in the [Event-Based Indexing](#event-based-indexing) section above.
+
+**Critical Issue:** Event-based indexing of Pool events alone misses users who receive aTokens without calling `supply()`.
 
 **Problem Scenario:**
 
-1. Alice supplies 100 USDC → Receives 100 aUSDC
-2. Alice transfers 50 aUSDC to Bob (direct ERC-20 transfer)
-3. Bob now has a position but never emitted a `Supply` event
+1. Alice supplies 100 USDC → Receives 100 aUSDC (emits Pool `Supply` + aToken `Mint`)
+2. Alice transfers 50 aUSDC to Bob (direct ERC-20 transfer, emits aToken `Transfer`)
+3. Bob now has a position but never emitted a Pool `Supply` event
 4. **Without transfer tracking, Bob is invisible to the indexer**
 
-**Solution:** Index `Transfer` events on all aToken contracts.
+**Solution:** Index aToken `Transfer`, `Mint`, and `Burn` events on all aToken contracts.
+
+**Events to Track:**
+
+| Event | Purpose | Key Addresses |
+|-------|---------|---------------|
+| `Transfer` | Track position transfers between users | `from`, `to` (both non-zero) |
+| `Mint` | Alternative to Pool `Supply` event | `from` = 0x0, `to` = receiver |
+| `Burn` | Alternative to Pool `Withdraw` event | `from` = burner, `to` = 0x0 |
 
 **Implementation:**
 
-For each aToken contract in the market, track `Transfer` events:
+For each aToken contract in the market, track events:
 
-1. **Filter transfers to process:**
-   - Ignore zero address (minting/burning already captured in Supply/Withdraw)
-   - Ignore Pool contract address (internal accounting)
-   - Ignore gateway contracts (e.g., WrappedTokenGateway)
+1. **Filter addresses to ignore:**
+   - Zero address (`0x000...000`) - only in `from` for Mint, only in `to` for Burn
+   - Pool contract address - internal accounting
+   - Gateway contracts (e.g., WrappedTokenGatewayV3)
 
-2. **Process valid transfers:**
-   - Mark both sender and recipient as active users
-   - Update supply positions and scaled balance snapshots for both users
+2. **Process valid events:**
+   - **Transfer** (non-zero from/to): Mark both sender and recipient as active users
+   - **Mint** (from=0x0): Mark `to` address as active user
+   - **Burn** (to=0x0): Update `from` address position
+   - Update supply positions and scaled balance snapshots for affected users
+
+3. **Key data to capture:**
+   - Amount (value)
+   - Sender and recipient addresses (from, to)
+   - Block number and timestamp
+   - Transaction hash and log index
+   - Index parameter (for Mint/Burn events - useful for scaled balance verification)
+
+**Using Mint/Burn vs. Pool Supply/Withdraw Events:**
+
+You can choose to index either:
+- **Option A**: Pool events (`Supply`, `Withdraw`) + aToken `Transfer` - provides transaction context
+- **Option B**: aToken events only (`Mint`, `Burn`, `Transfer`) - single source of truth, simpler
+- **Option C**: Both (recommended) - complete coverage with context and verification
 
 **Benefits:**
 
@@ -874,6 +976,7 @@ For each aToken contract in the market, track `Transfer` events:
 - Accurate active user count
 - Position correctness for all users
 - Full snapshot coverage
+- Verification of Pool events against aToken state
 
 **Discovery:**
 aToken addresses can be discovered by monitoring `ReserveInitialized` events emitted by the Pool contract during reserve setup.
@@ -1041,6 +1144,8 @@ WHERE user = '0x...'
 | `isPaused` | boolean | Reserve is paused | - |
 | `borrowingEnabled` | boolean | Borrowing is enabled | - |
 
+**Note:** These are the core fields. The complete `AggregatedReserveData` struct (documented above) includes additional fields like `name`, `symbol`, `decimals`, `reserveFactor`, `aTokenAddress`, rate model parameters, caps, and more. Store additional fields based on your indexing requirements.
+
 **Use Cases:**
 
 - **Get asset prices** at any historical block (critical for liquidation analysis)
@@ -1085,12 +1190,16 @@ From the indexed events and snapshots, we can calculate comprehensive protocol m
    ```
    Total Supply = (totalScaledVariableDebt × variableBorrowIndex / 1e27) + availableLiquidity
    ```
-   *Note: totalScaledVariableDebt is actually total scaled supply in this context*
+   Or equivalently: `Total Supply = Total Borrowed + Available Liquidity`
+   
+   This represents the sum of all user supply positions in the reserve.
 
 2. **Total Borrowed:**
    ```
    Total Borrowed = totalScaledVariableDebt × variableBorrowIndex / 1e27
    ```
+   
+   This represents the sum of all user borrow positions in the reserve.
 
 3. **Utilization Rate:**
    ```
@@ -1432,44 +1541,62 @@ Block 300: Snapshot runs
   → Bob's 500 aUSDC is untracked
 ```
 
-**Consequences of Not Tracking Transfers:**
+**Solution: Index aToken Events (Transfer, Mint, Burn)**
 
-- **Missing supply positions** leading to undercounted TVL
-- **Invisible users** not queried during snapshots
-- **Incomplete health factor monitoring** for untracked users
-- **Failed liquidation detection** for positions acquired via transfer
-
-**Solution: Index aToken Transfer Events**
+**See Also:** Complete details in the [aToken Transfer Tracking](#atoken-transfer-tracking) and [Event-Based Indexing](#event-based-indexing) sections.
 
 **Step 1: Discover aToken Contracts**
 
 Identify all aToken addresses for the Pool by:
 - Monitoring `ReserveInitialized` events from the Pool contract
 - Each event contains the aToken address for that reserve
-- Track all aToken addresses to index their Transfer events
+- Track all aToken addresses to index their events
 
-**Step 2: Handle Transfer Events**
+**Step 2: Choose Indexing Approach**
 
-For each aToken Transfer event:
+**Option A: Pool Events + aToken Transfers (Recommended)**
+- Index Pool `Supply`/`Withdraw` events for transaction context
+- Index aToken `Transfer` events for user discovery
+- Provides complete coverage with full context
+
+**Option B: aToken Events Only (Alternative)**
+- Index aToken `Mint`/`Burn`/`Transfer` events exclusively
+- Single source of truth, simpler reconciliation
+- Missing some transaction context (onBehalfOf, referralCode)
+
+**Step 3: Handle aToken Events**
+
+For each aToken event:
 
 1. **Filter addresses to ignore:**
-   - Zero address (`0x000...000`) - mint/burn operations (already captured in Supply/Withdraw events)
+   - Zero address (`0x000...000`) - for `from` in Mint, for `to` in Burn
    - Pool contract address - internal accounting
    - Gateway contracts - intermediate contracts, not end users
 
-2. **Process valid transfers:**
-   - Add both `from` and `to` addresses to active user list
-   - Update position tracking for both users
+2. **Process valid events:**
+   - **Transfer** (non-zero from/to): Add both `from` and `to` addresses to active user list
+   - **Mint** (from=0x0): Add `to` address to active user list
+   - **Burn** (to=0x0): Update `from` address position
+   - Update position tracking for all affected users
    - Map aToken address to its underlying reserve
-   - Store transfer event for historical records (optional)
+   - Store events for historical records (optional)
 
 3. **Key data to capture:**
-   - Transfer amount
+   - Amount (value)
    - Sender and recipient addresses
    - Block number and timestamp
    - Transaction hash and log index
+   - Index parameter (for Mint/Burn events)
 
-**Step 3: Use Active User List in Snapshots**
+**Benefits:**
+
+- **Complete user coverage** (no silent positions)
+- **Accurate TVL** (all supply positions tracked)
+- **Comprehensive snapshots** (all users queried)
+- **Correct liquidation monitoring** (health factors for all users)
+- **Verification capability** (cross-check Pool events against aToken events)
+
+**Step 4: Use Active User List in Snapshots**
 
 Query active users (including transfer recipients) when running snapshots to ensure complete coverage. See "Tracking Active Users" section below for implementation details.
 
@@ -1612,6 +1739,49 @@ Scaled balances only change when users perform transactions (Supply, Withdraw, B
 
 This is the key optimization: instead of making thousands of historical RPC calls, we track deltas event-by-event and calculate historical balances offchain.
 
+**⚠️ Critical: Handling Multiple Events in the Same Block**
+
+When multiple position-changing events occur in the same block for the same user and asset, handlers must **not overwrite** previous updates from the same block. Since the snapshot ID is `${user}-${asset}-${blockNumber}`, multiple events in the same block share the same ID.
+
+**Two Implementation Approaches:**
+
+**Option 1: Check and Update Existing Snapshot (Recommended)**
+```typescript
+// Check if a snapshot already exists for this block
+const existingSnapshot = getSnapshot(user, asset, blockNumber);
+
+if (existingSnapshot) {
+  // Multiple events in same block - update existing snapshot
+  const newScaledBalance = existingSnapshot.scaledBalance + scaledAmount;
+  updateUserScaledSupplyPosition({
+    id: `${user}-${asset}-${blockNumber}`,
+    scaledBalance: newScaledBalance,
+    lastLiquidityIndex: currentIndex,
+  });
+} else {
+  // First event in this block - create new snapshot based on previous block
+  const prevSnapshot = getPreviousSnapshot(user, asset, blockNumber - 1);
+  const newScaledBalance = (prevSnapshot?.scaledBalance || 0n) + scaledAmount;
+  insertUserScaledSupplyPosition({...});
+}
+```
+
+**Option 2: Use Log Index in ID**
+```typescript
+// Include transaction log index in ID to store all intermediate states
+const id = `${user}-${asset}-${blockNumber}-${logIndex}`;
+
+// Always get most recent snapshot up to and including current block
+const prevSnapshot = getMostRecentSnapshot(user, asset, blockNumber); // <= not <
+const newScaledBalance = (prevSnapshot?.scaledBalance || 0n) + scaledAmount;
+
+insertUserScaledSupplyPosition({
+  id,
+  scaledBalance: newScaledBalance,
+  ...
+});
+```
+
 **Track scaled balances on every position-changing event:**
 
 **Supply Event:**
@@ -1624,24 +1794,35 @@ async function trackScaledSupply(user, asset, amount, blockNumber, timestamp) {
   // 2. Convert supplied amount to scaled balance
   const scaledAmount = (amount × RAY) / currentIndex;
   
-  // 3. Get previous snapshot to find starting balance
-  const prevSnapshot = getPreviousSnapshot(user, asset, blockNumber - 1);
-  const prevScaledBalance = prevSnapshot?.scaledBalance || 0n;
+  // 3. Check if snapshot already exists for this block (multiple events)
+  const existingSnapshot = getSnapshot(user, asset, blockNumber);
   
-  // 4. Calculate new scaled balance
-  const newScaledBalance = prevScaledBalance + scaledAmount;
-  
-  // 5. Store snapshot
-  insertUserScaledSupplyPosition({
-    id: `${user}-${asset}-${blockNumber}`,
-    user,
-    asset,
-    blockNumber,
-    timestamp,
-    scaledBalance: newScaledBalance,
-    isCollateral: prevSnapshot?.isCollateral ?? true,
-    lastLiquidityIndex: currentIndex,
-  });
+  if (existingSnapshot) {
+    // Multiple events in same block - update existing
+    const newScaledBalance = existingSnapshot.scaledBalance + scaledAmount;
+    updateUserScaledSupplyPosition({
+      id: `${user}-${asset}-${blockNumber}`,
+      scaledBalance: newScaledBalance,
+      lastLiquidityIndex: currentIndex,
+    });
+  } else {
+    // First event in this block - get from previous block
+    const prevSnapshot = getPreviousSnapshot(user, asset, blockNumber - 1);
+    const prevScaledBalance = prevSnapshot?.scaledBalance || 0n;
+    const newScaledBalance = prevScaledBalance + scaledAmount;
+    
+    // Store new snapshot
+    insertUserScaledSupplyPosition({
+      id: `${user}-${asset}-${blockNumber}`,
+      user,
+      asset,
+      blockNumber,
+      timestamp,
+      scaledBalance: newScaledBalance,
+      isCollateral: prevSnapshot?.isCollateral ?? true,
+      lastLiquidityIndex: currentIndex,
+    });
+  }
 }
 ```
 
@@ -1652,45 +1833,91 @@ async function trackScaledWithdraw(user, asset, amount, blockNumber, timestamp) 
   const reserveData = getLatestReserveDataAtBlock(asset, blockNumber);
   const scaledAmount = (amount × RAY) / reserveData.liquidityIndex;
   
-  // Get previous balance
-  const prevSnapshot = getPreviousSnapshot(user, asset, blockNumber - 1);
-  const newScaledBalance = prevSnapshot.scaledBalance - scaledAmount;
+  // Check if snapshot already exists for this block
+  const existingSnapshot = getSnapshot(user, asset, blockNumber);
   
-  // Store updated snapshot (even if balance becomes 0)
-  insertUserScaledSupplyPosition({
-    ...
-    scaledBalance: newScaledBalance >= 0 ? newScaledBalance : 0,
-  });
+  if (existingSnapshot) {
+    // Multiple events in same block - update existing
+    const newScaledBalance = existingSnapshot.scaledBalance - scaledAmount;
+    updateUserScaledSupplyPosition({
+      id: `${user}-${asset}-${blockNumber}`,
+      scaledBalance: newScaledBalance >= 0n ? newScaledBalance : 0n,
+      lastLiquidityIndex: reserveData.liquidityIndex,
+    });
+  } else {
+    // First event in this block - get from previous block
+    const prevSnapshot = getPreviousSnapshot(user, asset, blockNumber - 1);
+    const newScaledBalance = prevSnapshot.scaledBalance - scaledAmount;
+    
+    // Store updated snapshot (even if balance becomes 0)
+    insertUserScaledSupplyPosition({
+      id: `${user}-${asset}-${blockNumber}`,
+      user,
+      asset,
+      blockNumber,
+      timestamp,
+      scaledBalance: newScaledBalance >= 0n ? newScaledBalance : 0n,
+      isCollateral: prevSnapshot?.isCollateral ?? true,
+      lastLiquidityIndex: reserveData.liquidityIndex,
+    });
+  }
 }
 ```
 
-**Borrow/Repay Events:** Similar logic using `variableBorrowIndex` instead of `liquidityIndex`.
+**Borrow/Repay Events:** Similar logic using `variableBorrowIndex` instead of `liquidityIndex`. Same rules apply for handling multiple events in the same block.
 
 **Collateral Toggle Events:**
 ```typescript
 async function trackCollateralEnabled(user, asset, blockNumber, timestamp) {
-  // Update isCollateral flag while preserving scaled balance
-  const prevSnapshot = getPreviousSnapshot(user, asset, blockNumber - 1);
+  // Check if snapshot already exists for this block
+  const existingSnapshot = getSnapshot(user, asset, blockNumber);
   
-  insertUserScaledSupplyPosition({
-    ...prevSnapshot,
-    blockNumber,
-    timestamp,
-    isCollateral: true,  // Enable collateral
-  });
+  if (existingSnapshot) {
+    // Update existing snapshot's collateral flag
+    updateUserScaledSupplyPosition({
+      id: `${user}-${asset}-${blockNumber}`,
+      isCollateral: true,
+    });
+  } else {
+    // Get previous block's snapshot and create new one with updated flag
+    const prevSnapshot = getPreviousSnapshot(user, asset, blockNumber - 1);
+    
+    insertUserScaledSupplyPosition({
+      id: `${user}-${asset}-${blockNumber}`,
+      user,
+      asset,
+      blockNumber,
+      timestamp,
+      scaledBalance: prevSnapshot?.scaledBalance || 0n,
+      isCollateral: true,  // Enable collateral
+      lastLiquidityIndex: prevSnapshot?.lastLiquidityIndex || 0n,
+    });
+  }
 }
 ```
 
 **E-Mode Events:**
 ```typescript
 async function trackEModeSet(user, categoryId, blockNumber, timestamp) {
-  insertUserEModeCategory({
-    id: `${user}-${blockNumber}`,
-    user,
-    blockNumber,
-    timestamp,
-    categoryId,
-  });
+  // E-Mode is per-user (not per-asset), so check if already set in this block
+  const existingEMode = getEModeSnapshot(user, blockNumber);
+  
+  if (existingEMode) {
+    // Update existing E-Mode setting for this block
+    updateUserEModeCategory({
+      id: `${user}-${blockNumber}`,
+      categoryId,
+    });
+  } else {
+    // Create new E-Mode snapshot
+    insertUserEModeCategory({
+      id: `${user}-${blockNumber}`,
+      user,
+      blockNumber,
+      timestamp,
+      categoryId,
+    });
+  }
 }
 ```
 
