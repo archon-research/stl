@@ -3,22 +3,24 @@ package migrator
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Migrator struct {
-	db            *sql.DB
+	pool          *pgxpool.Pool
 	migrationsDir string
 }
 
-func New(db *sql.DB, migrationsDir string) *Migrator {
+func New(pool *pgxpool.Pool, migrationsDir string) *Migrator {
 	return &Migrator{
-		db:            db,
+		pool:          pool,
 		migrationsDir: migrationsDir,
 	}
 }
@@ -52,7 +54,7 @@ func (m *Migrator) ApplyAll(ctx context.Context) error {
 
 func (m *Migrator) getAppliedMigrations(ctx context.Context) (map[string]bool, error) {
 	var exists bool
-	err := m.db.QueryRowContext(ctx, `
+	err := m.pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT FROM information_schema.tables 
 			WHERE table_schema = 'public' 
@@ -66,7 +68,7 @@ func (m *Migrator) getAppliedMigrations(ctx context.Context) (map[string]bool, e
 		return make(map[string]bool), nil
 	}
 
-	rows, err := m.db.QueryContext(ctx, "SELECT filename FROM migrations")
+	rows, err := m.pool.Query(ctx, "SELECT filename FROM migrations")
 	if err != nil {
 		return nil, err
 	}
@@ -116,17 +118,17 @@ func (m *Migrator) verifyChecksum(ctx context.Context, filename string) error {
 
 	currentChecksum := fmt.Sprintf("%x", sha256.Sum256(content))
 
-	var storedChecksum sql.NullString
-	err = m.db.QueryRowContext(ctx,
+	var storedChecksum *string
+	err = m.pool.QueryRow(ctx,
 		"SELECT checksum FROM migrations WHERE filename = $1",
 		filename).Scan(&storedChecksum)
 	if err != nil {
 		return err
 	}
 
-	if storedChecksum.Valid && storedChecksum.String != currentChecksum {
+	if storedChecksum != nil && *storedChecksum != currentChecksum {
 		return fmt.Errorf("migration has been modified (expected checksum %s, got %s)",
-			storedChecksum.String, currentChecksum)
+			*storedChecksum, currentChecksum)
 	}
 
 	return nil
@@ -142,28 +144,28 @@ func (m *Migrator) applyMigration(ctx context.Context, filename string) error {
 
 	checksum := fmt.Sprintf("%x", sha256.Sum256(content))
 
-	tx, err := m.db.BeginTx(ctx, nil)
+	tx, err := m.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+		if err := tx.Rollback(ctx); err != nil && err != pgx.ErrTxClosed {
 			fmt.Printf("warning: failed to rollback transaction: %v\n", err)
 		}
 	}()
 
-	if _, err := tx.ExecContext(ctx, string(content)); err != nil {
+	if _, err := tx.Exec(ctx, string(content)); err != nil {
 		return fmt.Errorf("failed to execute migration SQL: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx,
+	_, err = tx.Exec(ctx,
 		"UPDATE migrations SET checksum = $1 WHERE filename = $2",
 		checksum, filename)
 	if err != nil {
 		return fmt.Errorf("failed to update checksum: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
 
@@ -172,7 +174,7 @@ func (m *Migrator) applyMigration(ctx context.Context, filename string) error {
 }
 
 func (m *Migrator) ListApplied(ctx context.Context) ([]string, error) {
-	rows, err := m.db.QueryContext(ctx,
+	rows, err := m.pool.Query(ctx,
 		"SELECT filename FROM migrations ORDER BY applied_at ASC")
 	if err != nil {
 		return nil, err

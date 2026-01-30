@@ -4,19 +4,21 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -55,14 +57,14 @@ func TestLargeDataset_QueryPerformance(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert blocks
-	bulkInsertBlocksCOPY(t, repo.DB(), 1, totalRows)
+	bulkInsertBlocksCOPY(t, repo.Pool(), 1, totalRows)
 
 	// Create indexes and analyze
-	createIndexes(t, repo.DB())
+	createIndexes(t, repo.Pool())
 
 	// Verify row count
 	var count int64
-	if err := repo.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM block_states").Scan(&count); err != nil {
+	if err := repo.Pool().QueryRow(ctx, "SELECT COUNT(*) FROM block_states").Scan(&count); err != nil {
 		t.Fatalf("failed to count rows: %v", err)
 	}
 	t.Logf("Total rows in database: %d", count)
@@ -268,8 +270,8 @@ func TestExplainAnalyze(t *testing.T) {
 
 	// Insert enough data to see realistic query plans
 	const explainRows = 100_000
-	bulkInsertBlocksCOPY(t, repo.DB(), 1, explainRows)
-	createIndexes(t, repo.DB())
+	bulkInsertBlocksCOPY(t, repo.Pool(), 1, explainRows)
+	createIndexes(t, repo.Pool())
 
 	queries := []struct {
 		name  string
@@ -377,7 +379,7 @@ func TestExplainAnalyze(t *testing.T) {
 
 	for _, q := range queries {
 		t.Run(q.name, func(t *testing.T) {
-			rows, err := repo.DB().QueryContext(ctx, q.query)
+			rows, err := repo.Pool().Query(ctx, q.query)
 			if err != nil {
 				t.Fatalf("failed to run EXPLAIN ANALYZE: %v", err)
 			}
@@ -448,30 +450,38 @@ func setupLargePostgres(tb testing.TB) (*BlockStateRepository, func()) {
 
 	dsn := fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
 
-	db, err := sql.Open("pgx", dsn)
+	poolConfig, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		tb.Fatalf("failed to parse config: %v", err)
+	}
+	poolConfig.MaxConns = 10
+	poolConfig.MinConns = 5
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		tb.Fatalf("failed to connect to database: %v", err)
 	}
 
-	// Increase connection pool for bulk operations
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
-
 	// Wait for connection
 	for i := 0; i < 30; i++ {
-		if err := db.Ping(); err == nil {
+		if err := pool.Ping(ctx); err == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	repo := NewBlockStateRepository(db, nil)
-	if err := repo.Migrate(ctx); err != nil {
-		tb.Fatalf("failed to migrate: %v", err)
+	// Run migrations
+	_, currentFile, _, _ := runtime.Caller(0)
+	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../../db/migrations")
+	m := migrator.New(pool, migrationsDir)
+	if err := m.ApplyAll(ctx); err != nil {
+		tb.Fatalf("failed to apply migrations: %v", err)
 	}
 
+	repo := NewBlockStateRepository(pool, nil)
+
 	cleanup := func() {
-		db.Close()
+		pool.Close()
 		container.Terminate(ctx)
 	}
 
@@ -480,27 +490,22 @@ func setupLargePostgres(tb testing.TB) (*BlockStateRepository, func()) {
 
 // bulkInsertBlocksCOPY uses PostgreSQL COPY protocol for maximum insert performance.
 // This is 10-100x faster than INSERT statements.
-func bulkInsertBlocksCOPY(tb testing.TB, db *sql.DB, startBlock, count int64) {
+func bulkInsertBlocksCOPY(tb testing.TB, pool *pgxpool.Pool, startBlock, count int64) {
 	tb.Helper()
 	ctx := context.Background()
 
 	tb.Logf("Bulk inserting %d blocks using COPY protocol starting from %d...", count, startBlock)
 	startTime := time.Now()
 
-	// Get the underlying pgx connection for COPY support
-	conn, err := db.Conn(ctx)
+	// Get a connection from the pool for COPY support
+	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		tb.Fatalf("failed to get connection: %v", err)
 	}
-	defer conn.Close()
+	defer conn.Release()
 
-	// Use pgx's raw connection for CopyFrom
-	err = conn.Raw(func(driverConn any) error {
-		stdlibConn := driverConn.(*stdlib.Conn)
-		pgxConn := stdlibConn.Conn()
-		return bulkInsertWithPgxCopy(ctx, tb, pgxConn, startBlock, count)
-	})
-	if err != nil {
+	// Use pgx's CopyFrom
+	if err := bulkInsertWithPgxCopy(ctx, tb, conn.Conn(), startBlock, count); err != nil {
 		tb.Fatalf("COPY failed: %v", err)
 	}
 
@@ -568,7 +573,7 @@ func bulkInsertWithPgxCopy(ctx context.Context, tb testing.TB, conn *pgx.Conn, s
 }
 
 // createIndexes ensures indexes are created and analyzed for optimal query performance.
-func createIndexes(tb testing.TB, db *sql.DB) {
+func createIndexes(tb testing.TB, pool *pgxpool.Pool) {
 	tb.Helper()
 	ctx := context.Background()
 
@@ -585,13 +590,13 @@ func createIndexes(tb testing.TB, db *sql.DB) {
 	}
 
 	for _, idx := range indexes {
-		if _, err := db.ExecContext(ctx, idx); err != nil {
+		if _, err := pool.Exec(ctx, idx); err != nil {
 			tb.Logf("Warning: failed to create index: %v", err)
 		}
 	}
 
 	// Analyze the table for query planner optimization
-	if _, err := db.ExecContext(ctx, "ANALYZE block_states"); err != nil {
+	if _, err := pool.Exec(ctx, "ANALYZE block_states"); err != nil {
 		tb.Fatalf("failed to analyze table: %v", err)
 	}
 

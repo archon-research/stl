@@ -4,7 +4,6 @@ package backfill_gaps
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -35,7 +34,7 @@ const (
 )
 
 // setupLargePostgres creates a PostgreSQL container optimized for large data benchmarks.
-func setupLargePostgres(b *testing.B) (*sql.DB, *postgres.BlockStateRepository, func()) {
+func setupLargePostgres(b *testing.B) (*pgxpool.Pool, *postgres.BlockStateRepository, func()) {
 	b.Helper()
 	ctx := context.Background()
 
@@ -80,45 +79,48 @@ func setupLargePostgres(b *testing.B) (*sql.DB, *postgres.BlockStateRepository, 
 
 	dsn := fmt.Sprintf("postgres://bench:bench@%s:%s/benchdb?sslmode=disable", host, port.Port())
 
-	db, err := sql.Open("pgx", dsn)
+	poolConfig, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		b.Fatalf("failed to parse config: %v", err)
+	}
+	poolConfig.MaxConns = 10
+	poolConfig.MinConns = 5
+	poolConfig.MaxConnLifetime = 5 * time.Minute
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		b.Fatalf("failed to connect to database: %v", err)
 	}
 
-	// Configure connection pool for high throughput
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
-
 	// Wait for connection
 	for i := 0; i < 60; i++ {
-		if err := db.Ping(); err == nil {
+		if err := pool.Ping(ctx); err == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	repo := postgres.NewBlockStateRepository(db, nil)
+	repo := postgres.NewBlockStateRepository(pool, nil)
 
 	// Run migrations
 	_, currentFile, _, _ := runtime.Caller(0)
 	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../db/migrations")
-	m := migrator.New(db, migrationsDir)
+	m := migrator.New(pool, migrationsDir)
 	if err := m.ApplyAll(ctx); err != nil {
 		b.Fatalf("failed to apply migrations: %v", err)
 	}
 
 	cleanup := func() {
-		db.Close()
+		pool.Close()
 		container.Terminate(ctx)
 	}
 
-	return db, repo, cleanup
+	return pool, repo, cleanup
 }
 
 // seedLargeDataset inserts rowCount blocks into the database using multi-row batch inserts.
 // It creates gaps at specified positions for testing gap detection.
-func seedLargeDataset(b *testing.B, db *sql.DB, rowCount int64, gapRanges []outbound.BlockRange) {
+func seedLargeDataset(b *testing.B, pool *pgxpool.Pool, rowCount int64, gapRanges []outbound.BlockRange) {
 	b.Helper()
 	ctx := context.Background()
 
@@ -158,7 +160,7 @@ func seedLargeDataset(b *testing.B, db *sql.DB, rowCount int64, gapRanges []outb
 
 		finalQuery := fmt.Sprintf(query, strings.Join(placeholders, ", "))
 
-		_, err := db.ExecContext(ctx, finalQuery, args...)
+		_, err := pool.Exec(ctx, finalQuery, args...)
 		if err != nil {
 			return fmt.Errorf("batch insert failed: %w", err)
 		}
@@ -204,7 +206,7 @@ func seedLargeDataset(b *testing.B, db *sql.DB, rowCount int64, gapRanges []outb
 	}
 
 	// Analyze table for better query planning
-	_, err := db.ExecContext(ctx, "ANALYZE block_states")
+	_, err := pool.Exec(ctx, "ANALYZE block_states")
 	if err != nil {
 		b.Logf("Warning: failed to analyze table: %v", err)
 	}
@@ -452,7 +454,7 @@ func BenchmarkLargePostgres_FindGaps(b *testing.B) {
 
 // BenchmarkLargePostgres_BackfillService benchmarks the full backfill service on 10M rows.
 func BenchmarkLargePostgres_BackfillService(b *testing.B) {
-	db, repo, cleanup := setupLargePostgres(b)
+	pool, repo, cleanup := setupLargePostgres(b)
 	b.Cleanup(cleanup)
 
 	// Create a small gap to backfill (we don't want to backfill thousands of blocks each iteration)
@@ -460,7 +462,7 @@ func BenchmarkLargePostgres_BackfillService(b *testing.B) {
 		{From: 5_000_000, To: 5_000_049}, // 50 blocks in the middle
 	}
 
-	seedLargeDataset(b, db, LargeBenchmarkRowCount, gapRanges)
+	seedLargeDataset(b, pool, LargeBenchmarkRowCount, gapRanges)
 
 	client := newLargeBenchmarkClient(LargeBenchmarkRowCount)
 	cache := memory.NewBlockCache()
@@ -490,7 +492,7 @@ func BenchmarkLargePostgres_BackfillService(b *testing.B) {
 
 		for b.Loop() {
 			// Clear the gap blocks we filled in previous iteration
-			_, err := db.ExecContext(ctx, `
+			_, err := pool.Exec(ctx, `
 				DELETE FROM block_states 
 				WHERE number >= $1 AND number <= $2
 			`, gapRanges[0].From, gapRanges[0].To)
@@ -534,14 +536,14 @@ func BenchmarkLargePostgres_BackfillService(b *testing.B) {
 // BenchmarkLargePostgres_QueryAnalysis runs EXPLAIN ANALYZE on critical queries.
 // This is not a traditional benchmark but provides query planning insights.
 func BenchmarkLargePostgres_QueryAnalysis(b *testing.B) {
-	db, repo, cleanup := setupLargePostgres(b)
+	pool, repo, cleanup := setupLargePostgres(b)
 	b.Cleanup(cleanup)
 
 	gapRanges := []outbound.BlockRange{
 		{From: 5_000_000, To: 5_000_099},
 	}
 
-	seedLargeDataset(b, db, LargeBenchmarkRowCount, gapRanges)
+	seedLargeDataset(b, pool, LargeBenchmarkRowCount, gapRanges)
 
 	ctx := context.Background()
 
@@ -569,7 +571,7 @@ func BenchmarkLargePostgres_QueryAnalysis(b *testing.B) {
 			ORDER BY gap_start
 		`
 
-		rows, err := db.QueryContext(ctx, query, 1, LargeBenchmarkRowCount)
+		rows, err := pool.Query(ctx, query, 1, LargeBenchmarkRowCount)
 		if err != nil {
 			b.Fatalf("EXPLAIN failed: %v", err)
 		}
@@ -594,7 +596,7 @@ func BenchmarkLargePostgres_QueryAnalysis(b *testing.B) {
 
 		for _, q := range queries {
 			b.Logf("\n%s EXPLAIN ANALYZE:", q.name)
-			rows, err := db.QueryContext(ctx, q.query)
+			rows, err := pool.Query(ctx, q.query)
 			if err != nil {
 				b.Fatalf("EXPLAIN failed: %v", err)
 			}

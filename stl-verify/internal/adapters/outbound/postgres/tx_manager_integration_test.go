@@ -4,19 +4,19 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // setupTxManagerTest creates a PostgreSQL container and returns a TxManager.
-func setupTxManagerTest(t *testing.T) (*TxManager, *sql.DB, func()) {
+func setupTxManagerTest(t *testing.T) (*TxManager, *pgxpool.Pool, func()) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -53,21 +53,21 @@ func setupTxManagerTest(t *testing.T) (*TxManager, *sql.DB, func()) {
 
 	dsn := fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
 
-	db, err := sql.Open("pgx", dsn)
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatalf("failed to connect to database: %v", err)
 	}
 
 	// Wait for connection
 	for i := 0; i < 30; i++ {
-		if err := db.Ping(); err == nil {
+		if err := pool.Ping(ctx); err == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
 	// Create a simple test table
-	_, err = db.ExecContext(ctx, `
+	_, err = pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS tx_test (
 			id SERIAL PRIMARY KEY,
 			value TEXT NOT NULL
@@ -77,28 +77,28 @@ func setupTxManagerTest(t *testing.T) (*TxManager, *sql.DB, func()) {
 		t.Fatalf("failed to create test table: %v", err)
 	}
 
-	txm, err := NewTxManager(db, nil)
+	txm, err := NewTxManager(pool, nil)
 	if err != nil {
 		t.Fatalf("failed to create TxManager: %v", err)
 	}
 
 	cleanup := func() {
-		db.Close()
+		pool.Close()
 		container.Terminate(ctx)
 	}
 
-	return txm, db, cleanup
+	return txm, pool, cleanup
 }
 
 func TestTxManager_WithTransaction_Commit(t *testing.T) {
-	txm, db, cleanup := setupTxManagerTest(t)
+	txm, pool, cleanup := setupTxManagerTest(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
 	// Execute a transaction that inserts data
-	err := txm.WithTransaction(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "test_value")
+	err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "test_value")
 		return err
 	})
 	if err != nil {
@@ -107,7 +107,7 @@ func TestTxManager_WithTransaction_Commit(t *testing.T) {
 
 	// Verify data was committed
 	var value string
-	err = db.QueryRowContext(ctx, "SELECT value FROM tx_test WHERE value = $1", "test_value").Scan(&value)
+	err = pool.QueryRow(ctx, "SELECT value FROM tx_test WHERE value = $1", "test_value").Scan(&value)
 	if err != nil {
 		t.Fatalf("failed to query inserted data: %v", err)
 	}
@@ -117,15 +117,15 @@ func TestTxManager_WithTransaction_Commit(t *testing.T) {
 }
 
 func TestTxManager_WithTransaction_Rollback(t *testing.T) {
-	txm, db, cleanup := setupTxManagerTest(t)
+	txm, pool, cleanup := setupTxManagerTest(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
 	// Execute a transaction that fails
 	testErr := errors.New("intentional failure")
-	err := txm.WithTransaction(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "should_not_exist")
+	err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "should_not_exist")
 		if err != nil {
 			return err
 		}
@@ -138,7 +138,7 @@ func TestTxManager_WithTransaction_Rollback(t *testing.T) {
 
 	// Verify data was NOT committed (rolled back)
 	var count int
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM tx_test WHERE value = $1", "should_not_exist").Scan(&count)
+	err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM tx_test WHERE value = $1", "should_not_exist").Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestTxManager_WithTransaction_Rollback(t *testing.T) {
 }
 
 func TestTxManager_WithTransaction_PanicRollback(t *testing.T) {
-	txm, db, cleanup := setupTxManagerTest(t)
+	txm, pool, cleanup := setupTxManagerTest(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -160,8 +160,8 @@ func TestTxManager_WithTransaction_PanicRollback(t *testing.T) {
 		}
 	}()
 
-	_ = txm.WithTransaction(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "panic_value")
+	_ = txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "panic_value")
 		if err != nil {
 			return err
 		}
@@ -170,7 +170,7 @@ func TestTxManager_WithTransaction_PanicRollback(t *testing.T) {
 
 	// Verify data was NOT committed (rolled back due to panic)
 	var count int
-	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM tx_test WHERE value = $1", "panic_value").Scan(&count)
+	err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM tx_test WHERE value = $1", "panic_value").Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
@@ -180,15 +180,15 @@ func TestTxManager_WithTransaction_PanicRollback(t *testing.T) {
 }
 
 func TestTxManager_WithTransaction_MultipleOperations(t *testing.T) {
-	txm, db, cleanup := setupTxManagerTest(t)
+	txm, pool, cleanup := setupTxManagerTest(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
 	// Execute multiple operations in a single transaction
-	err := txm.WithTransaction(ctx, func(tx *sql.Tx) error {
+	err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		for i := 1; i <= 3; i++ {
-			_, err := tx.ExecContext(ctx, "INSERT INTO tx_test (value) VALUES ($1)", fmt.Sprintf("multi_%d", i))
+			_, err := tx.Exec(ctx, "INSERT INTO tx_test (value) VALUES ($1)", fmt.Sprintf("multi_%d", i))
 			if err != nil {
 				return err
 			}
@@ -201,7 +201,7 @@ func TestTxManager_WithTransaction_MultipleOperations(t *testing.T) {
 
 	// Verify all data was committed
 	var count int
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM tx_test WHERE value LIKE 'multi_%'").Scan(&count)
+	err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM tx_test WHERE value LIKE 'multi_%'").Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
@@ -211,18 +211,18 @@ func TestTxManager_WithTransaction_MultipleOperations(t *testing.T) {
 }
 
 func TestTxManager_WithTransaction_PartialFailure(t *testing.T) {
-	txm, db, cleanup := setupTxManagerTest(t)
+	txm, pool, cleanup := setupTxManagerTest(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
 	// Execute operations where one fails midway
-	err := txm.WithTransaction(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "partial_1")
+	err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "partial_1")
 		if err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "partial_2")
+		_, err = tx.Exec(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "partial_2")
 		if err != nil {
 			return err
 		}
@@ -236,7 +236,7 @@ func TestTxManager_WithTransaction_PartialFailure(t *testing.T) {
 
 	// Verify NO data was committed (atomic rollback)
 	var count int
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM tx_test WHERE value LIKE 'partial_%'").Scan(&count)
+	err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM tx_test WHERE value LIKE 'partial_%'").Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
@@ -246,21 +246,21 @@ func TestTxManager_WithTransaction_PartialFailure(t *testing.T) {
 }
 
 func TestTxManager_WithTransactionOptions_ReadOnly(t *testing.T) {
-	txm, db, cleanup := setupTxManagerTest(t)
+	txm, pool, cleanup := setupTxManagerTest(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 
 	// Insert test data first
-	_, err := db.ExecContext(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "readonly_test")
+	_, err := pool.Exec(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "readonly_test")
 	if err != nil {
 		t.Fatalf("failed to insert test data: %v", err)
 	}
 
 	// Read-only transaction should allow reads
 	var value string
-	err = txm.WithTransactionOptions(ctx, &TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, "SELECT value FROM tx_test WHERE value = $1", "readonly_test").Scan(&value)
+	err = txm.WithTransactionOptions(ctx, &TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, "SELECT value FROM tx_test WHERE value = $1", "readonly_test").Scan(&value)
 	})
 	if err != nil {
 		t.Fatalf("read-only transaction failed: %v", err)
@@ -270,8 +270,8 @@ func TestTxManager_WithTransactionOptions_ReadOnly(t *testing.T) {
 	}
 
 	// Read-only transaction should reject writes
-	err = txm.WithTransactionOptions(ctx, &TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "should_fail")
+	err = txm.WithTransactionOptions(ctx, &TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "should_fail")
 		return err
 	})
 	if err == nil {
@@ -287,7 +287,7 @@ func TestTxManager_ContextCancellation(t *testing.T) {
 	cancel() // Cancel immediately
 
 	// Transaction should fail due to cancelled context
-	err := txm.WithTransaction(ctx, func(tx *sql.Tx) error {
+	err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		return nil
 	})
 	if err == nil {

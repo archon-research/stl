@@ -2,29 +2,25 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"log"
 	"os"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
 	connStr := requireEnv("DATABASE_URL")
+	ctx := context.Background()
 
-	db, err := sql.Open("pgx", connStr)
+	pool, err := pgxpool.New(ctx, connStr)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer func() {
-		if err := db.Close(); err != nil {
-			log.Printf("Error closing database: %v", err)
-		}
-	}()
+	defer pool.Close()
 
-	m := migrator.New(db, "./db/migrations")
-	if err := m.ApplyAll(context.Background()); err != nil {
+	m := migrator.New(pool, "./db/migrations")
+	if err := m.ApplyAll(ctx); err != nil {
 		log.Fatalf("Migration failed: %v", err)
 	}
 
