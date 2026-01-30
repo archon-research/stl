@@ -65,27 +65,3 @@ func TestResult_FailureCase(t *testing.T) {
 		t.Errorf("ReturnData length = %d, want 0", len(result.ReturnData))
 	}
 }
-
-func TestMultipleResults(t *testing.T) {
-	results := []Result{
-		{Success: true, ReturnData: []byte{0x01}},
-		{Success: false, ReturnData: []byte{}},
-		{Success: true, ReturnData: []byte{0x02, 0x03}},
-	}
-
-	if len(results) != 3 {
-		t.Errorf("results length = %d, want 3", len(results))
-	}
-	if !results[0].Success {
-		t.Errorf("results[0].Success = false, want true")
-	}
-	if results[1].Success {
-		t.Errorf("results[1].Success = true, want false")
-	}
-	if !results[2].Success {
-		t.Errorf("results[2].Success = false, want true")
-	}
-	if !bytes.Equal(results[2].ReturnData, []byte{0x02, 0x03}) {
-		t.Errorf("results[2].ReturnData = %v, want [0x02 0x03]", results[2].ReturnData)
-	}
-}

@@ -11,7 +11,7 @@ type ProtocolConfig struct {
 	UseAaveABI            bool // NEW: flag to determine which ABI
 }
 
-var ProtocolRegistry = map[common.Address]ProtocolConfig{
+var protocolRegistry = map[common.Address]ProtocolConfig{
 	common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"): {
 		Name:                  "Aave V3",
 		PoolAddress:           common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"),
@@ -47,6 +47,6 @@ var ProtocolRegistry = map[common.Address]ProtocolConfig{
 }
 
 func GetProtocolConfig(protocolAddress common.Address) (ProtocolConfig, bool) {
-	config, exists := ProtocolRegistry[protocolAddress]
+	config, exists := protocolRegistry[protocolAddress]
 	return config, exists
 }

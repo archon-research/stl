@@ -65,7 +65,7 @@ func newBlockchainService(
 	uiPoolDataProvider common.Address,
 	poolDataProvider common.Address,
 	poolAddressesProvider common.Address,
-	useAaveABI bool, // NEW parameter
+	useAaveABI bool,
 	logger *slog.Logger,
 ) (*blockchainService, error) {
 	service := &blockchainService{

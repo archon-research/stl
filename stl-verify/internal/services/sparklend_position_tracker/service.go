@@ -486,7 +486,8 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 			return fmt.Errorf("failed to ensure user: %w", err)
 		}
 
-		protocolID, err := s.protocolRepo.GetProtocolByAddress(ctx, chainID, protocolAddress.Hex())
+		protocolID, err := s.protocolRepo.GetProtocolByAddress(ctx, chainID, protocolAddress)
+
 		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
@@ -568,7 +569,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			return fmt.Errorf("failed to ensure user: %w", err)
 		}
 
-		protocolID, err := s.protocolRepo.GetProtocolByAddress(ctx, chainID, protocolAddress.Hex())
+		protocolID, err := s.protocolRepo.GetProtocolByAddress(ctx, chainID, protocolAddress)
 		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
@@ -630,7 +631,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 		return fmt.Errorf("failed to ensure user: %w", err)
 	}
 
-	protocolID, err := s.protocolRepo.GetProtocolByAddress(ctx, chainID, protocolAddress.Hex())
+	protocolID, err := s.protocolRepo.GetProtocolByAddress(ctx, chainID, protocolAddress)
 	if err != nil {
 		return fmt.Errorf("failed to get protocol: %w", err)
 	}

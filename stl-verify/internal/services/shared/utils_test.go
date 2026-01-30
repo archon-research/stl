@@ -3,7 +3,6 @@ package shared
 import (
 	"bytes"
 	"compress/gzip"
-	"encoding/json"
 	"testing"
 )
 
@@ -255,64 +254,4 @@ func gzipData(t *testing.T, data []byte) []byte {
 	}
 
 	return buf.Bytes()
-}
-
-// Benchmark tests
-func BenchmarkParseCompressedJSON_Uncompressed(b *testing.B) {
-	data := []byte(`{"name":"benchmark","value":12345}`)
-	var result testStruct
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = ParseCompressedJSON(data, &result)
-	}
-}
-
-func BenchmarkParseCompressedJSON_Compressed(b *testing.B) {
-	jsonData := []byte(`{"name":"benchmark","value":12345}`)
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	if _, err := gw.Write(jsonData); err != nil {
-		b.Fatalf("failed to write gzip data: %v", err)
-	}
-	if err := gw.Close(); err != nil {
-		b.Fatalf("failed to close gzip writer: %v", err)
-	}
-	data := buf.Bytes()
-
-	var result testStruct
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = ParseCompressedJSON(data, &result)
-	}
-}
-
-func BenchmarkParseCompressedJSON_LargeArray(b *testing.B) {
-	// Create a large array
-	items := make([]testStruct, 1000)
-	for i := range items {
-		items[i] = testStruct{Name: "item", Value: i}
-	}
-	jsonData, err := json.Marshal(items)
-	if err != nil {
-		b.Fatalf("failed to marshal test data: %v", err)
-	}
-
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	if _, err := gw.Write(jsonData); err != nil {
-		b.Fatalf("failed to write gzip data: %v", err)
-	}
-	if err := gw.Close(); err != nil {
-		b.Fatalf("failed to close gzip writer: %v", err)
-	}
-	data := buf.Bytes()
-
-	var result []testStruct
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = ParseCompressedJSON(data, &result)
-	}
 }

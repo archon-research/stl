@@ -16,14 +16,12 @@ import (
 type Multicaller interface {
 	Execute(ctx context.Context, calls []Call, blockNumber *big.Int) ([]Result, error)
 	Address() common.Address
-	AddressString() string
 }
 
 type Client struct {
-	ethClient     *ethclient.Client
-	address       common.Address
-	addressString string
-	abi           *abi.ABI
+	ethClient *ethclient.Client
+	address   common.Address
+	abi       *abi.ABI
 }
 
 func NewClient(ethClient *ethclient.Client, multicall3Address common.Address) (Multicaller, error) {
@@ -33,23 +31,14 @@ func NewClient(ethClient *ethclient.Client, multicall3Address common.Address) (M
 	}
 
 	return &Client{
-		ethClient:     ethClient,
-		address:       multicall3Address,
-		addressString: multicall3Address.Hex(),
-		abi:           multicallABI,
+		ethClient: ethClient,
+		address:   multicall3Address,
+		abi:       multicallABI,
 	}, nil
-}
-
-func NewClientFromString(ethClient *ethclient.Client, multicall3AddressStr string) (Multicaller, error) {
-	return NewClient(ethClient, common.HexToAddress(multicall3AddressStr))
 }
 
 func (c *Client) Address() common.Address {
 	return c.address
-}
-
-func (c *Client) AddressString() string {
-	return c.addressString
 }
 
 func (c *Client) Execute(ctx context.Context, calls []Call, blockNumber *big.Int) ([]Result, error) {
@@ -69,21 +58,14 @@ func (c *Client) Execute(ctx context.Context, calls []Call, blockNumber *big.Int
 
 	result, err := c.ethClient.CallContract(ctx, msg, blockNumber)
 	if err != nil {
-		blockStr := "latest"
-		if blockNumber != nil {
-			blockStr = blockNumber.String()
-		}
 		return nil, fmt.Errorf("failed to call multicall contract at address=%s block=%s calls=%d: %w",
-			c.address.Hex(), blockStr, len(calls), err)
+			c.address.Hex(), blockNumberString(blockNumber), len(calls), err)
 	}
 
 	unpacked, err := c.abi.Unpack("aggregate3", result)
 	if err != nil {
-		blockStr := "latest"
-		if blockNumber != nil {
-			blockStr = blockNumber.String()
-		}
-		return nil, fmt.Errorf("failed to unpack multicall response at block=%s: %w", blockStr, err)
+		return nil, fmt.Errorf("failed to unpack multicall response at block=%s: %w",
+			blockNumberString(blockNumber), err)
 	}
 
 	resultsRaw := unpacked[0].([]struct {
@@ -100,4 +82,11 @@ func (c *Client) Execute(ctx context.Context, calls []Call, blockNumber *big.Int
 	}
 
 	return results, nil
+}
+
+func blockNumberString(blockNumber *big.Int) string {
+	if blockNumber == nil {
+		return "latest"
+	}
+	return blockNumber.String()
 }
