@@ -8,6 +8,7 @@ package alchemy
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -34,6 +35,11 @@ type jsonRPCResponse struct {
 type jsonRPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+// Error implements the error interface.
+func (e *jsonRPCError) Error() string {
+	return fmt.Sprintf("RPC error %d: %s", e.Code, e.Message)
 }
 
 // subscriptionParams represents the params field for subscription notifications.

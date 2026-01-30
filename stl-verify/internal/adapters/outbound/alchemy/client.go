@@ -61,6 +61,11 @@ type ClientConfig struct {
 	// Telemetry is the optional OpenTelemetry instrumentation.
 	// If nil, no metrics or traces are recorded.
 	Telemetry *Telemetry
+
+	// HTTPClient is an optional custom HTTP client.
+	// If nil, a default client with OpenTelemetry instrumentation is used.
+	// Use this to configure custom transport settings like connection pooling.
+	HTTPClient *http.Client
 }
 
 // ClientConfigDefaults returns a config with default values.
@@ -110,18 +115,24 @@ func NewClient(config ClientConfig) (*Client, error) {
 		config.Logger = defaults.Logger
 	}
 
-	return &Client{
-		config: config,
-		httpClient: &http.Client{
+	// Use provided HTTP client or create a default one
+	httpClient := config.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{
 			Timeout: config.Timeout,
 			Transport: otelhttp.NewTransport(http.DefaultTransport,
 				otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 					return "alchemy.http"
 				}),
 			),
-		},
-		logger:    config.Logger.With("component", "alchemy-client"),
-		telemetry: config.Telemetry,
+		}
+	}
+
+	return &Client{
+		config:     config,
+		httpClient: httpClient,
+		logger:     config.Logger.With("component", "alchemy-client"),
+		telemetry:  config.Telemetry,
 	}, nil
 }
 
@@ -336,7 +347,7 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 		if err != nil {
 			result.BlockErr = err
 		} else if resp.Error != nil {
-			result.BlockErr = fmt.Errorf("RPC error for block %s: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
+			result.BlockErr = fmt.Errorf("block %s: %w", hash, resp.Error)
 		} else {
 			result.Block = resp.Result
 		}
@@ -353,7 +364,7 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 		if err != nil {
 			result.ReceiptsErr = err
 		} else if resp.Error != nil {
-			result.ReceiptsErr = fmt.Errorf("RPC error for block %s receipts: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
+			result.ReceiptsErr = fmt.Errorf("block %s receipts: %w", hash, resp.Error)
 		} else {
 			result.Receipts = resp.Result
 		}
@@ -370,7 +381,7 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 		if err != nil {
 			result.TracesErr = err
 		} else if resp.Error != nil {
-			result.TracesErr = fmt.Errorf("RPC error for block %s traces: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
+			result.TracesErr = fmt.Errorf("block %s traces: %w", hash, resp.Error)
 		} else {
 			result.Traces = resp.Result
 		}
@@ -388,7 +399,7 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 			if err != nil {
 				result.BlobsErr = err
 			} else if resp.Error != nil {
-				result.BlobsErr = fmt.Errorf("RPC error for block %s blobs: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
+				result.BlobsErr = fmt.Errorf("block %s blobs: %w", hash, resp.Error)
 			} else {
 				result.Blobs = resp.Result
 			}
@@ -437,7 +448,7 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 	// Block data
 	if resp := respMap[0]; resp != nil {
 		if resp.Error != nil {
-			result.BlockErr = fmt.Errorf("RPC error for block %s: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
+			result.BlockErr = fmt.Errorf("block %s: %w", hash, resp.Error)
 		} else {
 			result.Block = resp.Result
 		}
@@ -448,7 +459,7 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 	// Receipts
 	if resp := respMap[1]; resp != nil {
 		if resp.Error != nil {
-			result.ReceiptsErr = fmt.Errorf("RPC error for block %s receipts: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
+			result.ReceiptsErr = fmt.Errorf("block %s receipts: %w", hash, resp.Error)
 		} else {
 			result.Receipts = resp.Result
 		}
@@ -459,7 +470,7 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 	// Traces
 	if resp := respMap[2]; resp != nil {
 		if resp.Error != nil {
-			result.TracesErr = fmt.Errorf("RPC error for block %s traces: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
+			result.TracesErr = fmt.Errorf("block %s traces: %w", hash, resp.Error)
 		} else {
 			result.Traces = resp.Result
 		}
@@ -471,7 +482,7 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 	if c.config.EnableBlobs {
 		if resp := respMap[3]; resp != nil {
 			if resp.Error != nil {
-				result.BlobsErr = fmt.Errorf("RPC error for block %s blobs: %s (code: %d)", hash, resp.Error.Message, resp.Error.Code)
+				result.BlobsErr = fmt.Errorf("block %s blobs: %w", hash, resp.Error)
 			} else {
 				result.Blobs = resp.Result
 			}
@@ -553,7 +564,7 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		// Block data
 		if resp := respMap[baseID]; resp != nil {
 			if resp.Error != nil {
-				results[i].BlockErr = fmt.Errorf("RPC error for block %d: %s (code: %d)", blockNum, resp.Error.Message, resp.Error.Code)
+				results[i].BlockErr = fmt.Errorf("block %d: %w", blockNum, resp.Error)
 			} else {
 				results[i].Block = resp.Result
 			}
@@ -564,7 +575,7 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		// Receipts
 		if resp := respMap[baseID+1]; resp != nil {
 			if resp.Error != nil {
-				results[i].ReceiptsErr = fmt.Errorf("RPC error for block %d receipts: %s (code: %d)", blockNum, resp.Error.Message, resp.Error.Code)
+				results[i].ReceiptsErr = fmt.Errorf("block %d receipts: %w", blockNum, resp.Error)
 			} else {
 				results[i].Receipts = resp.Result
 			}
@@ -575,7 +586,7 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		// Traces
 		if resp := respMap[baseID+2]; resp != nil {
 			if resp.Error != nil {
-				results[i].TracesErr = fmt.Errorf("RPC error for block %d traces: %s (code: %d)", blockNum, resp.Error.Message, resp.Error.Code)
+				results[i].TracesErr = fmt.Errorf("block %d traces: %w", blockNum, resp.Error)
 			} else {
 				results[i].Traces = resp.Result
 			}
@@ -587,7 +598,7 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		if c.config.EnableBlobs {
 			if resp := respMap[baseID+3]; resp != nil {
 				if resp.Error != nil {
-					results[i].BlobsErr = fmt.Errorf("RPC error for block %d blobs: %s (code: %d)", blockNum, resp.Error.Message, resp.Error.Code)
+					results[i].BlobsErr = fmt.Errorf("block %d blobs: %w", blockNum, resp.Error)
 				} else {
 					results[i].Blobs = resp.Result
 				}
@@ -598,6 +609,117 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 	}
 
 	return results, nil
+}
+
+// GetBlocksAndReceiptsBatch fetches blocks and receipts (without traces) for multiple blocks.
+// This is the "fast phase" of two-phase bulk downloading - blocks and receipts are cheap queries.
+// Use this when you want to fetch traces separately with GetTracesBatch.
+func (c *Client) GetBlocksAndReceiptsBatch(ctx context.Context, blockNums []int64, fullTx bool) ([]outbound.BlockData, error) {
+	if len(blockNums) == 0 {
+		return nil, nil
+	}
+
+	// Build batch request: 2 calls per block (block, receipts)
+	requests := make([]jsonRPCRequest, 0, len(blockNums)*2)
+	for i, blockNum := range blockNums {
+		hexNum := fmt.Sprintf("0x%x", blockNum)
+		baseID := i * 2
+
+		requests = append(requests,
+			jsonRPCRequest{JSONRPC: "2.0", ID: baseID, Method: "eth_getBlockByNumber", Params: []interface{}{hexNum, fullTx}},
+			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 1, Method: "eth_getBlockReceipts", Params: []interface{}{hexNum}},
+		)
+	}
+
+	responses, err := c.callBatch(ctx, requests)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build a map of ID -> response for easy lookup
+	respMap := make(map[int]*jsonRPCResponse, len(responses))
+	for i := range responses {
+		respMap[responses[i].ID] = &responses[i]
+	}
+
+	// Assemble results
+	results := make([]outbound.BlockData, len(blockNums))
+	for i, blockNum := range blockNums {
+		baseID := i * 2
+		results[i] = outbound.BlockData{BlockNumber: blockNum}
+
+		// Block data
+		if resp := respMap[baseID]; resp != nil {
+			if resp.Error != nil {
+				results[i].BlockErr = fmt.Errorf("block %d: %w", blockNum, resp.Error)
+			} else {
+				results[i].Block = resp.Result
+			}
+		} else {
+			results[i].BlockErr = fmt.Errorf("missing response for block %d", blockNum)
+		}
+
+		// Receipts
+		if resp := respMap[baseID+1]; resp != nil {
+			if resp.Error != nil {
+				results[i].ReceiptsErr = fmt.Errorf("block %d receipts: %w", blockNum, resp.Error)
+			} else {
+				results[i].Receipts = resp.Result
+			}
+		} else {
+			results[i].ReceiptsErr = fmt.Errorf("missing response for receipts of block %d", blockNum)
+		}
+	}
+
+	return results, nil
+}
+
+// GetTracesBatch fetches traces for multiple blocks in a single batched RPC call.
+// This is the "slow phase" of two-phase bulk downloading - traces re-execute all transactions.
+// Returns a map of block number -> trace data and a map of block number -> error.
+func (c *Client) GetTracesBatch(ctx context.Context, blockNums []int64) (map[int64]json.RawMessage, map[int64]error) {
+	if len(blockNums) == 0 {
+		return nil, nil
+	}
+
+	requests := make([]jsonRPCRequest, len(blockNums))
+	for i, blockNum := range blockNums {
+		hexNum := fmt.Sprintf("0x%x", blockNum)
+		requests[i] = jsonRPCRequest{JSONRPC: "2.0", ID: i, Method: "trace_block", Params: []interface{}{hexNum}}
+	}
+
+	responses, err := c.callBatch(ctx, requests)
+	if err != nil {
+		// Return error for all blocks
+		errs := make(map[int64]error, len(blockNums))
+		for _, blockNum := range blockNums {
+			errs[blockNum] = err
+		}
+		return nil, errs
+	}
+
+	// Build a map of ID -> response for easy lookup
+	respMap := make(map[int]*jsonRPCResponse, len(responses))
+	for i := range responses {
+		respMap[responses[i].ID] = &responses[i]
+	}
+
+	traces := make(map[int64]json.RawMessage, len(blockNums))
+	errs := make(map[int64]error)
+
+	for i, blockNum := range blockNums {
+		if resp := respMap[i]; resp != nil {
+			if resp.Error != nil {
+				errs[blockNum] = fmt.Errorf("block %d traces: %w", blockNum, resp.Error)
+			} else {
+				traces[blockNum] = resp.Result
+			}
+		} else {
+			errs[blockNum] = fmt.Errorf("missing response for traces of block %d", blockNum)
+		}
+	}
+
+	return traces, errs
 }
 
 // callBatch makes a batched HTTP JSON-RPC call to the Alchemy API with retry.
