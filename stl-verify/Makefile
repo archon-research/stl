@@ -443,7 +443,7 @@ docker-release-backup-staging:
 # Erigon Node Terraform Commands
 # =============================================================================
 
-ERIGON_DIR := infrastructure/erigon-node
+ERIGON_DIR := ephemeral-infra/erigon-node
 
 # Helper to check AWS_PROFILE_ERIGON is set
 define require_aws_profile_erigon
