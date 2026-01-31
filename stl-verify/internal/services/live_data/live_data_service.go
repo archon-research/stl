@@ -486,10 +486,10 @@ func (s *LiveService) addBlock(ctx context.Context, block LightBlock) {
 // in-memory state and DB state after a reorg.
 //
 // Why reload instead of prune?
-// - Manual pruning only removes blocks, it doesn't add blocks that backfill may have
-//   inserted concurrently
-// - If pruning logic has a bug, in-memory state silently diverges from DB
-// - Reloading from DB guarantees we have the exact same state as the source of truth
+//   - Manual pruning only removes blocks, it doesn't add blocks that backfill may have
+//     inserted concurrently
+//   - If pruning logic has a bug, in-memory state silently diverges from DB
+//   - Reloading from DB guarantees we have the exact same state as the source of truth
 //
 // This method is called AFTER the reorg has been successfully persisted to the database.
 // If this fails, the caller should treat the block as failed and not proceed.
