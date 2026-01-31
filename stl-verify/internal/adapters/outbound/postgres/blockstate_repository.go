@@ -303,6 +303,9 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 // HandleReorgAtomic atomically performs all reorg-related database operations in a single transaction.
 // This ensures consistency: either all operations succeed, or none do.
 // The commonAncestor is derived from the ReorgEvent (BlockNumber - Depth).
+//
+// Uses SERIALIZABLE isolation (consistent with SaveBlock) and includes retry logic
+// for transient serialization failures (SQLSTATE 40001).
 func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "postgres.HandleReorgAtomic",
@@ -319,15 +322,55 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 	)
 	defer span.End()
 
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
+	const maxRetries = 10
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		version, err := r.handleReorgAtomicOnce(ctx, commonAncestor, event, newBlock)
+		if err == nil {
+			return version, nil
+		}
+
+		// Check if this is a serialization failure (SQLSTATE 40001)
+		// These are expected with concurrent transactions and should be retried
+		if isSerializationFailure(err) {
+			r.logger.Debug("serialization failure in HandleReorgAtomic, retrying",
+				"attempt", attempt+1,
+				"maxRetries", maxRetries,
+				"block", newBlock.Number,
+				"hash", newBlock.Hash)
+			// Exponential backoff with jitter, capped at 100ms
+			base := time.Duration(1<<attempt) * time.Millisecond
+			const maxBackoff = 100 * time.Millisecond
+			if base > maxBackoff {
+				base = maxBackoff
+			}
+			jitter := time.Duration(rand.Int63n(int64(base)))
+			time.Sleep(base + jitter)
+			continue
+		}
+
+		// For other errors, return immediately
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to begin transaction")
+		span.SetStatus(codes.Error, "HandleReorgAtomic failed")
+		return 0, err
+	}
+
+	err := fmt.Errorf("failed to handle reorg after %d retries due to serialization conflicts", maxRetries)
+	span.RecordError(err)
+	span.SetStatus(codes.Error, "max retries exceeded")
+	return 0, err
+}
+
+// handleReorgAtomicOnce attempts a single reorg operation with SERIALIZABLE isolation.
+func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+	// Use SERIALIZABLE isolation for consistency with SaveBlock
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() {
 		if err := tx.Rollback(ctx); err != nil && err != pgx.ErrTxClosed {
-			r.logger.Error("failed to rollback transaction", "error", err)
+			r.logger.Warn("failed to rollback transaction", "error", err)
 		}
 	}()
 

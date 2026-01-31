@@ -134,7 +134,7 @@ tools:
 	go install golang.org/x/tools/gopls@latest
 
 # CI target: everything with strict checks
-ci: test-race vet fmt-check tidy-check staticcheck vulncheck golangci-lint
+ci: test-race vet fmt-check tidy-check vulncheck golangci-lint staticcheck
 
 # =============================================================================
 # Local Development

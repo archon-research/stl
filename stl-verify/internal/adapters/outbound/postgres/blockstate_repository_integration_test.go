@@ -1447,6 +1447,97 @@ func TestHandleReorgAtomic_MultiBlockReorgGap(t *testing.T) {
 	}
 }
 
+// TestHandleReorgAtomic_ConcurrentCallsWithSerializableMustAllSucceed verifies that
+// HandleReorgAtomic handles concurrent operations correctly when using SERIALIZABLE isolation.
+//
+// This test calls HandleReorgAtomic concurrently with operations that create overlapping
+// orphan ranges. With SERIALIZABLE isolation and retry logic, all operations should succeed.
+func TestHandleReorgAtomic_ConcurrentCallsWithSerializableMustAllSucceed(t *testing.T) {
+	// Set test timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	// Setup: Create a chain of blocks (100-115)
+	for i := int64(100); i <= 115; i++ {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0xoriginal_%d", i),
+			ParentHash: fmt.Sprintf("0xoriginal_%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Run concurrent HandleReorgAtomic calls
+	// All use the same common ancestor but different new block numbers/hashes
+	// This creates serialization pressure that tests the retry logic
+	const numGoroutines = 10
+	startCh := make(chan struct{})
+	resultCh := make(chan struct {
+		id      int
+		version int
+		err     error
+	}, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			<-startCh
+
+			blockNum := int64(110 + id%3) // Overlapping block numbers
+			event := outbound.ReorgEvent{
+				DetectedAt:  time.Now(),
+				BlockNumber: blockNum,
+				OldHash:     fmt.Sprintf("0xoriginal_%d", blockNum),
+				NewHash:     fmt.Sprintf("0xnew_%d", id),
+				Depth:       int(blockNum - 105), // Common ancestor at 105
+			}
+
+			newBlock := outbound.BlockState{
+				Number:     blockNum,
+				Hash:       fmt.Sprintf("0xnew_%d", id),
+				ParentHash: "0xoriginal_105",
+				ReceivedAt: time.Now().Unix(),
+			}
+
+			// Call the actual HandleReorgAtomic which now has SERIALIZABLE + retry logic
+			version, err := repo.HandleReorgAtomic(ctx, 105, event, newBlock)
+			resultCh <- struct {
+				id      int
+				version int
+				err     error
+			}{id, version, err}
+		}(i)
+	}
+
+	close(startCh)
+
+	// Collect results
+	successCount := 0
+	var failures []string
+	for i := 0; i < numGoroutines; i++ {
+		result := <-resultCh
+		if result.err == nil {
+			successCount++
+		} else {
+			failures = append(failures, fmt.Sprintf("goroutine %d: %v", result.id, result.err))
+		}
+	}
+
+	t.Logf("Results: %d/%d succeeded", successCount, numGoroutines)
+
+	// With SERIALIZABLE isolation and retry logic, ALL operations should succeed
+	if successCount != numGoroutines {
+		t.Errorf("Expected all %d HandleReorgAtomic calls to succeed, but only %d succeeded.\n"+
+			"Failures:\n%s",
+			numGoroutines, successCount, strings.Join(failures, "\n"))
+	}
+}
+
 // TestFindGaps_DetectsReorgGap confirms that the gap created by HandleReorgAtomic
 // (when it doesn't save intermediate blocks) is correctly detected by FindGaps.
 // This confirms the BackfillService will eventually repair the state.
