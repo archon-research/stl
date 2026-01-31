@@ -412,12 +412,10 @@ func TestLateBlockAfterPruning(t *testing.T) {
 		t.Fatalf("failed to save block: %v", err)
 	}
 
-	// Use a SMALL MaxUnfinalizedBlocks to force pruning
 	liveConfig := LiveConfig{
-		ChainID:              1,
-		FinalityBlockCount:   10,
-		MaxUnfinalizedBlocks: 30, // Small - will force pruning
-		Logger:               slog.Default(),
+		ChainID:            1,
+		FinalityBlockCount: 10,
+		Logger:             slog.Default(),
 	}
 
 	liveService, err := NewLiveService(liveConfig, subscriber, client, stateRepo, cache, eventSink)
@@ -544,9 +542,6 @@ func TestNewLiveService_AppliesDefaults(t *testing.T) {
 	if svc.config.FinalityBlockCount != defaults.FinalityBlockCount {
 		t.Errorf("expected FinalityBlockCount %d, got %d", defaults.FinalityBlockCount, svc.config.FinalityBlockCount)
 	}
-	if svc.config.MaxUnfinalizedBlocks != defaults.MaxUnfinalizedBlocks {
-		t.Errorf("expected MaxUnfinalizedBlocks %d, got %d", defaults.MaxUnfinalizedBlocks, svc.config.MaxUnfinalizedBlocks)
-	}
 	if svc.config.Logger == nil {
 		t.Error("expected Logger to be set to default")
 	}
@@ -561,11 +556,10 @@ func TestNewLiveService_UsesProvidedConfig(t *testing.T) {
 	customLogger := slog.Default().With("custom", true)
 
 	config := LiveConfig{
-		ChainID:              42,
-		FinalityBlockCount:   128,
-		MaxUnfinalizedBlocks: 500,
-		EnableBlobs:          false,
-		Logger:               customLogger,
+		ChainID:            42,
+		FinalityBlockCount: 128,
+		EnableBlobs:        false,
+		Logger:             customLogger,
 	}
 
 	svc, err := NewLiveService(config, subscriber, client, stateRepo, cache, eventSink)
@@ -578,9 +572,6 @@ func TestNewLiveService_UsesProvidedConfig(t *testing.T) {
 	}
 	if svc.config.FinalityBlockCount != 128 {
 		t.Errorf("expected FinalityBlockCount 128, got %d", svc.config.FinalityBlockCount)
-	}
-	if svc.config.MaxUnfinalizedBlocks != 500 {
-		t.Errorf("expected MaxUnfinalizedBlocks 500, got %d", svc.config.MaxUnfinalizedBlocks)
 	}
 	if svc.config.EnableBlobs {
 		t.Error("expected EnableBlobs to be false")
@@ -2360,11 +2351,10 @@ func TestFetchBlockData_ReorgBetweenHeaderAndFetch(t *testing.T) {
 	expectedHash := block100Header.Hash
 
 	config := LiveConfig{
-		ChainID:              1,
-		FinalityBlockCount:   64,
-		MaxUnfinalizedBlocks: 200,
-		EnableBlobs:          false, // Simplify test
-		Logger:               slog.Default(),
+		ChainID:            1,
+		FinalityBlockCount: 64,
+		EnableBlobs:        false, // Simplify test
+		Logger:             slog.Default(),
 	}
 
 	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
@@ -2425,11 +2415,10 @@ func TestFetchBlockData_ByHashReturnsErrorWhenBlockNotFound(t *testing.T) {
 	client.addBlock(99, "")
 
 	config := LiveConfig{
-		ChainID:              1,
-		FinalityBlockCount:   64,
-		MaxUnfinalizedBlocks: 200,
-		EnableBlobs:          false,
-		Logger:               slog.Default(),
+		ChainID:            1,
+		FinalityBlockCount: 64,
+		EnableBlobs:        false,
+		Logger:             slog.Default(),
 	}
 
 	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
@@ -2496,11 +2485,10 @@ func TestFetchReceiptsTracesBlobsByHash(t *testing.T) {
 	expectedHash := block100Header.Hash
 
 	config := LiveConfig{
-		ChainID:              1,
-		FinalityBlockCount:   64,
-		MaxUnfinalizedBlocks: 200,
-		EnableBlobs:          true, // Enable blobs to test all data types
-		Logger:               slog.Default(),
+		ChainID:            1,
+		FinalityBlockCount: 64,
+		EnableBlobs:        true, // Enable blobs to test all data types
+		Logger:             slog.Default(),
 	}
 
 	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
@@ -2623,11 +2611,10 @@ func TestHashComparisonCaseInsensitive(t *testing.T) {
 	}
 
 	config := LiveConfig{
-		ChainID:              1,
-		FinalityBlockCount:   64,
-		MaxUnfinalizedBlocks: 200,
-		EnableBlobs:          false,
-		Logger:               slog.Default(),
+		ChainID:            1,
+		FinalityBlockCount: 64,
+		EnableBlobs:        false,
+		Logger:             slog.Default(),
 	}
 
 	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
@@ -2895,11 +2882,10 @@ func TestProcessBlock_RollsBackInMemoryChainOnDBFailure(t *testing.T) {
 	client.addBlock(100, "")
 
 	config := LiveConfig{
-		ChainID:              1,
-		FinalityBlockCount:   64,
-		MaxUnfinalizedBlocks: 200,
-		EnableBlobs:          false,
-		Logger:               slog.Default(),
+		ChainID:            1,
+		FinalityBlockCount: 64,
+		EnableBlobs:        false,
+		Logger:             slog.Default(),
 	}
 
 	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
@@ -3230,9 +3216,8 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 	}
 
 	svc, err := NewLiveService(LiveConfig{
-		Logger:               slog.Default(),
-		FinalityBlockCount:   64,
-		MaxUnfinalizedBlocks: 200,
+		Logger:             slog.Default(),
+		FinalityBlockCount: 64,
 	}, subscriber, client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -3440,9 +3425,8 @@ func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
 	// Create and start LiveService - it loads blocks 98, 99, 100 into memory
 	subscriber := newMockSubscriber()
 	svc, err := NewLiveService(LiveConfig{
-		Logger:               slog.Default(),
-		FinalityBlockCount:   64,
-		MaxUnfinalizedBlocks: 200,
+		Logger:             slog.Default(),
+		FinalityBlockCount: 64,
 	}, subscriber, client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)

@@ -27,10 +27,8 @@ type LiveConfig struct {
 	ChainID int64
 
 	// FinalityBlockCount is how many blocks behind the tip before considered finalized.
+	// This also limits how far back reorg detection will look for orphaned blocks.
 	FinalityBlockCount int
-
-	// MaxUnfinalizedBlocks is the max number of unfinalized blocks to keep in memory.
-	MaxUnfinalizedBlocks int
 
 	// EnableBlobs enables fetching blob sidecars (post-Dencun blocks on supported nodes).
 	EnableBlobs bool
@@ -45,10 +43,9 @@ type LiveConfig struct {
 // LiveConfigDefaults returns default configuration.
 func LiveConfigDefaults() LiveConfig {
 	return LiveConfig{
-		ChainID:              1,
-		FinalityBlockCount:   64,
-		MaxUnfinalizedBlocks: 200,
-		Logger:               slog.Default(),
+		ChainID:            1,
+		FinalityBlockCount: 64,
+		Logger:             slog.Default(),
 	}
 }
 
@@ -123,9 +120,6 @@ func NewLiveService(
 	}
 	if config.FinalityBlockCount == 0 {
 		config.FinalityBlockCount = defaults.FinalityBlockCount
-	}
-	if config.MaxUnfinalizedBlocks == 0 {
-		config.MaxUnfinalizedBlocks = defaults.MaxUnfinalizedBlocks
 	}
 	if config.Logger == nil {
 		config.Logger = defaults.Logger
@@ -563,7 +557,8 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 	}
 
 	// Query DB for blocks that will be orphaned (non-orphaned blocks > commonAncestor)
-	recentBlocks, err := s.stateRepo.GetRecentBlocks(ctx, s.config.MaxUnfinalizedBlocks)
+	// We only need to look back FinalityBlockCount blocks since reorgs can't go deeper
+	recentBlocks, err := s.stateRepo.GetRecentBlocks(ctx, s.config.FinalityBlockCount)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to get recent blocks")
