@@ -372,8 +372,8 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 	return nil
 }
 
-// MarkPublishComplete marks a specific publish type as completed for a block.
-func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash string, publishType outbound.PublishType) error {
+// MarkPublishComplete marks a block as published.
+func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -382,26 +382,14 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 		return fmt.Errorf("block with hash %s not found", hash)
 	}
 
-	switch publishType {
-	case outbound.PublishTypeBlock:
-		block.BlockPublished = true
-	case outbound.PublishTypeReceipts:
-		block.ReceiptsPublished = true
-	case outbound.PublishTypeTraces:
-		block.TracesPublished = true
-	case outbound.PublishTypeBlobs:
-		block.BlobsPublished = true
-	default:
-		return fmt.Errorf("unknown publish type: %s", publishType)
-	}
-
+	block.BlockPublished = true
 	r.blocks[hash] = block
 	return nil
 }
 
-// GetBlocksWithIncompletePublish returns canonical blocks that have at least one
-// publish type incomplete. Used by backfill to recover from crashes.
-func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int, enableBlobs bool) ([]outbound.BlockState, error) {
+// GetBlocksWithIncompletePublish returns canonical blocks that have not been published.
+// Used by backfill to recover from crashes.
+func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int) ([]outbound.BlockState, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -411,12 +399,8 @@ func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Contex
 			continue
 		}
 
-		hasIncomplete := !b.BlockPublished || !b.ReceiptsPublished || !b.TracesPublished
-		if enableBlobs {
-			hasIncomplete = hasIncomplete || !b.BlobsPublished
-		}
-
-		if hasIncomplete {
+		// Only check BlockPublished - there's only 1 publish event that includes all data
+		if !b.BlockPublished {
 			bc := b
 			incomplete = append(incomplete, bc)
 		}

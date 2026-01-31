@@ -1781,10 +1781,10 @@ func TestProcessBlock_AddsBlockToChain(t *testing.T) {
 }
 
 // ============================================================================
-// fetchAndPublishBlockData failure tests
+// cacheAndPublishBlockData failure tests
 // ============================================================================
 
-// mockFailingClient simulates fetch failures
+// mockFailingClient simulates fetch failures by setting error fields in BlockData
 type mockFailingClient struct {
 	*mockBlockchainClient
 	failGetBlock    bool
@@ -1925,6 +1925,23 @@ func (c *mockFailingCache) SetBlobs(ctx context.Context, chainID, blockNum int64
 	return c.BlockCache.SetBlobs(ctx, chainID, blockNum, version, data)
 }
 
+func (c *mockFailingCache) SetBlockData(ctx context.Context, chainID int64, blockNumber int64, version int, data outbound.BlockDataInput) error {
+	// Simulate failures based on individual failure flags
+	if c.failSetBlock {
+		return fmt.Errorf("failed to cache block data for block %d: simulated cache block failure", blockNumber)
+	}
+	if c.failSetReceipts {
+		return fmt.Errorf("failed to cache block data for block %d: simulated cache receipts failure", blockNumber)
+	}
+	if c.failSetTraces {
+		return fmt.Errorf("failed to cache block data for block %d: simulated cache traces failure", blockNumber)
+	}
+	if c.failSetBlobs && data.Blobs != nil {
+		return fmt.Errorf("failed to cache block data for block %d: simulated cache blobs failure", blockNumber)
+	}
+	return c.BlockCache.SetBlockData(ctx, chainID, blockNumber, version, data)
+}
+
 // mockFailingEventSink simulates publish failures
 type mockFailingEventSink struct {
 	*memory.EventSink
@@ -1944,7 +1961,7 @@ func (s *mockFailingEventSink) Publish(ctx context.Context, event outbound.Event
 	return s.EventSink.Publish(ctx, event)
 }
 
-func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
+func TestCacheAndPublishBlockData_ErrorHandling(t *testing.T) {
 	tests := []struct {
 		name              string
 		failGetBlock      bool
@@ -1965,25 +1982,25 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:         "block_fetch_fails",
+			name:         "block_fetch_error_in_data",
 			failGetBlock: true,
 			wantErr:      true,
 			errContains:  "failed to fetch block",
 		},
 		{
-			name:            "receipts_fetch_fails",
+			name:            "receipts_fetch_error_in_data",
 			failGetReceipts: true,
 			wantErr:         true,
 			errContains:     "failed to fetch receipts",
 		},
 		{
-			name:          "traces_fetch_fails",
+			name:          "traces_fetch_error_in_data",
 			failGetTraces: true,
 			wantErr:       true,
 			errContains:   "failed to fetch traces",
 		},
 		{
-			name:         "blobs_fetch_fails",
+			name:         "blobs_fetch_error_in_data",
 			failGetBlobs: true,
 			enableBlobs:  true,
 			wantErr:      true,
@@ -1993,26 +2010,26 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 			name:           "block_cache_fails",
 			failCacheBlock: true,
 			wantErr:        true,
-			errContains:    "failed to cache block",
+			errContains:    "cache block failure",
 		},
 		{
 			name:              "receipts_cache_fails",
 			failCacheReceipts: true,
 			wantErr:           true,
-			errContains:       "failed to cache receipts",
+			errContains:       "cache receipts failure",
 		},
 		{
 			name:            "traces_cache_fails",
 			failCacheTraces: true,
 			wantErr:         true,
-			errContains:     "failed to cache traces",
+			errContains:     "cache traces failure",
 		},
 		{
 			name:           "blobs_cache_fails",
 			failCacheBlobs: true,
 			enableBlobs:    true,
 			wantErr:        true,
-			errContains:    "failed to cache blobs",
+			errContains:    "cache blobs failure",
 		},
 		{
 			name:        "publish_fails",
@@ -2047,8 +2064,9 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 			client.failGetBlobs = tt.failGetBlobs
 			client.addBlock(100, "")
 
-			// Get the actual hash from mock client
+			// Get the actual header and block data from mock client
 			header100 := client.getHeader(100)
+			blockData, _ := client.GetBlockDataByHash(ctx, 100, header100.Hash, true)
 
 			cache := newMockFailingCache()
 			cache.failSetBlock = tt.failCacheBlock
@@ -2066,8 +2084,8 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 				t.Fatalf("failed to create service: %v", err)
 			}
 
-			// Use actual header from mock client
-			err = svc.fetchAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false)
+			// Call cacheAndPublishBlockData with the block data
+			err = svc.cacheAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false, blockData)
 
 			if tt.wantErr {
 				if err == nil {
@@ -2084,7 +2102,7 @@ func TestFetchAndPublishBlockData_ErrorHandling(t *testing.T) {
 	}
 }
 
-func TestFetchAndPublishBlockData_WithBlobs_CachesBlobs(t *testing.T) {
+func TestCacheAndPublishBlockData_WithBlobs_CachesBlobs(t *testing.T) {
 	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
@@ -2093,8 +2111,9 @@ func TestFetchAndPublishBlockData_WithBlobs_CachesBlobs(t *testing.T) {
 	client := newMockFailingClient()
 	client.addBlock(100, "")
 
-	// Get actual header from mock client
+	// Get actual header and block data from mock client
 	header100 := client.getHeader(100)
+	blockData, _ := client.GetBlockDataByHash(ctx, 100, header100.Hash, true)
 
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: true, // Enable blobs
@@ -2103,9 +2122,9 @@ func TestFetchAndPublishBlockData_WithBlobs_CachesBlobs(t *testing.T) {
 		t.Fatalf("failed to create service: %v", err)
 	}
 
-	err = svc.fetchAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false)
+	err = svc.cacheAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false, blockData)
 	if err != nil {
-		t.Fatalf("fetchAndPublishBlockData failed: %v", err)
+		t.Fatalf("cacheAndPublishBlockData failed: %v", err)
 	}
 
 	// Verify data was cached (block, receipts, traces, blobs = 4 entries)
@@ -2121,7 +2140,7 @@ func TestFetchAndPublishBlockData_WithBlobs_CachesBlobs(t *testing.T) {
 	}
 }
 
-func TestFetchAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
+func TestCacheAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
 	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
@@ -2130,8 +2149,9 @@ func TestFetchAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
 	client := newMockFailingClient()
 	client.addBlock(100, "")
 
-	// Get actual header from mock client
+	// Get actual header and block data from mock client
 	header100 := client.getHeader(100)
+	blockData, _ := client.GetBlockDataByHash(ctx, 100, header100.Hash, true)
 
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: false,
@@ -2140,9 +2160,9 @@ func TestFetchAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
 		t.Fatalf("failed to create service: %v", err)
 	}
 
-	err = svc.fetchAndPublishBlockData(ctx, header100, 100, 0, time.Now(), true) // isReorg = true
+	err = svc.cacheAndPublishBlockData(ctx, header100, 100, 0, time.Now(), true, blockData) // isReorg = true
 	if err != nil {
-		t.Fatalf("fetchAndPublishBlockData failed: %v", err)
+		t.Fatalf("cacheAndPublishBlockData failed: %v", err)
 	}
 
 	events := eventSink.GetEvents()
@@ -2579,7 +2599,7 @@ func TestProcessBlock_FetchAndPublishError_ReturnsError(t *testing.T) {
 
 	err = svc.processBlockWithPrefetch(header, time.Now())
 	if err == nil {
-		t.Error("expected error when fetchAndPublishBlockData fails")
+		t.Error("expected error when cacheAndPublishBlockData fails")
 	}
 	if !strings.Contains(err.Error(), "failed to fetch block data for block") {
 		t.Errorf("unexpected error message: %v", err)
@@ -3521,6 +3541,18 @@ func (c *mockOrderTrackingCache) SetBlobs(ctx context.Context, chainID, blockNum
 	return c.BlockCache.SetBlobs(ctx, chainID, blockNum, version, data)
 }
 
+func (c *mockOrderTrackingCache) SetBlockData(ctx context.Context, chainID int64, blockNumber int64, version int, data outbound.BlockDataInput) error {
+	c.mu.Lock()
+	c.operations = append(c.operations, "cache_block")
+	c.operations = append(c.operations, "cache_receipts")
+	c.operations = append(c.operations, "cache_traces")
+	if data.Blobs != nil {
+		c.operations = append(c.operations, "cache_blobs")
+	}
+	c.mu.Unlock()
+	return c.BlockCache.SetBlockData(ctx, chainID, blockNumber, version, data)
+}
+
 func (c *mockOrderTrackingCache) getOperations() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -3558,7 +3590,7 @@ func (s *mockOrderTrackingEventSink) getOperations() []string {
 	return result
 }
 
-func TestFetchAndPublishBlockData_CachesAllDataBeforePublishing(t *testing.T) {
+func TestCacheAndPublishBlockData_CachesAllDataBeforePublishing(t *testing.T) {
 	ctx := context.Background()
 	stateRepo := newMockStateRepo()
 	cache := newMockOrderTrackingCache()
@@ -3568,6 +3600,7 @@ func TestFetchAndPublishBlockData_CachesAllDataBeforePublishing(t *testing.T) {
 	client.addBlock(100, "")
 
 	header100 := client.getHeader(100)
+	blockData, _ := client.GetBlockDataByHash(ctx, 100, header100.Hash, true)
 
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: true, // Enable blobs to test all 4 cache operations
@@ -3576,9 +3609,9 @@ func TestFetchAndPublishBlockData_CachesAllDataBeforePublishing(t *testing.T) {
 		t.Fatalf("failed to create service: %v", err)
 	}
 
-	err = svc.fetchAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false)
+	err = svc.cacheAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false, blockData)
 	if err != nil {
-		t.Fatalf("fetchAndPublishBlockData failed: %v", err)
+		t.Fatalf("cacheAndPublishBlockData failed: %v", err)
 	}
 
 	// Collect all operations from both cache and event sink
@@ -3620,7 +3653,7 @@ func TestFetchAndPublishBlockData_CachesAllDataBeforePublishing(t *testing.T) {
 	t.Logf("Publish operations: %v", publishOps)
 }
 
-func TestFetchAndPublishBlockData_NoPublishOnCacheFailure(t *testing.T) {
+func TestCacheAndPublishBlockData_NoPublishOnCacheFailure(t *testing.T) {
 	// This test verifies that if caching fails, publish is never called
 	tests := []struct {
 		name              string
@@ -3663,6 +3696,7 @@ func TestFetchAndPublishBlockData_NoPublishOnCacheFailure(t *testing.T) {
 			client := newMockFailingClient()
 			client.addBlock(100, "")
 			header100 := client.getHeader(100)
+			blockData, _ := client.GetBlockDataByHash(ctx, 100, header100.Hash, true)
 
 			svc, err := NewLiveService(LiveConfig{
 				EnableBlobs: true,
@@ -3671,7 +3705,7 @@ func TestFetchAndPublishBlockData_NoPublishOnCacheFailure(t *testing.T) {
 				t.Fatalf("failed to create service: %v", err)
 			}
 
-			err = svc.fetchAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false)
+			err = svc.cacheAndPublishBlockData(ctx, header100, 100, 0, time.Now(), false, blockData)
 			if err == nil {
 				t.Fatal("expected error due to cache failure")
 			}

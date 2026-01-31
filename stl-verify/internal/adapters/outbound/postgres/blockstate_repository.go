@@ -174,8 +174,7 @@ func isSerializationFailure(err error) bool {
 // GetLastBlock retrieves the most recently saved canonical (non-orphaned) block state.
 func (r *BlockStateRepository) GetLastBlock(ctx context.Context) (*outbound.BlockState, error) {
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-		       block_published, receipts_published, traces_published, blobs_published
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
 		WHERE NOT is_orphaned
 		ORDER BY number DESC
@@ -184,7 +183,7 @@ func (r *BlockStateRepository) GetLastBlock(ctx context.Context) (*outbound.Bloc
 	var state outbound.BlockState
 	err := r.pool.QueryRow(ctx, query).Scan(
 		&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-		&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished)
+		&state.BlockPublished)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -197,15 +196,14 @@ func (r *BlockStateRepository) GetLastBlock(ctx context.Context) (*outbound.Bloc
 // GetBlockByNumber retrieves a canonical block state by its number.
 func (r *BlockStateRepository) GetBlockByNumber(ctx context.Context, number int64) (*outbound.BlockState, error) {
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-		       block_published, receipts_published, traces_published, blobs_published
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
 		WHERE number = $1 AND NOT is_orphaned
 	`
 	var state outbound.BlockState
 	err := r.pool.QueryRow(ctx, query, number).Scan(
 		&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-		&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished)
+		&state.BlockPublished)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -230,15 +228,14 @@ func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) 
 	defer span.End()
 
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-		       block_published, receipts_published, traces_published, blobs_published
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
 		WHERE hash = $1
 	`
 	var state outbound.BlockState
 	err := r.pool.QueryRow(ctx, query, hash).Scan(
 		&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-		&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished)
+		&state.BlockPublished)
 	if errors.Is(err, pgx.ErrNoRows) {
 		span.SetAttributes(attribute.Bool("db.row_found", false))
 		return nil, nil
@@ -267,8 +264,7 @@ func (r *BlockStateRepository) GetBlockVersionCount(ctx context.Context, number 
 // GetRecentBlocks retrieves the N most recent canonical blocks.
 func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) ([]outbound.BlockState, error) {
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-		       block_published, receipts_published, traces_published, blobs_published
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
 		WHERE NOT is_orphaned
 		ORDER BY number DESC
@@ -285,7 +281,7 @@ func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) (
 		var state outbound.BlockState
 		if err := rows.Scan(
 			&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-			&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished); err != nil {
+			&state.BlockPublished); err != nil {
 			return nil, fmt.Errorf("failed to scan block state: %w", err)
 		}
 		states = append(states, state)
@@ -454,8 +450,7 @@ func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, f
 // GetOrphanedBlocks retrieves orphaned blocks for analysis.
 func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int) ([]outbound.BlockState, error) {
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-		       block_published, receipts_published, traces_published, blobs_published
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
 		WHERE is_orphaned
 		ORDER BY received_at DESC
@@ -472,7 +467,7 @@ func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int)
 		var state outbound.BlockState
 		if err := rows.Scan(
 			&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-			&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished); err != nil {
+			&state.BlockPublished); err != nil {
 			return nil, fmt.Errorf("failed to scan block state: %w", err)
 		}
 		states = append(states, state)
@@ -669,8 +664,8 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 		brokenBlock, parentHash, prevHash, prevBlockNum)
 }
 
-// MarkPublishComplete marks a specific publish type as completed for a block.
-func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash string, publishType outbound.PublishType) error {
+// MarkPublishComplete marks a block as published.
+func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash string) error {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "postgres.MarkPublishComplete",
 		trace.WithSpanKind(trace.SpanKindClient),
@@ -679,31 +674,16 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 			attribute.String("db.operation", "UPDATE"),
 			attribute.String("db.table", "block_states"),
 			attribute.String("block.hash", hash),
-			attribute.String("publish.type", string(publishType)),
 		),
 	)
 	defer span.End()
 
-	var column string
-	switch publishType {
-	case outbound.PublishTypeBlock:
-		column = "block_published"
-	case outbound.PublishTypeReceipts:
-		column = "receipts_published"
-	case outbound.PublishTypeTraces:
-		column = "traces_published"
-	case outbound.PublishTypeBlobs:
-		column = "blobs_published"
-	default:
-		return fmt.Errorf("unknown publish type: %s", publishType)
-	}
-
-	query := fmt.Sprintf(`UPDATE block_states SET %s = TRUE WHERE hash = $1`, column)
+	query := `UPDATE block_states SET block_published = TRUE WHERE hash = $1`
 	result, err := r.pool.Exec(ctx, query, hash)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to mark published")
-		return fmt.Errorf("failed to mark %s published: %w", publishType, err)
+		return fmt.Errorf("failed to mark block published: %w", err)
 	}
 
 	rowsAffected := result.RowsAffected()
@@ -717,32 +697,17 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 	return nil
 }
 
-// GetBlocksWithIncompletePublish returns canonical blocks that have at least one
-// publish type incomplete. Used by backfill to recover from crashes.
-func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int, enableBlobs bool) ([]outbound.BlockState, error) {
-	var query string
-	if enableBlobs {
-		query = `
-			SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-			       block_published, receipts_published, traces_published, blobs_published
-			FROM block_states
-			WHERE NOT is_orphaned
-			  AND (NOT block_published OR NOT receipts_published OR NOT traces_published OR NOT blobs_published)
-			ORDER BY number ASC
-			LIMIT $1
-		`
-	} else {
-		// Don't consider blobs_published when blobs are disabled
-		query = `
-			SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-			       block_published, receipts_published, traces_published, blobs_published
-			FROM block_states
-			WHERE NOT is_orphaned
-			  AND (NOT block_published OR NOT receipts_published OR NOT traces_published)
-			ORDER BY number ASC
-			LIMIT $1
-		`
-	}
+// GetBlocksWithIncompletePublish returns canonical blocks that have not been published.
+// Used by backfill to recover from crashes.
+func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int) ([]outbound.BlockState, error) {
+	query := `
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
+		FROM block_states
+		WHERE NOT is_orphaned
+		  AND NOT block_published
+		ORDER BY number ASC
+		LIMIT $1
+	`
 
 	rows, err := r.pool.Query(ctx, query, limit)
 	if err != nil {
@@ -755,7 +720,7 @@ func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Contex
 		var state outbound.BlockState
 		if err := rows.Scan(
 			&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-			&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished); err != nil {
+			&state.BlockPublished); err != nil {
 			return nil, fmt.Errorf("failed to scan block state: %w", err)
 		}
 		states = append(states, state)

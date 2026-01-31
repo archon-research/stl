@@ -292,6 +292,13 @@ func (s *BackfillService) findAndFillGaps() error {
 		}
 	}
 
+	// Retry blocks that were saved but not fully published (cache/publish failed).
+	// This ensures eventual consistency for blocks that had transient failures.
+	if err := s.retryIncompletePublishes(ctx); err != nil {
+		s.logger.Warn("failed to retry incomplete publishes", "error", err)
+		// Continue - this will be retried on the next pass
+	}
+
 	// After filling gaps, advance the watermark to the highest contiguous block.
 	// We find the new contiguous range by checking if there are still gaps.
 	if err := s.advanceWatermark(ctx); err != nil {
@@ -461,7 +468,12 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 	}
 
 	// Cache and publish the data
-	s.cacheAndPublishBlockData(ctx, bd, header, version, receivedAt)
+	if err := s.cacheAndPublishBlockData(ctx, bd, header, version, receivedAt); err != nil {
+		// Block is saved to DB but cache/publish failed.
+		// Return error so caller knows to retry. The block will be picked up
+		// by retryIncompletePublishes() on the next backfill pass.
+		return fmt.Errorf("cache/publish failed for block %d: %w", blockNum, err)
+	}
 
 	return nil
 }
@@ -637,59 +649,57 @@ func (s *BackfillService) recoverFromStaleChain(ctx context.Context, staleBlocks
 
 // cacheAndPublishBlockData caches all pre-fetched data types and publishes a block event.
 // All data must be cached successfully before the event is published.
-func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbound.BlockData, header outbound.BlockHeader, version int, receivedAt time.Time) {
+// Returns an error if any step fails, allowing the caller to handle retry logic.
+func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbound.BlockData, header outbound.BlockHeader, version int, receivedAt time.Time) error {
 	chainID := s.config.ChainID
 	blockNum := bd.BlockNumber
 	blockHash := header.Hash
 	parentHash := header.ParentHash
 	blockTimestamp, err := hexutil.ParseInt64(header.Timestamp)
 	if err != nil {
-		s.logger.Error("failed to parse block timestamp, skipping block", "block", blockNum, "timestamp", header.Timestamp, "error", err)
-		return
+		return fmt.Errorf("failed to parse block timestamp for block %d: %w", blockNum, err)
 	}
 
 	// Cache block data
 	if bd.Block == nil {
-		s.logger.Warn("missing block data, skipping", "block", blockNum)
-		return
+		return fmt.Errorf("missing block data for block %d", blockNum)
 	}
 	if err := s.cache.SetBlock(ctx, chainID, blockNum, version, bd.Block); err != nil {
-		s.logger.Warn("failed to cache block", "block", blockNum, "error", err)
-		return
+		return fmt.Errorf("failed to cache block %d: %w", blockNum, err)
 	}
 
-	// Cache receipts
-	if bd.Receipts != nil {
-		if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, bd.Receipts); err != nil {
-			s.logger.Warn("failed to cache receipts", "block", blockNum, "error", err)
-			return
-		}
-	} else if bd.ReceiptsErr != nil {
-		s.logger.Warn("receipts fetch failed, skipping cache", "block", blockNum, "error", bd.ReceiptsErr)
-		return
+	// Cache receipts - receipts are required for all blocks
+	if bd.ReceiptsErr != nil {
+		return fmt.Errorf("receipts fetch failed for block %d: %w", blockNum, bd.ReceiptsErr)
+	}
+	if bd.Receipts == nil {
+		return fmt.Errorf("missing receipts data for block %d (no error reported)", blockNum)
+	}
+	if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, bd.Receipts); err != nil {
+		return fmt.Errorf("failed to cache receipts for block %d: %w", blockNum, err)
 	}
 
-	// Cache traces
-	if bd.Traces != nil {
-		if err := s.cache.SetTraces(ctx, chainID, blockNum, version, bd.Traces); err != nil {
-			s.logger.Warn("failed to cache traces", "block", blockNum, "error", err)
-			return
-		}
-	} else if bd.TracesErr != nil {
-		s.logger.Warn("traces fetch failed, skipping cache", "block", blockNum, "error", bd.TracesErr)
-		return
+	// Cache traces - traces are required for all blocks
+	if bd.TracesErr != nil {
+		return fmt.Errorf("traces fetch failed for block %d: %w", blockNum, bd.TracesErr)
+	}
+	if bd.Traces == nil {
+		return fmt.Errorf("missing traces data for block %d (no error reported)", blockNum)
+	}
+	if err := s.cache.SetTraces(ctx, chainID, blockNum, version, bd.Traces); err != nil {
+		return fmt.Errorf("failed to cache traces for block %d: %w", blockNum, err)
 	}
 
-	// Cache blobs (if enabled)
+	// Cache blobs (if enabled) - blobs are required when blob support is enabled
 	if s.config.EnableBlobs {
-		if bd.Blobs != nil {
-			if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, bd.Blobs); err != nil {
-				s.logger.Warn("failed to cache blobs", "block", blockNum, "error", err)
-				return
-			}
-		} else if bd.BlobsErr != nil {
-			s.logger.Warn("blobs fetch failed, skipping cache", "block", blockNum, "error", bd.BlobsErr)
-			return
+		if bd.BlobsErr != nil {
+			return fmt.Errorf("blobs fetch failed for block %d: %w", blockNum, bd.BlobsErr)
+		}
+		if bd.Blobs == nil {
+			return fmt.Errorf("missing blobs data for block %d (no error reported)", blockNum)
+		}
+		if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, bd.Blobs); err != nil {
+			return fmt.Errorf("failed to cache blobs for block %d: %w", blockNum, err)
 		}
 	}
 
@@ -705,14 +715,19 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 		IsBackfill:     true,
 	}
 	if err := s.eventSink.Publish(ctx, event); err != nil {
-		s.logger.Warn("failed to publish block event", "block", blockNum, "error", err)
-		return
+		return fmt.Errorf("failed to publish block event for block %d: %w", blockNum, err)
 	}
 
-	// Mark block publish complete for crash recovery tracking
-	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlock); err != nil {
-		s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
+	// Mark block publish complete for crash recovery tracking.
+	// If this fails, we return an error because:
+	// 1. The block will appear as "incomplete" in the DB
+	// 2. Retry logic will attempt to republish, potentially causing duplicates
+	// 3. It's better to surface this failure than silently leave inconsistent state
+	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash); err != nil {
+		return fmt.Errorf("failed to mark block %d publish complete (block was published but tracking failed): %w", blockNum, err)
 	}
+
+	return nil
 }
 
 // advanceWatermark updates the backfill watermark to the highest contiguous block.
@@ -827,4 +842,88 @@ func (s *BackfillService) getFirstBlockInRange(ctx context.Context, fromBlock, t
 	// fromBlock doesn't exist, so the gap starts at fromBlock
 	// Return toBlock + 1 to indicate no blocks exist in range
 	return toBlock + 1, nil
+}
+
+// retryIncompletePublishes finds blocks that were saved to DB but not fully
+// cached/published, and retries them. This ensures eventual consistency for
+// blocks that had transient failures during cache or publish operations.
+func (s *BackfillService) retryIncompletePublishes(ctx context.Context) error {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "backfill.retryIncompletePublishes",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+
+	// Get blocks with incomplete publishes (limit to batch size to avoid overwhelming the system)
+	incompleteBlocks, err := s.stateRepo.GetBlocksWithIncompletePublish(ctx, s.config.BatchSize)
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("failed to get blocks with incomplete publish: %w", err)
+	}
+
+	if len(incompleteBlocks) == 0 {
+		return nil
+	}
+
+	span.SetAttributes(attribute.Int("backfill.incomplete_blocks", len(incompleteBlocks)))
+	s.logger.Info("retrying incomplete publishes", "count", len(incompleteBlocks))
+
+	// Fetch and republish each incomplete block
+	for _, block := range incompleteBlocks {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		if err := s.retryBlockPublish(ctx, block); err != nil {
+			s.logger.Warn("failed to retry block publish",
+				"block", block.Number,
+				"hash", truncateHash(block.Hash),
+				"error", err)
+			// Continue with other blocks
+		}
+	}
+
+	return nil
+}
+
+// retryBlockPublish fetches and republishes a single block that had incomplete publish.
+func (s *BackfillService) retryBlockPublish(ctx context.Context, block outbound.BlockState) error {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "backfill.retryBlockPublish",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("block.number", block.Number),
+			attribute.String("block.hash", truncateHash(block.Hash)),
+		),
+	)
+	defer span.End()
+
+	// Fetch block data by hash to ensure we get the exact block we have in DB
+	bd, err := s.client.GetBlockDataByHash(ctx, block.Number, block.Hash, true)
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("failed to fetch block data: %w", err)
+	}
+
+	// Parse header
+	var header outbound.BlockHeader
+	if err := shared.ParseBlockHeader(bd.Block, &header); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("failed to parse block header: %w", err)
+	}
+
+	// Retry cache and publish using the version from the block state
+	receivedAt := time.Unix(block.ReceivedAt, 0)
+	if err := s.cacheAndPublishBlockData(ctx, bd, header, block.Version, receivedAt); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("failed to cache/publish: %w", err)
+	}
+
+	s.logger.Info("successfully retried block publish",
+		"block", block.Number,
+		"hash", truncateHash(block.Hash))
+
+	return nil
 }

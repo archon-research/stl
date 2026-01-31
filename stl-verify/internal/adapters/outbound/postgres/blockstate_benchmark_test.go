@@ -199,21 +199,14 @@ func TestLargeDataset_QueryPerformance(t *testing.T) {
 
 	t.Run("GetBlocksWithIncompletePublish_10", func(t *testing.T) {
 		runQueryBenchmark(t, "GetBlocksWithIncompletePublish(10)", 100, func() error {
-			_, err := repo.GetBlocksWithIncompletePublish(ctx, 10, false)
+			_, err := repo.GetBlocksWithIncompletePublish(ctx, 10)
 			return err
 		})
 	})
 
 	t.Run("GetBlocksWithIncompletePublish_100", func(t *testing.T) {
 		runQueryBenchmark(t, "GetBlocksWithIncompletePublish(100)", 50, func() error {
-			_, err := repo.GetBlocksWithIncompletePublish(ctx, 100, false)
-			return err
-		})
-	})
-
-	t.Run("GetBlocksWithIncompletePublish_EnableBlobs", func(t *testing.T) {
-		runQueryBenchmark(t, "GetBlocksWithIncompletePublish(100, enableBlobs=false)", 50, func() error {
-			_, err := repo.GetBlocksWithIncompletePublish(ctx, 100, false)
+			_, err := repo.GetBlocksWithIncompletePublish(ctx, 100)
 			return err
 		})
 	})
@@ -279,7 +272,7 @@ func TestExplainAnalyze(t *testing.T) {
 			name: "GetLastBlock",
 			query: `EXPLAIN ANALYZE
 				SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-					block_published, receipts_published, traces_published, blobs_published
+					block_published
 				FROM block_states
 				WHERE NOT is_orphaned
 				ORDER BY number DESC
@@ -289,7 +282,7 @@ func TestExplainAnalyze(t *testing.T) {
 			name: "GetBlockByNumber",
 			query: `EXPLAIN ANALYZE
 				SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-					block_published, receipts_published, traces_published, blobs_published
+					block_published
 				FROM block_states
 				WHERE number = 50000 AND NOT is_orphaned`,
 		},
@@ -297,7 +290,7 @@ func TestExplainAnalyze(t *testing.T) {
 			name: "GetBlockByHash",
 			query: fmt.Sprintf(`EXPLAIN ANALYZE
 				SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-					block_published, receipts_published, traces_published, blobs_published
+					block_published
 				FROM block_states
 				WHERE hash = '0x%064d'`, 50000),
 		},
@@ -319,7 +312,7 @@ func TestExplainAnalyze(t *testing.T) {
 			name: "GetRecentBlocks",
 			query: `EXPLAIN ANALYZE
 				SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-					block_published, receipts_published, traces_published, blobs_published
+					block_published
 				FROM block_states
 				WHERE NOT is_orphaned
 				ORDER BY number DESC
@@ -366,10 +359,10 @@ func TestExplainAnalyze(t *testing.T) {
 			name: "GetBlocksWithIncompletePublish",
 			query: `EXPLAIN ANALYZE
 				SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-					block_published, receipts_published, traces_published, blobs_published
+					block_published
 				FROM block_states
 				WHERE NOT is_orphaned
-					AND (NOT block_published OR NOT receipts_published OR NOT traces_published OR NOT blobs_published)
+					AND NOT block_published
 				ORDER BY number ASC
 				LIMIT 100`,
 		},
@@ -516,7 +509,7 @@ func bulkInsertWithPgxCopy(ctx context.Context, tb testing.TB, conn *pgx.Conn, s
 
 	columns := []string{
 		"number", "hash", "parent_hash", "received_at", "is_orphaned", "version",
-		"block_published", "receipts_published", "traces_published", "blobs_published",
+		"block_published",
 	}
 
 	for batchStart := int64(0); batchStart < count; batchStart += batchSize {
@@ -540,9 +533,6 @@ func bulkInsertWithPgxCopy(ctx context.Context, tb testing.TB, conn *pgx.Conn, s
 				false,                              // is_orphaned
 				0,                                  // version
 				idx%10 < 8,                         // block_published (80%)
-				idx%10 < 7,                         // receipts_published (70%)
-				idx%10 < 6,                         // traces_published (60%)
-				idx%10 < 5,                         // blobs_published (50%)
 			}
 		}
 
@@ -579,9 +569,9 @@ func createIndexes(tb testing.TB, db *sql.DB) {
 	indexes := []string{
 		`CREATE INDEX IF NOT EXISTS idx_block_states_number_not_orphaned 
 		 ON block_states(number) WHERE NOT is_orphaned`,
-		`CREATE INDEX IF NOT EXISTS idx_block_states_incomplete_publish 
-		 ON block_states(number) 
-		 WHERE NOT is_orphaned AND (NOT block_published OR NOT receipts_published OR NOT traces_published OR NOT blobs_published)`,
+		`CREATE INDEX IF NOT EXISTS idx_block_states_incomplete_publish
+		 ON block_states(number)
+		 WHERE NOT is_orphaned AND NOT block_published`,
 	}
 
 	for _, idx := range indexes {

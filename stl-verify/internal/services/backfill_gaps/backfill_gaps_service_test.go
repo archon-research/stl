@@ -3,6 +3,7 @@ package backfill_gaps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -336,8 +337,10 @@ func TestBackfillService_FillsGaps(t *testing.T) {
 
 	t.Run("events published for backfilled blocks", func(t *testing.T) {
 		blockEvents := eventSink.GetEventsByType(outbound.EventTypeBlock)
-		// Should have 97 events (blocks 2-49 = 48, blocks 51-99 = 49)
-		expectedEvents := 48 + 49
+		// Should have 100 events:
+		// - 97 from gap fill (blocks 2-49 = 48, blocks 51-99 = 49)
+		// - 3 from retry mechanism (seed blocks 1, 50, 100 that were saved but not published)
+		expectedEvents := 100
 		if len(blockEvents) != expectedEvents {
 			t.Errorf("expected %d block events, got %d", expectedEvents, len(blockEvents))
 		}
@@ -1065,18 +1068,117 @@ func assertBlocksMissing(t *testing.T, ctx context.Context, repo outbound.BlockS
 	}
 }
 
-// Mock EventSink for unit tests
-type mockEventSink struct{}
+// =============================================================================
+// Failing Adapters for Testing Error Handling
+// =============================================================================
 
-func (m *mockEventSink) Publish(ctx context.Context, event outbound.Event) error { return nil }
-func (m *mockEventSink) Close() error                                            { return nil }
+// failingCache wraps a real cache but fails on demand.
+type failingCache struct {
+	*memory.BlockCache
+	mu               sync.Mutex
+	failOnBlock      int64  // Block number to fail on (0 = don't fail)
+	failOnOperation  string // "block", "receipts", "traces", "blobs", or "any"
+	failCount        int    // How many times to fail (0 = forever)
+	currentFailCount int
+}
+
+func newFailingCache() *failingCache {
+	return &failingCache{
+		BlockCache: memory.NewBlockCache(),
+	}
+}
+
+func (c *failingCache) shouldFail(blockNum int64, operation string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.failOnBlock == 0 || c.failOnBlock != blockNum {
+		return false
+	}
+	if c.failOnOperation != "any" && c.failOnOperation != operation {
+		return false
+	}
+	if c.failCount > 0 && c.currentFailCount >= c.failCount {
+		return false
+	}
+	c.currentFailCount++
+	return true
+}
+
+func (c *failingCache) SetBlock(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error {
+	if c.shouldFail(blockNumber, "block") {
+		return errors.New("simulated cache failure on SetBlock")
+	}
+	return c.BlockCache.SetBlock(ctx, chainID, blockNumber, version, data)
+}
+
+func (c *failingCache) SetReceipts(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error {
+	if c.shouldFail(blockNumber, "receipts") {
+		return errors.New("simulated cache failure on SetReceipts")
+	}
+	return c.BlockCache.SetReceipts(ctx, chainID, blockNumber, version, data)
+}
+
+func (c *failingCache) SetTraces(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error {
+	if c.shouldFail(blockNumber, "traces") {
+		return errors.New("simulated cache failure on SetTraces")
+	}
+	return c.BlockCache.SetTraces(ctx, chainID, blockNumber, version, data)
+}
+
+func (c *failingCache) SetBlobs(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error {
+	if c.shouldFail(blockNumber, "blobs") {
+		return errors.New("simulated cache failure on SetBlobs")
+	}
+	return c.BlockCache.SetBlobs(ctx, chainID, blockNumber, version, data)
+}
+
+// failingEventSink wraps a real event sink but fails on demand.
+// When no failures are configured (failOnBlock=0), it acts as a no-op sink.
+type failingEventSink struct {
+	*memory.EventSink
+	mu               sync.Mutex
+	failOnBlock      int64
+	failCount        int
+	currentFailCount int
+}
+
+func newFailingEventSink() *failingEventSink {
+	return &failingEventSink{
+		EventSink: memory.NewEventSink(),
+	}
+}
+
+// newNoOpEventSink creates an event sink that silently accepts all events.
+func newNoOpEventSink() *failingEventSink {
+	return &failingEventSink{
+		EventSink: memory.NewEventSink(),
+	}
+}
+
+func (s *failingEventSink) Publish(ctx context.Context, event outbound.Event) error {
+	s.mu.Lock()
+	shouldFail := s.failOnBlock != 0 && event.GetBlockNumber() == s.failOnBlock
+	if shouldFail && s.failCount > 0 && s.currentFailCount >= s.failCount {
+		shouldFail = false
+	}
+	if shouldFail {
+		s.currentFailCount++
+	}
+	s.mu.Unlock()
+
+	if shouldFail {
+		return errors.New("simulated publish failure")
+	}
+	return s.EventSink.Publish(ctx, event)
+}
 
 func TestVerifyBoundaryBlocks_DetectsUncleReorg(t *testing.T) {
 	// 1. Setup
 	repo := memory.NewBlockStateRepository()
 	client := newMockClient()
 	cache := memory.NewBlockCache()
-	sink := &mockEventSink{}
+	sink := newNoOpEventSink()
 
 	cfg := BackfillConfigDefaults()
 	cfg.ChainID = 1
@@ -1242,5 +1344,272 @@ func TestVerifyBoundaryBlocks_RecoverFromDeepReorgCorrected(t *testing.T) {
 	}
 	if new101.IsOrphaned {
 		t.Errorf("New block 101B should NOT be orphaned")
+	}
+}
+
+// =============================================================================
+// Silent Failure Bug Tests
+// =============================================================================
+//
+// These tests verify that BackfillService correctly handles and retries
+// cache/publish failures instead of silently swallowing errors.
+
+// TestRetry_CacheFailureIsRetried verifies that when caching fails,
+// the block is retried via GetBlocksWithIncompletePublish on the next pass.
+func TestRetry_CacheFailureIsRetried(t *testing.T) {
+	ctx := context.Background()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := newFailingCache()
+	eventSink := newFailingEventSink()
+
+	// Add blocks 1-5 to the client
+	for i := int64(1); i <= 5; i++ {
+		client.addBlock(i, "")
+	}
+
+	// Configure cache to fail on block 3, but only once (will succeed on retry)
+	cache.failOnBlock = 3
+	cache.failOnOperation = "receipts"
+	cache.failCount = 1
+
+	service, err := NewBackfillService(
+		BackfillConfig{
+			ChainID:            1,
+			BatchSize:          10,
+			PollInterval:       time.Hour,
+			BoundaryCheckDepth: -1,
+			Logger:             slog.Default(),
+		},
+		client,
+		stateRepo,
+		cache,
+		eventSink,
+	)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Save blocks 1 and 5 to create a gap (blocks 2-4 missing)
+	for _, num := range []int64{1, 5} {
+		block := outbound.BlockState{
+			Number:     num,
+			Hash:       client.getHeader(num).Hash,
+			ParentHash: client.getHeader(num).ParentHash,
+			ReceivedAt: time.Now().Unix(),
+		}
+		stateRepo.SaveBlock(ctx, block)
+		stateRepo.MarkPublishComplete(ctx, block.Hash)
+	}
+
+	// Run backfill - block 3 will fail on first attempt but succeed on retry
+	if err := service.RunOnce(ctx); err != nil {
+		t.Logf("RunOnce returned error (may be expected): %v", err)
+	}
+
+	// Check: Block 3 should be saved and published after retry
+	block3, err := stateRepo.GetBlockByNumber(ctx, 3)
+	if err != nil {
+		t.Fatalf("failed to get block 3: %v", err)
+	}
+	if block3 == nil {
+		t.Fatal("block 3 was not saved to DB")
+	}
+
+	events := eventSink.GetBlockEvents()
+	block3Published := false
+	for _, e := range events {
+		if e.BlockNumber == 3 {
+			block3Published = true
+			break
+		}
+	}
+
+	if !block3Published {
+		t.Error("Block 3 was saved to DB but never published after retry")
+	}
+}
+
+// TestRetry_PublishFailureIsRetried verifies that when publish fails,
+// the block is retried via GetBlocksWithIncompletePublish.
+func TestRetry_PublishFailureIsRetried(t *testing.T) {
+	ctx := context.Background()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := newFailingEventSink()
+
+	for i := int64(1); i <= 5; i++ {
+		client.addBlock(i, "")
+	}
+
+	// Configure event sink to fail on block 3, but only once
+	eventSink.failOnBlock = 3
+	eventSink.failCount = 1
+
+	service, err := NewBackfillService(
+		BackfillConfig{
+			ChainID:            1,
+			BatchSize:          10,
+			PollInterval:       time.Hour,
+			BoundaryCheckDepth: -1,
+			Logger:             slog.Default(),
+		},
+		client,
+		stateRepo,
+		cache,
+		eventSink,
+	)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Create gap: save blocks 1 and 5
+	for _, num := range []int64{1, 5} {
+		block := outbound.BlockState{
+			Number:     num,
+			Hash:       client.getHeader(num).Hash,
+			ParentHash: client.getHeader(num).ParentHash,
+			ReceivedAt: time.Now().Unix(),
+		}
+		stateRepo.SaveBlock(ctx, block)
+		stateRepo.MarkPublishComplete(ctx, block.Hash)
+	}
+
+	// Run backfill - block 3 publish will fail then be retried
+	service.RunOnce(ctx)
+
+	// Verify block 3 was published after retry
+	events := eventSink.GetBlockEvents()
+	block3Published := false
+	for _, e := range events {
+		if e.BlockNumber == 3 {
+			block3Published = true
+			break
+		}
+	}
+
+	if !block3Published {
+		t.Error("Block 3 publish failed but was never retried")
+	}
+}
+
+// TestProcessBlockData_ReturnsErrorOnCacheFailure verifies that processBlockData
+// returns an error when cacheAndPublishBlockData fails.
+func TestProcessBlockData_ReturnsErrorOnCacheFailure(t *testing.T) {
+	ctx := context.Background()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := newFailingCache()
+	eventSink := memory.NewEventSink()
+
+	client.addBlock(1, "")
+	cache.failOnBlock = 1
+	cache.failOnOperation = "any"
+
+	service, _ := NewBackfillService(
+		BackfillConfig{
+			ChainID:            1,
+			BatchSize:          10,
+			BoundaryCheckDepth: -1,
+			Logger:             slog.Default(),
+		},
+		client,
+		stateRepo,
+		cache,
+		eventSink,
+	)
+
+	blockData, _ := client.GetBlocksBatch(ctx, []int64{1}, true)
+	err := service.processBlockData(ctx, blockData[0])
+
+	if err == nil {
+		t.Error("processBlockData should return error when cache fails")
+	} else {
+		t.Logf("processBlockData correctly returned error: %v", err)
+	}
+}
+
+// TestPublishNeverHappensWithoutCache verifies that an event is never published
+// if any required data (block, receipts, traces) is missing from the BlockData.
+// This protects against the scenario where RPC returns null without an error.
+func TestPublishNeverHappensWithoutCache(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		blockData outbound.BlockData
+		wantErr   string
+	}{
+		{
+			name: "nil receipts without error should fail",
+			blockData: outbound.BlockData{
+				BlockNumber: 1,
+				Block:       json.RawMessage(`{"number":"0x1","hash":"0x0000000000000000000000000000000000000000000000000000000000000001","parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","timestamp":"0x0"}`),
+				Receipts:    nil, // nil without error - edge case
+				Traces:      json.RawMessage(`[]`),
+			},
+			wantErr: "missing receipts",
+		},
+		{
+			name: "nil traces without error should fail",
+			blockData: outbound.BlockData{
+				BlockNumber: 1,
+				Block:       json.RawMessage(`{"number":"0x1","hash":"0x0000000000000000000000000000000000000000000000000000000000000001","parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","timestamp":"0x0"}`),
+				Receipts:    json.RawMessage(`[]`),
+				Traces:      nil, // nil without error - edge case
+			},
+			wantErr: "missing traces",
+		},
+		{
+			name: "nil block should fail",
+			blockData: outbound.BlockData{
+				BlockNumber: 1,
+				Block:       nil,
+				Receipts:    json.RawMessage(`[]`),
+				Traces:      json.RawMessage(`[]`),
+			},
+			wantErr: "missing block",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newMockClient()
+			stateRepo := memory.NewBlockStateRepository()
+			cache := memory.NewBlockCache()
+			eventSink := memory.NewEventSink()
+
+			service, _ := NewBackfillService(
+				BackfillConfig{
+					ChainID:            1,
+					BatchSize:          10,
+					BoundaryCheckDepth: -1,
+					Logger:             slog.Default(),
+				},
+				client,
+				stateRepo,
+				cache,
+				eventSink,
+			)
+
+			err := service.processBlockData(ctx, tt.blockData)
+
+			// Should error - never publish without all data
+			if err == nil {
+				t.Errorf("expected error containing %q, got nil", tt.wantErr)
+
+				// Check if event was incorrectly published
+				events := eventSink.GetBlockEvents()
+				if len(events) > 0 {
+					t.Error("BUG: Event was published without all data being cached!")
+				}
+			} else {
+				t.Logf("correctly rejected: %v", err)
+			}
+		})
 	}
 }

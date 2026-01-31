@@ -2,7 +2,6 @@ package live_data
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -738,209 +737,6 @@ func (s *LiveService) restoreInMemoryChain() error {
 	return nil
 }
 
-// fetchAndPublishBlockData fetches all data types in a single batched RPC call by hash,
-// caches them in parallel, and publishes a single block event only after all data has been successfully cached.
-// Fetching by hash is TOCTOU-safe - it ensures we get data for the exact block we received.
-func (s *LiveService) fetchAndPublishBlockData(ctx context.Context, header outbound.BlockHeader, blockNum int64, version int, receivedAt time.Time, isReorg bool) error {
-	tracer := otel.Tracer(tracerName)
-	ctx, span := tracer.Start(ctx, "live.fetchAndPublishBlockData",
-		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(
-			attribute.Int64("block.number", blockNum),
-			attribute.String("block.hash", header.Hash),
-			attribute.Int("block.version", version),
-		),
-	)
-	defer span.End()
-
-	chainID := s.config.ChainID
-	blockHash := header.Hash
-	parentHash := header.ParentHash
-	blockTimestamp, err := hexutil.ParseInt64(header.Timestamp)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to parse block timestamp")
-		return fmt.Errorf("failed to parse block timestamp %q for block %d: %w", header.Timestamp, blockNum, err)
-	}
-
-	// Fetch all data in a single batched HTTP request (by hash for TOCTOU safety)
-	fetchCtx, fetchSpan := tracer.Start(ctx, "live.fetchBlockData",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.Int64("block.number", blockNum),
-			attribute.String("block.hash", blockHash),
-		),
-	)
-	fetchStart := time.Now()
-
-	bd, err := s.client.GetBlockDataByHash(fetchCtx, blockNum, blockHash, true)
-	fetchDuration := time.Since(fetchStart)
-	fetchSpan.SetAttributes(attribute.Int64("fetch.duration_ms", fetchDuration.Milliseconds()))
-	if err != nil {
-		fetchSpan.RecordError(err)
-		fetchSpan.SetStatus(codes.Error, "failed to fetch block data")
-		fetchSpan.End()
-		return fmt.Errorf("failed to fetch block data for block %d: %w", blockNum, err)
-	}
-	fetchSpan.End()
-
-	s.logger.Debug("fetched block data", "block", blockNum, "duration", fetchDuration)
-
-	// Check for fetch errors before caching
-	if bd.BlockErr != nil {
-		span.RecordError(bd.BlockErr)
-		span.SetStatus(codes.Error, "block fetch error")
-		return fmt.Errorf("failed to fetch block %d: %w", blockNum, bd.BlockErr)
-	}
-	if bd.ReceiptsErr != nil {
-		span.RecordError(bd.ReceiptsErr)
-		span.SetStatus(codes.Error, "receipts fetch error")
-		return fmt.Errorf("failed to fetch receipts for block %d: %w", blockNum, bd.ReceiptsErr)
-	}
-	if bd.TracesErr != nil {
-		span.RecordError(bd.TracesErr)
-		span.SetStatus(codes.Error, "traces fetch error")
-		return fmt.Errorf("failed to fetch traces for block %d: %w", blockNum, bd.TracesErr)
-	}
-	if s.config.EnableBlobs && bd.BlobsErr != nil {
-		span.RecordError(bd.BlobsErr)
-		span.SetStatus(codes.Error, "blobs fetch error")
-		return fmt.Errorf("failed to fetch blobs for block %d: %w", blockNum, bd.BlobsErr)
-	}
-
-	// Cache all data types in parallel - create a child span for the cache operation
-	cacheCtx, cacheSpan := tracer.Start(ctx, "live.cacheBlockData",
-		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(
-			attribute.Int64("block.number", blockNum),
-			attribute.Int64("chain.id", chainID),
-			attribute.Int("block.version", version),
-			attribute.Bool("blobs.enabled", s.config.EnableBlobs),
-		),
-	)
-	cacheStart := time.Now()
-
-	numWorkers := 3
-	if s.config.EnableBlobs {
-		numWorkers = 4
-	}
-	errCh := make(chan error, numWorkers)
-
-	go func() {
-		_, blockSpan := tracer.Start(cacheCtx, "live.cacheBlock",
-			trace.WithSpanKind(trace.SpanKindInternal),
-			trace.WithAttributes(
-				attribute.Int64("block.number", blockNum),
-				attribute.String("cache.type", "block"),
-			),
-		)
-		start := time.Now()
-		err := s.cache.SetBlock(cacheCtx, chainID, blockNum, version, bd.Block)
-		blockSpan.SetAttributes(attribute.Int64("cache.duration_ms", time.Since(start).Milliseconds()))
-		if err != nil {
-			blockSpan.RecordError(err)
-			blockSpan.SetStatus(codes.Error, "failed to cache block")
-			blockSpan.End()
-			errCh <- fmt.Errorf("failed to cache block %d: %w", blockNum, err)
-		} else {
-			blockSpan.End()
-			errCh <- nil
-		}
-	}()
-
-	go func() {
-		_, receiptsSpan := tracer.Start(cacheCtx, "live.cacheReceipts",
-			trace.WithSpanKind(trace.SpanKindInternal),
-			trace.WithAttributes(
-				attribute.Int64("block.number", blockNum),
-				attribute.String("cache.type", "receipts"),
-			),
-		)
-		start := time.Now()
-		err := s.cache.SetReceipts(cacheCtx, chainID, blockNum, version, bd.Receipts)
-		receiptsSpan.SetAttributes(attribute.Int64("cache.duration_ms", time.Since(start).Milliseconds()))
-		if err != nil {
-			receiptsSpan.RecordError(err)
-			receiptsSpan.SetStatus(codes.Error, "failed to cache receipts")
-			receiptsSpan.End()
-			errCh <- fmt.Errorf("failed to cache receipts for block %d: %w", blockNum, err)
-		} else {
-			receiptsSpan.End()
-			errCh <- nil
-		}
-	}()
-
-	go func() {
-		_, tracesSpan := tracer.Start(cacheCtx, "live.cacheTraces",
-			trace.WithSpanKind(trace.SpanKindInternal),
-			trace.WithAttributes(
-				attribute.Int64("block.number", blockNum),
-				attribute.String("cache.type", "traces"),
-			),
-		)
-		start := time.Now()
-		err := s.cache.SetTraces(cacheCtx, chainID, blockNum, version, bd.Traces)
-		tracesSpan.SetAttributes(attribute.Int64("cache.duration_ms", time.Since(start).Milliseconds()))
-		if err != nil {
-			tracesSpan.RecordError(err)
-			tracesSpan.SetStatus(codes.Error, "failed to cache traces")
-			tracesSpan.End()
-			errCh <- fmt.Errorf("failed to cache traces for block %d: %w", blockNum, err)
-		} else {
-			tracesSpan.End()
-			errCh <- nil
-		}
-	}()
-
-	if s.config.EnableBlobs {
-		go func() {
-			_, blobsSpan := tracer.Start(cacheCtx, "live.cacheBlobs",
-				trace.WithSpanKind(trace.SpanKindInternal),
-				trace.WithAttributes(
-					attribute.Int64("block.number", blockNum),
-					attribute.String("cache.type", "blobs"),
-				),
-			)
-			start := time.Now()
-			err := s.cache.SetBlobs(cacheCtx, chainID, blockNum, version, bd.Blobs)
-			blobsSpan.SetAttributes(attribute.Int64("cache.duration_ms", time.Since(start).Milliseconds()))
-			if err != nil {
-				blobsSpan.RecordError(err)
-				blobsSpan.SetStatus(codes.Error, "failed to cache blobs")
-				blobsSpan.End()
-				errCh <- fmt.Errorf("failed to cache blobs for block %d: %w", blockNum, err)
-			} else {
-				blobsSpan.End()
-				errCh <- nil
-			}
-		}()
-	}
-
-	// Wait for all caching to complete
-	var errs []error
-	for i := 0; i < numWorkers; i++ {
-		if err := <-errCh; err != nil {
-			errs = append(errs, err)
-		}
-	}
-
-	cacheDuration := time.Since(cacheStart)
-	cacheSpan.SetAttributes(attribute.Int64("cache.duration_ms", cacheDuration.Milliseconds()))
-
-	if len(errs) > 0 {
-		cacheSpan.RecordError(errors.Join(errs...))
-		cacheSpan.SetStatus(codes.Error, "failed to cache block data")
-		cacheSpan.End()
-		return errors.Join(errs...)
-	}
-	cacheSpan.End()
-
-	s.logger.Debug("cached all block data", "block", blockNum, "duration", time.Since(fetchStart))
-
-	// All data cached successfully - now publish the block event
-	return s.publishBlockEvent(ctx, chainID, blockNum, version, blockHash, parentHash, blockTimestamp, receivedAt, isReorg)
-}
-
 func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum int64, version int, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg bool) error {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "live.publishBlockEvent",
@@ -978,7 +774,7 @@ func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum i
 
 	// Mark block publish as complete in DB for crash recovery
 	dbStart := time.Now()
-	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash, outbound.PublishTypeBlock); err != nil {
+	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash); err != nil {
 		s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
 		// Note: We don't fail here as the publish already succeeded
 	}
@@ -1034,6 +830,32 @@ func (s *LiveService) cacheAndPublishBlockData(ctx context.Context, header outbo
 		span.RecordError(bd.BlobsErr)
 		span.SetStatus(codes.Error, "blobs fetch error")
 		return fmt.Errorf("failed to fetch blobs for block %d: %w", blockNum, bd.BlobsErr)
+	}
+
+	// Verify all required data is present (defensive check against nil data without error)
+	if bd.Block == nil {
+		err := fmt.Errorf("missing block data for block %d (no error reported)", blockNum)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "missing block data")
+		return err
+	}
+	if bd.Receipts == nil {
+		err := fmt.Errorf("missing receipts data for block %d (no error reported)", blockNum)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "missing receipts data")
+		return err
+	}
+	if bd.Traces == nil {
+		err := fmt.Errorf("missing traces data for block %d (no error reported)", blockNum)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "missing traces data")
+		return err
+	}
+	if s.config.EnableBlobs && bd.Blobs == nil {
+		err := fmt.Errorf("missing blobs data for block %d (no error reported)", blockNum)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "missing blobs data")
+		return err
 	}
 
 	// Cache all data types - create a child span for the cache operation
