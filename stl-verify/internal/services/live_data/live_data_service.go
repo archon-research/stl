@@ -347,7 +347,16 @@ func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, rece
 			span.SetStatus(codes.Error, "failed to handle reorg atomically")
 			return fmt.Errorf("failed to handle reorg atomically: %w", err)
 		}
-		s.pruneReorgedBlocks(ctx, commonAncestor)
+		// After successful DB reorg, reload in-memory chain from DB to guarantee consistency.
+		// This is safer than manual pruning: if manual pruning had a bug or if backfill added
+		// blocks concurrently, in-memory state would diverge from DB, causing false reorg
+		// detections on subsequent blocks.
+		// Reloading from DB is the authoritative recovery strategy for mission-critical consistency.
+		if err := s.reloadChainAfterReorg(ctx); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to reload chain after reorg")
+			return fmt.Errorf("failed to reload chain after reorg (DB reorg succeeded, but in-memory state may be stale): %w", err)
+		}
 	} else {
 		version, err = s.stateRepo.SaveBlock(ctx, state)
 		if err != nil {
@@ -355,10 +364,9 @@ func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, rece
 			span.SetStatus(codes.Error, "failed to save block state")
 			return fmt.Errorf("failed to save block state: %w", err)
 		}
+		// Add block to in-memory chain AFTER successful DB save (non-reorg case only)
+		s.addBlock(ctx, block)
 	}
-
-	// Add block to in-memory chain AFTER successful DB save
-	s.addBlock(ctx, block)
 
 	stateOpsDuration := time.Since(start)
 	span.SetAttributes(attribute.Int64("block.state_ops_ms", stateOpsDuration.Milliseconds()))
@@ -473,34 +481,68 @@ func (s *LiveService) addBlock(ctx context.Context, block LightBlock) {
 	)
 }
 
-// pruneReorgedBlocks removes blocks above the common ancestor from the in-memory chain.
-// This should only be called AFTER the reorg has been successfully persisted to the database.
-func (s *LiveService) pruneReorgedBlocks(ctx context.Context, commonAncestor int64) {
+// reloadChainAfterReorg reloads the in-memory chain from the database after a reorg.
+// This is the authoritative recovery strategy that guarantees consistency between
+// in-memory state and DB state after a reorg.
+//
+// Why reload instead of prune?
+// - Manual pruning only removes blocks, it doesn't add blocks that backfill may have
+//   inserted concurrently
+// - If pruning logic has a bug, in-memory state silently diverges from DB
+// - Reloading from DB guarantees we have the exact same state as the source of truth
+//
+// This method is called AFTER the reorg has been successfully persisted to the database.
+// If this fails, the caller should treat the block as failed and not proceed.
+func (s *LiveService) reloadChainAfterReorg(ctx context.Context) error {
 	tracer := otel.Tracer(tracerName)
-	_, span := tracer.Start(ctx, "live.pruneReorgedBlocks",
+	_, span := tracer.Start(ctx, "live.reloadChainAfterReorg",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
-			attribute.Int64("reorg.common_ancestor", commonAncestor),
 			attribute.Int("chain.size_before", len(s.unfinalizedBlocks)),
 		),
 	)
 	defer span.End()
 
-	prunedCount := 0
-	newChain := make([]LightBlock, 0, len(s.unfinalizedBlocks))
-	for _, b := range s.unfinalizedBlocks {
-		if b.Number <= commonAncestor {
-			newChain = append(newChain, b)
-		} else {
-			prunedCount++
+	// Reload from DB - this is the source of truth after a reorg
+	recentBlocks, err := s.stateRepo.GetRecentBlocks(ctx, s.config.MaxUnfinalizedBlocks)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to reload chain from DB")
+		return fmt.Errorf("failed to reload chain from DB after reorg: %w", err)
+	}
+
+	// Rebuild in-memory chain from DB
+	// GetRecentBlocks returns non-orphaned blocks in ascending order (oldest first)
+	s.unfinalizedBlocks = make([]LightBlock, 0, len(recentBlocks))
+	for _, b := range recentBlocks {
+		s.unfinalizedBlocks = append(s.unfinalizedBlocks, LightBlock{
+			Number:     b.Number,
+			Hash:       b.Hash,
+			ParentHash: b.ParentHash,
+		})
+	}
+
+	// Update finalized block pointer
+	if len(s.unfinalizedBlocks) > 0 {
+		tip := s.unfinalizedBlocks[len(s.unfinalizedBlocks)-1]
+		finalizedNum := tip.Number - int64(s.config.FinalityBlockCount)
+		s.finalizedBlock = nil // Reset first
+		for i := range s.unfinalizedBlocks {
+			if s.unfinalizedBlocks[i].Number <= finalizedNum {
+				s.finalizedBlock = &s.unfinalizedBlocks[i]
+			}
 		}
 	}
-	s.unfinalizedBlocks = newChain
 
 	span.SetAttributes(
 		attribute.Int("chain.size_after", len(s.unfinalizedBlocks)),
-		attribute.Int("chain.pruned_count", prunedCount),
+		attribute.Bool("chain.reloaded_from_db", true),
 	)
+
+	s.logger.Info("reloaded in-memory chain from DB after reorg",
+		"blockCount", len(s.unfinalizedBlocks))
+
+	return nil
 }
 
 // detectReorg detects chain reorganizations using Ponder-style parent hash chain validation.

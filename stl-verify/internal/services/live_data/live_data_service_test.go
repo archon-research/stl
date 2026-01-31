@@ -1035,7 +1035,7 @@ func TestHandleReorg_FindsCommonAncestorInMemory(t *testing.T) {
 		t.Fatalf("failed to create service: %v", err)
 	}
 
-	// Set up a chain with blocks 95-100
+	// Set up a chain with blocks 95-100 in memory
 	svc.unfinalizedBlocks = []LightBlock{
 		{Number: 95, Hash: "0xblock95", ParentHash: "0xblock94"},
 		{Number: 96, Hash: "0xblock96", ParentHash: "0xblock95"},
@@ -1043,6 +1043,16 @@ func TestHandleReorg_FindsCommonAncestorInMemory(t *testing.T) {
 		{Number: 98, Hash: "0xblock98", ParentHash: "0xblock97"},
 		{Number: 99, Hash: "0xblock99", ParentHash: "0xblock98"},
 		{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99"},
+	}
+
+	// Also save to DB (needed for reloadChainAfterReorg)
+	for _, b := range svc.unfinalizedBlocks {
+		_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     b.Number,
+			Hash:       b.Hash,
+			ParentHash: b.ParentHash,
+			ReceivedAt: time.Now().Unix(),
+		})
 	}
 
 	// Incoming block 99 with different hash but parent is block 98
@@ -1070,15 +1080,43 @@ func TestHandleReorg_FindsCommonAncestorInMemory(t *testing.T) {
 	if reorgEvent == nil {
 		t.Error("expected reorg event to be populated")
 	}
-	// handleReorg should NOT prune the chain - that happens after successful DB save
+	// handleReorg should NOT modify the chain - that happens after successful DB save
 	// The chain should still have all 6 blocks
 	if len(svc.unfinalizedBlocks) != 6 {
-		t.Errorf("expected 6 blocks still in chain (not pruned by handleReorg), got %d", len(svc.unfinalizedBlocks))
+		t.Errorf("expected 6 blocks still in chain (not modified by handleReorg), got %d", len(svc.unfinalizedBlocks))
 	}
-	// Verify pruneReorgedBlocks works correctly when called separately
-	svc.pruneReorgedBlocks(ctx, ancestor)
-	if len(svc.unfinalizedBlocks) != 4 {
-		t.Errorf("expected 4 blocks after pruneReorgedBlocks, got %d", len(svc.unfinalizedBlocks))
+
+	// Simulate what happens after HandleReorgAtomic: mark orphaned blocks and save new block
+	_, _ = stateRepo.HandleReorgAtomic(ctx, ancestor, *reorgEvent, outbound.BlockState{
+		Number:     block.Number,
+		Hash:       block.Hash,
+		ParentHash: block.ParentHash,
+		ReceivedAt: time.Now().Unix(),
+	})
+
+	// Verify reloadChainAfterReorg loads from DB correctly
+	if err := svc.reloadChainAfterReorg(ctx); err != nil {
+		t.Fatalf("reloadChainAfterReorg failed: %v", err)
+	}
+
+	// After reload, we should have blocks 95-98 (non-orphaned) + 99_alt (new block) = 5 blocks
+	if len(svc.unfinalizedBlocks) != 5 {
+		t.Errorf("expected 5 blocks after reloadChainAfterReorg, got %d", len(svc.unfinalizedBlocks))
+		for _, b := range svc.unfinalizedBlocks {
+			t.Logf("  block %d: %s", b.Number, b.Hash)
+		}
+	}
+
+	// Verify the new block is present
+	found := false
+	for _, b := range svc.unfinalizedBlocks {
+		if b.Number == 99 && b.Hash == "0xblock99_alt" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected new block 99_alt to be in chain after reload")
 	}
 }
 
@@ -3719,4 +3757,210 @@ func TestCacheAndPublishBlockData_NoPublishOnCacheFailure(t *testing.T) {
 			t.Logf("SUCCESS: No publish when %s", tt.name)
 		})
 	}
+}
+
+// TestReorgPruning_InMemoryMustMatchDB verifies that after a reorg is handled,
+// the in-memory chain state MUST match the database state.
+//
+// This is critical for mission-critical consistency: if in-memory state diverges
+// from DB after a reorg, subsequent block processing will produce false reorg
+// detections or errors.
+//
+// The bug: pruneReorgedBlocks() was called without error handling or verification.
+// If the DB has blocks that memory doesn't know about (e.g., from concurrent
+// backfill), we silently lose synchronization.
+//
+// The fix: After HandleReorgAtomic succeeds, reload in-memory chain from DB
+// (the authoritative source) rather than relying on manual pruning.
+//
+// This test uses only the public API (Start/Stop) and mock adapters, exactly
+// like production usage in cmd/watcher/main.go.
+func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
+	ctx := context.Background()
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+	subscriber := newMockSubscriber()
+	client := newMockClient()
+
+	// Set up initial DB state: blocks 95-100 (what service will load on Start)
+	initialBlocks := []outbound.BlockState{
+		{Number: 95, Hash: "0xblock95", ParentHash: "0xblock94", ReceivedAt: time.Now().Unix()},
+		{Number: 96, Hash: "0xblock96", ParentHash: "0xblock95", ReceivedAt: time.Now().Unix()},
+		{Number: 97, Hash: "0xblock97", ParentHash: "0xblock96", ReceivedAt: time.Now().Unix()},
+		{Number: 98, Hash: "0xblock98", ParentHash: "0xblock97", ReceivedAt: time.Now().Unix()},
+		{Number: 99, Hash: "0xblock99", ParentHash: "0xblock98", ReceivedAt: time.Now().Unix()},
+		{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", ReceivedAt: time.Now().Unix()},
+	}
+	for _, b := range initialBlocks {
+		if _, err := stateRepo.SaveBlock(ctx, b); err != nil {
+			t.Fatalf("failed to save initial block: %v", err)
+		}
+	}
+
+	// Set up client to return block data for RPC fetches
+	// The reorg block (99_new) needs to be fetchable
+	client.blocks[99] = blockTestData{
+		header: outbound.BlockHeader{
+			Number:     "0x63", // 99
+			Hash:       "0xblock99_new",
+			ParentHash: "0xblock97", // Forks at 97
+			Timestamp:  "0x0",
+		},
+		receipts: json.RawMessage(`[]`),
+		traces:   json.RawMessage(`[]`),
+		blobs:    json.RawMessage(`[]`),
+	}
+
+	svc, err := NewLiveService(LiveConfig{
+		Logger:               slog.Default(),
+		FinalityBlockCount:   64,
+		MaxUnfinalizedBlocks: 200,
+	}, subscriber, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Start the service - this loads initial blocks from DB into memory
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("failed to start service: %v", err)
+	}
+	defer func() { _ = svc.Stop() }()
+
+	// CRITICAL: Simulate backfill adding blocks AFTER service started.
+	// These blocks (93, 94) are now in DB but NOT in the service's in-memory chain.
+	// This simulates the race condition where backfill runs concurrently with live service.
+	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:     93,
+		Hash:       "0xblock93",
+		ParentHash: "0xblock92",
+		ReceivedAt: time.Now().Unix(),
+	})
+	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:     94,
+		Hash:       "0xblock94",
+		ParentHash: "0xblock93",
+		ReceivedAt: time.Now().Unix(),
+	})
+
+	// Send a reorg block via the subscriber (simulating WebSocket notification)
+	// Block 99_new has parent 0xblock97, which orphans blocks 98, 99, 100
+	subscriber.sendHeader(outbound.BlockHeader{
+		Number:     "0x63", // 99
+		Hash:       "0xblock99_new",
+		ParentHash: "0xblock97", // Forks at 97
+		Timestamp:  "0x0",
+	})
+
+	// Wait for the reorg event to be published (with timeout)
+	waitForCondition(t, 2*time.Second, func() bool {
+		for _, e := range eventSink.GetBlockEvents() {
+			if e.BlockNumber == 99 && e.BlockHash == "0xblock99_new" && e.IsReorg {
+				return true
+			}
+		}
+		return false
+	}, "reorg event for block 99_new")
+
+	// Verify DB state after reorg
+	dbBlocks, err := stateRepo.GetRecentBlocks(ctx, 200)
+	if err != nil {
+		t.Fatalf("failed to get recent blocks from DB: %v", err)
+	}
+
+	var dbNonOrphaned []outbound.BlockState
+	for _, b := range dbBlocks {
+		if !b.IsOrphaned {
+			dbNonOrphaned = append(dbNonOrphaned, b)
+		}
+	}
+
+	// The DB should have: 93, 94, 95, 96, 97, 99_new = 6 non-orphaned blocks
+	// (blocks 98, 99, 100 are orphaned by the reorg)
+	if len(dbNonOrphaned) != 6 {
+		t.Fatalf("expected 6 non-orphaned blocks in DB after reorg, got %d", len(dbNonOrphaned))
+	}
+
+	// Verify expected blocks are present
+	expectedBlocks := map[int64]string{
+		93: "0xblock93",
+		94: "0xblock94",
+		95: "0xblock95",
+		96: "0xblock96",
+		97: "0xblock97",
+		99: "0xblock99_new",
+	}
+	for _, b := range dbNonOrphaned {
+		expectedHash, ok := expectedBlocks[b.Number]
+		if !ok {
+			t.Errorf("unexpected block %d in DB", b.Number)
+		} else if b.Hash != expectedHash {
+			t.Errorf("block %d: expected hash %s, got %s", b.Number, expectedHash, b.Hash)
+		}
+	}
+
+	// Now send another block that depends on the backfilled blocks being in memory.
+	// Set up the client to return block 94_alt that forks at 93
+	client.blocks[94] = blockTestData{
+		header: outbound.BlockHeader{
+			Number:     "0x5e", // 94
+			Hash:       "0xblock94_alt",
+			ParentHash: "0xblock93",
+			Timestamp:  "0x0",
+		},
+		receipts: json.RawMessage(`[]`),
+		traces:   json.RawMessage(`[]`),
+		blobs:    json.RawMessage(`[]`),
+	}
+
+	// Record event count before sending second block
+	eventCountBefore := len(eventSink.GetBlockEvents())
+
+	// Send block 94_alt - if memory has block 93 (from DB reload), this should work
+	// If memory doesn't have block 93 (bug), it will fail during reorg walk
+	subscriber.sendHeader(outbound.BlockHeader{
+		Number:     "0x5e", // 94
+		Hash:       "0xblock94_alt",
+		ParentHash: "0xblock93",
+		Timestamp:  "0x0",
+	})
+
+	// Wait for the second block to be processed
+	// With the fix, block 93 is in memory after the first reorg (reloaded from DB),
+	// so block 94_alt should be processed successfully as a reorg
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(eventSink.GetBlockEvents()) > eventCountBefore
+	}, "event for block 94_alt (requires block 93 to be in memory from DB reload)")
+
+	// Verify the second block was processed correctly
+	events := eventSink.GetBlockEvents()
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events total (99_new and 94_alt), got %d", len(events))
+	}
+
+	// Verify first event is the initial reorg block
+	if events[0].BlockNumber != 99 || events[0].BlockHash != "0xblock99_new" || !events[0].IsReorg {
+		t.Errorf("first event: expected block 99 (0xblock99_new, reorg=true), got block %d (%s, reorg=%v)",
+			events[0].BlockNumber, events[0].BlockHash, events[0].IsReorg)
+	}
+
+	// Verify second event is the block that required backfilled block 93 as ancestor
+	if events[1].BlockNumber != 94 || events[1].BlockHash != "0xblock94_alt" || !events[1].IsReorg {
+		t.Errorf("second event: expected block 94 (0xblock94_alt, reorg=true), got block %d (%s, reorg=%v)",
+			events[1].BlockNumber, events[1].BlockHash, events[1].IsReorg)
+	}
+}
+
+// waitForCondition polls until condition returns true or timeout is reached.
+// Fails the test if timeout is reached.
+func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool, description string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for: %s", description)
 }
