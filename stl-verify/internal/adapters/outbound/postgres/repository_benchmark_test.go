@@ -4,7 +4,6 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"math/big"
 	"path/filepath"
@@ -12,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -28,7 +27,7 @@ const (
 )
 
 // setupBenchmarkPostgres creates a TimescaleDB container for benchmarks.
-func setupBenchmarkPostgres(b *testing.B) (*sql.DB, func()) {
+func setupBenchmarkPostgres(b *testing.B) (*pgxpool.Pool, func()) {
 	b.Helper()
 	ctx := context.Background()
 
@@ -71,18 +70,22 @@ func setupBenchmarkPostgres(b *testing.B) (*sql.DB, func()) {
 
 	dsn := fmt.Sprintf("postgres://bench:bench@%s:%s/benchdb?sslmode=disable", host, port.Port())
 
-	db, err := sql.Open("pgx", dsn)
+	poolConfig, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		b.Fatalf("failed to parse config: %v", err)
+	}
+	poolConfig.MaxConns = 10
+	poolConfig.MinConns = 5
+	poolConfig.MaxConnLifetime = 5 * time.Minute
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		b.Fatalf("failed to connect to database: %v", err)
 	}
 
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
-
 	// Wait for connection
 	for i := 0; i < 60; i++ {
-		if err := db.Ping(); err == nil {
+		if err := pool.Ping(ctx); err == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -91,17 +94,17 @@ func setupBenchmarkPostgres(b *testing.B) (*sql.DB, func()) {
 	// Run migrations
 	_, currentFile, _, _ := runtime.Caller(0)
 	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../../db/migrations")
-	m := migrator.New(db, migrationsDir)
+	m := migrator.New(pool, migrationsDir)
 	if err := m.ApplyAll(ctx); err != nil {
 		b.Fatalf("failed to apply migrations: %v", err)
 	}
 
 	cleanup := func() {
-		db.Close()
+		pool.Close()
 		container.Terminate(ctx)
 	}
 
-	return db, cleanup
+	return pool, cleanup
 }
 
 // generateBorrowers creates test borrower entities.
@@ -140,14 +143,14 @@ func generateBorrowerCollateral(count int, startBlock int64) []*entity.BorrowerC
 
 // BenchmarkPositionRepository_UpsertBorrowers benchmarks borrower upserts at various scales.
 func BenchmarkPositionRepository_UpsertBorrowers(b *testing.B) {
-	db, cleanup := setupBenchmarkPostgres(b)
+	pool, cleanup := setupBenchmarkPostgres(b)
 	defer cleanup()
 
 	// Seed required reference data
 	ctx := context.Background()
-	seedReferenceData(b, db, ctx)
+	seedReferenceData(b, pool, ctx)
 
-	repo, err := NewPositionRepository(db, nil, 1000)
+	repo, err := NewPositionRepository(pool, nil, 1000)
 	if err != nil {
 		b.Fatalf("failed to create repository: %v", err)
 	}
@@ -180,13 +183,13 @@ func BenchmarkPositionRepository_UpsertBorrowers(b *testing.B) {
 
 // BenchmarkPositionRepository_UpsertBorrowerCollateral benchmarks collateral upserts.
 func BenchmarkPositionRepository_UpsertBorrowerCollateral(b *testing.B) {
-	db, cleanup := setupBenchmarkPostgres(b)
+	pool, cleanup := setupBenchmarkPostgres(b)
 	defer cleanup()
 
 	ctx := context.Background()
-	seedReferenceData(b, db, ctx)
+	seedReferenceData(b, pool, ctx)
 
-	repo, err := NewPositionRepository(db, nil, 1000)
+	repo, err := NewPositionRepository(pool, nil, 1000)
 	if err != nil {
 		b.Fatalf("failed to create repository: %v", err)
 	}
@@ -218,18 +221,18 @@ func BenchmarkPositionRepository_UpsertBorrowerCollateral(b *testing.B) {
 
 // BenchmarkPositionRepository_BatchSizes compares different batch sizes.
 func BenchmarkPositionRepository_BatchSizes(b *testing.B) {
-	db, cleanup := setupBenchmarkPostgres(b)
+	pool, cleanup := setupBenchmarkPostgres(b)
 	defer cleanup()
 
 	ctx := context.Background()
-	seedReferenceData(b, db, ctx)
+	seedReferenceData(b, pool, ctx)
 
 	batchSizes := []int{100, 500, 1000, 2000, 5000}
 	rowCount := 50_000
 
 	for _, batchSize := range batchSizes {
 		b.Run(fmt.Sprintf("batch_%d", batchSize), func(b *testing.B) {
-			repo, err := NewPositionRepository(db, nil, batchSize)
+			repo, err := NewPositionRepository(pool, nil, batchSize)
 			if err != nil {
 				b.Fatalf("failed to create repository: %v", err)
 			}
@@ -293,17 +296,17 @@ func generateSparkLendReserveData(count int, startBlock int64) []*entity.SparkLe
 
 // BenchmarkTokenRepository_UpsertTokens benchmarks token upserts at various scales.
 func BenchmarkTokenRepository_UpsertTokens(b *testing.B) {
-	db, cleanup := setupBenchmarkPostgres(b)
+	pool, cleanup := setupBenchmarkPostgres(b)
 	defer cleanup()
 
 	ctx := context.Background()
 	// Seed chain for FK constraint
-	_, err := db.ExecContext(ctx, `INSERT INTO "chain" (chain_id, name) VALUES (1, 'mainnet') ON CONFLICT DO NOTHING`)
+	_, err := pool.Exec(ctx, `INSERT INTO "chain" (chain_id, name) VALUES (1, 'mainnet') ON CONFLICT DO NOTHING`)
 	if err != nil {
 		b.Fatalf("failed to seed chain: %v", err)
 	}
 
-	repo, err := NewTokenRepository(db, nil, 1000)
+	repo, err := NewTokenRepository(pool, nil, 1000)
 	if err != nil {
 		b.Fatalf("failed to create repository: %v", err)
 	}
@@ -335,13 +338,13 @@ func BenchmarkTokenRepository_UpsertTokens(b *testing.B) {
 
 // BenchmarkProtocolRepository_UpsertSparkLendReserveData benchmarks SparkLend reserve data upserts.
 func BenchmarkProtocolRepository_UpsertSparkLendReserveData(b *testing.B) {
-	db, cleanup := setupBenchmarkPostgres(b)
+	pool, cleanup := setupBenchmarkPostgres(b)
 	defer cleanup()
 
 	ctx := context.Background()
-	seedReferenceData(b, db, ctx)
+	seedReferenceData(b, pool, ctx)
 
-	repo, err := NewProtocolRepository(db, nil, 1000)
+	repo, err := NewProtocolRepository(pool, nil, 1000)
 	if err != nil {
 		b.Fatalf("failed to create repository: %v", err)
 	}
@@ -372,18 +375,18 @@ func BenchmarkProtocolRepository_UpsertSparkLendReserveData(b *testing.B) {
 }
 
 // seedReferenceData inserts the chains, protocols, tokens, and users needed for FK constraints.
-func seedReferenceData(b *testing.B, db *sql.DB, ctx context.Context) {
+func seedReferenceData(b *testing.B, pool *pgxpool.Pool, ctx context.Context) {
 	b.Helper()
 
 	// Insert chain
-	_, err := db.ExecContext(ctx, `INSERT INTO "chain" (chain_id, name) VALUES (1, 'mainnet') ON CONFLICT DO NOTHING`)
+	_, err := pool.Exec(ctx, `INSERT INTO "chain" (chain_id, name) VALUES (1, 'mainnet') ON CONFLICT DO NOTHING`)
 	if err != nil {
 		b.Fatalf("failed to seed chain: %v", err)
 	}
 
 	// Insert protocols
 	for i := 1; i <= 10; i++ {
-		_, err := db.ExecContext(ctx, `
+		_, err := pool.Exec(ctx, `
 			INSERT INTO protocol (id, chain_id, address, name, protocol_type, metadata)
 			VALUES ($1, 1, $2, $3, 'lending', '{}')
 			ON CONFLICT DO NOTHING`,
@@ -395,7 +398,7 @@ func seedReferenceData(b *testing.B, db *sql.DB, ctx context.Context) {
 
 	// Insert tokens
 	for i := 1; i <= 50; i++ {
-		_, err := db.ExecContext(ctx, `
+		_, err := pool.Exec(ctx, `
 			INSERT INTO token (id, chain_id, address, symbol, decimals, metadata)
 			VALUES ($1, 1, $2, $3, 18, '{}')
 			ON CONFLICT DO NOTHING`,
@@ -407,7 +410,7 @@ func seedReferenceData(b *testing.B, db *sql.DB, ctx context.Context) {
 
 	// Insert users
 	for i := 1; i <= 1000; i++ {
-		_, err := db.ExecContext(ctx, `
+		_, err := pool.Exec(ctx, `
 			INSERT INTO "user" (id, chain_id, address, metadata)
 			VALUES ($1, 1, $2, '{}')
 			ON CONFLICT DO NOTHING`,

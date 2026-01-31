@@ -6,12 +6,10 @@
 //   - Canonical and orphaned block tracking
 //   - Reorg event recording for chain reorganization history
 //   - Gap detection queries for backfill operations
-//   - Automatic schema migration via embedded SQL
 package postgres
 
 import (
 	"context"
-	_ "embed"
 	"errors"
 	"fmt"
 	"log/slog"
