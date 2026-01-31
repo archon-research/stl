@@ -1399,8 +1399,8 @@ func TestRetry_CacheFailureIsRetried(t *testing.T) {
 			ParentHash: client.getHeader(num).ParentHash,
 			ReceivedAt: time.Now().Unix(),
 		}
-		stateRepo.SaveBlock(ctx, block)
-		stateRepo.MarkPublishComplete(ctx, block.Hash)
+		_, _ = stateRepo.SaveBlock(ctx, block)
+		_ = stateRepo.MarkPublishComplete(ctx, block.Hash)
 	}
 
 	// Run backfill - block 3 will fail on first attempt but succeed on retry
@@ -1474,12 +1474,12 @@ func TestRetry_PublishFailureIsRetried(t *testing.T) {
 			ParentHash: client.getHeader(num).ParentHash,
 			ReceivedAt: time.Now().Unix(),
 		}
-		stateRepo.SaveBlock(ctx, block)
-		stateRepo.MarkPublishComplete(ctx, block.Hash)
+		_, _ = stateRepo.SaveBlock(ctx, block)
+		_ = stateRepo.MarkPublishComplete(ctx, block.Hash)
 	}
 
 	// Run backfill - block 3 publish will fail then be retried
-	service.RunOnce(ctx)
+	_ = service.RunOnce(ctx)
 
 	// Verify block 3 was published after retry
 	events := eventSink.GetBlockEvents()

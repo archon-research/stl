@@ -236,7 +236,6 @@ func (m *Migrator) applyMigrationNoTx(ctx context.Context, filename string, cont
 func splitStatements(content string) []string {
 	var statements []string
 	var current strings.Builder
-	inLineComment := false
 
 	lines := strings.Split(content, "\n")
 	for _, line := range lines {
@@ -244,10 +243,8 @@ func splitStatements(content string) []string {
 
 		// Skip pure comment lines
 		if strings.HasPrefix(trimmed, "--") {
-			inLineComment = true
 			continue
 		}
-		inLineComment = false
 
 		// Add line to current statement
 		if current.Len() > 0 {
@@ -256,7 +253,7 @@ func splitStatements(content string) []string {
 		current.WriteString(line)
 
 		// Check if line ends with semicolon (end of statement)
-		if strings.HasSuffix(trimmed, ";") && !inLineComment {
+		if strings.HasSuffix(trimmed, ";") {
 			statements = append(statements, current.String())
 			current.Reset()
 		}

@@ -1078,7 +1078,7 @@ func TestHandleReorg_FindsCommonAncestorInMemory(t *testing.T) {
 	}
 	// Reorg event should be populated
 	if reorgEvent == nil {
-		t.Error("expected reorg event to be populated")
+		t.Fatal("expected reorg event to be populated")
 	}
 	// handleReorg should NOT modify the chain - that happens after successful DB save
 	// The chain should still have all 6 blocks
