@@ -4,7 +4,6 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -12,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -58,31 +57,31 @@ func setupPostgres(t *testing.T) (*BlockStateRepository, func()) {
 
 	dsn := fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
 
-	db, err := sql.Open("pgx", dsn)
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatalf("failed to connect to database: %v", err)
 	}
 
 	// Wait for connection
 	for i := 0; i < 30; i++ {
-		if err := db.Ping(); err == nil {
+		if err := pool.Ping(ctx); err == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	repo := NewBlockStateRepository(db, nil)
+	repo := NewBlockStateRepository(pool, nil)
 
 	// Run migrations
 	_, currentFile, _, _ := runtime.Caller(0)
 	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../../db/migrations")
-	m := migrator.New(db, migrationsDir)
+	m := migrator.New(pool, migrationsDir)
 	if err := m.ApplyAll(ctx); err != nil {
 		t.Fatalf("failed to apply migrations: %v", err)
 	}
 
 	cleanup := func() {
-		db.Close()
+		pool.Close()
 		container.Terminate(ctx)
 	}
 
@@ -242,7 +241,7 @@ func TestHandleReorgAtomic_AllOrNothingSemantics(t *testing.T) {
 
 	t.Run("reorg_event_is_recorded", func(t *testing.T) {
 		// Query reorg events directly via raw SQL
-		rows, err := repo.DB().QueryContext(ctx, `
+		rows, err := repo.Pool().Query(ctx, `
 			SELECT id, detected_at, block_number, old_hash, new_hash, depth
 			FROM reorg_events
 			ORDER BY detected_at DESC

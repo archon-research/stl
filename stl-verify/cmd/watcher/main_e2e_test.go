@@ -4,11 +4,12 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -19,10 +20,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
@@ -489,7 +491,7 @@ func TestEndToEnd_MultipleBlocksInSequence(t *testing.T) {
 
 // TestInfrastructure holds all test dependencies.
 type TestInfrastructure struct {
-	DB             *sql.DB
+	Pool           *pgxpool.Pool
 	BlockStateRepo *postgres.BlockStateRepository
 	Cache          *rediscache.BlockCache
 	EventSink      *snsadapter.EventSink
@@ -522,21 +524,24 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 		}
 	})
 
-	db, err := sql.Open("pgx", postgresCfg.ConnectionString())
+	pool, err := pgxpool.New(ctx, postgresCfg.ConnectionString())
 	if err != nil {
 		t.Fatalf("failed to connect to postgres: %v", err)
 	}
 	cleanupFuncs = append(cleanupFuncs, func() {
-		if err := db.Close(); err != nil {
-			logger.Error("failed to close database connection", "error", err)
-		}
+		pool.Close()
 	})
-	infra.DB = db
+	infra.Pool = pool
 
-	blockStateRepo := postgres.NewBlockStateRepository(db, logger)
-	if err := blockStateRepo.Migrate(ctx); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
+	// Run migrations
+	_, currentFile, _, _ := runtime.Caller(0)
+	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../db/migrations")
+	m := migrator.New(pool, migrationsDir)
+	if err := m.ApplyAll(ctx); err != nil {
+		t.Fatalf("failed to apply migrations: %v", err)
 	}
+
+	blockStateRepo := postgres.NewBlockStateRepository(pool, logger)
 	infra.BlockStateRepo = blockStateRepo
 
 	// Start Redis
@@ -690,7 +695,7 @@ func startPostgres(t *testing.T, ctx context.Context) (testcontainers.Container,
 	}
 
 	req := testcontainers.ContainerRequest{
-		Image:        "postgres:18",
+		Image:        "timescale/timescaledb:latest-pg17",
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     config.User,

@@ -2,7 +2,6 @@ package migrator_test
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -22,7 +21,7 @@ func getMigrationsPath() string {
 	return filepath.Join(testDir, "..", "migrations")
 }
 
-func setupPostgres(ctx context.Context, t *testing.T) (*sql.DB, func()) {
+func setupPostgres(ctx context.Context, t *testing.T) (*pgxpool.Pool, func()) {
 	req := testcontainers.ContainerRequest{
 		Image:        "timescale/timescaledb:latest-pg17",
 		ExposedPorts: []string{"5432/tcp"},
@@ -54,36 +53,34 @@ func setupPostgres(ctx context.Context, t *testing.T) (*sql.DB, func()) {
 
 	connStr := fmt.Sprintf("postgres://postgres:postgres@%s:%s/test_db?sslmode=disable", host, port.Port())
 
-	db, err := sql.Open("pgx", connStr)
+	pool, err := pgxpool.New(ctx, connStr)
 	if err != nil {
 		t.Fatalf("failed to connect to database: %v", err)
 	}
 
 	cleanup := func() {
-		if err := db.Close(); err != nil {
-			t.Logf("failed to close database: %v", err)
-		}
+		pool.Close()
 		if err := container.Terminate(ctx); err != nil {
 			t.Logf("failed to terminate container: %v", err)
 		}
 	}
 
-	return db, cleanup
+	return pool, cleanup
 }
 
 func TestMigrator_ApplyAll(t *testing.T) {
 	ctx := context.Background()
 
-	db, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupPostgres(ctx, t)
 	defer cleanup()
 
-	m := migrator.New(db, getMigrationsPath())
+	m := migrator.New(pool, getMigrationsPath())
 	if err := m.ApplyAll(ctx); err != nil {
 		t.Fatalf("failed to apply migrations: %v", err)
 	}
 
 	var exists bool
-	err := db.QueryRowContext(ctx, `
+	err := pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT FROM information_schema.tables 
 			WHERE table_schema = 'public' 
@@ -97,7 +94,7 @@ func TestMigrator_ApplyAll(t *testing.T) {
 	}
 
 	var count int
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM migrations").Scan(&count)
+	err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM migrations").Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to count migrations: %v", err)
 	}
@@ -121,7 +118,7 @@ func TestMigrator_ApplyAll(t *testing.T) {
 	t.Logf("✓ Migrations are idempotent")
 
 	var newCount int
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM migrations").Scan(&newCount)
+	err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM migrations").Scan(&newCount)
 	if err != nil {
 		t.Fatalf("failed to count migrations after second run: %v", err)
 	}
@@ -134,10 +131,10 @@ func TestMigrator_ApplyAll(t *testing.T) {
 func TestMigrator_VerifySchema(t *testing.T) {
 	ctx := context.Background()
 
-	db, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupPostgres(ctx, t)
 	defer cleanup()
 
-	m := migrator.New(db, getMigrationsPath())
+	m := migrator.New(pool, getMigrationsPath())
 	if err := m.ApplyAll(ctx); err != nil {
 		t.Fatalf("failed to apply migrations: %v", err)
 	}
@@ -151,7 +148,7 @@ func TestMigrator_VerifySchema(t *testing.T) {
 
 	for _, tableName := range expectedTables {
 		var exists bool
-		err := db.QueryRowContext(ctx, `
+		err := pool.QueryRow(ctx, `
 			SELECT EXISTS (
 				SELECT FROM information_schema.tables 
 				WHERE table_schema = 'public' 
@@ -171,10 +168,10 @@ func TestMigrator_VerifySchema(t *testing.T) {
 func TestMigrator_ChecksumVerification(t *testing.T) {
 	ctx := context.Background()
 
-	db, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupPostgres(ctx, t)
 	defer cleanup()
 
-	_, err := db.ExecContext(ctx, `
+	_, err := pool.Exec(ctx, `
 		CREATE TABLE migrations (
 			id SERIAL PRIMARY KEY,
 			filename TEXT NOT NULL UNIQUE,
@@ -204,7 +201,7 @@ ON CONFLICT (filename) DO NOTHING;
 		t.Fatalf("failed to write test migration: %v", err)
 	}
 
-	m := migrator.New(db, tempDir)
+	m := migrator.New(pool, tempDir)
 	if err := m.ApplyAll(ctx); err != nil {
 		t.Fatalf("failed to apply initial migrations: %v", err)
 	}

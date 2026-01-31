@@ -4,7 +4,6 @@ package backfill_gaps
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -13,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -29,7 +28,7 @@ func setupPostgres(t *testing.T) (*postgres.BlockStateRepository, func()) {
 	ctx := context.Background()
 
 	req := testcontainers.ContainerRequest{
-		Image:        "postgres:18",
+		Image:        "timescale/timescaledb:latest-pg17",
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "test",
@@ -61,31 +60,31 @@ func setupPostgres(t *testing.T) (*postgres.BlockStateRepository, func()) {
 
 	dsn := fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
 
-	db, err := sql.Open("pgx", dsn)
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatalf("failed to connect to database: %v", err)
 	}
 
 	// Wait for connection
 	for i := 0; i < 30; i++ {
-		if err := db.Ping(); err == nil {
+		if err := pool.Ping(ctx); err == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	repo := postgres.NewBlockStateRepository(db, nil)
+	repo := postgres.NewBlockStateRepository(pool, nil)
 
 	// Run migrations
 	_, currentFile, _, _ := runtime.Caller(0)
 	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../db/migrations")
-	m := migrator.New(db, migrationsDir)
+	m := migrator.New(pool, migrationsDir)
 	if err := m.ApplyAll(ctx); err != nil {
 		t.Fatalf("failed to apply migrations: %v", err)
 	}
 
 	cleanup := func() {
-		db.Close()
+		pool.Close()
 		container.Terminate(ctx)
 	}
 
@@ -506,7 +505,7 @@ func TestSaveBlock_ConcurrentVersionRaceCondition(t *testing.T) {
 
 	// Use a raw query to get all blocks at this height
 	query := `SELECT hash, version FROM block_states WHERE number = $1 ORDER BY version`
-	rowsResult, err := repo.DB().QueryContext(ctx, query, blockNum)
+	rowsResult, err := repo.Pool().Query(ctx, query, blockNum)
 	if err != nil {
 		t.Fatalf("failed to query blocks: %v", err)
 	}

@@ -5,7 +5,6 @@ package postgres
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -59,15 +57,15 @@ func setupPositionTest(t *testing.T) *positionTestFixture {
 		t.Fatalf("failed to get connection string: %v", err)
 	}
 
-	// Open database/sql connection for migrations using pgx stdlib adapter
-	db, err := sql.Open("pgx", dsn)
+	// Create pgxpool for migrations and repository
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		t.Fatalf("failed to connect to database: %v", err)
+		t.Fatalf("failed to create pgxpool: %v", err)
 	}
 
 	// Wait for connection
 	for i := 0; i < 30; i++ {
-		if err := db.Ping(); err == nil {
+		if err := pool.Ping(ctx); err == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -76,18 +74,9 @@ func setupPositionTest(t *testing.T) *positionTestFixture {
 	// Run migrations
 	_, currentFile, _, _ := runtime.Caller(0)
 	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../../db/migrations")
-	m := migrator.New(db, migrationsDir)
+	m := migrator.New(pool, migrationsDir)
 	if err := m.ApplyAll(ctx); err != nil {
 		t.Fatalf("failed to apply migrations: %v", err)
-	}
-
-	// Close database/sql connection - we'll use pgxpool for the repository
-	db.Close()
-
-	// Create pgxpool for PositionRepository
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("failed to create pgxpool: %v", err)
 	}
 
 	repo, err := NewPositionRepository(pool, nil, 100)
