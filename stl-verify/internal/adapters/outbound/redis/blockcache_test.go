@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -468,5 +469,98 @@ func TestCompressDecompress_LargeData(t *testing.T) {
 
 	if len(decompressed) != len(largeData) {
 		t.Errorf("round-trip size mismatch: got %d, want %d", len(decompressed), len(largeData))
+	}
+}
+
+// --- Test: isRetryableError ---
+
+func TestIsRetryableError_RetryableErrors(t *testing.T) {
+	retryableErrors := []error{
+		fmt.Errorf("connection refused"),
+		fmt.Errorf("dial tcp: connection reset by peer"),
+		fmt.Errorf("write: broken pipe"),
+		fmt.Errorf("read tcp: i/o timeout"),
+		fmt.Errorf("network is unreachable"),
+		fmt.Errorf("dial tcp: no route to host"),
+		fmt.Errorf("unexpected EOF"),
+		fmt.Errorf("connection pool timeout"),
+		fmt.Errorf("LOADING Redis is loading the dataset in memory"),
+		fmt.Errorf("READONLY You can't write against a read only replica"),
+		// Case variations
+		fmt.Errorf("CONNECTION REFUSED"),
+		fmt.Errorf("Connection Reset"),
+	}
+
+	for _, err := range retryableErrors {
+		if !isRetryableError(err) {
+			t.Errorf("expected %q to be retryable", err)
+		}
+	}
+}
+
+func TestIsRetryableError_NonRetryableErrors(t *testing.T) {
+	nonRetryableErrors := []error{
+		nil,
+		fmt.Errorf("WRONGTYPE Operation against a key holding the wrong kind of value"),
+		fmt.Errorf("ERR invalid password"),
+		fmt.Errorf("ERR unknown command"),
+		fmt.Errorf("OOM command not allowed when used memory > 'maxmemory'"),
+		fmt.Errorf("some random error"),
+	}
+
+	for _, err := range nonRetryableErrors {
+		if isRetryableError(err) {
+			t.Errorf("expected %q to NOT be retryable", err)
+		}
+	}
+}
+
+// --- Test: Retry Configuration ---
+
+func TestNewBlockCache_AppliesRetryDefaults(t *testing.T) {
+	cache, err := NewBlockCache(Config{
+		Addr: "localhost:6379",
+		// MaxRetries and RetryBackoff not set - should use defaults
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer cache.Close()
+
+	if cache.maxRetries != 3 {
+		t.Errorf("expected default maxRetries=3, got %d", cache.maxRetries)
+	}
+	if cache.retryBackoff != 100*time.Millisecond {
+		t.Errorf("expected default retryBackoff=100ms, got %v", cache.retryBackoff)
+	}
+}
+
+func TestNewBlockCache_UsesCustomRetryConfig(t *testing.T) {
+	cache, err := NewBlockCache(Config{
+		Addr:         "localhost:6379",
+		MaxRetries:   5,
+		RetryBackoff: 200 * time.Millisecond,
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer cache.Close()
+
+	if cache.maxRetries != 5 {
+		t.Errorf("expected maxRetries=5, got %d", cache.maxRetries)
+	}
+	if cache.retryBackoff != 200*time.Millisecond {
+		t.Errorf("expected retryBackoff=200ms, got %v", cache.retryBackoff)
+	}
+}
+
+func TestConfigDefaults_IncludesRetryConfig(t *testing.T) {
+	defaults := ConfigDefaults()
+
+	if defaults.MaxRetries != 3 {
+		t.Errorf("expected default MaxRetries=3, got %d", defaults.MaxRetries)
+	}
+	if defaults.RetryBackoff != 100*time.Millisecond {
+		t.Errorf("expected default RetryBackoff=100ms, got %v", defaults.RetryBackoff)
 	}
 }

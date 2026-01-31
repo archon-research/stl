@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -44,25 +45,34 @@ type Config struct {
 	TTL time.Duration
 	// KeyPrefix is prepended to all cache keys
 	KeyPrefix string
+	// MaxRetries is the maximum number of retry attempts for transient failures (default: 3)
+	MaxRetries int
+	// RetryBackoff is the initial backoff duration between retries (default: 100ms)
+	// Subsequent retries use exponential backoff: backoff * 2^attempt
+	RetryBackoff time.Duration
 }
 
 // ConfigDefaults returns sensible defaults for Redis cache configuration.
 func ConfigDefaults() Config {
 	return Config{
-		Addr:      "localhost:6379",
-		Password:  "",
-		DB:        0,
-		TTL:       24 * time.Hour,
-		KeyPrefix: "stl",
+		Addr:         "localhost:6379",
+		Password:     "",
+		DB:           0,
+		TTL:          24 * time.Hour,
+		KeyPrefix:    "stl",
+		MaxRetries:   3,
+		RetryBackoff: 100 * time.Millisecond,
 	}
 }
 
 // BlockCache is a Redis implementation of the outbound.BlockCache port.
 type BlockCache struct {
-	client    *redis.Client
-	ttl       time.Duration
-	keyPrefix string
-	logger    *slog.Logger
+	client       *redis.Client
+	ttl          time.Duration
+	keyPrefix    string
+	maxRetries   int
+	retryBackoff time.Duration
+	logger       *slog.Logger
 }
 
 // NewBlockCache creates a new Redis block cache.
@@ -82,12 +92,53 @@ func NewBlockCache(cfg Config, logger *slog.Logger) (*BlockCache, error) {
 	}
 	logger = logger.With("component", "redis-cache")
 
+	// Apply defaults for retry config
+	maxRetries := cfg.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+	retryBackoff := cfg.RetryBackoff
+	if retryBackoff <= 0 {
+		retryBackoff = 100 * time.Millisecond
+	}
+
 	return &BlockCache{
-		client:    client,
-		ttl:       cfg.TTL,
-		keyPrefix: cfg.KeyPrefix,
-		logger:    logger,
+		client:       client,
+		ttl:          cfg.TTL,
+		keyPrefix:    cfg.KeyPrefix,
+		maxRetries:   maxRetries,
+		retryBackoff: retryBackoff,
+		logger:       logger,
 	}, nil
+}
+
+// isRetryableError checks if an error is transient and worth retrying.
+// Connection errors, timeouts, and network errors are retryable.
+// Data errors (wrong type, nil responses for writes) are not.
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for common transient Redis errors (case-insensitive)
+	errStr := strings.ToLower(err.Error())
+	retryablePatterns := []string{
+		"connection refused",
+		"connection reset",
+		"broken pipe",
+		"i/o timeout",
+		"network is unreachable",
+		"no route to host",
+		"eof",
+		"connection pool timeout",
+		"loading",  // Redis is loading dataset
+		"readonly", // Redis is in readonly mode (failover)
+	}
+	for _, pattern := range retryablePatterns {
+		if strings.Contains(errStr, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // Ping checks the Redis connection.
@@ -104,6 +155,7 @@ func (c *BlockCache) Close() error {
 // This is more efficient than calling SetBlock, SetReceipts, SetTraces, SetBlobs separately
 // as it batches all commands into a single network round-trip.
 // Data is compressed using gzip before storing.
+// Transient Redis failures (connection loss, timeouts) are automatically retried.
 func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int64, version int, data outbound.BlockDataInput) error {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "redis.SetBlockData",
@@ -118,7 +170,7 @@ func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int6
 	)
 	defer span.End()
 
-	// Compress all data
+	// Compress all data (do this once, outside the retry loop)
 	blockCompressed, err := compress(data.Block)
 	if err != nil {
 		span.RecordError(err)
@@ -138,35 +190,85 @@ func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int6
 		return fmt.Errorf("failed to compress traces: %w", err)
 	}
 
-	pipe := c.client.Pipeline()
-
-	// Queue all SET commands with compressed data
-	pipe.Set(ctx, c.key(chainID, blockNumber, version, "block"), blockCompressed, c.ttl)
-	pipe.Set(ctx, c.key(chainID, blockNumber, version, "receipts"), receiptsCompressed, c.ttl)
-	pipe.Set(ctx, c.key(chainID, blockNumber, version, "traces"), tracesCompressed, c.ttl)
-
-	totalCommands := 3
+	var blobsCompressed []byte
 	if data.Blobs != nil {
-		blobsCompressed, err := compress(data.Blobs)
+		blobsCompressed, err = compress(data.Blobs)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "failed to compress blobs")
 			return fmt.Errorf("failed to compress blobs: %w", err)
 		}
-		pipe.Set(ctx, c.key(chainID, blockNumber, version, "blobs"), blobsCompressed, c.ttl)
+	}
+
+	totalCommands := 3
+	if data.Blobs != nil {
 		totalCommands = 4
 	}
-
 	span.SetAttributes(attribute.Int("redis.pipeline_commands", totalCommands))
 
-	// Execute all commands in one round-trip
-	_, err = pipe.Exec(ctx)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to execute pipeline")
-		return fmt.Errorf("failed to pipeline cache block data: %w", err)
+	// Execute with retry for transient failures
+	var lastErr error
+	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: backoff * 2^(attempt-1)
+			backoff := c.retryBackoff * time.Duration(1<<(attempt-1))
+			c.logger.Warn("retrying Redis pipeline after transient failure",
+				"attempt", attempt,
+				"maxRetries", c.maxRetries,
+				"backoff", backoff,
+				"block", blockNumber,
+				"error", lastErr)
+
+			select {
+			case <-ctx.Done():
+				span.RecordError(ctx.Err())
+				span.SetStatus(codes.Error, "context cancelled during retry")
+				return fmt.Errorf("context cancelled while retrying Redis: %w", ctx.Err())
+			case <-time.After(backoff):
+				// Continue with retry
+			}
+		}
+
+		// Build and execute pipeline
+		pipe := c.client.Pipeline()
+		pipe.Set(ctx, c.key(chainID, blockNumber, version, "block"), blockCompressed, c.ttl)
+		pipe.Set(ctx, c.key(chainID, blockNumber, version, "receipts"), receiptsCompressed, c.ttl)
+		pipe.Set(ctx, c.key(chainID, blockNumber, version, "traces"), tracesCompressed, c.ttl)
+		if blobsCompressed != nil {
+			pipe.Set(ctx, c.key(chainID, blockNumber, version, "blobs"), blobsCompressed, c.ttl)
+		}
+
+		_, err = pipe.Exec(ctx)
+		if err == nil {
+			if attempt > 0 {
+				span.SetAttributes(attribute.Int("redis.retry_success_attempt", attempt))
+				c.logger.Info("Redis pipeline succeeded after retry",
+					"attempt", attempt,
+					"block", blockNumber)
+			}
+			return nil
+		}
+
+		lastErr = err
+
+		// Check if error is retryable
+		if !isRetryableError(err) {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to execute pipeline (non-retryable)")
+			return fmt.Errorf("failed to pipeline cache block data: %w", err)
+		}
+
+		span.AddEvent("retry_attempt", trace.WithAttributes(
+			attribute.Int("attempt", attempt+1),
+			attribute.String("error", err.Error()),
+		))
 	}
-	return nil
+
+	// All retries exhausted
+	span.RecordError(lastErr)
+	span.SetStatus(codes.Error, "failed to execute pipeline after retries")
+	span.SetAttributes(attribute.Int("redis.retries_exhausted", c.maxRetries))
+	return fmt.Errorf("failed to pipeline cache block data after %d retries: %w", c.maxRetries, lastErr)
 }
 
 // key generates a cache key in the format prefix:chainID:blockNumber:version:dataType
