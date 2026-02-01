@@ -155,27 +155,34 @@ func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int6
 	)
 	defer span.End()
 
-	// Compress all data (do this once, outside the retry loop)
-	blockCompressed, err := compress(data.Block)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to compress block")
-		return fmt.Errorf("failed to compress block: %w", err)
-	}
-	receiptsCompressed, err := compress(data.Receipts)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to compress receipts")
-		return fmt.Errorf("failed to compress receipts: %w", err)
-	}
-	tracesCompressed, err := compress(data.Traces)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to compress traces")
-		return fmt.Errorf("failed to compress traces: %w", err)
-	}
+	// Compress non-nil data (do this once, outside the retry loop)
+	var blockCompressed, receiptsCompressed, tracesCompressed, blobsCompressed []byte
+	var err error
 
-	var blobsCompressed []byte
+	if data.Block != nil {
+		blockCompressed, err = compress(data.Block)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to compress block")
+			return fmt.Errorf("failed to compress block: %w", err)
+		}
+	}
+	if data.Receipts != nil {
+		receiptsCompressed, err = compress(data.Receipts)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to compress receipts")
+			return fmt.Errorf("failed to compress receipts: %w", err)
+		}
+	}
+	if data.Traces != nil {
+		tracesCompressed, err = compress(data.Traces)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to compress traces")
+			return fmt.Errorf("failed to compress traces: %w", err)
+		}
+	}
 	if data.Blobs != nil {
 		blobsCompressed, err = compress(data.Blobs)
 		if err != nil {
@@ -185,9 +192,18 @@ func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int6
 		}
 	}
 
-	totalCommands := 3
-	if data.Blobs != nil {
-		totalCommands = 4
+	totalCommands := 0
+	if blockCompressed != nil {
+		totalCommands++
+	}
+	if receiptsCompressed != nil {
+		totalCommands++
+	}
+	if tracesCompressed != nil {
+		totalCommands++
+	}
+	if blobsCompressed != nil {
+		totalCommands++
 	}
 	span.SetAttributes(attribute.Int("redis.pipeline_commands", totalCommands))
 
@@ -213,9 +229,15 @@ func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int6
 
 	err = retry.DoVoid(ctx, cfg, isRetryableError, onRetry, func() error {
 		pipe := c.client.Pipeline()
-		pipe.Set(ctx, c.key(chainID, blockNumber, version, "block"), blockCompressed, c.ttl)
-		pipe.Set(ctx, c.key(chainID, blockNumber, version, "receipts"), receiptsCompressed, c.ttl)
-		pipe.Set(ctx, c.key(chainID, blockNumber, version, "traces"), tracesCompressed, c.ttl)
+		if blockCompressed != nil {
+			pipe.Set(ctx, c.key(chainID, blockNumber, version, "block"), blockCompressed, c.ttl)
+		}
+		if receiptsCompressed != nil {
+			pipe.Set(ctx, c.key(chainID, blockNumber, version, "receipts"), receiptsCompressed, c.ttl)
+		}
+		if tracesCompressed != nil {
+			pipe.Set(ctx, c.key(chainID, blockNumber, version, "traces"), tracesCompressed, c.ttl)
+		}
 		if blobsCompressed != nil {
 			pipe.Set(ctx, c.key(chainID, blockNumber, version, "blobs"), blobsCompressed, c.ttl)
 		}
