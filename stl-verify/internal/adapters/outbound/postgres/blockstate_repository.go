@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +23,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -75,39 +75,35 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 	)
 	defer span.End()
 
-	const maxRetries = 10
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		version, err := r.saveBlockOnce(ctx, state)
-		if err == nil {
-			return version, nil
-		}
-
-		// Check if this is a serialization failure (SQLSTATE 40001)
-		// These are expected with concurrent transactions and should be retried
-		if isSerializationFailure(err) {
-			r.logger.Debug("serialization failure, retrying",
-				"attempt", attempt+1,
-				"maxRetries", maxRetries,
-				"block", state.Number,
-				"hash", state.Hash)
-			// Exponential backoff with jitter, capped at 100ms to prevent excessive waits
-			// Base: 1ms, 2ms, 4ms, 8ms, 16ms, 32ms, 64ms, 100ms (capped)
-			base := time.Duration(1<<attempt) * time.Millisecond
-			const maxBackoff = 100 * time.Millisecond
-			if base > maxBackoff {
-				base = maxBackoff
-			}
-			jitter := time.Duration(rand.Int63n(int64(base)))
-			time.Sleep(base + jitter)
-			continue
-		}
-
-		// For other errors, return immediately
-		return 0, err
+	cfg := retry.Config{
+		MaxRetries:     10,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     100 * time.Millisecond,
+		BackoffFactor:  2.0,
+		Jitter:         true,
 	}
 
-	return 0, fmt.Errorf("failed to save block after %d retries due to serialization conflicts", maxRetries)
+	onRetry := func(attempt int, err error, backoff time.Duration) {
+		r.logger.Debug("serialization failure, retrying",
+			"attempt", attempt,
+			"block", state.Number,
+			"hash", state.Hash,
+			"backoff", backoff)
+		span.AddEvent("retry_attempt", trace.WithAttributes(
+			attribute.Int("attempt", attempt),
+			attribute.String("error", err.Error()),
+		))
+	}
+
+	version, err := retry.Do(ctx, cfg, isSerializationFailure, onRetry, func() (int, error) {
+		return r.saveBlockOnce(ctx, state)
+	})
+
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "SaveBlock failed")
+	}
+	return version, err
 }
 
 // saveBlockOnce attempts a single save operation with serializable isolation.
@@ -167,6 +163,19 @@ func isSerializationFailure(err error) bool {
 		return pgErr.Code == "40001"
 	}
 	return false
+}
+
+// isRetryableError checks if an error should trigger a retry.
+// Retries on any error except context cancellation (shutdown signal).
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Don't retry on context cancellation (shutdown)
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	return true
 }
 
 // GetLastBlock retrieves the most recently saved canonical (non-orphaned) block state.
@@ -322,43 +331,35 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 	)
 	defer span.End()
 
-	const maxRetries = 10
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		version, err := r.handleReorgAtomicOnce(ctx, commonAncestor, event, newBlock)
-		if err == nil {
-			return version, nil
-		}
-
-		// Check if this is a serialization failure (SQLSTATE 40001)
-		// These are expected with concurrent transactions and should be retried
-		if isSerializationFailure(err) {
-			r.logger.Debug("serialization failure in HandleReorgAtomic, retrying",
-				"attempt", attempt+1,
-				"maxRetries", maxRetries,
-				"block", newBlock.Number,
-				"hash", newBlock.Hash)
-			// Exponential backoff with jitter, capped at 100ms
-			base := time.Duration(1<<attempt) * time.Millisecond
-			const maxBackoff = 100 * time.Millisecond
-			if base > maxBackoff {
-				base = maxBackoff
-			}
-			jitter := time.Duration(rand.Int63n(int64(base)))
-			time.Sleep(base + jitter)
-			continue
-		}
-
-		// For other errors, return immediately
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "HandleReorgAtomic failed")
-		return 0, err
+	cfg := retry.Config{
+		MaxRetries:     10,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     100 * time.Millisecond,
+		BackoffFactor:  2.0,
+		Jitter:         true,
 	}
 
-	err := fmt.Errorf("failed to handle reorg after %d retries due to serialization conflicts", maxRetries)
-	span.RecordError(err)
-	span.SetStatus(codes.Error, "max retries exceeded")
-	return 0, err
+	onRetry := func(attempt int, err error, backoff time.Duration) {
+		r.logger.Debug("serialization failure in HandleReorgAtomic, retrying",
+			"attempt", attempt,
+			"block", newBlock.Number,
+			"hash", newBlock.Hash,
+			"backoff", backoff)
+		span.AddEvent("retry_attempt", trace.WithAttributes(
+			attribute.Int("attempt", attempt),
+			attribute.String("error", err.Error()),
+		))
+	}
+
+	version, err := retry.Do(ctx, cfg, isSerializationFailure, onRetry, func() (int, error) {
+		return r.handleReorgAtomicOnce(ctx, commonAncestor, event, newBlock)
+	})
+
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "HandleReorgAtomic failed")
+	}
+	return version, err
 }
 
 // handleReorgAtomicOnce attempts a single reorg operation with SERIALIZABLE isolation.
@@ -706,6 +707,7 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 }
 
 // MarkPublishComplete marks a block as published.
+// Includes retry logic for transient database errors.
 func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash string) error {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "postgres.MarkPublishComplete",
@@ -720,19 +722,42 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 	defer span.End()
 
 	query := `UPDATE block_states SET block_published = TRUE WHERE hash = $1`
-	result, err := r.pool.Exec(ctx, query, hash)
+
+	cfg := retry.Config{
+		MaxRetries:     3,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     100 * time.Millisecond,
+		BackoffFactor:  2.0,
+		Jitter:         true,
+	}
+
+	onRetry := func(attempt int, err error, backoff time.Duration) {
+		r.logger.Debug("retrying MarkPublishComplete",
+			"attempt", attempt,
+			"hash", hash,
+			"backoff", backoff,
+			"error", err)
+		span.AddEvent("retry_attempt", trace.WithAttributes(
+			attribute.Int("attempt", attempt),
+			attribute.String("error", err.Error()),
+		))
+	}
+
+	err := retry.DoVoid(ctx, cfg, isRetryableError, onRetry, func() error {
+		result, err := r.pool.Exec(ctx, query, hash)
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() == 0 {
+			return fmt.Errorf("block with hash %s not found", hash)
+		}
+		return nil
+	})
+
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to mark published")
 		return fmt.Errorf("failed to mark block published: %w", err)
-	}
-
-	rowsAffected := result.RowsAffected()
-	if rowsAffected == 0 {
-		err := fmt.Errorf("block with hash %s not found", hash)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "block not found")
-		return err
 	}
 
 	return nil

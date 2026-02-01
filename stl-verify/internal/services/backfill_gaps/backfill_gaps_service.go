@@ -2,6 +2,7 @@ package backfill_gaps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -660,37 +661,25 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 		return fmt.Errorf("failed to parse block timestamp for block %d: %w", blockNum, err)
 	}
 
-	// Cache block data
+	// Validate all required data before caching
 	if bd.Block == nil {
 		return fmt.Errorf("missing block data for block %d", blockNum)
 	}
-	if err := s.cache.SetBlock(ctx, chainID, blockNum, version, bd.Block); err != nil {
-		return fmt.Errorf("failed to cache block %d: %w", blockNum, err)
-	}
-
-	// Cache receipts - receipts are required for all blocks
 	if bd.ReceiptsErr != nil {
 		return fmt.Errorf("receipts fetch failed for block %d: %w", blockNum, bd.ReceiptsErr)
 	}
 	if bd.Receipts == nil {
 		return fmt.Errorf("missing receipts data for block %d (no error reported)", blockNum)
 	}
-	if err := s.cache.SetReceipts(ctx, chainID, blockNum, version, bd.Receipts); err != nil {
-		return fmt.Errorf("failed to cache receipts for block %d: %w", blockNum, err)
-	}
-
-	// Cache traces - traces are required for all blocks
 	if bd.TracesErr != nil {
 		return fmt.Errorf("traces fetch failed for block %d: %w", blockNum, bd.TracesErr)
 	}
 	if bd.Traces == nil {
 		return fmt.Errorf("missing traces data for block %d (no error reported)", blockNum)
 	}
-	if err := s.cache.SetTraces(ctx, chainID, blockNum, version, bd.Traces); err != nil {
-		return fmt.Errorf("failed to cache traces for block %d: %w", blockNum, err)
-	}
 
-	// Cache blobs (if enabled) - blobs are required when blob support is enabled
+	// Validate blobs if enabled
+	var blobs json.RawMessage
 	if s.config.EnableBlobs {
 		if bd.BlobsErr != nil {
 			return fmt.Errorf("blobs fetch failed for block %d: %w", blockNum, bd.BlobsErr)
@@ -698,9 +687,18 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 		if bd.Blobs == nil {
 			return fmt.Errorf("missing blobs data for block %d (no error reported)", blockNum)
 		}
-		if err := s.cache.SetBlobs(ctx, chainID, blockNum, version, bd.Blobs); err != nil {
-			return fmt.Errorf("failed to cache blobs for block %d: %w", blockNum, err)
-		}
+		blobs = bd.Blobs
+	}
+
+	// Cache all block data in a single pipelined operation with retry
+	cacheInput := outbound.BlockDataInput{
+		Block:    bd.Block,
+		Receipts: bd.Receipts,
+		Traces:   bd.Traces,
+		Blobs:    blobs,
+	}
+	if err := s.cache.SetBlockData(ctx, chainID, blockNum, version, cacheInput); err != nil {
+		return fmt.Errorf("failed to cache block data for block %d: %w", blockNum, err)
 	}
 
 	// All data cached successfully - now publish the block event

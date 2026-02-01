@@ -648,11 +648,15 @@ func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum i
 	snsDuration := time.Since(snsStart)
 	span.SetAttributes(attribute.Int64("sns.duration_ms", snsDuration.Milliseconds()))
 
-	// Mark block publish as complete in DB for crash recovery
+	// Mark block publish as complete in DB for crash recovery.
+	// Note: If this fails, the block remains marked as "unpublished" in the DB, and the
+	// backfill service will retry publishing it later. This can result in duplicate publishes
+	// to SNS/SQS. Downstream consumers MUST be idempotent to handle this correctly.
+	// We intentionally don't fail here because the publish already succeeded - failing would
+	// be worse as we'd lose the block entirely.
 	dbStart := time.Now()
 	if err := s.stateRepo.MarkPublishComplete(ctx, blockHash); err != nil {
 		s.logger.Warn("failed to mark block publish complete", "block", blockNum, "error", err)
-		// Note: We don't fail here as the publish already succeeded
 	}
 	dbDuration := time.Since(dbStart)
 	span.SetAttributes(attribute.Int64("db.mark_complete_duration_ms", dbDuration.Milliseconds()))

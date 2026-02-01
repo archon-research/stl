@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -475,43 +476,44 @@ func TestCompressDecompress_LargeData(t *testing.T) {
 // --- Test: isRetryableError ---
 
 func TestIsRetryableError_RetryableErrors(t *testing.T) {
-	retryableErrors := []error{
-		fmt.Errorf("connection refused"),
-		fmt.Errorf("dial tcp: connection reset by peer"),
-		fmt.Errorf("write: broken pipe"),
-		fmt.Errorf("read tcp: i/o timeout"),
-		fmt.Errorf("network is unreachable"),
-		fmt.Errorf("dial tcp: no route to host"),
-		fmt.Errorf("unexpected EOF"),
-		fmt.Errorf("connection pool timeout"),
-		fmt.Errorf("LOADING Redis is loading the dataset in memory"),
-		fmt.Errorf("READONLY You can't write against a read only replica"),
-		// Case variations
-		fmt.Errorf("CONNECTION REFUSED"),
-		fmt.Errorf("Connection Reset"),
+	// Any error except context.Canceled should be retryable
+	retryableErrors := []struct {
+		name string
+		err  error
+	}{
+		{"context deadline exceeded", context.DeadlineExceeded},
+		{"generic error", fmt.Errorf("some error")},
+		{"wrapped error", fmt.Errorf("failed: %w", errors.New("inner"))},
+		{"connection refused", fmt.Errorf("connection refused")},
+		{"timeout", fmt.Errorf("i/o timeout")},
 	}
 
-	for _, err := range retryableErrors {
-		if !isRetryableError(err) {
-			t.Errorf("expected %q to be retryable", err)
-		}
+	for _, tc := range retryableErrors {
+		t.Run(tc.name, func(t *testing.T) {
+			if !isRetryableError(tc.err) {
+				t.Errorf("expected %q to be retryable", tc.err)
+			}
+		})
 	}
 }
 
 func TestIsRetryableError_NonRetryableErrors(t *testing.T) {
-	nonRetryableErrors := []error{
-		nil,
-		fmt.Errorf("WRONGTYPE Operation against a key holding the wrong kind of value"),
-		fmt.Errorf("ERR invalid password"),
-		fmt.Errorf("ERR unknown command"),
-		fmt.Errorf("OOM command not allowed when used memory > 'maxmemory'"),
-		fmt.Errorf("some random error"),
+	// Only nil and context.Canceled should NOT be retryable
+	nonRetryableErrors := []struct {
+		name string
+		err  error
+	}{
+		{"nil", nil},
+		{"context canceled", context.Canceled},
+		{"wrapped context canceled", fmt.Errorf("operation failed: %w", context.Canceled)},
 	}
 
-	for _, err := range nonRetryableErrors {
-		if isRetryableError(err) {
-			t.Errorf("expected %q to NOT be retryable", err)
-		}
+	for _, tc := range nonRetryableErrors {
+		t.Run(tc.name, func(t *testing.T) {
+			if isRetryableError(tc.err) {
+				t.Errorf("expected %q to NOT be retryable", tc.err)
+			}
+		})
 	}
 }
 

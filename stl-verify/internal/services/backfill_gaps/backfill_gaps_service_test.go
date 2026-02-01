@@ -1133,6 +1133,13 @@ func (c *failingCache) SetBlobs(ctx context.Context, chainID int64, blockNumber 
 	return c.BlockCache.SetBlobs(ctx, chainID, blockNumber, version, data)
 }
 
+func (c *failingCache) SetBlockData(ctx context.Context, chainID int64, blockNumber int64, version int, data outbound.BlockDataInput) error {
+	if c.shouldFail(blockNumber, "any") || c.shouldFail(blockNumber, "block") {
+		return errors.New("simulated cache failure on SetBlockData")
+	}
+	return c.BlockCache.SetBlockData(ctx, chainID, blockNumber, version, data)
+}
+
 // failingEventSink wraps a real event sink but fails on demand.
 // When no failures are configured (failOnBlock=0), it acts as a no-op sink.
 type failingEventSink struct {
