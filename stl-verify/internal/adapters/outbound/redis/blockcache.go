@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -155,41 +156,76 @@ func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int6
 	)
 	defer span.End()
 
-	// Compress non-nil data (do this once, outside the retry loop)
+	// Compress non-nil data in parallel (do this once, outside the retry loop)
 	var blockCompressed, receiptsCompressed, tracesCompressed, blobsCompressed []byte
-	var err error
+	var compressErr error
+	var errMu sync.Mutex
+	var wg sync.WaitGroup
+
+	// Helper to set first error encountered
+	setErr := func(err error) {
+		errMu.Lock()
+		if compressErr == nil {
+			compressErr = err
+		}
+		errMu.Unlock()
+	}
 
 	if data.Block != nil {
-		blockCompressed, err = compress(data.Block)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to compress block")
-			return fmt.Errorf("failed to compress block: %w", err)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			compressed, err := compress(data.Block)
+			if err != nil {
+				setErr(fmt.Errorf("failed to compress block: %w", err))
+				return
+			}
+			blockCompressed = compressed
+		}()
 	}
 	if data.Receipts != nil {
-		receiptsCompressed, err = compress(data.Receipts)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to compress receipts")
-			return fmt.Errorf("failed to compress receipts: %w", err)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			compressed, err := compress(data.Receipts)
+			if err != nil {
+				setErr(fmt.Errorf("failed to compress receipts: %w", err))
+				return
+			}
+			receiptsCompressed = compressed
+		}()
 	}
 	if data.Traces != nil {
-		tracesCompressed, err = compress(data.Traces)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to compress traces")
-			return fmt.Errorf("failed to compress traces: %w", err)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			compressed, err := compress(data.Traces)
+			if err != nil {
+				setErr(fmt.Errorf("failed to compress traces: %w", err))
+				return
+			}
+			tracesCompressed = compressed
+		}()
 	}
 	if data.Blobs != nil {
-		blobsCompressed, err = compress(data.Blobs)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to compress blobs")
-			return fmt.Errorf("failed to compress blobs: %w", err)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			compressed, err := compress(data.Blobs)
+			if err != nil {
+				setErr(fmt.Errorf("failed to compress blobs: %w", err))
+				return
+			}
+			blobsCompressed = compressed
+		}()
+	}
+
+	wg.Wait()
+
+	if compressErr != nil {
+		span.RecordError(compressErr)
+		span.SetStatus(codes.Error, "failed to compress data")
+		return compressErr
 	}
 
 	totalCommands := 0
@@ -215,19 +251,19 @@ func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int6
 		Jitter:         true,
 	}
 
-	onRetry := func(attempt int, err error, backoff time.Duration) {
+	onRetry := func(attempt int, retryErr error, backoff time.Duration) {
 		c.logger.Warn("retrying Redis pipeline",
 			"attempt", attempt,
 			"block", blockNumber,
 			"backoff", backoff,
-			"error", err)
+			"error", retryErr)
 		span.AddEvent("retry_attempt", trace.WithAttributes(
 			attribute.Int("attempt", attempt),
-			attribute.String("error", err.Error()),
+			attribute.String("error", retryErr.Error()),
 		))
 	}
 
-	err = retry.DoVoid(ctx, cfg, isRetryableError, onRetry, func() error {
+	err := retry.DoVoid(ctx, cfg, isRetryableError, onRetry, func() error {
 		pipe := c.client.Pipeline()
 		if blockCompressed != nil {
 			pipe.Set(ctx, c.key(chainID, blockNumber, version, "block"), blockCompressed, c.ttl)
