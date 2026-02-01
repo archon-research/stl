@@ -177,126 +177,77 @@ func (s *BackfillService) run() {
 
 // findAndFillGaps queries the state repo for gaps and fills them.
 func (s *BackfillService) findAndFillGaps() error {
-	ctx, span, done := s.beginBackfillPass()
-	defer done()
+	start := time.Now()
 
-	minBlock, maxBlock, err := s.getBlockRange(ctx, span)
+	// Start span for the backfill pass
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(s.ctx, "backfill.findAndFillGaps",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer func() {
+		span.SetAttributes(attribute.Int64("backfill.duration_ms", time.Since(start).Milliseconds()))
+		span.End()
+	}()
+
+	// Get the highest block we've processed
+	maxBlock, err := s.stateRepo.GetMaxBlockNumber(ctx)
 	if err != nil {
-		return err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to get max block number")
+		return fmt.Errorf("failed to get max block number: %w", err)
 	}
 	if maxBlock == 0 {
 		s.logger.Debug("no blocks in state repo, nothing to backfill")
 		return nil
 	}
 
-	maxBlock = s.recoverFromStaleBlocksIfNeeded(ctx, span, maxBlock)
-
-	gaps, err := s.findGapsInRange(ctx, span, minBlock, maxBlock)
-	if err != nil {
-		return err
-	}
-	if len(gaps) == 0 {
-		return nil
-	}
-
-	s.recordGapsFound(span, gaps, minBlock, maxBlock)
-
-	s.fillAllGaps(ctx, gaps)
-
-	s.retryFailedPublishes(ctx)
-
-	s.updateWatermark(ctx)
-
-	return nil
-}
-
-// beginBackfillPass starts tracing for a backfill pass and returns a cleanup function.
-func (s *BackfillService) beginBackfillPass() (context.Context, trace.Span, func()) {
-	start := time.Now()
-	tracer := otel.Tracer(tracerName)
-	ctx, span := tracer.Start(s.ctx, "backfill.findAndFillGaps",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
-	done := func() {
-		span.SetAttributes(attribute.Int64("backfill.duration_ms", time.Since(start).Milliseconds()))
-		span.End()
-	}
-	return ctx, span, done
-}
-
-// getBlockRange returns the min and max block numbers from the state repository.
-func (s *BackfillService) getBlockRange(ctx context.Context, span trace.Span) (minBlock, maxBlock int64, err error) {
-	maxBlock, err = s.stateRepo.GetMaxBlockNumber(ctx)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to get max block number")
-		return 0, 0, fmt.Errorf("failed to get max block number: %w", err)
-	}
-	if maxBlock == 0 {
-		return 0, 0, nil
-	}
-
-	minBlock, err = s.stateRepo.GetMinBlockNumber(ctx)
+	// Get the lowest block we have
+	minBlock, err := s.stateRepo.GetMinBlockNumber(ctx)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to get min block number")
-		return 0, 0, fmt.Errorf("failed to get min block number: %w", err)
+		return fmt.Errorf("failed to get min block number: %w", err)
 	}
 
-	return minBlock, maxBlock, nil
-}
-
-// recoverFromStaleBlocksIfNeeded checks for reorgs that occurred during downtime and recovers.
-// Returns the updated maxBlock (which may be higher if we need to backfill to the new chain head).
-func (s *BackfillService) recoverFromStaleBlocksIfNeeded(ctx context.Context, span trace.Span, maxBlock int64) int64 {
+	// Verify our boundary blocks match the canonical chain on RPC.
+	// This detects reorgs that happened while the service was down.
 	staleBlocks, err := s.verifyBoundaryBlocks(ctx)
 	if err != nil {
 		span.RecordError(err)
 		s.logger.Warn("boundary verification failed", "error", err)
-		return maxBlock // continue anyway - we'll catch linkage issues per-block
+		// Continue anyway - we'll catch linkage issues per-block
+	} else if len(staleBlocks) > 0 {
+		// We have stale blocks - recover from the reorg before filling gaps
+		span.SetAttributes(attribute.Int("backfill.stale_blocks_detected", len(staleBlocks)))
+		s.logger.Warn("detected stale blocks from reorg during downtime",
+			"staleCount", len(staleBlocks),
+			"oldestStale", staleBlocks[len(staleBlocks)-1].Number,
+			"newestStale", staleBlocks[0].Number)
+
+		if err := s.recoverFromStaleChain(ctx, staleBlocks); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to recover from stale chain")
+			return fmt.Errorf("failed to recover from stale chain: %w", err)
+		}
+
+		// After orphaning stale blocks, we need to backfill up to the current chain head.
+		// Get maxBlock from RPC since our DB's maxBlock is now lower (orphaned blocks excluded).
+		rpcHead, err := s.client.GetCurrentBlockNumber(ctx)
+		if err != nil {
+			s.logger.Warn("failed to get current block from RPC, using DB maxBlock", "error", err)
+		} else if rpcHead > maxBlock {
+			maxBlock = rpcHead
+			s.logger.Info("using RPC head as maxBlock after reorg recovery",
+				"rpcHead", rpcHead)
+		}
 	}
 
-	if len(staleBlocks) == 0 {
-		return maxBlock
-	}
-
-	span.SetAttributes(attribute.Int("backfill.stale_blocks_detected", len(staleBlocks)))
-	s.logger.Warn("detected stale blocks from reorg during downtime",
-		"staleCount", len(staleBlocks),
-		"oldestStale", staleBlocks[len(staleBlocks)-1].Number,
-		"newestStale", staleBlocks[0].Number)
-
-	if err := s.recoverFromStaleChain(ctx, staleBlocks); err != nil {
-		span.RecordError(err)
-		s.logger.Error("failed to recover from stale chain", "error", err)
-		return maxBlock
-	}
-
-	// After recovery, check if RPC head is higher than our DB maxBlock
-	return s.getUpdatedMaxBlockFromRPC(ctx, maxBlock)
-}
-
-// getUpdatedMaxBlockFromRPC checks if the RPC chain head is higher than our current maxBlock.
-func (s *BackfillService) getUpdatedMaxBlockFromRPC(ctx context.Context, currentMax int64) int64 {
-	rpcHead, err := s.client.GetCurrentBlockNumber(ctx)
-	if err != nil {
-		s.logger.Warn("failed to get current block from RPC, using DB maxBlock", "error", err)
-		return currentMax
-	}
-	if rpcHead > currentMax {
-		s.logger.Info("using RPC head as maxBlock after reorg recovery", "rpcHead", rpcHead)
-		return rpcHead
-	}
-	return currentMax
-}
-
-// findGapsInRange queries for gaps between minBlock and maxBlock.
-func (s *BackfillService) findGapsInRange(ctx context.Context, span trace.Span, minBlock, maxBlock int64) ([]outbound.BlockRange, error) {
+	// Find gaps in our block sequence
 	gaps, err := s.stateRepo.FindGaps(ctx, minBlock, maxBlock)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to find block gaps")
-		return nil, fmt.Errorf("failed to find block gaps: %w", err)
+		return fmt.Errorf("failed to find block gaps: %w", err)
 	}
 
 	if len(gaps) == 0 {
@@ -306,13 +257,10 @@ func (s *BackfillService) findGapsInRange(ctx context.Context, span trace.Span, 
 			attribute.Int64("backfill.min_block", minBlock),
 			attribute.Int64("backfill.max_block", maxBlock),
 		)
+		return nil
 	}
 
-	return gaps, nil
-}
-
-// recordGapsFound logs and records telemetry for the gaps found.
-func (s *BackfillService) recordGapsFound(span trace.Span, gaps []outbound.BlockRange, minBlock, maxBlock int64) {
+	// Calculate total missing blocks
 	totalMissing := int64(0)
 	for _, gap := range gaps {
 		totalMissing += gap.To - gap.From + 1
@@ -330,35 +278,35 @@ func (s *BackfillService) recordGapsFound(span trace.Span, gaps []outbound.Block
 		"totalMissing", totalMissing,
 		"minBlock", minBlock,
 		"maxBlock", maxBlock)
-}
 
-// fillAllGaps processes each gap, continuing even if individual gaps fail.
-func (s *BackfillService) fillAllGaps(ctx context.Context, gaps []outbound.BlockRange) {
+	// Process each gap
 	for _, gap := range gaps {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		default:
 		}
 
 		if err := s.fillGapWithTracing(ctx, gap); err != nil {
 			s.logger.Warn("failed to fill gap", "from", gap.From, "to", gap.To, "error", err)
+			// Continue with other gaps
 		}
 	}
-}
 
-// retryFailedPublishes retries blocks that were saved but failed to publish.
-func (s *BackfillService) retryFailedPublishes(ctx context.Context) {
+	// Retry blocks that were saved but not fully published (cache/publish failed).
+	// This ensures eventual consistency for blocks that had transient failures.
 	if err := s.retryIncompletePublishes(ctx); err != nil {
 		s.logger.Warn("failed to retry incomplete publishes", "error", err)
+		// Continue - this will be retried on the next pass
 	}
-}
 
-// updateWatermark advances the backfill watermark to the highest contiguous block.
-func (s *BackfillService) updateWatermark(ctx context.Context) {
+	// After filling gaps, advance the watermark to the highest contiguous block.
+	// We find the new contiguous range by checking if there are still gaps.
 	if err := s.advanceWatermark(ctx); err != nil {
 		s.logger.Warn("failed to advance watermark", "error", err)
 	}
+
+	return nil
 }
 
 // fillGap fills a single gap range using batched RPC calls.
