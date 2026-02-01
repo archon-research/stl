@@ -302,10 +302,9 @@ func TestConcurrentLiveAndBackfill(t *testing.T) {
 	}
 
 	liveConfig := live_data.LiveConfig{
-		ChainID:              1,
-		FinalityBlockCount:   10,
-		MaxUnfinalizedBlocks: 50,
-		Logger:               slog.Default(),
+		ChainID:            1,
+		FinalityBlockCount: 10,
+		Logger:             slog.Default(),
 	}
 
 	backfillConfig := backfill_gaps.BackfillConfig{

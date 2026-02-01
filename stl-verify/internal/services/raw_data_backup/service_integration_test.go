@@ -467,21 +467,14 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 	tracesData := json.RawMessage(`[{"action":{"callType":"call","from":"0x1","to":"0x2"}}]`)
 	blobsData := json.RawMessage(`[{"commitment":"0xbeef"}]`)
 
-	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, version, blockData)
+	err := infra.Cache.SetBlockData(ctx, chainID, blockNumber, version, outbound.BlockDataInput{
+		Block:    blockData,
+		Receipts: receiptsData,
+		Traces:   tracesData,
+		Blobs:    blobsData,
+	})
 	if err != nil {
-		t.Fatalf("failed to set block in cache: %v", err)
-	}
-	err = infra.Cache.SetReceipts(ctx, chainID, blockNumber, version, receiptsData)
-	if err != nil {
-		t.Fatalf("failed to set receipts in cache: %v", err)
-	}
-	err = infra.Cache.SetTraces(ctx, chainID, blockNumber, version, tracesData)
-	if err != nil {
-		t.Fatalf("failed to set traces in cache: %v", err)
-	}
-	err = infra.Cache.SetBlobs(ctx, chainID, blockNumber, version, blobsData)
-	if err != nil {
-		t.Fatalf("failed to set blobs in cache: %v", err)
+		t.Fatalf("failed to set block data in cache: %v", err)
 	}
 
 	// Create and start the backup service
@@ -580,7 +573,7 @@ func TestIntegration_MultipleBlocksProcessedConcurrently(t *testing.T) {
 	for i := 0; i < numBlocks; i++ {
 		blockNumber := int64(100 + i)
 		blockData := json.RawMessage(fmt.Sprintf(`{"number":"0x%x","hash":"0x%064x"}`, blockNumber, blockNumber))
-		err := infra.Cache.SetBlock(ctx, chainID, blockNumber, 0, blockData)
+		err := infra.Cache.SetBlockData(ctx, chainID, blockNumber, 0, outbound.BlockDataInput{Block: blockData})
 		if err != nil {
 			t.Fatalf("failed to set block %d in cache: %v", blockNumber, err)
 		}
@@ -654,7 +647,7 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 
 	// Set up block data
 	blockData := json.RawMessage(`{"number":"0x1f4","hash":"0xfirst"}`)
-	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, 0, blockData)
+	err := infra.Cache.SetBlockData(ctx, chainID, blockNumber, 0, outbound.BlockDataInput{Block: blockData})
 	if err != nil {
 		t.Fatalf("failed to set block in cache: %v", err)
 	}
@@ -696,7 +689,7 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 
 	// Update cache with different data (simulating reprocessing scenario)
 	blockData2 := json.RawMessage(`{"number":"0x1f4","hash":"0xsecond"}`)
-	_ = infra.Cache.SetBlock(ctx, chainID, blockNumber, 0, blockData2)
+	_ = infra.Cache.SetBlockData(ctx, chainID, blockNumber, 0, outbound.BlockDataInput{Block: blockData2})
 
 	// Publish again - the service should skip due to idempotency
 	publishBlockEvent(t, ctx, infra, event)
@@ -751,14 +744,14 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 
 	// Set up version 0
 	blockData0 := json.RawMessage(`{"number":"0x5dc","version":0}`)
-	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, 0, blockData0)
+	err := infra.Cache.SetBlockData(ctx, chainID, blockNumber, 0, outbound.BlockDataInput{Block: blockData0})
 	if err != nil {
 		t.Fatalf("failed to set block v0 in cache: %v", err)
 	}
 
 	// Set up version 1 (reorg)
 	blockData1 := json.RawMessage(`{"number":"0x5dc","version":1}`)
-	err = infra.Cache.SetBlock(ctx, chainID, blockNumber, 1, blockData1)
+	err = infra.Cache.SetBlockData(ctx, chainID, blockNumber, 1, outbound.BlockDataInput{Block: blockData1})
 	if err != nil {
 		t.Fatalf("failed to set block v1 in cache: %v", err)
 	}
@@ -876,7 +869,7 @@ func TestIntegration_LargeBlockData(t *testing.T) {
 	}
 	blockData := json.RawMessage(fmt.Sprintf(`{"number":"0x7d1","data":"%s"}`, string(largeData)))
 
-	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, 0, blockData)
+	err := infra.Cache.SetBlockData(ctx, chainID, blockNumber, 0, outbound.BlockDataInput{Block: blockData})
 	if err != nil {
 		t.Fatalf("failed to set large block in cache: %v", err)
 	}
@@ -941,7 +934,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		blockNumber := int64(3001 + i)
 		blockData := json.RawMessage(fmt.Sprintf(`{"number":"0x%x"}`, blockNumber))
-		_ = infra.Cache.SetBlock(ctx, chainID, blockNumber, 0, blockData)
+		_ = infra.Cache.SetBlockData(ctx, chainID, blockNumber, 0, outbound.BlockDataInput{Block: blockData})
 	}
 
 	svc, err := NewService(Config{
@@ -1017,7 +1010,7 @@ func TestIntegration_RaceConditionIdempotency(t *testing.T) {
 
 	// Set up block data in cache
 	blockData := json.RawMessage(`{"number":"0x1e61","hash":"0xrace"}`)
-	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, version, blockData)
+	err := infra.Cache.SetBlockData(ctx, chainID, blockNumber, version, outbound.BlockDataInput{Block: blockData})
 	if err != nil {
 		t.Fatalf("failed to set block in cache: %v", err)
 	}
@@ -1123,7 +1116,7 @@ func TestIntegration_PartialWriteFailure(t *testing.T) {
 
 	// Set up block data in cache (only block, no receipts/traces/blobs)
 	blockData := json.RawMessage(`{"number":"0x22b8","hash":"0xpartial"}`)
-	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, version, blockData)
+	err := infra.Cache.SetBlockData(ctx, chainID, blockNumber, version, outbound.BlockDataInput{Block: blockData})
 	if err != nil {
 		t.Fatalf("failed to set block in cache: %v", err)
 	}
@@ -1263,7 +1256,7 @@ func TestIntegration_ChainIDMismatch(t *testing.T) {
 	// Set up block data for the EVENT's chainID (not service's)
 	// The cache key uses chainID, so we need to set it for the correct chain
 	blockData := json.RawMessage(`{"number":"0x15b3","hash":"0xpolygon"}`)
-	err := infra.Cache.SetBlock(ctx, eventChainID, blockNumber, version, blockData)
+	err := infra.Cache.SetBlockData(ctx, eventChainID, blockNumber, version, outbound.BlockDataInput{Block: blockData})
 	if err != nil {
 		t.Fatalf("failed to set block in cache: %v", err)
 	}
@@ -1361,7 +1354,7 @@ func TestIntegration_GzipContentIntegrity(t *testing.T) {
 	}
 	blockData, _ := json.Marshal(complexBlock)
 
-	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, version, blockData)
+	err := infra.Cache.SetBlockData(ctx, chainID, blockNumber, version, outbound.BlockDataInput{Block: blockData})
 	if err != nil {
 		t.Fatalf("failed to set block in cache: %v", err)
 	}
@@ -1441,7 +1434,7 @@ func TestIntegration_ChainExpectationsMismatch(t *testing.T) {
 
 	// Set up ONLY block data - missing receipts and traces that chain 1 expects
 	blockData := json.RawMessage(`{"number":"0x115c","hash":"0xexpectfail"}`)
-	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, version, blockData)
+	err := infra.Cache.SetBlockData(ctx, chainID, blockNumber, version, outbound.BlockDataInput{Block: blockData})
 	if err != nil {
 		t.Fatalf("failed to set block in cache: %v", err)
 	}
@@ -1534,19 +1527,15 @@ func TestIntegration_ChainExpectationsMetSuccessfully(t *testing.T) {
 	receiptsData := json.RawMessage(`[{"status":"0x1"}]`)
 	tracesData := json.RawMessage(`[{"action":{"callType":"call"}}]`)
 
-	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, version, blockData)
+	err := infra.Cache.SetBlockData(ctx, chainID, blockNumber, version, outbound.BlockDataInput{
+		Block:    blockData,
+		Receipts: receiptsData,
+		Traces:   tracesData,
+		// Note: NOT setting blobs since ExpectBlobs=false for chain 1
+	})
 	if err != nil {
-		t.Fatalf("failed to set block in cache: %v", err)
+		t.Fatalf("failed to set block data in cache: %v", err)
 	}
-	err = infra.Cache.SetReceipts(ctx, chainID, blockNumber, version, receiptsData)
-	if err != nil {
-		t.Fatalf("failed to set receipts in cache: %v", err)
-	}
-	err = infra.Cache.SetTraces(ctx, chainID, blockNumber, version, tracesData)
-	if err != nil {
-		t.Fatalf("failed to set traces in cache: %v", err)
-	}
-	// Note: NOT setting blobs since ExpectBlobs=false for chain 1
 
 	// Create service with chain expectations
 	svc, err := NewService(Config{
@@ -1630,7 +1619,7 @@ func TestIntegration_UnknownChainNoExpectations(t *testing.T) {
 
 	// Set up ONLY block data
 	blockData := json.RawMessage(`{"number":"0x8ae","hash":"0xunknownchain"}`)
-	err := infra.Cache.SetBlock(ctx, chainID, blockNumber, version, blockData)
+	err := infra.Cache.SetBlockData(ctx, chainID, blockNumber, version, outbound.BlockDataInput{Block: blockData})
 	if err != nil {
 		t.Fatalf("failed to set block in cache: %v", err)
 	}

@@ -37,3 +37,6 @@ override.tf.json
 # Git worktrees
 .worktrees/
 .env.local
+
+# Claude
+settings.local.json

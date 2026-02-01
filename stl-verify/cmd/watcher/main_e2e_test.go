@@ -309,11 +309,10 @@ func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
 
 	// Create live service
 	config := live_data.LiveConfig{
-		ChainID:              1,
-		FinalityBlockCount:   2, // Use small finality for faster tests
-		MaxUnfinalizedBlocks: 10,
-		EnableBlobs:          false,
-		Logger:               slog.Default(),
+		ChainID:            1,
+		FinalityBlockCount: 2, // Use small finality for faster tests
+		EnableBlobs:        false,
+		Logger:             slog.Default(),
 	}
 
 	liveService, err := live_data.NewLiveService(
@@ -403,11 +402,10 @@ func TestEndToEnd_MultipleBlocksInSequence(t *testing.T) {
 	mockClient := newMockBlockchainClient()
 
 	config := live_data.LiveConfig{
-		ChainID:              1,
-		FinalityBlockCount:   3,
-		MaxUnfinalizedBlocks: 10,
-		EnableBlobs:          false,
-		Logger:               slog.Default(),
+		ChainID:            1,
+		FinalityBlockCount: 3,
+		EnableBlobs:        false,
+		Logger:             slog.Default(),
 	}
 
 	liveService, err := live_data.NewLiveService(

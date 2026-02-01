@@ -13,9 +13,11 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -24,6 +26,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -44,25 +47,34 @@ type Config struct {
 	TTL time.Duration
 	// KeyPrefix is prepended to all cache keys
 	KeyPrefix string
+	// MaxRetries is the maximum number of retry attempts for transient failures (default: 3)
+	MaxRetries int
+	// RetryBackoff is the initial backoff duration between retries (default: 100ms)
+	// Subsequent retries use exponential backoff: backoff * 2^attempt
+	RetryBackoff time.Duration
 }
 
 // ConfigDefaults returns sensible defaults for Redis cache configuration.
 func ConfigDefaults() Config {
 	return Config{
-		Addr:      "localhost:6379",
-		Password:  "",
-		DB:        0,
-		TTL:       24 * time.Hour,
-		KeyPrefix: "stl",
+		Addr:         "localhost:6379",
+		Password:     "",
+		DB:           0,
+		TTL:          24 * time.Hour,
+		KeyPrefix:    "stl",
+		MaxRetries:   3,
+		RetryBackoff: 100 * time.Millisecond,
 	}
 }
 
 // BlockCache is a Redis implementation of the outbound.BlockCache port.
 type BlockCache struct {
-	client    *redis.Client
-	ttl       time.Duration
-	keyPrefix string
-	logger    *slog.Logger
+	client       *redis.Client
+	ttl          time.Duration
+	keyPrefix    string
+	maxRetries   int
+	retryBackoff time.Duration
+	logger       *slog.Logger
 }
 
 // NewBlockCache creates a new Redis block cache.
@@ -82,12 +94,37 @@ func NewBlockCache(cfg Config, logger *slog.Logger) (*BlockCache, error) {
 	}
 	logger = logger.With("component", "redis-cache")
 
+	// Apply defaults for retry config
+	maxRetries := cfg.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+	retryBackoff := cfg.RetryBackoff
+	if retryBackoff <= 0 {
+		retryBackoff = 100 * time.Millisecond
+	}
+
 	return &BlockCache{
-		client:    client,
-		ttl:       cfg.TTL,
-		keyPrefix: cfg.KeyPrefix,
-		logger:    logger,
+		client:       client,
+		ttl:          cfg.TTL,
+		keyPrefix:    cfg.KeyPrefix,
+		maxRetries:   maxRetries,
+		retryBackoff: retryBackoff,
+		logger:       logger,
 	}, nil
+}
+
+// isRetryableError checks if an error should trigger a retry.
+// Retries on any error except context cancellation (shutdown signal).
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Don't retry on context cancellation (shutdown)
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	return true
 }
 
 // Ping checks the Redis connection.
@@ -104,6 +141,7 @@ func (c *BlockCache) Close() error {
 // This is more efficient than calling SetBlock, SetReceipts, SetTraces, SetBlobs separately
 // as it batches all commands into a single network round-trip.
 // Data is compressed using gzip before storing.
+// Transient failures are automatically retried.
 func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int64, version int, data outbound.BlockDataInput) error {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "redis.SetBlockData",
@@ -118,54 +156,137 @@ func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int6
 	)
 	defer span.End()
 
-	// Compress all data
-	blockCompressed, err := compress(data.Block)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to compress block")
-		return fmt.Errorf("failed to compress block: %w", err)
-	}
-	receiptsCompressed, err := compress(data.Receipts)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to compress receipts")
-		return fmt.Errorf("failed to compress receipts: %w", err)
-	}
-	tracesCompressed, err := compress(data.Traces)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to compress traces")
-		return fmt.Errorf("failed to compress traces: %w", err)
-	}
+	// Compress non-nil data in parallel (do this once, outside the retry loop)
+	var blockCompressed, receiptsCompressed, tracesCompressed, blobsCompressed []byte
+	var compressErr error
+	var errMu sync.Mutex
+	var wg sync.WaitGroup
 
-	pipe := c.client.Pipeline()
-
-	// Queue all SET commands with compressed data
-	pipe.Set(ctx, c.key(chainID, blockNumber, version, "block"), blockCompressed, c.ttl)
-	pipe.Set(ctx, c.key(chainID, blockNumber, version, "receipts"), receiptsCompressed, c.ttl)
-	pipe.Set(ctx, c.key(chainID, blockNumber, version, "traces"), tracesCompressed, c.ttl)
-
-	totalCommands := 3
-	if data.Blobs != nil {
-		blobsCompressed, err := compress(data.Blobs)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to compress blobs")
-			return fmt.Errorf("failed to compress blobs: %w", err)
+	// Helper to set first error encountered
+	setErr := func(err error) {
+		errMu.Lock()
+		if compressErr == nil {
+			compressErr = err
 		}
-		pipe.Set(ctx, c.key(chainID, blockNumber, version, "blobs"), blobsCompressed, c.ttl)
-		totalCommands = 4
+		errMu.Unlock()
 	}
 
+	if data.Block != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			compressed, err := compress(data.Block)
+			if err != nil {
+				setErr(fmt.Errorf("failed to compress block: %w", err))
+				return
+			}
+			blockCompressed = compressed
+		}()
+	}
+	if data.Receipts != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			compressed, err := compress(data.Receipts)
+			if err != nil {
+				setErr(fmt.Errorf("failed to compress receipts: %w", err))
+				return
+			}
+			receiptsCompressed = compressed
+		}()
+	}
+	if data.Traces != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			compressed, err := compress(data.Traces)
+			if err != nil {
+				setErr(fmt.Errorf("failed to compress traces: %w", err))
+				return
+			}
+			tracesCompressed = compressed
+		}()
+	}
+	if data.Blobs != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			compressed, err := compress(data.Blobs)
+			if err != nil {
+				setErr(fmt.Errorf("failed to compress blobs: %w", err))
+				return
+			}
+			blobsCompressed = compressed
+		}()
+	}
+
+	wg.Wait()
+
+	if compressErr != nil {
+		span.RecordError(compressErr)
+		span.SetStatus(codes.Error, "failed to compress data")
+		return compressErr
+	}
+
+	totalCommands := 0
+	if blockCompressed != nil {
+		totalCommands++
+	}
+	if receiptsCompressed != nil {
+		totalCommands++
+	}
+	if tracesCompressed != nil {
+		totalCommands++
+	}
+	if blobsCompressed != nil {
+		totalCommands++
+	}
 	span.SetAttributes(attribute.Int("redis.pipeline_commands", totalCommands))
 
-	// Execute all commands in one round-trip
-	_, err = pipe.Exec(ctx)
+	cfg := retry.Config{
+		MaxRetries:     c.maxRetries,
+		InitialBackoff: c.retryBackoff,
+		MaxBackoff:     c.retryBackoff * 8, // Cap at 8x initial
+		BackoffFactor:  2.0,
+		Jitter:         true,
+	}
+
+	onRetry := func(attempt int, retryErr error, backoff time.Duration) {
+		c.logger.Warn("retrying Redis pipeline",
+			"attempt", attempt,
+			"block", blockNumber,
+			"backoff", backoff,
+			"error", retryErr)
+		span.AddEvent("retry_attempt", trace.WithAttributes(
+			attribute.Int("attempt", attempt),
+			attribute.String("error", retryErr.Error()),
+		))
+	}
+
+	err := retry.DoVoid(ctx, cfg, isRetryableError, onRetry, func() error {
+		pipe := c.client.Pipeline()
+		if blockCompressed != nil {
+			pipe.Set(ctx, c.key(chainID, blockNumber, version, "block"), blockCompressed, c.ttl)
+		}
+		if receiptsCompressed != nil {
+			pipe.Set(ctx, c.key(chainID, blockNumber, version, "receipts"), receiptsCompressed, c.ttl)
+		}
+		if tracesCompressed != nil {
+			pipe.Set(ctx, c.key(chainID, blockNumber, version, "traces"), tracesCompressed, c.ttl)
+		}
+		if blobsCompressed != nil {
+			pipe.Set(ctx, c.key(chainID, blockNumber, version, "blobs"), blobsCompressed, c.ttl)
+		}
+		_, err := pipe.Exec(ctx)
+		return err
+	})
+
 	if err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to execute pipeline")
-		return fmt.Errorf("failed to pipeline cache block data: %w", err)
+		span.SetStatus(codes.Error, "failed to cache block data")
+		return fmt.Errorf("failed to cache block data: %w", err)
 	}
+
 	return nil
 }
 
@@ -214,119 +335,84 @@ func decompress(data []byte) ([]byte, error) {
 }
 
 // SetBlock caches block data (compressed).
+// Transient failures are automatically retried.
 func (c *BlockCache) SetBlock(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
+	return c.setWithRetry(ctx, chainID, blockNumber, version, "block", data)
+}
+
+// setWithRetry is a helper that handles compression, retry logic, and tracing for individual set operations.
+func (c *BlockCache) setWithRetry(ctx context.Context, chainID, blockNumber int64, version int, dataType string, data json.RawMessage) error {
 	tracer := otel.Tracer(tracerName)
-	key := c.key(chainID, blockNumber, version, "block")
-	ctx, span := tracer.Start(ctx, "redis.SetBlock",
+	key := c.key(chainID, blockNumber, version, dataType)
+	ctx, span := tracer.Start(ctx, "redis.Set",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
 			attribute.String("db.system", "redis"),
 			attribute.String("db.operation", "SET"),
 			attribute.String("redis.key", key),
+			attribute.String("redis.data_type", dataType),
 			attribute.Int64("block.number", blockNumber),
 		),
 	)
 	defer span.End()
 
+	// Compress data outside retry loop
 	compressed, err := compress(data)
 	if err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to compress block")
-		return fmt.Errorf("failed to compress block: %w", err)
+		span.SetStatus(codes.Error, fmt.Sprintf("failed to compress %s", dataType))
+		return fmt.Errorf("failed to compress %s: %w", dataType, err)
 	}
-	if err := c.client.Set(ctx, key, compressed, c.ttl).Err(); err != nil {
+
+	cfg := retry.Config{
+		MaxRetries:     c.maxRetries,
+		InitialBackoff: c.retryBackoff,
+		MaxBackoff:     c.retryBackoff * 8,
+		BackoffFactor:  2.0,
+		Jitter:         true,
+	}
+
+	onRetry := func(attempt int, err error, backoff time.Duration) {
+		c.logger.Warn("retrying Redis SET",
+			"dataType", dataType,
+			"attempt", attempt,
+			"block", blockNumber,
+			"backoff", backoff,
+			"error", err)
+		span.AddEvent("retry_attempt", trace.WithAttributes(
+			attribute.Int("attempt", attempt),
+			attribute.String("error", err.Error()),
+		))
+	}
+
+	err = retry.DoVoid(ctx, cfg, isRetryableError, onRetry, func() error {
+		return c.client.Set(ctx, key, compressed, c.ttl).Err()
+	})
+
+	if err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to cache block")
-		return fmt.Errorf("failed to cache block: %w", err)
+		span.SetStatus(codes.Error, fmt.Sprintf("failed to cache %s", dataType))
+		return fmt.Errorf("failed to cache %s: %w", dataType, err)
 	}
 	return nil
 }
 
 // SetReceipts caches receipt data (compressed).
+// Transient failures are automatically retried.
 func (c *BlockCache) SetReceipts(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
-	tracer := otel.Tracer(tracerName)
-	key := c.key(chainID, blockNumber, version, "receipts")
-	ctx, span := tracer.Start(ctx, "redis.SetReceipts",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.String("db.system", "redis"),
-			attribute.String("db.operation", "SET"),
-			attribute.String("redis.key", key),
-			attribute.Int64("block.number", blockNumber),
-		),
-	)
-	defer span.End()
-
-	compressed, err := compress(data)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to compress receipts")
-		return fmt.Errorf("failed to compress receipts: %w", err)
-	}
-	if err := c.client.Set(ctx, key, compressed, c.ttl).Err(); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to cache receipts")
-		return fmt.Errorf("failed to cache receipts: %w", err)
-	}
-	return nil
+	return c.setWithRetry(ctx, chainID, blockNumber, version, "receipts", data)
 }
 
 // SetTraces caches trace data (compressed).
+// Transient failures are automatically retried.
 func (c *BlockCache) SetTraces(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
-	tracer := otel.Tracer(tracerName)
-	key := c.key(chainID, blockNumber, version, "traces")
-	ctx, span := tracer.Start(ctx, "redis.SetTraces",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.String("db.system", "redis"),
-			attribute.String("db.operation", "SET"),
-			attribute.String("redis.key", key),
-			attribute.Int64("block.number", blockNumber),
-		),
-	)
-	defer span.End()
-
-	compressed, err := compress(data)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to compress traces")
-		return fmt.Errorf("failed to compress traces: %w", err)
-	}
-	if err := c.client.Set(ctx, key, compressed, c.ttl).Err(); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to cache traces")
-		return fmt.Errorf("failed to cache traces: %w", err)
-	}
-	return nil
+	return c.setWithRetry(ctx, chainID, blockNumber, version, "traces", data)
 }
 
 // SetBlobs caches blob data (compressed).
+// Transient failures are automatically retried.
 func (c *BlockCache) SetBlobs(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
-	tracer := otel.Tracer(tracerName)
-	key := c.key(chainID, blockNumber, version, "blobs")
-	ctx, span := tracer.Start(ctx, "redis.SetBlobs",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.String("db.system", "redis"),
-			attribute.String("db.operation", "SET"),
-			attribute.String("redis.key", key),
-			attribute.Int64("block.number", blockNumber),
-		),
-	)
-	defer span.End()
-
-	compressed, err := compress(data)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to compress blobs")
-		return fmt.Errorf("failed to compress blobs: %w", err)
-	}
-	if err := c.client.Set(ctx, key, compressed, c.ttl).Err(); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to cache blobs")
-		return fmt.Errorf("failed to cache blobs: %w", err)
-	}
-	return nil
+	return c.setWithRetry(ctx, chainID, blockNumber, version, "blobs", data)
 }
 
 // GetBlock retrieves cached block data (decompressed).
