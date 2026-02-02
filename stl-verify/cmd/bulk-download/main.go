@@ -33,6 +33,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/aws/aws-sdk-go-v2/config"
 )
@@ -46,9 +47,6 @@ const (
 	DefaultUploadWorkers       = 64  // S3 uploads are fast, but need enough workers
 	DefaultTimeout             = 120 * time.Second
 	DefaultMaxRetries          = 3
-
-	// BlockRangeSize is the number of blocks per S3 partition.
-	BlockRangeSize = 1000
 )
 
 // Config holds the CLI configuration.
@@ -64,8 +62,6 @@ type Config struct {
 	UploadWorkers       int
 	BlockBatchSize      int
 	TraceBatchSize      int
-
-	DryRun bool
 }
 
 // Stats tracks download progress and timing metrics.
@@ -164,7 +160,7 @@ func (pc *PartitionCache) ensurePartitionLoaded(ctx context.Context, partition s
 }
 
 func (pc *PartitionCache) HasBlockAndReceipts(ctx context.Context, blockNum int64) (bool, error) {
-	partition := getPartition(blockNum)
+	partition := partition.GetPartition(blockNum)
 	if err := pc.ensurePartitionLoaded(ctx, partition); err != nil {
 		return false, err
 	}
@@ -188,7 +184,7 @@ func (pc *PartitionCache) HasBlockAndReceipts(ctx context.Context, blockNum int6
 // HasAllData checks if block, receipts, AND traces all exist for a block.
 // Use this to determine if a block can be completely skipped.
 func (pc *PartitionCache) HasAllData(ctx context.Context, blockNum int64) (bool, error) {
-	partition := getPartition(blockNum)
+	partition := partition.GetPartition(blockNum)
 	if err := pc.ensurePartitionLoaded(ctx, partition); err != nil {
 		return false, err
 	}
@@ -212,7 +208,7 @@ func (pc *PartitionCache) HasAllData(ctx context.Context, blockNum int64) (bool,
 }
 
 func (pc *PartitionCache) HasTraces(ctx context.Context, blockNum int64) (bool, error) {
-	partition := getPartition(blockNum)
+	partition := partition.GetPartition(blockNum)
 	if err := pc.ensurePartitionLoaded(ctx, partition); err != nil {
 		return false, err
 	}
@@ -232,7 +228,7 @@ func (pc *PartitionCache) HasTraces(ctx context.Context, blockNum int64) (bool, 
 }
 
 func (pc *PartitionCache) MarkWritten(blockNum int64, dataType string) {
-	partition := getPartition(blockNum)
+	partition := partition.GetPartition(blockNum)
 	key := fmt.Sprintf("%s/%d_1_%s.json.gz", partition, blockNum, dataType)
 
 	pc.mu.Lock()
@@ -296,7 +292,6 @@ func parseFlags() Config {
 	flag.IntVar(&cfg.UploadWorkers, "upload-workers", DefaultUploadWorkers, "S3 upload worker count")
 	flag.IntVar(&cfg.BlockBatchSize, "block-batch-size", DefaultBlockBatchSize, "Blocks per batch for block+receipt fetching")
 	flag.IntVar(&cfg.TraceBatchSize, "trace-batch-size", DefaultTraceBatchSize, "Blocks per batch for trace fetching")
-	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Fetch data from RPC but skip S3 uploads (for performance testing)")
 	flag.Parse()
 
 	return cfg
@@ -406,10 +401,6 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		"bucket", cfg.Bucket,
 	)
 
-	if cfg.DryRun {
-		logger.Info("dry run mode - S3 uploads will be skipped")
-	}
-
 	stats := &Stats{startTime: time.Now()}
 
 	// Start progress reporter
@@ -431,7 +422,7 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		uploadWg.Add(1)
 		go func(workerID int) {
 			defer uploadWg.Done()
-			uploadWorker(ctx, workerID, s3Writer, partitionCache, uploadCh, stats, cfg.DryRun, logger)
+			uploadWorker(ctx, workerID, s3Writer, partitionCache, uploadCh, stats, logger)
 		}(i)
 	}
 
@@ -642,7 +633,7 @@ func blockReceiptWorker(
 				continue
 			}
 
-			partition := getPartition(r.BlockNumber)
+			partition := partition.GetPartition(r.BlockNumber)
 
 			// Queue block upload
 			if r.Block != nil {
@@ -803,7 +794,7 @@ func traceWorker(
 				continue
 			}
 
-			partition := getPartition(blockNum)
+			partition := partition.GetPartition(blockNum)
 			select {
 			case uploadCh <- UploadJob{
 				Bucket:   bucket,
@@ -876,13 +867,6 @@ func uploadWorker(
 		}
 		stats.uploadsCompleted.Add(1)
 	}
-}
-
-func getPartition(blockNumber int64) string {
-	partitionIndex := blockNumber / BlockRangeSize
-	start := partitionIndex * BlockRangeSize
-	end := start + BlockRangeSize - 1
-	return fmt.Sprintf("%d-%d", start, end)
 }
 
 func reportProgress(ctx context.Context, stats *Stats, totalBlocks int64, partitionCache *PartitionCache, logger *slog.Logger) {
