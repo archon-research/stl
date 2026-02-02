@@ -561,52 +561,45 @@ func blockReceiptWorker(
 		// Check what exists and build fetch list
 		blocksToFetch := make([]int64, 0, batchEnd-batchStart+1)
 
-		// In dry-run mode, skip S3 checks and fetch all blocks
-		if cfg.DryRun {
-			for blockNum := batchStart; blockNum <= batchEnd; blockNum++ {
+		s3CheckStart := time.Now()
+		for blockNum := batchStart; blockNum <= batchEnd; blockNum++ {
+			// Check if ALL data (block, receipts, traces) exists
+			hasAllData, err := partitionCache.HasAllData(ctx, blockNum)
+			if err != nil {
+				logger.Warn("failed to check S3", "block", blockNum, "error", err)
 				blocksToFetch = append(blocksToFetch, blockNum)
+				continue
 			}
-		} else {
-			s3CheckStart := time.Now()
-			for blockNum := batchStart; blockNum <= batchEnd; blockNum++ {
-				// Check if ALL data (block, receipts, traces) exists
-				hasAllData, err := partitionCache.HasAllData(ctx, blockNum)
+
+			if hasAllData {
+				// All 3 files exist - completely skip this block
+				stats.blocksSkipped.Add(1)
+				stats.tracesSkipped.Add(1)
+			} else {
+				// Check if just block+receipts exist (need traces only)
+				hasBlockAndReceipts, err := partitionCache.HasBlockAndReceipts(ctx, blockNum)
 				if err != nil {
 					logger.Warn("failed to check S3", "block", blockNum, "error", err)
 					blocksToFetch = append(blocksToFetch, blockNum)
 					continue
 				}
 
-				if hasAllData {
-					// All 3 files exist - completely skip this block
+				if hasBlockAndReceipts {
+					// Block+receipts exist but traces missing - signal for trace fetch only
 					stats.blocksSkipped.Add(1)
-					stats.tracesSkipped.Add(1)
+					select {
+					case traceCollectorCh <- blockNum:
+					case <-ctx.Done():
+						return
+					}
 				} else {
-					// Check if just block+receipts exist (need traces only)
-					hasBlockAndReceipts, err := partitionCache.HasBlockAndReceipts(ctx, blockNum)
-					if err != nil {
-						logger.Warn("failed to check S3", "block", blockNum, "error", err)
-						blocksToFetch = append(blocksToFetch, blockNum)
-						continue
-					}
-
-					if hasBlockAndReceipts {
-						// Block+receipts exist but traces missing - signal for trace fetch only
-						stats.blocksSkipped.Add(1)
-						select {
-						case traceCollectorCh <- blockNum:
-						case <-ctx.Done():
-							return
-						}
-					} else {
-						// Need to fetch block+receipts (and traces)
-						blocksToFetch = append(blocksToFetch, blockNum)
-					}
+					// Need to fetch block+receipts (and traces)
+					blocksToFetch = append(blocksToFetch, blockNum)
 				}
 			}
-			stats.s3CheckTime.Add(time.Since(s3CheckStart).Nanoseconds())
-			stats.s3CheckCalls.Add(1)
 		}
+		stats.s3CheckTime.Add(time.Since(s3CheckStart).Nanoseconds())
+		stats.s3CheckCalls.Add(1)
 
 		if len(blocksToFetch) == 0 {
 			continue
@@ -700,25 +693,19 @@ func traceCollector(
 		if len(batch) == 0 {
 			return
 		}
-		// In dry-run mode, process all blocks without S3 checks
-		var toProcess []int64
-		if cfg.DryRun {
-			toProcess = batch
-		} else {
-			// Filter out blocks that already have traces
-			toProcess = make([]int64, 0, len(batch))
-			for _, blockNum := range batch {
-				hasTraces, err := partitionCache.HasTraces(ctx, blockNum)
-				if err != nil {
-					logger.Warn("failed to check traces", "block", blockNum, "error", err)
-					toProcess = append(toProcess, blockNum)
-					continue
-				}
-				if hasTraces {
-					stats.tracesSkipped.Add(1)
-				} else {
-					toProcess = append(toProcess, blockNum)
-				}
+		// Filter out blocks that already have traces
+		toProcess := make([]int64, 0, len(batch))
+		for _, blockNum := range batch {
+			hasTraces, err := partitionCache.HasTraces(ctx, blockNum)
+			if err != nil {
+				logger.Warn("failed to check traces", "block", blockNum, "error", err)
+				toProcess = append(toProcess, blockNum)
+				continue
+			}
+			if hasTraces {
+				stats.tracesSkipped.Add(1)
+			} else {
+				toProcess = append(toProcess, blockNum)
 			}
 		}
 
@@ -821,7 +808,6 @@ func uploadWorker(
 	partitionCache *PartitionCache,
 	workCh <-chan UploadJob,
 	stats *Stats,
-	dryRun bool,
 	logger *slog.Logger,
 ) {
 	logger = logger.With("worker", workerID, "type", "upload")
@@ -831,18 +817,6 @@ func uploadWorker(
 		case <-ctx.Done():
 			return
 		default:
-		}
-
-		// In dry-run mode, skip actual S3 upload but still count the bytes
-		if dryRun {
-			switch job.DataType {
-			case "block", "receipts":
-				stats.blockBytesWritten.Add(int64(len(job.Data)))
-			case "traces":
-				stats.traceBytesWritten.Add(int64(len(job.Data)))
-			}
-			stats.uploadsCompleted.Add(1)
-			continue
 		}
 
 		// Write data with gzip compression (S3 writer handles compression and sets Content-Encoding)
