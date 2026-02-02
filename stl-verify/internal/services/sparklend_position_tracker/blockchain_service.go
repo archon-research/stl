@@ -6,13 +6,13 @@ import (
 	"log/slog"
 	"math/big"
 
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 )
 
 type TokenMetadata struct {
@@ -47,7 +47,7 @@ type ActualUserReserveData struct {
 
 type blockchainService struct {
 	ethClient             *ethclient.Client
-	multicallClient       multicall.Multicaller
+	multicallClient       outbound.Multicaller
 	erc20ABI              *abi.ABI
 	getUserReservesABI    *abi.ABI
 	getUserReserveDataABI *abi.ABI
@@ -60,7 +60,7 @@ type blockchainService struct {
 
 func newBlockchainService(
 	ethClient *ethclient.Client,
-	multicallClient multicall.Multicaller,
+	multicallClient outbound.Multicaller,
 	erc20ABI *abi.ABI,
 	uiPoolDataProvider common.Address,
 	poolDataProvider common.Address,
@@ -205,7 +205,7 @@ func (s *blockchainService) batchGetUserReserveData(ctx context.Context, assets 
 		return make(map[common.Address]ActualUserReserveData), nil
 	}
 
-	calls := make([]multicall.Call, 0, len(assets))
+	calls := make([]outbound.Call, 0, len(assets))
 	for _, asset := range assets {
 		callData, err := s.getUserReserveDataABI.Pack("getUserReserveData", asset, user)
 		if err != nil {
@@ -213,7 +213,7 @@ func (s *blockchainService) batchGetUserReserveData(ctx context.Context, assets 
 			continue
 		}
 
-		calls = append(calls, multicall.Call{
+		calls = append(calls, outbound.Call{
 			Target:       s.poolDataProvider,
 			AllowFailure: true,
 			CallData:     callData,
@@ -289,16 +289,16 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 		return result, nil
 	}
 
-	calls := make([]multicall.Call, 0, len(tokensToFetch)*3)
+	calls := make([]outbound.Call, 0, len(tokensToFetch)*3)
 	for _, token := range tokensToFetch {
 		decimalsData, _ := s.erc20ABI.Pack("decimals")
 		symbolData, _ := s.erc20ABI.Pack("symbol")
 		nameData, _ := s.erc20ABI.Pack("name")
 
 		calls = append(calls,
-			multicall.Call{Target: token, AllowFailure: true, CallData: decimalsData},
-			multicall.Call{Target: token, AllowFailure: true, CallData: symbolData},
-			multicall.Call{Target: token, AllowFailure: true, CallData: nameData},
+			outbound.Call{Target: token, AllowFailure: true, CallData: decimalsData},
+			outbound.Call{Target: token, AllowFailure: true, CallData: symbolData},
+			outbound.Call{Target: token, AllowFailure: true, CallData: nameData},
 		)
 	}
 

@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -141,7 +142,7 @@ type Service struct {
 	positionRepo *postgres.PositionRepository
 
 	blockchainServices map[common.Address]*blockchainService
-	multicallClient    multicall.Multicaller
+	multicallClient    outbound.Multicaller
 	erc20ABI           *abi.ABI
 	eventExtractor     *EventExtractor
 

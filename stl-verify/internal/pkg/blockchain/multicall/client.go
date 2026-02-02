@@ -11,12 +11,8 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
-
-type Multicaller interface {
-	Execute(ctx context.Context, calls []Call, blockNumber *big.Int) ([]Result, error)
-	Address() common.Address
-}
 
 type Client struct {
 	ethClient *ethclient.Client
@@ -24,7 +20,17 @@ type Client struct {
 	abi       *abi.ABI
 }
 
-func NewClient(ethClient *ethclient.Client, multicall3Address common.Address) (Multicaller, error) {
+// NewClient creates a new Multicall3 client.
+//
+// Multicall3 contract deployment blocks by chain:
+//   - Ethereum Mainnet: 14,353,601 (December 2021)
+//   - Other chains: varies by deployment
+//
+// For historical queries before the deployment block, calls will fail with
+// "execution reverted" as the contract does not exist at those blocks.
+//
+// Address: 0xcA11bde05977b3631167028862bE2a173976CA11 (same on all chains)
+func NewClient(ethClient *ethclient.Client, multicall3Address common.Address) (outbound.Multicaller, error) {
 	multicallABI, err := abis.GetMulticall3ABI()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load multicall3 ABI: %w", err)
@@ -41,9 +47,9 @@ func (c *Client) Address() common.Address {
 	return c.address
 }
 
-func (c *Client) Execute(ctx context.Context, calls []Call, blockNumber *big.Int) ([]Result, error) {
+func (c *Client) Execute(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 	if len(calls) == 0 {
-		return []Result{}, nil
+		return []outbound.Result{}, nil
 	}
 
 	data, err := c.abi.Pack("aggregate3", calls)
@@ -73,9 +79,9 @@ func (c *Client) Execute(ctx context.Context, calls []Call, blockNumber *big.Int
 		ReturnData []byte `json:"returnData"`
 	})
 
-	results := make([]Result, len(resultsRaw))
+	results := make([]outbound.Result, len(resultsRaw))
 	for i, r := range resultsRaw {
-		results[i] = Result{
+		results[i] = outbound.Result{
 			Success:    r.Success,
 			ReturnData: r.ReturnData,
 		}
