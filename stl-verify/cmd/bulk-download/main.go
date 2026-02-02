@@ -314,12 +314,41 @@ func validateConfig(cfg Config) error {
 }
 
 func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
-	// Calculate total RPC workers for connection pooling
+	rpcClient, err := createRPCClient(cfg, logger)
+	if err != nil {
+		return err
+	}
+
+	s3Writer, s3Reader, err := createS3Clients(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
+
+	partitionCache := NewPartitionCache(s3Reader, cfg.Bucket, logger)
+	stats := &Stats{startTime: time.Now()}
+
+	logStartupInfo(cfg, logger)
+
+	stopProgressReporter := startProgressReporter(ctx, stats, cfg.EndBlock-cfg.StartBlock+1, partitionCache, logger)
+	defer stopProgressReporter()
+
+	pipeline := newPipeline(cfg)
+	pipeline.startUploadWorkers(ctx, s3Writer, partitionCache, stats, logger)
+	pipeline.startTraceCollector(ctx, cfg, partitionCache, stats, logger)
+	pipeline.startBlockReceiptWorkers(ctx, rpcClient, partitionCache, cfg, stats, logger)
+	pipeline.startTraceWorkers(ctx, rpcClient, partitionCache, cfg.Bucket, stats, logger)
+	pipeline.feedBlockWork(ctx, cfg.StartBlock, cfg.EndBlock, cfg.BlockBatchSize)
+
+	pipeline.waitForCompletion()
+
+	logFinalStats(stats, partitionCache, logger)
+	return nil
+}
+
+func createRPCClient(cfg Config, logger *slog.Logger) (*alchemy.Client, error) {
 	totalRPCWorkers := cfg.BlockReceiptWorkers + cfg.TraceWorkers
 
-	// Create a custom HTTP client for RPC with connection limits.
-	// This prevents connection exhaustion when running many workers.
-	rpcHTTPClient := &http.Client{
+	httpClient := &http.Client{
 		Timeout: DefaultTimeout,
 		Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
@@ -336,7 +365,6 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		},
 	}
 
-	// Create RPC client
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
 		HTTPURL:        cfg.RPCURL,
 		Timeout:        DefaultTimeout,
@@ -345,54 +373,54 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		MaxBackoff:     5 * time.Second,
 		BackoffFactor:  2.0,
 		Logger:         logger,
-		HTTPClient:     rpcHTTPClient,
+		HTTPClient:     httpClient,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create RPC client: %w", err)
+		return nil, fmt.Errorf("failed to create RPC client: %w", err)
 	}
+	return client, nil
+}
 
-	// Initialize S3
+func createS3Clients(ctx context.Context, cfg Config, logger *slog.Logger) (*s3.Writer, *s3.Reader, error) {
 	var loadOpts []func(*config.LoadOptions) error
 	if cfg.Region != "" {
 		loadOpts = append(loadOpts, config.WithRegion(cfg.Region))
 	}
+
 	awsCfg, err := config.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
-		return fmt.Errorf("failed to load AWS config: %w", err)
+		return nil, nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	// Create a custom HTTP client with connection limits to prevent exhaustion.
-	// With many workers, the default transport creates too many connections.
-	// This client is shared between S3 reader and writer.
-	s3HTTPClient := &http.Client{
+	httpClient := &http.Client{
+		Timeout: 60 * time.Second,
 		Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
-			MaxIdleConns:          cfg.UploadWorkers * 2, // Allow some headroom
-			MaxIdleConnsPerHost:   cfg.UploadWorkers,     // Match upload workers
-			MaxConnsPerHost:       cfg.UploadWorkers,     // Limit concurrent connections
+			MaxIdleConns:          cfg.UploadWorkers * 2,
+			MaxIdleConnsPerHost:   cfg.UploadWorkers,
+			MaxConnsPerHost:       cfg.UploadWorkers,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 			ForceAttemptHTTP2:     true,
 		},
-		Timeout: 60 * time.Second, // Overall request timeout
 	}
 
-	s3Writer := s3.NewWriterWithHTTPClient(awsCfg, s3HTTPClient, logger)
-	s3Reader := s3.NewReaderWithHTTPClient(awsCfg, s3HTTPClient, logger)
-	partitionCache := NewPartitionCache(s3Reader, cfg.Bucket, logger)
+	writer := s3.NewWriterWithHTTPClient(awsCfg, httpClient, logger)
+	reader := s3.NewReaderWithHTTPClient(awsCfg, httpClient, logger)
+	return writer, reader, nil
+}
 
-	totalBlocks := cfg.EndBlock - cfg.StartBlock + 1
-
+func logStartupInfo(cfg Config, logger *slog.Logger) {
 	logger.Info("starting pipelined bulk download",
 		"rpcURL", cfg.RPCURL,
 		"startBlock", cfg.StartBlock,
 		"endBlock", cfg.EndBlock,
-		"totalBlocks", totalBlocks,
+		"totalBlocks", cfg.EndBlock-cfg.StartBlock+1,
 		"blockWorkers", cfg.BlockReceiptWorkers,
 		"traceWorkers", cfg.TraceWorkers,
 		"uploadWorkers", cfg.UploadWorkers,
@@ -400,105 +428,17 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		"traceBatchSize", cfg.TraceBatchSize,
 		"bucket", cfg.Bucket,
 	)
+}
 
-	stats := &Stats{startTime: time.Now()}
+func startProgressReporter(ctx context.Context, stats *Stats, totalBlocks int64, cache *PartitionCache, logger *slog.Logger) func() {
+	progressCtx, cancel := context.WithCancel(ctx)
+	go reportProgress(progressCtx, stats, totalBlocks, cache, logger)
+	return cancel
+}
 
-	// Start progress reporter
-	progressCtx, progressCancel := context.WithCancel(ctx)
-	defer progressCancel()
-	go reportProgress(progressCtx, stats, totalBlocks, partitionCache, logger)
-
-	// Create channels for pipelined processing
-	blockWorkCh := make(chan int64, cfg.BlockReceiptWorkers*2) // Block batch start numbers
-	traceWorkCh := make(chan []int64, cfg.TraceWorkers*2)      // Batches of blocks needing traces
-	uploadCh := make(chan UploadJob, cfg.UploadWorkers*4)      // S3 upload jobs
-	traceCollectorCh := make(chan int64, 10000)                // Blocks ready for trace fetching
-
-	var traceWg sync.WaitGroup
-
-	// Start S3 upload workers
-	var uploadWg sync.WaitGroup
-	for i := 0; i < cfg.UploadWorkers; i++ {
-		uploadWg.Add(1)
-		go func(workerID int) {
-			defer uploadWg.Done()
-			uploadWorker(ctx, workerID, s3Writer, partitionCache, uploadCh, stats, logger)
-		}(i)
-	}
-
-	// Start trace collector - batches individual blocks into trace batches
-	traceWg.Add(1)
-	go func() {
-		defer traceWg.Done()
-		defer close(traceWorkCh)
-		traceCollector(ctx, cfg, traceCollectorCh, traceWorkCh, partitionCache, stats, logger)
-	}()
-
-	// Start block+receipt workers
-	var blockWg sync.WaitGroup
-	for i := 0; i < cfg.BlockReceiptWorkers; i++ {
-		blockWg.Add(1)
-		go func(workerID int) {
-			defer blockWg.Done()
-			blockReceiptWorker(ctx, workerID, client, partitionCache, cfg, blockWorkCh, traceCollectorCh, uploadCh, stats, logger)
-		}(i)
-	}
-
-	// Start trace workers
-	for i := 0; i < cfg.TraceWorkers; i++ {
-		traceWg.Add(1)
-		go func(workerID int) {
-			defer traceWg.Done()
-			traceWorker(ctx, workerID, client, partitionCache, cfg.Bucket, traceWorkCh, uploadCh, stats, logger)
-		}(i)
-	}
-
-	// Feed block work
-	go func() {
-		defer close(blockWorkCh)
-		for blockNum := cfg.StartBlock; blockNum <= cfg.EndBlock; blockNum += int64(cfg.BlockBatchSize) {
-			select {
-			case <-ctx.Done():
-				return
-			case blockWorkCh <- blockNum:
-			}
-		}
-	}()
-
-	// Wait for block workers to finish, then close traceCollectorCh
-	go func() {
-		blockWg.Wait()
-		close(traceCollectorCh)
-	}()
-
-	// Wait for trace collector and trace workers to finish
-	traceWg.Wait()
-
-	// Close upload channel and wait for uploads to complete
-	close(uploadCh)
-	uploadWg.Wait()
-
-	// Final stats
+func logFinalStats(stats *Stats, cache *PartitionCache, logger *slog.Logger) {
 	elapsed := time.Since(stats.startTime)
-	hits, misses := partitionCache.GetStats()
-
-	// Calculate average times
-	avgRpcBlock := time.Duration(0)
-	if calls := stats.rpcBlockCalls.Load(); calls > 0 {
-		avgRpcBlock = time.Duration(stats.rpcBlockTime.Load() / calls)
-	}
-	avgRpcTrace := time.Duration(0)
-	if calls := stats.rpcTraceCalls.Load(); calls > 0 {
-		avgRpcTrace = time.Duration(stats.rpcTraceTime.Load() / calls)
-	}
-	avgUpload := time.Duration(0)
-	if calls := stats.s3UploadCalls.Load(); calls > 0 {
-		avgUpload = time.Duration(stats.s3UploadTime.Load() / calls)
-	}
-	avgS3Check := time.Duration(0)
-	if calls := stats.s3CheckCalls.Load(); calls > 0 {
-		avgS3Check = time.Duration(stats.s3CheckTime.Load() / calls)
-	}
+	hits, misses := cache.GetStats()
 
 	logger.Info("download complete",
 		"blocksProcessed", stats.blocksProcessed.Load(),
@@ -516,7 +456,15 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		"cacheMisses", misses,
 	)
 
-	// Timing breakdown
+	logTimingBreakdown(stats, logger)
+}
+
+func logTimingBreakdown(stats *Stats, logger *slog.Logger) {
+	avgRpcBlock := avgDuration(stats.rpcBlockTime.Load(), stats.rpcBlockCalls.Load())
+	avgRpcTrace := avgDuration(stats.rpcTraceTime.Load(), stats.rpcTraceCalls.Load())
+	avgUpload := avgDuration(stats.s3UploadTime.Load(), stats.s3UploadCalls.Load())
+	avgS3Check := avgDuration(stats.s3CheckTime.Load(), stats.s3CheckCalls.Load())
+
 	logger.Info("timing breakdown",
 		"avgRpcBlockBatch", avgRpcBlock.Round(time.Millisecond),
 		"avgRpcTraceBatch", avgRpcTrace.Round(time.Millisecond),
@@ -527,8 +475,104 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		"totalS3UploadTime", time.Duration(stats.s3UploadTime.Load()).Round(time.Second),
 		"totalS3CheckTime", time.Duration(stats.s3CheckTime.Load()).Round(time.Second),
 	)
+}
 
-	return nil
+func avgDuration(totalNanos, count int64) time.Duration {
+	if count == 0 {
+		return 0
+	}
+	return time.Duration(totalNanos / count)
+}
+
+// pipeline coordinates the concurrent worker pools for bulk downloading.
+type pipeline struct {
+	blockWorkCh      chan int64
+	traceWorkCh      chan []int64
+	uploadCh         chan UploadJob
+	traceCollectorCh chan int64
+
+	uploadWorkers int
+	traceWorkers  int
+	blockWorkers  int
+
+	uploadWg sync.WaitGroup
+	blockWg  sync.WaitGroup
+	traceWg  sync.WaitGroup
+}
+
+func newPipeline(cfg Config) *pipeline {
+	return &pipeline{
+		blockWorkCh:      make(chan int64, cfg.BlockReceiptWorkers*2),
+		traceWorkCh:      make(chan []int64, cfg.TraceWorkers*2),
+		uploadCh:         make(chan UploadJob, cfg.UploadWorkers*4),
+		traceCollectorCh: make(chan int64, 10000),
+		uploadWorkers:    cfg.UploadWorkers,
+		traceWorkers:     cfg.TraceWorkers,
+		blockWorkers:     cfg.BlockReceiptWorkers,
+	}
+}
+
+func (p *pipeline) startUploadWorkers(ctx context.Context, writer outbound.S3Writer, cache *PartitionCache, stats *Stats, logger *slog.Logger) {
+	for i := 0; i < p.uploadWorkers; i++ {
+		p.uploadWg.Add(1)
+		go func(workerID int) {
+			defer p.uploadWg.Done()
+			uploadWorker(ctx, workerID, writer, cache, p.uploadCh, stats, logger)
+		}(i)
+	}
+}
+
+func (p *pipeline) startTraceCollector(ctx context.Context, cfg Config, cache *PartitionCache, stats *Stats, logger *slog.Logger) {
+	p.traceWg.Add(1)
+	go func() {
+		defer p.traceWg.Done()
+		defer close(p.traceWorkCh)
+		traceCollector(ctx, cfg, p.traceCollectorCh, p.traceWorkCh, cache, stats, logger)
+	}()
+}
+
+func (p *pipeline) startBlockReceiptWorkers(ctx context.Context, client *alchemy.Client, cache *PartitionCache, cfg Config, stats *Stats, logger *slog.Logger) {
+	for i := 0; i < p.blockWorkers; i++ {
+		p.blockWg.Add(1)
+		go func(workerID int) {
+			defer p.blockWg.Done()
+			blockReceiptWorker(ctx, workerID, client, cache, cfg, p.blockWorkCh, p.traceCollectorCh, p.uploadCh, stats, logger)
+		}(i)
+	}
+}
+
+func (p *pipeline) startTraceWorkers(ctx context.Context, client *alchemy.Client, cache *PartitionCache, bucket string, stats *Stats, logger *slog.Logger) {
+	for i := 0; i < p.traceWorkers; i++ {
+		p.traceWg.Add(1)
+		go func(workerID int) {
+			defer p.traceWg.Done()
+			traceWorker(ctx, workerID, client, cache, bucket, p.traceWorkCh, p.uploadCh, stats, logger)
+		}(i)
+	}
+}
+
+func (p *pipeline) feedBlockWork(ctx context.Context, startBlock, endBlock int64, batchSize int) {
+	go func() {
+		defer close(p.blockWorkCh)
+		for blockNum := startBlock; blockNum <= endBlock; blockNum += int64(batchSize) {
+			select {
+			case <-ctx.Done():
+				return
+			case p.blockWorkCh <- blockNum:
+			}
+		}
+	}()
+
+	go func() {
+		p.blockWg.Wait()
+		close(p.traceCollectorCh)
+	}()
+}
+
+func (p *pipeline) waitForCompletion() {
+	p.traceWg.Wait()
+	close(p.uploadCh)
+	p.uploadWg.Wait()
 }
 
 // blockReceiptWorker fetches blocks and receipts, queues S3 uploads, and signals trace collection.
