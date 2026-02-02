@@ -1837,4 +1837,3 @@ func TestProcessMessage_AllDataTypesWithContent(t *testing.T) {
 		}
 	}
 }
-
