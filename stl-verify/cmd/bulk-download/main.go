@@ -423,7 +423,7 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	uploadCh := make(chan UploadJob, cfg.UploadWorkers*4)      // S3 upload jobs
 	traceCollectorCh := make(chan int64, 10000)                // Blocks ready for trace fetching
 
-	var wg sync.WaitGroup
+	var traceWg sync.WaitGroup
 
 	// Start S3 upload workers
 	var uploadWg sync.WaitGroup
@@ -436,9 +436,9 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	}
 
 	// Start trace collector - batches individual blocks into trace batches
-	wg.Add(1)
+	traceWg.Add(1)
 	go func() {
-		defer wg.Done()
+		defer traceWg.Done()
 		defer close(traceWorkCh)
 		traceCollector(ctx, cfg, traceCollectorCh, traceWorkCh, partitionCache, stats, logger)
 	}()
@@ -455,9 +455,9 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 
 	// Start trace workers
 	for i := 0; i < cfg.TraceWorkers; i++ {
-		wg.Add(1)
+		traceWg.Add(1)
 		go func(workerID int) {
-			defer wg.Done()
+			defer traceWg.Done()
 			traceWorker(ctx, workerID, client, partitionCache, cfg.Bucket, traceWorkCh, uploadCh, stats, logger)
 		}(i)
 	}
@@ -480,8 +480,8 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		close(traceCollectorCh)
 	}()
 
-	// Wait for all RPC workers to finish
-	wg.Wait()
+	// Wait for trace collector and trace workers to finish
+	traceWg.Wait()
 
 	// Close upload channel and wait for uploads to complete
 	close(uploadCh)
