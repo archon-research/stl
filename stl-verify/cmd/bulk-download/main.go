@@ -18,9 +18,7 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -39,9 +37,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 )
 
-// BlockRangeSize is the number of blocks per S3 partition.
-const BlockRangeSize = 1000
-
 // Default settings optimized for local Erigon node
 const (
 	DefaultBlockBatchSize      = 2   // Small batches maximize parallelism
@@ -51,6 +46,9 @@ const (
 	DefaultUploadWorkers       = 64  // S3 uploads are fast, but need enough workers
 	DefaultTimeout             = 120 * time.Second
 	DefaultMaxRetries          = 3
+
+	// BlockRangeSize is the number of blocks per S3 partition.
+	BlockRangeSize = 1000
 )
 
 // Config holds the CLI configuration.
@@ -89,14 +87,12 @@ type Stats struct {
 	// Timing metrics (in nanoseconds)
 	rpcBlockTime atomic.Int64 // Time spent in RPC calls for blocks+receipts
 	rpcTraceTime atomic.Int64 // Time spent in RPC calls for traces
-	compressTime atomic.Int64 // Time spent compressing data
 	s3UploadTime atomic.Int64 // Time spent uploading to S3
 	s3CheckTime  atomic.Int64 // Time spent checking S3 for existing files
 
 	// Counts for averaging
 	rpcBlockCalls atomic.Int64
 	rpcTraceCalls atomic.Int64
-	compressCalls atomic.Int64
 	s3UploadCalls atomic.Int64
 	s3CheckCalls  atomic.Int64
 
@@ -107,7 +103,7 @@ type Stats struct {
 type UploadJob struct {
 	Bucket   string
 	Key      string
-	Data     []byte // Already gzip compressed
+	Data     []byte // Raw uncompressed data (S3 writer handles compression)
 	DataType string // "block", "receipts", or "traces"
 	BlockNum int64
 }
@@ -133,7 +129,6 @@ func NewPartitionCache(s3Reader outbound.S3Reader, bucket string, logger *slog.L
 }
 
 // ensurePartitionLoaded loads a partition into the cache if not already present.
-// Caller must NOT hold any lock when calling this.
 func (pc *PartitionCache) ensurePartitionLoaded(ctx context.Context, partition string) error {
 	pc.mu.RLock()
 	_, ok := pc.cache[partition]
@@ -505,10 +500,6 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	if calls := stats.rpcTraceCalls.Load(); calls > 0 {
 		avgRpcTrace = time.Duration(stats.rpcTraceTime.Load() / calls)
 	}
-	avgCompress := time.Duration(0)
-	if calls := stats.compressCalls.Load(); calls > 0 {
-		avgCompress = time.Duration(stats.compressTime.Load() / calls)
-	}
 	avgUpload := time.Duration(0)
 	if calls := stats.s3UploadCalls.Load(); calls > 0 {
 		avgUpload = time.Duration(stats.s3UploadTime.Load() / calls)
@@ -538,12 +529,10 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	logger.Info("timing breakdown",
 		"avgRpcBlockBatch", avgRpcBlock.Round(time.Millisecond),
 		"avgRpcTraceBatch", avgRpcTrace.Round(time.Millisecond),
-		"avgCompress", avgCompress.Round(time.Microsecond),
 		"avgS3Upload", avgUpload.Round(time.Millisecond),
 		"avgS3Check", avgS3Check.Round(time.Millisecond),
 		"totalRpcBlockTime", time.Duration(stats.rpcBlockTime.Load()).Round(time.Second),
 		"totalRpcTraceTime", time.Duration(stats.rpcTraceTime.Load()).Round(time.Second),
-		"totalCompressTime", time.Duration(stats.compressTime.Load()).Round(time.Second),
 		"totalS3UploadTime", time.Duration(stats.s3UploadTime.Load()).Round(time.Second),
 		"totalS3CheckTime", time.Duration(stats.s3CheckTime.Load()).Round(time.Second),
 	)
@@ -655,22 +644,13 @@ func blockReceiptWorker(
 
 			partition := getPartition(r.BlockNumber)
 
-			// Compress and queue block upload
+			// Queue block upload
 			if r.Block != nil {
-				compressStart := time.Now()
-				compressed, err := compressData(r.Block)
-				stats.compressTime.Add(time.Since(compressStart).Nanoseconds())
-				stats.compressCalls.Add(1)
-				if err != nil {
-					logger.Warn("failed to compress block", "block", r.BlockNumber, "error", err)
-					stats.blocksFailed.Add(1)
-					continue
-				}
 				select {
 				case uploadCh <- UploadJob{
 					Bucket:   cfg.Bucket,
 					Key:      fmt.Sprintf("%s/%d_1_block.json.gz", partition, r.BlockNumber),
-					Data:     compressed,
+					Data:     r.Block,
 					DataType: "block",
 					BlockNum: r.BlockNumber,
 				}:
@@ -680,22 +660,13 @@ func blockReceiptWorker(
 				}
 			}
 
-			// Compress and queue receipts upload
+			// Queue receipts upload
 			if r.Receipts != nil {
-				compressStart := time.Now()
-				compressed, err := compressData(r.Receipts)
-				stats.compressTime.Add(time.Since(compressStart).Nanoseconds())
-				stats.compressCalls.Add(1)
-				if err != nil {
-					logger.Warn("failed to compress receipts", "block", r.BlockNumber, "error", err)
-					stats.blocksFailed.Add(1)
-					continue
-				}
 				select {
 				case uploadCh <- UploadJob{
 					Bucket:   cfg.Bucket,
 					Key:      fmt.Sprintf("%s/%d_1_receipts.json.gz", partition, r.BlockNumber),
-					Data:     compressed,
+					Data:     r.Receipts,
 					DataType: "receipts",
 					BlockNum: r.BlockNumber,
 				}:
@@ -832,22 +803,12 @@ func traceWorker(
 				continue
 			}
 
-			compressStart := time.Now()
-			compressed, err := compressData(traceData)
-			stats.compressTime.Add(time.Since(compressStart).Nanoseconds())
-			stats.compressCalls.Add(1)
-			if err != nil {
-				logger.Warn("failed to compress trace", "block", blockNum, "error", err)
-				stats.tracesFailed.Add(1)
-				continue
-			}
-
 			partition := getPartition(blockNum)
 			select {
 			case uploadCh <- UploadJob{
 				Bucket:   bucket,
 				Key:      fmt.Sprintf("%s/%d_1_traces.json.gz", partition, blockNum),
-				Data:     compressed,
+				Data:     traceData,
 				DataType: "traces",
 				BlockNum: blockNum,
 			}:
@@ -893,9 +854,9 @@ func uploadWorker(
 			continue
 		}
 
-		// Write pre-compressed data (pass compressGzip=false since we already compressed)
+		// Write data with gzip compression (S3 writer handles compression and sets Content-Encoding)
 		uploadStart := time.Now()
-		written, err := s3Writer.WriteFileIfNotExists(ctx, job.Bucket, job.Key, bytes.NewReader(job.Data), false)
+		written, err := s3Writer.WriteFileIfNotExists(ctx, job.Bucket, job.Key, bytes.NewReader(job.Data), true)
 		stats.s3UploadTime.Add(time.Since(uploadStart).Nanoseconds())
 		stats.s3UploadCalls.Add(1)
 		if err != nil {
@@ -915,19 +876,6 @@ func uploadWorker(
 		}
 		stats.uploadsCompleted.Add(1)
 	}
-}
-
-// compressData gzip compresses the input data.
-func compressData(data json.RawMessage) ([]byte, error) {
-	var buf bytes.Buffer
-	gzWriter := gzip.NewWriter(&buf)
-	if _, err := gzWriter.Write(data); err != nil {
-		return nil, fmt.Errorf("failed to compress: %w", err)
-	}
-	if err := gzWriter.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close gzip writer: %w", err)
-	}
-	return buf.Bytes(), nil
 }
 
 func getPartition(blockNumber int64) string {
