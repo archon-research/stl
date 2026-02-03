@@ -74,7 +74,7 @@ func TestEventExtractor_NewEventExtractor(t *testing.T) {
 	}
 }
 
-func TestEventExtractor_IsRelevantEvent(t *testing.T) {
+func TestEventExtractor_IsPositionEvent(t *testing.T) {
 	extractor, err := NewEventExtractor()
 	if err != nil {
 		t.Fatalf("failed to create extractor: %v", err)
@@ -731,7 +731,7 @@ func TestEventExtractor_ExtractEventData_ReserveUsedAsCollateralDisabled(t *test
 	}
 }
 
-func TestEventExtractor_IsRelevantEvent_AllEventTypes(t *testing.T) {
+func TestEventExtractor_IsPositionEvent_AllEventTypes(t *testing.T) {
 	extractor, err := NewEventExtractor()
 	if err != nil {
 		t.Fatalf("failed to create extractor: %v", err)

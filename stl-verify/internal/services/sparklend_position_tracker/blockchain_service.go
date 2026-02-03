@@ -395,8 +395,8 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 	return result, nil
 }
 
-// getFullReserveData fetches both reserve data from Pool and configuration data from ProtocolDataProvider.
-func (s *blockchainService) getFullReserveData(ctx context.Context, poolAddress common.Address, asset common.Address, blockNumber int64) (*FullReserveData, error) {
+// getFullReserveData fetches both reserve data and configuration data from ProtocolDataProvider.
+func (s *blockchainService) getFullReserveData(ctx context.Context, asset common.Address, blockNumber int64) (*FullReserveData, error) {
 	// Build multicall requests for both getReserveData and getReserveConfigurationData
 	getReserveDataCallData, err := s.getReserveDataABI.Pack("getReserveData", asset)
 	if err != nil {
@@ -410,12 +410,12 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, poolAddress 
 
 	calls := []Multicall3Request{
 		{
-			Target:       poolAddress,
+			Target:       s.protocolDataProvider,
 			AllowFailure: false,
 			CallData:     getReserveDataCallData,
 		},
 		{
-			Target:       s.aaveProtocolDataProvider,
+			Target:       s.protocolDataProvider,
 			AllowFailure: false,
 			CallData:     getConfigCallData,
 		},
@@ -477,8 +477,8 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, poolAddress 
 	}, nil
 }
 
-// reserveDataFromPool holds parsed data from Pool.getReserveData
-type reserveDataFromPool struct {
+// reserveDataFromProvider holds parsed data from ProtocolDataProvider.getReserveData
+type reserveDataFromProvider struct {
 	Unbacked                *big.Int
 	AccruedToTreasuryScaled *big.Int
 	TotalAToken             *big.Int
@@ -493,52 +493,30 @@ type reserveDataFromPool struct {
 	LastUpdateTimestamp     int64
 }
 
-// parseReserveData parses the raw bytes from Pool.getReserveData into structured data.
-func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromPool, error) {
+// parseReserveData parses the raw bytes from ProtocolDataProvider.getReserveData into structured data.
+func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvider, error) {
 	unpacked, err := s.getReserveDataABI.Unpack("getReserveData", data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unpack getReserveData: %w", err)
 	}
 
-	if len(unpacked) == 0 {
-		return nil, fmt.Errorf("empty result from getReserveData")
+	if len(unpacked) < 12 {
+		return nil, fmt.Errorf("expected 12 values from getReserveData, got %d", len(unpacked))
 	}
 
-	// The result is a struct tuple
-	reserveTuple := unpacked[0].(struct {
-		Configuration               *big.Int       `json:"configuration"`
-		LiquidityIndex              *big.Int       `json:"liquidityIndex"`
-		CurrentLiquidityRate        *big.Int       `json:"currentLiquidityRate"`
-		VariableBorrowIndex         *big.Int       `json:"variableBorrowIndex"`
-		CurrentVariableBorrowRate   *big.Int       `json:"currentVariableBorrowRate"`
-		CurrentStableBorrowRate     *big.Int       `json:"currentStableBorrowRate"`
-		LastUpdateTimestamp         *big.Int       `json:"lastUpdateTimestamp"`
-		Id                          uint16         `json:"id"`
-		ATokenAddress               common.Address `json:"aTokenAddress"`
-		StableDebtTokenAddress      common.Address `json:"stableDebtTokenAddress"`
-		VariableDebtTokenAddress    common.Address `json:"variableDebtTokenAddress"`
-		InterestRateStrategyAddress common.Address `json:"interestRateStrategyAddress"`
-		AccruedToTreasury           *big.Int       `json:"accruedToTreasury"`
-		Unbacked                    *big.Int       `json:"unbacked"`
-		IsolationModeTotalDebt      *big.Int       `json:"isolationModeTotalDebt"`
-	})
-
-	return &reserveDataFromPool{
-		LiquidityIndex:          reserveTuple.LiquidityIndex,
-		LiquidityRate:           reserveTuple.CurrentLiquidityRate,
-		VariableBorrowIndex:     reserveTuple.VariableBorrowIndex,
-		VariableBorrowRate:      reserveTuple.CurrentVariableBorrowRate,
-		StableBorrowRate:        reserveTuple.CurrentStableBorrowRate,
-		AccruedToTreasuryScaled: reserveTuple.AccruedToTreasury,
-		Unbacked:                reserveTuple.Unbacked,
-		LastUpdateTimestamp:     reserveTuple.LastUpdateTimestamp.Int64(),
-		// Note: TotalAToken, TotalStableDebt, TotalVariableDebt, AverageStableBorrowRate
-		// are not directly available from getReserveData - they need to be fetched separately
-		// or computed. For now, set to nil/zero.
-		TotalAToken:             big.NewInt(0),
-		TotalStableDebt:         big.NewInt(0),
-		TotalVariableDebt:       big.NewInt(0),
-		AverageStableBorrowRate: big.NewInt(0),
+	return &reserveDataFromProvider{
+		Unbacked:                unpacked[0].(*big.Int),
+		AccruedToTreasuryScaled: unpacked[1].(*big.Int),
+		TotalAToken:             unpacked[2].(*big.Int),
+		TotalStableDebt:         unpacked[3].(*big.Int),
+		TotalVariableDebt:       unpacked[4].(*big.Int),
+		LiquidityRate:           unpacked[5].(*big.Int),
+		VariableBorrowRate:      unpacked[6].(*big.Int),
+		StableBorrowRate:        unpacked[7].(*big.Int),
+		AverageStableBorrowRate: unpacked[8].(*big.Int),
+		LiquidityIndex:          unpacked[9].(*big.Int),
+		VariableBorrowIndex:     unpacked[10].(*big.Int),
+		LastUpdateTimestamp:     unpacked[11].(*big.Int).Int64(),
 	}, nil
 }
 
