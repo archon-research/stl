@@ -10,7 +10,7 @@
         docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
-        bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel \
+        bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel db-migrate \
         erigon-init erigon-validate erigon-plan erigon-apply erigon-apply-auto erigon-destroy erigon-check \
         erigon-status erigon-logs erigon-logs-follow erigon-deploy-readonly erigon-switch-readonly erigon-switch-sync erigon-mode \
         erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download
@@ -340,6 +340,26 @@ tigerdata-tunnel:
 	@echo "    Remote: $(TIGERDATA_HOST):5432"
 	@echo "    Press Ctrl+C to stop"
 	ssh -N -L 5432:$(TIGERDATA_HOST):5432 ec2-user@$(BASTION_IP)
+
+# =============================================================================
+# Database Migrations
+# =============================================================================
+
+# Run database migrations
+# Usage: make db-migrate DATABASE_URL="postgresql://user:pass@localhost:5432/dbname?sslmode=require"
+# Requires tunnel to be running first: make tigerdata-tunnel BASTION_IP=... TIGERDATA_HOST=...
+db-migrate:
+	@if [ -z "$(DATABASE_URL)" ]; then \
+		echo "Error: DATABASE_URL is required"; \
+		echo "Usage: make $@ DATABASE_URL=\"postgresql://user:pass@localhost:5432/dbname?sslmode=require\""; \
+		echo ""; \
+		echo "First start the tunnel in another terminal:"; \
+		echo "  make tigerdata-tunnel BASTION_IP=stl-sentinelstaging-bastion TIGERDATA_HOST=<pooler-host>"; \
+		exit 1; \
+	fi
+	@echo "==> Running database migrations..."
+	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate
+	@echo "==> Migrations complete"
 
 # =============================================================================
 # Docker Build & Push - Backup Worker
