@@ -26,6 +26,12 @@ variable "tailscale_auth_key_secret_name" {
   default     = ""
 }
 
+variable "tailscale_enabled" {
+  description = "Install and configure Tailscale on the bastion host (should only be enabled for sentinelstaging)"
+  type        = bool
+  default     = false
+}
+
 # -----------------------------------------------------------------------------
 # Security Group
 # -----------------------------------------------------------------------------
@@ -168,12 +174,14 @@ resource "aws_instance" "bastion" {
     # Update system
     dnf update -y
 
-    # Install Tailscale
+    %{if var.tailscale_enabled}
+    # Install Tailscale (only for sentinelstaging)
     dnf config-manager --add-repo https://pkgs.tailscale.com/stable/amazon-linux/2023/tailscale.repo
     dnf install -y tailscale
 
     # Enable and start Tailscale
     systemctl enable --now tailscaled
+    %{endif}
 
     # Install PostgreSQL client for TigerData access
     dnf install -y postgresql15
@@ -181,6 +189,7 @@ resource "aws_instance" "bastion" {
     # Install useful tools
     dnf install -y htop jq
 
+    %{if var.tailscale_enabled}
     # If auth key is in Secrets Manager, authenticate automatically
     %{if var.tailscale_auth_key_secret_name != ""}
     AUTH_KEY=$(aws secretsmanager get-secret-value \
@@ -192,8 +201,10 @@ resource "aws_instance" "bastion" {
       tailscale up --authkey="$AUTH_KEY" --ssh --accept-dns=false --hostname="${local.prefix}-bastion"
     fi
     %{endif}
-
-    echo "Bastion setup complete. Run 'tailscale up' to authenticate if not done automatically."
+    echo "Bastion setup complete with Tailscale. Run 'tailscale up' to authenticate if not done automatically."
+    %{else}
+    echo "Bastion setup complete. Use SSM Session Manager to connect."
+    %{endif}
   EOF
 
   root_block_device {

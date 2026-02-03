@@ -64,3 +64,6 @@ bastion_instance_type = "t4g.nano" # Smallest ARM instance (~$3/month)
 
 # Tailscale auth key stored in Secrets Manager (create manually first)
 tailscale_auth_key_secret_name = "stl-sentinelstaging-bastion-host-tailscale-authkey"
+
+# Enable Tailscale for staging only (NOT for production)
+tailscale_enabled = true
