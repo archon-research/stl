@@ -18,30 +18,30 @@ func TestEventExtractor_NewEventExtractor(t *testing.T) {
 		t.Fatalf("NewEventExtractor() failed: %v", err)
 	}
 
-	if extractor.eventsABI == nil {
-		t.Fatal("eventsABI is nil after loading")
+	if extractor.positionEventsABI == nil {
+		t.Fatal("positionEventsABI is nil after loading")
 	}
 
-	// Check all 7 events are loaded
+	// Check all 7 position events are loaded
 	expectedEvents := []string{
 		"Borrow", "Repay", "Supply", "Withdraw",
 		"LiquidationCall", "ReserveUsedAsCollateralEnabled", "ReserveUsedAsCollateralDisabled",
 	}
 
 	for _, eventName := range expectedEvents {
-		event, ok := extractor.eventsABI.Events[eventName]
+		event, ok := extractor.positionEventsABI.Events[eventName]
 		if !ok {
 			t.Errorf("%s event not found in ABI", eventName)
 			continue
 		}
 
-		if _, exists := extractor.eventSignatures[event.ID]; !exists {
-			t.Errorf("%s event signature not registered in eventSignatures map", eventName)
+		if _, exists := extractor.positionEventSignatures[event.ID]; !exists {
+			t.Errorf("%s event signature not registered in positionEventSignatures map", eventName)
 		}
 	}
 
 	// Verify Borrow event has expected inputs
-	borrowEvent := extractor.eventsABI.Events["Borrow"]
+	borrowEvent := extractor.positionEventsABI.Events["Borrow"]
 	expectedInputs := map[string]bool{
 		"reserve":          true,
 		"user":             true,
@@ -127,9 +127,9 @@ func TestEventExtractor_IsRelevantEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := extractor.IsRelevantEvent(tt.log)
+			result := extractor.IsPositionEvent(tt.log)
 			if result != tt.expected {
-				t.Errorf("IsRelevantEvent() = %v, want %v", result, tt.expected)
+				t.Errorf("IsPositionEvent() = %v, want %v", result, tt.expected)
 			}
 		})
 	}
@@ -326,7 +326,7 @@ func TestEventExtractor_ProcessReceipt_MultipleEventTypes(t *testing.T) {
 
 			relevantCount := 0
 			for _, log := range receipt.Logs {
-				if !extractor.IsRelevantEvent(log) {
+				if !extractor.IsPositionEvent(log) {
 					continue
 				}
 
@@ -761,9 +761,9 @@ func TestEventExtractor_IsRelevantEvent_AllEventTypes(t *testing.T) {
 				Topics:  []string{tt.signature},
 			}
 
-			result := extractor.IsRelevantEvent(log)
+			result := extractor.IsPositionEvent(log)
 			if result != tt.expected {
-				t.Errorf("IsRelevantEvent(%s) = %v, want %v", tt.name, result, tt.expected)
+				t.Errorf("IsPositionEvent(%s) = %v, want %v", tt.name, result, tt.expected)
 			}
 		})
 	}
@@ -799,7 +799,7 @@ func TestEventExtractor_ExtractEventData_ErrorCases(t *testing.T) {
 				Data:    "0x",
 			},
 			expectError: true,
-			errorMsg:    "not a tracked event",
+			errorMsg:    "not a tracked position event",
 		},
 	}
 
