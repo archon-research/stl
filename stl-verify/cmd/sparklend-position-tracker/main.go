@@ -17,16 +17,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
-)
-
-const (
-	Multicall3Address = "0xcA11bde05977b3631167028862bE2a173976CA11"
 )
 
 func main() {
@@ -52,7 +47,7 @@ func main() {
 		*queueURL = getEnv("AWS_SQS_QUEUE_URL", "")
 	}
 	if *queueURL == "" {
-		logger.Error("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_RECEIPTS env var)")
+		logger.Error("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_URL env var)")
 		os.Exit(1)
 	}
 
@@ -181,9 +176,6 @@ func main() {
 		sqsClient,
 		redisClient,
 		ethClient,
-		common.HexToAddress(Multicall3Address),
-		common.HexToAddress("0x56b7A1012765C285afAC8b8F25C69Bf10ccfE978"),
-		common.HexToAddress("0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e"),
 		txManager,
 		userRepo,
 		protocolRepo,

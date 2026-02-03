@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -48,14 +49,43 @@ func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 	}, nil
 }
 
+func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, name string, createdAtBlock int64) (int64, error) {
+	var protocolID int64
+	addressHex := strings.ToLower(address.Hex())
+
+	err := tx.QueryRow(ctx,
+		`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2`,
+		chainID, addressHex).Scan(&protocolID)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		r.logger.Info("auto-creating protocol", "address", address.Hex(), "name", name)
+		err = tx.QueryRow(ctx,
+			`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
+			 VALUES ($1, $2, $3, $4, $5)
+			 RETURNING id`,
+			chainID, addressHex, name, "lending", createdAtBlock).Scan(&protocolID)
+		if err != nil {
+			return 0, fmt.Errorf("failed to create protocol: %w", err)
+		}
+		return protocolID, nil
+	} else if err != nil {
+		return 0, fmt.Errorf("failed to get protocol: %w", err)
+	}
+
+	return protocolID, nil
+}
+
 // GetProtocolByAddress retrieves a protocol by its chain ID and address.
-func (r *ProtocolRepository) GetProtocolByAddress(ctx context.Context, chainID int64, address string) (*entity.Protocol, error) {
+func (r *ProtocolRepository) GetProtocolByAddress(ctx context.Context, chainID int64, address common.Address) (*entity.Protocol, error) {
+	// Convert address to lowercase hex without 0x prefix for bytea comparison
+	addressHex := strings.ToLower(address.Hex()[2:])
+
 	var protocol entity.Protocol
 	err := r.pool.QueryRow(ctx,
 		`SELECT id, chain_id, address, name, protocol_type, created_at_block
-		 FROM protocol
-		 WHERE chain_id = $1 AND address = $2`,
-		chainID, address).Scan(
+         FROM protocol
+         WHERE chain_id = $1 AND address = decode($2, 'hex')`,
+		chainID, addressHex).Scan(
 		&protocol.ID,
 		&protocol.ChainID,
 		&protocol.Address,

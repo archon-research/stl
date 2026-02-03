@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // ProtocolRepository defines the interface for protocol-related data persistence.
@@ -16,5 +17,5 @@ type ProtocolRepository interface {
 	UpsertSparkLendReserveData(ctx context.Context, data []*entity.SparkLendReserveData) error
 
 	// GetProtocolByAddress retrieves a protocol by its chain ID and address.
-	GetProtocolByAddress(ctx context.Context, chainID int64, address string) (*entity.Protocol, error)
+	GetProtocolByAddress(ctx context.Context, chainID int64, address common.Address) (*entity.Protocol, error)
 }
