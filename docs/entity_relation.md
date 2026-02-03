@@ -79,6 +79,16 @@ erDiagram
         numeric liquidityIndex
         numeric variableBorrowIndex
         bigint lastUpdateTimestamp
+        numeric decimals
+        numeric ltv
+        numeric liquidationThreshold
+        numeric liquidationBonus
+        numeric reserveFactor
+        boolean usageAsCollateralEnabled
+        boolean borrowingEnabled
+        boolean stableBorrowRateEnabled
+        boolean isActive
+        boolean isFrozen
     }
 
     Borrower {
