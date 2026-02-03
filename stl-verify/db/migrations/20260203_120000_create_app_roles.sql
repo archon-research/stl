@@ -109,3 +109,10 @@ BEGIN
 END
 $$;
 GRANT stl_readonly TO stl_read_only;
+
+-- =============================================================================
+-- Record this migration
+-- =============================================================================
+INSERT INTO migrations (filename)
+VALUES ('20260203_120000_create_app_roles.sql')
+ON CONFLICT (filename) DO NOTHING;
