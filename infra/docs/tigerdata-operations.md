@@ -29,7 +29,7 @@ This opens a tunnel on `localhost:5432`. Keep this terminal open.
 psql "postgresql://tsdbadmin:<password>@localhost:5432/tsdb?sslmode=require"
 
 # Application user connection (for testing)
-psql "postgresql://stl_app:<password>@localhost:5432/tsdb?sslmode=require"
+psql "postgresql://stl_read_write:<password>@localhost:5432/tsdb?sslmode=require"
 ```
 
 ## New Environment Setup
@@ -108,7 +108,7 @@ Each secret contains:
 ### Retrieving Credentials
 
 ```bash
-# Get stl_app password
+# Get stl_read_write password
 aws secretsmanager get-secret-value \
   --secret-id stl-<env>-tigerdata-app \
   --query SecretString --output text | jq -r .password
