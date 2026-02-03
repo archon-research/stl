@@ -4,15 +4,16 @@
 .PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher help \
         dev-up dev-down dev-ips \
         tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
-        tf-init-staging tf-validate-staging tf-plan-staging tf-apply-staging tf-check-staging \
         ecr-login docker-build docker-push docker-release \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
         docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging \
+        ecs-deploy-watcher ecs-deploy-watcher-staging \
+        bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
+        bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel \
         erigon-init erigon-validate erigon-plan erigon-apply erigon-apply-auto erigon-destroy erigon-check \
         erigon-status erigon-logs erigon-logs-follow erigon-deploy-readonly erigon-switch-readonly erigon-switch-sync erigon-mode \
         erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download
-        ecs-deploy-watcher ecs-deploy-watcher-staging
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -225,24 +226,6 @@ tf-apply:
 tf-check: tf-init tf-validate tf-plan
 
 # =============================================================================
-# Sentinelstaging Shortcuts
-# =============================================================================
-
-tf-init-staging:
-	@$(MAKE) tf-init ENV=sentinelstaging
-
-tf-validate-staging:
-	@$(MAKE) tf-validate ENV=sentinelstaging
-
-tf-plan-staging:
-	@$(MAKE) tf-plan ENV=sentinelstaging
-
-tf-apply-staging:
-	@$(MAKE) tf-apply ENV=sentinelstaging
-
-tf-check-staging: tf-init-staging tf-validate-staging tf-plan-staging
-
-# =============================================================================
 # Docker Build & Push
 # =============================================================================
 
@@ -334,6 +317,29 @@ ecs-deploy-watcher:
 	@echo "==> Forcing new deployment of watcher service..."
 	aws ecs update-service --cluster stl-$(ENV)-cluster --service stl-$(ENV)-watcher --force-new-deployment --region $(AWS_REGION)
 	@echo "==> Deployment initiated. Monitor with: aws ecs describe-services --cluster stl-$(ENV)-cluster --services stl-$(ENV)-watcher --region $(AWS_REGION)"
+
+ecs-deploy-watcher-staging:
+	@$(MAKE) ecs-deploy-watcher ENV=sentinelstaging
+
+# =============================================================================
+# Bastion Host Management
+# =============================================================================
+
+# SSH tunnel to TigerData via bastion (after Tailscale is connected)
+# Usage: make tigerdata-tunnel BASTION_IP=<tailscale-ip>
+# Then connect locally: psql "postgres://user:pass@localhost:5432/dbname"
+tigerdata-tunnel:
+	@if [ -z "$(BASTION_IP)" ] || [ -z "$(TIGERDATA_HOST)" ]; then \
+		echo "Error: BASTION_IP and TIGERDATA_HOST are required"; \
+		echo "Usage: make $@ BASTION_IP=<tailscale-ip> TIGERDATA_HOST=<tigerdata-host>"; \
+		echo "Get TIGERDATA_HOST from: aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-connection --query SecretString --output text | jq -r .host"; \
+		exit 1; \
+	fi
+	@echo "==> Starting Tailscale SSH tunnel to TigerData..."
+	@echo "    Local:  localhost:5432"
+	@echo "    Remote: $(TIGERDATA_HOST):5432"
+	@echo "    Press Ctrl+C to stop"
+	tailscale ssh -N -L 5432:$(TIGERDATA_HOST):5432 ec2-user@$(BASTION_IP)
 
 # =============================================================================
 # Docker Build & Push - Backup Worker
