@@ -821,3 +821,104 @@ func TestEventExtractor_ExtractEventData_ErrorCases(t *testing.T) {
 		})
 	}
 }
+
+func TestEventExtractor_ExtractReserveEventData(t *testing.T) {
+	extractor, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("failed to create extractor: %v", err)
+	}
+
+	// ReserveDataUpdated event signature
+	// Calculated from: ReserveDataUpdated(address,uint256,uint256,uint256,uint256,uint256)
+	reserveDataUpdatedSig := "0x804c9b842b2748a22bb64b345453a3de7ca54a6ca45ce00d415894979e22897a"
+	testReserve := "0x6B175474E89094C44Da98b954EedeAC495271d0F" // DAI address
+	testTxHash := "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+	tests := []struct {
+		name        string
+		log         Log
+		expectError bool
+		errorMsg    string
+		wantReserve string
+		wantTxHash  string
+	}{
+		{
+			name: "valid ReserveDataUpdated event",
+			log: Log{
+				Address:         testPool,
+				Topics:          []string{reserveDataUpdatedSig, testReserve},
+				Data:            "0x",
+				TransactionHash: testTxHash,
+			},
+			expectError: false,
+			wantReserve: testReserve,
+			wantTxHash:  testTxHash,
+		},
+		{
+			name: "missing reserve topic",
+			log: Log{
+				Address:         testPool,
+				Topics:          []string{reserveDataUpdatedSig}, // Only 1 topic
+				Data:            "0x",
+				TransactionHash: testTxHash,
+			},
+			expectError: true,
+			errorMsg:    "requires at least 2 topics",
+		},
+		{
+			name: "wrong event signature",
+			log: Log{
+				Address:         testPool,
+				Topics:          []string{"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", testReserve},
+				Data:            "0x",
+				TransactionHash: testTxHash,
+			},
+			expectError: true,
+			errorMsg:    "not a ReserveDataUpdated event",
+		},
+		{
+			name: "empty topics",
+			log: Log{
+				Address:         testPool,
+				Topics:          []string{},
+				Data:            "0x",
+				TransactionHash: testTxHash,
+			},
+			expectError: true,
+			errorMsg:    "requires at least 2 topics",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := extractor.ExtractReserveEventData(tt.log)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("expected error containing %q, got nil", tt.errorMsg)
+				} else if !strings.Contains(err.Error(), tt.errorMsg) {
+					t.Errorf("expected error containing %q, got %q", tt.errorMsg, err.Error())
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+
+			if result == nil {
+				t.Error("expected result, got nil")
+				return
+			}
+
+			if result.Reserve.Hex() != tt.wantReserve {
+				t.Errorf("Reserve = %s, want %s", result.Reserve.Hex(), tt.wantReserve)
+			}
+
+			if result.TxHash != tt.wantTxHash {
+				t.Errorf("TxHash = %s, want %s", result.TxHash, tt.wantTxHash)
+			}
+		})
+	}
+}

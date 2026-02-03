@@ -432,20 +432,20 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, asset common
 
 	// Parse getReserveData result
 	if !results[0].Success {
-		return nil, fmt.Errorf("getReserveData call failed")
+		return nil, fmt.Errorf("getReserveData call failed for asset %s at block %d", asset.Hex(), blockNumber)
 	}
 	reserveData, err := s.parseReserveData(results[0].ReturnData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse reserve data: %w", err)
+		return nil, fmt.Errorf("failed to parse reserve data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
 	}
 
 	// Parse getReserveConfigurationData result
 	if !results[1].Success {
-		return nil, fmt.Errorf("getReserveConfigurationData call failed")
+		return nil, fmt.Errorf("getReserveConfigurationData call failed for asset %s at block %d", asset.Hex(), blockNumber)
 	}
 	configData, err := s.parseReserveConfigurationData(results[1].ReturnData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse configuration data: %w", err)
+		return nil, fmt.Errorf("failed to parse configuration data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
 	}
 
 	// Merge into FullReserveData
@@ -504,20 +504,81 @@ func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvi
 		return nil, fmt.Errorf("expected 12 values from getReserveData, got %d", len(unpacked))
 	}
 
-	return &reserveDataFromProvider{
-		Unbacked:                unpacked[0].(*big.Int),
-		AccruedToTreasuryScaled: unpacked[1].(*big.Int),
-		TotalAToken:             unpacked[2].(*big.Int),
-		TotalStableDebt:         unpacked[3].(*big.Int),
-		TotalVariableDebt:       unpacked[4].(*big.Int),
-		LiquidityRate:           unpacked[5].(*big.Int),
-		VariableBorrowRate:      unpacked[6].(*big.Int),
-		StableBorrowRate:        unpacked[7].(*big.Int),
-		AverageStableBorrowRate: unpacked[8].(*big.Int),
-		LiquidityIndex:          unpacked[9].(*big.Int),
-		VariableBorrowIndex:     unpacked[10].(*big.Int),
-		LastUpdateTimestamp:     unpacked[11].(*big.Int).Int64(),
-	}, nil
+	result := &reserveDataFromProvider{}
+
+	if v, ok := unpacked[0].(*big.Int); ok {
+		result.Unbacked = v
+	} else {
+		return nil, fmt.Errorf("unpacked[0] expected *big.Int, got %T", unpacked[0])
+	}
+
+	if v, ok := unpacked[1].(*big.Int); ok {
+		result.AccruedToTreasuryScaled = v
+	} else {
+		return nil, fmt.Errorf("unpacked[1] expected *big.Int, got %T", unpacked[1])
+	}
+
+	if v, ok := unpacked[2].(*big.Int); ok {
+		result.TotalAToken = v
+	} else {
+		return nil, fmt.Errorf("unpacked[2] expected *big.Int, got %T", unpacked[2])
+	}
+
+	if v, ok := unpacked[3].(*big.Int); ok {
+		result.TotalStableDebt = v
+	} else {
+		return nil, fmt.Errorf("unpacked[3] expected *big.Int, got %T", unpacked[3])
+	}
+
+	if v, ok := unpacked[4].(*big.Int); ok {
+		result.TotalVariableDebt = v
+	} else {
+		return nil, fmt.Errorf("unpacked[4] expected *big.Int, got %T", unpacked[4])
+	}
+
+	if v, ok := unpacked[5].(*big.Int); ok {
+		result.LiquidityRate = v
+	} else {
+		return nil, fmt.Errorf("unpacked[5] expected *big.Int, got %T", unpacked[5])
+	}
+
+	if v, ok := unpacked[6].(*big.Int); ok {
+		result.VariableBorrowRate = v
+	} else {
+		return nil, fmt.Errorf("unpacked[6] expected *big.Int, got %T", unpacked[6])
+	}
+
+	if v, ok := unpacked[7].(*big.Int); ok {
+		result.StableBorrowRate = v
+	} else {
+		return nil, fmt.Errorf("unpacked[7] expected *big.Int, got %T", unpacked[7])
+	}
+
+	if v, ok := unpacked[8].(*big.Int); ok {
+		result.AverageStableBorrowRate = v
+	} else {
+		return nil, fmt.Errorf("unpacked[8] expected *big.Int, got %T", unpacked[8])
+	}
+
+	if v, ok := unpacked[9].(*big.Int); ok {
+		result.LiquidityIndex = v
+	} else {
+		return nil, fmt.Errorf("unpacked[9] expected *big.Int, got %T", unpacked[9])
+	}
+
+	if v, ok := unpacked[10].(*big.Int); ok {
+		result.VariableBorrowIndex = v
+	} else {
+		return nil, fmt.Errorf("unpacked[10] expected *big.Int, got %T", unpacked[10])
+	}
+
+	if v, ok := unpacked[11].(*big.Int); ok {
+		result.LastUpdateTimestamp = v.Int64()
+	} else {
+		return nil, fmt.Errorf("unpacked[11] expected *big.Int, got %T", unpacked[11])
+	}
+
+	return result, nil
 }
 
 // reserveConfigData holds parsed data from ProtocolDataProvider.getReserveConfigurationData
@@ -545,16 +606,67 @@ func (s *blockchainService) parseReserveConfigurationData(data []byte) (*reserve
 		return nil, fmt.Errorf("expected 10 values from getReserveConfigurationData, got %d", len(unpacked))
 	}
 
-	return &reserveConfigData{
-		Decimals:                 unpacked[0].(*big.Int),
-		LTV:                      unpacked[1].(*big.Int),
-		LiquidationThreshold:     unpacked[2].(*big.Int),
-		LiquidationBonus:         unpacked[3].(*big.Int),
-		ReserveFactor:            unpacked[4].(*big.Int),
-		UsageAsCollateralEnabled: unpacked[5].(bool),
-		BorrowingEnabled:         unpacked[6].(bool),
-		StableBorrowRateEnabled:  unpacked[7].(bool),
-		IsActive:                 unpacked[8].(bool),
-		IsFrozen:                 unpacked[9].(bool),
-	}, nil
+	result := &reserveConfigData{}
+
+	if v, ok := unpacked[0].(*big.Int); ok {
+		result.Decimals = v
+	} else {
+		return nil, fmt.Errorf("unpacked[0] expected *big.Int, got %T", unpacked[0])
+	}
+
+	if v, ok := unpacked[1].(*big.Int); ok {
+		result.LTV = v
+	} else {
+		return nil, fmt.Errorf("unpacked[1] expected *big.Int, got %T", unpacked[1])
+	}
+
+	if v, ok := unpacked[2].(*big.Int); ok {
+		result.LiquidationThreshold = v
+	} else {
+		return nil, fmt.Errorf("unpacked[2] expected *big.Int, got %T", unpacked[2])
+	}
+
+	if v, ok := unpacked[3].(*big.Int); ok {
+		result.LiquidationBonus = v
+	} else {
+		return nil, fmt.Errorf("unpacked[3] expected *big.Int, got %T", unpacked[3])
+	}
+
+	if v, ok := unpacked[4].(*big.Int); ok {
+		result.ReserveFactor = v
+	} else {
+		return nil, fmt.Errorf("unpacked[4] expected *big.Int, got %T", unpacked[4])
+	}
+
+	if v, ok := unpacked[5].(bool); ok {
+		result.UsageAsCollateralEnabled = v
+	} else {
+		return nil, fmt.Errorf("unpacked[5] expected bool, got %T", unpacked[5])
+	}
+
+	if v, ok := unpacked[6].(bool); ok {
+		result.BorrowingEnabled = v
+	} else {
+		return nil, fmt.Errorf("unpacked[6] expected bool, got %T", unpacked[6])
+	}
+
+	if v, ok := unpacked[7].(bool); ok {
+		result.StableBorrowRateEnabled = v
+	} else {
+		return nil, fmt.Errorf("unpacked[7] expected bool, got %T", unpacked[7])
+	}
+
+	if v, ok := unpacked[8].(bool); ok {
+		result.IsActive = v
+	} else {
+		return nil, fmt.Errorf("unpacked[8] expected bool, got %T", unpacked[8])
+	}
+
+	if v, ok := unpacked[9].(bool); ok {
+		result.IsFrozen = v
+	} else {
+		return nil, fmt.Errorf("unpacked[9] expected bool, got %T", unpacked[9])
+	}
+
+	return result, nil
 }
