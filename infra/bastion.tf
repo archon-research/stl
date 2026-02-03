@@ -189,7 +189,7 @@ resource "aws_instance" "bastion" {
       --region ${var.aws_region} 2>/dev/null || echo "")
     
     if [ -n "$AUTH_KEY" ]; then
-      tailscale up --authkey="$AUTH_KEY" --hostname="${local.prefix}-bastion"
+      tailscale up --authkey="$AUTH_KEY" --ssh --accept-dns=false --hostname="${local.prefix}-bastion"
     fi
     %{endif}
 

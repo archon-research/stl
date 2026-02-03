@@ -335,11 +335,11 @@ tigerdata-tunnel:
 		echo "Get TIGERDATA_HOST from: aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-connection --query SecretString --output text | jq -r .host"; \
 		exit 1; \
 	fi
-	@echo "==> Starting Tailscale SSH tunnel to TigerData..."
+	@echo "==> Starting SSH tunnel to TigerData via Tailscale..."
 	@echo "    Local:  localhost:5432"
 	@echo "    Remote: $(TIGERDATA_HOST):5432"
 	@echo "    Press Ctrl+C to stop"
-	tailscale ssh -N -L 5432:$(TIGERDATA_HOST):5432 ec2-user@$(BASTION_IP)
+	ssh -N -L 5432:$(TIGERDATA_HOST):5432 ec2-user@$(BASTION_IP)
 
 # =============================================================================
 # Docker Build & Push - Backup Worker
