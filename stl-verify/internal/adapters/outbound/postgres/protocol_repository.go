@@ -115,18 +115,22 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 			protocol_id, token_id, block_number, block_version,
 			unbacked, accrued_to_treasury_scaled, total_a_token, total_stable_debt, total_variable_debt,
 			liquidity_rate, variable_borrow_rate, stable_borrow_rate, average_stable_borrow_rate,
-			liquidity_index, variable_borrow_index, last_update_timestamp
+			liquidity_index, variable_borrow_index, last_update_timestamp,
+			decimals, ltv, liquidation_threshold, liquidation_bonus, reserve_factor,
+			usage_as_collateral_enabled, borrowing_enabled, stable_borrow_rate_enabled, is_active, is_frozen
 		) VALUES `)
 
-	args := make([]any, 0, len(data)*16)
+	args := make([]any, 0, len(data)*26)
 	for i, d := range data {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 16
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+		baseIdx := i * 26
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8,
-			baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14, baseIdx+15, baseIdx+16))
+			baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14, baseIdx+15, baseIdx+16,
+			baseIdx+17, baseIdx+18, baseIdx+19, baseIdx+20, baseIdx+21, baseIdx+22, baseIdx+23, baseIdx+24,
+			baseIdx+25, baseIdx+26))
 		args = append(args, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion)
 
 		for _, valToConvert := range []*big.Int{
@@ -150,6 +154,23 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 		}
 
 		args = append(args, d.LastUpdateTimestamp)
+
+		// Configuration fields
+		for _, valToConvert := range []*big.Int{
+			d.Decimals,
+			d.LTV,
+			d.LiquidationThreshold,
+			d.LiquidationBonus,
+			d.ReserveFactor,
+		} {
+			convertedVal, err := bigIntToNumeric(valToConvert)
+			if err != nil {
+				return fmt.Errorf("sparklend_reserve_data[%d] (ProtocolID=%d, TokenID=%d): configuration numeric fields must not be nil", i, d.ProtocolID, d.TokenID)
+			}
+			args = append(args, convertedVal)
+		}
+
+		args = append(args, d.UsageAsCollateralEnabled, d.BorrowingEnabled, d.StableBorrowRateEnabled, d.IsActive, d.IsFrozen)
 	}
 
 	sb.WriteString(`
@@ -165,7 +186,17 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 			average_stable_borrow_rate = EXCLUDED.average_stable_borrow_rate,
 			liquidity_index = EXCLUDED.liquidity_index,
 			variable_borrow_index = EXCLUDED.variable_borrow_index,
-			last_update_timestamp = EXCLUDED.last_update_timestamp
+			last_update_timestamp = EXCLUDED.last_update_timestamp,
+			decimals = EXCLUDED.decimals,
+			ltv = EXCLUDED.ltv,
+			liquidation_threshold = EXCLUDED.liquidation_threshold,
+			liquidation_bonus = EXCLUDED.liquidation_bonus,
+			reserve_factor = EXCLUDED.reserve_factor,
+			usage_as_collateral_enabled = EXCLUDED.usage_as_collateral_enabled,
+			borrowing_enabled = EXCLUDED.borrowing_enabled,
+			stable_borrow_rate_enabled = EXCLUDED.stable_borrow_rate_enabled,
+			is_active = EXCLUDED.is_active,
+			is_frozen = EXCLUDED.is_frozen
 	`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)

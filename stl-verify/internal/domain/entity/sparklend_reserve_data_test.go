@@ -219,3 +219,112 @@ func TestSparkLendReserveData_ChainedMethods(t *testing.T) {
 		t.Errorf("Chained methods failed to set TotalAToken")
 	}
 }
+
+func TestSparkLendReserveData_WithConfiguration(t *testing.T) {
+	srd, err := NewSparkLendReserveData(1, 5, 10, 1000)
+	if err != nil {
+		t.Fatalf("NewSparkLendReserveData() unexpected error = %v", err)
+	}
+
+	decimals := big.NewInt(18)
+	ltv := big.NewInt(8300)
+	liquidationThreshold := big.NewInt(8400)
+	liquidationBonus := big.NewInt(10700)
+	reserveFactor := big.NewInt(3000)
+	usageAsCollateralEnabled := true
+	borrowingEnabled := true
+	stableBorrowRateEnabled := false
+	isActive := true
+	isFrozen := false
+
+	result := srd.WithConfiguration(
+		decimals,
+		ltv,
+		liquidationThreshold,
+		liquidationBonus,
+		reserveFactor,
+		usageAsCollateralEnabled,
+		borrowingEnabled,
+		stableBorrowRateEnabled,
+		isActive,
+		isFrozen,
+	)
+
+	if result != srd {
+		t.Errorf("WithConfiguration() should return same instance")
+	}
+	if srd.Decimals.Cmp(decimals) != 0 {
+		t.Errorf("WithConfiguration() Decimals = %v, want %v", srd.Decimals, decimals)
+	}
+	if srd.LTV.Cmp(ltv) != 0 {
+		t.Errorf("WithConfiguration() LTV = %v, want %v", srd.LTV, ltv)
+	}
+	if srd.LiquidationThreshold.Cmp(liquidationThreshold) != 0 {
+		t.Errorf("WithConfiguration() LiquidationThreshold = %v, want %v", srd.LiquidationThreshold, liquidationThreshold)
+	}
+	if srd.LiquidationBonus.Cmp(liquidationBonus) != 0 {
+		t.Errorf("WithConfiguration() LiquidationBonus = %v, want %v", srd.LiquidationBonus, liquidationBonus)
+	}
+	if srd.ReserveFactor.Cmp(reserveFactor) != 0 {
+		t.Errorf("WithConfiguration() ReserveFactor = %v, want %v", srd.ReserveFactor, reserveFactor)
+	}
+	if srd.UsageAsCollateralEnabled != usageAsCollateralEnabled {
+		t.Errorf("WithConfiguration() UsageAsCollateralEnabled = %v, want %v", srd.UsageAsCollateralEnabled, usageAsCollateralEnabled)
+	}
+	if srd.BorrowingEnabled != borrowingEnabled {
+		t.Errorf("WithConfiguration() BorrowingEnabled = %v, want %v", srd.BorrowingEnabled, borrowingEnabled)
+	}
+	if srd.StableBorrowRateEnabled != stableBorrowRateEnabled {
+		t.Errorf("WithConfiguration() StableBorrowRateEnabled = %v, want %v", srd.StableBorrowRateEnabled, stableBorrowRateEnabled)
+	}
+	if srd.IsActive != isActive {
+		t.Errorf("WithConfiguration() IsActive = %v, want %v", srd.IsActive, isActive)
+	}
+	if srd.IsFrozen != isFrozen {
+		t.Errorf("WithConfiguration() IsFrozen = %v, want %v", srd.IsFrozen, isFrozen)
+	}
+}
+
+func TestSparkLendReserveData_ChainedWithConfiguration(t *testing.T) {
+	srd, err := NewSparkLendReserveData(1, 5, 10, 1000)
+	if err != nil {
+		t.Fatalf("NewSparkLendReserveData() unexpected error = %v", err)
+	}
+
+	// Test method chaining with configuration
+	result := srd.
+		WithRates(big.NewInt(1000), big.NewInt(2000), big.NewInt(3000), big.NewInt(2500)).
+		WithIndexes(big.NewInt(5000), big.NewInt(6000)).
+		WithTotals(big.NewInt(100), big.NewInt(200), big.NewInt(10000), big.NewInt(3000), big.NewInt(7000)).
+		WithConfiguration(
+			big.NewInt(18),
+			big.NewInt(8300),
+			big.NewInt(8400),
+			big.NewInt(10700),
+			big.NewInt(3000),
+			true,
+			true,
+			false,
+			true,
+			false,
+		)
+
+	if result != srd {
+		t.Errorf("Chained methods should return same instance")
+	}
+	if srd.LiquidityRate.Cmp(big.NewInt(1000)) != 0 {
+		t.Errorf("Chained methods failed to set LiquidityRate")
+	}
+	if srd.Decimals.Cmp(big.NewInt(18)) != 0 {
+		t.Errorf("Chained methods failed to set Decimals")
+	}
+	if srd.LTV.Cmp(big.NewInt(8300)) != 0 {
+		t.Errorf("Chained methods failed to set LTV")
+	}
+	if !srd.UsageAsCollateralEnabled {
+		t.Errorf("Chained methods failed to set UsageAsCollateralEnabled")
+	}
+	if !srd.IsActive {
+		t.Errorf("Chained methods failed to set IsActive")
+	}
+}

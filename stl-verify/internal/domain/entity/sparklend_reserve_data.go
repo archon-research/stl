@@ -28,6 +28,17 @@ type SparkLendReserveData struct {
 	VariableBorrowIndex *big.Int
 	// Timestamps
 	LastUpdateTimestamp int64
+	// Configuration data from getReserveConfigurationData
+	Decimals                 *big.Int
+	LTV                      *big.Int
+	LiquidationThreshold     *big.Int
+	LiquidationBonus         *big.Int
+	ReserveFactor            *big.Int
+	UsageAsCollateralEnabled bool
+	BorrowingEnabled         bool
+	StableBorrowRateEnabled  bool
+	IsActive                 bool
+	IsFrozen                 bool
 }
 
 // NewSparkLendReserveData creates a new SparkLendReserveData entity.
@@ -87,5 +98,24 @@ func (s *SparkLendReserveData) WithTotals(unbacked, accruedToTreasury, totalATok
 	s.TotalAToken = totalAToken
 	s.TotalStableDebt = totalStableDebt
 	s.TotalVariableDebt = totalVariableDebt
+	return s
+}
+
+// WithConfiguration sets the configuration data from getReserveConfigurationData on the reserve data.
+// Note: This mutates the receiver and returns it for chaining.
+func (s *SparkLendReserveData) WithConfiguration(
+	decimals, ltv, liquidationThreshold, liquidationBonus, reserveFactor *big.Int,
+	usageAsCollateralEnabled, borrowingEnabled, stableBorrowRateEnabled, isActive, isFrozen bool,
+) *SparkLendReserveData {
+	s.Decimals = decimals
+	s.LTV = ltv
+	s.LiquidationThreshold = liquidationThreshold
+	s.LiquidationBonus = liquidationBonus
+	s.ReserveFactor = reserveFactor
+	s.UsageAsCollateralEnabled = usageAsCollateralEnabled
+	s.BorrowingEnabled = borrowingEnabled
+	s.StableBorrowRateEnabled = stableBorrowRateEnabled
+	s.IsActive = isActive
+	s.IsFrozen = isFrozen
 	return s
 }
