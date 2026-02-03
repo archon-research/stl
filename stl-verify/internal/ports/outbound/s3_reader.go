@@ -18,6 +18,10 @@ type S3Reader interface {
 	// ListFiles lists all files in the bucket with the given prefix.
 	ListFiles(ctx context.Context, bucket, prefix string) ([]S3File, error)
 
+	// ListPrefix lists all keys in the bucket with the given prefix.
+	// Returns a slice of key names only (lighter weight than ListFiles).
+	ListPrefix(ctx context.Context, bucket, prefix string) ([]string, error)
+
 	// StreamFile returns a reader for the file content.
 	// The caller is responsible for closing the reader.
 	// If the file is gzipped (.gz extension), the reader automatically decompresses.

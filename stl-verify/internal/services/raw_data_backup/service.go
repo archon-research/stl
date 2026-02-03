@@ -11,13 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
-
-// BlockRangeSize is the number of blocks per S3 partition.
-// Blocks 0-1000 go in partition "0-1000", blocks 1001-2000 go in "1001-2000", etc.
-const BlockRangeSize = 1000
 
 // ChainExpectation defines what data is expected for a specific chain.
 // If a data type is expected but missing from cache, the message will error
@@ -312,7 +309,7 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (
 	}
 
 	// Calculate the partition (block range)
-	partition := s.getPartition(event.BlockNumber)
+	partitionKey := partition.GetPartition(event.BlockNumber)
 
 	// Determine which files are expected for a complete backup
 	expectedTypes := []string{"block"}
@@ -331,7 +328,7 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (
 	// Check if all expected files already exist
 	allExist := true
 	for _, dataType := range expectedTypes {
-		key := s.generateKey(partition, event, dataType)
+		key := s.generateKey(partitionKey, event, dataType)
 		exists, err := s.writer.FileExists(ctx, s.config.Bucket, key)
 		if err != nil {
 			return fmt.Errorf("failed to check existence of %s: %w", key, err)
@@ -348,45 +345,34 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (
 	}
 
 	// Write all available data to S3 (overwriting if necessary to ensure consistency)
-	if err := s.writeToS3(ctx, partition, event, "block", blockData); err != nil {
+	if err := s.writeToS3(ctx, partitionKey, event, "block", blockData); err != nil {
 		return err
 	}
 
 	if receiptsData != nil {
-		if err := s.writeToS3(ctx, partition, event, "receipts", receiptsData); err != nil {
+		if err := s.writeToS3(ctx, partitionKey, event, "receipts", receiptsData); err != nil {
 			return err
 		}
 	}
 
 	if tracesData != nil {
-		if err := s.writeToS3(ctx, partition, event, "traces", tracesData); err != nil {
+		if err := s.writeToS3(ctx, partitionKey, event, "traces", tracesData); err != nil {
 			return err
 		}
 	}
 
 	if blobsData != nil {
-		if err := s.writeToS3(ctx, partition, event, "blobs", blobsData); err != nil {
+		if err := s.writeToS3(ctx, partitionKey, event, "blobs", blobsData); err != nil {
 			return err
 		}
 	}
 
 	s.logger.Info("backed up block to S3",
 		"blockNumber", event.BlockNumber,
-		"partition", partition,
+		"partition", partitionKey,
 	)
 
 	return nil
-}
-
-// getPartition returns the partition string for a block number.
-// Each partition contains exactly BlockRangeSize (1000) blocks:
-// Block 0-999 -> "0-999", block 1000-1999 -> "1000-1999", etc.
-func (s *Service) getPartition(blockNumber int64) string {
-	partitionIndex := blockNumber / BlockRangeSize
-	start := partitionIndex * BlockRangeSize
-	end := start + BlockRangeSize - 1
-
-	return fmt.Sprintf("%d-%d", start, end)
 }
 
 // generateKey creates the S3 key for a given data type.

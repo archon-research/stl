@@ -497,53 +497,6 @@ func TestNewService_DefaultsApplied(t *testing.T) {
 }
 
 // =============================================================================
-// Tests: getPartition
-// =============================================================================
-
-func TestGetPartition(t *testing.T) {
-	svc := &Service{}
-
-	tests := []struct {
-		blockNumber int64
-		expected    string
-	}{
-		// First partition: 0-999 (1000 blocks)
-		{0, "0-999"},
-		{1, "0-999"},
-		{500, "0-999"},
-		{999, "0-999"},
-
-		// Second partition: 1000-1999 (1000 blocks)
-		{1000, "1000-1999"},
-		{1500, "1000-1999"},
-		{1999, "1000-1999"},
-
-		// Third partition: 2000-2999 (1000 blocks)
-		{2000, "2000-2999"},
-		{2999, "2000-2999"},
-
-		// Large block numbers
-		{10000, "10000-10999"},
-		{10999, "10000-10999"},
-		{1000000, "1000000-1000999"},
-		{1000999, "1000000-1000999"},
-
-		// Edge cases at partition boundaries
-		{BlockRangeSize - 1, "0-999"},
-		{BlockRangeSize, "1000-1999"},
-	}
-
-	for _, tt := range tests {
-		t.Run(fmt.Sprintf("block_%d", tt.blockNumber), func(t *testing.T) {
-			result := svc.getPartition(tt.blockNumber)
-			if result != tt.expected {
-				t.Errorf("getPartition(%d) = %s, expected %s", tt.blockNumber, result, tt.expected)
-			}
-		})
-	}
-}
-
-// =============================================================================
 // Tests: processMessage
 // =============================================================================
 
@@ -1881,46 +1834,6 @@ func TestProcessMessage_AllDataTypesWithContent(t *testing.T) {
 			if !exists || len(data) == 0 {
 				t.Errorf("expected non-empty data for %s", key)
 			}
-		}
-	}
-}
-
-func TestProcessMessage_PartitionBoundariesComprehensive(t *testing.T) {
-	svc := &Service{}
-
-	// Test all boundary conditions thoroughly
-	testCases := []struct {
-		blockNumber int64
-		expected    string
-	}{
-		// First partition boundaries (0-999)
-		{0, "0-999"},
-		{1, "0-999"},
-		{999, "0-999"},
-
-		// Second partition boundaries (1000-1999)
-		{1000, "1000-1999"},
-		{1001, "1000-1999"},
-		{1999, "1000-1999"},
-
-		// Third partition boundaries (2000-2999)
-		{2000, "2000-2999"},
-		{2001, "2000-2999"},
-		{2999, "2000-2999"},
-
-		// Fourth partition boundary
-		{3000, "3000-3999"},
-
-		// Large number boundaries
-		{9999999, "9999000-9999999"},
-		{10000000, "10000000-10000999"},
-		{10000999, "10000000-10000999"},
-	}
-
-	for _, tc := range testCases {
-		result := svc.getPartition(tc.blockNumber)
-		if result != tc.expected {
-			t.Errorf("getPartition(%d) = %s, expected %s", tc.blockNumber, result, tc.expected)
 		}
 	}
 }

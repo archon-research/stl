@@ -8,7 +8,10 @@
         ecr-login docker-build docker-push docker-release \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
-        docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging
+        docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging \
+        erigon-init erigon-validate erigon-plan erigon-apply erigon-apply-auto erigon-destroy erigon-check \
+        erigon-status erigon-logs erigon-logs-follow erigon-deploy-readonly erigon-switch-readonly erigon-switch-sync erigon-mode \
+        erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -435,4 +438,165 @@ docker-push-backup-staging:
 
 docker-release-backup-staging:
 	@$(MAKE) docker-release-backup ENV=sentinelstaging
+
+# =============================================================================
+# Erigon Node Terraform Commands
+# =============================================================================
+
+ERIGON_DIR := ephemeral-infra/erigon-node
+
+# Helper to check AWS_PROFILE_ERIGON is set
+define require_aws_profile_erigon
+	@if [ -z "$(AWS_PROFILE_ERIGON)" ]; then \
+		echo "Error: AWS_PROFILE_ERIGON is required"; \
+		echo "Usage: make $@ AWS_PROFILE_ERIGON=<profile-name>"; \
+		exit 1; \
+	fi
+endef
+
+# Initialize Erigon Terraform
+erigon-init:
+	$(call require_aws_profile_erigon)
+	@echo "==> Initializing Erigon Terraform..."
+	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu init -backend-config=environments/sentinelstaging.backend.hcl
+
+# Validate Erigon Terraform configuration
+erigon-validate:
+	$(call require_aws_profile_erigon)
+	@echo "==> Validating Erigon Terraform..."
+	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu validate
+
+# Plan Erigon Terraform changes
+erigon-plan:
+	$(call require_aws_profile_erigon)
+	@echo "==> Planning Erigon Terraform..."
+	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu plan
+
+# Apply Erigon Terraform changes
+erigon-apply:
+	$(call require_aws_profile_erigon)
+	@echo "==> Applying Erigon Terraform..."
+	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu apply
+
+# Apply Erigon Terraform changes (auto-approve)
+erigon-apply-auto:
+	$(call require_aws_profile_erigon)
+	@echo "==> Applying Erigon Terraform (auto-approve)..."
+	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu apply -auto-approve
+
+# Destroy Erigon infrastructure
+erigon-destroy:
+	$(call require_aws_profile_erigon)
+	@echo "==> Destroying Erigon infrastructure..."
+	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu destroy
+
+# Full Erigon workflow: init, validate, plan
+erigon-check: erigon-init erigon-validate erigon-plan
+
+# =============================================================================
+# Erigon Node Management (via Tailscale)
+# =============================================================================
+
+# ERIGON_USER and ERIGON_IP are required for all erigon-* targets
+# Usage: make erigon-status ERIGON_USER=<user> ERIGON_IP=<tailscale-ip>
+
+# Helper to check required vars are set
+define require_erigon_vars
+	@if [ -z "$(ERIGON_USER)" ] || [ -z "$(ERIGON_IP)" ]; then \
+		echo "Error: ERIGON_USER and ERIGON_IP are required"; \
+		echo "Usage: make $@ ERIGON_USER=<user> ERIGON_IP=<tailscale-ip>"; \
+		exit 1; \
+	fi
+endef
+
+# Check Erigon sync status
+erigon-status:
+	$(call require_erigon_vars)
+	@echo "==> Checking Erigon status..."
+	tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'systemctl status erigon --no-pager; echo "---"; df -h /data'
+
+# View Erigon logs (last 100 lines)
+erigon-logs:
+	$(call require_erigon_vars)
+	@echo "==> Viewing Erigon logs..."
+	tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'journalctl -u erigon -n 100 --no-pager'
+
+# Follow Erigon logs (streaming)
+erigon-logs-follow:
+	$(call require_erigon_vars)
+	@echo "==> Following Erigon logs..."
+	tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'journalctl -u erigon -f'
+
+# Deploy erigon-readonly.service to node
+erigon-deploy-readonly:
+	$(call require_erigon_vars)
+	@echo "==> Deploying erigon-readonly.service to Erigon node..."
+	cat $(ERIGON_DIR)/erigon-readonly.service | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > /etc/systemd/system/erigon-readonly.service && systemctl daemon-reload'
+	@echo "==> Service deployed. Use 'make erigon-switch-readonly' to switch modes."
+
+# Switch to read-only mode (for bulk downloading)
+erigon-switch-readonly:
+	$(call require_erigon_vars)
+	@echo "==> Switching Erigon to read-only mode..."
+	@echo "    WARNING: This will stop syncing and optimize for bulk RPC queries."
+	tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'systemctl stop erigon && systemctl start erigon-readonly'
+	@echo "==> Erigon is now in read-only mode. Use 'make erigon-switch-sync' to resume syncing."
+
+# Switch back to sync mode (normal operation)
+erigon-switch-sync:
+	$(call require_erigon_vars)
+	@echo "==> Switching Erigon back to sync mode..."
+	tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'systemctl stop erigon-readonly && systemctl start erigon'
+	@echo "==> Erigon is now syncing."
+
+# Check which mode Erigon is in
+erigon-mode:
+	$(call require_erigon_vars)
+	@echo "==> Checking Erigon mode..."
+	@tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) '\
+		if systemctl is-active --quiet erigon-readonly; then \
+			echo "Mode: READ-ONLY (optimized for bulk queries)"; \
+		elif systemctl is-active --quiet erigon; then \
+			echo "Mode: SYNC (normal operation)"; \
+		else \
+			echo "Mode: STOPPED (neither service running)"; \
+		fi'
+
+# Run a command on Erigon node
+# Usage: make erigon-run ERIGON_USER=<user> ERIGON_IP=<ip> CMD="df -h"
+erigon-run:
+	$(call require_erigon_vars)
+	@tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) '$(CMD)'
+
+# Build bulk-download binary for ARM64 Linux (to run on Erigon node)
+build-bulk-download-arm64:
+	@echo "==> Building bulk-download for ARM64 Linux..."
+	mkdir -p dist
+	GOOS=linux GOARCH=arm64 go build -o dist/bulk-download-linux-arm64 ./cmd/bulk-download
+	@echo "==> Built: dist/bulk-download-linux-arm64"
+
+# Deploy bulk-download to Erigon node
+# Usage: make deploy-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip>
+deploy-bulk-download: build-bulk-download-arm64
+	$(call require_erigon_vars)
+	@echo "==> Deploying bulk-download to Erigon node..."
+	cat dist/bulk-download-linux-arm64 | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > ~/bulk-download && chmod +x ~/bulk-download'
+	@echo "==> Deployed to ~/bulk-download on Erigon node."
+
+# Run bulk-download on Erigon node (dry-run by default)
+# Usage: make erigon-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip> BUCKET=<bucket> START=16000000 END=16001000 [DRY_RUN=false]
+DRY_RUN ?= true
+erigon-bulk-download:
+	$(call require_erigon_vars)
+	@if [ -z "$(BUCKET)" ]; then \
+		echo "Error: BUCKET is required"; \
+		echo "Usage: make $@ ERIGON_USER=<user> ERIGON_IP=<ip> BUCKET=<bucket> START=<start> END=<end>"; \
+		exit 1; \
+	fi
+	@echo "==> Running bulk-download on Erigon node..."
+	tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) '~/bulk-download \
+		--start-block=$(START) \
+		--end-block=$(END) \
+		--bucket=$(BUCKET) \
+		$(if $(filter true,$(DRY_RUN)),--dry-run,)'
 
