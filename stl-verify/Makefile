@@ -12,6 +12,7 @@
         erigon-init erigon-validate erigon-plan erigon-apply erigon-apply-auto erigon-destroy erigon-check \
         erigon-status erigon-logs erigon-logs-follow erigon-deploy-readonly erigon-switch-readonly erigon-switch-sync erigon-mode \
         erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download
+        ecs-deploy-watcher ecs-deploy-watcher-staging
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -327,6 +328,12 @@ docker-push-watcher-staging:
 
 docker-release-watcher-staging:
 	@$(MAKE) docker-release ENV=sentinelstaging
+
+# Force new deployment of watcher service (pulls latest image)
+ecs-deploy-watcher:
+	@echo "==> Forcing new deployment of watcher service..."
+	aws ecs update-service --cluster stl-$(ENV)-cluster --service stl-$(ENV)-watcher --force-new-deployment --region $(AWS_REGION)
+	@echo "==> Deployment initiated. Monitor with: aws ecs describe-services --cluster stl-$(ENV)-cluster --services stl-$(ENV)-watcher --region $(AWS_REGION)"
 
 # =============================================================================
 # Docker Build & Push - Backup Worker
