@@ -10,7 +10,8 @@
         docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
-        bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel db-migrate \
+        bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel \
+        db-migrate db-set-passwords db-test-app-user \
         erigon-init erigon-validate erigon-plan erigon-apply erigon-apply-auto erigon-destroy erigon-check \
         erigon-status erigon-logs erigon-logs-follow erigon-deploy-readonly erigon-switch-readonly erigon-switch-sync erigon-mode \
         erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download
@@ -360,6 +361,47 @@ db-migrate:
 	@echo "==> Running database migrations..."
 	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate
 	@echo "==> Migrations complete"
+
+# Set database user passwords from Secrets Manager
+# Usage: make db-set-passwords DATABASE_URL="postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require" ENV=sentinelstaging
+# Requires:
+#   1. Tunnel running: make tigerdata-tunnel BASTION_IP=... TIGERDATA_HOST=...
+#   2. Terraform applied: make tf-apply ENV=sentinelstaging (creates secrets with passwords)
+#   3. Migrations run: make db-migrate DATABASE_URL=... (creates users with placeholder passwords)
+db-set-passwords:
+	@if [ -z "$(DATABASE_URL)" ] || [ -z "$(ENV)" ]; then \
+		echo "Error: DATABASE_URL and ENV are required"; \
+		echo "Usage: make $@ DATABASE_URL=\"postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require\" ENV=sentinelstaging"; \
+		exit 1; \
+	fi
+	@echo "==> Setting database user passwords from Secrets Manager..."
+	@STL_RW_PASS=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-app --query SecretString --output text | jq -r .password) && \
+	STL_RO_PASS=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-readonly --query SecretString --output text | jq -r .password) && \
+	echo "Updating stl_read_write password..." && \
+	psql "$(DATABASE_URL)" -c "ALTER USER stl_read_write WITH PASSWORD '$$STL_RW_PASS';" && \
+	echo "Updating stl_read_only password..." && \
+	psql "$(DATABASE_URL)" -c "ALTER USER stl_read_only WITH PASSWORD '$$STL_RO_PASS';" && \
+	echo "==> Database user passwords configured successfully"
+
+# Test database connection with application user
+# Usage: make db-test-app-user ENV=sentinelstaging
+# Requires tunnel to be running first: make tigerdata-tunnel BASTION_IP=... TIGERDATA_HOST=...
+db-test-app-user:
+	@if [ -z "$(ENV)" ]; then \
+		echo "Error: ENV is required"; \
+		echo "Usage: make $@ ENV=sentinelstaging"; \
+		exit 1; \
+	fi
+	@echo "==> Testing stl_read_write connection..."
+	@CONNECTION_URL=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-app --query SecretString --output text | jq -r .connection_url | sed 's|@[^:]*:|@localhost:|') && \
+	psql "$$CONNECTION_URL" -c "SELECT current_user, current_database();" && \
+	echo "" && \
+	echo "==> Testing SELECT permission..." && \
+	psql "$$CONNECTION_URL" -c "SELECT COUNT(*) FROM block_states;" && \
+	echo "" && \
+	echo "==> Testing INSERT permission (will rollback)..." && \
+	psql "$$CONNECTION_URL" -c "BEGIN; INSERT INTO reorg_events (block_number, old_hash, new_hash, depth) VALUES (0, 'test', 'test', 1); ROLLBACK;" && \
+	echo "==> All tests passed!"
 
 # =============================================================================
 # Docker Build & Push - Backup Worker
