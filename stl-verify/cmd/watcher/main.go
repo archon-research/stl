@@ -319,11 +319,10 @@ func main() {
 
 	// Create LiveService (handles WebSocket subscription and reorg detection)
 	config := live_data.LiveConfig{
-		ChainID:              chainID,
-		FinalityBlockCount:   64,
-		MaxUnfinalizedBlocks: 128,
-		EnableBlobs:          *enableBlobs,
-		Logger:               logger,
+		ChainID:            chainID,
+		FinalityBlockCount: 64,
+		EnableBlobs:        *enableBlobs,
+		Logger:             logger,
 	}
 
 	liveService, err := live_data.NewLiveService(

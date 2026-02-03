@@ -18,20 +18,8 @@ type BlockDataInput struct {
 // The version is incremented each time a block at the same height is reorged.
 type BlockCache interface {
 	// SetBlockData stores all block data types in a single pipelined operation.
-	// This is more efficient than calling SetBlock, SetReceipts, SetTraces, SetBlobs separately.
+	// Data is compressed before storing. Transient failures are automatically retried.
 	SetBlockData(ctx context.Context, chainID int64, blockNumber int64, version int, data BlockDataInput) error
-
-	// SetBlock stores the full block with transactions.
-	SetBlock(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error
-
-	// SetReceipts stores transaction receipts for a block.
-	SetReceipts(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error
-
-	// SetTraces stores execution traces for a block.
-	SetTraces(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error
-
-	// SetBlobs stores blob sidecars for a block.
-	SetBlobs(ctx context.Context, chainID int64, blockNumber int64, version int, data json.RawMessage) error
 
 	// GetBlock retrieves the full block with transactions.
 	// Returns nil, nil if the block is not in cache.

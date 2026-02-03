@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +23,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -75,39 +75,35 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 	)
 	defer span.End()
 
-	const maxRetries = 10
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		version, err := r.saveBlockOnce(ctx, state)
-		if err == nil {
-			return version, nil
-		}
-
-		// Check if this is a serialization failure (SQLSTATE 40001)
-		// These are expected with concurrent transactions and should be retried
-		if isSerializationFailure(err) {
-			r.logger.Debug("serialization failure, retrying",
-				"attempt", attempt+1,
-				"maxRetries", maxRetries,
-				"block", state.Number,
-				"hash", state.Hash)
-			// Exponential backoff with jitter, capped at 100ms to prevent excessive waits
-			// Base: 1ms, 2ms, 4ms, 8ms, 16ms, 32ms, 64ms, 100ms (capped)
-			base := time.Duration(1<<attempt) * time.Millisecond
-			const maxBackoff = 100 * time.Millisecond
-			if base > maxBackoff {
-				base = maxBackoff
-			}
-			jitter := time.Duration(rand.Int63n(int64(base)))
-			time.Sleep(base + jitter)
-			continue
-		}
-
-		// For other errors, return immediately
-		return 0, err
+	cfg := retry.Config{
+		MaxRetries:     10,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     100 * time.Millisecond,
+		BackoffFactor:  2.0,
+		Jitter:         true,
 	}
 
-	return 0, fmt.Errorf("failed to save block after %d retries due to serialization conflicts", maxRetries)
+	onRetry := func(attempt int, err error, backoff time.Duration) {
+		r.logger.Debug("serialization failure, retrying",
+			"attempt", attempt,
+			"block", state.Number,
+			"hash", state.Hash,
+			"backoff", backoff)
+		span.AddEvent("retry_attempt", trace.WithAttributes(
+			attribute.Int("attempt", attempt),
+			attribute.String("error", err.Error()),
+		))
+	}
+
+	version, err := retry.Do(ctx, cfg, isSerializationFailure, onRetry, func() (int, error) {
+		return r.saveBlockOnce(ctx, state)
+	})
+
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "SaveBlock failed")
+	}
+	return version, err
 }
 
 // saveBlockOnce attempts a single save operation with serializable isolation.
@@ -169,11 +165,23 @@ func isSerializationFailure(err error) bool {
 	return false
 }
 
+// isRetryableError checks if an error should trigger a retry.
+// Retries on any error except context cancellation (shutdown signal).
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Don't retry on context cancellation (shutdown)
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	return true
+}
+
 // GetLastBlock retrieves the most recently saved canonical (non-orphaned) block state.
 func (r *BlockStateRepository) GetLastBlock(ctx context.Context) (*outbound.BlockState, error) {
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-		       block_published, receipts_published, traces_published, blobs_published
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
 		WHERE NOT is_orphaned
 		ORDER BY number DESC
@@ -182,7 +190,7 @@ func (r *BlockStateRepository) GetLastBlock(ctx context.Context) (*outbound.Bloc
 	var state outbound.BlockState
 	err := r.pool.QueryRow(ctx, query).Scan(
 		&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-		&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished)
+		&state.BlockPublished)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -195,15 +203,14 @@ func (r *BlockStateRepository) GetLastBlock(ctx context.Context) (*outbound.Bloc
 // GetBlockByNumber retrieves a canonical block state by its number.
 func (r *BlockStateRepository) GetBlockByNumber(ctx context.Context, number int64) (*outbound.BlockState, error) {
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-		       block_published, receipts_published, traces_published, blobs_published
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
 		WHERE number = $1 AND NOT is_orphaned
 	`
 	var state outbound.BlockState
 	err := r.pool.QueryRow(ctx, query, number).Scan(
 		&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-		&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished)
+		&state.BlockPublished)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -228,15 +235,14 @@ func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) 
 	defer span.End()
 
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-		       block_published, receipts_published, traces_published, blobs_published
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
 		WHERE hash = $1
 	`
 	var state outbound.BlockState
 	err := r.pool.QueryRow(ctx, query, hash).Scan(
 		&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-		&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished)
+		&state.BlockPublished)
 	if errors.Is(err, pgx.ErrNoRows) {
 		span.SetAttributes(attribute.Bool("db.row_found", false))
 		return nil, nil
@@ -265,8 +271,7 @@ func (r *BlockStateRepository) GetBlockVersionCount(ctx context.Context, number 
 // GetRecentBlocks retrieves the N most recent canonical blocks.
 func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) ([]outbound.BlockState, error) {
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-		       block_published, receipts_published, traces_published, blobs_published
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
 		WHERE NOT is_orphaned
 		ORDER BY number DESC
@@ -283,7 +288,7 @@ func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) (
 		var state outbound.BlockState
 		if err := rows.Scan(
 			&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-			&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished); err != nil {
+			&state.BlockPublished); err != nil {
 			return nil, fmt.Errorf("failed to scan block state: %w", err)
 		}
 		states = append(states, state)
@@ -307,6 +312,9 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 // HandleReorgAtomic atomically performs all reorg-related database operations in a single transaction.
 // This ensures consistency: either all operations succeed, or none do.
 // The commonAncestor is derived from the ReorgEvent (BlockNumber - Depth).
+//
+// Uses SERIALIZABLE isolation (consistent with SaveBlock) and includes retry logic
+// for transient serialization failures (SQLSTATE 40001).
 func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "postgres.HandleReorgAtomic",
@@ -323,15 +331,47 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 	)
 	defer span.End()
 
-	tx, err := r.pool.Begin(ctx)
+	cfg := retry.Config{
+		MaxRetries:     10,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     100 * time.Millisecond,
+		BackoffFactor:  2.0,
+		Jitter:         true,
+	}
+
+	onRetry := func(attempt int, err error, backoff time.Duration) {
+		r.logger.Debug("serialization failure in HandleReorgAtomic, retrying",
+			"attempt", attempt,
+			"block", newBlock.Number,
+			"hash", newBlock.Hash,
+			"backoff", backoff)
+		span.AddEvent("retry_attempt", trace.WithAttributes(
+			attribute.Int("attempt", attempt),
+			attribute.String("error", err.Error()),
+		))
+	}
+
+	version, err := retry.Do(ctx, cfg, isSerializationFailure, onRetry, func() (int, error) {
+		return r.handleReorgAtomicOnce(ctx, commonAncestor, event, newBlock)
+	})
+
 	if err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to begin transaction")
+		span.SetStatus(codes.Error, "HandleReorgAtomic failed")
+	}
+	return version, err
+}
+
+// handleReorgAtomicOnce attempts a single reorg operation with SERIALIZABLE isolation.
+func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+	// Use SERIALIZABLE isolation for consistency with SaveBlock
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() {
 		if err := tx.Rollback(ctx); err != nil && err != pgx.ErrTxClosed {
-			r.logger.Error("failed to rollback transaction", "error", err)
+			r.logger.Warn("failed to rollback transaction", "error", err)
 		}
 	}()
 
@@ -452,8 +492,7 @@ func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, f
 // GetOrphanedBlocks retrieves orphaned blocks for analysis.
 func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int) ([]outbound.BlockState, error) {
 	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-		       block_published, receipts_published, traces_published, blobs_published
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
 		WHERE is_orphaned
 		ORDER BY received_at DESC
@@ -470,7 +509,7 @@ func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int)
 		var state outbound.BlockState
 		if err := rows.Scan(
 			&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-			&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished); err != nil {
+			&state.BlockPublished); err != nil {
 			return nil, fmt.Errorf("failed to scan block state: %w", err)
 		}
 		states = append(states, state)
@@ -667,8 +706,9 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 		brokenBlock, parentHash, prevHash, prevBlockNum)
 }
 
-// MarkPublishComplete marks a specific publish type as completed for a block.
-func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash string, publishType outbound.PublishType) error {
+// MarkPublishComplete marks a block as published.
+// Includes retry logic for transient database errors.
+func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash string) error {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "postgres.MarkPublishComplete",
 		trace.WithSpanKind(trace.SpanKindClient),
@@ -677,70 +717,63 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 			attribute.String("db.operation", "UPDATE"),
 			attribute.String("db.table", "block_states"),
 			attribute.String("block.hash", hash),
-			attribute.String("publish.type", string(publishType)),
 		),
 	)
 	defer span.End()
 
-	var column string
-	switch publishType {
-	case outbound.PublishTypeBlock:
-		column = "block_published"
-	case outbound.PublishTypeReceipts:
-		column = "receipts_published"
-	case outbound.PublishTypeTraces:
-		column = "traces_published"
-	case outbound.PublishTypeBlobs:
-		column = "blobs_published"
-	default:
-		return fmt.Errorf("unknown publish type: %s", publishType)
+	query := `UPDATE block_states SET block_published = TRUE WHERE hash = $1`
+
+	cfg := retry.Config{
+		MaxRetries:     3,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     100 * time.Millisecond,
+		BackoffFactor:  2.0,
+		Jitter:         true,
 	}
 
-	query := fmt.Sprintf(`UPDATE block_states SET %s = TRUE WHERE hash = $1`, column)
-	result, err := r.pool.Exec(ctx, query, hash)
+	onRetry := func(attempt int, err error, backoff time.Duration) {
+		r.logger.Debug("retrying MarkPublishComplete",
+			"attempt", attempt,
+			"hash", hash,
+			"backoff", backoff,
+			"error", err)
+		span.AddEvent("retry_attempt", trace.WithAttributes(
+			attribute.Int("attempt", attempt),
+			attribute.String("error", err.Error()),
+		))
+	}
+
+	err := retry.DoVoid(ctx, cfg, isRetryableError, onRetry, func() error {
+		result, err := r.pool.Exec(ctx, query, hash)
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() == 0 {
+			return fmt.Errorf("block with hash %s not found", hash)
+		}
+		return nil
+	})
+
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to mark published")
-		return fmt.Errorf("failed to mark %s published: %w", publishType, err)
-	}
-
-	rowsAffected := result.RowsAffected()
-	if rowsAffected == 0 {
-		err := fmt.Errorf("block with hash %s not found", hash)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "block not found")
-		return err
+		return fmt.Errorf("failed to mark block published: %w", err)
 	}
 
 	return nil
 }
 
-// GetBlocksWithIncompletePublish returns canonical blocks that have at least one
-// publish type incomplete. Used by backfill to recover from crashes.
-func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int, enableBlobs bool) ([]outbound.BlockState, error) {
-	var query string
-	if enableBlobs {
-		query = `
-			SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-			       block_published, receipts_published, traces_published, blobs_published
-			FROM block_states
-			WHERE NOT is_orphaned
-			  AND (NOT block_published OR NOT receipts_published OR NOT traces_published OR NOT blobs_published)
-			ORDER BY number ASC
-			LIMIT $1
-		`
-	} else {
-		// Don't consider blobs_published when blobs are disabled
-		query = `
-			SELECT number, hash, parent_hash, received_at, is_orphaned, version,
-			       block_published, receipts_published, traces_published, blobs_published
-			FROM block_states
-			WHERE NOT is_orphaned
-			  AND (NOT block_published OR NOT receipts_published OR NOT traces_published)
-			ORDER BY number ASC
-			LIMIT $1
-		`
-	}
+// GetBlocksWithIncompletePublish returns canonical blocks that have not been published.
+// Used by backfill to recover from crashes.
+func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int) ([]outbound.BlockState, error) {
+	query := `
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
+		FROM block_states
+		WHERE NOT is_orphaned
+		  AND NOT block_published
+		ORDER BY number ASC
+		LIMIT $1
+	`
 
 	rows, err := r.pool.Query(ctx, query, limit)
 	if err != nil {
@@ -753,7 +786,7 @@ func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Contex
 		var state outbound.BlockState
 		if err := rows.Scan(
 			&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-			&state.BlockPublished, &state.ReceiptsPublished, &state.TracesPublished, &state.BlobsPublished); err != nil {
+			&state.BlockPublished); err != nil {
 			return nil, fmt.Errorf("failed to scan block state: %w", err)
 		}
 		states = append(states, state)

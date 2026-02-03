@@ -637,7 +637,7 @@ func TestMinMaxBlockNumber(t *testing.T) {
 	})
 }
 
-// TestMarkPublishComplete tests marking publish types as complete.
+// TestMarkPublishComplete tests marking blocks as published.
 func TestMarkPublishComplete(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
@@ -656,7 +656,7 @@ func TestMarkPublishComplete(t *testing.T) {
 	}
 
 	t.Run("marks block published", func(t *testing.T) {
-		if err := repo.MarkPublishComplete(ctx, "0xtest_block", outbound.PublishTypeBlock); err != nil {
+		if err := repo.MarkPublishComplete(ctx, "0xtest_block"); err != nil {
 			t.Fatalf("failed to mark block published: %v", err)
 		}
 		block, _ := repo.GetBlockByHash(ctx, "0xtest_block")
@@ -665,38 +665,8 @@ func TestMarkPublishComplete(t *testing.T) {
 		}
 	})
 
-	t.Run("marks receipts published", func(t *testing.T) {
-		if err := repo.MarkPublishComplete(ctx, "0xtest_block", outbound.PublishTypeReceipts); err != nil {
-			t.Fatalf("failed to mark receipts published: %v", err)
-		}
-		block, _ := repo.GetBlockByHash(ctx, "0xtest_block")
-		if !block.ReceiptsPublished {
-			t.Error("expected ReceiptsPublished to be true")
-		}
-	})
-
-	t.Run("marks traces published", func(t *testing.T) {
-		if err := repo.MarkPublishComplete(ctx, "0xtest_block", outbound.PublishTypeTraces); err != nil {
-			t.Fatalf("failed to mark traces published: %v", err)
-		}
-		block, _ := repo.GetBlockByHash(ctx, "0xtest_block")
-		if !block.TracesPublished {
-			t.Error("expected TracesPublished to be true")
-		}
-	})
-
-	t.Run("marks blobs published", func(t *testing.T) {
-		if err := repo.MarkPublishComplete(ctx, "0xtest_block", outbound.PublishTypeBlobs); err != nil {
-			t.Fatalf("failed to mark blobs published: %v", err)
-		}
-		block, _ := repo.GetBlockByHash(ctx, "0xtest_block")
-		if !block.BlobsPublished {
-			t.Error("expected BlobsPublished to be true")
-		}
-	})
-
 	t.Run("returns error for non-existent block", func(t *testing.T) {
-		err := repo.MarkPublishComplete(ctx, "0xnonexistent", outbound.PublishTypeBlock)
+		err := repo.MarkPublishComplete(ctx, "0xnonexistent")
 		if err == nil {
 			t.Error("expected error for non-existent block")
 		}
@@ -723,30 +693,19 @@ func TestGetBlocksWithIncompletePublish(t *testing.T) {
 		}
 	}
 
-	// Mark block 1 as fully published
-	for _, pt := range []outbound.PublishType{
-		outbound.PublishTypeBlock,
-		outbound.PublishTypeReceipts,
-		outbound.PublishTypeTraces,
-		outbound.PublishTypeBlobs,
-	} {
-		if err := repo.MarkPublishComplete(ctx, "0xblock_1", pt); err != nil {
-			t.Fatalf("failed to mark publish: %v", err)
-		}
+	// Mark block 1 as published
+	if err := repo.MarkPublishComplete(ctx, "0xblock_1"); err != nil {
+		t.Fatalf("failed to mark publish: %v", err)
 	}
 
-	// Mark block 2 partially published (missing traces and blobs)
-	repo.MarkPublishComplete(ctx, "0xblock_2", outbound.PublishTypeBlock)
-	repo.MarkPublishComplete(ctx, "0xblock_2", outbound.PublishTypeReceipts)
-
-	// Block 3 has nothing published
+	// Blocks 2 and 3 have not been published
 
 	t.Run("returns incomplete blocks", func(t *testing.T) {
-		blocks, err := repo.GetBlocksWithIncompletePublish(ctx, 10, false)
+		blocks, err := repo.GetBlocksWithIncompletePublish(ctx, 10)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		// Blocks 2 and 3 should be returned (block 1 is complete)
+		// Blocks 2 and 3 should be returned (block 1 is published)
 		if len(blocks) != 2 {
 			t.Fatalf("expected 2 blocks, got %d", len(blocks))
 		}
@@ -756,29 +715,12 @@ func TestGetBlocksWithIncompletePublish(t *testing.T) {
 	})
 
 	t.Run("respects limit", func(t *testing.T) {
-		blocks, err := repo.GetBlocksWithIncompletePublish(ctx, 1, false)
+		blocks, err := repo.GetBlocksWithIncompletePublish(ctx, 1)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(blocks) != 1 {
 			t.Fatalf("expected 1 block, got %d", len(blocks))
-		}
-	})
-
-	t.Run("enableBlobs=false ignores blob status", func(t *testing.T) {
-		// Mark block 2's traces complete - now only blobs is missing
-		repo.MarkPublishComplete(ctx, "0xblock_2", outbound.PublishTypeTraces)
-
-		blocks, err := repo.GetBlocksWithIncompletePublish(ctx, 10, false)
-		if err != nil {
-			t.Fatalf("unexpected error: %v\"", err)
-		}
-		// Only block 3 should be returned (block 2's missing blobs is ignored)
-		if len(blocks) != 1 {
-			t.Fatalf("expected 1 block (blobs ignored), got %d", len(blocks))
-		}
-		if blocks[0].Number != 3 {
-			t.Errorf("expected block 3, got %d", blocks[0].Number)
 		}
 	})
 }
@@ -1226,31 +1168,6 @@ func TestVerifyChainIntegrity_IgnoresOrphanedBlocks(t *testing.T) {
 	}
 }
 
-// TestMarkPublishComplete_InvalidType tests MarkPublishComplete with invalid type.
-func TestMarkPublishComplete_InvalidType(t *testing.T) {
-	repo, cleanup := setupPostgres(t)
-	t.Cleanup(cleanup)
-
-	ctx := context.Background()
-
-	// Save a block
-	_, err := repo.SaveBlock(ctx, outbound.BlockState{
-		Number:     100,
-		Hash:       "0xtest",
-		ParentHash: "0xparent",
-		ReceivedAt: time.Now().Unix(),
-	})
-	if err != nil {
-		t.Fatalf("failed to save block: %v", err)
-	}
-
-	// Try with invalid publish type
-	err = repo.MarkPublishComplete(ctx, "0xtest", outbound.PublishType("invalid_type"))
-	if err == nil {
-		t.Error("expected error for invalid publish type")
-	}
-}
-
 // TestSaveBlock_ConcurrentRaceConditionWithRetry tests that SaveBlock handles concurrent saves
 // with retry logic when unique constraint violations occur.
 func TestSaveBlock_ConcurrentRaceConditionWithRetry(t *testing.T) {
@@ -1527,6 +1444,97 @@ func TestHandleReorgAtomic_MultiBlockReorgGap(t *testing.T) {
 	// Double check we have a gap
 	if b101 == nil {
 		t.Log("Confirmed: Gap exists at block 101")
+	}
+}
+
+// TestHandleReorgAtomic_ConcurrentCallsWithSerializableMustAllSucceed verifies that
+// HandleReorgAtomic handles concurrent operations correctly when using SERIALIZABLE isolation.
+//
+// This test calls HandleReorgAtomic concurrently with operations that create overlapping
+// orphan ranges. With SERIALIZABLE isolation and retry logic, all operations should succeed.
+func TestHandleReorgAtomic_ConcurrentCallsWithSerializableMustAllSucceed(t *testing.T) {
+	// Set test timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	// Setup: Create a chain of blocks (100-115)
+	for i := int64(100); i <= 115; i++ {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0xoriginal_%d", i),
+			ParentHash: fmt.Sprintf("0xoriginal_%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Run concurrent HandleReorgAtomic calls
+	// All use the same common ancestor but different new block numbers/hashes
+	// This creates serialization pressure that tests the retry logic
+	const numGoroutines = 10
+	startCh := make(chan struct{})
+	resultCh := make(chan struct {
+		id      int
+		version int
+		err     error
+	}, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			<-startCh
+
+			blockNum := int64(110 + id%3) // Overlapping block numbers
+			event := outbound.ReorgEvent{
+				DetectedAt:  time.Now(),
+				BlockNumber: blockNum,
+				OldHash:     fmt.Sprintf("0xoriginal_%d", blockNum),
+				NewHash:     fmt.Sprintf("0xnew_%d", id),
+				Depth:       int(blockNum - 105), // Common ancestor at 105
+			}
+
+			newBlock := outbound.BlockState{
+				Number:     blockNum,
+				Hash:       fmt.Sprintf("0xnew_%d", id),
+				ParentHash: "0xoriginal_105",
+				ReceivedAt: time.Now().Unix(),
+			}
+
+			// Call the actual HandleReorgAtomic which now has SERIALIZABLE + retry logic
+			version, err := repo.HandleReorgAtomic(ctx, 105, event, newBlock)
+			resultCh <- struct {
+				id      int
+				version int
+				err     error
+			}{id, version, err}
+		}(i)
+	}
+
+	close(startCh)
+
+	// Collect results
+	successCount := 0
+	var failures []string
+	for i := 0; i < numGoroutines; i++ {
+		result := <-resultCh
+		if result.err == nil {
+			successCount++
+		} else {
+			failures = append(failures, fmt.Sprintf("goroutine %d: %v", result.id, result.err))
+		}
+	}
+
+	t.Logf("Results: %d/%d succeeded", successCount, numGoroutines)
+
+	// With SERIALIZABLE isolation and retry logic, ALL operations should succeed
+	if successCount != numGoroutines {
+		t.Errorf("Expected all %d HandleReorgAtomic calls to succeed, but only %d succeeded.\n"+
+			"Failures:\n%s",
+			numGoroutines, successCount, strings.Join(failures, "\n"))
 	}
 }
 
