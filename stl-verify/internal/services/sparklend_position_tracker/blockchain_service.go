@@ -15,6 +15,36 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 )
 
+// Constants for getReserveData return value indices
+const (
+	reserveDataUnbackedIdx                = 0
+	reserveDataAccruedToTreasuryIdx       = 1
+	reserveDataTotalATokenIdx             = 2
+	reserveDataTotalStableDebtIdx         = 3
+	reserveDataTotalVariableDebtIdx       = 4
+	reserveDataLiquidityRateIdx           = 5
+	reserveDataVariableBorrowRateIdx      = 6
+	reserveDataStableBorrowRateIdx        = 7
+	reserveDataAverageStableBorrowRateIdx = 8
+	reserveDataLiquidityIndexIdx          = 9
+	reserveDataVariableBorrowIndexIdx     = 10
+	reserveDataLastUpdateTimestampIdx     = 11
+)
+
+// Constants for getReserveConfigurationData return value indices
+const (
+	reserveConfigDecimalsIdx                 = 0
+	reserveConfigLTVIdx                      = 1
+	reserveConfigLiquidationThresholdIdx     = 2
+	reserveConfigLiquidationBonusIdx         = 3
+	reserveConfigReserveFactorIdx            = 4
+	reserveConfigUsageAsCollateralEnabledIdx = 5
+	reserveConfigBorrowingEnabledIdx         = 6
+	reserveConfigStableBorrowRateEnabledIdx  = 7
+	reserveConfigIsActiveIdx                 = 8
+	reserveConfigIsFrozenIdx                 = 9
+)
+
 type TokenMetadata struct {
 	Symbol   string
 	Decimals int
@@ -46,16 +76,48 @@ type ActualUserReserveData struct {
 }
 
 type blockchainService struct {
-	ethClient             *ethclient.Client
-	multicallClient       outbound.Multicaller
-	erc20ABI              *abi.ABI
-	getUserReservesABI    *abi.ABI
-	getUserReserveDataABI *abi.ABI
-	uiPoolDataProvider    common.Address
-	poolDataProvider      common.Address
-	poolAddressesProvider common.Address
-	metadataCache         map[common.Address]TokenMetadata
-	logger                *slog.Logger
+	ethClient                                  *ethclient.Client
+	multicallClient                            outbound.Multicaller
+	erc20ABI                                   *abi.ABI
+	getUserReservesABI                         *abi.ABI
+	getUserReserveDataABI                      *abi.ABI
+	getPoolDataProviderReserveConfigurationABI *abi.ABI
+	getPoolDataProviderReserveDataABI          *abi.ABI
+	uiPoolDataProvider                         common.Address
+	poolDataProvider                           common.Address
+	poolAddressesProvider                      common.Address
+	metadataCache                              map[common.Address]TokenMetadata
+	logger                                     *slog.Logger
+}
+
+// reserveConfigData holds parsed data from PoolDataProvider.getReserveConfigurationData
+type reserveConfigData struct {
+	Decimals                 *big.Int
+	LTV                      *big.Int
+	LiquidationThreshold     *big.Int
+	LiquidationBonus         *big.Int
+	ReserveFactor            *big.Int
+	UsageAsCollateralEnabled bool
+	BorrowingEnabled         bool
+	StableBorrowRateEnabled  bool
+	IsActive                 bool
+	IsFrozen                 bool
+}
+
+// reserveDataFromProvider holds parsed data from ProtocolDataProvider.getReserveData
+type reserveDataFromProvider struct {
+	Unbacked                *big.Int
+	AccruedToTreasuryScaled *big.Int
+	TotalAToken             *big.Int
+	TotalStableDebt         *big.Int
+	TotalVariableDebt       *big.Int
+	LiquidityRate           *big.Int
+	VariableBorrowRate      *big.Int
+	StableBorrowRate        *big.Int
+	AverageStableBorrowRate *big.Int
+	LiquidityIndex          *big.Int
+	VariableBorrowIndex     *big.Int
+	LastUpdateTimestamp     int64
 }
 
 func newBlockchainService(
@@ -101,6 +163,16 @@ func (s *blockchainService) loadABIs(useAaveABI bool) error {
 	s.getUserReserveDataABI, err = abis.GetPoolDataProviderUserReserveDataABI()
 	if err != nil {
 		return fmt.Errorf("failed to load getUserReserveData ABI: %w", err)
+	}
+
+	s.getPoolDataProviderReserveConfigurationABI, err = abis.GetPoolDataProviderReserveConfigurationABI()
+	if err != nil {
+		return fmt.Errorf("failed to load getReserveConfigurationData ABI: %w", err)
+	}
+
+	s.getPoolDataProviderReserveDataABI, err = abis.GetPoolDataProviderReserveData()
+	if err != nil {
+		return fmt.Errorf("failed to load getReserveData ABI: %w", err)
 	}
 
 	return nil
@@ -351,6 +423,226 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 
 		s.metadataCache[token] = metadata
 		result[token] = metadata
+	}
+
+	return result, nil
+}
+
+// getFullReserveData fetches both reserve data and configuration data from ProtocolDataProvider.
+func (s *blockchainService) getFullReserveData(ctx context.Context, asset common.Address, blockNumber int64) (*reserveDataFromProvider, *reserveConfigData, error) {
+	// Build multicall requests for both getReserveData and getReserveConfigurationData
+	getReserveDataCallData, err := s.getPoolDataProviderReserveDataABI.Pack("getReserveData", asset)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to pack getReserveData: %w", err)
+	}
+
+	getConfigCallData, err := s.getPoolDataProviderReserveConfigurationABI.Pack("getReserveConfigurationData", asset)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to pack getReserveConfigurationData: %w", err)
+	}
+
+	calls := []outbound.Call{
+		{
+			Target:       s.poolDataProvider,
+			AllowFailure: false,
+			CallData:     getReserveDataCallData,
+		},
+		{
+			Target:       s.poolDataProvider,
+			AllowFailure: false,
+			CallData:     getConfigCallData,
+		},
+	}
+
+	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
+	if err != nil {
+		return nil, nil, fmt.Errorf("multicall failed: %w", err)
+	}
+
+	if len(results) < 2 {
+		return nil, nil, fmt.Errorf("expected 2 results, got %d", len(results))
+	}
+
+	// Parse getReserveData result
+	if !results[0].Success {
+		return nil, nil, fmt.Errorf("getReserveData call failed for asset %s at block %d", asset.Hex(), blockNumber)
+	}
+	reserveData, err := s.parseReserveData(results[0].ReturnData)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse reserve data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
+	}
+
+	// Parse getReserveConfigurationData result
+	if !results[1].Success {
+		return nil, nil, fmt.Errorf("getReserveConfigurationData call failed for asset %s at block %d", asset.Hex(), blockNumber)
+	}
+	configData, err := s.parseReserveConfigurationData(results[1].ReturnData)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse configuration data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
+	}
+
+	return reserveData, configData, nil
+}
+
+// parseReserveData parses the raw bytes from ProtocolDataProvider.getReserveData into structured data.
+func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvider, error) {
+	unpacked, err := s.getPoolDataProviderReserveDataABI.Unpack("getReserveData", data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unpack getReserveData: %w", err)
+	}
+
+	if len(unpacked) < 12 {
+		return nil, fmt.Errorf("expected 12 values from getReserveData, got %d", len(unpacked))
+	}
+
+	result := &reserveDataFromProvider{}
+
+	if v, ok := unpacked[reserveDataUnbackedIdx].(*big.Int); ok {
+		result.Unbacked = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (unbacked) expected *big.Int, got %T", reserveDataUnbackedIdx, unpacked[reserveDataUnbackedIdx])
+	}
+
+	if v, ok := unpacked[reserveDataAccruedToTreasuryIdx].(*big.Int); ok {
+		result.AccruedToTreasuryScaled = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (accruedToTreasuryScaled) expected *big.Int, got %T", reserveDataAccruedToTreasuryIdx, unpacked[reserveDataAccruedToTreasuryIdx])
+	}
+
+	if v, ok := unpacked[reserveDataTotalATokenIdx].(*big.Int); ok {
+		result.TotalAToken = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (totalAToken) expected *big.Int, got %T", reserveDataTotalATokenIdx, unpacked[reserveDataTotalATokenIdx])
+	}
+
+	if v, ok := unpacked[reserveDataTotalStableDebtIdx].(*big.Int); ok {
+		result.TotalStableDebt = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (totalStableDebt) expected *big.Int, got %T", reserveDataTotalStableDebtIdx, unpacked[reserveDataTotalStableDebtIdx])
+	}
+
+	if v, ok := unpacked[reserveDataTotalVariableDebtIdx].(*big.Int); ok {
+		result.TotalVariableDebt = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (totalVariableDebt) expected *big.Int, got %T", reserveDataTotalVariableDebtIdx, unpacked[reserveDataTotalVariableDebtIdx])
+	}
+
+	if v, ok := unpacked[reserveDataLiquidityRateIdx].(*big.Int); ok {
+		result.LiquidityRate = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (liquidityRate) expected *big.Int, got %T", reserveDataLiquidityRateIdx, unpacked[reserveDataLiquidityRateIdx])
+	}
+
+	if v, ok := unpacked[reserveDataVariableBorrowRateIdx].(*big.Int); ok {
+		result.VariableBorrowRate = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (variableBorrowRate) expected *big.Int, got %T", reserveDataVariableBorrowRateIdx, unpacked[reserveDataVariableBorrowRateIdx])
+	}
+
+	if v, ok := unpacked[reserveDataStableBorrowRateIdx].(*big.Int); ok {
+		result.StableBorrowRate = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (stableBorrowRate) expected *big.Int, got %T", reserveDataStableBorrowRateIdx, unpacked[reserveDataStableBorrowRateIdx])
+	}
+
+	if v, ok := unpacked[reserveDataAverageStableBorrowRateIdx].(*big.Int); ok {
+		result.AverageStableBorrowRate = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (averageStableBorrowRate) expected *big.Int, got %T", reserveDataAverageStableBorrowRateIdx, unpacked[reserveDataAverageStableBorrowRateIdx])
+	}
+
+	if v, ok := unpacked[reserveDataLiquidityIndexIdx].(*big.Int); ok {
+		result.LiquidityIndex = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (liquidityIndex) expected *big.Int, got %T", reserveDataLiquidityIndexIdx, unpacked[reserveDataLiquidityIndexIdx])
+	}
+
+	if v, ok := unpacked[reserveDataVariableBorrowIndexIdx].(*big.Int); ok {
+		result.VariableBorrowIndex = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (variableBorrowIndex) expected *big.Int, got %T", reserveDataVariableBorrowIndexIdx, unpacked[reserveDataVariableBorrowIndexIdx])
+	}
+
+	if v, ok := unpacked[reserveDataLastUpdateTimestampIdx].(*big.Int); ok {
+		result.LastUpdateTimestamp = v.Int64()
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (lastUpdateTimestamp) expected *big.Int, got %T", reserveDataLastUpdateTimestampIdx, unpacked[reserveDataLastUpdateTimestampIdx])
+	}
+
+	return result, nil
+}
+
+// parseReserveConfigurationData parses the raw bytes from getReserveConfigurationData.
+func (s *blockchainService) parseReserveConfigurationData(data []byte) (*reserveConfigData, error) {
+	unpacked, err := s.getPoolDataProviderReserveConfigurationABI.Unpack("getReserveConfigurationData", data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unpack getReserveConfigurationData: %w", err)
+	}
+
+	if len(unpacked) < 10 {
+		return nil, fmt.Errorf("expected 10 values from getReserveConfigurationData, got %d", len(unpacked))
+	}
+
+	result := &reserveConfigData{}
+
+	if v, ok := unpacked[reserveConfigDecimalsIdx].(*big.Int); ok {
+		result.Decimals = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (decimals) expected *big.Int, got %T", reserveConfigDecimalsIdx, unpacked[reserveConfigDecimalsIdx])
+	}
+
+	if v, ok := unpacked[reserveConfigLTVIdx].(*big.Int); ok {
+		result.LTV = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (ltv) expected *big.Int, got %T", reserveConfigLTVIdx, unpacked[reserveConfigLTVIdx])
+	}
+
+	if v, ok := unpacked[reserveConfigLiquidationThresholdIdx].(*big.Int); ok {
+		result.LiquidationThreshold = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (liquidationThreshold) expected *big.Int, got %T", reserveConfigLiquidationThresholdIdx, unpacked[reserveConfigLiquidationThresholdIdx])
+	}
+
+	if v, ok := unpacked[reserveConfigLiquidationBonusIdx].(*big.Int); ok {
+		result.LiquidationBonus = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (liquidationBonus) expected *big.Int, got %T", reserveConfigLiquidationBonusIdx, unpacked[reserveConfigLiquidationBonusIdx])
+	}
+
+	if v, ok := unpacked[reserveConfigReserveFactorIdx].(*big.Int); ok {
+		result.ReserveFactor = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (reserveFactor) expected *big.Int, got %T", reserveConfigReserveFactorIdx, unpacked[reserveConfigReserveFactorIdx])
+	}
+
+	if v, ok := unpacked[reserveConfigUsageAsCollateralEnabledIdx].(bool); ok {
+		result.UsageAsCollateralEnabled = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (usageAsCollateralEnabled) expected bool, got %T", reserveConfigUsageAsCollateralEnabledIdx, unpacked[reserveConfigUsageAsCollateralEnabledIdx])
+	}
+
+	if v, ok := unpacked[reserveConfigBorrowingEnabledIdx].(bool); ok {
+		result.BorrowingEnabled = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (borrowingEnabled) expected bool, got %T", reserveConfigBorrowingEnabledIdx, unpacked[reserveConfigBorrowingEnabledIdx])
+	}
+
+	if v, ok := unpacked[reserveConfigStableBorrowRateEnabledIdx].(bool); ok {
+		result.StableBorrowRateEnabled = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (stableBorrowRateEnabled) expected bool, got %T", reserveConfigStableBorrowRateEnabledIdx, unpacked[reserveConfigStableBorrowRateEnabledIdx])
+	}
+
+	if v, ok := unpacked[reserveConfigIsActiveIdx].(bool); ok {
+		result.IsActive = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (isActive) expected bool, got %T", reserveConfigIsActiveIdx, unpacked[reserveConfigIsActiveIdx])
+	}
+
+	if v, ok := unpacked[reserveConfigIsFrozenIdx].(bool); ok {
+		result.IsFrozen = v
+	} else {
+		return nil, fmt.Errorf("unpacked[%d] (isFrozen) expected bool, got %T", reserveConfigIsFrozenIdx, unpacked[reserveConfigIsFrozenIdx])
 	}
 
 	return result, nil
