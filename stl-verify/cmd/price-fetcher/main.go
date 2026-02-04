@@ -45,12 +45,11 @@ func init() {
 }
 
 func main() {
-	mode := flag.String("mode", "current", "Mode: 'historical' or 'current'")
 	source := flag.String("source", "coingecko", "Price source: 'coingecko' (more coming)")
-	fromDate := flag.String("from", "", "Start date (YYYY-MM-DD) for historical mode")
-	toDate := flag.String("to", "", "End date (YYYY-MM-DD) for historical mode, default: yesterday")
+	fromDate := flag.String("from", "", "Start date (YYYY-MM-DD) for historical backfill")
+	toDate := flag.String("to", "", "End date (YYYY-MM-DD) for historical backfill, default: yesterday")
 	assets := flag.String("assets", "", "Comma-separated asset IDs (default: all enabled for source)")
-	concurrency := flag.Int("concurrency", 5, "Number of assets to fetch in parallel (default: 5)")
+	concurrency := flag.Int("concurrency", 5, "Number of assets to fetch in parallel")
 	showVersion := flag.Bool("version", false, "Show version information and exit")
 	flag.Parse()
 
@@ -70,11 +69,15 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
+	mode := "current"
+	if *fromDate != "" {
+		mode = "historical"
+	}
+
 	logger.Info("starting price-fetcher",
 		"commit", GitCommit,
-		"mode", *mode,
+		"mode", mode,
 		"source", *source,
-		"concurrency", *concurrency,
 	)
 
 	sigChan := make(chan os.Signal, 1)
@@ -85,7 +88,7 @@ func main() {
 		cancel()
 	}()
 
-	if err := run(ctx, logger, *mode, *source, *fromDate, *toDate, *assets, *concurrency); err != nil {
+	if err := run(ctx, logger, *source, *fromDate, *toDate, *assets, *concurrency); err != nil {
 		logger.Error("failed", "error", err)
 		os.Exit(1)
 	}
@@ -93,7 +96,7 @@ func main() {
 	logger.Info("completed successfully")
 }
 
-func run(ctx context.Context, logger *slog.Logger, mode, source, fromDate, toDate, assets string, concurrency int) error {
+func run(ctx context.Context, logger *slog.Logger, source, fromDate, toDate, assets string, concurrency int) error {
 	provider, err := createProvider(source, logger)
 	if err != nil {
 		return fmt.Errorf("creating provider: %w", err)
@@ -127,14 +130,11 @@ func run(ctx context.Context, logger *slog.Logger, mode, source, fromDate, toDat
 
 	assetIDs := parseAssetIDs(assets)
 
-	switch mode {
-	case "current":
-		return runCurrentMode(ctx, service, assetIDs)
-	case "historical":
+	// If --from is specified, fetch historical data; otherwise fetch current prices
+	if fromDate != "" {
 		return runHistoricalMode(ctx, service, assetIDs, fromDate, toDate)
-	default:
-		return fmt.Errorf("unknown mode: %s (must be 'current' or 'historical')", mode)
 	}
+	return service.FetchCurrentPrices(ctx, assetIDs)
 }
 
 func createProvider(source string, logger *slog.Logger) (outbound.PriceProvider, error) {
@@ -153,14 +153,7 @@ func createProvider(source string, logger *slog.Logger) (outbound.PriceProvider,
 	}
 }
 
-func runCurrentMode(ctx context.Context, service *price_fetcher.Service, assetIDs []string) error {
-	return service.FetchCurrentPrices(ctx, assetIDs)
-}
-
 func runHistoricalMode(ctx context.Context, service *price_fetcher.Service, assetIDs []string, fromDate, toDate string) error {
-	if fromDate == "" {
-		return fmt.Errorf("--from is required for historical mode")
-	}
 
 	from, err := time.Parse(time.DateOnly, fromDate)
 	if err != nil {

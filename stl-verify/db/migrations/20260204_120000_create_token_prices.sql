@@ -57,6 +57,8 @@ CREATE INDEX IF NOT EXISTS idx_token_price_source_asset_timestamp
     ON token_price (source, source_asset_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_token_price_token_timestamp
     ON token_price (token_id, timestamp DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_token_price_unique
+    ON token_price (token_id, source, timestamp);
 
 -- Token volume table (hourly granularity, on-chain tokens only)
 CREATE TABLE IF NOT EXISTS token_volume (
@@ -79,6 +81,8 @@ CREATE INDEX IF NOT EXISTS idx_token_volume_source_asset_timestamp
     ON token_volume (source, source_asset_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_token_volume_token_timestamp
     ON token_volume (token_id, timestamp DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_token_volume_unique
+    ON token_volume (token_id, source, timestamp);
 
 -- Seed SparkLend reserve token mappings for CoinGecko
 -- Links to tokens seeded in previous migration via symbol match

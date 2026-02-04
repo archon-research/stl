@@ -87,7 +87,10 @@ func (s *Service) FetchCurrentPrices(ctx context.Context, assetIDs []string) err
 		return fmt.Errorf("fetching current prices: %w", err)
 	}
 
-	tokenPrices := s.convertToTokenPrices(prices, assets)
+	tokenPrices, err := s.convertToTokenPrices(prices, assets)
+	if err != nil {
+		return fmt.Errorf("converting prices: %w", err)
+	}
 	if len(tokenPrices) == 0 {
 		s.logger.Warn("no prices to store")
 		return nil
@@ -131,6 +134,8 @@ func (s *Service) FetchHistoricalData(ctx context.Context, assetIDs []string, fr
 	// Use a semaphore pattern for bounded concurrency
 	sem := make(chan struct{}, s.concurrency)
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failedAssets []string
 
 	for _, asset := range assets {
 		sem <- struct{}{} // Acquire semaphore
@@ -145,12 +150,18 @@ func (s *Service) FetchHistoricalData(ctx context.Context, assetIDs []string, fr
 					"asset", asset.SourceAssetID,
 					"error", err,
 				)
-				// Continue with other assets even if one fails
+				mu.Lock()
+				failedAssets = append(failedAssets, asset.SourceAssetID)
+				mu.Unlock()
 			}
 		}(asset)
 	}
 
 	wg.Wait()
+
+	if len(failedAssets) > 0 {
+		return fmt.Errorf("failed to fetch %d/%d assets: %v", len(failedAssets), len(assets), failedAssets)
+	}
 	return nil
 }
 
@@ -201,7 +212,10 @@ func (s *Service) fetchAndStoreChunk(ctx context.Context, asset *entity.PriceAss
 		return fmt.Errorf("fetching historical data: %w", err)
 	}
 
-	prices := s.convertHistoricalPrices(data, assetMap)
+	prices, err := s.convertHistoricalPrices(data, assetMap)
+	if err != nil {
+		return fmt.Errorf("converting historical prices: %w", err)
+	}
 	if len(prices) > 0 {
 		if err := s.repo.UpsertPrices(ctx, prices); err != nil {
 			return fmt.Errorf("storing prices: %w", err)
@@ -209,7 +223,10 @@ func (s *Service) fetchAndStoreChunk(ctx context.Context, asset *entity.PriceAss
 		s.logger.Debug("stored prices", "count", len(prices))
 	}
 
-	volumes := s.convertHistoricalVolumes(data, assetMap)
+	volumes, err := s.convertHistoricalVolumes(data, assetMap)
+	if err != nil {
+		return fmt.Errorf("converting historical volumes: %w", err)
+	}
 	if len(volumes) > 0 {
 		if err := s.repo.UpsertVolumes(ctx, volumes); err != nil {
 			return fmt.Errorf("storing volumes: %w", err)
@@ -233,40 +250,45 @@ func (s *Service) resolveAssets(ctx context.Context, assetIDs []string) ([]*enti
 	return s.repo.GetAssetsBySourceAssetIDs(ctx, source.ID, assetIDs)
 }
 
-func (s *Service) convertToTokenPrices(prices []outbound.PriceData, assets []*entity.PriceAsset) []*entity.TokenPrice {
+func (s *Service) convertToTokenPrices(prices []outbound.PriceData, assets []*entity.PriceAsset) ([]*entity.TokenPrice, error) {
 	assetMap := buildAssetMap(assets)
 	result := make([]*entity.TokenPrice, 0, len(prices))
 
 	for _, p := range prices {
 		asset, ok := assetMap[p.SourceAssetID]
 		if !ok {
-			s.logger.Warn("price for unknown asset", "asset", p.SourceAssetID)
-			continue
+			return nil, fmt.Errorf("price for unknown asset: %s", p.SourceAssetID)
 		}
 		if asset.TokenID == nil {
 			s.logger.Debug("skipping asset without token_id", "asset", p.SourceAssetID)
 			continue
 		}
 
-		result = append(result, &entity.TokenPrice{
-			TokenID:       *asset.TokenID,
-			ChainID:       s.config.ChainID,
-			Source:        s.provider.Name(),
-			SourceAssetID: p.SourceAssetID,
-			PriceUSD:      p.PriceUSD,
-			MarketCapUSD:  p.MarketCapUSD,
-			Timestamp:     p.Timestamp,
-			CreatedAt:     time.Now(),
-		})
+		tp, err := entity.NewTokenPrice(
+			*asset.TokenID,
+			s.config.ChainID,
+			s.provider.Name(),
+			p.SourceAssetID,
+			p.PriceUSD,
+			p.MarketCapUSD,
+			p.Timestamp,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("invalid price data for asset %s: %w", p.SourceAssetID, err)
+		}
+		result = append(result, tp)
 	}
 
-	return result
+	return result, nil
 }
 
-func (s *Service) convertHistoricalPrices(data *outbound.HistoricalData, assetMap map[string]*entity.PriceAsset) []*entity.TokenPrice {
+func (s *Service) convertHistoricalPrices(data *outbound.HistoricalData, assetMap map[string]*entity.PriceAsset) ([]*entity.TokenPrice, error) {
 	asset, ok := assetMap[data.SourceAssetID]
-	if !ok || asset.TokenID == nil {
-		return nil
+	if !ok {
+		return nil, fmt.Errorf("historical data for unknown asset: %s", data.SourceAssetID)
+	}
+	if asset.TokenID == nil {
+		return nil, nil
 	}
 
 	// Build a map of timestamps to market caps for efficient lookup
@@ -282,41 +304,50 @@ func (s *Service) convertHistoricalPrices(data *outbound.HistoricalData, assetMa
 			marketCap = &mc
 		}
 
-		result = append(result, &entity.TokenPrice{
-			TokenID:       *asset.TokenID,
-			ChainID:       s.config.ChainID,
-			Source:        s.provider.Name(),
-			SourceAssetID: data.SourceAssetID,
-			PriceUSD:      p.PriceUSD,
-			MarketCapUSD:  marketCap,
-			Timestamp:     p.Timestamp,
-			CreatedAt:     time.Now(),
-		})
+		tp, err := entity.NewTokenPrice(
+			*asset.TokenID,
+			s.config.ChainID,
+			s.provider.Name(),
+			data.SourceAssetID,
+			p.PriceUSD,
+			marketCap,
+			p.Timestamp,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("invalid historical price data for asset %s: %w", data.SourceAssetID, err)
+		}
+		result = append(result, tp)
 	}
 
-	return result
+	return result, nil
 }
 
-func (s *Service) convertHistoricalVolumes(data *outbound.HistoricalData, assetMap map[string]*entity.PriceAsset) []*entity.TokenVolume {
+func (s *Service) convertHistoricalVolumes(data *outbound.HistoricalData, assetMap map[string]*entity.PriceAsset) ([]*entity.TokenVolume, error) {
 	asset, ok := assetMap[data.SourceAssetID]
-	if !ok || asset.TokenID == nil {
-		return nil
+	if !ok {
+		return nil, fmt.Errorf("historical data for unknown asset: %s", data.SourceAssetID)
+	}
+	if asset.TokenID == nil {
+		return nil, nil
 	}
 
 	result := make([]*entity.TokenVolume, 0, len(data.Volumes))
 	for _, v := range data.Volumes {
-		result = append(result, &entity.TokenVolume{
-			TokenID:       *asset.TokenID,
-			ChainID:       s.config.ChainID,
-			Source:        s.provider.Name(),
-			SourceAssetID: data.SourceAssetID,
-			VolumeUSD:     v.VolumeUSD,
-			Timestamp:     v.Timestamp,
-			CreatedAt:     time.Now(),
-		})
+		tv, err := entity.NewTokenVolume(
+			*asset.TokenID,
+			s.config.ChainID,
+			s.provider.Name(),
+			data.SourceAssetID,
+			v.VolumeUSD,
+			v.Timestamp,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("invalid historical volume data for asset %s: %w", data.SourceAssetID, err)
+		}
+		result = append(result, tv)
 	}
 
-	return result
+	return result, nil
 }
 
 func extractSourceAssetIDs(assets []*entity.PriceAsset) []string {

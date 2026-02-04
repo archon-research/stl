@@ -170,9 +170,8 @@ func (r *PriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx, price
 		args = append(args, price.Timestamp, price.TokenID, price.ChainID, price.Source, price.SourceAssetID, price.PriceUSD, price.MarketCapUSD)
 	}
 
-	// TimescaleDB doesn't support ON CONFLICT with hypertables the same way
-	// We use a simple INSERT and rely on unique timestamps or handle duplicates at the application level
-	sb.WriteString(` ON CONFLICT DO NOTHING`)
+	// Skip duplicates based on unique index (token_id, source, timestamp)
+	sb.WriteString(` ON CONFLICT (token_id, source, timestamp) DO NOTHING`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
@@ -254,7 +253,8 @@ func (r *PriceRepository) upsertVolumeBatch(ctx context.Context, tx pgx.Tx, volu
 		args = append(args, vol.Timestamp, vol.TokenID, vol.ChainID, vol.Source, vol.SourceAssetID, vol.VolumeUSD)
 	}
 
-	sb.WriteString(` ON CONFLICT DO NOTHING`)
+	// Skip duplicates based on unique index (token_id, source, timestamp)
+	sb.WriteString(` ON CONFLICT (token_id, source, timestamp) DO NOTHING`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
