@@ -487,7 +487,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 	}
 
 	// Fetch reserve data and configuration from chain
-	reserveData, err := blockchainSvc.getFullReserveData(ctx, reserve, blockNumber)
+	reserveData, configData, err := blockchainSvc.getFullReserveData(ctx, reserve, blockNumber)
 	if err != nil {
 		return fmt.Errorf("failed to get reserve data: %w", err)
 	}
@@ -508,49 +508,8 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 			return fmt.Errorf("failed to get token: %w", err)
 		}
 
-		// Build the entity
-		sparkReserveData := &entity.SparkLendReserveData{
-			ProtocolID:   protocolID.ID,
-			TokenID:      tokenID,
-			BlockNumber:  blockNumber,
-			BlockVersion: blockVersion,
-		}
-
-		// Set reserve state data
-		sparkReserveData.WithRates(
-			reserveData.LiquidityRate,
-			reserveData.VariableBorrowRate,
-			reserveData.StableBorrowRate,
-			reserveData.AverageStableBorrowRate,
-		)
-		sparkReserveData.WithIndexes(
-			reserveData.LiquidityIndex,
-			reserveData.VariableBorrowIndex,
-		)
-		sparkReserveData.WithTotals(
-			reserveData.Unbacked,
-			reserveData.AccruedToTreasuryScaled,
-			reserveData.TotalAToken,
-			reserveData.TotalStableDebt,
-			reserveData.TotalVariableDebt,
-		)
-		sparkReserveData.LastUpdateTimestamp = reserveData.LastUpdateTimestamp
-
-		// Set configuration data
-		sparkReserveData.WithConfiguration(
-			reserveData.Decimals,
-			reserveData.LTV,
-			reserveData.LiquidationThreshold,
-			reserveData.LiquidationBonus,
-			reserveData.ReserveFactor,
-			reserveData.UsageAsCollateralEnabled,
-			reserveData.BorrowingEnabled,
-			reserveData.StableBorrowRateEnabled,
-			reserveData.IsActive,
-			reserveData.IsFrozen,
-		)
-
-		// Persist the data
+		// Build and persist the entity
+		sparkReserveData := s.buildReserveDataEntity(protocolID.ID, tokenID, blockNumber, blockVersion, reserveData, configData)
 		if err := s.protocolRepo.UpsertSparkLendReserveData(ctx, []*entity.SparkLendReserveData{sparkReserveData}); err != nil {
 			return fmt.Errorf("failed to upsert reserve data: %w", err)
 		}
@@ -563,6 +522,55 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 
 		return nil
 	})
+}
+
+// buildReserveDataEntity creates a SparkLendReserveData entity from fetched reserve data.
+func (s *Service) buildReserveDataEntity(
+	protocolID, tokenID, blockNumber int64,
+	blockVersion int,
+	reserveData *reserveDataFromProvider,
+	configData *reserveConfigData,
+) *entity.SparkLendReserveData {
+	sparkReserveData := &entity.SparkLendReserveData{
+		ProtocolID:   protocolID,
+		TokenID:      tokenID,
+		BlockNumber:  blockNumber,
+		BlockVersion: blockVersion,
+	}
+
+	sparkReserveData.WithRates(
+		reserveData.LiquidityRate,
+		reserveData.VariableBorrowRate,
+		reserveData.StableBorrowRate,
+		reserveData.AverageStableBorrowRate,
+	)
+	sparkReserveData.WithIndexes(
+		reserveData.LiquidityIndex,
+		reserveData.VariableBorrowIndex,
+	)
+	sparkReserveData.WithTotals(
+		reserveData.Unbacked,
+		reserveData.AccruedToTreasuryScaled,
+		reserveData.TotalAToken,
+		reserveData.TotalStableDebt,
+		reserveData.TotalVariableDebt,
+	)
+	sparkReserveData.LastUpdateTimestamp = reserveData.LastUpdateTimestamp
+
+	sparkReserveData.WithConfiguration(
+		configData.Decimals,
+		configData.LTV,
+		configData.LiquidationThreshold,
+		configData.LiquidationBonus,
+		configData.ReserveFactor,
+		configData.UsageAsCollateralEnabled,
+		configData.BorrowingEnabled,
+		configData.StableBorrowRateEnabled,
+		configData.IsActive,
+		configData.IsFrozen,
+	)
+
+	return sparkReserveData
 }
 
 // saveCollateralToggleEvent handles ReserveUsedAsCollateralEnabled/Disabled events

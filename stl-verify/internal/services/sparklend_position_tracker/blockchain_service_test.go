@@ -384,7 +384,7 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 					big.NewInt(1640995200), // lastUpdateTimestamp
 				}
 				// Pack the return values using the ABI outputs
-				packed, _ := service.getPoolDataProviderReserveData.Methods["getReserveData"].Outputs.Pack(values...)
+				packed, _ := service.getPoolDataProviderReserveDataABI.Methods["getReserveData"].Outputs.Pack(values...)
 				return packed
 			},
 			wantErr: false,

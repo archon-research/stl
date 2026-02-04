@@ -15,6 +15,36 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 )
 
+// Constants for getReserveData return value indices
+const (
+	reserveDataUnbackedIdx                = 0
+	reserveDataAccruedToTreasuryIdx       = 1
+	reserveDataTotalATokenIdx             = 2
+	reserveDataTotalStableDebtIdx         = 3
+	reserveDataTotalVariableDebtIdx       = 4
+	reserveDataLiquidityRateIdx           = 5
+	reserveDataVariableBorrowRateIdx      = 6
+	reserveDataStableBorrowRateIdx        = 7
+	reserveDataAverageStableBorrowRateIdx = 8
+	reserveDataLiquidityIndexIdx          = 9
+	reserveDataVariableBorrowIndexIdx     = 10
+	reserveDataLastUpdateTimestampIdx     = 11
+)
+
+// Constants for getReserveConfigurationData return value indices
+const (
+	reserveConfigDecimalsIdx                 = 0
+	reserveConfigLTVIdx                      = 1
+	reserveConfigLiquidationThresholdIdx     = 2
+	reserveConfigLiquidationBonusIdx         = 3
+	reserveConfigReserveFactorIdx            = 4
+	reserveConfigUsageAsCollateralEnabledIdx = 5
+	reserveConfigBorrowingEnabledIdx         = 6
+	reserveConfigStableBorrowRateEnabledIdx  = 7
+	reserveConfigIsActiveIdx                 = 8
+	reserveConfigIsFrozenIdx                 = 9
+)
+
 type TokenMetadata struct {
 	Symbol   string
 	Decimals int
@@ -45,23 +75,23 @@ type ActualUserReserveData struct {
 	StableRateLastUpdated    uint64
 }
 
-// FullReserveData contains combined data from getReserveData and getReserveConfigurationData.
-type FullReserveData struct {
-	// From getReserveData (Pool contract)
-	Unbacked                *big.Int
-	AccruedToTreasuryScaled *big.Int
-	TotalAToken             *big.Int
-	TotalStableDebt         *big.Int
-	TotalVariableDebt       *big.Int
-	LiquidityRate           *big.Int
-	VariableBorrowRate      *big.Int
-	StableBorrowRate        *big.Int
-	AverageStableBorrowRate *big.Int
-	LiquidityIndex          *big.Int
-	VariableBorrowIndex     *big.Int
-	LastUpdateTimestamp     int64
+type blockchainService struct {
+	ethClient                                  *ethclient.Client
+	multicallClient                            outbound.Multicaller
+	erc20ABI                                   *abi.ABI
+	getUserReservesABI                         *abi.ABI
+	getUserReserveDataABI                      *abi.ABI
+	getPoolDataProviderReserveConfigurationABI *abi.ABI
+	getPoolDataProviderReserveDataABI          *abi.ABI
+	uiPoolDataProvider                         common.Address
+	poolDataProvider                           common.Address
+	poolAddressesProvider                      common.Address
+	metadataCache                              map[common.Address]TokenMetadata
+	logger                                     *slog.Logger
+}
 
-	// From getReserveConfigurationData (ProtocolDataProvider contract)
+// reserveConfigData holds parsed data from PoolDataProvider.getReserveConfigurationData
+type reserveConfigData struct {
 	Decimals                 *big.Int
 	LTV                      *big.Int
 	LiquidationThreshold     *big.Int
@@ -74,19 +104,20 @@ type FullReserveData struct {
 	IsFrozen                 bool
 }
 
-type blockchainService struct {
-	ethClient                                  *ethclient.Client
-	multicallClient                            outbound.Multicaller
-	erc20ABI                                   *abi.ABI
-	getUserReservesABI                         *abi.ABI
-	getUserReserveDataABI                      *abi.ABI
-	getPoolDataProviderReserveConfigurationABI *abi.ABI
-	getPoolDataProviderReserveData             *abi.ABI
-	uiPoolDataProvider                         common.Address
-	poolDataProvider                           common.Address
-	poolAddressesProvider                      common.Address
-	metadataCache                              map[common.Address]TokenMetadata
-	logger                                     *slog.Logger
+// reserveDataFromProvider holds parsed data from ProtocolDataProvider.getReserveData
+type reserveDataFromProvider struct {
+	Unbacked                *big.Int
+	AccruedToTreasuryScaled *big.Int
+	TotalAToken             *big.Int
+	TotalStableDebt         *big.Int
+	TotalVariableDebt       *big.Int
+	LiquidityRate           *big.Int
+	VariableBorrowRate      *big.Int
+	StableBorrowRate        *big.Int
+	AverageStableBorrowRate *big.Int
+	LiquidityIndex          *big.Int
+	VariableBorrowIndex     *big.Int
+	LastUpdateTimestamp     int64
 }
 
 func newBlockchainService(
@@ -139,10 +170,11 @@ func (s *blockchainService) loadABIs(useAaveABI bool) error {
 		return fmt.Errorf("failed to load getReserveConfigurationData ABI: %w", err)
 	}
 
-	s.getPoolDataProviderReserveData, err = abis.GetPoolDataProviderReserveData()
+	s.getPoolDataProviderReserveDataABI, err = abis.GetPoolDataProviderReserveData()
 	if err != nil {
 		return fmt.Errorf("failed to load getReserveData ABI: %w", err)
 	}
+
 	return nil
 }
 
@@ -397,16 +429,16 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 }
 
 // getFullReserveData fetches both reserve data and configuration data from ProtocolDataProvider.
-func (s *blockchainService) getFullReserveData(ctx context.Context, asset common.Address, blockNumber int64) (*FullReserveData, error) {
+func (s *blockchainService) getFullReserveData(ctx context.Context, asset common.Address, blockNumber int64) (*reserveDataFromProvider, *reserveConfigData, error) {
 	// Build multicall requests for both getReserveData and getReserveConfigurationData
-	getReserveDataCallData, err := s.getPoolDataProviderReserveData.Pack("getReserveData", asset)
+	getReserveDataCallData, err := s.getPoolDataProviderReserveDataABI.Pack("getReserveData", asset)
 	if err != nil {
-		return nil, fmt.Errorf("failed to pack getReserveData: %w", err)
+		return nil, nil, fmt.Errorf("failed to pack getReserveData: %w", err)
 	}
 
 	getConfigCallData, err := s.getPoolDataProviderReserveConfigurationABI.Pack("getReserveConfigurationData", asset)
 	if err != nil {
-		return nil, fmt.Errorf("failed to pack getReserveConfigurationData: %w", err)
+		return nil, nil, fmt.Errorf("failed to pack getReserveConfigurationData: %w", err)
 	}
 
 	calls := []outbound.Call{
@@ -424,79 +456,53 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, asset common
 
 	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
 	if err != nil {
-		return nil, fmt.Errorf("multicall failed: %w", err)
+		return nil, nil, fmt.Errorf("multicall failed: %w", err)
 	}
 
 	if len(results) < 2 {
-		return nil, fmt.Errorf("expected 2 results, got %d", len(results))
+		return nil, nil, fmt.Errorf("expected 2 results, got %d", len(results))
 	}
 
 	// Parse getReserveData result
 	if !results[0].Success {
-		return nil, fmt.Errorf("getReserveData call failed for asset %s at block %d", asset.Hex(), blockNumber)
+		return nil, nil, fmt.Errorf("getReserveData call failed for asset %s at block %d", asset.Hex(), blockNumber)
 	}
 	reserveData, err := s.parseReserveData(results[0].ReturnData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse reserve data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
+		return nil, nil, fmt.Errorf("failed to parse reserve data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
 	}
 
 	// Parse getReserveConfigurationData result
 	if !results[1].Success {
-		return nil, fmt.Errorf("getReserveConfigurationData call failed for asset %s at block %d", asset.Hex(), blockNumber)
+		return nil, nil, fmt.Errorf("getReserveConfigurationData call failed for asset %s at block %d", asset.Hex(), blockNumber)
 	}
 	configData, err := s.parseReserveConfigurationData(results[1].ReturnData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse configuration data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
+		return nil, nil, fmt.Errorf("failed to parse configuration data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
 	}
 
-	// Merge into FullReserveData
-	return &FullReserveData{
-		// From getReserveData
-		Unbacked:                reserveData.Unbacked,
-		AccruedToTreasuryScaled: reserveData.AccruedToTreasuryScaled,
-		TotalAToken:             reserveData.TotalAToken,
-		TotalStableDebt:         reserveData.TotalStableDebt,
-		TotalVariableDebt:       reserveData.TotalVariableDebt,
-		LiquidityRate:           reserveData.LiquidityRate,
-		VariableBorrowRate:      reserveData.VariableBorrowRate,
-		StableBorrowRate:        reserveData.StableBorrowRate,
-		AverageStableBorrowRate: reserveData.AverageStableBorrowRate,
-		LiquidityIndex:          reserveData.LiquidityIndex,
-		VariableBorrowIndex:     reserveData.VariableBorrowIndex,
-		LastUpdateTimestamp:     reserveData.LastUpdateTimestamp,
-		// From getReserveConfigurationData
-		Decimals:                 configData.Decimals,
-		LTV:                      configData.LTV,
-		LiquidationThreshold:     configData.LiquidationThreshold,
-		LiquidationBonus:         configData.LiquidationBonus,
-		ReserveFactor:            configData.ReserveFactor,
-		UsageAsCollateralEnabled: configData.UsageAsCollateralEnabled,
-		BorrowingEnabled:         configData.BorrowingEnabled,
-		StableBorrowRateEnabled:  configData.StableBorrowRateEnabled,
-		IsActive:                 configData.IsActive,
-		IsFrozen:                 configData.IsFrozen,
-	}, nil
+	return reserveData, configData, nil
 }
 
-// reserveDataFromProvider holds parsed data from ProtocolDataProvider.getReserveData
-type reserveDataFromProvider struct {
-	Unbacked                *big.Int
-	AccruedToTreasuryScaled *big.Int
-	TotalAToken             *big.Int
-	TotalStableDebt         *big.Int
-	TotalVariableDebt       *big.Int
-	LiquidityRate           *big.Int
-	VariableBorrowRate      *big.Int
-	StableBorrowRate        *big.Int
-	AverageStableBorrowRate *big.Int
-	LiquidityIndex          *big.Int
-	VariableBorrowIndex     *big.Int
-	LastUpdateTimestamp     int64
+// unpackBigInt safely extracts a *big.Int from unpacked ABI data at the given index.
+func unpackBigInt(unpacked []interface{}, idx int, field string) (*big.Int, error) {
+	if v, ok := unpacked[idx].(*big.Int); ok {
+		return v, nil
+	}
+	return nil, fmt.Errorf("unpacked[%d] (%s) expected *big.Int, got %T", idx, field, unpacked[idx])
+}
+
+// unpackBool safely extracts a bool from unpacked ABI data at the given index.
+func unpackBool(unpacked []interface{}, idx int, field string) (bool, error) {
+	if v, ok := unpacked[idx].(bool); ok {
+		return v, nil
+	}
+	return false, fmt.Errorf("unpacked[%d] (%s) expected bool, got %T", idx, field, unpacked[idx])
 }
 
 // parseReserveData parses the raw bytes from ProtocolDataProvider.getReserveData into structured data.
 func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvider, error) {
-	unpacked, err := s.getPoolDataProviderReserveData.Unpack("getReserveData", data)
+	unpacked, err := s.getPoolDataProviderReserveDataABI.Unpack("getReserveData", data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unpack getReserveData: %w", err)
 	}
@@ -507,93 +513,68 @@ func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvi
 
 	result := &reserveDataFromProvider{}
 
-	if v, ok := unpacked[0].(*big.Int); ok {
-		result.Unbacked = v
-	} else {
-		return nil, fmt.Errorf("unpacked[0] expected *big.Int, got %T", unpacked[0])
+	result.Unbacked, err = unpackBigInt(unpacked, reserveDataUnbackedIdx, "unbacked")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[1].(*big.Int); ok {
-		result.AccruedToTreasuryScaled = v
-	} else {
-		return nil, fmt.Errorf("unpacked[1] expected *big.Int, got %T", unpacked[1])
+	result.AccruedToTreasuryScaled, err = unpackBigInt(unpacked, reserveDataAccruedToTreasuryIdx, "accruedToTreasuryScaled")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[2].(*big.Int); ok {
-		result.TotalAToken = v
-	} else {
-		return nil, fmt.Errorf("unpacked[2] expected *big.Int, got %T", unpacked[2])
+	result.TotalAToken, err = unpackBigInt(unpacked, reserveDataTotalATokenIdx, "totalAToken")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[3].(*big.Int); ok {
-		result.TotalStableDebt = v
-	} else {
-		return nil, fmt.Errorf("unpacked[3] expected *big.Int, got %T", unpacked[3])
+	result.TotalStableDebt, err = unpackBigInt(unpacked, reserveDataTotalStableDebtIdx, "totalStableDebt")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[4].(*big.Int); ok {
-		result.TotalVariableDebt = v
-	} else {
-		return nil, fmt.Errorf("unpacked[4] expected *big.Int, got %T", unpacked[4])
+	result.TotalVariableDebt, err = unpackBigInt(unpacked, reserveDataTotalVariableDebtIdx, "totalVariableDebt")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[5].(*big.Int); ok {
-		result.LiquidityRate = v
-	} else {
-		return nil, fmt.Errorf("unpacked[5] expected *big.Int, got %T", unpacked[5])
+	result.LiquidityRate, err = unpackBigInt(unpacked, reserveDataLiquidityRateIdx, "liquidityRate")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[6].(*big.Int); ok {
-		result.VariableBorrowRate = v
-	} else {
-		return nil, fmt.Errorf("unpacked[6] expected *big.Int, got %T", unpacked[6])
+	result.VariableBorrowRate, err = unpackBigInt(unpacked, reserveDataVariableBorrowRateIdx, "variableBorrowRate")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[7].(*big.Int); ok {
-		result.StableBorrowRate = v
-	} else {
-		return nil, fmt.Errorf("unpacked[7] expected *big.Int, got %T", unpacked[7])
+	result.StableBorrowRate, err = unpackBigInt(unpacked, reserveDataStableBorrowRateIdx, "stableBorrowRate")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[8].(*big.Int); ok {
-		result.AverageStableBorrowRate = v
-	} else {
-		return nil, fmt.Errorf("unpacked[8] expected *big.Int, got %T", unpacked[8])
+	result.AverageStableBorrowRate, err = unpackBigInt(unpacked, reserveDataAverageStableBorrowRateIdx, "averageStableBorrowRate")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[9].(*big.Int); ok {
-		result.LiquidityIndex = v
-	} else {
-		return nil, fmt.Errorf("unpacked[9] expected *big.Int, got %T", unpacked[9])
+	result.LiquidityIndex, err = unpackBigInt(unpacked, reserveDataLiquidityIndexIdx, "liquidityIndex")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[10].(*big.Int); ok {
-		result.VariableBorrowIndex = v
-	} else {
-		return nil, fmt.Errorf("unpacked[10] expected *big.Int, got %T", unpacked[10])
+	result.VariableBorrowIndex, err = unpackBigInt(unpacked, reserveDataVariableBorrowIndexIdx, "variableBorrowIndex")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[11].(*big.Int); ok {
-		result.LastUpdateTimestamp = v.Int64()
-	} else {
-		return nil, fmt.Errorf("unpacked[11] expected *big.Int, got %T", unpacked[11])
+	lastUpdateTs, err := unpackBigInt(unpacked, reserveDataLastUpdateTimestampIdx, "lastUpdateTimestamp")
+	if err != nil {
+		return nil, err
 	}
+	result.LastUpdateTimestamp = lastUpdateTs.Int64()
 
 	return result, nil
-}
-
-// reserveConfigData holds parsed data from PoolDataProvider.getReserveConfigurationData
-type reserveConfigData struct {
-	Decimals                 *big.Int
-	LTV                      *big.Int
-	LiquidationThreshold     *big.Int
-	LiquidationBonus         *big.Int
-	ReserveFactor            *big.Int
-	UsageAsCollateralEnabled bool
-	BorrowingEnabled         bool
-	StableBorrowRateEnabled  bool
-	IsActive                 bool
-	IsFrozen                 bool
 }
 
 // parseReserveConfigurationData parses the raw bytes from getReserveConfigurationData.
@@ -609,64 +590,54 @@ func (s *blockchainService) parseReserveConfigurationData(data []byte) (*reserve
 
 	result := &reserveConfigData{}
 
-	if v, ok := unpacked[0].(*big.Int); ok {
-		result.Decimals = v
-	} else {
-		return nil, fmt.Errorf("unpacked[0] expected *big.Int, got %T", unpacked[0])
+	result.Decimals, err = unpackBigInt(unpacked, reserveConfigDecimalsIdx, "decimals")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[1].(*big.Int); ok {
-		result.LTV = v
-	} else {
-		return nil, fmt.Errorf("unpacked[1] expected *big.Int, got %T", unpacked[1])
+	result.LTV, err = unpackBigInt(unpacked, reserveConfigLTVIdx, "ltv")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[2].(*big.Int); ok {
-		result.LiquidationThreshold = v
-	} else {
-		return nil, fmt.Errorf("unpacked[2] expected *big.Int, got %T", unpacked[2])
+	result.LiquidationThreshold, err = unpackBigInt(unpacked, reserveConfigLiquidationThresholdIdx, "liquidationThreshold")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[3].(*big.Int); ok {
-		result.LiquidationBonus = v
-	} else {
-		return nil, fmt.Errorf("unpacked[3] expected *big.Int, got %T", unpacked[3])
+	result.LiquidationBonus, err = unpackBigInt(unpacked, reserveConfigLiquidationBonusIdx, "liquidationBonus")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[4].(*big.Int); ok {
-		result.ReserveFactor = v
-	} else {
-		return nil, fmt.Errorf("unpacked[4] expected *big.Int, got %T", unpacked[4])
+	result.ReserveFactor, err = unpackBigInt(unpacked, reserveConfigReserveFactorIdx, "reserveFactor")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[5].(bool); ok {
-		result.UsageAsCollateralEnabled = v
-	} else {
-		return nil, fmt.Errorf("unpacked[5] expected bool, got %T", unpacked[5])
+	result.UsageAsCollateralEnabled, err = unpackBool(unpacked, reserveConfigUsageAsCollateralEnabledIdx, "usageAsCollateralEnabled")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[6].(bool); ok {
-		result.BorrowingEnabled = v
-	} else {
-		return nil, fmt.Errorf("unpacked[6] expected bool, got %T", unpacked[6])
+	result.BorrowingEnabled, err = unpackBool(unpacked, reserveConfigBorrowingEnabledIdx, "borrowingEnabled")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[7].(bool); ok {
-		result.StableBorrowRateEnabled = v
-	} else {
-		return nil, fmt.Errorf("unpacked[7] expected bool, got %T", unpacked[7])
+	result.StableBorrowRateEnabled, err = unpackBool(unpacked, reserveConfigStableBorrowRateEnabledIdx, "stableBorrowRateEnabled")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[8].(bool); ok {
-		result.IsActive = v
-	} else {
-		return nil, fmt.Errorf("unpacked[8] expected bool, got %T", unpacked[8])
+	result.IsActive, err = unpackBool(unpacked, reserveConfigIsActiveIdx, "isActive")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[9].(bool); ok {
-		result.IsFrozen = v
-	} else {
-		return nil, fmt.Errorf("unpacked[9] expected bool, got %T", unpacked[9])
+	result.IsFrozen, err = unpackBool(unpacked, reserveConfigIsFrozenIdx, "isFrozen")
+	if err != nil {
+		return nil, err
 	}
 
 	return result, nil
