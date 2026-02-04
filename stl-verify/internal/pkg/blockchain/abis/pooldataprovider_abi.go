@@ -60,7 +60,7 @@ func GetPoolDataProviderUserReserveDataABI() (*abi.ABI, error) {
 	]`)
 }
 
-func getPoolDataProviderReserveConfigurationABI() (*abi.ABI, error) {
+func GetPoolDataProviderReserveConfigurationABI() (*abi.ABI, error) {
 	return ParseABI(`[
 		{
 			"inputs": [
@@ -118,7 +118,7 @@ func getPoolDataProviderReserveConfigurationABI() (*abi.ABI, error) {
 	]`)
 }
 
-func getPoolDataProviderReserveData() (*abi.ABI, error) {
+func GetPoolDataProviderReserveData() (*abi.ABI, error) {
 	return ParseABI(`[
 	{
         "inputs": [

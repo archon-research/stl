@@ -353,7 +353,7 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 		metadataCache: make(map[common.Address]TokenMetadata),
 	}
 
-	if err := service.loadABIs(); err != nil {
+	if err := service.loadABIs(false); err != nil {
 		t.Fatalf("loadABIs() failed: %v", err)
 	}
 
@@ -384,7 +384,7 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 					big.NewInt(1640995200), // lastUpdateTimestamp
 				}
 				// Pack the return values using the ABI outputs
-				packed, _ := service.getReserveDataABI.Methods["getReserveData"].Outputs.Pack(values...)
+				packed, _ := service.getPoolDataProviderReserveData.Methods["getReserveData"].Outputs.Pack(values...)
 				return packed
 			},
 			wantErr: false,
@@ -454,7 +454,7 @@ func TestBlockchainService_ParseReserveConfigurationData(t *testing.T) {
 		metadataCache: make(map[common.Address]TokenMetadata),
 	}
 
-	if err := service.loadABIs(); err != nil {
+	if err := service.loadABIs(false); err != nil {
 		t.Fatalf("loadABIs() failed: %v", err)
 	}
 
@@ -481,7 +481,7 @@ func TestBlockchainService_ParseReserveConfigurationData(t *testing.T) {
 					true,              // isActive
 					false,             // isFrozen
 				}
-				packed, _ := service.getReserveConfigurationDataABI.Methods["getReserveConfigurationData"].Outputs.Pack(values...)
+				packed, _ := service.getPoolDataProviderReserveConfigurationABI.Methods["getReserveConfigurationData"].Outputs.Pack(values...)
 				return packed
 			},
 			wantErr: false,

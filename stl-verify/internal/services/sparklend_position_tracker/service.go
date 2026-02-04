@@ -487,13 +487,13 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 	}
 
 	// Fetch reserve data and configuration from chain
-	reserveData, err := blockchainSvc.getFullReserveData(ctx, protocolAddress, reserve, blockNumber)
+	reserveData, err := blockchainSvc.getFullReserveData(ctx, reserve, blockNumber)
 	if err != nil {
 		return fmt.Errorf("failed to get reserve data: %w", err)
 	}
 
 	// Get protocol ID
-	protocolID, err := s.protocolRepo.GetProtocolByAddress(ctx, chainID, protocolAddress.Hex())
+	protocolID, err := s.protocolRepo.GetProtocolByAddress(ctx, chainID, protocolAddress)
 	if err != nil {
 		return fmt.Errorf("failed to get protocol: %w", err)
 	}

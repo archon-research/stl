@@ -74,18 +74,19 @@ type FullReserveData struct {
 	IsFrozen                 bool
 }
 
-
 type blockchainService struct {
-	ethClient             *ethclient.Client
-	multicallClient       outbound.Multicaller
-	erc20ABI              *abi.ABI
-	getUserReservesABI    *abi.ABI
-	getUserReserveDataABI *abi.ABI
-	uiPoolDataProvider    common.Address
-	poolDataProvider      common.Address
-	poolAddressesProvider common.Address
-	metadataCache         map[common.Address]TokenMetadata
-	logger                *slog.Logger
+	ethClient                                  *ethclient.Client
+	multicallClient                            outbound.Multicaller
+	erc20ABI                                   *abi.ABI
+	getUserReservesABI                         *abi.ABI
+	getUserReserveDataABI                      *abi.ABI
+	getPoolDataProviderReserveConfigurationABI *abi.ABI
+	getPoolDataProviderReserveData             *abi.ABI
+	uiPoolDataProvider                         common.Address
+	poolDataProvider                           common.Address
+	poolAddressesProvider                      common.Address
+	metadataCache                              map[common.Address]TokenMetadata
+	logger                                     *slog.Logger
 }
 
 func newBlockchainService(
@@ -133,12 +134,12 @@ func (s *blockchainService) loadABIs(useAaveABI bool) error {
 		return fmt.Errorf("failed to load getUserReserveData ABI: %w", err)
 	}
 
-	s.getPoolDataProviderReserveConfigurationABI, err = abis.getPoolDataProviderReserveConfigurationABI()
+	s.getPoolDataProviderReserveConfigurationABI, err = abis.GetPoolDataProviderReserveConfigurationABI()
 	if err != nil {
 		return fmt.Errorf("failed to load getReserveConfigurationData ABI: %w", err)
 	}
 
-	s.getPoolDataProviderReserveData, err = abis.getPoolDataProviderReserveData()
+	s.getPoolDataProviderReserveData, err = abis.GetPoolDataProviderReserveData()
 	if err != nil {
 		return fmt.Errorf("failed to load getReserveData ABI: %w", err)
 	}
@@ -398,30 +399,30 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 // getFullReserveData fetches both reserve data and configuration data from ProtocolDataProvider.
 func (s *blockchainService) getFullReserveData(ctx context.Context, asset common.Address, blockNumber int64) (*FullReserveData, error) {
 	// Build multicall requests for both getReserveData and getReserveConfigurationData
-	getReserveDataCallData, err := s.getReserveDataABI.Pack("getReserveData", asset)
+	getReserveDataCallData, err := s.getPoolDataProviderReserveData.Pack("getReserveData", asset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack getReserveData: %w", err)
 	}
 
-	getConfigCallData, err := s.getReserveConfigurationDataABI.Pack("getReserveConfigurationData", asset)
+	getConfigCallData, err := s.getPoolDataProviderReserveConfigurationABI.Pack("getReserveConfigurationData", asset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack getReserveConfigurationData: %w", err)
 	}
 
-	calls := []Multicall3Request{
+	calls := []outbound.Call{
 		{
-			Target:       s.protocolDataProvider,
+			Target:       s.poolDataProvider,
 			AllowFailure: false,
 			CallData:     getReserveDataCallData,
 		},
 		{
-			Target:       s.protocolDataProvider,
+			Target:       s.poolDataProvider,
 			AllowFailure: false,
 			CallData:     getConfigCallData,
 		},
 	}
 
-	results, err := s.executeMulticall(ctx, calls, big.NewInt(blockNumber))
+	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
 	if err != nil {
 		return nil, fmt.Errorf("multicall failed: %w", err)
 	}
@@ -495,7 +496,7 @@ type reserveDataFromProvider struct {
 
 // parseReserveData parses the raw bytes from ProtocolDataProvider.getReserveData into structured data.
 func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvider, error) {
-	unpacked, err := s.getReserveDataABI.Unpack("getReserveData", data)
+	unpacked, err := s.getPoolDataProviderReserveData.Unpack("getReserveData", data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unpack getReserveData: %w", err)
 	}
@@ -581,7 +582,7 @@ func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvi
 	return result, nil
 }
 
-// reserveConfigData holds parsed data from ProtocolDataProvider.getReserveConfigurationData
+// reserveConfigData holds parsed data from PoolDataProvider.getReserveConfigurationData
 type reserveConfigData struct {
 	Decimals                 *big.Int
 	LTV                      *big.Int
@@ -597,7 +598,7 @@ type reserveConfigData struct {
 
 // parseReserveConfigurationData parses the raw bytes from getReserveConfigurationData.
 func (s *blockchainService) parseReserveConfigurationData(data []byte) (*reserveConfigData, error) {
-	unpacked, err := s.getReserveConfigurationDataABI.Unpack("getReserveConfigurationData", data)
+	unpacked, err := s.getPoolDataProviderReserveConfigurationABI.Unpack("getReserveConfigurationData", data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unpack getReserveConfigurationData: %w", err)
 	}
