@@ -60,9 +60,9 @@ if err != nil {
 }
 
 // ❌ BAD: Silent failures
-try {
-    processBlock(block)
-} catch { }  // Never ignore errors
+if err := processBlock(block); err != nil {
+    // Ignoring error - never do this
+}
 
 // ✅ GOOD: Wrap with context
 user, err := db.Get(ctx, id)
