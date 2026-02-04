@@ -53,3 +53,17 @@ backup_worker_memory        = 4096     # 4 GB
 backup_worker_desired_count = 1        # Single instance
 backup_worker_image_tag     = "latest" # Override in CI/CD
 backup_worker_workers       = 2        # Concurrent workers per task
+
+# -----------------------------------------------------------------------------
+# Bastion Host Configuration
+# -----------------------------------------------------------------------------
+
+# Enable bastion for local access to TigerData and Redis via Tailscale
+bastion_enabled       = true
+bastion_instance_type = "t4g.nano" # Smallest ARM instance (~$3/month)
+
+# Tailscale auth key stored in Secrets Manager (create manually first)
+tailscale_auth_key_secret_name = "stl-sentinelstaging-bastion-host-tailscale-authkey"
+
+# Enable Tailscale for staging only (NOT for production)
+tailscale_enabled = true

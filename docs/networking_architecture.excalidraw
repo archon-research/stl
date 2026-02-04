@@ -667,14 +667,18 @@
         {
           "id": "vpc-peering-arrow",
           "type": "arrow"
+        },
+        {
+          "id": "bastion-to-tigerdata",
+          "type": "arrow"
         }
       ],
       "isDeleted": false,
       "seed": 20,
-      "version": 3,
-      "versionNonce": 1872056987,
+      "version": 14,
+      "versionNonce": 1315244248,
       "index": "aJ",
-      "updated": 1768566830792,
+      "updated": 1770190686611,
       "link": null,
       "locked": false
     },
@@ -785,8 +789,8 @@
     {
       "id": "redis",
       "type": "rectangle",
-      "x": 250,
-      "y": 435,
+      "x": 100.27993774414062,
+      "y": 433.2779541015625,
       "width": 150,
       "height": 55,
       "strokeColor": "#e8590c",
@@ -805,18 +809,18 @@
       "boundElements": [],
       "isDeleted": false,
       "seed": 24,
-      "version": 2,
-      "versionNonce": 1989365725,
+      "version": 77,
+      "versionNonce": 286714328,
       "index": "aN",
-      "updated": 1768402637669,
+      "updated": 1770190659507,
       "link": null,
       "locked": false
     },
     {
       "id": "redis-text",
       "type": "text",
-      "x": 275,
-      "y": 452,
+      "x": 123.427734375,
+      "y": 449.90692138671875,
       "width": 100,
       "height": 20,
       "text": "ElastiCache Redis",
@@ -837,10 +841,10 @@
       "boundElements": [],
       "isDeleted": false,
       "seed": 25,
-      "version": 2,
-      "versionNonce": 1794107507,
+      "version": 61,
+      "versionNonce": 1073812392,
       "index": "aO",
-      "updated": 1768402637669,
+      "updated": 1770190661141,
       "link": null,
       "locked": false,
       "verticalAlign": "top",
@@ -1492,8 +1496,8 @@
     {
       "id": "sg-box",
       "type": "rectangle",
-      "x": 50.15191650390625,
-      "y": 529.8372802734375,
+      "x": 50.53924560546875,
+      "y": 530.1693115234375,
       "width": 520,
       "height": 150,
       "strokeColor": "#c92a2a",
@@ -1509,13 +1513,18 @@
       "roundness": {
         "type": 3
       },
-      "boundElements": [],
+      "boundElements": [
+        {
+          "id": "bastion-to-tigerdata",
+          "type": "arrow"
+        }
+      ],
       "isDeleted": false,
       "seed": 45,
-      "version": 4,
-      "versionNonce": 1029488115,
+      "version": 7,
+      "versionNonce": 151969448,
       "index": "ai",
-      "updated": 1768566503916,
+      "updated": 1770190700559,
       "link": null,
       "locked": false
     },
@@ -1578,13 +1587,18 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": [],
+      "boundElements": [
+        {
+          "id": "bastion-to-tigerdata",
+          "type": "arrow"
+        }
+      ],
       "isDeleted": false,
       "seed": 47,
-      "version": 2,
-      "versionNonce": 845837907,
+      "version": 3,
+      "versionNonce": 822472360,
       "index": "ak",
-      "updated": 1768402637669,
+      "updated": 1770190675660,
       "link": null,
       "locked": false,
       "verticalAlign": "top",
@@ -1596,8 +1610,8 @@
     {
       "id": "EGgbigOXCS8clEV2DnyZD",
       "type": "rectangle",
-      "x": 635.5757795061382,
-      "y": 647.0545567103795,
+      "x": 635.5822492327007,
+      "y": 647.1880405970983,
       "width": 180,
       "height": 89.56295340401775,
       "angle": 0,
@@ -1615,24 +1629,28 @@
         "type": 3
       },
       "seed": 631729147,
-      "version": 240,
-      "versionNonce": 1291130267,
+      "version": 242,
+      "versionNonce": 837332440,
       "isDeleted": false,
       "boundElements": [
         {
           "id": "tigerdata-vpc-label",
           "type": "text"
+        },
+        {
+          "id": "bastion-to-tigerdata",
+          "type": "arrow"
         }
       ],
-      "updated": 1768567031410,
+      "updated": 1770190693957,
       "link": null,
       "locked": false
     },
     {
       "id": "tigerdata-vpc-label",
       "type": "text",
-      "x": 641.3658414568218,
-      "y": 683.5860334123884,
+      "x": 641.3723111833843,
+      "y": 683.7195172991071,
       "width": 168.4198760986328,
       "height": 16.5,
       "text": "TigerData VPC (10.1.0.0/24)",
@@ -1650,13 +1668,13 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
+      "boundElements": [],
       "isDeleted": false,
       "seed": 101,
-      "version": 510,
-      "versionNonce": 244689467,
+      "version": 511,
+      "versionNonce": 1497707224,
       "index": "am",
-      "updated": 1768567031410,
+      "updated": 1770190693957,
       "link": null,
       "locked": false,
       "verticalAlign": "middle",
@@ -1715,6 +1733,136 @@
         [
           72.04210024098995,
           219.61117784183864
+        ]
+      ],
+      "elbowed": false
+    },
+    {
+      "id": "bastion-box",
+      "type": "rectangle",
+      "x": 325.944091796875,
+      "y": 434.72985839843756,
+      "width": 139.31646728515628,
+      "height": 54.521484375,
+      "strokeColor": "#5c940d",
+      "backgroundColor": "#d8f5a2",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "angle": 0,
+      "groupIds": [],
+      "frameId": null,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "bastion-to-tigerdata",
+          "type": "arrow"
+        }
+      ],
+      "isDeleted": false,
+      "seed": 200,
+      "version": 338,
+      "versionNonce": 215118552,
+      "index": "ao",
+      "updated": 1770190701782,
+      "link": null,
+      "locked": false
+    },
+    {
+      "id": "bastion-text",
+      "type": "text",
+      "x": 349.36846923828125,
+      "y": 443.9973754882813,
+      "width": 90,
+      "height": 40,
+      "text": "Bastion\n(Tailscale)",
+      "fontSize": 12,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "angle": 0,
+      "groupIds": [],
+      "frameId": null,
+      "roundness": null,
+      "boundElements": [],
+      "isDeleted": false,
+      "seed": 201,
+      "version": 98,
+      "versionNonce": 1509388200,
+      "index": "ap",
+      "updated": 1770190671822,
+      "link": null,
+      "locked": false,
+      "verticalAlign": "top",
+      "containerId": null,
+      "originalText": "Bastion\n(Tailscale)",
+      "autoResize": true,
+      "lineHeight": 1.6666666666666667
+    },
+    {
+      "id": "bastion-to-tigerdata",
+      "type": "arrow",
+      "x": 476.52787860411104,
+      "y": 474.24149137993186,
+      "width": 151.4684728408563,
+      "height": 202.62656262925202,
+      "strokeColor": "#5c940d",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "dashed",
+      "roughness": 1,
+      "opacity": 100,
+      "angle": 0,
+      "groupIds": [],
+      "frameId": null,
+      "roundness": {
+        "type": 2
+      },
+      "boundElements": [],
+      "isDeleted": false,
+      "seed": 202,
+      "version": 672,
+      "versionNonce": 2118918616,
+      "index": "aq",
+      "updated": 1770190710206,
+      "link": null,
+      "locked": false,
+      "startBinding": {
+        "elementId": "bastion-box",
+        "focus": -0.5667939031825084,
+        "gap": 11.267319522079788
+      },
+      "endBinding": {
+        "elementId": "EGgbigOXCS8clEV2DnyZD",
+        "focus": -0.8438021959178584,
+        "gap": 7.5858977877334155
+      },
+      "lastCommittedPoint": null,
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          94.35749737245146,
+          63.07116992726674
+        ],
+        [
+          151.4684728408563,
+          202.62656262925202
         ]
       ],
       "elbowed": false
