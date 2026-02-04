@@ -50,6 +50,7 @@ func main() {
 	fromDate := flag.String("from", "", "Start date (YYYY-MM-DD) for historical mode")
 	toDate := flag.String("to", "", "End date (YYYY-MM-DD) for historical mode, default: yesterday")
 	assets := flag.String("assets", "", "Comma-separated asset IDs (default: all enabled for source)")
+	concurrency := flag.Int("concurrency", 5, "Number of assets to fetch in parallel (default: 5)")
 	showVersion := flag.Bool("version", false, "Show version information and exit")
 	flag.Parse()
 
@@ -73,6 +74,7 @@ func main() {
 		"commit", GitCommit,
 		"mode", *mode,
 		"source", *source,
+		"concurrency", *concurrency,
 	)
 
 	sigChan := make(chan os.Signal, 1)
@@ -83,7 +85,7 @@ func main() {
 		cancel()
 	}()
 
-	if err := run(ctx, logger, *mode, *source, *fromDate, *toDate, *assets); err != nil {
+	if err := run(ctx, logger, *mode, *source, *fromDate, *toDate, *assets, *concurrency); err != nil {
 		logger.Error("failed", "error", err)
 		os.Exit(1)
 	}
@@ -91,7 +93,7 @@ func main() {
 	logger.Info("completed successfully")
 }
 
-func run(ctx context.Context, logger *slog.Logger, mode, source, fromDate, toDate, assets string) error {
+func run(ctx context.Context, logger *slog.Logger, mode, source, fromDate, toDate, assets string, concurrency int) error {
 	provider, err := createProvider(source, logger)
 	if err != nil {
 		return fmt.Errorf("creating provider: %w", err)
@@ -115,8 +117,9 @@ func run(ctx context.Context, logger *slog.Logger, mode, source, fromDate, toDat
 	}
 
 	service, err := price_fetcher.NewService(price_fetcher.ServiceConfig{
-		ChainID: chainID,
-		Logger:  logger,
+		ChainID:     chainID,
+		Concurrency: concurrency,
+		Logger:      logger,
 	}, provider, priceRepo)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)
