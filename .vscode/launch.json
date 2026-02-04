@@ -10,6 +10,22 @@
       "envFile": [
         "${workspaceFolder}/stl-verify/cmd/watcher/.env"
       ]
+    },
+    {
+      "name": "Price Fetcher - Historical 1 Year (CoinGecko)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/stl-verify/cmd/price-fetcher/main.go",
+      "args": [
+        "-mode", "historical",
+        "-source", "coingecko",
+        "-from", "2025-02-04",
+        "-to", "2026-02-03"
+      ],
+      "envFile": [
+        "${workspaceFolder}/stl-verify/cmd/price-fetcher/.env"
+      ]
     }
   ]
 }
