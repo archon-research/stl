@@ -568,32 +568,6 @@ event AccrueInterest(
 );
 ```
 
-### Flash Loans (Morpho Blue)
-
-**Flash Loan Mechanics:**
-
-Morpho Blue supports flash loans of any token with liquidity:
-
-1. **User calls** `flashLoan(token, assets, data)`
-2. **Morpho transfers** `assets` of `token` to user
-3. **User executes** arbitrary logic in callback
-4. **User must repay** `assets` of `token` within same transaction
-5. **No fee** charged (unlike Aave)
-
-**Events:**
-
-```solidity
-event FlashLoan(
-    address indexed caller,
-    address indexed token,
-    uint256 assets
-);
-```
-
-No collateral required, but must repay in same transaction or revert.
-
----
-
 ## Smart Contracts
 
 ### Morpho Blue Contract

@@ -993,7 +993,6 @@ This section describes how to comprehensively index Sparklend to track and deriv
 | `Borrow` | User borrows asset | reserve, user, onBehalfOf, amount, interestRateMode, borrowRate, referralCode |
 | `Repay` | User repays debt | reserve, user, repayer, amount, useATokens |
 | `LiquidationCall` | Position liquidated | collateralAsset, debtAsset, user, debtToCover, liquidatedCollateralAmount, liquidator, receiveAToken |
-| `FlashLoan` | Flash loan executed | target, initiator, asset, amount, interestRateMode, premium, referralCode |
 
 #### Reserve & Market Events
 

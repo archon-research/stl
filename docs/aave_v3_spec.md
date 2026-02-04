@@ -834,7 +834,6 @@ This section describes how to comprehensively index Aave V3 to track and derive 
 | `Borrow` | User borrows asset | reserve, user, onBehalfOf, amount, interestRateMode, borrowRate, referralCode |
 | `Repay` | User repays debt | reserve, user, repayer, amount, useATokens |
 | `LiquidationCall` | Position liquidated | collateralAsset, debtAsset, user, debtToCover, liquidatedCollateralAmount, liquidator, receiveAToken |
-| `FlashLoan` | Flash loan executed | target, initiator, asset, amount, interestRateMode, premium, referralCode |
 
 #### Reserve & Market Events
 
@@ -1043,18 +1042,6 @@ At each snapshot interval:
 - Calculate total protocol collateral and debt (sum across users)
 - Identify users in E-Mode
 
-**Query Example:**
-
-```sql
--- Find users at risk of liquidation
-SELECT user, healthFactor / 1e18 AS hf_decimal, totalDebtBase / 1e8 AS debt_usd
-FROM UserAccountSnapshot
-WHERE blockNumber = (SELECT MAX(blockNumber) FROM UserAccountSnapshot)
-  AND healthFactor < 1.2e18
-  AND totalDebtBase > 0
-ORDER BY healthFactor ASC;
-```
-
 #### 2. UserReserveSnapshot
 
 **Source:** `UiPoolDataProviderV3.getUserReservesData(provider, user)`
@@ -1090,24 +1077,6 @@ ORDER BY healthFactor ASC;
 - Track position changes over time
 - Calculate position value (balance × price from ReserveMarketSnapshot)
 - Identify which assets are used as collateral
-- Calculate interest earned/paid (current - scaled)
-
-**Query Example:**
-
-```sql
--- Get user's detailed position breakdown at specific block
-SELECT 
-    underlyingAsset,
-    currentATokenBalance AS supply_balance,
-    currentVariableDebt AS debt_balance,
-    usageAsCollateralEnabled AS is_collateral,
-    price AS price_usd
-FROM UserReserveSnapshot
-JOIN ReserveMarketSnapshot USING (reserveId, blockNumber)
-WHERE user = '0x...'
-  AND blockNumber = 18500000
-  AND (currentATokenBalance > 0 OR currentVariableDebt > 0);
-```
 
 #### 3. ReserveMarketSnapshot
 
@@ -1150,35 +1119,13 @@ WHERE user = '0x...'
 
 - **Get asset prices** at any historical block (critical for liquidation analysis)
 - Calculate interest rates (APY conversion)
-- Track total supply and borrow per reserve
-- Calculate utilization rate: `totalDebt / (totalDebt + availableLiquidity)`
+- **Track total supply and borrow per reserve:**
+  - `Total Borrowed = totalScaledVariableDebt × variableBorrowIndex / 1e27`
+  - `Total Supply = Total Borrowed + availableLiquidity`
+- **Calculate utilization rate:**
+  - `Utilization = Total Borrowed / Total Supply`
 - Monitor market conditions (frozen, paused states)
 - Calculate total value locked (TVL)
-
-**Query Example:**
-
-```sql
--- Get current market state for all reserves
-SELECT 
-    underlyingAsset,
-    liquidityRate / 1e27 * 100 AS supply_apy_percent,
-    variableBorrowRate / 1e27 * 100 AS borrow_apy_percent,
-    priceInMarketReferenceCurrency / 1e8 AS price_usd,
-    availableLiquidity,
-    (totalScaledVariableDebt * variableBorrowIndex / 1e27) AS total_borrowed,
-    isActive,
-    isFrozen,
-    isPaused
-FROM ReserveMarketSnapshot
-WHERE blockNumber = (SELECT MAX(blockNumber) FROM ReserveMarketSnapshot);
-```
-
-**Important Notes:**
-
-- **Prices** are stored here, not in a separate table
-- Stored once per reserve per snapshot block (not per user)
-- Indexes are cumulative (always increasing)
-- Rates are instantaneous (can change each transaction)
 
 ### Derived Metrics
 
@@ -1206,99 +1153,29 @@ From the indexed events and snapshots, we can calculate comprehensive protocol m
    Utilization = Total Borrowed / Total Supply
    ```
 
-4. **Supply APY (Annual Percentage Yield):**
+4. **Supply APY & Borrow APY:**
    ```
    Supply APY = (liquidityRate / 1e27) × 100%
-   ```
-   Convert ray (27 decimals) to percentage.
-
-5. **Borrow APY:**
-   ```
    Borrow APY = (variableBorrowRate / 1e27) × 100%
    ```
 
-6. **TVL (Total Value Locked) per Reserve:**
+5. **TVL per Reserve:**
    ```
    TVL = Total Supply × Price in USD
    ```
 
 **Protocol-Wide Metrics:**
 
-1. **Total TVL:**
-   ```
-   Total TVL = Σ (Reserve TVL)
-   ```
-
-2. **Total Debt:**
-   ```
-   Total Debt = Σ (Total Borrowed × Price in USD)
-   ```
-
-3. **Active Users:**
-   Count of users with active positions (supply > 0 OR debt > 0)
-
-4. **Users at Risk:**
-   Count of users with 1.0 < HF < 1.2
+- Total TVL across all reserves
+- Total Debt across all reserves
+- Active user count
+- Users at risk count (1.0 < HF < 1.2)
 
 **User-Specific Metrics:**
 
-1. **Position Value in USD:**
-   ```
-   Supply Value = Σ (currentATokenBalance × priceInUSD)
-   Debt Value = Σ (currentVariableDebt × priceInUSD)
-   Net Value = Supply Value - Debt Value
-   ```
-
-2. **Interest Earned:**
-   ```
-   Interest Earned = (currentATokenBalance - scaledATokenBalance × liquidityIndex / 1e27)
-   ```
-
-3. **Interest Paid:**
-   ```
-   Interest Paid = (currentVariableDebt - scaledVariableDebt × variableBorrowIndex / 1e27)
-   ```
-
-4. **Effective APY:**
-   Track user's supply/debt over time to calculate realized APY
-
-
-**Historical Analysis:**
-
-Using snapshots at different blocks:
-
-1. **Health Factor Trends:**
-   Track HF changes for users over time
-
-2. **Rate History:**
-   Chart liquidityRate and variableBorrowRate changes
-
-3. **Price History:**
-   Track priceInMarketReferenceCurrency over time
-
-4. **Position Changes:**
-   Diff UserReserveSnapshot at different blocks to see deposits/withdrawals
-
-**Calculation Example:**
-
-For each reserve's market snapshot at a given block:
-
-```typescript
-// Total Supply = Total Borrowed + Available Liquidity
-totalSupply = (totalScaledVariableDebt × variableBorrowIndex) / RAY + availableLiquidity
-
-// Total Borrowed (with accrued interest)
-totalBorrowed = (totalScaledVariableDebt × variableBorrowIndex) / RAY
-
-// Utilization Rate
-utilization = totalBorrowed / totalSupply
-
-// APY Conversion (from ray precision to percentage)
-supplyAPY = (liquidityRate / RAY) × 100
-borrowAPY = (variableBorrowRate / RAY) × 100
-```
-
-Where `RAY = 10^27` (27 decimal precision)
+- Position value in USD
+- Interest earned/paid
+- Effective APY over time
 
 ### Position Backing Analysis
 
@@ -2261,6 +2138,7 @@ Aave documentation has undergone several reorganizations. For the most current i
 **Finding Contract Addresses:**
 
 Contract addresses for each Pool can be found through:
+- **Aave Address Book:** https://github.com/bgd-labs/aave-address-book - Comprehensive registry of all Aave ecosystem smart contract addresses (Solidity & JavaScript/TypeScript)
 - **PoolAddressesProvider:** Query this contract to discover other protocol contracts for a Pool
 - **Chain Explorers:** Verify contracts on Etherscan, Polygonscan, Arbiscan, etc.
 - **Aave GitHub:** Official contract deployment information in repository releases

@@ -575,12 +575,9 @@ query {
 - **Dune Dashboard:** https://dune.com/maple-finance/maple-finance
 - **Token Terminal:** https://tokenterminal.com/terminal/projects/maple-finance
 - **DeFi Llama:** https://defillama.com/protocol/maple-finance
-- **Messari:** https://messari.io/project/syrup
 
 ### Community & Support
 
-- **Integration Support:** integrate@maple.finance
-- **Partnerships:** partnerships@maple.finance
 - **Telegram:** https://t.me/maplefinance
 - **Twitter:** https://twitter.com/maplefinance
 

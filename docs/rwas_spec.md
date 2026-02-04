@@ -995,22 +995,6 @@ if (code === 0) {
 const paused = await token.isPaused();
 ```
 
-#### Wallet Enumeration
-
-```typescript
-// Get total number of holder wallets on this chain
-const walletCount = await token.walletCount();
-
-// Iterate through holders (1-indexed)
-for (let i = 1; i <= walletCount; i++) {
-  const walletAddress = await token.getWalletAt(i);
-  const balance = await token.balanceOf(walletAddress);
-  // ...
-}
-```
-
-**Note**: This only shows wallets on the current chain. Multi-chain holder data must be obtained from Securitize.
-
 ### Asset Backing Information
 
 For detailed information about the **real-world assets** backing Securitize tokens (e.g., treasury bills, money market funds, real estate, private equity), refer to the [Securitize platform](https://securitize.io/) and token-specific offering documents.
