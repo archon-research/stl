@@ -97,7 +97,7 @@ CROSS JOIN (VALUES
     ('tether', 'Tether', 'USDT'),
     ('wrapped-eeth', 'Wrapped eETH', 'weETH'),
     ('coinbase-wrapped-btc', 'Coinbase Wrapped BTC', 'cbBTC'),
-    ('savings-usds', 'Savings USDS', 'sUSDS'),
+    ('susds', 'Savings USDS', 'sUSDS'),
     ('usds', 'USDS', 'USDS'),
     ('lombard-staked-btc', 'Lombard Staked BTC', 'LBTC'),
     ('tbtc', 'tBTC', 'tBTC'),
