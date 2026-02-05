@@ -171,10 +171,7 @@ func (c *Client) GetCurrentPrices(ctx context.Context, assetIDs []string) ([]out
 	batchSize := 250
 
 	for i := 0; i < len(assetIDs); i += batchSize {
-		end := i + batchSize
-		if end > len(assetIDs) {
-			end = len(assetIDs)
-		}
+		end := min(i+batchSize, len(assetIDs))
 		batch := assetIDs[i:end]
 
 		batchResults, err := c.getCurrentPricesBatch(ctx, batch)
