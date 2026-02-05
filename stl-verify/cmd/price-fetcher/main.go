@@ -16,6 +16,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coingecko"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/price_fetcher"
 )
@@ -102,7 +103,7 @@ func run(ctx context.Context, logger *slog.Logger, source, fromDate, toDate, ass
 		return fmt.Errorf("creating provider: %w", err)
 	}
 
-	postgresURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
+	postgresURL := env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(postgresURL))
 	if err != nil {
 		return fmt.Errorf("connecting to database: %w", err)
@@ -193,17 +194,10 @@ func parseAssetIDs(assets string) []string {
 }
 
 func getChainID() (int, error) {
-	chainIDStr := getEnv("CHAIN_ID", "1")
+	chainIDStr := env.Get("CHAIN_ID", "1")
 	chainID, err := strconv.Atoi(chainIDStr)
 	if err != nil {
 		return 0, fmt.Errorf("CHAIN_ID must be a valid integer: %w", err)
 	}
 	return chainID, nil
-}
-
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
 }

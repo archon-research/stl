@@ -34,6 +34,33 @@
       "envFile": [
         "${workspaceFolder}/stl-verify/cmd/price-fetcher/.env"
       ]
+    },
+    {
+      "name": "Data Validator - Full (requires tunnel)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/stl-verify/cmd/data-validator/main.go",
+      "args": [
+        "--spot-checks", "1000"
+      ],
+      "envFile": [
+        "${workspaceFolder}/stl-verify/cmd/data-validator/.env"
+      ]
+    },
+    {
+      "name": "Data Validator - Chain Integrity Only (requires tunnel)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/stl-verify/cmd/data-validator/main.go",
+      "args": [
+        "--skip-reorgs",
+        "--spot-checks", "0"
+      ],
+      "envFile": [
+        "${workspaceFolder}/stl-verify/cmd/data-validator/.env"
+      ]
     }
   ]
 }
