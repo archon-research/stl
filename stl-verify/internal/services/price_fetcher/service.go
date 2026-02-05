@@ -266,9 +266,7 @@ func (s *Service) convertToTokenPrices(prices []outbound.PriceData, assets []*en
 
 		tp, err := entity.NewTokenPrice(
 			*asset.TokenID,
-			s.config.ChainID,
-			s.provider.Name(),
-			p.SourceAssetID,
+			int16(asset.SourceID),
 			p.PriceUSD,
 			p.MarketCapUSD,
 			p.Timestamp,
@@ -306,9 +304,7 @@ func (s *Service) convertHistoricalPrices(data *outbound.HistoricalData, assetMa
 
 		tp, err := entity.NewTokenPrice(
 			*asset.TokenID,
-			s.config.ChainID,
-			s.provider.Name(),
-			data.SourceAssetID,
+			int16(asset.SourceID),
 			p.PriceUSD,
 			marketCap,
 			p.Timestamp,
@@ -335,9 +331,7 @@ func (s *Service) convertHistoricalVolumes(data *outbound.HistoricalData, assetM
 	for _, v := range data.Volumes {
 		tv, err := entity.NewTokenVolume(
 			*asset.TokenID,
-			s.config.ChainID,
-			s.provider.Name(),
-			data.SourceAssetID,
+			int16(asset.SourceID),
 			v.VolumeUSD,
 			v.Timestamp,
 		)

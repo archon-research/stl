@@ -308,7 +308,7 @@ func TestIntegration_FetchCurrentPrices(t *testing.T) {
 
 	// Verify price was stored
 	var count int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE source_asset_id = 'ethereum'`).Scan(&count)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE token_id = 1`).Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query token_price: %v", err)
 	}
@@ -319,7 +319,7 @@ func TestIntegration_FetchCurrentPrices(t *testing.T) {
 
 	// Verify price value
 	var priceUSD float64
-	err = pool.QueryRow(ctx, `SELECT price_usd FROM token_price WHERE source_asset_id = 'ethereum'`).Scan(&priceUSD)
+	err = pool.QueryRow(ctx, `SELECT price_usd FROM token_price WHERE token_id = 1 ORDER BY timestamp DESC LIMIT 1`).Scan(&priceUSD)
 	if err != nil {
 		t.Fatalf("failed to query price_usd: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestIntegration_FetchHistoricalData(t *testing.T) {
 
 	// Verify prices were stored (3 days * 24 hours = ~72 data points)
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE source_asset_id = 'ethereum'`).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE token_id = 1`).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query token_price count: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestIntegration_FetchHistoricalData(t *testing.T) {
 
 	// Verify volumes were stored
 	var volumeCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_volume WHERE source_asset_id = 'ethereum'`).Scan(&volumeCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_volume WHERE token_id = 1`).Scan(&volumeCount)
 	if err != nil {
 		t.Fatalf("failed to query token_volume count: %v", err)
 	}
@@ -526,16 +526,16 @@ func TestIntegration_FetchHistoricalData_MultipleAssetsConcurrently(t *testing.T
 		t.Fatalf("FetchHistoricalData failed: %v", err)
 	}
 
-	// Verify both assets have prices stored
-	for _, assetID := range []string{"ethereum", "bitcoin"} {
+	// Verify both assets have prices stored (token_id 1=WETH, 2=WBTC)
+	for _, tokenID := range []int64{1, 2} {
 		var count int
-		err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE source_asset_id = $1`, assetID).Scan(&count)
+		err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE token_id = $1`, tokenID).Scan(&count)
 		if err != nil {
-			t.Fatalf("failed to query token_price count for %s: %v", assetID, err)
+			t.Fatalf("failed to query token_price count for token_id %d: %v", tokenID, err)
 		}
 
 		if count < 40 {
-			t.Errorf("expected at least 40 price records for %s, got %d", assetID, count)
+			t.Errorf("expected at least 40 price records for token_id %d, got %d", tokenID, count)
 		}
 	}
 }
@@ -593,7 +593,7 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 
 	// Get count after first fetch
 	var countAfterFirst int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE source_asset_id = 'ethereum'`).Scan(&countAfterFirst)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE token_id = 1`).Scan(&countAfterFirst)
 	if err != nil {
 		t.Fatalf("failed to query token_price count: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 
 	// Count should be the same (no duplicates)
 	var countAfterSecond int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE source_asset_id = 'ethereum'`).Scan(&countAfterSecond)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE token_id = 1`).Scan(&countAfterSecond)
 	if err != nil {
 		t.Fatalf("failed to query token_price count: %v", err)
 	}

@@ -170,7 +170,7 @@ func (m *mockPriceRepository) UpsertPrices(ctx context.Context, prices []*entity
 	return nil
 }
 
-func (m *mockPriceRepository) GetLatestPrice(ctx context.Context, source, sourceAssetID string) (*entity.TokenPrice, error) {
+func (m *mockPriceRepository) GetLatestPrice(ctx context.Context, tokenID int64) (*entity.TokenPrice, error) {
 	return nil, nil
 }
 
@@ -517,8 +517,8 @@ func TestFetchCurrentPrices_AssetWithoutTokenID(t *testing.T) {
 	if len(calls) != 1 || len(calls[0]) != 1 {
 		t.Fatalf("expected 1 price (only mapped asset)")
 	}
-	if calls[0][0].SourceAssetID != "weth" {
-		t.Error("expected only weth to be stored")
+	if calls[0][0].TokenID != 100 {
+		t.Error("expected only the mapped token to be stored")
 	}
 }
 

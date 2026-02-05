@@ -103,27 +103,21 @@ func (pa *PriceAsset) validate() error {
 
 // TokenPrice stores price data for on-chain tokens.
 type TokenPrice struct {
-	TokenID       int64
-	ChainID       int
-	Source        string
-	SourceAssetID string
-	PriceUSD      float64
-	MarketCapUSD  *float64
-	Timestamp     time.Time
-	CreatedAt     time.Time
+	TokenID      int64
+	SourceID     int16
+	PriceUSD     float64
+	MarketCapUSD *float64
+	Timestamp    time.Time
 }
 
 // NewTokenPrice creates a new TokenPrice entity with validation.
-func NewTokenPrice(tokenID int64, chainID int, source, sourceAssetID string, priceUSD float64, marketCapUSD *float64, timestamp time.Time) (*TokenPrice, error) {
+func NewTokenPrice(tokenID int64, sourceID int16, priceUSD float64, marketCapUSD *float64, timestamp time.Time) (*TokenPrice, error) {
 	tp := &TokenPrice{
-		TokenID:       tokenID,
-		ChainID:       chainID,
-		Source:        source,
-		SourceAssetID: sourceAssetID,
-		PriceUSD:      priceUSD,
-		MarketCapUSD:  marketCapUSD,
-		Timestamp:     timestamp,
-		CreatedAt:     time.Now(),
+		TokenID:      tokenID,
+		SourceID:     sourceID,
+		PriceUSD:     priceUSD,
+		MarketCapUSD: marketCapUSD,
+		Timestamp:    timestamp,
 	}
 	if err := tp.validate(); err != nil {
 		return nil, err
@@ -135,14 +129,8 @@ func (tp *TokenPrice) validate() error {
 	if tp.TokenID <= 0 {
 		return fmt.Errorf("tokenID must be positive, got %d", tp.TokenID)
 	}
-	if tp.ChainID <= 0 {
-		return fmt.Errorf("chainID must be positive, got %d", tp.ChainID)
-	}
-	if tp.Source == "" {
-		return fmt.Errorf("source must not be empty")
-	}
-	if tp.SourceAssetID == "" {
-		return fmt.Errorf("sourceAssetID must not be empty")
+	if tp.SourceID <= 0 {
+		return fmt.Errorf("sourceID must be positive, got %d", tp.SourceID)
 	}
 	if tp.PriceUSD < 0 {
 		return fmt.Errorf("priceUSD must be non-negative, got %f", tp.PriceUSD)
@@ -155,25 +143,19 @@ func (tp *TokenPrice) validate() error {
 
 // TokenVolume stores hourly trading volume data for on-chain tokens.
 type TokenVolume struct {
-	TokenID       int64
-	ChainID       int
-	Source        string
-	SourceAssetID string
-	VolumeUSD     float64
-	Timestamp     time.Time
-	CreatedAt     time.Time
+	TokenID   int64
+	SourceID  int16
+	VolumeUSD float64
+	Timestamp time.Time
 }
 
 // NewTokenVolume creates a new TokenVolume entity with validation.
-func NewTokenVolume(tokenID int64, chainID int, source, sourceAssetID string, volumeUSD float64, timestamp time.Time) (*TokenVolume, error) {
+func NewTokenVolume(tokenID int64, sourceID int16, volumeUSD float64, timestamp time.Time) (*TokenVolume, error) {
 	tv := &TokenVolume{
-		TokenID:       tokenID,
-		ChainID:       chainID,
-		Source:        source,
-		SourceAssetID: sourceAssetID,
-		VolumeUSD:     volumeUSD,
-		Timestamp:     timestamp,
-		CreatedAt:     time.Now(),
+		TokenID:   tokenID,
+		SourceID:  sourceID,
+		VolumeUSD: volumeUSD,
+		Timestamp: timestamp,
 	}
 	if err := tv.validate(); err != nil {
 		return nil, err
@@ -185,14 +167,8 @@ func (tv *TokenVolume) validate() error {
 	if tv.TokenID <= 0 {
 		return fmt.Errorf("tokenID must be positive, got %d", tv.TokenID)
 	}
-	if tv.ChainID <= 0 {
-		return fmt.Errorf("chainID must be positive, got %d", tv.ChainID)
-	}
-	if tv.Source == "" {
-		return fmt.Errorf("source must not be empty")
-	}
-	if tv.SourceAssetID == "" {
-		return fmt.Errorf("sourceAssetID must not be empty")
+	if tv.SourceID <= 0 {
+		return fmt.Errorf("sourceID must be positive, got %d", tv.SourceID)
 	}
 	if tv.VolumeUSD < 0 {
 		return fmt.Errorf("volumeUSD must be non-negative, got %f", tv.VolumeUSD)

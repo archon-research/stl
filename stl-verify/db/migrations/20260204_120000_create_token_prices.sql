@@ -50,14 +50,11 @@ CREATE INDEX IF NOT EXISTS idx_price_asset_token
 
 CREATE TABLE IF NOT EXISTS token_price (
     token_id BIGINT NOT NULL,
-    chain_id INT NOT NULL,
+    source_id SMALLINT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL,
-    source VARCHAR(50) NOT NULL,
-    source_asset_id VARCHAR(255) NOT NULL,
     price_usd NUMERIC(30, 18) NOT NULL,
     market_cap_usd NUMERIC(30, 2),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (token_id, source, timestamp)
+    PRIMARY KEY (token_id, source_id, timestamp)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'timestamp',
@@ -83,13 +80,10 @@ SELECT add_compression_policy('token_price', INTERVAL '2 days', if_not_exists =>
 
 CREATE TABLE IF NOT EXISTS token_volume (
     token_id BIGINT NOT NULL,
-    chain_id INT NOT NULL,
+    source_id SMALLINT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL,
-    source VARCHAR(50) NOT NULL,
-    source_asset_id VARCHAR(255) NOT NULL,
     volume_usd NUMERIC(30, 2) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (token_id, source, timestamp)
+    PRIMARY KEY (token_id, source_id, timestamp)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'timestamp',

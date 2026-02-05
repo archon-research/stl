@@ -17,7 +17,7 @@ type PriceRepository interface {
 
 	// Price operations
 	UpsertPrices(ctx context.Context, prices []*entity.TokenPrice) error
-	GetLatestPrice(ctx context.Context, source, sourceAssetID string) (*entity.TokenPrice, error)
+	GetLatestPrice(ctx context.Context, tokenID int64) (*entity.TokenPrice, error)
 
 	// Volume operations
 	UpsertVolumes(ctx context.Context, volumes []*entity.TokenVolume) error
