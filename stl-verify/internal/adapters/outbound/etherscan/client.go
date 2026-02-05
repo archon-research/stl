@@ -294,7 +294,7 @@ func etherscanErrorParser(statusCode int, body []byte) error {
 func parseHexInt64(hexStr string) (int64, error) {
 	hexStr = strings.TrimPrefix(hexStr, "0x")
 	if hexStr == "" {
-		return 0, nil
+		return 0, fmt.Errorf("empty hex string")
 	}
 	return strconv.ParseInt(hexStr, 16, 64)
 }

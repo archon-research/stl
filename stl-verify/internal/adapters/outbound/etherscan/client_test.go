@@ -397,8 +397,8 @@ func TestParseHexInt64(t *testing.T) {
 		{"0x1406f40", 21000000, false},
 		{"1406f40", 21000000, false},
 		{"0x0", 0, false},
-		{"0x", 0, false},
-		{"", 0, false},
+		{"0x", 0, true}, // empty after prefix should error
+		{"", 0, true},   // empty string should error
 	}
 
 	for _, tt := range tests {
@@ -408,7 +408,7 @@ func TestParseHexInt64(t *testing.T) {
 				t.Errorf("parseHexInt64(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
 				return
 			}
-			if got != tt.want {
+			if !tt.wantErr && got != tt.want {
 				t.Errorf("parseHexInt64(%q) = %d, want %d", tt.input, got, tt.want)
 			}
 		})
