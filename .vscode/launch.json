@@ -42,7 +42,7 @@
       "mode": "auto",
       "program": "${workspaceFolder}/stl-verify/cmd/data-validator/main.go",
       "args": [
-        "--spot-checks", "1000"
+        "--spot-checks", "10"
       ],
       "envFile": [
         "${workspaceFolder}/stl-verify/cmd/data-validator/.env"
