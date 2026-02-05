@@ -133,7 +133,7 @@ func applyDefaults(config *ClientConfig, defaults ClientConfig) {
 	if config.Timeout == 0 {
 		config.Timeout = defaults.Timeout
 	}
-	// MaxRetries: 0 means use default, -1 means explicitly disable retries
+	// MaxRetries: 0 means use default, negative values disable retries (set to 0)
 	if config.MaxRetries == 0 {
 		config.MaxRetries = defaults.MaxRetries
 	} else if config.MaxRetries < 0 {
