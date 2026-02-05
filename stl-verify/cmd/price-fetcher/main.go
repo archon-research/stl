@@ -171,8 +171,8 @@ func runHistoricalMode(ctx context.Context, service *price_fetcher.Service, asse
 		}
 	}
 
-	// Set end of day for the 'to' date
-	to = to.Add(24*time.Hour - time.Second)
+	// Set time-component to end of day (23:59:59) for the 'to' date
+	to = to.Add(24*time.Hour - 1*time.Second)
 
 	if from.After(to) {
 		return fmt.Errorf("--from date must be before --to date")
