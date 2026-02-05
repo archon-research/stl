@@ -36,6 +36,12 @@ CREATE INDEX IF NOT EXISTS idx_price_asset_token
     ON price_asset (token_id) WHERE token_id IS NOT NULL;
 
 -- Token prices table (on-chain tokens only)
+--
+-- TimescaleDB chunk interval rationale (30 days):
+-- 1. Balances partition overhead vs query performance - at ~720 rows per token per month
+--    (hourly data), 30-day chunks keep individual partitions small for efficient queries
+-- 2. Simplifies retention management - chunks align with monthly boundaries for easy
+--    archival or deletion of old price data
 CREATE TABLE IF NOT EXISTS token_price (
     id BIGSERIAL,
     token_id BIGINT NOT NULL REFERENCES token(id),
@@ -61,6 +67,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_token_price_unique
     ON token_price (token_id, source, timestamp);
 
 -- Token volume table (hourly granularity, on-chain tokens only)
+-- Uses same 30-day chunk interval as token_price - see rationale above
 CREATE TABLE IF NOT EXISTS token_volume (
     id BIGSERIAL,
     token_id BIGINT NOT NULL REFERENCES token(id),
