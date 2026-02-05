@@ -132,7 +132,11 @@ func run(ctx context.Context, logger *slog.Logger, source, fromDate, toDate, ass
 
 	// If --from is specified, fetch historical data; otherwise fetch current prices
 	if fromDate != "" {
-		return runHistoricalMode(ctx, service, assetIDs, fromDate, toDate)
+		from, to, err := parseDateRange(fromDate, toDate)
+		if err != nil {
+			return err
+		}
+		return service.FetchHistoricalData(ctx, assetIDs, from, to)
 	}
 	return service.FetchCurrentPrices(ctx, assetIDs)
 }
@@ -151,32 +155,6 @@ func createProvider(source string, logger *slog.Logger) (outbound.PriceProvider,
 	default:
 		return nil, fmt.Errorf("unknown source: %s (supported: coingecko)", source)
 	}
-}
-
-func runHistoricalMode(ctx context.Context, service *price_fetcher.Service, assetIDs []string, fromDate, toDate string) error {
-
-	from, err := time.Parse(time.DateOnly, fromDate)
-	if err != nil {
-		return fmt.Errorf("invalid --from date (must be YYYY-MM-DD): %w", err)
-	}
-
-    // default to yesterday
-	var to = time.Now().UTC().Truncate(24 * time.Hour).Add(-24 * time.Hour)
-	if toDate != "" {
-		to, err = time.Parse(time.DateOnly, toDate)
-		if err != nil {
-			return fmt.Errorf("invalid --to date (must be YYYY-MM-DD): %w", err)
-		}
-	}
-
-	// Set time-component to end of day (23:59:59) for the 'to' date
-	to = to.Add(24*time.Hour - 1*time.Second)
-
-	if from.After(to) {
-		return fmt.Errorf("--from date must be before --to date")
-	}
-
-	return service.FetchHistoricalData(ctx, assetIDs, from, to)
 }
 
 func parseAssetIDs(assets string) []string {
@@ -204,4 +182,32 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// parseDateRange parses from/to date strings and returns the time range.
+// If toDate is empty, it defaults to yesterday (end of day).
+func parseDateRange(fromDate, toDate string) (from, to time.Time, err error) {
+	from, err = time.Parse(time.DateOnly, fromDate)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid --from date (must be YYYY-MM-DD): %w", err)
+	}
+
+	if toDate == "" {
+		// Default to yesterday (today's data not yet finalized on most price APIs)
+		to = time.Now().UTC().Truncate(24 * time.Hour).Add(-24 * time.Hour)
+	} else {
+		to, err = time.Parse(time.DateOnly, toDate)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid --to date (must be YYYY-MM-DD): %w", err)
+		}
+	}
+
+	// Set end of day for the 'to' date
+	to = to.Add(24*time.Hour - time.Second)
+
+	if from.After(to) {
+		return time.Time{}, time.Time{}, fmt.Errorf("--from date must be before --to date")
+	}
+
+	return from, to, nil
 }

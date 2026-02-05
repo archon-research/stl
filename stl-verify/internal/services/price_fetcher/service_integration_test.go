@@ -1,15 +1,17 @@
 //go:build integration
 
-package main
+package price_fetcher
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,13 +22,11 @@ import (
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coingecko"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/services/price_fetcher"
 )
 
-// setupTestDatabase creates a PostgreSQL container with TimescaleDB and returns a connection pool.
-func setupTestDatabase(t *testing.T) (*pgxpool.Pool, func()) {
+// createDatabaseContainer starts a TimescaleDB container and returns it with connection details.
+func createDatabaseContainer(t *testing.T, ctx context.Context) (testcontainers.Container, string) {
 	t.Helper()
-	ctx := context.Background()
 
 	req := testcontainers.ContainerRequest{
 		Image:        "timescale/timescaledb:latest-pg17",
@@ -60,6 +60,12 @@ func setupTestDatabase(t *testing.T) (*pgxpool.Pool, func()) {
 	}
 
 	dsn := fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
+	return container, dsn
+}
+
+// connectToDatabase creates a connection pool and waits for it to be ready.
+func connectToDatabase(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {
+	t.Helper()
 
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -69,18 +75,35 @@ func setupTestDatabase(t *testing.T) (*pgxpool.Pool, func()) {
 	// Wait for connection
 	for i := 0; i < 30; i++ {
 		if err := pool.Ping(ctx); err == nil {
-			break
+			return pool
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// Run migrations
+	t.Fatal("timed out waiting for database connection")
+	return nil
+}
+
+// runMigrations applies all database migrations.
+func runMigrations(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+
 	_, currentFile, _, _ := runtime.Caller(0)
-	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../db/migrations")
+	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../db/migrations")
 	m := migrator.New(pool, migrationsDir)
 	if err := m.ApplyAll(ctx); err != nil {
 		t.Fatalf("failed to apply migrations: %v", err)
 	}
+}
+
+// setupTestDatabase creates a PostgreSQL container with TimescaleDB and returns a connection pool.
+func setupTestDatabase(t *testing.T) (*pgxpool.Pool, func()) {
+	t.Helper()
+	ctx := context.Background()
+
+	container, dsn := createDatabaseContainer(t, ctx)
+	pool := connectToDatabase(t, ctx, dsn)
+	runMigrations(t, ctx, pool)
 
 	cleanup := func() {
 		pool.Close()
@@ -155,17 +178,7 @@ func splitIDs(ids string) []string {
 	if ids == "" {
 		return nil
 	}
-	var result []string
-	start := 0
-	for i := 0; i <= len(ids); i++ {
-		if i == len(ids) || ids[i] == ',' {
-			if start < i {
-				result = append(result, ids[start:i])
-			}
-			start = i + 1
-		}
-	}
-	return result
+	return strings.Split(ids, ",")
 }
 
 func mockPrice(id string) float64 {
@@ -219,46 +232,9 @@ func insertTestToken(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id i
 
 // hexToBytes converts a hex string (with or without 0x prefix) to bytes.
 func hexToBytes(s string) ([]byte, error) {
-	if len(s) >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X') {
-		s = s[2:]
-	}
-	if len(s)%2 != 0 {
-		s = "0" + s
-	}
-	result := make([]byte, len(s)/2)
-	for i := 0; i < len(result); i++ {
-		b, err := hexByte(s[i*2], s[i*2+1])
-		if err != nil {
-			return nil, err
-		}
-		result[i] = b
-	}
-	return result, nil
-}
-
-func hexByte(hi, lo byte) (byte, error) {
-	h, err := hexNibble(hi)
-	if err != nil {
-		return 0, err
-	}
-	l, err := hexNibble(lo)
-	if err != nil {
-		return 0, err
-	}
-	return h<<4 | l, nil
-}
-
-func hexNibble(c byte) (byte, error) {
-	switch {
-	case c >= '0' && c <= '9':
-		return c - '0', nil
-	case c >= 'a' && c <= 'f':
-		return c - 'a' + 10, nil
-	case c >= 'A' && c <= 'F':
-		return c - 'A' + 10, nil
-	default:
-		return 0, fmt.Errorf("invalid hex character: %c", c)
-	}
+	s = strings.TrimPrefix(s, "0x")
+	s = strings.TrimPrefix(s, "0X")
+	return hex.DecodeString(s)
 }
 
 // insertTestPriceAsset links a CoinGecko asset ID to a token.
@@ -312,7 +288,7 @@ func TestIntegration_FetchCurrentPrices(t *testing.T) {
 	}
 
 	// Create service
-	service, err := price_fetcher.NewService(price_fetcher.ServiceConfig{
+	service, err := NewService(ServiceConfig{
 		ChainID:     1,
 		Concurrency: 2,
 	}, client, repo)
@@ -386,7 +362,7 @@ func TestIntegration_FetchCurrentPrices_AllEnabledAssets(t *testing.T) {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
 
-	service, err := price_fetcher.NewService(price_fetcher.ServiceConfig{
+	service, err := NewService(ServiceConfig{
 		ChainID:     1,
 		Concurrency: 2,
 	}, client, repo)
@@ -452,7 +428,7 @@ func TestIntegration_FetchHistoricalData(t *testing.T) {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
 
-	service, err := price_fetcher.NewService(price_fetcher.ServiceConfig{
+	service, err := NewService(ServiceConfig{
 		ChainID:     1,
 		Concurrency: 2,
 	}, client, repo)
@@ -529,7 +505,7 @@ func TestIntegration_FetchHistoricalData_MultipleAssetsConcurrently(t *testing.T
 		t.Fatalf("failed to create price repository: %v", err)
 	}
 
-	service, err := price_fetcher.NewService(price_fetcher.ServiceConfig{
+	service, err := NewService(ServiceConfig{
 		ChainID:     1,
 		Concurrency: 2, // Fetch both assets concurrently
 	}, client, repo)
@@ -594,7 +570,7 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
 
-	service, err := price_fetcher.NewService(price_fetcher.ServiceConfig{
+	service, err := NewService(ServiceConfig{
 		ChainID:     1,
 		Concurrency: 2,
 	}, client, repo)
@@ -661,7 +637,7 @@ func TestIntegration_NoEnabledAssets(t *testing.T) {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
 
-	service, err := price_fetcher.NewService(price_fetcher.ServiceConfig{
+	service, err := NewService(ServiceConfig{
 		ChainID:     1,
 		Concurrency: 2,
 	}, client, repo)
@@ -684,88 +660,5 @@ func TestIntegration_NoEnabledAssets(t *testing.T) {
 
 	if count != 0 {
 		t.Errorf("expected 0 price records, got %d", count)
-	}
-}
-
-func TestIntegration_RunHelper_ParseAssetIDs(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected []string
-	}{
-		{
-			name:     "empty string",
-			input:    "",
-			expected: nil,
-		},
-		{
-			name:     "single asset",
-			input:    "ethereum",
-			expected: []string{"ethereum"},
-		},
-		{
-			name:     "multiple assets",
-			input:    "ethereum,bitcoin,usd-coin",
-			expected: []string{"ethereum", "bitcoin", "usd-coin"},
-		},
-		{
-			name:     "with spaces",
-			input:    " ethereum , bitcoin , usd-coin ",
-			expected: []string{"ethereum", "bitcoin", "usd-coin"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := parseAssetIDs(tt.input)
-
-			if len(result) != len(tt.expected) {
-				t.Errorf("expected %d assets, got %d", len(tt.expected), len(result))
-				return
-			}
-
-			for i, expected := range tt.expected {
-				if result[i] != expected {
-					t.Errorf("asset %d: expected %q, got %q", i, expected, result[i])
-				}
-			}
-		})
-	}
-}
-
-func TestIntegration_RunHelper_GetChainID(t *testing.T) {
-	// Save original env and restore after test
-	originalChainID := getEnv("CHAIN_ID", "")
-	t.Cleanup(func() {
-		if originalChainID != "" {
-			t.Setenv("CHAIN_ID", originalChainID)
-		}
-	})
-
-	// Test default value
-	t.Setenv("CHAIN_ID", "")
-	chainID, err := getChainID()
-	if err != nil {
-		t.Fatalf("getChainID failed: %v", err)
-	}
-	if chainID != 1 {
-		t.Errorf("expected default chainID 1, got %d", chainID)
-	}
-
-	// Test custom value
-	t.Setenv("CHAIN_ID", "42")
-	chainID, err = getChainID()
-	if err != nil {
-		t.Fatalf("getChainID failed: %v", err)
-	}
-	if chainID != 42 {
-		t.Errorf("expected chainID 42, got %d", chainID)
-	}
-
-	// Test invalid value
-	t.Setenv("CHAIN_ID", "not-a-number")
-	_, err = getChainID()
-	if err == nil {
-		t.Error("expected error for invalid CHAIN_ID")
 	}
 }

@@ -100,8 +100,13 @@ func NewClient(config ClientConfig) (*Client, error) {
 	}
 
 	// Calculate rate limiter: requests per second from requests per minute
+	// Burst size allows short bursts of concurrent requests while maintaining average rate
 	rps := float64(config.RateLimitPerMin) / 60.0
-	limiter := rate.NewLimiter(rate.Limit(rps), 1)
+	burstSize := config.RateLimitPerMin / 60
+	if burstSize < 1 {
+		burstSize = 1
+	}
+	limiter := rate.NewLimiter(rate.Limit(rps), burstSize)
 
 	return &Client{
 		config:     config,
@@ -243,6 +248,8 @@ func (c *Client) GetHistoricalData(ctx context.Context, assetID string, from, to
 				Timestamp: time.UnixMilli(int64(p[0])),
 				PriceUSD:  p[1],
 			})
+		} else {
+			c.logger.Warn("malformed price data point from CoinGecko API", "assetID", assetID, "dataPoint", p)
 		}
 	}
 
@@ -252,6 +259,8 @@ func (c *Client) GetHistoricalData(ctx context.Context, assetID string, from, to
 				Timestamp: time.UnixMilli(int64(v[0])),
 				VolumeUSD: v[1],
 			})
+		} else {
+			c.logger.Warn("malformed volume data point from CoinGecko API", "assetID", assetID, "dataPoint", v)
 		}
 	}
 
@@ -261,6 +270,8 @@ func (c *Client) GetHistoricalData(ctx context.Context, assetID string, from, to
 				Timestamp:    time.UnixMilli(int64(m[0])),
 				MarketCapUSD: m[1],
 			})
+		} else {
+			c.logger.Warn("malformed market cap data point from CoinGecko API", "assetID", assetID, "dataPoint", m)
 		}
 	}
 
