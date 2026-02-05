@@ -30,7 +30,7 @@ STL Verify is a Go service using **Ports and Adapters (Hexagonal) Architecture**
 
 ### Dependency Rules (MUST FOLLOW)
 - **Domain layer** (`internal/domain/`): NO external dependencies, only standard library
-- **Application layer** (`internal/application/`): Depends only on domain and ports
+- **Application layer** (`internal/services`): Depends only on domain and ports
 - **Adapters** (`internal/adapters/`): Implement ports, can use any dependencies
 - **Ports** (`internal/ports/`): Interface definitions only
 
@@ -41,7 +41,7 @@ package domain
 import "stl-verify/internal/adapters/postgres"  // NEVER DO THIS
 
 // ❌ BAD: Application importing adapter directly
-package application
+package services
 import "stl-verify/internal/adapters/alchemy"  // NEVER DO THIS
 ```
 
@@ -167,6 +167,8 @@ func (r *PostgresRepo) SaveBlock(ctx context.Context, block *entity.Block) error
 ```
 
 ## Code Style
+### Function composition
+- Compose large functions from smaller functions. Large functions should read like prose, with each step delegated to a well-named helper function.
 
 ### Naming
 - **Files**: `snake_case.go` (e.g., `block_repository.go`)
