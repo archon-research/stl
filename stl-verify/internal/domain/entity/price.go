@@ -8,13 +8,8 @@ import (
 // PriceSource represents a price data provider (CoinGecko, Chainlink, etc.)
 type PriceSource struct {
 	ID                 int64
-<<<<<<< HEAD
-	Name               string // "coingecko", "chainlink"
-	DisplayName        string // "CoinGecko", "Chainlink"
-=======
 	Name               string
 	DisplayName        string
->>>>>>> main
 	BaseURL            string
 	RateLimitPerMin    int
 	SupportsHistorical bool
@@ -59,13 +54,8 @@ func (ps *PriceSource) validate() error {
 type PriceAsset struct {
 	ID            int64
 	SourceID      int64
-<<<<<<< HEAD
-	SourceAssetID string // Source-specific ID (CoinGecko ID, Chainlink feed, etc.)
-	TokenID       *int64 // Optional FK to Token table
-=======
 	SourceAssetID string
 	TokenID       *int64
->>>>>>> main
 	Name          string
 	Symbol        string
 	Enabled       bool
@@ -114,19 +104,11 @@ func (pa *PriceAsset) validate() error {
 // TokenPrice stores price data for on-chain tokens.
 type TokenPrice struct {
 	ID            int64
-<<<<<<< HEAD
-	TokenID       int64   // FK to token table (required - on-chain only)
-	ChainID       int     // Required
-	Source        string  // Denormalized for query efficiency
-	SourceAssetID string  // Source-specific identifier
-	PriceUSD      float64 // Price in USD
-=======
 	TokenID       int64
 	ChainID       int
 	Source        string
 	SourceAssetID string
 	PriceUSD      float64
->>>>>>> main
 	MarketCapUSD  *float64
 	Timestamp     time.Time
 	CreatedAt     time.Time
@@ -175,19 +157,11 @@ func (tp *TokenPrice) validate() error {
 // TokenVolume stores hourly trading volume data for on-chain tokens.
 type TokenVolume struct {
 	ID            int64
-<<<<<<< HEAD
-	TokenID       int64   // Required
-	ChainID       int     // Required
-	Source        string  // Denormalized
-	SourceAssetID string  // Source-specific identifier
-	VolumeUSD     float64 // Trading volume in USD
-=======
 	TokenID       int64
 	ChainID       int
 	Source        string
 	SourceAssetID string
 	VolumeUSD     float64
->>>>>>> main
 	Timestamp     time.Time
 	CreatedAt     time.Time
 }

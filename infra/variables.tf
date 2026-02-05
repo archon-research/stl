@@ -138,15 +138,12 @@ variable "coingecko_api_key" {
   default     = "placeholder" # Will be updated in Secrets Manager
 }
 
-<<<<<<< HEAD
 variable "etherscan_api_key" {
   description = "Etherscan API key. Set via TF_VAR_etherscan_api_key env var or enter when prompted."
   type        = string
   sensitive   = true
 }
 
-=======
->>>>>>> main
 variable "alchemy_http_url" {
   description = "Alchemy HTTP RPC base URL"
   type        = string

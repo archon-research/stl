@@ -100,10 +100,6 @@ func NewClient(config ClientConfig) (*Client, error) {
 	}
 
 	// Calculate rate limiter: requests per second from requests per minute
-<<<<<<< HEAD
-	rps := float64(config.RateLimitPerMin) / 60.0
-	limiter := rate.NewLimiter(rate.Limit(rps), 1)
-=======
 	// Burst size allows short bursts of concurrent requests while maintaining average rate
 	rps := float64(config.RateLimitPerMin) / 60.0
 	burstSize := config.RateLimitPerMin / 60
@@ -111,7 +107,6 @@ func NewClient(config ClientConfig) (*Client, error) {
 		burstSize = 1
 	}
 	limiter := rate.NewLimiter(rate.Limit(rps), burstSize)
->>>>>>> main
 
 	return &Client{
 		config:     config,
@@ -176,14 +171,7 @@ func (c *Client) GetCurrentPrices(ctx context.Context, assetIDs []string) ([]out
 	batchSize := 250
 
 	for i := 0; i < len(assetIDs); i += batchSize {
-<<<<<<< HEAD
-		end := i + batchSize
-		if end > len(assetIDs) {
-			end = len(assetIDs)
-		}
-=======
 		end := min(i+batchSize, len(assetIDs))
->>>>>>> main
 		batch := assetIDs[i:end]
 
 		batchResults, err := c.getCurrentPricesBatch(ctx, batch)
@@ -257,11 +245,8 @@ func (c *Client) GetHistoricalData(ctx context.Context, assetID string, from, to
 				Timestamp: time.UnixMilli(int64(p[0])),
 				PriceUSD:  p[1],
 			})
-<<<<<<< HEAD
-=======
 		} else {
 			c.logger.Warn("malformed price data point from CoinGecko API", "assetID", assetID, "dataPoint", p)
->>>>>>> main
 		}
 	}
 
@@ -271,11 +256,8 @@ func (c *Client) GetHistoricalData(ctx context.Context, assetID string, from, to
 				Timestamp: time.UnixMilli(int64(v[0])),
 				VolumeUSD: v[1],
 			})
-<<<<<<< HEAD
-=======
 		} else {
 			c.logger.Warn("malformed volume data point from CoinGecko API", "assetID", assetID, "dataPoint", v)
->>>>>>> main
 		}
 	}
 
@@ -285,11 +267,8 @@ func (c *Client) GetHistoricalData(ctx context.Context, assetID string, from, to
 				Timestamp:    time.UnixMilli(int64(m[0])),
 				MarketCapUSD: m[1],
 			})
-<<<<<<< HEAD
-=======
 		} else {
 			c.logger.Warn("malformed market cap data point from CoinGecko API", "assetID", assetID, "dataPoint", m)
->>>>>>> main
 		}
 	}
 

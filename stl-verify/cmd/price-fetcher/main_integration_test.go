@@ -20,6 +20,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coingecko"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/price_fetcher"
 )
 
@@ -735,7 +736,7 @@ func TestIntegration_RunHelper_ParseAssetIDs(t *testing.T) {
 
 func TestIntegration_RunHelper_GetChainID(t *testing.T) {
 	// Save original env and restore after test
-	originalChainID := getEnv("CHAIN_ID", "")
+	originalChainID := env.Get("CHAIN_ID", "")
 	t.Cleanup(func() {
 		if originalChainID != "" {
 			t.Setenv("CHAIN_ID", originalChainID)

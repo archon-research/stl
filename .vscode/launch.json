@@ -34,7 +34,6 @@
       "envFile": [
         "${workspaceFolder}/stl-verify/cmd/price-fetcher/.env"
       ]
-<<<<<<< HEAD
     },
     {
       "name": "Data Validator - Full (requires tunnel)",
@@ -62,8 +61,6 @@
       "envFile": [
         "${workspaceFolder}/stl-verify/cmd/data-validator/.env"
       ]
-=======
->>>>>>> main
     }
   ]
 }
