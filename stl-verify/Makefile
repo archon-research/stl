@@ -178,7 +178,15 @@ dev-up:
 		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		> cmd/price-fetcher/.env
+	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text 2>/dev/null || echo '') && \
+	TIGERDATA_URL=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-tigerdata-readonly --query SecretString --output text 2>/dev/null | jq -r '.connection_url // empty' | sed 's|@[^:]*:|@localhost:|') && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" \
+		"DATABASE_URL=$$TIGERDATA_URL" \
+		> cmd/data-validator/.env
 	@echo "Ready. Secrets fetched from AWS."
+	@echo "Note: data-validator uses staging TigerData. Run 'make tigerdata-tunnel' first."
 
 # Stop all local services
 dev-down:

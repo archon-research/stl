@@ -387,6 +387,29 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 	return nil
 }
 
+// GetReorgEventsByBlockRange retrieves reorg events within a block number range.
+func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, fromBlock, toBlock int64) ([]outbound.ReorgEvent, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var filtered []outbound.ReorgEvent
+	for _, e := range r.reorgEvents {
+		if e.BlockNumber >= fromBlock && e.BlockNumber <= toBlock {
+			filtered = append(filtered, e)
+		}
+	}
+
+	// Sort by block number descending, then detection time descending
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].BlockNumber != filtered[j].BlockNumber {
+			return filtered[i].BlockNumber > filtered[j].BlockNumber
+		}
+		return filtered[i].DetectedAt.After(filtered[j].DetectedAt)
+	})
+
+	return filtered, nil
+}
+
 // GetBlocksWithIncompletePublish returns canonical blocks that have not been published.
 // Used by backfill to recover from crashes.
 func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int) ([]outbound.BlockState, error) {
