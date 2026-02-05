@@ -3,6 +3,10 @@ package price_fetcher
 import (
 	"context"
 	"errors"
+<<<<<<< HEAD
+=======
+	"fmt"
+>>>>>>> main
 	"io"
 	"log/slog"
 	"sync"
@@ -1104,7 +1108,11 @@ func TestFetchHistoricalData_ConcurrencyLimit(t *testing.T) {
 	var assets []*entity.PriceAsset
 	for i := 1; i <= 10; i++ {
 		tokenID := int64(100 + i)
+<<<<<<< HEAD
 		assets = append(assets, createAsset(int64(i), "asset"+string(rune('0'+i)), "A"+string(rune('0'+i)), &tokenID))
+=======
+		assets = append(assets, createAsset(int64(i), fmt.Sprintf("asset%02d", i), fmt.Sprintf("A%02d", i), &tokenID))
+>>>>>>> main
 	}
 	repo.enabledAssets = assets
 
@@ -1288,7 +1296,11 @@ func TestFetchCurrentPrices_LargeNumberOfPrices(t *testing.T) {
 
 	for i := 1; i <= 100; i++ {
 		tokenID := int64(100 + i)
+<<<<<<< HEAD
 		assetID := "asset" + string(rune('0'+i%10)) + string(rune('0'+i/10))
+=======
+		assetID := fmt.Sprintf("asset%02d", i)
+>>>>>>> main
 		assets = append(assets, createAsset(int64(i), assetID, "SYM", &tokenID))
 		prices = append(prices, createPriceData(assetID, float64(i)*100, ts))
 	}

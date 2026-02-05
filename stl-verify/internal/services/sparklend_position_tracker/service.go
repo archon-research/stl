@@ -375,13 +375,20 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event BlockEvent)
 func (s *Service) processReceipt(ctx context.Context, receipt TransactionReceipt, chainID, blockNumber int64, blockVersion int) error {
 	var errs []error
 	for _, log := range receipt.Logs {
-		if !s.isRelevantEvent(log) {
+		if s.isPositionEvent(log) {
+			if err := s.processPositionEventLog(ctx, log, receipt.TransactionHash, chainID, blockNumber, blockVersion); err != nil {
+				s.logger.Error("failed to process position event", "error", err, "tx", receipt.TransactionHash)
+				errs = append(errs, err)
+			}
 			continue
 		}
 
-		if err := s.processEventLog(ctx, log, receipt.TransactionHash, chainID, blockNumber, blockVersion); err != nil {
-			s.logger.Error("failed to process event", "error", err, "tx", receipt.TransactionHash)
-			errs = append(errs, err)
+		if s.isReserveEvent(log) {
+			if err := s.processReserveEventLog(ctx, log, receipt.TransactionHash, chainID, blockNumber, blockVersion); err != nil {
+				s.logger.Error("failed to process reserve event", "error", err, "tx", receipt.TransactionHash)
+				errs = append(errs, err)
+			}
+			continue
 		}
 	}
 
@@ -391,11 +398,15 @@ func (s *Service) processReceipt(ctx context.Context, receipt TransactionReceipt
 	return nil
 }
 
-func (s *Service) isRelevantEvent(log Log) bool {
-	return s.eventExtractor.IsRelevantEvent(log)
+func (s *Service) isPositionEvent(log Log) bool {
+	return s.eventExtractor.IsPositionEvent(log)
 }
 
-func (s *Service) processEventLog(ctx context.Context, log Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
+func (s *Service) isReserveEvent(log Log) bool {
+	return s.eventExtractor.IsReserveEvent(log)
+}
+
+func (s *Service) processPositionEventLog(ctx context.Context, log Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("processEventLog completed",
@@ -430,6 +441,139 @@ func (s *Service) processEventLog(ctx context.Context, log Log, txHash string, c
 	return s.savePositionSnapshot(ctx, eventData, protocolAddress, chainID, blockNumber, blockVersion)
 }
 
+// processReserveEventLog handles ReserveDataUpdated events by fetching and storing reserve data.
+func (s *Service) processReserveEventLog(ctx context.Context, log Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
+	start := time.Now()
+	defer func() {
+		s.logger.Debug("processReserveEventLog completed",
+			"tx", txHash,
+			"block", blockNumber,
+			"duration", time.Since(start))
+	}()
+
+	reserveEventData, err := s.eventExtractor.ExtractReserveEventData(log)
+	if err != nil {
+		return fmt.Errorf("failed to extract reserve event data: %w", err)
+	}
+
+	protocolAddress := common.HexToAddress(log.Address)
+
+	s.logger.Info("ReserveDataUpdated event detected",
+		"reserve", reserveEventData.Reserve.Hex(),
+		"protocol", protocolAddress.Hex(),
+		"tx", txHash,
+		"block", blockNumber)
+
+	return s.saveReserveDataSnapshot(ctx, reserveEventData.Reserve, protocolAddress, chainID, blockNumber, blockVersion, txHash)
+}
+
+// saveReserveDataSnapshot fetches reserve data from chain and persists it.
+func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Address, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int, txHash string) error {
+	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
+	if err != nil {
+		return fmt.Errorf("failed to get blockchain service: %w", err)
+	}
+
+	// Get token metadata for the reserve
+	tokensToFetch := map[common.Address]bool{reserve: true}
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
+	if err != nil {
+		return fmt.Errorf("failed to get token metadata: %w", err)
+	}
+
+	tokenMetadata, ok := metadataMap[reserve]
+	if !ok || tokenMetadata.Decimals == 0 {
+		return fmt.Errorf("token metadata not found for %s", reserve.Hex())
+	}
+
+	// Fetch reserve data and configuration from chain
+	reserveData, configData, err := blockchainSvc.getFullReserveData(ctx, reserve, blockNumber)
+	if err != nil {
+		return fmt.Errorf("failed to get reserve data: %w", err)
+	}
+
+	// Get protocol ID
+	protocolID, err := s.protocolRepo.GetProtocolByAddress(ctx, chainID, protocolAddress)
+	if err != nil {
+		return fmt.Errorf("failed to get protocol: %w", err)
+	}
+	if protocolID == nil {
+		return fmt.Errorf("protocol not found for address %s on chain %d", protocolAddress.Hex(), chainID)
+	}
+
+	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		// Get or create token
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reserve, tokenMetadata.Symbol, tokenMetadata.Decimals, blockNumber)
+		if err != nil {
+			return fmt.Errorf("failed to get token: %w", err)
+		}
+
+		// Build and persist the entity
+		sparkReserveData := s.buildReserveDataEntity(protocolID.ID, tokenID, blockNumber, blockVersion, reserveData, configData)
+		if err := s.protocolRepo.UpsertSparkLendReserveData(ctx, []*entity.SparkLendReserveData{sparkReserveData}); err != nil {
+			return fmt.Errorf("failed to upsert reserve data: %w", err)
+		}
+
+		s.logger.Info("Saved reserve data snapshot",
+			"reserve", reserve.Hex(),
+			"protocol", protocolAddress.Hex(),
+			"tx", txHash,
+			"block", blockNumber)
+
+		return nil
+	})
+}
+
+// buildReserveDataEntity creates a SparkLendReserveData entity from fetched reserve data.
+func (s *Service) buildReserveDataEntity(
+	protocolID, tokenID, blockNumber int64,
+	blockVersion int,
+	reserveData *reserveDataFromProvider,
+	configData *reserveConfigData,
+) *entity.SparkLendReserveData {
+	sparkReserveData := &entity.SparkLendReserveData{
+		ProtocolID:   protocolID,
+		TokenID:      tokenID,
+		BlockNumber:  blockNumber,
+		BlockVersion: blockVersion,
+	}
+
+	sparkReserveData.WithRates(
+		reserveData.LiquidityRate,
+		reserveData.VariableBorrowRate,
+		reserveData.StableBorrowRate,
+		reserveData.AverageStableBorrowRate,
+	)
+	sparkReserveData.WithIndexes(
+		reserveData.LiquidityIndex,
+		reserveData.VariableBorrowIndex,
+	)
+	sparkReserveData.WithTotals(
+		reserveData.Unbacked,
+		reserveData.AccruedToTreasuryScaled,
+		reserveData.TotalAToken,
+		reserveData.TotalStableDebt,
+		reserveData.TotalVariableDebt,
+	)
+	sparkReserveData.LastUpdateTimestamp = reserveData.LastUpdateTimestamp
+
+	sparkReserveData.WithConfiguration(
+		configData.Decimals,
+		configData.LTV,
+		configData.LiquidationThreshold,
+		configData.LiquidationBonus,
+		configData.ReserveFactor,
+		configData.UsageAsCollateralEnabled,
+		configData.BorrowingEnabled,
+		configData.StableBorrowRateEnabled,
+		configData.IsActive,
+		configData.IsFrozen,
+	)
+
+	return sparkReserveData
+}
+
+// saveCollateralToggleEvent handles ReserveUsedAsCollateralEnabled/Disabled events
 func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
 	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
 	if err != nil {

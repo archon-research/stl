@@ -36,8 +36,23 @@ CREATE INDEX IF NOT EXISTS idx_price_asset_token
     ON price_asset (token_id) WHERE token_id IS NOT NULL;
 
 -- Token prices table (on-chain tokens only)
+<<<<<<< HEAD
 CREATE TABLE IF NOT EXISTS token_price (
     id BIGSERIAL,
+=======
+--
+-- TimescaleDB chunk interval rationale (30 days):
+-- 1. Balances partition overhead vs query performance - at ~720 rows per token per month
+--    (hourly data), 30-day chunks keep individual partitions small for efficient queries
+-- 2. Simplifies retention management - chunks align with monthly boundaries for easy
+--    archival or deletion of old price data
+
+-- Explicit sequence for hypertable ID (avoid BIGSERIAL for distributed TimescaleDB compatibility)
+CREATE SEQUENCE IF NOT EXISTS token_price_id_seq AS BIGINT;
+
+CREATE TABLE IF NOT EXISTS token_price (
+    id BIGINT NOT NULL DEFAULT nextval('token_price_id_seq'),
+>>>>>>> main
     token_id BIGINT NOT NULL REFERENCES token(id),
     chain_id INT NOT NULL REFERENCES chain(chain_id),
     timestamp TIMESTAMPTZ NOT NULL,
@@ -50,7 +65,11 @@ CREATE TABLE IF NOT EXISTS token_price (
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'timestamp',
+<<<<<<< HEAD
     tsdb.chunk_interval = '30 days'
+=======
+    tsdb.chunk_interval = '7 days'
+>>>>>>> main
 );
 
 CREATE INDEX IF NOT EXISTS idx_token_price_source_asset_timestamp
@@ -60,9 +79,33 @@ CREATE INDEX IF NOT EXISTS idx_token_price_token_timestamp
 CREATE UNIQUE INDEX IF NOT EXISTS idx_token_price_unique
     ON token_price (token_id, source, timestamp);
 
+<<<<<<< HEAD
 -- Token volume table (hourly granularity, on-chain tokens only)
 CREATE TABLE IF NOT EXISTS token_volume (
     id BIGSERIAL,
+=======
+-- Enable compression on token_price hypertable
+-- Segment by token_id for efficient queries filtering by token
+-- Order by timestamp descending for time-series query patterns
+ALTER TABLE token_price SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'token_id',
+    timescaledb.compress_orderby = 'timestamp DESC'
+);
+
+-- Compress chunks older than 21 days (3x chunk_interval)
+-- Historical price data is rarely modified and benefits from compression
+SELECT add_compression_policy('token_price', INTERVAL '21 days', if_not_exists => TRUE);
+
+-- Token volume table (hourly granularity, on-chain tokens only)
+-- Uses same 30-day chunk interval as token_price - see rationale above
+
+-- Explicit sequence for hypertable ID (avoid BIGSERIAL for distributed TimescaleDB compatibility)
+CREATE SEQUENCE IF NOT EXISTS token_volume_id_seq AS BIGINT;
+
+CREATE TABLE IF NOT EXISTS token_volume (
+    id BIGINT NOT NULL DEFAULT nextval('token_volume_id_seq'),
+>>>>>>> main
     token_id BIGINT NOT NULL REFERENCES token(id),
     chain_id INT NOT NULL REFERENCES chain(chain_id),
     timestamp TIMESTAMPTZ NOT NULL,
@@ -74,7 +117,11 @@ CREATE TABLE IF NOT EXISTS token_volume (
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'timestamp',
+<<<<<<< HEAD
     tsdb.chunk_interval = '30 days'
+=======
+    tsdb.chunk_interval = '7 days'
+>>>>>>> main
 );
 
 CREATE INDEX IF NOT EXISTS idx_token_volume_source_asset_timestamp
@@ -84,6 +131,22 @@ CREATE INDEX IF NOT EXISTS idx_token_volume_token_timestamp
 CREATE UNIQUE INDEX IF NOT EXISTS idx_token_volume_unique
     ON token_volume (token_id, source, timestamp);
 
+<<<<<<< HEAD
+=======
+-- Enable compression on token_volume hypertable
+-- Segment by token_id for efficient queries filtering by token
+-- Order by timestamp descending for time-series query patterns
+ALTER TABLE token_volume SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'token_id',
+    timescaledb.compress_orderby = 'timestamp DESC'
+);
+
+-- Compress chunks older than 21 days (3x chunk_interval)
+-- Historical volume data is rarely modified and benefits from compression
+SELECT add_compression_policy('token_volume', INTERVAL '21 days', if_not_exists => TRUE);
+
+>>>>>>> main
 -- Seed SparkLend reserve token mappings for CoinGecko
 -- Links to tokens seeded in previous migration via symbol match
 INSERT INTO price_asset (source_id, source_asset_id, token_id, name, symbol, enabled)

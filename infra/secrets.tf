@@ -186,6 +186,7 @@ output "coingecko_secret_policy_arn" {
   description = "ARN of the IAM policy for reading CoinGecko secret"
   value       = aws_iam_policy.coingecko_secret_read.arn
 }
+<<<<<<< HEAD
 
 # =============================================================================
 # AWS Secrets Manager - Etherscan API Key
@@ -248,3 +249,5 @@ output "etherscan_secret_policy_arn" {
   description = "ARN of the IAM policy for reading Etherscan secret"
   value       = aws_iam_policy.etherscan_secret_read.arn
 }
+=======
+>>>>>>> main
