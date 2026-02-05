@@ -160,11 +160,9 @@ func runHistoricalMode(ctx context.Context, service *price_fetcher.Service, asse
 		return fmt.Errorf("invalid --from date (must be YYYY-MM-DD): %w", err)
 	}
 
-	var to time.Time
-	if toDate == "" {
-		// Default to yesterday
-		to = time.Now().UTC().Truncate(24 * time.Hour).Add(-24 * time.Hour)
-	} else {
+    // default to yesterday
+	var to = time.Now().UTC().Truncate(24 * time.Hour).Add(-24 * time.Hour)
+	if toDate != "" {
 		to, err = time.Parse(time.DateOnly, toDate)
 		if err != nil {
 			return fmt.Errorf("invalid --to date (must be YYYY-MM-DD): %w", err)
