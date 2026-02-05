@@ -210,7 +210,10 @@ func (s *Service) validateReorgs(ctx context.Context, fromBlock, toBlock int64) 
 	s.logger.Info("validating reorg events", "count", len(events))
 
 	results := make([]CheckResult, 0, len(events))
-	for _, event := range events {
+	for i, event := range events {
+		if i > 0 && i%10 == 0 {
+			s.logger.Info("reorg validation progress", "completed", i, "total", len(events))
+		}
 		result := s.validateSingleReorg(ctx, event)
 		results = append(results, result)
 	}
@@ -304,7 +307,10 @@ func (s *Service) runSpotChecks(ctx context.Context, fromBlock, toBlock int64) [
 	selectedBlocks := selectRandomBlocks(fromBlock, toBlock, count)
 
 	results := make([]CheckResult, 0, count)
-	for _, blockNum := range selectedBlocks {
+	for i, blockNum := range selectedBlocks {
+		if i > 0 && i%10 == 0 {
+			s.logger.Info("spot check progress", "completed", i, "total", count)
+		}
 		result := s.spotCheckBlock(ctx, blockNum)
 		results = append(results, result)
 	}
