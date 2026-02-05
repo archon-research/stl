@@ -151,8 +151,12 @@ dev-up:
 	@docker compose up -d
 	@until docker inspect stl-verify-localstack --format '{{.State.Health.Status}}' 2>/dev/null | grep -q healthy; do sleep 1; done
 	@./localstack-init/init-aws.sh > /dev/null 2>&1
-	@printf '%s\n' \
+	@echo "Running database migrations..."
+	@DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" go run ./cmd/migrate
+	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-watcher-config --query SecretString --output text 2>/dev/null | jq -r '.alchemy_api_key // empty') && \
+	printf '%s\n' \
 		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"ALCHEMY_WS_URL=wss://eth-mainnet.g.alchemy.com/v2" \
 		"CHAIN_ID=1" \
@@ -168,7 +172,13 @@ dev-up:
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"ENABLE_BACKFILL=false" \
 		> cmd/watcher/.env
-	@echo "Ready. Set ALCHEMY_API_KEY in cmd/watcher/.env.local"
+	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text 2>/dev/null | jq -r '.coingecko_api_key // empty') && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		> cmd/price-fetcher/.env
+	@echo "Ready. Secrets fetched from AWS."
 
 # Stop all local services
 dev-down:

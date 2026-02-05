@@ -119,3 +119,70 @@ output "tigerdata_secret_policy_arn" {
   description = "ARN of the IAM policy for reading TigerData secrets"
   value       = aws_iam_policy.tigerdata_secret_read.arn
 }
+
+# =============================================================================
+# AWS Secrets Manager - CoinGecko API Key
+# =============================================================================
+# Stores CoinGecko Pro API key for price fetching service.
+
+resource "aws_secretsmanager_secret" "coingecko" {
+  name        = "coingecko_api_key"
+  description = "CoinGecko Pro API key for price fetching"
+
+  recovery_window_in_days = 7
+
+  tags = {
+    Name    = "coingecko_api_key"
+    Service = "price-fetcher"
+  }
+
+  lifecycle {
+    # Secret already exists - prevent recreation on name change
+    prevent_destroy = true
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "coingecko" {
+  secret_id     = aws_secretsmanager_secret.coingecko.id
+  secret_string = var.coingecko_api_key
+
+  lifecycle {
+    # Don't update if the secret was changed outside of Terraform
+    ignore_changes = [secret_string]
+  }
+}
+
+# -----------------------------------------------------------------------------
+# IAM Policy for reading CoinGecko secret
+# -----------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "coingecko_secret_read" {
+  statement {
+    sid    = "ReadCoinGeckoSecret"
+    effect = "Allow"
+
+    actions = [
+      "secretsmanager:GetSecretValue",
+    ]
+
+    resources = [
+      aws_secretsmanager_secret.coingecko.arn,
+    ]
+  }
+}
+
+resource "aws_iam_policy" "coingecko_secret_read" {
+  name        = "${local.prefix}-coingecko-secret-read"
+  description = "Allows reading CoinGecko API key from Secrets Manager"
+  policy      = data.aws_iam_policy_document.coingecko_secret_read.json
+}
+
+output "coingecko_secret_arn" {
+  description = "ARN of the CoinGecko API key secret"
+  value       = aws_secretsmanager_secret.coingecko.arn
+}
+
+output "coingecko_secret_policy_arn" {
+  description = "ARN of the IAM policy for reading CoinGecko secret"
+  value       = aws_iam_policy.coingecko_secret_read.arn
+}
