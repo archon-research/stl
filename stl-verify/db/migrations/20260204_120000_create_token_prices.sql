@@ -37,41 +37,35 @@ CREATE INDEX IF NOT EXISTS idx_price_asset_token
 
 -- Token prices table (on-chain tokens only)
 --
--- TimescaleDB chunk interval rationale (30 days):
--- 1. Balances partition overhead vs query performance - at ~720 rows per token per month
---    (hourly data), 30-day chunks keep individual partitions small for efficient queries
--- 2. Simplifies retention management - chunks align with monthly boundaries for easy
---    archival or deletion of old price data
-
--- Explicit sequence for hypertable ID (avoid BIGSERIAL for distributed TimescaleDB compatibility)
-CREATE SEQUENCE IF NOT EXISTS token_price_id_seq AS BIGINT;
+-- TimescaleDB chunk interval rationale (1 day):
+-- Worst case (Base, 250ms blocks): 10 oracles × 20 assets × 345,600 blocks/day
+-- = ~69M rows/day (~10 GB uncompressed per chunk).
+-- 1-day chunks balance memory footprint against chunk count (~1,825 over 5 years).
+--
+-- Distributed TimescaleDB compatibility:
+-- No foreign keys (incompatible with distributed hypertables).
+-- No synthetic ID column (centralized sequences are a bottleneck across data nodes).
+-- Natural PK (token_id, source, timestamp) serves both uniqueness and the primary
+-- query pattern (token_id + time range).
 
 CREATE TABLE IF NOT EXISTS token_price (
-    id BIGINT NOT NULL DEFAULT nextval('token_price_id_seq'),
-    token_id BIGINT NOT NULL REFERENCES token(id),
-    chain_id INT NOT NULL REFERENCES chain(chain_id),
+    token_id BIGINT NOT NULL,
+    chain_id INT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL,
     source VARCHAR(50) NOT NULL,
     source_asset_id VARCHAR(255) NOT NULL,
     price_usd NUMERIC(30, 18) NOT NULL,
     market_cap_usd NUMERIC(30, 2),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id, timestamp)
+    PRIMARY KEY (token_id, source, timestamp)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'timestamp',
-    tsdb.chunk_interval = '7 days'
+    tsdb.chunk_interval = '1 day'
 );
 
-CREATE INDEX IF NOT EXISTS idx_token_price_source_asset_timestamp
-    ON token_price (source, source_asset_id, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_token_price_token_timestamp
-    ON token_price (token_id, timestamp DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_token_price_unique
-    ON token_price (token_id, source, timestamp);
-
 -- Enable compression on token_price hypertable
--- Segment by token_id for efficient queries filtering by token
+-- Segment by token_id for efficient queries filtering by token + time range
 -- Order by timestamp descending for time-series query patterns
 ALTER TABLE token_price SET (
     timescaledb.compress,
@@ -79,41 +73,31 @@ ALTER TABLE token_price SET (
     timescaledb.compress_orderby = 'timestamp DESC'
 );
 
--- Compress chunks older than 21 days (3x chunk_interval)
--- Historical price data is rarely modified and benefits from compression
-SELECT add_compression_policy('token_price', INTERVAL '21 days', if_not_exists => TRUE);
+-- Compress chunks older than 2 days (2x chunk_interval)
+-- Compress aggressively to limit uncompressed working set. Queries over compressed
+-- chunks decompress only the relevant token_id segments (aligned with compress_segmentby).
+SELECT add_compression_policy('token_price', INTERVAL '2 days', if_not_exists => TRUE);
 
 -- Token volume table (hourly granularity, on-chain tokens only)
--- Uses same 30-day chunk interval as token_price - see rationale above
-
--- Explicit sequence for hypertable ID (avoid BIGSERIAL for distributed TimescaleDB compatibility)
-CREATE SEQUENCE IF NOT EXISTS token_volume_id_seq AS BIGINT;
+-- Same design rationale as token_price - see comments above.
 
 CREATE TABLE IF NOT EXISTS token_volume (
-    id BIGINT NOT NULL DEFAULT nextval('token_volume_id_seq'),
-    token_id BIGINT NOT NULL REFERENCES token(id),
-    chain_id INT NOT NULL REFERENCES chain(chain_id),
+    token_id BIGINT NOT NULL,
+    chain_id INT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL,
     source VARCHAR(50) NOT NULL,
     source_asset_id VARCHAR(255) NOT NULL,
     volume_usd NUMERIC(30, 2) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id, timestamp)
+    PRIMARY KEY (token_id, source, timestamp)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'timestamp',
-    tsdb.chunk_interval = '7 days'
+    tsdb.chunk_interval = '1 day'
 );
 
-CREATE INDEX IF NOT EXISTS idx_token_volume_source_asset_timestamp
-    ON token_volume (source, source_asset_id, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_token_volume_token_timestamp
-    ON token_volume (token_id, timestamp DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_token_volume_unique
-    ON token_volume (token_id, source, timestamp);
-
 -- Enable compression on token_volume hypertable
--- Segment by token_id for efficient queries filtering by token
+-- Segment by token_id for efficient queries filtering by token + time range
 -- Order by timestamp descending for time-series query patterns
 ALTER TABLE token_volume SET (
     timescaledb.compress,
@@ -121,9 +105,10 @@ ALTER TABLE token_volume SET (
     timescaledb.compress_orderby = 'timestamp DESC'
 );
 
--- Compress chunks older than 21 days (3x chunk_interval)
--- Historical volume data is rarely modified and benefits from compression
-SELECT add_compression_policy('token_volume', INTERVAL '21 days', if_not_exists => TRUE);
+-- Compress chunks older than 2 days (2x chunk_interval)
+-- Compress aggressively to limit uncompressed working set. Queries over compressed
+-- chunks decompress only the relevant token_id segments (aligned with compress_segmentby).
+SELECT add_compression_policy('token_volume', INTERVAL '2 days', if_not_exists => TRUE);
 
 -- Seed SparkLend reserve token mappings for CoinGecko
 -- Links to tokens seeded in previous migration via symbol match

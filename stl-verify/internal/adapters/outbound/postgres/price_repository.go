@@ -184,13 +184,13 @@ func (r *PriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx, price
 func (r *PriceRepository) GetLatestPrice(ctx context.Context, source, sourceAssetID string) (*entity.TokenPrice, error) {
 	var tp entity.TokenPrice
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, token_id, chain_id, source, source_asset_id, price_usd, market_cap_usd, timestamp, created_at
+		SELECT token_id, chain_id, source, source_asset_id, price_usd, market_cap_usd, timestamp, created_at
 		FROM token_price
 		WHERE source = $1 AND source_asset_id = $2
 		ORDER BY timestamp DESC
 		LIMIT 1
 	`, source, sourceAssetID).Scan(
-		&tp.ID, &tp.TokenID, &tp.ChainID, &tp.Source, &tp.SourceAssetID, &tp.PriceUSD, &tp.MarketCapUSD, &tp.Timestamp, &tp.CreatedAt,
+		&tp.TokenID, &tp.ChainID, &tp.Source, &tp.SourceAssetID, &tp.PriceUSD, &tp.MarketCapUSD, &tp.Timestamp, &tp.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil

@@ -103,7 +103,6 @@ func (pa *PriceAsset) validate() error {
 
 // TokenPrice stores price data for on-chain tokens.
 type TokenPrice struct {
-	ID            int64
 	TokenID       int64
 	ChainID       int
 	Source        string
@@ -156,7 +155,6 @@ func (tp *TokenPrice) validate() error {
 
 // TokenVolume stores hourly trading volume data for on-chain tokens.
 type TokenVolume struct {
-	ID            int64
 	TokenID       int64
 	ChainID       int
 	Source        string
