@@ -96,28 +96,18 @@ The A parameter can be adjusted by pool admin over time via ramping mechanisms.
 
 #### Virtual Price
 
-**Virtual price** represents the growth in LP token value due to accumulated fees:
+The virtual price is calculated as `D / totalSupply` where `D` is the StableSwap invariant. It starts at 1.0 and increases as trading fees accumulate.
 
-```
-virtual_price = get_virtual_price()  // Returns value in 18 decimals
-```
-
-**How it works:**
-- Starts at 1.0 (1e18)
-- Increases as trading fees accumulate
-- Grows monotonically (never decreases)
-- Reflects LP profit from fees
-
-**Example:**
-```
-Initial: virtual_price = 1.000000000000000000
-After fees accrue: virtual_price = 1.002345678901234567
-LP profit: 0.23% from trading fees
+```solidity
+function get_virtual_price() returns (uint256) {
+    uint256 D = get_D(xp, amp);  // StableSwap invariant
+    return D * PRECISION / total_supply;  // Returns 1e18 format
+}
 ```
 
-**Note:** Virtual price does **not** include CRV emissions from gauges - those are separate rewards.
+**Note:** This metric tracks fee growth over time. For most indexing purposes, you'll want to calculate LP token value in USD directly (see formulas below).
 
-### LP Tokens
+### LP Tokens & Pool Metrics
 
 When users provide liquidity, they receive **LP tokens** representing their pool share:
 
@@ -139,9 +129,14 @@ function remove_liquidity(
 ) returns (uint256[N_COINS])
 ```
 
-**LP Token Value:**
+**Key Formulas:**
+
 ```
-LP Token Value = (Total Pool TVL * virtual_price) / totalSupply
+1. Pool TVL (USD) = Σ(balance[i] × price[i]) for all coins
+   
+2. LP Token Value (USD) = Pool TVL / totalSupply
+   
+3. User Position Value (USD) = (user LP balance / totalSupply) × Pool TVL
 ```
 
 ### Fee Structure
@@ -152,7 +147,7 @@ LP Token Value = (Total Pool TVL * virtual_price) / totalSupply
 - Fees increase when pool is imbalanced to discourage further imbalance
 
 **Fee Distribution:**
-- 50% to LPs (increases virtual price)
+- 50% to LPs (retained in pool)
 - 50% to veCRV holders (via FeeDistributor)
 
 ---
@@ -225,29 +220,51 @@ const composition = normalizedBalances.map(bal =>
 
 ### TVL (Total Value Locked)
 
+**Pool TVL** is the total USD value of all assets in the pool.
+
+**Formula:**
+```
+TVL = Σ(balance[i] × price[i]) for all coins in the pool
+```
+
 **Calculate pool TVL:**
 
 ```typescript
-const pool = await ethers.getContractAt("CurveStableSwapNG", poolAddress);
+async function calculatePoolTVL(pool) {
+  const nCoins = await pool.N_COINS();
+  let tvl = 0;
 
-// Method 1: Sum normalized balances (requires token prices)
-const nCoins = await pool.N_COINS();
-let tvl = 0;
+  for (let i = 0; i < nCoins; i++) {
+    const balance = await pool.balances(i);
+    const coinAddress = await pool.coins(i);
+    const decimals = await ERC20(coinAddress).decimals();
+    const price = await getPrice(coinAddress);  // From oracle or hardcode for stables
+    
+    // Normalize balance to standard units and multiply by USD price
+    const valueUSD = Number(balance) / (10 ** Number(decimals)) * price;
+    tvl += valueUSD;
+  }
 
-for (let i = 0; i < nCoins; i++) {
-  const balance = await pool.balances(i);
-  const coinAddress = await pool.coins(i);
-  const decimals = await ERC20(coinAddress).decimals();
-  const price = await getPrice(coinAddress);  // From oracle or hardcode for stables
-  
-  const normalizedBalance = balance / (10 ** decimals);
-  tvl += normalizedBalance * price;
+  return tvl;
 }
 
-// Method 2: For stablecoin pools, approximate by summing balances
+// Usage:
+const pool = await ethers.getContractAt("CurveStableSwapNG", poolAddress);
+const tvl = await calculatePoolTVL(pool);
+console.log(`Pool TVL: $${tvl}`);
+```
+
+**For stablecoin pools (quick approximation):**
+
+If all coins are stablecoins (~$1.00), you can approximate:
+
+```typescript
 // Assumes all stables ≈ $1.00
 const balances = await pool.get_balances();
-const tvlApprox = balances.reduce((sum, bal) => sum + bal / 1e18, 0);  // Adjust decimals
+const tvlApprox = balances.reduce((sum, bal, i) => {
+  const decimals = await ERC20(await pool.coins(i)).decimals();
+  return sum + Number(bal) / (10 ** Number(decimals));
+}, 0);
 ```
 
 **For stablecoin pools (USDC/USDT/DAI):**
@@ -333,32 +350,21 @@ async function getPriceMatrix(pool) {
 
 ### LP Token Value & Share Price
 
-**Get virtual price (includes accrued fees):**
-
-```typescript
-const virtualPrice = await pool.get_virtual_price();
-// Returns value in 18 decimals (1e18 = 1.0)
-
-const virtualPriceDecimal = Number(virtualPrice) / 1e18;
-console.log(`Virtual Price: ${virtualPriceDecimal}`);
-// e.g., 1.002345 means LPs earned 0.23% from fees
-```
-
-**Calculate LP token value in USD:**
+**Calculate LP Token Value in USD:**
 
 ```typescript
 const pool = await ethers.getContractAt("CurveStableSwapNG", poolAddress);
 const lpToken = await ethers.getContractAt("ERC20", await pool.token());
 
-// Get pool TVL (sum of all coin balances in USD)
-const tvl = await calculateTVL(pool);  // From previous section
+// Step 1: Calculate Pool TVL in USD (see "TVL" section above for details)
+const tvl = await calculatePoolTVL(pool);  // Sum of all coin balances × their prices
 
-// Get total LP supply
+// Step 2: Get total LP token supply
 const totalSupply = await lpToken.totalSupply();
 
-// LP token value
-const lpTokenValue = tvl / (Number(totalSupply) / 1e18);
-console.log(`1 LP token = $${lpTokenValue}`);
+// Step 3: Calculate value per LP token
+const lpTokenValueUSD = tvl / (Number(totalSupply) / 1e18);
+console.log(`1 LP token = $${lpTokenValueUSD}`);
 ```
 
 **Get user's liquidity position:**
@@ -372,7 +378,7 @@ const totalSupply = await lpToken.totalSupply();
 const sharePercent = (userLpBalance * 10000n) / totalSupply / 100;  // Percentage
 
 // User's position value
-const tvl = await calculateTVL(pool);
+const tvl = await calculatePoolTVL(pool);
 const userPositionValue = tvl * Number(userLpBalance) / Number(totalSupply);
 
 console.log(`User owns ${sharePercent}% of pool = $${userPositionValue}`);
@@ -382,28 +388,11 @@ console.log(`User owns ${sharePercent}% of pool = $${userPositionValue}`);
 
 Pool yields come from up to three sources, though not all pools have all components:
 
-#### 1. Trading Fee APY (Always Present)
+1. **Trading fees** (50% to LPs)
+2. **CRV emissions** (from liquidity gauges)
+3. **Bonus token emissions** (additional incentives)
 
-Trading fees increase the virtual price over time. Calculate fee APY on-chain:
-
-```typescript
-// Snapshot virtual price at two points in time
-const virtualPrice1 = await pool.get_virtual_price({ blockTag: block1 });
-const virtualPrice2 = await pool.get_virtual_price({ blockTag: block2 });
-const timestamp1 = (await provider.getBlock(block1)).timestamp;
-const timestamp2 = (await provider.getBlock(block2)).timestamp;
-
-// Calculate APY from fee accumulation
-const timeDelta = timestamp2 - timestamp1;
-const periodsPerYear = (365 * 24 * 60 * 60) / timeDelta;
-const returnRate = Number(virtualPrice2) / Number(virtualPrice1);
-
-// APY = (1 + periodReturn)^periodsPerYear - 1
-const feeApy = Math.pow(returnRate, periodsPerYear) - 1;
-const feeApyPercent = feeApy * 100;
-```
-
-**Or use Curve API:**
+**Get APY data from Curve API:**
 
 ```bash
 GET https://api.curve.finance/v1/getBaseApys/{blockchainId}
@@ -545,15 +534,12 @@ const usdtOut = await pool.get_dy(
 
 #### `get_virtual_price() → uint256`
 
-Returns the current virtual price of the pool's LP token (18 decimals).
+Returns the current virtual price of the pool's LP token (18 decimals). Calculated as `D / totalSupply` where D is the StableSwap invariant.
 
 ```typescript
 const virtualPrice = await pool.get_virtual_price();
 // 1000000000000000000 = 1.0
-// 1002345678901234567 = 1.002345... (0.23% increase from fees)
 ```
-
-Virtual price increases monotonically as trading fees accumulate.
 
 #### `N_COINS() → uint256`
 

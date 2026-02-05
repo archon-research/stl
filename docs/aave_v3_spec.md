@@ -209,8 +209,10 @@ Aave uses a **scaled balance** system for gas-efficient interest accrual:
 Interest rates in Aave adjust automatically based on **utilization rate**:
 
 ```
-Utilization Rate (U) = Total Borrowed / (Total Supplied + Available Liquidity)
+Utilization Rate (U) = Total Borrowed / Total Supply
 ```
+
+Where `Total Supply = Total Borrowed + Available Liquidity`
 
 **Two-Slope Rate Model:**
 

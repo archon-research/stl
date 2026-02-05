@@ -342,8 +342,10 @@ spToken addresses can be discovered by monitoring `ReserveInitialized` events em
 Interest rates in Sparklend adjust automatically based on **utilization rate**:
 
 ```
-Utilization Rate (U) = Total Borrowed / (Total Supplied + Available Liquidity)
+Utilization Rate (U) = Total Borrowed / Total Supply
 ```
+
+Where `Total Supply = Total Borrowed + Available Liquidity`
 
 **Two-Slope Rate Model:**
 

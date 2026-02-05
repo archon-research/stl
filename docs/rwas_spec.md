@@ -533,9 +533,15 @@ if (claimable.shares > 0) {
 
 #### Position Value
 
-**Prerequisites - Finding poolId and trancheId:**
+There are three methods to calculate the USD value of a user's Centrifuge position:
 
-If you have a Share Token address, find its `DeployTranche` event from the PoolManager contract:
+---
+
+##### Prerequisites: Token & Pool Discovery
+
+If you need to find poolId, trancheId, or ShareToken addresses, use one of these methods:
+
+**Option 1: From ShareToken address → poolId/trancheId (On-Chain)**
 
 ```typescript
 // PoolManager emits DeployTranche event when ShareToken is deployed
@@ -552,9 +558,7 @@ const poolId = Number(events[0].args.poolId);  // Convert BigInt to number
 const trancheId = events[0].args.trancheId;  // bytes16
 ```
 
-**Centrifuge GitHub**: Smart contract source code and ABIs can be found at [github.com/centrifuge/liquidity-pools](https://github.com/centrifuge/liquidity-pools).
-
-**Alternative - GraphQL API for Pool/Token Discovery:**
+**Option 2: GraphQL API for all pools and tokens**
 
 ```graphql
 query GetPoolTokens {
@@ -577,7 +581,7 @@ query GetPoolTokens {
 }
 ```
 
-To get share token addresses on specific chains, query `TokenInstance` (use token `id` from previous query):
+To get ShareToken addresses on specific chains:
 
 ```graphql
 query GetTokenDeployments($tokenId: String!) {
@@ -595,34 +599,119 @@ query GetTokenDeployments($tokenId: String!) {
 
 Endpoint: `https://api.centrifuge.io/`
 
-This returns the ShareToken contract addresses deployed on each blockchain for that token.
 
-**On-Chain Method:**
+---
+
+##### Method 1: On-Chain via ERC-4626 Vault
+
+**How it works:** Query the vault's `convertToAssets()` function to convert user's share balance to underlying asset value.
+
+**Complete Example:**
 
 ```typescript
-// Get vault address
+// 1. Get vault address for this pool/tranche/asset
 const poolManager = new ethers.Contract("0x9c8454A506263549f07c80698E276e3622077098", [
     "function getVault(uint64,bytes16,address) view returns (address)"
 ], provider);
 const vaultAddress = await poolManager.getVault(poolId, trancheId, assetAddress);
 
-// Query user position
+// 2. Get user's share balance
+const shareToken = new ethers.Contract(shareTokenAddress, [
+    "function balanceOf(address) view returns (uint256)",
+    "function decimals() view returns (uint8)"
+], provider);
 const shares = await shareToken.balanceOf(userAddress);
+
+// 3. Convert shares to underlying assets
+const vault = new ethers.Contract(vaultAddress, [
+    "function convertToAssets(uint256) view returns (uint256)"
+], provider);
 const assets = await vault.convertToAssets(shares);
 
-// Calculate USD value (assuming stablecoin = $1)
-const decimals = 6;  // USDC/USDT typically have 6 decimals
-const usdValue = Number(assets) / (10 ** decimals);
+// 4. Calculate USD value
+// For stablecoins (USDC/USDT), 1 asset ≈ $1
+const assetDecimals = 6;  // USDC/USDT typically have 6 decimals
+const usdValue = Number(assets) / (10 ** assetDecimals);
+
+console.log(`User holds ${shares} shares`);
+console.log(`Worth ${assets} underlying assets`);
+console.log(`USD Value: $${usdValue.toFixed(2)}`);
 ```
 
-**SDK Method:**
+**When to use:** Best for indexing - direct on-chain queries, no external dependencies.
+
+---
+
+##### Method 2: Centrifuge SDK
+
+**How it works:** Use the official Centrifuge SDK which abstracts vault interactions.
+
+**Complete Example:**
 
 ```typescript
+import { Centrifuge, PoolId } from '@centrifuge/sdk';
+
 const centrifuge = new Centrifuge({ environment: "mainnet" });
+
+// Get pool and vault
 const pool = await centrifuge.pool(new PoolId(4139607887));
 const vault = await pool.vault(chainId, shareClassId, assetId);
+
+// Get user's investment position
 const investment = await vault.investment(userAddress);
-console.log(`Position value: ${investment.assetBalance}`);
+
+console.log(`Asset Balance: ${investment.assetBalance}`);
+console.log(`Share Balance: ${investment.shareBalance}`);
+console.log(`Pending deposits: ${investment.pendingDeposit}`);
+console.log(`Pending redemptions: ${investment.pendingRedeem}`);
+```
+
+
+##### Method 3: Chronicle Protocol Price Oracles
+
+**How it works:** Chronicle provides price oracles for tokenized RWA reserves. Query the oracle for current share price, multiply by user's balance.
+
+**Step 1: Find Oracle Address**
+
+1. Visit Chronicle Dashboard: [https://chroniclelabs.org/dashboard/proofofassets](https://chroniclelabs.org/dashboard/proofofassets)
+2. Click on the Centrifuge asset you need
+3. Navigate to "Proof of Asset Contracts" section
+4. Copy the oracle smart contract address for your chain
+
+**Step 2: Query Oracle and Calculate Value**
+
+```typescript
+// Chronicle oracle interface (IChronicle)
+const oracleAbi = [
+    "function read() external view returns (uint256 value)",
+    "function decimals() external view returns (uint8)"
+];
+
+// 1. Query oracle for current price
+const oracle = new ethers.Contract(oracleAddress, oracleAbi, provider);
+const priceValue = await oracle.read();
+const priceDecimals = await oracle.decimals();
+
+// Price is in USD with `priceDecimals` decimals
+const priceUSD = Number(priceValue) / (10 ** priceDecimals);
+
+// 2. Get user's share balance
+const shareTokenAbi = [
+    "function balanceOf(address) view returns (uint256)",
+    "function decimals() view returns (uint8)"
+];
+const shareToken = new ethers.Contract(shareTokenAddress, shareTokenAbi, provider);
+const shares = await shareToken.balanceOf(userAddress);
+const shareDecimals = await shareToken.decimals();
+
+// 3. Calculate position value
+const shareAmount = Number(shares) / (10 ** shareDecimals);
+const positionValueUSD = shareAmount * priceUSD;
+
+console.log(`Oracle Price: $${priceUSD.toFixed(6)} per share`);
+console.log(`User Shares: ${shareAmount}`);
+console.log(`Position Value: $${positionValueUSD.toFixed(2)}`);
+
 ```
 
 #### APY Calculation
@@ -1213,8 +1302,7 @@ The on-chain data focuses on token mechanics and ownership rather than detailed 
 ### Industry Resources
 
 - **RWA.xyz:** https://www.rwa.xyz/ - RWA market data and analytics
-- **DeFi Llama (RWA):** https://defillama.com/protocols/RWA - TVL tracking for RWA protocols
-- **Messari RWA Reports:** https://messari.io/report-category/real-world-assets
+- **DeFi Llama (RWA):** https://defillama.com/rwa - TVL tracking for RWA assets
 
 ---
 
