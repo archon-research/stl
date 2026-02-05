@@ -79,9 +79,9 @@ ALTER TABLE token_price SET (
     timescaledb.compress_orderby = 'timestamp DESC'
 );
 
--- Compress chunks older than 90 days (3x chunk_interval)
+-- Compress chunks older than 21 days (3x chunk_interval)
 -- Historical price data is rarely modified and benefits from compression
-SELECT add_compression_policy('token_price', INTERVAL '21 days');
+SELECT add_compression_policy('token_price', INTERVAL '21 days', if_not_exists => TRUE);
 
 -- Token volume table (hourly granularity, on-chain tokens only)
 -- Uses same 30-day chunk interval as token_price - see rationale above
@@ -121,9 +121,9 @@ ALTER TABLE token_volume SET (
     timescaledb.compress_orderby = 'timestamp DESC'
 );
 
--- Compress chunks older than 90 days (3x chunk_interval)
+-- Compress chunks older than 21 days (3x chunk_interval)
 -- Historical volume data is rarely modified and benefits from compression
-SELECT add_compression_policy('token_volume', INTERVAL '21 days');
+SELECT add_compression_policy('token_volume', INTERVAL '21 days', if_not_exists => TRUE);
 
 -- Seed SparkLend reserve token mappings for CoinGecko
 -- Links to tokens seeded in previous migration via symbol match
