@@ -1,6 +1,7 @@
 package sparklend_position_tracker
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strings"
@@ -363,4 +364,42 @@ func (e *EventExtractor) ExtractReserveEventData(log Log) (*ReserveEventData, er
 		Reserve: reserve,
 		TxHash:  log.TransactionHash,
 	}, nil
+}
+
+// ToJSON converts PositionEventData to a JSON-serializable map.
+// Addresses are hex strings, amounts are decimal strings.
+func (p *PositionEventData) ToJSON() (json.RawMessage, error) {
+	data := make(map[string]interface{})
+	data["user"] = p.User.Hex()
+
+	if p.Reserve != (common.Address{}) {
+		data["reserve"] = p.Reserve.Hex()
+	}
+	if p.Amount != nil {
+		data["amount"] = p.Amount.String()
+	}
+	if p.Liquidator != (common.Address{}) {
+		data["liquidator"] = p.Liquidator.Hex()
+	}
+	if p.CollateralAsset != (common.Address{}) {
+		data["collateralAsset"] = p.CollateralAsset.Hex()
+	}
+	if p.DebtAsset != (common.Address{}) {
+		data["debtAsset"] = p.DebtAsset.Hex()
+	}
+	if p.DebtToCover != nil {
+		data["debtToCover"] = p.DebtToCover.String()
+	}
+	if p.LiquidatedCollateralAmount != nil {
+		data["liquidatedCollateralAmount"] = p.LiquidatedCollateralAmount.String()
+	}
+	if p.EventType == EventReserveUsedAsCollateralEnabled || p.EventType == EventReserveUsedAsCollateralDisabled {
+		data["collateralEnabled"] = p.CollateralEnabled
+	}
+
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal event data: %w", err)
+	}
+	return raw, nil
 }
