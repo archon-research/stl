@@ -10,13 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/httpclient"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"golang.org/x/time/rate"
@@ -92,29 +92,31 @@ func NewClient(config ClientConfig) (*Client, error) {
 	defaults := ClientConfigDefaults()
 	applyDefaults(&config, defaults)
 
-	httpClient := config.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: config.Timeout,
-		}
-	}
+	logger := config.Logger.With("component", "coingecko-client")
 
 	// Calculate rate limiter: requests per second from requests per minute
+	// Burst size allows short bursts of concurrent requests while maintaining average rate
 	rps := float64(config.RateLimitPerMin) / 60.0
-	limiter := rate.NewLimiter(rate.Limit(rps), 1)
+	burstSize := config.RateLimitPerMin / 60
+	if burstSize < 1 {
+		burstSize = 1
+	}
+
+	httpCfg := httpclient.Config{
+		Timeout:        config.Timeout,
+		MaxRetries:     config.MaxRetries,
+		InitialBackoff: config.InitialBackoff,
+		MaxBackoff:     config.MaxBackoff,
+		BackoffFactor:  config.BackoffFactor,
+		RateLimit:      rate.Limit(rps),
+		RateBurst:      burstSize,
+	}
 
 	return &Client{
 		config:     config,
-		httpClient: httpClient,
-		logger:     config.Logger.With("component", "coingecko-client"),
-		limiter:    limiter,
-		retryConfig: retry.Config{
-			MaxRetries:     config.MaxRetries,
-			InitialBackoff: config.InitialBackoff,
-			MaxBackoff:     config.MaxBackoff,
-			BackoffFactor:  config.BackoffFactor,
-			Jitter:         false, // Keep deterministic for API rate limiting
-		},
+		httpClient: httpclient.NewClient(httpCfg, logger, coinGeckoErrorParser),
+		logger:     logger,
+		apiKey:     config.APIKey,
 	}, nil
 }
 
@@ -166,10 +168,7 @@ func (c *Client) GetCurrentPrices(ctx context.Context, assetIDs []string) ([]out
 	batchSize := 250
 
 	for i := 0; i < len(assetIDs); i += batchSize {
-		end := i + batchSize
-		if end > len(assetIDs) {
-			end = len(assetIDs)
-		}
+		end := min(i+batchSize, len(assetIDs))
 		batch := assetIDs[i:end]
 
 		batchResults, err := c.getCurrentPricesBatch(ctx, batch)
@@ -243,6 +242,8 @@ func (c *Client) GetHistoricalData(ctx context.Context, assetID string, from, to
 				Timestamp: time.UnixMilli(int64(p[0])),
 				PriceUSD:  p[1],
 			})
+		} else {
+			c.logger.Warn("malformed price data point from CoinGecko API", "assetID", assetID, "dataPoint", p)
 		}
 	}
 
@@ -252,6 +253,8 @@ func (c *Client) GetHistoricalData(ctx context.Context, assetID string, from, to
 				Timestamp: time.UnixMilli(int64(v[0])),
 				VolumeUSD: v[1],
 			})
+		} else {
+			c.logger.Warn("malformed volume data point from CoinGecko API", "assetID", assetID, "dataPoint", v)
 		}
 	}
 
@@ -261,6 +264,8 @@ func (c *Client) GetHistoricalData(ctx context.Context, assetID string, from, to
 				Timestamp:    time.UnixMilli(int64(m[0])),
 				MarketCapUSD: m[1],
 			})
+		} else {
+			c.logger.Warn("malformed market cap data point from CoinGecko API", "assetID", assetID, "dataPoint", m)
 		}
 	}
 
@@ -273,84 +278,22 @@ func (c *Client) doRequest(ctx context.Context, endpoint string, params url.Valu
 		fullURL = fmt.Sprintf("%s?%s", endpoint, params.Encode())
 	}
 
-	isRetryable := func(err error) bool {
-		var nonRetryable *nonRetryableError
-		return !errors.As(err, &nonRetryable)
-	}
-
-	onRetry := func(attempt int, err error, backoff time.Duration) {
-		c.logger.Warn("request failed, retrying",
-			"attempt", attempt,
-			"maxRetries", c.retryConfig.MaxRetries,
-			"backoff", backoff,
-			"error", err,
-		)
-	}
-
-	return retry.DoVoid(ctx, c.retryConfig, isRetryable, onRetry, func() error {
-		if err := c.limiter.Wait(ctx); err != nil {
-			return &nonRetryableError{err: fmt.Errorf("rate limiter: %w", err)}
-		}
-		return c.doSingleRequest(ctx, fullURL, result)
-	})
+	return c.httpClient.DoRequest(ctx, httpclient.RequestConfig{
+		URL: fullURL,
+		Headers: map[string]string{
+			"x-cg-pro-api-key": c.apiKey,
+		},
+	}, result)
 }
 
-func (c *Client) doSingleRequest(ctx context.Context, fullURL string, result any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
-	if err != nil {
-		return &nonRetryableError{err: fmt.Errorf("creating request: %w", err)}
-	}
-
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("x-cg-pro-api-key", c.config.APIKey)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("HTTP request failed: %w", err)
-	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			c.logger.Warn("failed to close response body", "error", closeErr)
-		}
-	}()
-
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return fmt.Errorf("rate limited (HTTP 429)")
-	}
-
-	if resp.StatusCode >= 500 {
-		return fmt.Errorf("server error (HTTP %d)", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("reading response body: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
+// coinGeckoErrorParser parses CoinGecko-specific error responses.
+func coinGeckoErrorParser(statusCode int, body []byte) error {
+	if statusCode >= 400 && statusCode < 500 {
 		var apiErr coinGeckoError
 		if jsonErr := json.Unmarshal(body, &apiErr); jsonErr == nil && apiErr.Error != "" {
-			return &nonRetryableError{err: fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, apiErr.Error)}
+			return fmt.Errorf("API error (HTTP %d): %s", statusCode, apiErr.Error)
 		}
-		return &nonRetryableError{err: fmt.Errorf("client error (HTTP %d): %s", resp.StatusCode, string(body))}
+		return fmt.Errorf("client error (HTTP %d): %s", statusCode, string(body))
 	}
-
-	if err := json.Unmarshal(body, result); err != nil {
-		return &nonRetryableError{err: fmt.Errorf("parsing response: %w", err)}
-	}
-
 	return nil
-}
-
-// nonRetryableError wraps errors that should not be retried.
-type nonRetryableError struct {
-	err error
-}
-
-func (e *nonRetryableError) Error() string {
-	return e.err.Error()
-}
-
-func (e *nonRetryableError) Unwrap() error {
-	return e.err
 }

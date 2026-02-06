@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -340,6 +341,210 @@ func TestBlockchainService_ParseUserReservesData(t *testing.T) {
 				}
 				if reserve.ScaledATokenBalance == nil {
 					t.Errorf("reserve[%d] has nil balance", i)
+				}
+			}
+		})
+	}
+}
+
+func TestBlockchainService_ParseReserveData(t *testing.T) {
+	service := &blockchainService{
+		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache: make(map[common.Address]TokenMetadata),
+	}
+
+	if err := service.loadABIs(false); err != nil {
+		t.Fatalf("loadABIs() failed: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		mockData    func() []byte
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name: "valid reserve data",
+			mockData: func() []byte {
+				// Pack 12 uint256 values: unbacked, accruedToTreasuryScaled, totalAToken, totalStableDebt,
+				// totalVariableDebt, liquidityRate, variableBorrowRate, stableBorrowRate,
+				// averageStableBorrowRate, liquidityIndex, variableBorrowIndex, lastUpdateTimestamp
+				values := []interface{}{
+					big.NewInt(1000),       // unbacked
+					big.NewInt(2000),       // accruedToTreasuryScaled
+					big.NewInt(3000),       // totalAToken
+					big.NewInt(4000),       // totalStableDebt
+					big.NewInt(5000),       // totalVariableDebt
+					big.NewInt(6000),       // liquidityRate
+					big.NewInt(7000),       // variableBorrowRate
+					big.NewInt(8000),       // stableBorrowRate
+					big.NewInt(9000),       // averageStableBorrowRate
+					big.NewInt(10000),      // liquidityIndex
+					big.NewInt(11000),      // variableBorrowIndex
+					big.NewInt(1640995200), // lastUpdateTimestamp
+				}
+				// Pack the return values using the ABI outputs
+				packed, _ := service.getPoolDataProviderReserveDataABI.Methods["getReserveData"].Outputs.Pack(values...)
+				return packed
+			},
+			wantErr: false,
+		},
+		{
+			name: "unpack error - insufficient data",
+			mockData: func() []byte {
+				// Return insufficient data that will fail ABI unpack
+				return []byte{0x00, 0x01, 0x02}
+			},
+			wantErr:     true,
+			errContains: "failed to unpack getReserveData",
+		},
+		{
+			name: "unpack error - wrong data format",
+			mockData: func() []byte {
+				// Return data that won't match ABI format
+				return make([]byte, 64) // Empty 64 bytes that doesn't match expected format
+			},
+			wantErr:     true,
+			errContains: "failed to unpack getReserveData",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := tt.mockData()
+			result, err := service.parseReserveData(data)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("parseReserveData() expected error, got nil")
+					return
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("parseReserveData() error = %v, want error containing %q", err, tt.errContains)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("parseReserveData() unexpected error: %v", err)
+				return
+			}
+
+			if result == nil {
+				t.Error("parseReserveData() returned nil result")
+				return
+			}
+
+			// Verify expected values for valid case
+			if tt.name == "valid reserve data" {
+				if result.Unbacked.Cmp(big.NewInt(1000)) != 0 {
+					t.Errorf("Unbacked = %v, want 1000", result.Unbacked)
+				}
+				if result.LastUpdateTimestamp != 1640995200 {
+					t.Errorf("LastUpdateTimestamp = %v, want 1640995200", result.LastUpdateTimestamp)
+				}
+			}
+		})
+	}
+}
+
+func TestBlockchainService_ParseReserveConfigurationData(t *testing.T) {
+	service := &blockchainService{
+		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache: make(map[common.Address]TokenMetadata),
+	}
+
+	if err := service.loadABIs(false); err != nil {
+		t.Fatalf("loadABIs() failed: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		mockData    func() []byte
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name: "valid configuration data",
+			mockData: func() []byte {
+				// Pack: decimals(0), ltv(1), liquidationThreshold(2), liquidationBonus(3), reserveFactor(4),
+				// usageAsCollateralEnabled(5), borrowingEnabled(6), stableBorrowRateEnabled(7), isActive(8), isFrozen(9)
+				values := []interface{}{
+					big.NewInt(18),    // decimals
+					big.NewInt(8000),  // ltv (80%)
+					big.NewInt(8250),  // liquidationThreshold
+					big.NewInt(10500), // liquidationBonus
+					big.NewInt(2000),  // reserveFactor
+					true,              // usageAsCollateralEnabled
+					true,              // borrowingEnabled
+					false,             // stableBorrowRateEnabled
+					true,              // isActive
+					false,             // isFrozen
+				}
+				packed, _ := service.getPoolDataProviderReserveConfigurationABI.Methods["getReserveConfigurationData"].Outputs.Pack(values...)
+				return packed
+			},
+			wantErr: false,
+		},
+		{
+			name: "unpack error - insufficient data",
+			mockData: func() []byte {
+				// Return insufficient data that will fail ABI unpack
+				return []byte{0x00, 0x01, 0x02}
+			},
+			wantErr:     true,
+			errContains: "failed to unpack getReserveConfigurationData",
+		},
+		{
+			name: "unpack error - empty data",
+			mockData: func() []byte {
+				// Return empty data
+				return []byte{}
+			},
+			wantErr:     true,
+			errContains: "failed to unpack getReserveConfigurationData",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := tt.mockData()
+			result, err := service.parseReserveConfigurationData(data)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("parseReserveConfigurationData() expected error, got nil")
+					return
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("parseReserveConfigurationData() error = %v, want error containing %q", err, tt.errContains)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("parseReserveConfigurationData() unexpected error: %v", err)
+				return
+			}
+
+			if result == nil {
+				t.Error("parseReserveConfigurationData() returned nil result")
+				return
+			}
+
+			// Verify expected values for valid case
+			if tt.name == "valid configuration data" {
+				if result.Decimals.Cmp(big.NewInt(18)) != 0 {
+					t.Errorf("Decimals = %v, want 18", result.Decimals)
+				}
+				if result.LTV.Cmp(big.NewInt(8000)) != 0 {
+					t.Errorf("LTV = %v, want 8000", result.LTV)
+				}
+				if !result.UsageAsCollateralEnabled {
+					t.Error("UsageAsCollateralEnabled = false, want true")
+				}
+				if result.IsFrozen {
+					t.Error("IsFrozen = true, want false")
 				}
 			}
 		})

@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -18,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/httpclient"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"golang.org/x/time/rate"
 )
@@ -83,11 +82,9 @@ func ClientConfigDefaults() ClientConfig {
 
 // Client implements BlockVerifier using Etherscan's API.
 type Client struct {
-	config      ClientConfig
-	httpClient  *http.Client
-	logger      *slog.Logger
-	limiter     *rate.Limiter
-	retryConfig retry.Config
+	config     ClientConfig
+	httpClient *httpclient.Client
+	logger     *slog.Logger
 }
 
 // NewClient creates a new Etherscan API client.
@@ -99,27 +96,22 @@ func NewClient(config ClientConfig) (*Client, error) {
 	defaults := ClientConfigDefaults()
 	applyDefaults(&config, defaults)
 
-	httpClient := config.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: config.Timeout,
-		}
-	}
+	logger := config.Logger.With("component", "etherscan-client")
 
-	limiter := rate.NewLimiter(rate.Limit(config.RateLimitPerSec), 1)
+	httpCfg := httpclient.Config{
+		Timeout:        config.Timeout,
+		MaxRetries:     config.MaxRetries,
+		InitialBackoff: config.InitialBackoff,
+		MaxBackoff:     config.MaxBackoff,
+		BackoffFactor:  config.BackoffFactor,
+		RateLimit:      rate.Limit(config.RateLimitPerSec),
+		RateBurst:      1,
+	}
 
 	return &Client{
 		config:     config,
-		httpClient: httpClient,
-		logger:     config.Logger.With("component", "etherscan-client"),
-		limiter:    limiter,
-		retryConfig: retry.Config{
-			MaxRetries:     config.MaxRetries,
-			InitialBackoff: config.InitialBackoff,
-			MaxBackoff:     config.MaxBackoff,
-			BackoffFactor:  config.BackoffFactor,
-			Jitter:         false, // Keep deterministic for API rate limiting
-		},
+		httpClient: httpclient.NewClient(httpCfg, logger, etherscanErrorParser),
+		logger:     logger,
 	}, nil
 }
 
@@ -133,7 +125,7 @@ func applyDefaults(config *ClientConfig, defaults ClientConfig) {
 	if config.Timeout == 0 {
 		config.Timeout = defaults.Timeout
 	}
-	// MaxRetries: 0 means use default, -1 means explicitly disable retries
+	// MaxRetries: 0 means use default, negative values disable retries (set to 0)
 	if config.MaxRetries == 0 {
 		config.MaxRetries = defaults.MaxRetries
 	} else if config.MaxRetries < 0 {
@@ -270,80 +262,29 @@ func (c *Client) parseBlockResponse(response proxyResponse, expectedNumber int64
 
 func (c *Client) doRequest(ctx context.Context, params url.Values, result any) error {
 	fullURL := fmt.Sprintf("%s?%s", c.config.BaseURL, params.Encode())
-
-	isRetryable := func(err error) bool {
-		var nonRetryable *nonRetryableError
-		return !errors.As(err, &nonRetryable)
-	}
-
-	onRetry := func(attempt int, err error, backoff time.Duration) {
-		c.logger.Warn("request failed, retrying",
-			"attempt", attempt,
-			"maxRetries", c.retryConfig.MaxRetries,
-			"backoff", backoff,
-			"error", err,
-		)
-	}
-
-	return retry.DoVoid(ctx, c.retryConfig, isRetryable, onRetry, func() error {
-		if err := c.limiter.Wait(ctx); err != nil {
-			return &nonRetryableError{err: fmt.Errorf("rate limiter: %w", err)}
-		}
-		return c.doSingleRequest(ctx, fullURL, result)
-	})
+	return c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: fullURL}, result)
 }
 
-func (c *Client) doSingleRequest(ctx context.Context, fullURL string, result any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
-	if err != nil {
-		return &nonRetryableError{err: fmt.Errorf("creating request: %w", err)}
-	}
-
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("HTTP request failed: %w", err)
-	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			c.logger.Warn("failed to close response body", "error", closeErr)
-		}
-	}()
-
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return fmt.Errorf("rate limited (HTTP 429)")
-	}
-
-	if resp.StatusCode >= 500 {
-		return fmt.Errorf("server error (HTTP %d)", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("reading response body: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
+// etherscanErrorParser parses Etherscan-specific error responses.
+func etherscanErrorParser(statusCode int, body []byte) error {
+	// Check for HTTP 4xx errors
+	if statusCode >= 400 && statusCode < 500 {
 		var apiErr etherscanError
 		if jsonErr := json.Unmarshal(body, &apiErr); jsonErr == nil && apiErr.Message != "" {
-			return &nonRetryableError{err: fmt.Errorf("API error (HTTP %d): %s - %s", resp.StatusCode, apiErr.Message, apiErr.Result)}
+			return fmt.Errorf("API error (HTTP %d): %s - %s", statusCode, apiErr.Message, apiErr.Result)
 		}
-		return &nonRetryableError{err: fmt.Errorf("client error (HTTP %d): %s", resp.StatusCode, string(body))}
+		return fmt.Errorf("client error (HTTP %d): %s", statusCode, string(body))
 	}
 
-	// Check for Etherscan-specific error format (status: "0")
+	// Check for Etherscan-specific error format (status: "0") in successful responses
 	var apiErr etherscanError
 	if jsonErr := json.Unmarshal(body, &apiErr); jsonErr == nil && apiErr.Status == "0" {
-		// Check for rate limit message
+		// Check for rate limit message - these are retryable
 		if strings.Contains(strings.ToLower(apiErr.Result), "rate limit") {
 			return fmt.Errorf("rate limited: %s", apiErr.Result)
 		}
-		return &nonRetryableError{err: fmt.Errorf("API error: %s - %s", apiErr.Message, apiErr.Result)}
-	}
-
-	if err := json.Unmarshal(body, result); err != nil {
-		return &nonRetryableError{err: fmt.Errorf("parsing response: %w", err)}
+		// Other API errors are not retryable
+		return httpclient.WrapNonRetryable(fmt.Errorf("API error: %s - %s", apiErr.Message, apiErr.Result))
 	}
 
 	return nil
@@ -353,7 +294,7 @@ func (c *Client) doSingleRequest(ctx context.Context, fullURL string, result any
 func parseHexInt64(hexStr string) (int64, error) {
 	hexStr = strings.TrimPrefix(hexStr, "0x")
 	if hexStr == "" {
-		return 0, nil
+		return 0, fmt.Errorf("empty hex string")
 	}
 	return strconv.ParseInt(hexStr, 16, 64)
 }

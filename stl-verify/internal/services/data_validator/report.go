@@ -171,6 +171,9 @@ func formatNumber(n int64) string {
 
 // formatDuration formats a duration for human readability.
 func formatDuration(d time.Duration) string {
+	if d < time.Millisecond {
+		return "<1ms"
+	}
 	if d < time.Second {
 		return fmt.Sprintf("%.1fms", float64(d.Milliseconds()))
 	}
