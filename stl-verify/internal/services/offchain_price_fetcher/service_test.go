@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,15 +11,12 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // =============================================================================
 // Test Helpers
 // =============================================================================
-
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 func ptr[T any](v T) *T {
 	return &v
@@ -243,7 +238,7 @@ func TestNewService_Success(t *testing.T) {
 
 	svc, err := NewService(ServiceConfig{
 		ChainID: 1,
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, provider, repo)
 
 	if err != nil {
@@ -330,7 +325,7 @@ func TestNewService_CustomConcurrency(t *testing.T) {
 	svc, err := NewService(ServiceConfig{
 		ChainID:     1,
 		Concurrency: 10,
-		Logger:      testLogger(),
+		Logger:      testutil.DiscardLogger(),
 	}, provider, repo)
 
 	if err != nil {
@@ -359,7 +354,7 @@ func TestFetchCurrentPrices_Success(t *testing.T) {
 		createPriceData("weth", 2500.0, ts),
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchCurrentPrices(context.Background(), nil)
 
@@ -393,7 +388,7 @@ func TestFetchCurrentPrices_WithSpecificAssetIDs(t *testing.T) {
 		createPriceData("weth", 2500.0, ts),
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchCurrentPrices(context.Background(), []string{"weth"})
 
@@ -413,7 +408,7 @@ func TestFetchCurrentPrices_NoAssets(t *testing.T) {
 	repo := newMockRepository()
 	repo.enabledAssets = []*entity.PriceAsset{} // Empty
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchCurrentPrices(context.Background(), nil)
 
@@ -430,7 +425,7 @@ func TestFetchCurrentPrices_ResolveAssetsFails(t *testing.T) {
 	repo := newMockRepository()
 	repo.getSourceErr = errors.New("database error")
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchCurrentPrices(context.Background(), nil)
 
@@ -452,7 +447,7 @@ func TestFetchCurrentPrices_ProviderFails(t *testing.T) {
 	}
 	provider.getCurrentPriceErr = errors.New("API error")
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchCurrentPrices(context.Background(), nil)
 
@@ -478,7 +473,7 @@ func TestFetchCurrentPrices_UnknownAssetInPriceData(t *testing.T) {
 		createPriceData("unknown-asset", 100.0, ts), // Asset not in our list
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchCurrentPrices(context.Background(), nil)
 
@@ -504,7 +499,7 @@ func TestFetchCurrentPrices_AssetWithoutTokenID(t *testing.T) {
 		createPriceData("unmapped", 1.0, ts),
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchCurrentPrices(context.Background(), nil)
 
@@ -535,7 +530,7 @@ func TestFetchCurrentPrices_AllAssetsUnmapped(t *testing.T) {
 		createPriceData("unmapped", 1.0, ts),
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchCurrentPrices(context.Background(), nil)
 
@@ -563,7 +558,7 @@ func TestFetchCurrentPrices_UpsertFails(t *testing.T) {
 		createPriceData("weth", 2500.0, ts),
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchCurrentPrices(context.Background(), nil)
 
@@ -593,7 +588,7 @@ func TestFetchCurrentPrices_InvalidPriceData(t *testing.T) {
 		},
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchCurrentPrices(context.Background(), nil)
 
@@ -620,7 +615,7 @@ func TestFetchCurrentPrices_ZeroTimestamp(t *testing.T) {
 		},
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchCurrentPrices(context.Background(), nil)
 
@@ -642,7 +637,7 @@ func TestFetchCurrentPrices_ContextCancelled(t *testing.T) {
 		return nil, ctx.Err()
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
@@ -674,7 +669,7 @@ func TestFetchHistoricalData_Success(t *testing.T) {
 		[]outbound.MarketCapPoint{{Timestamp: ts, MarketCapUSD: 5000000000.0}},
 	)
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	from := time.Now().AddDate(0, 0, -7)
 	to := time.Now()
@@ -696,7 +691,7 @@ func TestFetchHistoricalData_ProviderDoesNotSupportHistorical(t *testing.T) {
 	provider := newMockProvider("limited-provider", false) // Does not support historical
 	repo := newMockRepository()
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now(), time.Now())
 
@@ -713,7 +708,7 @@ func TestFetchHistoricalData_NoAssets(t *testing.T) {
 	repo := newMockRepository()
 	repo.enabledAssets = []*entity.PriceAsset{} // Empty
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now(), time.Now())
 
@@ -731,7 +726,7 @@ func TestFetchHistoricalData_ResolveAssetsFails(t *testing.T) {
 	repo := newMockRepository()
 	repo.getSourceErr = errors.New("database error")
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now(), time.Now())
 
@@ -748,7 +743,7 @@ func TestFetchHistoricalData_AssetWithoutTokenID(t *testing.T) {
 		createAsset(1, "unmapped", "UNM", nil), // No token mapping
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -1), time.Now())
 
@@ -785,7 +780,7 @@ func TestFetchHistoricalData_MultipleAssets(t *testing.T) {
 		nil,
 	)
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Concurrency: 2, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Concurrency: 2, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -7), time.Now())
 
@@ -823,7 +818,7 @@ func TestFetchHistoricalData_PartialFailure(t *testing.T) {
 		return provider.historicalData[assetID], nil
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Concurrency: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Concurrency: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -7), time.Now())
 
@@ -855,7 +850,7 @@ func TestFetchHistoricalData_ChunkingOver30Days(t *testing.T) {
 		), nil
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	// 45 days should result in 2 chunks (30 + 15)
 	from := time.Now().AddDate(0, 0, -45)
@@ -890,7 +885,7 @@ func TestFetchHistoricalData_LessThan30Days(t *testing.T) {
 		), nil
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	// 20 days should be 1 chunk (less than 30-day chunk size)
 	from := time.Now().AddDate(0, 0, -20)
@@ -922,7 +917,7 @@ func TestFetchHistoricalData_UpsertPricesFails(t *testing.T) {
 		nil, nil,
 	)
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -1), time.Now())
 
@@ -948,7 +943,7 @@ func TestFetchHistoricalData_UpsertVolumesFails(t *testing.T) {
 		nil,
 	)
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -1), time.Now())
 
@@ -969,7 +964,7 @@ func TestFetchHistoricalData_EmptyPricesAndVolumes(t *testing.T) {
 	// Empty data
 	provider.historicalData["weth"] = createHistoricalData("weth", nil, nil, nil)
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -1), time.Now())
 
@@ -1001,7 +996,7 @@ func TestFetchHistoricalData_MarketCapMatching(t *testing.T) {
 		[]outbound.MarketCapPoint{{Timestamp: ts, MarketCapUSD: 5000000000.0}},
 	)
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -1), time.Now())
 
@@ -1037,7 +1032,7 @@ func TestFetchHistoricalData_InvalidHistoricalPriceData(t *testing.T) {
 		nil, nil,
 	)
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -1), time.Now())
 
@@ -1062,7 +1057,7 @@ func TestFetchHistoricalData_InvalidVolumeData(t *testing.T) {
 		nil,
 	)
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -1), time.Now())
 
@@ -1088,7 +1083,7 @@ func TestFetchHistoricalData_UnknownAssetInHistoricalData(t *testing.T) {
 		), nil
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -1), time.Now())
 
@@ -1128,7 +1123,7 @@ func TestFetchHistoricalData_ConcurrencyLimit(t *testing.T) {
 		return createHistoricalData(assetID, nil, nil, nil), nil
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Concurrency: 3, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Concurrency: 3, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -1), time.Now())
 
@@ -1207,7 +1202,7 @@ func TestConvertHistoricalPrices_NilTokenID(t *testing.T) {
 	provider := newMockProvider("coingecko", true)
 	repo := newMockRepository()
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	// Asset without token_id
 	asset := createAsset(1, "unmapped", "UNM", nil)
@@ -1232,7 +1227,7 @@ func TestConvertHistoricalVolumes_NilTokenID(t *testing.T) {
 	provider := newMockProvider("coingecko", true)
 	repo := newMockRepository()
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	// Asset without token_id
 	asset := createAsset(1, "unmapped", "UNM", nil)
@@ -1257,7 +1252,7 @@ func TestConvertHistoricalVolumes_UnknownAsset(t *testing.T) {
 	provider := newMockProvider("coingecko", true)
 	repo := newMockRepository()
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	// Empty asset map - asset not found
 	assetMap := map[string]*entity.PriceAsset{}
@@ -1296,7 +1291,7 @@ func TestFetchCurrentPrices_LargeNumberOfPrices(t *testing.T) {
 	repo.enabledAssets = assets
 	provider.currentPrices = prices
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchCurrentPrices(context.Background(), nil)
 
@@ -1325,7 +1320,7 @@ func TestFetchHistoricalData_VeryShortTimeRange(t *testing.T) {
 		return createHistoricalData(assetID, nil, nil, nil), nil
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	// Just 1 hour
 	from := time.Now().Add(-time.Hour)
@@ -1356,7 +1351,7 @@ func TestFetchHistoricalData_FromEqualsTo(t *testing.T) {
 		return createHistoricalData(assetID, nil, nil, nil), nil
 	}
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	now := time.Now()
 	err := svc.FetchHistoricalData(context.Background(), nil, now, now)
@@ -1383,7 +1378,7 @@ func TestFetchHistoricalData_AllAssetsFail(t *testing.T) {
 
 	provider.getHistoricalErr = errors.New("API down")
 
-	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testLogger()}, provider, repo)
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -1), time.Now())
 

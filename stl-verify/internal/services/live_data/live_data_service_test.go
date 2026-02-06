@@ -12,51 +12,8 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
-
-// mockSubscriber is a test subscriber that emits headers on demand.
-type mockSubscriber struct {
-	mu       sync.Mutex
-	headers  chan outbound.BlockHeader
-	closed   bool
-	onReconn func()
-}
-
-func newMockSubscriber() *mockSubscriber {
-	return &mockSubscriber{
-		headers: make(chan outbound.BlockHeader, 100),
-	}
-}
-
-func (m *mockSubscriber) Subscribe(ctx context.Context) (<-chan outbound.BlockHeader, error) {
-	return m.headers, nil
-}
-
-func (m *mockSubscriber) Unsubscribe() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.closed {
-		m.closed = true
-		close(m.headers)
-	}
-	return nil
-}
-
-func (m *mockSubscriber) HealthCheck(ctx context.Context) error {
-	return nil
-}
-
-func (m *mockSubscriber) SetOnReconnect(callback func()) {
-	m.onReconn = callback
-}
-
-func (m *mockSubscriber) sendHeader(header outbound.BlockHeader) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.closed {
-		m.headers <- header
-	}
-}
 
 // mockStateRepo is a test state repository that can simulate errors.
 // It embeds the memory implementation and overrides specific methods for testing.
@@ -138,275 +95,28 @@ func (m *mockStateRepo) HandleReorgAtomic(ctx context.Context, commonAncestor in
 	return m.BlockStateRepository.HandleReorgAtomic(ctx, commonAncestor, event, newBlock)
 }
 
-// mockBlockchainClient provides predictable block data for testing.
-type mockBlockchainClient struct {
-	mu              sync.RWMutex
-	blocks          map[int64]blockTestData
-	delay           time.Duration
-	getByHashErr    error
-	getByHashErrFor string // Only return error for this specific hash
-}
-
-type blockTestData struct {
-	header   outbound.BlockHeader
-	receipts json.RawMessage
-	traces   json.RawMessage
-	blobs    json.RawMessage
-}
-
-func newMockClient() *mockBlockchainClient {
-	return &mockBlockchainClient{
-		blocks: make(map[int64]blockTestData),
-	}
-}
-
-func (m *mockBlockchainClient) addBlock(num int64, parentHash string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	hash := fmt.Sprintf("0x%064x", num)
-	if parentHash == "" && num > 0 {
-		parentHash = fmt.Sprintf("0x%064x", num-1)
-	}
-
-	header := outbound.BlockHeader{
-		Number:     fmt.Sprintf("0x%x", num),
-		Hash:       hash,
-		ParentHash: parentHash,
-		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
-	}
-
-	m.blocks[num] = blockTestData{
-		header:   header,
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
-}
-
-func (m *mockBlockchainClient) getHeader(num int64) outbound.BlockHeader {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.blocks[num].header
-}
-
-func (m *mockBlockchainClient) GetBlockByNumber(ctx context.Context, blockNum int64, fullTx bool) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.delay > 0 {
-		time.Sleep(m.delay)
-	}
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		data, _ := json.Marshal(bd.header)
-		return data, nil
-	}
-	return nil, fmt.Errorf("block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (*outbound.BlockHeader, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	// Check if we should return an error for this specific hash
-	if m.getByHashErr != nil && (m.getByHashErrFor == "" || m.getByHashErrFor == hash) {
-		return nil, m.getByHashErr
-	}
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			h := bd.header
-			return &h, nil
-		}
-	}
-	return nil, fmt.Errorf("block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	// Check if we should return an error for this specific hash
-	if m.getByHashErr != nil && (m.getByHashErrFor == "" || m.getByHashErrFor == hash) {
-		return nil, m.getByHashErr
-	}
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			data, _ := json.Marshal(bd.header)
-			return data, nil
-		}
-	}
-	return nil, fmt.Errorf("block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.receipts, nil
-	}
-	return nil, fmt.Errorf("receipts for block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	// Check if we should return an error for this specific hash
-	if m.getByHashErr != nil && (m.getByHashErrFor == "" || m.getByHashErrFor == hash) {
-		return nil, m.getByHashErr
-	}
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			return bd.receipts, nil
-		}
-	}
-	return nil, fmt.Errorf("receipts for block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.traces, nil
-	}
-	return nil, fmt.Errorf("traces for block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	// Check if we should return an error for this specific hash
-	if m.getByHashErr != nil && (m.getByHashErrFor == "" || m.getByHashErrFor == hash) {
-		return nil, m.getByHashErr
-	}
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			return bd.traces, nil
-		}
-	}
-	return nil, fmt.Errorf("traces for block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.blobs, nil
-	}
-	return nil, fmt.Errorf("blobs for block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	// Check if we should return an error for this specific hash
-	if m.getByHashErr != nil && (m.getByHashErrFor == "" || m.getByHashErrFor == hash) {
-		return nil, m.getByHashErr
-	}
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			return bd.blobs, nil
-		}
-	}
-	return nil, fmt.Errorf("blobs for block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var max int64
-	for num := range m.blocks {
-		if num > max {
-			max = num
-		}
-	}
-	return max, nil
-}
-
-func (m *mockBlockchainClient) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx bool) ([]outbound.BlockData, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.delay > 0 {
-		time.Sleep(m.delay)
-	}
-
-	result := make([]outbound.BlockData, len(blockNums))
-	for i, num := range blockNums {
-		result[i] = outbound.BlockData{BlockNumber: num}
-		if bd, ok := m.blocks[num]; ok {
-			blockJSON, _ := json.Marshal(bd.header)
-			result[i].Block = blockJSON
-			result[i].Receipts = bd.receipts
-			result[i].Traces = bd.traces
-			result[i].Blobs = bd.blobs
-		}
-	}
-	return result, nil
-}
-
-func (m *mockBlockchainClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.delay > 0 {
-		time.Sleep(m.delay)
-	}
-
-	// Check if we should return an error for this specific hash
-	if m.getByHashErr != nil && (m.getByHashErrFor == "" || m.getByHashErrFor == hash) {
-		return outbound.BlockData{}, m.getByHashErr
-	}
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			blockJSON, _ := json.Marshal(bd.header)
-			return outbound.BlockData{
-				BlockNumber: blockNum,
-				Block:       blockJSON,
-				Receipts:    bd.receipts,
-				Traces:      bd.traces,
-				Blobs:       bd.blobs,
-			}, nil
-		}
-	}
-	return outbound.BlockData{}, fmt.Errorf("block %s not found", hash)
-}
-
 // TestLateBlockAfterPruning tests the scenario where a live block arrives after
 // its corresponding blocks have been pruned from the unfinalized chain.
 func TestLateBlockAfterPruning(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	subscriber := newMockSubscriber()
-	client := newMockClient()
+	subscriber := testutil.NewMockSubscriber()
+	client := testutil.NewMockBlockchainClient()
 	stateRepo := memory.NewBlockStateRepository()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
 	// Pre-populate client with blocks 1-300
 	for i := int64(1); i <= 300; i++ {
-		client.addBlock(i, "")
+		client.AddBlock(i, "")
 	}
 
 	// Seed the state repo with block 1
 	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
 		Number:     1,
-		Hash:       client.getHeader(1).Hash,
-		ParentHash: client.getHeader(1).ParentHash,
+		Hash:       client.GetHeader(1).Hash,
+		ParentHash: client.GetHeader(1).ParentHash,
 		ReceivedAt: time.Now().Unix(),
 	}); err != nil {
 		t.Fatalf("failed to save block: %v", err)
@@ -434,8 +144,8 @@ func TestLateBlockAfterPruning(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := int64(150); i <= 250; i++ {
-			header := client.getHeader(i)
-			subscriber.sendHeader(header)
+			header := client.GetHeader(i)
+			subscriber.SendHeader(header)
 			time.Sleep(2 * time.Millisecond)
 		}
 	}()
@@ -485,8 +195,8 @@ func TestNewLiveService_NilDependencies(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create all dependencies
-			subscriber := newMockSubscriber()
-			client := newMockClient()
+			subscriber := testutil.NewMockSubscriber()
+			client := testutil.NewMockBlockchainClient()
 			stateRepo := memory.NewBlockStateRepository()
 			cache := memory.NewBlockCache()
 			eventSink := memory.NewEventSink()
@@ -523,8 +233,8 @@ func TestNewLiveService_NilDependencies(t *testing.T) {
 }
 
 func TestNewLiveService_AppliesDefaults(t *testing.T) {
-	subscriber := newMockSubscriber()
-	client := newMockClient()
+	subscriber := testutil.NewMockSubscriber()
+	client := testutil.NewMockBlockchainClient()
 	stateRepo := memory.NewBlockStateRepository()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
@@ -548,8 +258,8 @@ func TestNewLiveService_AppliesDefaults(t *testing.T) {
 }
 
 func TestNewLiveService_UsesProvidedConfig(t *testing.T) {
-	subscriber := newMockSubscriber()
-	client := newMockClient()
+	subscriber := testutil.NewMockSubscriber()
+	client := testutil.NewMockBlockchainClient()
 	stateRepo := memory.NewBlockStateRepository()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
@@ -594,7 +304,7 @@ func TestIsDuplicateBlock_FoundInDB(t *testing.T) {
 		Hash:   "0xdb_block_hash",
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -615,7 +325,7 @@ func TestIsDuplicateBlock_NotFound(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -638,7 +348,7 @@ func TestIsDuplicateBlock_DBError(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -663,7 +373,7 @@ func TestDetectReorg_EmptyChain_NoReorg(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -696,10 +406,10 @@ func TestDetectReorg_NextBlock_ParentMatches_NoReorg(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	client := newMockClient()
+	client := testutil.NewMockBlockchainClient()
 	// Add blocks for lookups
 	for i := int64(1); i <= 100; i++ {
-		client.addBlock(i, "")
+		client.AddBlock(i, "")
 	}
 
 	// Pre-populate DB with blocks 99-100
@@ -710,7 +420,7 @@ func TestDetectReorg_NextBlock_ParentMatches_NoReorg(t *testing.T) {
 		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99",
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -743,16 +453,10 @@ func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	client := newMockClient()
+	client := testutil.NewMockBlockchainClient()
 	// Add alternate chain blocks for ancestry walk
 	// Block 100_alt's parent is block 99 (which exists in our chain)
-	client.blocks[100] = blockTestData{
-		header: outbound.BlockHeader{
-			Number:     "0x64",
-			Hash:       "0xblock100_alt",
-			ParentHash: "0xblock99", // Points to our block 99
-		},
-	}
+	client.SetBlockHeader(100, "0xblock100_alt", "0xblock99")
 
 	// Pre-populate DB with blocks 99-100
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
@@ -764,7 +468,7 @@ func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
 
 	svc, err := NewLiveService(LiveConfig{
 		FinalityBlockCount: 64,
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -803,15 +507,9 @@ func TestDetectReorg_LowerBlockNumber_Reorg(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	client := newMockClient()
+	client := testutil.NewMockBlockchainClient()
 	// Add blocks for ancestry walk
-	client.blocks[98] = blockTestData{
-		header: outbound.BlockHeader{
-			Number:     "0x62",
-			Hash:       "0xblock98",
-			ParentHash: "0xblock97",
-		},
-	}
+	client.SetBlockHeader(98, "0xblock98", "0xblock97")
 
 	// Pre-populate DB with blocks 98-100
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
@@ -824,7 +522,7 @@ func TestDetectReorg_LowerBlockNumber_Reorg(t *testing.T) {
 		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99",
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -866,7 +564,7 @@ func TestDetectReorg_Gap_NoReorg(t *testing.T) {
 		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99",
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -916,7 +614,7 @@ func TestHandleReorg_FindsCommonAncestorInDB(t *testing.T) {
 		_, _ = stateRepo.SaveBlock(ctx, b)
 	}
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -986,23 +684,11 @@ func TestHandleReorg_WalksBackViaNetwork(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	client := newMockClient()
+	client := testutil.NewMockBlockchainClient()
 	// Set up remote chain that forks at block 97
 	// Remote: 97 -> 98_alt -> 99_alt -> 100_alt
-	client.blocks[97] = blockTestData{
-		header: outbound.BlockHeader{
-			Number:     "0x61",
-			Hash:       "0xblock97", // Common ancestor
-			ParentHash: "0xblock96",
-		},
-	}
-	client.blocks[98] = blockTestData{
-		header: outbound.BlockHeader{
-			Number:     "0x62",
-			Hash:       "0xblock98_alt",
-			ParentHash: "0xblock97",
-		},
-	}
+	client.SetBlockHeader(97, "0xblock97", "0xblock96")
+	client.SetBlockHeader(98, "0xblock98_alt", "0xblock97")
 
 	// Pre-populate DB with blocks 95-100
 	blocks := []outbound.BlockState{
@@ -1017,7 +703,7 @@ func TestHandleReorg_WalksBackViaNetwork(t *testing.T) {
 		_, _ = stateRepo.SaveBlock(ctx, b)
 	}
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1061,7 +747,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 
 		svc, err := NewLiveService(LiveConfig{
 			FinalityBlockCount: 64,
-		}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
+		}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 		if err != nil {
 			t.Fatalf("failed to create service: %v", err)
 		}
@@ -1087,30 +773,12 @@ func TestHandleReorg_Errors(t *testing.T) {
 		stateRepo := newMockStateRepo()
 		cache := memory.NewBlockCache()
 		eventSink := memory.NewEventSink()
-		client := newMockClient()
+		client := testutil.NewMockBlockchainClient()
 
 		// Set up a chain of unknown blocks that the walk will traverse
-		client.blocks[99] = blockTestData{
-			header: outbound.BlockHeader{
-				Number:     "0x63",
-				Hash:       "0xunknown_parent",
-				ParentHash: "0xunknown_grandparent",
-			},
-		}
-		client.blocks[98] = blockTestData{
-			header: outbound.BlockHeader{
-				Number:     "0x62",
-				Hash:       "0xunknown_grandparent",
-				ParentHash: "0xunknown_great_grandparent",
-			},
-		}
-		client.blocks[97] = blockTestData{
-			header: outbound.BlockHeader{
-				Number:     "0x61",
-				Hash:       "0xunknown_great_grandparent",
-				ParentHash: "0xunknown_great_great_grandparent",
-			},
-		}
+		client.SetBlockHeader(99, "0xunknown_parent", "0xunknown_grandparent")
+		client.SetBlockHeader(98, "0xunknown_grandparent", "0xunknown_great_grandparent")
+		client.SetBlockHeader(97, "0xunknown_great_grandparent", "0xunknown_great_great_grandparent")
 
 		// Pre-populate DB with our chain (completely different from the unknown chain)
 		_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
@@ -1119,7 +787,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 
 		svc, err := NewLiveService(LiveConfig{
 			FinalityBlockCount: 3, // Walk will exhaust after 3 iterations
-		}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+		}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 		if err != nil {
 			t.Fatalf("failed to create service: %v", err)
 		}
@@ -1156,7 +824,7 @@ func TestHandleReorg_ReturnsReorgEvent(t *testing.T) {
 		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99",
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1204,9 +872,9 @@ func TestProcessBlock_Errors(t *testing.T) {
 		stateRepo := newMockStateRepo()
 		cache := memory.NewBlockCache()
 		eventSink := memory.NewEventSink()
-		client := newMockClient()
+		client := testutil.NewMockBlockchainClient()
 
-		svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+		svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 		if err != nil {
 			t.Fatalf("failed to create service: %v", err)
 		}
@@ -1232,10 +900,10 @@ func TestProcessBlock_Errors(t *testing.T) {
 		stateRepo.saveBlockErr = fmt.Errorf("database write failed")
 		cache := memory.NewBlockCache()
 		eventSink := memory.NewEventSink()
-		client := newMockClient()
-		client.addBlock(100, "")
+		client := testutil.NewMockBlockchainClient()
+		client.AddBlock(100, "")
 
-		svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+		svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 		if err != nil {
 			t.Fatalf("failed to create service: %v", err)
 		}
@@ -1263,15 +931,15 @@ func TestProcessBlock_SkipsDuplicate(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	client := newMockClient()
-	client.addBlock(100, "")
+	client := testutil.NewMockBlockchainClient()
+	client.AddBlock(100, "")
 
 	// Pre-populate DB with block
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
 		Number: 100, Hash: "0x64", ParentHash: "0x63",
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1306,20 +974,20 @@ func TestProcessBlock_AddsBlockToChain(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	client := newMockClient()
-	client.addBlock(100, "")
-	client.addBlock(101, "")
+	client := testutil.NewMockBlockchainClient()
+	client.AddBlock(100, "")
+	client.AddBlock(101, "")
 
 	// Get the actual hashes from the mock client
-	header100 := client.getHeader(100)
-	header101 := client.getHeader(101)
+	header100 := client.GetHeader(100)
+	header101 := client.GetHeader(101)
 
 	// Pre-populate DB with block 100
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
 		Number: 100, Hash: header100.Hash, ParentHash: header100.ParentHash,
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1357,7 +1025,7 @@ type mockFailingClient struct {
 
 func newMockFailingClient() *mockFailingClient {
 	return &mockFailingClient{
-		mockBlockchainClient: newMockClient(),
+		mockBlockchainClient: testutil.NewMockBlockchainClient(),
 	}
 }
 
@@ -1624,10 +1292,10 @@ func TestCacheAndPublishBlockData_ErrorHandling(t *testing.T) {
 			client.failGetReceipts = tt.failGetReceipts
 			client.failGetTraces = tt.failGetTraces
 			client.failGetBlobs = tt.failGetBlobs
-			client.addBlock(100, "")
+			client.AddBlock(100, "")
 
 			// Get the actual header and block data from mock client
-			header100 := client.getHeader(100)
+			header100 := client.GetHeader(100)
 			blockData, _ := client.GetBlockDataByHash(ctx, 100, header100.Hash, true)
 
 			cache := newMockFailingCache()
@@ -1641,7 +1309,7 @@ func TestCacheAndPublishBlockData_ErrorHandling(t *testing.T) {
 
 			svc, err := NewLiveService(LiveConfig{
 				EnableBlobs: tt.enableBlobs,
-			}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+			}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 			if err != nil {
 				t.Fatalf("failed to create service: %v", err)
 			}
@@ -1671,15 +1339,15 @@ func TestCacheAndPublishBlockData_WithBlobs_CachesBlobs(t *testing.T) {
 	eventSink := memory.NewEventSink()
 
 	client := newMockFailingClient()
-	client.addBlock(100, "")
+	client.AddBlock(100, "")
 
 	// Get actual header and block data from mock client
-	header100 := client.getHeader(100)
+	header100 := client.GetHeader(100)
 	blockData, _ := client.GetBlockDataByHash(ctx, 100, header100.Hash, true)
 
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: true, // Enable blobs
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1709,15 +1377,15 @@ func TestCacheAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
 	eventSink := memory.NewEventSink()
 
 	client := newMockFailingClient()
-	client.addBlock(100, "")
+	client.AddBlock(100, "")
 
 	// Get actual header and block data from mock client
-	header100 := client.getHeader(100)
+	header100 := client.GetHeader(100)
 	blockData, _ := client.GetBlockDataByHash(ctx, 100, header100.Hash, true)
 
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: false,
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1748,7 +1416,7 @@ func TestStart_SubscribeError_ReturnsError(t *testing.T) {
 
 	subscriber := &failingSubscriber{err: fmt.Errorf("subscribe failed")}
 
-	svc, err := NewLiveService(LiveConfig{}, subscriber, newMockClient(), stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, subscriber, testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1785,7 +1453,7 @@ func TestStart_Success_SetsContext(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1815,7 +1483,7 @@ func TestStop_CancelsContext(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1846,7 +1514,7 @@ func TestStop_BeforeStart_NoError(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	svc, err := NewLiveService(LiveConfig{}, newMockSubscriber(), newMockClient(), stateRepo, cache, eventSink)
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1866,8 +1534,8 @@ func TestProcessHeaders_ContextCancellation(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	subscriber := newMockSubscriber()
-	svc, err := NewLiveService(LiveConfig{}, subscriber, newMockClient(), stateRepo, cache, eventSink)
+	subscriber := testutil.NewMockSubscriber()
+	svc, err := NewLiveService(LiveConfig{}, subscriber, testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1900,8 +1568,8 @@ func TestProcessHeaders_ChannelClosed(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	subscriber := newMockSubscriber()
-	svc, err := NewLiveService(LiveConfig{}, subscriber, newMockClient(), stateRepo, cache, eventSink)
+	subscriber := testutil.NewMockSubscriber()
+	svc, err := NewLiveService(LiveConfig{}, subscriber, testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1916,10 +1584,7 @@ func TestProcessHeaders_ChannelClosed(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Close the subscriber's channel - should trigger the !ok branch
-	subscriber.mu.Lock()
-	subscriber.closed = true
-	close(subscriber.headers)
-	subscriber.mu.Unlock()
+	_ = subscriber.Unsubscribe()
 
 	// Give processHeaders time to exit
 	time.Sleep(10 * time.Millisecond)
@@ -1933,21 +1598,12 @@ func TestProcessBlock_WithMetrics_RecordsReorg(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	client := newMockClient()
+	client := testutil.NewMockBlockchainClient()
 	// Set up chain: 98 -> 99
-	client.blocks[98] = blockTestData{
-		header: outbound.BlockHeader{Number: "0x62", Hash: "0x98", ParentHash: "0x97"},
-	}
-	client.blocks[99] = blockTestData{
-		header: outbound.BlockHeader{Number: "0x63", Hash: "0x99", ParentHash: "0x98"},
-	}
+	client.SetBlockHeader(98, "0x98", "0x97")
+	client.SetBlockHeader(99, "0x99", "0x98")
 	// Add block 100 with alt hash for the reorg
-	client.blocks[100] = blockTestData{
-		header:   outbound.BlockHeader{Number: "0x64", Hash: "0x100_alt", ParentHash: "0x99", Timestamp: "0x0"},
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
+	client.SetBlockHeader(100, "0x100_alt", "0x99")
 
 	metrics := &mockMetrics{}
 
@@ -1966,7 +1622,7 @@ func TestProcessBlock_WithMetrics_RecordsReorg(t *testing.T) {
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: false,
 		Metrics:     metrics,
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2009,10 +1665,10 @@ func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	client := newMockClient()
+	client := testutil.NewMockBlockchainClient()
 	// Set up error for fetching parent
-	client.getByHashErr = fmt.Errorf("network error")
-	client.getByHashErrFor = "0xunknown_parent"
+	client.HashLookupErr = fmt.Errorf("network error")
+	client.HashLookupErrFor = "0xunknown_parent"
 
 	// Pre-populate DB with block
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
@@ -2021,7 +1677,7 @@ func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
 
 	svc, err := NewLiveService(LiveConfig{
 		FinalityBlockCount: 10,
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2052,8 +1708,8 @@ func TestProcessHeaders_LogsErrorOnProcessBlockFailure(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	subscriber := newMockSubscriber()
-	svc, err := NewLiveService(LiveConfig{}, subscriber, newMockClient(), stateRepo, cache, eventSink)
+	subscriber := testutil.NewMockSubscriber()
+	svc, err := NewLiveService(LiveConfig{}, subscriber, testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2068,7 +1724,7 @@ func TestProcessHeaders_LogsErrorOnProcessBlockFailure(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Send a header with invalid block number - this will cause processBlock to fail
-	subscriber.sendHeader(outbound.BlockHeader{
+	subscriber.SendHeader(outbound.BlockHeader{
 		Number:     "invalid_hex",
 		Hash:       "0x123",
 		ParentHash: "0x122",
@@ -2084,11 +1740,11 @@ func TestProcessBlock_FetchAndPublishError_ReturnsError(t *testing.T) {
 	eventSink := memory.NewEventSink()
 
 	// Client with no block data - will cause fetch to fail
-	client := newMockClient()
+	client := testutil.NewMockBlockchainClient()
 
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: false,
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2126,25 +1782,15 @@ func TestProcessBlock_VersionIsCorrectAfterReorg(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	client := newMockClient()
+	client := testutil.NewMockBlockchainClient()
 	// Add block 99 to serve as the common ancestor during reorg walk
-	client.blocks[99] = blockTestData{
-		header:   outbound.BlockHeader{Number: "0x63", Hash: "0x99", ParentHash: "0x98", Timestamp: "0x0"},
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
+	client.SetBlockHeader(99, "0x99", "0x98")
 	// Add block data for fetching with specific hash
-	client.blocks[100] = blockTestData{
-		header:   outbound.BlockHeader{Number: "0x64", Hash: "0x100_new", ParentHash: "0x99", Timestamp: "0x0"},
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
+	client.SetBlockHeader(100, "0x100_new", "0x99")
 
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: false,
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2213,25 +1859,15 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	client := newMockClient()
+	client := testutil.NewMockBlockchainClient()
 	// Add block 99 to serve as common ancestor during reorg walk
-	client.blocks[99] = blockTestData{
-		header:   outbound.BlockHeader{Number: "0x63", Hash: "0x99", ParentHash: "0x98", Timestamp: "0x0"},
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
+	client.SetBlockHeader(99, "0x99", "0x98")
 	// Add block data for fetching - we need blocks with specific hashes for the v0 and v2 cases
-	client.blocks[100] = blockTestData{
-		header:   outbound.BlockHeader{Number: "0x64", Hash: "0x100_v0", ParentHash: "0x99", Timestamp: "0x0"},
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
+	client.SetBlockHeader(100, "0x100_v0", "0x99")
 
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: false,
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2336,18 +1972,18 @@ func TestFetchBlockData_ReorgBetweenHeaderAndFetch(t *testing.T) {
 	ctx := context.Background()
 
 	// Setup
-	client := newMockClient()
+	client := testutil.NewMockBlockchainClient()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
 	// Add a base block chain including block 100 with a specific hash
 	for i := int64(99); i <= 100; i++ {
-		client.addBlock(i, "")
+		client.AddBlock(i, "")
 	}
 
 	// Get the hash that was generated for block 100
-	block100Header := client.getHeader(100)
+	block100Header := client.GetHeader(100)
 	expectedHash := block100Header.Hash
 
 	config := LiveConfig{
@@ -2357,7 +1993,7 @@ func TestFetchBlockData_ReorgBetweenHeaderAndFetch(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2406,13 +2042,13 @@ func TestFetchBlockData_ByHashReturnsErrorWhenBlockNotFound(t *testing.T) {
 	ctx := context.Background()
 
 	// Setup
-	client := newMockClient()
+	client := testutil.NewMockBlockchainClient()
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
 	// Add a base block chain but NOT block 100
-	client.addBlock(99, "")
+	client.AddBlock(99, "")
 
 	config := LiveConfig{
 		ChainID:            1,
@@ -2421,7 +2057,7 @@ func TestFetchBlockData_ByHashReturnsErrorWhenBlockNotFound(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2470,7 +2106,7 @@ func TestFetchReceiptsTracesBlobsByHash(t *testing.T) {
 
 	// Create a mock client that tracks which methods are called
 	client := &mockClientWithHashTracking{
-		mockBlockchainClient: newMockClient(),
+		mockBlockchainClient: testutil.NewMockBlockchainClient(),
 		fetchedByHash:        make(map[string][]string),
 	}
 	stateRepo := newMockStateRepo()
@@ -2478,10 +2114,10 @@ func TestFetchReceiptsTracesBlobsByHash(t *testing.T) {
 	eventSink := memory.NewEventSink()
 
 	// Add block 99 and 100
-	client.addBlock(99, "")
-	client.addBlock(100, "")
+	client.AddBlock(99, "")
+	client.AddBlock(100, "")
 
-	block100Header := client.getHeader(100)
+	block100Header := client.GetHeader(100)
 	expectedHash := block100Header.Hash
 
 	config := LiveConfig{
@@ -2491,7 +2127,7 @@ func TestFetchReceiptsTracesBlobsByHash(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2617,7 +2253,7 @@ func TestHashComparisonCaseInsensitive(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2875,11 +2511,11 @@ func TestProcessBlock_RollsBackInMemoryChainOnDBFailure(t *testing.T) {
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
-	client := newMockClient()
+	client := testutil.NewMockBlockchainClient()
 
 	// Add blocks for RPC lookups
-	client.addBlock(99, "")
-	client.addBlock(100, "")
+	client.AddBlock(99, "")
+	client.AddBlock(100, "")
 
 	config := LiveConfig{
 		ChainID:            1,
@@ -2888,14 +2524,14 @@ func TestProcessBlock_RollsBackInMemoryChainOnDBFailure(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	svc, err := NewLiveService(config, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
 	svc.ctx = ctx
 
 	// Get block 100's header so we know what parent hash it expects
-	block100Header := client.getHeader(100)
+	block100Header := client.GetHeader(100)
 	block99Hash := block100Header.ParentHash
 
 	// Pre-populate DB with block 99
@@ -3038,14 +2674,14 @@ func TestCacheAndPublishBlockData_CachesAllDataBeforePublishing(t *testing.T) {
 	eventSink := newMockOrderTrackingEventSink()
 
 	client := newMockFailingClient()
-	client.addBlock(100, "")
+	client.AddBlock(100, "")
 
-	header100 := client.getHeader(100)
+	header100 := client.GetHeader(100)
 	blockData, _ := client.GetBlockDataByHash(ctx, 100, header100.Hash, true)
 
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: true, // Enable blobs to test all 4 cache operations
-	}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -3135,13 +2771,13 @@ func TestCacheAndPublishBlockData_NoPublishOnCacheFailure(t *testing.T) {
 			eventSink := memory.NewEventSink()
 
 			client := newMockFailingClient()
-			client.addBlock(100, "")
-			header100 := client.getHeader(100)
+			client.AddBlock(100, "")
+			header100 := client.GetHeader(100)
 			blockData, _ := client.GetBlockDataByHash(ctx, 100, header100.Hash, true)
 
 			svc, err := NewLiveService(LiveConfig{
 				EnableBlobs: true,
-			}, newMockSubscriber(), client, stateRepo, cache, eventSink)
+			}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 			if err != nil {
 				t.Fatalf("failed to create service: %v", err)
 			}
@@ -3183,8 +2819,8 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
-	subscriber := newMockSubscriber()
-	client := newMockClient()
+	subscriber := testutil.NewMockSubscriber()
+	client := testutil.NewMockBlockchainClient()
 
 	// Set up initial DB state: blocks 95-100 (what service will load on Start)
 	initialBlocks := []outbound.BlockState{
@@ -3247,7 +2883,7 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 
 	// Send a reorg block via the subscriber (simulating WebSocket notification)
 	// Block 99_new has parent 0xblock97, which orphans blocks 98, 99, 100
-	subscriber.sendHeader(outbound.BlockHeader{
+	subscriber.SendHeader(outbound.BlockHeader{
 		Number:     "0x63", // 99
 		Hash:       "0xblock99_new",
 		ParentHash: "0xblock97", // Forks at 97
@@ -3320,7 +2956,7 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 
 	// Send block 94_alt - if memory has block 93 (from DB reload), this should work
 	// If memory doesn't have block 93 (bug), it will fail during reorg walk
-	subscriber.sendHeader(outbound.BlockHeader{
+	subscriber.SendHeader(outbound.BlockHeader{
 		Number:     "0x5e", // 94
 		Hash:       "0xblock94_alt",
 		ParentHash: "0xblock93",
@@ -3390,17 +3026,17 @@ func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
 	eventSink := memory.NewEventSink()
 
 	// Create a mock client that serves specific blocks
-	client := newMockClient()
+	client := testutil.NewMockBlockchainClient()
 
 	// Build a chain: 98 -> 99 -> 100 -> 101 -> 102 -> 103 -> 104
 	for i := int64(98); i <= 104; i++ {
-		client.addBlock(i, "")
+		client.AddBlock(i, "")
 	}
 
 	// Get block 101's hash BEFORE any overwriting - this is the common ancestor
-	block101 := client.getHeader(101)
+	block101 := client.GetHeader(101)
 	// Save original block 102's hash for later verification
-	originalBlock102 := client.getHeader(102)
+	originalBlock102 := client.GetHeader(102)
 
 	// Create the reorg block: 102' with same parent as 102 (parent = hash of 101)
 	reorgBlock := outbound.BlockHeader{
@@ -3413,7 +3049,7 @@ func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
 	// Set up initial DB state: ONLY blocks 98, 99, 100
 	// This is what LiveService will load on startup
 	for i := int64(98); i <= 100; i++ {
-		h := client.getHeader(i)
+		h := client.GetHeader(i)
 		_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
 			Number:     i,
 			Hash:       h.Hash,
@@ -3423,7 +3059,7 @@ func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
 	}
 
 	// Create and start LiveService - it loads blocks 98, 99, 100 into memory
-	subscriber := newMockSubscriber()
+	subscriber := testutil.NewMockSubscriber()
 	svc, err := NewLiveService(LiveConfig{
 		Logger:             slog.Default(),
 		FinalityBlockCount: 64,
@@ -3447,9 +3083,9 @@ func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
 	// IMPORTANT: Use the ORIGINAL block headers, not from client (which will be overwritten with reorg block)
 	// (in the old implementation, these were NOT in memory, causing the bug)
 	backfillBlocks := []outbound.BlockState{
-		{Number: 101, Hash: block101.Hash, ParentHash: client.getHeader(100).Hash},
+		{Number: 101, Hash: block101.Hash, ParentHash: client.GetHeader(100).Hash},
 		{Number: 102, Hash: originalBlock102.Hash, ParentHash: block101.Hash},
-		{Number: 103, Hash: client.getHeader(103).Hash, ParentHash: originalBlock102.Hash},
+		{Number: 103, Hash: client.GetHeader(103).Hash, ParentHash: originalBlock102.Hash},
 	}
 	for _, b := range backfillBlocks {
 		b.ReceivedAt = time.Now().Unix()
@@ -3457,8 +3093,8 @@ func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
 	}
 
 	// LiveService receives block 104 via WebSocket
-	h104 := client.getHeader(104)
-	subscriber.sendHeader(h104)
+	h104 := client.GetHeader(104)
+	subscriber.SendHeader(h104)
 
 	// Wait for block 104 to be processed
 	time.Sleep(100 * time.Millisecond)
@@ -3481,7 +3117,7 @@ func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
 	client.mu.Unlock()
 
 	// Now send the reorg block (102') via WebSocket
-	subscriber.sendHeader(reorgBlock)
+	subscriber.SendHeader(reorgBlock)
 
 	// Wait for processing
 	time.Sleep(200 * time.Millisecond)
@@ -3505,7 +3141,7 @@ func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
 	// Note: We use saved hashes because client.blocks[102] was overwritten with reorg block
 	orphanedHashes := map[int64]string{
 		102: originalBlock102.Hash,
-		103: client.getHeader(103).Hash,
+		103: client.GetHeader(103).Hash,
 		104: h104.Hash,
 	}
 	for blockNum, hash := range orphanedHashes {

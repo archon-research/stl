@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"math/big"
 	"strings"
 	"sync"
@@ -23,10 +21,6 @@ import (
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
-
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 // mockRepo implements outbound.OnchainPriceRepository for testing.
 type mockRepo struct {
@@ -107,21 +101,6 @@ func (m *mockHeaderFetcher) HeaderByNumber(ctx context.Context, number *big.Int)
 	return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
 }
 
-// mockMulticaller implements outbound.Multicaller for testing.
-type mockMulticaller struct {
-	executeFn func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error)
-}
-
-func (m *mockMulticaller) Execute(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-	if m.executeFn != nil {
-		return m.executeFn(ctx, calls, blockNumber)
-	}
-	return nil, errors.New("Execute not mocked")
-}
-
-func (m *mockMulticaller) Address() common.Address {
-	return common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11")
-}
 
 // abiPackAddress packs an address as the return data for getPriceOracle.
 func abiPackAddress(t *testing.T, addr common.Address) []byte {
@@ -230,7 +209,7 @@ func blockDependentPrices(t *testing.T) func(ctx context.Context, calls []outbou
 func TestNewService(t *testing.T) {
 	validFetcher := &mockHeaderFetcher{}
 	validFactory := func() (outbound.Multicaller, error) {
-		return &mockMulticaller{}, nil
+		return &testutil.MockMulticaller{}, nil
 	}
 	validRepo := &mockRepo{}
 	validTokenAddrs := defaultTokenAddresses()
@@ -253,7 +232,7 @@ func TestNewService(t *testing.T) {
 				Concurrency:  2,
 				BatchSize:    50,
 				OracleSource: "test-oracle",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
@@ -311,7 +290,7 @@ func TestNewService(t *testing.T) {
 			name: "success with negative concurrency uses default",
 			config: Config{
 				Concurrency: -5,
-				Logger:      discardLogger(),
+				Logger:      testutil.DiscardLogger(),
 			},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
@@ -329,7 +308,7 @@ func TestNewService(t *testing.T) {
 			name: "success with negative batch size uses default",
 			config: Config{
 				BatchSize: -1,
-				Logger:    discardLogger(),
+				Logger:    testutil.DiscardLogger(),
 			},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
@@ -345,7 +324,7 @@ func TestNewService(t *testing.T) {
 		},
 		{
 			name:           "error nil headerFetcher",
-			config:         Config{Logger: discardLogger()},
+			config:         Config{Logger: testutil.DiscardLogger()},
 			headerFetcher:  nil,
 			newMulticaller: validFactory,
 			repo:           validRepo,
@@ -355,7 +334,7 @@ func TestNewService(t *testing.T) {
 		},
 		{
 			name:           "error nil newMulticaller",
-			config:         Config{Logger: discardLogger()},
+			config:         Config{Logger: testutil.DiscardLogger()},
 			headerFetcher:  validFetcher,
 			newMulticaller: nil,
 			repo:           validRepo,
@@ -365,7 +344,7 @@ func TestNewService(t *testing.T) {
 		},
 		{
 			name:           "error nil repo",
-			config:         Config{Logger: discardLogger()},
+			config:         Config{Logger: testutil.DiscardLogger()},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
 			repo:           nil,
@@ -375,7 +354,7 @@ func TestNewService(t *testing.T) {
 		},
 		{
 			name:           "error empty tokenAddresses",
-			config:         Config{Logger: discardLogger()},
+			config:         Config{Logger: testutil.DiscardLogger()},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
 			repo:           validRepo,
@@ -385,7 +364,7 @@ func TestNewService(t *testing.T) {
 		},
 		{
 			name:           "error nil tokenAddresses",
-			config:         Config{Logger: discardLogger()},
+			config:         Config{Logger: testutil.DiscardLogger()},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
 			repo:           validRepo,
@@ -455,7 +434,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -473,7 +452,7 @@ func TestRun(t *testing.T) {
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) {
-					return &mockMulticaller{executeFn: blockDependentPrices(t)}, nil
+					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
 			wantErr: false,
@@ -494,7 +473,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -514,8 +493,8 @@ func TestRun(t *testing.T) {
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) {
-					return &mockMulticaller{
-						executeFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+					return &testutil.MockMulticaller{
+						ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 							bn := blockNumber.Int64()
 							if bn < 107 || bn > 109 {
 								t.Errorf("unexpected block number %d, expected 107-109", bn)
@@ -552,7 +531,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -586,7 +565,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  10,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -604,7 +583,7 @@ func TestRun(t *testing.T) {
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) {
-					return &mockMulticaller{executeFn: blockDependentPrices(t)}, nil
+					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
 			wantErr: false,
@@ -625,7 +604,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -643,8 +622,8 @@ func TestRun(t *testing.T) {
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) {
-					return &mockMulticaller{
-						executeFn: defaultMulticallExecute(t, standardPrices, nil),
+					return &testutil.MockMulticaller{
+						ExecuteFn: defaultMulticallExecute(t, standardPrices, nil),
 					}, nil
 				}
 			},
@@ -671,7 +650,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -682,7 +661,7 @@ func TestRun(t *testing.T) {
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) { return &mockMulticaller{}, nil }
+				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
 			wantErr:     true,
 			errContains: "getting oracle source",
@@ -695,7 +674,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -709,7 +688,7 @@ func TestRun(t *testing.T) {
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) { return &mockMulticaller{}, nil }
+				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
 			wantErr:     true,
 			errContains: "getting enabled assets",
@@ -722,7 +701,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -736,7 +715,7 @@ func TestRun(t *testing.T) {
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) { return &mockMulticaller{}, nil }
+				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
 			wantErr:     true,
 			errContains: "no enabled assets",
@@ -749,7 +728,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -766,7 +745,7 @@ func TestRun(t *testing.T) {
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) { return &mockMulticaller{}, nil }
+				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
 			wantErr:     true,
 			errContains: "token address not found for token_id 999",
@@ -779,7 +758,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -792,7 +771,7 @@ func TestRun(t *testing.T) {
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) { return &mockMulticaller{}, nil }
+				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
 			wantErr:     true,
 			errContains: "getting latest block",
@@ -805,7 +784,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    3, // small batch size forces flush during for loop
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -823,7 +802,7 @@ func TestRun(t *testing.T) {
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) {
-					return &mockMulticaller{executeFn: blockDependentPrices(t)}, nil
+					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
 			wantErr: false,
@@ -844,7 +823,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    3, // small batch triggers mid-loop flush
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -865,7 +844,7 @@ func TestRun(t *testing.T) {
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) {
-					return &mockMulticaller{executeFn: blockDependentPrices(t)}, nil
+					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
 			wantErr:     true,
@@ -879,7 +858,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -900,7 +879,7 @@ func TestRun(t *testing.T) {
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) {
-					return &mockMulticaller{executeFn: blockDependentPrices(t)}, nil
+					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
 			wantErr:     true,
@@ -914,7 +893,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -945,7 +924,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -963,8 +942,8 @@ func TestRun(t *testing.T) {
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) {
-					return &mockMulticaller{
-						executeFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+					return &testutil.MockMulticaller{
+						ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 							bn := blockNumber.Int64()
 							// Fail on blocks 101 and 103
 							if bn == 101 || bn == 103 {
@@ -1002,7 +981,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -1024,7 +1003,7 @@ func TestRun(t *testing.T) {
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) {
-					return &mockMulticaller{executeFn: blockDependentPrices(t)}, nil
+					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
 			wantErr: false,
@@ -1050,7 +1029,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -1068,8 +1047,8 @@ func TestRun(t *testing.T) {
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) {
-					return &mockMulticaller{
-						executeFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+					return &testutil.MockMulticaller{
+						ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 							bn := blockNumber.Int64()
 							if bn == 101 {
 								// Return only 1 price for 2 tokens → mismatch
@@ -1108,7 +1087,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -1126,8 +1105,8 @@ func TestRun(t *testing.T) {
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) {
-					return &mockMulticaller{
-						executeFn: defaultMulticallExecute(t, []*big.Int{big.NewInt(100_000_000), big.NewInt(250_000_000_000)}, nil),
+					return &testutil.MockMulticaller{
+						ExecuteFn: defaultMulticallExecute(t, []*big.Int{big.NewInt(100_000_000), big.NewInt(250_000_000_000)}, nil),
 					}, nil
 				}
 			},
@@ -1150,7 +1129,7 @@ func TestRun(t *testing.T) {
 				Concurrency:  1,
 				BatchSize:    100,
 				OracleSource: "sparklend",
-				Logger:       discardLogger(),
+				Logger:       testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -1168,7 +1147,7 @@ func TestRun(t *testing.T) {
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) {
-					return &mockMulticaller{executeFn: blockDependentPrices(t)}, nil
+					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
 			wantErr: false,
@@ -1248,8 +1227,8 @@ func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 	}
 
 	mcFactory := func() (outbound.Multicaller, error) {
-		return &mockMulticaller{
-			executeFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		return &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				bn := blockNumber.Int64()
 				prices := pricesByBlock[bn]
 				return multicallResult(t, calls, prices), nil
@@ -1261,7 +1240,7 @@ func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 		Concurrency:  1,
 		BatchSize:    100,
 		OracleSource: "sparklend",
-		Logger:       discardLogger(),
+		Logger:       testutil.DiscardLogger(),
 	}, header, mcFactory, repo, defaultTokenAddresses())
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -1335,8 +1314,8 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 	rawPrices := []*big.Int{big.NewInt(100_000_000), big.NewInt(250_000_000_000)}
 
 	mcFactory := func() (outbound.Multicaller, error) {
-		return &mockMulticaller{
-			executeFn: defaultMulticallExecute(t, rawPrices, nil),
+		return &testutil.MockMulticaller{
+			ExecuteFn: defaultMulticallExecute(t, rawPrices, nil),
 		}, nil
 	}
 
@@ -1344,7 +1323,7 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 		Concurrency:  1,
 		BatchSize:    100,
 		OracleSource: "sparklend",
-		Logger:       discardLogger(),
+		Logger:       testutil.DiscardLogger(),
 	}, header, mcFactory, repo, defaultTokenAddresses())
 	if err != nil {
 		t.Fatalf("NewService: %v", err)

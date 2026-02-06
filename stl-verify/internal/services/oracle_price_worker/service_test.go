@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
 	"math/big"
 	"sync"
 	"testing"
@@ -18,6 +16,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -112,40 +111,15 @@ func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTok
 	return nil
 }
 
-// mockMulticaller implements outbound.Multicaller.
-type mockMulticaller struct {
-	mu           sync.Mutex
-	executeFunc  func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error)
-	executeCalls int
-}
-
-func (m *mockMulticaller) Execute(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-	m.mu.Lock()
-	m.executeCalls++
-	m.mu.Unlock()
-	if m.executeFunc != nil {
-		return m.executeFunc(ctx, calls, blockNumber)
-	}
-	return nil, fmt.Errorf("not implemented")
-}
-
-func (m *mockMulticaller) Address() common.Address {
-	return common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 func validConfig() Config {
 	return Config{
 		QueueURL:     "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
 		OracleSource: "sparklend",
-		Logger:       discardLogger(),
+		Logger:       testutil.DiscardLogger(),
 	}
 }
 
@@ -199,12 +173,12 @@ func packPricesResult(prices []*big.Int) ([]byte, error) {
 // used by FetchOraclePrices:
 //  1. Initial 2-call batch: getPriceOracle + getAssetsPrices (when cached addr matches, prices come from call 2)
 //  2. Retry 1-call batch: getAssetsPrices only (when cached addr differs from actual oracle addr)
-func newOracleMulticaller(oracleAddr common.Address, prices []*big.Int) *mockMulticaller {
+func newOracleMulticaller(oracleAddr common.Address, prices []*big.Int) *testutil.MockMulticaller {
 	addrData, _ := packOracleAddrResult(oracleAddr)
 	pricesData, _ := packPricesResult(prices)
 
-	return &mockMulticaller{
-		executeFunc: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	return &testutil.MockMulticaller{
+		ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 			if len(calls) == 2 {
 				// Initial batch: getPriceOracle + getAssetsPrices
 				return []outbound.Result{
@@ -245,7 +219,7 @@ func strPtr(s string) *string {
 
 func TestNewService(t *testing.T) {
 	sqsClient := &mockSQSClient{}
-	multicaller := &mockMulticaller{}
+	multicaller := &testutil.MockMulticaller{}
 	repo := &mockRepo{}
 	tokenAddrs := validTokenAddresses()
 
@@ -337,7 +311,7 @@ func TestNewService(t *testing.T) {
 			name: "error empty queueURL",
 			config: Config{
 				QueueURL: "",
-				Logger:   discardLogger(),
+				Logger:   testutil.DiscardLogger(),
 			},
 			sqsClient:      sqsClient,
 			multicaller:    multicaller,
@@ -731,7 +705,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 			},
 		}
 
-		mc := &mockMulticaller{}
+		mc := &testutil.MockMulticaller{}
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
@@ -777,7 +751,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 			},
 		}
 
-		mc := &mockMulticaller{}
+		mc := &testutil.MockMulticaller{}
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
@@ -835,7 +809,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 			},
 		}
 
-		mc := &mockMulticaller{}
+		mc := &testutil.MockMulticaller{}
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
@@ -900,7 +874,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 			},
 		}
 
-		mc := &mockMulticaller{}
+		mc := &testutil.MockMulticaller{}
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
@@ -959,8 +933,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 			},
 		}
 
-		mc := &mockMulticaller{
-			executeFunc: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		mc := &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 				return nil, fmt.Errorf("RPC node timeout")
 			},
 		}
@@ -1305,7 +1279,7 @@ func TestStop(t *testing.T) {
 	t.Run("stop without start (cancel is nil)", func(t *testing.T) {
 		repo := &mockRepo{}
 		sqsClient := &mockSQSClient{}
-		mc := &mockMulticaller{}
+		mc := &testutil.MockMulticaller{}
 
 		svc, err := NewService(validConfig(), sqsClient, mc, repo, validTokenAddresses())
 		if err != nil {
@@ -1337,7 +1311,7 @@ func TestStop(t *testing.T) {
 				return nil, ctx.Err()
 			},
 		}
-		mc := &mockMulticaller{}
+		mc := &testutil.MockMulticaller{}
 
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond

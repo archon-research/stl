@@ -4,93 +4,18 @@ package oracle_backfill
 
 import (
 	"context"
-	"encoding/hex"
-	"io"
-	"log/slog"
 	"math/big"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
-
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
-
-// hexToBytes converts a hex string (with or without 0x prefix) to bytes.
-func hexToBytes(s string) ([]byte, error) {
-	s = strings.TrimPrefix(s, "0x")
-	s = strings.TrimPrefix(s, "0X")
-	return hex.DecodeString(s)
-}
-
-// ---------------------------------------------------------------------------
-// Seed helpers
-// ---------------------------------------------------------------------------
-
-// seedToken inserts a token into the token table. Returns the auto-generated ID.
-func seedToken(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int, address, symbol string, decimals int) int64 {
-	t.Helper()
-	addressBytes, err := hexToBytes(address)
-	if err != nil {
-		t.Fatalf("failed to parse address %s: %v", address, err)
-	}
-
-	var id int64
-	err = pool.QueryRow(ctx, `
-		INSERT INTO token (chain_id, address, symbol, decimals, updated_at)
-		VALUES ($1, $2, $3, $4, NOW())
-		ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol
-		RETURNING id
-	`, chainID, addressBytes, symbol, decimals).Scan(&id)
-	if err != nil {
-		t.Fatalf("failed to insert test token %s: %v", symbol, err)
-	}
-	return id
-}
-
-// seedOracleSource inserts an oracle source. Returns the auto-generated ID.
-func seedOracleSource(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, displayName string, chainID int, poolAddressProvider string) int64 {
-	t.Helper()
-	providerBytes, err := hexToBytes(poolAddressProvider)
-	if err != nil {
-		t.Fatalf("failed to parse pool address provider %s: %v", poolAddressProvider, err)
-	}
-
-	var id int64
-	err = pool.QueryRow(ctx, `
-		INSERT INTO oracle_source (name, display_name, chain_id, pool_address_provider, deployment_block, enabled)
-		VALUES ($1, $2, $3, $4, 100, true)
-		ON CONFLICT (name) DO UPDATE SET display_name = EXCLUDED.display_name
-		RETURNING id
-	`, name, displayName, chainID, providerBytes).Scan(&id)
-	if err != nil {
-		t.Fatalf("failed to insert oracle source %s: %v", name, err)
-	}
-	return id
-}
-
-// seedOracleAsset inserts an oracle asset link.
-func seedOracleAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleSourceID, tokenID int64) {
-	t.Helper()
-	_, err := pool.Exec(ctx, `
-		INSERT INTO oracle_asset (oracle_source_id, token_id, enabled)
-		VALUES ($1, $2, true)
-		ON CONFLICT (oracle_source_id, token_id) DO NOTHING
-	`, oracleSourceID, tokenID)
-	if err != nil {
-		t.Fatalf("failed to insert oracle asset (source=%d, token=%d): %v", oracleSourceID, tokenID, err)
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Integration test mock helpers (blockchain layer)
@@ -111,8 +36,8 @@ func integrationMockHeaderFetcher() *mockHeaderFetcher {
 func integrationMockMulticallFactory(t *testing.T, numTokens int) MulticallFactory {
 	t.Helper()
 	return func() (outbound.Multicaller, error) {
-		return &mockMulticaller{
-			executeFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		return &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				bn := blockNumber.Int64()
 				prices := make([]*big.Int, numTokens)
 				for i := range numTokens {
@@ -135,8 +60,8 @@ func integrationMockMulticallFactory(t *testing.T, numTokens int) MulticallFacto
 func integrationMockMulticallFactoryConstant(t *testing.T, prices []*big.Int) MulticallFactory {
 	t.Helper()
 	return func() (outbound.Multicaller, error) {
-		return &mockMulticaller{
-			executeFn: defaultMulticallExecute(t, prices, nil),
+		return &testutil.MockMulticaller{
+			ExecuteFn: defaultMulticallExecute(t, prices, nil),
 		}, nil
 	}
 }
@@ -150,7 +75,7 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
 	// Get the oracle source ID seeded by migration
 	var oracleSourceID int64
@@ -294,15 +219,15 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
 	// Use the sparklend source and only two custom tokens (to keep things deterministic)
 	// We create our own oracle source to avoid interference from migration seed data.
-	sourceID := seedOracleSource(t, ctx, pool, "test-oracle", "Test Oracle", 1, "0x0000000000000000000000000000000000000AAA")
-	tokenID1 := seedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000001", "TK1", 18)
-	tokenID2 := seedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000002", "TK2", 18)
-	seedOracleAsset(t, ctx, pool, sourceID, tokenID1)
-	seedOracleAsset(t, ctx, pool, sourceID, tokenID2)
+	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-oracle", "Test Oracle", 1, "0x0000000000000000000000000000000000000AAA")
+	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000001", "TK1", 18)
+	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000002", "TK2", 18)
+	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID2)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000001"),
@@ -386,13 +311,13 @@ func TestIntegration_BackfillRun_ResumeFromLatestBlock(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
-	sourceID := seedOracleSource(t, ctx, pool, "test-resume", "Test Resume", 1, "0x0000000000000000000000000000000000000AAA")
-	tokenID1 := seedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000011", "RSM1", 18)
-	tokenID2 := seedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000012", "RSM2", 18)
-	seedOracleAsset(t, ctx, pool, sourceID, tokenID1)
-	seedOracleAsset(t, ctx, pool, sourceID, tokenID2)
+	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-resume", "Test Resume", 1, "0x0000000000000000000000000000000000000AAA")
+	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000011", "RSM1", 18)
+	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000012", "RSM2", 18)
+	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID2)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000011"),
@@ -520,11 +445,11 @@ func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
-	sourceID := seedOracleSource(t, ctx, pool, "test-idempotent", "Test Idempotent", 1, "0x0000000000000000000000000000000000000AAA")
-	tokenID1 := seedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000021", "IDP1", 18)
-	seedOracleAsset(t, ctx, pool, sourceID, tokenID1)
+	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-idempotent", "Test Idempotent", 1, "0x0000000000000000000000000000000000000AAA")
+	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000021", "IDP1", 18)
+	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000021"),
@@ -596,11 +521,11 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
-	sourceID := seedOracleSource(t, ctx, pool, "test-latest-block", "Test Latest Block", 1, "0x0000000000000000000000000000000000000AAA")
-	tokenID1 := seedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000031", "LB1", 18)
-	seedOracleAsset(t, ctx, pool, sourceID, tokenID1)
+	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-latest-block", "Test Latest Block", 1, "0x0000000000000000000000000000000000000AAA")
+	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000031", "LB1", 18)
+	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000031"),
@@ -657,13 +582,13 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
-	logger := testLogger()
+	logger := testutil.DiscardLogger()
 
-	sourceID := seedOracleSource(t, ctx, pool, "test-selective", "Test Selective", 1, "0x0000000000000000000000000000000000000AAA")
-	tokenID1 := seedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000041", "SC1", 18)
-	tokenID2 := seedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000042", "SC2", 18)
-	seedOracleAsset(t, ctx, pool, sourceID, tokenID1)
-	seedOracleAsset(t, ctx, pool, sourceID, tokenID2)
+	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-selective", "Test Selective", 1, "0x0000000000000000000000000000000000000AAA")
+	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000041", "SC1", 18)
+	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000042", "SC2", 18)
+	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID2)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000041"),
@@ -684,8 +609,8 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 	}
 
 	mcFactory := func() (outbound.Multicaller, error) {
-		return &mockMulticaller{
-			executeFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		return &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				prices := pricesByBlock[blockNumber.Int64()]
 				return multicallResult(t, calls, prices), nil
 			},

@@ -4,7 +4,6 @@ package offchain_price_fetcher
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -122,7 +121,7 @@ func mockMarketCap(id string) float64 {
 func insertTestToken(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id int64, chainID int, address, symbol string) {
 	t.Helper()
 	// Convert hex address string to bytes (remove 0x prefix)
-	addressBytes, err := hexToBytes(address)
+	addressBytes, err := testutil.HexToBytes(address)
 	if err != nil {
 		t.Fatalf("failed to parse address %s: %v", address, err)
 	}
@@ -135,13 +134,6 @@ func insertTestToken(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id i
 	if err != nil {
 		t.Fatalf("failed to insert test token: %v", err)
 	}
-}
-
-// hexToBytes converts a hex string (with or without 0x prefix) to bytes.
-func hexToBytes(s string) ([]byte, error) {
-	s = strings.TrimPrefix(s, "0x")
-	s = strings.TrimPrefix(s, "0X")
-	return hex.DecodeString(s)
 }
 
 // insertTestPriceAsset links a CoinGecko asset ID to a token.
