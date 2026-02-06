@@ -176,6 +176,7 @@ func defaultAssets() []*entity.OracleAsset {
 }
 
 // packOracleAddrResult builds ABI-encoded return data for getPriceOracle.
+// Uses a testing.T-less wrapper for compatibility with newOracleMulticaller.
 func packOracleAddrResult(oracleAddr common.Address) ([]byte, error) {
 	providerABI, err := abis.GetPoolAddressProviderABI()
 	if err != nil {
@@ -185,6 +186,7 @@ func packOracleAddrResult(oracleAddr common.Address) ([]byte, error) {
 }
 
 // packPricesResult builds ABI-encoded return data for getAssetsPrices.
+// Uses a testing.T-less wrapper for compatibility with newOracleMulticaller.
 func packPricesResult(prices []*big.Int) ([]byte, error) {
 	oracleABI, err := abis.GetSparkLendOracleABI()
 	if err != nil {

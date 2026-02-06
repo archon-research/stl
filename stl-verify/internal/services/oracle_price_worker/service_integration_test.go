@@ -10,8 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -20,106 +18,12 @@ import (
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
-
-// ---------------------------------------------------------------------------
-// Test infrastructure (DB container, migrations, seeding)
-// ---------------------------------------------------------------------------
-
-func createDatabaseContainer(t *testing.T, ctx context.Context) (testcontainers.Container, string) {
-	t.Helper()
-
-	req := testcontainers.ContainerRequest{
-		Image:        "timescale/timescaledb:latest-pg17",
-		ExposedPorts: []string{"5432/tcp"},
-		Env: map[string]string{
-			"POSTGRES_USER":     "test",
-			"POSTGRES_PASSWORD": "test",
-			"POSTGRES_DB":       "testdb",
-		},
-		WaitingFor: wait.ForAll(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(60*time.Second),
-			wait.ForListeningPort("5432/tcp").
-				WithStartupTimeout(60*time.Second),
-		),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		t.Fatalf("failed to start container: %v", err)
-	}
-
-	host, err := container.Host(ctx)
-	if err != nil {
-		t.Fatalf("failed to get container host: %v", err)
-	}
-
-	port, err := container.MappedPort(ctx, "5432")
-	if err != nil {
-		t.Fatalf("failed to get container port: %v", err)
-	}
-
-	dsn := fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
-	return container, dsn
-}
-
-func connectToDatabase(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {
-	t.Helper()
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("failed to connect to database: %v", err)
-	}
-
-	for i := 0; i < 30; i++ {
-		if err := pool.Ping(ctx); err == nil {
-			return pool
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	t.Fatal("timed out waiting for database connection")
-	return nil
-}
-
-func runMigrations(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
-	t.Helper()
-
-	_, currentFile, _, _ := runtime.Caller(0)
-	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../db/migrations")
-	m := migrator.New(pool, migrationsDir)
-	if err := m.ApplyAll(ctx); err != nil {
-		t.Fatalf("failed to apply migrations: %v", err)
-	}
-}
-
-func setupTestDatabase(t *testing.T) (*pgxpool.Pool, func()) {
-	t.Helper()
-	ctx := context.Background()
-
-	container, dsn := createDatabaseContainer(t, ctx)
-	pool := connectToDatabase(t, ctx, dsn)
-	runMigrations(t, ctx, pool)
-
-	cleanup := func() {
-		pool.Close()
-		container.Terminate(ctx)
-	}
-
-	return pool, cleanup
-}
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -288,7 +192,7 @@ func sqsClientWithSequentialMessages(batches [][]sqstypes.Message) *mockSQSClien
 // ---------------------------------------------------------------------------
 
 func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
-	pool, cleanup := setupTestDatabase(t)
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -408,7 +312,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 }
 
 func TestIntegration_WorkerChangeDetection(t *testing.T) {
-	pool, cleanup := setupTestDatabase(t)
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -507,7 +411,7 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 }
 
 func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
-	pool, cleanup := setupTestDatabase(t)
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -606,7 +510,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 }
 
 func TestIntegration_WorkerStartStop(t *testing.T) {
-	pool, cleanup := setupTestDatabase(t)
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -681,7 +585,7 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 }
 
 func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
-	pool, cleanup := setupTestDatabase(t)
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -788,7 +692,7 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 }
 
 func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
-	pool, cleanup := setupTestDatabase(t)
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()

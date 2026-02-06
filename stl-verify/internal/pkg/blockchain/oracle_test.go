@@ -12,6 +12,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // mockMulticaller implements outbound.Multicaller for testing.
@@ -48,25 +49,17 @@ func testABIs(t *testing.T) (*abi.ABI, *abi.ABI) {
 }
 
 // abiPackAddress packs an address as the return data for getPriceOracle.
-func abiPackAddress(t *testing.T, providerABI *abi.ABI, addr common.Address) []byte {
-	t.Helper()
-	args := providerABI.Methods["getPriceOracle"].Outputs
-	data, err := args.Pack(addr)
-	if err != nil {
-		t.Fatalf("packing address: %v", err)
-	}
-	return data
+// The providerABI parameter is accepted for call-site compatibility but unused;
+// the ABI is loaded internally by testutil.
+func abiPackAddress(t *testing.T, _ *abi.ABI, addr common.Address) []byte {
+	return testutil.PackOracleAddress(t, addr)
 }
 
 // abiPackPrices packs a slice of *big.Int as the return data for getAssetsPrices.
-func abiPackPrices(t *testing.T, oracleABI *abi.ABI, prices []*big.Int) []byte {
-	t.Helper()
-	args := oracleABI.Methods["getAssetsPrices"].Outputs
-	data, err := args.Pack(prices)
-	if err != nil {
-		t.Fatalf("packing prices: %v", err)
-	}
-	return data
+// The oracleABI parameter is accepted for call-site compatibility but unused;
+// the ABI is loaded internally by testutil.
+func abiPackPrices(t *testing.T, _ *abi.ABI, prices []*big.Int) []byte {
+	return testutil.PackAssetPrices(t, prices)
 }
 
 func TestFetchOraclePrices(t *testing.T) {

@@ -16,8 +16,8 @@ import (
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -125,30 +125,12 @@ func (m *mockMulticaller) Address() common.Address {
 
 // abiPackAddress packs an address as the return data for getPriceOracle.
 func abiPackAddress(t *testing.T, addr common.Address) []byte {
-	t.Helper()
-	providerABI, err := abis.GetPoolAddressProviderABI()
-	if err != nil {
-		t.Fatalf("loading provider ABI: %v", err)
-	}
-	data, err := providerABI.Methods["getPriceOracle"].Outputs.Pack(addr)
-	if err != nil {
-		t.Fatalf("packing address: %v", err)
-	}
-	return data
+	return testutil.PackOracleAddress(t, addr)
 }
 
 // abiPackPrices packs a slice of *big.Int as the return data for getAssetsPrices.
 func abiPackPrices(t *testing.T, prices []*big.Int) []byte {
-	t.Helper()
-	oracleABI, err := abis.GetSparkLendOracleABI()
-	if err != nil {
-		t.Fatalf("loading oracle ABI: %v", err)
-	}
-	data, err := oracleABI.Methods["getAssetsPrices"].Outputs.Pack(prices)
-	if err != nil {
-		t.Fatalf("packing prices: %v", err)
-	}
-	return data
+	return testutil.PackAssetPrices(t, prices)
 }
 
 // defaultOracleSource returns a standard OracleSource for testing.
