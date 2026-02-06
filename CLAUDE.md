@@ -94,7 +94,14 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 - **Constructors**: Use `New` prefix
 - **Files**: snake_case
 - **Errors**: Wrap with context: `fmt.Errorf("doing X: %w", err)`
-- **Testing**: Table-driven tests, mock outbound ports for unit tests
+- **Testing**: 
+    Table-driven tests, mock outbound ports for unit tests.
+    Services and main.go files should have 100% coverage. Think very hard about edge cases, it is mission critical that code is correct and robust.
+    In services, ONLY test the public api. Dont test internals if you can avoid it.
+    You can move the main.go code into a function and only call that from main() so that you can test it properly.
+    For main.go files, only create integration tests.
+    For services, create both unit and integration tests.
+    Integration tests are only allowed to mock our data sources that we cannot control, e.g. Alchemy
 - **Binaries/Building**: Output to `stl/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.
 - **Function composition**: Compose large functions from smaller functions. Large functions should read like prose, with each step delegated to a well-named helper function.

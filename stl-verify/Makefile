@@ -616,6 +616,35 @@ erigon-run:
 	$(call require_erigon_vars)
 	@tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) '$(CMD)'
 
+# Build oracle-price-worker binary
+build-oracle-worker:
+	@echo "==> Building oracle-price-worker..."
+	mkdir -p dist
+	go build -o dist/oracle-price-worker ./cmd/oracle-price-worker
+	@echo "==> Built: dist/oracle-price-worker"
+
+# Build oracle-backfill binary
+build-oracle-backfill:
+	@echo "==> Building oracle-backfill..."
+	mkdir -p dist
+	go build -o dist/oracle-backfill ./cmd/oracle-backfill
+	@echo "==> Built: dist/oracle-backfill"
+
+# Build oracle-backfill binary for ARM64 Linux (to run on Erigon node)
+build-oracle-backfill-arm64:
+	@echo "==> Building oracle-backfill for ARM64 Linux..."
+	mkdir -p dist
+	GOOS=linux GOARCH=arm64 go build -o dist/oracle-backfill-linux-arm64 ./cmd/oracle-backfill
+	@echo "==> Built: dist/oracle-backfill-linux-arm64"
+
+# Deploy oracle-backfill to Erigon node
+# Usage: make deploy-oracle-backfill ERIGON_USER=<user> ERIGON_IP=<ip>
+deploy-oracle-backfill: build-oracle-backfill-arm64
+	$(call require_erigon_vars)
+	@echo "==> Deploying oracle-backfill to Erigon node..."
+	cat dist/oracle-backfill-linux-arm64 | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > ~/oracle-backfill && chmod +x ~/oracle-backfill'
+	@echo "==> Deployed to ~/oracle-backfill on Erigon node."
+
 # Build bulk-download binary for ARM64 Linux (to run on Erigon node)
 build-bulk-download-arm64:
 	@echo "==> Building bulk-download for ARM64 Linux..."

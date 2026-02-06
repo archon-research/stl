@@ -1,5 +1,5 @@
--- Price source table (metadata about each price provider)
-CREATE TABLE IF NOT EXISTS price_source (
+-- Offchain price source table (metadata about each external price provider)
+CREATE TABLE IF NOT EXISTS offchain_price_source (
     id BIGSERIAL PRIMARY KEY,
     name VARCHAR(50) NOT NULL UNIQUE,
     display_name VARCHAR(100) NOT NULL,
@@ -12,14 +12,14 @@ CREATE TABLE IF NOT EXISTS price_source (
 );
 
 -- Seed initial source
-INSERT INTO price_source (name, display_name, base_url, rate_limit_per_min, supports_historical, enabled)
+INSERT INTO offchain_price_source (name, display_name, base_url, rate_limit_per_min, supports_historical, enabled)
 VALUES ('coingecko', 'CoinGecko', 'https://pro-api.coingecko.com/api/v3', 500, true, true)
 ON CONFLICT (name) DO NOTHING;
 
--- Price asset mapping table
-CREATE TABLE IF NOT EXISTS price_asset (
+-- Offchain price asset mapping table
+CREATE TABLE IF NOT EXISTS offchain_price_asset (
     id BIGSERIAL PRIMARY KEY,
-    source_id BIGINT NOT NULL REFERENCES price_source(id),
+    source_id BIGINT NOT NULL REFERENCES offchain_price_source(id),
     source_asset_id VARCHAR(255) NOT NULL,
     token_id BIGINT REFERENCES token(id),
     name VARCHAR(255) NOT NULL,
@@ -27,68 +27,103 @@ CREATE TABLE IF NOT EXISTS price_asset (
     enabled BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT price_asset_source_asset_unique UNIQUE (source_id, source_asset_id)
+    CONSTRAINT offchain_price_asset_source_asset_unique UNIQUE (source_id, source_asset_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_price_asset_source_enabled
-    ON price_asset (source_id) WHERE enabled = true;
-CREATE INDEX IF NOT EXISTS idx_price_asset_token
-    ON price_asset (token_id) WHERE token_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_offchain_price_asset_source_enabled
+    ON offchain_price_asset (source_id) WHERE enabled = true;
+CREATE INDEX IF NOT EXISTS idx_offchain_price_asset_token
+    ON offchain_price_asset (token_id) WHERE token_id IS NOT NULL;
 
--- Token prices table (on-chain tokens only)
-CREATE TABLE IF NOT EXISTS token_price (
-    id BIGSERIAL,
-    token_id BIGINT NOT NULL REFERENCES token(id),
-    chain_id INT NOT NULL REFERENCES chain(chain_id),
+-- Offchain token prices table (on-chain tokens only)
+--
+-- TimescaleDB chunk interval rationale (1 day):
+-- Worst case (Base, 250ms blocks): 10 oracles × 20 assets × 345,600 blocks/day
+-- = ~69M rows/day (~10 GB uncompressed per chunk).
+-- 1-day chunks balance memory footprint against chunk count (~1,825 over 5 years).
+--
+-- Distributed TimescaleDB compatibility:
+-- No foreign keys (incompatible with distributed hypertables).
+-- No synthetic ID column (centralized sequences are a bottleneck across data nodes).
+-- Natural PK (token_id, source, timestamp) serves both uniqueness and the primary
+-- query pattern (token_id + time range).
+
+CREATE TABLE IF NOT EXISTS offchain_token_price (
+    token_id BIGINT NOT NULL,
+    source_id SMALLINT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL,
-    source VARCHAR(50) NOT NULL,
-    source_asset_id VARCHAR(255) NOT NULL,
     price_usd NUMERIC(30, 18) NOT NULL,
     market_cap_usd NUMERIC(30, 2),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id, timestamp)
+    PRIMARY KEY (token_id, source_id, timestamp)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'timestamp',
-    tsdb.chunk_interval = '30 days'
+    tsdb.chunk_interval = '1 day'
 );
 
-CREATE INDEX IF NOT EXISTS idx_token_price_source_asset_timestamp
-    ON token_price (source, source_asset_id, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_token_price_token_timestamp
-    ON token_price (token_id, timestamp DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_token_price_unique
-    ON token_price (token_id, source, timestamp);
+-- Enable compression on offchain_token_price hypertable
+-- Segment by token_id for efficient queries filtering by token + time range
+-- Order by timestamp descending for time-series query patterns
+ALTER TABLE offchain_token_price SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'token_id',
+    timescaledb.compress_orderby = 'timestamp DESC'
+);
 
--- Token volume table (hourly granularity, on-chain tokens only)
-CREATE TABLE IF NOT EXISTS token_volume (
-    id BIGSERIAL,
-    token_id BIGINT NOT NULL REFERENCES token(id),
-    chain_id INT NOT NULL REFERENCES chain(chain_id),
+-- Compress chunks older than 2 days (2x chunk_interval)
+-- Compress aggressively to limit uncompressed working set. Queries over compressed
+-- chunks decompress only the relevant token_id segments (aligned with compress_segmentby).
+SELECT add_compression_policy('offchain_token_price', INTERVAL '2 days', if_not_exists => TRUE);
+
+-- Tier data older than 1 year to S3-backed object storage (Tiger Cloud Scale Plan)
+-- Only available on Timescale Cloud; skipped gracefully on self-hosted.
+DO $$ BEGIN
+    PERFORM add_tiering_policy('offchain_token_price', INTERVAL '1 year');
+EXCEPTION WHEN undefined_function THEN
+    RAISE NOTICE 'add_tiering_policy not available, skipping tiering for offchain_token_price';
+END $$;
+
+-- Offchain token volume table (hourly granularity, on-chain tokens only)
+-- Same design rationale as offchain_token_price - see comments above.
+
+CREATE TABLE IF NOT EXISTS offchain_token_volume (
+    token_id BIGINT NOT NULL,
+    source_id SMALLINT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL,
-    source VARCHAR(50) NOT NULL,
-    source_asset_id VARCHAR(255) NOT NULL,
     volume_usd NUMERIC(30, 2) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id, timestamp)
+    PRIMARY KEY (token_id, source_id, timestamp)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'timestamp',
-    tsdb.chunk_interval = '30 days'
+    tsdb.chunk_interval = '1 day'
 );
 
-CREATE INDEX IF NOT EXISTS idx_token_volume_source_asset_timestamp
-    ON token_volume (source, source_asset_id, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_token_volume_token_timestamp
-    ON token_volume (token_id, timestamp DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_token_volume_unique
-    ON token_volume (token_id, source, timestamp);
+-- Enable compression on offchain_token_volume hypertable
+-- Segment by token_id for efficient queries filtering by token + time range
+-- Order by timestamp descending for time-series query patterns
+ALTER TABLE offchain_token_volume SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'token_id',
+    timescaledb.compress_orderby = 'timestamp DESC'
+);
+
+-- Compress chunks older than 2 days (2x chunk_interval)
+-- Compress aggressively to limit uncompressed working set. Queries over compressed
+-- chunks decompress only the relevant token_id segments (aligned with compress_segmentby).
+SELECT add_compression_policy('offchain_token_volume', INTERVAL '2 days', if_not_exists => TRUE);
+
+-- Tier data older than 1 year to S3-backed object storage (Tiger Cloud Scale Plan)
+DO $$ BEGIN
+    PERFORM add_tiering_policy('offchain_token_volume', INTERVAL '1 year');
+EXCEPTION WHEN undefined_function THEN
+    RAISE NOTICE 'add_tiering_policy not available, skipping tiering for offchain_token_volume';
+END $$;
 
 -- Seed SparkLend reserve token mappings for CoinGecko
 -- Links to tokens seeded in previous migration via symbol match
-INSERT INTO price_asset (source_id, source_asset_id, token_id, name, symbol, enabled)
+INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, name, symbol, enabled)
 SELECT ps.id, pa.source_asset_id, t.id, pa.name, pa.symbol, true
-FROM price_source ps
+FROM offchain_price_source ps
 CROSS JOIN (VALUES
     ('dai', 'Dai', 'DAI'),
     ('savings-dai', 'Savings Dai', 'sDAI'),
