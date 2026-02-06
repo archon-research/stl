@@ -437,13 +437,11 @@ func (s *Service) processPositionEventLog(ctx context.Context, log Log, txHash s
 	// Save the raw decoded event for analytics/auditability
 	logIndex, err := strconv.ParseInt(strings.TrimPrefix(log.LogIndex, "0x"), 16, 64)
 	if err != nil {
-		s.logger.Warn("failed to parse log index", "logIndex", log.LogIndex, "error", err)
-		logIndex = 0
+		return fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 	}
 
 	if err := s.saveProtocolEvent(ctx, eventData, protocolAddress, chainID, blockNumber, blockVersion, int(logIndex)); err != nil {
-		s.logger.Warn("failed to save protocol event", "error", err, "tx", txHash, "block", blockNumber)
-		// Non-fatal: position tracking continues even if event storage fails
+		return fmt.Errorf("failed to save protocol event: %w", err)
 	}
 
 	if eventData.EventType == EventReserveUsedAsCollateralEnabled ||
