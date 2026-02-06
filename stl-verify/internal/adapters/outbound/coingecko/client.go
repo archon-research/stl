@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/httpclient"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"golang.org/x/time/rate"
 )
@@ -76,11 +75,10 @@ func ClientConfigDefaults() ClientConfig {
 
 // Client implements PriceProvider using CoinGecko's API.
 type Client struct {
-	config      ClientConfig
-	httpClient  *http.Client
-	logger      *slog.Logger
-	limiter     *rate.Limiter
-	retryConfig retry.Config
+	config     ClientConfig
+	httpClient *httpclient.Client
+	logger     *slog.Logger
+	apiKey     string
 }
 
 // NewClient creates a new CoinGecko API client.
