@@ -140,7 +140,7 @@ func insertTestToken(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id i
 func insertTestPriceAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sourceID int64, sourceAssetID string, tokenID int64, symbol, name string) {
 	t.Helper()
 	_, err := pool.Exec(ctx, `
-		INSERT INTO price_asset (source_id, source_asset_id, token_id, symbol, name, enabled, created_at, updated_at)
+		INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, symbol, name, enabled, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, true, NOW(), NOW())
 		ON CONFLICT (source_id, source_asset_id) DO UPDATE SET token_id = $3
 	`, sourceID, sourceAssetID, tokenID, symbol, name)
@@ -159,7 +159,7 @@ func TestIntegration_FetchCurrentPrices(t *testing.T) {
 
 	// Get the coingecko source ID from migration seed data
 	var sourceID int64
-	err := pool.QueryRow(ctx, `SELECT id FROM price_source WHERE name = 'coingecko'`).Scan(&sourceID)
+	err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID)
 	if err != nil {
 		t.Fatalf("failed to get coingecko source: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestIntegration_FetchCurrentPrices(t *testing.T) {
 
 	// Verify price was stored
 	var count int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE token_id = 1`).Scan(&count)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price WHERE token_id = 1`).Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query token_price: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestIntegration_FetchCurrentPrices(t *testing.T) {
 
 	// Verify price value
 	var priceUSD float64
-	err = pool.QueryRow(ctx, `SELECT price_usd FROM token_price WHERE token_id = 1 ORDER BY timestamp DESC LIMIT 1`).Scan(&priceUSD)
+	err = pool.QueryRow(ctx, `SELECT price_usd FROM offchain_token_price WHERE token_id = 1 ORDER BY timestamp DESC LIMIT 1`).Scan(&priceUSD)
 	if err != nil {
 		t.Fatalf("failed to query price_usd: %v", err)
 	}
@@ -234,14 +234,14 @@ func TestIntegration_FetchCurrentPrices_AllEnabledAssets(t *testing.T) {
 
 	// Get the coingecko source ID
 	var sourceID int64
-	err := pool.QueryRow(ctx, `SELECT id FROM price_source WHERE name = 'coingecko'`).Scan(&sourceID)
+	err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID)
 	if err != nil {
 		t.Fatalf("failed to get coingecko source: %v", err)
 	}
 
 	// Count enabled assets from seed data (migration seeds SparkLend tokens)
 	var enabledAssetCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM price_asset WHERE source_id = $1 AND enabled = true AND token_id IS NOT NULL`, sourceID).Scan(&enabledAssetCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_price_asset WHERE source_id = $1 AND enabled = true AND token_id IS NOT NULL`, sourceID).Scan(&enabledAssetCount)
 	if err != nil {
 		t.Fatalf("failed to count enabled assets: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestIntegration_FetchCurrentPrices_AllEnabledAssets(t *testing.T) {
 
 	// Verify prices were stored for all enabled assets
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price`).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price`).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query token_price count: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestIntegration_FetchHistoricalData(t *testing.T) {
 
 	// Get the coingecko source ID
 	var sourceID int64
-	err := pool.QueryRow(ctx, `SELECT id FROM price_source WHERE name = 'coingecko'`).Scan(&sourceID)
+	err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID)
 	if err != nil {
 		t.Fatalf("failed to get coingecko source: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestIntegration_FetchHistoricalData(t *testing.T) {
 
 	// Verify prices were stored (3 days * 24 hours = ~72 data points)
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE token_id = 1`).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price WHERE token_id = 1`).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query token_price count: %v", err)
 	}
@@ -355,15 +355,15 @@ func TestIntegration_FetchHistoricalData(t *testing.T) {
 		t.Errorf("expected at least 70 price records, got %d", priceCount)
 	}
 
-	// Verify volumes were stored
+	// Verify volumes were stored alongside prices
 	var volumeCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_volume WHERE token_id = 1`).Scan(&volumeCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price WHERE token_id = 1 AND volume_usd IS NOT NULL`).Scan(&volumeCount)
 	if err != nil {
-		t.Fatalf("failed to query token_volume count: %v", err)
+		t.Fatalf("failed to query volume count: %v", err)
 	}
 
 	if volumeCount < 70 {
-		t.Errorf("expected at least 70 volume records, got %d", volumeCount)
+		t.Errorf("expected at least 70 price records with volume_usd, got %d", volumeCount)
 	}
 }
 
@@ -377,7 +377,7 @@ func TestIntegration_FetchHistoricalData_MultipleAssetsConcurrently(t *testing.T
 
 	// Get the coingecko source ID
 	var sourceID int64
-	err := pool.QueryRow(ctx, `SELECT id FROM price_source WHERE name = 'coingecko'`).Scan(&sourceID)
+	err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID)
 	if err != nil {
 		t.Fatalf("failed to get coingecko source: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestIntegration_FetchHistoricalData_MultipleAssetsConcurrently(t *testing.T
 	// Verify both assets have prices stored (token_id 1=WETH, 2=WBTC)
 	for _, tokenID := range []int64{1, 2} {
 		var count int
-		err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE token_id = $1`, tokenID).Scan(&count)
+		err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price WHERE token_id = $1`, tokenID).Scan(&count)
 		if err != nil {
 			t.Fatalf("failed to query token_price count for token_id %d: %v", tokenID, err)
 		}
@@ -445,7 +445,7 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 
 	// Get the coingecko source ID
 	var sourceID int64
-	err := pool.QueryRow(ctx, `SELECT id FROM price_source WHERE name = 'coingecko'`).Scan(&sourceID)
+	err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID)
 	if err != nil {
 		t.Fatalf("failed to get coingecko source: %v", err)
 	}
@@ -488,7 +488,7 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 
 	// Get count after first fetch
 	var countAfterFirst int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE token_id = 1`).Scan(&countAfterFirst)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price WHERE token_id = 1`).Scan(&countAfterFirst)
 	if err != nil {
 		t.Fatalf("failed to query token_price count: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 
 	// Count should be the same (no duplicates)
 	var countAfterSecond int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE token_id = 1`).Scan(&countAfterSecond)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price WHERE token_id = 1`).Scan(&countAfterSecond)
 	if err != nil {
 		t.Fatalf("failed to query token_price count: %v", err)
 	}
@@ -552,7 +552,7 @@ func TestIntegration_NoEnabledAssets(t *testing.T) {
 
 	// Verify no prices stored
 	var count int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price`).Scan(&count)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price`).Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query token_price count: %v", err)
 	}

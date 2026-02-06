@@ -11,21 +11,21 @@ type OnchainPriceRepository interface {
 	// UpsertPrices inserts onchain price records in batches.
 	UpsertPrices(ctx context.Context, prices []*entity.OnchainTokenPrice) error
 
-	// GetOracleSource retrieves an oracle source by its name.
-	GetOracleSource(ctx context.Context, name string) (*entity.OracleSource, error)
+	// GetOracle retrieves an oracle by its name.
+	GetOracle(ctx context.Context, name string) (*entity.Oracle, error)
 
-	// GetEnabledAssets retrieves all enabled assets for a given oracle source.
-	GetEnabledAssets(ctx context.Context, oracleSourceID int64) ([]*entity.OracleAsset, error)
+	// GetEnabledAssets retrieves all enabled assets for a given oracle.
+	GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
 
-	// GetLatestPrices returns the most recent price per token for a given oracle source.
+	// GetLatestPrices returns the most recent price per token for a given oracle.
 	// Used for change detection: only store prices that differ from the previous block.
-	GetLatestPrices(ctx context.Context, oracleSourceID int64) (map[int64]float64, error)
+	GetLatestPrices(ctx context.Context, oracleID int64) (map[int64]float64, error)
 
-	// GetLatestBlock returns the highest block number stored for a given oracle source.
+	// GetLatestBlock returns the highest block number stored for a given oracle.
 	// Used for resume support in backfill.
-	GetLatestBlock(ctx context.Context, oracleSourceID int64) (int64, error)
+	GetLatestBlock(ctx context.Context, oracleID int64) (int64, error)
 
 	// GetTokenAddresses returns a map of token_id → on-chain address for all enabled
-	// oracle assets of the given source. Used to build the asset address list for oracle calls.
-	GetTokenAddresses(ctx context.Context, oracleSourceID int64) (map[int64][]byte, error)
+	// oracle assets of the given oracle. Used to build the asset address list for oracle calls.
+	GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error)
 }

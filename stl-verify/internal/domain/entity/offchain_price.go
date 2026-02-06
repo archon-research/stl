@@ -107,16 +107,18 @@ type TokenPrice struct {
 	SourceID     int16
 	PriceUSD     float64
 	MarketCapUSD *float64
+	VolumeUSD    *float64
 	Timestamp    time.Time
 }
 
 // NewTokenPrice creates a new TokenPrice entity with validation.
-func NewTokenPrice(tokenID int64, sourceID int16, priceUSD float64, marketCapUSD *float64, timestamp time.Time) (*TokenPrice, error) {
+func NewTokenPrice(tokenID int64, sourceID int16, priceUSD float64, marketCapUSD *float64, volumeUSD *float64, timestamp time.Time) (*TokenPrice, error) {
 	tp := &TokenPrice{
 		TokenID:      tokenID,
 		SourceID:     sourceID,
 		PriceUSD:     priceUSD,
 		MarketCapUSD: marketCapUSD,
+		VolumeUSD:    volumeUSD,
 		Timestamp:    timestamp,
 	}
 	if err := tp.validate(); err != nil {
@@ -136,44 +138,6 @@ func (tp *TokenPrice) validate() error {
 		return fmt.Errorf("priceUSD must be non-negative, got %f", tp.PriceUSD)
 	}
 	if tp.Timestamp.IsZero() {
-		return fmt.Errorf("timestamp must not be zero")
-	}
-	return nil
-}
-
-// TokenVolume stores hourly trading volume data for on-chain tokens.
-type TokenVolume struct {
-	TokenID   int64
-	SourceID  int16
-	VolumeUSD float64
-	Timestamp time.Time
-}
-
-// NewTokenVolume creates a new TokenVolume entity with validation.
-func NewTokenVolume(tokenID int64, sourceID int16, volumeUSD float64, timestamp time.Time) (*TokenVolume, error) {
-	tv := &TokenVolume{
-		TokenID:   tokenID,
-		SourceID:  sourceID,
-		VolumeUSD: volumeUSD,
-		Timestamp: timestamp,
-	}
-	if err := tv.validate(); err != nil {
-		return nil, err
-	}
-	return tv, nil
-}
-
-func (tv *TokenVolume) validate() error {
-	if tv.TokenID <= 0 {
-		return fmt.Errorf("tokenID must be positive, got %d", tv.TokenID)
-	}
-	if tv.SourceID <= 0 {
-		return fmt.Errorf("sourceID must be positive, got %d", tv.SourceID)
-	}
-	if tv.VolumeUSD < 0 {
-		return fmt.Errorf("volumeUSD must be non-negative, got %f", tv.VolumeUSD)
-	}
-	if tv.Timestamp.IsZero() {
 		return fmt.Errorf("timestamp must not be zero")
 	}
 	return nil

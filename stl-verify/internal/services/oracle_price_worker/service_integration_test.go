@@ -27,13 +27,13 @@ import (
 var testOracleAddr = common.HexToAddress("0x0000000000000000000000000000000000000BBB")
 
 // integrationMulticaller creates a mock multicaller that returns given prices for all blocks.
-func integrationMulticaller(prices []*big.Int) *testutil.MockMulticaller {
-	return newOracleMulticaller(testOracleAddr, prices)
+func integrationMulticaller(t *testing.T, prices []*big.Int) *testutil.MockMulticaller {
+	t.Helper()
+	return newOracleMulticallerWithT(t, prices)
 }
 
 // integrationMulticallerBlockDependent creates a mock multicaller where prices depend on block number.
 func integrationMulticallerBlockDependent(numTokens int) *testutil.MockMulticaller {
-	addrData, _ := packOracleAddrResult(testOracleAddr)
 	return &testutil.MockMulticaller{
 		ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 			bn := blockNumber.Int64()
@@ -44,14 +44,7 @@ func integrationMulticallerBlockDependent(numTokens int) *testutil.MockMulticall
 					big.NewInt(int64(i+1)*100_000_000),
 				)
 			}
-			pricesData, _ := packPricesResult(prices)
-
-			if len(calls) == 2 {
-				return []outbound.Result{
-					{Success: true, ReturnData: addrData},
-					{Success: true, ReturnData: pricesData},
-				}, nil
-			}
+			pricesData := testutil.PackAssetPrices(&testing.T{}, prices)
 			return []outbound.Result{
 				{Success: true, ReturnData: pricesData},
 			}, nil
@@ -126,11 +119,11 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-worker", "Test Worker", 1, "0x0000000000000000000000000000000000000AAA")
+	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker", "Test Worker", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000051", "WK1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000052", "WK2", 18)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID2)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000051"),
@@ -146,7 +139,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	price1 := new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8))    // $2000
 	price2 := new(big.Int).Mul(big.NewInt(1), big.NewInt(100000000)) // $1
 
-	mc := integrationMulticaller([]*big.Int{price1, price2})
+	mc := integrationMulticaller(t, []*big.Int{price1, price2})
 
 	// Create SQS client that delivers one block event
 	messages := []sqstypes.Message{
@@ -176,7 +169,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	deadline := time.After(5 * time.Second)
 	for {
 		var count int
-		pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&count)
+		pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&count)
 		if count >= 2 {
 			break
 		}
@@ -190,7 +183,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 
 	// Verify prices stored
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query price count: %v", err)
 	}
@@ -200,7 +193,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 
 	// Verify correct block number
 	var storedBlock int64
-	err = pool.QueryRow(ctx, `SELECT DISTINCT block_number FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&storedBlock)
+	err = pool.QueryRow(ctx, `SELECT DISTINCT block_number FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&storedBlock)
 	if err != nil {
 		t.Fatalf("failed to query stored block: %v", err)
 	}
@@ -210,7 +203,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 
 	// Verify price values
 	var storedPriceUSD float64
-	err = pool.QueryRow(ctx, `SELECT price_usd FROM onchain_token_price WHERE oracle_source_id = $1 AND token_id = $2`, sourceID, tokenID1).Scan(&storedPriceUSD)
+	err = pool.QueryRow(ctx, `SELECT price_usd FROM onchain_token_price WHERE oracle_id = $1 AND token_id = $2`, oracleID, tokenID1).Scan(&storedPriceUSD)
 	if err != nil {
 		t.Fatalf("failed to query price for token1: %v", err)
 	}
@@ -218,7 +211,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 		t.Errorf("expected price 2000.0 for token1, got %f", storedPriceUSD)
 	}
 
-	err = pool.QueryRow(ctx, `SELECT price_usd FROM onchain_token_price WHERE oracle_source_id = $1 AND token_id = $2`, sourceID, tokenID2).Scan(&storedPriceUSD)
+	err = pool.QueryRow(ctx, `SELECT price_usd FROM onchain_token_price WHERE oracle_id = $1 AND token_id = $2`, oracleID, tokenID2).Scan(&storedPriceUSD)
 	if err != nil {
 		t.Fatalf("failed to query price for token2: %v", err)
 	}
@@ -246,11 +239,11 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-worker-cd", "Test Worker CD", 1, "0x0000000000000000000000000000000000000AAA")
+	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-cd", "Test Worker CD", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000061", "CD1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000062", "CD2", 18)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID2)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000061"),
@@ -265,7 +258,7 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 	// Same prices for both blocks - second block should be skipped by change detection
 	price1 := new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8))
 	price2 := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8))
-	mc := integrationMulticaller([]*big.Int{price1, price2})
+	mc := integrationMulticaller(t, []*big.Int{price1, price2})
 
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
 
@@ -315,7 +308,7 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 
 	// Only the first block should have prices (change detection skips second)
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query price count: %v", err)
 	}
@@ -325,7 +318,7 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 
 	// Verify only block 18000000 has prices
 	var storedBlock int64
-	err = pool.QueryRow(ctx, `SELECT DISTINCT block_number FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&storedBlock)
+	err = pool.QueryRow(ctx, `SELECT DISTINCT block_number FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&storedBlock)
 	if err != nil {
 		t.Fatalf("failed to query stored block: %v", err)
 	}
@@ -345,11 +338,11 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-worker-multi", "Test Worker Multi", 1, "0x0000000000000000000000000000000000000AAA")
+	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-multi", "Test Worker Multi", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000071", "MT1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000072", "MT2", 18)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID2)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000071"),
@@ -414,7 +407,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	// All 3 blocks should have prices (each has unique prices)
 	// 3 blocks * 2 tokens = 6 prices
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query price count: %v", err)
 	}
@@ -424,7 +417,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 
 	// Verify all 3 blocks are represented
 	var distinctBlocks int
-	err = pool.QueryRow(ctx, `SELECT COUNT(DISTINCT block_number) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&distinctBlocks)
+	err = pool.QueryRow(ctx, `SELECT COUNT(DISTINCT block_number) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&distinctBlocks)
 	if err != nil {
 		t.Fatalf("failed to query distinct blocks: %v", err)
 	}
@@ -444,9 +437,9 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-worker-ss", "Test Worker SS", 1, "0x0000000000000000000000000000000000000AAA")
+	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-ss", "Test Worker SS", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000081", "SS1", 18)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000081"),
@@ -466,7 +459,7 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 	}
 
 	price1 := new(big.Int).Mul(big.NewInt(100), big.NewInt(1e8))
-	mc := integrationMulticaller([]*big.Int{price1})
+	mc := integrationMulticaller(t, []*big.Int{price1})
 
 	cfg := Config{
 		QueueURL:        "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
@@ -488,8 +481,8 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 	}
 
 	// Verify service initialized properly
-	if svc.oracleSource == nil {
-		t.Error("oracleSource not set after Start")
+	if svc.oracle == nil {
+		t.Error("oracle not set after Start")
 	}
 	if len(svc.assets) != 1 {
 		t.Errorf("expected 1 asset, got %d", len(svc.assets))
@@ -503,7 +496,7 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 
 	// No prices should have been stored (no messages)
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query price count: %v", err)
 	}
@@ -519,11 +512,11 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Use the sparklend source seeded by migration
-	var oracleSourceID int64
-	err := pool.QueryRow(ctx, `SELECT id FROM oracle_source WHERE name = 'sparklend'`).Scan(&oracleSourceID)
+	// Use the sparklend oracle seeded by migration
+	var oracleID int64
+	err := pool.QueryRow(ctx, `SELECT id FROM oracle WHERE name = 'sparklend'`).Scan(&oracleID)
 	if err != nil {
-		t.Fatalf("failed to get sparklend oracle source: %v", err)
+		t.Fatalf("failed to get sparklend oracle: %v", err)
 	}
 
 	// Build token address map from migration-seeded data
@@ -532,9 +525,9 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 		SELECT oa.token_id, t.address
 		FROM oracle_asset oa
 		JOIN token t ON t.id = oa.token_id
-		WHERE oa.oracle_source_id = $1 AND oa.enabled = true
+		WHERE oa.oracle_id = $1 AND oa.enabled = true
 		ORDER BY oa.id
-	`, oracleSourceID)
+	`, oracleID)
 	if err != nil {
 		t.Fatalf("failed to query token addresses: %v", err)
 	}
@@ -592,7 +585,7 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 	deadline := time.After(5 * time.Second)
 	for {
 		var count int
-		pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, oracleSourceID).Scan(&count)
+		pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&count)
 		if count >= numTokens {
 			break
 		}
@@ -606,7 +599,7 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 
 	// Verify all tokens got prices
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1 AND block_number = 20000000`, oracleSourceID).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1 AND block_number = 20000000`, oracleID).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query price count: %v", err)
 	}
@@ -626,11 +619,11 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-worker-cache", "Test Worker Cache", 1, "0x0000000000000000000000000000000000000AAA")
+	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-cache", "Test Worker Cache", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000091", "CA1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000092", "CA2", 18)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID2)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000091"),
@@ -644,25 +637,22 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 
 	// Pre-seed some prices in the database to test GetLatestPrices initialization
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	oracleAddrBytes := testOracleAddr.Bytes()
 	err = repo.UpsertPrices(ctx, []*entity.OnchainTokenPrice{
 		{
-			TokenID:        tokenID1,
-			OracleSourceID: int16(sourceID),
-			BlockNumber:    17999999,
-			BlockVersion:   0,
-			Timestamp:      blockTimestamp,
-			OracleAddress:  oracleAddrBytes,
-			PriceUSD:       2000.0,
+			TokenID:      tokenID1,
+			OracleID:     int16(oracleID),
+			BlockNumber:  17999999,
+			BlockVersion: 0,
+			Timestamp:    blockTimestamp,
+			PriceUSD:     2000.0,
 		},
 		{
-			TokenID:        tokenID2,
-			OracleSourceID: int16(sourceID),
-			BlockNumber:    17999999,
-			BlockVersion:   0,
-			Timestamp:      blockTimestamp,
-			OracleAddress:  oracleAddrBytes,
-			PriceUSD:       1.0,
+			TokenID:      tokenID2,
+			OracleID:     int16(oracleID),
+			BlockNumber:  17999999,
+			BlockVersion: 0,
+			Timestamp:    blockTimestamp,
+			PriceUSD:     1.0,
 		},
 	})
 	if err != nil {
@@ -673,7 +663,7 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	// This means the new block event should NOT trigger an upsert (prices unchanged)
 	price1 := new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8))
 	price2 := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8))
-	mc := integrationMulticaller([]*big.Int{price1, price2})
+	mc := integrationMulticaller(t, []*big.Int{price1, price2})
 
 	newBlockTimestamp := blockTimestamp.Add(12 * time.Second).Unix()
 	messages := []sqstypes.Message{
@@ -719,7 +709,7 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	// Should still have only 2 prices (the pre-seeded ones)
 	// The new block had the same prices, so change detection filtered them out
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query price count: %v", err)
 	}

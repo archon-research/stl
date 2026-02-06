@@ -56,7 +56,7 @@ func StartTimescaleDB(t *testing.T) (dsn string, cleanup func()) {
 	}
 
 	dsn = fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
-	cleanup = func() { container.Terminate(ctx) }
+	cleanup = func() { _ = container.Terminate(ctx) }
 	return dsn, cleanup
 }
 

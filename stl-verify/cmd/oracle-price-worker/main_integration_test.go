@@ -102,7 +102,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	var tokenCount int
 	if err := pool.QueryRow(ctx,
 		`SELECT COUNT(*) FROM oracle_asset oa
-		 JOIN oracle_source os ON os.id = oa.oracle_source_id
+		 JOIN oracle os ON os.id = oa.oracle_id
 		 WHERE os.name = 'sparklend' AND oa.enabled = true`).Scan(&tokenCount); err != nil {
 		t.Fatalf("count tokens: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestRunIntegration_VerboseFlag(t *testing.T) {
 }
 
 func TestRunIntegration_OracleSourceNotFound(t *testing.T) {
-	// Database without migrations — oracle_source table does not exist
+	// Database without migrations — oracle table does not exist
 	dsn, cleanup := testutil.StartTimescaleDB(t)
 	defer cleanup()
 

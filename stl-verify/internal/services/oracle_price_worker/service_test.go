@@ -14,7 +14,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -55,47 +54,47 @@ func (m *mockSQSClient) DeleteMessage(ctx context.Context, params *sqs.DeleteMes
 // mockRepo implements outbound.OnchainPriceRepository.
 type mockRepo struct {
 	mu                sync.Mutex
-	getOracleSource   func(ctx context.Context, name string) (*entity.OracleSource, error)
-	getEnabledAssets  func(ctx context.Context, oracleSourceID int64) ([]*entity.OracleAsset, error)
-	getLatestPrices   func(ctx context.Context, oracleSourceID int64) (map[int64]float64, error)
-	getLatestBlock    func(ctx context.Context, oracleSourceID int64) (int64, error)
-	getTokenAddresses func(ctx context.Context, oracleSourceID int64) (map[int64][]byte, error)
+	getOracle         func(ctx context.Context, name string) (*entity.Oracle, error)
+	getEnabledAssets  func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
+	getLatestPrices   func(ctx context.Context, oracleID int64) (map[int64]float64, error)
+	getLatestBlock    func(ctx context.Context, oracleID int64) (int64, error)
+	getTokenAddresses func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
 	upsertPrices      func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
 	upsertPricesCalls int
 	lastUpserted      []*entity.OnchainTokenPrice
 }
 
-func (m *mockRepo) GetOracleSource(ctx context.Context, name string) (*entity.OracleSource, error) {
-	if m.getOracleSource != nil {
-		return m.getOracleSource(ctx, name)
+func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, error) {
+	if m.getOracle != nil {
+		return m.getOracle(ctx, name)
 	}
 	return nil, fmt.Errorf("not implemented")
 }
 
-func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleSourceID int64) ([]*entity.OracleAsset, error) {
+func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
 	if m.getEnabledAssets != nil {
-		return m.getEnabledAssets(ctx, oracleSourceID)
+		return m.getEnabledAssets(ctx, oracleID)
 	}
 	return nil, fmt.Errorf("not implemented")
 }
 
-func (m *mockRepo) GetLatestPrices(ctx context.Context, oracleSourceID int64) (map[int64]float64, error) {
+func (m *mockRepo) GetLatestPrices(ctx context.Context, oracleID int64) (map[int64]float64, error) {
 	if m.getLatestPrices != nil {
-		return m.getLatestPrices(ctx, oracleSourceID)
+		return m.getLatestPrices(ctx, oracleID)
 	}
 	return nil, fmt.Errorf("not implemented")
 }
 
-func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleSourceID int64) (int64, error) {
+func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, error) {
 	if m.getLatestBlock != nil {
-		return m.getLatestBlock(ctx, oracleSourceID)
+		return m.getLatestBlock(ctx, oracleID)
 	}
 	return 0, fmt.Errorf("not implemented")
 }
 
-func (m *mockRepo) GetTokenAddresses(ctx context.Context, oracleSourceID int64) (map[int64][]byte, error) {
+func (m *mockRepo) GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error) {
 	if m.getTokenAddresses != nil {
-		return m.getTokenAddresses(ctx, oracleSourceID)
+		return m.getTokenAddresses(ctx, oracleID)
 	}
 	return nil, fmt.Errorf("not implemented")
 }
@@ -130,69 +129,37 @@ func validTokenAddresses() map[int64]common.Address {
 	}
 }
 
-func defaultOracleSource() *entity.OracleSource {
-	return &entity.OracleSource{
-		ID:                  1,
-		Name:                "sparklend",
-		DisplayName:         "SparkLend",
-		ChainID:             1,
-		PoolAddressProvider: common.HexToAddress("0xaaBe6FE75ADA775eEb5C9E25e9AA2E648616ad84").Bytes(),
-		DeploymentBlock:     17000000,
-		Enabled:             true,
+func defaultOracle() *entity.Oracle {
+	return &entity.Oracle{
+		ID:              1,
+		Name:            "sparklend",
+		DisplayName:     "Spark: aave Oracle",
+		ChainID:         1,
+		Address:         common.HexToAddress("0x8105f69D9C41644c6A0803fDA7D03Aa70996cFD9"),
+		DeploymentBlock: 17000000,
+		Enabled:         true,
 	}
 }
 
 func defaultAssets() []*entity.OracleAsset {
 	return []*entity.OracleAsset{
-		{ID: 1, OracleSourceID: 1, TokenID: 1, Enabled: true},
-		{ID: 2, OracleSourceID: 1, TokenID: 2, Enabled: true},
+		{ID: 1, OracleID: 1, TokenID: 1, Enabled: true},
+		{ID: 2, OracleID: 1, TokenID: 2, Enabled: true},
 	}
 }
 
-// packOracleAddrResult builds ABI-encoded return data for getPriceOracle.
-// Uses a testing.T-less wrapper for compatibility with newOracleMulticaller.
-func packOracleAddrResult(oracleAddr common.Address) ([]byte, error) {
-	providerABI, err := abis.GetPoolAddressProviderABI()
-	if err != nil {
-		return nil, fmt.Errorf("getting provider ABI: %w", err)
-	}
-	return providerABI.Methods["getPriceOracle"].Outputs.Pack(oracleAddr)
-}
-
-// packPricesResult builds ABI-encoded return data for getAssetsPrices.
-// Uses a testing.T-less wrapper for compatibility with newOracleMulticaller.
-func packPricesResult(prices []*big.Int) ([]byte, error) {
-	oracleABI, err := abis.GetSparkLendOracleABI()
-	if err != nil {
-		return nil, fmt.Errorf("getting oracle ABI: %w", err)
-	}
-	return oracleABI.Methods["getAssetsPrices"].Outputs.Pack(prices)
-}
-
-// newOracleMulticaller creates a mock multicaller that handles both call patterns
-// used by FetchOraclePrices:
-//  1. Initial 2-call batch: getPriceOracle + getAssetsPrices (when cached addr matches, prices come from call 2)
-//  2. Retry 1-call batch: getAssetsPrices only (when cached addr differs from actual oracle addr)
-func newOracleMulticaller(oracleAddr common.Address, prices []*big.Int) *testutil.MockMulticaller {
-	addrData, _ := packOracleAddrResult(oracleAddr)
-	pricesData, _ := packPricesResult(prices)
-
+// newOracleMulticallerWithT creates a mock multicaller using the provided testing.T.
+func newOracleMulticallerWithT(t *testing.T, prices []*big.Int) *testutil.MockMulticaller {
+	t.Helper()
+	pricesData := testutil.PackAssetPrices(t, prices)
 	return &testutil.MockMulticaller{
 		ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-			if len(calls) == 2 {
-				// Initial batch: getPriceOracle + getAssetsPrices
-				return []outbound.Result{
-					{Success: true, ReturnData: addrData},
-					{Success: true, ReturnData: pricesData},
-				}, nil
+			if len(calls) != 1 {
+				return nil, fmt.Errorf("expected 1 call, got %d", len(calls))
 			}
-			if len(calls) == 1 {
-				// Retry: getAssetsPrices only (oracle address changed)
-				return []outbound.Result{
-					{Success: true, ReturnData: pricesData},
-				}, nil
-			}
-			return nil, fmt.Errorf("unexpected call count: %d", len(calls))
+			return []outbound.Result{
+				{Success: true, ReturnData: pricesData},
+			}, nil
 		},
 	}
 }
@@ -356,9 +323,6 @@ func TestNewService(t *testing.T) {
 			if svc.repo == nil {
 				t.Error("repo should not be nil")
 			}
-			if svc.providerABI == nil {
-				t.Error("providerABI should not be nil")
-			}
 			if svc.oracleABI == nil {
 				t.Error("oracleABI should not be nil")
 			}
@@ -396,8 +360,6 @@ func TestNewService(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStart(t *testing.T) {
-	oracleAddr := common.HexToAddress("0x8105f69D9C41644c6A0803fDA7D03Aa70996cFD2")
-
 	tests := []struct {
 		name        string
 		setupRepo   func(r *mockRepo)
@@ -408,8 +370,8 @@ func TestStart(t *testing.T) {
 		{
 			name: "success",
 			setupRepo: func(r *mockRepo) {
-				r.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-					return defaultOracleSource(), nil
+				r.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+					return defaultOracle(), nil
 				}
 				r.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return defaultAssets(), nil
@@ -422,9 +384,9 @@ func TestStart(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name: "error GetOracleSource fails",
+			name: "error GetOracle fails",
 			setupRepo: func(r *mockRepo) {
-				r.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
+				r.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
 					return nil, fmt.Errorf("db connection refused")
 				}
 			},
@@ -435,8 +397,8 @@ func TestStart(t *testing.T) {
 		{
 			name: "error GetEnabledAssets fails",
 			setupRepo: func(r *mockRepo) {
-				r.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-					return defaultOracleSource(), nil
+				r.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+					return defaultOracle(), nil
 				}
 				r.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return nil, fmt.Errorf("query timeout")
@@ -449,8 +411,8 @@ func TestStart(t *testing.T) {
 		{
 			name: "error GetEnabledAssets returns empty",
 			setupRepo: func(r *mockRepo) {
-				r.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-					return defaultOracleSource(), nil
+				r.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+					return defaultOracle(), nil
 				}
 				r.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return []*entity.OracleAsset{}, nil
@@ -463,12 +425,12 @@ func TestStart(t *testing.T) {
 		{
 			name: "error token address not found in tokenAddressMap",
 			setupRepo: func(r *mockRepo) {
-				r.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-					return defaultOracleSource(), nil
+				r.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+					return defaultOracle(), nil
 				}
 				r.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return []*entity.OracleAsset{
-						{ID: 1, OracleSourceID: 1, TokenID: 999, Enabled: true}, // 999 not in tokenAddressMap
+						{ID: 1, OracleID: 1, TokenID: 999, Enabled: true}, // 999 not in tokenAddressMap
 					}, nil
 				}
 			},
@@ -479,8 +441,8 @@ func TestStart(t *testing.T) {
 		{
 			name: "error GetLatestPrices fails",
 			setupRepo: func(r *mockRepo) {
-				r.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-					return defaultOracleSource(), nil
+				r.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+					return defaultOracle(), nil
 				}
 				r.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return defaultAssets(), nil
@@ -510,7 +472,7 @@ func TestStart(t *testing.T) {
 				},
 			}
 
-			mc := newOracleMulticaller(oracleAddr, []*big.Int{
+			mc := newOracleMulticallerWithT(t, []*big.Int{
 				new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8)),
 				new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8)),
 			})
@@ -538,8 +500,8 @@ func TestStart(t *testing.T) {
 			}
 
 			// Verify initialization state
-			if svc.oracleSource == nil {
-				t.Error("oracleSource not set after Start")
+			if svc.oracle == nil {
+				t.Error("oracle not set after Start")
 			}
 			if len(svc.assets) == 0 {
 				t.Error("assets not set after Start")
@@ -561,13 +523,12 @@ func TestStart(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStartAndProcessMessages(t *testing.T) {
-	oracleAddr := common.HexToAddress("0x8105f69D9C41644c6A0803fDA7D03Aa70996cFD2")
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
 
 	t.Run("end to end: new prices are upserted, same prices are skipped", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-			return defaultOracleSource(), nil
+		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+			return defaultOracle(), nil
 		}
 		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return defaultAssets(), nil
@@ -582,7 +543,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		price1 := new(big.Int).Mul(big.NewInt(200000), big.NewInt(1e4)) // 2000.00 * 1e8
 		price2 := new(big.Int).Mul(big.NewInt(100), big.NewInt(1e6))    // 1.00 * 1e8
 
-		mc := newOracleMulticaller(oracleAddr, []*big.Int{price1, price2})
+		mc := newOracleMulticallerWithT(t, []*big.Int{price1, price2})
 
 		// Deliver one message on first call, then empty on subsequent calls.
 		messageDelivered := false
@@ -689,8 +650,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("SQS receive error", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-			return defaultOracleSource(), nil
+		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+			return defaultOracle(), nil
 		}
 		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return defaultAssets(), nil
@@ -735,8 +696,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("SQS returns empty messages", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-			return defaultOracleSource(), nil
+		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+			return defaultOracle(), nil
 		}
 		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return defaultAssets(), nil
@@ -780,8 +741,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("message with nil body", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-			return defaultOracleSource(), nil
+		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+			return defaultOracle(), nil
 		}
 		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return defaultAssets(), nil
@@ -845,8 +806,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("message with invalid JSON", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-			return defaultOracleSource(), nil
+		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+			return defaultOracle(), nil
 		}
 		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return defaultAssets(), nil
@@ -903,8 +864,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("multicall returns error during processBlock", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-			return defaultOracleSource(), nil
+		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+			return defaultOracle(), nil
 		}
 		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return defaultAssets(), nil
@@ -974,8 +935,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("DeleteMessage returns error after successful processing", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-			return defaultOracleSource(), nil
+		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+			return defaultOracle(), nil
 		}
 		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return defaultAssets(), nil
@@ -986,7 +947,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 		price1 := new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8))
 		price2 := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8))
-		mc := newOracleMulticaller(oracleAddr, []*big.Int{price1, price2})
+		mc := newOracleMulticallerWithT(t, []*big.Int{price1, price2})
 
 		delivered := false
 		body := makeBlockEventJSON(18000000, 1, blockTimestamp)
@@ -1061,8 +1022,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("price count mismatch from oracle", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-			return defaultOracleSource(), nil
+		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+			return defaultOracle(), nil
 		}
 		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return defaultAssets(), nil
@@ -1073,7 +1034,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 		// Return only 1 price for 2 tokens
 		onePrice := []*big.Int{new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8))}
-		mc := newOracleMulticaller(oracleAddr, onePrice)
+		mc := newOracleMulticallerWithT(t, onePrice)
 
 		delivered := false
 		body := makeBlockEventJSON(18000000, 1, blockTimestamp)
@@ -1130,8 +1091,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("UpsertPrices returns error", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-			return defaultOracleSource(), nil
+		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+			return defaultOracle(), nil
 		}
 		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return defaultAssets(), nil
@@ -1146,7 +1107,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		price1 := new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8))
 		price2 := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8))
 
-		mc := newOracleMulticaller(oracleAddr, []*big.Int{price1, price2})
+		mc := newOracleMulticallerWithT(t, []*big.Int{price1, price2})
 
 		delivered := false
 		body := makeBlockEventJSON(18000000, 1, blockTimestamp)
@@ -1211,8 +1172,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("entity validation error with blockNumber zero", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-			return defaultOracleSource(), nil
+		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+			return defaultOracle(), nil
 		}
 		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return defaultAssets(), nil
@@ -1223,7 +1184,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 		price1 := new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8))
 		price2 := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8))
-		mc := newOracleMulticaller(oracleAddr, []*big.Int{price1, price2})
+		mc := newOracleMulticallerWithT(t, []*big.Int{price1, price2})
 
 		sqsClient := &mockSQSClient{
 			receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
@@ -1295,8 +1256,8 @@ func TestStop(t *testing.T) {
 
 	t.Run("stop after start", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracleSource = func(_ context.Context, _ string) (*entity.OracleSource, error) {
-			return defaultOracleSource(), nil
+		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+			return defaultOracle(), nil
 		}
 		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return defaultAssets(), nil

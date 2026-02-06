@@ -49,7 +49,7 @@ func integrationMockMulticallFactory(t *testing.T, numTokens int) MulticallFacto
 						big.NewInt(int64(i+1)*100_000_000),
 					)
 				}
-				return multicallResult(t, calls, prices), nil
+				return multicallResult(t, prices), nil
 			},
 		}, nil
 	}
@@ -77,11 +77,11 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Get the oracle source ID seeded by migration
-	var oracleSourceID int64
-	err := pool.QueryRow(ctx, `SELECT id FROM oracle_source WHERE name = 'sparklend'`).Scan(&oracleSourceID)
+	// Get the oracle ID seeded by migration
+	var oracleID int64
+	err := pool.QueryRow(ctx, `SELECT id FROM oracle WHERE name = 'sparklend'`).Scan(&oracleID)
 	if err != nil {
-		t.Fatalf("failed to get sparklend oracle source: %v", err)
+		t.Fatalf("failed to get sparklend oracle: %v", err)
 	}
 
 	// Get two token IDs from the migration-seeded tokens (WETH and DAI)
@@ -95,11 +95,9 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 		t.Fatalf("failed to get DAI token: %v", err)
 	}
 
-	// The migration already seeds oracle_asset rows linking sparklend to tokens.
-	// We need to figure out which assets are enabled and build the token address map.
-	// For simplicity, let's use the existing seeded data and query the token addresses.
+	// The migration already seeds oracle_asset rows linking oracle to tokens.
 	var enabledAssetCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM oracle_asset WHERE oracle_source_id = $1 AND enabled = true`, oracleSourceID).Scan(&enabledAssetCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM oracle_asset WHERE oracle_id = $1 AND enabled = true`, oracleID).Scan(&enabledAssetCount)
 	if err != nil {
 		t.Fatalf("failed to count enabled assets: %v", err)
 	}
@@ -113,9 +111,9 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 		SELECT oa.token_id, t.address
 		FROM oracle_asset oa
 		JOIN token t ON t.id = oa.token_id
-		WHERE oa.oracle_source_id = $1 AND oa.enabled = true
+		WHERE oa.oracle_id = $1 AND oa.enabled = true
 		ORDER BY oa.id
-	`, oracleSourceID)
+	`, oracleID)
 	if err != nil {
 		t.Fatalf("failed to query token addresses: %v", err)
 	}
@@ -171,7 +169,7 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 
 	// Verify prices were stored in the database
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, oracleSourceID).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query price count: %v", err)
 	}
@@ -185,7 +183,7 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 
 	// Verify block numbers stored
 	var minBlock, maxBlock int64
-	err = pool.QueryRow(ctx, `SELECT MIN(block_number), MAX(block_number) FROM onchain_token_price WHERE oracle_source_id = $1`, oracleSourceID).Scan(&minBlock, &maxBlock)
+	err = pool.QueryRow(ctx, `SELECT MIN(block_number), MAX(block_number) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&minBlock, &maxBlock)
 	if err != nil {
 		t.Fatalf("failed to query block range: %v", err)
 	}
@@ -196,16 +194,13 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 		t.Errorf("expected max block %d, got %d", toBlock, maxBlock)
 	}
 
-	// Verify a specific price value for WETH at block 100
-	// WETH is the first token in ordering, price = blockNum * 1 * 1e8 -> ConvertOraclePriceToUSD -> blockNum * 1.0
-	// Actually the order depends on oracle_asset ordering by ID, which is seeded by migration.
-	// We can verify any token - let's just check that prices are > 0
+	// Verify a sample price is positive
 	var samplePrice float64
 	err = pool.QueryRow(ctx, `
 		SELECT price_usd FROM onchain_token_price
-		WHERE oracle_source_id = $1 AND block_number = $2
+		WHERE oracle_id = $1 AND block_number = $2
 		ORDER BY token_id LIMIT 1
-	`, oracleSourceID, fromBlock).Scan(&samplePrice)
+	`, oracleID, fromBlock).Scan(&samplePrice)
 	if err != nil {
 		t.Fatalf("failed to query sample price: %v", err)
 	}
@@ -221,13 +216,12 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Use the sparklend source and only two custom tokens (to keep things deterministic)
-	// We create our own oracle source to avoid interference from migration seed data.
-	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-oracle", "Test Oracle", 1, "0x0000000000000000000000000000000000000AAA")
+	// Create our own oracle to avoid interference from migration seed data.
+	oracleID := testutil.SeedOracle(t, ctx, pool, "test-oracle", "Test Oracle", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000001", "TK1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000002", "TK2", 18)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID2)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000001"),
@@ -267,7 +261,7 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 
 	// With constant prices, only the first block should have stored prices (2 tokens = 2 records)
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query price count: %v", err)
 	}
@@ -277,7 +271,7 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 
 	// Verify only block 100 has prices
 	var storedBlock int64
-	err = pool.QueryRow(ctx, `SELECT DISTINCT block_number FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&storedBlock)
+	err = pool.QueryRow(ctx, `SELECT DISTINCT block_number FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&storedBlock)
 	if err != nil {
 		t.Fatalf("failed to query stored block: %v", err)
 	}
@@ -287,7 +281,7 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 
 	// Verify actual price values
 	var priceUSD1, priceUSD2 float64
-	err = pool.QueryRow(ctx, `SELECT price_usd FROM onchain_token_price WHERE oracle_source_id = $1 AND token_id = $2`, sourceID, tokenID1).Scan(&priceUSD1)
+	err = pool.QueryRow(ctx, `SELECT price_usd FROM onchain_token_price WHERE oracle_id = $1 AND token_id = $2`, oracleID, tokenID1).Scan(&priceUSD1)
 	if err != nil {
 		t.Fatalf("failed to query TK1 price: %v", err)
 	}
@@ -296,7 +290,7 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 		t.Errorf("expected TK1 price 1.0, got %f", priceUSD1)
 	}
 
-	err = pool.QueryRow(ctx, `SELECT price_usd FROM onchain_token_price WHERE oracle_source_id = $1 AND token_id = $2`, sourceID, tokenID2).Scan(&priceUSD2)
+	err = pool.QueryRow(ctx, `SELECT price_usd FROM onchain_token_price WHERE oracle_id = $1 AND token_id = $2`, oracleID, tokenID2).Scan(&priceUSD2)
 	if err != nil {
 		t.Fatalf("failed to query TK2 price: %v", err)
 	}
@@ -313,11 +307,11 @@ func TestIntegration_BackfillRun_ResumeFromLatestBlock(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-resume", "Test Resume", 1, "0x0000000000000000000000000000000000000AAA")
+	oracleID := testutil.SeedOracle(t, ctx, pool, "test-resume", "Test Resume", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000011", "RSM1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000012", "RSM2", 18)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID2)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000011"),
@@ -352,7 +346,7 @@ func TestIntegration_BackfillRun_ResumeFromLatestBlock(t *testing.T) {
 	}
 
 	var countAfterFirst int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&countAfterFirst)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&countAfterFirst)
 	if err != nil {
 		t.Fatalf("failed to query price count: %v", err)
 	}
@@ -385,7 +379,7 @@ func TestIntegration_BackfillRun_ResumeFromLatestBlock(t *testing.T) {
 
 	// Count should be unchanged (resume detected block 104 as latest, from >= 105)
 	var countAfterSecond int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&countAfterSecond)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&countAfterSecond)
 	if err != nil {
 		t.Fatalf("failed to query price count after second run: %v", err)
 	}
@@ -416,7 +410,7 @@ func TestIntegration_BackfillRun_ResumeFromLatestBlock(t *testing.T) {
 	}
 
 	var countAfterThird int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&countAfterThird)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&countAfterThird)
 	if err != nil {
 		t.Fatalf("failed to query price count after third run: %v", err)
 	}
@@ -428,7 +422,7 @@ func TestIntegration_BackfillRun_ResumeFromLatestBlock(t *testing.T) {
 
 	// Verify block range coverage
 	var minBlock, maxBlock int64
-	err = pool.QueryRow(ctx, `SELECT MIN(block_number), MAX(block_number) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&minBlock, &maxBlock)
+	err = pool.QueryRow(ctx, `SELECT MIN(block_number), MAX(block_number) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&minBlock, &maxBlock)
 	if err != nil {
 		t.Fatalf("failed to query block range: %v", err)
 	}
@@ -447,9 +441,9 @@ func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-idempotent", "Test Idempotent", 1, "0x0000000000000000000000000000000000000AAA")
+	oracleID := testutil.SeedOracle(t, ctx, pool, "test-idempotent", "Test Idempotent", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000021", "IDP1", 18)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000021"),
@@ -483,7 +477,7 @@ func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 	}
 
 	var countFirst int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&countFirst)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&countFirst)
 	if err != nil {
 		t.Fatalf("failed to query price count: %v", err)
 	}
@@ -491,21 +485,19 @@ func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 	// Manually re-run UpsertPrices with the same data to verify ON CONFLICT DO NOTHING.
 	// The resume logic would skip this, so we test idempotency at the repo level.
 	sampleTimestamp := time.Unix(1700000100, 0).UTC()
-	oracleAddrBytes := oracleAddr.Bytes()
 	repo.UpsertPrices(ctx, []*entity.OnchainTokenPrice{
 		{
-			TokenID:        tokenID1,
-			OracleSourceID: int16(sourceID),
-			BlockNumber:    100,
-			BlockVersion:   0,
-			Timestamp:      sampleTimestamp,
-			OracleAddress:  oracleAddrBytes,
-			PriceUSD:       999.99, // Different price, but same PK
+			TokenID:      tokenID1,
+			OracleID:     int16(oracleID),
+			BlockNumber:  100,
+			BlockVersion: 0,
+			Timestamp:    sampleTimestamp,
+			PriceUSD:     999.99, // Different price, but same PK
 		},
 	})
 
 	var countSecond int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&countSecond)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&countSecond)
 	if err != nil {
 		t.Fatalf("failed to query price count: %v", err)
 	}
@@ -523,9 +515,9 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-latest-block", "Test Latest Block", 1, "0x0000000000000000000000000000000000000AAA")
+	oracleID := testutil.SeedOracle(t, ctx, pool, "test-latest-block", "Test Latest Block", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000031", "LB1", 18)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000031"),
@@ -537,7 +529,7 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 	}
 
 	// Before any data: GetLatestBlock should return 0
-	latestBlock, err := repo.GetLatestBlock(ctx, sourceID)
+	latestBlock, err := repo.GetLatestBlock(ctx, oracleID)
 	if err != nil {
 		t.Fatalf("GetLatestBlock failed: %v", err)
 	}
@@ -568,7 +560,7 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 	}
 
 	// After backfill: GetLatestBlock should return 205
-	latestBlock, err = repo.GetLatestBlock(ctx, sourceID)
+	latestBlock, err = repo.GetLatestBlock(ctx, oracleID)
 	if err != nil {
 		t.Fatalf("GetLatestBlock after backfill failed: %v", err)
 	}
@@ -584,11 +576,11 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	sourceID := testutil.SeedOracleSource(t, ctx, pool, "test-selective", "Test Selective", 1, "0x0000000000000000000000000000000000000AAA")
+	oracleID := testutil.SeedOracle(t, ctx, pool, "test-selective", "Test Selective", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000041", "SC1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000042", "SC2", 18)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID1)
-	testutil.SeedOracleAsset(t, ctx, pool, sourceID, tokenID2)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
 
 	tokenAddresses := map[int64]common.Address{
 		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000041"),
@@ -612,7 +604,7 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				prices := pricesByBlock[blockNumber.Int64()]
-				return multicallResult(t, calls, prices), nil
+				return multicallResult(t, prices), nil
 			},
 		}, nil
 	}
@@ -649,7 +641,7 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 	// Block 104: token2 = 1 (only token2 changed)
 	// Total: 4
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1`, sourceID).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query price count: %v", err)
 	}
@@ -660,7 +652,7 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 	// Verify specific blocks have entries
 	for _, blockNum := range []int64{100, 102, 104} {
 		var count int
-		err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1 AND block_number = $2`, sourceID, blockNum).Scan(&count)
+		err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1 AND block_number = $2`, oracleID, blockNum).Scan(&count)
 		if err != nil {
 			t.Fatalf("failed to query block %d: %v", blockNum, err)
 		}
@@ -672,7 +664,7 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 	// Verify blocks 101 and 103 have no entries
 	for _, blockNum := range []int64{101, 103} {
 		var count int
-		err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_source_id = $1 AND block_number = $2`, sourceID, blockNum).Scan(&count)
+		err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1 AND block_number = $2`, oracleID, blockNum).Scan(&count)
 		if err != nil {
 			t.Fatalf("failed to query block %d: %v", blockNum, err)
 		}

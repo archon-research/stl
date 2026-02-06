@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS offchain_token_price (
     timestamp TIMESTAMPTZ NOT NULL,
     price_usd NUMERIC(30, 18) NOT NULL,
     market_cap_usd NUMERIC(30, 2),
+    volume_usd NUMERIC(30, 2),
     PRIMARY KEY (token_id, source_id, timestamp)
 ) WITH (
     tsdb.hypertable,
@@ -81,42 +82,6 @@ DO $$ BEGIN
     PERFORM add_tiering_policy('offchain_token_price', INTERVAL '1 year');
 EXCEPTION WHEN undefined_function THEN
     RAISE NOTICE 'add_tiering_policy not available, skipping tiering for offchain_token_price';
-END $$;
-
--- Offchain token volume table (hourly granularity, on-chain tokens only)
--- Same design rationale as offchain_token_price - see comments above.
-
-CREATE TABLE IF NOT EXISTS offchain_token_volume (
-    token_id BIGINT NOT NULL,
-    source_id SMALLINT NOT NULL,
-    timestamp TIMESTAMPTZ NOT NULL,
-    volume_usd NUMERIC(30, 2) NOT NULL,
-    PRIMARY KEY (token_id, source_id, timestamp)
-) WITH (
-    tsdb.hypertable,
-    tsdb.partition_column = 'timestamp',
-    tsdb.chunk_interval = '1 day'
-);
-
--- Enable compression on offchain_token_volume hypertable
--- Segment by token_id for efficient queries filtering by token + time range
--- Order by timestamp descending for time-series query patterns
-ALTER TABLE offchain_token_volume SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = 'token_id',
-    timescaledb.compress_orderby = 'timestamp DESC'
-);
-
--- Compress chunks older than 2 days (2x chunk_interval)
--- Compress aggressively to limit uncompressed working set. Queries over compressed
--- chunks decompress only the relevant token_id segments (aligned with compress_segmentby).
-SELECT add_compression_policy('offchain_token_volume', INTERVAL '2 days', if_not_exists => TRUE);
-
--- Tier data older than 1 year to S3-backed object storage (Tiger Cloud Scale Plan)
-DO $$ BEGIN
-    PERFORM add_tiering_policy('offchain_token_volume', INTERVAL '1 year');
-EXCEPTION WHEN undefined_function THEN
-    RAISE NOTICE 'add_tiering_policy not available, skipping tiering for offchain_token_volume';
 END $$;
 
 -- Seed SparkLend reserve token mappings for CoinGecko

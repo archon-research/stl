@@ -43,35 +43,37 @@ func NewOnchainPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSiz
 	}, nil
 }
 
-// GetOracleSource retrieves an oracle source by its name.
-func (r *OnchainPriceRepository) GetOracleSource(ctx context.Context, name string) (*entity.OracleSource, error) {
-	var os entity.OracleSource
+// GetOracle retrieves an oracle by its name.
+func (r *OnchainPriceRepository) GetOracle(ctx context.Context, name string) (*entity.Oracle, error) {
+	var o entity.Oracle
+	var addrBytes []byte
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, name, display_name, chain_id, pool_address_provider,
+		SELECT id, name, display_name, chain_id, address,
 		       deployment_block, enabled, created_at, updated_at
-		FROM oracle_source
+		FROM oracle
 		WHERE name = $1
 	`, name).Scan(
-		&os.ID, &os.Name, &os.DisplayName, &os.ChainID, &os.PoolAddressProvider,
-		&os.DeploymentBlock, &os.Enabled, &os.CreatedAt, &os.UpdatedAt,
+		&o.ID, &o.Name, &o.DisplayName, &o.ChainID, &addrBytes,
+		&o.DeploymentBlock, &o.Enabled, &o.CreatedAt, &o.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("oracle source not found: %s", name)
+		return nil, fmt.Errorf("oracle not found: %s", name)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("querying oracle source: %w", err)
+		return nil, fmt.Errorf("querying oracle: %w", err)
 	}
-	return &os, nil
+	copy(o.Address[:], addrBytes)
+	return &o, nil
 }
 
-// GetEnabledAssets retrieves all enabled assets for a given oracle source.
-func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleSourceID int64) ([]*entity.OracleAsset, error) {
+// GetEnabledAssets retrieves all enabled assets for a given oracle.
+func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, oracle_source_id, token_id, enabled, created_at
+		SELECT id, oracle_id, token_id, enabled, created_at
 		FROM oracle_asset
-		WHERE oracle_source_id = $1 AND enabled = true
+		WHERE oracle_id = $1 AND enabled = true
 		ORDER BY id
-	`, oracleSourceID)
+	`, oracleID)
 	if err != nil {
 		return nil, fmt.Errorf("querying enabled oracle assets: %w", err)
 	}
@@ -80,7 +82,7 @@ func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleSou
 	var assets []*entity.OracleAsset
 	for rows.Next() {
 		var oa entity.OracleAsset
-		if err := rows.Scan(&oa.ID, &oa.OracleSourceID, &oa.TokenID, &oa.Enabled, &oa.CreatedAt); err != nil {
+		if err := rows.Scan(&oa.ID, &oa.OracleID, &oa.TokenID, &oa.Enabled, &oa.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scanning oracle asset: %w", err)
 		}
 		assets = append(assets, &oa)
@@ -91,15 +93,15 @@ func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleSou
 	return assets, nil
 }
 
-// GetLatestPrices returns the most recent price per token for a given oracle source.
+// GetLatestPrices returns the most recent price per token for a given oracle.
 // Used for change detection: only store prices that differ from the previous block.
-func (r *OnchainPriceRepository) GetLatestPrices(ctx context.Context, oracleSourceID int64) (map[int64]float64, error) {
+func (r *OnchainPriceRepository) GetLatestPrices(ctx context.Context, oracleID int64) (map[int64]float64, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT DISTINCT ON (token_id) token_id, price_usd
 		FROM onchain_token_price
-		WHERE oracle_source_id = $1
+		WHERE oracle_id = $1
 		ORDER BY token_id, block_number DESC, block_version DESC
-	`, oracleSourceID)
+	`, oracleID)
 	if err != nil {
 		return nil, fmt.Errorf("querying latest onchain prices: %w", err)
 	}
@@ -120,15 +122,15 @@ func (r *OnchainPriceRepository) GetLatestPrices(ctx context.Context, oracleSour
 	return prices, nil
 }
 
-// GetLatestBlock returns the highest block number stored for a given oracle source.
+// GetLatestBlock returns the highest block number stored for a given oracle.
 // Returns 0 if no blocks have been stored yet.
-func (r *OnchainPriceRepository) GetLatestBlock(ctx context.Context, oracleSourceID int64) (int64, error) {
+func (r *OnchainPriceRepository) GetLatestBlock(ctx context.Context, oracleID int64) (int64, error) {
 	var blockNumber *int64
 	err := r.pool.QueryRow(ctx, `
 		SELECT MAX(block_number)
 		FROM onchain_token_price
-		WHERE oracle_source_id = $1
-	`, oracleSourceID).Scan(&blockNumber)
+		WHERE oracle_id = $1
+	`, oracleID).Scan(&blockNumber)
 	if err != nil {
 		return 0, fmt.Errorf("querying latest block: %w", err)
 	}
@@ -139,14 +141,14 @@ func (r *OnchainPriceRepository) GetLatestBlock(ctx context.Context, oracleSourc
 }
 
 // GetTokenAddresses returns a map of token_id → on-chain address for enabled oracle assets.
-func (r *OnchainPriceRepository) GetTokenAddresses(ctx context.Context, oracleSourceID int64) (map[int64][]byte, error) {
+func (r *OnchainPriceRepository) GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT oa.token_id, t.address
 		FROM oracle_asset oa
 		JOIN token t ON t.id = oa.token_id
-		WHERE oa.oracle_source_id = $1 AND oa.enabled = true
+		WHERE oa.oracle_id = $1 AND oa.enabled = true
 		ORDER BY oa.id
-	`, oracleSourceID)
+	`, oracleID)
 	if err != nil {
 		return nil, fmt.Errorf("querying token addresses: %w", err)
 	}
@@ -205,22 +207,22 @@ func (r *OnchainPriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO onchain_token_price (token_id, oracle_source_id, block_number, block_version, timestamp, oracle_address, price_usd)
+		INSERT INTO onchain_token_price (token_id, oracle_id, block_number, block_version, timestamp, price_usd)
 		VALUES `)
 
-	args := make([]any, 0, len(prices)*7)
+	args := make([]any, 0, len(prices)*6)
 	for i, price := range prices {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 7
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
+		baseIdx := i * 6
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d)",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6))
 
-		args = append(args, price.TokenID, price.OracleSourceID, price.BlockNumber, price.BlockVersion, price.Timestamp, price.OracleAddress, price.PriceUSD)
+		args = append(args, price.TokenID, price.OracleID, price.BlockNumber, price.BlockVersion, price.Timestamp, price.PriceUSD)
 	}
 
-	sb.WriteString(` ON CONFLICT (token_id, oracle_source_id, block_number, block_version, timestamp) DO NOTHING`)
+	sb.WriteString(` ON CONFLICT (token_id, oracle_id, block_number, block_version, timestamp) DO NOTHING`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {

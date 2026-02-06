@@ -56,8 +56,7 @@ type Service struct {
 	newMulticaller MulticallFactory
 	repo           outbound.OnchainPriceRepository
 
-	providerABI *abi.ABI
-	oracleABI   *abi.ABI
+	oracleABI *abi.ABI
 
 	// tokenAddressMap is the token_id → on-chain address mapping.
 	tokenAddressMap map[int64]common.Address
@@ -100,11 +99,6 @@ func NewService(
 		config.Logger = defaults.Logger
 	}
 
-	providerABI, err := abis.GetPoolAddressProviderABI()
-	if err != nil {
-		return nil, fmt.Errorf("loading PoolAddressProvider ABI: %w", err)
-	}
-
 	oracleABI, err := abis.GetSparkLendOracleABI()
 	if err != nil {
 		return nil, fmt.Errorf("loading SparkLend Oracle ABI: %w", err)
@@ -115,7 +109,6 @@ func NewService(
 		headerFetcher:   headerFetcher,
 		newMulticaller:  newMulticaller,
 		repo:            repo,
-		providerABI:     providerABI,
 		oracleABI:       oracleABI,
 		tokenAddressMap: tokenAddresses,
 		logger:          config.Logger.With("component", "oracle-backfill"),
@@ -124,20 +117,20 @@ func NewService(
 
 // Run executes the backfill for the given block range.
 func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
-	source, err := s.repo.GetOracleSource(ctx, s.config.OracleSource)
+	oracle, err := s.repo.GetOracle(ctx, s.config.OracleSource)
 	if err != nil {
 		return fmt.Errorf("getting oracle source: %w", err)
 	}
 
-	assets, err := s.repo.GetEnabledAssets(ctx, source.ID)
+	assets, err := s.repo.GetEnabledAssets(ctx, oracle.ID)
 	if err != nil {
 		return fmt.Errorf("getting enabled assets: %w", err)
 	}
 	if len(assets) == 0 {
-		return fmt.Errorf("no enabled assets for oracle source %s", source.Name)
+		return fmt.Errorf("no enabled assets for oracle source %s", oracle.Name)
 	}
 
-	providerAddr := common.BytesToAddress(source.PoolAddressProvider)
+	oracleAddr := common.Address(oracle.Address)
 
 	// Build ordered token address and ID lists
 	tokenAddrs := make([]common.Address, len(assets))
@@ -152,7 +145,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	}
 
 	// Resume support: skip already-processed blocks
-	latestBlock, err := s.repo.GetLatestBlock(ctx, source.ID)
+	latestBlock, err := s.repo.GetLatestBlock(ctx, oracle.ID)
 	if err != nil {
 		return fmt.Errorf("getting latest block: %w", err)
 	}
@@ -217,7 +210,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		wg.Add(1)
 		go func(wFrom, wTo int64) {
 			defer wg.Done()
-			s.worker(workerCtx, wFrom, wTo, source, providerAddr, tokenAddrs, tokenIDs, priceCh, &stats)
+			s.worker(workerCtx, wFrom, wTo, oracle, oracleAddr, tokenAddrs, tokenIDs, priceCh, &stats)
 		}(workerFrom, workerTo)
 	}
 
@@ -248,8 +241,8 @@ type backfillStats struct {
 func (s *Service) worker(
 	ctx context.Context,
 	fromBlock, toBlock int64,
-	source *entity.OracleSource,
-	providerAddr common.Address,
+	oracle *entity.Oracle,
+	oracleAddr common.Address,
 	tokenAddrs []common.Address,
 	tokenIDs []int64,
 	priceCh chan<- []*entity.OnchainTokenPrice,
@@ -261,8 +254,7 @@ func (s *Service) worker(
 		return
 	}
 
-	oracleSourceID := int16(source.ID)
-	oracleAddr := common.Address{} // will be set on first block
+	oracleID := int16(oracle.ID)
 
 	// Per-worker price cache for change detection within this contiguous range.
 	// First block in range initializes from "all new" (or DB if needed).
@@ -273,7 +265,7 @@ func (s *Service) worker(
 			return
 		}
 
-		prices, newOracleAddr, err := s.processBlock(ctx, mc, providerAddr, oracleAddr, tokenAddrs, tokenIDs, oracleSourceID, blockNum)
+		prices, err := s.processBlock(ctx, mc, oracleAddr, tokenAddrs, tokenIDs, oracleID, blockNum)
 		if err != nil {
 			s.logger.Error("failed to process block",
 				"block", blockNum,
@@ -281,8 +273,6 @@ func (s *Service) worker(
 			stats.blocksFailed.Add(1)
 			continue
 		}
-
-		oracleAddr = newOracleAddr
 
 		// Change detection: only keep prices that differ from previous block
 		var changed []*entity.OnchainTokenPrice
@@ -309,45 +299,43 @@ func (s *Service) worker(
 func (s *Service) processBlock(
 	ctx context.Context,
 	mc outbound.Multicaller,
-	providerAddr, cachedOracleAddr common.Address,
+	oracleAddr common.Address,
 	tokenAddrs []common.Address,
 	tokenIDs []int64,
-	oracleSourceID int16,
+	oracleID int16,
 	blockNum int64,
-) ([]*entity.OnchainTokenPrice, common.Address, error) {
+) ([]*entity.OnchainTokenPrice, error) {
 	// Fetch oracle prices via multicall
-	result, err := blockchain.FetchOraclePrices(
-		ctx, mc, s.providerABI, s.oracleABI,
-		providerAddr, cachedOracleAddr,
+	rawPrices, err := blockchain.FetchOraclePrices(
+		ctx, mc, s.oracleABI,
+		oracleAddr,
 		tokenAddrs, blockNum,
 	)
 	if err != nil {
-		return nil, cachedOracleAddr, fmt.Errorf("fetching oracle prices: %w", err)
+		return nil, fmt.Errorf("fetching oracle prices: %w", err)
 	}
 
-	if len(result.Prices) != len(tokenIDs) {
-		return nil, result.OracleAddress, fmt.Errorf("price count mismatch: expected %d, got %d", len(tokenIDs), len(result.Prices))
+	if len(rawPrices) != len(tokenIDs) {
+		return nil, fmt.Errorf("price count mismatch: expected %d, got %d", len(tokenIDs), len(rawPrices))
 	}
 
 	// Get block timestamp
 	header, err := s.headerFetcher.HeaderByNumber(ctx, new(big.Int).SetInt64(blockNum))
 	if err != nil {
-		return nil, result.OracleAddress, fmt.Errorf("getting block header: %w", err)
+		return nil, fmt.Errorf("getting block header: %w", err)
 	}
 	blockTimestamp := time.Unix(int64(header.Time), 0).UTC()
-	oracleAddrBytes := result.OracleAddress.Bytes()
 
 	prices := make([]*entity.OnchainTokenPrice, 0, len(tokenIDs))
-	for i, rawPrice := range result.Prices {
+	for i, rawPrice := range rawPrices {
 		priceUSD := blockchain.ConvertOraclePriceToUSD(rawPrice)
 
 		p, err := entity.NewOnchainTokenPrice(
 			tokenIDs[i],
-			oracleSourceID,
+			oracleID,
 			blockNum,
 			0, // block_version = 0 for historical backfill
 			blockTimestamp,
-			oracleAddrBytes,
 			priceUSD,
 		)
 		if err != nil {
@@ -357,7 +345,7 @@ func (s *Service) processBlock(
 		prices = append(prices, p)
 	}
 
-	return prices, result.OracleAddress, nil
+	return prices, nil
 }
 
 func (s *Service) batchWriter(ctx context.Context, priceCh <-chan []*entity.OnchainTokenPrice, stats *backfillStats) error {

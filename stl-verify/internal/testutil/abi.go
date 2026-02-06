@@ -4,24 +4,8 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/common"
-
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 )
-
-// PackOracleAddress ABI-encodes an address as getPriceOracle() return data.
-func PackOracleAddress(t *testing.T, addr common.Address) []byte {
-	t.Helper()
-	providerABI, err := abis.GetPoolAddressProviderABI()
-	if err != nil {
-		t.Fatalf("loading provider ABI: %v", err)
-	}
-	data, err := providerABI.Methods["getPriceOracle"].Outputs.Pack(addr)
-	if err != nil {
-		t.Fatalf("packing address: %v", err)
-	}
-	return data
-}
 
 // PackAssetPrices ABI-encodes prices as getAssetsPrices() return data.
 func PackAssetPrices(t *testing.T, prices []*big.Int) []byte {

@@ -223,17 +223,6 @@ func (s *Service) fetchAndStoreChunk(ctx context.Context, asset *entity.PriceAss
 		s.logger.Debug("stored prices", "count", len(prices))
 	}
 
-	volumes, err := s.convertHistoricalVolumes(data, assetMap)
-	if err != nil {
-		return fmt.Errorf("converting historical volumes: %w", err)
-	}
-	if len(volumes) > 0 {
-		if err := s.repo.UpsertVolumes(ctx, volumes); err != nil {
-			return fmt.Errorf("storing volumes: %w", err)
-		}
-		s.logger.Debug("stored volumes", "count", len(volumes))
-	}
-
 	return nil
 }
 
@@ -269,6 +258,7 @@ func (s *Service) convertToTokenPrices(prices []outbound.PriceData, assets []*en
 			int16(asset.SourceID),
 			p.PriceUSD,
 			p.MarketCapUSD,
+			nil,
 			p.Timestamp,
 		)
 		if err != nil {
@@ -289,10 +279,15 @@ func (s *Service) convertHistoricalPrices(data *outbound.HistoricalData, assetMa
 		return nil, nil
 	}
 
-	// Build a map of timestamps to market caps for efficient lookup
+	// Build maps of timestamps to market caps and volumes for efficient lookup
 	marketCapMap := make(map[int64]float64, len(data.MarketCaps))
 	for _, mc := range data.MarketCaps {
 		marketCapMap[mc.Timestamp.Unix()] = mc.MarketCapUSD
+	}
+
+	volumeMap := make(map[int64]float64, len(data.Volumes))
+	for _, v := range data.Volumes {
+		volumeMap[v.Timestamp.Unix()] = v.VolumeUSD
 	}
 
 	result := make([]*entity.TokenPrice, 0, len(data.Prices))
@@ -302,43 +297,23 @@ func (s *Service) convertHistoricalPrices(data *outbound.HistoricalData, assetMa
 			marketCap = &mc
 		}
 
+		var volume *float64
+		if v, ok := volumeMap[p.Timestamp.Unix()]; ok {
+			volume = &v
+		}
+
 		tp, err := entity.NewTokenPrice(
 			*asset.TokenID,
 			int16(asset.SourceID),
 			p.PriceUSD,
 			marketCap,
+			volume,
 			p.Timestamp,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("invalid historical price data for asset %s: %w", data.SourceAssetID, err)
 		}
 		result = append(result, tp)
-	}
-
-	return result, nil
-}
-
-func (s *Service) convertHistoricalVolumes(data *outbound.HistoricalData, assetMap map[string]*entity.PriceAsset) ([]*entity.TokenVolume, error) {
-	asset, ok := assetMap[data.SourceAssetID]
-	if !ok {
-		return nil, fmt.Errorf("historical data for unknown asset: %s", data.SourceAssetID)
-	}
-	if asset.TokenID == nil {
-		return nil, nil
-	}
-
-	result := make([]*entity.TokenVolume, 0, len(data.Volumes))
-	for _, v := range data.Volumes {
-		tv, err := entity.NewTokenVolume(
-			*asset.TokenID,
-			int16(asset.SourceID),
-			v.VolumeUSD,
-			v.Timestamp,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("invalid historical volume data for asset %s: %w", data.SourceAssetID, err)
-		}
-		result = append(result, tv)
 	}
 
 	return result, nil

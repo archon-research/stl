@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -56,19 +57,17 @@ type Service struct {
 	repo        outbound.OnchainPriceRepository
 	multicaller outbound.Multicaller
 
-	providerABI *abi.ABI
-	oracleABI   *abi.ABI
+	oracleABI *abi.ABI
 
 	// tokenAddressMap is the token_id → on-chain address mapping, provided at construction.
 	tokenAddressMap map[int64]common.Address
 
-	oracleSource *entity.OracleSource
-	assets       []*entity.OracleAsset
-	tokenAddrs   []common.Address  // ordered list of token addresses for oracle call
-	tokenIDs     []int64           // parallel to tokenAddrs
-	providerAddr common.Address    // PoolAddressProvider address
-	oracleAddr   common.Address    // cached oracle address
-	priceCache   map[int64]float64 // tokenID → last stored price (for change detection)
+	oracle     *entity.Oracle
+	assets     []*entity.OracleAsset
+	tokenAddrs []common.Address  // ordered list of token addresses for oracle call
+	tokenIDs   []int64           // parallel to tokenAddrs
+	oracleAddr common.Address    // oracle contract address
+	priceCache map[int64]float64 // tokenID → last stored price (for change detection)
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -117,11 +116,6 @@ func NewService(
 		config.Logger = defaults.Logger
 	}
 
-	providerABI, err := abis.GetPoolAddressProviderABI()
-	if err != nil {
-		return nil, fmt.Errorf("loading PoolAddressProvider ABI: %w", err)
-	}
-
 	oracleABI, err := abis.GetSparkLendOracleABI()
 	if err != nil {
 		return nil, fmt.Errorf("loading SparkLend Oracle ABI: %w", err)
@@ -132,7 +126,6 @@ func NewService(
 		sqsClient:       sqsClient,
 		repo:            repo,
 		multicaller:     multicaller,
-		providerABI:     providerABI,
 		oracleABI:       oracleABI,
 		tokenAddressMap: tokenAddresses,
 		priceCache:      make(map[int64]float64),
@@ -167,19 +160,19 @@ func (s *Service) Stop() error {
 }
 
 func (s *Service) initialize(ctx context.Context) error {
-	source, err := s.repo.GetOracleSource(ctx, s.config.OracleSource)
+	oracle, err := s.repo.GetOracle(ctx, s.config.OracleSource)
 	if err != nil {
 		return fmt.Errorf("getting oracle source: %w", err)
 	}
-	s.oracleSource = source
-	s.providerAddr = common.BytesToAddress(source.PoolAddressProvider)
+	s.oracle = oracle
+	s.oracleAddr = common.Address(oracle.Address)
 
-	assets, err := s.repo.GetEnabledAssets(ctx, source.ID)
+	assets, err := s.repo.GetEnabledAssets(ctx, oracle.ID)
 	if err != nil {
 		return fmt.Errorf("getting enabled assets: %w", err)
 	}
 	if len(assets) == 0 {
-		return fmt.Errorf("no enabled assets for oracle source %s", source.Name)
+		return fmt.Errorf("no enabled assets for oracle source %s", oracle.Name)
 	}
 	s.assets = assets
 
@@ -196,14 +189,14 @@ func (s *Service) initialize(ctx context.Context) error {
 	}
 
 	// Initialize price cache from DB
-	cached, err := s.repo.GetLatestPrices(ctx, source.ID)
+	cached, err := s.repo.GetLatestPrices(ctx, oracle.ID)
 	if err != nil {
 		return fmt.Errorf("loading latest prices: %w", err)
 	}
 	s.priceCache = cached
 
 	s.logger.Info("initialized",
-		"oracleSource", source.Name,
+		"oracleSource", oracle.Name,
 		"assets", len(assets),
 		"cachedPrices", len(cached))
 
@@ -290,12 +283,10 @@ func (s *Service) processMessage(ctx context.Context, msg sqstypes.Message) erro
 }
 
 func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
-	result, err := blockchain.FetchOraclePrices(
+	prices, err := blockchain.FetchOraclePrices(
 		ctx,
 		s.multicaller,
-		s.providerABI,
 		s.oracleABI,
-		s.providerAddr,
 		s.oracleAddr,
 		s.tokenAddrs,
 		event.BlockNumber,
@@ -304,20 +295,11 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 		return fmt.Errorf("fetching oracle prices at block %d: %w", event.BlockNumber, err)
 	}
 
-	// Update cached oracle address
-	if s.oracleAddr != result.OracleAddress {
-		s.logger.Info("oracle address updated",
-			"old", s.oracleAddr.Hex(),
-			"new", result.OracleAddress.Hex(),
-			"block", event.BlockNumber)
-		s.oracleAddr = result.OracleAddress
+	if len(prices) != len(s.tokenIDs) {
+		return fmt.Errorf("price count mismatch: expected %d, got %d", len(s.tokenIDs), len(prices))
 	}
 
-	if len(result.Prices) != len(s.tokenIDs) {
-		return fmt.Errorf("price count mismatch: expected %d, got %d", len(s.tokenIDs), len(result.Prices))
-	}
-
-	changed := s.detectChanges(result, event)
+	changed := s.detectChanges(prices, event)
 
 	if len(changed) == 0 {
 		s.logger.Debug("no price changes", "block", event.BlockNumber)
@@ -336,13 +318,12 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 	return nil
 }
 
-func (s *Service) detectChanges(result *blockchain.OraclePriceResult, event blockEvent) []*entity.OnchainTokenPrice {
+func (s *Service) detectChanges(rawPrices []*big.Int, event blockEvent) []*entity.OnchainTokenPrice {
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
-	oracleAddrBytes := result.OracleAddress.Bytes()
-	oracleSourceID := int16(s.oracleSource.ID)
+	oracleID := int16(s.oracle.ID)
 
 	var changed []*entity.OnchainTokenPrice
-	for i, rawPrice := range result.Prices {
+	for i, rawPrice := range rawPrices {
 		priceUSD := blockchain.ConvertOraclePriceToUSD(rawPrice)
 		tokenID := s.tokenIDs[i]
 
@@ -352,11 +333,10 @@ func (s *Service) detectChanges(result *blockchain.OraclePriceResult, event bloc
 
 		price, err := entity.NewOnchainTokenPrice(
 			tokenID,
-			oracleSourceID,
+			oracleID,
 			event.BlockNumber,
 			int16(event.Version),
 			blockTimestamp,
-			oracleAddrBytes,
 			priceUSD,
 		)
 		if err != nil {

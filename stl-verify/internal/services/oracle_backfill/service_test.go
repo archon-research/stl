@@ -24,11 +24,11 @@ import (
 
 // mockRepo implements outbound.OnchainPriceRepository for testing.
 type mockRepo struct {
-	getOracleSourceFn   func(ctx context.Context, name string) (*entity.OracleSource, error)
-	getEnabledAssetsFn  func(ctx context.Context, oracleSourceID int64) ([]*entity.OracleAsset, error)
-	getLatestPricesFn   func(ctx context.Context, oracleSourceID int64) (map[int64]float64, error)
-	getLatestBlockFn    func(ctx context.Context, oracleSourceID int64) (int64, error)
-	getTokenAddressesFn func(ctx context.Context, oracleSourceID int64) (map[int64][]byte, error)
+	getOracleFn         func(ctx context.Context, name string) (*entity.Oracle, error)
+	getEnabledAssetsFn  func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
+	getLatestPricesFn   func(ctx context.Context, oracleID int64) (map[int64]float64, error)
+	getLatestBlockFn    func(ctx context.Context, oracleID int64) (int64, error)
+	getTokenAddressesFn func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
 	upsertPricesFn      func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
 
 	// mu guards upserted for concurrent access from the batch writer goroutine.
@@ -36,37 +36,37 @@ type mockRepo struct {
 	upserted []*entity.OnchainTokenPrice
 }
 
-func (m *mockRepo) GetOracleSource(ctx context.Context, name string) (*entity.OracleSource, error) {
-	if m.getOracleSourceFn != nil {
-		return m.getOracleSourceFn(ctx, name)
+func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, error) {
+	if m.getOracleFn != nil {
+		return m.getOracleFn(ctx, name)
 	}
-	return nil, errors.New("GetOracleSource not mocked")
+	return nil, errors.New("GetOracle not mocked")
 }
 
-func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleSourceID int64) ([]*entity.OracleAsset, error) {
+func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
 	if m.getEnabledAssetsFn != nil {
-		return m.getEnabledAssetsFn(ctx, oracleSourceID)
+		return m.getEnabledAssetsFn(ctx, oracleID)
 	}
 	return nil, errors.New("GetEnabledAssets not mocked")
 }
 
-func (m *mockRepo) GetLatestPrices(ctx context.Context, oracleSourceID int64) (map[int64]float64, error) {
+func (m *mockRepo) GetLatestPrices(ctx context.Context, oracleID int64) (map[int64]float64, error) {
 	if m.getLatestPricesFn != nil {
-		return m.getLatestPricesFn(ctx, oracleSourceID)
+		return m.getLatestPricesFn(ctx, oracleID)
 	}
 	return nil, errors.New("GetLatestPrices not mocked")
 }
 
-func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleSourceID int64) (int64, error) {
+func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, error) {
 	if m.getLatestBlockFn != nil {
-		return m.getLatestBlockFn(ctx, oracleSourceID)
+		return m.getLatestBlockFn(ctx, oracleID)
 	}
 	return 0, nil
 }
 
-func (m *mockRepo) GetTokenAddresses(ctx context.Context, oracleSourceID int64) (map[int64][]byte, error) {
+func (m *mockRepo) GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error) {
 	if m.getTokenAddressesFn != nil {
-		return m.getTokenAddressesFn(ctx, oracleSourceID)
+		return m.getTokenAddressesFn(ctx, oracleID)
 	}
 	return nil, errors.New("GetTokenAddresses not mocked")
 }
@@ -101,34 +101,29 @@ func (m *mockHeaderFetcher) HeaderByNumber(ctx context.Context, number *big.Int)
 	return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
 }
 
-// abiPackAddress packs an address as the return data for getPriceOracle.
-func abiPackAddress(t *testing.T, addr common.Address) []byte {
-	return testutil.PackOracleAddress(t, addr)
-}
-
 // abiPackPrices packs a slice of *big.Int as the return data for getAssetsPrices.
 func abiPackPrices(t *testing.T, prices []*big.Int) []byte {
 	return testutil.PackAssetPrices(t, prices)
 }
 
-// defaultOracleSource returns a standard OracleSource for testing.
-func defaultOracleSource() *entity.OracleSource {
-	return &entity.OracleSource{
-		ID:                  1,
-		Name:                "sparklend",
-		DisplayName:         "SparkLend",
-		ChainID:             1,
-		PoolAddressProvider: common.HexToAddress("0x0000000000000000000000000000000000000AAA").Bytes(),
-		DeploymentBlock:     100,
-		Enabled:             true,
+// defaultOracle returns a standard Oracle for testing.
+func defaultOracle() *entity.Oracle {
+	return &entity.Oracle{
+		ID:              1,
+		Name:            "sparklend",
+		DisplayName:     "Spark: aave Oracle",
+		ChainID:         1,
+		Address:         common.HexToAddress("0x0000000000000000000000000000000000000BBB"),
+		DeploymentBlock: 100,
+		Enabled:         true,
 	}
 }
 
 // defaultAssets returns a standard set of OracleAssets for testing (two tokens).
 func defaultAssets() []*entity.OracleAsset {
 	return []*entity.OracleAsset{
-		{ID: 1, OracleSourceID: 1, TokenID: 10, Enabled: true},
-		{ID: 2, OracleSourceID: 1, TokenID: 20, Enabled: true},
+		{ID: 1, OracleID: 1, TokenID: 10, Enabled: true},
+		{ID: 2, OracleID: 1, TokenID: 20, Enabled: true},
 	}
 }
 
@@ -140,33 +135,17 @@ func defaultTokenAddresses() map[int64]common.Address {
 	}
 }
 
-// oracleAddr is the oracle address returned by the mock multicall.
-var oracleAddr = common.HexToAddress("0x0000000000000000000000000000000000000BBB")
-
 // multicallResult returns the multicall results for a given set of prices.
-// It handles both the initial 2-call pattern (getPriceOracle + getAssetsPrices)
-// and the retry 1-call pattern (getAssetsPrices only) from FetchOraclePrices.
-// On the first block, the worker's cachedOracleAddr is zero, which does not
-// match oracleAddr, so FetchOraclePrices retries with a single call.
-func multicallResult(t *testing.T, calls []outbound.Call, prices []*big.Int) []outbound.Result {
+// FetchOraclePrices uses a single-call pattern (getAssetsPrices only).
+func multicallResult(t *testing.T, prices []*big.Int) []outbound.Result {
 	t.Helper()
-	if len(calls) == 2 {
-		return []outbound.Result{
-			{Success: true, ReturnData: abiPackAddress(t, oracleAddr)},
-			{Success: true, ReturnData: abiPackPrices(t, prices)},
-		}
-	}
-	// Retry path: single getAssetsPrices call
 	return []outbound.Result{
 		{Success: true, ReturnData: abiPackPrices(t, prices)},
 	}
 }
 
 // defaultMulticallExecute returns a mock Execute function that returns
-// valid oracle address + prices for the given raw prices per block.
-// It handles both the initial 2-call pattern and the retry 1-call pattern
-// from FetchOraclePrices. pricesByBlock maps blockNumber -> []*big.Int prices.
-// If a block is missing, it uses defaultPrices.
+// valid prices for the given raw prices per block.
 func defaultMulticallExecute(t *testing.T, defaultPrices []*big.Int, pricesByBlock map[int64][]*big.Int) func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 	t.Helper()
 	return func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
@@ -179,7 +158,7 @@ func defaultMulticallExecute(t *testing.T, defaultPrices []*big.Int, pricesByBlo
 				prices = p
 			}
 		}
-		return multicallResult(t, calls, prices), nil
+		return multicallResult(t, prices), nil
 	}
 }
 
@@ -197,7 +176,7 @@ func blockDependentPrices(t *testing.T) func(ctx context.Context, calls []outbou
 			new(big.Int).Mul(big.NewInt(bn), big.NewInt(100_000_000)),
 			new(big.Int).Mul(big.NewInt(bn), big.NewInt(200_000_000)),
 		}
-		return multicallResult(t, calls, prices), nil
+		return multicallResult(t, prices), nil
 	}
 }
 
@@ -248,9 +227,6 @@ func TestNewService(t *testing.T) {
 				}
 				if svc.config.OracleSource != "test-oracle" {
 					t.Errorf("OracleSource = %q, want %q", svc.config.OracleSource, "test-oracle")
-				}
-				if svc.providerABI == nil {
-					t.Error("providerABI is nil")
 				}
 				if svc.oracleABI == nil {
 					t.Error("oracleABI is nil")
@@ -437,7 +413,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 				}
@@ -476,7 +452,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) {
 						return 106, nil
@@ -502,7 +478,7 @@ func TestRun(t *testing.T) {
 								new(big.Int).Mul(big.NewInt(bn), big.NewInt(100_000_000)),
 								new(big.Int).Mul(big.NewInt(bn), big.NewInt(200_000_000)),
 							}
-							return multicallResult(t, calls, prices), nil
+							return multicallResult(t, prices), nil
 						},
 					}, nil
 				}
@@ -534,7 +510,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) {
 						return 110, nil
@@ -568,7 +544,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 				}
@@ -607,7 +583,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 				}
@@ -642,7 +618,7 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:      "error GetOracleSource fails",
+			name:      "error GetOracle fails",
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
@@ -653,7 +629,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn: func(_ context.Context, _ string) (*entity.OracleSource, error) {
+					getOracleFn: func(_ context.Context, _ string) (*entity.Oracle, error) {
 						return nil, errors.New("database connection failed")
 					},
 				}
@@ -677,8 +653,8 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn: func(_ context.Context, _ string) (*entity.OracleSource, error) {
-						return defaultOracleSource(), nil
+					getOracleFn: func(_ context.Context, _ string) (*entity.Oracle, error) {
+						return defaultOracle(), nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return nil, errors.New("query failed")
@@ -704,8 +680,8 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn: func(_ context.Context, _ string) (*entity.OracleSource, error) {
-						return defaultOracleSource(), nil
+					getOracleFn: func(_ context.Context, _ string) (*entity.Oracle, error) {
+						return defaultOracle(), nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{}, nil
@@ -731,12 +707,12 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn: func(_ context.Context, _ string) (*entity.OracleSource, error) {
-						return defaultOracleSource(), nil
+					getOracleFn: func(_ context.Context, _ string) (*entity.Oracle, error) {
+						return defaultOracle(), nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{
-							{ID: 1, OracleSourceID: 1, TokenID: 999, Enabled: true},
+							{ID: 1, OracleID: 1, TokenID: 999, Enabled: true},
 						}, nil
 					},
 					getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) { return 0, nil },
@@ -761,7 +737,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) {
 						return 0, errors.New("redis unavailable")
@@ -787,7 +763,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 				}
@@ -826,7 +802,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 					upsertPricesFn: func(_ context.Context, _ []*entity.OnchainTokenPrice) error {
@@ -861,7 +837,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 					upsertPricesFn: func(_ context.Context, _ []*entity.OnchainTokenPrice) error {
@@ -896,7 +872,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 				}
@@ -927,7 +903,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 				}
@@ -952,7 +928,7 @@ func TestRun(t *testing.T) {
 								new(big.Int).Mul(big.NewInt(bn), big.NewInt(100_000_000)),
 								new(big.Int).Mul(big.NewInt(bn), big.NewInt(200_000_000)),
 							}
-							return multicallResult(t, calls, prices), nil
+							return multicallResult(t, prices), nil
 						},
 					}, nil
 				}
@@ -984,7 +960,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 				}
@@ -1032,7 +1008,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 				}
@@ -1051,13 +1027,13 @@ func TestRun(t *testing.T) {
 							bn := blockNumber.Int64()
 							if bn == 101 {
 								// Return only 1 price for 2 tokens → mismatch
-								return multicallResult(t, calls, []*big.Int{big.NewInt(100_000_000)}), nil
+								return multicallResult(t, []*big.Int{big.NewInt(100_000_000)}), nil
 							}
 							prices := []*big.Int{
 								new(big.Int).Mul(big.NewInt(bn), big.NewInt(100_000_000)),
 								new(big.Int).Mul(big.NewInt(bn), big.NewInt(200_000_000)),
 							}
-							return multicallResult(t, calls, prices), nil
+							return multicallResult(t, prices), nil
 						},
 					}, nil
 				}
@@ -1090,7 +1066,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 				}
@@ -1132,7 +1108,7 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 				}
@@ -1200,7 +1176,7 @@ func TestRun(t *testing.T) {
 // on specific blocks, only those blocks' prices are stored.
 func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 	repo := &mockRepo{
-		getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+		getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 		getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 	}
@@ -1230,7 +1206,7 @@ func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				bn := blockNumber.Int64()
 				prices := pricesByBlock[bn]
-				return multicallResult(t, calls, prices), nil
+				return multicallResult(t, prices), nil
 			},
 		}, nil
 	}
@@ -1298,7 +1274,7 @@ func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 // stored by Run have the correct field values.
 func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 	repo := &mockRepo{
-		getOracleSourceFn:  func(_ context.Context, _ string) (*entity.OracleSource, error) { return defaultOracleSource(), nil },
+		getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
 		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
 		getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 	}
@@ -1341,8 +1317,8 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 	expectedTimestamp := time.Unix(int64(blockTimestamp), 0).UTC()
 
 	for _, p := range upserted {
-		if p.OracleSourceID != 1 {
-			t.Errorf("OracleSourceID = %d, want 1", p.OracleSourceID)
+		if p.OracleID != 1 {
+			t.Errorf("OracleID = %d, want 1", p.OracleID)
 		}
 		if p.BlockNumber != 100 {
 			t.Errorf("BlockNumber = %d, want 100", p.BlockNumber)
@@ -1352,16 +1328,6 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 		}
 		if !p.Timestamp.Equal(expectedTimestamp) {
 			t.Errorf("Timestamp = %v, want %v", p.Timestamp, expectedTimestamp)
-		}
-		if len(p.OracleAddress) != 20 {
-			t.Errorf("OracleAddress length = %d, want 20", len(p.OracleAddress))
-		}
-		expectedOracleBytes := oracleAddr.Bytes()
-		for i := range p.OracleAddress {
-			if p.OracleAddress[i] != expectedOracleBytes[i] {
-				t.Errorf("OracleAddress[%d] = %x, want %x", i, p.OracleAddress[i], expectedOracleBytes[i])
-				break
-			}
 		}
 
 		switch p.TokenID {

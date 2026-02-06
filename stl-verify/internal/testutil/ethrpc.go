@@ -12,8 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/common"
-
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 )
 
@@ -35,16 +33,10 @@ func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 	if err != nil {
 		t.Fatalf("load multicall3 ABI: %v", err)
 	}
-	providerABI, err := abis.GetPoolAddressProviderABI()
-	if err != nil {
-		t.Fatalf("load provider ABI: %v", err)
-	}
 	oracleABI, err := abis.GetSparkLendOracleABI()
 	if err != nil {
 		t.Fatalf("load oracle ABI: %v", err)
 	}
-
-	oracleAddr := common.Address{}
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -60,8 +52,6 @@ func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 		case "eth_call":
 			blockNum := parseBlockFromEthCall(req.Params)
 
-			oracleAddrData, _ := providerABI.Methods["getPriceOracle"].Outputs.Pack(oracleAddr)
-
 			prices := make([]*big.Int, numTokens)
 			for i := range prices {
 				prices[i] = new(big.Int).Mul(
@@ -76,7 +66,6 @@ func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 				ReturnData []byte
 			}
 			aggResult, _ := multicallABI.Methods["aggregate3"].Outputs.Pack([]Result{
-				{Success: true, ReturnData: oracleAddrData},
 				{Success: true, ReturnData: pricesData},
 			})
 
@@ -96,7 +85,7 @@ func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 
 // WriteRPCResult writes a JSON-RPC success response.
 func WriteRPCResult(w http.ResponseWriter, id, result json.RawMessage) {
-	json.NewEncoder(w).Encode(map[string]json.RawMessage{
+	_ = json.NewEncoder(w).Encode(map[string]json.RawMessage{
 		"jsonrpc": json.RawMessage(`"2.0"`),
 		"id":      id,
 		"result":  result,
@@ -106,7 +95,7 @@ func WriteRPCResult(w http.ResponseWriter, id, result json.RawMessage) {
 // WriteRPCError writes a JSON-RPC error response.
 func WriteRPCError(w http.ResponseWriter, id json.RawMessage, code int, message string) {
 	errJSON, _ := json.Marshal(map[string]interface{}{"code": code, "message": message})
-	json.NewEncoder(w).Encode(map[string]json.RawMessage{
+	_ = json.NewEncoder(w).Encode(map[string]json.RawMessage{
 		"jsonrpc": json.RawMessage(`"2.0"`),
 		"id":      id,
 		"error":   json.RawMessage(errJSON),
@@ -139,23 +128,25 @@ func writeBlockHeaderResponse(w http.ResponseWriter, id json.RawMessage, blockNu
 
 func parseBlockFromEthCall(params json.RawMessage) int64 {
 	var p []json.RawMessage
-	json.Unmarshal(params, &p)
-	if len(p) < 2 {
+	if err := json.Unmarshal(params, &p); err != nil || len(p) < 2 {
 		return 100
 	}
 	var blockHex string
-	json.Unmarshal(p[1], &blockHex)
+	if err := json.Unmarshal(p[1], &blockHex); err != nil {
+		return 100
+	}
 	return parseHexInt64(blockHex)
 }
 
 func parseBlockFromGetBlock(params json.RawMessage) int64 {
 	var p []json.RawMessage
-	json.Unmarshal(params, &p)
-	if len(p) < 1 {
+	if err := json.Unmarshal(params, &p); err != nil || len(p) < 1 {
 		return 100
 	}
 	var blockHex string
-	json.Unmarshal(p[0], &blockHex)
+	if err := json.Unmarshal(p[0], &blockHex); err != nil {
+		return 100
+	}
 	return parseHexInt64(blockHex)
 }
 

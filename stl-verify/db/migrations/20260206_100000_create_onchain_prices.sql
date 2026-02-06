@@ -1,45 +1,62 @@
--- Oracle source table (metadata about each onchain oracle provider)
-CREATE TABLE IF NOT EXISTS oracle_source (
+-- Oracle table (standalone entity, independent lifecycle)
+CREATE TABLE IF NOT EXISTS oracle (
     id BIGSERIAL PRIMARY KEY,
     name VARCHAR(50) NOT NULL UNIQUE,
     display_name VARCHAR(100) NOT NULL,
     chain_id INT NOT NULL,
-    pool_address_provider BYTEA,
+    address BYTEA NOT NULL,
     deployment_block BIGINT,
     enabled BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Seed SparkLend oracle source
--- PoolAddressProvider: 0x02c3eA4e34C0cBd694D2adFa2c690EECbC1793eE
+-- Seed SparkLend oracle
+-- Oracle address: 0x8105f69D9C41644c6A0803fDA7D03Aa70996cFD9
 -- Deployment block: 16664447 (SparkLend mainnet deployment)
-INSERT INTO oracle_source (name, display_name, chain_id, pool_address_provider, deployment_block, enabled)
+INSERT INTO oracle (name, display_name, chain_id, address, deployment_block, enabled)
 VALUES (
     'sparklend',
-    'SparkLend Oracle',
+    'Spark: aave Oracle',
     1,
-    '\x02c3eA4e34C0cBd694D2adFa2c690EECbC1793eE',
+    '\x8105f69D9C41644c6A0803fDA7D03Aa70996cFD9',
     16664447,
     true
 )
 ON CONFLICT (name) DO NOTHING;
 
+-- Temporal binding: which oracle a protocol uses, at which blocks.
+-- When a protocol changes oracle, close old row (set to_block) and insert new row.
+CREATE TABLE IF NOT EXISTS protocol_oracle (
+    id BIGSERIAL PRIMARY KEY,
+    protocol_id BIGINT NOT NULL,
+    oracle_id BIGINT NOT NULL,
+    from_block BIGINT NOT NULL,
+    to_block BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Bind SparkLend protocol to its oracle (from deployment block, currently active)
+INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block)
+SELECT p.id, o.id, 16664447
+FROM protocol p, oracle o
+WHERE p.name = 'SparkLend' AND o.name = 'sparklend';
+
 -- Oracle asset mapping table (which tokens to fetch oracle prices for)
 CREATE TABLE IF NOT EXISTS oracle_asset (
     id BIGSERIAL PRIMARY KEY,
-    oracle_source_id BIGINT NOT NULL REFERENCES oracle_source(id),
-    token_id BIGINT NOT NULL REFERENCES token(id),
+    oracle_id BIGINT NOT NULL,
+    token_id BIGINT NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT oracle_asset_unique UNIQUE (oracle_source_id, token_id)
+    UNIQUE (oracle_id, token_id)
 );
 
 -- Seed SparkLend reserve tokens for oracle price fetching
--- Links oracle_source to tokens seeded in the token table via symbol match
-INSERT INTO oracle_asset (oracle_source_id, token_id, enabled)
-SELECT os.id, t.id, true
-FROM oracle_source os
+-- Links oracle to tokens seeded in the token table via symbol match
+INSERT INTO oracle_asset (oracle_id, token_id, enabled)
+SELECT o.id, t.id, true
+FROM oracle o
 CROSS JOIN (VALUES
     ('DAI'),
     ('sDAI'),
@@ -61,8 +78,8 @@ CROSS JOIN (VALUES
     ('PYUSD')
 ) AS symbols(symbol)
 JOIN token t ON t.symbol = symbols.symbol AND t.chain_id = 1
-WHERE os.name = 'sparklend'
-ON CONFLICT (oracle_source_id, token_id) DO NOTHING;
+WHERE o.name = 'sparklend'
+ON CONFLICT (oracle_id, token_id) DO NOTHING;
 
 -- Onchain token price table (oracle prices per block)
 --
@@ -72,7 +89,7 @@ ON CONFLICT (oracle_source_id, token_id) DO NOTHING;
 --
 -- Query pattern for "price at block N" (block may not have a row):
 --   SELECT * FROM onchain_token_price
---   WHERE token_id = $1 AND oracle_source_id = $2 AND block_number <= $3
+--   WHERE token_id = $1 AND oracle_id = $2 AND block_number <= $3
 --   ORDER BY block_number DESC, block_version DESC
 --   LIMIT 1
 --
@@ -85,13 +102,12 @@ ON CONFLICT (oracle_source_id, token_id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS onchain_token_price (
     token_id BIGINT NOT NULL,
-    oracle_source_id SMALLINT NOT NULL,
+    oracle_id SMALLINT NOT NULL,
     block_number BIGINT NOT NULL,
     block_version SMALLINT NOT NULL DEFAULT 0,
     timestamp TIMESTAMPTZ NOT NULL,
-    oracle_address BYTEA NOT NULL,
     price_usd NUMERIC(30, 18) NOT NULL,
-    PRIMARY KEY (token_id, oracle_source_id, block_number, block_version, timestamp)
+    PRIMARY KEY (token_id, oracle_id, block_number, block_version, timestamp)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'timestamp',
@@ -99,12 +115,12 @@ CREATE TABLE IF NOT EXISTS onchain_token_price (
 );
 
 -- Enable compression on onchain_token_price hypertable
--- Segment by (oracle_source_id, token_id) — queries filter by both;
+-- Segment by (oracle_id, token_id) — queries filter by both;
 -- ~200 segments per chunk at 10-oracle scale, ~7,200 rows each = good compression.
 -- Order by block_number descending for time-series query patterns.
 ALTER TABLE onchain_token_price SET (
     timescaledb.compress,
-    timescaledb.compress_segmentby = 'oracle_source_id, token_id',
+    timescaledb.compress_segmentby = 'oracle_id, token_id',
     timescaledb.compress_orderby = 'block_number DESC, block_version DESC'
 );
 

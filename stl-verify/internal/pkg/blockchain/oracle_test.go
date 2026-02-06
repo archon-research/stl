@@ -17,57 +17,36 @@ import (
 
 // mockMulticaller implements outbound.Multicaller for testing.
 type mockMulticaller struct {
-	// executeFn is called for each Execute invocation. The callIndex tracks
-	// how many times Execute has been called so tests can return different
-	// results for the initial call vs. the retry call.
-	executeFn func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int, callIndex int) ([]outbound.Result, error)
-	callIndex int
+	executeFn func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error)
 }
 
 func (m *mockMulticaller) Execute(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-	idx := m.callIndex
-	m.callIndex++
-	return m.executeFn(ctx, calls, blockNumber, idx)
+	return m.executeFn(ctx, calls, blockNumber)
 }
 
 func (m *mockMulticaller) Address() common.Address {
 	return common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11")
 }
 
-// testABIs loads the real provider and oracle ABIs. It calls t.Fatal on error.
-func testABIs(t *testing.T) (*abi.ABI, *abi.ABI) {
+// testOracleABI loads the oracle ABI. It calls t.Fatal on error.
+func testOracleABI(t *testing.T) *abi.ABI {
 	t.Helper()
-	providerABI, err := abis.GetPoolAddressProviderABI()
-	if err != nil {
-		t.Fatalf("loading provider ABI: %v", err)
-	}
 	oracleABI, err := abis.GetSparkLendOracleABI()
 	if err != nil {
 		t.Fatalf("loading oracle ABI: %v", err)
 	}
-	return providerABI, oracleABI
-}
-
-// abiPackAddress packs an address as the return data for getPriceOracle.
-// The providerABI parameter is accepted for call-site compatibility but unused;
-// the ABI is loaded internally by testutil.
-func abiPackAddress(t *testing.T, _ *abi.ABI, addr common.Address) []byte {
-	return testutil.PackOracleAddress(t, addr)
+	return oracleABI
 }
 
 // abiPackPrices packs a slice of *big.Int as the return data for getAssetsPrices.
-// The oracleABI parameter is accepted for call-site compatibility but unused;
-// the ABI is loaded internally by testutil.
-func abiPackPrices(t *testing.T, _ *abi.ABI, prices []*big.Int) []byte {
+func abiPackPrices(t *testing.T, prices []*big.Int) []byte {
 	return testutil.PackAssetPrices(t, prices)
 }
 
 func TestFetchOraclePrices(t *testing.T) {
-	providerABI, oracleABI := testABIs(t)
+	oracleABI := testOracleABI(t)
 
-	providerAddr := common.HexToAddress("0x0000000000000000000000000000000000000001")
-	cachedOracleAddr := common.HexToAddress("0x0000000000000000000000000000000000000002")
-	differentOracleAddr := common.HexToAddress("0x0000000000000000000000000000000000000003")
+	oracleAddr := common.HexToAddress("0x0000000000000000000000000000000000000002")
 
 	asset1 := common.HexToAddress("0x0000000000000000000000000000000000000010")
 	asset2 := common.HexToAddress("0x0000000000000000000000000000000000000020")
@@ -80,87 +59,34 @@ func TestFetchOraclePrices(t *testing.T) {
 	blockNum := int64(12345678)
 
 	tests := []struct {
-		name           string
-		ctx            context.Context
-		mock           *mockMulticaller
-		wantErr        bool
-		errContains    string
-		wantOracleAddr common.Address
-		wantPrices     []*big.Int
+		name        string
+		ctx         context.Context
+		mock        *mockMulticaller
+		wantErr     bool
+		errContains string
+		wantPrices  []*big.Int
 	}{
 		{
-			name: "happy path - oracle address matches cache",
+			name: "happy path - prices returned",
 			ctx:  context.Background(),
 			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, calls []outbound.Call, _ *big.Int, _ int) ([]outbound.Result, error) {
-					if len(calls) != 2 {
-						t.Fatalf("expected 2 calls, got %d", len(calls))
-					}
-					return []outbound.Result{
-						{Success: true, ReturnData: abiPackAddress(t, providerABI, cachedOracleAddr)},
-						{Success: true, ReturnData: abiPackPrices(t, oracleABI, expectedPrices)},
-					}, nil
-				},
-			},
-			wantErr:        false,
-			wantOracleAddr: cachedOracleAddr,
-			wantPrices:     expectedPrices,
-		},
-		{
-			name: "oracle address changed - retry path succeeds",
-			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, calls []outbound.Call, _ *big.Int, callIndex int) ([]outbound.Result, error) {
-					if callIndex == 0 {
-						// First call: return different oracle address, prices call fails
-						return []outbound.Result{
-							{Success: true, ReturnData: abiPackAddress(t, providerABI, differentOracleAddr)},
-							{Success: false, ReturnData: nil},
-						}, nil
-					}
-					// Retry call: one call to the new oracle address
+				executeFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					if len(calls) != 1 {
-						t.Fatalf("retry expected 1 call, got %d", len(calls))
-					}
-					if calls[0].Target != differentOracleAddr {
-						t.Fatalf("retry target = %v, want %v", calls[0].Target, differentOracleAddr)
+						t.Fatalf("expected 1 call, got %d", len(calls))
 					}
 					return []outbound.Result{
-						{Success: true, ReturnData: abiPackPrices(t, oracleABI, expectedPrices)},
+						{Success: true, ReturnData: abiPackPrices(t, expectedPrices)},
 					}, nil
 				},
 			},
-			wantErr:        false,
-			wantOracleAddr: differentOracleAddr,
-			wantPrices:     expectedPrices,
+			wantErr:    false,
+			wantPrices: expectedPrices,
 		},
 		{
-			name: "oracle address matches but prices call failed - retry path",
+			name: "multicall execution error",
 			ctx:  context.Background(),
 			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, callIndex int) ([]outbound.Result, error) {
-					if callIndex == 0 {
-						// Oracle address matches cache, but prices call failed
-						return []outbound.Result{
-							{Success: true, ReturnData: abiPackAddress(t, providerABI, cachedOracleAddr)},
-							{Success: false, ReturnData: nil},
-						}, nil
-					}
-					// Retry with same cached address
-					return []outbound.Result{
-						{Success: true, ReturnData: abiPackPrices(t, oracleABI, expectedPrices)},
-					}, nil
-				},
-			},
-			wantErr:        false,
-			wantOracleAddr: cachedOracleAddr,
-			wantPrices:     expectedPrices,
-		},
-		{
-			name: "multicall execution error on first call",
-			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, _ int) ([]outbound.Result, error) {
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return nil, errors.New("rpc connection refused")
 				},
 			},
@@ -171,155 +97,52 @@ func TestFetchOraclePrices(t *testing.T) {
 			name: "wrong number of results - zero results",
 			ctx:  context.Background(),
 			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, _ int) ([]outbound.Result, error) {
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{}, nil
 				},
 			},
 			wantErr:     true,
-			errContains: "expected 2 multicall results, got 0",
+			errContains: "expected 1 multicall result, got 0",
 		},
 		{
-			name: "wrong number of results - one result",
+			name: "wrong number of results - two results",
 			ctx:  context.Background(),
 			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, _ int) ([]outbound.Result, error) {
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
-						{Success: true, ReturnData: abiPackAddress(t, providerABI, cachedOracleAddr)},
-					}, nil
-				},
-			},
-			wantErr:     true,
-			errContains: "expected 2 multicall results, got 1",
-		},
-		{
-			name: "wrong number of results - three results",
-			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, _ int) ([]outbound.Result, error) {
-					return []outbound.Result{
-						{Success: true, ReturnData: abiPackAddress(t, providerABI, cachedOracleAddr)},
-						{Success: true, ReturnData: abiPackPrices(t, oracleABI, expectedPrices)},
+						{Success: true, ReturnData: abiPackPrices(t, expectedPrices)},
 						{Success: true, ReturnData: nil},
 					}, nil
 				},
 			},
 			wantErr:     true,
-			errContains: "expected 2 multicall results, got 3",
+			errContains: "expected 1 multicall result, got 2",
 		},
 		{
-			name: "getPriceOracle call failed - Success false",
+			name: "getAssetsPrices call failed - Success false",
 			ctx:  context.Background(),
 			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, _ int) ([]outbound.Result, error) {
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: false, ReturnData: nil},
-						{Success: true, ReturnData: abiPackPrices(t, oracleABI, expectedPrices)},
 					}, nil
 				},
 			},
 			wantErr:     true,
-			errContains: "getPriceOracle call failed at block 12345678",
+			errContains: "getAssetsPrices call failed at block 12345678",
 		},
 		{
-			name: "unpack getPriceOracle error - bad return data",
+			name: "unpack getAssetsPrices error - bad return data",
 			ctx:  context.Background(),
 			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, _ int) ([]outbound.Result, error) {
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
-						{Success: true, ReturnData: []byte{0x01, 0x02, 0x03}}, // invalid ABI data
-						{Success: true, ReturnData: abiPackPrices(t, oracleABI, expectedPrices)},
-					}, nil
-				},
-			},
-			wantErr:     true,
-			errContains: "unpacking getPriceOracle at block 12345678",
-		},
-		{
-			name: "unpack getAssetsPrices error - bad return data in cache hit path",
-			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, _ int) ([]outbound.Result, error) {
-					return []outbound.Result{
-						{Success: true, ReturnData: abiPackAddress(t, providerABI, cachedOracleAddr)},
-						{Success: true, ReturnData: []byte{0xde, 0xad, 0xbe, 0xef}}, // invalid ABI data
+						{Success: true, ReturnData: []byte{0xde, 0xad, 0xbe, 0xef}},
 					}, nil
 				},
 			},
 			wantErr:     true,
 			errContains: "unpacking getAssetsPrices at block 12345678",
-		},
-		{
-			name: "oracle address changed - retry multicall execution error",
-			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, callIndex int) ([]outbound.Result, error) {
-					if callIndex == 0 {
-						return []outbound.Result{
-							{Success: true, ReturnData: abiPackAddress(t, providerABI, differentOracleAddr)},
-							{Success: false, ReturnData: nil},
-						}, nil
-					}
-					return nil, errors.New("retry rpc timeout")
-				},
-			},
-			wantErr:     true,
-			errContains: "executing retry multicall at block 12345678",
-		},
-		{
-			name: "oracle address changed - retry returns wrong count",
-			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, callIndex int) ([]outbound.Result, error) {
-					if callIndex == 0 {
-						return []outbound.Result{
-							{Success: true, ReturnData: abiPackAddress(t, providerABI, differentOracleAddr)},
-							{Success: false, ReturnData: nil},
-						}, nil
-					}
-					// Return empty results for retry
-					return []outbound.Result{}, nil
-				},
-			},
-			wantErr:     true,
-			errContains: "getAssetsPrices retry failed at block 12345678",
-		},
-		{
-			name: "oracle address changed - retry returns failure",
-			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, callIndex int) ([]outbound.Result, error) {
-					if callIndex == 0 {
-						return []outbound.Result{
-							{Success: true, ReturnData: abiPackAddress(t, providerABI, differentOracleAddr)},
-							{Success: false, ReturnData: nil},
-						}, nil
-					}
-					return []outbound.Result{
-						{Success: false, ReturnData: nil},
-					}, nil
-				},
-			},
-			wantErr:     true,
-			errContains: "getAssetsPrices retry failed at block 12345678",
-		},
-		{
-			name: "oracle address changed - retry unpack error",
-			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, callIndex int) ([]outbound.Result, error) {
-					if callIndex == 0 {
-						return []outbound.Result{
-							{Success: true, ReturnData: abiPackAddress(t, providerABI, differentOracleAddr)},
-							{Success: false, ReturnData: nil},
-						}, nil
-					}
-					return []outbound.Result{
-						{Success: true, ReturnData: []byte{0xff, 0xfe}}, // invalid ABI data
-					}, nil
-				},
-			},
-			wantErr:     true,
-			errContains: "unpacking retry getAssetsPrices at block 12345678",
 		},
 		{
 			name: "context cancellation propagated to multicall",
@@ -329,7 +152,7 @@ func TestFetchOraclePrices(t *testing.T) {
 				return ctx
 			}(),
 			mock: &mockMulticaller{
-				executeFn: func(ctx context.Context, _ []outbound.Call, _ *big.Int, _ int) ([]outbound.Result, error) {
+				executeFn: func(ctx context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return nil, ctx.Err()
 				},
 			},
@@ -340,11 +163,11 @@ func TestFetchOraclePrices(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := FetchOraclePrices(
+			prices, err := FetchOraclePrices(
 				tt.ctx,
 				tt.mock,
-				providerABI, oracleABI,
-				providerAddr, cachedOracleAddr,
+				oracleABI,
+				oracleAddr,
 				assets,
 				blockNum,
 			)
@@ -356,8 +179,8 @@ func TestFetchOraclePrices(t *testing.T) {
 				if tt.errContains != "" && !containsSubstring(err.Error(), tt.errContains) {
 					t.Errorf("error = %q, want it to contain %q", err.Error(), tt.errContains)
 				}
-				if result != nil {
-					t.Errorf("expected nil result on error, got %+v", result)
+				if prices != nil {
+					t.Errorf("expected nil result on error, got %+v", prices)
 				}
 				return
 			}
@@ -365,16 +188,13 @@ func TestFetchOraclePrices(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if result == nil {
+			if prices == nil {
 				t.Fatal("expected non-nil result, got nil")
 			}
-			if result.OracleAddress != tt.wantOracleAddr {
-				t.Errorf("OracleAddress = %v, want %v", result.OracleAddress, tt.wantOracleAddr)
+			if len(prices) != len(tt.wantPrices) {
+				t.Fatalf("Prices length = %d, want %d", len(prices), len(tt.wantPrices))
 			}
-			if len(result.Prices) != len(tt.wantPrices) {
-				t.Fatalf("Prices length = %d, want %d", len(result.Prices), len(tt.wantPrices))
-			}
-			for i, got := range result.Prices {
+			for i, got := range prices {
 				if got.Cmp(tt.wantPrices[i]) != 0 {
 					t.Errorf("Prices[%d] = %s, want %s", i, got.String(), tt.wantPrices[i].String())
 				}
@@ -384,120 +204,74 @@ func TestFetchOraclePrices(t *testing.T) {
 }
 
 func TestFetchOraclePrices_VerifiesCallTargets(t *testing.T) {
-	providerABI, oracleABI := testABIs(t)
+	oracleABI := testOracleABI(t)
 
-	providerAddr := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-	cachedOracleAddr := common.HexToAddress("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+	oracleAddr := common.HexToAddress("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
 	assets := []common.Address{common.HexToAddress("0xCC")}
 	prices := []*big.Int{big.NewInt(42)}
 
 	mock := &mockMulticaller{
-		executeFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int, _ int) ([]outbound.Result, error) {
-			if len(calls) != 2 {
-				t.Fatalf("expected 2 calls, got %d", len(calls))
+		executeFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+			if len(calls) != 1 {
+				t.Fatalf("expected 1 call, got %d", len(calls))
 			}
-			if calls[0].Target != providerAddr {
-				t.Errorf("call[0].Target = %v, want %v", calls[0].Target, providerAddr)
-			}
-			if calls[1].Target != cachedOracleAddr {
-				t.Errorf("call[1].Target = %v, want %v", calls[1].Target, cachedOracleAddr)
+			if calls[0].Target != oracleAddr {
+				t.Errorf("call[0].Target = %v, want %v", calls[0].Target, oracleAddr)
 			}
 			if calls[0].AllowFailure {
 				t.Error("call[0].AllowFailure = true, want false")
-			}
-			if calls[1].AllowFailure {
-				t.Error("call[1].AllowFailure = true, want false")
 			}
 			if blockNumber.Int64() != 99 {
 				t.Errorf("blockNumber = %d, want 99", blockNumber.Int64())
 			}
 			return []outbound.Result{
-				{Success: true, ReturnData: abiPackAddress(t, providerABI, cachedOracleAddr)},
-				{Success: true, ReturnData: abiPackPrices(t, oracleABI, prices)},
+				{Success: true, ReturnData: abiPackPrices(t, prices)},
 			}, nil
 		},
 	}
 
 	result, err := FetchOraclePrices(
 		context.Background(), mock,
-		providerABI, oracleABI,
-		providerAddr, cachedOracleAddr,
+		oracleABI,
+		oracleAddr,
 		assets, 99,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.OracleAddress != cachedOracleAddr {
-		t.Errorf("OracleAddress = %v, want %v", result.OracleAddress, cachedOracleAddr)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 price, got %d", len(result))
+	}
+	if result[0].Cmp(prices[0]) != 0 {
+		t.Errorf("price = %s, want %s", result[0].String(), prices[0].String())
 	}
 }
 
 func TestFetchOraclePrices_EmptyAssets(t *testing.T) {
-	providerABI, oracleABI := testABIs(t)
+	oracleABI := testOracleABI(t)
 
-	providerAddr := common.HexToAddress("0x01")
-	cachedOracleAddr := common.HexToAddress("0x02")
+	oracleAddr := common.HexToAddress("0x02")
 	var emptyPrices []*big.Int
 
 	mock := &mockMulticaller{
-		executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, _ int) ([]outbound.Result, error) {
+		executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 			return []outbound.Result{
-				{Success: true, ReturnData: abiPackAddress(t, providerABI, cachedOracleAddr)},
-				{Success: true, ReturnData: abiPackPrices(t, oracleABI, emptyPrices)},
+				{Success: true, ReturnData: abiPackPrices(t, emptyPrices)},
 			}, nil
 		},
 	}
 
 	result, err := FetchOraclePrices(
 		context.Background(), mock,
-		providerABI, oracleABI,
-		providerAddr, cachedOracleAddr,
+		oracleABI,
+		oracleAddr,
 		[]common.Address{}, 100,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(result.Prices) != 0 {
-		t.Errorf("expected 0 prices, got %d", len(result.Prices))
-	}
-}
-
-func TestFetchOraclePrices_RetryCallCount(t *testing.T) {
-	providerABI, oracleABI := testABIs(t)
-
-	providerAddr := common.HexToAddress("0x01")
-	cachedOracleAddr := common.HexToAddress("0x02")
-	newOracleAddr := common.HexToAddress("0x03")
-	assets := []common.Address{common.HexToAddress("0x10")}
-	prices := []*big.Int{big.NewInt(500)}
-
-	callCount := 0
-	mock := &mockMulticaller{
-		executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int, callIndex int) ([]outbound.Result, error) {
-			callCount++
-			if callIndex == 0 {
-				return []outbound.Result{
-					{Success: true, ReturnData: abiPackAddress(t, providerABI, newOracleAddr)},
-					{Success: false, ReturnData: nil},
-				}, nil
-			}
-			return []outbound.Result{
-				{Success: true, ReturnData: abiPackPrices(t, oracleABI, prices)},
-			}, nil
-		},
-	}
-
-	_, err := FetchOraclePrices(
-		context.Background(), mock,
-		providerABI, oracleABI,
-		providerAddr, cachedOracleAddr,
-		assets, 100,
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if callCount != 2 {
-		t.Errorf("Execute called %d times, want 2", callCount)
+	if len(result) != 0 {
+		t.Errorf("expected 0 prices, got %d", len(result))
 	}
 }
 

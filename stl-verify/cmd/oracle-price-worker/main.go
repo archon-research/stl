@@ -140,12 +140,12 @@ func run(args []string) error {
 		return fmt.Errorf("creating repository: %w", err)
 	}
 
-	oracleSource, err := repo.GetOracleSource(ctx, "sparklend")
+	oracle, err := repo.GetOracle(ctx, "sparklend")
 	if err != nil {
 		return fmt.Errorf("getting oracle source: %w", err)
 	}
 
-	tokenAddrBytes, err := repo.GetTokenAddresses(ctx, oracleSource.ID)
+	tokenAddrBytes, err := repo.GetTokenAddresses(ctx, oracle.ID)
 	if err != nil {
 		return fmt.Errorf("getting token addresses: %w", err)
 	}

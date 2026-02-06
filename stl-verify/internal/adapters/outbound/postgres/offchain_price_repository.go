@@ -155,19 +155,19 @@ func (r *PriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx, price
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, market_cap_usd)
+		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd)
 		VALUES `)
 
-	args := make([]any, 0, len(prices)*5)
+	args := make([]any, 0, len(prices)*6)
 	for i, price := range prices {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 5
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5))
+		baseIdx := i * 6
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d)",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6))
 
-		args = append(args, price.TokenID, price.SourceID, price.Timestamp, price.PriceUSD, price.MarketCapUSD)
+		args = append(args, price.TokenID, price.SourceID, price.Timestamp, price.PriceUSD, price.MarketCapUSD, price.VolumeUSD)
 	}
 
 	sb.WriteString(` ON CONFLICT (token_id, source_id, timestamp) DO NOTHING`)
@@ -183,13 +183,13 @@ func (r *PriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx, price
 func (r *PriceRepository) GetLatestPrice(ctx context.Context, tokenID int64) (*entity.TokenPrice, error) {
 	var tp entity.TokenPrice
 	err := r.pool.QueryRow(ctx, `
-		SELECT token_id, source_id, timestamp, price_usd, market_cap_usd
+		SELECT token_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd
 		FROM offchain_token_price
 		WHERE token_id = $1
 		ORDER BY timestamp DESC
 		LIMIT 1
 	`, tokenID).Scan(
-		&tp.TokenID, &tp.SourceID, &tp.Timestamp, &tp.PriceUSD, &tp.MarketCapUSD,
+		&tp.TokenID, &tp.SourceID, &tp.Timestamp, &tp.PriceUSD, &tp.MarketCapUSD, &tp.VolumeUSD,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -198,65 +198,4 @@ func (r *PriceRepository) GetLatestPrice(ctx context.Context, tokenID int64) (*e
 		return nil, fmt.Errorf("querying latest price: %w", err)
 	}
 	return &tp, nil
-}
-
-// UpsertVolumes inserts volume records in batches.
-func (r *PriceRepository) UpsertVolumes(ctx context.Context, volumes []*entity.TokenVolume) error {
-	if len(volumes) == 0 {
-		return nil
-	}
-
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer rollback(ctx, tx, r.logger)
-
-	for i := 0; i < len(volumes); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(volumes) {
-			end = len(volumes)
-		}
-		batch := volumes[i:end]
-
-		if err := r.upsertVolumeBatch(ctx, tx, batch); err != nil {
-			return err
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-	return nil
-}
-
-func (r *PriceRepository) upsertVolumeBatch(ctx context.Context, tx pgx.Tx, volumes []*entity.TokenVolume) error {
-	if len(volumes) == 0 {
-		return nil
-	}
-
-	var sb strings.Builder
-	sb.WriteString(`
-		INSERT INTO offchain_token_volume (token_id, source_id, timestamp, volume_usd)
-		VALUES `)
-
-	args := make([]any, 0, len(volumes)*4)
-	for i, vol := range volumes {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		baseIdx := i * 4
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4))
-
-		args = append(args, vol.TokenID, vol.SourceID, vol.Timestamp, vol.VolumeUSD)
-	}
-
-	sb.WriteString(` ON CONFLICT (token_id, source_id, timestamp) DO NOTHING`)
-
-	_, err := tx.Exec(ctx, sb.String(), args...)
-	if err != nil {
-		return fmt.Errorf("upserting volume batch: %w", err)
-	}
-	return nil
 }
