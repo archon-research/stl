@@ -13,3 +13,7 @@ VALUES (1, '\x4e033931ad43597d96d6bcc25c280717730b58b1'::bytea, 'Aave V3 Lido', 
 -- Aave V3 RWA
 INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at)
 VALUES (1, '\xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8'::bytea, 'Aave V3 RWA', 'lending', 19320000, NOW());
+
+INSERT INTO migrations (filename)
+VALUES ('20260205_120000_create_aave_protocols.sql')
+ON CONFLICT (filename) DO NOTHING;
