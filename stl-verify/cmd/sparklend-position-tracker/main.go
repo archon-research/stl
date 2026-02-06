@@ -165,11 +165,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	eventRepo, err := postgres.NewEventRepository(pool, logger)
-	if err != nil {
-		logger.Error("failed to create event repository", "error", err)
-		os.Exit(1)
-	}
+	eventRepo := postgres.NewEventRepository(logger)
 
 	processorConfig := sparklend_position_tracker.Config{
 		QueueURL:        *queueURL,

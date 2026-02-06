@@ -70,10 +70,7 @@ func setupEventTest(t *testing.T) *eventTestFixture {
 		t.Fatalf("failed to apply migrations: %v", err)
 	}
 
-	repo, err := NewEventRepository(pool, nil)
-	if err != nil {
-		t.Fatalf("failed to create repository: %v", err)
-	}
+	repo := NewEventRepository(nil)
 
 	fixture := &eventTestFixture{
 		repo: repo,

@@ -370,6 +370,7 @@ func (e *EventExtractor) ExtractReserveEventData(log Log) (*ReserveEventData, er
 // Addresses are hex strings, amounts are decimal strings.
 func (p *PositionEventData) ToJSON() (json.RawMessage, error) {
 	data := make(map[string]interface{})
+	data["eventType"] = string(p.EventType)
 	data["user"] = p.User.Hex()
 
 	if p.Reserve != (common.Address{}) {

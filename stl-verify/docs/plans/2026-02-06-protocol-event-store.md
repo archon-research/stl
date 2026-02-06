@@ -33,8 +33,12 @@ CREATE TABLE IF NOT EXISTS protocol_event (
     event_name       TEXT      NOT NULL,
     event_data       JSONB     NOT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (chain_id, block_number, tx_hash, log_index)
+    UNIQUE (chain_id, block_number, block_version, tx_hash, log_index)
 );
+
+-- Indexes for analytics query patterns
+CREATE INDEX idx_protocol_event_block ON protocol_event (chain_id, block_number);
+CREATE INDEX idx_protocol_event_name ON protocol_event (event_name);
 
 -- Grant permissions to application roles
 GRANT SELECT ON protocol_event TO stl_readonly;
@@ -647,7 +651,7 @@ func (r *EventRepository) SaveEvent(ctx context.Context, tx pgx.Tx, event *entit
 	_, err := tx.Exec(ctx,
 		`INSERT INTO protocol_event (chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		 ON CONFLICT (chain_id, block_number, tx_hash, log_index) DO NOTHING`,
+		 ON CONFLICT (chain_id, block_number, block_version, tx_hash, log_index) DO NOTHING`,
 		event.ChainID, event.ProtocolID, event.BlockNumber, event.BlockVersion,
 		event.TxHash, event.LogIndex, event.ContractAddress, event.EventName, event.EventData)
 

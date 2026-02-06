@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS protocol_event (
     UNIQUE (chain_id, block_number, block_version, tx_hash, log_index)
 );
 
+-- Indexes for analytics query patterns
+CREATE INDEX idx_protocol_event_block ON protocol_event (chain_id, block_number);
+CREATE INDEX idx_protocol_event_name ON protocol_event (event_name);
+
 -- Grant permissions to application roles
 GRANT SELECT ON protocol_event TO stl_readonly;
 GRANT SELECT, INSERT, UPDATE, DELETE ON protocol_event TO stl_readwrite;

@@ -135,7 +135,7 @@ type Service struct {
 	protocolRepo *postgres.ProtocolRepository
 	tokenRepo    *postgres.TokenRepository
 	positionRepo *postgres.PositionRepository
-	eventRepo    *postgres.EventRepository
+	eventRepo    outbound.EventRepository
 
 	blockchainServices map[common.Address]*blockchainService
 	multicallClient    outbound.Multicaller
@@ -157,7 +157,7 @@ func NewService(
 	protocolRepo *postgres.ProtocolRepository,
 	tokenRepo *postgres.TokenRepository,
 	positionRepo *postgres.PositionRepository,
-	eventRepo *postgres.EventRepository,
+	eventRepo outbound.EventRepository,
 ) (*Service, error) {
 	if err := validateDependencies(sqsClient, redisClient, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo); err != nil {
 		return nil, err
@@ -441,7 +441,7 @@ func (s *Service) processPositionEventLog(ctx context.Context, log Log, txHash s
 		logIndex = 0
 	}
 
-	if err := s.saveProtocolEvent(ctx, eventData, protocolAddress, chainID, blockNumber, blockVersion, log, int(logIndex)); err != nil {
+	if err := s.saveProtocolEvent(ctx, eventData, protocolAddress, chainID, blockNumber, blockVersion, int(logIndex)); err != nil {
 		s.logger.Warn("failed to save protocol event", "error", err, "tx", txHash, "block", blockNumber)
 		// Non-fatal: position tracking continues even if event storage fails
 	}
@@ -458,43 +458,7 @@ func (s *Service) processPositionEventLog(ctx context.Context, log Log, txHash s
 	return s.savePositionSnapshot(ctx, eventData, protocolAddress, chainID, blockNumber, blockVersion)
 }
 
-func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int, log Log, logIndex int) error {
-	eventJSON, err := eventData.ToJSON()
-	if err != nil {
-		return fmt.Errorf("failed to serialize event data: %w", err)
-	}
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
-		if !exists {
-			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
-		}
-
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, blockNumber)
-		if err != nil {
-			return fmt.Errorf("failed to get protocol: %w", err)
-		}
-
-		event, err := entity.NewProtocolEvent(
-			int(chainID),
-			protocolID,
-			blockNumber,
-			blockVersion,
-			common.FromHex(eventData.TxHash),
-			logIndex,
-			protocolAddress.Bytes(),
-			string(eventData.EventType),
-			eventJSON,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to create protocol event entity: %w", err)
-		}
-
-		return s.eventRepo.SaveEvent(ctx, tx, event)
-	})
-}
-
-func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int, log Log, logIndex int) error {
+func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int, logIndex int) error {
 	eventJSON, err := eventData.ToJSON()
 	if err != nil {
 		return fmt.Errorf("failed to serialize event data: %w", err)
@@ -1000,7 +964,7 @@ func validateDependencies(
 	protocolRepo *postgres.ProtocolRepository,
 	tokenRepo *postgres.TokenRepository,
 	positionRepo *postgres.PositionRepository,
-	eventRepo *postgres.EventRepository,
+	eventRepo outbound.EventRepository,
 ) error {
 	if sqsClient == nil {
 		return fmt.Errorf("sqsClient is required")
