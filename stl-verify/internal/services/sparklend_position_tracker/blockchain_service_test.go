@@ -22,12 +22,13 @@ func TestBlockchainService_LoadABIs(t *testing.T) {
 	}
 
 	service := &blockchainService{
-		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
-		metadataCache: make(map[common.Address]TokenMetadata),
-		erc20ABI:      erc20ABI,
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		protocolVersion: "sparklend",
 	}
 
-	err = service.loadABIs(false)
+	err = service.loadABIs("sparklend")
 	if err != nil {
 		t.Fatalf("loadABIs() failed: %v", err)
 	}
@@ -74,8 +75,45 @@ func TestBlockchainService_LoadABIs(t *testing.T) {
 	}
 }
 
-func TestBlockchainService_ERC20ABI_Methods(t *testing.T) {
-	// Load ERC20 ABI first
+func TestBlockchainService_LoadABIs_AllProtocols(t *testing.T) {
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	protocols := []string{"aave-v2", "aave-v3", "sparklend"}
+
+	for _, protocol := range protocols {
+		t.Run(protocol, func(t *testing.T) {
+			service := &blockchainService{
+				logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+				metadataCache:   make(map[common.Address]TokenMetadata),
+				erc20ABI:        erc20ABI,
+				protocolVersion: protocol,
+			}
+
+			err := service.loadABIs(protocol)
+			if err != nil {
+				t.Fatalf("loadABIs(%s) failed: %v", protocol, err)
+			}
+
+			if service.getUserReservesABI == nil {
+				t.Error("getUserReservesABI is nil")
+			}
+			if service.getUserReserveDataABI == nil {
+				t.Error("getUserReserveDataABI is nil")
+			}
+			if service.getPoolDataProviderReserveDataABI == nil {
+				t.Error("getPoolDataProviderReserveDataABI is nil")
+			}
+			if service.getPoolDataProviderReserveConfigurationABI == nil {
+				t.Error("getPoolDataProviderReserveConfigurationABI is nil")
+			}
+		})
+	}
+}
+
+func TestBlockchainService_LoadABIs_InvalidProtocol(t *testing.T) {
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
 		t.Fatalf("failed to load ERC20 ABI: %v", err)
@@ -87,7 +125,30 @@ func TestBlockchainService_ERC20ABI_Methods(t *testing.T) {
 		erc20ABI:      erc20ABI,
 	}
 
-	err = service.loadABIs(false)
+	err = service.loadABIs("invalid-protocol")
+	if err == nil {
+		t.Error("loadABIs() should fail with invalid protocol version")
+	}
+	if !strings.Contains(err.Error(), "unknown protocol version") {
+		t.Errorf("expected 'unknown protocol version' error, got: %v", err)
+	}
+}
+
+func TestBlockchainService_ERC20ABI_Methods(t *testing.T) {
+	// Load ERC20 ABI first
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	service := &blockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		protocolVersion: "sparklend",
+	}
+
+	err = service.loadABIs("sparklend")
 	if err != nil {
 		t.Fatalf("loadABIs() failed: %v", err)
 	}
@@ -114,12 +175,13 @@ func TestBlockchainService_GetUserReservesDataABI_Structure(t *testing.T) {
 	}
 
 	service := &blockchainService{
-		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
-		metadataCache: make(map[common.Address]TokenMetadata),
-		erc20ABI:      erc20ABI,
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		protocolVersion: "sparklend",
 	}
 
-	err = service.loadABIs(false)
+	err = service.loadABIs("sparklend")
 	if err != nil {
 		t.Fatalf("loadABIs() failed: %v", err)
 	}
@@ -167,12 +229,13 @@ func TestBlockchainService_GetUserReserveDataABI_Structure(t *testing.T) {
 	}
 
 	service := &blockchainService{
-		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
-		metadataCache: make(map[common.Address]TokenMetadata),
-		erc20ABI:      erc20ABI,
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		protocolVersion: "sparklend",
 	}
 
-	err = service.loadABIs(false)
+	err = service.loadABIs("sparklend")
 	if err != nil {
 		t.Fatalf("loadABIs() failed: %v", err)
 	}
@@ -224,9 +287,10 @@ func TestABI_PackingDoesNotPanic(t *testing.T) {
 		metadataCache:         make(map[common.Address]TokenMetadata),
 		erc20ABI:              erc20ABI,
 		poolAddressesProvider: common.HexToAddress("0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e"),
+		protocolVersion:       "sparklend",
 	}
 
-	if err := service.loadABIs(false); err != nil {
+	if err := service.loadABIs("sparklend"); err != nil {
 		t.Fatalf("loadABIs() failed: %v", err)
 	}
 
@@ -324,10 +388,13 @@ func TestBlockchainService_ParseUserReservesData(t *testing.T) {
 				}
 
 				reserves = append(reserves, UserReserveData{
-					UnderlyingAsset:                underlyingAsset,
-					ScaledATokenBalance:            new(big.Int).SetBytes(structData[32:64]),
-					UsageAsCollateralEnabledOnUser: new(big.Int).SetBytes(structData[64:96]).Uint64() != 0,
-					ScaledVariableDebt:             new(big.Int).SetBytes(structData[96:128]),
+					UnderlyingAsset:                 underlyingAsset,
+					ScaledATokenBalance:             new(big.Int).SetBytes(structData[32:64]),
+					UsageAsCollateralEnabledOnUser:  new(big.Int).SetBytes(structData[64:96]).Uint64() != 0,
+					ScaledVariableDebt:              new(big.Int).SetBytes(structData[96:128]),
+					StableBorrowRate:                big.NewInt(0),
+					PrincipalStableDebt:             big.NewInt(0),
+					StableBorrowLastUpdateTimestamp: big.NewInt(0),
 				})
 			}
 
@@ -348,101 +415,147 @@ func TestBlockchainService_ParseUserReservesData(t *testing.T) {
 }
 
 func TestBlockchainService_ParseReserveData(t *testing.T) {
-	service := &blockchainService{
-		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
-		metadataCache: make(map[common.Address]TokenMetadata),
-	}
-
-	if err := service.loadABIs(false); err != nil {
-		t.Fatalf("loadABIs() failed: %v", err)
-	}
-
-	tests := []struct {
-		name        string
-		mockData    func() []byte
-		wantErr     bool
-		errContains string
+	protocols := []struct {
+		name    string
+		version string
 	}{
-		{
-			name: "valid reserve data",
-			mockData: func() []byte {
-				// Pack 12 uint256 values: unbacked, accruedToTreasuryScaled, totalAToken, totalStableDebt,
-				// totalVariableDebt, liquidityRate, variableBorrowRate, stableBorrowRate,
-				// averageStableBorrowRate, liquidityIndex, variableBorrowIndex, lastUpdateTimestamp
-				values := []interface{}{
-					big.NewInt(1000),       // unbacked
-					big.NewInt(2000),       // accruedToTreasuryScaled
-					big.NewInt(3000),       // totalAToken
-					big.NewInt(4000),       // totalStableDebt
-					big.NewInt(5000),       // totalVariableDebt
-					big.NewInt(6000),       // liquidityRate
-					big.NewInt(7000),       // variableBorrowRate
-					big.NewInt(8000),       // stableBorrowRate
-					big.NewInt(9000),       // averageStableBorrowRate
-					big.NewInt(10000),      // liquidityIndex
-					big.NewInt(11000),      // variableBorrowIndex
-					big.NewInt(1640995200), // lastUpdateTimestamp
-				}
-				// Pack the return values using the ABI outputs
-				packed, _ := service.getPoolDataProviderReserveDataABI.Methods["getReserveData"].Outputs.Pack(values...)
-				return packed
-			},
-			wantErr: false,
-		},
-		{
-			name: "unpack error - insufficient data",
-			mockData: func() []byte {
-				// Return insufficient data that will fail ABI unpack
-				return []byte{0x00, 0x01, 0x02}
-			},
-			wantErr:     true,
-			errContains: "failed to unpack getReserveData",
-		},
-		{
-			name: "unpack error - wrong data format",
-			mockData: func() []byte {
-				// Return data that won't match ABI format
-				return make([]byte, 64) // Empty 64 bytes that doesn't match expected format
-			},
-			wantErr:     true,
-			errContains: "failed to unpack getReserveData",
-		},
+		{"Sparklend", "sparklend"},
+		{"Aave V3", "aave-v3"},
+		{"Aave V2", "aave-v2"},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			data := tt.mockData()
-			result, err := service.parseReserveData(data)
-
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("parseReserveData() expected error, got nil")
-					return
-				}
-				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
-					t.Errorf("parseReserveData() error = %v, want error containing %q", err, tt.errContains)
-				}
-				return
+	for _, proto := range protocols {
+		t.Run(proto.name, func(t *testing.T) {
+			service := &blockchainService{
+				logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+				metadataCache:   make(map[common.Address]TokenMetadata),
+				protocolVersion: proto.version,
 			}
 
-			if err != nil {
-				t.Errorf("parseReserveData() unexpected error: %v", err)
-				return
+			if err := service.loadABIs(proto.version); err != nil {
+				t.Fatalf("loadABIs() failed: %v", err)
 			}
 
-			if result == nil {
-				t.Error("parseReserveData() returned nil result")
-				return
+			tests := []struct {
+				name        string
+				mockData    func() []byte
+				wantErr     bool
+				errContains string
+			}{
+				{
+					name: "valid reserve data",
+					mockData: func() []byte {
+						var values []interface{}
+
+						// Different protocols have different field counts
+						if proto.version == "aave-v2" {
+							// Aave V2: 10 fields
+							values = []interface{}{
+								big.NewInt(1000),       // availableLiquidity
+								big.NewInt(4000),       // totalStableDebt
+								big.NewInt(5000),       // totalVariableDebt
+								big.NewInt(6000),       // liquidityRate
+								big.NewInt(7000),       // variableBorrowRate
+								big.NewInt(8000),       // stableBorrowRate
+								big.NewInt(9000),       // averageStableBorrowRate
+								big.NewInt(10000),      // liquidityIndex
+								big.NewInt(11000),      // variableBorrowIndex
+								big.NewInt(1640995200), // lastUpdateTimestamp
+							}
+						} else if proto.version == "sparklend" {
+							// Sparklend: 11 fields (no averageStableBorrowRate)
+							values = []interface{}{
+								big.NewInt(1000),       // unbacked
+								big.NewInt(2000),       // accruedToTreasuryScaled
+								big.NewInt(3000),       // totalAToken
+								big.NewInt(4000),       // totalStableDebt
+								big.NewInt(5000),       // totalVariableDebt
+								big.NewInt(6000),       // liquidityRate
+								big.NewInt(7000),       // variableBorrowRate
+								big.NewInt(8000),       // stableBorrowRate
+								big.NewInt(10000),      // liquidityIndex
+								big.NewInt(11000),      // variableBorrowIndex
+								big.NewInt(1640995200), // lastUpdateTimestamp
+							}
+						} else {
+							// Aave V3: 12 fields
+							values = []interface{}{
+								big.NewInt(1000),       // unbacked
+								big.NewInt(2000),       // accruedToTreasuryScaled
+								big.NewInt(3000),       // totalAToken
+								big.NewInt(4000),       // totalStableDebt
+								big.NewInt(5000),       // totalVariableDebt
+								big.NewInt(6000),       // liquidityRate
+								big.NewInt(7000),       // variableBorrowRate
+								big.NewInt(8000),       // stableBorrowRate
+								big.NewInt(9000),       // averageStableBorrowRate
+								big.NewInt(10000),      // liquidityIndex
+								big.NewInt(11000),      // variableBorrowIndex
+								big.NewInt(1640995200), // lastUpdateTimestamp
+							}
+						}
+
+						packed, _ := service.getPoolDataProviderReserveDataABI.Methods["getReserveData"].Outputs.Pack(values...)
+						return packed
+					},
+					wantErr: false,
+				},
+				{
+					name: "unpack error - insufficient data",
+					mockData: func() []byte {
+						return []byte{0x00, 0x01, 0x02}
+					},
+					wantErr:     true,
+					errContains: "failed to unpack getReserveData",
+				},
 			}
 
-			// Verify expected values for valid case
-			if tt.name == "valid reserve data" {
-				if result.Unbacked.Cmp(big.NewInt(1000)) != 0 {
-					t.Errorf("Unbacked = %v, want 1000", result.Unbacked)
-				}
-				if result.LastUpdateTimestamp != 1640995200 {
-					t.Errorf("LastUpdateTimestamp = %v, want 1640995200", result.LastUpdateTimestamp)
-				}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					data := tt.mockData()
+					result, err := service.parseReserveData(data)
+
+					if tt.wantErr {
+						if err == nil {
+							t.Errorf("parseReserveData() expected error, got nil")
+							return
+						}
+						if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+							t.Errorf("parseReserveData() error = %v, want error containing %q", err, tt.errContains)
+						}
+						return
+					}
+
+					if err != nil {
+						t.Errorf("parseReserveData() unexpected error: %v", err)
+						return
+					}
+
+					if result == nil {
+						t.Error("parseReserveData() returned nil result")
+						return
+					}
+
+					// Verify expected values for valid case
+					if tt.name == "valid reserve data" {
+						if result.LastUpdateTimestamp != 1640995200 {
+							t.Errorf("LastUpdateTimestamp = %v, want 1640995200", result.LastUpdateTimestamp)
+						}
+
+						// Check protocol-specific fields
+						if proto.version == "aave-v2" {
+							// For V2, TotalAToken gets mapped from availableLiquidity
+							if result.TotalAToken.Cmp(big.NewInt(1000)) != 0 {
+								t.Errorf("TotalAToken = %v, want 1000", result.TotalAToken)
+							}
+						} else {
+							// For V3 and Sparklend, check unbacked
+							if result.Unbacked.Cmp(big.NewInt(1000)) != 0 {
+								t.Errorf("Unbacked = %v, want 1000", result.Unbacked)
+							}
+						}
+					}
+				})
 			}
 		})
 	}
@@ -450,11 +563,12 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 
 func TestBlockchainService_ParseReserveConfigurationData(t *testing.T) {
 	service := &blockchainService{
-		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
-		metadataCache: make(map[common.Address]TokenMetadata),
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		protocolVersion: "sparklend",
 	}
 
-	if err := service.loadABIs(false); err != nil {
+	if err := service.loadABIs("sparklend"); err != nil {
 		t.Fatalf("loadABIs() failed: %v", err)
 	}
 
@@ -467,8 +581,6 @@ func TestBlockchainService_ParseReserveConfigurationData(t *testing.T) {
 		{
 			name: "valid configuration data",
 			mockData: func() []byte {
-				// Pack: decimals(0), ltv(1), liquidationThreshold(2), liquidationBonus(3), reserveFactor(4),
-				// usageAsCollateralEnabled(5), borrowingEnabled(6), stableBorrowRateEnabled(7), isActive(8), isFrozen(9)
 				values := []interface{}{
 					big.NewInt(18),    // decimals
 					big.NewInt(8000),  // ltv (80%)
@@ -489,7 +601,6 @@ func TestBlockchainService_ParseReserveConfigurationData(t *testing.T) {
 		{
 			name: "unpack error - insufficient data",
 			mockData: func() []byte {
-				// Return insufficient data that will fail ABI unpack
 				return []byte{0x00, 0x01, 0x02}
 			},
 			wantErr:     true,
@@ -498,7 +609,6 @@ func TestBlockchainService_ParseReserveConfigurationData(t *testing.T) {
 		{
 			name: "unpack error - empty data",
 			mockData: func() []byte {
-				// Return empty data
 				return []byte{}
 			},
 			wantErr:     true,
