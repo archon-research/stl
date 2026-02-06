@@ -3,7 +3,7 @@
 
 .PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher help \
         dev-up dev-down dev-ips \
-        tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
+        tf-bootstrap tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check check-tofu \
         ecr-login docker-build docker-push docker-release \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -191,24 +191,84 @@ INFRA_DIR := ../infra
 # Helper script to load TigerData credentials and run tofu
 # This exports credentials directly in the shell to ensure they're passed to tofu
 define run_tofu_with_creds
-	@SECRET_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --query SecretString --output text 2>/dev/null || echo '{}') && \
-	export TF_VAR_tigerdata_project_id=$$(echo "$$SECRET_JSON" | jq -r '.project_id // empty') && \
-	export TF_VAR_tigerdata_access_key=$$(echo "$$SECRET_JSON" | jq -r '.access_key // empty') && \
-	export TF_VAR_tigerdata_secret_key=$$(echo "$$SECRET_JSON" | jq -r '.secret_key // empty') && \
+	SECRET_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --region $(AWS_REGION) --query SecretString --output text) && \
+	export TF_VAR_tigerdata_project_id=$$(echo "$$SECRET_JSON" | jq -r '.project_id') && \
+	export TF_VAR_tigerdata_access_key=$$(echo "$$SECRET_JSON" | jq -r '.access_key') && \
+	export TF_VAR_tigerdata_secret_key=$$(echo "$$SECRET_JSON" | jq -r '.secret_key') && \
 	cd $(INFRA_DIR) && $(1)
 endef
 
-# Initialize Terraform for an environment
+# Check for required tools
+check-tofu:
+	@command -v tofu >/dev/null 2>&1 || (echo "Error: OpenTofu is not installed. Install with: brew install opentofu (macOS) or visit https://opentofu.org/docs/intro/install/" && exit 1)
+	@echo "OpenTofu: $$(tofu version)"
+
+# Bootstrap backend (S3 + DynamoDB) for an environment
+# Creates infrastructure state bucket and locking table
+# Must run once per environment before main tf-init
+# Usage: make tf-bootstrap ENV=sentineldev
+# Bootstrap backend and initial secrets
+# Phase 1: Create S3 state bucket and DynamoDB locks table
+# Phase 2: Create initial secrets (tigerdata API, watcher config)
+# 
+# Optional: pass credentials as environment variables to populate secrets
+# Usage: make tf-bootstrap ENV=sentineldev TIGERDATA_PROJECT_ID=xxx TIGERDATA_ACCESS_KEY=xxx TIGERDATA_SECRET_KEY=xxx ALCHEMY_API_KEY=xxx
+# If credentials not provided, placeholder secrets are created (can be updated manually)
+tf-bootstrap: check-tofu
+	@echo "==> Bootstrapping backend for $(ENV)..."
+	@if [ ! -d "$(INFRA_DIR)/bootstrap" ]; then \
+		echo "Error: Bootstrap directory not found at $(INFRA_DIR)/bootstrap"; \
+		exit 1; \
+	fi
+	@echo ""
+	@echo "Step 1: Creating backend resources (S3 + DynamoDB)..."
+	cd $(INFRA_DIR)/bootstrap && \
+	rm -rf .terraform .terraform.lock.hcl && \
+	tofu init -backend=false && \
+	tofu apply -auto-approve \
+		-var-file=environments/$(ENV).tfvars \
+		-target=aws_s3_bucket.terraform_state \
+		-target=aws_s3_bucket_versioning.terraform_state \
+		-target=aws_s3_bucket_server_side_encryption_configuration.terraform_state \
+		-target=aws_s3_bucket_public_access_block.terraform_state \
+		-target=aws_dynamodb_table.terraform_locks \
+		-target=random_id.bucket_suffix && \
+	echo "✓ Backend resources created" && \
+	echo ""
+	@echo "Step 2: Creating secrets..."
+	cd $(INFRA_DIR)/bootstrap && \
+	tofu apply -auto-approve \
+		-var-file=environments/$(ENV).tfvars \
+		-var="tigerdata_project_id=$(TIGERDATA_PROJECT_ID)" \
+		-var="tigerdata_access_key=$(TIGERDATA_ACCESS_KEY)" \
+		-var="tigerdata_secret_key=$(TIGERDATA_SECRET_KEY)" \
+		-var="alchemy_api_key=$(ALCHEMY_API_KEY)" && \
+	echo "✓ Secrets created" && \
+	echo "" && \
+	echo "==> Bootstrap complete!" && \
+	echo "==> State file: $(INFRA_DIR)/bootstrap/terraform.tfstate" && \
+	echo "==> Next: make tf-init ENV=$(ENV)"
+
+# Initialize Terraform for main infrastructure
+# Requires: tf-bootstrap must be run first
+# Migrates backend state from bootstrap to remote S3 backend
 # Usage: make tf-init ENV=sentinelstaging
 tf-init:
-	@echo "==> Initializing Terraform for $(ENV)..."
-	cd $(INFRA_DIR) && tofu init -backend-config=environments/$(ENV).backend.hcl -reconfigure
+	@echo "==> Initializing main infrastructure for $(ENV)..."
+	@if [ ! -f "$(INFRA_DIR)/bootstrap/terraform.tfstate" ]; then \
+		echo "Error: Bootstrap state file not found. Run 'make tf-bootstrap ENV=$(ENV)' first."; \
+		exit 1; \
+	fi
+	@echo "==> Copying bootstrap state file..."
+	@mkdir -p $(INFRA_DIR)/.terraform
+	@cp $(INFRA_DIR)/bootstrap/terraform.tfstate $(INFRA_DIR)/.terraform/terraform.tfstate.bak
+	@cd $(INFRA_DIR) && tofu init -backend-config=environments/$(ENV).backend.hcl -migrate-state
 
 # Validate Terraform configuration
 # Usage: make tf-validate ENV=sentinelstaging
 tf-validate:
 	@echo "==> Validating Terraform for $(ENV)..."
-	$(call run_tofu_with_creds,tofu validate)
+	@cd ../infra && TF_VAR_tigerdata_project_id="dummy" TF_VAR_tigerdata_access_key="dummy" TF_VAR_tigerdata_secret_key="dummy" tofu validate
 
 # Plan Terraform changes
 # Usage: make tf-plan ENV=sentinelstaging
@@ -222,9 +282,16 @@ tf-apply:
 	@echo "==> Applying Terraform for $(ENV)..."
 	$(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars)
 
-# Full Terraform workflow: init, validate, plan
+# Destroy Terraform infrastructure
+# Usage: make tf-destroy ENV=sentinelstaging
+tf-destroy:
+	@echo "==> Destroying Terraform infrastructure for $(ENV)..."
+	@read -p "Are you sure you want to destroy all infrastructure for $(ENV)? (yes/no) " confirm && \
+	[ "$$confirm" = "yes" ] && (cd ../infra && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -auto-approve)) || echo "Destroy cancelled"
+
+# Full Terraform workflow: bootstrap, init, validate, plan
 # Usage: make tf-check ENV=sentinelstaging
-tf-check: tf-init tf-validate tf-plan
+tf-check: tf-bootstrap tf-init tf-validate tf-plan
 
 # =============================================================================
 # Docker Build & Push
