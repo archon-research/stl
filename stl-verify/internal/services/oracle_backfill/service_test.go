@@ -101,7 +101,6 @@ func (m *mockHeaderFetcher) HeaderByNumber(ctx context.Context, number *big.Int)
 	return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
 }
 
-
 // abiPackAddress packs an address as the return data for getPriceOracle.
 func abiPackAddress(t *testing.T, addr common.Address) []byte {
 	return testutil.PackOracleAddress(t, addr)

@@ -1016,7 +1016,7 @@ func TestProcessBlock_AddsBlockToChain(t *testing.T) {
 
 // mockFailingClient simulates fetch failures by setting error fields in BlockData
 type mockFailingClient struct {
-	*mockBlockchainClient
+	*testutil.MockBlockchainClient
 	failGetBlock    bool
 	failGetReceipts bool
 	failGetTraces   bool
@@ -1025,7 +1025,7 @@ type mockFailingClient struct {
 
 func newMockFailingClient() *mockFailingClient {
 	return &mockFailingClient{
-		mockBlockchainClient: testutil.NewMockBlockchainClient(),
+		MockBlockchainClient: testutil.NewMockBlockchainClient(),
 	}
 }
 
@@ -1033,62 +1033,62 @@ func (m *mockFailingClient) GetBlockByNumber(ctx context.Context, blockNum int64
 	if m.failGetBlock {
 		return nil, fmt.Errorf("simulated block fetch failure")
 	}
-	return m.mockBlockchainClient.GetBlockByNumber(ctx, blockNum, fullTx)
+	return m.MockBlockchainClient.GetBlockByNumber(ctx, blockNum, fullTx)
 }
 
 func (m *mockFailingClient) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
 	if m.failGetBlock {
 		return nil, fmt.Errorf("simulated block fetch failure")
 	}
-	return m.mockBlockchainClient.GetFullBlockByHash(ctx, hash, fullTx)
+	return m.MockBlockchainClient.GetFullBlockByHash(ctx, hash, fullTx)
 }
 
 func (m *mockFailingClient) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	if m.failGetReceipts {
 		return nil, fmt.Errorf("simulated receipts fetch failure")
 	}
-	return m.mockBlockchainClient.GetBlockReceipts(ctx, blockNum)
+	return m.MockBlockchainClient.GetBlockReceipts(ctx, blockNum)
 }
 
 func (m *mockFailingClient) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
 	if m.failGetReceipts {
 		return nil, fmt.Errorf("simulated receipts fetch failure")
 	}
-	return m.mockBlockchainClient.GetBlockReceiptsByHash(ctx, hash)
+	return m.MockBlockchainClient.GetBlockReceiptsByHash(ctx, hash)
 }
 
 func (m *mockFailingClient) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	if m.failGetTraces {
 		return nil, fmt.Errorf("simulated traces fetch failure")
 	}
-	return m.mockBlockchainClient.GetBlockTraces(ctx, blockNum)
+	return m.MockBlockchainClient.GetBlockTraces(ctx, blockNum)
 }
 
 func (m *mockFailingClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
 	if m.failGetTraces {
 		return nil, fmt.Errorf("simulated traces fetch failure")
 	}
-	return m.mockBlockchainClient.GetBlockTracesByHash(ctx, hash)
+	return m.MockBlockchainClient.GetBlockTracesByHash(ctx, hash)
 }
 
 func (m *mockFailingClient) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	if m.failGetBlobs {
 		return nil, fmt.Errorf("simulated blobs fetch failure")
 	}
-	return m.mockBlockchainClient.GetBlobSidecars(ctx, blockNum)
+	return m.MockBlockchainClient.GetBlobSidecars(ctx, blockNum)
 }
 
 func (m *mockFailingClient) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
 	if m.failGetBlobs {
 		return nil, fmt.Errorf("simulated blobs fetch failure")
 	}
-	return m.mockBlockchainClient.GetBlobSidecarsByHash(ctx, hash)
+	return m.MockBlockchainClient.GetBlobSidecarsByHash(ctx, hash)
 }
 
 func (m *mockFailingClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
 	// Delegate to underlying mock - failure flags are for individual method failures
 	// which are no longer used since we now use batched requests
-	bd, err := m.mockBlockchainClient.GetBlockDataByHash(ctx, blockNum, hash, fullTx)
+	bd, err := m.MockBlockchainClient.GetBlockDataByHash(ctx, blockNum, hash, fullTx)
 	if err != nil {
 		return bd, err
 	}
@@ -1931,12 +1931,7 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 	// (Note: reorg detection will trigger but that's expected and handled)
 
 	// Add block data for v2
-	client.blocks[100] = blockTestData{
-		header:   outbound.BlockHeader{Number: "0x64", Hash: "0x100_v2", ParentHash: "0x99", Timestamp: "0x0"},
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
+	client.SetBlockHeader(100, "0x100_v2", "0x99")
 
 	header3 := outbound.BlockHeader{
 		Number:     "0x64", // 100
@@ -2106,7 +2101,7 @@ func TestFetchReceiptsTracesBlobsByHash(t *testing.T) {
 
 	// Create a mock client that tracks which methods are called
 	client := &mockClientWithHashTracking{
-		mockBlockchainClient: testutil.NewMockBlockchainClient(),
+		MockBlockchainClient: testutil.NewMockBlockchainClient(),
 		fetchedByHash:        make(map[string][]string),
 	}
 	stateRepo := newMockStateRepo()
@@ -2163,9 +2158,9 @@ func TestFetchReceiptsTracesBlobsByHash(t *testing.T) {
 	t.Logf("SUCCESS: Data fetched by hash using batched request: %v", fetchedMethods)
 }
 
-// mockClientWithHashTracking wraps mockBlockchainClient to track which methods are called with which hashes
+// mockClientWithHashTracking wraps MockBlockchainClient to track which methods are called with which hashes
 type mockClientWithHashTracking struct {
-	*mockBlockchainClient
+	*testutil.MockBlockchainClient
 	mu            sync.Mutex
 	fetchedByHash map[string][]string // hash -> list of method names called
 }
@@ -2174,35 +2169,35 @@ func (m *mockClientWithHashTracking) GetBlockDataByHash(ctx context.Context, blo
 	m.mu.Lock()
 	m.fetchedByHash[hash] = append(m.fetchedByHash[hash], "GetBlockDataByHash")
 	m.mu.Unlock()
-	return m.mockBlockchainClient.GetBlockDataByHash(ctx, blockNum, hash, fullTx)
+	return m.MockBlockchainClient.GetBlockDataByHash(ctx, blockNum, hash, fullTx)
 }
 
 func (m *mockClientWithHashTracking) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
 	m.mu.Lock()
 	m.fetchedByHash[hash] = append(m.fetchedByHash[hash], "GetFullBlockByHash")
 	m.mu.Unlock()
-	return m.mockBlockchainClient.GetFullBlockByHash(ctx, hash, fullTx)
+	return m.MockBlockchainClient.GetFullBlockByHash(ctx, hash, fullTx)
 }
 
 func (m *mockClientWithHashTracking) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
 	m.mu.Lock()
 	m.fetchedByHash[hash] = append(m.fetchedByHash[hash], "GetBlockReceiptsByHash")
 	m.mu.Unlock()
-	return m.mockBlockchainClient.GetBlockReceiptsByHash(ctx, hash)
+	return m.MockBlockchainClient.GetBlockReceiptsByHash(ctx, hash)
 }
 
 func (m *mockClientWithHashTracking) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
 	m.mu.Lock()
 	m.fetchedByHash[hash] = append(m.fetchedByHash[hash], "GetBlockTracesByHash")
 	m.mu.Unlock()
-	return m.mockBlockchainClient.GetBlockTracesByHash(ctx, hash)
+	return m.MockBlockchainClient.GetBlockTracesByHash(ctx, hash)
 }
 
 func (m *mockClientWithHashTracking) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
 	m.mu.Lock()
 	m.fetchedByHash[hash] = append(m.fetchedByHash[hash], "GetBlobSidecarsByHash")
 	m.mu.Unlock()
-	return m.mockBlockchainClient.GetBlobSidecarsByHash(ctx, hash)
+	return m.MockBlockchainClient.GetBlobSidecarsByHash(ctx, hash)
 }
 
 // TestHashComparisonCaseInsensitive verifies that hash comparisons are case-insensitive.
@@ -2213,7 +2208,7 @@ func TestHashComparisonCaseInsensitive(t *testing.T) {
 
 	// Create mock dependencies
 	client := &caseInsensitiveMockClient{
-		blocks: make(map[int64]blockTestData),
+		blocks: make(map[int64]testutil.BlockTestData),
 	}
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
@@ -2221,29 +2216,29 @@ func TestHashComparisonCaseInsensitive(t *testing.T) {
 
 	// Add blocks with UPPERCASE hashes
 	// Block 99 with uppercase hash
-	client.blocks[99] = blockTestData{
-		header: outbound.BlockHeader{
+	client.blocks[99] = testutil.BlockTestData{
+		Header: outbound.BlockHeader{
 			Number:     "0x63", // 99
 			Hash:       "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 			ParentHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
 			Timestamp:  "0x12345678",
 		},
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
+		Receipts: json.RawMessage(`[]`),
+		Traces:   json.RawMessage(`[]`),
+		Blobs:    json.RawMessage(`[]`),
 	}
 
 	// Block 100 with uppercase hash, parent is block 99
-	client.blocks[100] = blockTestData{
-		header: outbound.BlockHeader{
+	client.blocks[100] = testutil.BlockTestData{
+		Header: outbound.BlockHeader{
 			Number:     "0x64", // 100
 			Hash:       "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
 			ParentHash: "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 			Timestamp:  "0x12345679",
 		},
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
+		Receipts: json.RawMessage(`[]`),
+		Traces:   json.RawMessage(`[]`),
+		Blobs:    json.RawMessage(`[]`),
 	}
 
 	config := LiveConfig{
@@ -2344,7 +2339,7 @@ func TestHashComparisonCaseInsensitive(t *testing.T) {
 // to simulate real RPC behavior where hash case doesn't matter
 type caseInsensitiveMockClient struct {
 	mu     sync.RWMutex
-	blocks map[int64]blockTestData
+	blocks map[int64]testutil.BlockTestData
 }
 
 func (m *caseInsensitiveMockClient) GetBlockByNumber(ctx context.Context, blockNum int64, fullTx bool) (json.RawMessage, error) {
@@ -2352,7 +2347,7 @@ func (m *caseInsensitiveMockClient) GetBlockByNumber(ctx context.Context, blockN
 	defer m.mu.RUnlock()
 
 	if bd, ok := m.blocks[blockNum]; ok {
-		data, _ := json.Marshal(bd.header)
+		data, _ := json.Marshal(bd.Header)
 		return data, nil
 	}
 	return nil, fmt.Errorf("block %d not found", blockNum)
@@ -2363,8 +2358,8 @@ func (m *caseInsensitiveMockClient) GetBlockByHash(ctx context.Context, hash str
 	defer m.mu.RUnlock()
 
 	for _, bd := range m.blocks {
-		if strings.EqualFold(bd.header.Hash, hash) {
-			h := bd.header
+		if strings.EqualFold(bd.Header.Hash, hash) {
+			h := bd.Header
 			return &h, nil
 		}
 	}
@@ -2376,8 +2371,8 @@ func (m *caseInsensitiveMockClient) GetFullBlockByHash(ctx context.Context, hash
 	defer m.mu.RUnlock()
 
 	for _, bd := range m.blocks {
-		if strings.EqualFold(bd.header.Hash, hash) {
-			data, _ := json.Marshal(bd.header)
+		if strings.EqualFold(bd.Header.Hash, hash) {
+			data, _ := json.Marshal(bd.Header)
 			return data, nil
 		}
 	}
@@ -2389,7 +2384,7 @@ func (m *caseInsensitiveMockClient) GetBlockReceipts(ctx context.Context, blockN
 	defer m.mu.RUnlock()
 
 	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.receipts, nil
+		return bd.Receipts, nil
 	}
 	return nil, fmt.Errorf("receipts for block %d not found", blockNum)
 }
@@ -2399,8 +2394,8 @@ func (m *caseInsensitiveMockClient) GetBlockReceiptsByHash(ctx context.Context, 
 	defer m.mu.RUnlock()
 
 	for _, bd := range m.blocks {
-		if strings.EqualFold(bd.header.Hash, hash) {
-			return bd.receipts, nil
+		if strings.EqualFold(bd.Header.Hash, hash) {
+			return bd.Receipts, nil
 		}
 	}
 	return nil, fmt.Errorf("receipts for block %s not found", hash)
@@ -2411,7 +2406,7 @@ func (m *caseInsensitiveMockClient) GetBlockTraces(ctx context.Context, blockNum
 	defer m.mu.RUnlock()
 
 	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.traces, nil
+		return bd.Traces, nil
 	}
 	return nil, fmt.Errorf("traces for block %d not found", blockNum)
 }
@@ -2421,8 +2416,8 @@ func (m *caseInsensitiveMockClient) GetBlockTracesByHash(ctx context.Context, ha
 	defer m.mu.RUnlock()
 
 	for _, bd := range m.blocks {
-		if strings.EqualFold(bd.header.Hash, hash) {
-			return bd.traces, nil
+		if strings.EqualFold(bd.Header.Hash, hash) {
+			return bd.Traces, nil
 		}
 	}
 	return nil, fmt.Errorf("traces for block %s not found", hash)
@@ -2433,7 +2428,7 @@ func (m *caseInsensitiveMockClient) GetBlobSidecars(ctx context.Context, blockNu
 	defer m.mu.RUnlock()
 
 	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.blobs, nil
+		return bd.Blobs, nil
 	}
 	return nil, fmt.Errorf("blobs for block %d not found", blockNum)
 }
@@ -2443,8 +2438,8 @@ func (m *caseInsensitiveMockClient) GetBlobSidecarsByHash(ctx context.Context, h
 	defer m.mu.RUnlock()
 
 	for _, bd := range m.blocks {
-		if strings.EqualFold(bd.header.Hash, hash) {
-			return bd.blobs, nil
+		if strings.EqualFold(bd.Header.Hash, hash) {
+			return bd.Blobs, nil
 		}
 	}
 	return nil, fmt.Errorf("blobs for block %s not found", hash)
@@ -2471,11 +2466,11 @@ func (m *caseInsensitiveMockClient) GetBlocksBatch(ctx context.Context, blockNum
 	for i, num := range blockNums {
 		result[i] = outbound.BlockData{BlockNumber: num}
 		if bd, ok := m.blocks[num]; ok {
-			blockJSON, _ := json.Marshal(bd.header)
+			blockJSON, _ := json.Marshal(bd.Header)
 			result[i].Block = blockJSON
-			result[i].Receipts = bd.receipts
-			result[i].Traces = bd.traces
-			result[i].Blobs = bd.blobs
+			result[i].Receipts = bd.Receipts
+			result[i].Traces = bd.Traces
+			result[i].Blobs = bd.Blobs
 		}
 	}
 	return result, nil
@@ -2487,14 +2482,14 @@ func (m *caseInsensitiveMockClient) GetBlockDataByHash(ctx context.Context, bloc
 
 	lowerHash := strings.ToLower(hash)
 	for _, bd := range m.blocks {
-		if strings.ToLower(bd.header.Hash) == lowerHash {
-			blockJSON, _ := json.Marshal(bd.header)
+		if strings.ToLower(bd.Header.Hash) == lowerHash {
+			blockJSON, _ := json.Marshal(bd.Header)
 			return outbound.BlockData{
 				BlockNumber: blockNum,
 				Block:       blockJSON,
-				Receipts:    bd.receipts,
-				Traces:      bd.traces,
-				Blobs:       bd.blobs,
+				Receipts:    bd.Receipts,
+				Traces:      bd.Traces,
+				Blobs:       bd.Blobs,
 			}, nil
 		}
 	}
@@ -2839,17 +2834,7 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 
 	// Set up client to return block data for RPC fetches
 	// The reorg block (99_new) needs to be fetchable
-	client.blocks[99] = blockTestData{
-		header: outbound.BlockHeader{
-			Number:     "0x63", // 99
-			Hash:       "0xblock99_new",
-			ParentHash: "0xblock97", // Forks at 97
-			Timestamp:  "0x0",
-		},
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
+	client.SetBlockHeader(99, "0xblock99_new", "0xblock97")
 
 	svc, err := NewLiveService(LiveConfig{
 		Logger:             slog.Default(),
@@ -2939,17 +2924,7 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 
 	// Now send another block that depends on the backfilled blocks being in memory.
 	// Set up the client to return block 94_alt that forks at 93
-	client.blocks[94] = blockTestData{
-		header: outbound.BlockHeader{
-			Number:     "0x5e", // 94
-			Hash:       "0xblock94_alt",
-			ParentHash: "0xblock93",
-			Timestamp:  "0x0",
-		},
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
+	client.SetBlockHeader(94, "0xblock94_alt", "0xblock93")
 
 	// Record event count before sending second block
 	eventCountBefore := len(eventSink.GetBlockEvents())
@@ -3107,14 +3082,7 @@ func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
 	}
 
 	// Add reorg block to client so it can be fetched when processing
-	client.mu.Lock()
-	client.blocks[102] = blockTestData{
-		header:   reorgBlock,
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
-	client.mu.Unlock()
+	client.SetBlockHeader(102, reorgBlock.Hash, reorgBlock.ParentHash)
 
 	// Now send the reorg block (102') via WebSocket
 	subscriber.SendHeader(reorgBlock)

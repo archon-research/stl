@@ -2,7 +2,6 @@ package migrator_test
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,9 +9,8 @@ import (
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 func getMigrationsPath() string {
@@ -22,49 +20,13 @@ func getMigrationsPath() string {
 }
 
 func setupPostgres(ctx context.Context, t *testing.T) (*pgxpool.Pool, func()) {
-	req := testcontainers.ContainerRequest{
-		Image:        "timescale/timescaledb:latest-pg17",
-		ExposedPorts: []string{"5432/tcp"},
-		Env: map[string]string{
-			"POSTGRES_USER":     "postgres",
-			"POSTGRES_PASSWORD": "postgres",
-			"POSTGRES_DB":       "test_db",
-		},
-		WaitingFor: wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		t.Fatalf("failed to start container: %v", err)
-	}
-
-	host, err := container.Host(ctx)
-	if err != nil {
-		t.Fatalf("failed to get container host: %v", err)
-	}
-
-	port, err := container.MappedPort(ctx, "5432")
-	if err != nil {
-		t.Fatalf("failed to get container port: %v", err)
-	}
-
-	connStr := fmt.Sprintf("postgres://postgres:postgres@%s:%s/test_db?sslmode=disable", host, port.Port())
-
-	pool, err := pgxpool.New(ctx, connStr)
-	if err != nil {
-		t.Fatalf("failed to connect to database: %v", err)
-	}
-
+	t.Helper()
+	dsn, containerCleanup := testutil.StartTimescaleDB(t)
+	pool := testutil.ConnectPool(t, dsn)
 	cleanup := func() {
 		pool.Close()
-		if err := container.Terminate(ctx); err != nil {
-			t.Logf("failed to terminate container: %v", err)
-		}
+		containerCleanup()
 	}
-
 	return pool, cleanup
 }
 
