@@ -67,7 +67,7 @@ RWA tokenization platforms: Held token balance, token price.
 
 - [ ] Index Morpho
   - **Labels:** `indexing`
-  - **Note:** first Ethereum, then Base
+  - **Note:** first Ethereum, then Base, Monad
   - **Phase:** 3
 
 - [ ] Index DEXes (Curve and Uniswap)
@@ -76,6 +76,7 @@ RWA tokenization platforms: Held token balance, token price.
 
 - [ ] Index RWA tokenization platforms (Securitize, Centrifuge, etc.)
   - **Labels:** `indexing`
+  - **Note:** first Ethereum, then Base, Avalanche, Plume
   - **Phase:** 2
 
 ---
@@ -134,7 +135,7 @@ RWA tokenization platforms: Held token balance, token price.
   - **Labels:** `indexing`
   - **Phase:** 1
   - Track token balances
-  - Handle exceptions (e.g., Galaxy)
+  - Handle exceptions (e.g., Anchorage)
   - Handle allocations in transition (not strictly necessary, but affects alerting)
   - Track RRC
 
