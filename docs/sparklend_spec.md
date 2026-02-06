@@ -858,10 +858,10 @@ There are NO pre-calculated `totalDebt` or `totalSupply` fields - you must deriv
 ```solidity
 struct UserReserveData {
     address underlyingAsset;
-    uint256 scaledATokenBalance;        // Scaled supply balance (principal)
+    uint256 scaledATokenBalance;        // Scaled supply balance
     bool usageAsCollateralEnabledOnUser; // Is this asset enabled as collateral?
     uint256 stableBorrowRate;           // User's stable borrow rate (deprecated)
-    uint256 scaledVariableDebt;         // Scaled variable debt (principal)
+    uint256 scaledVariableDebt;         // Scaled variable debt
     uint256 principalStableDebt;        // Stable debt principal (deprecated)
     uint256 stableBorrowLastUpdateTimestamp; // Last stable rate update (deprecated)
 }
@@ -877,7 +877,7 @@ currentVariableDebt = scaledVariableDebt × variableBorrowIndex / 1e27
 **Why UiPoolDataProviderV3 is Critical for Indexing:**
 
 1. **Batch Queries**: Get all reserves or all user positions in a single call
-2. **Scaled Balances**: Returns scaled balances (principals) that you can use with indexes to calculate current balances
+2. **Scaled Balances**: Returns scaled balances that you can use with indexes to calculate current balances
 3. **Complete Market Data**: Includes rates, indexes, prices, and all reserve parameters in one call
 4. **Efficient RPC Usage**: Reduces number of calls dramatically vs querying Pool directly
 
@@ -952,7 +952,7 @@ function transfer(address to, uint256 amount) returns (bool)
 function approve(address spender, uint256 amount) returns (bool)
 
 // Aave-specific
-function scaledBalanceOf(address user) returns (uint256) // Returns scaled balance (principal)
+function scaledBalanceOf(address user) returns (uint256) // Returns scaled balance
 function getScaledUserBalanceAndSupply(address user) returns (uint256, uint256)
 ```
 
@@ -1209,9 +1209,9 @@ At each snapshot interval:
 | `underlyingAsset` | hex | Reserve asset address | - |
 | `blockNumber` | bigint | Block number | - |
 | `timestamp` | bigint | Block timestamp | seconds |
-| `scaledATokenBalance` | bigint | Scaled supply balance (principal) FROM API | Token decimals |
+| `scaledATokenBalance` | bigint | Scaled supply balance FROM API | Token decimals |
 | `usageAsCollateralEnabled` | boolean | Is this asset enabled as collateral? FROM API | - |
-| `scaledVariableDebt` | bigint | Scaled variable debt (principal) FROM API | Token decimals |
+| `scaledVariableDebt` | bigint | Scaled variable debt FROM API | Token decimals |
 | `principalStableDebt` | bigint | Stable debt principal FROM API (deprecated, typically 0) | Token decimals |
 | `stableBorrowRate` | bigint | User's stable borrow rate FROM API (deprecated) | 27 decimals (ray) |
 | `stableBorrowLastUpdateTimestamp` | bigint | Last stable rate update FROM API (deprecated) | seconds |
@@ -1678,7 +1678,7 @@ UserScaledSupplyPosition {
   asset: hex,
   blockNumber: bigint,           // Block of this snapshot
   timestamp: bigint,
-  scaledBalance: bigint,         // Scaled spToken balance (principal)
+  scaledBalance: bigint,         // Scaled spToken balance
   isCollateral: boolean,         // Whether asset is enabled as collateral
   lastLiquidityIndex: bigint,    // liquidityIndex at this block (27 decimals)
 }
@@ -1693,7 +1693,7 @@ UserScaledBorrowPosition {
   asset: hex,
   blockNumber: bigint,
   timestamp: bigint,
-  scaledVariableDebt: bigint,    // Scaled variable debt (principal)
+  scaledVariableDebt: bigint,    // Scaled variable debt
   lastVariableBorrowIndex: bigint, // variableBorrowIndex at this block (27 decimals)
 }
 ```

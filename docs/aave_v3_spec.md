@@ -793,7 +793,7 @@ function transfer(address to, uint256 amount) returns (bool)
 function approve(address spender, uint256 amount) returns (bool)
 
 // Aave-specific
-function scaledBalanceOf(address user) returns (uint256) // Returns scaled balance (principal)
+function scaledBalanceOf(address user) returns (uint256) // Returns scaled balance
 function getScaledUserBalanceAndSupply(address user) returns (uint256, uint256)
 ```
 
@@ -1064,9 +1064,9 @@ At each snapshot interval:
 | `underlyingAsset` | hex | Reserve asset address | - |
 | `blockNumber` | bigint | Block number | - |
 | `timestamp` | bigint | Block timestamp | seconds |
-| `scaledATokenBalance` | bigint | Scaled supply balance (principal) | Token decimals |
+| `scaledATokenBalance` | bigint | Scaled supply balance | Token decimals |
 | `usageAsCollateralEnabled` | boolean | Is this asset enabled as collateral? | - |
-| `scaledVariableDebt` | bigint | Scaled variable debt (principal) | Token decimals |
+| `scaledVariableDebt` | bigint | Scaled variable debt | Token decimals |
 | `principalStableDebt` | bigint | Stable debt principal | Token decimals |
 | `stableBorrowRate` | bigint | User's stable borrow rate | 27 decimals (ray) |
 | `stableBorrowLastUpdateTimestamp` | bigint | Last stable rate update | seconds |
@@ -1576,7 +1576,7 @@ UserScaledSupplyPosition {
   asset: hex,
   blockNumber: bigint,           // Block of this snapshot
   timestamp: bigint,
-  scaledBalance: bigint,         // Scaled aToken balance (principal)
+  scaledBalance: bigint,         // Scaled aToken balance
   isCollateral: boolean,         // Whether asset is enabled as collateral
   lastLiquidityIndex: bigint,    // liquidityIndex at this block (27 decimals)
 }
@@ -1591,7 +1591,7 @@ UserScaledBorrowPosition {
   asset: hex,
   blockNumber: bigint,
   timestamp: bigint,
-  scaledVariableDebt: bigint,    // Scaled variable debt (principal)
+  scaledVariableDebt: bigint,    // Scaled variable debt
   lastVariableBorrowIndex: bigint, // variableBorrowIndex at this block (27 decimals)
 }
 ```
