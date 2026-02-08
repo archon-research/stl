@@ -186,7 +186,7 @@ func main() {
 	}
 	defer pool.Close()
 
-	blockStateRepo := postgres.NewBlockStateRepository(pool, logger)
+	blockStateRepo := postgres.NewBlockStateRepository(pool, chainID, logger)
 
 	logger.Info("PostgreSQL connected, block state tracking enabled")
 

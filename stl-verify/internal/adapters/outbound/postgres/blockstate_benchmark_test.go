@@ -471,7 +471,7 @@ func setupLargePostgres(tb testing.TB) (*BlockStateRepository, func()) {
 		tb.Fatalf("failed to apply migrations: %v", err)
 	}
 
-	repo := NewBlockStateRepository(pool, nil)
+	repo := NewBlockStateRepository(pool, 1, nil)
 
 	cleanup := func() {
 		pool.Close()

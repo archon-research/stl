@@ -36,9 +36,11 @@ func (c *Chain) validate() error {
 // ChainNameToID maps chain names to their chain IDs.
 var ChainNameToID = map[string]int{
 	"mainnet": 1,
+	"gnosis":  100,
 }
 
 // ChainIDToName maps chain IDs to their names.
 var ChainIDToName = map[int]string{
-	1: "mainnet",
+	1:   "mainnet",
+	100: "gnosis",
 }

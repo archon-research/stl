@@ -70,7 +70,7 @@ func setupPostgres(t *testing.T) (*BlockStateRepository, func()) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	repo := NewBlockStateRepository(pool, nil)
+	repo := NewBlockStateRepository(pool, 1, nil)
 
 	// Run migrations
 	_, currentFile, _, _ := runtime.Caller(0)

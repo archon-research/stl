@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build integration
 
 package main
 
@@ -33,7 +33,7 @@ import (
 )
 
 // =============================================================================
-// Mock Implementations (must be declared before tests to avoid compilation issues)
+// Mock Implementations
 // =============================================================================
 
 // mockSubscriber simulates block notifications from Alchemy WebSocket.
@@ -102,6 +102,25 @@ func (m *mockBlockchainClient) addBlock(num int64, parentHash string) {
 	if parentHash == "" && num > 0 {
 		parentHash = fmt.Sprintf("0x%064x", num-1)
 	}
+
+	header := outbound.BlockHeader{
+		Number:     fmt.Sprintf("0x%x", num),
+		Hash:       hash,
+		ParentHash: parentHash,
+		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
+	}
+
+	m.blocks[num] = blockTestData{
+		header:   header,
+		receipts: json.RawMessage(`[]`),
+		traces:   json.RawMessage(`[]`),
+		blobs:    json.RawMessage(`[]`),
+	}
+}
+
+func (m *mockBlockchainClient) addBlockWithHash(num int64, parentHash string, hash string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	header := outbound.BlockHeader{
 		Number:     fmt.Sprintf("0x%x", num),
@@ -288,10 +307,10 @@ func (m *mockBlockchainClient) GetBlockDataByHash(ctx context.Context, blockNum 
 // Test Cases
 // =============================================================================
 
-// TestEndToEnd_LiveService_ProcessesNewBlock tests the full flow of processing a new block.
-func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
+// TestLiveService_ProcessesNewBlock tests the full flow of processing a new block.
+func TestLiveService_ProcessesNewBlock(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping E2E test in short mode")
+		t.Skip("Skipping integration test in short mode")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -386,10 +405,10 @@ func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
 	})
 }
 
-// TestEndToEnd_MultipleBlocksInSequence tests processing multiple blocks in sequence.
-func TestEndToEnd_MultipleBlocksInSequence(t *testing.T) {
+// TestMultipleBlocksInSequence tests processing multiple blocks in sequence.
+func TestMultipleBlocksInSequence(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping E2E test in short mode")
+		t.Skip("Skipping integration test in short mode")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -484,6 +503,363 @@ func TestEndToEnd_MultipleBlocksInSequence(t *testing.T) {
 }
 
 // =============================================================================
+// Multi-Chain Tests
+// =============================================================================
+
+// TestMultiChain_Isolation verifies that two chains sharing the same
+// database have proper data isolation: blocks, last block, and queries are scoped
+// by chain_id.
+func TestMultiChain_Isolation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupTestInfrastructure(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Create per-chain repos sharing the same DB pool
+	ethRepo := postgres.NewBlockStateRepository(infra.Pool, 1, logger)
+	gnoRepo := postgres.NewBlockStateRepository(infra.Pool, 100, logger)
+
+	// Create per-chain mock infrastructure
+	ethSub := newMockSubscriber()
+	gnoSub := newMockSubscriber()
+	ethClient := newMockBlockchainClient()
+	gnoClient := newMockBlockchainClient()
+
+	// Create per-chain live services
+	ethLive, err := live_data.NewLiveService(
+		live_data.LiveConfig{ChainID: 1, FinalityBlockCount: 2, Logger: logger},
+		ethSub, ethClient, ethRepo, infra.Cache, infra.EventSink,
+	)
+	if err != nil {
+		t.Fatalf("failed to create eth live service: %v", err)
+	}
+
+	gnoLive, err := live_data.NewLiveService(
+		live_data.LiveConfig{ChainID: 100, FinalityBlockCount: 2, Logger: logger},
+		gnoSub, gnoClient, gnoRepo, infra.Cache, infra.EventSink,
+	)
+	if err != nil {
+		t.Fatalf("failed to create gnosis live service: %v", err)
+	}
+
+	// Start both
+	if err := ethLive.Start(ctx); err != nil {
+		t.Fatalf("failed to start eth service: %v", err)
+	}
+	defer ethLive.Stop()
+
+	if err := gnoLive.Start(ctx); err != nil {
+		t.Fatalf("failed to start gnosis service: %v", err)
+	}
+	defer gnoLive.Stop()
+
+	// Add overlapping block numbers: both chains have blocks 100-102
+	// Ethereum hashes start with 0x1...
+	for i := int64(100); i <= 102; i++ {
+		parentHash := fmt.Sprintf("0x1%063x", i-1)
+		ethClient.addBlockWithHash(i, parentHash, fmt.Sprintf("0x1%063x", i))
+	}
+	// Gnosis hashes start with 0x2...
+	for i := int64(100); i <= 102; i++ {
+		parentHash := fmt.Sprintf("0x2%063x", i-1)
+		gnoClient.addBlockWithHash(i, parentHash, fmt.Sprintf("0x2%063x", i))
+	}
+
+	// Send block headers to both chains
+	for i := int64(100); i <= 102; i++ {
+		ethSub.sendHeader(ethClient.getHeader(i))
+		gnoSub.sendHeader(gnoClient.getHeader(i))
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Wait for blocks to be processed
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		ethLast, _ := ethRepo.GetLastBlock(ctx)
+		gnoLast, _ := gnoRepo.GetLastBlock(ctx)
+		if ethLast != nil && ethLast.Number == 102 && gnoLast != nil && gnoLast.Number == 102 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	t.Run("ethereum_blocks_isolated", func(t *testing.T) {
+		block, err := ethRepo.GetBlockByNumber(ctx, 100)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if block == nil {
+			t.Fatal("expected eth block 100")
+		}
+		if block.Hash != fmt.Sprintf("0x1%063x", 100) {
+			t.Errorf("expected eth hash, got %s", block.Hash)
+		}
+	})
+
+	t.Run("gnosis_blocks_isolated", func(t *testing.T) {
+		block, err := gnoRepo.GetBlockByNumber(ctx, 100)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if block == nil {
+			t.Fatal("expected gnosis block 100")
+		}
+		if block.Hash != fmt.Sprintf("0x2%063x", 100) {
+			t.Errorf("expected gnosis hash, got %s", block.Hash)
+		}
+	})
+
+	t.Run("last_block_per_chain", func(t *testing.T) {
+		ethLast, err := ethRepo.GetLastBlock(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ethLast == nil || ethLast.Number != 102 {
+			t.Errorf("expected eth last block 102, got %v", ethLast)
+		}
+
+		gnoLast, err := gnoRepo.GetLastBlock(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if gnoLast == nil || gnoLast.Number != 102 {
+			t.Errorf("expected gnosis last block 102, got %v", gnoLast)
+		}
+	})
+}
+
+// TestMultiChain_BackfillWithGaps verifies that backfill watermarks
+// are chain-scoped: each chain's watermark advances independently.
+func TestMultiChain_BackfillWithGaps(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupTestInfrastructure(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	ethRepo := postgres.NewBlockStateRepository(infra.Pool, 1, logger)
+	gnoRepo := postgres.NewBlockStateRepository(infra.Pool, 100, logger)
+
+	t.Run("watermarks_are_independent", func(t *testing.T) {
+		// Set different watermarks per chain
+		if err := ethRepo.SetBackfillWatermark(ctx, 500); err != nil {
+			t.Fatalf("failed to set eth watermark: %v", err)
+		}
+		if err := gnoRepo.SetBackfillWatermark(ctx, 200); err != nil {
+			t.Fatalf("failed to set gnosis watermark: %v", err)
+		}
+
+		ethWM, err := ethRepo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("failed to get eth watermark: %v", err)
+		}
+		if ethWM != 500 {
+			t.Errorf("expected eth watermark 500, got %d", ethWM)
+		}
+
+		gnoWM, err := gnoRepo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("failed to get gnosis watermark: %v", err)
+		}
+		if gnoWM != 200 {
+			t.Errorf("expected gnosis watermark 200, got %d", gnoWM)
+		}
+	})
+
+	t.Run("gaps_are_chain_scoped", func(t *testing.T) {
+		// Reset watermarks for this subtest
+		ethRepo.SetBackfillWatermark(ctx, 0)
+		gnoRepo.SetBackfillWatermark(ctx, 0)
+
+		// Save eth blocks 1, 2, 5 (gap at 3-4)
+		for _, num := range []int64{1, 2, 5} {
+			_, err := ethRepo.SaveBlock(ctx, outbound.BlockState{
+				Number:     num,
+				Hash:       fmt.Sprintf("0x1_gap_%d", num),
+				ParentHash: fmt.Sprintf("0x1_gap_%d", num-1),
+				ReceivedAt: time.Now().Unix(),
+			})
+			if err != nil {
+				t.Fatalf("failed to save eth block %d: %v", num, err)
+			}
+		}
+
+		// Save gnosis blocks 1-5 (no gap)
+		for i := int64(1); i <= 5; i++ {
+			_, err := gnoRepo.SaveBlock(ctx, outbound.BlockState{
+				Number:     i,
+				Hash:       fmt.Sprintf("0x2_gap_%d", i),
+				ParentHash: fmt.Sprintf("0x2_gap_%d", i-1),
+				ReceivedAt: time.Now().Unix(),
+			})
+			if err != nil {
+				t.Fatalf("failed to save gnosis block %d: %v", i, err)
+			}
+		}
+
+		// Eth should have a gap
+		ethGaps, err := ethRepo.FindGaps(ctx, 1, 5)
+		if err != nil {
+			t.Fatalf("failed to find eth gaps: %v", err)
+		}
+		if len(ethGaps) != 1 {
+			t.Fatalf("expected 1 eth gap, got %d: %v", len(ethGaps), ethGaps)
+		}
+		if ethGaps[0].From != 3 || ethGaps[0].To != 4 {
+			t.Errorf("expected eth gap [3,4], got [%d,%d]", ethGaps[0].From, ethGaps[0].To)
+		}
+
+		// Gnosis should have no gaps
+		gnoGaps, err := gnoRepo.FindGaps(ctx, 1, 5)
+		if err != nil {
+			t.Fatalf("failed to find gnosis gaps: %v", err)
+		}
+		if len(gnoGaps) != 0 {
+			t.Errorf("expected no gnosis gaps, got %d: %v", len(gnoGaps), gnoGaps)
+		}
+	})
+}
+
+// TestMultiChain_ReorgIsolation verifies that a reorg on one chain
+// does not affect blocks on another chain.
+func TestMultiChain_ReorgIsolation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupTestInfrastructure(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	ethRepo := postgres.NewBlockStateRepository(infra.Pool, 1, logger)
+	gnoRepo := postgres.NewBlockStateRepository(infra.Pool, 100, logger)
+
+	// Save blocks 100-102 on both chains
+	for i := int64(100); i <= 102; i++ {
+		_, err := ethRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x1_reorg_%d", i),
+			ParentHash: fmt.Sprintf("0x1_reorg_%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save eth block %d: %v", i, err)
+		}
+
+		_, err = gnoRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x2_reorg_%d", i),
+			ParentHash: fmt.Sprintf("0x2_reorg_%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save gnosis block %d: %v", i, err)
+		}
+	}
+
+	// Trigger reorg on Ethereum only at block 101
+	reorgEvent := outbound.ReorgEvent{
+		DetectedAt:  time.Now(),
+		BlockNumber: 101,
+		OldHash:     "0x1_reorg_101",
+		NewHash:     "0x1_reorg_101_new",
+		Depth:       1,
+	}
+	newBlock := outbound.BlockState{
+		Number:     101,
+		Hash:       "0x1_reorg_101_new",
+		ParentHash: "0x1_reorg_100",
+		ReceivedAt: time.Now().Unix(),
+	}
+
+	_, err := ethRepo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock)
+	if err != nil {
+		t.Fatalf("HandleReorgAtomic failed: %v", err)
+	}
+
+	t.Run("ethereum_reorg_applied", func(t *testing.T) {
+		// Old eth block 101 should be orphaned
+		oldBlock, err := ethRepo.GetBlockByHash(ctx, "0x1_reorg_101")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !oldBlock.IsOrphaned {
+			t.Error("expected old eth block 101 to be orphaned")
+		}
+
+		// New eth block 101 should be canonical
+		canonical, err := ethRepo.GetBlockByNumber(ctx, 101)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if canonical == nil || canonical.Hash != "0x1_reorg_101_new" {
+			t.Error("expected new canonical eth block at 101")
+		}
+	})
+
+	t.Run("gnosis_unaffected", func(t *testing.T) {
+		// Gnosis block 101 should still be canonical and not orphaned
+		gnoBlock, err := gnoRepo.GetBlockByNumber(ctx, 101)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if gnoBlock == nil {
+			t.Fatal("expected gnosis block 101 to still exist")
+		}
+		if gnoBlock.Hash != "0x2_reorg_101" {
+			t.Errorf("expected gnosis block hash 0x2_reorg_101, got %s", gnoBlock.Hash)
+		}
+		if gnoBlock.IsOrphaned {
+			t.Error("gnosis block 101 should NOT be orphaned")
+		}
+
+		// Gnosis block 102 should also be unaffected
+		gno102, err := gnoRepo.GetBlockByNumber(ctx, 102)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if gno102 == nil || gno102.IsOrphaned {
+			t.Error("gnosis block 102 should NOT be orphaned")
+		}
+	})
+
+	t.Run("reorg_events_chain_scoped", func(t *testing.T) {
+		ethEvents, err := ethRepo.GetReorgEvents(ctx, 10)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(ethEvents) != 1 {
+			t.Errorf("expected 1 eth reorg event, got %d", len(ethEvents))
+		}
+
+		gnoEvents, err := gnoRepo.GetReorgEvents(ctx, 10)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(gnoEvents) != 0 {
+			t.Errorf("expected 0 gnosis reorg events, got %d", len(gnoEvents))
+		}
+	})
+}
+
+// =============================================================================
 // Test Infrastructure
 // =============================================================================
 
@@ -539,7 +915,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 		t.Fatalf("failed to apply migrations: %v", err)
 	}
 
-	blockStateRepo := postgres.NewBlockStateRepository(pool, logger)
+	blockStateRepo := postgres.NewBlockStateRepository(pool, 1, logger)
 	infra.BlockStateRepo = blockStateRepo
 
 	// Start Redis
