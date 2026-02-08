@@ -94,7 +94,7 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 - **Constructors**: Use `New` prefix
 - **Files**: snake_case
 - **Errors**: Wrap with context: `fmt.Errorf("doing X: %w", err)`
-- **Testing**: Table-driven tests, mock outbound ports for unit tests
+- **Testing**: Table-driven tests, mock outbound ports for unit tests. Do NOT use time.Sleep.
 - **Binaries/Building**: Output to `stl/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.
 - **Function composition**: Compose large functions from smaller functions. Large functions should read like prose, with each step delegated to a well-named helper function.

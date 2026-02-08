@@ -28,6 +28,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/testutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
 )
@@ -381,21 +382,15 @@ func TestLiveService_ProcessesNewBlock(t *testing.T) {
 	// The separate receipts/traces topics are no longer used.
 
 	t.Run("block_state_saved", func(t *testing.T) {
-		// Poll for block state with timeout instead of static sleep
 		var state *outbound.BlockState
-		var err error
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
+		if !testutil.WaitFor(t, 5*time.Second, 50*time.Millisecond, func() bool {
+			var err error
 			state, err = infra.BlockStateRepo.GetBlockByNumber(ctx, 100)
 			if err != nil {
 				t.Fatalf("failed to get block state: %v", err)
 			}
-			if state != nil {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		if state == nil {
+			return state != nil
+		}) {
 			t.Fatal("expected block state to be saved")
 		}
 		expectedHash := fmt.Sprintf("0x%064x", 100)
@@ -444,32 +439,26 @@ func TestMultipleBlocksInSequence(t *testing.T) {
 	}
 	defer liveService.Stop()
 
-	// Process 10 blocks
+	// Process 10 blocks, waiting for each to be saved before sending the next
 	const numBlocks = 10
 	for i := int64(100); i < 100+numBlocks; i++ {
 		parentHash := fmt.Sprintf("0x%064x", i-1)
 		mockClient.addBlock(i, parentHash)
 		header := mockClient.getHeader(i)
 		mockSub.sendHeader(header)
-		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Poll until all blocks are saved (or timeout)
-	deadline := time.Now().Add(10 * time.Second)
-	allSaved := false
-	for time.Now().Before(deadline) {
-		allSaved = true
+	// Wait until all blocks are saved
+	if !testutil.WaitFor(t, 10*time.Second, 100*time.Millisecond, func() bool {
 		for i := int64(100); i < 100+numBlocks; i++ {
 			state, _ := infra.BlockStateRepo.GetBlockByNumber(ctx, i)
 			if state == nil {
-				allSaved = false
-				break
+				return false
 			}
 		}
-		if allSaved {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+		return true
+	}) {
+		t.Fatal("timed out waiting for all blocks to be saved")
 	}
 
 	// Verify all blocks are saved
@@ -576,18 +565,15 @@ func TestMultiChain_Isolation(t *testing.T) {
 	for i := int64(100); i <= 102; i++ {
 		ethSub.sendHeader(ethClient.getHeader(i))
 		gnoSub.sendHeader(gnoClient.getHeader(i))
-		time.Sleep(50 * time.Millisecond)
 	}
 
 	// Wait for blocks to be processed
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	if !testutil.WaitFor(t, 10*time.Second, 100*time.Millisecond, func() bool {
 		ethLast, _ := ethRepo.GetLastBlock(ctx)
 		gnoLast, _ := gnoRepo.GetLastBlock(ctx)
-		if ethLast != nil && ethLast.Number == 102 && gnoLast != nil && gnoLast.Number == 102 {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+		return ethLast != nil && ethLast.Number == 102 && gnoLast != nil && gnoLast.Number == 102
+	}) {
+		t.Fatal("timed out waiting for both chains to process blocks")
 	}
 
 	t.Run("ethereum_blocks_isolated", func(t *testing.T) {
@@ -1011,29 +997,30 @@ func (infra *TestInfrastructure) WaitForMessage(t *testing.T, queueURL string, t
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	// Try immediately, then on each tick
 	for {
+		result, err := infra.SQSClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+			QueueUrl:            aws.String(queueURL),
+			MaxNumberOfMessages: 1,
+			WaitTimeSeconds:     1,
+		})
+		if err != nil {
+			t.Logf("error receiving message: %v", err)
+		} else if len(result.Messages) > 0 {
+			infra.SQSClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+				QueueUrl:      aws.String(queueURL),
+				ReceiptHandle: result.Messages[0].ReceiptHandle,
+			})
+			return aws.ToString(result.Messages[0].Body)
+		}
+
 		select {
 		case <-ctx.Done():
 			return ""
-		default:
-			result, err := infra.SQSClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-				QueueUrl:            aws.String(queueURL),
-				MaxNumberOfMessages: 1,
-				WaitTimeSeconds:     1,
-			})
-			if err != nil {
-				t.Logf("error receiving message: %v", err)
-				time.Sleep(500 * time.Millisecond)
-				continue
-			}
-			if len(result.Messages) > 0 {
-				// Delete the message
-				infra.SQSClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-					QueueUrl:      aws.String(queueURL),
-					ReceiptHandle: result.Messages[0].ReceiptHandle,
-				})
-				return aws.ToString(result.Messages[0].Body)
-			}
+		case <-ticker.C:
 		}
 	}
 }
