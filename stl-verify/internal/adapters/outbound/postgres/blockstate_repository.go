@@ -46,11 +46,6 @@ func NewBlockStateRepository(pool *pgxpool.Pool, logger *slog.Logger) *BlockStat
 	return &BlockStateRepository{pool: pool, logger: logger}
 }
 
-// closeRows closes database rows and logs any error.
-func (r *BlockStateRepository) closeRows(rows pgx.Rows) {
-	rows.Close()
-}
-
 // Pool returns the underlying database pool for advanced queries.
 func (r *BlockStateRepository) Pool() *pgxpool.Pool {
 	return r.pool
@@ -281,7 +276,7 @@ func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) (
 	if err != nil {
 		return nil, fmt.Errorf("failed to get recent blocks: %w", err)
 	}
-	defer r.closeRows(rows)
+	defer rows.Close()
 
 	var states []outbound.BlockState
 	for rows.Next() {
@@ -445,7 +440,7 @@ func (r *BlockStateRepository) GetReorgEvents(ctx context.Context, limit int) ([
 	if err != nil {
 		return nil, fmt.Errorf("failed to get reorg events: %w", err)
 	}
-	defer r.closeRows(rows)
+	defer rows.Close()
 
 	var events []outbound.ReorgEvent
 	for rows.Next() {
@@ -473,7 +468,7 @@ func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, f
 	if err != nil {
 		return nil, fmt.Errorf("failed to get reorg events by block range: %w", err)
 	}
-	defer r.closeRows(rows)
+	defer rows.Close()
 
 	var events []outbound.ReorgEvent
 	for rows.Next() {
@@ -502,7 +497,7 @@ func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get orphaned blocks: %w", err)
 	}
-	defer r.closeRows(rows)
+	defer rows.Close()
 
 	var states []outbound.BlockState
 	for rows.Next() {
@@ -636,7 +631,7 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 	if err != nil {
 		return nil, fmt.Errorf("failed to find gaps: %w", err)
 	}
-	defer r.closeRows(rows)
+	defer rows.Close()
 
 	var gaps []outbound.BlockRange
 	for rows.Next() {
@@ -779,7 +774,7 @@ func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Contex
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blocks with incomplete publish: %w", err)
 	}
-	defer r.closeRows(rows)
+	defer rows.Close()
 
 	var states []outbound.BlockState
 	for rows.Next() {
