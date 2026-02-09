@@ -27,13 +27,12 @@ VALUES (
 ON CONFLICT (name) DO NOTHING;
 
 -- Temporal binding: which oracle a protocol uses, at which blocks.
--- When a protocol changes oracle, close old row (set to_block) and insert new row.
+-- Active binding per protocol = latest row by from_block.
 CREATE TABLE IF NOT EXISTS protocol_oracle (
     id BIGSERIAL PRIMARY KEY,
     protocol_id BIGINT NOT NULL,
     oracle_id BIGINT NOT NULL,
     from_block BIGINT NOT NULL,
-    to_block BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

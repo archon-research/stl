@@ -3,6 +3,7 @@ package blockchain
 import (
 	"context"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -65,7 +66,7 @@ func TestAaveResolver_ResolveOracleAddresses(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected error, got nil")
 				}
-				if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("error %q does not contain %q", err.Error(), tt.errContains)
 				}
 				return

@@ -41,12 +41,6 @@ type OnchainPriceRepository interface {
 	// GetAllActiveProtocolOracles retrieves all active (to_block IS NULL) protocol-oracle bindings.
 	GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error)
 
-	// GetProtocol retrieves a protocol by ID.
-	GetProtocol(ctx context.Context, protocolID int64) (*entity.Protocol, error)
-
-	// CloseProtocolOracleBinding sets to_block on an existing protocol-oracle binding.
-	CloseProtocolOracleBinding(ctx context.Context, bindingID int64, toBlock int64) error
-
 	// InsertProtocolOracleBinding inserts a new protocol-oracle binding.
 	InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
 

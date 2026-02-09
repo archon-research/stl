@@ -32,7 +32,7 @@ func (m *mockMulticaller) Address() common.Address {
 // testOracleABI loads the oracle ABI. It calls t.Fatal on error.
 func testOracleABI(t *testing.T) *abi.ABI {
 	t.Helper()
-	oracleABI, err := abis.GetSparkLendOracleABI()
+	oracleABI, err := abis.GetAaveOracleABI()
 	if err != nil {
 		t.Fatalf("loading oracle ABI: %v", err)
 	}

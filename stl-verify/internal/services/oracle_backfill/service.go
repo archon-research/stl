@@ -95,7 +95,7 @@ func NewService(
 		config.Logger = defaults.Logger
 	}
 
-	oracleABI, err := abis.GetSparkLendOracleABI()
+	oracleABI, err := abis.GetAaveOracleABI()
 	if err != nil {
 		return nil, fmt.Errorf("loading Oracle ABI: %w", err)
 	}

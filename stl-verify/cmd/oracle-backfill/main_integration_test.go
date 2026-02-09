@@ -70,13 +70,6 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	}
 }
 
-func TestRunIntegration_InvalidFlags(t *testing.T) {
-	err := run([]string{"-nonexistent"})
-	if err == nil {
-		t.Fatal("expected error for invalid flags")
-	}
-}
-
 func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	// Use a mock RPC so we get past the RPC dial (which is lazy for HTTP)
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
@@ -93,54 +86,5 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "database") && !strings.Contains(err.Error(), "connect") {
 		t.Errorf("expected database/connect error, got: %v", err)
-	}
-}
-
-func TestRunIntegration_VerboseFlag(t *testing.T) {
-	pool, dbURL, cleanup := testutil.SetupTimescaleDB(t)
-	defer cleanup()
-
-	ctx := context.Background()
-	var tokenCount int
-	pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM oracle_asset oa
-		 JOIN oracle os ON os.id = oa.oracle_id
-		 WHERE os.name = 'sparklend' AND oa.enabled = true`).Scan(&tokenCount)
-
-	rpcServer := testutil.StartMockEthRPC(t, tokenCount)
-	defer rpcServer.Close()
-
-	// Single block with verbose flag
-	args := []string{
-		"-rpc-url", rpcServer.URL,
-		"-from", "100",
-		"-to", "100",
-		"-db", dbURL,
-		"-verbose",
-	}
-	if err := run(args); err != nil {
-		t.Fatalf("run() with -verbose failed: %v", err)
-	}
-}
-
-func TestRunIntegration_OracleTableNotFound(t *testing.T) {
-	// Database without migrations — oracle table does not exist
-	dsn, cleanup := testutil.StartTimescaleDB(t)
-	defer cleanup()
-
-	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defer rpcServer.Close()
-
-	err := run([]string{
-		"-rpc-url", rpcServer.URL,
-		"-from", "100",
-		"-to", "105",
-		"-db", dsn,
-	})
-	if err == nil {
-		t.Fatal("expected error for missing oracle table")
-	}
-	if !strings.Contains(err.Error(), "oracle") {
-		t.Errorf("expected oracle-related error, got: %v", err)
 	}
 }

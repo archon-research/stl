@@ -34,8 +34,6 @@ type mockRepo struct {
 	getOracleByAddressFn          func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
 	insertOracleFn                func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
 	getAllActiveProtocolOraclesFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
-	getProtocolFn                 func(ctx context.Context, protocolID int64) (*entity.Protocol, error)
-	closeProtocolOracleBindingFn  func(ctx context.Context, bindingID int64, toBlock int64) error
 	insertProtocolOracleBindingFn func(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
 	copyOracleAssetsFn            func(ctx context.Context, fromOracleID, toOracleID int64) error
 
@@ -115,20 +113,6 @@ func (m *mockRepo) GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.P
 		return m.getAllActiveProtocolOraclesFn(ctx)
 	}
 	return nil, errors.New("GetAllActiveProtocolOracles not mocked")
-}
-
-func (m *mockRepo) GetProtocol(ctx context.Context, protocolID int64) (*entity.Protocol, error) {
-	if m.getProtocolFn != nil {
-		return m.getProtocolFn(ctx, protocolID)
-	}
-	return nil, errors.New("GetProtocol not mocked")
-}
-
-func (m *mockRepo) CloseProtocolOracleBinding(ctx context.Context, bindingID int64, toBlock int64) error {
-	if m.closeProtocolOracleBindingFn != nil {
-		return m.closeProtocolOracleBindingFn(ctx, bindingID, toBlock)
-	}
-	return errors.New("CloseProtocolOracleBinding not mocked")
 }
 
 func (m *mockRepo) InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error) {

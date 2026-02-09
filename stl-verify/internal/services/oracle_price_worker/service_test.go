@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -24,33 +22,37 @@ import (
 // Mocks
 // ---------------------------------------------------------------------------
 
-// mockSQSClient implements SQSClient.
-type mockSQSClient struct {
+// mockConsumer implements outbound.SQSConsumer.
+type mockConsumer struct {
 	mu                  sync.Mutex
-	receiveMessageFunc  func(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
-	deleteMessageFunc   func(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
+	receiveMessagesFn   func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
+	deleteMessageFn     func(ctx context.Context, receiptHandle string) error
 	deleteMessageCalls  int
 	receiveMessageCalls int
 }
 
-func (m *mockSQSClient) ReceiveMessage(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+func (m *mockConsumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error) {
 	m.mu.Lock()
 	m.receiveMessageCalls++
 	m.mu.Unlock()
-	if m.receiveMessageFunc != nil {
-		return m.receiveMessageFunc(ctx, params, optFns...)
+	if m.receiveMessagesFn != nil {
+		return m.receiveMessagesFn(ctx, maxMessages)
 	}
-	return &sqs.ReceiveMessageOutput{}, nil
+	return nil, nil
 }
 
-func (m *mockSQSClient) DeleteMessage(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error) {
+func (m *mockConsumer) DeleteMessage(ctx context.Context, receiptHandle string) error {
 	m.mu.Lock()
 	m.deleteMessageCalls++
 	m.mu.Unlock()
-	if m.deleteMessageFunc != nil {
-		return m.deleteMessageFunc(ctx, params, optFns...)
+	if m.deleteMessageFn != nil {
+		return m.deleteMessageFn(ctx, receiptHandle)
 	}
-	return &sqs.DeleteMessageOutput{}, nil
+	return nil
+}
+
+func (m *mockConsumer) Close() error {
+	return nil
 }
 
 // mockRepo implements outbound.OnchainPriceRepository.
@@ -66,8 +68,6 @@ type mockRepo struct {
 	getOracleByAddressFn          func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
 	insertOracleFn                func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
 	getAllActiveProtocolOraclesFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
-	getProtocolFn                 func(ctx context.Context, protocolID int64) (*entity.Protocol, error)
-	closeProtocolOracleBindingFn  func(ctx context.Context, bindingID int64, toBlock int64) error
 	insertProtocolOracleBindingFn func(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
 	copyOracleAssetsFn            func(ctx context.Context, fromOracleID, toOracleID int64) error
 
@@ -149,20 +149,6 @@ func (m *mockRepo) GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.P
 	return nil, errors.New("GetAllActiveProtocolOracles not mocked")
 }
 
-func (m *mockRepo) GetProtocol(ctx context.Context, protocolID int64) (*entity.Protocol, error) {
-	if m.getProtocolFn != nil {
-		return m.getProtocolFn(ctx, protocolID)
-	}
-	return nil, errors.New("GetProtocol not mocked")
-}
-
-func (m *mockRepo) CloseProtocolOracleBinding(ctx context.Context, bindingID int64, toBlock int64) error {
-	if m.closeProtocolOracleBindingFn != nil {
-		return m.closeProtocolOracleBindingFn(ctx, bindingID, toBlock)
-	}
-	return errors.New("CloseProtocolOracleBinding not mocked")
-}
-
 func (m *mockRepo) InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error) {
 	if m.insertProtocolOracleBindingFn != nil {
 		return m.insertProtocolOracleBindingFn(ctx, binding)
@@ -183,8 +169,7 @@ func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleI
 
 func validConfig() Config {
 	return Config{
-		QueueURL: "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		Logger:   testutil.DiscardLogger(),
+		Logger: testutil.DiscardLogger(),
 	}
 }
 
@@ -258,23 +243,19 @@ func makeBlockEventJSON(blockNumber int64, version int, blockTimestamp int64) st
 	return string(data)
 }
 
-func strPtr(s string) *string {
-	return &s
-}
-
 // ---------------------------------------------------------------------------
 // TestNewService
 // ---------------------------------------------------------------------------
 
 func TestNewService(t *testing.T) {
-	sqsClient := &mockSQSClient{}
+	consumer := &mockConsumer{}
 	multicaller := &testutil.MockMulticaller{}
 	repo := &mockRepo{}
 
 	tests := []struct {
 		name        string
 		config      Config
-		sqsClient   SQSClient
+		consumer    outbound.SQSConsumer
 		multicaller outbound.Multicaller
 		repo        outbound.OnchainPriceRepository
 		wantErr     bool
@@ -285,36 +266,33 @@ func TestNewService(t *testing.T) {
 		{
 			name:        "success with all valid params",
 			config:      validConfig(),
-			sqsClient:   sqsClient,
+			consumer:    consumer,
 			multicaller: multicaller,
 			repo:        repo,
 			wantErr:     false,
 		},
 		{
-			name: "success with default config values",
-			config: Config{
-				QueueURL: "https://sqs.example.com/queue",
-				// All other fields left zero/empty to test defaults
-			},
-			sqsClient:     sqsClient,
+			name:          "success with default config values",
+			config:        Config{},
+			consumer:      consumer,
 			multicaller:   multicaller,
 			repo:          repo,
 			wantErr:       false,
 			checkDefaults: true,
 		},
 		{
-			name:        "error nil sqsClient",
+			name:        "error nil consumer",
 			config:      validConfig(),
-			sqsClient:   nil,
+			consumer:    nil,
 			multicaller: multicaller,
 			repo:        repo,
 			wantErr:     true,
-			errContains: "sqsClient cannot be nil",
+			errContains: "consumer cannot be nil",
 		},
 		{
 			name:        "error nil multicaller",
 			config:      validConfig(),
-			sqsClient:   sqsClient,
+			consumer:    consumer,
 			multicaller: nil,
 			repo:        repo,
 			wantErr:     true,
@@ -323,29 +301,17 @@ func TestNewService(t *testing.T) {
 		{
 			name:        "error nil repo",
 			config:      validConfig(),
-			sqsClient:   sqsClient,
+			consumer:    consumer,
 			multicaller: multicaller,
 			repo:        nil,
 			wantErr:     true,
 			errContains: "repo cannot be nil",
 		},
-		{
-			name: "error empty queueURL",
-			config: Config{
-				QueueURL: "",
-				Logger:   testutil.DiscardLogger(),
-			},
-			sqsClient:   sqsClient,
-			multicaller: multicaller,
-			repo:        repo,
-			wantErr:     true,
-			errContains: "queueURL is required",
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, err := NewService(tc.config, tc.sqsClient, tc.multicaller, tc.repo)
+			svc, err := NewService(tc.config, tc.consumer, tc.multicaller, tc.repo)
 
 			if tc.wantErr {
 				if err == nil {
@@ -368,8 +334,8 @@ func TestNewService(t *testing.T) {
 			}
 
 			// Verify service fields
-			if svc.sqsClient == nil {
-				t.Error("sqsClient should not be nil")
+			if svc.consumer == nil {
+				t.Error("consumer should not be nil")
 			}
 			if svc.multicaller == nil {
 				t.Error("multicaller should not be nil")
@@ -388,9 +354,6 @@ func TestNewService(t *testing.T) {
 				defaults := configDefaults()
 				if svc.config.MaxMessages != defaults.MaxMessages {
 					t.Errorf("MaxMessages = %d, want %d", svc.config.MaxMessages, defaults.MaxMessages)
-				}
-				if svc.config.WaitTimeSeconds != defaults.WaitTimeSeconds {
-					t.Errorf("WaitTimeSeconds = %d, want %d", svc.config.WaitTimeSeconds, defaults.WaitTimeSeconds)
 				}
 				if svc.config.PollInterval != defaults.PollInterval {
 					t.Errorf("PollInterval = %v, want %v", svc.config.PollInterval, defaults.PollInterval)
@@ -556,10 +519,10 @@ func TestStart(t *testing.T) {
 			repo := &mockRepo{}
 			tc.setupRepo(repo)
 
-			// For success case, provide a mock SQS that blocks on receive so the goroutine
+			// For success case, provide a mock consumer that blocks on receive so the goroutine
 			// doesn't spin. For error cases, it doesn't matter since Start returns early.
-			sqsClient := &mockSQSClient{
-				receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+			consumer := &mockConsumer{
+				receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 					// Block until context is cancelled to avoid spinning
 					<-ctx.Done()
 					return nil, ctx.Err()
@@ -571,7 +534,7 @@ func TestStart(t *testing.T) {
 				new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8)),
 			})
 
-			svc, err := NewService(validConfig(), sqsClient, mc, repo)
+			svc, err := NewService(validConfig(), consumer, mc, repo)
 			if err != nil {
 				t.Fatalf("NewService failed: %v", err)
 			}
@@ -633,17 +596,15 @@ func TestStartAndProcessMessages(t *testing.T) {
 		body1 := makeBlockEventJSON(18000000, 1, blockTimestamp)
 		receipt1 := "receipt-1"
 
-		sqsClient := &mockSQSClient{
-			receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
 				if !messageDelivered {
 					messageDelivered = true
-					return &sqs.ReceiveMessageOutput{
-						Messages: []sqstypes.Message{
-							{Body: strPtr(body1), ReceiptHandle: strPtr(receipt1)},
-						},
+					return []outbound.SQSMessage{
+						{MessageID: "msg-1", Body: body1, ReceiptHandle: receipt1},
 					}, nil
 				}
 				// After the first message, block until context is done
@@ -655,7 +616,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -680,11 +641,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		repo.mu.Unlock()
 
 		// Verify delete was called
-		sqsClient.mu.Lock()
-		if sqsClient.deleteMessageCalls < 1 {
-			t.Errorf("DeleteMessage call count = %d, want >= 1", sqsClient.deleteMessageCalls)
+		consumer.mu.Lock()
+		if consumer.deleteMessageCalls < 1 {
+			t.Errorf("DeleteMessage call count = %d, want >= 1", consumer.deleteMessageCalls)
 		}
-		sqsClient.mu.Unlock()
+		consumer.mu.Unlock()
 
 		// Now verify change detection: second block with same prices should not upsert.
 		// Reset repo call count and deliver a second message.
@@ -725,8 +686,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 			return map[int64]float64{}, nil
 		}
 
-		sqsClient := &mockSQSClient{
-			receiveMessageFunc: func(_ context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(_ context.Context, _ int) ([]outbound.SQSMessage, error) {
 				return nil, fmt.Errorf("SQS service unavailable")
 			},
 		}
@@ -735,7 +696,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -748,11 +709,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Verify processMessages was attempted (no crash)
-		sqsClient.mu.Lock()
-		if sqsClient.receiveMessageCalls == 0 {
+		consumer.mu.Lock()
+		if consumer.receiveMessageCalls == 0 {
 			t.Error("expected at least one ReceiveMessage call")
 		}
-		sqsClient.mu.Unlock()
+		consumer.mu.Unlock()
 
 		if stopErr := svc.Stop(); stopErr != nil {
 			t.Errorf("Stop: %v", stopErr)
@@ -766,9 +727,9 @@ func TestStartAndProcessMessages(t *testing.T) {
 			return map[int64]float64{}, nil
 		}
 
-		sqsClient := &mockSQSClient{
-			receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
-				return &sqs.ReceiveMessageOutput{Messages: []sqstypes.Message{}}, nil
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+				return nil, nil
 			},
 		}
 
@@ -776,7 +737,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -807,17 +768,15 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}
 
 		delivered := false
-		sqsClient := &mockSQSClient{
-			receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
 				if !delivered {
 					delivered = true
-					return &sqs.ReceiveMessageOutput{
-						Messages: []sqstypes.Message{
-							{Body: nil, ReceiptHandle: strPtr("receipt-nil")},
-						},
+					return []outbound.SQSMessage{
+						{MessageID: "msg-nil", Body: "", ReceiptHandle: "receipt-nil"},
 					}, nil
 				}
 				<-ctx.Done()
@@ -829,7 +788,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -841,11 +800,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Message should not have been deleted (process failed)
-		sqsClient.mu.Lock()
-		if sqsClient.deleteMessageCalls != 0 {
-			t.Errorf("DeleteMessage call count = %d, want 0 (nil body should fail)", sqsClient.deleteMessageCalls)
+		consumer.mu.Lock()
+		if consumer.deleteMessageCalls != 0 {
+			t.Errorf("DeleteMessage call count = %d, want 0 (nil body should fail)", consumer.deleteMessageCalls)
 		}
-		sqsClient.mu.Unlock()
+		consumer.mu.Unlock()
 
 		// UpsertPrices should NOT have been called
 		repo.mu.Lock()
@@ -867,17 +826,15 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}
 
 		delivered := false
-		sqsClient := &mockSQSClient{
-			receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
 				if !delivered {
 					delivered = true
-					return &sqs.ReceiveMessageOutput{
-						Messages: []sqstypes.Message{
-							{Body: strPtr("not valid json{{{"), ReceiptHandle: strPtr("receipt-bad-json")},
-						},
+					return []outbound.SQSMessage{
+						{MessageID: "msg-bad-json", Body: "not valid json{{{", ReceiptHandle: "receipt-bad-json"},
 					}, nil
 				}
 				<-ctx.Done()
@@ -889,7 +846,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -901,11 +858,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Message should not have been deleted
-		sqsClient.mu.Lock()
-		if sqsClient.deleteMessageCalls != 0 {
-			t.Errorf("DeleteMessage call count = %d, want 0 (invalid JSON)", sqsClient.deleteMessageCalls)
+		consumer.mu.Lock()
+		if consumer.deleteMessageCalls != 0 {
+			t.Errorf("DeleteMessage call count = %d, want 0 (invalid JSON)", consumer.deleteMessageCalls)
 		}
-		sqsClient.mu.Unlock()
+		consumer.mu.Unlock()
 
 		if stopErr := svc.Stop(); stopErr != nil {
 			t.Errorf("Stop: %v", stopErr)
@@ -921,17 +878,15 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 		delivered := false
 		body := makeBlockEventJSON(18000000, 1, blockTimestamp)
-		sqsClient := &mockSQSClient{
-			receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
 				if !delivered {
 					delivered = true
-					return &sqs.ReceiveMessageOutput{
-						Messages: []sqstypes.Message{
-							{Body: strPtr(body), ReceiptHandle: strPtr("receipt-mc-err")},
-						},
+					return []outbound.SQSMessage{
+						{MessageID: "msg-mc-err", Body: body, ReceiptHandle: "receipt-mc-err"},
 					}, nil
 				}
 				<-ctx.Done()
@@ -948,7 +903,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -960,11 +915,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Message should not have been deleted (processBlock failed)
-		sqsClient.mu.Lock()
-		if sqsClient.deleteMessageCalls != 0 {
-			t.Errorf("DeleteMessage call count = %d, want 0 (multicall error)", sqsClient.deleteMessageCalls)
+		consumer.mu.Lock()
+		if consumer.deleteMessageCalls != 0 {
+			t.Errorf("DeleteMessage call count = %d, want 0 (multicall error)", consumer.deleteMessageCalls)
 		}
-		sqsClient.mu.Unlock()
+		consumer.mu.Unlock()
 
 		// UpsertPrices should NOT have been called
 		repo.mu.Lock()
@@ -991,31 +946,29 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 		delivered := false
 		body := makeBlockEventJSON(18000000, 1, blockTimestamp)
-		sqsClient := &mockSQSClient{
-			receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
 				if !delivered {
 					delivered = true
-					return &sqs.ReceiveMessageOutput{
-						Messages: []sqstypes.Message{
-							{Body: strPtr(body), ReceiptHandle: strPtr("receipt-del-err")},
-						},
+					return []outbound.SQSMessage{
+						{MessageID: "msg-del-err", Body: body, ReceiptHandle: "receipt-del-err"},
 					}, nil
 				}
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
-			deleteMessageFunc: func(_ context.Context, _ *sqs.DeleteMessageInput, _ ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error) {
-				return nil, fmt.Errorf("SQS delete failed")
+			deleteMessageFn: func(_ context.Context, _ string) error {
+				return fmt.Errorf("SQS delete failed")
 			},
 		}
 
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1032,11 +985,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}, "UpsertPrices to be called")
 
 		// DeleteMessage was attempted (even though it failed)
-		sqsClient.mu.Lock()
-		if sqsClient.deleteMessageCalls < 1 {
-			t.Errorf("DeleteMessage call count = %d, want >= 1", sqsClient.deleteMessageCalls)
+		consumer.mu.Lock()
+		if consumer.deleteMessageCalls < 1 {
+			t.Errorf("DeleteMessage call count = %d, want >= 1", consumer.deleteMessageCalls)
 		}
-		sqsClient.mu.Unlock()
+		consumer.mu.Unlock()
 
 		if stopErr := svc.Stop(); stopErr != nil {
 			t.Errorf("Stop: %v", stopErr)
@@ -1056,17 +1009,15 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 		delivered := false
 		body := makeBlockEventJSON(18000000, 1, blockTimestamp)
-		sqsClient := &mockSQSClient{
-			receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
 				if !delivered {
 					delivered = true
-					return &sqs.ReceiveMessageOutput{
-						Messages: []sqstypes.Message{
-							{Body: strPtr(body), ReceiptHandle: strPtr("receipt-mismatch")},
-						},
+					return []outbound.SQSMessage{
+						{MessageID: "msg-mismatch", Body: body, ReceiptHandle: "receipt-mismatch"},
 					}, nil
 				}
 				<-ctx.Done()
@@ -1077,7 +1028,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1089,11 +1040,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Message should NOT have been deleted (processBlock returned error)
-		sqsClient.mu.Lock()
-		if sqsClient.deleteMessageCalls != 0 {
-			t.Errorf("DeleteMessage call count = %d, want 0 (price mismatch)", sqsClient.deleteMessageCalls)
+		consumer.mu.Lock()
+		if consumer.deleteMessageCalls != 0 {
+			t.Errorf("DeleteMessage call count = %d, want 0 (price mismatch)", consumer.deleteMessageCalls)
 		}
-		sqsClient.mu.Unlock()
+		consumer.mu.Unlock()
 
 		// UpsertPrices should NOT have been called
 		repo.mu.Lock()
@@ -1124,17 +1075,15 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 		delivered := false
 		body := makeBlockEventJSON(18000000, 1, blockTimestamp)
-		sqsClient := &mockSQSClient{
-			receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
 				if !delivered {
 					delivered = true
-					return &sqs.ReceiveMessageOutput{
-						Messages: []sqstypes.Message{
-							{Body: strPtr(body), ReceiptHandle: strPtr("receipt-upsert-err")},
-						},
+					return []outbound.SQSMessage{
+						{MessageID: "msg-upsert-err", Body: body, ReceiptHandle: "receipt-upsert-err"},
 					}, nil
 				}
 				<-ctx.Done()
@@ -1145,7 +1094,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1162,11 +1111,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}, "UpsertPrices to be called")
 
 		// Message should NOT have been deleted because processMessage returned error
-		sqsClient.mu.Lock()
-		if sqsClient.deleteMessageCalls != 0 {
-			t.Errorf("DeleteMessage call count = %d, want 0 (UpsertPrices failed)", sqsClient.deleteMessageCalls)
+		consumer.mu.Lock()
+		if consumer.deleteMessageCalls != 0 {
+			t.Errorf("DeleteMessage call count = %d, want 0 (UpsertPrices failed)", consumer.deleteMessageCalls)
 		}
-		sqsClient.mu.Unlock()
+		consumer.mu.Unlock()
 
 		if stopErr := svc.Stop(); stopErr != nil {
 			t.Errorf("Stop: %v", stopErr)
@@ -1184,8 +1133,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 		price2 := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8))
 		mc := newOracleMulticallerWithT(t, []*big.Int{price1, price2})
 
-		sqsClient := &mockSQSClient{
-			receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
@@ -1194,7 +1143,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1237,10 +1186,10 @@ func TestStartAndProcessMessages(t *testing.T) {
 func TestStop(t *testing.T) {
 	t.Run("stop without start (cancel is nil)", func(t *testing.T) {
 		repo := &mockRepo{}
-		sqsClient := &mockSQSClient{}
+		consumer := &mockConsumer{}
 		mc := &testutil.MockMulticaller{}
 
-		svc, err := NewService(validConfig(), sqsClient, mc, repo)
+		svc, err := NewService(validConfig(), consumer, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1259,8 +1208,8 @@ func TestStop(t *testing.T) {
 			return map[int64]float64{}, nil
 		}
 
-		sqsClient := &mockSQSClient{
-			receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
@@ -1270,7 +1219,7 @@ func TestStop(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}

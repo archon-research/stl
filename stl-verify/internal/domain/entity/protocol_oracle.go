@@ -6,13 +6,11 @@ import (
 )
 
 // ProtocolOracle is a temporal binding: which oracle a protocol uses at which blocks.
-// When a protocol changes oracle, close the old row (set ToBlock) and insert a new row.
 type ProtocolOracle struct {
 	ID         int64
 	ProtocolID int64
 	OracleID   int64
 	FromBlock  int64
-	ToBlock    *int64 // nil means currently active
 	CreatedAt  time.Time
 }
 
@@ -40,9 +38,4 @@ func (po *ProtocolOracle) validate() error {
 		return fmt.Errorf("fromBlock must be positive, got %d", po.FromBlock)
 	}
 	return nil
-}
-
-// IsActive returns true if this binding has no end block.
-func (po *ProtocolOracle) IsActive() bool {
-	return po.ToBlock == nil
 }

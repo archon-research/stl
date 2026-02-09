@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -303,13 +302,13 @@ func (r *OnchainPriceRepository) InsertOracle(ctx context.Context, oracle *entit
 	return oracle, nil
 }
 
-// GetAllActiveProtocolOracles retrieves all active (to_block IS NULL) protocol-oracle bindings.
+// GetAllActiveProtocolOracles retrieves all active protocol-oracle bindings.
+// Returns only the latest binding per protocol (by from_block DESC).
 func (r *OnchainPriceRepository) GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, protocol_id, oracle_id, from_block, to_block, created_at
+		SELECT DISTINCT ON (protocol_id) id, protocol_id, oracle_id, from_block, created_at
 		FROM protocol_oracle
-		WHERE to_block IS NULL
-		ORDER BY id
+		ORDER BY protocol_id, from_block DESC
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("querying active protocol oracles: %w", err)
@@ -319,7 +318,7 @@ func (r *OnchainPriceRepository) GetAllActiveProtocolOracles(ctx context.Context
 	var bindings []*entity.ProtocolOracle
 	for rows.Next() {
 		var po entity.ProtocolOracle
-		if err := rows.Scan(&po.ID, &po.ProtocolID, &po.OracleID, &po.FromBlock, &po.ToBlock, &po.CreatedAt); err != nil {
+		if err := rows.Scan(&po.ID, &po.ProtocolID, &po.OracleID, &po.FromBlock, &po.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scanning protocol oracle: %w", err)
 		}
 		bindings = append(bindings, &po)
@@ -328,45 +327,6 @@ func (r *OnchainPriceRepository) GetAllActiveProtocolOracles(ctx context.Context
 		return nil, fmt.Errorf("iterating protocol oracles: %w", err)
 	}
 	return bindings, nil
-}
-
-// GetProtocol retrieves a protocol by ID.
-func (r *OnchainPriceRepository) GetProtocol(ctx context.Context, protocolID int64) (*entity.Protocol, error) {
-	var p entity.Protocol
-	var metadataBytes []byte
-	err := r.pool.QueryRow(ctx, `
-		SELECT id, chain_id, address, name, protocol_type, created_at_block, metadata
-		FROM protocol
-		WHERE id = $1
-	`, protocolID).Scan(
-		&p.ID, &p.ChainID, &p.Address, &p.Name, &p.ProtocolType, &p.CreatedAtBlock, &metadataBytes,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("protocol not found: %d", protocolID)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("querying protocol: %w", err)
-	}
-	if metadataBytes != nil {
-		if err := json.Unmarshal(metadataBytes, &p.Metadata); err != nil {
-			return nil, fmt.Errorf("unmarshalling protocol metadata: %w", err)
-		}
-	}
-	if p.Metadata == nil {
-		p.Metadata = make(map[string]any)
-	}
-	return &p, nil
-}
-
-// CloseProtocolOracleBinding sets to_block on an existing protocol-oracle binding.
-func (r *OnchainPriceRepository) CloseProtocolOracleBinding(ctx context.Context, bindingID int64, toBlock int64) error {
-	_, err := r.pool.Exec(ctx, `
-		UPDATE protocol_oracle SET to_block = $1 WHERE id = $2
-	`, toBlock, bindingID)
-	if err != nil {
-		return fmt.Errorf("closing protocol oracle binding %d: %w", bindingID, err)
-	}
-	return nil
 }
 
 // InsertProtocolOracleBinding inserts a new protocol-oracle binding.

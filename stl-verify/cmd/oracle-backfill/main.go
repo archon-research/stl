@@ -40,7 +40,6 @@ type cliConfig struct {
 	concurrency int
 	batchSize   int
 	dbURL       string
-	verbose     bool
 }
 
 func parseFlags(args []string) (cliConfig, error) {
@@ -51,7 +50,6 @@ func parseFlags(args []string) (cliConfig, error) {
 	concurrency := fs.Int("concurrency", 100, "Number of concurrent workers")
 	batchSize := fs.Int("batch-size", 1000, "Batch size for DB inserts")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
-	verbose := fs.Bool("verbose", false, "Enable verbose logging")
 	if err := fs.Parse(args); err != nil {
 		return cliConfig{}, err
 	}
@@ -63,7 +61,6 @@ func parseFlags(args []string) (cliConfig, error) {
 		concurrency: *concurrency,
 		batchSize:   *batchSize,
 		dbURL:       *dbURL,
-		verbose:     *verbose,
 	}
 
 	if cfg.rpcURL == "" {
@@ -95,13 +92,8 @@ func run(args []string) error {
 		return err
 	}
 
-	logLevel := slog.LevelInfo
-	if cfg.verbose {
-		logLevel = slog.LevelDebug
-	}
-
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: logLevel,
+		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
 	slog.SetDefault(logger)
 

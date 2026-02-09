@@ -33,7 +33,7 @@ func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 	if err != nil {
 		t.Fatalf("load multicall3 ABI: %v", err)
 	}
-	oracleABI, err := abis.GetSparkLendOracleABI()
+	oracleABI, err := abis.GetAaveOracleABI()
 	if err != nil {
 		t.Fatalf("load oracle ABI: %v", err)
 	}

@@ -10,7 +10,7 @@ import (
 // PackAssetPrices ABI-encodes prices as getAssetsPrices() return data.
 func PackAssetPrices(t *testing.T, prices []*big.Int) []byte {
 	t.Helper()
-	oracleABI, err := abis.GetSparkLendOracleABI()
+	oracleABI, err := abis.GetAaveOracleABI()
 	if err != nil {
 		t.Fatalf("loading oracle ABI: %v", err)
 	}

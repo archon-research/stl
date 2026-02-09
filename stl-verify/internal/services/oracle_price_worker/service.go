@@ -12,9 +12,6 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
@@ -24,28 +21,18 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// SQSClient defines the SQS operations used by this service.
-// Satisfied by *sqs.Client from the AWS SDK.
-type SQSClient interface {
-	ReceiveMessage(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
-	DeleteMessage(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
-}
-
 // Config holds configuration for the oracle price worker.
 type Config struct {
-	QueueURL        string
-	MaxMessages     int32
-	WaitTimeSeconds int32
-	PollInterval    time.Duration
-	Logger          *slog.Logger
+	MaxMessages  int
+	PollInterval time.Duration
+	Logger       *slog.Logger
 }
 
 func configDefaults() Config {
 	return Config{
-		MaxMessages:     10,
-		WaitTimeSeconds: 20,
-		PollInterval:    100 * time.Millisecond,
-		Logger:          slog.Default(),
+		MaxMessages:  10,
+		PollInterval: 100 * time.Millisecond,
+		Logger:       slog.Default(),
 	}
 }
 
@@ -61,7 +48,7 @@ type oracleUnit struct {
 // Service processes SQS block events and fetches oracle prices for each block.
 type Service struct {
 	config      Config
-	sqsClient   SQSClient
+	consumer    outbound.SQSConsumer
 	repo        outbound.OnchainPriceRepository
 	multicaller outbound.Multicaller
 
@@ -76,12 +63,12 @@ type Service struct {
 // NewService creates a new oracle price worker service.
 func NewService(
 	config Config,
-	sqsClient SQSClient,
+	consumer outbound.SQSConsumer,
 	multicaller outbound.Multicaller,
 	repo outbound.OnchainPriceRepository,
 ) (*Service, error) {
-	if sqsClient == nil {
-		return nil, fmt.Errorf("sqsClient cannot be nil")
+	if consumer == nil {
+		return nil, fmt.Errorf("consumer cannot be nil")
 	}
 	if multicaller == nil {
 		return nil, fmt.Errorf("multicaller cannot be nil")
@@ -91,14 +78,8 @@ func NewService(
 	}
 
 	defaults := configDefaults()
-	if config.QueueURL == "" {
-		return nil, fmt.Errorf("queueURL is required")
-	}
 	if config.MaxMessages == 0 {
 		config.MaxMessages = defaults.MaxMessages
-	}
-	if config.WaitTimeSeconds == 0 {
-		config.WaitTimeSeconds = defaults.WaitTimeSeconds
 	}
 	if config.PollInterval == 0 {
 		config.PollInterval = defaults.PollInterval
@@ -107,14 +88,14 @@ func NewService(
 		config.Logger = defaults.Logger
 	}
 
-	oracleABI, err := abis.GetSparkLendOracleABI()
+	oracleABI, err := abis.GetAaveOracleABI()
 	if err != nil {
-		return nil, fmt.Errorf("loading SparkLend Oracle ABI: %w", err)
+		return nil, fmt.Errorf("loading Oracle ABI: %w", err)
 	}
 
 	return &Service{
 		config:      config,
-		sqsClient:   sqsClient,
+		consumer:    consumer,
 		repo:        repo,
 		multicaller: multicaller,
 		oracleABI:   oracleABI,
@@ -133,7 +114,6 @@ func (s *Service) Start(ctx context.Context) error {
 	go s.processLoop()
 
 	s.logger.Info("oracle price worker started",
-		"queue", s.config.QueueURL,
 		"oracles", len(s.units))
 	return nil
 }
@@ -240,35 +220,26 @@ func (s *Service) processLoop() {
 }
 
 func (s *Service) processMessages(ctx context.Context) error {
-	result, err := s.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-		QueueUrl:            aws.String(s.config.QueueURL),
-		MaxNumberOfMessages: s.config.MaxMessages,
-		WaitTimeSeconds:     s.config.WaitTimeSeconds,
-		VisibilityTimeout:   30,
-	})
+	messages, err := s.consumer.ReceiveMessages(ctx, s.config.MaxMessages)
 	if err != nil {
 		return fmt.Errorf("receiving messages: %w", err)
 	}
 
-	if len(result.Messages) == 0 {
+	if len(messages) == 0 {
 		return nil
 	}
 
-	s.logger.Info("received messages", "count", len(result.Messages))
+	s.logger.Info("received messages", "count", len(messages))
 
 	var errs []error
-	for _, msg := range result.Messages {
+	for _, msg := range messages {
 		if err := s.processMessage(ctx, msg); err != nil {
 			s.logger.Error("failed to process message", "error", err)
 			errs = append(errs, err)
 			continue
 		}
 
-		_, deleteErr := s.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-			QueueUrl:      aws.String(s.config.QueueURL),
-			ReceiptHandle: msg.ReceiptHandle,
-		})
-		if deleteErr != nil {
+		if deleteErr := s.consumer.DeleteMessage(ctx, msg.ReceiptHandle); deleteErr != nil {
 			s.logger.Error("failed to delete message", "error", deleteErr)
 		}
 	}
@@ -289,13 +260,9 @@ type blockEvent struct {
 	IsReorg        bool   `json:"isReorg,omitempty"`
 }
 
-func (s *Service) processMessage(ctx context.Context, msg sqstypes.Message) error {
-	if msg.Body == nil {
-		return fmt.Errorf("message body is nil")
-	}
-
+func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) error {
 	var event blockEvent
-	if err := json.Unmarshal([]byte(*msg.Body), &event); err != nil {
+	if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
 		return fmt.Errorf("parsing block event: %w", err)
 	}
 

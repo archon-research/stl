@@ -23,7 +23,6 @@ func TestParseFlags(t *testing.T) {
 				concurrency: 100,
 				batchSize:   1000,
 				dbURL:       "postgres://localhost:5432/testdb",
-				verbose:     false,
 			},
 		},
 		{
@@ -36,7 +35,6 @@ func TestParseFlags(t *testing.T) {
 				concurrency: 50,
 				batchSize:   500,
 				dbURL:       "postgres://localhost/db",
-				verbose:     false,
 			},
 		},
 		{
@@ -50,20 +48,6 @@ func TestParseFlags(t *testing.T) {
 				concurrency: 100,
 				batchSize:   1000,
 				dbURL:       "postgres://localhost:5432/envdb",
-				verbose:     false,
-			},
-		},
-		{
-			name: "verbose flag",
-			args: []string{"-rpc-url", "http://erigon:8545", "-from", "100", "-to", "200", "-db", "postgres://localhost/db", "-verbose"},
-			wantCfg: cliConfig{
-				rpcURL:      "http://erigon:8545",
-				fromBlock:   100,
-				toBlock:     200,
-				concurrency: 100,
-				batchSize:   1000,
-				dbURL:       "postgres://localhost/db",
-				verbose:     true,
 			},
 		},
 		{
@@ -76,7 +60,6 @@ func TestParseFlags(t *testing.T) {
 				concurrency: 100,
 				batchSize:   1000,
 				dbURL:       "postgres://localhost/db",
-				verbose:     false,
 			},
 		},
 		{
@@ -122,7 +105,6 @@ func TestParseFlags(t *testing.T) {
 				concurrency: 100,
 				batchSize:   1000,
 				dbURL:       "postgres://localhost/cli-db",
-				verbose:     false,
 			},
 		},
 		{
@@ -135,7 +117,6 @@ func TestParseFlags(t *testing.T) {
 				concurrency: 100,
 				batchSize:   1000,
 				dbURL:       "postgres://localhost/db",
-				verbose:     false,
 			},
 		},
 	}
@@ -179,9 +160,6 @@ func TestParseFlags(t *testing.T) {
 			}
 			if cfg.dbURL != tt.wantCfg.dbURL {
 				t.Errorf("dbURL: expected %q, got %q", tt.wantCfg.dbURL, cfg.dbURL)
-			}
-			if cfg.verbose != tt.wantCfg.verbose {
-				t.Errorf("verbose: expected %v, got %v", tt.wantCfg.verbose, cfg.verbose)
 			}
 		})
 	}

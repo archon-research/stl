@@ -3,6 +3,7 @@ package blockchain
 import (
 	"context"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -73,7 +74,7 @@ func TestSparkLendResolver_ResolveOracleAddresses(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected error, got nil")
 				}
-				if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("error %q does not contain %q", err.Error(), tt.errContains)
 				}
 				return
@@ -89,13 +90,4 @@ func TestSparkLendResolver_ResolveOracleAddresses(t *testing.T) {
 			}
 		})
 	}
-}
-
-func contains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
