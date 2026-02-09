@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"math/big"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -435,7 +434,7 @@ func (s *Service) processPositionEventLog(ctx context.Context, log Log, txHash s
 		"block", blockNumber)
 
 	// Save the raw decoded event for analytics/auditability
-	logIndex, err := strconv.ParseInt(strings.TrimPrefix(log.LogIndex, "0x"), 16, 64)
+	logIndex, err := strconv.ParseInt(log.LogIndex, 0, 64)
 	if err != nil {
 		return fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 	}

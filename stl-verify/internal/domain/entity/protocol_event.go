@@ -45,7 +45,7 @@ func (e *ProtocolEvent) validate() error {
 	if e.ProtocolID <= 0 {
 		return fmt.Errorf("protocolID must be positive, got %d", e.ProtocolID)
 	}
-	if e.BlockNumber <= 0 {
+	if e.BlockNumber < 0 {
 		return fmt.Errorf("blockNumber must be positive, got %d", e.BlockNumber)
 	}
 	if e.BlockVersion < 0 {
