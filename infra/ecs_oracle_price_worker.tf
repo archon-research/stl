@@ -194,7 +194,7 @@ resource "aws_ecs_task_definition" "oracle_price_worker" {
 
       # Health check - the worker is long-running, basic health check
       healthCheck = {
-        command     = ["CMD-SHELL", "pgrep oracle-price-worker || exit 1"]
+        command     = ["CMD-SHELL", "pgrep oracle_price_worker || exit 1"]
         interval    = 30
         timeout     = 5
         retries     = 3
