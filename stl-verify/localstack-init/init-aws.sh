@@ -53,6 +53,17 @@ $AWS sqs create-queue \
   --attributes FifoQueue=true,ContentBasedDeduplication=true \
   --region $REGION
 
+# Oracle price worker queue + DLQ
+$AWS sqs create-queue \
+  --queue-name stl-ethereum-oracle-price-dlq.fifo \
+  --attributes FifoQueue=true,ContentBasedDeduplication=true \
+  --region $REGION
+
+$AWS sqs create-queue \
+  --queue-name stl-ethereum-oracle-price.fifo \
+  --attributes FifoQueue=true,ContentBasedDeduplication=true \
+  --region $REGION
+
 # Subscribe SQS FIFO queues to SNS FIFO topic
 echo "Subscribing queues to topic..."
 $AWS sns subscribe \
@@ -66,6 +77,13 @@ $AWS sns subscribe \
   --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
   --protocol sqs \
   --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-backup.fifo" \
+  --attributes RawMessageDelivery=true \
+  --region $REGION
+
+$AWS sns subscribe \
+  --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
+  --protocol sqs \
+  --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-oracle-price.fifo" \
   --attributes RawMessageDelivery=true \
   --region $REGION
 

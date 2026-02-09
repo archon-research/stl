@@ -8,8 +8,10 @@
 #   SNS FIFO (ethereum-blocks.fifo)
 #     ├── SQS FIFO (ethereum-transformer.fifo) → Transform/Load processing
 #     │     └── DLQ (ethereum-transformer-dlq.fifo)
-#     └── SQS FIFO (ethereum-backup.fifo) → Backup capability
-#           └── DLQ (ethereum-backup-dlq.fifo)
+#     ├── SQS FIFO (ethereum-backup.fifo) → Backup capability
+#     │     └── DLQ (ethereum-backup-dlq.fifo)
+#     └── SQS FIFO (ethereum-oracle-price.fifo) → Oracle price tracking
+#           └── DLQ (ethereum-oracle-price-dlq.fifo)
 
 # -----------------------------------------------------------------------------
 # SNS FIFO Topic - Ethereum Blocks
@@ -212,6 +214,97 @@ resource "aws_sns_topic_subscription" "ethereum_backup" {
 }
 
 # -----------------------------------------------------------------------------
+# SQS FIFO Queue - Oracle Price Worker
+# -----------------------------------------------------------------------------
+# Receives block events for oracle price tracking
+
+resource "aws_sqs_queue" "ethereum_oracle_price_dlq" {
+  name                        = "${local.prefix}-ethereum-oracle-price-dlq.fifo"
+  fifo_queue                  = true
+  content_based_deduplication = true
+
+  # DLQ retention: 14 days for debugging failed messages
+  message_retention_seconds = 1209600
+
+  tags = {
+    Name       = "${local.prefix}-ethereum-oracle-price-dlq"
+    Blockchain = "ethereum"
+    Service    = "messaging"
+    Type       = "dlq"
+  }
+}
+
+# Allow redrive from oracle price DLQ back to source queue
+resource "aws_sqs_queue_redrive_allow_policy" "ethereum_oracle_price_dlq" {
+  queue_url = aws_sqs_queue.ethereum_oracle_price_dlq.id
+
+  redrive_allow_policy = jsonencode({
+    redrivePermission = "byQueue"
+    sourceQueueArns   = [aws_sqs_queue.ethereum_oracle_price.arn]
+  })
+}
+
+resource "aws_sqs_queue" "ethereum_oracle_price" {
+  name                        = "${local.prefix}-ethereum-oracle-price.fifo"
+  fifo_queue                  = true
+  content_based_deduplication = true
+
+  # Visibility timeout: 5 minutes for processing
+  visibility_timeout_seconds = 300
+
+  # Message retention: 14 days (max allowed by SQS)
+  message_retention_seconds = 1209600
+
+  # Dead letter queue configuration
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.ethereum_oracle_price_dlq.arn
+    maxReceiveCount     = 3
+  })
+
+  tags = {
+    Name       = "${local.prefix}-ethereum-oracle-price"
+    Blockchain = "ethereum"
+    Service    = "messaging"
+    Consumer   = "oracle-price"
+  }
+}
+
+# Allow SNS to send messages to oracle price queue
+data "aws_iam_policy_document" "ethereum_oracle_price_queue" {
+  statement {
+    sid    = "AllowSNSPublish"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["sns.amazonaws.com"]
+    }
+
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.ethereum_oracle_price.arn]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [aws_sns_topic.ethereum_blocks.arn]
+    }
+  }
+}
+
+resource "aws_sqs_queue_policy" "ethereum_oracle_price" {
+  queue_url = aws_sqs_queue.ethereum_oracle_price.id
+  policy    = data.aws_iam_policy_document.ethereum_oracle_price_queue.json
+}
+
+# SNS subscription with raw message delivery
+resource "aws_sns_topic_subscription" "ethereum_oracle_price" {
+  topic_arn            = aws_sns_topic.ethereum_blocks.arn
+  protocol             = "sqs"
+  endpoint             = aws_sqs_queue.ethereum_oracle_price.arn
+  raw_message_delivery = true
+}
+
+# -----------------------------------------------------------------------------
 # IAM Policy for Publishing to SNS
 # -----------------------------------------------------------------------------
 # Allows Watcher to publish block events
@@ -254,6 +347,7 @@ data "aws_iam_policy_document" "ethereum_sqs_consume" {
     resources = [
       aws_sqs_queue.ethereum_transformer.arn,
       aws_sqs_queue.ethereum_backup.arn,
+      aws_sqs_queue.ethereum_oracle_price.arn,
     ]
   }
 
@@ -270,6 +364,7 @@ data "aws_iam_policy_document" "ethereum_sqs_consume" {
     resources = [
       aws_sqs_queue.ethereum_transformer_dlq.arn,
       aws_sqs_queue.ethereum_backup_dlq.arn,
+      aws_sqs_queue.ethereum_oracle_price_dlq.arn,
     ]
   }
 }
@@ -317,4 +412,19 @@ output "ethereum_transformer_dlq_url" {
 output "ethereum_backup_dlq_url" {
   description = "URL of the Ethereum backup dead letter queue"
   value       = aws_sqs_queue.ethereum_backup_dlq.url
+}
+
+output "ethereum_oracle_price_queue_url" {
+  description = "URL of the Ethereum oracle price SQS FIFO queue"
+  value       = aws_sqs_queue.ethereum_oracle_price.url
+}
+
+output "ethereum_oracle_price_queue_arn" {
+  description = "ARN of the Ethereum oracle price SQS FIFO queue"
+  value       = aws_sqs_queue.ethereum_oracle_price.arn
+}
+
+output "ethereum_oracle_price_dlq_url" {
+  description = "URL of the Ethereum oracle price dead letter queue"
+  value       = aws_sqs_queue.ethereum_oracle_price_dlq.url
 }
