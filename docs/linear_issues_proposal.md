@@ -53,7 +53,6 @@ RWA tokenization platforms: Held token balance, token price.
 
 - [ ] Index Sparklend
   - **Labels:** `indexing`
-  - **Note:** first Ethereum, then Gnosis
   - **Phase:** 1
 
 - [ ] Index Aave
@@ -196,6 +195,7 @@ RWA tokenization platforms: Held token balance, token price.
   - Indexing/RPC error monitoring
   - External API error monitoring
   - RRC alerting
+  - Missing prices
   - Monitoring for inputs to RRC calculations (e.g., APYs) bounds
   - Volume and liquidity change/bounds monitoring
 
