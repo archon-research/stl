@@ -24,7 +24,7 @@ The following should all be high priority in order to be better coordinated, bot
 
 ## Generic Infrastructure
 
-- [ ] Complete worker infrastructure
+- [ ] Complete worker infrastructure (Terraform, docker, Database, Redis, ...)
   - **Labels:** `infrastructure`
   - **Phase:** 1
 
@@ -65,17 +65,38 @@ RWA tokenization platforms: Held token balance, token price.
   - **Labels:** `indexing`
   - **Phase:** 1
 
+- [ ] Index Anchroage
+  - **Note:** Currently blocked as there is no public data to track
+  - **Labels:** `indexing`
+  - **Phase:** 1
+
+- [ ] Index Arkis
+  - **Labels:** `indexing`
+  - **Phase:** 1
+
 - [ ] Index Morpho
   - **Labels:** `indexing`
   - **Note:** first Ethereum, then Base
   - **Phase:** 3
 
-- [ ] Index DEXes (Curve and Uniswap)
+- [ ] Index DEXes (Curve)
   - **Labels:** `indexing`
   - **Phase:** 2
 
-- [ ] Index RWA tokenization platforms (Securitize, Centrifuge, etc.)
+- [ ] Index DEXes (Uniswap)
   - **Labels:** `indexing`
+  - **Phase:** 2
+
+- [ ] Index RWA tokenization platforms (Centrifuge)
+  - **Labels:** `indexing-rwa`
+  - **Phase:** 2
+
+- [ ] Index RWA tokenization platforms (Securitize)
+  - **Labels:** `indexing-rwa`
+  - **Phase:** 2
+
+- [ ] Index RWA tokenization platforms (INX)
+  - **Labels:** `indexing-rwa`
   - **Phase:** 2
 
 ---
@@ -83,7 +104,7 @@ RWA tokenization platforms: Held token balance, token price.
 ## Data Collection & Processing
 
 #### Historical State Gathering
-- [ ] Create scripts for historical state gathering
+- [ ] Create scripts for historical state gathering (generic smart contract(s) state if needed)
   - **Labels:** `indexing`
   - **Phase:** 1
 
@@ -130,11 +151,19 @@ RWA tokenization platforms: Held token balance, token price.
 
 ## Star Allocation Tracking
 
-- [ ] Implement tracking of Star allocations
+- [ ] Implement tracking of Star allocations (Spark)
   - **Labels:** `indexing`
   - **Phase:** 1
   - Track token balances
   - Handle exceptions (e.g., Galaxy)
+  - Handle allocations in transition (not strictly necessary, but affects alerting)
+  - Track RRC
+
+- [ ] Implement tracking of Star allocations (Grove)
+  - **Labels:** `indexing`
+  - **Phase:** 1
+  - Track token balances
+  - Handle exceptions
   - Handle allocations in transition (not strictly necessary, but affects alerting)
   - Track RRC
 
@@ -143,7 +172,7 @@ RWA tokenization platforms: Held token balance, token price.
 ## Python Business Layer
 
 - [ ] Implement Python business layer
-  - **Labels:** `infrastructure`
+  - **Labels:** `api`
   - **Phase:** 2
   - For initial lending market risk engine, will need to:
   - Get `asset correlation`
@@ -154,26 +183,33 @@ RWA tokenization platforms: Held token balance, token price.
   - Get `backed breakdown`
   - Get `star allocation value`
 
+- [ ] Implement Terraform, docker for Python API
+  - **Labels:** `infrastructure`
+  - **Phase:**: 2
+  - Once the API is ready make sure it is deployable, has DB access, an api endpoint etc
+
 ---
 
 ## Risk Engines
 
+#### Lending market Risk Engines
+
 - [ ] Add initial lending market risk engine (follow current BA methodology)
-  - **Labels:** `infrastructure`
+  - **Labels:** `risk`
   - **Phase:** 1
 
 - [ ] Implement updated lending market risk engine
-  - **Labels:** `infrastructure`
+  - **Labels:** `risk`
   - **Phase:** 2
 
 #### RWA Risk Engines
 
 - [ ] Add initial RWA risk engine
-  - **Labels:** `infrastructure`
+  - **Labels:** `risk`
   - **Phase:** 1
 
 - [ ] Possible expansion of RWA risk engine to account for different classes of assets
-  - **Labels:** `infrastructure`
+  - **Labels:** `risk`
   - **Phase:** 2
 
 ---
@@ -182,12 +218,12 @@ RWA tokenization platforms: Held token balance, token price.
 
 #### API
 - [ ] Define routes to interact with risk engines (FastAPI)
-  - **Labels:** `infrastructure`
+  - **Labels:** `api`
   - **Phase:** 2
 
 #### Alerting & Monitoring
 - [ ] Implement monitoring and alerting
-  - **Labels:** `infrastructure`
+  - **Labels:** `monitoring-alert`
   - **Phase:** 3
   - Price change/bounds monitoring
   - Balance change/bounds monitoring
