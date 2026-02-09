@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -113,15 +112,9 @@ func TestParseConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Ensure ALCHEMY_API_KEY is unset unless provided in envVars.
+			// Ensure ALCHEMY_API_KEY is empty unless provided in envVars.
 			if _, has := tt.envVars["ALCHEMY_API_KEY"]; !has {
-				prev, hadPrev := os.LookupEnv("ALCHEMY_API_KEY")
-				os.Unsetenv("ALCHEMY_API_KEY")
-				t.Cleanup(func() {
-					if hadPrev {
-						os.Setenv("ALCHEMY_API_KEY", prev)
-					}
-				})
+				t.Setenv("ALCHEMY_API_KEY", "")
 			}
 
 			for k, v := range tt.envVars {
