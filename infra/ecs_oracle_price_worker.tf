@@ -262,8 +262,8 @@ resource "aws_ecs_task_definition" "oracle_price_worker" {
       ]
 
       # Resource limits for sidecar
-      cpu    = 256
-      memory = 512
+      cpu    = 64
+      memory = 128
 
       # Logging configuration
       logConfiguration = {
