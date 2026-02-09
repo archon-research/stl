@@ -6,18 +6,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"path/filepath"
-	"runtime"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/archon-research/stl/stl-verify/db/migrator"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // positionTestFixture holds test dependencies for position repository tests.
@@ -36,48 +30,7 @@ func setupPositionTest(t *testing.T) *positionTestFixture {
 	t.Helper()
 	ctx := context.Background()
 
-	// Use testcontainers postgres module with TimescaleDB image
-	container, err := postgres.Run(ctx,
-		"timescale/timescaledb:latest-pg17",
-		postgres.WithDatabase("testdb"),
-		postgres.WithUsername("test"),
-		postgres.WithPassword("test"),
-		postgres.WithSQLDriver("pgx"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(60*time.Second)),
-	)
-	if err != nil {
-		t.Fatalf("failed to start container: %v", err)
-	}
-
-	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("failed to get connection string: %v", err)
-	}
-
-	// Create pgxpool for migrations and repository
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("failed to create pgxpool: %v", err)
-	}
-
-	// Wait for connection
-	for i := 0; i < 30; i++ {
-		if err := pool.Ping(ctx); err == nil {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// Run migrations
-	_, currentFile, _, _ := runtime.Caller(0)
-	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../../db/migrations")
-	m := migrator.New(pool, migrationsDir)
-	if err := m.ApplyAll(ctx); err != nil {
-		t.Fatalf("failed to apply migrations: %v", err)
-	}
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 
 	repo, err := NewPositionRepository(pool, nil, 100)
 	if err != nil {
@@ -85,12 +38,9 @@ func setupPositionTest(t *testing.T) *positionTestFixture {
 	}
 
 	fixture := &positionTestFixture{
-		repo: repo,
-		pool: pool,
-		cleanup: func() {
-			pool.Close()
-			container.Terminate(ctx)
-		},
+		repo:    repo,
+		pool:    pool,
+		cleanup: cleanup,
 	}
 
 	// Create required foreign key references

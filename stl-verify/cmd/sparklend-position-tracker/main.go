@@ -31,16 +31,10 @@ func main() {
 	dbURL := flag.String("db", "", "PostgreSQL connection URL")
 	maxMessages := flag.Int("max", 10, "Max messages per poll")
 	waitTime := flag.Int("wait", 20, "Wait time in seconds (long polling)")
-	verbose := flag.Bool("verbose", false, "Enable verbose logging")
 	flag.Parse()
 
-	logLevel := slog.LevelInfo
-	if *verbose {
-		logLevel = slog.LevelDebug
-	}
-
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: logLevel,
+		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
 	slog.SetDefault(logger)
 
