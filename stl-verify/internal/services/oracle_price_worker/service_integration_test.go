@@ -10,9 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
-
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -49,8 +46,8 @@ func integrationMulticallerBlockDependent(numTokens int) *testutil.MockMulticall
 	}
 }
 
-// blockEventMsg creates an SQS message containing a block event.
-func blockEventMsg(blockNumber int64, version int, blockTimestamp int64, receiptHandle string) sqstypes.Message {
+// blockEventMessage creates an outbound.SQSMessage containing a block event.
+func blockEventMessage(blockNumber int64, version int, blockTimestamp int64, receiptHandle string) outbound.SQSMessage {
 	event := blockEvent{
 		ChainID:        1,
 		BlockNumber:    blockNumber,
@@ -59,25 +56,25 @@ func blockEventMsg(blockNumber int64, version int, blockTimestamp int64, receipt
 		BlockTimestamp: blockTimestamp,
 	}
 	data, _ := json.Marshal(event)
-	body := string(data)
-	return sqstypes.Message{
-		Body:          &body,
-		ReceiptHandle: &receiptHandle,
+	return outbound.SQSMessage{
+		MessageID:     fmt.Sprintf("msg-%d", blockNumber),
+		Body:          string(data),
+		ReceiptHandle: receiptHandle,
 	}
 }
 
-// sqsClientWithMessages creates a mock SQS client that delivers the provided messages
-// on the first ReceiveMessage call, then blocks until context cancellation.
-func sqsClientWithMessages(messages []sqstypes.Message) *mockSQSClient {
+// consumerWithMessages creates a mock consumer that delivers the provided messages
+// on the first ReceiveMessages call, then blocks until context cancellation.
+func consumerWithMessages(messages []outbound.SQSMessage) *mockConsumer {
 	delivered := false
-	return &mockSQSClient{
-		receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+	return &mockConsumer{
+		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			if !delivered {
 				delivered = true
-				return &sqs.ReceiveMessageOutput{Messages: messages}, nil
+				return messages, nil
 			}
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -85,19 +82,19 @@ func sqsClientWithMessages(messages []sqstypes.Message) *mockSQSClient {
 	}
 }
 
-// sqsClientWithSequentialMessages creates a mock SQS client that delivers messages
-// in sequence, one batch per ReceiveMessage call.
-func sqsClientWithSequentialMessages(batches [][]sqstypes.Message) *mockSQSClient {
+// consumerWithSequentialMessages creates a mock consumer that delivers messages
+// in sequence, one batch per ReceiveMessages call.
+func consumerWithSequentialMessages(batches [][]outbound.SQSMessage) *mockConsumer {
 	callIndex := 0
-	return &mockSQSClient{
-		receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+	return &mockConsumer{
+		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			if callIndex < len(batches) {
 				batch := batches[callIndex]
 				callIndex++
-				return &sqs.ReceiveMessageOutput{Messages: batch}, nil
+				return batch, nil
 			}
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -138,20 +135,18 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 
 	mc := integrationMulticaller(t, []*big.Int{price1, price2})
 
-	// Create SQS client that delivers one block event
-	messages := []sqstypes.Message{
-		blockEventMsg(18000000, 1, blockTimestamp, "receipt-1"),
+	// Create consumer that delivers one block event
+	messages := []outbound.SQSMessage{
+		blockEventMessage(18000000, 1, blockTimestamp, "receipt-1"),
 	}
-	sqsClient := sqsClientWithMessages(messages)
+	consumer := consumerWithMessages(messages)
 
 	cfg := Config{
-		QueueURL:        "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		PollInterval:    1 * time.Millisecond,
-		WaitTimeSeconds: 0,
-		Logger:          logger,
+		PollInterval: 1 * time.Millisecond,
+		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, sqsClient, mc, repo)
+	svc, err := NewService(cfg, consumer, mc, repo)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -207,9 +202,9 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	}
 
 	// Verify delete was called
-	sqsClient.mu.Lock()
-	deleteCalls := sqsClient.deleteMessageCalls
-	sqsClient.mu.Unlock()
+	consumer.mu.Lock()
+	deleteCalls := consumer.deleteMessageCalls
+	consumer.mu.Unlock()
 	if deleteCalls < 1 {
 		t.Errorf("expected at least 1 DeleteMessage call, got %d", deleteCalls)
 	}
@@ -250,20 +245,18 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
 
 	// Deliver two messages with the same prices
-	batches := [][]sqstypes.Message{
-		{blockEventMsg(18000000, 1, blockTimestamp, "receipt-1")},
-		{blockEventMsg(18000001, 1, blockTimestamp+12, "receipt-2")},
+	batches := [][]outbound.SQSMessage{
+		{blockEventMessage(18000000, 1, blockTimestamp, "receipt-1")},
+		{blockEventMessage(18000001, 1, blockTimestamp+12, "receipt-2")},
 	}
-	sqsClient := sqsClientWithSequentialMessages(batches)
+	consumer := consumerWithSequentialMessages(batches)
 
 	cfg := Config{
-		QueueURL:        "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		PollInterval:    1 * time.Millisecond,
-		WaitTimeSeconds: 0,
-		Logger:          logger,
+		PollInterval: 1 * time.Millisecond,
+		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, sqsClient, mc, repo)
+	svc, err := NewService(cfg, consumer, mc, repo)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -275,9 +268,9 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 
 	// Wait for both messages to be processed (at least 2 receive calls + 2 deletes)
 	testutil.WaitForCondition(t, 5*time.Second, func() bool {
-		sqsClient.mu.Lock()
-		defer sqsClient.mu.Unlock()
-		return sqsClient.deleteMessageCalls >= 2
+		consumer.mu.Lock()
+		defer consumer.mu.Unlock()
+		return consumer.deleteMessageCalls >= 2
 	}, "both messages to be processed")
 
 	// Only the first block should have prices (change detection skips second)
@@ -334,21 +327,19 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
 
 	// Deliver 3 blocks with unique prices
-	batches := [][]sqstypes.Message{
-		{blockEventMsg(18000000, 1, blockTimestamp, "receipt-1")},
-		{blockEventMsg(18000001, 1, blockTimestamp+12, "receipt-2")},
-		{blockEventMsg(18000002, 1, blockTimestamp+24, "receipt-3")},
+	batches := [][]outbound.SQSMessage{
+		{blockEventMessage(18000000, 1, blockTimestamp, "receipt-1")},
+		{blockEventMessage(18000001, 1, blockTimestamp+12, "receipt-2")},
+		{blockEventMessage(18000002, 1, blockTimestamp+24, "receipt-3")},
 	}
-	sqsClient := sqsClientWithSequentialMessages(batches)
+	consumer := consumerWithSequentialMessages(batches)
 
 	cfg := Config{
-		QueueURL:        "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		PollInterval:    1 * time.Millisecond,
-		WaitTimeSeconds: 0,
-		Logger:          logger,
+		PollInterval: 1 * time.Millisecond,
+		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, sqsClient, mc, repo)
+	svc, err := NewService(cfg, consumer, mc, repo)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -360,9 +351,9 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 
 	// Wait for all 3 messages to be processed
 	testutil.WaitForCondition(t, 5*time.Second, func() bool {
-		sqsClient.mu.Lock()
-		defer sqsClient.mu.Unlock()
-		return sqsClient.deleteMessageCalls >= 3
+		consumer.mu.Lock()
+		defer consumer.mu.Unlock()
+		return consumer.deleteMessageCalls >= 3
 	}, "all 3 messages to be processed")
 
 	// All 3 blocks should have prices (each has unique prices)
@@ -412,9 +403,9 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 		t.Fatalf("failed to create repository: %v", err)
 	}
 
-	// SQS client that blocks until context is cancelled (no messages)
-	sqsClient := &mockSQSClient{
-		receiveMessageFunc: func(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+	// Consumer that blocks until context is cancelled (no messages)
+	consumer := &mockConsumer{
+		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -424,13 +415,11 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 	mc := integrationMulticaller(t, []*big.Int{price1})
 
 	cfg := Config{
-		QueueURL:        "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		PollInterval:    1 * time.Millisecond,
-		WaitTimeSeconds: 0,
-		Logger:          logger,
+		PollInterval: 1 * time.Millisecond,
+		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, sqsClient, mc, repo)
+	svc, err := NewService(cfg, consumer, mc, repo)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -495,19 +484,17 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 	mc := integrationMulticallerBlockDependent(numTokens)
 
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
-	messages := []sqstypes.Message{
-		blockEventMsg(20000000, 1, blockTimestamp, "receipt-seeded"),
+	messages := []outbound.SQSMessage{
+		blockEventMessage(20000000, 1, blockTimestamp, "receipt-seeded"),
 	}
-	sqsClient := sqsClientWithMessages(messages)
+	consumer := consumerWithMessages(messages)
 
 	cfg := Config{
-		QueueURL:        "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		PollInterval:    1 * time.Millisecond,
-		WaitTimeSeconds: 0,
-		Logger:          logger,
+		PollInterval: 1 * time.Millisecond,
+		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, sqsClient, mc, repo)
+	svc, err := NewService(cfg, consumer, mc, repo)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -593,19 +580,17 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	mc := integrationMulticaller(t, []*big.Int{price1, price2})
 
 	newBlockTimestamp := blockTimestamp.Add(12 * time.Second).Unix()
-	messages := []sqstypes.Message{
-		blockEventMsg(18000000, 1, newBlockTimestamp, "receipt-cache"),
+	messages := []outbound.SQSMessage{
+		blockEventMessage(18000000, 1, newBlockTimestamp, "receipt-cache"),
 	}
-	sqsClient := sqsClientWithMessages(messages)
+	consumer := consumerWithMessages(messages)
 
 	cfg := Config{
-		QueueURL:        "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		PollInterval:    1 * time.Millisecond,
-		WaitTimeSeconds: 0,
-		Logger:          logger,
+		PollInterval: 1 * time.Millisecond,
+		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, sqsClient, mc, repo)
+	svc, err := NewService(cfg, consumer, mc, repo)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -617,9 +602,9 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 
 	// Wait for the message to be processed (delete indicates processing completed)
 	testutil.WaitForCondition(t, 5*time.Second, func() bool {
-		sqsClient.mu.Lock()
-		defer sqsClient.mu.Unlock()
-		return sqsClient.deleteMessageCalls >= 1
+		consumer.mu.Lock()
+		defer consumer.mu.Unlock()
+		return consumer.deleteMessageCalls >= 1
 	}, "message to be processed")
 
 	// Should still have only 2 prices (the pre-seeded ones)
