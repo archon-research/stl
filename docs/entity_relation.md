@@ -124,6 +124,20 @@ erDiagram
         jsonb metadata "user-protocol specific data"
     }
 
+    ProtocolEvent {
+        bigint id PK
+        int chain_id FK "UK1"
+        bigint protocol_id FK
+        bigint block_number "UK1"
+        int block_version "UK1"
+        bytea tx_hash "UK1"
+        int log_index "UK1"
+        bytea contract_address
+        text event_name
+        jsonb event_data
+        timestamptz created_at
+    }
+
     PriceSource {
         bigint id PK
         varchar name UK "coingecko, chainlink"
@@ -174,9 +188,11 @@ erDiagram
     Chain ||--o{ Token : ""
     Chain ||--o{ Protocol : ""
     Chain ||--o{ User : ""
+    Chain ||--o{ ProtocolEvent : ""
     Protocol ||--o{ ReceiptToken : ""
     Protocol ||--o{ DebtToken : ""
     Protocol ||--o{ SparkLendReserveData : ""
+    Protocol ||--o{ ProtocolEvent : ""
     Token ||--o{ ReceiptToken : ""
     Token ||--o{ DebtToken : ""
     Token ||--o{ SparkLendReserveData : ""
