@@ -36,6 +36,48 @@
       ]
     },
     {
+      "name": "Oracle Price Worker",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/stl-verify/cmd/oracle-price-worker/main.go",
+      "envFile": [
+        "${workspaceFolder}/stl-verify/cmd/oracle-price-worker/.env"
+      ]
+    },
+    {
+      "name": "Oracle Backfill - SparkLend Genesis to Present",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/stl-verify/cmd/oracle-backfill/main.go",
+      "args": [
+        "--rpc-url", "http://erigon:8545",
+        "--from", "16664447",
+        "--to", "21800000",
+        "--concurrency", "100"
+      ],
+      "envFile": [
+        "${workspaceFolder}/stl-verify/cmd/oracle-backfill/.env"
+      ]
+    },
+    {
+      "name": "Oracle Backfill - Small Test Range",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/stl-verify/cmd/oracle-backfill/main.go",
+      "args": [
+        "--rpc-url", "http://erigon:8545",
+        "--from", "21800000",
+        "--to", "21800100",
+        "--concurrency", "10"
+      ],
+      "envFile": [
+        "${workspaceFolder}/stl-verify/cmd/oracle-backfill/.env"
+      ]
+    },
+    {
       "name": "Data Validator - Full (requires tunnel)",
       "type": "go",
       "request": "launch",

@@ -75,6 +75,33 @@ resource "aws_cloudwatch_metric_alarm" "backup_dlq_messages" {
   }
 }
 
+resource "aws_cloudwatch_metric_alarm" "oracle_price_dlq_messages" {
+  alarm_name          = "${local.prefix}-ethereum-oracle-price-dlq-messages"
+  alarm_description   = "Messages detected in oracle price DLQ - requires investigation"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    QueueName = aws_sqs_queue.ethereum_oracle_price_dlq.name
+  }
+
+  alarm_actions = [aws_sns_topic.messaging_alarms.arn]
+  ok_actions    = [aws_sns_topic.messaging_alarms.arn]
+
+  tags = {
+    Name       = "${local.prefix}-ethereum-oracle-price-dlq-messages"
+    Blockchain = "ethereum"
+    Service    = "messaging"
+    Severity   = "critical"
+  }
+}
+
 # Queue Backlog Alarms - Warning: Messages piling up
 resource "aws_cloudwatch_metric_alarm" "transformer_queue_backlog" {
   alarm_name          = "${local.prefix}-ethereum-transformer-backlog"
@@ -130,6 +157,33 @@ resource "aws_cloudwatch_metric_alarm" "backup_queue_backlog" {
   }
 }
 
+resource "aws_cloudwatch_metric_alarm" "oracle_price_queue_backlog" {
+  alarm_name          = "${local.prefix}-ethereum-oracle-price-backlog"
+  alarm_description   = "Oracle price queue backlog exceeds threshold - consumers may be slow"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 100
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    QueueName = aws_sqs_queue.ethereum_oracle_price.name
+  }
+
+  alarm_actions = [aws_sns_topic.messaging_alarms.arn]
+  ok_actions    = [aws_sns_topic.messaging_alarms.arn]
+
+  tags = {
+    Name       = "${local.prefix}-ethereum-oracle-price-backlog"
+    Blockchain = "ethereum"
+    Service    = "messaging"
+    Severity   = "warning"
+  }
+}
+
 # Message Age Alarms - Warning: Old messages indicate processing issues
 resource "aws_cloudwatch_metric_alarm" "transformer_message_age" {
   alarm_name          = "${local.prefix}-ethereum-transformer-message-age"
@@ -179,6 +233,33 @@ resource "aws_cloudwatch_metric_alarm" "backup_message_age" {
 
   tags = {
     Name       = "${local.prefix}-ethereum-backup-message-age"
+    Blockchain = "ethereum"
+    Service    = "messaging"
+    Severity   = "warning"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "oracle_price_message_age" {
+  alarm_name          = "${local.prefix}-ethereum-oracle-price-message-age"
+  alarm_description   = "Oldest message in oracle price queue exceeds 5 minutes"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "ApproximateAgeOfOldestMessage"
+  namespace           = "AWS/SQS"
+  period              = 300
+  statistic           = "Maximum"
+  threshold           = 300 # 5 minutes in seconds
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    QueueName = aws_sqs_queue.ethereum_oracle_price.name
+  }
+
+  alarm_actions = [aws_sns_topic.messaging_alarms.arn]
+  ok_actions    = [aws_sns_topic.messaging_alarms.arn]
+
+  tags = {
+    Name       = "${local.prefix}-ethereum-oracle-price-message-age"
     Blockchain = "ethereum"
     Service    = "messaging"
     Severity   = "warning"
@@ -472,7 +553,7 @@ resource "aws_cloudwatch_dashboard" "messaging" {
         }
       },
 
-      # Row 4: Dead Letter Queues (Critical)
+      # Row 4: Oracle Price Queue
       {
         type   = "text"
         x      = 0
@@ -480,14 +561,109 @@ resource "aws_cloudwatch_dashboard" "messaging" {
         width  = 24
         height = 1
         properties = {
-          markdown = "## ⚠️ Dead Letter Queues (DLQ)"
+          markdown = "## Oracle Price Queue"
         }
       },
       {
         type   = "metric"
         x      = 0
         y      = 22
-        width  = 12
+        width  = 6
+        height = 6
+        properties = {
+          title  = "Messages Visible (Backlog)"
+          region = var.aws_region
+          stat   = "Average"
+          period = 60
+          metrics = [
+            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.ethereum_oracle_price.name]
+          ]
+          annotations = {
+            horizontal = [
+              {
+                value = 100
+                color = "#ff7f0e"
+                label = "Warning Threshold"
+              }
+            ]
+          }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 6
+        y      = 22
+        width  = 6
+        height = 6
+        properties = {
+          title  = "Messages In Flight"
+          region = var.aws_region
+          stat   = "Average"
+          period = 60
+          metrics = [
+            ["AWS/SQS", "ApproximateNumberOfMessagesNotVisible", "QueueName", aws_sqs_queue.ethereum_oracle_price.name]
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 22
+        width  = 6
+        height = 6
+        properties = {
+          title  = "Age of Oldest Message (seconds)"
+          region = var.aws_region
+          stat   = "Maximum"
+          period = 60
+          metrics = [
+            ["AWS/SQS", "ApproximateAgeOfOldestMessage", "QueueName", aws_sqs_queue.ethereum_oracle_price.name]
+          ]
+          annotations = {
+            horizontal = [
+              {
+                value = 300
+                color = "#ff7f0e"
+                label = "5 min Warning"
+              }
+            ]
+          }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 18
+        y      = 22
+        width  = 6
+        height = 6
+        properties = {
+          title  = "Throughput (Received vs Deleted)"
+          region = var.aws_region
+          stat   = "Sum"
+          period = 60
+          metrics = [
+            ["AWS/SQS", "NumberOfMessagesReceived", "QueueName", aws_sqs_queue.ethereum_oracle_price.name],
+            [".", "NumberOfMessagesDeleted", ".", "."]
+          ]
+        }
+      },
+
+      # Row 5: Dead Letter Queues (Critical)
+      {
+        type   = "text"
+        x      = 0
+        y      = 28
+        width  = 24
+        height = 1
+        properties = {
+          markdown = "## Dead Letter Queues (DLQ)"
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 29
+        width  = 8
         height = 6
         properties = {
           title  = "Transformer DLQ - Messages"
@@ -510,9 +686,9 @@ resource "aws_cloudwatch_dashboard" "messaging" {
       },
       {
         type   = "metric"
-        x      = 12
-        y      = 22
-        width  = 12
+        x      = 8
+        y      = 29
+        width  = 8
         height = 6
         properties = {
           title  = "Backup DLQ - Messages"
@@ -533,12 +709,37 @@ resource "aws_cloudwatch_dashboard" "messaging" {
           }
         }
       },
+      {
+        type   = "metric"
+        x      = 16
+        y      = 29
+        width  = 8
+        height = 6
+        properties = {
+          title  = "Oracle Price DLQ - Messages"
+          region = var.aws_region
+          stat   = "Sum"
+          period = 60
+          metrics = [
+            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.ethereum_oracle_price_dlq.name]
+          ]
+          annotations = {
+            horizontal = [
+              {
+                value = 1
+                color = "#d62728"
+                label = "Alert: Messages in DLQ"
+              }
+            ]
+          }
+        }
+      },
 
-      # Row 5: Alarm Status
+      # Row 6: Alarm Status
       {
         type   = "text"
         x      = 0
-        y      = 28
+        y      = 35
         width  = 24
         height = 1
         properties = {
@@ -548,7 +749,7 @@ resource "aws_cloudwatch_dashboard" "messaging" {
       {
         type   = "alarm"
         x      = 0
-        y      = 29
+        y      = 36
         width  = 24
         height = 3
         properties = {
@@ -556,10 +757,13 @@ resource "aws_cloudwatch_dashboard" "messaging" {
           alarms = [
             aws_cloudwatch_metric_alarm.transformer_dlq_messages.arn,
             aws_cloudwatch_metric_alarm.backup_dlq_messages.arn,
+            aws_cloudwatch_metric_alarm.oracle_price_dlq_messages.arn,
             aws_cloudwatch_metric_alarm.transformer_queue_backlog.arn,
             aws_cloudwatch_metric_alarm.backup_queue_backlog.arn,
+            aws_cloudwatch_metric_alarm.oracle_price_queue_backlog.arn,
             aws_cloudwatch_metric_alarm.transformer_message_age.arn,
             aws_cloudwatch_metric_alarm.backup_message_age.arn,
+            aws_cloudwatch_metric_alarm.oracle_price_message_age.arn,
             aws_cloudwatch_metric_alarm.sns_publish_failures.arn
           ]
         }

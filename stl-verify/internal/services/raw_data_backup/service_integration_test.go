@@ -28,6 +28,7 @@ import (
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // =============================================================================
@@ -420,27 +421,6 @@ func waitForS3Object(t *testing.T, ctx context.Context, infra *IntegrationTestIn
 	t.Fatalf("timed out waiting for S3 object %q", key)
 }
 
-// waitForCondition polls until the condition function returns true.
-func waitForCondition(t *testing.T, ctx context.Context, timeout, interval time.Duration, condition func() bool) {
-	t.Helper()
-
-	deadline := time.Now().Add(timeout)
-
-	for time.Now().Before(deadline) {
-		if condition() {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("context cancelled while waiting for condition")
-		case <-time.After(interval):
-			// continue polling
-		}
-	}
-
-	t.Fatalf("timed out waiting for condition")
-}
-
 // =============================================================================
 // Integration Tests
 // =============================================================================
@@ -696,7 +676,7 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 
 	// Wait a short time for the second message to be processed
 	// (it should be skipped, but we need to give it time to process)
-	waitForCondition(t, ctx, 5*time.Second, 100*time.Millisecond, func() bool {
+	testutil.WaitForCondition(t, 5*time.Second, func() bool {
 		// Check queue is empty (message was processed)
 		attrs, _ := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 			QueueUrl:       aws.String(infra.BackupQueueURL),
@@ -707,7 +687,7 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 			return count == "0"
 		}
 		return false
-	})
+	}, "SQS queue to be empty")
 
 	svc.Stop()
 	svcCancel()
@@ -1053,7 +1033,7 @@ func TestIntegration_RaceConditionIdempotency(t *testing.T) {
 	waitForS3Object(t, ctx, infra, key, 15*time.Second)
 
 	// Wait a bit for any concurrent writes to complete
-	waitForCondition(t, ctx, 5*time.Second, 100*time.Millisecond, func() bool {
+	testutil.WaitForCondition(t, 5*time.Second, func() bool {
 		attrs, _ := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 			QueueUrl:       aws.String(infra.BackupQueueURL),
 			AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameApproximateNumberOfMessages},
@@ -1063,7 +1043,7 @@ func TestIntegration_RaceConditionIdempotency(t *testing.T) {
 			return count == "0"
 		}
 		return false
-	})
+	}, "SQS queue to drain")
 
 	svc.Stop()
 	svcCancel()
@@ -1294,7 +1274,7 @@ func TestIntegration_ChainIDMismatch(t *testing.T) {
 	// Wait for the message to be processed (rejected due to chain ID mismatch)
 	// The message will return to the queue since processing failed, but we wait
 	// for at least one processing attempt by checking the queue becomes in-flight
-	waitForCondition(t, ctx, 5*time.Second, 100*time.Millisecond, func() bool {
+	testutil.WaitForCondition(t, 5*time.Second, func() bool {
 		attrs, _ := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 			QueueUrl: aws.String(infra.BackupQueueURL),
 			AttributeNames: []sqstypes.QueueAttributeName{
@@ -1307,7 +1287,7 @@ func TestIntegration_ChainIDMismatch(t *testing.T) {
 			return inFlight != "0"
 		}
 		return false
-	})
+	}, "message to be in-flight")
 
 	svc.Stop()
 	svcCancel()

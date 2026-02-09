@@ -32,7 +32,7 @@ services:
   # Access via AWS SDK with endpoint: http://localhost:4566
   # AWS credentials can be any non-empty string (e.g., "test")
   localstack:
-    image: localstack/localstack:latest
+    image: localstack/localstack:4.3
     container_name: stl-verify-localstack
     ports:
       - "4566:4566"     # LocalStack gateway (all services)

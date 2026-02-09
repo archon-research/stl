@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // =============================================================================
@@ -350,10 +350,6 @@ func (m *mockS3Writer) PresetFileExists(bucket, key string) {
 // Helper Functions
 // =============================================================================
 
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
-
 // blockOnlyExpectations returns chain expectations where only block data is required.
 // Use this for unit tests that only set block data in cache.
 func blockOnlyExpectations() map[int64]ChainExpectation {
@@ -397,7 +393,7 @@ func TestNewService_Success(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Workers: 2,
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	if err != nil {
@@ -508,7 +504,7 @@ func TestProcessMessage_Success(t *testing.T) {
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	// Set up cache with block data
@@ -568,7 +564,7 @@ func TestProcessMessage_BlockOnlyNoOptionalData(t *testing.T) {
 		ChainID:           1,
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	// Set up cache with ONLY block data (no receipts, traces, blobs)
@@ -600,7 +596,7 @@ func TestProcessMessage_BlockNotInCache(t *testing.T) {
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	// Don't put any data in cache
@@ -625,7 +621,7 @@ func TestProcessMessage_InvalidJSON(t *testing.T) {
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	msg := outbound.SQSMessage{
@@ -653,7 +649,7 @@ func TestProcessMessage_ChainIDMismatch(t *testing.T) {
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	// Event comes from chain 137 (Polygon)
@@ -690,7 +686,7 @@ func TestProcessMessage_CacheGetBlockError(t *testing.T) {
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -715,7 +711,7 @@ func TestProcessMessage_CacheGetReceiptsError(t *testing.T) {
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -742,7 +738,7 @@ func TestProcessMessage_CacheGetTracesError(t *testing.T) {
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -769,7 +765,7 @@ func TestProcessMessage_CacheGetBlobsError(t *testing.T) {
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -797,7 +793,7 @@ func TestProcessMessage_S3WriteError(t *testing.T) {
 		ChainID:           1,
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -826,7 +822,7 @@ func TestProcessMessage_S3ExistsError(t *testing.T) {
 		ChainID:           1,
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -855,7 +851,7 @@ func TestProcessMessage_Idempotent_SkipsExistingFile(t *testing.T) {
 		ChainID:           1,
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -888,7 +884,7 @@ func TestProcessMessage_DifferentVersionsAreSeparate(t *testing.T) {
 		ChainID:           1,
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -929,7 +925,7 @@ func TestProcessMessage_SameBlockNumberSameKeyPattern(t *testing.T) {
 		ChainID:           1,
 		Bucket:            "mainnet-bucket",
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -970,7 +966,7 @@ func TestRun_ProcessesMessages(t *testing.T) {
 		Workers:           1,
 		BatchSize:         1,
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -1026,7 +1022,7 @@ func TestRun_StopsOnContextCancel(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Workers: 1,
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	// Make consumer block on receive
@@ -1064,7 +1060,7 @@ func TestRun_StopsOnStopSignal(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Workers: 1,
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	// Make consumer return empty immediately
@@ -1109,7 +1105,7 @@ func TestRun_ContinuesOnReceiveError(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Workers: 1,
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	errorReturned := make(chan struct{})
@@ -1156,7 +1152,7 @@ func TestRun_DoesNotDeleteMessageOnProcessError(t *testing.T) {
 		Bucket:    "test-bucket",
 		Workers:   1,
 		BatchSize: 1,
-		Logger:    testLogger(),
+		Logger:    testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -1205,7 +1201,7 @@ func TestRun_DeletesMessageOnSuccess(t *testing.T) {
 		Workers:           1,
 		BatchSize:         1,
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -1258,7 +1254,7 @@ func TestRun_HandlesDeleteMessageError(t *testing.T) {
 		Workers:           1,
 		BatchSize:         1,
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -1320,7 +1316,7 @@ func TestRun_MultipleWorkersProcessConcurrently(t *testing.T) {
 		Workers:           4,
 		BatchSize:         10,
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -1392,7 +1388,7 @@ func TestProcessMessage_ZeroBlockNumber(t *testing.T) {
 		ChainID:           1,
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 0, 0)
@@ -1422,7 +1418,7 @@ func TestProcessMessage_LargeBlockNumber(t *testing.T) {
 		ChainID:           1,
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	blockNum := int64(20000000) // Block 20 million
@@ -1455,7 +1451,7 @@ func TestProcessMessage_HighVersion(t *testing.T) {
 		ChainID:           1,
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	// High version number (many reorgs)
@@ -1485,7 +1481,7 @@ func TestProcessMessage_EmptyBlockData(t *testing.T) {
 		ChainID:           1,
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -1510,7 +1506,7 @@ func TestProcessMessage_LargeBlockData(t *testing.T) {
 		ChainID:           1,
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -1549,7 +1545,7 @@ func TestStop_CanBeCalledMultipleTimes(t *testing.T) {
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	// Should not panic
@@ -1588,7 +1584,7 @@ func BenchmarkProcessMessage(b *testing.B) {
 		ChainID:           1,
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
-		Logger:            testLogger(),
+		Logger:            testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	ctx := context.Background()
@@ -1623,7 +1619,7 @@ func TestProcessMessage_ReceiptsWriteError(t *testing.T) {
 		ChainExpectations: map[int64]ChainExpectation{
 			1: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false},
 		},
-		Logger: testLogger(),
+		Logger: testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -1655,7 +1651,7 @@ func TestProcessMessage_TracesWriteError(t *testing.T) {
 		ChainExpectations: map[int64]ChainExpectation{
 			1: {ExpectReceipts: false, ExpectTraces: true, ExpectBlobs: false},
 		},
-		Logger: testLogger(),
+		Logger: testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -1687,7 +1683,7 @@ func TestProcessMessage_BlobsWriteError(t *testing.T) {
 		ChainExpectations: map[int64]ChainExpectation{
 			1: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: true},
 		},
-		Logger: testLogger(),
+		Logger: testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -1718,7 +1714,7 @@ func TestRun_ContextCancelledDuringMessageSend(t *testing.T) {
 		Bucket:    "test-bucket",
 		Workers:   1,
 		BatchSize: 100,
-		Logger:    testLogger(),
+		Logger:    testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	// Create many messages
@@ -1774,7 +1770,7 @@ func TestRun_ReceiveMessagesReturnsContextError(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Workers: 1,
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1799,7 +1795,7 @@ func TestProcessMessage_AllDataTypesWithContent(t *testing.T) {
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testLogger(),
+		Logger:  testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)

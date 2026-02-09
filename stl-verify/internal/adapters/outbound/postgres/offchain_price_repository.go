@@ -49,7 +49,7 @@ func (r *PriceRepository) GetSourceByName(ctx context.Context, name string) (*en
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, name, display_name, base_url, rate_limit_per_min,
 		       supports_historical, enabled, created_at, updated_at
-		FROM price_source
+		FROM offchain_price_source
 		WHERE name = $1
 	`, name).Scan(
 		&ps.ID, &ps.Name, &ps.DisplayName, &ps.BaseURL, &ps.RateLimitPerMin,
@@ -68,7 +68,7 @@ func (r *PriceRepository) GetSourceByName(ctx context.Context, name string) (*en
 func (r *PriceRepository) GetEnabledAssets(ctx context.Context, sourceID int64) ([]*entity.PriceAsset, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, source_id, source_asset_id, token_id, name, symbol, enabled, created_at, updated_at
-		FROM price_asset
+		FROM offchain_price_asset
 		WHERE source_id = $1 AND enabled = true
 		ORDER BY id
 	`, sourceID)
@@ -88,7 +88,7 @@ func (r *PriceRepository) GetAssetsBySourceAssetIDs(ctx context.Context, sourceI
 
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, source_id, source_asset_id, token_id, name, symbol, enabled, created_at, updated_at
-		FROM price_asset
+		FROM offchain_price_asset
 		WHERE source_id = $1 AND source_asset_id = ANY($2)
 		ORDER BY id
 	`, sourceID, sourceAssetIDs)
@@ -155,23 +155,22 @@ func (r *PriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx, price
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO token_price (timestamp, token_id, chain_id, source, source_asset_id, price_usd, market_cap_usd, created_at)
+		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd)
 		VALUES `)
 
-	args := make([]any, 0, len(prices)*7)
+	args := make([]any, 0, len(prices)*6)
 	for i, price := range prices {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 7
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
+		baseIdx := i * 6
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d)",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6))
 
-		args = append(args, price.Timestamp, price.TokenID, price.ChainID, price.Source, price.SourceAssetID, price.PriceUSD, price.MarketCapUSD)
+		args = append(args, price.TokenID, price.SourceID, price.Timestamp, price.PriceUSD, price.MarketCapUSD, price.VolumeUSD)
 	}
 
-	// Skip duplicates based on unique index (token_id, source, timestamp)
-	sb.WriteString(` ON CONFLICT (token_id, source, timestamp) DO NOTHING`)
+	sb.WriteString(` ON CONFLICT (token_id, source_id, timestamp) DO NOTHING`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
@@ -180,17 +179,17 @@ func (r *PriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx, price
 	return nil
 }
 
-// GetLatestPrice retrieves the most recent price for a given source and asset ID.
-func (r *PriceRepository) GetLatestPrice(ctx context.Context, source, sourceAssetID string) (*entity.TokenPrice, error) {
+// GetLatestPrice retrieves the most recent price for a given token.
+func (r *PriceRepository) GetLatestPrice(ctx context.Context, tokenID int64) (*entity.TokenPrice, error) {
 	var tp entity.TokenPrice
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, token_id, chain_id, source, source_asset_id, price_usd, market_cap_usd, timestamp, created_at
-		FROM token_price
-		WHERE source = $1 AND source_asset_id = $2
+		SELECT token_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd
+		FROM offchain_token_price
+		WHERE token_id = $1
 		ORDER BY timestamp DESC
 		LIMIT 1
-	`, source, sourceAssetID).Scan(
-		&tp.ID, &tp.TokenID, &tp.ChainID, &tp.Source, &tp.SourceAssetID, &tp.PriceUSD, &tp.MarketCapUSD, &tp.Timestamp, &tp.CreatedAt,
+	`, tokenID).Scan(
+		&tp.TokenID, &tp.SourceID, &tp.Timestamp, &tp.PriceUSD, &tp.MarketCapUSD, &tp.VolumeUSD,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -199,66 +198,4 @@ func (r *PriceRepository) GetLatestPrice(ctx context.Context, source, sourceAsse
 		return nil, fmt.Errorf("querying latest price: %w", err)
 	}
 	return &tp, nil
-}
-
-// UpsertVolumes inserts volume records in batches.
-func (r *PriceRepository) UpsertVolumes(ctx context.Context, volumes []*entity.TokenVolume) error {
-	if len(volumes) == 0 {
-		return nil
-	}
-
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer rollback(ctx, tx, r.logger)
-
-	for i := 0; i < len(volumes); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(volumes) {
-			end = len(volumes)
-		}
-		batch := volumes[i:end]
-
-		if err := r.upsertVolumeBatch(ctx, tx, batch); err != nil {
-			return err
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-	return nil
-}
-
-func (r *PriceRepository) upsertVolumeBatch(ctx context.Context, tx pgx.Tx, volumes []*entity.TokenVolume) error {
-	if len(volumes) == 0 {
-		return nil
-	}
-
-	var sb strings.Builder
-	sb.WriteString(`
-		INSERT INTO token_volume (timestamp, token_id, chain_id, source, source_asset_id, volume_usd, created_at)
-		VALUES `)
-
-	args := make([]any, 0, len(volumes)*6)
-	for i, vol := range volumes {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		baseIdx := i * 6
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, NOW())",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6))
-
-		args = append(args, vol.Timestamp, vol.TokenID, vol.ChainID, vol.Source, vol.SourceAssetID, vol.VolumeUSD)
-	}
-
-	// Skip duplicates based on unique index (token_id, source, timestamp)
-	sb.WriteString(` ON CONFLICT (token_id, source, timestamp) DO NOTHING`)
-
-	_, err := tx.Exec(ctx, sb.String(), args...)
-	if err != nil {
-		return fmt.Errorf("upserting volume batch: %w", err)
-	}
-	return nil
 }

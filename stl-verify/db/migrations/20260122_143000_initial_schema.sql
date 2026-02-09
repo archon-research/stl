@@ -232,8 +232,9 @@ INSERT INTO chain (chain_id, name)
 VALUES (1, 'Ethereum Mainnet')
 ON CONFLICT (chain_id) DO NOTHING;
 
-INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at)
-VALUES (1, '\xc13e21b648a5ee794902342038ff3adab66be987'::bytea, 'SparkLend', 'lending', 16776401, NOW());
+INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+VALUES (1, '\xc13e21b648a5ee794902342038ff3adab66be987'::bytea, 'SparkLend', 'lending', 16776401, NOW(),
+        '{"oracle_resolver_type": "sparklend", "pool_addresses_provider": "0x02C3eA4e34C0cBd694D2adFa2c690EECbC1793eE"}'::jsonb);
 
 INSERT INTO migrations (filename)
 VALUES ('20260122_143000_initial_schema.sql')

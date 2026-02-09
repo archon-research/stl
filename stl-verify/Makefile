@@ -171,13 +171,29 @@ dev-up:
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"ENABLE_BACKFILL=false" \
-		> cmd/watcher/.env
+		> cmd/watcher/.env && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-oracle-price.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"LOG_LEVEL=debug" \
+		> cmd/oracle-price-worker/.env
 	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text 2>/dev/null | jq -r '.coingecko_api_key // empty') && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		> cmd/price-fetcher/.env
+	@printf '%s\n' \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"LOG_LEVEL=debug" \
+		> cmd/oracle-backfill/.env
 	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text 2>/dev/null || echo '') && \
 	TIGERDATA_URL=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-tigerdata-readonly --query SecretString --output text 2>/dev/null | jq -r '.connection_url // empty' | sed 's|@[^:]*:|@localhost:|') && \
 	printf '%s\n' \
@@ -615,6 +631,35 @@ erigon-mode:
 erigon-run:
 	$(call require_erigon_vars)
 	@tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) '$(CMD)'
+
+# Build oracle-price-worker binary
+build-oracle-worker:
+	@echo "==> Building oracle-price-worker..."
+	mkdir -p dist
+	go build -o dist/oracle-price-worker ./cmd/oracle-price-worker
+	@echo "==> Built: dist/oracle-price-worker"
+
+# Build oracle-backfill binary
+build-oracle-backfill:
+	@echo "==> Building oracle-backfill..."
+	mkdir -p dist
+	go build -o dist/oracle-backfill ./cmd/oracle-backfill
+	@echo "==> Built: dist/oracle-backfill"
+
+# Build oracle-backfill binary for ARM64 Linux (to run on Erigon node)
+build-oracle-backfill-arm64:
+	@echo "==> Building oracle-backfill for ARM64 Linux..."
+	mkdir -p dist
+	GOOS=linux GOARCH=arm64 go build -o dist/oracle-backfill-linux-arm64 ./cmd/oracle-backfill
+	@echo "==> Built: dist/oracle-backfill-linux-arm64"
+
+# Deploy oracle-backfill to Erigon node
+# Usage: make deploy-oracle-backfill ERIGON_USER=<user> ERIGON_IP=<ip>
+deploy-oracle-backfill: build-oracle-backfill-arm64
+	$(call require_erigon_vars)
+	@echo "==> Deploying oracle-backfill to Erigon node..."
+	cat dist/oracle-backfill-linux-arm64 | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > ~/oracle-backfill && chmod +x ~/oracle-backfill'
+	@echo "==> Deployed to ~/oracle-backfill on Erigon node."
 
 # Build bulk-download binary for ARM64 Linux (to run on Erigon node)
 build-bulk-download-arm64:
