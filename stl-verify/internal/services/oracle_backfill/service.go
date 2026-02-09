@@ -254,14 +254,17 @@ func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBloc
 		workerCount = int(totalBlocks)
 	}
 	blocksPerWorker := totalBlocks / int64(workerCount)
+	remainder := totalBlocks % int64(workerCount)
 
 	var wg sync.WaitGroup
+	cursor := fromBlock
 	for i := range workerCount {
-		workerFrom := fromBlock + int64(i)*blocksPerWorker
+		workerFrom := cursor
 		workerTo := workerFrom + blocksPerWorker - 1
-		if i == workerCount-1 {
-			workerTo = toBlock // last worker takes remaining blocks
+		if int64(i) < remainder {
+			workerTo++ // distribute remainder evenly across first N workers
 		}
+		cursor = workerTo + 1
 
 		wg.Add(1)
 		go func(wFrom, wTo int64) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -350,7 +351,7 @@ func TestNewService(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected error, got nil")
 				}
-				if tc.errContains != "" && !containsStr(err.Error(), tc.errContains) {
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
 					t.Errorf("error %q does not contain %q", err.Error(), tc.errContains)
 				}
 				if svc != nil {
@@ -582,7 +583,7 @@ func TestStart(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected error, got nil")
 				}
-				if tc.errContains != "" && !containsStr(err.Error(), tc.errContains) {
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
 					t.Errorf("error %q does not contain %q", err.Error(), tc.errContains)
 				}
 				return
@@ -1295,19 +1296,3 @@ func TestStop(t *testing.T) {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// Utility
-// ---------------------------------------------------------------------------
-
-func containsStr(s, substr string) bool {
-	return len(s) >= len(substr) && searchStr(s, substr)
-}
-
-func searchStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
