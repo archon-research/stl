@@ -140,4 +140,8 @@ type BlockStateRepository interface {
 	// GetBlocksWithIncompletePublish returns canonical blocks that have not been
 	// published. Used by backfill to recover from crashes.
 	GetBlocksWithIncompletePublish(ctx context.Context, limit int) ([]BlockState, error)
+
+	// GetReorgEventsByBlockRange retrieves reorg events within a block number range.
+	// Results are ordered by block number descending, then detection time descending.
+	GetReorgEventsByBlockRange(ctx context.Context, fromBlock, toBlock int64) ([]ReorgEvent, error)
 }

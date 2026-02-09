@@ -1,6 +1,7 @@
 package sparklend_position_tracker
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strings"
@@ -9,16 +10,25 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+// ReserveEventData contains the data extracted from a ReserveDataUpdated event.
+type ReserveEventData struct {
+	Reserve common.Address
+	TxHash  string
+}
+
 // EventExtractor handles parsing and extraction of SparkLend position events from logs.
 type EventExtractor struct {
-	eventsABI       *abi.ABI
-	eventSignatures map[common.Hash]*abi.Event
+	positionEventsABI       *abi.ABI
+	positionEventSignatures map[common.Hash]*abi.Event
+	reserveEventsABI        *abi.ABI
+	reserveEventSignatures  map[common.Hash]*abi.Event
 }
 
 // NewEventExtractor creates a new EventExtractor with all SparkLend position event ABIs loaded.
 func NewEventExtractor() (*EventExtractor, error) {
 	extractor := &EventExtractor{
-		eventSignatures: make(map[common.Hash]*abi.Event),
+		positionEventSignatures: make(map[common.Hash]*abi.Event),
+		reserveEventSignatures:  make(map[common.Hash]*abi.Event),
 	}
 
 	if err := extractor.loadEventABIs(); err != nil {
@@ -30,7 +40,7 @@ func NewEventExtractor() (*EventExtractor, error) {
 
 func (e *EventExtractor) loadEventABIs() error {
 	// All 7 SparkLend position-changing events
-	eventsABI := `[
+	positionEventsABI := `[
 		{"anonymous":false,"inputs":[{"indexed":true,"name":"reserve","type":"address"},{"indexed":false,"name":"user","type":"address"},{"indexed":true,"name":"onBehalfOf","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"interestRateMode","type":"uint8"},{"indexed":false,"name":"borrowRate","type":"uint256"},{"indexed":true,"name":"referralCode","type":"uint16"}],"name":"Borrow","type":"event"},
 		{"anonymous":false,"inputs":[{"indexed":true,"name":"reserve","type":"address"},{"indexed":true,"name":"user","type":"address"},{"indexed":true,"name":"repayer","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"useATokens","type":"bool"}],"name":"Repay","type":"event"},
 		{"anonymous":false,"inputs":[{"indexed":true,"name":"reserve","type":"address"},{"indexed":false,"name":"user","type":"address"},{"indexed":true,"name":"onBehalfOf","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":true,"name":"referralCode","type":"uint16"}],"name":"Supply","type":"event"},
@@ -39,20 +49,40 @@ func (e *EventExtractor) loadEventABIs() error {
 		{"anonymous":false,"inputs":[{"indexed":true,"name":"reserve","type":"address"},{"indexed":true,"name":"user","type":"address"}],"name":"ReserveUsedAsCollateralEnabled","type":"event"},
 		{"anonymous":false,"inputs":[{"indexed":true,"name":"reserve","type":"address"},{"indexed":true,"name":"user","type":"address"}],"name":"ReserveUsedAsCollateralDisabled","type":"event"}
 	]`
-	parsedABI, err := abi.JSON(strings.NewReader(eventsABI))
+	parsedPositionABI, err := abi.JSON(strings.NewReader(positionEventsABI))
 	if err != nil {
-		return fmt.Errorf("failed to parse events ABI: %w", err)
+		return fmt.Errorf("failed to parse position events ABI: %w", err)
 	}
-	e.eventsABI = &parsedABI
+	e.positionEventsABI = &parsedPositionABI
 
-	// Register all event signatures for quick lookup
-	eventNames := []string{
+	// Register all position event signatures for quick lookup
+	positionEventNames := []string{
 		"Borrow", "Repay", "Supply", "Withdraw",
 		"LiquidationCall", "ReserveUsedAsCollateralEnabled", "ReserveUsedAsCollateralDisabled",
 	}
-	for _, name := range eventNames {
-		if event, ok := e.eventsABI.Events[name]; ok {
-			e.eventSignatures[event.ID] = &event
+	for _, name := range positionEventNames {
+		if event, ok := e.positionEventsABI.Events[name]; ok {
+			e.positionEventSignatures[event.ID] = &event
+		} else {
+			return fmt.Errorf("%s event not found in ABI", name)
+		}
+	}
+
+	// Reserve events ABI (ReserveDataUpdated)
+	reserveEventsABI := `[
+		{"anonymous":false,"inputs":[{"indexed":true,"name":"reserve","type":"address"},{"indexed":false,"name":"liquidityRate","type":"uint256"},{"indexed":false,"name":"stableBorrowRate","type":"uint256"},{"indexed":false,"name":"variableBorrowRate","type":"uint256"},{"indexed":false,"name":"liquidityIndex","type":"uint256"},{"indexed":false,"name":"variableBorrowIndex","type":"uint256"}],"name":"ReserveDataUpdated","type":"event"}
+	]`
+	parsedReserveABI, err := abi.JSON(strings.NewReader(reserveEventsABI))
+	if err != nil {
+		return fmt.Errorf("failed to parse reserve events ABI: %w", err)
+	}
+	e.reserveEventsABI = &parsedReserveABI
+
+	// Register reserve event signatures
+	reserveEventNames := []string{"ReserveDataUpdated"}
+	for _, name := range reserveEventNames {
+		if event, ok := e.reserveEventsABI.Events[name]; ok {
+			e.reserveEventSignatures[event.ID] = &event
 		} else {
 			return fmt.Errorf("%s event not found in ABI", name)
 		}
@@ -61,26 +91,36 @@ func (e *EventExtractor) loadEventABIs() error {
 	return nil
 }
 
-// IsRelevantEvent checks if the log contains a tracked SparkLend event.
-func (e *EventExtractor) IsRelevantEvent(log Log) bool {
+// IsPositionEvent checks if the log contains a tracked SparkLend position event.
+func (e *EventExtractor) IsPositionEvent(log Log) bool {
 	if len(log.Topics) == 0 {
 		return false
 	}
 	eventSig := common.HexToHash(log.Topics[0])
-	_, ok := e.eventSignatures[eventSig]
+	_, ok := e.positionEventSignatures[eventSig]
 	return ok
 }
 
-// ExtractEventData parses a log and returns structured event data.
+// IsReserveEvent checks if the log contains a ReserveDataUpdated event.
+func (e *EventExtractor) IsReserveEvent(log Log) bool {
+	if len(log.Topics) == 0 {
+		return false
+	}
+	eventSig := common.HexToHash(log.Topics[0])
+	_, ok := e.reserveEventSignatures[eventSig]
+	return ok
+}
+
+// ExtractEventData parses a position log and returns structured event data.
 func (e *EventExtractor) ExtractEventData(log Log) (*PositionEventData, error) {
 	if len(log.Topics) == 0 {
 		return nil, fmt.Errorf("no topics")
 	}
 
 	eventSig := common.HexToHash(log.Topics[0])
-	event, ok := e.eventSignatures[eventSig]
+	event, ok := e.positionEventSignatures[eventSig]
 	if !ok {
-		return nil, fmt.Errorf("not a tracked event")
+		return nil, fmt.Errorf("not a tracked position event")
 	}
 
 	eventData := make(map[string]interface{})
@@ -303,4 +343,64 @@ func (e *EventExtractor) extractCollateralDisabledData(eventData map[string]inte
 		Reserve:           reserve,
 		CollateralEnabled: false,
 	}, nil
+}
+
+// ExtractReserveEventData parses a ReserveDataUpdated log and returns the reserve address.
+func (e *EventExtractor) ExtractReserveEventData(log Log) (*ReserveEventData, error) {
+	if len(log.Topics) < 2 {
+		return nil, fmt.Errorf("ReserveDataUpdated event requires at least 2 topics")
+	}
+
+	eventSig := common.HexToHash(log.Topics[0])
+	_, ok := e.reserveEventSignatures[eventSig]
+	if !ok {
+		return nil, fmt.Errorf("not a ReserveDataUpdated event")
+	}
+
+	// reserve is indexed (topic[1])
+	reserve := common.HexToAddress(log.Topics[1])
+
+	return &ReserveEventData{
+		Reserve: reserve,
+		TxHash:  log.TransactionHash,
+	}, nil
+}
+
+// ToJSON converts PositionEventData to a JSON-serializable map.
+// Addresses are hex strings, amounts are decimal strings.
+func (p *PositionEventData) ToJSON() (json.RawMessage, error) {
+	data := make(map[string]interface{})
+	data["eventType"] = string(p.EventType)
+	data["user"] = p.User.Hex()
+
+	if p.Reserve != (common.Address{}) {
+		data["reserve"] = p.Reserve.Hex()
+	}
+	if p.Amount != nil {
+		data["amount"] = p.Amount.String()
+	}
+	if p.Liquidator != (common.Address{}) {
+		data["liquidator"] = p.Liquidator.Hex()
+	}
+	if p.CollateralAsset != (common.Address{}) {
+		data["collateralAsset"] = p.CollateralAsset.Hex()
+	}
+	if p.DebtAsset != (common.Address{}) {
+		data["debtAsset"] = p.DebtAsset.Hex()
+	}
+	if p.DebtToCover != nil {
+		data["debtToCover"] = p.DebtToCover.String()
+	}
+	if p.LiquidatedCollateralAmount != nil {
+		data["liquidatedCollateralAmount"] = p.LiquidatedCollateralAmount.String()
+	}
+	if p.EventType == EventReserveUsedAsCollateralEnabled || p.EventType == EventReserveUsedAsCollateralDisabled {
+		data["collateralEnabled"] = p.CollateralEnabled
+	}
+
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal event data: %w", err)
+	}
+	return raw, nil
 }

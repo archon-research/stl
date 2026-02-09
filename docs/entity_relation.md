@@ -124,12 +124,75 @@ erDiagram
         jsonb metadata "user-protocol specific data"
     }
 
+    ProtocolEvent {
+        bigint id PK
+        int chain_id FK "UK1"
+        bigint protocol_id FK
+        bigint block_number "UK1"
+        int block_version "UK1"
+        bytea tx_hash "UK1"
+        int log_index "UK1"
+        bytea contract_address
+        text event_name
+        jsonb event_data
+        timestamptz created_at
+    }
+
+    PriceSource {
+        bigint id PK
+        varchar name UK "coingecko, chainlink"
+        varchar display_name
+        varchar base_url
+        int rate_limit_per_min
+        boolean supports_historical
+        boolean enabled
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    PriceAsset {
+        bigint id PK
+        bigint source_id FK "UK1"
+        varchar source_asset_id "UK1"
+        bigint token_id FK "nullable"
+        varchar name
+        varchar symbol
+        boolean enabled
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    TokenPrice {
+        bigint id PK
+        timestamptz timestamp "hypertable partition"
+        bigint token_id FK
+        int chain_id FK
+        varchar source "denormalized"
+        varchar source_asset_id
+        numeric price_usd
+        numeric market_cap_usd "nullable"
+        timestamptz created_at
+    }
+
+    TokenVolume {
+        bigint id PK
+        timestamptz timestamp "hypertable partition, hourly"
+        bigint token_id FK
+        int chain_id FK
+        varchar source "denormalized"
+        varchar source_asset_id
+        numeric volume_usd
+        timestamptz created_at
+    }
+
     Chain ||--o{ Token : ""
     Chain ||--o{ Protocol : ""
     Chain ||--o{ User : ""
+    Chain ||--o{ ProtocolEvent : ""
     Protocol ||--o{ ReceiptToken : ""
     Protocol ||--o{ DebtToken : ""
     Protocol ||--o{ SparkLendReserveData : ""
+    Protocol ||--o{ ProtocolEvent : ""
     Token ||--o{ ReceiptToken : ""
     Token ||--o{ DebtToken : ""
     Token ||--o{ SparkLendReserveData : ""
@@ -141,4 +204,10 @@ erDiagram
     Token ||--o{ BorrowerCollateral : ""
     User ||--o{ UserProtocolMetadata : ""
     Protocol ||--o{ UserProtocolMetadata : ""
+    PriceSource ||--o{ PriceAsset : ""
+    Token ||--o{ PriceAsset : ""
+    Token ||--o{ TokenPrice : ""
+    Token ||--o{ TokenVolume : ""
+    Chain ||--o{ TokenPrice : ""
+    Chain ||--o{ TokenVolume : ""
 ```

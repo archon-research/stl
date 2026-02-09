@@ -119,3 +119,132 @@ output "tigerdata_secret_policy_arn" {
   description = "ARN of the IAM policy for reading TigerData secrets"
   value       = aws_iam_policy.tigerdata_secret_read.arn
 }
+
+# =============================================================================
+# AWS Secrets Manager - CoinGecko API Key
+# =============================================================================
+# Stores CoinGecko Pro API key for price fetching service.
+
+resource "aws_secretsmanager_secret" "coingecko" {
+  name        = "coingecko_api_key"
+  description = "CoinGecko Pro API key for price fetching"
+
+  recovery_window_in_days = 7
+
+  tags = {
+    Name    = "coingecko_api_key"
+    Service = "price-fetcher"
+  }
+
+  lifecycle {
+    # Secret already exists - prevent recreation on name change
+    prevent_destroy = true
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "coingecko" {
+  secret_id     = aws_secretsmanager_secret.coingecko.id
+  secret_string = var.coingecko_api_key
+
+  lifecycle {
+    # Don't update if the secret was changed outside of Terraform
+    ignore_changes = [secret_string]
+  }
+}
+
+# -----------------------------------------------------------------------------
+# IAM Policy for reading CoinGecko secret
+# -----------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "coingecko_secret_read" {
+  statement {
+    sid    = "ReadCoinGeckoSecret"
+    effect = "Allow"
+
+    actions = [
+      "secretsmanager:GetSecretValue",
+    ]
+
+    resources = [
+      aws_secretsmanager_secret.coingecko.arn,
+    ]
+  }
+}
+
+resource "aws_iam_policy" "coingecko_secret_read" {
+  name        = "${local.prefix}-coingecko-secret-read"
+  description = "Allows reading CoinGecko API key from Secrets Manager"
+  policy      = data.aws_iam_policy_document.coingecko_secret_read.json
+}
+
+output "coingecko_secret_arn" {
+  description = "ARN of the CoinGecko API key secret"
+  value       = aws_secretsmanager_secret.coingecko.arn
+}
+
+output "coingecko_secret_policy_arn" {
+  description = "ARN of the IAM policy for reading CoinGecko secret"
+  value       = aws_iam_policy.coingecko_secret_read.arn
+}
+
+# =============================================================================
+# AWS Secrets Manager - Etherscan API Key
+# =============================================================================
+# Stores Etherscan API key for blockchain data verification.
+
+resource "aws_secretsmanager_secret" "etherscan" {
+  name        = "etherscan_api_key"
+  description = "Etherscan API key for blockchain data verification"
+
+  recovery_window_in_days = 7
+
+  tags = {
+    Name    = "etherscan_api_key"
+    Service = "blockchain-verification"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "etherscan" {
+  secret_id     = aws_secretsmanager_secret.etherscan.id
+  secret_string = var.etherscan_api_key
+
+  lifecycle {
+    # Don't update if the secret was changed outside of Terraform
+    ignore_changes = [secret_string]
+  }
+}
+
+# -----------------------------------------------------------------------------
+# IAM Policy for reading Etherscan secret
+# -----------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "etherscan_secret_read" {
+  statement {
+    sid    = "ReadEtherscanSecret"
+    effect = "Allow"
+
+    actions = [
+      "secretsmanager:GetSecretValue",
+    ]
+
+    resources = [
+      aws_secretsmanager_secret.etherscan.arn,
+    ]
+  }
+}
+
+resource "aws_iam_policy" "etherscan_secret_read" {
+  name        = "${local.prefix}-etherscan-secret-read"
+  description = "Allows reading Etherscan API key from Secrets Manager"
+  policy      = data.aws_iam_policy_document.etherscan_secret_read.json
+}
+
+output "etherscan_secret_arn" {
+  description = "ARN of the Etherscan API key secret"
+  value       = aws_secretsmanager_secret.etherscan.arn
+}
+
+output "etherscan_secret_policy_arn" {
+  description = "ARN of the IAM policy for reading Etherscan secret"
+  value       = aws_iam_policy.etherscan_secret_read.arn
+}

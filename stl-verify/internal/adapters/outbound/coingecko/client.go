@@ -1,0 +1,297 @@
+// Package coingecko implements the PriceProvider interface using CoinGecko's API.
+// It provides methods for fetching current and historical price data with:
+//   - Automatic retry logic with exponential backoff for transient failures
+//   - Configurable timeouts and backoff parameters
+//   - Rate limiting to stay within API limits
+package coingecko
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/httpclient"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"golang.org/x/time/rate"
+)
+
+// Compile-time check that Client implements outbound.PriceProvider.
+var _ outbound.PriceProvider = (*Client)(nil)
+
+// ClientConfig holds configuration for the CoinGecko client.
+type ClientConfig struct {
+	// APIKey is the CoinGecko Pro API key.
+	APIKey string
+
+	// BaseURL is the CoinGecko API base URL.
+	// Defaults to https://pro-api.coingecko.com/api/v3
+	BaseURL string
+
+	// Timeout is the maximum time to wait for a single HTTP request.
+	Timeout time.Duration
+
+	// MaxRetries is the maximum number of retry attempts for transient failures.
+	MaxRetries int
+
+	// InitialBackoff is the initial delay before the first retry.
+	InitialBackoff time.Duration
+
+	// MaxBackoff is the maximum delay between retries.
+	MaxBackoff time.Duration
+
+	// BackoffFactor is the multiplier applied to backoff after each retry.
+	BackoffFactor float64
+
+	// RateLimitPerMin is the rate limit in requests per minute.
+	// Defaults to 450 to stay safely under CoinGecko Pro's 500/min limit.
+	RateLimitPerMin int
+
+	// Logger is the structured logger for the client.
+	Logger *slog.Logger
+
+	// HTTPClient is an optional custom HTTP client.
+	HTTPClient *http.Client
+}
+
+// ClientConfigDefaults returns a config with default values.
+func ClientConfigDefaults() ClientConfig {
+	return ClientConfig{
+		BaseURL:         "https://pro-api.coingecko.com/api/v3",
+		Timeout:         30 * time.Second,
+		MaxRetries:      3,
+		InitialBackoff:  500 * time.Millisecond,
+		MaxBackoff:      10 * time.Second,
+		BackoffFactor:   2.0,
+		RateLimitPerMin: 450,
+		Logger:          slog.Default(),
+	}
+}
+
+// Client implements PriceProvider using CoinGecko's API.
+type Client struct {
+	config     ClientConfig
+	httpClient *httpclient.Client
+	logger     *slog.Logger
+	apiKey     string
+}
+
+// NewClient creates a new CoinGecko API client.
+func NewClient(config ClientConfig) (*Client, error) {
+	if config.APIKey == "" {
+		return nil, errors.New("APIKey is required")
+	}
+
+	defaults := ClientConfigDefaults()
+	applyDefaults(&config, defaults)
+
+	logger := config.Logger.With("component", "coingecko-client")
+
+	// Calculate rate limiter: requests per second from requests per minute
+	// Burst size allows short bursts of concurrent requests while maintaining average rate
+	rps := float64(config.RateLimitPerMin) / 60.0
+	burstSize := config.RateLimitPerMin / 60
+	if burstSize < 1 {
+		burstSize = 1
+	}
+
+	httpCfg := httpclient.Config{
+		Timeout:        config.Timeout,
+		MaxRetries:     config.MaxRetries,
+		InitialBackoff: config.InitialBackoff,
+		MaxBackoff:     config.MaxBackoff,
+		BackoffFactor:  config.BackoffFactor,
+		RateLimit:      rate.Limit(rps),
+		RateBurst:      burstSize,
+	}
+
+	return &Client{
+		config:     config,
+		httpClient: httpclient.NewClient(httpCfg, logger, coinGeckoErrorParser),
+		logger:     logger,
+		apiKey:     config.APIKey,
+	}, nil
+}
+
+func applyDefaults(config *ClientConfig, defaults ClientConfig) {
+	if config.BaseURL == "" {
+		config.BaseURL = defaults.BaseURL
+	}
+	if config.Timeout == 0 {
+		config.Timeout = defaults.Timeout
+	}
+	if config.MaxRetries == 0 {
+		config.MaxRetries = defaults.MaxRetries
+	}
+	if config.InitialBackoff == 0 {
+		config.InitialBackoff = defaults.InitialBackoff
+	}
+	if config.MaxBackoff == 0 {
+		config.MaxBackoff = defaults.MaxBackoff
+	}
+	if config.BackoffFactor == 0 {
+		config.BackoffFactor = defaults.BackoffFactor
+	}
+	if config.RateLimitPerMin == 0 {
+		config.RateLimitPerMin = defaults.RateLimitPerMin
+	}
+	if config.Logger == nil {
+		config.Logger = defaults.Logger
+	}
+}
+
+// Name returns the provider name.
+func (c *Client) Name() string {
+	return "coingecko"
+}
+
+// SupportsHistorical returns true since CoinGecko supports historical data.
+func (c *Client) SupportsHistorical() bool {
+	return true
+}
+
+// GetCurrentPrices fetches current prices for the given asset IDs.
+// Uses the /simple/price endpoint which supports up to 250 coins per request.
+func (c *Client) GetCurrentPrices(ctx context.Context, assetIDs []string) ([]outbound.PriceData, error) {
+	if len(assetIDs) == 0 {
+		return nil, nil
+	}
+
+	results := make([]outbound.PriceData, 0, len(assetIDs))
+	batchSize := 250
+
+	for i := 0; i < len(assetIDs); i += batchSize {
+		end := min(i+batchSize, len(assetIDs))
+		batch := assetIDs[i:end]
+
+		batchResults, err := c.getCurrentPricesBatch(ctx, batch)
+		if err != nil {
+			return nil, fmt.Errorf("fetching prices for batch starting at %d: %w", i, err)
+		}
+		results = append(results, batchResults...)
+	}
+
+	return results, nil
+}
+
+func (c *Client) getCurrentPricesBatch(ctx context.Context, assetIDs []string) ([]outbound.PriceData, error) {
+	endpoint := fmt.Sprintf("%s/simple/price", c.config.BaseURL)
+	params := url.Values{
+		"ids":                     {strings.Join(assetIDs, ",")},
+		"vs_currencies":           {"usd"},
+		"include_market_cap":      {"true"},
+		"include_last_updated_at": {"true"},
+	}
+
+	var response simplePriceResponse
+	if err := c.doRequest(ctx, endpoint, params, &response); err != nil {
+		return nil, err
+	}
+
+	results := make([]outbound.PriceData, 0, len(response))
+	for assetID, data := range response {
+		var marketCap *float64
+		if data.USDMarketCap > 0 {
+			marketCap = &data.USDMarketCap
+		}
+		results = append(results, outbound.PriceData{
+			SourceAssetID: assetID,
+			PriceUSD:      data.USD,
+			MarketCapUSD:  marketCap,
+			Timestamp:     time.Unix(data.LastUpdated, 0),
+		})
+	}
+
+	return results, nil
+}
+
+// GetHistoricalData fetches historical prices and volumes for a single asset.
+// Uses the /coins/{id}/market_chart/range endpoint.
+// Note: CoinGecko returns hourly data for ranges up to 90 days, daily for larger ranges.
+// For best results, fetch in 30-day chunks.
+func (c *Client) GetHistoricalData(ctx context.Context, assetID string, from, to time.Time) (*outbound.HistoricalData, error) {
+	endpoint := fmt.Sprintf("%s/coins/%s/market_chart/range", c.config.BaseURL, assetID)
+	params := url.Values{
+		"vs_currency": {"usd"},
+		"from":        {fmt.Sprintf("%d", from.Unix())},
+		"to":          {fmt.Sprintf("%d", to.Unix())},
+	}
+
+	var response marketChartRangeResponse
+	if err := c.doRequest(ctx, endpoint, params, &response); err != nil {
+		return nil, err
+	}
+
+	result := &outbound.HistoricalData{
+		SourceAssetID: assetID,
+		Prices:        make([]outbound.PricePoint, 0, len(response.Prices)),
+		Volumes:       make([]outbound.VolumePoint, 0, len(response.TotalVolumes)),
+		MarketCaps:    make([]outbound.MarketCapPoint, 0, len(response.MarketCaps)),
+	}
+
+	for _, p := range response.Prices {
+		if len(p) >= 2 {
+			result.Prices = append(result.Prices, outbound.PricePoint{
+				Timestamp: time.UnixMilli(int64(p[0])),
+				PriceUSD:  p[1],
+			})
+		} else {
+			c.logger.Warn("malformed price data point from CoinGecko API", "assetID", assetID, "dataPoint", p)
+		}
+	}
+
+	for _, v := range response.TotalVolumes {
+		if len(v) >= 2 {
+			result.Volumes = append(result.Volumes, outbound.VolumePoint{
+				Timestamp: time.UnixMilli(int64(v[0])),
+				VolumeUSD: v[1],
+			})
+		} else {
+			c.logger.Warn("malformed volume data point from CoinGecko API", "assetID", assetID, "dataPoint", v)
+		}
+	}
+
+	for _, m := range response.MarketCaps {
+		if len(m) >= 2 {
+			result.MarketCaps = append(result.MarketCaps, outbound.MarketCapPoint{
+				Timestamp:    time.UnixMilli(int64(m[0])),
+				MarketCapUSD: m[1],
+			})
+		} else {
+			c.logger.Warn("malformed market cap data point from CoinGecko API", "assetID", assetID, "dataPoint", m)
+		}
+	}
+
+	return result, nil
+}
+
+func (c *Client) doRequest(ctx context.Context, endpoint string, params url.Values, result any) error {
+	fullURL := endpoint
+	if len(params) > 0 {
+		fullURL = fmt.Sprintf("%s?%s", endpoint, params.Encode())
+	}
+
+	return c.httpClient.DoRequest(ctx, httpclient.RequestConfig{
+		URL: fullURL,
+		Headers: map[string]string{
+			"x-cg-pro-api-key": c.apiKey,
+		},
+	}, result)
+}
+
+// coinGeckoErrorParser parses CoinGecko-specific error responses.
+func coinGeckoErrorParser(statusCode int, body []byte) error {
+	if statusCode >= 400 && statusCode < 500 {
+		var apiErr coinGeckoError
+		if jsonErr := json.Unmarshal(body, &apiErr); jsonErr == nil && apiErr.Error != "" {
+			return fmt.Errorf("API error (HTTP %d): %s", statusCode, apiErr.Error)
+		}
+		return fmt.Errorf("client error (HTTP %d): %s", statusCode, string(body))
+	}
+	return nil
+}

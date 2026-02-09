@@ -131,6 +131,19 @@ variable "alchemy_api_key" {
   default     = "placeholder" # Will be updated in Secrets Manager
 }
 
+variable "coingecko_api_key" {
+  description = "CoinGecko Pro API key. Set via TF_VAR_coingecko_api_key env var."
+  type        = string
+  sensitive   = true
+  default     = "placeholder" # Will be updated in Secrets Manager
+}
+
+variable "etherscan_api_key" {
+  description = "Etherscan API key. Set via TF_VAR_etherscan_api_key env var or enter when prompted."
+  type        = string
+  sensitive   = true
+}
+
 variable "alchemy_http_url" {
   description = "Alchemy HTTP RPC base URL"
   type        = string
