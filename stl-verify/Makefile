@@ -8,6 +8,8 @@
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
         docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging \
+        docker-build-oracle-price-worker docker-push-oracle-price-worker docker-release-oracle-price-worker \
+        docker-build-oracle-price-worker-staging docker-push-oracle-price-worker-staging docker-release-oracle-price-worker-staging \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
         bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel \
@@ -256,6 +258,12 @@ tf-apply:
 	@echo "==> Applying Terraform for $(ENV)..."
 	$(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars)
 
+# Apply Terraform changes (auto-approve)
+# Usage: make tf-apply-auto ENV=sentinelstaging
+tf-apply-auto:
+	@echo "==> Applying Terraform for $(ENV) (auto-approve)..."
+	$(call run_tofu_with_creds,tofu apply -auto-approve -var-file=environments/$(ENV).tfvars)
+
 # Full Terraform workflow: init, validate, plan
 # Usage: make tf-check ENV=sentinelstaging
 tf-check: tf-init tf-validate tf-plan
@@ -502,6 +510,72 @@ docker-push-backup-staging:
 
 docker-release-backup-staging:
 	@$(MAKE) docker-release-backup ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - Oracle Price Worker
+# =============================================================================
+
+# ECR repository URL for oracle price worker
+ECR_REPO_ORACLE_PRICE_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-oracle-price-worker
+
+# Build Docker image for oracle price worker (ARM64 for Fargate Graviton)
+docker-build-oracle-price-worker:
+	@echo "==> Building Oracle Price Worker Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_ORACLE_PRICE_WORKER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.oracle-price-worker \
+		-t $(ECR_REPO_ORACLE_PRICE_WORKER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_ORACLE_PRICE_WORKER):latest \
+		--load .
+
+# Push oracle price worker Docker image to ECR
+docker-push-oracle-price-worker: ecr-login
+	@echo "==> Pushing Oracle Price Worker Docker image to ECR..."
+	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):latest
+
+# Build and push oracle price worker in one step (captures tag at start to ensure consistency)
+docker-release-oracle-price-worker: ecr-login
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Oracle Price Worker Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_ORACLE_PRICE_WORKER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.oracle-price-worker \
+		-t $(ECR_REPO_ORACLE_PRICE_WORKER):$$TAG \
+		-t $(ECR_REPO_ORACLE_PRICE_WORKER):latest \
+		--load . && \
+	echo "==> Pushing Oracle Price Worker Docker image to ECR..." && \
+	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):$$TAG && \
+	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):latest && \
+	echo "==> Oracle Price Worker Docker image released: $(ECR_REPO_ORACLE_PRICE_WORKER):$$TAG"
+
+# =============================================================================
+# Sentinelstaging Oracle Price Worker Docker Shortcuts
+# =============================================================================
+
+docker-build-oracle-price-worker-staging:
+	@$(MAKE) docker-build-oracle-price-worker ENV=sentinelstaging
+
+docker-push-oracle-price-worker-staging:
+	@$(MAKE) docker-push-oracle-price-worker ENV=sentinelstaging
+
+docker-release-oracle-price-worker-staging:
+	@$(MAKE) docker-release-oracle-price-worker ENV=sentinelstaging
 
 # =============================================================================
 # Erigon Node Terraform Commands

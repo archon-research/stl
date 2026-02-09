@@ -189,9 +189,15 @@ func (s *Service) buildOracleUnit(ctx context.Context, oracle *entity.Oracle) (*
 		return nil, fmt.Errorf("loading latest prices: %w", err)
 	}
 
+	tokenHexAddrs := make([]string, len(tokenAddrs))
+	for i, addr := range tokenAddrs {
+		tokenHexAddrs[i] = addr.Hex()
+	}
 	s.logger.Info("loaded oracle",
 		"name", oracle.Name,
+		"oracleAddr", common.Address(oracle.Address).Hex(),
 		"assets", len(assets),
+		"tokenAddrs", tokenHexAddrs,
 		"cachedPrices", len(cached))
 
 	return &oracleUnit{
@@ -275,7 +281,9 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 		if err := s.processBlockForOracle(ctx, event, unit); err != nil {
 			s.logger.Error("failed to process oracle",
 				"oracle", unit.oracle.Name,
+				"oracleAddr", unit.oracleAddr.Hex(),
 				"block", event.BlockNumber,
+				"assets", len(unit.tokenAddrs),
 				"error", err)
 			errs = append(errs, fmt.Errorf("oracle %s: %w", unit.oracle.Name, err))
 		}
