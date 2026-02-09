@@ -24,12 +24,20 @@ import (
 
 // mockRepo implements outbound.OnchainPriceRepository for testing.
 type mockRepo struct {
-	getOracleFn         func(ctx context.Context, name string) (*entity.Oracle, error)
-	getEnabledAssetsFn  func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
-	getLatestPricesFn   func(ctx context.Context, oracleID int64) (map[int64]float64, error)
-	getLatestBlockFn    func(ctx context.Context, oracleID int64) (int64, error)
-	getTokenAddressesFn func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
-	upsertPricesFn      func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
+	getOracleFn                   func(ctx context.Context, name string) (*entity.Oracle, error)
+	getEnabledAssetsFn            func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
+	getLatestPricesFn             func(ctx context.Context, oracleID int64) (map[int64]float64, error)
+	getLatestBlockFn              func(ctx context.Context, oracleID int64) (int64, error)
+	getTokenAddressesFn           func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
+	upsertPricesFn                func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
+	getAllEnabledOraclesFn        func(ctx context.Context) ([]*entity.Oracle, error)
+	getOracleByAddressFn          func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
+	insertOracleFn                func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
+	getAllActiveProtocolOraclesFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
+	getProtocolFn                 func(ctx context.Context, protocolID int64) (*entity.Protocol, error)
+	closeProtocolOracleBindingFn  func(ctx context.Context, bindingID int64, toBlock int64) error
+	insertProtocolOracleBindingFn func(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
+	copyOracleAssetsFn            func(ctx context.Context, fromOracleID, toOracleID int64) error
 
 	// mu guards upserted for concurrent access from the batch writer goroutine.
 	mu       sync.Mutex
@@ -81,6 +89,62 @@ func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTok
 	return nil
 }
 
+func (m *mockRepo) GetAllEnabledOracles(ctx context.Context) ([]*entity.Oracle, error) {
+	if m.getAllEnabledOraclesFn != nil {
+		return m.getAllEnabledOraclesFn(ctx)
+	}
+	return nil, errors.New("GetAllEnabledOracles not mocked")
+}
+
+func (m *mockRepo) GetOracleByAddress(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error) {
+	if m.getOracleByAddressFn != nil {
+		return m.getOracleByAddressFn(ctx, chainID, address)
+	}
+	return nil, errors.New("GetOracleByAddress not mocked")
+}
+
+func (m *mockRepo) InsertOracle(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error) {
+	if m.insertOracleFn != nil {
+		return m.insertOracleFn(ctx, oracle)
+	}
+	return nil, errors.New("InsertOracle not mocked")
+}
+
+func (m *mockRepo) GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error) {
+	if m.getAllActiveProtocolOraclesFn != nil {
+		return m.getAllActiveProtocolOraclesFn(ctx)
+	}
+	return nil, errors.New("GetAllActiveProtocolOracles not mocked")
+}
+
+func (m *mockRepo) GetProtocol(ctx context.Context, protocolID int64) (*entity.Protocol, error) {
+	if m.getProtocolFn != nil {
+		return m.getProtocolFn(ctx, protocolID)
+	}
+	return nil, errors.New("GetProtocol not mocked")
+}
+
+func (m *mockRepo) CloseProtocolOracleBinding(ctx context.Context, bindingID int64, toBlock int64) error {
+	if m.closeProtocolOracleBindingFn != nil {
+		return m.closeProtocolOracleBindingFn(ctx, bindingID, toBlock)
+	}
+	return errors.New("CloseProtocolOracleBinding not mocked")
+}
+
+func (m *mockRepo) InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error) {
+	if m.insertProtocolOracleBindingFn != nil {
+		return m.insertProtocolOracleBindingFn(ctx, binding)
+	}
+	return nil, errors.New("InsertProtocolOracleBinding not mocked")
+}
+
+func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
+	if m.copyOracleAssetsFn != nil {
+		return m.copyOracleAssetsFn(ctx, fromOracleID, toOracleID)
+	}
+	return errors.New("CopyOracleAssets not mocked")
+}
+
 func (m *mockRepo) getUpserted() []*entity.OnchainTokenPrice {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -127,11 +191,11 @@ func defaultAssets() []*entity.OracleAsset {
 	}
 }
 
-// defaultTokenAddresses returns a token ID -> address map matching defaultAssets.
-func defaultTokenAddresses() map[int64]common.Address {
-	return map[int64]common.Address{
-		10: common.HexToAddress("0x0000000000000000000000000000000000000010"),
-		20: common.HexToAddress("0x0000000000000000000000000000000000000020"),
+// defaultTokenAddressBytes returns a token ID -> address bytes map matching defaultAssets.
+func defaultTokenAddressBytes() map[int64][]byte {
+	return map[int64][]byte{
+		10: common.HexToAddress("0x0000000000000000000000000000000000000010").Bytes(),
+		20: common.HexToAddress("0x0000000000000000000000000000000000000020").Bytes(),
 	}
 }
 
@@ -180,6 +244,23 @@ func blockDependentPrices(t *testing.T) func(ctx context.Context, calls []outbou
 	}
 }
 
+// defaultRepoSetup returns a mockRepo preconfigured for common test scenarios.
+// It mocks GetAllEnabledOracles, GetEnabledAssets, GetTokenAddresses, and GetLatestBlock.
+func defaultRepoSetup() *mockRepo {
+	return &mockRepo{
+		getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+			return []*entity.Oracle{defaultOracle()}, nil
+		},
+		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+			return defaultAssets(), nil
+		},
+		getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+			return defaultTokenAddressBytes(), nil
+		},
+		getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) { return 0, nil },
+	}
+}
+
 // ---------------------------------------------------------------------------
 // TestNewService
 // ---------------------------------------------------------------------------
@@ -190,7 +271,6 @@ func TestNewService(t *testing.T) {
 		return &testutil.MockMulticaller{}, nil
 	}
 	validRepo := &mockRepo{}
-	validTokenAddrs := defaultTokenAddresses()
 
 	tests := []struct {
 		name           string
@@ -198,7 +278,6 @@ func TestNewService(t *testing.T) {
 		headerFetcher  BlockHeaderFetcher
 		newMulticaller MulticallFactory
 		repo           outbound.OnchainPriceRepository
-		tokenAddresses map[int64]common.Address
 		wantErr        bool
 		errContains    string
 		// checks run on the returned service when wantErr is false
@@ -207,15 +286,13 @@ func TestNewService(t *testing.T) {
 		{
 			name: "success with all valid params",
 			config: Config{
-				Concurrency:  2,
-				BatchSize:    50,
-				OracleSource: "test-oracle",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 2,
+				BatchSize:   50,
+				Logger:      testutil.DiscardLogger(),
 			},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
 			repo:           validRepo,
-			tokenAddresses: validTokenAddrs,
 			wantErr:        false,
 			checkService: func(t *testing.T, svc *Service) {
 				t.Helper()
@@ -225,14 +302,8 @@ func TestNewService(t *testing.T) {
 				if svc.config.BatchSize != 50 {
 					t.Errorf("BatchSize = %d, want 50", svc.config.BatchSize)
 				}
-				if svc.config.OracleSource != "test-oracle" {
-					t.Errorf("OracleSource = %q, want %q", svc.config.OracleSource, "test-oracle")
-				}
 				if svc.oracleABI == nil {
 					t.Error("oracleABI is nil")
-				}
-				if len(svc.tokenAddressMap) != 2 {
-					t.Errorf("tokenAddressMap length = %d, want 2", len(svc.tokenAddressMap))
 				}
 			},
 		},
@@ -242,7 +313,6 @@ func TestNewService(t *testing.T) {
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
 			repo:           validRepo,
-			tokenAddresses: validTokenAddrs,
 			wantErr:        false,
 			checkService: func(t *testing.T, svc *Service) {
 				t.Helper()
@@ -252,9 +322,6 @@ func TestNewService(t *testing.T) {
 				}
 				if svc.config.BatchSize != defaults.BatchSize {
 					t.Errorf("BatchSize = %d, want default %d", svc.config.BatchSize, defaults.BatchSize)
-				}
-				if svc.config.OracleSource != defaults.OracleSource {
-					t.Errorf("OracleSource = %q, want default %q", svc.config.OracleSource, defaults.OracleSource)
 				}
 				if svc.config.Logger == nil {
 					t.Error("Logger should not be nil after defaults applied")
@@ -270,7 +337,6 @@ func TestNewService(t *testing.T) {
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
 			repo:           validRepo,
-			tokenAddresses: validTokenAddrs,
 			wantErr:        false,
 			checkService: func(t *testing.T, svc *Service) {
 				t.Helper()
@@ -288,7 +354,6 @@ func TestNewService(t *testing.T) {
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
 			repo:           validRepo,
-			tokenAddresses: validTokenAddrs,
 			wantErr:        false,
 			checkService: func(t *testing.T, svc *Service) {
 				t.Helper()
@@ -303,7 +368,6 @@ func TestNewService(t *testing.T) {
 			headerFetcher:  nil,
 			newMulticaller: validFactory,
 			repo:           validRepo,
-			tokenAddresses: validTokenAddrs,
 			wantErr:        true,
 			errContains:    "headerFetcher cannot be nil",
 		},
@@ -313,7 +377,6 @@ func TestNewService(t *testing.T) {
 			headerFetcher:  validFetcher,
 			newMulticaller: nil,
 			repo:           validRepo,
-			tokenAddresses: validTokenAddrs,
 			wantErr:        true,
 			errContains:    "newMulticaller cannot be nil",
 		},
@@ -323,35 +386,14 @@ func TestNewService(t *testing.T) {
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
 			repo:           nil,
-			tokenAddresses: validTokenAddrs,
 			wantErr:        true,
 			errContains:    "repo cannot be nil",
-		},
-		{
-			name:           "error empty tokenAddresses",
-			config:         Config{Logger: testutil.DiscardLogger()},
-			headerFetcher:  validFetcher,
-			newMulticaller: validFactory,
-			repo:           validRepo,
-			tokenAddresses: map[int64]common.Address{},
-			wantErr:        true,
-			errContains:    "tokenAddresses cannot be empty",
-		},
-		{
-			name:           "error nil tokenAddresses",
-			config:         Config{Logger: testutil.DiscardLogger()},
-			headerFetcher:  validFetcher,
-			newMulticaller: validFactory,
-			repo:           validRepo,
-			tokenAddresses: nil,
-			wantErr:        true,
-			errContains:    "tokenAddresses cannot be empty",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc, err := NewService(tt.config, tt.headerFetcher, tt.newMulticaller, tt.repo, tt.tokenAddresses)
+			svc, err := NewService(tt.config, tt.headerFetcher, tt.newMulticaller, tt.repo)
 
 			if tt.wantErr {
 				if err == nil {
@@ -406,17 +448,12 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-				}
+				return defaultRepoSetup()
 			},
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
@@ -445,19 +482,16 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   109,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) {
-						return 106, nil
-					},
+				repo := defaultRepoSetup()
+				repo.getLatestBlockFn = func(_ context.Context, _ int64) (int64, error) {
+					return 106, nil
 				}
+				return repo
 			},
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
@@ -503,19 +537,16 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) {
-						return 110, nil
-					},
+				repo := defaultRepoSetup()
+				repo.getLatestBlockFn = func(_ context.Context, _ int64) (int64, error) {
+					return 110, nil
 				}
+				return repo
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
@@ -537,17 +568,12 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   101,
 			config: Config{
-				Concurrency:  10,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 10,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-				}
+				return defaultRepoSetup()
 			},
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
@@ -576,17 +602,12 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-				}
+				return defaultRepoSetup()
 			},
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
@@ -618,18 +639,51 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:      "error GetOracle fails",
+			name:      "success no oracles with enabled assets returns nil",
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleFn: func(_ context.Context, _ string) (*entity.Oracle, error) {
+					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{defaultOracle()}, nil
+					},
+					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+						return []*entity.OracleAsset{}, nil
+					},
+					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+						return defaultTokenAddressBytes(), nil
+					},
+				}
+			},
+			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
+			setupMC: func(t *testing.T) MulticallFactory {
+				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
+			},
+			wantErr: false,
+			checkResult: func(t *testing.T, repo *mockRepo) {
+				t.Helper()
+				if len(repo.getUpserted()) != 0 {
+					t.Error("expected no upserted prices when no enabled assets")
+				}
+			},
+		},
+		{
+			name:      "error GetAllEnabledOracles fails",
+			fromBlock: 100,
+			toBlock:   104,
+			config: Config{
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
+			},
+			setupRepo: func() *mockRepo {
+				return &mockRepo{
+					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
 						return nil, errors.New("database connection failed")
 					},
 				}
@@ -639,22 +693,21 @@ func TestRun(t *testing.T) {
 				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
 			wantErr:     true,
-			errContains: "getting oracle source",
+			errContains: "getting enabled oracles",
 		},
 		{
-			name:      "error GetEnabledAssets fails",
+			name:      "error GetEnabledAssets fails is warned and skipped",
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleFn: func(_ context.Context, _ string) (*entity.Oracle, error) {
-						return defaultOracle(), nil
+					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{defaultOracle()}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return nil, errors.New("query failed")
@@ -665,84 +718,67 @@ func TestRun(t *testing.T) {
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
-			wantErr:     true,
-			errContains: "getting enabled assets",
-		},
-		{
-			name:      "error GetEnabledAssets returns empty",
-			fromBlock: 100,
-			toBlock:   104,
-			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
-			},
-			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn: func(_ context.Context, _ string) (*entity.Oracle, error) {
-						return defaultOracle(), nil
-					},
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-						return []*entity.OracleAsset{}, nil
-					},
+			// With the new multi-oracle flow, buildWorkUnit errors are warned + skipped
+			wantErr: false,
+			checkResult: func(t *testing.T, repo *mockRepo) {
+				t.Helper()
+				if len(repo.getUpserted()) != 0 {
+					t.Error("expected no upserted prices when GetEnabledAssets fails")
 				}
 			},
-			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
-			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
-			},
-			wantErr:     true,
-			errContains: "no enabled assets",
 		},
 		{
-			name:      "error token address not found in map",
+			name:      "error token address not found for token_id is warned and skipped",
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getOracleFn: func(_ context.Context, _ string) (*entity.Oracle, error) {
-						return defaultOracle(), nil
+					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{defaultOracle()}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{
 							{ID: 1, OracleID: 1, TokenID: 999, Enabled: true},
 						}, nil
 					},
-					getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) { return 0, nil },
+					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+						return map[int64][]byte{}, nil // no addresses
+					},
 				}
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
-			wantErr:     true,
-			errContains: "token address not found for token_id 999",
+			// buildWorkUnit errors are warned + skipped
+			wantErr: false,
+			checkResult: func(t *testing.T, repo *mockRepo) {
+				t.Helper()
+				if len(repo.getUpserted()) != 0 {
+					t.Error("expected no upserted prices when token address not found")
+				}
+			},
 		},
 		{
 			name:      "error GetLatestBlock fails",
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) {
-						return 0, errors.New("redis unavailable")
-					},
+				repo := defaultRepoSetup()
+				repo.getLatestBlockFn = func(_ context.Context, _ int64) (int64, error) {
+					return 0, errors.New("redis unavailable")
 				}
+				return repo
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
@@ -756,17 +792,12 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    3, // small batch size forces flush during for loop
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   3, // small batch size forces flush during for loop
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-				}
+				return defaultRepoSetup()
 			},
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
@@ -795,20 +826,16 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    3, // small batch triggers mid-loop flush
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   3, // small batch triggers mid-loop flush
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-					upsertPricesFn: func(_ context.Context, _ []*entity.OnchainTokenPrice) error {
-						return errors.New("disk full")
-					},
+				repo := defaultRepoSetup()
+				repo.upsertPricesFn = func(_ context.Context, _ []*entity.OnchainTokenPrice) error {
+					return errors.New("disk full")
 				}
+				return repo
 			},
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
@@ -830,20 +857,16 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-					upsertPricesFn: func(_ context.Context, _ []*entity.OnchainTokenPrice) error {
-						return errors.New("disk full")
-					},
+				repo := defaultRepoSetup()
+				repo.upsertPricesFn = func(_ context.Context, _ []*entity.OnchainTokenPrice) error {
+					return errors.New("disk full")
 				}
+				return repo
 			},
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
@@ -865,17 +888,12 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-				}
+				return defaultRepoSetup()
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
@@ -896,17 +914,12 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-				}
+				return defaultRepoSetup()
 			},
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
@@ -953,17 +966,12 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-				}
+				return defaultRepoSetup()
 			},
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
@@ -1001,17 +1009,12 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   102,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-				}
+				return defaultRepoSetup()
 			},
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
@@ -1059,17 +1062,12 @@ func TestRun(t *testing.T) {
 			fromBlock: 0,
 			toBlock:   0,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-				}
+				return defaultRepoSetup()
 			},
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
@@ -1101,17 +1099,12 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   10099,
 			config: Config{
-				Concurrency:  1,
-				BatchSize:    100,
-				OracleSource: "sparklend",
-				Logger:       testutil.DiscardLogger(),
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
-				return &mockRepo{
-					getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-					getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-				}
+				return defaultRepoSetup()
 			},
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
@@ -1127,6 +1120,133 @@ func TestRun(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name:      "success multiple oracles deduplicates by oracle_id",
+			fromBlock: 100,
+			toBlock:   101,
+			config: Config{
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
+			},
+			setupRepo: func() *mockRepo {
+				oracle := defaultOracle()
+				return &mockRepo{
+					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+						// Return the same oracle twice (simulating generic + protocol-bound)
+						return []*entity.Oracle{oracle, oracle}, nil
+					},
+					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+						return defaultAssets(), nil
+					},
+					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+						return defaultTokenAddressBytes(), nil
+					},
+					getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) { return 0, nil },
+				}
+			},
+			setupHeader: func() *mockHeaderFetcher {
+				return &mockHeaderFetcher{
+					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
+						return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
+					},
+				}
+			},
+			setupMC: func(t *testing.T) MulticallFactory {
+				return func() (outbound.Multicaller, error) {
+					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
+				}
+			},
+			wantErr: false,
+			checkResult: func(t *testing.T, repo *mockRepo) {
+				t.Helper()
+				upserted := repo.getUpserted()
+				// Only 1 oracle (deduplicated), 2 blocks x 2 tokens = 4 prices
+				if len(upserted) != 4 {
+					t.Errorf("upserted count = %d, want 4 (deduplicated oracle)", len(upserted))
+				}
+			},
+		},
+		{
+			name:      "success with two distinct oracles",
+			fromBlock: 100,
+			toBlock:   100,
+			config: Config{
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
+			},
+			setupRepo: func() *mockRepo {
+				oracle1 := defaultOracle()
+				oracle2 := &entity.Oracle{
+					ID:              2,
+					Name:            "other-oracle",
+					DisplayName:     "Other Oracle",
+					ChainID:         1,
+					Address:         common.HexToAddress("0x0000000000000000000000000000000000000CCC"),
+					DeploymentBlock: 50,
+					Enabled:         true,
+				}
+				return &mockRepo{
+					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{oracle1, oracle2}, nil
+					},
+					getEnabledAssetsFn: func(_ context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
+						if oracleID == 1 {
+							return defaultAssets(), nil
+						}
+						return []*entity.OracleAsset{
+							{ID: 3, OracleID: 2, TokenID: 30, Enabled: true},
+						}, nil
+					},
+					getTokenAddressesFn: func(_ context.Context, oracleID int64) (map[int64][]byte, error) {
+						if oracleID == 1 {
+							return defaultTokenAddressBytes(), nil
+						}
+						return map[int64][]byte{
+							30: common.HexToAddress("0x0000000000000000000000000000000000000030").Bytes(),
+						}, nil
+					},
+					getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) { return 0, nil },
+				}
+			},
+			setupHeader: func() *mockHeaderFetcher {
+				return &mockHeaderFetcher{
+					headerByNumberFn: func(_ context.Context, _ *big.Int) (*ethtypes.Header, error) {
+						return &ethtypes.Header{Time: uint64(1700000100)}, nil
+					},
+				}
+			},
+			setupMC: func(t *testing.T) MulticallFactory {
+				return func() (outbound.Multicaller, error) {
+					return &testutil.MockMulticaller{
+						ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+							// calls[0] is getAssetsPrices — determine count from the call data
+							// For simplicity, we check the target address to know which oracle
+							if len(calls) == 1 {
+								target := calls[0].Target
+								if target == common.HexToAddress("0x0000000000000000000000000000000000000BBB") {
+									// oracle1 has 2 tokens
+									return multicallResult(t, []*big.Int{big.NewInt(100_000_000), big.NewInt(200_000_000)}), nil
+								}
+								// oracle2 has 1 token
+								return multicallResult(t, []*big.Int{big.NewInt(300_000_000)}), nil
+							}
+							return nil, errors.New("unexpected calls")
+						},
+					}, nil
+				}
+			},
+			wantErr: false,
+			checkResult: func(t *testing.T, repo *mockRepo) {
+				t.Helper()
+				upserted := repo.getUpserted()
+				// oracle1: 2 tokens, oracle2: 1 token, 1 block = 3 prices total
+				if len(upserted) != 3 {
+					t.Errorf("upserted count = %d, want 3 (2 oracles)", len(upserted))
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1135,7 +1255,7 @@ func TestRun(t *testing.T) {
 			header := tt.setupHeader()
 			mcFactory := tt.setupMC(t)
 
-			svc, err := NewService(tt.config, header, mcFactory, repo, defaultTokenAddresses())
+			svc, err := NewService(tt.config, header, mcFactory, repo)
 			if err != nil {
 				t.Fatalf("NewService: %v", err)
 			}
@@ -1175,18 +1295,6 @@ func TestRun(t *testing.T) {
 // TestRun_ChangeDetection_MultiplePriceChanges verifies that when prices change
 // on specific blocks, only those blocks' prices are stored.
 func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
-	repo := &mockRepo{
-		getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-		getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-	}
-
-	header := &mockHeaderFetcher{
-		headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
-			return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
-		},
-	}
-
 	// Prices by block:
 	// Block 100: token10=$100, token20=$2500  (new -> stored)
 	// Block 101: token10=$100, token20=$2500  (same -> NOT stored)
@@ -1201,6 +1309,14 @@ func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 		104: {big.NewInt(200_00000000), big.NewInt(3000_00000000)},
 	}
 
+	repo := defaultRepoSetup()
+
+	header := &mockHeaderFetcher{
+		headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
+			return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
+		},
+	}
+
 	mcFactory := func() (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
@@ -1212,11 +1328,10 @@ func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		Concurrency:  1,
-		BatchSize:    100,
-		OracleSource: "sparklend",
-		Logger:       testutil.DiscardLogger(),
-	}, header, mcFactory, repo, defaultTokenAddresses())
+		Concurrency: 1,
+		BatchSize:   100,
+		Logger:      testutil.DiscardLogger(),
+	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1273,11 +1388,7 @@ func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 // TestRun_VerifiesUpsertedPriceFields verifies that the OnchainTokenPrice entities
 // stored by Run have the correct field values.
 func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
-	repo := &mockRepo{
-		getOracleFn:        func(_ context.Context, _ string) (*entity.Oracle, error) { return defaultOracle(), nil },
-		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) { return defaultAssets(), nil },
-		getLatestBlockFn:   func(_ context.Context, _ int64) (int64, error) { return 0, nil },
-	}
+	repo := defaultRepoSetup()
 
 	blockTimestamp := uint64(1700000100)
 	header := &mockHeaderFetcher{
@@ -1295,11 +1406,10 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		Concurrency:  1,
-		BatchSize:    100,
-		OracleSource: "sparklend",
-		Logger:       testutil.DiscardLogger(),
-	}, header, mcFactory, repo, defaultTokenAddresses())
+		Concurrency: 1,
+		BatchSize:   100,
+		Logger:      testutil.DiscardLogger(),
+	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

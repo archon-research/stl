@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS oracle (
     address BYTEA NOT NULL,
     deployment_block BIGINT,
     enabled BOOLEAN NOT NULL DEFAULT true,
+    price_decimals SMALLINT NOT NULL DEFAULT 8,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

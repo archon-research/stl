@@ -14,6 +14,7 @@ type Oracle struct {
 	Address         [20]byte
 	DeploymentBlock int64
 	Enabled         bool
+	PriceDecimals   int // default 8 for Chainlink/Aave standard
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }

@@ -1,6 +1,6 @@
 // Package oracle_backfill provides a historical backfill service for onchain oracle prices.
 // It fetches oracle prices for a block range using a worker pool and stores price changes
-// in the database.
+// in the database. All oracles are loaded from the DB — no hardcoded oracle configuration.
 package oracle_backfill
 
 import (
@@ -34,19 +34,25 @@ type MulticallFactory func() (outbound.Multicaller, error)
 
 // Config holds configuration for the backfill service.
 type Config struct {
-	Concurrency  int
-	BatchSize    int
-	OracleSource string
-	Logger       *slog.Logger
+	Concurrency int
+	BatchSize   int
+	Logger      *slog.Logger
 }
 
 func configDefaults() Config {
 	return Config{
-		Concurrency:  100,
-		BatchSize:    1000,
-		OracleSource: "sparklend",
-		Logger:       slog.Default(),
+		Concurrency: 100,
+		BatchSize:   1000,
+		Logger:      slog.Default(),
 	}
+}
+
+// oracleWorkUnit holds everything needed to fetch prices for one oracle.
+type oracleWorkUnit struct {
+	oracle     *entity.Oracle
+	oracleAddr common.Address
+	tokenAddrs []common.Address
+	tokenIDs   []int64
 }
 
 // Service orchestrates parallel oracle price backfilling.
@@ -58,9 +64,6 @@ type Service struct {
 
 	oracleABI *abi.ABI
 
-	// tokenAddressMap is the token_id → on-chain address mapping.
-	tokenAddressMap map[int64]common.Address
-
 	logger *slog.Logger
 }
 
@@ -70,7 +73,6 @@ func NewService(
 	headerFetcher BlockHeaderFetcher,
 	newMulticaller MulticallFactory,
 	repo outbound.OnchainPriceRepository,
-	tokenAddresses map[int64]common.Address,
 ) (*Service, error) {
 	if headerFetcher == nil {
 		return nil, fmt.Errorf("headerFetcher cannot be nil")
@@ -81,9 +83,6 @@ func NewService(
 	if repo == nil {
 		return nil, fmt.Errorf("repo cannot be nil")
 	}
-	if len(tokenAddresses) == 0 {
-		return nil, fmt.Errorf("tokenAddresses cannot be empty")
-	}
 
 	defaults := configDefaults()
 	if config.Concurrency <= 0 {
@@ -92,65 +91,121 @@ func NewService(
 	if config.BatchSize <= 0 {
 		config.BatchSize = defaults.BatchSize
 	}
-	if config.OracleSource == "" {
-		config.OracleSource = defaults.OracleSource
-	}
 	if config.Logger == nil {
 		config.Logger = defaults.Logger
 	}
 
 	oracleABI, err := abis.GetSparkLendOracleABI()
 	if err != nil {
-		return nil, fmt.Errorf("loading SparkLend Oracle ABI: %w", err)
+		return nil, fmt.Errorf("loading Oracle ABI: %w", err)
 	}
 
 	return &Service{
-		config:          config,
-		headerFetcher:   headerFetcher,
-		newMulticaller:  newMulticaller,
-		repo:            repo,
-		oracleABI:       oracleABI,
-		tokenAddressMap: tokenAddresses,
-		logger:          config.Logger.With("component", "oracle-backfill"),
+		config:         config,
+		headerFetcher:  headerFetcher,
+		newMulticaller: newMulticaller,
+		repo:           repo,
+		oracleABI:      oracleABI,
+		logger:         config.Logger.With("component", "oracle-backfill"),
 	}, nil
 }
 
-// Run executes the backfill for the given block range.
+// Run executes the backfill for the given block range across all enabled oracles.
 func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
-	oracle, err := s.repo.GetOracle(ctx, s.config.OracleSource)
+	workUnits, err := s.buildOracleWorkUnits(ctx)
 	if err != nil {
-		return fmt.Errorf("getting oracle source: %w", err)
+		return err
+	}
+	if len(workUnits) == 0 {
+		s.logger.Info("no oracles with enabled assets found")
+		return nil
 	}
 
+	s.logger.Info("loaded oracles for backfill", "count", len(workUnits))
+
+	for _, wu := range workUnits {
+		if err := s.runForOracle(ctx, wu, fromBlock, toBlock); err != nil {
+			return fmt.Errorf("backfilling oracle %s: %w", wu.oracle.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// buildOracleWorkUnits loads all enabled oracles from DB, deduplicates by oracle_id,
+// and builds the per-oracle data structures needed for price fetching.
+func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, error) {
+	// Load all enabled oracles (generic + protocol-bound)
+	allOracles, err := s.repo.GetAllEnabledOracles(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting enabled oracles: %w", err)
+	}
+
+	// Deduplicate by oracle ID (a protocol oracle may also exist as a generic oracle)
+	seen := make(map[int64]bool)
+	var workUnits []*oracleWorkUnit
+
+	for _, oracle := range allOracles {
+		if seen[oracle.ID] {
+			continue
+		}
+		seen[oracle.ID] = true
+
+		wu, err := s.buildWorkUnit(ctx, oracle)
+		if err != nil {
+			s.logger.Warn("skipping oracle", "name", oracle.Name, "error", err)
+			continue
+		}
+		if wu != nil {
+			workUnits = append(workUnits, wu)
+		}
+	}
+
+	return workUnits, nil
+}
+
+func (s *Service) buildWorkUnit(ctx context.Context, oracle *entity.Oracle) (*oracleWorkUnit, error) {
 	assets, err := s.repo.GetEnabledAssets(ctx, oracle.ID)
 	if err != nil {
-		return fmt.Errorf("getting enabled assets: %w", err)
+		return nil, fmt.Errorf("getting enabled assets: %w", err)
 	}
 	if len(assets) == 0 {
-		return fmt.Errorf("no enabled assets for oracle source %s", oracle.Name)
+		return nil, nil
 	}
 
-	oracleAddr := common.Address(oracle.Address)
+	tokenAddrBytes, err := s.repo.GetTokenAddresses(ctx, oracle.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting token addresses: %w", err)
+	}
 
-	// Build ordered token address and ID lists
 	tokenAddrs := make([]common.Address, len(assets))
 	tokenIDs := make([]int64, len(assets))
 	for i, asset := range assets {
-		addr, ok := s.tokenAddressMap[asset.TokenID]
+		addrBytes, ok := tokenAddrBytes[asset.TokenID]
 		if !ok {
-			return fmt.Errorf("token address not found for token_id %d", asset.TokenID)
+			return nil, fmt.Errorf("token address not found for token_id %d", asset.TokenID)
 		}
-		tokenAddrs[i] = addr
+		tokenAddrs[i] = common.BytesToAddress(addrBytes)
 		tokenIDs[i] = asset.TokenID
 	}
 
+	return &oracleWorkUnit{
+		oracle:     oracle,
+		oracleAddr: common.Address(oracle.Address),
+		tokenAddrs: tokenAddrs,
+		tokenIDs:   tokenIDs,
+	}, nil
+}
+
+func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBlock, toBlock int64) error {
 	// Resume support: skip already-processed blocks
-	latestBlock, err := s.repo.GetLatestBlock(ctx, oracle.ID)
+	latestBlock, err := s.repo.GetLatestBlock(ctx, wu.oracle.ID)
 	if err != nil {
 		return fmt.Errorf("getting latest block: %w", err)
 	}
 	if latestBlock > 0 && latestBlock >= fromBlock {
 		s.logger.Info("resuming from latest stored block",
+			"oracle", wu.oracle.Name,
 			"latestStored", latestBlock,
 			"requestedFrom", fromBlock)
 		fromBlock = latestBlock + 1
@@ -158,21 +213,22 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 
 	totalBlocks := toBlock - fromBlock + 1
 	if totalBlocks <= 0 {
-		s.logger.Info("no blocks to process", "from", fromBlock, "to", toBlock)
+		s.logger.Info("no blocks to process", "oracle", wu.oracle.Name, "from", fromBlock, "to", toBlock)
 		return nil
 	}
 
 	s.logger.Info("starting backfill",
+		"oracle", wu.oracle.Name,
 		"from", fromBlock,
 		"to", toBlock,
 		"blocks", totalBlocks,
 		"concurrency", s.config.Concurrency,
-		"assets", len(assets))
+		"assets", len(wu.tokenIDs))
 
 	// Progress tracking
 	var stats backfillStats
 	stats.startTime = time.Now()
-	stopProgress := s.startProgressReporter(ctx, &stats, totalBlocks)
+	stopProgress := s.startProgressReporter(ctx, &stats, totalBlocks, wu.oracle.Name)
 	defer stopProgress()
 
 	// Child context: cancelled if batchWriter fails so workers stop promptly.
@@ -210,7 +266,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		wg.Add(1)
 		go func(wFrom, wTo int64) {
 			defer wg.Done()
-			s.worker(workerCtx, wFrom, wTo, oracle, oracleAddr, tokenAddrs, tokenIDs, priceCh, &stats)
+			s.worker(workerCtx, wFrom, wTo, wu, priceCh, &stats)
 		}(workerFrom, workerTo)
 	}
 
@@ -223,6 +279,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	}
 
 	s.logger.Info("backfill complete",
+		"oracle", wu.oracle.Name,
 		"blocks", stats.blocksProcessed.Load(),
 		"pricesStored", stats.pricesStored.Load(),
 		"errors", stats.blocksFailed.Load(),
@@ -241,10 +298,7 @@ type backfillStats struct {
 func (s *Service) worker(
 	ctx context.Context,
 	fromBlock, toBlock int64,
-	oracle *entity.Oracle,
-	oracleAddr common.Address,
-	tokenAddrs []common.Address,
-	tokenIDs []int64,
+	wu *oracleWorkUnit,
 	priceCh chan<- []*entity.OnchainTokenPrice,
 	stats *backfillStats,
 ) {
@@ -254,10 +308,13 @@ func (s *Service) worker(
 		return
 	}
 
-	oracleID := int16(oracle.ID)
+	oracleID := int16(wu.oracle.ID)
+	priceDecimals := wu.oracle.PriceDecimals
+	if priceDecimals == 0 {
+		priceDecimals = 8
+	}
 
 	// Per-worker price cache for change detection within this contiguous range.
-	// First block in range initializes from "all new" (or DB if needed).
 	prevPrices := make(map[int64]float64)
 
 	for blockNum := fromBlock; blockNum <= toBlock; blockNum++ {
@@ -265,7 +322,7 @@ func (s *Service) worker(
 			return
 		}
 
-		prices, err := s.processBlock(ctx, mc, oracleAddr, tokenAddrs, tokenIDs, oracleID, blockNum)
+		prices, err := s.processBlock(ctx, mc, wu.oracleAddr, wu.tokenAddrs, wu.tokenIDs, oracleID, priceDecimals, blockNum)
 		if err != nil {
 			s.logger.Error("failed to process block",
 				"block", blockNum,
@@ -303,6 +360,7 @@ func (s *Service) processBlock(
 	tokenAddrs []common.Address,
 	tokenIDs []int64,
 	oracleID int16,
+	priceDecimals int,
 	blockNum int64,
 ) ([]*entity.OnchainTokenPrice, error) {
 	// Fetch oracle prices via multicall
@@ -328,7 +386,7 @@ func (s *Service) processBlock(
 
 	prices := make([]*entity.OnchainTokenPrice, 0, len(tokenIDs))
 	for i, rawPrice := range rawPrices {
-		priceUSD := blockchain.ConvertOraclePriceToUSD(rawPrice)
+		priceUSD := blockchain.ConvertOraclePriceToUSD(rawPrice, priceDecimals)
 
 		p, err := entity.NewOnchainTokenPrice(
 			tokenIDs[i],
@@ -375,7 +433,7 @@ func (s *Service) batchWriter(ctx context.Context, priceCh <-chan []*entity.Onch
 	return flush()
 }
 
-func (s *Service) startProgressReporter(ctx context.Context, stats *backfillStats, totalBlocks int64) func() {
+func (s *Service) startProgressReporter(ctx context.Context, stats *backfillStats, totalBlocks int64, oracleName string) func() {
 	ticker := time.NewTicker(2 * time.Second)
 	done := make(chan struct{})
 
@@ -398,6 +456,7 @@ func (s *Service) startProgressReporter(ctx context.Context, stats *backfillStat
 				}
 
 				s.logger.Info("progress",
+					"oracle", oracleName,
 					"processed", processed,
 					"failed", failed,
 					"stored", stored,

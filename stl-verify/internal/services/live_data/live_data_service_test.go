@@ -2876,7 +2876,7 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 	})
 
 	// Wait for the reorg event to be published (with timeout)
-	waitForCondition(t, 2*time.Second, func() bool {
+	testutil.WaitForCondition(t, 2*time.Second, func() bool {
 		for _, e := range eventSink.GetBlockEvents() {
 			if e.BlockNumber == 99 && e.BlockHash == "0xblock99_new" && e.IsReorg {
 				return true
@@ -2941,7 +2941,7 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 	// Wait for the second block to be processed
 	// With the fix, block 93 is in memory after the first reorg (reloaded from DB),
 	// so block 94_alt should be processed successfully as a reorg
-	waitForCondition(t, 2*time.Second, func() bool {
+	testutil.WaitForCondition(t, 2*time.Second, func() bool {
 		return len(eventSink.GetBlockEvents()) > eventCountBefore
 	}, "event for block 94_alt (requires block 93 to be in memory from DB reload)")
 
@@ -2962,20 +2962,6 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 		t.Errorf("second event: expected block 94 (0xblock94_alt, reorg=true), got block %d (%s, reorg=%v)",
 			events[1].BlockNumber, events[1].BlockHash, events[1].IsReorg)
 	}
-}
-
-// waitForCondition polls until condition returns true or timeout is reached.
-// Fails the test if timeout is reached.
-func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool, description string) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if condition() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("timeout waiting for: %s", description)
 }
 
 // TestReorgWithBackfilledBlocks_CommonAncestorCalculation verifies that when

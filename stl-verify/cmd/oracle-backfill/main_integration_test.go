@@ -123,7 +123,7 @@ func TestRunIntegration_VerboseFlag(t *testing.T) {
 	}
 }
 
-func TestRunIntegration_OracleSourceNotFound(t *testing.T) {
+func TestRunIntegration_OracleTableNotFound(t *testing.T) {
 	// Database without migrations — oracle table does not exist
 	dsn, cleanup := testutil.StartTimescaleDB(t)
 	defer cleanup()
@@ -138,9 +138,9 @@ func TestRunIntegration_OracleSourceNotFound(t *testing.T) {
 		"-db", dsn,
 	})
 	if err == nil {
-		t.Fatal("expected error for missing oracle source table")
+		t.Fatal("expected error for missing oracle table")
 	}
-	if !strings.Contains(err.Error(), "oracle source") {
-		t.Errorf("expected oracle source error, got: %v", err)
+	if !strings.Contains(err.Error(), "oracle") {
+		t.Errorf("expected oracle-related error, got: %v", err)
 	}
 }

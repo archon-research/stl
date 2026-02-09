@@ -333,9 +333,9 @@ func TestConvertOraclePriceToUSD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ConvertOraclePriceToUSD(tt.rawPrice)
+			got := ConvertOraclePriceToUSD(tt.rawPrice, 8)
 			if !floatEquals(got, tt.want) {
-				t.Errorf("ConvertOraclePriceToUSD(%v) = %v, want %v", tt.rawPrice, got, tt.want)
+				t.Errorf("ConvertOraclePriceToUSD(%v, 8) = %v, want %v", tt.rawPrice, got, tt.want)
 			}
 		})
 	}

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -49,12 +50,12 @@ func (r *OnchainPriceRepository) GetOracle(ctx context.Context, name string) (*e
 	var addrBytes []byte
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, name, display_name, chain_id, address,
-		       deployment_block, enabled, created_at, updated_at
+		       deployment_block, enabled, price_decimals, created_at, updated_at
 		FROM oracle
 		WHERE name = $1
 	`, name).Scan(
 		&o.ID, &o.Name, &o.DisplayName, &o.ChainID, &addrBytes,
-		&o.DeploymentBlock, &o.Enabled, &o.CreatedAt, &o.UpdatedAt,
+		&o.DeploymentBlock, &o.Enabled, &o.PriceDecimals, &o.CreatedAt, &o.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("oracle not found: %s", name)
@@ -227,6 +228,172 @@ func (r *OnchainPriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx
 	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("upserting onchain price batch: %w", err)
+	}
+	return nil
+}
+
+// GetAllEnabledOracles retrieves all enabled oracles.
+func (r *OnchainPriceRepository) GetAllEnabledOracles(ctx context.Context) ([]*entity.Oracle, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, name, display_name, chain_id, address,
+		       deployment_block, enabled, price_decimals, created_at, updated_at
+		FROM oracle
+		WHERE enabled = true
+		ORDER BY id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("querying enabled oracles: %w", err)
+	}
+	defer rows.Close()
+
+	var oracles []*entity.Oracle
+	for rows.Next() {
+		var o entity.Oracle
+		var addrBytes []byte
+		if err := rows.Scan(
+			&o.ID, &o.Name, &o.DisplayName, &o.ChainID, &addrBytes,
+			&o.DeploymentBlock, &o.Enabled, &o.PriceDecimals, &o.CreatedAt, &o.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scanning oracle: %w", err)
+		}
+		copy(o.Address[:], addrBytes)
+		oracles = append(oracles, &o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating oracles: %w", err)
+	}
+	return oracles, nil
+}
+
+// GetOracleByAddress retrieves an oracle by chain_id and onchain address.
+func (r *OnchainPriceRepository) GetOracleByAddress(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error) {
+	var o entity.Oracle
+	var addrBytes []byte
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, name, display_name, chain_id, address,
+		       deployment_block, enabled, price_decimals, created_at, updated_at
+		FROM oracle
+		WHERE chain_id = $1 AND address = $2
+	`, chainID, address).Scan(
+		&o.ID, &o.Name, &o.DisplayName, &o.ChainID, &addrBytes,
+		&o.DeploymentBlock, &o.Enabled, &o.PriceDecimals, &o.CreatedAt, &o.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying oracle by address: %w", err)
+	}
+	copy(o.Address[:], addrBytes)
+	return &o, nil
+}
+
+// InsertOracle inserts a new oracle and returns it with the generated ID.
+func (r *OnchainPriceRepository) InsertOracle(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error) {
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO oracle (name, display_name, chain_id, address, deployment_block, enabled, price_decimals)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id, created_at, updated_at
+	`, oracle.Name, oracle.DisplayName, oracle.ChainID, oracle.Address[:],
+		oracle.DeploymentBlock, oracle.Enabled, oracle.PriceDecimals,
+	).Scan(&oracle.ID, &oracle.CreatedAt, &oracle.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("inserting oracle: %w", err)
+	}
+	return oracle, nil
+}
+
+// GetAllActiveProtocolOracles retrieves all active (to_block IS NULL) protocol-oracle bindings.
+func (r *OnchainPriceRepository) GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, protocol_id, oracle_id, from_block, to_block, created_at
+		FROM protocol_oracle
+		WHERE to_block IS NULL
+		ORDER BY id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("querying active protocol oracles: %w", err)
+	}
+	defer rows.Close()
+
+	var bindings []*entity.ProtocolOracle
+	for rows.Next() {
+		var po entity.ProtocolOracle
+		if err := rows.Scan(&po.ID, &po.ProtocolID, &po.OracleID, &po.FromBlock, &po.ToBlock, &po.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scanning protocol oracle: %w", err)
+		}
+		bindings = append(bindings, &po)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating protocol oracles: %w", err)
+	}
+	return bindings, nil
+}
+
+// GetProtocol retrieves a protocol by ID.
+func (r *OnchainPriceRepository) GetProtocol(ctx context.Context, protocolID int64) (*entity.Protocol, error) {
+	var p entity.Protocol
+	var metadataBytes []byte
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, chain_id, address, name, protocol_type, created_at_block, metadata
+		FROM protocol
+		WHERE id = $1
+	`, protocolID).Scan(
+		&p.ID, &p.ChainID, &p.Address, &p.Name, &p.ProtocolType, &p.CreatedAtBlock, &metadataBytes,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("protocol not found: %d", protocolID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying protocol: %w", err)
+	}
+	if metadataBytes != nil {
+		if err := json.Unmarshal(metadataBytes, &p.Metadata); err != nil {
+			return nil, fmt.Errorf("unmarshalling protocol metadata: %w", err)
+		}
+	}
+	if p.Metadata == nil {
+		p.Metadata = make(map[string]any)
+	}
+	return &p, nil
+}
+
+// CloseProtocolOracleBinding sets to_block on an existing protocol-oracle binding.
+func (r *OnchainPriceRepository) CloseProtocolOracleBinding(ctx context.Context, bindingID int64, toBlock int64) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE protocol_oracle SET to_block = $1 WHERE id = $2
+	`, toBlock, bindingID)
+	if err != nil {
+		return fmt.Errorf("closing protocol oracle binding %d: %w", bindingID, err)
+	}
+	return nil
+}
+
+// InsertProtocolOracleBinding inserts a new protocol-oracle binding.
+func (r *OnchainPriceRepository) InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error) {
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block)
+		VALUES ($1, $2, $3)
+		RETURNING id, created_at
+	`, binding.ProtocolID, binding.OracleID, binding.FromBlock,
+	).Scan(&binding.ID, &binding.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("inserting protocol oracle binding: %w", err)
+	}
+	return binding, nil
+}
+
+// CopyOracleAssets copies all enabled oracle_asset rows from one oracle to another.
+func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO oracle_asset (oracle_id, token_id, enabled)
+		SELECT $2, token_id, enabled
+		FROM oracle_asset
+		WHERE oracle_id = $1 AND enabled = true
+		ON CONFLICT (oracle_id, token_id) DO NOTHING
+	`, fromOracleID, toOracleID)
+	if err != nil {
+		return fmt.Errorf("copying oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
 	}
 	return nil
 }

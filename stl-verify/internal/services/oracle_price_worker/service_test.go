@@ -3,6 +3,7 @@ package oracle_price_worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"sync"
@@ -53,50 +54,59 @@ func (m *mockSQSClient) DeleteMessage(ctx context.Context, params *sqs.DeleteMes
 
 // mockRepo implements outbound.OnchainPriceRepository.
 type mockRepo struct {
-	mu                sync.Mutex
-	getOracle         func(ctx context.Context, name string) (*entity.Oracle, error)
-	getEnabledAssets  func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
-	getLatestPrices   func(ctx context.Context, oracleID int64) (map[int64]float64, error)
-	getLatestBlock    func(ctx context.Context, oracleID int64) (int64, error)
-	getTokenAddresses func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
-	upsertPrices      func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
+	mu                            sync.Mutex
+	getOracleFn                   func(ctx context.Context, name string) (*entity.Oracle, error)
+	getEnabledAssetsFn            func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
+	getLatestPricesFn             func(ctx context.Context, oracleID int64) (map[int64]float64, error)
+	getLatestBlockFn              func(ctx context.Context, oracleID int64) (int64, error)
+	getTokenAddressesFn           func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
+	upsertPricesFn                func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
+	getAllEnabledOraclesFn        func(ctx context.Context) ([]*entity.Oracle, error)
+	getOracleByAddressFn          func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
+	insertOracleFn                func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
+	getAllActiveProtocolOraclesFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
+	getProtocolFn                 func(ctx context.Context, protocolID int64) (*entity.Protocol, error)
+	closeProtocolOracleBindingFn  func(ctx context.Context, bindingID int64, toBlock int64) error
+	insertProtocolOracleBindingFn func(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
+	copyOracleAssetsFn            func(ctx context.Context, fromOracleID, toOracleID int64) error
+
 	upsertPricesCalls int
 	lastUpserted      []*entity.OnchainTokenPrice
 }
 
 func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, error) {
-	if m.getOracle != nil {
-		return m.getOracle(ctx, name)
+	if m.getOracleFn != nil {
+		return m.getOracleFn(ctx, name)
 	}
-	return nil, fmt.Errorf("not implemented")
+	return nil, errors.New("GetOracle not mocked")
 }
 
 func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
-	if m.getEnabledAssets != nil {
-		return m.getEnabledAssets(ctx, oracleID)
+	if m.getEnabledAssetsFn != nil {
+		return m.getEnabledAssetsFn(ctx, oracleID)
 	}
-	return nil, fmt.Errorf("not implemented")
+	return nil, errors.New("GetEnabledAssets not mocked")
 }
 
 func (m *mockRepo) GetLatestPrices(ctx context.Context, oracleID int64) (map[int64]float64, error) {
-	if m.getLatestPrices != nil {
-		return m.getLatestPrices(ctx, oracleID)
+	if m.getLatestPricesFn != nil {
+		return m.getLatestPricesFn(ctx, oracleID)
 	}
-	return nil, fmt.Errorf("not implemented")
+	return nil, errors.New("GetLatestPrices not mocked")
 }
 
 func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, error) {
-	if m.getLatestBlock != nil {
-		return m.getLatestBlock(ctx, oracleID)
+	if m.getLatestBlockFn != nil {
+		return m.getLatestBlockFn(ctx, oracleID)
 	}
-	return 0, fmt.Errorf("not implemented")
+	return 0, nil
 }
 
 func (m *mockRepo) GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error) {
-	if m.getTokenAddresses != nil {
-		return m.getTokenAddresses(ctx, oracleID)
+	if m.getTokenAddressesFn != nil {
+		return m.getTokenAddressesFn(ctx, oracleID)
 	}
-	return nil, fmt.Errorf("not implemented")
+	return nil, errors.New("GetTokenAddresses not mocked")
 }
 
 func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTokenPrice) error {
@@ -104,10 +114,66 @@ func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTok
 	m.upsertPricesCalls++
 	m.lastUpserted = prices
 	m.mu.Unlock()
-	if m.upsertPrices != nil {
-		return m.upsertPrices(ctx, prices)
+	if m.upsertPricesFn != nil {
+		return m.upsertPricesFn(ctx, prices)
 	}
 	return nil
+}
+
+func (m *mockRepo) GetAllEnabledOracles(ctx context.Context) ([]*entity.Oracle, error) {
+	if m.getAllEnabledOraclesFn != nil {
+		return m.getAllEnabledOraclesFn(ctx)
+	}
+	return nil, errors.New("GetAllEnabledOracles not mocked")
+}
+
+func (m *mockRepo) GetOracleByAddress(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error) {
+	if m.getOracleByAddressFn != nil {
+		return m.getOracleByAddressFn(ctx, chainID, address)
+	}
+	return nil, errors.New("GetOracleByAddress not mocked")
+}
+
+func (m *mockRepo) InsertOracle(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error) {
+	if m.insertOracleFn != nil {
+		return m.insertOracleFn(ctx, oracle)
+	}
+	return nil, errors.New("InsertOracle not mocked")
+}
+
+func (m *mockRepo) GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error) {
+	if m.getAllActiveProtocolOraclesFn != nil {
+		return m.getAllActiveProtocolOraclesFn(ctx)
+	}
+	return nil, errors.New("GetAllActiveProtocolOracles not mocked")
+}
+
+func (m *mockRepo) GetProtocol(ctx context.Context, protocolID int64) (*entity.Protocol, error) {
+	if m.getProtocolFn != nil {
+		return m.getProtocolFn(ctx, protocolID)
+	}
+	return nil, errors.New("GetProtocol not mocked")
+}
+
+func (m *mockRepo) CloseProtocolOracleBinding(ctx context.Context, bindingID int64, toBlock int64) error {
+	if m.closeProtocolOracleBindingFn != nil {
+		return m.closeProtocolOracleBindingFn(ctx, bindingID, toBlock)
+	}
+	return errors.New("CloseProtocolOracleBinding not mocked")
+}
+
+func (m *mockRepo) InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error) {
+	if m.insertProtocolOracleBindingFn != nil {
+		return m.insertProtocolOracleBindingFn(ctx, binding)
+	}
+	return nil, errors.New("InsertProtocolOracleBinding not mocked")
+}
+
+func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
+	if m.copyOracleAssetsFn != nil {
+		return m.copyOracleAssetsFn(ctx, fromOracleID, toOracleID)
+	}
+	return errors.New("CopyOracleAssets not mocked")
 }
 
 // ---------------------------------------------------------------------------
@@ -116,16 +182,8 @@ func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTok
 
 func validConfig() Config {
 	return Config{
-		QueueURL:     "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		OracleSource: "sparklend",
-		Logger:       testutil.DiscardLogger(),
-	}
-}
-
-func validTokenAddresses() map[int64]common.Address {
-	return map[int64]common.Address{
-		1: common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
-		2: common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F"), // DAI
+		QueueURL: "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
+		Logger:   testutil.DiscardLogger(),
 	}
 }
 
@@ -145,6 +203,29 @@ func defaultAssets() []*entity.OracleAsset {
 	return []*entity.OracleAsset{
 		{ID: 1, OracleID: 1, TokenID: 1, Enabled: true},
 		{ID: 2, OracleID: 1, TokenID: 2, Enabled: true},
+	}
+}
+
+func defaultTokenAddressBytes() map[int64][]byte {
+	return map[int64][]byte{
+		1: common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").Bytes(), // WETH
+		2: common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F").Bytes(), // DAI
+	}
+}
+
+// defaultRepoSetup configures the mock repo with defaults for a successful initialization.
+func defaultRepoSetup(r *mockRepo) {
+	r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+		return []*entity.Oracle{defaultOracle()}, nil
+	}
+	r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+		return defaultAssets(), nil
+	}
+	r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
+		return defaultTokenAddressBytes(), nil
+	}
+	r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		return map[int64]float64{1: 2000.0, 2: 1.0}, nil
 	}
 }
 
@@ -188,28 +269,25 @@ func TestNewService(t *testing.T) {
 	sqsClient := &mockSQSClient{}
 	multicaller := &testutil.MockMulticaller{}
 	repo := &mockRepo{}
-	tokenAddrs := validTokenAddresses()
 
 	tests := []struct {
-		name           string
-		config         Config
-		sqsClient      SQSClient
-		multicaller    outbound.Multicaller
-		repo           outbound.OnchainPriceRepository
-		tokenAddresses map[int64]common.Address
-		wantErr        bool
-		errContains    string
+		name        string
+		config      Config
+		sqsClient   SQSClient
+		multicaller outbound.Multicaller
+		repo        outbound.OnchainPriceRepository
+		wantErr     bool
+		errContains string
 		// For checking defaults are applied:
 		checkDefaults bool
 	}{
 		{
-			name:           "success with all valid params",
-			config:         validConfig(),
-			sqsClient:      sqsClient,
-			multicaller:    multicaller,
-			repo:           repo,
-			tokenAddresses: tokenAddrs,
-			wantErr:        false,
+			name:        "success with all valid params",
+			config:      validConfig(),
+			sqsClient:   sqsClient,
+			multicaller: multicaller,
+			repo:        repo,
+			wantErr:     false,
 		},
 		{
 			name: "success with default config values",
@@ -217,62 +295,38 @@ func TestNewService(t *testing.T) {
 				QueueURL: "https://sqs.example.com/queue",
 				// All other fields left zero/empty to test defaults
 			},
-			sqsClient:      sqsClient,
-			multicaller:    multicaller,
-			repo:           repo,
-			tokenAddresses: tokenAddrs,
-			wantErr:        false,
-			checkDefaults:  true,
+			sqsClient:     sqsClient,
+			multicaller:   multicaller,
+			repo:          repo,
+			wantErr:       false,
+			checkDefaults: true,
 		},
 		{
-			name:           "error nil sqsClient",
-			config:         validConfig(),
-			sqsClient:      nil,
-			multicaller:    multicaller,
-			repo:           repo,
-			tokenAddresses: tokenAddrs,
-			wantErr:        true,
-			errContains:    "sqsClient cannot be nil",
+			name:        "error nil sqsClient",
+			config:      validConfig(),
+			sqsClient:   nil,
+			multicaller: multicaller,
+			repo:        repo,
+			wantErr:     true,
+			errContains: "sqsClient cannot be nil",
 		},
 		{
-			name:           "error nil multicaller",
-			config:         validConfig(),
-			sqsClient:      sqsClient,
-			multicaller:    nil,
-			repo:           repo,
-			tokenAddresses: tokenAddrs,
-			wantErr:        true,
-			errContains:    "multicaller cannot be nil",
+			name:        "error nil multicaller",
+			config:      validConfig(),
+			sqsClient:   sqsClient,
+			multicaller: nil,
+			repo:        repo,
+			wantErr:     true,
+			errContains: "multicaller cannot be nil",
 		},
 		{
-			name:           "error nil repo",
-			config:         validConfig(),
-			sqsClient:      sqsClient,
-			multicaller:    multicaller,
-			repo:           nil,
-			tokenAddresses: tokenAddrs,
-			wantErr:        true,
-			errContains:    "repo cannot be nil",
-		},
-		{
-			name:           "error empty tokenAddresses",
-			config:         validConfig(),
-			sqsClient:      sqsClient,
-			multicaller:    multicaller,
-			repo:           repo,
-			tokenAddresses: map[int64]common.Address{},
-			wantErr:        true,
-			errContains:    "tokenAddresses cannot be empty",
-		},
-		{
-			name:           "error nil tokenAddresses",
-			config:         validConfig(),
-			sqsClient:      sqsClient,
-			multicaller:    multicaller,
-			repo:           repo,
-			tokenAddresses: nil,
-			wantErr:        true,
-			errContains:    "tokenAddresses cannot be empty",
+			name:        "error nil repo",
+			config:      validConfig(),
+			sqsClient:   sqsClient,
+			multicaller: multicaller,
+			repo:        nil,
+			wantErr:     true,
+			errContains: "repo cannot be nil",
 		},
 		{
 			name: "error empty queueURL",
@@ -280,18 +334,17 @@ func TestNewService(t *testing.T) {
 				QueueURL: "",
 				Logger:   testutil.DiscardLogger(),
 			},
-			sqsClient:      sqsClient,
-			multicaller:    multicaller,
-			repo:           repo,
-			tokenAddresses: tokenAddrs,
-			wantErr:        true,
-			errContains:    "queueURL is required",
+			sqsClient:   sqsClient,
+			multicaller: multicaller,
+			repo:        repo,
+			wantErr:     true,
+			errContains: "queueURL is required",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, err := NewService(tc.config, tc.sqsClient, tc.multicaller, tc.repo, tc.tokenAddresses)
+			svc, err := NewService(tc.config, tc.sqsClient, tc.multicaller, tc.repo)
 
 			if tc.wantErr {
 				if err == nil {
@@ -326,9 +379,6 @@ func TestNewService(t *testing.T) {
 			if svc.oracleABI == nil {
 				t.Error("oracleABI should not be nil")
 			}
-			if svc.priceCache == nil {
-				t.Error("priceCache should not be nil")
-			}
 			if svc.logger == nil {
 				t.Error("logger should not be nil")
 			}
@@ -343,9 +393,6 @@ func TestNewService(t *testing.T) {
 				}
 				if svc.config.PollInterval != defaults.PollInterval {
 					t.Errorf("PollInterval = %v, want %v", svc.config.PollInterval, defaults.PollInterval)
-				}
-				if svc.config.OracleSource != defaults.OracleSource {
-					t.Errorf("OracleSource = %q, want %q", svc.config.OracleSource, defaults.OracleSource)
 				}
 				if svc.config.Logger == nil {
 					t.Error("Logger should have been set to default")
@@ -363,97 +410,143 @@ func TestStart(t *testing.T) {
 	tests := []struct {
 		name        string
 		setupRepo   func(r *mockRepo)
-		tokenAddrs  map[int64]common.Address
 		wantErr     bool
 		errContains string
 	}{
 		{
-			name: "success",
-			setupRepo: func(r *mockRepo) {
-				r.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-					return defaultOracle(), nil
-				}
-				r.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-					return defaultAssets(), nil
-				}
-				r.getLatestPrices = func(_ context.Context, _ int64) (map[int64]float64, error) {
-					return map[int64]float64{1: 2000.0, 2: 1.0}, nil
-				}
-			},
-			tokenAddrs: validTokenAddresses(),
-			wantErr:    false,
+			name:      "success",
+			setupRepo: defaultRepoSetup,
+			wantErr:   false,
 		},
 		{
-			name: "error GetOracle fails",
+			name: "error GetAllEnabledOracles fails",
 			setupRepo: func(r *mockRepo) {
-				r.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
+				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
 					return nil, fmt.Errorf("db connection refused")
 				}
 			},
-			tokenAddrs:  validTokenAddresses(),
 			wantErr:     true,
-			errContains: "getting oracle source",
+			errContains: "getting enabled oracles",
 		},
 		{
-			name: "error GetEnabledAssets fails",
+			name: "error GetEnabledAssets fails is warned and skipped",
 			setupRepo: func(r *mockRepo) {
-				r.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-					return defaultOracle(), nil
+				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+					return []*entity.Oracle{defaultOracle()}, nil
 				}
-				r.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return nil, fmt.Errorf("query timeout")
 				}
 			},
-			tokenAddrs:  validTokenAddresses(),
 			wantErr:     true,
-			errContains: "getting enabled assets",
+			errContains: "no oracles with enabled assets found",
 		},
 		{
-			name: "error GetEnabledAssets returns empty",
+			name: "error no enabled assets returns no oracles error",
 			setupRepo: func(r *mockRepo) {
-				r.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-					return defaultOracle(), nil
+				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+					return []*entity.Oracle{defaultOracle()}, nil
 				}
-				r.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return []*entity.OracleAsset{}, nil
 				}
 			},
-			tokenAddrs:  validTokenAddresses(),
 			wantErr:     true,
-			errContains: "no enabled assets",
+			errContains: "no oracles with enabled assets found",
 		},
 		{
-			name: "error token address not found in tokenAddressMap",
+			name: "error token address not found is warned and skipped",
 			setupRepo: func(r *mockRepo) {
-				r.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-					return defaultOracle(), nil
+				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+					return []*entity.Oracle{defaultOracle()}, nil
 				}
-				r.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return []*entity.OracleAsset{
-						{ID: 1, OracleID: 1, TokenID: 999, Enabled: true}, // 999 not in tokenAddressMap
+						{ID: 1, OracleID: 1, TokenID: 999, Enabled: true}, // 999 not in tokenAddresses
 					}, nil
 				}
+				r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
+					return defaultTokenAddressBytes(), nil // has 1, 2 but not 999
+				}
 			},
-			tokenAddrs:  validTokenAddresses(), // has 1, 2 but not 999
 			wantErr:     true,
-			errContains: "token address not found for token_id 999",
+			errContains: "no oracles with enabled assets found",
 		},
 		{
-			name: "error GetLatestPrices fails",
+			name: "error GetLatestPrices fails is warned and skipped",
 			setupRepo: func(r *mockRepo) {
-				r.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-					return defaultOracle(), nil
+				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+					return []*entity.Oracle{defaultOracle()}, nil
 				}
-				r.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return defaultAssets(), nil
 				}
-				r.getLatestPrices = func(_ context.Context, _ int64) (map[int64]float64, error) {
+				r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
+					return defaultTokenAddressBytes(), nil
+				}
+				r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 					return nil, fmt.Errorf("redis unavailable")
 				}
 			},
-			tokenAddrs:  validTokenAddresses(),
 			wantErr:     true,
-			errContains: "loading latest prices",
+			errContains: "no oracles with enabled assets found",
+		},
+		{
+			name: "success multiple oracles deduplicates by oracle_id",
+			setupRepo: func(r *mockRepo) {
+				oracle := defaultOracle()
+				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+					return []*entity.Oracle{oracle, oracle}, nil // same oracle twice
+				}
+				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+					return defaultAssets(), nil
+				}
+				r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
+					return defaultTokenAddressBytes(), nil
+				}
+				r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
+					return map[int64]float64{}, nil
+				}
+			},
+			wantErr: false,
+		},
+		{
+			name: "success with two distinct oracles",
+			setupRepo: func(r *mockRepo) {
+				oracle1 := defaultOracle()
+				oracle2 := &entity.Oracle{
+					ID:              2,
+					Name:            "aave-v3",
+					DisplayName:     "Aave V3 Oracle",
+					ChainID:         1,
+					Address:         common.HexToAddress("0x54586bE62E3c3580375aE3723C145253060Ca0C2"),
+					DeploymentBlock: 18000000,
+					Enabled:         true,
+				}
+				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+					return []*entity.Oracle{oracle1, oracle2}, nil
+				}
+				r.getEnabledAssetsFn = func(_ context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
+					if oracleID == 1 {
+						return defaultAssets(), nil
+					}
+					return []*entity.OracleAsset{
+						{ID: 3, OracleID: 2, TokenID: 3, Enabled: true},
+					}, nil
+				}
+				r.getTokenAddressesFn = func(_ context.Context, oracleID int64) (map[int64][]byte, error) {
+					if oracleID == 1 {
+						return defaultTokenAddressBytes(), nil
+					}
+					return map[int64][]byte{
+						3: common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").Bytes(),
+					}, nil
+				}
+				r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
+					return map[int64]float64{}, nil
+				}
+			},
+			wantErr: false,
 		},
 	}
 
@@ -477,7 +570,7 @@ func TestStart(t *testing.T) {
 				new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8)),
 			})
 
-			svc, err := NewService(validConfig(), sqsClient, mc, repo, tc.tokenAddrs)
+			svc, err := NewService(validConfig(), sqsClient, mc, repo)
 			if err != nil {
 				t.Fatalf("NewService failed: %v", err)
 			}
@@ -500,14 +593,8 @@ func TestStart(t *testing.T) {
 			}
 
 			// Verify initialization state
-			if svc.oracle == nil {
-				t.Error("oracle not set after Start")
-			}
-			if len(svc.assets) == 0 {
-				t.Error("assets not set after Start")
-			}
-			if len(svc.tokenAddrs) != len(svc.assets) {
-				t.Errorf("tokenAddrs length = %d, want %d", len(svc.tokenAddrs), len(svc.assets))
+			if len(svc.units) == 0 {
+				t.Error("units not set after Start")
 			}
 
 			// Clean up
@@ -527,16 +614,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("end to end: new prices are upserted, same prices are skipped", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-			return defaultOracle(), nil
-		}
-		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-			return defaultAssets(), nil
-		}
-		repo.getLatestPrices = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		defaultRepoSetup(repo)
+		repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 			return map[int64]float64{}, nil // empty cache means all prices are new
 		}
-		repo.upsertPrices = func(_ context.Context, prices []*entity.OnchainTokenPrice) error {
+		repo.upsertPricesFn = func(_ context.Context, prices []*entity.OnchainTokenPrice) error {
 			return nil
 		}
 
@@ -572,7 +654,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo, validTokenAddresses())
+		svc, err := NewService(cfg, sqsClient, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -583,27 +665,14 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}
 
 		// Wait for processing
-		deadline := time.After(2 * time.Second)
-		for {
+		testutil.WaitForCondition(t, 2*time.Second, func() bool {
 			repo.mu.Lock()
-			upserts := repo.upsertPricesCalls
-			repo.mu.Unlock()
-			if upserts >= 1 {
-				break
-			}
-			select {
-			case <-deadline:
-				t.Fatal("timed out waiting for UpsertPrices to be called")
-			default:
-				time.Sleep(5 * time.Millisecond)
-			}
-		}
+			defer repo.mu.Unlock()
+			return repo.upsertPricesCalls >= 1
+		}, "UpsertPrices to be called")
 
 		// Verify UpsertPrices was called with 2 prices (both new)
 		repo.mu.Lock()
-		if repo.upsertPricesCalls < 1 {
-			t.Errorf("UpsertPrices call count = %d, want >= 1", repo.upsertPricesCalls)
-		}
 		if len(repo.lastUpserted) != 2 {
 			t.Errorf("lastUpserted length = %d, want 2", len(repo.lastUpserted))
 		}
@@ -650,13 +719,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("SQS receive error", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-			return defaultOracle(), nil
-		}
-		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-			return defaultAssets(), nil
-		}
-		repo.getLatestPrices = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		defaultRepoSetup(repo)
+		repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 			return map[int64]float64{}, nil
 		}
 
@@ -670,7 +734,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo, validTokenAddresses())
+		svc, err := NewService(cfg, sqsClient, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -696,13 +760,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("SQS returns empty messages", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-			return defaultOracle(), nil
-		}
-		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-			return defaultAssets(), nil
-		}
-		repo.getLatestPrices = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		defaultRepoSetup(repo)
+		repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 			return map[int64]float64{}, nil
 		}
 
@@ -716,7 +775,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo, validTokenAddresses())
+		svc, err := NewService(cfg, sqsClient, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -741,13 +800,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("message with nil body", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-			return defaultOracle(), nil
-		}
-		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-			return defaultAssets(), nil
-		}
-		repo.getLatestPrices = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		defaultRepoSetup(repo)
+		repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 			return map[int64]float64{}, nil
 		}
 
@@ -774,7 +828,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo, validTokenAddresses())
+		svc, err := NewService(cfg, sqsClient, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -806,13 +860,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("message with invalid JSON", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-			return defaultOracle(), nil
-		}
-		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-			return defaultAssets(), nil
-		}
-		repo.getLatestPrices = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		defaultRepoSetup(repo)
+		repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 			return map[int64]float64{}, nil
 		}
 
@@ -839,7 +888,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo, validTokenAddresses())
+		svc, err := NewService(cfg, sqsClient, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -864,13 +913,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("multicall returns error during processBlock", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-			return defaultOracle(), nil
-		}
-		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-			return defaultAssets(), nil
-		}
-		repo.getLatestPrices = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		defaultRepoSetup(repo)
+		repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 			return map[int64]float64{}, nil
 		}
 
@@ -903,7 +947,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo, validTokenAddresses())
+		svc, err := NewService(cfg, sqsClient, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -935,13 +979,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("DeleteMessage returns error after successful processing", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-			return defaultOracle(), nil
-		}
-		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-			return defaultAssets(), nil
-		}
-		repo.getLatestPrices = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		defaultRepoSetup(repo)
+		repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 			return map[int64]float64{}, nil
 		}
 
@@ -975,7 +1014,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo, validTokenAddresses())
+		svc, err := NewService(cfg, sqsClient, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -985,28 +1024,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}
 
 		// Wait for processing
-		deadline := time.After(2 * time.Second)
-		for {
+		testutil.WaitForCondition(t, 2*time.Second, func() bool {
 			repo.mu.Lock()
-			upserts := repo.upsertPricesCalls
-			repo.mu.Unlock()
-			if upserts >= 1 {
-				break
-			}
-			select {
-			case <-deadline:
-				t.Fatal("timed out waiting for UpsertPrices to be called")
-			default:
-				time.Sleep(5 * time.Millisecond)
-			}
-		}
-
-		// UpsertPrices was called (message processed successfully)
-		repo.mu.Lock()
-		if repo.upsertPricesCalls < 1 {
-			t.Errorf("UpsertPrices call count = %d, want >= 1", repo.upsertPricesCalls)
-		}
-		repo.mu.Unlock()
+			defer repo.mu.Unlock()
+			return repo.upsertPricesCalls >= 1
+		}, "UpsertPrices to be called")
 
 		// DeleteMessage was attempted (even though it failed)
 		sqsClient.mu.Lock()
@@ -1022,13 +1044,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("price count mismatch from oracle", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-			return defaultOracle(), nil
-		}
-		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-			return defaultAssets(), nil
-		}
-		repo.getLatestPrices = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		defaultRepoSetup(repo)
+		repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 			return map[int64]float64{}, nil
 		}
 
@@ -1059,7 +1076,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo, validTokenAddresses())
+		svc, err := NewService(cfg, sqsClient, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1091,16 +1108,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("UpsertPrices returns error", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-			return defaultOracle(), nil
-		}
-		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-			return defaultAssets(), nil
-		}
-		repo.getLatestPrices = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		defaultRepoSetup(repo)
+		repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 			return map[int64]float64{}, nil
 		}
-		repo.upsertPrices = func(_ context.Context, _ []*entity.OnchainTokenPrice) error {
+		repo.upsertPricesFn = func(_ context.Context, _ []*entity.OnchainTokenPrice) error {
 			return fmt.Errorf("database write failure")
 		}
 
@@ -1132,7 +1144,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo, validTokenAddresses())
+		svc, err := NewService(cfg, sqsClient, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1142,21 +1154,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}
 
 		// Wait for the processing attempt
-		deadline := time.After(2 * time.Second)
-		for {
+		testutil.WaitForCondition(t, 2*time.Second, func() bool {
 			repo.mu.Lock()
-			calls := repo.upsertPricesCalls
-			repo.mu.Unlock()
-			if calls >= 1 {
-				break
-			}
-			select {
-			case <-deadline:
-				t.Fatal("timed out waiting for UpsertPrices to be called")
-			default:
-				time.Sleep(5 * time.Millisecond)
-			}
-		}
+			defer repo.mu.Unlock()
+			return repo.upsertPricesCalls >= 1
+		}, "UpsertPrices to be called")
 
 		// Message should NOT have been deleted because processMessage returned error
 		sqsClient.mu.Lock()
@@ -1172,13 +1174,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 	t.Run("entity validation error with blockNumber zero", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-			return defaultOracle(), nil
-		}
-		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-			return defaultAssets(), nil
-		}
-		repo.getLatestPrices = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		defaultRepoSetup(repo)
+		repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 			return map[int64]float64{}, nil
 		}
 
@@ -1196,7 +1193,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo, validTokenAddresses())
+		svc, err := NewService(cfg, sqsClient, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1242,7 +1239,7 @@ func TestStop(t *testing.T) {
 		sqsClient := &mockSQSClient{}
 		mc := &testutil.MockMulticaller{}
 
-		svc, err := NewService(validConfig(), sqsClient, mc, repo, validTokenAddresses())
+		svc, err := NewService(validConfig(), sqsClient, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1256,13 +1253,8 @@ func TestStop(t *testing.T) {
 
 	t.Run("stop after start", func(t *testing.T) {
 		repo := &mockRepo{}
-		repo.getOracle = func(_ context.Context, _ string) (*entity.Oracle, error) {
-			return defaultOracle(), nil
-		}
-		repo.getEnabledAssets = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-			return defaultAssets(), nil
-		}
-		repo.getLatestPrices = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		defaultRepoSetup(repo)
+		repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 			return map[int64]float64{}, nil
 		}
 
@@ -1277,7 +1269,7 @@ func TestStop(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, sqsClient, mc, repo, validTokenAddresses())
+		svc, err := NewService(cfg, sqsClient, mc, repo)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}

@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 
@@ -159,34 +158,15 @@ func run(args []string) error {
 		return fmt.Errorf("creating repository: %w", err)
 	}
 
-	// Load oracle and token addresses
-	oracle, err := repo.GetOracle(ctx, "sparklend")
-	if err != nil {
-		return fmt.Errorf("getting oracle source: %w", err)
-	}
-
-	tokenAddrBytes, err := repo.GetTokenAddresses(ctx, oracle.ID)
-	if err != nil {
-		return fmt.Errorf("getting token addresses: %w", err)
-	}
-
-	tokenAddresses := make(map[int64]common.Address, len(tokenAddrBytes))
-	for tokenID, addr := range tokenAddrBytes {
-		tokenAddresses[tokenID] = common.BytesToAddress(addr)
-	}
-	logger.Info("loaded token addresses", "count", len(tokenAddresses))
-
 	service, err := oracle_backfill.NewService(
 		oracle_backfill.Config{
-			Concurrency:  cfg.concurrency,
-			BatchSize:    cfg.batchSize,
-			OracleSource: "sparklend",
-			Logger:       logger,
+			Concurrency: cfg.concurrency,
+			BatchSize:   cfg.batchSize,
+			Logger:      logger,
 		},
 		ethClient,
 		newMulticaller,
 		repo,
-		tokenAddresses,
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)

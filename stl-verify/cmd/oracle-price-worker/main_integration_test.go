@@ -140,20 +140,11 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	}
 
 	// Wait for the block event to be processed (prices stored in DB)
-	deadline := time.After(10 * time.Second)
-	for {
+	testutil.WaitForCondition(t, 10*time.Second, func() bool {
 		var count int
 		pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price`).Scan(&count)
-		if count >= tokenCount {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("timed out waiting for prices (got %d, want %d)", count, tokenCount)
-		default:
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
+		return count >= tokenCount
+	}, "prices to be stored in DB")
 
 	// Send SIGINT to trigger graceful shutdown
 	p, _ := os.FindProcess(os.Getpid())
@@ -246,7 +237,7 @@ func TestRunIntegration_VerboseFlag(t *testing.T) {
 	}
 }
 
-func TestRunIntegration_OracleSourceNotFound(t *testing.T) {
+func TestRunIntegration_OracleTableNotFound(t *testing.T) {
 	// Database without migrations — oracle table does not exist
 	dsn, cleanup := testutil.StartTimescaleDB(t)
 	defer cleanup()
@@ -266,9 +257,9 @@ func TestRunIntegration_OracleSourceNotFound(t *testing.T) {
 		"-db", dsn,
 	})
 	if err == nil {
-		t.Fatal("expected error for missing oracle source table")
+		t.Fatal("expected error for missing oracle table")
 	}
-	if !strings.Contains(err.Error(), "oracle source") {
-		t.Errorf("expected oracle source error, got: %v", err)
+	if !strings.Contains(err.Error(), "oracle") {
+		t.Errorf("expected oracle-related error, got: %v", err)
 	}
 }

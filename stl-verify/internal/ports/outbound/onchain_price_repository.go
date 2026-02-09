@@ -28,4 +28,28 @@ type OnchainPriceRepository interface {
 	// GetTokenAddresses returns a map of token_id → on-chain address for all enabled
 	// oracle assets of the given oracle. Used to build the asset address list for oracle calls.
 	GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error)
+
+	// GetAllEnabledOracles retrieves all enabled oracles.
+	GetAllEnabledOracles(ctx context.Context) ([]*entity.Oracle, error)
+
+	// GetOracleByAddress retrieves an oracle by chain_id and onchain address.
+	GetOracleByAddress(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
+
+	// InsertOracle inserts a new oracle and returns it with the generated ID.
+	InsertOracle(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
+
+	// GetAllActiveProtocolOracles retrieves all active (to_block IS NULL) protocol-oracle bindings.
+	GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error)
+
+	// GetProtocol retrieves a protocol by ID.
+	GetProtocol(ctx context.Context, protocolID int64) (*entity.Protocol, error)
+
+	// CloseProtocolOracleBinding sets to_block on an existing protocol-oracle binding.
+	CloseProtocolOracleBinding(ctx context.Context, bindingID int64, toBlock int64) error
+
+	// InsertProtocolOracleBinding inserts a new protocol-oracle binding.
+	InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
+
+	// CopyOracleAssets copies all oracle_asset rows from one oracle to another.
+	CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error
 }

@@ -61,3 +61,44 @@ func SeedOracleAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, orac
 		t.Fatalf("failed to insert oracle asset (oracle=%d, token=%d): %v", oracleID, tokenID, err)
 	}
 }
+
+// SeedProtocol inserts a protocol and returns its auto-generated ID.
+func SeedProtocol(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int, address, name, protocolType string, createdAtBlock int64, metadata string) int64 {
+	t.Helper()
+	addrBytes, err := HexToBytes(address)
+	if err != nil {
+		t.Fatalf("failed to parse protocol address %s: %v", address, err)
+	}
+
+	var metadataArg any
+	if metadata != "" {
+		metadataArg = []byte(metadata)
+	}
+
+	var id int64
+	err = pool.QueryRow(ctx, `
+		INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+		VALUES ($1, $2, $3, $4, $5, NOW(), $6)
+		ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
+		RETURNING id
+	`, chainID, addrBytes, name, protocolType, createdAtBlock, metadataArg).Scan(&id)
+	if err != nil {
+		t.Fatalf("failed to insert protocol %s: %v", name, err)
+	}
+	return id
+}
+
+// SeedProtocolOracle inserts a protocol-oracle binding and returns its auto-generated ID.
+func SeedProtocolOracle(t *testing.T, ctx context.Context, pool *pgxpool.Pool, protocolID, oracleID, fromBlock int64) int64 {
+	t.Helper()
+	var id int64
+	err := pool.QueryRow(ctx, `
+		INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block)
+		VALUES ($1, $2, $3)
+		RETURNING id
+	`, protocolID, oracleID, fromBlock).Scan(&id)
+	if err != nil {
+		t.Fatalf("failed to insert protocol oracle (protocol=%d, oracle=%d): %v", protocolID, oracleID, err)
+	}
+	return id
+}

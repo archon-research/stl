@@ -64,13 +64,13 @@ func unpackAssetsPrices(oracleABI *abi.ABI, data []byte) ([]*big.Int, error) {
 }
 
 // ConvertOraclePriceToUSD converts a raw oracle price to USD.
-// Aave/SparkLend oracles return prices with 8 decimals (1e8 = $1.00).
-func ConvertOraclePriceToUSD(rawPrice *big.Int) float64 {
+// decimals specifies the oracle's price precision (e.g., 8 for Chainlink/Aave: 1e8 = $1.00).
+func ConvertOraclePriceToUSD(rawPrice *big.Int, decimals int) float64 {
 	if rawPrice == nil || rawPrice.Sign() == 0 {
 		return 0
 	}
 	f := new(big.Float).SetInt(rawPrice)
-	divisor := new(big.Float).SetFloat64(math.Pow10(8))
+	divisor := new(big.Float).SetFloat64(math.Pow10(decimals))
 	result, _ := new(big.Float).Quo(f, divisor).Float64()
 	return result
 }

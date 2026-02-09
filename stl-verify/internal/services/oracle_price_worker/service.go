@@ -1,5 +1,6 @@
 // Package oracle_price_worker provides an SQS consumer that fetches onchain oracle
 // prices for each new block and stores them in the database.
+// All oracles are loaded from the DB — no hardcoded oracle configuration.
 package oracle_price_worker
 
 import (
@@ -36,7 +37,6 @@ type Config struct {
 	MaxMessages     int32
 	WaitTimeSeconds int32
 	PollInterval    time.Duration
-	OracleSource    string // e.g., "sparklend"
 	Logger          *slog.Logger
 }
 
@@ -45,9 +45,17 @@ func configDefaults() Config {
 		MaxMessages:     10,
 		WaitTimeSeconds: 20,
 		PollInterval:    100 * time.Millisecond,
-		OracleSource:    "sparklend",
 		Logger:          slog.Default(),
 	}
+}
+
+// oracleUnit holds everything needed to fetch prices for one oracle.
+type oracleUnit struct {
+	oracle     *entity.Oracle
+	oracleAddr common.Address
+	tokenAddrs []common.Address  // ordered list of token addresses for oracle call
+	tokenIDs   []int64           // parallel to tokenAddrs
+	priceCache map[int64]float64 // tokenID → last stored price (for change detection)
 }
 
 // Service processes SQS block events and fetches oracle prices for each block.
@@ -58,16 +66,7 @@ type Service struct {
 	multicaller outbound.Multicaller
 
 	oracleABI *abi.ABI
-
-	// tokenAddressMap is the token_id → on-chain address mapping, provided at construction.
-	tokenAddressMap map[int64]common.Address
-
-	oracle     *entity.Oracle
-	assets     []*entity.OracleAsset
-	tokenAddrs []common.Address  // ordered list of token addresses for oracle call
-	tokenIDs   []int64           // parallel to tokenAddrs
-	oracleAddr common.Address    // oracle contract address
-	priceCache map[int64]float64 // tokenID → last stored price (for change detection)
+	units     []*oracleUnit
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -75,13 +74,11 @@ type Service struct {
 }
 
 // NewService creates a new oracle price worker service.
-// tokenAddresses maps token_id → on-chain address (loaded from the token table).
 func NewService(
 	config Config,
 	sqsClient SQSClient,
 	multicaller outbound.Multicaller,
 	repo outbound.OnchainPriceRepository,
-	tokenAddresses map[int64]common.Address,
 ) (*Service, error) {
 	if sqsClient == nil {
 		return nil, fmt.Errorf("sqsClient cannot be nil")
@@ -91,9 +88,6 @@ func NewService(
 	}
 	if repo == nil {
 		return nil, fmt.Errorf("repo cannot be nil")
-	}
-	if len(tokenAddresses) == 0 {
-		return nil, fmt.Errorf("tokenAddresses cannot be empty")
 	}
 
 	defaults := configDefaults()
@@ -109,9 +103,6 @@ func NewService(
 	if config.PollInterval == 0 {
 		config.PollInterval = defaults.PollInterval
 	}
-	if config.OracleSource == "" {
-		config.OracleSource = defaults.OracleSource
-	}
 	if config.Logger == nil {
 		config.Logger = defaults.Logger
 	}
@@ -122,14 +113,12 @@ func NewService(
 	}
 
 	return &Service{
-		config:          config,
-		sqsClient:       sqsClient,
-		repo:            repo,
-		multicaller:     multicaller,
-		oracleABI:       oracleABI,
-		tokenAddressMap: tokenAddresses,
-		priceCache:      make(map[int64]float64),
-		logger:          config.Logger.With("component", "oracle-price-worker"),
+		config:      config,
+		sqsClient:   sqsClient,
+		repo:        repo,
+		multicaller: multicaller,
+		oracleABI:   oracleABI,
+		logger:      config.Logger.With("component", "oracle-price-worker"),
 	}, nil
 }
 
@@ -145,8 +134,7 @@ func (s *Service) Start(ctx context.Context) error {
 
 	s.logger.Info("oracle price worker started",
 		"queue", s.config.QueueURL,
-		"oracleSource", s.config.OracleSource,
-		"assets", len(s.assets))
+		"oracles", len(s.units))
 	return nil
 }
 
@@ -160,47 +148,79 @@ func (s *Service) Stop() error {
 }
 
 func (s *Service) initialize(ctx context.Context) error {
-	oracle, err := s.repo.GetOracle(ctx, s.config.OracleSource)
+	allOracles, err := s.repo.GetAllEnabledOracles(ctx)
 	if err != nil {
-		return fmt.Errorf("getting oracle source: %w", err)
+		return fmt.Errorf("getting enabled oracles: %w", err)
 	}
-	s.oracle = oracle
-	s.oracleAddr = common.Address(oracle.Address)
 
+	seen := make(map[int64]bool)
+	for _, oracle := range allOracles {
+		if seen[oracle.ID] {
+			continue
+		}
+		seen[oracle.ID] = true
+
+		unit, err := s.buildOracleUnit(ctx, oracle)
+		if err != nil {
+			s.logger.Warn("skipping oracle", "name", oracle.Name, "error", err)
+			continue
+		}
+		if unit != nil {
+			s.units = append(s.units, unit)
+		}
+	}
+
+	if len(s.units) == 0 {
+		return fmt.Errorf("no oracles with enabled assets found")
+	}
+
+	s.logger.Info("initialized", "oracles", len(s.units))
+	return nil
+}
+
+func (s *Service) buildOracleUnit(ctx context.Context, oracle *entity.Oracle) (*oracleUnit, error) {
 	assets, err := s.repo.GetEnabledAssets(ctx, oracle.ID)
 	if err != nil {
-		return fmt.Errorf("getting enabled assets: %w", err)
+		return nil, fmt.Errorf("getting enabled assets: %w", err)
 	}
 	if len(assets) == 0 {
-		return fmt.Errorf("no enabled assets for oracle source %s", oracle.Name)
+		return nil, nil
 	}
-	s.assets = assets
 
-	// Build ordered token address and ID lists
-	s.tokenAddrs = make([]common.Address, len(assets))
-	s.tokenIDs = make([]int64, len(assets))
+	tokenAddrBytes, err := s.repo.GetTokenAddresses(ctx, oracle.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting token addresses: %w", err)
+	}
+
+	tokenAddrs := make([]common.Address, len(assets))
+	tokenIDs := make([]int64, len(assets))
 	for i, asset := range assets {
-		addr, ok := s.tokenAddressMap[asset.TokenID]
+		addrBytes, ok := tokenAddrBytes[asset.TokenID]
 		if !ok {
-			return fmt.Errorf("token address not found for token_id %d", asset.TokenID)
+			return nil, fmt.Errorf("token address not found for token_id %d", asset.TokenID)
 		}
-		s.tokenAddrs[i] = addr
-		s.tokenIDs[i] = asset.TokenID
+		tokenAddrs[i] = common.BytesToAddress(addrBytes)
+		tokenIDs[i] = asset.TokenID
 	}
 
 	// Initialize price cache from DB
 	cached, err := s.repo.GetLatestPrices(ctx, oracle.ID)
 	if err != nil {
-		return fmt.Errorf("loading latest prices: %w", err)
+		return nil, fmt.Errorf("loading latest prices: %w", err)
 	}
-	s.priceCache = cached
 
-	s.logger.Info("initialized",
-		"oracleSource", oracle.Name,
+	s.logger.Info("loaded oracle",
+		"name", oracle.Name,
 		"assets", len(assets),
 		"cachedPrices", len(cached))
 
-	return nil
+	return &oracleUnit{
+		oracle:     oracle,
+		oracleAddr: common.Address(oracle.Address),
+		tokenAddrs: tokenAddrs,
+		tokenIDs:   tokenIDs,
+		priceCache: cached,
+	}, nil
 }
 
 func (s *Service) processLoop() {
@@ -283,26 +303,43 @@ func (s *Service) processMessage(ctx context.Context, msg sqstypes.Message) erro
 }
 
 func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
+	var errs []error
+	for _, unit := range s.units {
+		if err := s.processBlockForOracle(ctx, event, unit); err != nil {
+			s.logger.Error("failed to process oracle",
+				"oracle", unit.oracle.Name,
+				"block", event.BlockNumber,
+				"error", err)
+			errs = append(errs, fmt.Errorf("oracle %s: %w", unit.oracle.Name, err))
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
+func (s *Service) processBlockForOracle(ctx context.Context, event blockEvent, unit *oracleUnit) error {
 	prices, err := blockchain.FetchOraclePrices(
 		ctx,
 		s.multicaller,
 		s.oracleABI,
-		s.oracleAddr,
-		s.tokenAddrs,
+		unit.oracleAddr,
+		unit.tokenAddrs,
 		event.BlockNumber,
 	)
 	if err != nil {
 		return fmt.Errorf("fetching oracle prices at block %d: %w", event.BlockNumber, err)
 	}
 
-	if len(prices) != len(s.tokenIDs) {
-		return fmt.Errorf("price count mismatch: expected %d, got %d", len(s.tokenIDs), len(prices))
+	if len(prices) != len(unit.tokenIDs) {
+		return fmt.Errorf("price count mismatch: expected %d, got %d", len(unit.tokenIDs), len(prices))
 	}
 
-	changed := s.detectChanges(prices, event)
+	changed := s.detectChanges(prices, event, unit)
 
 	if len(changed) == 0 {
-		s.logger.Debug("no price changes", "block", event.BlockNumber)
+		s.logger.Debug("no price changes", "oracle", unit.oracle.Name, "block", event.BlockNumber)
 		return nil
 	}
 
@@ -311,23 +348,28 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 	}
 
 	s.logger.Info("stored oracle prices",
+		"oracle", unit.oracle.Name,
 		"block", event.BlockNumber,
 		"changed", len(changed),
-		"total", len(s.tokenIDs))
+		"total", len(unit.tokenIDs))
 
 	return nil
 }
 
-func (s *Service) detectChanges(rawPrices []*big.Int, event blockEvent) []*entity.OnchainTokenPrice {
+func (s *Service) detectChanges(rawPrices []*big.Int, event blockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
-	oracleID := int16(s.oracle.ID)
+	oracleID := int16(unit.oracle.ID)
+	priceDecimals := unit.oracle.PriceDecimals
+	if priceDecimals == 0 {
+		priceDecimals = 8
+	}
 
 	var changed []*entity.OnchainTokenPrice
 	for i, rawPrice := range rawPrices {
-		priceUSD := blockchain.ConvertOraclePriceToUSD(rawPrice)
-		tokenID := s.tokenIDs[i]
+		priceUSD := blockchain.ConvertOraclePriceToUSD(rawPrice, priceDecimals)
+		tokenID := unit.tokenIDs[i]
 
-		if cachedPrice, ok := s.priceCache[tokenID]; ok && cachedPrice == priceUSD {
+		if cachedPrice, ok := unit.priceCache[tokenID]; ok && cachedPrice == priceUSD {
 			continue
 		}
 
@@ -344,7 +386,7 @@ func (s *Service) detectChanges(rawPrices []*big.Int, event blockEvent) []*entit
 			continue
 		}
 		changed = append(changed, price)
-		s.priceCache[tokenID] = priceUSD
+		unit.priceCache[tokenID] = priceUSD
 	}
 
 	return changed

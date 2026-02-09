@@ -12,7 +12,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
-	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -23,8 +22,6 @@ import (
 // ---------------------------------------------------------------------------
 // Integration mock helpers (SQS + multicall)
 // ---------------------------------------------------------------------------
-
-var testOracleAddr = common.HexToAddress("0x0000000000000000000000000000000000000BBB")
 
 // integrationMulticaller creates a mock multicaller that returns given prices for all blocks.
 func integrationMulticaller(t *testing.T, prices []*big.Int) *testutil.MockMulticaller {
@@ -119,16 +116,16 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	// Disable migration-seeded oracle to isolate test data
+	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
+		t.Fatalf("disable sparklend oracle: %v", err)
+	}
+
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker", "Test Worker", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000051", "WK1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000052", "WK2", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
-
-	tokenAddresses := map[int64]common.Address{
-		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000051"),
-		tokenID2: common.HexToAddress("0x0000000000000000000000000000000000000052"),
-	}
 
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
 	if err != nil {
@@ -149,13 +146,12 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 
 	cfg := Config{
 		QueueURL:        "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		OracleSource:    "test-worker",
 		PollInterval:    1 * time.Millisecond,
 		WaitTimeSeconds: 0,
 		Logger:          logger,
 	}
 
-	svc, err := NewService(cfg, sqsClient, mc, repo, tokenAddresses)
+	svc, err := NewService(cfg, sqsClient, mc, repo)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -166,20 +162,11 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	}
 
 	// Wait for processing
-	deadline := time.After(5 * time.Second)
-	for {
+	testutil.WaitForCondition(t, 5*time.Second, func() bool {
 		var count int
 		pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&count)
-		if count >= 2 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for prices to be stored")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+		return count >= 2
+	}, "prices to be stored")
 
 	// Verify prices stored
 	var priceCount int
@@ -239,16 +226,16 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	// Disable migration-seeded oracle to isolate test data
+	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
+		t.Fatalf("disable sparklend oracle: %v", err)
+	}
+
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-cd", "Test Worker CD", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000061", "CD1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000062", "CD2", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
-
-	tokenAddresses := map[int64]common.Address{
-		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000061"),
-		tokenID2: common.HexToAddress("0x0000000000000000000000000000000000000062"),
-	}
 
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
 	if err != nil {
@@ -271,13 +258,12 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 
 	cfg := Config{
 		QueueURL:        "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		OracleSource:    "test-worker-cd",
 		PollInterval:    1 * time.Millisecond,
 		WaitTimeSeconds: 0,
 		Logger:          logger,
 	}
 
-	svc, err := NewService(cfg, sqsClient, mc, repo, tokenAddresses)
+	svc, err := NewService(cfg, sqsClient, mc, repo)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -288,23 +274,11 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 	}
 
 	// Wait for both messages to be processed (at least 2 receive calls + 2 deletes)
-	deadline := time.After(5 * time.Second)
-	for {
+	testutil.WaitForCondition(t, 5*time.Second, func() bool {
 		sqsClient.mu.Lock()
-		deletes := sqsClient.deleteMessageCalls
-		sqsClient.mu.Unlock()
-		if deletes >= 2 {
-			break
-		}
-		select {
-		case <-deadline:
-			sqsClient.mu.Lock()
-			t.Fatalf("timed out waiting for message processing (deletes=%d)", sqsClient.deleteMessageCalls)
-			sqsClient.mu.Unlock()
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+		defer sqsClient.mu.Unlock()
+		return sqsClient.deleteMessageCalls >= 2
+	}, "both messages to be processed")
 
 	// Only the first block should have prices (change detection skips second)
 	var priceCount int
@@ -338,16 +312,16 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	// Disable migration-seeded oracle to isolate test data
+	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
+		t.Fatalf("disable sparklend oracle: %v", err)
+	}
+
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-multi", "Test Worker Multi", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000071", "MT1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000072", "MT2", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
-
-	tokenAddresses := map[int64]common.Address{
-		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000071"),
-		tokenID2: common.HexToAddress("0x0000000000000000000000000000000000000072"),
-	}
 
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
 	if err != nil {
@@ -369,13 +343,12 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 
 	cfg := Config{
 		QueueURL:        "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		OracleSource:    "test-worker-multi",
 		PollInterval:    1 * time.Millisecond,
 		WaitTimeSeconds: 0,
 		Logger:          logger,
 	}
 
-	svc, err := NewService(cfg, sqsClient, mc, repo, tokenAddresses)
+	svc, err := NewService(cfg, sqsClient, mc, repo)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -386,23 +359,11 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	}
 
 	// Wait for all 3 messages to be processed
-	deadline := time.After(5 * time.Second)
-	for {
+	testutil.WaitForCondition(t, 5*time.Second, func() bool {
 		sqsClient.mu.Lock()
-		deletes := sqsClient.deleteMessageCalls
-		sqsClient.mu.Unlock()
-		if deletes >= 3 {
-			break
-		}
-		select {
-		case <-deadline:
-			sqsClient.mu.Lock()
-			t.Fatalf("timed out waiting for all messages (deletes=%d)", sqsClient.deleteMessageCalls)
-			sqsClient.mu.Unlock()
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+		defer sqsClient.mu.Unlock()
+		return sqsClient.deleteMessageCalls >= 3
+	}, "all 3 messages to be processed")
 
 	// All 3 blocks should have prices (each has unique prices)
 	// 3 blocks * 2 tokens = 6 prices
@@ -437,13 +398,14 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	// Disable migration-seeded oracle to isolate test data
+	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
+		t.Fatalf("disable sparklend oracle: %v", err)
+	}
+
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-ss", "Test Worker SS", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000081", "SS1", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
-
-	tokenAddresses := map[int64]common.Address{
-		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000081"),
-	}
 
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
 	if err != nil {
@@ -463,13 +425,12 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 
 	cfg := Config{
 		QueueURL:        "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		OracleSource:    "test-worker-ss",
 		PollInterval:    1 * time.Millisecond,
 		WaitTimeSeconds: 0,
 		Logger:          logger,
 	}
 
-	svc, err := NewService(cfg, sqsClient, mc, repo, tokenAddresses)
+	svc, err := NewService(cfg, sqsClient, mc, repo)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -481,11 +442,11 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 	}
 
 	// Verify service initialized properly
-	if svc.oracle == nil {
-		t.Error("oracle not set after Start")
+	if len(svc.units) == 0 {
+		t.Error("units not set after Start")
 	}
-	if len(svc.assets) != 1 {
-		t.Errorf("expected 1 asset, got %d", len(svc.assets))
+	if len(svc.units) != 1 {
+		t.Errorf("expected 1 unit, got %d", len(svc.units))
 	}
 
 	// Stop should not error
@@ -512,42 +473,18 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Use the sparklend oracle seeded by migration
-	var oracleID int64
-	err := pool.QueryRow(ctx, `SELECT id FROM oracle WHERE name = 'sparklend'`).Scan(&oracleID)
+	// Count enabled oracle assets from all enabled oracles
+	var numTokens int
+	err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM oracle_asset oa
+		JOIN oracle o ON o.id = oa.oracle_id
+		WHERE o.enabled = true AND oa.enabled = true
+	`).Scan(&numTokens)
 	if err != nil {
-		t.Fatalf("failed to get sparklend oracle: %v", err)
+		t.Fatalf("failed to count enabled oracle assets: %v", err)
 	}
-
-	// Build token address map from migration-seeded data
-	tokenAddresses := make(map[int64]common.Address)
-	rows, err := pool.Query(ctx, `
-		SELECT oa.token_id, t.address
-		FROM oracle_asset oa
-		JOIN token t ON t.id = oa.token_id
-		WHERE oa.oracle_id = $1 AND oa.enabled = true
-		ORDER BY oa.id
-	`, oracleID)
-	if err != nil {
-		t.Fatalf("failed to query token addresses: %v", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var tokenID int64
-		var addressBytes []byte
-		if err := rows.Scan(&tokenID, &addressBytes); err != nil {
-			t.Fatalf("failed to scan token address: %v", err)
-		}
-		tokenAddresses[tokenID] = common.BytesToAddress(addressBytes)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("failed to iterate token addresses: %v", err)
-	}
-
-	numTokens := len(tokenAddresses)
 	if numTokens == 0 {
-		t.Fatal("no token addresses found from migration seed data")
+		t.Fatal("no enabled oracle assets found from migration seed data")
 	}
 
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
@@ -565,13 +502,12 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 
 	cfg := Config{
 		QueueURL:        "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		OracleSource:    "sparklend",
 		PollInterval:    1 * time.Millisecond,
 		WaitTimeSeconds: 0,
 		Logger:          logger,
 	}
 
-	svc, err := NewService(cfg, sqsClient, mc, repo, tokenAddresses)
+	svc, err := NewService(cfg, sqsClient, mc, repo)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -582,29 +518,20 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 	}
 
 	// Wait for the message to be processed
-	deadline := time.After(5 * time.Second)
-	for {
+	testutil.WaitForCondition(t, 5*time.Second, func() bool {
 		var count int
-		pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&count)
-		if count >= numTokens {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("timed out waiting for prices to be stored (expected %d)", numTokens)
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+		pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE block_number = 20000000`).Scan(&count)
+		return count >= numTokens
+	}, "prices to be stored for seeded migration data")
 
 	// Verify all tokens got prices
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1 AND block_number = 20000000`, oracleID).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE block_number = 20000000`).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query price count: %v", err)
 	}
 	if priceCount != numTokens {
-		t.Errorf("expected %d prices (one per seeded token), got %d", numTokens, priceCount)
+		t.Errorf("expected %d prices (one per enabled token), got %d", numTokens, priceCount)
 	}
 
 	if err := svc.Stop(); err != nil {
@@ -619,16 +546,16 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	// Disable migration-seeded oracle to isolate test data
+	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
+		t.Fatalf("disable sparklend oracle: %v", err)
+	}
+
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-cache", "Test Worker Cache", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000091", "CA1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000092", "CA2", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
-
-	tokenAddresses := map[int64]common.Address{
-		tokenID1: common.HexToAddress("0x0000000000000000000000000000000000000091"),
-		tokenID2: common.HexToAddress("0x0000000000000000000000000000000000000092"),
-	}
 
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
 	if err != nil {
@@ -673,13 +600,12 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 
 	cfg := Config{
 		QueueURL:        "https://sqs.us-east-1.amazonaws.com/123456789/test-queue",
-		OracleSource:    "test-worker-cache",
 		PollInterval:    1 * time.Millisecond,
 		WaitTimeSeconds: 0,
 		Logger:          logger,
 	}
 
-	svc, err := NewService(cfg, sqsClient, mc, repo, tokenAddresses)
+	svc, err := NewService(cfg, sqsClient, mc, repo)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -690,21 +616,11 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	}
 
 	// Wait for the message to be processed (delete indicates processing completed)
-	deadline := time.After(5 * time.Second)
-	for {
+	testutil.WaitForCondition(t, 5*time.Second, func() bool {
 		sqsClient.mu.Lock()
-		deletes := sqsClient.deleteMessageCalls
-		sqsClient.mu.Unlock()
-		if deletes >= 1 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for message to be processed")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+		defer sqsClient.mu.Unlock()
+		return sqsClient.deleteMessageCalls >= 1
+	}, "message to be processed")
 
 	// Should still have only 2 prices (the pre-seeded ones)
 	// The new block had the same prices, so change detection filtered them out

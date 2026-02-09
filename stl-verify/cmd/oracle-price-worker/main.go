@@ -1,5 +1,6 @@
-// Package main implements an SQS consumer that fetches SparkLend oracle prices for
+// Package main implements an SQS consumer that fetches oracle prices for
 // each new Ethereum block and stores price changes in PostgreSQL.
+// All oracles are loaded from the DB — no hardcoded oracle configuration.
 package main
 
 import (
@@ -15,7 +16,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -140,32 +140,14 @@ func run(args []string) error {
 		return fmt.Errorf("creating repository: %w", err)
 	}
 
-	oracle, err := repo.GetOracle(ctx, "sparklend")
-	if err != nil {
-		return fmt.Errorf("getting oracle source: %w", err)
-	}
-
-	tokenAddrBytes, err := repo.GetTokenAddresses(ctx, oracle.ID)
-	if err != nil {
-		return fmt.Errorf("getting token addresses: %w", err)
-	}
-
-	tokenAddresses := make(map[int64]common.Address, len(tokenAddrBytes))
-	for tokenID, addr := range tokenAddrBytes {
-		tokenAddresses[tokenID] = common.BytesToAddress(addr)
-	}
-	logger.Info("loaded token addresses", "count", len(tokenAddresses))
-
 	service, err := oracle_price_worker.NewService(
 		oracle_price_worker.Config{
-			QueueURL:     cfg.queueURL,
-			OracleSource: "sparklend",
-			Logger:       logger,
+			QueueURL: cfg.queueURL,
+			Logger:   logger,
 		},
 		sqsClient,
 		mc,
 		repo,
-		tokenAddresses,
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)
