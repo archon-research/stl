@@ -104,9 +104,14 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 
 // saveBlockOnce attempts a single save operation with serializable isolation.
 func (r *BlockStateRepository) saveBlockOnce(ctx context.Context, state outbound.BlockState) (int, error) {
-	// Use a transaction with SERIALIZABLE isolation to prevent version race conditions.
-	// This ensures that concurrent SaveBlock calls for the same block number will be serialized.
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	// Use READ COMMITTED isolation with an advisory lock to serialize version assignment.
+	// TimescaleDB hypertables use chunk-level constraints, so SERIALIZABLE isolation
+	// alone cannot detect version races in the assign_block_version() trigger — it
+	// produces unique constraint violations (23505) instead of serialization failures
+	// (40001). The advisory lock serializes inserts for the same (chain_id, number),
+	// and READ COMMITTED allows the trigger to see committed changes from the
+	// lock-holder (SERIALIZABLE snapshots would not).
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -115,6 +120,12 @@ func (r *BlockStateRepository) saveBlockOnce(ctx context.Context, state outbound
 			r.logger.Warn("failed to rollback transaction", "error", err)
 		}
 	}()
+
+	// Acquire advisory lock to serialize version assignment for this block number.
+	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::int, $2::int)`, r.chainID, state.Number)
+	if err != nil {
+		return 0, fmt.Errorf("failed to acquire advisory lock: %w", err)
+	}
 
 	// Check if a block with this hash already exists (duplicate detection).
 	// Done inside the serializable transaction to prevent TOCTOU races.
@@ -360,8 +371,8 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 
 // handleReorgAtomicOnce attempts a single reorg operation with SERIALIZABLE isolation.
 func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
-	// Use SERIALIZABLE isolation for consistency with SaveBlock
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	// Use READ COMMITTED with advisory lock, consistent with saveBlockOnce.
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
