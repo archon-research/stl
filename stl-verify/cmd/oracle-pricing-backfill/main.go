@@ -43,7 +43,7 @@ type cliConfig struct {
 }
 
 func parseFlags(args []string) (cliConfig, error) {
-	fs := flag.NewFlagSet("oracle-backfill", flag.ContinueOnError)
+	fs := flag.NewFlagSet("oracle-pricing-backfill", flag.ContinueOnError)
 	rpcURL := fs.String("rpc-url", "", "Erigon HTTP RPC endpoint (e.g., http://erigon:8545)")
 	fromBlock := fs.Int64("from", 0, "Start block number (required)")
 	toBlock := fs.Int64("to", 0, "End block number (required)")

@@ -16,7 +16,8 @@
         db-migrate db-set-passwords db-test-app-user \
         erigon-init erigon-validate erigon-plan erigon-apply erigon-apply-auto erigon-destroy erigon-check \
         erigon-status erigon-logs erigon-logs-follow erigon-deploy-readonly erigon-switch-readonly erigon-switch-sync erigon-mode \
-        erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download
+        erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download \
+        build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -195,7 +196,7 @@ dev-up:
 	@printf '%s\n' \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
-		> cmd/oracle-backfill/.env
+		> cmd/oracle-pricing-backfill/.env
 	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text 2>/dev/null || echo '') && \
 	TIGERDATA_URL=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-tigerdata-readonly --query SecretString --output text 2>/dev/null | jq -r '.connection_url // empty' | sed 's|@[^:]*:|@localhost:|') && \
 	printf '%s\n' \
@@ -713,27 +714,20 @@ build-oracle-worker:
 	go build -o dist/oracle-price-worker ./cmd/oracle-price-worker
 	@echo "==> Built: dist/oracle-price-worker"
 
-# Build oracle-backfill binary
-build-oracle-backfill:
-	@echo "==> Building oracle-backfill..."
+# Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
+build-oracle-pricing-backfill-arm64:
+	@echo "==> Building oracle-pricing-backfill for ARM64 Linux..."
 	mkdir -p dist
-	go build -o dist/oracle-backfill ./cmd/oracle-backfill
-	@echo "==> Built: dist/oracle-backfill"
+	GOOS=linux GOARCH=arm64 go build -o dist/oracle-pricing-backfill-linux-arm64 ./cmd/oracle-pricing-backfill
+	@echo "==> Built: dist/oracle-pricing-backfill-linux-arm64"
 
-# Build oracle-backfill binary for ARM64 Linux (to run on Erigon node)
-build-oracle-backfill-arm64:
-	@echo "==> Building oracle-backfill for ARM64 Linux..."
-	mkdir -p dist
-	GOOS=linux GOARCH=arm64 go build -o dist/oracle-backfill-linux-arm64 ./cmd/oracle-backfill
-	@echo "==> Built: dist/oracle-backfill-linux-arm64"
-
-# Deploy oracle-backfill to Erigon node
-# Usage: make deploy-oracle-backfill ERIGON_USER=<user> ERIGON_IP=<ip>
-deploy-oracle-backfill: build-oracle-backfill-arm64
+# Deploy oracle-pricing-backfill to Erigon node
+# Usage: make deploy-oracle-pricing-backfill ERIGON_USER=<user> ERIGON_IP=<ip>
+deploy-oracle-pricing-backfill: build-oracle-pricing-backfill-arm64
 	$(call require_erigon_vars)
-	@echo "==> Deploying oracle-backfill to Erigon node..."
-	cat dist/oracle-backfill-linux-arm64 | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > ~/oracle-backfill && chmod +x ~/oracle-backfill'
-	@echo "==> Deployed to ~/oracle-backfill on Erigon node."
+	@echo "==> Deploying oracle-pricing-backfill to Erigon node..."
+	cat dist/oracle-pricing-backfill-linux-arm64 | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > ~/oracle-pricing-backfill && chmod +x ~/oracle-pricing-backfill'
+	@echo "==> Deployed to ~/oracle-pricing-backfill on Erigon node."
 
 # Build bulk-download binary for ARM64 Linux (to run on Erigon node)
 build-bulk-download-arm64:

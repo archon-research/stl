@@ -3,7 +3,7 @@
 # Log everything
 exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
 
-echo "=== Starting Erigon Archive Node setup (c8gd.16xlarge with NVMe) ==="
+echo "=== Starting Erigon Archive Node setup (c8gd with NVMe) ==="
 
 # Install SSM agent first (not pre-installed on AL2023)
 echo "=== Installing SSM agent ==="
@@ -44,7 +44,7 @@ set -e
 
 # =============================================================================
 # Setup RAID 0 on the two local NVMe instance store disks
-# c8gd.16xlarge has 2x 1900GB NVMe disks
+# c8gd instances have local NVMe instance store disks
 # =============================================================================
 echo "=== Setting up NVMe RAID 0 ==="
 
@@ -171,15 +171,18 @@ ExecStart=/usr/local/bin/erigon \
   --http.corsdomain=* \
   --private.api.addr=localhost:9090 \
   --txpool.disable \
+  --state.cache=80GB \
+  --bodies.cache=16GB \
+  --batchSize=1GB \
+  --db.size.limit=4TB \
+  --rpc.batch.limit=10000 \
+  --rpc.batch.concurrency=128 \
+  --rpc.returndata.limit=10000000 \
+  --rpc.evmtimeout=30m \
+  --db.read.concurrency=256 \
   --nodiscover \
   --maxpeers=0 \
-  --db.size.limit=4TB \
-  --batchSize=512M \
-  --rpc.batch.limit=2000 \
-  --rpc.batch.concurrency=128 \
-  --rpc.returndata.limit=1000000 \
-  --db.read.concurrency=256 \
-  --log.console.verbosity=info
+  --log.console.verbosity=warn
 Restart=always
 RestartSec=10
 LimitNOFILE=1048576
@@ -210,14 +213,14 @@ ExecStart=/usr/local/bin/erigon \
   --http.vhosts=* \
   --http.corsdomain=* \
   --private.api.addr=localhost:9090 \
-  --torrent.download.rate=500mb \
+  --torrent.download.rate=1gb \
   --torrent.upload.rate=50mb \
-  --db.size.limit=4TB \
-  --batchSize=512M \
+  --db.size.limit=8TB \
+  --batchSize=1GB \
   --rpc.batch.limit=1000 \
-  --rpc.batch.concurrency=32 \
+  --rpc.batch.concurrency=64 \
   --rpc.returndata.limit=1000000 \
-  --db.read.concurrency=128 \
+  --db.read.concurrency=256 \
   --log.console.verbosity=info
 Restart=always
 RestartSec=10
@@ -297,7 +300,7 @@ systemctl start erigon
 
 echo "=== Setup complete ==="
 echo ""
-echo "c8gd.16xlarge NVMe RAID 0 setup complete!"
+echo "NVMe RAID 0 setup complete!"
 echo ""
 echo "Storage: $(df -h /data | tail -1 | awk '{print $2}')"
 echo ""
