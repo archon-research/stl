@@ -267,10 +267,14 @@ dev-ips:
 
 INFRA_DIR := ../infra
 
-# Require ENV to be explicitly set
+# Require ENV to be explicitly set for Terraform targets
 # Derive AWS_PROFILE from ENV (e.g., sentineldev -> sentineldev profile)
-ifeq ($(ENV),)
-$(error ENV is required. Usage: make tf-init ENV=sentineldev|sentinelstaging|sentinelprod)
+# Only check ENV when running terraform-related targets
+TF_TARGETS := tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check tf-bootstrap tf-destroy-bootstrap
+ifneq ($(filter $(TF_TARGETS),$(MAKECMDGOALS)),)
+  ifeq ($(ENV),)
+    $(error ENV is required. Usage: make tf-init ENV=sentineldev|sentinelstaging|sentinelprod)
+  endif
 endif
 AWS_PROFILE ?= $(ENV)
 
