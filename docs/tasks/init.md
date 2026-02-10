@@ -51,40 +51,53 @@ RWA tokenization platforms: Held token balance, token price.
 
 ### Index Star-Allocated Onchain Protocols
 
-- [ ] Index Sparklend
+- [X] Index Sparklend
   - **Labels:** `indexing`
   - **Note:** first Ethereum, then Gnosis
+  - **Ticket:** SEN-112 + SEN-113 + SEN-115
   - **Phase:** 1
 
-- [ ] Index Aave
+- [-] Index Aave (In review)
   - **Labels:** `indexing`
   - **Note:** first Ethereum, then Avalanche
+  - **Ticket:** SEN-114 + ?
   - **Phase:** 1
 
 - [ ] Index Maple
   - **Labels:** `indexing`
+  - **Estimate:** 4 days
+  - **Ticket:** SEN-152
   - **Phase:** 1
 
 - [ ] Index Anchroage
   - **Note:** Currently blocked as there is no public data to track
   - **Labels:** `indexing`
+  - **Ticket:** SEN-153
   - **Phase:** 1
 
 - [ ] Index Arkis
   - **Labels:** `indexing`
+  - **Estimate:** 4 days
+  - **Ticket:** SEN-154
   - **Phase:** 1
 
 - [ ] Index Morpho
   - **Labels:** `indexing`
+  - **Estimate:** 6 days
+  - **Ticket:** SEN-155
   - **Note:** first Ethereum, then Base
-  - **Phase:** 3
+  - **Phase:** 1
 
 - [ ] Index DEXes (Curve)
   - **Labels:** `indexing`
+  - **Ticket:** SEN-156
+  - **Estimate:** 4 days
   - **Phase:** 2
 
 - [ ] Index DEXes (Uniswap)
   - **Labels:** `indexing`
+  - **Ticket:** SEN-157
+  - **Estimate:** 4 days
   - **Phase:** 2
 
 - [ ] Index RWA tokenization platforms (Centrifuge)
@@ -98,6 +111,15 @@ RWA tokenization platforms: Held token balance, token price.
 - [ ] Index RWA tokenization platforms (INX)
   - **Labels:** `indexing-rwa`
   - **Phase:** 2
+
+### Deploy Index workers
+
+- [ ] Deploy each worker
+  - **Labels:** `infrastructure`
+  - **Estimate:** 2 days
+  - **Phase:** 1
+  - **Ticket:** SEN-151
+  - **Note:** Each worker needs pretty much the same setup so initially perhaps copy-paste but long term refactor to make this nice
 
 ---
 
@@ -153,7 +175,9 @@ RWA tokenization platforms: Held token balance, token price.
 
 - [ ] Implement tracking of Star allocations (Spark)
   - **Labels:** `indexing`
+  - **Estimate:** 2 days
   - **Phase:** 1
+  - **Ticket:** SEN-149
   - Track token balances
   - Handle exceptions (e.g., Galaxy)
   - Handle allocations in transition (not strictly necessary, but affects alerting)
@@ -161,7 +185,9 @@ RWA tokenization platforms: Held token balance, token price.
 
 - [ ] Implement tracking of Star allocations (Grove)
   - **Labels:** `indexing`
+  - **Estimate:** 2 days
   - **Phase:** 1
+  - **Ticket:** SEN-150
   - Track token balances
   - Handle exceptions
   - Handle allocations in transition (not strictly necessary, but affects alerting)
@@ -173,7 +199,9 @@ RWA tokenization platforms: Held token balance, token price.
 
 - [ ] Implement Python business layer
   - **Labels:** `api`
+  - **Estimate:** 1 day
   - **Phase:** 2
+  - **Ticket:** SEN-147
   - For initial lending market risk engine, will need to:
   - Get `asset correlation`
   - Get `historical APYs`
@@ -185,7 +213,9 @@ RWA tokenization platforms: Held token balance, token price.
 
 - [ ] Implement Terraform, docker for Python API
   - **Labels:** `infrastructure`
-  - **Phase:**: 2
+  - **Estimate:** 1 day
+  - **Phase:** 2
+  - **Ticket:** SEN-148
   - Once the API is ready make sure it is deployable, has DB access, an api endpoint etc
 
 ---
@@ -196,7 +226,9 @@ RWA tokenization platforms: Held token balance, token price.
 
 - [ ] Add initial lending market risk engine (follow current BA methodology)
   - **Labels:** `risk`
-  - **Phase:** 1
+  - **Estimate:** 3 days
+  - **Ticket:** SEN-68
+  - **Phase:** 2
 
 - [ ] Implement updated lending market risk engine
   - **Labels:** `risk`
@@ -219,6 +251,8 @@ RWA tokenization platforms: Held token balance, token price.
 #### API
 - [ ] Define routes to interact with risk engines (FastAPI)
   - **Labels:** `api`
+  - **Estimate:** 1 day
+  - **Ticket:** SEN-74
   - **Phase:** 2
 
 #### Alerting & Monitoring
