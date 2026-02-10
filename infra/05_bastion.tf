@@ -167,6 +167,13 @@ resource "aws_instance" "bastion" {
   # No SSH key - use Tailscale or SSM Session Manager
   key_name = null
 
+  lifecycle {
+    precondition {
+      condition     = !var.tailscale_enabled || var.bastion_enabled
+      error_message = "Tailscale requires bastion to be enabled. Set bastion_enabled = true when tailscale_enabled = true."
+    }
+  }
+
   user_data = <<-EOF
     #!/bin/bash
     set -e

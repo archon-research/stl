@@ -14,6 +14,11 @@ variable "environment" {
   description = "Environment name (e.g. sentinelstaging, sentinelprod)"
   type        = string
   # No default - must be specified explicitly
+
+  validation {
+    condition     = contains(["sentineldev", "sentinelstaging", "sentinelprod"], var.environment)
+    error_message = "Environment must be one of: sentineldev, sentinelstaging, sentinelprod."
+  }
 }
 
 variable "resource_suffix" {
@@ -35,6 +40,11 @@ variable "tigerdata_project_id" {
   description = "TigerData project ID from console. Set via TF_VAR_tigerdata_project_id env var."
   type        = string
   # No default - must be provided via environment variable or -var flag
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]+$", var.tigerdata_project_id))
+    error_message = "TigerData project ID must be set and contain only lowercase letters, numbers, and hyphens."
+  }
 }
 
 variable "tigerdata_access_key" {
@@ -42,6 +52,11 @@ variable "tigerdata_access_key" {
   type        = string
   sensitive   = true
   # No default - must be provided via environment variable or -var flag
+
+  validation {
+    condition     = length(var.tigerdata_access_key) > 0
+    error_message = "TigerData access key must be set. Add to .env file or set TF_VAR_tigerdata_access_key."
+  }
 }
 
 variable "tigerdata_secret_key" {
@@ -49,6 +64,11 @@ variable "tigerdata_secret_key" {
   type        = string
   sensitive   = true
   # No default - must be provided via environment variable or -var flag
+
+  validation {
+    condition     = length(var.tigerdata_secret_key) > 0
+    error_message = "TigerData secret key must be set. Add to .env file or set TF_VAR_tigerdata_secret_key."
+  }
 }
 
 variable "tigerdata_milli_cpu" {
@@ -137,6 +157,11 @@ variable "alchemy_api_key" {
   type        = string
   sensitive   = true
   default     = "placeholder" # Will be updated in Secrets Manager
+
+  validation {
+    condition     = var.alchemy_api_key != "placeholder" && length(var.alchemy_api_key) > 10
+    error_message = "Alchemy API key must be set (get from https://dashboard.alchemy.com/apps). Add to .env file or set TF_VAR_alchemy_api_key."
+  }
 }
 
 variable "coingecko_api_key" {
