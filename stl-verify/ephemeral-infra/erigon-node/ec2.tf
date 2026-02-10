@@ -27,7 +27,7 @@ resource "aws_security_group" "erigon" {
   description = "Security group for Erigon archive node"
   vpc_id      = data.aws_vpc.main.id
 
-  # All outbound: covers Tailscale, NAT (P2P sync, packages), S3 endpoint,
+  # All outbound: covers Tailscale, NAT (torrent snapshot downloads, packages), S3 endpoint,
   # and TigerData access via VPC peering route.
   egress {
     from_port   = 0
