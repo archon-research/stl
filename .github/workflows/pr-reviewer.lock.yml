@@ -21,7 +21,7 @@
 #
 # On-demand PR code reviewer for STL Verify using /review command
 #
-# frontmatter-hash: 77a185918674e16d03639e8ccbf0b463380fca539b0078b543234502586427d9
+# frontmatter-hash: 6fde1c90126fd0485e96fcb34b7e68781ff4c511b15221f19e319efccadc6728
 
 name: "STL Verify PR Code Reviewer"
 "on":
@@ -494,6 +494,11 @@ jobs:
           
           [mcp_servers.safeoutputs.headers]
           Authorization = "$GH_AW_SAFE_OUTPUTS_API_KEY"
+          
+          # Custom configuration
+          [model_providers.openai]
+          wire_api = "chat"
+          
           EOF
           
           # Generate JSON config for MCP gateway

@@ -15,6 +15,9 @@ engine:
   model: route-llm
   env:
     OPENAI_BASE_URL: https://routellm.abacus.ai/v1
+  config: |
+    [model_providers.openai]
+    wire_api = "chat"
 permissions:
   contents: read
   pull-requests: read
