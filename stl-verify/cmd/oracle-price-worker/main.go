@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+
 	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -94,14 +95,7 @@ func run(ctx context.Context, args []string) error {
 	logger.Info("starting oracle price worker", "queue", cfg.queueURL)
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithRegion(env.Get("AWS_REGION", "us-east-1")),
-		awsconfig.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
-			return aws.Credentials{
-				AccessKeyID:     env.Get("AWS_ACCESS_KEY_ID", "test"),
-				SecretAccessKey: env.Get("AWS_SECRET_ACCESS_KEY", "test"),
-				Source:          "Static",
-			}, nil
-		})),
+		awsconfig.WithRegion(env.Get("AWS_REGION", "eu-west-1")),
 	)
 	if err != nil {
 		return fmt.Errorf("loading AWS config: %w", err)
