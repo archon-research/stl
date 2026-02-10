@@ -71,24 +71,21 @@ HELD_ADDRESSES = {
         },
         "avalanche": {
             "alm": "0xecE6B0E8a54c2f44e066fBb9234e7157B15b7FeC"
-        },
-        "plume": {
-            "alm": "0x1DB91ad50446a671e2231f77e00948E68876F812"
-        },
-        "monad": {
-            "anchorage": "0x94B398ACb2fcE988871218221EA6a4a2b26CcCbC"
         }
     },
     "grove": {
         "ethereum": {
             "alm": "0x491EDFB0B8b608044e227225C715981a30F3A44E",
-            "anchorage": "0x94B398ACb2fcE988871218221EA6a4a2b26CcCbC"
+            "eoa": "0x94B398ACb2fcE988871218221EA6a4a2b26CcCbC"
         },
         "avalanche": {
             "alm": "0x7107DD8F56642327945294a18A4280C78e153644"
         },
         "base": {
             "alm": "0x9B746dBC5269e1DF6e4193Bcb441C0FbBF1CeCEe"
+        },
+        "plume": {
+            "alm": "0x1DB91ad50446a671e2231f77e00948E68876F812"
         },
         "monad": {
             "eoa": "0x94B398ACb2fcE988871218221EA6a4a2b26CcCbC"
