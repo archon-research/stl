@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
 	"testing"
 	"time"
 
@@ -31,277 +30,16 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/testutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// =============================================================================
-// Mock Implementations
-// =============================================================================
-
-// mockSubscriber simulates block notifications from Alchemy WebSocket.
-type mockSubscriber struct {
-	headers chan outbound.BlockHeader
-	closed  bool
-	mu      sync.Mutex
-}
-
-func newMockSubscriber() *mockSubscriber {
-	return &mockSubscriber{
-		headers: make(chan outbound.BlockHeader, 100),
-	}
-}
-
-func (m *mockSubscriber) Subscribe(ctx context.Context) (<-chan outbound.BlockHeader, error) {
-	return m.headers, nil
-}
-
-func (m *mockSubscriber) Unsubscribe() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.closed {
-		m.closed = true
-		close(m.headers)
-	}
-	return nil
-}
-
-func (m *mockSubscriber) HealthCheck(ctx context.Context) error {
-	return nil
-}
-
-func (m *mockSubscriber) sendHeader(header outbound.BlockHeader) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.closed {
-		m.headers <- header
-	}
-}
-
-// mockBlockchainClient provides mock block data for tests.
-type mockBlockchainClient struct {
-	blocks map[int64]blockTestData
-	mu     sync.RWMutex
-}
-
-type blockTestData struct {
-	header   outbound.BlockHeader
-	receipts json.RawMessage
-	traces   json.RawMessage
-	blobs    json.RawMessage
-}
-
-func newMockBlockchainClient() *mockBlockchainClient {
-	return &mockBlockchainClient{
-		blocks: make(map[int64]blockTestData),
-	}
-}
-
-func (m *mockBlockchainClient) addBlock(num int64, parentHash string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	hash := fmt.Sprintf("0x%064x", num)
-	if parentHash == "" && num > 0 {
-		parentHash = fmt.Sprintf("0x%064x", num-1)
-	}
-
-	header := outbound.BlockHeader{
-		Number:     fmt.Sprintf("0x%x", num),
-		Hash:       hash,
-		ParentHash: parentHash,
-		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
-	}
-
-	m.blocks[num] = blockTestData{
-		header:   header,
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
-}
-
-func (m *mockBlockchainClient) addBlockWithHash(num int64, parentHash string, hash string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	header := outbound.BlockHeader{
-		Number:     fmt.Sprintf("0x%x", num),
-		Hash:       hash,
-		ParentHash: parentHash,
-		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
-	}
-
-	m.blocks[num] = blockTestData{
-		header:   header,
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
-}
-
-func (m *mockBlockchainClient) getHeader(num int64) outbound.BlockHeader {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.blocks[num].header
-}
-
-func (m *mockBlockchainClient) GetBlockByNumber(ctx context.Context, blockNum int64, fullTx bool) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		data, _ := json.Marshal(bd.header)
-		return data, nil
-	}
-	return nil, fmt.Errorf("block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (*outbound.BlockHeader, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			h := bd.header
-			return &h, nil
-		}
-	}
-	return nil, fmt.Errorf("block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			data, _ := json.Marshal(bd.header)
-			return data, nil
-		}
-	}
-	return nil, fmt.Errorf("block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.receipts, nil
-	}
-	return nil, fmt.Errorf("receipts for block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			return bd.receipts, nil
-		}
-	}
-	return nil, fmt.Errorf("receipts for block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.traces, nil
-	}
-	return nil, fmt.Errorf("traces for block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			return bd.traces, nil
-		}
-	}
-	return nil, fmt.Errorf("traces for block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.blobs, nil
-	}
-	return nil, fmt.Errorf("blobs for block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			return bd.blobs, nil
-		}
-	}
-	return nil, fmt.Errorf("blobs for block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var max int64
-	for num := range m.blocks {
-		if num > max {
-			max = num
-		}
-	}
-	return max, nil
-}
-
-func (m *mockBlockchainClient) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx bool) ([]outbound.BlockData, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	results := make([]outbound.BlockData, len(blockNums))
-	for i, num := range blockNums {
-		if bd, ok := m.blocks[num]; ok {
-			data, _ := json.Marshal(bd.header)
-			results[i] = outbound.BlockData{
-				BlockNumber: num,
-				Block:       data,
-				Receipts:    bd.receipts,
-				Traces:      bd.traces,
-				Blobs:       bd.blobs,
-			}
-		} else {
-			results[i] = outbound.BlockData{
-				BlockNumber: num,
-				BlockErr:    fmt.Errorf("block %d not found", num),
-			}
-		}
-	}
-	return results, nil
-}
-
-func (m *mockBlockchainClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			data, _ := json.Marshal(bd.header)
-			return outbound.BlockData{
-				BlockNumber: blockNum,
-				Block:       data,
-				Receipts:    bd.receipts,
-				Traces:      bd.traces,
-				Blobs:       bd.blobs,
-			}, nil
-		}
-	}
-	return outbound.BlockData{}, fmt.Errorf("block %s not found", hash)
+// newTestBlockchainClient returns a MockBlockchainClient configured for
+// watcher e2e tests. It sets UseBlockErrForMissing so that GetBlocksBatch
+// returns BlockErr on blocks not previously added.
+func newTestBlockchainClient() *testutil.MockBlockchainClient {
+	c := testutil.NewMockBlockchainClient()
+	c.UseBlockErrForMissing = true
+	return c
 }
 
 // =============================================================================
@@ -322,10 +60,10 @@ func TestLiveService_ProcessesNewBlock(t *testing.T) {
 	t.Cleanup(infra.Cleanup)
 
 	// Create mock subscriber that will emit blocks
-	mockSub := newMockSubscriber()
+	mockSub := testutil.NewMockSubscriber()
 
 	// Create mock blockchain client
-	mockClient := newMockBlockchainClient()
+	mockClient := newTestBlockchainClient()
 
 	// Create live service
 	config := live_data.LiveConfig{
@@ -354,11 +92,11 @@ func TestLiveService_ProcessesNewBlock(t *testing.T) {
 	defer liveService.Stop()
 
 	// Set up block data that mock client will return
-	mockClient.addBlock(100, "0x"+fmt.Sprintf("%064x", 99))
+	mockClient.AddBlock(100, "0x"+fmt.Sprintf("%064x", 99))
 
 	// Emit block notification via header
-	header := mockClient.getHeader(100)
-	mockSub.sendHeader(header)
+	header := mockClient.GetHeader(100)
+	mockSub.SendHeader(header)
 
 	// Wait for messages on all queues
 	const messageTimeout = 10 * time.Second
@@ -412,8 +150,8 @@ func TestMultipleBlocksInSequence(t *testing.T) {
 	infra := setupTestInfrastructure(t, ctx)
 	t.Cleanup(infra.Cleanup)
 
-	mockSub := newMockSubscriber()
-	mockClient := newMockBlockchainClient()
+	mockSub := testutil.NewMockSubscriber()
+	mockClient := newTestBlockchainClient()
 
 	config := live_data.LiveConfig{
 		ChainID:            1,
@@ -443,9 +181,10 @@ func TestMultipleBlocksInSequence(t *testing.T) {
 	const numBlocks = 10
 	for i := int64(100); i < 100+numBlocks; i++ {
 		parentHash := fmt.Sprintf("0x%064x", i-1)
-		mockClient.addBlock(i, parentHash)
-		header := mockClient.getHeader(i)
-		mockSub.sendHeader(header)
+		mockClient.AddBlock(i, parentHash)
+		header := mockClient.GetHeader(i)
+		mockSub.SendHeader(header)
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	// Wait until all blocks are saved

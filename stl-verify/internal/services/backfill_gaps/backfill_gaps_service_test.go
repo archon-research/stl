@@ -12,271 +12,13 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// mockBlockchainClient provides predictable block data for testing.
-type mockBlockchainClient struct {
-	mu          sync.RWMutex
-	blocks      map[int64]blockTestData
-	extraBlocks map[string]blockTestData // Uncles/orphans accessible by hash only
-	delay       time.Duration
-}
-
-type blockTestData struct {
-	header   outbound.BlockHeader
-	receipts json.RawMessage
-	traces   json.RawMessage
-	blobs    json.RawMessage
-}
-
-func newMockClient() *mockBlockchainClient {
-	return &mockBlockchainClient{
-		blocks:      make(map[int64]blockTestData),
-		extraBlocks: make(map[string]blockTestData),
-	}
-}
-
-// addUncle adds a block that is accessible by hash but is NOT the canonical block at that number
-func (m *mockBlockchainClient) addUncle(num int64, hash string, parentHash string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	header := outbound.BlockHeader{
-		Number:     fmt.Sprintf("0x%x", num),
-		Hash:       hash,
-		ParentHash: parentHash,
-		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
-	}
-
-	m.extraBlocks[hash] = blockTestData{
-		header:   header,
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
-}
-
-func (m *mockBlockchainClient) addBlock(num int64, parentHash string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	hash := fmt.Sprintf("0x%064x", num)
-	if parentHash == "" && num > 0 {
-		parentHash = fmt.Sprintf("0x%064x", num-1)
-	}
-
-	header := outbound.BlockHeader{
-		Number:     fmt.Sprintf("0x%x", num),
-		Hash:       hash,
-		ParentHash: parentHash,
-		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
-	}
-
-	m.blocks[num] = blockTestData{
-		header:   header,
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
-}
-
-func (m *mockBlockchainClient) getHeader(num int64) outbound.BlockHeader {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.blocks[num].header
-}
-
-func (m *mockBlockchainClient) GetBlockByNumber(ctx context.Context, blockNum int64, fullTx bool) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.delay > 0 {
-		time.Sleep(m.delay)
-	}
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		data, _ := json.Marshal(bd.header)
-		return data, nil
-	}
-	return nil, fmt.Errorf("block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (*outbound.BlockHeader, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	// Check main canonical chain
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			h := bd.header
-			return &h, nil
-		}
-	}
-
-	// Check extra blocks (uncles/history) - simulating node that keeps old blocks
-	if bd, ok := m.extraBlocks[hash]; ok {
-		h := bd.header
-		return &h, nil
-	}
-
-	// Return nil, nil when block not found (not an error - just doesn't exist)
-	// This matches real RPC behavior where eth_getBlockByHash returns null for unknown hashes
-	return nil, nil
-}
-
-func (m *mockBlockchainClient) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			data, _ := json.Marshal(bd.header)
-			return data, nil
-		}
-	}
-	return nil, fmt.Errorf("block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.receipts, nil
-	}
-	return nil, fmt.Errorf("receipts for block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			return bd.receipts, nil
-		}
-	}
-	return nil, fmt.Errorf("receipts for block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.traces, nil
-	}
-	return nil, fmt.Errorf("traces for block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			return bd.traces, nil
-		}
-	}
-	return nil, fmt.Errorf("traces for block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.blobs, nil
-	}
-	return nil, fmt.Errorf("blobs for block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			return bd.blobs, nil
-		}
-	}
-	return nil, fmt.Errorf("blobs for block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var max int64
-	for num := range m.blocks {
-		if num > max {
-			max = num
-		}
-	}
-	return max, nil
-}
-
-func (m *mockBlockchainClient) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx bool) ([]outbound.BlockData, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.delay > 0 {
-		time.Sleep(m.delay)
-	}
-
-	result := make([]outbound.BlockData, len(blockNums))
-	for i, num := range blockNums {
-		result[i] = outbound.BlockData{BlockNumber: num}
-		if bd, ok := m.blocks[num]; ok {
-			blockJSON, _ := json.Marshal(bd.header)
-			result[i].Block = blockJSON
-			result[i].Receipts = bd.receipts
-			result[i].Traces = bd.traces
-			result[i].Blobs = bd.blobs
-		}
-	}
-	return result, nil
-}
-
-func (m *mockBlockchainClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.delay > 0 {
-		time.Sleep(m.delay)
-	}
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			blockJSON, _ := json.Marshal(bd.header)
-			return outbound.BlockData{
-				BlockNumber: blockNum,
-				Block:       blockJSON,
-				Receipts:    bd.receipts,
-				Traces:      bd.traces,
-				Blobs:       bd.blobs,
-			}, nil
-		}
-	}
-	return outbound.BlockData{}, fmt.Errorf("block %s not found", hash)
-}
-
-// setBlockHeader allows setting or overriding a block's header data.
-func (m *mockBlockchainClient) setBlockHeader(num int64, hash, parentHash string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.blocks[num] = blockTestData{
-		header: outbound.BlockHeader{
-			Number:     fmt.Sprintf("0x%x", num),
-			Hash:       hash,
-			ParentHash: parentHash,
-			Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
-		},
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
+func newMockClient() *testutil.MockBlockchainClient {
+	client := testutil.NewMockBlockchainClient()
+	client.ReturnNilForUnknownHash = true
+	return client
 }
 
 func TestBackfillService_FillsGaps(t *testing.T) {
@@ -290,15 +32,15 @@ func TestBackfillService_FillsGaps(t *testing.T) {
 
 	// Pre-populate client with blocks 1-100
 	for i := int64(1); i <= 100; i++ {
-		client.addBlock(i, "")
+		client.AddBlock(i, "")
 	}
 
 	// Seed the state repo with blocks 1, 50, and 100 (leaving gaps 2-49 and 51-99)
 	for _, num := range []int64{1, 50, 100} {
 		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
 			Number:     num,
-			Hash:       client.getHeader(num).Hash,
-			ParentHash: client.getHeader(num).ParentHash,
+			Hash:       client.GetHeader(num).Hash,
+			ParentHash: client.GetHeader(num).ParentHash,
 			ReceivedAt: time.Now().Unix(),
 		}); err != nil {
 			t.Fatalf("failed to save block %d: %v", num, err)
@@ -375,15 +117,15 @@ func TestBackfillService_VersionIsSavedToDatabase(t *testing.T) {
 
 	// Pre-populate client with blocks 1-10
 	for i := int64(1); i <= 10; i++ {
-		client.addBlock(i, "")
+		client.AddBlock(i, "")
 	}
 
 	// Seed blocks 1 and 10 to create a gap at 2-9
 	for _, num := range []int64{1, 10} {
 		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
 			Number:     num,
-			Hash:       client.getHeader(num).Hash,
-			ParentHash: client.getHeader(num).ParentHash,
+			Hash:       client.GetHeader(num).Hash,
+			ParentHash: client.GetHeader(num).ParentHash,
 			ReceivedAt: time.Now().Unix(),
 			Version:    0,
 		}); err != nil {
@@ -408,7 +150,7 @@ func TestBackfillService_VersionIsSavedToDatabase(t *testing.T) {
 	}
 
 	// Check that backfilled block 5 was saved with version 0 (first block at that height)
-	backfilledBlock, err := stateRepo.GetBlockByHash(ctx, client.getHeader(5).Hash)
+	backfilledBlock, err := stateRepo.GetBlockByHash(ctx, client.GetHeader(5).Hash)
 	if err != nil {
 		t.Fatalf("failed to get backfilled block: %v", err)
 	}
@@ -510,7 +252,7 @@ func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
 
 	// Add blocks 1-10 to the mock client with correct links
 	for i := int64(1); i <= 10; i++ {
-		client.addBlock(i, "")
+		client.AddBlock(i, "")
 	}
 
 	// Manually save blocks with a broken chain:
@@ -605,8 +347,8 @@ func TestBackfillService_ReorgDuringDowntime_CannotMakeProgress(t *testing.T) {
 	// RPC returns the missing blocks on a different chain segment (i.e., the DB boundary at 105 is stale).
 	// We only stub 106-107 because those are the missing heights; the key is that 106's parent does not match
 	// the hash of DB block 105.
-	client.setBlockHeader(106, hashWithSuffix(106, "_new"), hashWithSuffix(105, "_new")) // Note: 106_new parent is not 105_old
-	client.setBlockHeader(107, hashWithSuffix(107, "_new"), hashWithSuffix(106, "_new"))
+	client.SetBlockHeader(106, hashWithSuffix(106, "_new"), hashWithSuffix(105, "_new")) // Note: 106_new parent is not 105_old
+	client.SetBlockHeader(107, hashWithSuffix(107, "_new"), hashWithSuffix(106, "_new"))
 
 	config := BackfillConfig{
 		ChainID:            1,
@@ -663,7 +405,7 @@ func TestBackfillService_ReorgDuringDowntime_RecoveryWithBoundaryCheck(t *testin
 	// RPC: 100-102 unchanged
 	for i := int64(100); i <= 102; i++ {
 		parentHash := hashWithSuffix(i-1, "_old")
-		client.setBlockHeader(i, hashWithSuffix(i, "_old"), parentHash)
+		client.SetBlockHeader(i, hashWithSuffix(i, "_old"), parentHash)
 	}
 
 	// RPC: 103-105 are on a new chain (different hashes and parent links)
@@ -675,7 +417,7 @@ func TestBackfillService_ReorgDuringDowntime_RecoveryWithBoundaryCheck(t *testin
 			newParentHash = hashWithSuffix(102, "_old")
 		}
 
-		client.setBlockHeader(i, hashWithSuffix(i, "_new"), newParentHash)
+		client.SetBlockHeader(i, hashWithSuffix(i, "_new"), newParentHash)
 	}
 
 	config := BackfillConfig{
@@ -758,7 +500,7 @@ func TestBackfillService_RejectsNonCanonicalBlock(t *testing.T) {
 
 	// Add blocks 1-8 with normal chain (these match what we'll put in DB)
 	for i := int64(1); i <= 8; i++ {
-		client.addBlock(i, "")
+		client.AddBlock(i, "")
 	}
 
 	// Add block 10 - this is what the live service already processed
@@ -768,17 +510,17 @@ func TestBackfillService_RejectsNonCanonicalBlock(t *testing.T) {
 	// But the client returns a DIFFERENT block 9 (simulating reorg in RPC)
 	// This block 9 has a different hash than what block 10 expects as parent
 	reorgedBlock9Hash := "0xREORGED_BLOCK_9_HASH_DOES_NOT_MATCH_BLOCK_10_PARENT"
-	client.setBlockHeader(9, reorgedBlock9Hash, fmt.Sprintf("0x%064x", 8))
+	client.SetBlockHeader(9, reorgedBlock9Hash, fmt.Sprintf("0x%064x", 8))
 
 	// Add block 10 to client for completeness
-	client.addBlock(10, originalBlock9Hash)
+	client.AddBlock(10, originalBlock9Hash)
 
 	// Pre-populate state repo with blocks 1-8 and 10 (leaving gap at 9)
 	for i := int64(1); i <= 8; i++ {
 		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
 			Number:     i,
-			Hash:       client.getHeader(i).Hash,
-			ParentHash: client.getHeader(i).ParentHash,
+			Hash:       client.GetHeader(i).Hash,
+			ParentHash: client.GetHeader(i).ParentHash,
 			ReceivedAt: time.Now().Unix(),
 		}); err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -788,7 +530,7 @@ func TestBackfillService_RejectsNonCanonicalBlock(t *testing.T) {
 	// Save block 10 with parent_hash pointing to ORIGINAL block 9 hash
 	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
 		Number:     10,
-		Hash:       client.getHeader(10).Hash,
+		Hash:       client.GetHeader(10).Hash,
 		ParentHash: originalBlock9Hash, // This is A9, but client returns B9
 		ReceivedAt: time.Now().Unix(),
 	}); err != nil {
@@ -882,7 +624,7 @@ func TestBackfillService_HighestVersionIsCanonicalAfterRecovery(t *testing.T) {
 	// RPC: 100-102 unchanged (same as DB)
 	for i := int64(100); i <= 102; i++ {
 		parentHash := hashWithSuffix(i-1, "_old")
-		client.setBlockHeader(i, hashWithSuffix(i, "_old"), parentHash)
+		client.SetBlockHeader(i, hashWithSuffix(i, "_old"), parentHash)
 	}
 
 	// RPC: 103-105 are on a new chain (different hashes - simulating reorg during downtime)
@@ -891,7 +633,7 @@ func TestBackfillService_HighestVersionIsCanonicalAfterRecovery(t *testing.T) {
 		if i == 103 {
 			newParentHash = hashWithSuffix(102, "_old") // Links to existing chain
 		}
-		client.setBlockHeader(i, hashWithSuffix(i, "_new"), newParentHash)
+		client.SetBlockHeader(i, hashWithSuffix(i, "_new"), newParentHash)
 	}
 
 	config := BackfillConfig{
@@ -988,7 +730,7 @@ func TestBackfillService_SkipsStaleBlockWhenLiveAlreadyProcessed(t *testing.T) {
 
 	// Setup: blocks 1-99 exist in DB and client
 	for i := int64(1); i <= 99; i++ {
-		client.addBlock(i, "")
+		client.AddBlock(i, "")
 		saveBlockState(t, ctx, stateRepo, i, fmt.Sprintf("0x%064x", i), fmt.Sprintf("0x%064x", i-1))
 	}
 
@@ -998,7 +740,7 @@ func TestBackfillService_SkipsStaleBlockWhenLiveAlreadyProcessed(t *testing.T) {
 
 	// But the RPC returns a STALE block (hash A) - simulating a slow/stale RPC node
 	staleHash := "0xSTALE_HASH_A_FROM_SLOW_RPC_NODE"
-	client.setBlockHeader(100, staleHash, fmt.Sprintf("0x%064x", 99))
+	client.SetBlockHeader(100, staleHash, fmt.Sprintf("0x%064x", 99))
 
 	config := BackfillConfig{
 		ChainID:            1,
@@ -1211,7 +953,7 @@ func TestVerifyBoundaryBlocks_DetectsUncleReorg(t *testing.T) {
 
 	// 3. Client State:
 	// Canonical Block 100 is Hash B
-	client.addBlock(100, "0xHASH_99") // This sets Hash to auto-generated "0x...064"
+	client.AddBlock(100, "0xHASH_99") // This sets Hash to auto-generated "0x...064"
 	// Let's force it to Hash B for clarity, but addBlock auto-generates hash.
 	// client.blocks[100].header.Hash = "0xHASH_B"
 	// But  generates "0x000...64" for 100.
@@ -1224,7 +966,7 @@ func TestVerifyBoundaryBlocks_DetectsUncleReorg(t *testing.T) {
 	// CRITICAL: We also add "0xHASH_A" as an UNCLE to the client.
 	// This simulates the node still having the old block data available by hash
 	// even though it's not in the canonical chain.
-	client.addUncle(100, "0xHASH_A", "0xHASH_99")
+	client.AddUncle(100, "0xHASH_A", "0xHASH_99")
 
 	// 4. Verify Boundary Blocks
 	// Current Implementation: Calls GetBlockByHash("0xHASH_A").
@@ -1285,8 +1027,8 @@ func TestVerifyBoundaryBlocks_RecoverFromDeepReorgCorrected(t *testing.T) {
 	// Setup RPC State: Chain B (100B -> 101B)
 	// We simulate a reorg where 100A and 101A are replaced by 100B and 101B
 	// 99 is common ancestor
-	client.setBlockHeader(100, "0xHASH_100B", "0xHASH_99")
-	client.setBlockHeader(101, "0xHASH_101B", "0xHASH_100B")
+	client.SetBlockHeader(100, "0xHASH_100B", "0xHASH_99")
+	client.SetBlockHeader(101, "0xHASH_101B", "0xHASH_100B")
 
 	// Pre-populate ancestor 99 in DB so 100B binds correctly
 	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
@@ -1373,7 +1115,7 @@ func TestRetry_CacheFailureIsRetried(t *testing.T) {
 
 	// Add blocks 1-5 to the client
 	for i := int64(1); i <= 5; i++ {
-		client.addBlock(i, "")
+		client.AddBlock(i, "")
 	}
 
 	// Configure cache to fail on block 3, but only once (will succeed on retry)
@@ -1402,8 +1144,8 @@ func TestRetry_CacheFailureIsRetried(t *testing.T) {
 	for _, num := range []int64{1, 5} {
 		block := outbound.BlockState{
 			Number:     num,
-			Hash:       client.getHeader(num).Hash,
-			ParentHash: client.getHeader(num).ParentHash,
+			Hash:       client.GetHeader(num).Hash,
+			ParentHash: client.GetHeader(num).ParentHash,
 			ReceivedAt: time.Now().Unix(),
 		}
 		_, _ = stateRepo.SaveBlock(ctx, block)
@@ -1449,7 +1191,7 @@ func TestRetry_PublishFailureIsRetried(t *testing.T) {
 	eventSink := newFailingEventSink()
 
 	for i := int64(1); i <= 5; i++ {
-		client.addBlock(i, "")
+		client.AddBlock(i, "")
 	}
 
 	// Configure event sink to fail on block 3, but only once
@@ -1477,8 +1219,8 @@ func TestRetry_PublishFailureIsRetried(t *testing.T) {
 	for _, num := range []int64{1, 5} {
 		block := outbound.BlockState{
 			Number:     num,
-			Hash:       client.getHeader(num).Hash,
-			ParentHash: client.getHeader(num).ParentHash,
+			Hash:       client.GetHeader(num).Hash,
+			ParentHash: client.GetHeader(num).ParentHash,
 			ReceivedAt: time.Now().Unix(),
 		}
 		_, _ = stateRepo.SaveBlock(ctx, block)
@@ -1513,7 +1255,7 @@ func TestProcessBlockData_ReturnsErrorOnCacheFailure(t *testing.T) {
 	cache := newFailingCache()
 	eventSink := memory.NewEventSink()
 
-	client.addBlock(1, "")
+	client.AddBlock(1, "")
 	cache.failOnBlock = 1
 	cache.failOnOperation = "any"
 

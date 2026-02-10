@@ -139,9 +139,10 @@ variable "coingecko_api_key" {
 }
 
 variable "etherscan_api_key" {
-  description = "Etherscan API key. Set via TF_VAR_etherscan_api_key env var or enter when prompted."
+  description = "Etherscan API key. Set via TF_VAR_etherscan_api_key env var."
   type        = string
   sensitive   = true
+  default     = "placeholder" # Will be updated in Secrets Manager
 }
 
 variable "alchemy_http_url" {
@@ -188,4 +189,32 @@ variable "backup_worker_workers" {
   description = "Number of concurrent workers within each Backup Worker task"
   type        = number
   default     = 2
+}
+
+# -----------------------------------------------------------------------------
+# ECS Oracle Price Worker Configuration
+# -----------------------------------------------------------------------------
+
+variable "oracle_price_worker_cpu" {
+  description = "CPU units for Oracle Price Worker task (256, 512, 1024, 2048, 4096)"
+  type        = number
+  default     = 256
+}
+
+variable "oracle_price_worker_memory" {
+  description = "Memory for Oracle Price Worker task in MB (512, 1024, 2048, etc.)"
+  type        = number
+  default     = 512
+}
+
+variable "oracle_price_worker_desired_count" {
+  description = "Number of Oracle Price Worker tasks to run"
+  type        = number
+  default     = 1
+}
+
+variable "oracle_price_worker_image_tag" {
+  description = "Docker image tag for Oracle Price Worker"
+  type        = string
+  default     = "latest"
 }

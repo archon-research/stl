@@ -1,121 +1,23 @@
 //go:build integration
 
-package price_fetcher
+package offchain_price_fetcher
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coingecko"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
-
-// createDatabaseContainer starts a TimescaleDB container and returns it with connection details.
-func createDatabaseContainer(t *testing.T, ctx context.Context) (testcontainers.Container, string) {
-	t.Helper()
-
-	req := testcontainers.ContainerRequest{
-		Image:        "timescale/timescaledb:latest-pg17",
-		ExposedPorts: []string{"5432/tcp"},
-		Env: map[string]string{
-			"POSTGRES_USER":     "test",
-			"POSTGRES_PASSWORD": "test",
-			"POSTGRES_DB":       "testdb",
-		},
-		WaitingFor: wait.ForAll(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(60*time.Second),
-			wait.ForListeningPort("5432/tcp").
-				WithStartupTimeout(60*time.Second),
-		),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		t.Fatalf("failed to start container: %v", err)
-	}
-
-	host, err := container.Host(ctx)
-	if err != nil {
-		t.Fatalf("failed to get container host: %v", err)
-	}
-
-	port, err := container.MappedPort(ctx, "5432")
-	if err != nil {
-		t.Fatalf("failed to get container port: %v", err)
-	}
-
-	dsn := fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
-	return container, dsn
-}
-
-// connectToDatabase creates a connection pool and waits for it to be ready.
-func connectToDatabase(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {
-	t.Helper()
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("failed to connect to database: %v", err)
-	}
-
-	// Wait for connection
-	for i := 0; i < 30; i++ {
-		if err := pool.Ping(ctx); err == nil {
-			return pool
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	t.Fatal("timed out waiting for database connection")
-	return nil
-}
-
-// runMigrations applies all database migrations.
-func runMigrations(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
-	t.Helper()
-
-	_, currentFile, _, _ := runtime.Caller(0)
-	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../db/migrations")
-	m := migrator.New(pool, migrationsDir)
-	if err := m.ApplyAll(ctx); err != nil {
-		t.Fatalf("failed to apply migrations: %v", err)
-	}
-}
-
-// setupTestDatabase creates a PostgreSQL container with TimescaleDB and returns a connection pool.
-func setupTestDatabase(t *testing.T) (*pgxpool.Pool, func()) {
-	t.Helper()
-	ctx := context.Background()
-
-	container, dsn := createDatabaseContainer(t, ctx)
-	pool := connectToDatabase(t, ctx, dsn)
-	runMigrations(t, ctx, pool)
-
-	cleanup := func() {
-		pool.Close()
-		container.Terminate(ctx)
-	}
-
-	return pool, cleanup
-}
 
 // setupMockCoinGeckoServer creates an HTTP test server that simulates CoinGecko API responses.
 func setupMockCoinGeckoServer(t *testing.T) *httptest.Server {
@@ -219,7 +121,7 @@ func mockMarketCap(id string) float64 {
 func insertTestToken(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id int64, chainID int, address, symbol string) {
 	t.Helper()
 	// Convert hex address string to bytes (remove 0x prefix)
-	addressBytes, err := hexToBytes(address)
+	addressBytes, err := testutil.HexToBytes(address)
 	if err != nil {
 		t.Fatalf("failed to parse address %s: %v", address, err)
 	}
@@ -234,18 +136,11 @@ func insertTestToken(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id i
 	}
 }
 
-// hexToBytes converts a hex string (with or without 0x prefix) to bytes.
-func hexToBytes(s string) ([]byte, error) {
-	s = strings.TrimPrefix(s, "0x")
-	s = strings.TrimPrefix(s, "0X")
-	return hex.DecodeString(s)
-}
-
 // insertTestPriceAsset links a CoinGecko asset ID to a token.
 func insertTestPriceAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sourceID int64, sourceAssetID string, tokenID int64, symbol, name string) {
 	t.Helper()
 	_, err := pool.Exec(ctx, `
-		INSERT INTO price_asset (source_id, source_asset_id, token_id, symbol, name, enabled, created_at, updated_at)
+		INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, symbol, name, enabled, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, true, NOW(), NOW())
 		ON CONFLICT (source_id, source_asset_id) DO UPDATE SET token_id = $3
 	`, sourceID, sourceAssetID, tokenID, symbol, name)
@@ -255,7 +150,7 @@ func insertTestPriceAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 }
 
 func TestIntegration_FetchCurrentPrices(t *testing.T) {
-	pool, cleanup := setupTestDatabase(t)
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -264,7 +159,7 @@ func TestIntegration_FetchCurrentPrices(t *testing.T) {
 
 	// Get the coingecko source ID from migration seed data
 	var sourceID int64
-	err := pool.QueryRow(ctx, `SELECT id FROM price_source WHERE name = 'coingecko'`).Scan(&sourceID)
+	err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID)
 	if err != nil {
 		t.Fatalf("failed to get coingecko source: %v", err)
 	}
@@ -308,7 +203,7 @@ func TestIntegration_FetchCurrentPrices(t *testing.T) {
 
 	// Verify price was stored
 	var count int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE source_asset_id = 'ethereum'`).Scan(&count)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price WHERE token_id = 1`).Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query token_price: %v", err)
 	}
@@ -319,7 +214,7 @@ func TestIntegration_FetchCurrentPrices(t *testing.T) {
 
 	// Verify price value
 	var priceUSD float64
-	err = pool.QueryRow(ctx, `SELECT price_usd FROM token_price WHERE source_asset_id = 'ethereum'`).Scan(&priceUSD)
+	err = pool.QueryRow(ctx, `SELECT price_usd FROM offchain_token_price WHERE token_id = 1 ORDER BY timestamp DESC LIMIT 1`).Scan(&priceUSD)
 	if err != nil {
 		t.Fatalf("failed to query price_usd: %v", err)
 	}
@@ -330,7 +225,7 @@ func TestIntegration_FetchCurrentPrices(t *testing.T) {
 }
 
 func TestIntegration_FetchCurrentPrices_AllEnabledAssets(t *testing.T) {
-	pool, cleanup := setupTestDatabase(t)
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -339,14 +234,14 @@ func TestIntegration_FetchCurrentPrices_AllEnabledAssets(t *testing.T) {
 
 	// Get the coingecko source ID
 	var sourceID int64
-	err := pool.QueryRow(ctx, `SELECT id FROM price_source WHERE name = 'coingecko'`).Scan(&sourceID)
+	err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID)
 	if err != nil {
 		t.Fatalf("failed to get coingecko source: %v", err)
 	}
 
 	// Count enabled assets from seed data (migration seeds SparkLend tokens)
 	var enabledAssetCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM price_asset WHERE source_id = $1 AND enabled = true AND token_id IS NOT NULL`, sourceID).Scan(&enabledAssetCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_price_asset WHERE source_id = $1 AND enabled = true AND token_id IS NOT NULL`, sourceID).Scan(&enabledAssetCount)
 	if err != nil {
 		t.Fatalf("failed to count enabled assets: %v", err)
 	}
@@ -382,7 +277,7 @@ func TestIntegration_FetchCurrentPrices_AllEnabledAssets(t *testing.T) {
 
 	// Verify prices were stored for all enabled assets
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price`).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price`).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query token_price count: %v", err)
 	}
@@ -399,7 +294,7 @@ func TestIntegration_FetchCurrentPrices_AllEnabledAssets(t *testing.T) {
 }
 
 func TestIntegration_FetchHistoricalData(t *testing.T) {
-	pool, cleanup := setupTestDatabase(t)
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -408,7 +303,7 @@ func TestIntegration_FetchHistoricalData(t *testing.T) {
 
 	// Get the coingecko source ID
 	var sourceID int64
-	err := pool.QueryRow(ctx, `SELECT id FROM price_source WHERE name = 'coingecko'`).Scan(&sourceID)
+	err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID)
 	if err != nil {
 		t.Fatalf("failed to get coingecko source: %v", err)
 	}
@@ -451,7 +346,7 @@ func TestIntegration_FetchHistoricalData(t *testing.T) {
 
 	// Verify prices were stored (3 days * 24 hours = ~72 data points)
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE source_asset_id = 'ethereum'`).Scan(&priceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price WHERE token_id = 1`).Scan(&priceCount)
 	if err != nil {
 		t.Fatalf("failed to query token_price count: %v", err)
 	}
@@ -460,20 +355,20 @@ func TestIntegration_FetchHistoricalData(t *testing.T) {
 		t.Errorf("expected at least 70 price records, got %d", priceCount)
 	}
 
-	// Verify volumes were stored
+	// Verify volumes were stored alongside prices
 	var volumeCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_volume WHERE source_asset_id = 'ethereum'`).Scan(&volumeCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price WHERE token_id = 1 AND volume_usd IS NOT NULL`).Scan(&volumeCount)
 	if err != nil {
-		t.Fatalf("failed to query token_volume count: %v", err)
+		t.Fatalf("failed to query volume count: %v", err)
 	}
 
 	if volumeCount < 70 {
-		t.Errorf("expected at least 70 volume records, got %d", volumeCount)
+		t.Errorf("expected at least 70 price records with volume_usd, got %d", volumeCount)
 	}
 }
 
 func TestIntegration_FetchHistoricalData_MultipleAssetsConcurrently(t *testing.T) {
-	pool, cleanup := setupTestDatabase(t)
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -482,7 +377,7 @@ func TestIntegration_FetchHistoricalData_MultipleAssetsConcurrently(t *testing.T
 
 	// Get the coingecko source ID
 	var sourceID int64
-	err := pool.QueryRow(ctx, `SELECT id FROM price_source WHERE name = 'coingecko'`).Scan(&sourceID)
+	err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID)
 	if err != nil {
 		t.Fatalf("failed to get coingecko source: %v", err)
 	}
@@ -526,22 +421,22 @@ func TestIntegration_FetchHistoricalData_MultipleAssetsConcurrently(t *testing.T
 		t.Fatalf("FetchHistoricalData failed: %v", err)
 	}
 
-	// Verify both assets have prices stored
-	for _, assetID := range []string{"ethereum", "bitcoin"} {
+	// Verify both assets have prices stored (token_id 1=WETH, 2=WBTC)
+	for _, tokenID := range []int64{1, 2} {
 		var count int
-		err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE source_asset_id = $1`, assetID).Scan(&count)
+		err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price WHERE token_id = $1`, tokenID).Scan(&count)
 		if err != nil {
-			t.Fatalf("failed to query token_price count for %s: %v", assetID, err)
+			t.Fatalf("failed to query token_price count for token_id %d: %v", tokenID, err)
 		}
 
 		if count < 40 {
-			t.Errorf("expected at least 40 price records for %s, got %d", assetID, count)
+			t.Errorf("expected at least 40 price records for token_id %d, got %d", tokenID, count)
 		}
 	}
 }
 
 func TestIntegration_UpsertIdempotency(t *testing.T) {
-	pool, cleanup := setupTestDatabase(t)
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -550,7 +445,7 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 
 	// Get the coingecko source ID
 	var sourceID int64
-	err := pool.QueryRow(ctx, `SELECT id FROM price_source WHERE name = 'coingecko'`).Scan(&sourceID)
+	err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID)
 	if err != nil {
 		t.Fatalf("failed to get coingecko source: %v", err)
 	}
@@ -593,7 +488,7 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 
 	// Get count after first fetch
 	var countAfterFirst int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE source_asset_id = 'ethereum'`).Scan(&countAfterFirst)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price WHERE token_id = 1`).Scan(&countAfterFirst)
 	if err != nil {
 		t.Fatalf("failed to query token_price count: %v", err)
 	}
@@ -606,7 +501,7 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 
 	// Count should be the same (no duplicates)
 	var countAfterSecond int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price WHERE source_asset_id = 'ethereum'`).Scan(&countAfterSecond)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price WHERE token_id = 1`).Scan(&countAfterSecond)
 	if err != nil {
 		t.Fatalf("failed to query token_price count: %v", err)
 	}
@@ -617,7 +512,7 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 }
 
 func TestIntegration_NoEnabledAssets(t *testing.T) {
-	pool, cleanup := setupTestDatabase(t)
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -657,7 +552,7 @@ func TestIntegration_NoEnabledAssets(t *testing.T) {
 
 	// Verify no prices stored
 	var count int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM token_price`).Scan(&count)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price`).Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query token_price count: %v", err)
 	}

@@ -18,7 +18,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/price_fetcher"
+	"github.com/archon-research/stl/stl-verify/internal/services/offchain_price_fetcher"
 )
 
 // Build-time variables - can be set via ldflags, otherwise populated from Go's build info.
@@ -120,7 +120,7 @@ func run(ctx context.Context, logger *slog.Logger, source, fromDate, toDate, ass
 		return err
 	}
 
-	service, err := price_fetcher.NewService(price_fetcher.ServiceConfig{
+	service, err := offchain_price_fetcher.NewService(offchain_price_fetcher.ServiceConfig{
 		ChainID:     chainID,
 		Concurrency: concurrency,
 		Logger:      logger,
