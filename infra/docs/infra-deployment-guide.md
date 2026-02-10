@@ -8,7 +8,8 @@ Complete automation for provisioning STL infrastructure across environments (sen
 
 - OpenTofu/Terraform 1.0+: `brew install opentofu`
 - AWS CLI configured with appropriate credentials
-- Git (for version control of bootstrap state)
+- Secure storage for bootstrap state (encrypted S3, password manager, or secure vault)
+- **Important**: Ensure `*.tfstate` files are in `.gitignore` (never commit state files)
 
 ## Environments
 
@@ -29,13 +30,15 @@ make tf-bootstrap ENV=sentineldev
 This will:
 - Create S3 bucket: `stl-sentineldev-terraform-state-{suffix}`
 - Create DynamoDB table: `stl-sentineldev-terraform-locks`
-- Generate local `infra/terraform.tfstate`
+- Create initial secrets in AWS Secrets Manager
+- Generate local `infra/bootstrap/terraform.tfstate`
 
-**Commit the state to git:**
-```bash
-git add infra/terraform.tfstate
-git commit -m "Bootstrap backend for sentineldev"
-```
+**⚠️ SECURITY WARNING: Never commit terraform.tfstate to git!**
+
+The bootstrap state file contains sensitive values (secret ARNs, versions, etc.) in plaintext. Either:
+1. **Recommended**: Migrate bootstrap state to its own S3 backend (separate from main infra)
+2. Store the state file in a secure, encrypted location (e.g., 1Password, AWS Secrets Manager)
+3. Ensure the state file is in `.gitignore` and securely backed up elsewhere
 
 ### 2. Initialize Remote Backend
 
@@ -151,9 +154,19 @@ Run `make tf-init ENV=<env>` to initialize the remote backend.
 
 ## State Management
 
-- **Bootstrap state**: `infra/terraform.tfstate` (versioned in git)
-- **Remote state**: S3 bucket (locking via DynamoDB)
+- **Bootstrap state**: `infra/bootstrap/terraform.tfstate` (NEVER commit to git - contains sensitive data)
+- **Main infra state**: S3 bucket (locking via DynamoDB)
 - **State backup**: Automatically kept by S3 versioning
+
+### Securing Bootstrap State
+
+The bootstrap state contains secret ARNs and metadata. Options for secure storage:
+
+1. **S3 Backend (Recommended)**: Configure bootstrap to use its own remote backend
+2. **Encrypted Storage**: Store in 1Password, AWS Secrets Manager, or encrypted S3 bucket
+3. **Local Only**: Keep locally but ensure it's in `.gitignore` and backed up securely
+
+Never commit `terraform.tfstate` files to version control.
 
 ## Destroying Infrastructure
 
@@ -168,12 +181,17 @@ make tf-destroy ENV=sentineldev
 
 Deploy to both environments:
 ```bash
+# Bootstrap both environments
 make tf-bootstrap ENV=sentineldev
-git add infra/terraform.tfstate && git commit -m "Bootstrap dev"
-
 make tf-bootstrap ENV=sentinelstaging
-git add infra/terraform.tfstate && git commit -m "Bootstrap staging"
 
+# Securely backup bootstrap state (DO NOT commit to git)
+# Option 1: Upload to encrypted S3 bucket
+aws s3 cp infra/bootstrap/terraform.tfstate s3://your-secure-bucket/bootstrap-states/sentineldev.tfstate --sse AES256
+
+# Option 2: Store in password manager or secure vault
+
+# Deploy main infrastructure
 make tf-init ENV=sentineldev && make tf-apply ENV=sentineldev
 make tf-init ENV=sentinelstaging && make tf-apply ENV=sentinelstaging
 ```

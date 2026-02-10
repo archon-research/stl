@@ -5,8 +5,13 @@ variable "aws_region" {
 }
 
 variable "environment" {
-  description = "Environment name (sentineldev, sentinelstaging)"
+  description = "Environment name (sentineldev, sentinelstaging, sentinelprod)"
   type        = string
+  
+  validation {
+    condition     = contains(["sentineldev", "sentinelstaging", "sentinelprod"], var.environment)
+    error_message = "Environment must be one of: sentineldev, sentinelstaging, sentinelprod. CRITICAL: Only sentineldev infrastructure should be destroyed."
+  }
 }
 
 variable "project_name" {

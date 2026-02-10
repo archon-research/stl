@@ -436,9 +436,16 @@ tf-apply:
 	fi
 
 # Destroy Terraform infrastructure
+# WARNING: This is destructive. Only dev should be destroyed via automation.
 # Usage: make tf-destroy ENV=sentineldev|sentinelstaging|sentinelprod
 # Auto-approves in CI (GitHub Actions), prompts locally
+# Staging/prod require manual confirmation to prevent accidents
 tf-destroy:
+	@if [ "$(ENV)" != "sentineldev" ] && [ -n "$$CI" ]; then \
+		echo "Error: CI-based destroy is only allowed for sentineldev"; \
+		echo "Staging/Prod must be destroyed manually (run locally with confirmation)"; \
+		exit 1; \
+	fi
 	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Destroying Terraform infrastructure for $(ENV)..."
 	@if [ -n "$$CI" ]; then \
 		export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -auto-approve); \
