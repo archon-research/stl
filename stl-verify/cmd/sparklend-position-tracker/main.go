@@ -159,6 +159,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	eventRepo := postgres.NewEventRepository(logger)
+
 	processorConfig := sparklend_position_tracker.Config{
 		QueueURL:        *queueURL,
 		MaxMessages:     int32(*maxMessages),
@@ -176,6 +178,7 @@ func main() {
 		protocolRepo,
 		tokenRepo,
 		positionRepo,
+		eventRepo,
 	)
 	if err != nil {
 		logger.Error("failed to create processor", "error", err)

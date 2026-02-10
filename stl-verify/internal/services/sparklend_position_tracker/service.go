@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strconv"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -133,6 +134,7 @@ type Service struct {
 	protocolRepo *postgres.ProtocolRepository
 	tokenRepo    *postgres.TokenRepository
 	positionRepo *postgres.PositionRepository
+	eventRepo    outbound.EventRepository
 
 	blockchainServices map[common.Address]*blockchainService
 	multicallClient    outbound.Multicaller
@@ -154,8 +156,9 @@ func NewService(
 	protocolRepo *postgres.ProtocolRepository,
 	tokenRepo *postgres.TokenRepository,
 	positionRepo *postgres.PositionRepository,
+	eventRepo outbound.EventRepository,
 ) (*Service, error) {
-	if err := validateDependencies(sqsClient, redisClient, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo); err != nil {
+	if err := validateDependencies(sqsClient, redisClient, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo); err != nil {
 		return nil, err
 	}
 
@@ -201,6 +204,7 @@ func NewService(
 		protocolRepo:       protocolRepo,
 		tokenRepo:          tokenRepo,
 		positionRepo:       positionRepo,
+		eventRepo:          eventRepo,
 		blockchainServices: make(map[common.Address]*blockchainService),
 		multicallClient:    mc,
 		erc20ABI:           erc20ABI,
@@ -429,6 +433,16 @@ func (s *Service) processPositionEventLog(ctx context.Context, log Log, txHash s
 		"tx", txHash,
 		"block", blockNumber)
 
+	// Save the raw decoded event for analytics/auditability
+	logIndex, err := strconv.ParseInt(log.LogIndex, 0, 64)
+	if err != nil {
+		return fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
+	}
+
+	if err := s.saveProtocolEvent(ctx, eventData, protocolAddress, chainID, blockNumber, blockVersion, int(logIndex)); err != nil {
+		return fmt.Errorf("failed to save protocol event: %w", err)
+	}
+
 	if eventData.EventType == EventReserveUsedAsCollateralEnabled ||
 		eventData.EventType == EventReserveUsedAsCollateralDisabled {
 		return s.saveCollateralToggleEvent(ctx, eventData, protocolAddress, chainID, blockNumber, blockVersion)
@@ -439,6 +453,42 @@ func (s *Service) processPositionEventLog(ctx context.Context, log Log, txHash s
 	}
 
 	return s.savePositionSnapshot(ctx, eventData, protocolAddress, chainID, blockNumber, blockVersion)
+}
+
+func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int, logIndex int) error {
+	eventJSON, err := eventData.ToJSON()
+	if err != nil {
+		return fmt.Errorf("failed to serialize event data: %w", err)
+	}
+
+	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
+		if !exists {
+			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
+		}
+
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, blockNumber)
+		if err != nil {
+			return fmt.Errorf("failed to get protocol: %w", err)
+		}
+
+		event, err := entity.NewProtocolEvent(
+			int(chainID),
+			protocolID,
+			blockNumber,
+			blockVersion,
+			common.FromHex(eventData.TxHash),
+			logIndex,
+			protocolAddress.Bytes(),
+			string(eventData.EventType),
+			eventJSON,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create protocol event entity: %w", err)
+		}
+
+		return s.eventRepo.SaveEvent(ctx, tx, event)
+	})
 }
 
 // processReserveEventLog handles ReserveDataUpdated events by fetching and storing reserve data.
@@ -911,6 +961,7 @@ func validateDependencies(
 	protocolRepo *postgres.ProtocolRepository,
 	tokenRepo *postgres.TokenRepository,
 	positionRepo *postgres.PositionRepository,
+	eventRepo outbound.EventRepository,
 ) error {
 	if sqsClient == nil {
 		return fmt.Errorf("sqsClient is required")
@@ -935,6 +986,9 @@ func validateDependencies(
 	}
 	if positionRepo == nil {
 		return fmt.Errorf("positionRepo is required")
+	}
+	if eventRepo == nil {
+		return fmt.Errorf("eventRepo is required")
 	}
 	return nil
 }
