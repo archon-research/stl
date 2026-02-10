@@ -560,7 +560,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 
 		// Build and persist the entity
 		sparkReserveData := s.buildReserveDataEntity(protocolID.ID, tokenID, blockNumber, blockVersion, reserveData, configData)
-		if err := s.protocolRepo.UpsertSparkLendReserveData(ctx, tx, []*entity.SparkLendReserveData{sparkReserveData}); err != nil {
+		if err := s.protocolRepo.UpsertReserveData(ctx, tx, []*entity.SparkLendReserveData{sparkReserveData}); err != nil {
 			return fmt.Errorf("failed to upsert reserve data: %w", err)
 		}
 

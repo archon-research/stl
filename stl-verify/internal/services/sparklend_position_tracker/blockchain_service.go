@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/big"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -56,7 +57,7 @@ type blockchainService struct {
 	uiPoolDataProvider                         common.Address
 	poolDataProvider                           common.Address
 	poolAddressesProvider                      common.Address
-	protocolVersion                            string // "aave-v2", "aave-v3", or "sparklend"
+	protocolVersion                            blockchain.ProtocolVersion
 	metadataCache                              map[common.Address]TokenMetadata
 	logger                                     *slog.Logger
 }
@@ -98,7 +99,7 @@ func newBlockchainService(
 	uiPoolDataProvider common.Address,
 	poolDataProvider common.Address,
 	poolAddressesProvider common.Address,
-	protocolVersion string,
+	protocolVersion blockchain.ProtocolVersion,
 	logger *slog.Logger,
 ) (*blockchainService, error) {
 	service := &blockchainService{
@@ -120,16 +121,16 @@ func newBlockchainService(
 	return service, nil
 }
 
-func (s *blockchainService) loadABIs(protocolVersion string) error {
+func (s *blockchainService) loadABIs(protocolVersion blockchain.ProtocolVersion) error {
 	var err error
 
 	// Load getUserReservesData ABI based on protocol version
 	switch protocolVersion {
-	case "aave-v2":
+	case blockchain.ProtocolVersionAaveV2:
 		s.getUserReservesABI, err = abis.GetAaveUserReservesDataABI()
-	case "aave-v3":
+	case blockchain.ProtocolVersionAaveV3:
 		s.getUserReservesABI, err = abis.GetAaveUserReservesDataABI()
-	case "sparklend":
+	case blockchain.ProtocolVersionSparkLend:
 		s.getUserReservesABI, err = abis.GetSparklendUserReservesDataABI()
 	default:
 		return fmt.Errorf("unknown protocol version: %s", protocolVersion)
@@ -149,11 +150,11 @@ func (s *blockchainService) loadABIs(protocolVersion string) error {
 	}
 
 	switch protocolVersion {
-	case "aave-v2":
+	case blockchain.ProtocolVersionAaveV2:
 		s.getPoolDataProviderReserveDataABI, err = abis.GetAaveV2PoolDataProviderReserveDataABI()
-	case "aave-v3":
+	case blockchain.ProtocolVersionAaveV3:
 		s.getPoolDataProviderReserveDataABI, err = abis.GetPoolDataProviderReserveData()
-	case "sparklend":
+	case blockchain.ProtocolVersionSparkLend:
 		s.getPoolDataProviderReserveDataABI, err = abis.GetSparklendPoolDataProviderReserveDataABI()
 	default:
 		return fmt.Errorf("unknown protocol version: %s", protocolVersion)

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
@@ -81,10 +82,14 @@ func TestBlockchainService_LoadABIs_AllProtocols(t *testing.T) {
 		t.Fatalf("failed to load ERC20 ABI: %v", err)
 	}
 
-	protocols := []string{"aave-v2", "aave-v3", "sparklend"}
+	protocols := []blockchain.ProtocolVersion{
+		blockchain.ProtocolVersionAaveV2,
+		blockchain.ProtocolVersionAaveV3,
+		blockchain.ProtocolVersionSparkLend,
+	}
 
 	for _, protocol := range protocols {
-		t.Run(protocol, func(t *testing.T) {
+		t.Run(string(protocol), func(t *testing.T) {
 			service := &blockchainService{
 				logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 				metadataCache:   make(map[common.Address]TokenMetadata),
@@ -417,11 +422,11 @@ func TestBlockchainService_ParseUserReservesData(t *testing.T) {
 func TestBlockchainService_ParseReserveData(t *testing.T) {
 	protocols := []struct {
 		name    string
-		version string
+		version blockchain.ProtocolVersion
 	}{
-		{"Sparklend", "sparklend"},
-		{"Aave V3", "aave-v3"},
-		{"Aave V2", "aave-v2"},
+		{"Sparklend", blockchain.ProtocolVersionSparkLend},
+		{"Aave V3", blockchain.ProtocolVersionAaveV3},
+		{"Aave V2", blockchain.ProtocolVersionAaveV2},
 	}
 
 	for _, proto := range protocols {

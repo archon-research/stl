@@ -51,11 +51,11 @@ func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 
 func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, name string, protocolType string, createdAtBlock int64) (int64, error) {
 	var protocolID int64
-	addressBytes := address.Bytes() // Use bytes, not hex string
+	addressBytes := address.Bytes()
 
 	err := tx.QueryRow(ctx,
 		`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2`,
-		chainID, addressBytes).Scan(&protocolID) // Use addressBytes
+		chainID, addressBytes).Scan(&protocolID)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		r.logger.Info("auto-creating protocol", "address", address.Hex(), "name", name)
@@ -63,7 +63,7 @@ func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx,
 			`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
            VALUES ($1, $2, $3, $4, $5)
            RETURNING id`,
-			chainID, addressBytes, name, "lending", createdAtBlock).Scan(&protocolID) // Use addressBytes
+			chainID, addressBytes, name, "lending", createdAtBlock).Scan(&protocolID)
 		if err != nil {
 			return 0, fmt.Errorf("failed to create protocol: %w", err)
 		}
@@ -105,12 +105,11 @@ func (r *ProtocolRepository) GetProtocolByAddress(ctx context.Context, chainID i
 
 // UpsertSparkLendReserveData upserts SparkLend reserve data records atomically.
 // All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
-func (r *ProtocolRepository) UpsertSparkLendReserveData(ctx context.Context, tx pgx.Tx, data []*entity.SparkLendReserveData) error {
+func (r *ProtocolRepository) UpsertReserveData(ctx context.Context, tx pgx.Tx, data []*entity.SparkLendReserveData) error {
 	if len(data) == 0 {
 		return nil
 	}
 
-	// Don't create a new transaction - use the one passed in
 	for i := 0; i < len(data); i += r.batchSize {
 		end := i + r.batchSize
 		if end > len(data) {
@@ -123,7 +122,6 @@ func (r *ProtocolRepository) UpsertSparkLendReserveData(ctx context.Context, tx 
 		}
 	}
 
-	// Don't commit here - let the outer transaction handle it
 	return nil
 }
 
