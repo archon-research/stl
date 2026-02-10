@@ -1,12 +1,14 @@
 name: Sentinel Staging Deploy
 
+# Currently disabled - only manual triggers allowed
+# To re-enable automatic deployments, uncomment the push trigger below
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "infra/**"
-      - ".github/workflows/sentinel-staging-deploy.yml"
+  # push:
+  #   branches:
+  #     - main
+  #   paths:
+  #     - "infra/**"
+  #     - ".github/workflows/sentinel-staging-deploy.yml"
   workflow_dispatch:
     inputs:
       action:
