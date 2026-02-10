@@ -3,7 +3,7 @@
 # Log everything
 exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
 
-echo "=== Starting Erigon Archive Node setup (c8gd.48xlarge with NVMe) ==="
+echo "=== Starting Erigon Archive Node setup (c8gd with NVMe) ==="
 
 # Install SSM agent first (not pre-installed on AL2023)
 echo "=== Installing SSM agent ==="
@@ -44,7 +44,7 @@ set -e
 
 # =============================================================================
 # Setup RAID 0 on the two local NVMe instance store disks
-# c8gd.48xlarge has 6x 1900GB NVMe disks
+# c8gd instances have local NVMe instance store disks
 # =============================================================================
 echo "=== Setting up NVMe RAID 0 ==="
 
@@ -171,15 +171,15 @@ ExecStart=/usr/local/bin/erigon \
   --http.corsdomain=* \
   --private.api.addr=localhost:9090 \
   --txpool.disable \
-  --state.cache=256GB \
-  --bodies.cache=48GB \
-  --batchSize=2GB \
-  --db.size.limit=8TB \
+  --state.cache=80GB \
+  --bodies.cache=16GB \
+  --batchSize=1GB \
+  --db.size.limit=4TB \
   --rpc.batch.limit=10000 \
-  --rpc.batch.concurrency=512 \
+  --rpc.batch.concurrency=128 \
   --rpc.returndata.limit=10000000 \
   --rpc.evmtimeout=30m \
-  --db.read.concurrency=1024 \
+  --db.read.concurrency=256 \
   --nodiscover \
   --maxpeers=0 \
   --log.console.verbosity=warn
@@ -300,7 +300,7 @@ systemctl start erigon
 
 echo "=== Setup complete ==="
 echo ""
-echo "c8gd.48xlarge NVMe RAID 0 setup complete!"
+echo "NVMe RAID 0 setup complete!"
 echo ""
 echo "Storage: $(df -h /data | tail -1 | awk '{print $2}')"
 echo ""

@@ -19,32 +19,16 @@ data "aws_ami" "amazon_linux_2023" {
   }
 }
 
-# Security group for Erigon node (in isolated VPC)
-# SSH access via Tailscale only - no public SSH port needed
+# Security group for Erigon node (in main VPC private subnet)
+# No ingress rules — private subnet has no direct internet ingress.
+# SSH access via Tailscale only (outbound connection through NAT).
 resource "aws_security_group" "erigon" {
   name        = "${var.project}-erigon-sg"
   description = "Security group for Erigon archive node"
-  vpc_id      = aws_vpc.erigon.id
+  vpc_id      = data.aws_vpc.main.id
 
-  # Erigon P2P (TCP) - needed for blockchain sync
-  ingress {
-    description = "Erigon P2P TCP"
-    from_port   = 30303
-    to_port     = 30303
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # Erigon P2P (UDP) - needed for blockchain sync
-  ingress {
-    description = "Erigon P2P UDP"
-    from_port   = 30303
-    to_port     = 30303
-    protocol    = "udp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # All outbound (needed for P2P, S3, package downloads, Tailscale)
+  # All outbound: covers Tailscale, NAT (P2P sync, packages), S3 endpoint,
+  # and TigerData access via VPC peering route.
   egress {
     from_port   = 0
     to_port     = 0
@@ -138,15 +122,15 @@ resource "aws_iam_instance_profile" "erigon" {
 }
 
 # =============================================================================
-# c8gd.48xlarge Instance for High-Performance Bulk Downloads
-# Uses local NVMe instance store (6x 1900GB in RAID 0) for maximum I/O
+# Erigon Instance (c8gd family — Graviton4 with local NVMe instance store)
+# The user-data script auto-detects and RAIDs all NVMe instance store disks.
 # =============================================================================
 
 resource "aws_instance" "erigon_c8gd" {
   ami                    = data.aws_ami.amazon_linux_2023.id
   instance_type          = var.instance_type
   key_name               = var.key_name
-  subnet_id              = aws_subnet.erigon.id
+  subnet_id              = data.aws_subnet.private.id
   vpc_security_group_ids = [aws_security_group.erigon.id]
   iam_instance_profile   = aws_iam_instance_profile.erigon.name
 
@@ -155,8 +139,7 @@ resource "aws_instance" "erigon_c8gd" {
     volume_type = "gp3"
   }
 
-  # c8gd has local NVMe instance store - ephemeral but very fast
-  # The user-data script sets up RAID 0 on the 6x 1900GB NVMe disks
+  # NVMe instance store disks are set up by user-data (RAID 0 if multiple)
 
   user_data = base64encode(file("${path.module}/user-data-c8gd.sh"))
 

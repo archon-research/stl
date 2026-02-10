@@ -7,19 +7,19 @@ variable "aws_region" {
 variable "instance_type" {
   description = "EC2 instance type (must be c8gd family for NVMe instance store)"
   type        = string
-  default     = "c8gd.48xlarge" # 192 vCPUs (Graviton4), 384GB RAM, 6x 1900GB NVMe
+  default     = "c8gd.16xlarge"
 }
 
-variable "vpc_cidr" {
-  description = "CIDR block for the isolated VPC"
+variable "main_infra_prefix" {
+  description = "Name prefix of the main infrastructure (used for VPC/subnet tag lookups)"
   type        = string
-  default     = "10.100.0.0/16"
+  default     = "stl-sentinelstaging"
 }
 
-variable "subnet_cidr" {
-  description = "CIDR block for the public subnet"
+variable "tigerdata_vpc_cidr" {
+  description = "CIDR block of the TigerData VPC (for security group egress documentation)"
   type        = string
-  default     = "10.100.1.0/24"
+  default     = "10.1.0.0/24"
 }
 
 variable "s3_bucket_name" {
