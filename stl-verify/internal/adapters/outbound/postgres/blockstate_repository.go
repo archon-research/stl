@@ -119,7 +119,7 @@ func (r *BlockStateRepository) saveBlockOnce(ctx context.Context, state outbound
 	// Check if a block with this hash already exists (duplicate detection).
 	// Done inside the serializable transaction to prevent TOCTOU races.
 	var existingVersion int
-	err = tx.QueryRow(ctx, `SELECT version FROM block_states WHERE hash = $1`, state.Hash).Scan(&existingVersion)
+	err = tx.QueryRow(ctx, `SELECT version FROM block_states WHERE chain_id = $1 AND hash = $2`, r.chainID, state.Hash).Scan(&existingVersion)
 	if err == nil {
 		// Block already exists - return its version without updating
 		return existingVersion, nil
@@ -233,10 +233,10 @@ func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) 
 	query := `
 		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
-		WHERE hash = $1
+		WHERE chain_id = $1 AND hash = $2
 	`
 	var state outbound.BlockState
-	err := r.pool.QueryRow(ctx, query, hash).Scan(
+	err := r.pool.QueryRow(ctx, query, r.chainID, hash).Scan(
 		&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
 		&state.BlockPublished)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -297,8 +297,8 @@ func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) (
 
 // MarkBlockOrphaned marks a block as orphaned during a reorg.
 func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash string) error {
-	query := `UPDATE block_states SET is_orphaned = TRUE WHERE hash = $1`
-	_, err := r.pool.Exec(ctx, query, hash)
+	query := `UPDATE block_states SET is_orphaned = TRUE WHERE chain_id = $1 AND hash = $2`
+	_, err := r.pool.Exec(ctx, query, r.chainID, hash)
 	if err != nil {
 		return fmt.Errorf("failed to mark block orphaned: %w", err)
 	}
@@ -379,7 +379,7 @@ func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, common
 
 	// 2. Check if this block hash already exists (idempotency)
 	var existingVersion int
-	err = tx.QueryRow(ctx, `SELECT version FROM block_states WHERE hash = $1`, newBlock.Hash).Scan(&existingVersion)
+	err = tx.QueryRow(ctx, `SELECT version FROM block_states WHERE chain_id = $1 AND hash = $2`, r.chainID, newBlock.Hash).Scan(&existingVersion)
 	if err == nil {
 		// Block already exists - commit and return existing version
 		if commitErr := tx.Commit(ctx); commitErr != nil {
@@ -718,7 +718,7 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 	)
 	defer span.End()
 
-	query := `UPDATE block_states SET block_published = TRUE WHERE hash = $1`
+	query := `UPDATE block_states SET block_published = TRUE WHERE chain_id = $1 AND hash = $2`
 
 	cfg := retry.Config{
 		MaxRetries:     3,
@@ -741,7 +741,7 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 	}
 
 	err := retry.DoVoid(ctx, cfg, isRetryableError, onRetry, func() error {
-		result, err := r.pool.Exec(ctx, query, hash)
+		result, err := r.pool.Exec(ctx, query, r.chainID, hash)
 		if err != nil {
 			return err
 		}

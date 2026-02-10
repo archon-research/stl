@@ -32,7 +32,7 @@ DROP INDEX IF EXISTS idx_block_states_hash;
 DROP INDEX IF EXISTS idx_block_states_canonical;
 DROP INDEX IF EXISTS idx_block_states_incomplete_publish;
 
-CREATE INDEX idx_block_states_hash ON block_states (hash);
+CREATE INDEX idx_block_states_chain_hash ON block_states (chain_id, hash);
 CREATE INDEX idx_block_states_chain_canonical
     ON block_states (chain_id, number DESC) WHERE NOT is_orphaned;
 CREATE INDEX idx_block_states_chain_incomplete_publish
@@ -56,7 +56,7 @@ ALTER TABLE block_states SET (
     timescaledb.compress_orderby = 'number DESC'
 );
 SELECT add_compression_policy('block_states', INTERVAL '1 day');
-SELECT add_retention_policy('block_states', INTERVAL '7 days');
+SELECT add_retention_policy('block_states', INTERVAL '30 days');
 
 -- 1h. reorg_events: add chain_id
 ALTER TABLE reorg_events ADD COLUMN chain_id INT NOT NULL DEFAULT 1;
