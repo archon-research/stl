@@ -472,228 +472,238 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, asset common
 	return reserveData, configData, nil
 }
 
-// parseReserveData parses the raw bytes from ProtocolDataProvider.getReserveData into structured data.
 func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvider, error) {
 	unpacked, err := s.getPoolDataProviderReserveDataABI.Unpack("getReserveData", data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unpack getReserveData: %w", err)
 	}
 
-	result := &reserveDataFromProvider{}
-
-	// Helper to safely get *big.Int
-	getBigInt := func(idx int, name string) (*big.Int, error) {
-		if v, ok := unpacked[idx].(*big.Int); ok {
-			return v, nil
-		}
-		return nil, fmt.Errorf("unpacked[%d] (%s) expected *big.Int, got %T", idx, name, unpacked[idx])
-	}
+	outputs := s.getPoolDataProviderReserveDataABI.Methods["getReserveData"].Outputs
+	fieldIndex := buildFieldIndexMap(outputs)
 
 	switch s.protocolVersion {
-	case "aave-v2":
-		// Aave V2: 10 fields with different structure
-		// 0: availableLiquidity, 1: totalStableDebt, 2: totalVariableDebt,
-		// 3: liquidityRate, 4: variableBorrowRate, 5: stableBorrowRate,
-		// 6: averageStableBorrowRate, 7: liquidityIndex, 8: variableBorrowIndex,
-		// 9: lastUpdateTimestamp
-
-		if len(unpacked) < 10 {
-			return nil, fmt.Errorf("expected 10 values from getReserveData (Aave V2), got %d", len(unpacked))
-		}
-
-		// Map Aave V2 fields to our unified structure
-		result.Unbacked = big.NewInt(0)                              // Not available in V2
-		result.AccruedToTreasuryScaled = big.NewInt(0)               // Not available in V2
-		result.TotalAToken, err = getBigInt(0, "availableLiquidity") // Using availableLiquidity as proxy
-		if err != nil {
-			return nil, err
-		}
-
-		result.TotalStableDebt, err = getBigInt(1, "totalStableDebt")
-		if err != nil {
-			return nil, err
-		}
-
-		result.TotalVariableDebt, err = getBigInt(2, "totalVariableDebt")
-		if err != nil {
-			return nil, err
-		}
-
-		result.LiquidityRate, err = getBigInt(3, "liquidityRate")
-		if err != nil {
-			return nil, err
-		}
-
-		result.VariableBorrowRate, err = getBigInt(4, "variableBorrowRate")
-		if err != nil {
-			return nil, err
-		}
-
-		result.StableBorrowRate, err = getBigInt(5, "stableBorrowRate")
-		if err != nil {
-			return nil, err
-		}
-
-		result.AverageStableBorrowRate, err = getBigInt(6, "averageStableBorrowRate")
-		if err != nil {
-			return nil, err
-		}
-
-		result.LiquidityIndex, err = getBigInt(7, "liquidityIndex")
-		if err != nil {
-			return nil, err
-		}
-
-		result.VariableBorrowIndex, err = getBigInt(8, "variableBorrowIndex")
-		if err != nil {
-			return nil, err
-		}
-
-		if v, ok := unpacked[9].(*big.Int); ok {
-			result.LastUpdateTimestamp = v.Int64()
-		} else {
-			return nil, fmt.Errorf("unpacked[9] (lastUpdateTimestamp) expected *big.Int, got %T", unpacked[9])
-		}
-
-	case "aave-v3":
-		// Aave V3: 12 fields
-		if len(unpacked) < 12 {
-			return nil, fmt.Errorf("expected 12 values from getReserveData (Aave V3), got %d", len(unpacked))
-		}
-
-		result.Unbacked, err = getBigInt(0, "unbacked")
-		if err != nil {
-			return nil, err
-		}
-
-		result.AccruedToTreasuryScaled, err = getBigInt(1, "accruedToTreasuryScaled")
-		if err != nil {
-			return nil, err
-		}
-
-		result.TotalAToken, err = getBigInt(2, "totalAToken")
-		if err != nil {
-			return nil, err
-		}
-
-		result.TotalStableDebt, err = getBigInt(3, "totalStableDebt")
-		if err != nil {
-			return nil, err
-		}
-
-		result.TotalVariableDebt, err = getBigInt(4, "totalVariableDebt")
-		if err != nil {
-			return nil, err
-		}
-
-		result.LiquidityRate, err = getBigInt(5, "liquidityRate")
-		if err != nil {
-			return nil, err
-		}
-
-		result.VariableBorrowRate, err = getBigInt(6, "variableBorrowRate")
-		if err != nil {
-			return nil, err
-		}
-
-		result.StableBorrowRate, err = getBigInt(7, "stableBorrowRate")
-		if err != nil {
-			return nil, err
-		}
-
-		result.AverageStableBorrowRate, err = getBigInt(8, "averageStableBorrowRate")
-		if err != nil {
-			return nil, err
-		}
-
-		result.LiquidityIndex, err = getBigInt(9, "liquidityIndex")
-		if err != nil {
-			return nil, err
-		}
-
-		result.VariableBorrowIndex, err = getBigInt(10, "variableBorrowIndex")
-		if err != nil {
-			return nil, err
-		}
-
-		if v, ok := unpacked[11].(*big.Int); ok {
-			result.LastUpdateTimestamp = v.Int64()
-		} else {
-			return nil, fmt.Errorf("unpacked[11] (lastUpdateTimestamp) expected *big.Int, got %T", unpacked[11])
-		}
-
-	case "sparklend":
-		// Sparklend: 11 fields (no averageStableBorrowRate)
-		if len(unpacked) < 11 {
-			return nil, fmt.Errorf("expected 11 values from getReserveData (Sparklend), got %d", len(unpacked))
-		}
-
-		result.Unbacked, err = getBigInt(0, "unbacked")
-		if err != nil {
-			return nil, err
-		}
-
-		result.AccruedToTreasuryScaled, err = getBigInt(1, "accruedToTreasuryScaled")
-		if err != nil {
-			return nil, err
-		}
-
-		result.TotalAToken, err = getBigInt(2, "totalAToken")
-		if err != nil {
-			return nil, err
-		}
-
-		result.TotalStableDebt, err = getBigInt(3, "totalStableDebt")
-		if err != nil {
-			return nil, err
-		}
-
-		result.TotalVariableDebt, err = getBigInt(4, "totalVariableDebt")
-		if err != nil {
-			return nil, err
-		}
-
-		result.LiquidityRate, err = getBigInt(5, "liquidityRate")
-		if err != nil {
-			return nil, err
-		}
-
-		result.VariableBorrowRate, err = getBigInt(6, "variableBorrowRate")
-		if err != nil {
-			return nil, err
-		}
-
-		result.StableBorrowRate, err = getBigInt(7, "stableBorrowRate")
-		if err != nil {
-			return nil, err
-		}
-
-		result.AverageStableBorrowRate = big.NewInt(0) // Not available in Sparklend
-
-		result.LiquidityIndex, err = getBigInt(8, "liquidityIndex")
-		if err != nil {
-			return nil, err
-		}
-
-		result.VariableBorrowIndex, err = getBigInt(9, "variableBorrowIndex")
-		if err != nil {
-			return nil, err
-		}
-
-		if v, ok := unpacked[10].(*big.Int); ok {
-			result.LastUpdateTimestamp = v.Int64()
-		} else {
-			return nil, fmt.Errorf("unpacked[10] (lastUpdateTimestamp) expected *big.Int, got %T", unpacked[10])
-		}
-
+	case blockchain.ProtocolVersionAaveV2:
+		return parseReserveDataAaveV2(unpacked, fieldIndex)
+	case blockchain.ProtocolVersionAaveV3:
+		return parseReserveDataAaveV3(unpacked, fieldIndex)
+	case blockchain.ProtocolVersionSparkLend:
+		return parseReserveDataSparklend(unpacked, fieldIndex)
 	default:
 		return nil, fmt.Errorf("unknown protocol version: %s", s.protocolVersion)
 	}
+}
+
+// parseReserveDataAaveV2 parses Aave V2 reserve data (10 fields).
+func parseReserveDataAaveV2(unpacked []interface{}, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+	if len(unpacked) < 10 {
+		return nil, fmt.Errorf("expected 10 values from getReserveData (Aave V2), got %d", len(unpacked))
+	}
+
+	result := &reserveDataFromProvider{
+		Unbacked:                big.NewInt(0), // Not available in V2
+		AccruedToTreasuryScaled: big.NewInt(0), // Not available in V2
+	}
+
+	var err error
+
+	// Map availableLiquidity to TotalAToken as proxy
+	result.TotalAToken, err = getBigIntByName(unpacked, fieldIndex, "availableLiquidity")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalStableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalStableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalVariableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalVariableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidityRate, err = getBigIntByName(unpacked, fieldIndex, "liquidityRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.StableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "stableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AverageStableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "averageStableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidityIndex, err = getBigIntByName(unpacked, fieldIndex, "liquidityIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowIndex, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	timestamp, err := getBigIntByName(unpacked, fieldIndex, "lastUpdateTimestamp")
+	if err != nil {
+		return nil, err
+	}
+	result.LastUpdateTimestamp = timestamp.Int64()
 
 	return result, nil
 }
 
-// parseReserveConfigurationData parses the raw bytes from getReserveConfigurationData.
+// parseReserveDataAaveV3 parses Aave V3 reserve data (12 fields).
+func parseReserveDataAaveV3(unpacked []interface{}, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+	if len(unpacked) < 12 {
+		return nil, fmt.Errorf("expected 12 values from getReserveData (Aave V3), got %d", len(unpacked))
+	}
+
+	result := &reserveDataFromProvider{}
+	var err error
+
+	result.Unbacked, err = getBigIntByName(unpacked, fieldIndex, "unbacked")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AccruedToTreasuryScaled, err = getBigIntByName(unpacked, fieldIndex, "accruedToTreasuryScaled")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalAToken, err = getBigIntByName(unpacked, fieldIndex, "totalAToken")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalStableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalStableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalVariableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalVariableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidityRate, err = getBigIntByName(unpacked, fieldIndex, "liquidityRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.StableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "stableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AverageStableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "averageStableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidityIndex, err = getBigIntByName(unpacked, fieldIndex, "liquidityIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowIndex, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	timestamp, err := getBigIntByName(unpacked, fieldIndex, "lastUpdateTimestamp")
+	if err != nil {
+		return nil, err
+	}
+	result.LastUpdateTimestamp = timestamp.Int64()
+
+	return result, nil
+}
+
+// parseReserveDataSparklend parses Sparklend reserve data (11 fields, no averageStableBorrowRate).
+func parseReserveDataSparklend(unpacked []interface{}, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+	if len(unpacked) < 11 {
+		return nil, fmt.Errorf("expected 11 values from getReserveData (Sparklend), got %d", len(unpacked))
+	}
+
+	result := &reserveDataFromProvider{}
+	var err error
+
+	result.Unbacked, err = getBigIntByName(unpacked, fieldIndex, "unbacked")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AccruedToTreasuryScaled, err = getBigIntByName(unpacked, fieldIndex, "accruedToTreasuryScaled")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalAToken, err = getBigIntByName(unpacked, fieldIndex, "totalAToken")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalStableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalStableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalVariableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalVariableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidityRate, err = getBigIntByName(unpacked, fieldIndex, "liquidityRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.StableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "stableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AverageStableBorrowRate = big.NewInt(0) // Not available in Sparklend
+
+	result.LiquidityIndex, err = getBigIntByName(unpacked, fieldIndex, "liquidityIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowIndex, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	timestamp, err := getBigIntByName(unpacked, fieldIndex, "lastUpdateTimestamp") // ✅ Fixed with :=
+	if err != nil {
+		return nil, err
+	}
+	result.LastUpdateTimestamp = timestamp.Int64()
+
+	return result, nil
+}
+
 func (s *blockchainService) parseReserveConfigurationData(data []byte) (*reserveConfigData, error) {
 	unpacked, err := s.getPoolDataProviderReserveConfigurationABI.Unpack("getReserveConfigurationData", data)
 	if err != nil {
@@ -704,67 +714,104 @@ func (s *blockchainService) parseReserveConfigurationData(data []byte) (*reserve
 		return nil, fmt.Errorf("expected 10 values from getReserveConfigurationData, got %d", len(unpacked))
 	}
 
+	outputs := s.getPoolDataProviderReserveConfigurationABI.Methods["getReserveConfigurationData"].Outputs
+	fieldIndex := buildFieldIndexMap(outputs)
+
 	result := &reserveConfigData{}
 
-	if v, ok := unpacked[0].(*big.Int); ok {
-		result.Decimals = v
-	} else {
-		return nil, fmt.Errorf("unpacked[0] (decimals) expected *big.Int, got %T", unpacked[0])
+	result.Decimals, err = getBigIntByName(unpacked, fieldIndex, "decimals")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[1].(*big.Int); ok {
-		result.LTV = v
-	} else {
-		return nil, fmt.Errorf("unpacked[1] (ltv) expected *big.Int, got %T", unpacked[1])
+	result.LTV, err = getBigIntByName(unpacked, fieldIndex, "ltv")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[2].(*big.Int); ok {
-		result.LiquidationThreshold = v
-	} else {
-		return nil, fmt.Errorf("unpacked[2] (liquidationThreshold) expected *big.Int, got %T", unpacked[2])
+	result.LiquidationThreshold, err = getBigIntByName(unpacked, fieldIndex, "liquidationThreshold")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[3].(*big.Int); ok {
-		result.LiquidationBonus = v
-	} else {
-		return nil, fmt.Errorf("unpacked[3] (liquidationBonus) expected *big.Int, got %T", unpacked[3])
+	result.LiquidationBonus, err = getBigIntByName(unpacked, fieldIndex, "liquidationBonus")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[4].(*big.Int); ok {
-		result.ReserveFactor = v
-	} else {
-		return nil, fmt.Errorf("unpacked[4] (reserveFactor) expected *big.Int, got %T", unpacked[4])
+	result.ReserveFactor, err = getBigIntByName(unpacked, fieldIndex, "reserveFactor")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[5].(bool); ok {
-		result.UsageAsCollateralEnabled = v
-	} else {
-		return nil, fmt.Errorf("unpacked[5] (usageAsCollateralEnabled) expected bool, got %T", unpacked[5])
+	result.UsageAsCollateralEnabled, err = getBoolByName(unpacked, fieldIndex, "usageAsCollateralEnabled")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[6].(bool); ok {
-		result.BorrowingEnabled = v
-	} else {
-		return nil, fmt.Errorf("unpacked[6] (borrowingEnabled) expected bool, got %T", unpacked[6])
+	result.BorrowingEnabled, err = getBoolByName(unpacked, fieldIndex, "borrowingEnabled")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[7].(bool); ok {
-		result.StableBorrowRateEnabled = v
-	} else {
-		return nil, fmt.Errorf("unpacked[7] (stableBorrowRateEnabled) expected bool, got %T", unpacked[7])
+	result.StableBorrowRateEnabled, err = getBoolByName(unpacked, fieldIndex, "stableBorrowRateEnabled")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[8].(bool); ok {
-		result.IsActive = v
-	} else {
-		return nil, fmt.Errorf("unpacked[8] (isActive) expected bool, got %T", unpacked[8])
+	result.IsActive, err = getBoolByName(unpacked, fieldIndex, "isActive")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[9].(bool); ok {
-		result.IsFrozen = v
-	} else {
-		return nil, fmt.Errorf("unpacked[9] (isFrozen) expected bool, got %T", unpacked[9])
+	result.IsFrozen, err = getBoolByName(unpacked, fieldIndex, "isFrozen")
+	if err != nil {
+		return nil, err
 	}
 
 	return result, nil
+}
+
+func buildFieldIndexMap(outputs abi.Arguments) map[string]int {
+	fieldIndex := make(map[string]int, len(outputs))
+	for i, arg := range outputs {
+		fieldIndex[arg.Name] = i
+	}
+	return fieldIndex
+}
+
+func getBigIntByName(unpacked []interface{}, fieldIndex map[string]int, fieldName string) (*big.Int, error) {
+	idx, ok := fieldIndex[fieldName]
+	if !ok {
+		return nil, fmt.Errorf("field %s not found in ABI", fieldName)
+	}
+
+	if idx >= len(unpacked) {
+		return nil, fmt.Errorf("index %d out of range for %s", idx, fieldName)
+	}
+
+	v, ok := unpacked[idx].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("field %s expected *big.Int, got %T", fieldName, unpacked[idx])
+	}
+
+	return v, nil
+}
+
+func getBoolByName(unpacked []interface{}, fieldIndex map[string]int, fieldName string) (bool, error) {
+	idx, ok := fieldIndex[fieldName]
+	if !ok {
+		return false, fmt.Errorf("field %s not found in ABI", fieldName)
+	}
+
+	if idx >= len(unpacked) {
+		return false, fmt.Errorf("index %d out of range for %s", idx, fieldName)
+	}
+
+	v, ok := unpacked[idx].(bool)
+	if !ok {
+		return false, fmt.Errorf("field %s expected bool, got %T", fieldName, unpacked[idx])
+	}
+
+	return v, nil
 }
