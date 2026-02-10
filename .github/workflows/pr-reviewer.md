@@ -4,11 +4,20 @@ on:
   slash_command:
     name: review
     events: [pull_request_comment]
+engine:
+  id: codex
+  model: route-llm
+  env:
+    OPENAI_BASE_URL: https://routellm.abacus.ai/v1
 permissions:
   contents: read
   pull-requests: read
   issues: read
   actions: read
+network:
+  allowed:
+    - defaults
+    - routellm.abacus.ai
 tools:
   github:
     toolsets: [default, pull_requests]
