@@ -1204,34 +1204,40 @@ func TestCacheAndPublishBlockData_ErrorHandling(t *testing.T) {
 		failCacheTraces   bool
 		failCacheBlobs    bool
 		failPublish       bool
+		enableTraces      bool
 		enableBlobs       bool
 		wantErr           bool
 		errContains       string
 	}{
 		{
-			name:    "all_succeed",
-			wantErr: false,
+			name:         "all_succeed",
+			enableTraces: true,
+			wantErr:      false,
 		},
 		{
 			name:         "block_fetch_error_in_data",
+			enableTraces: true,
 			failGetBlock: true,
 			wantErr:      true,
 			errContains:  "failed to fetch block",
 		},
 		{
 			name:            "receipts_fetch_error_in_data",
+			enableTraces:    true,
 			failGetReceipts: true,
 			wantErr:         true,
 			errContains:     "failed to fetch receipts",
 		},
 		{
 			name:          "traces_fetch_error_in_data",
+			enableTraces:  true,
 			failGetTraces: true,
 			wantErr:       true,
 			errContains:   "failed to fetch traces",
 		},
 		{
 			name:         "blobs_fetch_error_in_data",
+			enableTraces: true,
 			failGetBlobs: true,
 			enableBlobs:  true,
 			wantErr:      true,
@@ -1239,43 +1245,56 @@ func TestCacheAndPublishBlockData_ErrorHandling(t *testing.T) {
 		},
 		{
 			name:           "block_cache_fails",
+			enableTraces:   true,
 			failCacheBlock: true,
 			wantErr:        true,
 			errContains:    "cache block failure",
 		},
 		{
 			name:              "receipts_cache_fails",
+			enableTraces:      true,
 			failCacheReceipts: true,
 			wantErr:           true,
 			errContains:       "cache receipts failure",
 		},
 		{
 			name:            "traces_cache_fails",
+			enableTraces:    true,
 			failCacheTraces: true,
 			wantErr:         true,
 			errContains:     "cache traces failure",
 		},
 		{
 			name:           "blobs_cache_fails",
+			enableTraces:   true,
 			failCacheBlobs: true,
 			enableBlobs:    true,
 			wantErr:        true,
 			errContains:    "cache blobs failure",
 		},
 		{
-			name:        "publish_fails",
-			failPublish: true,
-			wantErr:     true,
-			errContains: "failed to publish",
+			name:         "publish_fails",
+			enableTraces: true,
+			failPublish:  true,
+			wantErr:      true,
+			errContains:  "failed to publish",
 		},
 		{
 			name:         "blobs_disabled_blobs_error_ignored",
+			enableTraces: true,
 			failGetBlobs: true,
 			enableBlobs:  false,
 			wantErr:      false,
 		},
 		{
+			name:          "traces_disabled_traces_error_ignored",
+			enableTraces:  false,
+			failGetTraces: true,
+			wantErr:       false,
+		},
+		{
 			name:            "multiple_failures",
+			enableTraces:    true,
 			failGetBlock:    true,
 			failGetReceipts: true,
 			failGetTraces:   true,
@@ -1309,7 +1328,8 @@ func TestCacheAndPublishBlockData_ErrorHandling(t *testing.T) {
 			eventSink.failPublish = tt.failPublish
 
 			svc, err := NewLiveService(LiveConfig{
-				EnableBlobs: tt.enableBlobs,
+				EnableTraces: tt.enableTraces,
+				EnableBlobs:  tt.enableBlobs,
 			}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 			if err != nil {
 				t.Fatalf("failed to create service: %v", err)
@@ -1347,7 +1367,8 @@ func TestCacheAndPublishBlockData_WithBlobs_CachesBlobs(t *testing.T) {
 	blockData, _ := client.GetBlockDataByHash(ctx, 100, header100.Hash, true)
 
 	svc, err := NewLiveService(LiveConfig{
-		EnableBlobs: true, // Enable blobs
+		EnableTraces: true,
+		EnableBlobs:  true, // Enable blobs
 	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -2677,7 +2698,8 @@ func TestCacheAndPublishBlockData_CachesAllDataBeforePublishing(t *testing.T) {
 	blockData, _ := client.GetBlockDataByHash(ctx, 100, header100.Hash, true)
 
 	svc, err := NewLiveService(LiveConfig{
-		EnableBlobs: true, // Enable blobs to test all 4 cache operations
+		EnableTraces: true,
+		EnableBlobs:  true, // Enable all data types to test all 4 cache operations
 	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -2773,7 +2795,8 @@ func TestCacheAndPublishBlockData_NoPublishOnCacheFailure(t *testing.T) {
 			blockData, _ := client.GetBlockDataByHash(ctx, 100, header100.Hash, true)
 
 			svc, err := NewLiveService(LiveConfig{
-				EnableBlobs: true,
+				EnableTraces: true,
+				EnableBlobs:  true,
 			}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 			if err != nil {
 				t.Fatalf("failed to create service: %v", err)

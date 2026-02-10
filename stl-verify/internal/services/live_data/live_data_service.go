@@ -30,6 +30,9 @@ type LiveConfig struct {
 	// This also limits how far back reorg detection will look for orphaned blocks.
 	FinalityBlockCount int
 
+	// EnableTraces enables fetching execution traces (trace_block on supported nodes).
+	EnableTraces bool
+
 	// EnableBlobs enables fetching blob sidecars (post-Dencun blocks on supported nodes).
 	EnableBlobs bool
 
@@ -708,7 +711,7 @@ func (s *LiveService) cacheAndPublishBlockData(ctx context.Context, header outbo
 		span.SetStatus(codes.Error, "receipts fetch error")
 		return fmt.Errorf("failed to fetch receipts for block %d: %w", blockNum, bd.ReceiptsErr)
 	}
-	if bd.TracesErr != nil {
+	if s.config.EnableTraces && bd.TracesErr != nil {
 		span.RecordError(bd.TracesErr)
 		span.SetStatus(codes.Error, "traces fetch error")
 		return fmt.Errorf("failed to fetch traces for block %d: %w", blockNum, bd.TracesErr)
@@ -732,7 +735,7 @@ func (s *LiveService) cacheAndPublishBlockData(ctx context.Context, header outbo
 		span.SetStatus(codes.Error, "missing receipts data")
 		return err
 	}
-	if bd.Traces == nil {
+	if s.config.EnableTraces && bd.Traces == nil {
 		err := fmt.Errorf("missing traces data for block %d (no error reported)", blockNum)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "missing traces data")
@@ -761,7 +764,9 @@ func (s *LiveService) cacheAndPublishBlockData(ctx context.Context, header outbo
 	cacheInput := outbound.BlockDataInput{
 		Block:    bd.Block,
 		Receipts: bd.Receipts,
-		Traces:   bd.Traces,
+	}
+	if s.config.EnableTraces {
+		cacheInput.Traces = bd.Traces
 	}
 	if s.config.EnableBlobs {
 		cacheInput.Blobs = bd.Blobs

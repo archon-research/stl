@@ -1,8 +1,8 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher help \
-        dev-up dev-down dev-ips \
+.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax help \
+        dev-up dev-env dev-down dev-ips \
         tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
         ecr-login docker-build docker-push docker-release \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -26,10 +26,16 @@ run:
 	@echo "==> Running..."
 	go run ./cmd/server
 
-# Run the watcher (requires dev-up first)
+# Run the Ethereum watcher (requires dev-up first)
 run-watcher:
-	@echo "==> Running watcher..."
+	@echo "==> Running Ethereum watcher (chain_id=1)..."
 	@set -a && . cmd/watcher/.env && [ -f cmd/watcher/.env.local ] && . cmd/watcher/.env.local; set +a && go run ./cmd/watcher
+
+# Run the Avalanche watcher (requires dev-up first)
+# Avalanche C-Chain does not support trace_block, so traces are disabled.
+run-watcher-avax:
+	@echo "==> Running Avalanche watcher (chain_id=43114)..."
+	@set -a && . cmd/watcher/.env.avax && [ -f cmd/watcher/.env.avax.local ] && . cmd/watcher/.env.avax.local; set +a && go run ./cmd/watcher --enable-traces=false
 
 # Run tests with race detector
 test-race:
@@ -155,7 +161,13 @@ dev-up:
 	@./localstack-init/init-aws.sh > /dev/null 2>&1
 	@echo "Running database migrations..."
 	@DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" go run ./cmd/migrate
-	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-watcher-config --query SecretString --output text 2>/dev/null | jq -r '.alchemy_api_key // empty') && \
+	@$(MAKE) dev-env
+
+# Generate .env files for all services (fetches secrets from AWS)
+# Can be re-run independently to refresh secrets without restarting services.
+dev-env:
+	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-watcher-config --query SecretString --output text | jq -r '.alchemy_api_key // empty') || \
+		{ echo "WARNING: Failed to fetch ALCHEMY_API_KEY from AWS Secrets Manager. Set it manually in cmd/watcher/.env"; ALCHEMY_API_KEY=''; }; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -177,6 +189,24 @@ dev-up:
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://avax-mainnet.g.alchemy.com/v2" \
+		"ALCHEMY_WS_URL=wss://avax-mainnet.g.alchemy.com/v2" \
+		"CHAIN_ID=43114" \
+		"AWS_SNS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"AWS_SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:stl-avalanche-blocks.fifo" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:6379" \
+		"REDIS_PASSWORD=" \
+		"JAEGER_ENDPOINT=127.0.0.1:4317" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"ENABLE_BACKFILL=false" \
+		> cmd/watcher/.env.avax && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-oracle-price.fifo" \
 		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
@@ -186,7 +216,8 @@ dev-up:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
 		> cmd/oracle-price-worker/.env
-	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text 2>/dev/null | jq -r '.coingecko_api_key // empty') && \
+	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
+		{ echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
@@ -196,14 +227,16 @@ dev-up:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
 		> cmd/oracle-backfill/.env
-	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text 2>/dev/null || echo '') && \
-	TIGERDATA_URL=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-tigerdata-readonly --query SecretString --output text 2>/dev/null | jq -r '.connection_url // empty' | sed 's|@[^:]*:|@localhost:|') && \
+	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text) || \
+		{ echo "WARNING: Failed to fetch ETHERSCAN_API_KEY from AWS Secrets Manager."; ETHERSCAN_API_KEY=''; }; \
+	TIGERDATA_URL=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-tigerdata-readonly --query SecretString --output text | jq -r '.connection_url // empty' | sed 's|@[^:]*:|@localhost:|') || \
+		{ echo "WARNING: Failed to fetch TIGERDATA_URL from AWS Secrets Manager."; TIGERDATA_URL=''; }; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" \
 		"DATABASE_URL=$$TIGERDATA_URL" \
 		> cmd/data-validator/.env
-	@echo "Ready. Secrets fetched from AWS."
+	@echo "Environment files generated."
 	@echo "Note: data-validator uses staging TigerData. Run 'make tigerdata-tunnel' first."
 
 # Stop all local services
