@@ -39,13 +39,12 @@ run-watcher-avax:
 	@set -a && . cmd/watcher/.env.avax && [ -f cmd/watcher/.env.avax.local ] && . cmd/watcher/.env.avax.local; set +a && go run ./cmd/watcher --enable-traces=false
 
 # Pre-flight validation
-# Validates all prerequisites: AWS, TigerData, Alchemy, Tailscale
-# Pre-flight validation - checks AWS, TigerData, Alchemy credentials
-# Auto-generates Tailscale auth keys if TAILSCALE_API_KEY is provided (24-hour ephemeral)
-# Use --skip-tailscale to skip Tailscale setup for dev environments
-# Usage: make preflight [--skip-tailscale] [--env sentineldev|sentinelstaging|sentinelprod]
+# Checks that required CLI tools are installed (aws, tofu, curl, jq)
+# Ensures .env file exists (creates from .env.example if missing)
+# Credentials and API keys are validated by Terraform during plan/apply
+# Usage: make preflight
 preflight:
-	@../preflight.sh $(ARGS)
+	@../preflight.sh
 
 # Run tests with race detector
 test-race:
@@ -278,13 +277,18 @@ ifneq ($(filter $(TF_TARGETS),$(MAKECMDGOALS)),)
 endif
 AWS_PROFILE ?= $(ENV)
 
-# Helper script to load TigerData credentials and run tofu
+# Helper script to load credentials from Secrets Manager and run tofu
+# Loads both TigerData credentials and API keys (Alchemy, CoinGecko, Etherscan)
 # This exports credentials directly in the shell to ensure they're passed to tofu
 define run_tofu_with_creds
 	SECRET_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --region $(AWS_REGION) --query SecretString --output text) && \
 	export TF_VAR_tigerdata_project_id=$$(echo "$$SECRET_JSON" | jq -r '.project_id') && \
 	export TF_VAR_tigerdata_access_key=$$(echo "$$SECRET_JSON" | jq -r '.access_key') && \
 	export TF_VAR_tigerdata_secret_key=$$(echo "$$SECRET_JSON" | jq -r '.secret_key') && \
+	WATCHER_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-watcher-config --region $(AWS_REGION) --query SecretString --output text) && \
+	export TF_VAR_alchemy_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.alchemy_api_key') && \
+	export TF_VAR_coingecko_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.coingecko_api_key // "placeholder"') && \
+	export TF_VAR_etherscan_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.etherscan_api_key // "placeholder"') && \
 	cd $(INFRA_DIR) && $(1)
 endef
 
