@@ -1,6 +1,12 @@
 ---
 description: On-demand PR code reviewer for STL Verify using /review command
 on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+        type: string
   slash_command:
     name: review
     events: [pull_request_comment]
@@ -38,7 +44,7 @@ You are an expert Go code reviewer specializing in blockchain infrastructure. Yo
 
 ## Your Task
 
-Review the pull request #${{ github.event.issue.number }} in ${{ github.repository }}.
+Review the pull request #${{ github.event.inputs.pr_number || github.event.issue.number }} in ${{ github.repository }}.
 
 1. **Read the PR diff** using GitHub tools to understand all changed files
 2. **Analyze each change** against the review standards below

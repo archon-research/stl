@@ -21,7 +21,7 @@
 #
 # On-demand PR code reviewer for STL Verify using /review command
 #
-# frontmatter-hash: 5b20f76446cc08ed9668dec033731718d141d394319613c7047981bbe1b8f62f
+# frontmatter-hash: 77a185918674e16d03639e8ccbf0b463380fca539b0078b543234502586427d9
 
 name: "STL Verify PR Code Reviewer"
 "on":
@@ -29,6 +29,12 @@ name: "STL Verify PR Code Reviewer"
     types:
     - created
     - edited
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to review
+        required: true
+        type: string
 
 permissions: {}
 
@@ -41,8 +47,8 @@ jobs:
   activation:
     needs: pre_activation
     if: >
-      (needs.pre_activation.outputs.activated == 'true') && ((github.event_name == 'issue_comment') && ((contains(github.event.comment.body, '/review')) &&
-      (github.event.issue.pull_request != null)))
+      (needs.pre_activation.outputs.activated == 'true') && (((github.event_name == 'issue_comment') && ((github.event_name == 'issue_comment') &&
+      ((contains(github.event.comment.body, '/review')) && (github.event.issue.pull_request != null)))) || (!(github.event_name == 'issue_comment')))
     runs-on: ubuntu-slim
     permissions:
       contents: read
@@ -574,6 +580,7 @@ jobs:
         env:
           GH_AW_PROMPT: /tmp/gh-aw/aw-prompts/prompt.txt
           GH_AW_SAFE_OUTPUTS: ${{ env.GH_AW_SAFE_OUTPUTS }}
+          GH_AW_EXPR_AAA1AFAB: ${{ github.event.inputs.pr_number || github.event.issue.number }}
           GH_AW_GITHUB_ACTOR: ${{ github.actor }}
           GH_AW_GITHUB_EVENT_COMMENT_ID: ${{ github.event.comment.id }}
           GH_AW_GITHUB_EVENT_DISCUSSION_NUMBER: ${{ github.event.discussion.number }}
@@ -644,6 +651,7 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         env:
           GH_AW_PROMPT: /tmp/gh-aw/aw-prompts/prompt.txt
+          GH_AW_EXPR_AAA1AFAB: ${{ github.event.inputs.pr_number || github.event.issue.number }}
           GH_AW_GITHUB_ACTOR: ${{ github.actor }}
           GH_AW_GITHUB_EVENT_COMMENT_ID: ${{ github.event.comment.id }}
           GH_AW_GITHUB_EVENT_DISCUSSION_NUMBER: ${{ github.event.discussion.number }}
@@ -660,6 +668,7 @@ jobs:
             return await substitutePlaceholders({
               file: process.env.GH_AW_PROMPT,
               substitutions: {
+                GH_AW_EXPR_AAA1AFAB: process.env.GH_AW_EXPR_AAA1AFAB,
                 GH_AW_GITHUB_ACTOR: process.env.GH_AW_GITHUB_ACTOR,
                 GH_AW_GITHUB_EVENT_COMMENT_ID: process.env.GH_AW_GITHUB_EVENT_COMMENT_ID,
                 GH_AW_GITHUB_EVENT_DISCUSSION_NUMBER: process.env.GH_AW_GITHUB_EVENT_DISCUSSION_NUMBER,
@@ -674,7 +683,7 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         env:
           GH_AW_PROMPT: /tmp/gh-aw/aw-prompts/prompt.txt
-          GH_AW_GITHUB_EVENT_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GH_AW_EXPR_AAA1AFAB: ${{ github.event.inputs.pr_number || github.event.issue.number }}
           GH_AW_GITHUB_REPOSITORY: ${{ github.repository }}
         with:
           script: |
@@ -1014,7 +1023,8 @@ jobs:
 
   pre_activation:
     if: >
-      (github.event_name == 'issue_comment') && ((contains(github.event.comment.body, '/review')) && (github.event.issue.pull_request != null))
+      ((github.event_name == 'issue_comment') && ((github.event_name == 'issue_comment') && ((contains(github.event.comment.body, '/review')) &&
+      (github.event.issue.pull_request != null)))) || (!(github.event_name == 'issue_comment'))
     runs-on: ubuntu-slim
     permissions:
       discussions: write
