@@ -1,21 +1,16 @@
 output "vpc_id" {
   description = "VPC ID"
-  value       = aws_vpc.erigon.id
+  value       = data.aws_vpc.main.id
 }
 
 output "subnet_id" {
   description = "Subnet ID"
-  value       = aws_subnet.erigon.id
+  value       = data.aws_subnet.private.id
 }
 
 output "instance_id" {
-  description = "EC2 instance ID (c8gd.16xlarge)"
+  description = "EC2 instance ID"
   value       = aws_instance.erigon_c8gd.id
-}
-
-output "public_ip" {
-  description = "Public IP address (dynamic, changes on stop/start)"
-  value       = aws_instance.erigon_c8gd.public_ip
 }
 
 output "private_ip" {
