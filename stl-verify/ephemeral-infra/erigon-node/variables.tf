@@ -7,7 +7,7 @@ variable "aws_region" {
 variable "instance_type" {
   description = "EC2 instance type (must be c8gd family for NVMe instance store)"
   type        = string
-  default     = "c8gd.16xlarge" # 64 vCPUs (Graviton4), 128GB RAM, 2x 1900GB NVMe
+  default     = "c8gd.48xlarge" # 192 vCPUs (Graviton4), 384GB RAM, 6x 1900GB NVMe
 }
 
 variable "vpc_cidr" {

@@ -138,8 +138,8 @@ resource "aws_iam_instance_profile" "erigon" {
 }
 
 # =============================================================================
-# c8gd.16xlarge Instance for High-Performance Bulk Downloads
-# Uses local NVMe instance store (2x 1900GB in RAID 0) for maximum I/O
+# c8gd.48xlarge Instance for High-Performance Bulk Downloads
+# Uses local NVMe instance store (6x 1900GB in RAID 0) for maximum I/O
 # =============================================================================
 
 resource "aws_instance" "erigon_c8gd" {
@@ -156,7 +156,7 @@ resource "aws_instance" "erigon_c8gd" {
   }
 
   # c8gd has local NVMe instance store - ephemeral but very fast
-  # The user-data script sets up RAID 0 on the 2x 1900GB NVMe disks
+  # The user-data script sets up RAID 0 on the 6x 1900GB NVMe disks
 
   user_data = base64encode(file("${path.module}/user-data-c8gd.sh"))
 

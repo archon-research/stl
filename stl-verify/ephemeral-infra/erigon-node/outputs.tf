@@ -9,7 +9,7 @@ output "subnet_id" {
 }
 
 output "instance_id" {
-  description = "EC2 instance ID (c8gd.16xlarge)"
+  description = "EC2 instance ID (c8gd.48xlarge)"
   value       = aws_instance.erigon_c8gd.id
 }
 

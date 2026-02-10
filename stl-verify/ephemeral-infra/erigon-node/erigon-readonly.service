@@ -12,7 +12,7 @@ Description=Erigon Ethereum Archive Node (Read-Only Mode)
 After=network.target
 Conflicts=erigon.service
 
-# Optimized for c8gd.16xlarge: 64 vCPUs (Graviton4), 128GB RAM, NVMe RAID 0
+# Optimized for c8gd.48xlarge: 192 vCPUs (Graviton4), 384GB RAM, NVMe RAID 0
 
 [Service]
 Type=simple
@@ -30,15 +30,15 @@ ExecStart=/usr/local/bin/erigon \
   --http.vhosts=* \
   --http.corsdomain=* \
   --private.api.addr=localhost:9090 \
-  --rpc.batch.limit=5000 \
-  --rpc.batch.concurrency=256 \
-  --db.read.concurrency=512 \
-  --state.cache=64GB \
-  --bodies.cache=16GB \
-  --batchSize=1GB \
+  --rpc.batch.limit=10000 \
+  --rpc.batch.concurrency=512 \
+  --db.read.concurrency=1024 \
+  --state.cache=256GB \
+  --bodies.cache=48GB \
+  --batchSize=2GB \
   --rpc.returndata.limit=10000000 \
   --rpc.evmtimeout=30m \
-  --db.size.limit=4TB \
+  --db.size.limit=8TB \
   --nodiscover \
   --maxpeers=0 \
   --log.console.verbosity=warn
