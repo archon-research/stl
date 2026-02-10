@@ -174,7 +174,7 @@ resource "aws_ecs_task_definition" "oracle_price_worker" {
       secrets = [
         {
           name      = "ALCHEMY_API_KEY"
-          valueFrom = "${aws_secretsmanager_secret.watcher_config.arn}:alchemy_api_key::"
+          valueFrom = "${data.aws_secretsmanager_secret.watcher_config.arn}:alchemy_api_key::"
         },
         {
           name      = "DATABASE_URL"

@@ -124,6 +124,7 @@ infra/
 ├── 04_ecs.tf                       # ECS cluster
 ├── 04_ecs_watcher.tf               # Watcher task
 ├── 04_ecs_backup_worker.tf         # Backup worker task
+├── 04_ecs_oracle_price_worker.tf   # Oracle price worker task
 ├── 05_bastion.tf                   # Bastion host
 ├── 05_iam_ecs_task.tf              # Task IAM roles
 ├── 05_monitoring.tf                # Monitoring, alarms
