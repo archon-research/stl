@@ -437,13 +437,20 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 
 	receivedAt := time.Now()
 
+	// Parse block timestamp for deterministic created_at
+	blockTimestamp, err := hexutil.ParseInt64(header.Timestamp)
+	if err != nil {
+		return fmt.Errorf("failed to parse block timestamp for block %d: %w", blockNum, err)
+	}
+
 	// Save block state to DB - version is assigned atomically to prevent race conditions
 	state := outbound.BlockState{
-		Number:     blockNum,
-		Hash:       header.Hash,
-		ParentHash: header.ParentHash,
-		ReceivedAt: receivedAt.Unix(),
-		IsOrphaned: false,
+		Number:         blockNum,
+		Hash:           header.Hash,
+		ParentHash:     header.ParentHash,
+		ReceivedAt:     receivedAt.Unix(),
+		BlockTimestamp: blockTimestamp,
+		IsOrphaned:     false,
 	}
 
 	version, err := s.stateRepo.SaveBlock(ctx, state)

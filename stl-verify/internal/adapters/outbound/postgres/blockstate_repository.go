@@ -130,12 +130,12 @@ func (r *BlockStateRepository) saveBlockOnce(ctx context.Context, state outbound
 	// Insert the block - the trigger will assign the version automatically.
 	// RETURNING gives us the version that was assigned by the trigger.
 	query := `
-		INSERT INTO block_states (chain_id, number, hash, parent_hash, received_at, is_orphaned)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO block_states (chain_id, number, hash, parent_hash, received_at, is_orphaned, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING version
 	`
 	var version int
-	err = tx.QueryRow(ctx, query, r.chainID, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned).Scan(&version)
+	err = tx.QueryRow(ctx, query, r.chainID, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned, time.Unix(state.BlockTimestamp, 0).UTC()).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("failed to save block state: %w", err)
 	}
@@ -372,7 +372,7 @@ func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, common
 	}()
 
 	// 1. Acquire advisory lock namespaced by chain_id and block number
-	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, (r.chainID<<40)|newBlock.Number)
+	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::int, $2::int)`, r.chainID, newBlock.Number)
 	if err != nil {
 		return 0, fmt.Errorf("failed to acquire advisory lock: %w", err)
 	}
@@ -412,12 +412,12 @@ func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, common
 	// the correct version (MAX(version) + 1) atomically.
 	// We use RETURNING version to get the actually assigned version.
 	insertQuery := `
-		INSERT INTO block_states (chain_id, number, hash, parent_hash, received_at, is_orphaned, version)
-		VALUES ($1, $2, $3, $4, $5, $6, 0)
+		INSERT INTO block_states (chain_id, number, hash, parent_hash, received_at, is_orphaned, version, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 0, $7)
 		RETURNING version
 	`
 	var version int
-	err = tx.QueryRow(ctx, insertQuery, r.chainID, newBlock.Number, newBlock.Hash, newBlock.ParentHash, newBlock.ReceivedAt, newBlock.IsOrphaned).Scan(&version)
+	err = tx.QueryRow(ctx, insertQuery, r.chainID, newBlock.Number, newBlock.Hash, newBlock.ParentHash, newBlock.ReceivedAt, newBlock.IsOrphaned, time.Unix(newBlock.BlockTimestamp, 0).UTC()).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("failed to save new block state: %w", err)
 	}

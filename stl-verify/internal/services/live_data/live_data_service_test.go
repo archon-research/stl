@@ -914,6 +914,7 @@ func TestProcessBlock_Errors(t *testing.T) {
 			Number:     "0x64",
 			Hash:       "0xnew_hash",
 			ParentHash: "0x63",
+			Timestamp:  "0x0",
 		}
 
 		err = svc.processBlockWithPrefetch(header, time.Now())
@@ -1755,6 +1756,7 @@ func TestProcessBlock_FetchAndPublishError_ReturnsError(t *testing.T) {
 		Number:     "0x64",
 		Hash:       "0x100",
 		ParentHash: "0x99",
+		Timestamp:  "0x0",
 	}
 
 	err = svc.processBlockWithPrefetch(header, time.Now())

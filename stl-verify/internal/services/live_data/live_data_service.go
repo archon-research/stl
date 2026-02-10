@@ -317,13 +317,20 @@ func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, rece
 		}
 	}
 
+	// Parse block timestamp for deterministic created_at
+	blockTimestamp, err := hexutil.ParseInt64(header.Timestamp)
+	if err != nil {
+		return fmt.Errorf("failed to parse block timestamp: %w", err)
+	}
+
 	// Build block state for DB
 	state := outbound.BlockState{
-		Number:     block.Number,
-		Hash:       block.Hash,
-		ParentHash: block.ParentHash,
-		ReceivedAt: receivedAt.Unix(),
-		IsOrphaned: false,
+		Number:         block.Number,
+		Hash:           block.Hash,
+		ParentHash:     block.ParentHash,
+		ReceivedAt:     receivedAt.Unix(),
+		BlockTimestamp: blockTimestamp,
+		IsOrphaned:     false,
 	}
 
 	// Save block state to DB

@@ -251,13 +251,13 @@ func TestMultiChain_Isolation(t *testing.T) {
 
 	// Create per-chain repos sharing the same DB pool
 	ethRepo := postgres.NewBlockStateRepository(infra.Pool, 1, logger)
-	gnoRepo := postgres.NewBlockStateRepository(infra.Pool, 100, logger)
+	avaxRepo := postgres.NewBlockStateRepository(infra.Pool, 43114, logger)
 
 	// Create per-chain mock infrastructure
 	ethSub := testutil.NewMockSubscriber()
-	gnoSub := testutil.NewMockSubscriber()
+	avaxSub := testutil.NewMockSubscriber()
 	ethClient := testutil.NewMockBlockchainClient()
-	gnoClient := testutil.NewMockBlockchainClient()
+	avaxClient := testutil.NewMockBlockchainClient()
 
 	// Create per-chain live services
 	ethLive, err := live_data.NewLiveService(
@@ -268,12 +268,12 @@ func TestMultiChain_Isolation(t *testing.T) {
 		t.Fatalf("failed to create eth live service: %v", err)
 	}
 
-	gnoLive, err := live_data.NewLiveService(
-		live_data.LiveConfig{ChainID: 100, FinalityBlockCount: 2, Logger: logger},
-		gnoSub, gnoClient, gnoRepo, infra.Cache, infra.EventSink,
+	avaxLive, err := live_data.NewLiveService(
+		live_data.LiveConfig{ChainID: 43114, FinalityBlockCount: 2, Logger: logger},
+		avaxSub, avaxClient, avaxRepo, infra.Cache, infra.EventSink,
 	)
 	if err != nil {
-		t.Fatalf("failed to create gnosis live service: %v", err)
+		t.Fatalf("failed to create avalanche live service: %v", err)
 	}
 
 	// Start both
@@ -282,10 +282,10 @@ func TestMultiChain_Isolation(t *testing.T) {
 	}
 	defer ethLive.Stop()
 
-	if err := gnoLive.Start(ctx); err != nil {
-		t.Fatalf("failed to start gnosis service: %v", err)
+	if err := avaxLive.Start(ctx); err != nil {
+		t.Fatalf("failed to start avalanche service: %v", err)
 	}
-	defer gnoLive.Stop()
+	defer avaxLive.Stop()
 
 	// Add overlapping block numbers: both chains have blocks 100-102
 	// Ethereum hashes start with 0x1...
@@ -293,23 +293,23 @@ func TestMultiChain_Isolation(t *testing.T) {
 		parentHash := fmt.Sprintf("0x1%063x", i-1)
 		ethClient.SetBlockHeader(i, fmt.Sprintf("0x1%063x", i), parentHash)
 	}
-	// Gnosis hashes start with 0x2...
+	// Avalanche hashes start with 0x2...
 	for i := int64(100); i <= 102; i++ {
 		parentHash := fmt.Sprintf("0x2%063x", i-1)
-		gnoClient.SetBlockHeader(i, fmt.Sprintf("0x2%063x", i), parentHash)
+		avaxClient.SetBlockHeader(i, fmt.Sprintf("0x2%063x", i), parentHash)
 	}
 
 	// Send block headers to both chains
 	for i := int64(100); i <= 102; i++ {
 		ethSub.SendHeader(ethClient.GetHeader(i))
-		gnoSub.SendHeader(gnoClient.GetHeader(i))
+		avaxSub.SendHeader(avaxClient.GetHeader(i))
 	}
 
 	// Wait for blocks to be processed
 	if !testutil.WaitFor(t, 10*time.Second, 100*time.Millisecond, func() bool {
 		ethLast, _ := ethRepo.GetLastBlock(ctx)
-		gnoLast, _ := gnoRepo.GetLastBlock(ctx)
-		return ethLast != nil && ethLast.Number == 102 && gnoLast != nil && gnoLast.Number == 102
+		avaxLast, _ := avaxRepo.GetLastBlock(ctx)
+		return ethLast != nil && ethLast.Number == 102 && avaxLast != nil && avaxLast.Number == 102
 	}) {
 		t.Fatal("timed out waiting for both chains to process blocks")
 	}
@@ -327,16 +327,16 @@ func TestMultiChain_Isolation(t *testing.T) {
 		}
 	})
 
-	t.Run("gnosis_blocks_isolated", func(t *testing.T) {
-		block, err := gnoRepo.GetBlockByNumber(ctx, 100)
+	t.Run("avalanche_blocks_isolated", func(t *testing.T) {
+		block, err := avaxRepo.GetBlockByNumber(ctx, 100)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if block == nil {
-			t.Fatal("expected gnosis block 100")
+			t.Fatal("expected avalanche block 100")
 		}
 		if block.Hash != fmt.Sprintf("0x2%063x", 100) {
-			t.Errorf("expected gnosis hash, got %s", block.Hash)
+			t.Errorf("expected avalanche hash, got %s", block.Hash)
 		}
 	})
 
@@ -349,12 +349,12 @@ func TestMultiChain_Isolation(t *testing.T) {
 			t.Errorf("expected eth last block 102, got %v", ethLast)
 		}
 
-		gnoLast, err := gnoRepo.GetLastBlock(ctx)
+		avaxLast, err := avaxRepo.GetLastBlock(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if gnoLast == nil || gnoLast.Number != 102 {
-			t.Errorf("expected gnosis last block 102, got %v", gnoLast)
+		if avaxLast == nil || avaxLast.Number != 102 {
+			t.Errorf("expected avalanche last block 102, got %v", avaxLast)
 		}
 	})
 }
@@ -375,15 +375,15 @@ func TestMultiChain_BackfillWithGaps(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	ethRepo := postgres.NewBlockStateRepository(infra.Pool, 1, logger)
-	gnoRepo := postgres.NewBlockStateRepository(infra.Pool, 100, logger)
+	avaxRepo := postgres.NewBlockStateRepository(infra.Pool, 43114, logger)
 
 	t.Run("watermarks_are_independent", func(t *testing.T) {
 		// Set different watermarks per chain
 		if err := ethRepo.SetBackfillWatermark(ctx, 500); err != nil {
 			t.Fatalf("failed to set eth watermark: %v", err)
 		}
-		if err := gnoRepo.SetBackfillWatermark(ctx, 200); err != nil {
-			t.Fatalf("failed to set gnosis watermark: %v", err)
+		if err := avaxRepo.SetBackfillWatermark(ctx, 200); err != nil {
+			t.Fatalf("failed to set avalanche watermark: %v", err)
 		}
 
 		ethWM, err := ethRepo.GetBackfillWatermark(ctx)
@@ -394,19 +394,19 @@ func TestMultiChain_BackfillWithGaps(t *testing.T) {
 			t.Errorf("expected eth watermark 500, got %d", ethWM)
 		}
 
-		gnoWM, err := gnoRepo.GetBackfillWatermark(ctx)
+		avaxWM, err := avaxRepo.GetBackfillWatermark(ctx)
 		if err != nil {
-			t.Fatalf("failed to get gnosis watermark: %v", err)
+			t.Fatalf("failed to get avalanche watermark: %v", err)
 		}
-		if gnoWM != 200 {
-			t.Errorf("expected gnosis watermark 200, got %d", gnoWM)
+		if avaxWM != 200 {
+			t.Errorf("expected avalanche watermark 200, got %d", avaxWM)
 		}
 	})
 
 	t.Run("gaps_are_chain_scoped", func(t *testing.T) {
 		// Reset watermarks for this subtest
 		ethRepo.SetBackfillWatermark(ctx, 0)
-		gnoRepo.SetBackfillWatermark(ctx, 0)
+		avaxRepo.SetBackfillWatermark(ctx, 0)
 
 		// Save eth blocks 1, 2, 5 (gap at 3-4)
 		for _, num := range []int64{1, 2, 5} {
@@ -421,16 +421,16 @@ func TestMultiChain_BackfillWithGaps(t *testing.T) {
 			}
 		}
 
-		// Save gnosis blocks 1-5 (no gap)
+		// Save avalanche blocks 1-5 (no gap)
 		for i := int64(1); i <= 5; i++ {
-			_, err := gnoRepo.SaveBlock(ctx, outbound.BlockState{
+			_, err := avaxRepo.SaveBlock(ctx, outbound.BlockState{
 				Number:     i,
 				Hash:       fmt.Sprintf("0x2_gap_%d", i),
 				ParentHash: fmt.Sprintf("0x2_gap_%d", i-1),
 				ReceivedAt: time.Now().Unix(),
 			})
 			if err != nil {
-				t.Fatalf("failed to save gnosis block %d: %v", i, err)
+				t.Fatalf("failed to save avalanche block %d: %v", i, err)
 			}
 		}
 
@@ -446,13 +446,13 @@ func TestMultiChain_BackfillWithGaps(t *testing.T) {
 			t.Errorf("expected eth gap [3,4], got [%d,%d]", ethGaps[0].From, ethGaps[0].To)
 		}
 
-		// Gnosis should have no gaps
-		gnoGaps, err := gnoRepo.FindGaps(ctx, 1, 5)
+		// Avalanche should have no gaps
+		avaxGaps, err := avaxRepo.FindGaps(ctx, 1, 5)
 		if err != nil {
-			t.Fatalf("failed to find gnosis gaps: %v", err)
+			t.Fatalf("failed to find avalanche gaps: %v", err)
 		}
-		if len(gnoGaps) != 0 {
-			t.Errorf("expected no gnosis gaps, got %d: %v", len(gnoGaps), gnoGaps)
+		if len(avaxGaps) != 0 {
+			t.Errorf("expected no avalanche gaps, got %d: %v", len(avaxGaps), avaxGaps)
 		}
 	})
 }
@@ -473,7 +473,7 @@ func TestMultiChain_ReorgIsolation(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	ethRepo := postgres.NewBlockStateRepository(infra.Pool, 1, logger)
-	gnoRepo := postgres.NewBlockStateRepository(infra.Pool, 100, logger)
+	avaxRepo := postgres.NewBlockStateRepository(infra.Pool, 43114, logger)
 
 	// Save blocks 100-102 on both chains
 	for i := int64(100); i <= 102; i++ {
@@ -487,14 +487,14 @@ func TestMultiChain_ReorgIsolation(t *testing.T) {
 			t.Fatalf("failed to save eth block %d: %v", i, err)
 		}
 
-		_, err = gnoRepo.SaveBlock(ctx, outbound.BlockState{
+		_, err = avaxRepo.SaveBlock(ctx, outbound.BlockState{
 			Number:     i,
 			Hash:       fmt.Sprintf("0x2_reorg_%d", i),
 			ParentHash: fmt.Sprintf("0x2_reorg_%d", i-1),
 			ReceivedAt: time.Now().Unix(),
 		})
 		if err != nil {
-			t.Fatalf("failed to save gnosis block %d: %v", i, err)
+			t.Fatalf("failed to save avalanche block %d: %v", i, err)
 		}
 	}
 
@@ -538,29 +538,29 @@ func TestMultiChain_ReorgIsolation(t *testing.T) {
 		}
 	})
 
-	t.Run("gnosis_unaffected", func(t *testing.T) {
-		// Gnosis block 101 should still be canonical and not orphaned
-		gnoBlock, err := gnoRepo.GetBlockByNumber(ctx, 101)
+	t.Run("avalanche_unaffected", func(t *testing.T) {
+		// Avalanche block 101 should still be canonical and not orphaned
+		avaxBlock, err := avaxRepo.GetBlockByNumber(ctx, 101)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if gnoBlock == nil {
-			t.Fatal("expected gnosis block 101 to still exist")
+		if avaxBlock == nil {
+			t.Fatal("expected avalanche block 101 to still exist")
 		}
-		if gnoBlock.Hash != "0x2_reorg_101" {
-			t.Errorf("expected gnosis block hash 0x2_reorg_101, got %s", gnoBlock.Hash)
+		if avaxBlock.Hash != "0x2_reorg_101" {
+			t.Errorf("expected avalanche block hash 0x2_reorg_101, got %s", avaxBlock.Hash)
 		}
-		if gnoBlock.IsOrphaned {
-			t.Error("gnosis block 101 should NOT be orphaned")
+		if avaxBlock.IsOrphaned {
+			t.Error("avalanche block 101 should NOT be orphaned")
 		}
 
-		// Gnosis block 102 should also be unaffected
-		gno102, err := gnoRepo.GetBlockByNumber(ctx, 102)
+		// Avalanche block 102 should also be unaffected
+		avax102, err := avaxRepo.GetBlockByNumber(ctx, 102)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if gno102 == nil || gno102.IsOrphaned {
-			t.Error("gnosis block 102 should NOT be orphaned")
+		if avax102 == nil || avax102.IsOrphaned {
+			t.Error("avalanche block 102 should NOT be orphaned")
 		}
 	})
 
@@ -573,12 +573,12 @@ func TestMultiChain_ReorgIsolation(t *testing.T) {
 			t.Errorf("expected 1 eth reorg event, got %d", len(ethEvents))
 		}
 
-		gnoEvents, err := gnoRepo.GetReorgEvents(ctx, 10)
+		avaxEvents, err := avaxRepo.GetReorgEvents(ctx, 10)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(gnoEvents) != 0 {
-			t.Errorf("expected 0 gnosis reorg events, got %d", len(gnoEvents))
+		if len(avaxEvents) != 0 {
+			t.Errorf("expected 0 avalanche reorg events, got %d", len(avaxEvents))
 		}
 	})
 }

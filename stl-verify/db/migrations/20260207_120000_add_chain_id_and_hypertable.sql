@@ -1,11 +1,13 @@
 -- Add multi-chain support: chain_id columns, hypertable conversion, compression, retention.
 -- REQUIRES: watcher stopped during migration (hypertable conversion rewrites block_states).
 
--- 1a. Seed Gnosis chain
-INSERT INTO chain (chain_id, name) VALUES (100, 'Gnosis') ON CONFLICT DO NOTHING;
+-- 1a. Seed Avalanche C-Chain
+INSERT INTO chain (chain_id, name) VALUES (43114, 'Avalanche C-Chain') ON CONFLICT DO NOTHING;
 
 -- 1b. block_states: add columns (before hypertable conversion)
 ALTER TABLE block_states ADD COLUMN chain_id INT NOT NULL DEFAULT 1;
+-- created_at: set to block timestamp by application code (deterministic for dedup).
+-- DEFAULT NOW() is a safety net only; all INSERT paths should set created_at explicitly.
 ALTER TABLE block_states ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE block_states ADD CONSTRAINT fk_block_states_chain
     FOREIGN KEY (chain_id) REFERENCES chain(chain_id);
@@ -74,7 +76,7 @@ ALTER TABLE backfill_watermark ADD CONSTRAINT fk_backfill_watermark_chain
 ALTER TABLE backfill_watermark ADD CONSTRAINT unique_backfill_watermark_chain
     UNIQUE (chain_id);
 
-INSERT INTO backfill_watermark (id, chain_id, watermark) VALUES (2, 100, 0)
+INSERT INTO backfill_watermark (id, chain_id, watermark) VALUES (2, 43114, 0)
     ON CONFLICT DO NOTHING;
 
 INSERT INTO migrations (filename)
