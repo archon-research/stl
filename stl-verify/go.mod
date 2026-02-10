@@ -1,6 +1,6 @@
 module github.com/archon-research/stl/stl-verify
 
-go 1.25.6
+go 1.25.7
 
 require github.com/gorilla/websocket v1.5.3
 
@@ -26,6 +26,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.39.0
 	go.opentelemetry.io/otel/sdk/metric v1.39.0
 	go.opentelemetry.io/otel/trace v1.39.0
+	golang.org/x/time v0.9.0
 	google.golang.org/grpc v1.77.0
 )
 

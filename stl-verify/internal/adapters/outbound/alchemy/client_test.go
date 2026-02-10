@@ -20,10 +20,10 @@ func testClient(t *testing.T, url string) *Client {
 	return client
 }
 
-// testClientWithBlobs creates a client for testing with blobs enabled.
+// testClientWithBlobs creates a client for testing with traces and blobs enabled.
 func testClientWithBlobs(t *testing.T, url string) *Client {
 	t.Helper()
-	client, err := NewClient(ClientConfig{HTTPURL: url, EnableBlobs: true})
+	client, err := NewClient(ClientConfig{HTTPURL: url, EnableTraces: true, EnableBlobs: true})
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}

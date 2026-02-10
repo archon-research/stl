@@ -21,6 +21,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
 )
 
@@ -30,21 +31,15 @@ func main() {
 	dbURL := flag.String("db", "", "PostgreSQL connection URL")
 	maxMessages := flag.Int("max", 10, "Max messages per poll")
 	waitTime := flag.Int("wait", 20, "Wait time in seconds (long polling)")
-	verbose := flag.Bool("verbose", false, "Enable verbose logging")
 	flag.Parse()
 
-	logLevel := slog.LevelInfo
-	if *verbose {
-		logLevel = slog.LevelDebug
-	}
-
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: logLevel,
+		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
 	slog.SetDefault(logger)
 
 	if *queueURL == "" {
-		*queueURL = getEnv("AWS_SQS_QUEUE_URL", "")
+		*queueURL = env.Get("AWS_SQS_QUEUE_URL", "")
 	}
 	if *queueURL == "" {
 		logger.Error("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_URL env var)")
@@ -52,7 +47,7 @@ func main() {
 	}
 
 	if *dbURL == "" {
-		*dbURL = getEnv("DATABASE_URL", "")
+		*dbURL = env.Get("DATABASE_URL", "")
 	}
 	if *dbURL == "" {
 		logger.Error("database URL not provided (use -db flag or DATABASE_URL env var)")
@@ -60,7 +55,7 @@ func main() {
 	}
 
 	alchemyAPIKey := requireEnv("ALCHEMY_API_KEY", logger)
-	alchemyHTTPURL := getEnv("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
+	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
 	fullAlchemyURL := fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
 
 	if *redisAddr == "" {
@@ -71,7 +66,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	chainIDStr := getEnv("CHAIN_ID", "1")
+	chainIDStr := env.Get("CHAIN_ID", "1")
 	var chainID int64 = 1
 	_, _ = fmt.Sscanf(chainIDStr, "%d", &chainID)
 
@@ -83,11 +78,11 @@ func main() {
 	ctx := context.Background()
 
 	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(getEnv("AWS_REGION", "us-east-1")),
+		config.WithRegion(env.Get("AWS_REGION", "us-east-1")),
 		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
 			return aws.Credentials{
-				AccessKeyID:     getEnv("AWS_ACCESS_KEY_ID", "test"),
-				SecretAccessKey: getEnv("AWS_SECRET_ACCESS_KEY", "test"),
+				AccessKeyID:     env.Get("AWS_ACCESS_KEY_ID", "test"),
+				SecretAccessKey: env.Get("AWS_SECRET_ACCESS_KEY", "test"),
 				Source:          "Static",
 			}, nil
 		})),
@@ -98,14 +93,14 @@ func main() {
 	}
 
 	sqsClient := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
-		if endpoint := getEnv("AWS_SQS_ENDPOINT", ""); endpoint != "" {
+		if endpoint := env.Get("AWS_SQS_ENDPOINT", ""); endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
 		}
 	})
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     *redisAddr,
-		Password: getEnv("REDIS_PASSWORD", ""),
+		Password: env.Get("REDIS_PASSWORD", ""),
 		DB:       0,
 	})
 	if err := redisClient.Ping(ctx).Err(); err != nil {
@@ -164,6 +159,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	eventRepo := postgres.NewEventRepository(logger)
+
 	processorConfig := sparklend_position_tracker.Config{
 		QueueURL:        *queueURL,
 		MaxMessages:     int32(*maxMessages),
@@ -181,6 +178,7 @@ func main() {
 		protocolRepo,
 		tokenRepo,
 		positionRepo,
+		eventRepo,
 	)
 	if err != nil {
 		logger.Error("failed to create processor", "error", err)
@@ -224,13 +222,6 @@ func main() {
 		logger.Error("shutdown timed out, forcing exit")
 		os.Exit(1)
 	}
-}
-
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
 }
 
 func requireEnv(key string, logger *slog.Logger) string {

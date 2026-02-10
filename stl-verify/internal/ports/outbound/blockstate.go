@@ -19,6 +19,9 @@ type BlockState struct {
 	// ReceivedAt is when we received this block from the subscription.
 	ReceivedAt int64
 
+	// BlockTimestamp is the block's timestamp from the chain (Unix seconds).
+	BlockTimestamp int64
+
 	// IsOrphaned indicates this block was replaced during a chain reorganization.
 	IsOrphaned bool
 
@@ -140,4 +143,8 @@ type BlockStateRepository interface {
 	// GetBlocksWithIncompletePublish returns canonical blocks that have not been
 	// published. Used by backfill to recover from crashes.
 	GetBlocksWithIncompletePublish(ctx context.Context, limit int) ([]BlockState, error)
+
+	// GetReorgEventsByBlockRange retrieves reorg events within a block number range.
+	// Results are ordered by block number descending, then detection time descending.
+	GetReorgEventsByBlockRange(ctx context.Context, fromBlock, toBlock int64) ([]ReorgEvent, error)
 }

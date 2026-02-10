@@ -28,6 +28,7 @@ import (
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
 )
@@ -59,6 +60,7 @@ func init() {
 
 func main() {
 	// Parse command-line flags
+	enableTraces := flag.Bool("enable-traces", true, "Enable fetching execution traces (trace_block)")
 	enableBlobs := flag.Bool("enable-blobs", false, "Enable fetching blob sidecars")
 	parallelRPC := flag.Bool("parallel-rpc", true, "Use parallel goroutines for RPC calls instead of batching (faster but uses more credits)")
 	pprofAddr := flag.String("pprof", "", "Enable pprof profiling server (e.g., ':6060')")
@@ -121,12 +123,12 @@ func main() {
 
 	// Initialize OpenTelemetry tracer
 	// JAEGER_ENDPOINT is the OTLP endpoint - works with ADOT/X-Ray in AWS or Jaeger locally
-	traceEndpoint := getEnv("JAEGER_ENDPOINT", "localhost:4317")
+	traceEndpoint := env.Get("JAEGER_ENDPOINT", "localhost:4317")
 	shutdownTracer, err := telemetry.InitTracer(ctx, telemetry.TracerConfig{
 		ServiceName:    "stl-watcher",
 		ServiceVersion: GitCommit,
 		BuildTime:      BuildTime,
-		Environment:    getEnv("ENVIRONMENT", "development"),
+		Environment:    env.Get("ENVIRONMENT", "development"),
 		JaegerEndpoint: traceEndpoint,
 	})
 	if err != nil {
@@ -141,11 +143,11 @@ func main() {
 	}
 
 	// Initialize OpenTelemetry metrics
-	otelEndpoint := getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	otelEndpoint := env.Get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 	shutdownMetrics, err := telemetry.InitMetrics(ctx, telemetry.MetricConfig{
 		ServiceName:    "stl-watcher",
 		ServiceVersion: "0.1.0",
-		Environment:    getEnv("ENVIRONMENT", "development"),
+		Environment:    env.Get("ENVIRONMENT", "development"),
 		OTLPEndpoint:   otelEndpoint,
 	})
 	if err != nil {
@@ -162,9 +164,9 @@ func main() {
 	}
 
 	// Get configuration from environment
-	alchemyAPIKey := getEnv("ALCHEMY_API_KEY", "")
-	alchemyHTTPURL := getEnv("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
-	alchemyWSURL := getEnv("ALCHEMY_WS_URL", "wss://eth-mainnet.g.alchemy.com/v2")
+	alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")
+	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
+	alchemyWSURL := env.Get("ALCHEMY_WS_URL", "wss://eth-mainnet.g.alchemy.com/v2")
 	if alchemyAPIKey == "" {
 		logger.Error("ALCHEMY_API_KEY environment variable is required")
 		os.Exit(1)
@@ -175,7 +177,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	postgresURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
+	postgresURL := env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
 
 	// Set up PostgreSQL connection pool for block state tracking
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(postgresURL))
@@ -185,7 +187,7 @@ func main() {
 	}
 	defer pool.Close()
 
-	blockStateRepo := postgres.NewBlockStateRepository(pool, logger)
+	blockStateRepo := postgres.NewBlockStateRepository(pool, chainID, logger)
 
 	logger.Info("PostgreSQL connected, block state tracking enabled")
 
@@ -215,11 +217,12 @@ func main() {
 
 	// Create Alchemy HTTP client
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
-		HTTPURL:     fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
-		EnableBlobs: *enableBlobs,
-		ParallelRPC: *parallelRPC,
-		Logger:      logger,
-		Telemetry:   alchemyTelemetry,
+		HTTPURL:      fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
+		EnableTraces: *enableTraces,
+		EnableBlobs:  *enableBlobs,
+		ParallelRPC:  *parallelRPC,
+		Logger:       logger,
+		Telemetry:    alchemyTelemetry,
 	})
 	if err != nil {
 		logger.Error("failed to create client", "error", err)
@@ -227,16 +230,17 @@ func main() {
 	}
 
 	logger.Info("alchemy client configured",
+		"enableTraces", *enableTraces,
 		"enableBlobs", *enableBlobs,
 		"parallelRPC", *parallelRPC,
 		"chainID", chainID,
 	)
 
 	// Create Redis cache
-	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
+	redisAddr := env.Get("REDIS_ADDR", "localhost:6379")
 	cache, err := rediscache.NewBlockCache(rediscache.Config{
 		Addr:      redisAddr,
-		Password:  getEnv("REDIS_PASSWORD", ""),
+		Password:  env.Get("REDIS_PASSWORD", ""),
 		DB:        0,
 		TTL:       2 * 24 * time.Hour, // 2 days - allows retry of failed backups
 		KeyPrefix: "stl",
@@ -257,8 +261,8 @@ func main() {
 	}()
 
 	// Create SNS event sink
-	snsEndpoint := getEnv("AWS_SNS_ENDPOINT", "http://localhost:4566")
-	awsRegion := getEnv("AWS_REGION", "us-east-1")
+	snsEndpoint := env.Get("AWS_SNS_ENDPOINT", "http://localhost:4566")
+	awsRegion := env.Get("AWS_REGION", "us-east-1")
 
 	// Single SNS FIFO topic for all event types
 	snsTopicARN := requireEnv("AWS_SNS_TOPIC_ARN")
@@ -321,6 +325,7 @@ func main() {
 	config := live_data.LiveConfig{
 		ChainID:            chainID,
 		FinalityBlockCount: 64,
+		EnableTraces:       *enableTraces,
 		EnableBlobs:        *enableBlobs,
 		Logger:             logger,
 	}
@@ -340,12 +345,13 @@ func main() {
 
 	// Create BackfillService (handles gap filling from DB state)
 	var backfillService *backfill_gaps.BackfillService
-	enableBackfill := getEnv("ENABLE_BACKFILL", "false") == "true"
+	enableBackfill := env.Get("ENABLE_BACKFILL", "false") == "true"
 	if enableBackfill {
 		backfillConfig := backfill_gaps.BackfillConfig{
 			ChainID:      chainID,
 			BatchSize:    10,
 			PollInterval: 30 * time.Second,
+			EnableTraces: *enableTraces,
 			EnableBlobs:  *enableBlobs,
 			Logger:       logger,
 		}
@@ -417,14 +423,6 @@ func main() {
 		logger.Error("shutdown timed out, forcing exit")
 		os.Exit(1)
 	}
-}
-
-// getEnv returns the value of an environment variable or a default value.
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
 }
 
 // requireEnv returns the value of an environment variable or exits if not set.

@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build integration
 
 package main
 
@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
 	"testing"
 	"time"
 
@@ -30,268 +29,26 @@ import (
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// =============================================================================
-// Mock Implementations (must be declared before tests to avoid compilation issues)
-// =============================================================================
-
-// mockSubscriber simulates block notifications from Alchemy WebSocket.
-type mockSubscriber struct {
-	headers chan outbound.BlockHeader
-	closed  bool
-	mu      sync.Mutex
-}
-
-func newMockSubscriber() *mockSubscriber {
-	return &mockSubscriber{
-		headers: make(chan outbound.BlockHeader, 100),
-	}
-}
-
-func (m *mockSubscriber) Subscribe(ctx context.Context) (<-chan outbound.BlockHeader, error) {
-	return m.headers, nil
-}
-
-func (m *mockSubscriber) Unsubscribe() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.closed {
-		m.closed = true
-		close(m.headers)
-	}
-	return nil
-}
-
-func (m *mockSubscriber) HealthCheck(ctx context.Context) error {
-	return nil
-}
-
-func (m *mockSubscriber) sendHeader(header outbound.BlockHeader) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.closed {
-		m.headers <- header
-	}
-}
-
-// mockBlockchainClient provides mock block data for tests.
-type mockBlockchainClient struct {
-	blocks map[int64]blockTestData
-	mu     sync.RWMutex
-}
-
-type blockTestData struct {
-	header   outbound.BlockHeader
-	receipts json.RawMessage
-	traces   json.RawMessage
-	blobs    json.RawMessage
-}
-
-func newMockBlockchainClient() *mockBlockchainClient {
-	return &mockBlockchainClient{
-		blocks: make(map[int64]blockTestData),
-	}
-}
-
-func (m *mockBlockchainClient) addBlock(num int64, parentHash string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	hash := fmt.Sprintf("0x%064x", num)
-	if parentHash == "" && num > 0 {
-		parentHash = fmt.Sprintf("0x%064x", num-1)
-	}
-
-	header := outbound.BlockHeader{
-		Number:     fmt.Sprintf("0x%x", num),
-		Hash:       hash,
-		ParentHash: parentHash,
-		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
-	}
-
-	m.blocks[num] = blockTestData{
-		header:   header,
-		receipts: json.RawMessage(`[]`),
-		traces:   json.RawMessage(`[]`),
-		blobs:    json.RawMessage(`[]`),
-	}
-}
-
-func (m *mockBlockchainClient) getHeader(num int64) outbound.BlockHeader {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.blocks[num].header
-}
-
-func (m *mockBlockchainClient) GetBlockByNumber(ctx context.Context, blockNum int64, fullTx bool) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		data, _ := json.Marshal(bd.header)
-		return data, nil
-	}
-	return nil, fmt.Errorf("block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (*outbound.BlockHeader, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			h := bd.header
-			return &h, nil
-		}
-	}
-	return nil, fmt.Errorf("block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			data, _ := json.Marshal(bd.header)
-			return data, nil
-		}
-	}
-	return nil, fmt.Errorf("block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.receipts, nil
-	}
-	return nil, fmt.Errorf("receipts for block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			return bd.receipts, nil
-		}
-	}
-	return nil, fmt.Errorf("receipts for block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.traces, nil
-	}
-	return nil, fmt.Errorf("traces for block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			return bd.traces, nil
-		}
-	}
-	return nil, fmt.Errorf("traces for block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bd, ok := m.blocks[blockNum]; ok {
-		return bd.blobs, nil
-	}
-	return nil, fmt.Errorf("blobs for block %d not found", blockNum)
-}
-
-func (m *mockBlockchainClient) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			return bd.blobs, nil
-		}
-	}
-	return nil, fmt.Errorf("blobs for block %s not found", hash)
-}
-
-func (m *mockBlockchainClient) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var max int64
-	for num := range m.blocks {
-		if num > max {
-			max = num
-		}
-	}
-	return max, nil
-}
-
-func (m *mockBlockchainClient) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx bool) ([]outbound.BlockData, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	results := make([]outbound.BlockData, len(blockNums))
-	for i, num := range blockNums {
-		if bd, ok := m.blocks[num]; ok {
-			data, _ := json.Marshal(bd.header)
-			results[i] = outbound.BlockData{
-				BlockNumber: num,
-				Block:       data,
-				Receipts:    bd.receipts,
-				Traces:      bd.traces,
-				Blobs:       bd.blobs,
-			}
-		} else {
-			results[i] = outbound.BlockData{
-				BlockNumber: num,
-				BlockErr:    fmt.Errorf("block %d not found", num),
-			}
-		}
-	}
-	return results, nil
-}
-
-func (m *mockBlockchainClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, bd := range m.blocks {
-		if bd.header.Hash == hash {
-			data, _ := json.Marshal(bd.header)
-			return outbound.BlockData{
-				BlockNumber: blockNum,
-				Block:       data,
-				Receipts:    bd.receipts,
-				Traces:      bd.traces,
-				Blobs:       bd.blobs,
-			}, nil
-		}
-	}
-	return outbound.BlockData{}, fmt.Errorf("block %s not found", hash)
+// newTestBlockchainClient returns a MockBlockchainClient configured for
+// watcher e2e tests. It sets UseBlockErrForMissing so that GetBlocksBatch
+// returns BlockErr on blocks not previously added.
+func newTestBlockchainClient() *testutil.MockBlockchainClient {
+	c := testutil.NewMockBlockchainClient()
+	c.UseBlockErrForMissing = true
+	return c
 }
 
 // =============================================================================
 // Test Cases
 // =============================================================================
 
-// TestEndToEnd_LiveService_ProcessesNewBlock tests the full flow of processing a new block.
-func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
+// TestLiveService_ProcessesNewBlock tests the full flow of processing a new block.
+func TestLiveService_ProcessesNewBlock(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping E2E test in short mode")
+		t.Skip("Skipping integration test in short mode")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -302,10 +59,10 @@ func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
 	t.Cleanup(infra.Cleanup)
 
 	// Create mock subscriber that will emit blocks
-	mockSub := newMockSubscriber()
+	mockSub := testutil.NewMockSubscriber()
 
 	// Create mock blockchain client
-	mockClient := newMockBlockchainClient()
+	mockClient := newTestBlockchainClient()
 
 	// Create live service
 	config := live_data.LiveConfig{
@@ -334,11 +91,11 @@ func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
 	defer liveService.Stop()
 
 	// Set up block data that mock client will return
-	mockClient.addBlock(100, "0x"+fmt.Sprintf("%064x", 99))
+	mockClient.AddBlock(100, "0x"+fmt.Sprintf("%064x", 99))
 
 	// Emit block notification via header
-	header := mockClient.getHeader(100)
-	mockSub.sendHeader(header)
+	header := mockClient.GetHeader(100)
+	mockSub.SendHeader(header)
 
 	// Wait for messages on all queues
 	const messageTimeout = 10 * time.Second
@@ -362,21 +119,15 @@ func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
 	// The separate receipts/traces topics are no longer used.
 
 	t.Run("block_state_saved", func(t *testing.T) {
-		// Poll for block state with timeout instead of static sleep
 		var state *outbound.BlockState
-		var err error
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
+		if !testutil.WaitFor(t, 5*time.Second, 50*time.Millisecond, func() bool {
+			var err error
 			state, err = infra.BlockStateRepo.GetBlockByNumber(ctx, 100)
 			if err != nil {
 				t.Fatalf("failed to get block state: %v", err)
 			}
-			if state != nil {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		if state == nil {
+			return state != nil
+		}) {
 			t.Fatal("expected block state to be saved")
 		}
 		expectedHash := fmt.Sprintf("0x%064x", 100)
@@ -386,10 +137,10 @@ func TestEndToEnd_LiveService_ProcessesNewBlock(t *testing.T) {
 	})
 }
 
-// TestEndToEnd_MultipleBlocksInSequence tests processing multiple blocks in sequence.
-func TestEndToEnd_MultipleBlocksInSequence(t *testing.T) {
+// TestMultipleBlocksInSequence tests processing multiple blocks in sequence.
+func TestMultipleBlocksInSequence(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping E2E test in short mode")
+		t.Skip("Skipping integration test in short mode")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -398,8 +149,8 @@ func TestEndToEnd_MultipleBlocksInSequence(t *testing.T) {
 	infra := setupTestInfrastructure(t, ctx)
 	t.Cleanup(infra.Cleanup)
 
-	mockSub := newMockSubscriber()
-	mockClient := newMockBlockchainClient()
+	mockSub := testutil.NewMockSubscriber()
+	mockClient := newTestBlockchainClient()
 
 	config := live_data.LiveConfig{
 		ChainID:            1,
@@ -425,32 +176,27 @@ func TestEndToEnd_MultipleBlocksInSequence(t *testing.T) {
 	}
 	defer liveService.Stop()
 
-	// Process 10 blocks
+	// Process 10 blocks, waiting for each to be saved before sending the next
 	const numBlocks = 10
 	for i := int64(100); i < 100+numBlocks; i++ {
 		parentHash := fmt.Sprintf("0x%064x", i-1)
-		mockClient.addBlock(i, parentHash)
-		header := mockClient.getHeader(i)
-		mockSub.sendHeader(header)
+		mockClient.AddBlock(i, parentHash)
+		header := mockClient.GetHeader(i)
+		mockSub.SendHeader(header)
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Poll until all blocks are saved (or timeout)
-	deadline := time.Now().Add(10 * time.Second)
-	allSaved := false
-	for time.Now().Before(deadline) {
-		allSaved = true
+	// Wait until all blocks are saved
+	if !testutil.WaitFor(t, 10*time.Second, 100*time.Millisecond, func() bool {
 		for i := int64(100); i < 100+numBlocks; i++ {
 			state, _ := infra.BlockStateRepo.GetBlockByNumber(ctx, i)
 			if state == nil {
-				allSaved = false
-				break
+				return false
 			}
 		}
-		if allSaved {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+		return true
+	}) {
+		t.Fatal("timed out waiting for all blocks to be saved")
 	}
 
 	// Verify all blocks are saved
@@ -481,6 +227,360 @@ func TestEndToEnd_MultipleBlocksInSequence(t *testing.T) {
 	if lastBlock.Number != 109 {
 		t.Errorf("expected last block number 109, got %d", lastBlock.Number)
 	}
+}
+
+// =============================================================================
+// Multi-Chain Tests
+// =============================================================================
+
+// TestMultiChain_Isolation verifies that two chains sharing the same
+// database have proper data isolation: blocks, last block, and queries are scoped
+// by chain_id.
+func TestMultiChain_Isolation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupTestInfrastructure(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Create per-chain repos sharing the same DB pool
+	ethRepo := postgres.NewBlockStateRepository(infra.Pool, 1, logger)
+	avaxRepo := postgres.NewBlockStateRepository(infra.Pool, 43114, logger)
+
+	// Create per-chain mock infrastructure
+	ethSub := testutil.NewMockSubscriber()
+	avaxSub := testutil.NewMockSubscriber()
+	ethClient := testutil.NewMockBlockchainClient()
+	avaxClient := testutil.NewMockBlockchainClient()
+
+	// Create per-chain live services
+	ethLive, err := live_data.NewLiveService(
+		live_data.LiveConfig{ChainID: 1, FinalityBlockCount: 2, Logger: logger},
+		ethSub, ethClient, ethRepo, infra.Cache, infra.EventSink,
+	)
+	if err != nil {
+		t.Fatalf("failed to create eth live service: %v", err)
+	}
+
+	avaxLive, err := live_data.NewLiveService(
+		live_data.LiveConfig{ChainID: 43114, FinalityBlockCount: 2, Logger: logger},
+		avaxSub, avaxClient, avaxRepo, infra.Cache, infra.EventSink,
+	)
+	if err != nil {
+		t.Fatalf("failed to create avalanche live service: %v", err)
+	}
+
+	// Start both
+	if err := ethLive.Start(ctx); err != nil {
+		t.Fatalf("failed to start eth service: %v", err)
+	}
+	defer ethLive.Stop()
+
+	if err := avaxLive.Start(ctx); err != nil {
+		t.Fatalf("failed to start avalanche service: %v", err)
+	}
+	defer avaxLive.Stop()
+
+	// Add overlapping block numbers: both chains have blocks 100-102
+	// Ethereum hashes start with 0x1...
+	for i := int64(100); i <= 102; i++ {
+		parentHash := fmt.Sprintf("0x1%063x", i-1)
+		ethClient.SetBlockHeader(i, fmt.Sprintf("0x1%063x", i), parentHash)
+	}
+	// Avalanche hashes start with 0x2...
+	for i := int64(100); i <= 102; i++ {
+		parentHash := fmt.Sprintf("0x2%063x", i-1)
+		avaxClient.SetBlockHeader(i, fmt.Sprintf("0x2%063x", i), parentHash)
+	}
+
+	// Send block headers to both chains
+	for i := int64(100); i <= 102; i++ {
+		ethSub.SendHeader(ethClient.GetHeader(i))
+		avaxSub.SendHeader(avaxClient.GetHeader(i))
+	}
+
+	// Wait for blocks to be processed
+	if !testutil.WaitFor(t, 10*time.Second, 100*time.Millisecond, func() bool {
+		ethLast, _ := ethRepo.GetLastBlock(ctx)
+		avaxLast, _ := avaxRepo.GetLastBlock(ctx)
+		return ethLast != nil && ethLast.Number == 102 && avaxLast != nil && avaxLast.Number == 102
+	}) {
+		t.Fatal("timed out waiting for both chains to process blocks")
+	}
+
+	t.Run("ethereum_blocks_isolated", func(t *testing.T) {
+		block, err := ethRepo.GetBlockByNumber(ctx, 100)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if block == nil {
+			t.Fatal("expected eth block 100")
+		}
+		if block.Hash != fmt.Sprintf("0x1%063x", 100) {
+			t.Errorf("expected eth hash, got %s", block.Hash)
+		}
+	})
+
+	t.Run("avalanche_blocks_isolated", func(t *testing.T) {
+		block, err := avaxRepo.GetBlockByNumber(ctx, 100)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if block == nil {
+			t.Fatal("expected avalanche block 100")
+		}
+		if block.Hash != fmt.Sprintf("0x2%063x", 100) {
+			t.Errorf("expected avalanche hash, got %s", block.Hash)
+		}
+	})
+
+	t.Run("last_block_per_chain", func(t *testing.T) {
+		ethLast, err := ethRepo.GetLastBlock(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ethLast == nil || ethLast.Number != 102 {
+			t.Errorf("expected eth last block 102, got %v", ethLast)
+		}
+
+		avaxLast, err := avaxRepo.GetLastBlock(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if avaxLast == nil || avaxLast.Number != 102 {
+			t.Errorf("expected avalanche last block 102, got %v", avaxLast)
+		}
+	})
+}
+
+// TestMultiChain_BackfillWithGaps verifies that backfill watermarks
+// are chain-scoped: each chain's watermark advances independently.
+func TestMultiChain_BackfillWithGaps(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupTestInfrastructure(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	ethRepo := postgres.NewBlockStateRepository(infra.Pool, 1, logger)
+	avaxRepo := postgres.NewBlockStateRepository(infra.Pool, 43114, logger)
+
+	t.Run("watermarks_are_independent", func(t *testing.T) {
+		// Set different watermarks per chain
+		if err := ethRepo.SetBackfillWatermark(ctx, 500); err != nil {
+			t.Fatalf("failed to set eth watermark: %v", err)
+		}
+		if err := avaxRepo.SetBackfillWatermark(ctx, 200); err != nil {
+			t.Fatalf("failed to set avalanche watermark: %v", err)
+		}
+
+		ethWM, err := ethRepo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("failed to get eth watermark: %v", err)
+		}
+		if ethWM != 500 {
+			t.Errorf("expected eth watermark 500, got %d", ethWM)
+		}
+
+		avaxWM, err := avaxRepo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("failed to get avalanche watermark: %v", err)
+		}
+		if avaxWM != 200 {
+			t.Errorf("expected avalanche watermark 200, got %d", avaxWM)
+		}
+	})
+
+	t.Run("gaps_are_chain_scoped", func(t *testing.T) {
+		// Reset watermarks for this subtest
+		ethRepo.SetBackfillWatermark(ctx, 0)
+		avaxRepo.SetBackfillWatermark(ctx, 0)
+
+		// Save eth blocks 1, 2, 5 (gap at 3-4)
+		for _, num := range []int64{1, 2, 5} {
+			_, err := ethRepo.SaveBlock(ctx, outbound.BlockState{
+				Number:     num,
+				Hash:       fmt.Sprintf("0x1_gap_%d", num),
+				ParentHash: fmt.Sprintf("0x1_gap_%d", num-1),
+				ReceivedAt: time.Now().Unix(),
+			})
+			if err != nil {
+				t.Fatalf("failed to save eth block %d: %v", num, err)
+			}
+		}
+
+		// Save avalanche blocks 1-5 (no gap)
+		for i := int64(1); i <= 5; i++ {
+			_, err := avaxRepo.SaveBlock(ctx, outbound.BlockState{
+				Number:     i,
+				Hash:       fmt.Sprintf("0x2_gap_%d", i),
+				ParentHash: fmt.Sprintf("0x2_gap_%d", i-1),
+				ReceivedAt: time.Now().Unix(),
+			})
+			if err != nil {
+				t.Fatalf("failed to save avalanche block %d: %v", i, err)
+			}
+		}
+
+		// Eth should have a gap
+		ethGaps, err := ethRepo.FindGaps(ctx, 1, 5)
+		if err != nil {
+			t.Fatalf("failed to find eth gaps: %v", err)
+		}
+		if len(ethGaps) != 1 {
+			t.Fatalf("expected 1 eth gap, got %d: %v", len(ethGaps), ethGaps)
+		}
+		if ethGaps[0].From != 3 || ethGaps[0].To != 4 {
+			t.Errorf("expected eth gap [3,4], got [%d,%d]", ethGaps[0].From, ethGaps[0].To)
+		}
+
+		// Avalanche should have no gaps
+		avaxGaps, err := avaxRepo.FindGaps(ctx, 1, 5)
+		if err != nil {
+			t.Fatalf("failed to find avalanche gaps: %v", err)
+		}
+		if len(avaxGaps) != 0 {
+			t.Errorf("expected no avalanche gaps, got %d: %v", len(avaxGaps), avaxGaps)
+		}
+	})
+}
+
+// TestMultiChain_ReorgIsolation verifies that a reorg on one chain
+// does not affect blocks on another chain.
+func TestMultiChain_ReorgIsolation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupTestInfrastructure(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	ethRepo := postgres.NewBlockStateRepository(infra.Pool, 1, logger)
+	avaxRepo := postgres.NewBlockStateRepository(infra.Pool, 43114, logger)
+
+	// Save blocks 100-102 on both chains
+	for i := int64(100); i <= 102; i++ {
+		_, err := ethRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x1_reorg_%d", i),
+			ParentHash: fmt.Sprintf("0x1_reorg_%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save eth block %d: %v", i, err)
+		}
+
+		_, err = avaxRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x2_reorg_%d", i),
+			ParentHash: fmt.Sprintf("0x2_reorg_%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save avalanche block %d: %v", i, err)
+		}
+	}
+
+	// Trigger reorg on Ethereum only at block 101
+	reorgEvent := outbound.ReorgEvent{
+		DetectedAt:  time.Now(),
+		BlockNumber: 101,
+		OldHash:     "0x1_reorg_101",
+		NewHash:     "0x1_reorg_101_new",
+		Depth:       1,
+	}
+	newBlock := outbound.BlockState{
+		Number:     101,
+		Hash:       "0x1_reorg_101_new",
+		ParentHash: "0x1_reorg_100",
+		ReceivedAt: time.Now().Unix(),
+	}
+
+	_, err := ethRepo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock)
+	if err != nil {
+		t.Fatalf("HandleReorgAtomic failed: %v", err)
+	}
+
+	t.Run("ethereum_reorg_applied", func(t *testing.T) {
+		// Old eth block 101 should be orphaned
+		oldBlock, err := ethRepo.GetBlockByHash(ctx, "0x1_reorg_101")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !oldBlock.IsOrphaned {
+			t.Error("expected old eth block 101 to be orphaned")
+		}
+
+		// New eth block 101 should be canonical
+		canonical, err := ethRepo.GetBlockByNumber(ctx, 101)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if canonical == nil || canonical.Hash != "0x1_reorg_101_new" {
+			t.Error("expected new canonical eth block at 101")
+		}
+	})
+
+	t.Run("avalanche_unaffected", func(t *testing.T) {
+		// Avalanche block 101 should still be canonical and not orphaned
+		avaxBlock, err := avaxRepo.GetBlockByNumber(ctx, 101)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if avaxBlock == nil {
+			t.Fatal("expected avalanche block 101 to still exist")
+		}
+		if avaxBlock.Hash != "0x2_reorg_101" {
+			t.Errorf("expected avalanche block hash 0x2_reorg_101, got %s", avaxBlock.Hash)
+		}
+		if avaxBlock.IsOrphaned {
+			t.Error("avalanche block 101 should NOT be orphaned")
+		}
+
+		// Avalanche block 102 should also be unaffected
+		avax102, err := avaxRepo.GetBlockByNumber(ctx, 102)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if avax102 == nil || avax102.IsOrphaned {
+			t.Error("avalanche block 102 should NOT be orphaned")
+		}
+	})
+
+	t.Run("reorg_events_chain_scoped", func(t *testing.T) {
+		ethEvents, err := ethRepo.GetReorgEvents(ctx, 10)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(ethEvents) != 1 {
+			t.Errorf("expected 1 eth reorg event, got %d", len(ethEvents))
+		}
+
+		avaxEvents, err := avaxRepo.GetReorgEvents(ctx, 10)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(avaxEvents) != 0 {
+			t.Errorf("expected 0 avalanche reorg events, got %d", len(avaxEvents))
+		}
+	})
 }
 
 // =============================================================================
@@ -539,7 +639,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 		t.Fatalf("failed to apply migrations: %v", err)
 	}
 
-	blockStateRepo := postgres.NewBlockStateRepository(pool, logger)
+	blockStateRepo := postgres.NewBlockStateRepository(pool, 1, logger)
 	infra.BlockStateRepo = blockStateRepo
 
 	// Start Redis
@@ -635,29 +735,30 @@ func (infra *TestInfrastructure) WaitForMessage(t *testing.T, queueURL string, t
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	// Try immediately, then on each tick
 	for {
+		result, err := infra.SQSClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+			QueueUrl:            aws.String(queueURL),
+			MaxNumberOfMessages: 1,
+			WaitTimeSeconds:     1,
+		})
+		if err != nil {
+			t.Logf("error receiving message: %v", err)
+		} else if len(result.Messages) > 0 {
+			infra.SQSClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+				QueueUrl:      aws.String(queueURL),
+				ReceiptHandle: result.Messages[0].ReceiptHandle,
+			})
+			return aws.ToString(result.Messages[0].Body)
+		}
+
 		select {
 		case <-ctx.Done():
 			return ""
-		default:
-			result, err := infra.SQSClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-				QueueUrl:            aws.String(queueURL),
-				MaxNumberOfMessages: 1,
-				WaitTimeSeconds:     1,
-			})
-			if err != nil {
-				t.Logf("error receiving message: %v", err)
-				time.Sleep(500 * time.Millisecond)
-				continue
-			}
-			if len(result.Messages) > 0 {
-				// Delete the message
-				infra.SQSClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-					QueueUrl:      aws.String(queueURL),
-					ReceiptHandle: result.Messages[0].ReceiptHandle,
-				})
-				return aws.ToString(result.Messages[0].Body)
-			}
+		case <-ticker.C:
 		}
 	}
 }

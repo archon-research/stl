@@ -225,3 +225,37 @@ output "backup_worker_task_definition_arn" {
   description = "ARN of the Backup Worker task definition"
   value       = aws_ecs_task_definition.backup_worker.arn
 }
+
+# =============================================================================
+# Oracle Price Worker Outputs
+# =============================================================================
+
+output "oracle_price_worker_ecr_repository_url" {
+  description = "URL of the Oracle Price Worker ECR repository"
+  value       = aws_ecr_repository.oracle_price_worker.repository_url
+}
+
+output "oracle_price_worker_ecr_repository_arn" {
+  description = "ARN of the Oracle Price Worker ECR repository"
+  value       = aws_ecr_repository.oracle_price_worker.arn
+}
+
+output "oracle_price_worker_role_arn" {
+  description = "ARN of the Oracle Price Worker ECS task role"
+  value       = aws_iam_role.oracle_price_worker.arn
+}
+
+output "oracle_price_worker_role_name" {
+  description = "Name of the Oracle Price Worker ECS task role"
+  value       = aws_iam_role.oracle_price_worker.name
+}
+
+output "oracle_price_worker_service_name" {
+  description = "Name of the Oracle Price Worker ECS service"
+  value       = aws_ecs_service.oracle_price_worker.name
+}
+
+output "oracle_price_worker_task_definition_arn" {
+  description = "ARN of the Oracle Price Worker task definition"
+  value       = aws_ecs_task_definition.oracle_price_worker.arn
+}
