@@ -1,0 +1,338 @@
+name: Sentinel Staging Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "infra/**"
+      - ".github/workflows/sentinel-staging-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        default: "plan"
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: sentinel-staging-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Pre-flight Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TIGERDATA_PROJECT_ID: ${{ secrets.TIGERDATA_PROJECT_ID }}
+      TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
+      TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
+      ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+      TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run pre-flight validation
+        run: make preflight
+        working-directory: stl-verify
+
+  bootstrap:
+    name: Bootstrap Infrastructure
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'push' || github.event.inputs.action != 'destroy'
+    env:
+      TIGERDATA_PROJECT_ID: ${{ secrets.TIGERDATA_PROJECT_ID }}
+      TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
+      TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
+      ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+      TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check if bootstrap already exists
+        id: check_bootstrap
+        run: |
+          # Check if DynamoDB lock table exists
+          if aws dynamodb describe-table --table-name stl-sentinelstaging-terraform-lock --region eu-west-1 &>/dev/null; then
+            echo "bootstrap_exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Bootstrap infrastructure already exists, skipping bootstrap"
+          else
+            echo "bootstrap_exists=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  Bootstrap infrastructure not found, will create it"
+          fi
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "~> 1.0"
+
+      - name: Bootstrap backend (S3 + DynamoDB + Secrets)
+        if: steps.check_bootstrap.outputs.bootstrap_exists == 'false'
+        run: make tf-bootstrap ENV=sentinelstaging
+        working-directory: stl-verify
+
+      - name: Upload bootstrap state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-state
+          path: infra/bootstrap/terraform.tfstate
+          retention-days: 30
+
+  init:
+    name: Initialize Terraform
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "~> 1.0"
+
+      - name: Download bootstrap state
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-state
+          path: infra/bootstrap
+
+      - name: Initialize Terraform backend
+        run: make tf-init ENV=sentinelstaging
+        working-directory: stl-verify
+
+  validate:
+    name: Validate Terraform
+    needs: init
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TIGERDATA_PROJECT_ID: ${{ secrets.TIGERDATA_PROJECT_ID }}
+      TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
+      TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "~> 1.0"
+
+      - name: Download bootstrap state
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-state
+          path: infra/bootstrap
+
+      - name: Validate Terraform configuration
+        run: make tf-validate ENV=sentinelstaging
+        working-directory: stl-verify
+
+  plan:
+    name: Plan Infrastructure Changes
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TIGERDATA_PROJECT_ID: ${{ secrets.TIGERDATA_PROJECT_ID }}
+      TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
+      TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
+      ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "~> 1.0"
+
+      - name: Download bootstrap state
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-state
+          path: infra/bootstrap
+
+      - name: Generate Terraform plan
+        run: make tf-plan ENV=sentinelstaging | tee tfplan.txt
+        working-directory: stl-verify
+
+      - name: Upload plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: stl-verify/tfplan.txt
+          retention-days: 7
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('stl-verify/tfplan.txt', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## Terraform Plan\n\n\`\`\`\n${plan}\n\`\`\``
+            });
+
+  apply:
+    name: Apply Infrastructure Changes
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: staging
+    env:
+      TIGERDATA_PROJECT_ID: ${{ secrets.TIGERDATA_PROJECT_ID }}
+      TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
+      TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
+      ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "~> 1.0"
+
+      - name: Download bootstrap state
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-state
+          path: infra/bootstrap
+
+      - name: Apply Terraform changes
+        run: make tf-apply ENV=sentinelstaging
+        working-directory: stl-verify
+
+      - name: Notify Slack on success
+        if: success()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "✅ Staging infrastructure deployed successfully",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "✅ *Staging Infrastructure Deployed*\n*Commit:* <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>\n*Branch:* main"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: Notify Slack on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "❌ Staging infrastructure deployment failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "❌ *Staging Infrastructure Deployment Failed*\n*Commit:* <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>\n*Branch:* main\n*View:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Workflow logs>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+  rollback:
+    name: Rollback Infrastructure
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+    environment: staging
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "~> 1.0"
+
+      - name: Confirm rollback
+        run: |
+          echo "⚠️  ROLLBACK INITIATED FOR STAGING"
+          echo "This will destroy all staging infrastructure"
+          sleep 5
+
+      - name: Initialize Terraform
+        run: make tf-init ENV=sentinelstaging
+        working-directory: stl-verify
+
+      - name: Destroy infrastructure
+        run: make tf-destroy ENV=sentinelstaging
+        working-directory: stl-verify
+
+      - name: Notify Slack on rollback
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "⚠️  Staging infrastructure rolled back",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "⚠️  *Staging Infrastructure Rolled Back*\n*Triggered by:* ${{ github.actor }}\n*View:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Workflow logs>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

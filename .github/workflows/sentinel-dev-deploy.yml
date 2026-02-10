@@ -1,0 +1,429 @@
+name: Sentinel Dev Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        default: "plan"
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+          - destroy-bootstrap
+
+# No concurrency cancellation - dev can have multiple runs
+concurrency:
+  group: sentinel-dev-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Pre-flight Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TIGERDATA_PROJECT_ID: ${{ secrets.TIGERDATA_PROJECT_ID }}
+      TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
+      TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
+      ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+      TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run pre-flight validation
+        run: make preflight
+        working-directory: stl-verify
+
+  bootstrap:
+    name: Bootstrap Infrastructure
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event.inputs.action != 'destroy' && github.event.inputs.action != 'destroy-bootstrap'
+    env:
+      TIGERDATA_PROJECT_ID: ${{ secrets.TIGERDATA_PROJECT_ID }}
+      TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
+      TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
+      ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+      TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+      CI: "true"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check if bootstrap already exists
+        id: check_bootstrap
+        run: |
+          # Check if DynamoDB lock table exists
+          if aws dynamodb describe-table --table-name stl-sentineldev-terraform-locks --region eu-west-1 &>/dev/null; then
+            echo "bootstrap_exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Bootstrap infrastructure already exists, skipping bootstrap"
+          else
+            echo "bootstrap_exists=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  Bootstrap infrastructure not found, will create it"
+          fi
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "~> 1.0"
+
+      - name: Bootstrap backend (S3 + DynamoDB + Secrets)
+        if: steps.check_bootstrap.outputs.bootstrap_exists == 'false'
+        run: make tf-bootstrap ENV=sentineldev
+        working-directory: stl-verify
+
+      - name: Upload bootstrap state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-state
+          path: infra/bootstrap/terraform.tfstate
+          retention-days: 7
+
+  init:
+    name: Initialize Terraform
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event.inputs.action != 'destroy' && github.event.inputs.action != 'destroy-bootstrap'
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+      CI: "true"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "~> 1.0"
+
+      - name: Download bootstrap state
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-state
+          path: infra/bootstrap
+
+      - name: Initialize Terraform backend
+        run: make tf-init ENV=sentineldev
+        working-directory: stl-verify
+
+  validate:
+    name: Validate Terraform
+    needs: init
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event.inputs.action != 'destroy' && github.event.inputs.action != 'destroy-bootstrap'
+    env:
+      TIGERDATA_PROJECT_ID: ${{ secrets.TIGERDATA_PROJECT_ID }}
+      TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
+      TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+      CI: "true"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "~> 1.0"
+
+      - name: Download bootstrap state
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-state
+          path: infra/bootstrap
+
+      - name: Validate Terraform
+        run: make tf-validate ENV=sentineldev
+        working-directory: stl-verify
+
+  plan:
+    name: Plan Infrastructure Changes
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
+    env:
+      TIGERDATA_PROJECT_ID: ${{ secrets.TIGERDATA_PROJECT_ID }}
+      TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
+      TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
+      ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+      CI: "true"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "~> 1.0"
+
+      - name: Download bootstrap state
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-state
+          path: infra/bootstrap
+
+      - name: Plan Terraform changes
+        run: make tf-plan ENV=sentineldev > tfplan.txt 2>&1
+        working-directory: stl-verify
+
+      - name: Upload plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: stl-verify/tfplan.txt
+          retention-days: 7
+
+      - name: Display plan summary
+        run: tail -100 stl-verify/tfplan.txt
+
+  apply:
+    name: Apply Infrastructure Changes
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event.inputs.action == 'apply'
+    env:
+      TIGERDATA_PROJECT_ID: ${{ secrets.TIGERDATA_PROJECT_ID }}
+      TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
+      TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
+      ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+      CI: "true"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "~> 1.0"
+
+      - name: Download bootstrap state
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-state
+          path: infra/bootstrap
+
+      - name: Apply Terraform changes
+        run: make tf-apply ENV=sentineldev
+        working-directory: stl-verify
+
+      - name: Notify Slack on success
+        if: success()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "✅ Sentinel Dev Infrastructure Applied",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "✅ Dev Infrastructure Applied"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Workflow:* `Sentinel Dev Deploy`\n*Action:* `apply`\n*Status:* Success"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Workflow"
+                      },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: Notify Slack on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "❌ Sentinel Dev Infrastructure Apply Failed",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "❌ Dev Infrastructure Apply Failed"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Workflow:* `Sentinel Dev Deploy`\n*Action:* `apply`\n*Status:* Failed"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Workflow"
+                      },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+  destroy:
+    name: Destroy Infrastructure
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event.inputs.action == 'destroy'
+    env:
+      TIGERDATA_PROJECT_ID: ${{ secrets.TIGERDATA_PROJECT_ID }}
+      TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
+      TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
+      ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+      CI: "true"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "~> 1.0"
+
+      - name: Download bootstrap state
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-state
+          path: infra/bootstrap
+
+      - name: Destroy Infrastructure
+        run: make tf-destroy ENV=sentineldev
+        working-directory: stl-verify
+
+      - name: Notify Slack on success
+        if: success()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "✅ Sentinel Dev Infrastructure Destroyed",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "✅ Dev Infrastructure Destroyed"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Workflow:* `Sentinel Dev Deploy`\n*Action:* `destroy`\n*Status:* Success"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+  destroy-bootstrap:
+    name: Destroy Bootstrap Backend
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event.inputs.action == 'destroy-bootstrap'
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1
+      CI: "true"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "~> 1.0"
+
+      - name: Destroy Bootstrap Backend
+        run: make tf-destroy-bootstrap ENV=sentineldev
+        working-directory: stl-verify
+
+      - name: Notify Slack on success
+        if: success()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "✅ Sentinel Dev Bootstrap Destroyed",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "✅ Dev Bootstrap Backend Destroyed"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Workflow:* `Sentinel Dev Deploy`\n*Action:* `destroy-bootstrap`\n*Status:* Success"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

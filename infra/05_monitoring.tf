@@ -9,15 +9,12 @@
 # Cost-effective storage with Athena query capability
 
 resource "aws_s3_bucket" "flow_logs" {
-  bucket = "${local.prefix_lowercase}-vpc-flow-logs-${random_id.flow_logs_suffix.hex}"
+  bucket        = "${local.prefix_lowercase}-vpc-flow-logs${local.resource_suffix}"
+  force_destroy = true
 
   tags = {
     Name = "${local.prefix}-vpc-flow-logs"
   }
-}
-
-resource "random_id" "flow_logs_suffix" {
-  byte_length = 4
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "flow_logs" {

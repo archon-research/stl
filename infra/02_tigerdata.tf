@@ -9,7 +9,7 @@
 
 resource "timescale_vpcs" "main" {
   cidr        = local.tigerdata_vpc_cidr
-  name        = "${local.prefix}-vpc"
+  name        = "${local.prefix_lowercase}-vpc${local.resource_suffix}"
   region_code = var.aws_region
 }
 
@@ -18,7 +18,7 @@ resource "timescale_vpcs" "main" {
 # -----------------------------------------------------------------------------
 
 resource "timescale_service" "main" {
-  name        = "${local.prefix}-db"
+  name        = "${local.prefix_lowercase}-db${local.resource_suffix}"
   milli_cpu   = var.tigerdata_milli_cpu
   memory_gb   = var.tigerdata_memory_gb
   region_code = var.aws_region
@@ -33,7 +33,7 @@ resource "timescale_service" "main" {
 
   # Service requires active VPC peering and route before creation
   depends_on = [
-    aws_vpc_peering_connection_accepter.tigerdata,
+    time_sleep.peering_active,
     aws_route.private_to_tigerdata,
   ]
 }
@@ -60,6 +60,12 @@ resource "aws_vpc_peering_connection_accepter" "tigerdata" {
   }
 }
 
+# Wait for peering to fully activate before TigerData service tries to use it
+resource "time_sleep" "peering_active" {
+  depends_on      = [aws_vpc_peering_connection_accepter.tigerdata]
+  create_duration = "180s" # 3 minutes to ensure peering is fully active on both sides
+}
+
 # -----------------------------------------------------------------------------
 # Route from AWS VPC to TigerData VPC
 # -----------------------------------------------------------------------------
@@ -68,6 +74,8 @@ resource "aws_route" "private_to_tigerdata" {
   route_table_id            = aws_route_table.private.id
   destination_cidr_block    = local.tigerdata_vpc_cidr
   vpc_peering_connection_id = aws_vpc_peering_connection_accepter.tigerdata.id
+  
+  depends_on = [time_sleep.peering_active]
 }
 
 # Note: data.aws_caller_identity.current is defined in monitoring.tf

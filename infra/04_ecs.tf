@@ -132,7 +132,7 @@ data "aws_iam_policy_document" "ecs_secrets_access" {
     ]
 
     resources = [
-      aws_secretsmanager_secret.watcher_config.arn,
+      data.aws_secretsmanager_secret.watcher_config.arn,
       aws_secretsmanager_secret.tigerdata_db.arn,
     ]
   }

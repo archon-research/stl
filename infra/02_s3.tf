@@ -1,28 +1,12 @@
-# Deterministic suffix based on project/environment/region
-# Only regenerates if these values change
-resource "random_id" "bucket_suffix" {
-  byte_length = 4
-
-  keepers = {
-    project     = var.project_name
-    environment = var.environment
-    region      = var.aws_region
-  }
-}
-
 locals {
-  # S3-specific locals
-  bucket_name = "${local.prefix_lowercase}-ethereum-raw-${random_id.bucket_suffix.hex}"
+  # S3-specific locals - use shared resource_suffix for all buckets
+  bucket_name = "${local.prefix_lowercase}-ethereum-raw${local.resource_suffix}"
 }
 
 # S3 Bucket - configured to never be deleted and fully private
 resource "aws_s3_bucket" "main" {
-  bucket = local.bucket_name
-
-  # Prevent accidental deletion
-  lifecycle {
-    prevent_destroy = true
-  }
+  bucket        = local.bucket_name
+  force_destroy = var.environment == "sentineldev" ? true : false
 
   tags = {
     Name = local.bucket_name
@@ -142,7 +126,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "main" {
 
 # Dedicated bucket for access logs
 resource "aws_s3_bucket" "logs" {
-  bucket = "${local.prefix_lowercase}-access-logs-${random_id.bucket_suffix.hex}"
+  bucket = "${local.prefix_lowercase}-access-logs${local.resource_suffix}"
 
   tags = {
     Name    = "${local.prefix}-access-logs"

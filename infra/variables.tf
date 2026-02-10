@@ -16,6 +16,14 @@ variable "environment" {
   # No default - must be specified explicitly
 }
 
+variable "resource_suffix" {
+  description = "Random suffix for resource naming (from bootstrap, dev only)"
+  type        = string
+  default     = ""
+}
+
+# -----------------------------------------------------------------------------
+# TigerData (TimescaleDB) Configuration
 # -----------------------------------------------------------------------------
 # TigerData (TimescaleDB) Configuration
 # -----------------------------------------------------------------------------

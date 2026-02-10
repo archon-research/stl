@@ -1,28 +1,13 @@
-# =============================================================================
-# Terraform State Backend Resources
-# =============================================================================
-# These resources store Terraform state remotely with locking.
-
-locals {
-  state_bucket_name = "${local.prefix_lowercase}-terraform-state-${random_id.bucket_suffix.hex}"
-  locks_table_name  = "${local.prefix_lowercase}-terraform-locks"
-}
-
-# S3 bucket for state storage
+# S3 bucket for Terraform state
 resource "aws_s3_bucket" "terraform_state" {
-  bucket = local.state_bucket_name
+  bucket              = local.state_bucket_name
+  force_destroy       = true  # Allow deletion for dev environments
 
   lifecycle {
-    prevent_destroy = true
-  }
-
-  tags = {
-    Name    = local.state_bucket_name
-    Purpose = "terraform-state"
+    prevent_destroy = false  # Allow deletion (requires explicit tofu destroy)
   }
 }
 
-# Enable versioning for state history and recovery
 resource "aws_s3_bucket_versioning" "terraform_state" {
   bucket = aws_s3_bucket.terraform_state.id
 
@@ -31,7 +16,6 @@ resource "aws_s3_bucket_versioning" "terraform_state" {
   }
 }
 
-# Enable encryption at rest
 resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state" {
   bucket = aws_s3_bucket.terraform_state.id
 
@@ -42,7 +26,6 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state" 
   }
 }
 
-# Block all public access
 resource "aws_s3_bucket_public_access_block" "terraform_state" {
   bucket = aws_s3_bucket.terraform_state.id
 
@@ -63,8 +46,21 @@ resource "aws_dynamodb_table" "terraform_locks" {
     type = "S"
   }
 
-  tags = {
-    Name    = local.locks_table_name
-    Purpose = "terraform-state-locking"
+  lifecycle {
+    prevent_destroy = false  # Allow deletion (requires explicit tofu destroy)
   }
+}
+
+# Random suffix for globally unique S3 bucket name (dev only)
+resource "random_id" "bucket_suffix" {
+  byte_length = 4
+}
+
+# Outputs for reference
+output "state_bucket_name" {
+  value = aws_s3_bucket.terraform_state.id
+}
+
+output "locks_table_name" {
+  value = aws_dynamodb_table.terraform_locks.id
 }
