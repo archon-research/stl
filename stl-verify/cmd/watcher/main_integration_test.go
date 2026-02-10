@@ -27,7 +27,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/testutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -255,10 +254,10 @@ func TestMultiChain_Isolation(t *testing.T) {
 	gnoRepo := postgres.NewBlockStateRepository(infra.Pool, 100, logger)
 
 	// Create per-chain mock infrastructure
-	ethSub := newMockSubscriber()
-	gnoSub := newMockSubscriber()
-	ethClient := newMockBlockchainClient()
-	gnoClient := newMockBlockchainClient()
+	ethSub := testutil.NewMockSubscriber()
+	gnoSub := testutil.NewMockSubscriber()
+	ethClient := testutil.NewMockBlockchainClient()
+	gnoClient := testutil.NewMockBlockchainClient()
 
 	// Create per-chain live services
 	ethLive, err := live_data.NewLiveService(
@@ -292,18 +291,18 @@ func TestMultiChain_Isolation(t *testing.T) {
 	// Ethereum hashes start with 0x1...
 	for i := int64(100); i <= 102; i++ {
 		parentHash := fmt.Sprintf("0x1%063x", i-1)
-		ethClient.addBlockWithHash(i, parentHash, fmt.Sprintf("0x1%063x", i))
+		ethClient.SetBlockHeader(i, fmt.Sprintf("0x1%063x", i), parentHash)
 	}
 	// Gnosis hashes start with 0x2...
 	for i := int64(100); i <= 102; i++ {
 		parentHash := fmt.Sprintf("0x2%063x", i-1)
-		gnoClient.addBlockWithHash(i, parentHash, fmt.Sprintf("0x2%063x", i))
+		gnoClient.SetBlockHeader(i, fmt.Sprintf("0x2%063x", i), parentHash)
 	}
 
 	// Send block headers to both chains
 	for i := int64(100); i <= 102; i++ {
-		ethSub.sendHeader(ethClient.getHeader(i))
-		gnoSub.sendHeader(gnoClient.getHeader(i))
+		ethSub.SendHeader(ethClient.GetHeader(i))
+		gnoSub.SendHeader(gnoClient.GetHeader(i))
 	}
 
 	// Wait for blocks to be processed
