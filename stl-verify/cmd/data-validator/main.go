@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strconv"
 	"syscall"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/etherscan"
@@ -113,6 +114,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		return fmt.Errorf("ETHERSCAN_API_KEY environment variable is required")
 	}
 
+	chainID, err := strconv.ParseInt(env.Get("CHAIN_ID", "1"), 10, 64)
+	if err != nil {
+		return fmt.Errorf("CHAIN_ID must be a valid integer: %w", err)
+	}
+
 	postgresURL := env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(postgresURL))
 	if err != nil {
@@ -120,11 +126,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	}
 	defer pool.Close()
 
-	blockStateRepo := postgres.NewBlockStateRepository(pool, logger)
+	blockStateRepo := postgres.NewBlockStateRepository(pool, chainID, logger)
 
 	etherscanClient, err := etherscan.NewClient(etherscan.ClientConfig{
-		APIKey: etherscanAPIKey,
-		Logger: logger,
+		APIKey:  etherscanAPIKey,
+		ChainID: chainID,
+		Logger:  logger,
 	})
 	if err != nil {
 		return fmt.Errorf("creating etherscan client: %w", err)

@@ -49,7 +49,7 @@ func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 	}, nil
 }
 
-func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, name string, createdAtBlock int64) (int64, error) {
+func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, name string, protocolType string, createdAtBlock int64) (int64, error) {
 	var protocolID int64
 	addressHex := strings.ToLower(address.Hex())
 
@@ -63,7 +63,7 @@ func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx,
 			`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
 			 VALUES ($1, $2, $3, $4, $5)
 			 RETURNING id`,
-			chainID, addressHex, name, "lending", createdAtBlock).Scan(&protocolID)
+			chainID, addressHex, name, protocolType, createdAtBlock).Scan(&protocolID)
 		if err != nil {
 			return 0, fmt.Errorf("failed to create protocol: %w", err)
 		}

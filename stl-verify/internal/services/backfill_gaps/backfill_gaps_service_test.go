@@ -1337,6 +1337,7 @@ func TestPublishNeverHappensWithoutCache(t *testing.T) {
 					ChainID:            1,
 					BatchSize:          10,
 					BoundaryCheckDepth: -1,
+					EnableTraces:       true,
 					Logger:             slog.Default(),
 				},
 				client,

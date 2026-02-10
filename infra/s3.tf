@@ -125,13 +125,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "main" {
       storage_class   = "STANDARD_IA"
     }
 
-    noncurrent_version_transition {
-      noncurrent_days = 90
-      storage_class   = "GLACIER"
-    }
-
     noncurrent_version_expiration {
-      noncurrent_days = 365
+      noncurrent_days = 90
     }
   }
 }

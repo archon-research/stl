@@ -9,7 +9,7 @@ import (
 type BlockDataInput struct {
 	Block    json.RawMessage // Full block with transactions (required)
 	Receipts json.RawMessage // Transaction receipts (required)
-	Traces   json.RawMessage // Execution traces (required)
+	Traces   json.RawMessage // Execution traces (optional, nil to skip)
 	Blobs    json.RawMessage // Blob sidecars (optional, nil to skip)
 }
 

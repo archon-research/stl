@@ -467,7 +467,7 @@ func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEven
 			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
 		}
 
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, blockNumber)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
@@ -673,7 +673,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
 		}
 
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, blockNumber)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
@@ -753,7 +753,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
 		}
 
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, blockNumber)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
@@ -813,7 +813,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 		return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
 	}
 
-	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, blockNumber)
+	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
 	if err != nil {
 		return fmt.Errorf("failed to get protocol: %w", err)
 	}

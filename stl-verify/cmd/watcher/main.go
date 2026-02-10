@@ -60,6 +60,7 @@ func init() {
 
 func main() {
 	// Parse command-line flags
+	enableTraces := flag.Bool("enable-traces", true, "Enable fetching execution traces (trace_block)")
 	enableBlobs := flag.Bool("enable-blobs", false, "Enable fetching blob sidecars")
 	parallelRPC := flag.Bool("parallel-rpc", true, "Use parallel goroutines for RPC calls instead of batching (faster but uses more credits)")
 	pprofAddr := flag.String("pprof", "", "Enable pprof profiling server (e.g., ':6060')")
@@ -186,7 +187,7 @@ func main() {
 	}
 	defer pool.Close()
 
-	blockStateRepo := postgres.NewBlockStateRepository(pool, logger)
+	blockStateRepo := postgres.NewBlockStateRepository(pool, chainID, logger)
 
 	logger.Info("PostgreSQL connected, block state tracking enabled")
 
@@ -216,11 +217,12 @@ func main() {
 
 	// Create Alchemy HTTP client
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
-		HTTPURL:     fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
-		EnableBlobs: *enableBlobs,
-		ParallelRPC: *parallelRPC,
-		Logger:      logger,
-		Telemetry:   alchemyTelemetry,
+		HTTPURL:      fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
+		EnableTraces: *enableTraces,
+		EnableBlobs:  *enableBlobs,
+		ParallelRPC:  *parallelRPC,
+		Logger:       logger,
+		Telemetry:    alchemyTelemetry,
 	})
 	if err != nil {
 		logger.Error("failed to create client", "error", err)
@@ -228,6 +230,7 @@ func main() {
 	}
 
 	logger.Info("alchemy client configured",
+		"enableTraces", *enableTraces,
 		"enableBlobs", *enableBlobs,
 		"parallelRPC", *parallelRPC,
 		"chainID", chainID,
@@ -322,6 +325,7 @@ func main() {
 	config := live_data.LiveConfig{
 		ChainID:            chainID,
 		FinalityBlockCount: 64,
+		EnableTraces:       *enableTraces,
 		EnableBlobs:        *enableBlobs,
 		Logger:             logger,
 	}
@@ -347,6 +351,7 @@ func main() {
 			ChainID:      chainID,
 			BatchSize:    10,
 			PollInterval: 30 * time.Second,
+			EnableTraces: *enableTraces,
 			EnableBlobs:  *enableBlobs,
 			Logger:       logger,
 		}
