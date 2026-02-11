@@ -82,6 +82,14 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	// Set deployment_block and protocol binding below the test range so clamping doesn't skip blocks
+	if _, err := pool.Exec(ctx, `UPDATE oracle SET deployment_block = 0 WHERE name = 'sparklend'`); err != nil {
+		t.Fatalf("update deployment_block: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE protocol_oracle SET from_block = 0`); err != nil {
+		t.Fatalf("update protocol_oracle from_block: %v", err)
+	}
+
 	// Get the oracle ID seeded by migration
 	var oracleID int64
 	err := pool.QueryRow(ctx, `SELECT id FROM oracle WHERE name = 'sparklend'`).Scan(&oracleID)
