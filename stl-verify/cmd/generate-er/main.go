@@ -310,7 +310,10 @@ func fetchHypertableInfo(ctx context.Context, pool *pgxpool.Pool) (map[string]*H
 		SELECT EXISTS(
 			SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'
 		)`).Scan(&hasTimescale)
-	if err != nil || !hasTimescale {
+	if err != nil {
+		return nil, fmt.Errorf("checking timescaledb extension: %w", err)
+	}
+	if !hasTimescale {
 		return result, nil
 	}
 
@@ -411,34 +414,37 @@ func fetchHypertableInfo(ctx context.Context, pool *pgxpool.Pool) (map[string]*H
 		return nil, err
 	}
 
-	// Try to fetch tiering policies (only on Timescale Cloud)
+	// Fetch tiering policies (only on Timescale Cloud, returns 0 rows on self-hosted)
 	tierRows, err := pool.Query(ctx, `
-		SELECT j.proc_name,
-		       j.hypertable_name,
+		SELECT j.hypertable_name,
 		       j.config
 		FROM timescaledb_information.jobs j
 		WHERE j.hypertable_schema = 'public'
 		  AND j.proc_name = 'policy_tiering'
 		ORDER BY j.hypertable_name`)
-	if err == nil {
-		defer tierRows.Close()
-		for tierRows.Next() {
-			var (
-				procName  string
-				tableName string
-				config    map[string]any
-			)
-			if err := tierRows.Scan(&procName, &tableName, &config); err != nil {
-				break
-			}
-			info := result[tableName]
-			if info == nil {
-				continue
-			}
-			if v, ok := config["move_after"]; ok {
-				info.TierAfter = formatInterval(fmt.Sprintf("%v", v))
-			}
+	if err != nil {
+		return nil, fmt.Errorf("querying tiering policies: %w", err)
+	}
+	defer tierRows.Close()
+
+	for tierRows.Next() {
+		var (
+			tableName string
+			config    map[string]any
+		)
+		if err := tierRows.Scan(&tableName, &config); err != nil {
+			return nil, fmt.Errorf("scanning tiering policy: %w", err)
 		}
+		info := result[tableName]
+		if info == nil {
+			continue
+		}
+		if v, ok := config["move_after"]; ok {
+			info.TierAfter = formatInterval(fmt.Sprintf("%v", v))
+		}
+	}
+	if err := tierRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating tiering policies: %w", err)
 	}
 
 	return result, nil
