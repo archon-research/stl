@@ -78,8 +78,8 @@ type HypertableInfo struct {
 
 // Relationship represents a foreign key relationship between two entities.
 type Relationship struct {
-	Parent     string // PascalCase entity name
-	Child      string // PascalCase entity name
+	Parent      string // PascalCase entity name
+	Child       string // PascalCase entity name
 	parentSnake string // original snake_case for priority lookup
 	childSnake  string // original snake_case for priority lookup
 }
