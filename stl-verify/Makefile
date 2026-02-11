@@ -307,8 +307,9 @@ check-tofu:
 # Phase 3: Create initial secrets (tigerdata API, watcher config, tailscale key)
 # 
 # Optional: pass credentials as environment variables to populate secrets
-# Usage: make tf-bootstrap ENV=sentineldev TIGERDATA_PROJECT_ID=xxx TIGERDATA_ACCESS_KEY=xxx TIGERDATA_SECRET_KEY=xxx ALCHEMY_API_KEY=xxx [TAILSCALE_AUTH_KEY=xxx]
-# If credentials not provided, placeholder secrets are created (can be updated manually)
+# Usage: make tf-bootstrap ENV=sentineldev TIGERDATA_PROJECT_ID=xxx TIGERDATA_ACCESS_KEY=xxx TIGERDATA_SECRET_KEY=xxx ALCHEMY_API_KEY=xxx [COINGECKO_API_KEY=xxx] [ETHERSCAN_API_KEY=xxx] [TAILSCALE_AUTH_KEY=xxx]
+# Required credentials: TIGERDATA_*, ALCHEMY_API_KEY (must be set in .env and sourced)
+# Optional: COINGECKO_API_KEY, ETHERSCAN_API_KEY, TAILSCALE_AUTH_KEY
 tf-bootstrap: check-tofu
 	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Bootstrapping backend for $(ENV) (using AWS profile: $(AWS_PROFILE))..."
 	@if [ ! -d "$(INFRA_DIR)/bootstrap" ]; then \
@@ -317,14 +318,29 @@ tf-bootstrap: check-tofu
 	fi
 	@echo ""
 	@echo "Checking if bootstrap already exists for $(ENV)..."
-	@if aws dynamodb describe-table --table-name stl-$(ENV)-terraform-locks --region $(AWS_REGION) &>/dev/null; then \
-		echo "✓ Bootstrap infrastructure already exists for $(ENV)"; \
-		echo "  DynamoDB table: stl-$(ENV)-terraform-locks"; \
-		echo "  S3 bucket: stl-$(ENV)-terraform-state*"; \
-		echo ""; \
-		echo "⚠️  Bootstrap is idempotent and only needs to run once per environment"; \
-		echo "==> Skipping bootstrap (already initialized)"; \
-		exit 0; \
+	@if [ "$(ENV)" = "sentineldev" ]; then \
+		if [ -f "$(INFRA_DIR)/bootstrap/terraform.tfstate" ]; then \
+			LOCKS_TABLE=$$(cd $(INFRA_DIR)/bootstrap && tofu output -raw locks_table_name 2>/dev/null || echo ""); \
+			if [ -n "$$LOCKS_TABLE" ] && aws dynamodb describe-table --table-name "$$LOCKS_TABLE" --region $(AWS_REGION) &>/dev/null; then \
+				echo "✓ Bootstrap infrastructure already exists for $(ENV)"; \
+				echo "  DynamoDB table: $$LOCKS_TABLE"; \
+				echo "  S3 bucket: $$(cd $(INFRA_DIR)/bootstrap && tofu output -raw state_bucket_name 2>/dev/null || echo 'stl-$(ENV)-terraform-state-*')"; \
+				echo ""; \
+				echo "⚠️  Bootstrap is idempotent and only needs to run once per environment"; \
+				echo "==> Skipping bootstrap (already initialized)"; \
+				exit 0; \
+			fi; \
+		fi; \
+	else \
+		if aws dynamodb describe-table --table-name stl-$(ENV)-terraform-locks --region $(AWS_REGION) &>/dev/null; then \
+			echo "✓ Bootstrap infrastructure already exists for $(ENV)"; \
+			echo "  DynamoDB table: stl-$(ENV)-terraform-locks"; \
+			echo "  S3 bucket: stl-$(ENV)-terraform-state"; \
+			echo ""; \
+			echo "⚠️  Bootstrap is idempotent and only needs to run once per environment"; \
+			echo "==> Skipping bootstrap (already initialized)"; \
+			exit 0; \
+		fi; \
 	fi
 	@echo ""
 	@echo "Step 1: Creating backend resources (S3 + DynamoDB) with auto-retry (3 attempts)..."
@@ -378,6 +394,8 @@ tf-bootstrap: check-tofu
 				-var="tigerdata_access_key=$(TIGERDATA_ACCESS_KEY)" \
 				-var="tigerdata_secret_key=$(TIGERDATA_SECRET_KEY)" \
 				-var="alchemy_api_key=$(ALCHEMY_API_KEY)" \
+				-var="coingecko_api_key=$(COINGECKO_API_KEY)" \
+				-var="etherscan_api_key=$(ETHERSCAN_API_KEY)" \
 				-var="tailscale_auth_key=$(TAILSCALE_AUTH_KEY)" && \
 			echo "✓ Secrets created" && break || \
 			(if [ $$attempt -lt 3 ]; then sleep 5; fi); \
@@ -459,13 +477,19 @@ tf-destroy:
 	fi
 
 # Destroy bootstrap backend (S3 + DynamoDB + secrets)
-# WARNING: This is destructive and permanent. Only for dev cleanup.
+# Destroy bootstrap backend (S3 state bucket + DynamoDB locks table + secrets)
+# WARNING: This is destructive and permanent. Only for sentineldev cleanup.
+# 
+# Staging/prod destruction is prevented by:
+#   1. Environment check below (hard-coded to only allow sentineldev)
+#   2. Manual confirmation prompt (skipped in CI with auto-approve)
+#   3. force_destroy = false on S3 bucket (must manually empty first)
+#
 # Usage: make tf-destroy-bootstrap ENV=sentineldev
-# Auto-approves in CI (GitHub Actions), prompts locally
 tf-destroy-bootstrap: check-tofu
 	@if [ "$(ENV)" != "sentineldev" ]; then \
 		echo "Error: bootstrap destroy is only allowed for sentineldev"; \
-		echo "Staging/Prod must be destroyed manually via AWS Console"; \
+		echo "Staging/Prod must NEVER be destroyed"; \
 		exit 1; \
 	fi && \
 	export AWS_PROFILE=$(AWS_PROFILE) && \
