@@ -157,9 +157,9 @@ func (m *mockHeaderFetcher) HeaderByNumber(ctx context.Context, number *big.Int)
 	return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
 }
 
-// abiPackPrices packs a slice of *big.Int as the return data for getAssetsPrices.
-func abiPackPrices(t *testing.T, prices []*big.Int) []byte {
-	return testutil.PackAssetPrices(t, prices)
+// abiPackPrice packs a single *big.Int as the return data for getAssetPrice.
+func abiPackPrice(t *testing.T, price *big.Int) []byte {
+	return testutil.PackAssetPrice(t, price)
 }
 
 // defaultOracle returns a standard Oracle for testing.
@@ -192,12 +192,14 @@ func defaultTokenAddressBytes() map[int64][]byte {
 }
 
 // multicallResult returns the multicall results for a given set of prices.
-// FetchOraclePrices uses a single-call pattern (getAssetsPrices only).
+// FetchOraclePricesIndividual uses N individual getAssetPrice calls.
 func multicallResult(t *testing.T, prices []*big.Int) []outbound.Result {
 	t.Helper()
-	return []outbound.Result{
-		{Success: true, ReturnData: abiPackPrices(t, prices)},
+	results := make([]outbound.Result, len(prices))
+	for i, price := range prices {
+		results[i] = outbound.Result{Success: true, ReturnData: abiPackPrice(t, price)}
 	}
+	return results
 }
 
 // defaultMulticallExecute returns a mock Execute function that returns
@@ -909,7 +911,7 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:      "error FetchOraclePrices fails for a block worker continues",
+			name:      "error multicall Execute fails for a block worker continues",
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
@@ -1004,7 +1006,7 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:      "error price count mismatch from oracle",
+			name:      "success partial token failure skips failed tokens",
 			fromBlock: 100,
 			toBlock:   102,
 			config: Config{
@@ -1027,9 +1029,12 @@ func TestRun(t *testing.T) {
 					return &testutil.MockMulticaller{
 						ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 							bn := blockNumber.Int64()
+							// Token 20 (index 1) fails at block 101
 							if bn == 101 {
-								// Return only 1 price for 2 tokens → mismatch
-								return multicallResult(t, []*big.Int{big.NewInt(100_000_000)}), nil
+								return []outbound.Result{
+									{Success: true, ReturnData: abiPackPrice(t, big.NewInt(bn*100_000_000))},
+									{Success: false, ReturnData: nil}, // token 20 has no price source
+								}, nil
 							}
 							prices := []*big.Int{
 								new(big.Int).Mul(big.NewInt(bn), big.NewInt(100_000_000)),
@@ -1044,14 +1049,71 @@ func TestRun(t *testing.T) {
 			checkResult: func(t *testing.T, repo *mockRepo) {
 				t.Helper()
 				upserted := repo.getUpserted()
-				// Block 101 fails with price count mismatch, blocks 100 and 102 succeed
-				// 2 blocks x 2 tokens = 4 prices
+				// Block 100: 2 tokens, Block 101: 1 token (token 20 failed), Block 102: 2 tokens
+				// = 5 prices total (all different due to block-dependent prices)
+				if len(upserted) != 5 {
+					t.Errorf("upserted count = %d, want 5", len(upserted))
+				}
+				// Verify no token 20 price at block 101
+				for _, p := range upserted {
+					if p.BlockNumber == 101 && p.TokenID == 20 {
+						t.Error("found price for token 20 at block 101 (should have failed)")
+					}
+				}
+			},
+		},
+		{
+			name:      "success all tokens fail at a block counts as processed",
+			fromBlock: 100,
+			toBlock:   102,
+			config: Config{
+				Concurrency: 1,
+				BatchSize:   100,
+				Logger:      testutil.DiscardLogger(),
+			},
+			setupRepo: func() *mockRepo {
+				return defaultRepoSetup()
+			},
+			setupHeader: func() *mockHeaderFetcher {
+				return &mockHeaderFetcher{
+					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
+						return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
+					},
+				}
+			},
+			setupMC: func(t *testing.T) MulticallFactory {
+				return func() (outbound.Multicaller, error) {
+					return &testutil.MockMulticaller{
+						ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+							bn := blockNumber.Int64()
+							// All tokens fail at block 101
+							if bn == 101 {
+								return []outbound.Result{
+									{Success: false, ReturnData: nil},
+									{Success: false, ReturnData: nil},
+								}, nil
+							}
+							prices := []*big.Int{
+								new(big.Int).Mul(big.NewInt(bn), big.NewInt(100_000_000)),
+								new(big.Int).Mul(big.NewInt(bn), big.NewInt(200_000_000)),
+							}
+							return multicallResult(t, prices), nil
+						},
+					}, nil
+				}
+			},
+			wantErr: false,
+			checkResult: func(t *testing.T, repo *mockRepo) {
+				t.Helper()
+				upserted := repo.getUpserted()
+				// Block 100: 2 tokens, Block 101: 0 tokens (all failed), Block 102: 2 tokens
+				// = 4 prices total
 				if len(upserted) != 4 {
 					t.Errorf("upserted count = %d, want 4", len(upserted))
 				}
 				for _, p := range upserted {
 					if p.BlockNumber == 101 {
-						t.Error("found price from failed block 101 (price count mismatch)")
+						t.Errorf("found price at block 101 (all tokens should have failed)")
 					}
 				}
 			},
@@ -1220,18 +1282,12 @@ func TestRun(t *testing.T) {
 				return func() (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{
 						ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-							// calls[0] is getAssetsPrices — determine count from the call data
-							// For simplicity, we check the target address to know which oracle
-							if len(calls) == 1 {
-								target := calls[0].Target
-								if target == common.HexToAddress("0x0000000000000000000000000000000000000BBB") {
-									// oracle1 has 2 tokens
-									return multicallResult(t, []*big.Int{big.NewInt(100_000_000), big.NewInt(200_000_000)}), nil
-								}
-								// oracle2 has 1 token
-								return multicallResult(t, []*big.Int{big.NewInt(300_000_000)}), nil
+							// Individual calls: oracle1 has 2 tokens (2 calls), oracle2 has 1 token (1 call)
+							target := calls[0].Target
+							if target == common.HexToAddress("0x0000000000000000000000000000000000000BBB") {
+								return multicallResult(t, []*big.Int{big.NewInt(100_000_000), big.NewInt(200_000_000)}), nil
 							}
-							return nil, errors.New("unexpected calls")
+							return multicallResult(t, []*big.Int{big.NewInt(300_000_000)}), nil
 						},
 					}, nil
 				}

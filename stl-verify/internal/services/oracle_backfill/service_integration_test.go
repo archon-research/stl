@@ -32,23 +32,28 @@ func integrationMockHeaderFetcher() *mockHeaderFetcher {
 // integrationMockMulticallFactory creates a MulticallFactory returning mock multicall
 // clients that return block-dependent prices for the given number of tokens.
 // Each token gets a distinct price: tokenIndex * blockNumber * 100_000_000 (1e8 = $1 in oracle format).
+// Uses individual getAssetPrice results (one per token) matching FetchOraclePricesIndividual.
 func integrationMockMulticallFactory(t *testing.T, numTokens int) MulticallFactory {
 	t.Helper()
 	return func() (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				bn := blockNumber.Int64()
-				prices := make([]*big.Int, numTokens)
+				results := make([]outbound.Result, numTokens)
 				for i := range numTokens {
 					// Each token gets a unique price per block:
 					// token0: bn * 100_000_000 (= $bn)
 					// token1: bn * 200_000_000 (= $2*bn)
-					prices[i] = new(big.Int).Mul(
+					price := new(big.Int).Mul(
 						big.NewInt(bn),
 						big.NewInt(int64(i+1)*100_000_000),
 					)
+					results[i] = outbound.Result{
+						Success:    true,
+						ReturnData: testutil.PackAssetPrice(t, price),
+					}
 				}
-				return multicallResult(t, prices), nil
+				return results, nil
 			},
 		}, nil
 	}
@@ -56,6 +61,7 @@ func integrationMockMulticallFactory(t *testing.T, numTokens int) MulticallFacto
 
 // integrationMockMulticallFactoryConstant creates a MulticallFactory that always
 // returns the same prices regardless of block number.
+// Uses individual getAssetPrice results (one per token) matching FetchOraclePricesIndividual.
 func integrationMockMulticallFactoryConstant(t *testing.T, prices []*big.Int) MulticallFactory {
 	t.Helper()
 	return func() (outbound.Multicaller, error) {
@@ -665,6 +671,114 @@ func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
 	}
 	if oracle1MaxBlock > 159 {
 		t.Errorf("expected oracle1 max block <= 159, got %d", oracle1MaxBlock)
+	}
+}
+
+func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	logger := testutil.DiscardLogger()
+
+	oracleID := testutil.SeedOracle(t, ctx, pool, "test-partial", "Test Partial", 1, "0x0000000000000000000000000000000000000AAA")
+	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000071", "PF1", 18)
+	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000072", "PF2", 18)
+	tokenID3 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000073", "PF3", 18)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID3)
+
+	// Disable the migration-seeded sparklend oracle
+	_, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`)
+	if err != nil {
+		t.Fatalf("failed to disable sparklend oracle: %v", err)
+	}
+
+	// token3 (index 2) fails at blocks 100-102 (early blocks), succeeds at 103-104.
+	// This simulates a token that didn't have a price source until a later block.
+	mcFactory := func() (outbound.Multicaller, error) {
+		return &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+				bn := blockNumber.Int64()
+				results := make([]outbound.Result, 3)
+				// token1 and token2 always succeed with block-dependent prices
+				results[0] = outbound.Result{
+					Success:    true,
+					ReturnData: testutil.PackAssetPrice(t, new(big.Int).Mul(big.NewInt(bn), big.NewInt(100_000_000))),
+				}
+				results[1] = outbound.Result{
+					Success:    true,
+					ReturnData: testutil.PackAssetPrice(t, new(big.Int).Mul(big.NewInt(bn), big.NewInt(200_000_000))),
+				}
+				// token3 fails at blocks 100-102
+				if bn <= 102 {
+					results[2] = outbound.Result{Success: false, ReturnData: nil}
+				} else {
+					results[2] = outbound.Result{
+						Success:    true,
+						ReturnData: testutil.PackAssetPrice(t, new(big.Int).Mul(big.NewInt(bn), big.NewInt(300_000_000))),
+					}
+				}
+				return results, nil
+			},
+		}, nil
+	}
+
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
+	if err != nil {
+		t.Fatalf("failed to create repository: %v", err)
+	}
+
+	svc, err := NewService(
+		Config{
+			Concurrency: 1,
+			BatchSize:   100,
+			Logger:      logger,
+		},
+		integrationMockHeaderFetcher(),
+		mcFactory,
+		repo,
+	)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	err = svc.Run(ctx, 100, 104)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	// Blocks 100-102: 2 tokens each (token3 fails) = 6
+	// Blocks 103-104: 3 tokens each = 6
+	// Total = 12 prices (all unique due to block-dependent prices)
+	var priceCount int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&priceCount)
+	if err != nil {
+		t.Fatalf("failed to query price count: %v", err)
+	}
+	if priceCount != 12 {
+		t.Errorf("expected 12 price records, got %d", priceCount)
+	}
+
+	// Verify token3 has no prices at blocks 100-102
+	var token3EarlyCount int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1 AND token_id = $2 AND block_number <= 102`, oracleID, tokenID3).Scan(&token3EarlyCount)
+	if err != nil {
+		t.Fatalf("failed to query token3 early count: %v", err)
+	}
+	if token3EarlyCount != 0 {
+		t.Errorf("expected 0 prices for token3 at blocks 100-102, got %d", token3EarlyCount)
+	}
+
+	// Verify token3 has prices at blocks 103-104
+	var token3LateCount int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1 AND token_id = $2 AND block_number >= 103`, oracleID, tokenID3).Scan(&token3LateCount)
+	if err != nil {
+		t.Fatalf("failed to query token3 late count: %v", err)
+	}
+	if token3LateCount != 2 {
+		t.Errorf("expected 2 prices for token3 at blocks 103-104, got %d", token3LateCount)
 	}
 }
 

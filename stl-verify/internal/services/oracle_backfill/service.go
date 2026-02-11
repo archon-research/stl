@@ -483,8 +483,9 @@ func (s *Service) processBlock(
 	priceDecimals int,
 	blockNum int64,
 ) ([]*entity.OnchainTokenPrice, error) {
-	// Fetch oracle prices via multicall
-	rawPrices, err := blockchain.FetchOraclePrices(
+	// Fetch oracle prices via individual multicall calls (each with AllowFailure: true).
+	// Tokens without price sources at historical blocks return Success: false and are skipped.
+	results, err := blockchain.FetchOraclePricesIndividual(
 		ctx, mc, s.oracleABI,
 		oracleAddr,
 		tokenAddrs, blockNum,
@@ -493,8 +494,17 @@ func (s *Service) processBlock(
 		return nil, fmt.Errorf("fetching oracle prices: %w", err)
 	}
 
-	if len(rawPrices) != len(tokenIDs) {
-		return nil, fmt.Errorf("price count mismatch: expected %d, got %d", len(tokenIDs), len(rawPrices))
+	// Fast path: if no token succeeded, skip the header fetch entirely.
+	// This avoids a wasted RPC call for blocks where the oracle is deployed but not yet configured.
+	hasSuccess := false
+	for _, r := range results {
+		if r.Success {
+			hasSuccess = true
+			break
+		}
+	}
+	if !hasSuccess {
+		return nil, nil
 	}
 
 	// Get block timestamp
@@ -505,8 +515,11 @@ func (s *Service) processBlock(
 	blockTimestamp := time.Unix(int64(header.Time), 0).UTC()
 
 	prices := make([]*entity.OnchainTokenPrice, 0, len(tokenIDs))
-	for i, rawPrice := range rawPrices {
-		priceUSD := blockchain.ConvertOraclePriceToUSD(rawPrice, priceDecimals)
+	for i, result := range results {
+		if !result.Success {
+			continue // token didn't have a price source at this block
+		}
+		priceUSD := blockchain.ConvertOraclePriceToUSD(result.Price, priceDecimals)
 
 		p, err := entity.NewOnchainTokenPrice(
 			tokenIDs[i],
