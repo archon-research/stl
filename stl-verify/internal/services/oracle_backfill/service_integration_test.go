@@ -518,6 +518,156 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 	}
 }
 
+func TestIntegration_BackfillRun_RespectsDeploymentBlock(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	logger := testutil.DiscardLogger()
+
+	// Create oracle with deployment block at 200
+	oracleID := testutil.SeedOracleWithDeploymentBlock(t, ctx, pool, "test-deploy", "Test Deploy", 1, "0x0000000000000000000000000000000000000AAA", 200)
+	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000051", "DEP1", 18)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
+
+	// Disable the migration-seeded sparklend oracle
+	_, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`)
+	if err != nil {
+		t.Fatalf("failed to disable sparklend oracle: %v", err)
+	}
+
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
+	if err != nil {
+		t.Fatalf("failed to create repository: %v", err)
+	}
+
+	svc, err := NewService(
+		Config{
+			Concurrency: 1,
+			BatchSize:   100,
+			Logger:      logger,
+		},
+		integrationMockHeaderFetcher(),
+		integrationMockMulticallFactory(t, 1),
+		repo,
+	)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	// Request blocks 100-205, but oracle was deployed at block 200
+	err = svc.Run(ctx, 100, 205)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	// Only blocks 200-205 should have prices (6 blocks x 1 token = 6 records)
+	var priceCount int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&priceCount)
+	if err != nil {
+		t.Fatalf("failed to query price count: %v", err)
+	}
+	if priceCount != 6 {
+		t.Errorf("expected 6 price records (blocks 200-205), got %d", priceCount)
+	}
+
+	// Verify min block is the deployment block
+	var minBlock int64
+	err = pool.QueryRow(ctx, `SELECT MIN(block_number) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&minBlock)
+	if err != nil {
+		t.Fatalf("failed to query min block: %v", err)
+	}
+	if minBlock != 200 {
+		t.Errorf("expected min block 200 (deployment block), got %d", minBlock)
+	}
+}
+
+func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	logger := testutil.DiscardLogger()
+
+	// Create two oracles: oracle1 deployed at block 100, oracle2 deployed at block 150
+	oracle1ID := testutil.SeedOracleWithDeploymentBlock(t, ctx, pool, "test-old-oracle", "Test Old Oracle", 1, "0x0000000000000000000000000000000000000AAA", 100)
+	oracle2ID := testutil.SeedOracleWithDeploymentBlock(t, ctx, pool, "test-new-oracle", "Test New Oracle", 1, "0x0000000000000000000000000000000000000BBB", 150)
+
+	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000061", "SUP1", 18)
+	testutil.SeedOracleAsset(t, ctx, pool, oracle1ID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, oracle2ID, tokenID1)
+
+	// Create protocol and bind oracle1 from block 100, then oracle2 from block 160
+	protocolID := testutil.SeedProtocol(t, ctx, pool, 1, "0x0000000000000000000000000000000000000FFF", "test-protocol", "lending", 100, "")
+	testutil.SeedProtocolOracle(t, ctx, pool, protocolID, oracle1ID, 100)
+	testutil.SeedProtocolOracle(t, ctx, pool, protocolID, oracle2ID, 160)
+
+	// Disable the migration-seeded sparklend oracle
+	_, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`)
+	if err != nil {
+		t.Fatalf("failed to disable sparklend oracle: %v", err)
+	}
+
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
+	if err != nil {
+		t.Fatalf("failed to create repository: %v", err)
+	}
+
+	svc, err := NewService(
+		Config{
+			Concurrency: 1,
+			BatchSize:   100,
+			Logger:      logger,
+		},
+		integrationMockHeaderFetcher(),
+		integrationMockMulticallFactory(t, 1),
+		repo,
+	)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	// Request blocks 80-180
+	err = svc.Run(ctx, 80, 180)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	// Oracle1: validFrom = max(deploymentBlock=100, bindingFrom=100) = 100
+	//          validTo = 159 (superseded at block 160)
+	//          Clamped range: 100-159 = 60 blocks
+	var oracle1Count int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracle1ID).Scan(&oracle1Count)
+	if err != nil {
+		t.Fatalf("failed to query oracle1 count: %v", err)
+	}
+	if oracle1Count != 60 {
+		t.Errorf("expected 60 price records for oracle1 (blocks 100-159), got %d", oracle1Count)
+	}
+
+	// Oracle2: validFrom = max(deploymentBlock=150, bindingFrom=160) = 160
+	//          validTo = 0 (still active)
+	//          Clamped range: 160-180 = 21 blocks
+	var oracle2Count int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracle2ID).Scan(&oracle2Count)
+	if err != nil {
+		t.Fatalf("failed to query oracle2 count: %v", err)
+	}
+	if oracle2Count != 21 {
+		t.Errorf("expected 21 price records for oracle2 (blocks 160-180), got %d", oracle2Count)
+	}
+
+	// Verify oracle1 has no prices beyond block 159
+	var oracle1MaxBlock int64
+	err = pool.QueryRow(ctx, `SELECT MAX(block_number) FROM onchain_token_price WHERE oracle_id = $1`, oracle1ID).Scan(&oracle1MaxBlock)
+	if err != nil {
+		t.Fatalf("failed to query oracle1 max block: %v", err)
+	}
+	if oracle1MaxBlock > 159 {
+		t.Errorf("expected oracle1 max block <= 159, got %d", oracle1MaxBlock)
+	}
+}
+
 func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)

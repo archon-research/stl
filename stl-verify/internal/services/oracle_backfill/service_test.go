@@ -24,18 +24,19 @@ import (
 
 // mockRepo implements outbound.OnchainPriceRepository for testing.
 type mockRepo struct {
-	getOracleFn                   func(ctx context.Context, name string) (*entity.Oracle, error)
-	getEnabledAssetsFn            func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
-	getLatestPricesFn             func(ctx context.Context, oracleID int64) (map[int64]float64, error)
-	getLatestBlockFn              func(ctx context.Context, oracleID int64) (int64, error)
-	getTokenAddressesFn           func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
-	upsertPricesFn                func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
-	getAllEnabledOraclesFn        func(ctx context.Context) ([]*entity.Oracle, error)
-	getOracleByAddressFn          func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
-	insertOracleFn                func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
-	getAllActiveProtocolOraclesFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
-	insertProtocolOracleBindingFn func(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
-	copyOracleAssetsFn            func(ctx context.Context, fromOracleID, toOracleID int64) error
+	getOracleFn                    func(ctx context.Context, name string) (*entity.Oracle, error)
+	getEnabledAssetsFn             func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
+	getLatestPricesFn              func(ctx context.Context, oracleID int64) (map[int64]float64, error)
+	getLatestBlockFn               func(ctx context.Context, oracleID int64) (int64, error)
+	getTokenAddressesFn            func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
+	upsertPricesFn                 func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
+	getAllEnabledOraclesFn         func(ctx context.Context) ([]*entity.Oracle, error)
+	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
+	insertOracleFn                 func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
+	getAllActiveProtocolOraclesFn  func(ctx context.Context) ([]*entity.ProtocolOracle, error)
+	insertProtocolOracleBindingFn  func(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
+	copyOracleAssetsFn             func(ctx context.Context, fromOracleID, toOracleID int64) error
+	getAllProtocolOracleBindingsFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
 
 	// mu guards upserted for concurrent access from the batch writer goroutine.
 	mu       sync.Mutex
@@ -127,6 +128,13 @@ func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleI
 		return m.copyOracleAssetsFn(ctx, fromOracleID, toOracleID)
 	}
 	return errors.New("CopyOracleAssets not mocked")
+}
+
+func (m *mockRepo) GetAllProtocolOracleBindings(ctx context.Context) ([]*entity.ProtocolOracle, error) {
+	if m.getAllProtocolOracleBindingsFn != nil {
+		return m.getAllProtocolOracleBindingsFn(ctx)
+	}
+	return nil, nil // default: no bindings
 }
 
 func (m *mockRepo) getUpserted() []*entity.OnchainTokenPrice {
@@ -1443,5 +1451,376 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 		default:
 			t.Errorf("unexpected token ID: %d", p.TokenID)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestComputeOracleBlockRanges
+// ---------------------------------------------------------------------------
+
+func TestComputeOracleBlockRanges(t *testing.T) {
+	tests := []struct {
+		name     string
+		bindings []*entity.ProtocolOracle
+		want     map[int64]*oracleBlockRange
+	}{
+		{
+			name:     "empty bindings",
+			bindings: nil,
+			want:     map[int64]*oracleBlockRange{},
+		},
+		{
+			name: "single oracle active in one protocol",
+			bindings: []*entity.ProtocolOracle{
+				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
+			},
+			want: map[int64]*oracleBlockRange{
+				10: {validFrom: 1000, validTo: 0},
+			},
+		},
+		{
+			name: "oracle superseded by another in same protocol",
+			bindings: []*entity.ProtocolOracle{
+				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
+				{ProtocolID: 1, OracleID: 20, FromBlock: 2000},
+			},
+			want: map[int64]*oracleBlockRange{
+				10: {validFrom: 1000, validTo: 1999},
+				20: {validFrom: 2000, validTo: 0},
+			},
+		},
+		{
+			name: "oracle active in multiple protocols",
+			bindings: []*entity.ProtocolOracle{
+				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
+				{ProtocolID: 2, OracleID: 10, FromBlock: 500},
+			},
+			want: map[int64]*oracleBlockRange{
+				10: {validFrom: 500, validTo: 0},
+			},
+		},
+		{
+			name: "oracle superseded in one protocol but active in another",
+			bindings: []*entity.ProtocolOracle{
+				// Protocol 1: oracle 10 superseded by oracle 20 at block 2000
+				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
+				{ProtocolID: 1, OracleID: 20, FromBlock: 2000},
+				// Protocol 2: oracle 10 still active
+				{ProtocolID: 2, OracleID: 10, FromBlock: 1500},
+			},
+			want: map[int64]*oracleBlockRange{
+				10: {validFrom: 1000, validTo: 0}, // still active in protocol 2
+				20: {validFrom: 2000, validTo: 0},
+			},
+		},
+		{
+			name: "oracle superseded in all protocols",
+			bindings: []*entity.ProtocolOracle{
+				// Protocol 1: oracle 10 → oracle 20 at block 2000
+				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
+				{ProtocolID: 1, OracleID: 20, FromBlock: 2000},
+				// Protocol 2: oracle 10 → oracle 30 at block 3000
+				{ProtocolID: 2, OracleID: 10, FromBlock: 500},
+				{ProtocolID: 2, OracleID: 30, FromBlock: 3000},
+			},
+			want: map[int64]*oracleBlockRange{
+				10: {validFrom: 500, validTo: 2999}, // max superseded block
+				20: {validFrom: 2000, validTo: 0},
+				30: {validFrom: 3000, validTo: 0},
+			},
+		},
+		{
+			name: "oracle re-used after supersession",
+			bindings: []*entity.ProtocolOracle{
+				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
+				{ProtocolID: 1, OracleID: 20, FromBlock: 2000},
+				{ProtocolID: 1, OracleID: 10, FromBlock: 3000}, // oracle 10 re-used
+			},
+			want: map[int64]*oracleBlockRange{
+				10: {validFrom: 1000, validTo: 0}, // active again
+				20: {validFrom: 2000, validTo: 2999},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeOracleBlockRanges(tt.bindings)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d ranges, want %d", len(got), len(tt.want))
+			}
+			for oracleID, wantRange := range tt.want {
+				gotRange, ok := got[oracleID]
+				if !ok {
+					t.Errorf("missing range for oracle %d", oracleID)
+					continue
+				}
+				if gotRange.validFrom != wantRange.validFrom {
+					t.Errorf("oracle %d: validFrom = %d, want %d", oracleID, gotRange.validFrom, wantRange.validFrom)
+				}
+				if gotRange.validTo != wantRange.validTo {
+					t.Errorf("oracle %d: validTo = %d, want %d", oracleID, gotRange.validTo, wantRange.validTo)
+				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestClampBlockRange
+// ---------------------------------------------------------------------------
+
+func TestClampBlockRange(t *testing.T) {
+	tests := []struct {
+		name      string
+		from, to  int64
+		validFrom int64
+		validTo   int64
+		wantFrom  int64
+		wantTo    int64
+		wantOK    bool
+	}{
+		{
+			name: "no clamping needed",
+			from: 100, to: 200,
+			validFrom: 50, validTo: 300,
+			wantFrom: 100, wantTo: 200, wantOK: true,
+		},
+		{
+			name: "clamp from",
+			from: 100, to: 200,
+			validFrom: 150, validTo: 0,
+			wantFrom: 150, wantTo: 200, wantOK: true,
+		},
+		{
+			name: "clamp to",
+			from: 100, to: 200,
+			validFrom: 0, validTo: 150,
+			wantFrom: 100, wantTo: 150, wantOK: true,
+		},
+		{
+			name: "clamp both",
+			from: 100, to: 200,
+			validFrom: 120, validTo: 180,
+			wantFrom: 120, wantTo: 180, wantOK: true,
+		},
+		{
+			name: "from > to after clamping",
+			from: 100, to: 200,
+			validFrom: 300, validTo: 0,
+			wantFrom: 300, wantTo: 200, wantOK: false,
+		},
+		{
+			name: "no lower bound (validFrom=0)",
+			from: 100, to: 200,
+			validFrom: 0, validTo: 0,
+			wantFrom: 100, wantTo: 200, wantOK: true,
+		},
+		{
+			name: "no upper bound (validTo=0)",
+			from: 100, to: 200,
+			validFrom: 50, validTo: 0,
+			wantFrom: 100, wantTo: 200, wantOK: true,
+		},
+		{
+			name: "exact boundaries",
+			from: 100, to: 200,
+			validFrom: 100, validTo: 200,
+			wantFrom: 100, wantTo: 200, wantOK: true,
+		},
+		{
+			name: "entire range before deployment",
+			from: 10, to: 50,
+			validFrom: 100, validTo: 0,
+			wantFrom: 100, wantTo: 50, wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotFrom, gotTo, gotOK := clampBlockRange(tt.from, tt.to, tt.validFrom, tt.validTo)
+			if gotFrom != tt.wantFrom {
+				t.Errorf("from = %d, want %d", gotFrom, tt.wantFrom)
+			}
+			if gotTo != tt.wantTo {
+				t.Errorf("to = %d, want %d", gotTo, tt.wantTo)
+			}
+			if gotOK != tt.wantOK {
+				t.Errorf("ok = %v, want %v", gotOK, tt.wantOK)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRun_BlockRangeClamping
+// ---------------------------------------------------------------------------
+
+func TestRun_BlockRangeClamping(t *testing.T) {
+	tests := []struct {
+		name      string
+		fromBlock int64
+		toBlock   int64
+		oracle    *entity.Oracle
+		bindings  []*entity.ProtocolOracle
+		wantErr   bool
+		// checkResult is called after Run completes successfully.
+		checkResult func(t *testing.T, repo *mockRepo)
+	}{
+		{
+			name:      "clamps to deployment block",
+			fromBlock: 50,
+			toBlock:   104,
+			oracle: &entity.Oracle{
+				ID:              1,
+				Name:            "sparklend",
+				DisplayName:     "Spark: aave Oracle",
+				ChainID:         1,
+				Address:         common.HexToAddress("0x0000000000000000000000000000000000000BBB"),
+				DeploymentBlock: 100,
+				Enabled:         true,
+			},
+			bindings: nil,
+			checkResult: func(t *testing.T, repo *mockRepo) {
+				t.Helper()
+				upserted := repo.getUpserted()
+				// Blocks 100-104 = 5 blocks x 2 tokens = 10 prices
+				if len(upserted) != 10 {
+					t.Errorf("upserted count = %d, want 10", len(upserted))
+				}
+				for _, p := range upserted {
+					if p.BlockNumber < 100 {
+						t.Errorf("found price for block %d which is before deployment block 100", p.BlockNumber)
+					}
+				}
+			},
+		},
+		{
+			name:      "entire range before deployment skips oracle",
+			fromBlock: 10,
+			toBlock:   50,
+			oracle: &entity.Oracle{
+				ID:              1,
+				Name:            "sparklend",
+				DisplayName:     "Spark: aave Oracle",
+				ChainID:         1,
+				Address:         common.HexToAddress("0x0000000000000000000000000000000000000BBB"),
+				DeploymentBlock: 100,
+				Enabled:         true,
+			},
+			bindings: nil,
+			checkResult: func(t *testing.T, repo *mockRepo) {
+				t.Helper()
+				if len(repo.getUpserted()) != 0 {
+					t.Errorf("expected no upserted prices, got %d", len(repo.getUpserted()))
+				}
+			},
+		},
+		{
+			name:      "clamps to supersession block",
+			fromBlock: 100,
+			toBlock:   300,
+			oracle: &entity.Oracle{
+				ID:              1,
+				Name:            "old-oracle",
+				DisplayName:     "Old Oracle",
+				ChainID:         1,
+				Address:         common.HexToAddress("0x0000000000000000000000000000000000000BBB"),
+				DeploymentBlock: 50,
+				Enabled:         true,
+			},
+			bindings: []*entity.ProtocolOracle{
+				{ProtocolID: 1, OracleID: 1, FromBlock: 80},
+				{ProtocolID: 1, OracleID: 2, FromBlock: 201}, // oracle 1 superseded at 200
+			},
+			checkResult: func(t *testing.T, repo *mockRepo) {
+				t.Helper()
+				upserted := repo.getUpserted()
+				// Blocks 100-200 = 101 blocks x 2 tokens = 202 prices
+				if len(upserted) != 202 {
+					t.Errorf("upserted count = %d, want 202", len(upserted))
+				}
+				for _, p := range upserted {
+					if p.BlockNumber > 200 {
+						t.Errorf("found price for block %d which is after supersession block 200", p.BlockNumber)
+					}
+				}
+			},
+		},
+		{
+			name:      "deployment block 0 means no lower clamping",
+			fromBlock: 1,
+			toBlock:   5,
+			oracle: &entity.Oracle{
+				ID:              1,
+				Name:            "sparklend",
+				DisplayName:     "Spark: aave Oracle",
+				ChainID:         1,
+				Address:         common.HexToAddress("0x0000000000000000000000000000000000000BBB"),
+				DeploymentBlock: 0,
+				Enabled:         true,
+			},
+			bindings: nil,
+			checkResult: func(t *testing.T, repo *mockRepo) {
+				t.Helper()
+				upserted := repo.getUpserted()
+				// 5 blocks x 2 tokens = 10 prices
+				if len(upserted) != 10 {
+					t.Errorf("upserted count = %d, want 10", len(upserted))
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &mockRepo{
+				getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					return []*entity.Oracle{tt.oracle}, nil
+				},
+				getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+					return defaultAssets(), nil
+				},
+				getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+					return defaultTokenAddressBytes(), nil
+				},
+				getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) { return 0, nil },
+				getAllProtocolOracleBindingsFn: func(_ context.Context) ([]*entity.ProtocolOracle, error) {
+					return tt.bindings, nil
+				},
+			}
+
+			header := &mockHeaderFetcher{
+				headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
+					return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
+				},
+			}
+
+			svc, err := NewService(Config{
+				Concurrency: 1,
+				BatchSize:   1000,
+				Logger:      testutil.DiscardLogger(),
+			}, header, func() (outbound.Multicaller, error) {
+				return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
+			}, repo)
+			if err != nil {
+				t.Fatalf("NewService: %v", err)
+			}
+
+			err = svc.Run(context.Background(), tt.fromBlock, tt.toBlock)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.checkResult != nil {
+				tt.checkResult(t, repo)
+			}
+		})
 	}
 }
