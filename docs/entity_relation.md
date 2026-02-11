@@ -2,7 +2,7 @@
 erDiagram
     Chain {
         int chain_id PK
-        varchar name UK
+        varchar name "UK"
     }
 
     Token {
@@ -13,7 +13,7 @@ erDiagram
         smallint decimals
         bigint created_at_block
         timestamptz updated_at
-        jsonb metadata "protocol-specific fields"
+        jsonb metadata
     }
 
     Protocol {
@@ -21,34 +21,10 @@ erDiagram
         int chain_id FK "UK1"
         bytea address "UK1"
         varchar name
-        varchar protocol_type "lending,rwa"
+        varchar protocol_type
         bigint created_at_block
         timestamptz updated_at
-        jsonb metadata "protocol-specific config"
-    }
-
-    ReceiptToken {
-        bigint id PK
-        bigint protocol_id FK "UK1"
-        bigint underlying_token_id FK "UK1"
-        bytea receipt_token_address
-        varchar symbol "aWETH, spWETH, cWETH"
-        bigint created_at_block
-        timestamptz updated_at
-        jsonb metadata "protocol-specific fields"
-    }
-
-    DebtToken {
-        bigint id PK
-        bigint protocol_id FK "UK1"
-        bigint underlying_token_id FK "UK1"
-        bytea variable_debt_address
-        bytea stable_debt_address "nullable, not all protocols"
-        varchar variable_symbol "variableDebtWETH"
-        varchar stable_symbol "stableDebtWETH, nullable"
-        bigint created_at_block
-        timestamptz updated_at
-        jsonb metadata "protocol-specific fields"
+        jsonb metadata
     }
 
     User {
@@ -58,37 +34,62 @@ erDiagram
         bigint first_seen_block
         timestamptz created_at
         timestamptz updated_at
-        jsonb metadata "protocol-specific user data"
+        jsonb metadata
     }
 
-    SparkLendReserveData {
+    ReceiptToken {
+        bigint id PK
+        bigint protocol_id FK "UK1"
+        bigint underlying_token_id FK "UK1"
+        bytea receipt_token_address
+        varchar symbol
+        bigint created_at_block
+        timestamptz updated_at
+        jsonb metadata
+    }
+
+    DebtToken {
+        bigint id PK
+        bigint protocol_id FK "UK1"
+        bigint underlying_token_id FK "UK1"
+        bytea variable_debt_address
+        bytea stable_debt_address
+        varchar variable_symbol
+        varchar stable_symbol
+        bigint created_at_block
+        timestamptz updated_at
+        jsonb metadata
+    }
+
+    SparklendReserveData {
         bigint id PK
         bigint protocol_id FK "UK1"
         bigint token_id FK "UK1"
-        bigint block_number "UK1"
-        int block_version
+        bigint block_number PK "UK1, hypertable: 100000 chunks, compress 100000"
+        int block_version "UK1"
         numeric unbacked
-        numeric accruedToTreasuryScaled
-        numeric totalAToken
-        numeric totalStableDebt
-        numeric totalVariableDebt
-        numeric liquidityRate
-        numeric variableBorrowRate
-        numeric stableBorrowRate
-        numeric averageStableBorrowRate
-        numeric liquidityIndex
-        numeric variableBorrowIndex
-        bigint lastUpdateTimestamp
+        numeric accrued_to_treasury_scaled
+        numeric total_a_token
+        numeric total_stable_debt
+        numeric total_variable_debt
+        numeric liquidity_rate
+        numeric variable_borrow_rate
+        numeric stable_borrow_rate
+        numeric average_stable_borrow_rate
+        numeric liquidity_index
+        numeric variable_borrow_index
+        bigint last_update_timestamp
         numeric decimals
         numeric ltv
-        numeric liquidationThreshold
-        numeric liquidationBonus
-        numeric reserveFactor
-        boolean usageAsCollateralEnabled
-        boolean borrowingEnabled
-        boolean stableBorrowRateEnabled
-        boolean isActive
-        boolean isFrozen
+        numeric liquidation_threshold
+        numeric liquidation_bonus
+        numeric reserve_factor
+        boolean usage_as_collateral_enabled
+        boolean borrowing_enabled
+        boolean stable_borrow_rate_enabled
+        boolean is_active
+        boolean is_frozen
+        timestamptz created_at
     }
 
     Borrower {
@@ -100,6 +101,8 @@ erDiagram
         int block_version "UK1"
         numeric amount
         numeric change
+        text event_type
+        bytea tx_hash
         timestamptz created_at
     }
 
@@ -112,16 +115,10 @@ erDiagram
         int block_version "UK1"
         numeric amount
         numeric change
+        text event_type
+        bytea tx_hash
+        boolean collateral_enabled
         timestamptz created_at
-    }
-
-    UserProtocolMetadata {
-        bigint id PK
-        bigint user_id FK "UK1"
-        bigint protocol_id FK "UK1"
-        timestamptz created_at
-        timestamptz updated_at
-        jsonb metadata "user-protocol specific data"
     }
 
     ProtocolEvent {
@@ -138,9 +135,38 @@ erDiagram
         timestamptz created_at
     }
 
-    PriceSource {
+    Oracle {
         bigint id PK
-        varchar name UK "coingecko, chainlink"
+        varchar name "UK"
+        varchar display_name
+        int chain_id
+        bytea address
+        bigint deployment_block
+        boolean enabled
+        smallint price_decimals
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    ProtocolOracle {
+        bigint id PK
+        bigint protocol_id
+        bigint oracle_id
+        bigint from_block
+        timestamptz created_at
+    }
+
+    OracleAsset {
+        bigint id PK
+        bigint oracle_id "UK1"
+        bigint token_id "UK1"
+        boolean enabled
+        timestamptz created_at
+    }
+
+    OffchainPriceSource {
+        bigint id PK
+        varchar name "UK"
         varchar display_name
         varchar base_url
         int rate_limit_per_min
@@ -150,11 +176,11 @@ erDiagram
         timestamptz updated_at
     }
 
-    PriceAsset {
+    OffchainPriceAsset {
         bigint id PK
         bigint source_id FK "UK1"
         varchar source_asset_id "UK1"
-        bigint token_id FK "nullable"
+        bigint token_id FK
         varchar name
         varchar symbol
         boolean enabled
@@ -162,52 +188,72 @@ erDiagram
         timestamptz updated_at
     }
 
-    TokenPrice {
-        bigint id PK
-        timestamptz timestamp "hypertable partition"
-        bigint token_id FK
-        int chain_id FK
-        varchar source "denormalized"
-        varchar source_asset_id
+    OnchainTokenPrice {
+        bigint token_id PK
+        smallint oracle_id PK
+        bigint block_number PK
+        smallint block_version PK
+        timestamptz timestamp PK "hypertable: 1d chunks, compress 1d"
         numeric price_usd
-        numeric market_cap_usd "nullable"
-        timestamptz created_at
     }
 
-    TokenVolume {
-        bigint id PK
-        timestamptz timestamp "hypertable partition, hourly"
-        bigint token_id FK
-        int chain_id FK
-        varchar source "denormalized"
-        varchar source_asset_id
+    OffchainTokenPrice {
+        bigint token_id PK
+        smallint source_id PK
+        timestamptz timestamp PK "hypertable: 1d chunks, compress 1d"
+        numeric price_usd
+        numeric market_cap_usd
         numeric volume_usd
-        timestamptz created_at
+    }
+
+    BlockStates {
+        bigint number PK "UK1"
+        text hash PK
+        text parent_hash
+        bigint received_at
+        boolean is_orphaned
+        int version "UK1"
+        boolean block_published
+        int chain_id PK "UK1"
+        timestamptz created_at PK "UK1, hypertable: 1d chunks, hash(chain_id,4), compress 1d, retain 30d"
+    }
+
+    ReorgEvents {
+        bigint id PK
+        timestamptz detected_at
+        bigint block_number
+        text old_hash
+        text new_hash
+        int depth
+        int chain_id FK
+    }
+
+    BackfillWatermark {
+        int id PK
+        bigint watermark
+        int chain_id FK "UK"
     }
 
     Chain ||--o{ Token : ""
     Chain ||--o{ Protocol : ""
     Chain ||--o{ User : ""
     Chain ||--o{ ProtocolEvent : ""
-    Protocol ||--o{ ReceiptToken : ""
-    Protocol ||--o{ DebtToken : ""
-    Protocol ||--o{ SparkLendReserveData : ""
-    Protocol ||--o{ ProtocolEvent : ""
+    Chain ||--o{ BlockStates : ""
+    Chain ||--o{ ReorgEvents : ""
+    Chain ||--o{ BackfillWatermark : ""
     Token ||--o{ ReceiptToken : ""
     Token ||--o{ DebtToken : ""
-    Token ||--o{ SparkLendReserveData : ""
-    User ||--o{ Borrower : ""
-    User ||--o{ BorrowerCollateral : ""
-    Protocol ||--o{ Borrower : ""
-    Protocol ||--o{ BorrowerCollateral : ""
+    Token ||--o{ SparklendReserveData : ""
     Token ||--o{ Borrower : ""
     Token ||--o{ BorrowerCollateral : ""
-    User ||--o{ UserProtocolMetadata : ""
-    Protocol ||--o{ UserProtocolMetadata : ""
-    PriceSource ||--o{ PriceAsset : ""
-    Token ||--o{ PriceAsset : ""
-    Token ||--o{ TokenPrice : ""
-    Token ||--o{ TokenVolume : ""
-    Chain ||--o{ TokenPrice : ""
-    Chain ||--o{ TokenVolume : ""
+    Token ||--o{ OffchainPriceAsset : ""
+    Protocol ||--o{ ReceiptToken : ""
+    Protocol ||--o{ DebtToken : ""
+    Protocol ||--o{ SparklendReserveData : ""
+    Protocol ||--o{ Borrower : ""
+    Protocol ||--o{ BorrowerCollateral : ""
+    Protocol ||--o{ ProtocolEvent : ""
+    User ||--o{ Borrower : ""
+    User ||--o{ BorrowerCollateral : ""
+    OffchainPriceSource ||--o{ OffchainPriceAsset : ""
 ```
