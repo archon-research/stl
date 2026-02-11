@@ -1,5 +1,3 @@
-"""Integration test configuration with PostgreSQL testcontainers."""
-
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -27,7 +25,8 @@ async def apply_migrations(dsn: str) -> None:
         for migration_file in migration_files:
             sql = migration_file.read_text()
             
-            # CONCURRENTLY requires autocommit, convert to regular for tests
+            # Minor workaround for applying migrations:
+            #  `CONCURRENTLY` requires autocommit, convert to regular for tests
             sql = sql.replace("CONCURRENTLY", "")
 
             await conn.execute(sql)
