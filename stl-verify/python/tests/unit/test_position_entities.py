@@ -1,4 +1,4 @@
-from app.entities.positions import AssetAmount, UserLatestPositions
+from app.domain.entities.positions import AssetAmount, UserLatestPositions
 
 
 def test_user_latest_positions_accepts_assets():

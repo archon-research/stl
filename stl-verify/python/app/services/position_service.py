@@ -1,4 +1,4 @@
-from app.entities.positions import UserLatestPositions
+from app.domain.entities.positions import UserLatestPositions
 
 
 class PositionService:

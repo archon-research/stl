@@ -1,6 +1,6 @@
 import inspect
 
-from app.repositories.position_repository import PositionRepository
+from app.ports.position_repository import PositionRepository
 
 
 def test_repository_defines_list_method():
