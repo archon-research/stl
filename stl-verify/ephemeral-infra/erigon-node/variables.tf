@@ -34,6 +34,12 @@ variable "key_name" {
   default     = null
 }
 
+variable "worker_instance_type" {
+  description = "EC2 instance type for the backfill worker"
+  type        = string
+  default     = "t4g.large"
+}
+
 variable "environment" {
   description = "Environment name"
   type        = string

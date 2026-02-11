@@ -286,6 +286,23 @@ vm.max_map_count = 16777216
 # - Any application using LMDB/MDBX with large databases
 #
 vm.overcommit_memory = 1
+
+# -----------------------------------------------------------------------------
+# UDP buffer sizes for QUIC/BitTorrent
+# -----------------------------------------------------------------------------
+# Default: 212992 (208 KiB)
+#
+# Erigon's torrent client uses QUIC (via quic-go), which needs large UDP
+# buffers for high-throughput downloads. The default 208 KiB is far too small
+# and causes the warning:
+#   "failed to sufficiently increase receive buffer size"
+#
+# Set to 7 MiB as recommended by quic-go for high-bandwidth connections.
+#
+net.core.rmem_max = 7340032
+net.core.wmem_max = 7340032
+net.core.rmem_default = 7340032
+net.core.wmem_default = 7340032
 EOF
 
 # Apply the settings immediately

@@ -33,6 +33,16 @@ output "sync_status_command" {
   value       = "curl -s localhost:8545 -X POST -H 'Content-Type: application/json' --data '{\"jsonrpc\":\"2.0\",\"method\":\"eth_syncing\",\"params\":[],\"id\":1}'"
 }
 
+output "worker_instance_id" {
+  description = "Worker EC2 instance ID"
+  value       = aws_instance.worker.id
+}
+
+output "worker_private_ip" {
+  description = "Worker private IP address"
+  value       = aws_instance.worker.private_ip
+}
+
 output "s3_bucket" {
   description = "S3 bucket for data export"
   value       = var.s3_bucket_name

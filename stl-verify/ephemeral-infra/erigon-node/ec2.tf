@@ -27,6 +27,14 @@ resource "aws_security_group" "erigon" {
   description = "Security group for Erigon archive node"
   vpc_id      = data.aws_vpc.main.id
 
+  # Erigon RPC: allow worker → Erigon within this security group
+  ingress {
+    from_port = 8545
+    to_port   = 8545
+    protocol  = "tcp"
+    self      = true
+  }
+
   # All outbound: covers Tailscale, NAT (torrent snapshot downloads, packages), S3 endpoint,
   # and TigerData access via VPC peering route.
   egress {
@@ -105,26 +113,6 @@ resource "aws_iam_role_policy" "erigon_secrets" {
           "secretsmanager:GetSecretValue"
         ]
         Resource = "arn:aws:secretsmanager:${var.aws_region}:*:secret:stl-erigon-tailscale-auth-key*"
-      }
-    ]
-  })
-}
-
-# TigerData read/write credentials for oracle-pricing-backfill
-resource "aws_iam_role_policy" "erigon_tigerdata" {
-  name = "${var.project}-erigon-tigerdata-policy"
-  role = aws_iam_role.erigon.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "GetTigerDataAppSecret"
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:GetSecretValue"
-        ]
-        Resource = "arn:aws:secretsmanager:${var.aws_region}:*:secret:${var.main_infra_prefix}-tigerdata-app*"
       }
     ]
   })
