@@ -214,7 +214,7 @@ erDiagram
         boolean is_orphaned
         int version "UK1"
         boolean block_published
-        int chain_id PK,FK "UK1"
+        int chain_id PK "UK1"
         timestamptz created_at PK "UK1, hypertable: 1d chunks, hash(chain_id,4), compress 1d, retain 30d"
     }
 

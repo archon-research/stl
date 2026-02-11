@@ -78,8 +78,10 @@ type HypertableInfo struct {
 
 // Relationship represents a foreign key relationship between two entities.
 type Relationship struct {
-	Parent string
-	Child  string
+	Parent     string // PascalCase entity name
+	Child      string // PascalCase entity name
+	parentSnake string // original snake_case for priority lookup
+	childSnake  string // original snake_case for priority lookup
 }
 
 // excludedTables are infrastructure tables that should not appear in the ER diagram.
@@ -364,25 +366,6 @@ func fetchHypertableInfo(ctx context.Context, pool *pgxpool.Pool) (map[string]*H
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	// Fetch compression settings (presence means compression is enabled)
-	compRows, err := pool.Query(ctx, `
-		SELECT DISTINCT hypertable_name
-		FROM timescaledb_information.compression_settings
-		WHERE hypertable_schema = 'public'`)
-	if err != nil {
-		return nil, fmt.Errorf("querying compression settings: %w", err)
-	}
-	defer compRows.Close()
-	for compRows.Next() {
-		var tableName string
-		if err := compRows.Scan(&tableName); err != nil {
-			return nil, err
-		}
-	}
-	if err := compRows.Err(); err != nil {
 		return nil, err
 	}
 
@@ -706,9 +689,9 @@ func renderColumn(col Column, ht *HypertableInfo) string {
 	parts = append(parts, "        "+col.DataType)
 	parts = append(parts, col.Name)
 
-	if col.IsPrimaryKey && col.ForeignTable != "" {
-		parts = append(parts, "PK,FK")
-	} else if col.IsPrimaryKey {
+	// Mermaid ER syntax only supports a single key type (PK, FK, or UK).
+	// When a column is both PK and FK, prefer PK since FK is already shown via relationship lines.
+	if col.IsPrimaryKey {
 		parts = append(parts, "PK")
 	} else if col.ForeignTable != "" {
 		parts = append(parts, "FK")
@@ -769,25 +752,30 @@ func collectRelationships(tables []Table) []Relationship {
 				continue
 			}
 			seen[key] = true
-			rels = append(rels, Relationship{Parent: parentName, Child: childName})
+			rels = append(rels, Relationship{
+				Parent:      parentName,
+				Child:       childName,
+				parentSnake: col.ForeignTable,
+				childSnake:  t.Name,
+			})
 		}
 	}
 
 	slices.SortFunc(rels, func(a, b Relationship) int {
-		if a.Parent != b.Parent {
-			return compareByPriority(a.Parent, b.Parent)
+		pa, ha := tablePriority[a.parentSnake]
+		pb, hb := tablePriority[b.parentSnake]
+		if a.parentSnake != b.parentSnake {
+			return compareByPriority(pa, ha, pb, hb, a.Parent, b.Parent)
 		}
-		return compareByPriority(a.Child, b.Child)
+		ca, hca := tablePriority[a.childSnake]
+		cb, hcb := tablePriority[b.childSnake]
+		return compareByPriority(ca, hca, cb, hcb, a.Child, b.Child)
 	})
 
 	return rels
 }
 
-// compareByPriority compares two PascalCase entity names using the table priority map.
-func compareByPriority(a, b string) int {
-	pa, ha := tablePriority[pascalToSnake(a)]
-	pb, hb := tablePriority[pascalToSnake(b)]
-
+func compareByPriority(pa int, ha bool, pb int, hb bool, nameA, nameB string) int {
 	switch {
 	case ha && hb:
 		return pa - pb
@@ -796,24 +784,8 @@ func compareByPriority(a, b string) int {
 	case hb:
 		return 1
 	default:
-		return strings.Compare(a, b)
+		return strings.Compare(nameA, nameB)
 	}
-}
-
-// pascalToSnake converts PascalCase to snake_case.
-func pascalToSnake(s string) string {
-	var b strings.Builder
-	for i, r := range s {
-		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
-				b.WriteByte('_')
-			}
-			b.WriteRune(r + 32)
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 func writeFile(content, path string) error {
