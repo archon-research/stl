@@ -4,7 +4,7 @@ from pydantic import BaseModel
 class AssetAmount(BaseModel):
     token_address: str
     symbol: str
-    amount: int  # Wei amount, will use Decimal later
+    amount: int
 
 
 class UserLatestPositions(BaseModel):
