@@ -18,7 +18,4 @@ type PositionRepository interface {
 	// All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
 	// Conflict resolution: ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO UPDATE
 	UpsertBorrowerCollateral(ctx context.Context, collateral []*entity.BorrowerCollateral) error
-
-	// ListLatestUserPositions returns the latest non-orphaned debt and collateral positions per user.
-	ListLatestUserPositions(ctx context.Context, protocolID int64, limit int) ([]entity.UserLatestPositions, error)
 }

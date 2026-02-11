@@ -7,9 +7,10 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"path/filepath"
+	"runtime"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -722,139 +723,6 @@ func TestSaveBorrowerCollaterals_TransactionIsolation(t *testing.T) {
 	recordsAfterCommit := fixture.queryCollaterals(t, ctx)
 	if len(recordsAfterCommit) != 1 {
 		t.Errorf("expected 1 record after commit, got %d", len(recordsAfterCommit))
-	}
-}
-
-func TestPositionRepository_ListLatestUserPositions(t *testing.T) {
-	fixture := setupPositionTest(t)
-	t.Cleanup(fixture.cleanup)
-
-	ctx := context.Background()
-
-	userAddress1 := common.HexToAddress("0x1111111111111111111111111111111111111111")
-	userAddress2 := common.HexToAddress("0x2222222222222222222222222222222222222222")
-	tokenAddressUSDS := common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	tokenAddressWBTC := common.HexToAddress("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-
-	var userID1 int64
-	var userID2 int64
-	var tokenIDUSDS int64
-	var tokenIDWBTC int64
-
-	err := fixture.pool.QueryRow(ctx,
-		`INSERT INTO "user" (chain_id, address, first_seen_block) VALUES ($1, $2, $3) RETURNING id`,
-		1, userAddress1.Bytes(), 100,
-	).Scan(&userID1)
-	if err != nil {
-		t.Fatalf("failed to create user1: %v", err)
-	}
-
-	err = fixture.pool.QueryRow(ctx,
-		`INSERT INTO "user" (chain_id, address, first_seen_block) VALUES ($1, $2, $3) RETURNING id`,
-		1, userAddress2.Bytes(), 100,
-	).Scan(&userID2)
-	if err != nil {
-		t.Fatalf("failed to create user2: %v", err)
-	}
-
-	err = fixture.pool.QueryRow(ctx,
-		`INSERT INTO token (chain_id, address, symbol, decimals) VALUES ($1, $2, $3, $4) RETURNING id`,
-		1, tokenAddressUSDS.Bytes(), "USDS", 18,
-	).Scan(&tokenIDUSDS)
-	if err != nil {
-		t.Fatalf("failed to create USDS token: %v", err)
-	}
-
-	err = fixture.pool.QueryRow(ctx,
-		`INSERT INTO token (chain_id, address, symbol, decimals) VALUES ($1, $2, $3, $4) RETURNING id`,
-		1, tokenAddressWBTC.Bytes(), "WBTC", 8,
-	).Scan(&tokenIDWBTC)
-	if err != nil {
-		t.Fatalf("failed to create WBTC token: %v", err)
-	}
-
-	_, err = fixture.pool.Exec(ctx, `
-		INSERT INTO block_states (number, version, is_orphaned, hash, parent_hash, received_at)
-		VALUES
-			(9, 0, false, '0x09', '0x08', 9),
-			(10, 0, false, '0x0a', '0x09', 10),
-			(10, 1, true, '0x0b', '0x09', 10)
-		ON CONFLICT (number, version) DO NOTHING`)
-	if err != nil {
-		t.Fatalf("failed to insert block states: %v", err)
-	}
-
-	_, err = fixture.pool.Exec(ctx, `
-		INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
-		VALUES
-			($1, $2, $3, 9, 0, '100', '100', 'Borrow', $4),
-			($1, $2, $3, 10, 0, '150', '150', 'Borrow', $5),
-			($1, $2, $3, 10, 1, '999', '999', 'Borrow', $6),
-			($7, $2, $3, 9, 0, '50', '50', 'Borrow', $8),
-			($7, $2, $3, 10, 0, '0', '0', 'Borrow', $9)`,
-		userID1, fixture.protocolID, tokenIDUSDS,
-		[]byte{0x01}, []byte{0x02}, []byte{0x03},
-		userID2, []byte{0x04}, []byte{0x05},
-	)
-	if err != nil {
-		t.Fatalf("failed to insert borrower rows: %v", err)
-	}
-
-	_, err = fixture.pool.Exec(ctx, `
-		INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
-		VALUES
-			($1, $2, $3, 9, 0, '2', '2', 'Supply', $4, true),
-			($1, $2, $3, 10, 0, '4', '4', 'Supply', $5, true),
-			($1, $2, $3, 10, 1, '9', '9', 'Supply', $6, true),
-			($1, $2, $7, 9, 0, '1', '1', 'Supply', $8, true),
-			($1, $2, $7, 10, 0, '0', '0', 'Supply', $9, true),
-			($10, $2, $7, 9, 0, '1', '1', 'Supply', $11, true),
-			($10, $2, $7, 10, 0, '5', '5', 'Supply', $12, false)`,
-		userID1, fixture.protocolID, tokenIDUSDS,
-		[]byte{0x11}, []byte{0x12}, []byte{0x13},
-		tokenIDWBTC, []byte{0x14}, []byte{0x15},
-		userID2, []byte{0x16}, []byte{0x17},
-	)
-	if err != nil {
-		t.Fatalf("failed to insert collateral rows: %v", err)
-	}
-
-	positions, err := fixture.repo.ListLatestUserPositions(ctx, fixture.protocolID, 1)
-	if err != nil {
-		t.Fatalf("ListLatestUserPositions failed: %v", err)
-	}
-
-	if len(positions) != 1 {
-		t.Fatalf("expected 1 user, got %d", len(positions))
-	}
-
-	position := positions[0]
-	if position.UserAddress != userAddress1.Hex() {
-		t.Fatalf("unexpected user address: got %s", position.UserAddress)
-	}
-
-	if len(position.Debt) != 1 {
-		t.Fatalf("expected 1 debt entry, got %d", len(position.Debt))
-	}
-
-	if len(position.Collateral) != 1 {
-		t.Fatalf("expected 1 collateral entry, got %d", len(position.Collateral))
-	}
-
-	debt := position.Debt[0]
-	if debt.TokenAddress != tokenAddressUSDS || debt.Symbol != "USDS" || debt.Amount.Cmp(big.NewInt(150)) != 0 {
-		t.Errorf("unexpected debt entry: address=%s symbol=%s amount=%s", debt.TokenAddress.Hex(), debt.Symbol, debt.Amount)
-	}
-
-	collateral := position.Collateral[0]
-	if collateral.TokenAddress != tokenAddressUSDS || collateral.Symbol != "USDS" || collateral.Amount.Cmp(big.NewInt(4)) != 0 {
-		t.Errorf("unexpected collateral entry: address=%s symbol=%s amount=%s", collateral.TokenAddress.Hex(), collateral.Symbol, collateral.Amount)
-	}
-
-	for _, asset := range append(position.Debt, position.Collateral...) {
-		if asset.Amount.Sign() == 0 {
-			t.Errorf("unexpected zero amount entry: address=%s symbol=%s", asset.TokenAddress.Hex(), asset.Symbol)
-		}
 	}
 }
 
