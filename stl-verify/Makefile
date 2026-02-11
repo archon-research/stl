@@ -17,7 +17,7 @@
         erigon-init erigon-validate erigon-plan erigon-apply erigon-apply-auto erigon-destroy erigon-check \
         erigon-status erigon-logs erigon-logs-follow erigon-deploy-readonly erigon-switch-readonly erigon-switch-sync erigon-mode \
         erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download \
-        build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill
+        build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill deploy-oracle-pricing-backfill-worker
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -669,6 +669,16 @@ erigon-check: erigon-init erigon-validate erigon-plan
 # Erigon Node Management (via Tailscale)
 # =============================================================================
 
+# WORKER_USER and WORKER_IP are required for worker deploy targets
+# Usage: make deploy-oracle-pricing-backfill-worker WORKER_USER=root WORKER_IP=<tailscale-ip>
+define require_worker_vars
+	@if [ -z "$(WORKER_USER)" ] || [ -z "$(WORKER_IP)" ]; then \
+		echo "Error: WORKER_USER and WORKER_IP are required"; \
+		echo "Usage: make $@ WORKER_USER=<user> WORKER_IP=<tailscale-ip>"; \
+		exit 1; \
+	fi
+endef
+
 # ERIGON_USER and ERIGON_IP are required for all erigon-* targets
 # Usage: make erigon-status ERIGON_USER=<user> ERIGON_IP=<tailscale-ip>
 
@@ -761,6 +771,14 @@ deploy-oracle-pricing-backfill: build-oracle-pricing-backfill-arm64
 	@echo "==> Deploying oracle-pricing-backfill to Erigon node..."
 	cat dist/oracle-pricing-backfill-linux-arm64 | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > ~/oracle-pricing-backfill && chmod +x ~/oracle-pricing-backfill'
 	@echo "==> Deployed to ~/oracle-pricing-backfill on Erigon node."
+
+# Deploy oracle-pricing-backfill to worker instance
+# Usage: make deploy-oracle-pricing-backfill-worker WORKER_USER=root WORKER_IP=<tailscale-ip>
+deploy-oracle-pricing-backfill-worker: build-oracle-pricing-backfill-arm64
+	$(call require_worker_vars)
+	@echo "==> Deploying oracle-pricing-backfill to worker..."
+	cat dist/oracle-pricing-backfill-linux-arm64 | tailscale ssh $(WORKER_USER)@$(WORKER_IP) 'cat > ~/oracle-pricing-backfill && chmod +x ~/oracle-pricing-backfill'
+	@echo "==> Deployed to ~/oracle-pricing-backfill on worker."
 
 # Build bulk-download binary for ARM64 Linux (to run on Erigon node)
 build-bulk-download-arm64:

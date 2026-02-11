@@ -459,9 +459,11 @@ func (s *Service) startProgressReporter(ctx context.Context, stats *backfillStat
 				if blocksPerSec > 0 {
 					eta = time.Duration(float64(remaining)/blocksPerSec) * time.Second
 				}
+				pct := float64(processed+failed) / float64(totalBlocks) * 100
 
 				s.logger.Info("progress",
 					"oracle", oracleName,
+					"pct", fmt.Sprintf("%.1f%%", pct),
 					"processed", processed,
 					"failed", failed,
 					"stored", stored,
