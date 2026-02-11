@@ -110,6 +110,26 @@ resource "aws_iam_role_policy" "erigon_secrets" {
   })
 }
 
+# TigerData read/write credentials for oracle-pricing-backfill
+resource "aws_iam_role_policy" "erigon_tigerdata" {
+  name = "${var.project}-erigon-tigerdata-policy"
+  role = aws_iam_role.erigon.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "GetTigerDataAppSecret"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = "arn:aws:secretsmanager:${var.aws_region}:*:secret:${var.main_infra_prefix}-tigerdata-app*"
+      }
+    ]
+  })
+}
+
 # SSM access for Session Manager (optional, but useful for debugging)
 resource "aws_iam_role_policy_attachment" "erigon_ssm" {
   role       = aws_iam_role.erigon.name

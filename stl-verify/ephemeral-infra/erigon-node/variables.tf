@@ -7,7 +7,7 @@ variable "aws_region" {
 variable "instance_type" {
   description = "EC2 instance type (must be c8gd family for NVMe instance store)"
   type        = string
-  default     = "c8gd.16xlarge"
+  default     = "c8gd.48xlarge"
 }
 
 variable "main_infra_prefix" {
