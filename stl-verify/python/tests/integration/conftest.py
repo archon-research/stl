@@ -1,44 +1,85 @@
 """Integration test configuration with PostgreSQL testcontainers."""
-import asyncio
+
+import re
 from pathlib import Path
 from typing import AsyncGenerator
 
+import asyncpg
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker, AsyncEngine
 from testcontainers.postgres import PostgresContainer
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create an event loop for the entire test session."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
+# Migrations to skip (role/permission setup not needed for tests)
+SKIP_MIGRATIONS = {
+    "20260203_120000_create_app_roles.sql",
+    "20260206_150000_create_protocol_event.sql",
+}
+
+
+async def apply_migrations(dsn: str) -> None:
+    """Apply SQL migrations from db/migrations directory.
+    
+    Uses asyncpg directly since it supports multi-statement SQL execution,
+    unlike SQLAlchemy's asyncpg dialect which uses prepared statements.
+    """
+    migrations_dir = Path(__file__).parent.parent.parent.parent / "db" / "migrations"
+    migration_files = sorted(f for f in migrations_dir.glob("*.sql") if f.suffix == ".sql")
+
+    # asyncpg wants postgresql:// not postgresql+asyncpg://
+    dsn = dsn.replace("+asyncpg", "")
+    
+    conn = await asyncpg.connect(dsn)
+    try:
+        # Check for TimescaleDB
+        has_timescaledb = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')"
+        )
+
+        for migration_file in migration_files:
+            if migration_file.name in SKIP_MIGRATIONS:
+                continue
+
+            sql = migration_file.read_text()
+
+            # Minimal preprocessing for test compatibility
+            if not has_timescaledb:
+                sql = re.sub(r"CREATE EXTENSION IF NOT EXISTS timescaledb;\s*", "", sql)
+                sql = re.sub(r"\s+WITH\s*\([^)]*tsdb[^)]*\)", "", sql)
+            
+            # CONCURRENTLY requires autocommit, convert to regular for tests
+            sql = sql.replace("CONCURRENTLY", "")
+
+            await conn.execute(sql)
+    finally:
+        await conn.close()
 
 
 @pytest.fixture(scope="session")
 def postgres_container():
     """Spin up a PostgreSQL container for the entire test session."""
-    with PostgresContainer("postgres:16", driver="asyncpg") as postgres:
-        yield postgres
+    try:
+        with PostgresContainer("timescale/timescaledb:latest-pg16", driver="asyncpg") as postgres:
+            yield postgres
+    except Exception:
+        print("TimescaleDB not available, using regular PostgreSQL.")
+        with PostgresContainer("postgres:16", driver="asyncpg") as postgres:
+            yield postgres
 
 
 @pytest_asyncio.fixture(scope="session")
 async def db_engine(postgres_container) -> AsyncGenerator[AsyncEngine, None]:
-    """Create async database engine connected to test container."""
-    # Get connection URL from container
+    """Create async database engine with migrations applied."""
     db_url = postgres_container.get_connection_url()
     
-    # Create engine
+    # Apply migrations using asyncpg directly (supports multi-statement SQL)
+    await apply_migrations(db_url)
+    
+    # Create SQLAlchemy engine for tests
     engine = create_async_engine(db_url, echo=False)
     
-    # Apply migrations
-    await apply_migrations(engine)
-    
     yield engine
-    
     await engine.dispose()
 
 
@@ -46,32 +87,3 @@ async def db_engine(postgres_container) -> AsyncGenerator[AsyncEngine, None]:
 async def db_sessionmaker(db_engine):
     """Create async session factory for testing."""
     return async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-
-
-async def apply_migrations(engine: AsyncEngine) -> None:
-    """Apply all SQL migrations to the test database."""
-    migrations_dir = Path(__file__).parent.parent.parent.parent / "db" / "migrations"
-    
-    # Get all migration files in order
-    migration_files = sorted([
-        f for f in migrations_dir.glob("*.sql") 
-        if f.name != "README.md"
-    ])
-    
-    async with engine.begin() as conn:
-        for migration_file in migration_files:
-            print(f"Applying migration: {migration_file.name}")
-            sql_content = migration_file.read_text()
-            
-            # Split into individual statements (naive split by semicolon)
-            # This works for our migrations but won't handle all SQL edge cases
-            statements = [
-                stmt.strip() 
-                for stmt in sql_content.split(';') 
-                if stmt.strip() and not stmt.strip().startswith('--')
-            ]
-            
-            # Execute each statement separately
-            for statement in statements:
-                if statement:
-                    await conn.execute(text(statement))
