@@ -2,7 +2,7 @@
 # Go 1.25+ best practices
 
 .PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax help \
-        dev-up dev-env dev-down dev-ips \
+        dev-up dev-env dev-down dev-ips generate-er \
         preflight tf-bootstrap tf-destroy-bootstrap tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check check-tofu \
         ecr-login docker-build docker-push docker-release \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -259,6 +259,12 @@ dev-ips:
 	@docker inspect stl-verify-redis --format 'Redis:       {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "Redis: not running"
 	@docker inspect stl-verify-localstack --format 'LocalStack:  {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "LocalStack: not running"
 	@docker inspect stl-verify-jaeger --format 'Jaeger:      {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "Jaeger: not running"
+
+# Generate ER diagram from database schema (requires dev-up)
+generate-er:
+	@echo "==> Generating ER diagram..."
+	@DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" go run ./cmd/generate-er --output ../docs/entity_relation.md
+	@echo "==> Generated: docs/entity_relation.md"
 
 # =============================================================================
 # Terraform Commands
