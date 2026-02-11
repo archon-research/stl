@@ -724,7 +724,11 @@ func renderColumn(col Column, ht *HypertableInfo) string {
 
 func hypertableComment(ht *HypertableInfo) string {
 	var parts []string
-	parts = append(parts, fmt.Sprintf("hypertable: %s chunks", ht.ChunkInterval))
+	if ht.ChunkInterval != "" {
+		parts = append(parts, fmt.Sprintf("hypertable: %s chunks", ht.ChunkInterval))
+	} else {
+		parts = append(parts, "hypertable")
+	}
 
 	if ht.HashDimension != "" {
 		parts = append(parts, fmt.Sprintf("hash(%s)", ht.HashDimension))
