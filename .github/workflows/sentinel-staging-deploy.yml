@@ -36,6 +36,8 @@ jobs:
       TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
       TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
       ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+      COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+      ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
       TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -59,6 +61,8 @@ jobs:
       TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
       TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
       ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+      COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+      ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
       TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -71,7 +75,7 @@ jobs:
         id: check_bootstrap
         run: |
           # Check if DynamoDB lock table exists
-          if aws dynamodb describe-table --table-name stl-sentinelstaging-terraform-lock --region eu-west-1 &>/dev/null; then
+          if aws dynamodb describe-table --table-name stl-sentinelstaging-terraform-locks --region eu-west-1 &>/dev/null; then
             echo "bootstrap_exists=true" >> $GITHUB_OUTPUT
             echo "✅ Bootstrap infrastructure already exists, skipping bootstrap"
           else

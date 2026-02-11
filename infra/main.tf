@@ -12,7 +12,7 @@ terraform {
   required_version = "~> 1.0"
 
   # Backend configured via -backend-config file per environment
-  # Usage: terraform init -backend-config=environments/sentinelstaging.backend.hcl
+  # Usage: tofu init -backend-config=environments/sentinelstaging.backend.hcl
   backend "s3" {}
 
   required_providers {

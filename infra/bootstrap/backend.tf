@@ -1,17 +1,21 @@
 # S3 bucket for Terraform state
 # 
-# IMPORTANT: This should only be destroyed in sentineldev.
-# For sentinelstaging and sentinelprod, destroy operations should be prevented
-# via operational controls (CI/CD, IAM policies, manual review).
-# 
-# Note: Terraform's prevent_destroy must be a literal boolean and cannot 
-# reference variables, so protection must be enforced externally for staging/prod.
+# Protection strategy:
+# - force_destroy = true ONLY for sentineldev (allows deletion with objects inside)
+# - force_destroy = false for staging/prod (must manually empty bucket first)
+# - prevent_destroy is disabled to allow programmatic cleanup (dev) while staging/prod
+#   are protected via CI/CD workflow checks and IAM policies
+#
+# Staging/prod destruction is blocked by:
+#   1. GitHub Actions workflow checks (only allows sentineldev)
+#   2. Manual confirmation required for local runs
+#   3. force_destroy = false means bucket must be manually emptied first
 resource "aws_s3_bucket" "terraform_state" {
-  bucket              = local.state_bucket_name
-  force_destroy       = var.environment == "sentineldev" ? true : false  # Only allow force deletion in dev
+  bucket        = local.state_bucket_name
+  force_destroy = var.environment == "sentineldev"
 
   lifecycle {
-    prevent_destroy = false  # Required false for dev; staging/prod protected via external controls
+    prevent_destroy = false
   }
 }
 
@@ -43,11 +47,10 @@ resource "aws_s3_bucket_public_access_block" "terraform_state" {
 }
 
 # DynamoDB table for state locking
-# DynamoDB table for state locking
 # 
-# IMPORTANT: This should only be destroyed in sentineldev.
-# For sentinelstaging and sentinelprod, destroy operations should be prevented
-# via operational controls (CI/CD, IAM policies, manual review).
+# Protection strategy:
+# - prevent_destroy is disabled to allow programmatic cleanup (dev)
+# - Staging/prod are protected via CI/CD workflow checks and IAM policies
 resource "aws_dynamodb_table" "terraform_locks" {
   name         = local.locks_table_name
   billing_mode = "PAY_PER_REQUEST"
@@ -59,7 +62,7 @@ resource "aws_dynamodb_table" "terraform_locks" {
   }
 
   lifecycle {
-    prevent_destroy = false  # Required false for dev; staging/prod protected via external controls
+    prevent_destroy = false
   }
 }
 

@@ -32,7 +32,10 @@ resource "timescale_service" "main" {
   sync_replicas = 0
 
   # Service requires active VPC peering and route before creation
+  # Must wait for peering to be accepted and fully propagated on both AWS and TigerData sides
   depends_on = [
+    timescale_peering_connection.to_aws,
+    aws_vpc_peering_connection_accepter.tigerdata,
     time_sleep.peering_active,
     aws_route.private_to_tigerdata,
   ]
@@ -61,9 +64,10 @@ resource "aws_vpc_peering_connection_accepter" "tigerdata" {
 }
 
 # Wait for peering to fully activate before TigerData service tries to use it
+# TigerData's backend needs time to propagate the peering connection state
 resource "time_sleep" "peering_active" {
   depends_on      = [aws_vpc_peering_connection_accepter.tigerdata]
-  create_duration = "180s" # 3 minutes to ensure peering is fully active on both sides
+  create_duration = "300s" # 5 minutes to ensure peering is fully active on both TigerData and AWS sides
 }
 
 # -----------------------------------------------------------------------------

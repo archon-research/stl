@@ -2,7 +2,14 @@
 # Initial Secrets for Main Infrastructure
 # =============================================================================
 # Bootstrap creates the initial secrets that main infrastructure will use.
-# These are populated from variables passed during tf-bootstrap.
+# 
+# Required credentials (validated at bootstrap time):
+#   - TIGERDATA_PROJECT_ID, TIGERDATA_ACCESS_KEY, TIGERDATA_SECRET_KEY
+#   - ALCHEMY_API_KEY
+#
+# Optional credentials (use "placeholder" if not provided):
+#   - COINGECKO_API_KEY, ETHERSCAN_API_KEY
+#   - TAILSCALE_AUTH_KEY (only for staging/prod with bastion)
 
 # TigerData API credentials secret
 resource "aws_secretsmanager_secret" "tigerdata" {
@@ -18,13 +25,16 @@ resource "aws_secretsmanager_secret" "tigerdata" {
 }
 
 resource "aws_secretsmanager_secret_version" "tigerdata" {
-  count         = var.tigerdata_project_id != "" ? 1 : 0
-  secret_id     = aws_secretsmanager_secret.tigerdata.id
+  secret_id = aws_secretsmanager_secret.tigerdata.id
   secret_string = jsonencode({
     project_id = var.tigerdata_project_id
     access_key = var.tigerdata_access_key
     secret_key = var.tigerdata_secret_key
   })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
 }
 
 # Watcher config secret (Alchemy API key)
@@ -41,11 +51,16 @@ resource "aws_secretsmanager_secret" "watcher_config" {
 }
 
 resource "aws_secretsmanager_secret_version" "watcher_config" {
-  count         = var.alchemy_api_key != "" ? 1 : 0
-  secret_id     = aws_secretsmanager_secret.watcher_config.id
+  secret_id = aws_secretsmanager_secret.watcher_config.id
   secret_string = jsonencode({
-    alchemy_api_key = var.alchemy_api_key
+    alchemy_api_key   = var.alchemy_api_key
+    coingecko_api_key = var.coingecko_api_key != "" ? var.coingecko_api_key : "placeholder"
+    etherscan_api_key = var.etherscan_api_key != "" ? var.etherscan_api_key : "placeholder"
   })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
 }
 
 # Tailscale auth key secret (optional, only for staging/prod with bastion + VPN)
