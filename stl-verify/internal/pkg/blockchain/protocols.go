@@ -2,6 +2,14 @@ package blockchain
 
 import "github.com/ethereum/go-ethereum/common"
 
+type ProtocolVersion string
+
+const (
+	ProtocolVersionAaveV2    ProtocolVersion = "aave-v2"
+	ProtocolVersionAaveV3    ProtocolVersion = "aave-v3"
+	ProtocolVersionSparkLend ProtocolVersion = "sparklend"
+)
+
 type ProtocolConfig struct {
 	Name                  string
 	ProtocolType          string
@@ -9,10 +17,18 @@ type ProtocolConfig struct {
 	UIPoolDataProvider    common.Address
 	PoolDataProvider      common.Address
 	PoolAddressesProvider common.Address
-	UseAaveABI            bool // NEW: flag to determine which ABI
+	ProtocolVersion       ProtocolVersion
 }
 
 var protocolRegistry = map[common.Address]ProtocolConfig{
+	common.HexToAddress("0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9"): {
+		Name:                  "Aave V2",
+		PoolAddress:           common.HexToAddress("0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9"),
+		UIPoolDataProvider:    common.HexToAddress("0x00e50FAB64eBB37b87df06Aa46b8B35d5f1A4e1A"),
+		PoolDataProvider:      common.HexToAddress("0x057835Ad21a177dbdd3090bB1CAE03EaCF78Fc6d"),
+		PoolAddressesProvider: common.HexToAddress("0xB53C1a33016B2DC2fF3653530bfF1848a515c8c5"),
+		ProtocolVersion:       ProtocolVersionAaveV2,
+	},
 	common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"): {
 		Name:                  "Aave V3",
 		ProtocolType:          "lending",
@@ -20,7 +36,7 @@ var protocolRegistry = map[common.Address]ProtocolConfig{
 		UIPoolDataProvider:    common.HexToAddress("0x91c0eA31b49B69Ea18607702c5d9aC360bf3dE7d"),
 		PoolDataProvider:      common.HexToAddress("0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD"),
 		PoolAddressesProvider: common.HexToAddress("0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e"),
-		UseAaveABI:            true,
+		ProtocolVersion:       ProtocolVersionAaveV3,
 	},
 	common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987"): {
 		Name:                  "Sparklend",
@@ -29,7 +45,7 @@ var protocolRegistry = map[common.Address]ProtocolConfig{
 		UIPoolDataProvider:    common.HexToAddress("0x56b7A1012765C285afAC8b8F25C69Bf10ccfE978"),
 		PoolDataProvider:      common.HexToAddress("0xFc21d6d146E6086B8359705C8b28512a983db0cb"),
 		PoolAddressesProvider: common.HexToAddress("0x02C3eA4e34C0cBd694D2adFa2c690EECbC1793eE"),
-		UseAaveABI:            false,
+		ProtocolVersion:       ProtocolVersionSparkLend,
 	},
 	common.HexToAddress("0x4e033931ad43597d96d6bcc25c280717730b58b1"): {
 		Name:                  "Aave V3 Lido",
@@ -38,7 +54,7 @@ var protocolRegistry = map[common.Address]ProtocolConfig{
 		UIPoolDataProvider:    common.HexToAddress("0x91c0eA31b49B69Ea18607702c5d9aC360bf3dE7d"),
 		PoolDataProvider:      common.HexToAddress("0xB85B2bFEbeC4F5f401dbf92ac147A3076391fCD5"),
 		PoolAddressesProvider: common.HexToAddress("0xcfBf336fe147D643B9Cb705648500e101504B16d"),
-		UseAaveABI:            true,
+		ProtocolVersion:       ProtocolVersionAaveV3,
 	},
 	common.HexToAddress("0xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8"): {
 		Name:                  "Aave V3 RWA",
@@ -47,7 +63,7 @@ var protocolRegistry = map[common.Address]ProtocolConfig{
 		UIPoolDataProvider:    common.HexToAddress("0x91c0eA31b49B69Ea18607702c5d9aC360bf3dE7d"),
 		PoolDataProvider:      common.HexToAddress("0xB85B2bFEbeC4F5f401dbf92ac147A3076391fCD5"),
 		PoolAddressesProvider: common.HexToAddress("0x5D39E06b825C1F2B80bf2756a73e28eFAA128ba0"),
-		UseAaveABI:            true,
+		ProtocolVersion:       ProtocolVersionAaveV3,
 	},
 }
 
