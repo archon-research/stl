@@ -1,6 +1,5 @@
 """Integration test configuration with PostgreSQL testcontainers."""
 
-import re
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -9,13 +8,6 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker, AsyncEngine
 from testcontainers.postgres import PostgresContainer
-
-
-# Migrations to skip (role/permission setup not needed for tests)
-SKIP_MIGRATIONS = {
-    "20260203_120000_create_app_roles.sql",
-    "20260206_150000_create_protocol_event.sql",
-}
 
 
 async def apply_migrations(dsn: str) -> None:
@@ -32,21 +24,8 @@ async def apply_migrations(dsn: str) -> None:
     
     conn = await asyncpg.connect(dsn)
     try:
-        # Check for TimescaleDB
-        has_timescaledb = await conn.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')"
-        )
-
         for migration_file in migration_files:
-            if migration_file.name in SKIP_MIGRATIONS:
-                continue
-
             sql = migration_file.read_text()
-
-            # Minimal preprocessing for test compatibility
-            if not has_timescaledb:
-                sql = re.sub(r"CREATE EXTENSION IF NOT EXISTS timescaledb;\s*", "", sql)
-                sql = re.sub(r"\s+WITH\s*\([^)]*tsdb[^)]*\)", "", sql)
             
             # CONCURRENTLY requires autocommit, convert to regular for tests
             sql = sql.replace("CONCURRENTLY", "")
@@ -58,14 +37,9 @@ async def apply_migrations(dsn: str) -> None:
 
 @pytest.fixture(scope="session")
 def postgres_container():
-    """Spin up a PostgreSQL container for the entire test session."""
-    try:
-        with PostgresContainer("timescale/timescaledb:latest-pg16", driver="asyncpg") as postgres:
-            yield postgres
-    except Exception:
-        print("TimescaleDB not available, using regular PostgreSQL.")
-        with PostgresContainer("postgres:16", driver="asyncpg") as postgres:
-            yield postgres
+    """Spin up a TimescaleDB container for the entire test session."""
+    with PostgresContainer("timescale/timescaledb:latest-pg16", driver="asyncpg") as postgres:
+        yield postgres
 
 
 @pytest_asyncio.fixture(scope="session")
