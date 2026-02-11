@@ -198,12 +198,15 @@ func (s *Service) buildWorkUnit(ctx context.Context, oracle *entity.Oracle) (*or
 }
 
 func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBlock, toBlock int64) error {
-	// Resume support: skip already-processed blocks
+	// Resume support: if the latest stored block falls within the requested
+	// range, skip ahead to avoid re-processing. If it's outside the range
+	// (e.g. backfilling an earlier period), run the full requested range.
+	// Duplicate blocks are safe thanks to ON CONFLICT DO NOTHING.
 	latestBlock, err := s.repo.GetLatestBlock(ctx, wu.oracle.ID)
 	if err != nil {
 		return fmt.Errorf("getting latest block: %w", err)
 	}
-	if latestBlock > 0 && latestBlock >= fromBlock {
+	if latestBlock > 0 && latestBlock >= fromBlock && latestBlock < toBlock {
 		s.logger.Info("resuming from latest stored block",
 			"oracle", wu.oracle.Name,
 			"latestStored", latestBlock,

@@ -11,9 +11,9 @@ environment = "sentinelstaging"
 
 tigerdata_project_id = "p71n930y81" # Get from TigerData console
 
-# Staging: smallest instance
-tigerdata_milli_cpu   = 500 # 0.5 CPU
-tigerdata_memory_gb   = 2   # 2 GB RAM
+# Staging: scaled up for oracle backfill (was 500/2)
+tigerdata_milli_cpu   = 2000 # 2 CPU
+tigerdata_memory_gb   = 8    # 8 GB RAM
 tigerdata_ha_replicas = 0   # No HA for staging
 
 # -----------------------------------------------------------------------------

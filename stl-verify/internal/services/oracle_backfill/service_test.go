@@ -517,7 +517,7 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:      "success totalBlocks <= 0 after resume returns nil",
+			name:      "success latestBlock beyond requested range still processes all blocks",
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
@@ -532,18 +532,25 @@ func TestRun(t *testing.T) {
 				}
 				return repo
 			},
-			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
+			setupHeader: func() *mockHeaderFetcher {
+				return &mockHeaderFetcher{
+					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
+						return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
+					},
+				}
+			},
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func() (outbound.Multicaller, error) {
-					t.Error("multicall factory should not be called when no blocks to process")
-					return nil, errors.New("should not be called")
+					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
 			wantErr: false,
 			checkResult: func(t *testing.T, repo *mockRepo) {
 				t.Helper()
-				if len(repo.getUpserted()) != 0 {
-					t.Error("expected no upserted prices when all blocks already processed")
+				upserted := repo.getUpserted()
+				// 5 blocks x 2 tokens = 10 prices (all different)
+				if len(upserted) != 10 {
+					t.Errorf("upserted count = %d, want 10", len(upserted))
 				}
 			},
 		},
