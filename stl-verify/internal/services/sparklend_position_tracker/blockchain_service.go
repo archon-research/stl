@@ -636,10 +636,6 @@ func parseReserveDataAaveV3(unpacked []interface{}, fieldIndex map[string]int) (
 
 // parseReserveDataSparklend parses Sparklend reserve data (11 fields, no averageStableBorrowRate).
 func parseReserveDataSparklend(unpacked []interface{}, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
-	if len(unpacked) < 11 {
-		return nil, fmt.Errorf("expected 11 values from getReserveData (Sparklend), got %d", len(unpacked))
-	}
-
 	result := &reserveDataFromProvider{}
 	var err error
 
@@ -695,7 +691,7 @@ func parseReserveDataSparklend(unpacked []interface{}, fieldIndex map[string]int
 		return nil, err
 	}
 
-	timestamp, err := getBigIntByName(unpacked, fieldIndex, "lastUpdateTimestamp") // ✅ Fixed with :=
+	timestamp, err := getBigIntByName(unpacked, fieldIndex, "lastUpdateTimestamp")
 	if err != nil {
 		return nil, err
 	}
