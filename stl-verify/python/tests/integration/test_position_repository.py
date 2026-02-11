@@ -105,12 +105,12 @@ async def test_list_latest_user_positions(repository, db_sessionmaker):
     assert len(positions) == 1, f"Expected 1 user with limit=1, got {len(positions)}"
     
     position = positions[0]
-    assert position.user_address == "1111111111111111111111111111111111111111"
+    assert position.user_address == "0x1111111111111111111111111111111111111111"
     
     # Should have 1 debt entry (USDS with amount 150 from block 10 version 0, not version 1)
     assert len(position.debt) == 1, f"Expected 1 debt entry, got {len(position.debt)}"
     debt = position.debt[0]
-    assert debt.token_address == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert debt.token_address == "0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa"
     assert debt.symbol == "USDS"
     assert debt.amount == 150
     
@@ -118,7 +118,7 @@ async def test_list_latest_user_positions(repository, db_sessionmaker):
     # WBTC should be excluded (amount 0)
     assert len(position.collateral) == 1, f"Expected 1 collateral entry, got {len(position.collateral)}"
     collateral = position.collateral[0]
-    assert collateral.token_address == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert collateral.token_address == "0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa"
     assert collateral.symbol == "USDS"
     assert collateral.amount == 4
     

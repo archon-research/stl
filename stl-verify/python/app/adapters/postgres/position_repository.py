@@ -1,7 +1,6 @@
-from typing import Optional
-
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from web3 import Web3
 
 from app.domain.entities.positions import AssetAmount, UserLatestPositions
 from app.ports.position_repository import PositionRepository
@@ -39,28 +38,28 @@ class PostgresPositionRepository:
             positions_map: dict[str, UserLatestPositions] = {}
             
             for row in debt_rows:
-                user_addr = row["user_address"]
+                user_addr = Web3.to_checksum_address("0x" + row["user_address"])
                 if user_addr not in positions_map:
                     positions_map[user_addr] = UserLatestPositions(
                         user_address=user_addr, debt=[], collateral=[]
                     )
                 positions_map[user_addr].debt.append(
                     AssetAmount(
-                        token_address=row["token_address"],
+                        token_address=Web3.to_checksum_address("0x" + row["token_address"]),
                         symbol=row["symbol"],
                         amount=int(row["amount"]),
                     )
                 )
             
             for row in collateral_rows:
-                user_addr = row["user_address"]
+                user_addr = Web3.to_checksum_address("0x" + row["user_address"])
                 if user_addr not in positions_map:
                     positions_map[user_addr] = UserLatestPositions(
                         user_address=user_addr, debt=[], collateral=[]
                     )
                 positions_map[user_addr].collateral.append(
                     AssetAmount(
-                        token_address=row["token_address"],
+                        token_address=Web3.to_checksum_address("0x" + row["token_address"]),
                         symbol=row["symbol"],
                         amount=int(row["amount"]),
                     )
