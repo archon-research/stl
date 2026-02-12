@@ -4,6 +4,8 @@
 # Makes HTTP requests to the Erigon node and writes to TigerData (TimescaleDB).
 # =============================================================================
 
+data "aws_caller_identity" "current" {}
+
 # IAM role for the worker
 resource "aws_iam_role" "worker" {
   name = "${var.project}-worker-role"
@@ -36,7 +38,7 @@ resource "aws_iam_role_policy" "worker_secrets" {
         Action = [
           "secretsmanager:GetSecretValue"
         ]
-        Resource = "arn:aws:secretsmanager:${var.aws_region}:*:secret:stl-erigon-tailscale-auth-key*"
+        Resource = "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:stl-erigon-tailscale-auth-key*"
       }
     ]
   })
@@ -56,7 +58,7 @@ resource "aws_iam_role_policy" "worker_tigerdata" {
         Action = [
           "secretsmanager:GetSecretValue"
         ]
-        Resource = "arn:aws:secretsmanager:${var.aws_region}:*:secret:${var.main_infra_prefix}-tigerdata-app*"
+        Resource = "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.main_infra_prefix}-tigerdata-app*"
       }
     ]
   })
@@ -86,7 +88,7 @@ resource "aws_instance" "worker" {
     volume_type = "gp3"
   }
 
-  user_data = base64encode(file("${path.module}/user-data-worker.sh"))
+  user_data = file("${path.module}/user-data-worker.sh")
 
   tags = {
     Name = "${var.project}-worker"

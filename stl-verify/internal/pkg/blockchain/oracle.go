@@ -3,6 +3,7 @@ package blockchain
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
 
@@ -117,7 +118,11 @@ func FetchOraclePricesIndividual(
 		}
 		price, err := unpackAssetPrice(oracleABI, r.ReturnData)
 		if err != nil {
-			continue // bad return data, treat as failure
+			slog.Warn("failed to unpack asset price, treating as failure",
+				"asset", assets[i].Hex(),
+				"block", blockNum,
+				"error", err)
+			continue
 		}
 		out[i] = AssetPriceResult{Price: price, Success: true}
 	}

@@ -486,10 +486,12 @@ func TestFetchOraclePricesIndividual_VerifiesCallTargets(t *testing.T) {
 	}
 
 	results, err := FetchOraclePricesIndividual(
-		context.Background(), mock,
+		context.Background(),
+		mock,
 		oracleABI,
 		oracleAddr,
-		assets, 99,
+		assets,
+		99,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

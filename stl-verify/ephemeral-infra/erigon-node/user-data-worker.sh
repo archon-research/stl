@@ -28,7 +28,10 @@ TAILSCALE_AUTH_KEY=$(aws secretsmanager get-secret-value \
   --secret-id stl-erigon-tailscale-auth-key \
   --query SecretString \
   --output text \
-  --region eu-west-1) || true
+  --region eu-west-1)
+if [ $? -ne 0 ]; then
+  echo "ERROR: Failed to fetch Tailscale auth key from Secrets Manager"
+fi
 
 if [ -n "$TAILSCALE_AUTH_KEY" ]; then
   echo "=== Starting Tailscale ==="
