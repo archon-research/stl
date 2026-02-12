@@ -365,6 +365,7 @@ tf-bootstrap: check-tofu
 		AUTO_APPROVE=""; \
 		if [ -n "$$CI" ]; then AUTO_APPROVE="-auto-approve"; fi; \
 		OUTPUT=$$(tofu apply $$AUTO_APPROVE \
+			-state=terraform.tfstate.$(ENV) \
 			-var-file=environments/$(ENV).tfvars \
 			-target=aws_s3_bucket.terraform_state \
 			-target=aws_s3_bucket_versioning.terraform_state \
@@ -390,8 +391,8 @@ tf-bootstrap: check-tofu
 	@echo ""
 	@echo "Step 2: Extracting bucket suffix and updating backend config (dev only)..."
 	@if [ "$(ENV)" = "sentineldev" ]; then \
-		BUCKET_NAME=$$(cd $(INFRA_DIR)/bootstrap && tofu output -raw state_bucket_name 2>/dev/null || echo ""); \
-		LOCKS_TABLE=$$(cd $(INFRA_DIR)/bootstrap && tofu output -raw locks_table_name 2>/dev/null || echo ""); \
+		BUCKET_NAME=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null || echo ""); \
+		LOCKS_TABLE=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw locks_table_name 2>/dev/null || echo ""); \
 		if [ -z "$$BUCKET_NAME" ] || [ -z "$$LOCKS_TABLE" ]; then \
 			echo "Error: Could not extract bucket or locks table from bootstrap output"; \
 			exit 1; \
@@ -418,6 +419,7 @@ tf-bootstrap: check-tofu
 			AUTO_APPROVE=""; \
 			if [ -n "$$CI" ]; then AUTO_APPROVE="-auto-approve"; fi; \
 			OUTPUT=$$(tofu apply $$AUTO_APPROVE \
+				-state=terraform.tfstate.$(ENV) \
 				-var-file=environments/$(ENV).tfvars \
 				-var="tigerdata_project_id=$(TIGERDATA_PROJECT_ID)" \
 				-var="tigerdata_access_key=$(TIGERDATA_ACCESS_KEY)" \
@@ -549,7 +551,7 @@ tf-destroy-bootstrap: check-tofu
 	export TF_VAR_tigerdata_access_key=$$(echo "$$SECRET_JSON" | jq -r '.access_key // empty') && \
 	export TF_VAR_tigerdata_secret_key=$$(echo "$$SECRET_JSON" | jq -r '.secret_key // empty') && \
 	cd "$$BOOTSTRAP_DIR" && \
-	tofu destroy -var-file=environments/$(ENV).tfvars -auto-approve
+	tofu destroy -state=terraform.tfstate.$(ENV) -var-file=environments/$(ENV).tfvars -auto-approve
 
 # Full Terraform workflow: bootstrap, init, validate, plan
 # Usage: make tf-check ENV=sentineldev|sentinelstaging|sentinelprod

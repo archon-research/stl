@@ -24,6 +24,11 @@
 .terraform/
 terraform.tfvars
 *.auto.tfvars
+
+# Bootstrap state exceptions (commit persistent environments only)
+!infra/bootstrap/terraform.tfstate.sentinelstaging
+!infra/bootstrap/terraform.tfstate.sentinelprod
+# Dev bootstrap state remains ignored (ephemeral)
 crash.log
 crash.*.log
 override.tf
