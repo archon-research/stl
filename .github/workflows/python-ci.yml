@@ -1,0 +1,84 @@
+name: Python (stl-verify)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "stl-verify/python/**"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "stl-verify/python/**"
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: stl-verify/python
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          working-directory: stl-verify/python
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Lint
+        run: make lint
+
+  test:
+    name: Tests (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: lint
+
+    defaults:
+      run:
+        working-directory: stl-verify/python
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          working-directory: stl-verify/python
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Unit tests
+        run: make test-unit
+
+      - name: Integration tests
+        run: make test-integration
