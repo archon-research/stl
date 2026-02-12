@@ -1,6 +1,6 @@
 # stl-verify python
 
-FastAPI service for SparkLend position risk calculations.
+FastAPI service for sentinel verify
 
 ## Setup
 
