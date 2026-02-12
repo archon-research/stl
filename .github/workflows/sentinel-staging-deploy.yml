@@ -50,60 +50,13 @@ jobs:
         run: make preflight
         working-directory: stl-verify
 
-  bootstrap:
-    name: Bootstrap Infrastructure
-    needs: preflight
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    if: github.event_name == 'push' || github.event.inputs.action != 'destroy'
-    env:
-      TIGERDATA_PROJECT_ID: ${{ secrets.TIGERDATA_PROJECT_ID }}
-      TIGERDATA_ACCESS_KEY: ${{ secrets.TIGERDATA_ACCESS_KEY }}
-      TIGERDATA_SECRET_KEY: ${{ secrets.TIGERDATA_SECRET_KEY }}
-      ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
-      COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
-      ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
-      TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_REGION: eu-west-1
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Check if bootstrap already exists
-        id: check_bootstrap
-        run: |
-          # Check if DynamoDB lock table exists
-          if aws dynamodb describe-table --table-name stl-sentinelstaging-terraform-locks --region eu-west-1 &>/dev/null; then
-            echo "bootstrap_exists=true" >> $GITHUB_OUTPUT
-            echo "✅ Bootstrap infrastructure already exists, skipping bootstrap"
-          else
-            echo "bootstrap_exists=false" >> $GITHUB_OUTPUT
-            echo "ℹ️  Bootstrap infrastructure not found, will create it"
-          fi
-
-      - name: Setup OpenTofu
-        uses: opentofu/setup-opentofu@v1
-        with:
-          tofu_version: "~> 1.0"
-
-      - name: Bootstrap backend (S3 + DynamoDB + Secrets)
-        if: steps.check_bootstrap.outputs.bootstrap_exists == 'false'
-        run: make tf-bootstrap ENV=sentinelstaging
-        working-directory: stl-verify
-
-      - name: Upload bootstrap state
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bootstrap-state
-          path: infra/bootstrap/terraform.tfstate
-          retention-days: 30
+  # Bootstrap is NOT run in CI for staging - must be done manually
+  # Backend infrastructure (S3, DynamoDB, secrets) must exist before deployment
+  # To bootstrap staging: run `make tf-bootstrap ENV=sentinelstaging` locally
 
   init:
     name: Initialize Terraform
-    needs: bootstrap
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -118,12 +71,6 @@ jobs:
         uses: opentofu/setup-opentofu@v1
         with:
           tofu_version: "~> 1.0"
-
-      - name: Download bootstrap state
-        uses: actions/download-artifact@v4
-        with:
-          name: bootstrap-state
-          path: infra/bootstrap
 
       - name: Initialize Terraform backend
         run: make tf-init ENV=sentinelstaging

@@ -68,6 +68,7 @@ resource "aws_dynamodb_table" "terraform_locks" {
 
 # Random suffix for globally unique S3 bucket name (dev only)
 resource "random_id" "bucket_suffix" {
+  count       = var.environment == "sentineldev" ? 1 : 0
   byte_length = 4
 }
 

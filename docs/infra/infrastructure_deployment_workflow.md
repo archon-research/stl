@@ -8,6 +8,50 @@ Complete, fully-automated deployment workflow for all environments (sentineldev,
 2. **OpenTofu**: Installed (see [OpenTofu Installation](https://opentofu.org/docs/intro/install/))
 3. **jq**: For JSON parsing (brew install jq on macOS)
 
+## Provider Lock Files & Version Control
+
+### What is `.terraform.lock.hcl`?
+
+The `.terraform.lock.hcl` file is OpenTofu's **provider version lock file**. It records the exact versions and cryptographic hashes of providers used in your infrastructure. Think of it like `package-lock.json` (Node.js) or `go.sum` (Go).
+
+**Important**: This file is **version controlled** (committed to git) to ensure:
+- ✅ CI/CD uses the same provider versions as local development
+- ✅ All team members use consistent provider versions
+- ✅ Deployments are reproducible across environments
+- ✅ No surprise failures from provider version drift
+
+**What's in the file**: Provider names, versions, and cryptographic hashes for integrity verification
+**What's NOT in it**: No secrets, no credentials, no infrastructure details - completely safe to commit publicly
+
+### For Developers
+
+**Daily workflow**: You don't need to do anything - the lock file works automatically when you run `tofu init`.
+
+**When updating providers intentionally**:
+```bash
+cd infra  # or infra/bootstrap
+tofu init -upgrade  # Updates providers to latest allowed by version constraints
+git add .terraform.lock.hcl
+git commit -m "chore: update terraform providers"
+```
+
+**Handling merge conflicts**:
+If you get a conflict in `.terraform.lock.hcl`:
+```bash
+# Just regenerate it - no need to manually resolve
+tofu init -upgrade
+git add .terraform.lock.hcl
+```
+
+**When NOT to update providers**:
+- Don't run `tofu init -upgrade` unless you intend to update providers
+- Regular `tofu init` (without -upgrade) uses the locked versions
+- Provider updates should be intentional, tested, and documented in PRs
+
+### CI/CD Behavior
+
+GitHub Actions workflows automatically use the committed lock file to ensure consistent provider versions across all CI runs.
+
 ## Step 1: Prepare Environment Variables
 
 ```bash

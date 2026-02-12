@@ -9,7 +9,7 @@
 #
 # Optional credentials (use "placeholder" if not provided):
 #   - COINGECKO_API_KEY, ETHERSCAN_API_KEY
-#   - TAILSCALE_AUTH_KEY (only for staging/prod with bastion)
+#   - TAILSCALE_AUTH_KEY
 
 # TigerData API credentials secret
 resource "aws_secretsmanager_secret" "tigerdata" {
@@ -37,14 +37,14 @@ resource "aws_secretsmanager_secret_version" "tigerdata" {
   }
 }
 
-# TODO: Rename watcher_config to blockchain_api_keys or external_api_keys
-# This secret contains API keys for multiple external services (Alchemy, CoinGecko, Etherscan),
+# TODO: Rename watcher_config
+# This secret contains API keys for multiple external services (Alchemy),
 # not just watcher configuration. The name is historical and should be refactored.
 
-# Consolidated external API keys secret (Alchemy, CoinGecko, Etherscan)
+# Consolidated external API keys secret)
 resource "aws_secretsmanager_secret" "watcher_config" {
   name                    = "${local.prefix}-watcher-config"
-  description             = "External blockchain API keys (Alchemy, CoinGecko, Etherscan) for ${var.environment}"
+  description             = "External blockchain API keys (Alchemy) for ${var.environment}"
   recovery_window_in_days = var.environment == "sentineldev" ? 0 : 7
 
   tags = {
@@ -67,7 +67,7 @@ resource "aws_secretsmanager_secret_version" "watcher_config" {
   }
 }
 
-# Tailscale auth key secret (optional, only for staging/prod with bastion + VPN)
+# Tailscale auth key secret
 resource "aws_secretsmanager_secret" "tailscale_auth_key" {
   count                   = var.tailscale_auth_key != "" ? 1 : 0
   name                    = "${local.prefix}-tailscale-auth-key"

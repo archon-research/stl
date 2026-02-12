@@ -306,17 +306,23 @@ check-tofu:
 # Bootstrap backend (S3 + DynamoDB) for an environment
 # Creates infrastructure state bucket and locking table
 # Must run once per environment before main tf-init
-# Usage: make tf-bootstrap ENV=sentineldev
-# Bootstrap backend and initial secrets
+#
+# CI/Automation: Only allowed for sentineldev (ephemeral environment)
+# Staging/Prod: Must be run manually when needed (persistent environments)
+#
 # Phase 1: Create S3 state bucket and DynamoDB locks table
 # Phase 2: Extract S3 bucket suffix and update backend.hcl (dev only)
 # Phase 3: Create initial secrets (tigerdata API, watcher config, tailscale key)
 # 
-# Optional: pass credentials as environment variables to populate secrets
-# Usage: make tf-bootstrap ENV=sentineldev TIGERDATA_PROJECT_ID=xxx TIGERDATA_ACCESS_KEY=xxx TIGERDATA_SECRET_KEY=xxx ALCHEMY_API_KEY=xxx [COINGECKO_API_KEY=xxx] [ETHERSCAN_API_KEY=xxx] [TAILSCALE_AUTH_KEY=xxx]
-# Required credentials: TIGERDATA_*, ALCHEMY_API_KEY (must be set in .env and sourced)
+# Usage: make tf-bootstrap ENV=sentineldev|sentinelstaging|sentinelprod
+# Required credentials: TIGERDATA_PROJECT_ID, TIGERDATA_ACCESS_KEY, TIGERDATA_SECRET_KEY, ALCHEMY_API_KEY
 # Optional: COINGECKO_API_KEY, ETHERSCAN_API_KEY, TAILSCALE_AUTH_KEY
 tf-bootstrap: check-tofu
+	@if [ "$(ENV)" != "sentineldev" ] && [ -n "$$CI" ]; then \
+		echo "Error: CI-based bootstrap is only allowed for sentineldev"; \
+		echo "Staging/Prod bootstrap must be run manually (locally with confirmation)"; \
+		exit 1; \
+	fi
 	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Bootstrapping backend for $(ENV) (using AWS profile: $(AWS_PROFILE))..."
 	@if [ ! -d "$(INFRA_DIR)/bootstrap" ]; then \
 		echo "Error: Bootstrap directory not found at $(INFRA_DIR)/bootstrap"; \
@@ -355,16 +361,30 @@ tf-bootstrap: check-tofu
 		cd $(INFRA_DIR)/bootstrap && \
 		rm -rf .terraform .terraform.lock.hcl && \
 		tofu init -backend=false && \
-		tofu apply -auto-approve \
+		AUTO_APPROVE=""; \
+		if [ -n "$$CI" ]; then AUTO_APPROVE="-auto-approve"; fi; \
+		OUTPUT=$$(tofu apply $$AUTO_APPROVE \
 			-var-file=environments/$(ENV).tfvars \
 			-target=aws_s3_bucket.terraform_state \
 			-target=aws_s3_bucket_versioning.terraform_state \
 			-target=aws_s3_bucket_server_side_encryption_configuration.terraform_state \
 			-target=aws_s3_bucket_public_access_block.terraform_state \
-			-target=aws_dynamodb_table.terraform_locks \
-			-target=random_id.bucket_suffix && \
-		echo "✓ Backend resources created" && break || \
-		(if [ $$attempt -lt 3 ]; then sleep 5; fi); \
+			-target=aws_dynamodb_table.terraform_locks 2>&1); \
+		EXIT_CODE=$$?; \
+		echo "$$OUTPUT"; \
+		if [ $$EXIT_CODE -eq 0 ]; then \
+			echo "✓ Backend resources created"; \
+			break; \
+		elif echo "$$OUTPUT" | grep -qi "cancel\|interrupt"; then \
+			echo "✗ Cancelled by user"; \
+			exit 1; \
+		elif [ $$attempt -lt 3 ]; then \
+			echo "  Failed, retrying in 5 seconds..."; \
+			sleep 5; \
+		else \
+			echo "✗ Failed after 3 attempts"; \
+			exit 1; \
+		fi; \
 	done
 	@echo ""
 	@echo "Step 2: Extracting bucket suffix and updating backend config (dev only)..."
@@ -394,7 +414,9 @@ tf-bootstrap: check-tofu
 		for attempt in 1 2 3; do \
 			echo "  Attempt $$attempt/3..."; \
 			cd $(INFRA_DIR)/bootstrap && \
-			tofu apply -auto-approve \
+			AUTO_APPROVE=""; \
+			if [ -n "$$CI" ]; then AUTO_APPROVE="-auto-approve"; fi; \
+			OUTPUT=$$(tofu apply $$AUTO_APPROVE \
 				-var-file=environments/$(ENV).tfvars \
 				-var="tigerdata_project_id=$(TIGERDATA_PROJECT_ID)" \
 				-var="tigerdata_access_key=$(TIGERDATA_ACCESS_KEY)" \
@@ -402,9 +424,22 @@ tf-bootstrap: check-tofu
 				-var="alchemy_api_key=$(ALCHEMY_API_KEY)" \
 				-var="coingecko_api_key=$(COINGECKO_API_KEY)" \
 				-var="etherscan_api_key=$(ETHERSCAN_API_KEY)" \
-				-var="tailscale_auth_key=$(TAILSCALE_AUTH_KEY)" && \
-			echo "✓ Secrets created" && break || \
-			(if [ $$attempt -lt 3 ]; then sleep 5; fi); \
+				-var="tailscale_auth_key=$(TAILSCALE_AUTH_KEY)" 2>&1); \
+			EXIT_CODE=$$?; \
+			echo "$$OUTPUT"; \
+			if [ $$EXIT_CODE -eq 0 ]; then \
+				echo "✓ Secrets created"; \
+				break; \
+			elif echo "$$OUTPUT" | grep -qi "cancel\|interrupt"; then \
+				echo "✗ Cancelled by user"; \
+				exit 1; \
+			elif [ $$attempt -lt 3 ]; then \
+				echo "  Failed, retrying in 5 seconds..."; \
+				sleep 5; \
+			else \
+				echo "✗ Failed after 3 attempts"; \
+				exit 1; \
+			fi; \
 		done; \
 	fi
 	@echo ""
