@@ -3,46 +3,41 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from web3 import Web3
 
 from app.domain.entities.positions import AssetAmount, UserLatestPositions
-from app.ports.position_repository import PositionRepository
 
 
 class PostgresPositionRepository:
     """PostgreSQL implementation of PositionRepository.
-    
+
     Queries the latest non-orphaned debt and collateral positions from the database.
     """
 
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]):
         self.sessionmaker = sessionmaker
 
-    async def list_latest_user_positions(
-        self, protocol_id: int, limit: int
-    ) -> list[UserLatestPositions]:
+    async def list_latest_user_positions(self, protocol_id: int, limit: int) -> list[UserLatestPositions]:
         """Retrieve latest positions for users in a protocol.
-        
+
         Args:
             protocol_id: The protocol ID to query positions for
             limit: Maximum number of users to return (0 = unlimited)
-            
+
         Returns:
             List of user positions with debt and collateral, sorted by user address
         """
         async with self.sessionmaker() as session:
             # Query latest debt positions
             debt_rows = await self._query_latest_debt(session, protocol_id)
-            
+
             # Query latest collateral positions
             collateral_rows = await self._query_latest_collateral(session, protocol_id)
-            
+
             # Aggregate by user address
             positions_map: dict[str, UserLatestPositions] = {}
-            
+
             for row in debt_rows:
                 user_addr = Web3.to_checksum_address("0x" + row["user_address"])
                 if user_addr not in positions_map:
-                    positions_map[user_addr] = UserLatestPositions(
-                        user_address=user_addr, debt=[], collateral=[]
-                    )
+                    positions_map[user_addr] = UserLatestPositions(user_address=user_addr, debt=[], collateral=[])
                 positions_map[user_addr].debt.append(
                     AssetAmount(
                         token_address=Web3.to_checksum_address("0x" + row["token_address"]),
@@ -50,13 +45,11 @@ class PostgresPositionRepository:
                         amount=int(row["amount"]),
                     )
                 )
-            
+
             for row in collateral_rows:
                 user_addr = Web3.to_checksum_address("0x" + row["user_address"])
                 if user_addr not in positions_map:
-                    positions_map[user_addr] = UserLatestPositions(
-                        user_address=user_addr, debt=[], collateral=[]
-                    )
+                    positions_map[user_addr] = UserLatestPositions(user_address=user_addr, debt=[], collateral=[])
                 positions_map[user_addr].collateral.append(
                     AssetAmount(
                         token_address=Web3.to_checksum_address("0x" + row["token_address"]),
@@ -64,25 +57,20 @@ class PostgresPositionRepository:
                         amount=int(row["amount"]),
                     )
                 )
-            
+
             # Filter out users with no positions
-            result = [
-                pos for pos in positions_map.values()
-                if pos.debt or pos.collateral
-            ]
-            
+            result = [pos for pos in positions_map.values() if pos.debt or pos.collateral]
+
             # Sort by user address
             result.sort(key=lambda x: x.user_address)
-            
+
             # Apply limit
             if limit > 0:
                 result = result[:limit]
-            
+
             return result
 
-    async def _query_latest_debt(
-        self, session: AsyncSession, protocol_id: int
-    ) -> list[dict]:
+    async def _query_latest_debt(self, session: AsyncSession, protocol_id: int) -> list[dict]:
         """Query latest debt positions from non-orphaned blocks."""
         query = text("""
             WITH latest AS (
@@ -108,13 +96,11 @@ class PostgresPositionRepository:
             JOIN token t ON t.id = latest.token_id
             WHERE latest.amount <> '0'
         """)
-        
+
         result = await session.execute(query, {"protocol_id": protocol_id})
         return [dict(row._mapping) for row in result]
 
-    async def _query_latest_collateral(
-        self, session: AsyncSession, protocol_id: int
-    ) -> list[dict]:
+    async def _query_latest_collateral(self, session: AsyncSession, protocol_id: int) -> list[dict]:
         """Query latest collateral positions from non-orphaned blocks."""
         query = text("""
             WITH latest AS (
@@ -142,6 +128,6 @@ class PostgresPositionRepository:
             WHERE latest.amount <> '0'
                 AND latest.collateral_enabled = true
         """)
-        
+
         result = await session.execute(query, {"protocol_id": protocol_id})
         return [dict(row._mapping) for row in result]

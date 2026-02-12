@@ -4,13 +4,18 @@ from typing import AsyncGenerator
 import asyncpg
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker, AsyncEngine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from testcontainers.postgres import PostgresContainer
 
 
 async def apply_migrations(dsn: str) -> None:
     """Apply SQL migrations from db/migrations directory.
-    
+
     Uses asyncpg directly since it supports multi-statement SQL execution,
     unlike SQLAlchemy's asyncpg dialect which uses prepared statements.
     """
@@ -19,12 +24,12 @@ async def apply_migrations(dsn: str) -> None:
 
     # asyncpg wants postgresql:// not postgresql+asyncpg://
     dsn = dsn.replace("+asyncpg", "")
-    
+
     conn = await asyncpg.connect(dsn)
     try:
         for migration_file in migration_files:
             sql = migration_file.read_text()
-            
+
             # Minor workaround for applying migrations:
             #  `CONCURRENTLY` requires autocommit, convert to regular for tests
             sql = sql.replace("CONCURRENTLY", "")
@@ -45,13 +50,13 @@ def postgres_container():
 async def db_engine(postgres_container) -> AsyncGenerator[AsyncEngine, None]:
     """Create async database engine with migrations applied."""
     db_url = postgres_container.get_connection_url()
-    
+
     # Apply migrations using asyncpg directly (supports multi-statement SQL)
     await apply_migrations(db_url)
-    
+
     # Create SQLAlchemy engine for tests
     engine = create_async_engine(db_url, echo=False)
-    
+
     yield engine
     await engine.dispose()
 
