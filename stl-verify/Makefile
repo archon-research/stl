@@ -364,21 +364,20 @@ tf-bootstrap: check-tofu
 		tofu init -backend=false && \
 		AUTO_APPROVE=""; \
 		if [ -n "$$CI" ]; then AUTO_APPROVE="-auto-approve"; fi; \
-		OUTPUT=$$(tofu apply $$AUTO_APPROVE \
+		tofu apply $$AUTO_APPROVE \
 			-state=terraform.tfstate.$(ENV) \
 			-var-file=environments/$(ENV).tfvars \
 			-target=aws_s3_bucket.terraform_state \
 			-target=aws_s3_bucket_versioning.terraform_state \
 			-target=aws_s3_bucket_server_side_encryption_configuration.terraform_state \
 			-target=aws_s3_bucket_public_access_block.terraform_state \
-			-target=aws_dynamodb_table.terraform_locks 2>&1); \
+			-target=aws_dynamodb_table.terraform_locks; \
 		EXIT_CODE=$$?; \
-		echo "$$OUTPUT"; \
 		if [ $$EXIT_CODE -eq 0 ]; then \
 			echo "✓ Backend resources created"; \
 			break; \
-		elif echo "$$OUTPUT" | grep -qi "cancel\|interrupt"; then \
-			echo "✗ Cancelled by user"; \
+		elif [ $$EXIT_CODE -eq 1 ] && [ -z "$$CI" ]; then \
+			echo "✗ Cancelled by user or failed"; \
 			exit 1; \
 		elif [ $$attempt -lt 3 ]; then \
 			echo "  Failed, retrying in 5 seconds..."; \
@@ -418,7 +417,7 @@ tf-bootstrap: check-tofu
 			cd $(INFRA_DIR)/bootstrap && \
 			AUTO_APPROVE=""; \
 			if [ -n "$$CI" ]; then AUTO_APPROVE="-auto-approve"; fi; \
-			OUTPUT=$$(tofu apply $$AUTO_APPROVE \
+			tofu apply $$AUTO_APPROVE \
 				-state=terraform.tfstate.$(ENV) \
 				-var-file=environments/$(ENV).tfvars \
 				-var="tigerdata_project_id=$(TIGERDATA_PROJECT_ID)" \
@@ -427,14 +426,13 @@ tf-bootstrap: check-tofu
 				-var="alchemy_api_key=$(ALCHEMY_API_KEY)" \
 				-var="coingecko_api_key=$(COINGECKO_API_KEY)" \
 				-var="etherscan_api_key=$(ETHERSCAN_API_KEY)" \
-				-var="tailscale_auth_key=$(TAILSCALE_AUTH_KEY)" 2>&1); \
+				-var="tailscale_auth_key=$(TAILSCALE_AUTH_KEY)"; \
 			EXIT_CODE=$$?; \
-			echo "$$OUTPUT"; \
 			if [ $$EXIT_CODE -eq 0 ]; then \
 				echo "✓ Secrets created"; \
 				break; \
-			elif echo "$$OUTPUT" | grep -qi "cancel\|interrupt"; then \
-				echo "✗ Cancelled by user"; \
+			elif [ $$EXIT_CODE -eq 1 ] && [ -z "$$CI" ]; then \
+				echo "✗ Cancelled by user or failed"; \
 				exit 1; \
 			elif [ $$attempt -lt 3 ]; then \
 				echo "  Failed, retrying in 5 seconds..."; \
@@ -450,18 +448,22 @@ tf-bootstrap: check-tofu
 	@echo "==> Next: make tf-init ENV=$(ENV)"
 
 # Initialize Terraform for main infrastructure
-# Requires: tf-bootstrap must be run first
-# Migrates backend state from bootstrap to remote S3 backend
+# Checks for backend resources (S3 bucket) in AWS before proceeding
 # Usage: make tf-init ENV=sentineldev|sentinelstaging|sentinelprod
 tf-init:
 	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Initializing main infrastructure for $(ENV) (using AWS profile: $(AWS_PROFILE))..."
-	@if [ ! -f "$(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV)" ]; then \
-		echo "Error: Bootstrap state file not found. Run 'make tf-bootstrap ENV=$(ENV)' first."; \
+	@echo "==> Checking for backend resources in AWS..."
+	@BUCKET_NAME=$$(cd $(INFRA_DIR) && grep 'bucket' environments/$(ENV).backend.hcl | awk -F'"' '{print $$2}'); \
+	if ! aws s3api head-bucket --bucket "$$BUCKET_NAME" --region $(AWS_REGION) 2>/dev/null; then \
+		echo "Error: Backend S3 bucket '$$BUCKET_NAME' not found. Run 'make tf-bootstrap ENV=$(ENV)' first."; \
 		exit 1; \
 	fi
-	@echo "==> Copying bootstrap state file..."
-	@mkdir -p $(INFRA_DIR)/.terraform
-	@cp $(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV) $(INFRA_DIR)/.terraform/terraform.tfstate.bak
+	@echo "✓ Backend resources exist in AWS"
+	@if [ -f "$(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV)" ]; then \
+		echo "==> Backing up bootstrap state file..."; \
+		mkdir -p $(INFRA_DIR)/.terraform; \
+		cp $(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV) $(INFRA_DIR)/.terraform/terraform.tfstate.bak; \
+	fi
 	@export AWS_PROFILE=$(AWS_PROFILE) && cd $(INFRA_DIR) && tofu init -backend-config=environments/$(ENV).backend.hcl -reconfigure
 
 # Validate Terraform configuration
