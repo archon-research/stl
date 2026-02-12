@@ -771,6 +771,25 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 	return nil
 }
 
+// GetMinUnpublishedBlock returns the lowest canonical block number that has not been published.
+// Returns (blockNum, true, nil) if found, (0, false, nil) if all blocks are published.
+//
+// Uses the existing partial index idx_block_states_chain_incomplete_publish
+// (chain_id, number) WHERE NOT is_orphaned AND NOT block_published, so Postgres
+// resolves MIN(number) with a single index lookup — O(1) regardless of table size.
+func (r *BlockStateRepository) GetMinUnpublishedBlock(ctx context.Context) (int64, bool, error) {
+	var blockNum *int64
+	query := `SELECT MIN(number) FROM block_states WHERE chain_id = $1 AND NOT is_orphaned AND NOT block_published`
+	err := r.pool.QueryRow(ctx, query, r.chainID).Scan(&blockNum)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to get min unpublished block: %w", err)
+	}
+	if blockNum == nil {
+		return 0, false, nil
+	}
+	return *blockNum, true, nil
+}
+
 // GetBlocksWithIncompletePublish returns canonical blocks that have not been published.
 // Used by backfill to recover from crashes.
 func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int) ([]outbound.BlockState, error) {

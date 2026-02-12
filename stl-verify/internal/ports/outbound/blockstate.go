@@ -140,6 +140,12 @@ type BlockStateRepository interface {
 	// (e.g., backfill) can check which publishes are incomplete and retry them.
 	MarkPublishComplete(ctx context.Context, hash string) error
 
+	// GetMinUnpublishedBlock returns the lowest canonical block number that has
+	// not been published. Used by watermark advancement to avoid advancing past
+	// blocks that still need publishing.
+	// Returns (blockNum, true, nil) if found, (0, false, nil) if all published.
+	GetMinUnpublishedBlock(ctx context.Context) (int64, bool, error)
+
 	// GetBlocksWithIncompletePublish returns canonical blocks that have not been
 	// published. Used by backfill to recover from crashes.
 	GetBlocksWithIncompletePublish(ctx context.Context, limit int) ([]BlockState, error)

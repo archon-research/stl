@@ -82,6 +82,10 @@ func (m *mockBlockStateRepository) MarkPublishComplete(ctx context.Context, hash
 	return nil
 }
 
+func (m *mockBlockStateRepository) GetMinUnpublishedBlock(ctx context.Context) (int64, bool, error) {
+	return 0, false, nil
+}
+
 func (m *mockBlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int) ([]outbound.BlockState, error) {
 	return nil, nil
 }

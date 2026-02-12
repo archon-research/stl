@@ -410,6 +410,26 @@ func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, f
 	return filtered, nil
 }
 
+// GetMinUnpublishedBlock returns the lowest canonical block number that has not been published.
+// Returns (blockNum, true, nil) if found, (0, false, nil) if all blocks are published.
+func (r *BlockStateRepository) GetMinUnpublishedBlock(ctx context.Context) (int64, bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var minNum int64
+	found := false
+	for _, b := range r.blocks {
+		if b.IsOrphaned || b.BlockPublished {
+			continue
+		}
+		if !found || b.Number < minNum {
+			minNum = b.Number
+			found = true
+		}
+	}
+	return minNum, found, nil
+}
+
 // GetBlocksWithIncompletePublish returns canonical blocks that have not been published.
 // Used by backfill to recover from crashes.
 func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int) ([]outbound.BlockState, error) {

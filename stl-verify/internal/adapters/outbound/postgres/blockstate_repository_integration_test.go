@@ -1532,3 +1532,111 @@ func TestFindGaps_DetectsReorgGap(t *testing.T) {
 		t.Errorf("Expected gap at 101-101, got %d-%d", gap.From, gap.To)
 	}
 }
+
+// TestGetMinUnpublishedBlock tests finding the minimum unpublished canonical block.
+func TestGetMinUnpublishedBlock(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	t.Run("no unpublished blocks returns false", func(t *testing.T) {
+		// No blocks at all
+		blockNum, found, err := repo.GetMinUnpublishedBlock(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if found {
+			t.Errorf("expected found=false when no blocks exist, got blockNum=%d", blockNum)
+		}
+	})
+
+	// Save blocks 1-5, mark all as published
+	for i := int64(1); i <= 5; i++ {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0xpub_%d", i),
+			ParentHash: fmt.Sprintf("0xpub_%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+		if err := repo.MarkPublishComplete(ctx, fmt.Sprintf("0xpub_%d", i)); err != nil {
+			t.Fatalf("failed to mark block %d published: %v", i, err)
+		}
+	}
+
+	t.Run("all published returns false", func(t *testing.T) {
+		blockNum, found, err := repo.GetMinUnpublishedBlock(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if found {
+			t.Errorf("expected found=false when all blocks published, got blockNum=%d", blockNum)
+		}
+	})
+
+	// Save blocks 6-10, leave them unpublished
+	for i := int64(6); i <= 10; i++ {
+		_, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0xpub_%d", i),
+			ParentHash: fmt.Sprintf("0xpub_%d", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	t.Run("mix of published and unpublished returns lowest unpublished", func(t *testing.T) {
+		blockNum, found, err := repo.GetMinUnpublishedBlock(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !found {
+			t.Fatal("expected found=true")
+		}
+		if blockNum != 6 {
+			t.Errorf("expected blockNum=6, got %d", blockNum)
+		}
+	})
+
+	// Mark block 6 published, so 7 becomes the lowest unpublished
+	if err := repo.MarkPublishComplete(ctx, "0xpub_6"); err != nil {
+		t.Fatalf("failed to mark block 6 published: %v", err)
+	}
+
+	t.Run("after publishing lowest, returns next lowest", func(t *testing.T) {
+		blockNum, found, err := repo.GetMinUnpublishedBlock(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !found {
+			t.Fatal("expected found=true")
+		}
+		if blockNum != 7 {
+			t.Errorf("expected blockNum=7, got %d", blockNum)
+		}
+	})
+
+	t.Run("orphaned unpublished blocks are ignored", func(t *testing.T) {
+		// Orphan block 7 (unpublished) — should be excluded
+		if err := repo.MarkBlockOrphaned(ctx, "0xpub_7"); err != nil {
+			t.Fatalf("failed to orphan block 7: %v", err)
+		}
+
+		blockNum, found, err := repo.GetMinUnpublishedBlock(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !found {
+			t.Fatal("expected found=true")
+		}
+		// Block 7 is orphaned, so 8 should be the lowest unpublished
+		if blockNum != 8 {
+			t.Errorf("expected blockNum=8 (7 is orphaned), got %d", blockNum)
+		}
+	})
+}
