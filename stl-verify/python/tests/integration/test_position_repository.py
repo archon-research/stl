@@ -69,7 +69,9 @@ async def test_list_latest_user_positions(repository, db_sessionmaker):
         # Create block states (including orphaned block)
         await session.execute(
             text("""
-                INSERT INTO block_states (chain_id, created_at, number, version, is_orphaned, hash, parent_hash, received_at)
+                INSERT INTO block_states (
+                 chain_id, created_at, number, version, is_orphaned, hash, parent_hash, received_at
+                )
                 VALUES
                     (1, to_timestamp(9), 9, 0, false, decode('09', 'hex'), decode('08', 'hex'), 9),
                     (1, to_timestamp(10), 10, 0, false, decode('0a', 'hex'), decode('09', 'hex'), 10),
