@@ -292,11 +292,7 @@ func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
 
 	// Mark all blocks as published so the unpublished-block cap does not
 	// prevent the watermark from reaching the chain integrity check.
-	for i := int64(1); i <= 10; i++ {
-		if err := stateRepo.MarkPublishComplete(ctx, fmt.Sprintf("0x%064x", i)); err != nil {
-			t.Fatalf("failed to mark block %d published: %v", i, err)
-		}
-	}
+	markBlocksPublished(t, ctx, stateRepo, 1, 10, 0)
 
 	config := BackfillConfig{
 		ChainID:   1,
@@ -594,6 +590,19 @@ func TestBackfillService_RejectsNonCanonicalBlock(t *testing.T) {
 
 func hashWithSuffix(num int64, suffix string) string {
 	return fmt.Sprintf("0x%064d%s", num, suffix)
+}
+
+func markBlocksPublished(t *testing.T, ctx context.Context, repo outbound.BlockStateRepository, from, to int64, skip int64) {
+	t.Helper()
+
+	for i := from; i <= to; i++ {
+		if i == skip {
+			continue
+		}
+		if err := repo.MarkPublishComplete(ctx, fmt.Sprintf("0x%064x", i)); err != nil {
+			t.Fatalf("failed to mark block %d published: %v", i, err)
+		}
+	}
 }
 
 func saveBlockState(t *testing.T, ctx context.Context, repo outbound.BlockStateRepository, num int64, hash, parentHash string) {
@@ -1321,14 +1330,7 @@ func TestAdvanceWatermark_StopsAtUnpublishedBlock(t *testing.T) {
 	}
 
 	// Mark all blocks as published EXCEPT block 5
-	for i := int64(1); i <= 10; i++ {
-		if i == 5 {
-			continue
-		}
-		if err := stateRepo.MarkPublishComplete(ctx, fmt.Sprintf("0x%064x", i)); err != nil {
-			t.Fatalf("failed to mark block %d published: %v", i, err)
-		}
-	}
+	markBlocksPublished(t, ctx, stateRepo, 1, 10, 5)
 
 	config := BackfillConfig{
 		ChainID:   1,
@@ -1385,11 +1387,7 @@ func TestAdvanceWatermark_AdvancesWhenAllPublished(t *testing.T) {
 	}
 
 	// Mark ALL blocks as published
-	for i := int64(1); i <= 10; i++ {
-		if err := stateRepo.MarkPublishComplete(ctx, fmt.Sprintf("0x%064x", i)); err != nil {
-			t.Fatalf("failed to mark block %d published: %v", i, err)
-		}
-	}
+	markBlocksPublished(t, ctx, stateRepo, 1, 10, 0)
 
 	config := BackfillConfig{
 		ChainID:   1,
