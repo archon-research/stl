@@ -1,14 +1,32 @@
 ---
 description: On-demand PR code reviewer for STL Verify using /review command
 on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+        type: string
   slash_command:
     name: review
     events: [pull_request_comment]
+engine:
+  id: codex
+  model: route-llm
+  env:
+    OPENAI_BASE_URL: https://routellm.abacus.ai/v1
+  config: |
+    [model_providers.openai]
+    wire_api = "chat"
 permissions:
   contents: read
   pull-requests: read
   issues: read
   actions: read
+network:
+  allowed:
+    - defaults
+    - routellm.abacus.ai
 tools:
   github:
     toolsets: [default, pull_requests]
@@ -29,7 +47,7 @@ You are an expert Go code reviewer specializing in blockchain infrastructure. Yo
 
 ## Your Task
 
-Review the pull request #${{ github.event.issue.number }} in ${{ github.repository }}.
+Review the pull request #${{ github.event.inputs.pr_number || github.event.issue.number }} in ${{ github.repository }}.
 
 1. **Read the PR diff** using GitHub tools to understand all changed files
 2. **Analyze each change** against the review standards below
