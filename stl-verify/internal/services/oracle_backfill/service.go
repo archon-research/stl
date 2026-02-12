@@ -476,16 +476,16 @@ func (s *Service) processBlock(
 		return nil, fmt.Errorf("fetching oracle prices: %w", err)
 	}
 
+	// Collect successful token indices in a single pass.
 	// Fast path: if no token succeeded, skip the header fetch entirely.
 	// This avoids a wasted RPC call for blocks where the oracle is deployed but not yet configured.
-	hasSuccess := false
-	for _, r := range results {
+	var successIdx []int
+	for i, r := range results {
 		if r.Success {
-			hasSuccess = true
-			break
+			successIdx = append(successIdx, i)
 		}
 	}
-	if !hasSuccess {
+	if len(successIdx) == 0 {
 		return nil, nil
 	}
 
@@ -496,12 +496,9 @@ func (s *Service) processBlock(
 	}
 	blockTimestamp := time.Unix(int64(header.Time), 0).UTC()
 
-	prices := make([]*entity.OnchainTokenPrice, 0, len(tokenIDs))
-	for i, result := range results {
-		if !result.Success {
-			continue // token didn't have a price source at this block
-		}
-		priceUSD := blockchain.ConvertOraclePriceToUSD(result.Price, priceDecimals)
+	prices := make([]*entity.OnchainTokenPrice, 0, len(successIdx))
+	for _, i := range successIdx {
+		priceUSD := blockchain.ConvertOraclePriceToUSD(results[i].Price, priceDecimals)
 
 		p, err := entity.NewOnchainTokenPrice(
 			tokenIDs[i],
