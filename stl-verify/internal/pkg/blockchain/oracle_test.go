@@ -276,6 +276,239 @@ func TestFetchOraclePrices_EmptyAssets(t *testing.T) {
 	}
 }
 
+func TestFetchOraclePricesIndividual(t *testing.T) {
+	oracleABI := testOracleABI(t)
+
+	oracleAddr := common.HexToAddress("0x0000000000000000000000000000000000000002")
+
+	asset1 := common.HexToAddress("0x0000000000000000000000000000000000000010")
+	asset2 := common.HexToAddress("0x0000000000000000000000000000000000000020")
+	assets := []common.Address{asset1, asset2}
+
+	price1 := big.NewInt(100000000)    // 1.00 USD
+	price2 := big.NewInt(250000000000) // 2500.00 USD
+
+	blockNum := int64(12345678)
+
+	tests := []struct {
+		name        string
+		assets      []common.Address
+		mock        *mockMulticaller
+		wantErr     bool
+		errContains string
+		wantResults []AssetPriceResult
+	}{
+		{
+			name:   "happy path - all tokens succeed",
+			assets: assets,
+			mock: &mockMulticaller{
+				executeFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					if len(calls) != 2 {
+						t.Fatalf("expected 2 calls, got %d", len(calls))
+					}
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackAssetPrice(t, price1)},
+						{Success: true, ReturnData: testutil.PackAssetPrice(t, price2)},
+					}, nil
+				},
+			},
+			wantResults: []AssetPriceResult{
+				{Price: price1, Success: true},
+				{Price: price2, Success: true},
+			},
+		},
+		{
+			name:   "partial failure - second token fails",
+			assets: assets,
+			mock: &mockMulticaller{
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackAssetPrice(t, price1)},
+						{Success: false, ReturnData: nil},
+					}, nil
+				},
+			},
+			wantResults: []AssetPriceResult{
+				{Price: price1, Success: true},
+				{Success: false},
+			},
+		},
+		{
+			name:   "all tokens fail - no error returned",
+			assets: assets,
+			mock: &mockMulticaller{
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: false, ReturnData: nil},
+						{Success: false, ReturnData: nil},
+					}, nil
+				},
+			},
+			wantResults: []AssetPriceResult{
+				{Success: false},
+				{Success: false},
+			},
+		},
+		{
+			name:   "execute error - returns error",
+			assets: assets,
+			mock: &mockMulticaller{
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return nil, errors.New("rpc connection refused")
+				},
+			},
+			wantErr:     true,
+			errContains: "executing multicall at block 12345678",
+		},
+		{
+			name:   "result count mismatch - returns error",
+			assets: assets,
+			mock: &mockMulticaller{
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackAssetPrice(t, price1)},
+					}, nil
+				},
+			},
+			wantErr:     true,
+			errContains: "expected 2 multicall results, got 1",
+		},
+		{
+			name:   "bad return data - treated as failure",
+			assets: assets,
+			mock: &mockMulticaller{
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackAssetPrice(t, price1)},
+						{Success: true, ReturnData: []byte{0xde, 0xad}}, // bad data
+					}, nil
+				},
+			},
+			wantResults: []AssetPriceResult{
+				{Price: price1, Success: true},
+				{Success: false}, // bad data treated as failure
+			},
+		},
+		{
+			name:   "empty assets - returns nil",
+			assets: []common.Address{},
+			mock: &mockMulticaller{
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					t.Fatal("Execute should not be called for empty assets")
+					return nil, nil
+				},
+			},
+			wantResults: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			results, err := FetchOraclePricesIndividual(
+				context.Background(),
+				tt.mock,
+				oracleABI,
+				oracleAddr,
+				tt.assets,
+				blockNum,
+			)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.errContains)
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error = %q, want it to contain %q", err.Error(), tt.errContains)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if tt.wantResults == nil {
+				if results != nil {
+					t.Errorf("expected nil results, got %+v", results)
+				}
+				return
+			}
+
+			if len(results) != len(tt.wantResults) {
+				t.Fatalf("results length = %d, want %d", len(results), len(tt.wantResults))
+			}
+			for i, got := range results {
+				want := tt.wantResults[i]
+				if got.Success != want.Success {
+					t.Errorf("results[%d].Success = %v, want %v", i, got.Success, want.Success)
+				}
+				if want.Success {
+					if got.Price == nil || got.Price.Cmp(want.Price) != 0 {
+						t.Errorf("results[%d].Price = %v, want %v", i, got.Price, want.Price)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestFetchOraclePricesIndividual_VerifiesCallTargets(t *testing.T) {
+	oracleABI := testOracleABI(t)
+
+	oracleAddr := common.HexToAddress("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+	assets := []common.Address{
+		common.HexToAddress("0xCC"),
+		common.HexToAddress("0xDD"),
+	}
+	price := big.NewInt(42)
+
+	mock := &mockMulticaller{
+		executeFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+			if len(calls) != 2 {
+				t.Fatalf("expected 2 calls, got %d", len(calls))
+			}
+			for i, call := range calls {
+				if call.Target != oracleAddr {
+					t.Errorf("call[%d].Target = %v, want %v", i, call.Target, oracleAddr)
+				}
+				if !call.AllowFailure {
+					t.Errorf("call[%d].AllowFailure = false, want true", i)
+				}
+			}
+			if blockNumber.Int64() != 99 {
+				t.Errorf("blockNumber = %d, want 99", blockNumber.Int64())
+			}
+			return []outbound.Result{
+				{Success: true, ReturnData: testutil.PackAssetPrice(t, price)},
+				{Success: true, ReturnData: testutil.PackAssetPrice(t, price)},
+			}, nil
+		},
+	}
+
+	results, err := FetchOraclePricesIndividual(
+		context.Background(),
+		mock,
+		oracleABI,
+		oracleAddr,
+		assets,
+		99,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	for i, r := range results {
+		if !r.Success {
+			t.Errorf("results[%d].Success = false, want true", i)
+		}
+		if r.Price.Cmp(price) != 0 {
+			t.Errorf("results[%d].Price = %s, want %s", i, r.Price.String(), price.String())
+		}
+	}
+}
+
 func TestConvertOraclePriceToUSD(t *testing.T) {
 	tests := []struct {
 		name     string

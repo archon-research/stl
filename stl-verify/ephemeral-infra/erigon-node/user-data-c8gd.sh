@@ -171,15 +171,15 @@ ExecStart=/usr/local/bin/erigon \
   --http.corsdomain=* \
   --private.api.addr=localhost:9090 \
   --txpool.disable \
-  --state.cache=80GB \
-  --bodies.cache=16GB \
-  --batchSize=1GB \
-  --db.size.limit=4TB \
+  --state.cache=240GB \
+  --bodies.cache=48GB \
+  --batchSize=2GB \
+  --db.size.limit=8TB \
   --rpc.batch.limit=10000 \
-  --rpc.batch.concurrency=128 \
+  --rpc.batch.concurrency=384 \
   --rpc.returndata.limit=10000000 \
   --rpc.evmtimeout=30m \
-  --db.read.concurrency=256 \
+  --db.read.concurrency=512 \
   --nodiscover \
   --maxpeers=0 \
   --log.console.verbosity=warn
@@ -216,11 +216,11 @@ ExecStart=/usr/local/bin/erigon \
   --torrent.download.rate=1gb \
   --torrent.upload.rate=50mb \
   --db.size.limit=8TB \
-  --batchSize=1GB \
+  --batchSize=2GB \
   --rpc.batch.limit=1000 \
-  --rpc.batch.concurrency=64 \
+  --rpc.batch.concurrency=192 \
   --rpc.returndata.limit=1000000 \
-  --db.read.concurrency=256 \
+  --db.read.concurrency=512 \
   --log.console.verbosity=info
 Restart=always
 RestartSec=10
@@ -286,6 +286,23 @@ vm.max_map_count = 16777216
 # - Any application using LMDB/MDBX with large databases
 #
 vm.overcommit_memory = 1
+
+# -----------------------------------------------------------------------------
+# UDP buffer sizes for QUIC/BitTorrent
+# -----------------------------------------------------------------------------
+# Default: 212992 (208 KiB)
+#
+# Erigon's torrent client uses QUIC (via quic-go), which needs large UDP
+# buffers for high-throughput downloads. The default 208 KiB is far too small
+# and causes the warning:
+#   "failed to sufficiently increase receive buffer size"
+#
+# Set to 7 MiB as recommended by quic-go for high-bandwidth connections.
+#
+net.core.rmem_max = 7340032
+net.core.wmem_max = 7340032
+net.core.rmem_default = 7340032
+net.core.wmem_default = 7340032
 EOF
 
 # Apply the settings immediately

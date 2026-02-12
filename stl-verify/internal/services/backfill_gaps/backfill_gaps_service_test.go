@@ -290,6 +290,10 @@ func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
 		}
 	}
 
+	// Mark all blocks as published so the unpublished-block cap does not
+	// prevent the watermark from reaching the chain integrity check.
+	markBlocksPublished(t, ctx, stateRepo, 1, 10, 0)
+
 	config := BackfillConfig{
 		ChainID:   1,
 		BatchSize: 10,
@@ -586,6 +590,19 @@ func TestBackfillService_RejectsNonCanonicalBlock(t *testing.T) {
 
 func hashWithSuffix(num int64, suffix string) string {
 	return fmt.Sprintf("0x%064d%s", num, suffix)
+}
+
+func markBlocksPublished(t *testing.T, ctx context.Context, repo outbound.BlockStateRepository, from, to int64, skip int64) {
+	t.Helper()
+
+	for i := from; i <= to; i++ {
+		if i == skip {
+			continue
+		}
+		if err := repo.MarkPublishComplete(ctx, fmt.Sprintf("0x%064x", i)); err != nil {
+			t.Fatalf("failed to mark block %d published: %v", i, err)
+		}
+	}
 }
 
 func saveBlockState(t *testing.T, ctx context.Context, repo outbound.BlockStateRepository, num int64, hash, parentHash string) {
@@ -1279,6 +1296,240 @@ func TestProcessBlockData_ReturnsErrorOnCacheFailure(t *testing.T) {
 		t.Error("processBlockData should return error when cache fails")
 	} else {
 		t.Logf("processBlockData correctly returned error: %v", err)
+	}
+}
+
+// TestAdvanceWatermark_StopsAtUnpublishedBlock verifies that the watermark does not
+// advance past blocks that have not been fully published.
+//
+// Scenario: blocks 1-10 exist, block 5 is unpublished → watermark stops at 4.
+func TestAdvanceWatermark_StopsAtUnpublishedBlock(t *testing.T) {
+	ctx := context.Background()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Add blocks 1-10 with correct chain links
+	for i := int64(1); i <= 10; i++ {
+		client.AddBlock(i, "")
+	}
+
+	// Save all 10 blocks to the state repo
+	for i := int64(1); i <= 10; i++ {
+		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x%064x", i),
+			ParentHash: fmt.Sprintf("0x%064x", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Mark all blocks as published EXCEPT block 5
+	markBlocksPublished(t, ctx, stateRepo, 1, 10, 5)
+
+	config := BackfillConfig{
+		ChainID:   1,
+		BatchSize: 10,
+		Logger:    slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Advance watermark — should stop at block 4 (one before unpublished block 5)
+	if err := service.advanceWatermark(ctx); err != nil {
+		t.Fatalf("advanceWatermark failed: %v", err)
+	}
+
+	watermark, err := stateRepo.GetBackfillWatermark(ctx)
+	if err != nil {
+		t.Fatalf("failed to get watermark: %v", err)
+	}
+
+	if watermark != 4 {
+		t.Errorf("expected watermark to stop at 4 (before unpublished block 5), got %d", watermark)
+	}
+}
+
+// TestAdvanceWatermark_AdvancesWhenAllPublished verifies that the watermark advances
+// to the max block when all blocks are published.
+func TestAdvanceWatermark_AdvancesWhenAllPublished(t *testing.T) {
+	ctx := context.Background()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Add blocks 1-10
+	for i := int64(1); i <= 10; i++ {
+		client.AddBlock(i, "")
+	}
+
+	// Save all 10 blocks
+	for i := int64(1); i <= 10; i++ {
+		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x%064x", i),
+			ParentHash: fmt.Sprintf("0x%064x", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Mark ALL blocks as published
+	markBlocksPublished(t, ctx, stateRepo, 1, 10, 0)
+
+	config := BackfillConfig{
+		ChainID:   1,
+		BatchSize: 10,
+		Logger:    slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Advance watermark — should advance to 10
+	if err := service.advanceWatermark(ctx); err != nil {
+		t.Fatalf("advanceWatermark failed: %v", err)
+	}
+
+	watermark, err := stateRepo.GetBackfillWatermark(ctx)
+	if err != nil {
+		t.Fatalf("failed to get watermark: %v", err)
+	}
+
+	if watermark != 10 {
+		t.Errorf("expected watermark to advance to 10, got %d", watermark)
+	}
+}
+
+// TestWatermarkAlreadyPastUnpublished_RetryFixesThem reproduces the exact production
+// scenario: the watermark has already advanced past blocks that are unpublished
+// (because advanceWatermark previously only checked for gaps, not publish state).
+//
+// After deploying the watermark cap fix, this situation is already in place:
+//   - Watermark is at block 10
+//   - Blocks 5 and 6 exist in DB but have block_published = false
+//   - Block 12 exists (new head from live service), creating a gap at 11
+//   - retryIncompletePublishes runs as part of gap-filling and fixes blocks 5 and 6
+//   - The watermark should not regress
+func TestWatermarkAlreadyPastUnpublished_RetryFixesThem(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Add blocks 1-12 to the mock client
+	for i := int64(1); i <= 12; i++ {
+		client.AddBlock(i, "")
+	}
+
+	// Save blocks 1-10 to the state repo (simulating live service having processed them)
+	for i := int64(1); i <= 10; i++ {
+		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       client.GetHeader(i).Hash,
+			ParentHash: client.GetHeader(i).ParentHash,
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Save block 12 (live service jumped ahead), leaving a gap at 11.
+	// This gap ensures retryIncompletePublishes is reached during findAndFillGaps.
+	_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:     12,
+		Hash:       client.GetHeader(12).Hash,
+		ParentHash: client.GetHeader(12).ParentHash,
+		ReceivedAt: time.Now().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("failed to save block 12: %v", err)
+	}
+
+	// Mark all blocks as published EXCEPT 5 and 6 (the "stuck" blocks)
+	for i := int64(1); i <= 10; i++ {
+		if i == 5 || i == 6 {
+			continue
+		}
+		if err := stateRepo.MarkPublishComplete(ctx, client.GetHeader(i).Hash); err != nil {
+			t.Fatalf("failed to mark block %d published: %v", i, err)
+		}
+	}
+
+	// Set watermark to 10 — it already advanced past the unpublished blocks.
+	// This is the state we'd find in production before deploying the fix.
+	if err := stateRepo.SetBackfillWatermark(ctx, 10); err != nil {
+		t.Fatalf("failed to set watermark: %v", err)
+	}
+
+	config := BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		BoundaryCheckDepth: -1, // disable boundary check for this test
+		Logger:             slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Run a backfill pass — fills gap at 11, then retryIncompletePublishes finds 5 and 6
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+
+	// Verify blocks 5 and 6 are now published
+	for _, blockNum := range []int64{5, 6} {
+		block, err := stateRepo.GetBlockByNumber(ctx, blockNum)
+		if err != nil {
+			t.Fatalf("failed to get block %d: %v", blockNum, err)
+		}
+		if block == nil {
+			t.Fatalf("block %d missing", blockNum)
+		}
+		if !block.BlockPublished {
+			t.Errorf("block %d should be published after retry, but is not", blockNum)
+		}
+	}
+
+	// Verify events were published for blocks 5 and 6
+	events := eventSink.GetBlockEvents()
+	published := make(map[int64]bool)
+	for _, e := range events {
+		published[e.BlockNumber] = true
+	}
+	for _, blockNum := range []int64{5, 6} {
+		if !published[blockNum] {
+			t.Errorf("block %d was not published via retryIncompletePublishes", blockNum)
+		}
+	}
+
+	// Watermark should not regress — it stays at 10 (or higher)
+	watermark, err := stateRepo.GetBackfillWatermark(ctx)
+	if err != nil {
+		t.Fatalf("failed to get watermark: %v", err)
+	}
+	if watermark < 10 {
+		t.Errorf("watermark regressed from 10 to %d", watermark)
 	}
 }
 

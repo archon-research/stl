@@ -49,6 +49,27 @@ func SeedOracle(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, dis
 	return id
 }
 
+// SeedOracleWithDeploymentBlock inserts an oracle with a specific deployment block and returns its ID.
+func SeedOracleWithDeploymentBlock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, displayName string, chainID int, address string, deploymentBlock int64) int64 {
+	t.Helper()
+	addrBytes, err := HexToBytes(address)
+	if err != nil {
+		t.Fatalf("failed to parse oracle address %s: %v", address, err)
+	}
+
+	var id int64
+	err = pool.QueryRow(ctx, `
+		INSERT INTO oracle (name, display_name, chain_id, address, deployment_block, enabled)
+		VALUES ($1, $2, $3, $4, $5, true)
+		ON CONFLICT (name) DO UPDATE SET display_name = EXCLUDED.display_name, deployment_block = EXCLUDED.deployment_block
+		RETURNING id
+	`, name, displayName, chainID, addrBytes, deploymentBlock).Scan(&id)
+	if err != nil {
+		t.Fatalf("failed to insert oracle %s: %v", name, err)
+	}
+	return id
+}
+
 // SeedOracleAsset inserts an oracle asset link.
 func SeedOracleAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64) {
 	t.Helper()
