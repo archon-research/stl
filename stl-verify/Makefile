@@ -455,13 +455,13 @@ tf-bootstrap: check-tofu
 # Usage: make tf-init ENV=sentineldev|sentinelstaging|sentinelprod
 tf-init:
 	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Initializing main infrastructure for $(ENV) (using AWS profile: $(AWS_PROFILE))..."
-	@if [ ! -f "$(INFRA_DIR)/bootstrap/terraform.tfstate" ]; then \
+	@if [ ! -f "$(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV)" ]; then \
 		echo "Error: Bootstrap state file not found. Run 'make tf-bootstrap ENV=$(ENV)' first."; \
 		exit 1; \
 	fi
 	@echo "==> Copying bootstrap state file..."
 	@mkdir -p $(INFRA_DIR)/.terraform
-	@cp $(INFRA_DIR)/bootstrap/terraform.tfstate $(INFRA_DIR)/.terraform/terraform.tfstate.bak
+	@cp $(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV) $(INFRA_DIR)/.terraform/terraform.tfstate.bak
 	@export AWS_PROFILE=$(AWS_PROFILE) && cd $(INFRA_DIR) && tofu init -backend-config=environments/$(ENV).backend.hcl -reconfigure
 
 # Validate Terraform configuration
