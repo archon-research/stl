@@ -11,6 +11,7 @@
 resource "aws_ecr_repository" "oracle_price_worker" {
   name                 = "${local.prefix}-oracle-price-worker"
   image_tag_mutability = "MUTABLE"
+  force_delete         = var.environment == "sentineldev"
 
   image_scanning_configuration {
     scan_on_push = true
