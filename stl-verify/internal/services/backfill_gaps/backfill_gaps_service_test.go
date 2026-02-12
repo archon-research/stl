@@ -290,6 +290,14 @@ func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
 		}
 	}
 
+	// Mark all blocks as published so the unpublished-block cap does not
+	// prevent the watermark from reaching the chain integrity check.
+	for i := int64(1); i <= 10; i++ {
+		if err := stateRepo.MarkPublishComplete(ctx, fmt.Sprintf("0x%064x", i)); err != nil {
+			t.Fatalf("failed to mark block %d published: %v", i, err)
+		}
+	}
+
 	config := BackfillConfig{
 		ChainID:   1,
 		BatchSize: 10,
@@ -1279,6 +1287,133 @@ func TestProcessBlockData_ReturnsErrorOnCacheFailure(t *testing.T) {
 		t.Error("processBlockData should return error when cache fails")
 	} else {
 		t.Logf("processBlockData correctly returned error: %v", err)
+	}
+}
+
+// TestAdvanceWatermark_StopsAtUnpublishedBlock verifies that the watermark does not
+// advance past blocks that have not been fully published.
+//
+// Scenario: blocks 1-10 exist, block 5 is unpublished → watermark stops at 4.
+func TestAdvanceWatermark_StopsAtUnpublishedBlock(t *testing.T) {
+	ctx := context.Background()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Add blocks 1-10 with correct chain links
+	for i := int64(1); i <= 10; i++ {
+		client.AddBlock(i, "")
+	}
+
+	// Save all 10 blocks to the state repo
+	for i := int64(1); i <= 10; i++ {
+		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x%064x", i),
+			ParentHash: fmt.Sprintf("0x%064x", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Mark all blocks as published EXCEPT block 5
+	for i := int64(1); i <= 10; i++ {
+		if i == 5 {
+			continue
+		}
+		if err := stateRepo.MarkPublishComplete(ctx, fmt.Sprintf("0x%064x", i)); err != nil {
+			t.Fatalf("failed to mark block %d published: %v", i, err)
+		}
+	}
+
+	config := BackfillConfig{
+		ChainID:   1,
+		BatchSize: 10,
+		Logger:    slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Advance watermark — should stop at block 4 (one before unpublished block 5)
+	if err := service.advanceWatermark(ctx); err != nil {
+		t.Fatalf("advanceWatermark failed: %v", err)
+	}
+
+	watermark, err := stateRepo.GetBackfillWatermark(ctx)
+	if err != nil {
+		t.Fatalf("failed to get watermark: %v", err)
+	}
+
+	if watermark != 4 {
+		t.Errorf("expected watermark to stop at 4 (before unpublished block 5), got %d", watermark)
+	}
+}
+
+// TestAdvanceWatermark_AdvancesWhenAllPublished verifies that the watermark advances
+// to the max block when all blocks are published.
+func TestAdvanceWatermark_AdvancesWhenAllPublished(t *testing.T) {
+	ctx := context.Background()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Add blocks 1-10
+	for i := int64(1); i <= 10; i++ {
+		client.AddBlock(i, "")
+	}
+
+	// Save all 10 blocks
+	for i := int64(1); i <= 10; i++ {
+		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:     i,
+			Hash:       fmt.Sprintf("0x%064x", i),
+			ParentHash: fmt.Sprintf("0x%064x", i-1),
+			ReceivedAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Mark ALL blocks as published
+	for i := int64(1); i <= 10; i++ {
+		if err := stateRepo.MarkPublishComplete(ctx, fmt.Sprintf("0x%064x", i)); err != nil {
+			t.Fatalf("failed to mark block %d published: %v", i, err)
+		}
+	}
+
+	config := BackfillConfig{
+		ChainID:   1,
+		BatchSize: 10,
+		Logger:    slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Advance watermark — should advance to 10
+	if err := service.advanceWatermark(ctx); err != nil {
+		t.Fatalf("advanceWatermark failed: %v", err)
+	}
+
+	watermark, err := stateRepo.GetBackfillWatermark(ctx)
+	if err != nil {
+		t.Fatalf("failed to get watermark: %v", err)
+	}
+
+	if watermark != 10 {
+		t.Errorf("expected watermark to advance to 10, got %d", watermark)
 	}
 }
 

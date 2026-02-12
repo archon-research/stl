@@ -788,6 +788,16 @@ func (s *BackfillService) advanceWatermark(ctx context.Context) error {
 		newWatermark = gaps[0].From - 1
 	}
 
+	// Cap watermark at min(unpublished block) - 1 so we never advance past
+	// blocks that haven't been fully published yet.
+	minUnpub, found, err := s.stateRepo.GetMinUnpublishedBlock(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to check unpublished blocks: %w", err)
+	}
+	if found && minUnpub-1 < newWatermark {
+		newWatermark = minUnpub - 1
+	}
+
 	// Only advance if we have a higher watermark
 	if newWatermark > currentWatermark {
 		// Verify chain integrity before advancing watermark
