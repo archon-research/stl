@@ -40,3 +40,12 @@ override.tf.json
 
 # Claude
 settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
