@@ -37,10 +37,14 @@ resource "aws_secretsmanager_secret_version" "tigerdata" {
   }
 }
 
-# Watcher config secret (Alchemy API key)
+# TODO: Rename watcher_config to blockchain_api_keys or external_api_keys
+# This secret contains API keys for multiple external services (Alchemy, CoinGecko, Etherscan),
+# not just watcher configuration. The name is historical and should be refactored.
+
+# Consolidated external API keys secret (Alchemy, CoinGecko, Etherscan)
 resource "aws_secretsmanager_secret" "watcher_config" {
   name                    = "${local.prefix}-watcher-config"
-  description             = "Watcher service configuration for ${var.environment}"
+  description             = "External blockchain API keys (Alchemy, CoinGecko, Etherscan) for ${var.environment}"
   recovery_window_in_days = var.environment == "sentineldev" ? 0 : 7
 
   tags = {

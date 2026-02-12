@@ -9,7 +9,8 @@
 # Cost-effective storage with Athena query capability
 
 resource "aws_s3_bucket" "flow_logs" {
-  bucket = "${local.prefix_lowercase}-vpc-flow-logs${local.resource_suffix}"
+  # Preserve existing staging bucket suffix, use resource_suffix for dev
+  bucket = var.environment == "sentinelstaging" ? "${local.prefix_lowercase}-vpc-flow-logs-863ec365" : "${local.prefix_lowercase}-vpc-flow-logs${local.resource_suffix}"
   
   # Only allow force_destroy for dev - protect staging/prod logs
   force_destroy = var.environment == "sentineldev"

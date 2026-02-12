@@ -1,6 +1,8 @@
 locals {
-  # S3-specific locals - use shared resource_suffix for all buckets
-  bucket_name = "${local.prefix_lowercase}-ethereum-raw${local.resource_suffix}"
+  # S3-specific locals
+  # Staging buckets keep their existing suffix, new envs use resource_suffix (dev) or no suffix (prod)
+  bucket_suffix = var.environment == "sentinelstaging" ? "-89d540d0" : local.resource_suffix
+  bucket_name   = "${local.prefix_lowercase}-ethereum-raw${local.bucket_suffix}"
 }
 
 # S3 Bucket - configured to never be deleted and fully private
@@ -121,7 +123,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "main" {
 
 # Dedicated bucket for access logs
 resource "aws_s3_bucket" "logs" {
-  bucket = "${local.prefix_lowercase}-access-logs${local.resource_suffix}"
+  # Preserve existing staging bucket name to avoid data loss
+  bucket = var.environment == "sentinelstaging" ? "${local.prefix_lowercase}-access-logs-89d540d0" : "${local.prefix_lowercase}-access-logs${local.resource_suffix}"
 
   tags = {
     Name    = "${local.prefix}-access-logs"

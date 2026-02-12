@@ -148,7 +148,7 @@ data "aws_iam_policy_document" "tigerdata_secret_read" {
 
 resource "aws_iam_policy" "tigerdata_secret_read" {
   name        = "${local.prefix}-tigerdata-secret-read"
-  description = "Allows reading TigerData database credentials from Secrets Manager"
+  description = "Allows reading TigerData credentials from Secrets Manager"
   policy      = data.aws_iam_policy_document.tigerdata_secret_read.json
 }
 

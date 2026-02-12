@@ -160,7 +160,7 @@ resource "aws_instance" "bastion" {
 
   ami                    = data.aws_ami.amazon_linux_2023_arm64[0].id
   instance_type          = var.bastion_instance_type
-  subnet_id              = aws_subnet.private.id  # Private subnet has NAT gateway for internet access
+  subnet_id              = aws_subnet.private.id # Private subnet has NAT gateway for internet access
   vpc_security_group_ids = [aws_security_group.bastion[0].id]
   iam_instance_profile   = aws_iam_instance_profile.bastion[0].name
 

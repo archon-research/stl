@@ -2,9 +2,6 @@
 aws_region  = "eu-west-1"
 environment = "sentinelstaging"
 
-# Preserve existing resource naming (bucket suffix matches current deployment)
-resource_suffix = "89d540d0"
-
 # -----------------------------------------------------------------------------
 # TigerData (TimescaleDB) Configuration
 # -----------------------------------------------------------------------------

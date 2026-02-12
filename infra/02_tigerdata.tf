@@ -78,7 +78,7 @@ resource "aws_route" "private_to_tigerdata" {
   route_table_id            = aws_route_table.private.id
   destination_cidr_block    = local.tigerdata_vpc_cidr
   vpc_peering_connection_id = aws_vpc_peering_connection_accepter.tigerdata.id
-  
+
   depends_on = [time_sleep.peering_active]
 }
 
