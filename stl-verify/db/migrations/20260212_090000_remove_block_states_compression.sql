@@ -9,7 +9,7 @@
 -- rows per chain (~7,200 blocks/day × 30 days), which is trivially small.
 
 -- 1. Remove the compression policy (stops future compression jobs)
-SELECT remove_compression_policy('block_states');
+SELECT remove_compression_policy('block_states', if_exists => true);
 
 -- 2. Decompress all currently compressed chunks
 SELECT decompress_chunk(c, if_compressed => true)
