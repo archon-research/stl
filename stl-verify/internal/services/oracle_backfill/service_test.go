@@ -239,7 +239,7 @@ func blockDependentPrices(t *testing.T) func(ctx context.Context, calls []outbou
 }
 
 // defaultRepoSetup returns a mockRepo preconfigured for common test scenarios.
-// It mocks GetAllEnabledOracles, GetEnabledAssets, GetTokenAddresses, and GetLatestBlock.
+// It mocks GetAllEnabledOracles, GetEnabledAssets, and GetTokenAddresses.
 func defaultRepoSetup() *mockRepo {
 	return &mockRepo{
 		getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
@@ -251,7 +251,6 @@ func defaultRepoSetup() *mockRepo {
 		getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
 			return defaultTokenAddressBytes(), nil
 		},
-		getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 	}
 }
 
@@ -448,99 +447,6 @@ func TestRun(t *testing.T) {
 			},
 			setupRepo: func() *mockRepo {
 				return defaultRepoSetup()
-			},
-			setupHeader: func() *mockHeaderFetcher {
-				return &mockHeaderFetcher{
-					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
-						return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
-					},
-				}
-			},
-			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
-					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
-				}
-			},
-			wantErr: false,
-			checkResult: func(t *testing.T, repo *mockRepo) {
-				t.Helper()
-				upserted := repo.getUpserted()
-				// 5 blocks x 2 tokens = 10 prices (all different)
-				if len(upserted) != 10 {
-					t.Errorf("upserted count = %d, want 10", len(upserted))
-				}
-			},
-		},
-		{
-			name:      "success with resume - latestBlock >= fromBlock",
-			fromBlock: 100,
-			toBlock:   109,
-			config: Config{
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
-			},
-			setupRepo: func() *mockRepo {
-				repo := defaultRepoSetup()
-				repo.getLatestBlockFn = func(_ context.Context, _ int64) (int64, error) {
-					return 106, nil
-				}
-				return repo
-			},
-			setupHeader: func() *mockHeaderFetcher {
-				return &mockHeaderFetcher{
-					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
-						return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
-					},
-				}
-			},
-			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
-					return &testutil.MockMulticaller{
-						ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-							bn := blockNumber.Int64()
-							if bn < 107 || bn > 109 {
-								t.Errorf("unexpected block number %d, expected 107-109", bn)
-							}
-							prices := []*big.Int{
-								new(big.Int).Mul(big.NewInt(bn), big.NewInt(100_000_000)),
-								new(big.Int).Mul(big.NewInt(bn), big.NewInt(200_000_000)),
-							}
-							return multicallResult(t, prices), nil
-						},
-					}, nil
-				}
-			},
-			wantErr: false,
-			checkResult: func(t *testing.T, repo *mockRepo) {
-				t.Helper()
-				upserted := repo.getUpserted()
-				// 3 blocks x 2 tokens = 6 prices
-				if len(upserted) != 6 {
-					t.Errorf("upserted count = %d, want 6", len(upserted))
-				}
-				for _, p := range upserted {
-					if p.BlockNumber < 107 {
-						t.Errorf("unexpected block %d in upserted prices, should be >= 107", p.BlockNumber)
-					}
-				}
-			},
-		},
-		{
-			name:      "success latestBlock beyond requested range still processes all blocks",
-			fromBlock: 100,
-			toBlock:   104,
-			config: Config{
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
-			},
-			setupRepo: func() *mockRepo {
-				repo := defaultRepoSetup()
-				repo.getLatestBlockFn = func(_ context.Context, _ int64) (int64, error) {
-					return 110, nil
-				}
-				return repo
 			},
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
@@ -764,29 +670,6 @@ func TestRun(t *testing.T) {
 					t.Error("expected no upserted prices when token address not found")
 				}
 			},
-		},
-		{
-			name:      "error GetLatestBlock fails",
-			fromBlock: 100,
-			toBlock:   104,
-			config: Config{
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
-			},
-			setupRepo: func() *mockRepo {
-				repo := defaultRepoSetup()
-				repo.getLatestBlockFn = func(_ context.Context, _ int64) (int64, error) {
-					return 0, errors.New("redis unavailable")
-				}
-				return repo
-			},
-			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
-			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
-			},
-			wantErr:     true,
-			errContains: "getting latest block",
 		},
 		{
 			name:      "success with small batch size triggers mid-loop flush",
@@ -1203,7 +1086,6 @@ func TestRun(t *testing.T) {
 					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
 						return defaultTokenAddressBytes(), nil
 					},
-					getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 				}
 			},
 			setupHeader: func() *mockHeaderFetcher {
@@ -1268,7 +1150,6 @@ func TestRun(t *testing.T) {
 							30: common.HexToAddress("0x0000000000000000000000000000000000000030").Bytes(),
 						}, nil
 					},
-					getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 				}
 			},
 			setupHeader: func() *mockHeaderFetcher {
@@ -1515,11 +1396,10 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestRun_DuplicateBlocksSafeWithIdempotentUpsert verifies that re-processing
-// the same block range succeeds without error. When GetLatestBlock returns a value
-// equal to toBlock (not strictly less), the resume logic does not skip ahead, so all
-// blocks are re-sent to UpsertPrices. The service relies on the repository's
-// ON CONFLICT DO NOTHING to deduplicate — this test proves that the service
-// correctly sends duplicate data without erroring.
+// the same block range succeeds without error. The service always processes
+// the full clamped range, relying on the repository's ON CONFLICT DO NOTHING
+// to deduplicate — this test proves the service correctly sends duplicate
+// data without erroring.
 func TestRun_DuplicateBlocksSafeWithIdempotentUpsert(t *testing.T) {
 	repo := defaultRepoSetup()
 
@@ -1553,14 +1433,7 @@ func TestRun_DuplicateBlocksSafeWithIdempotentUpsert(t *testing.T) {
 		t.Fatalf("expected 10 prices after first run, got %d", countAfterFirst)
 	}
 
-	// Simulate GetLatestBlock returning toBlock (104). The resume condition
-	// requires latestBlock < toBlock (104 < 104 = false), so no blocks are
-	// skipped — all 5 blocks are re-processed and sent to UpsertPrices again.
-	repo.getLatestBlockFn = func(_ context.Context, _ int64) (int64, error) {
-		return 104, nil
-	}
-
-	// Second run: same block range
+	// Second run: same block range — all blocks re-processed.
 	err = svc.Run(context.Background(), 100, 104)
 	if err != nil {
 		t.Fatalf("Run (second): %v", err)
@@ -1904,7 +1777,6 @@ func TestRun_BlockRangeClamping(t *testing.T) {
 				getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
 					return defaultTokenAddressBytes(), nil
 				},
-				getLatestBlockFn: func(_ context.Context, _ int64) (int64, error) { return 0, nil },
 				getAllProtocolOracleBindingsFn: func(_ context.Context) ([]*entity.ProtocolOracle, error) {
 					return tt.bindings, nil
 				},

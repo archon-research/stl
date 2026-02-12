@@ -233,22 +233,6 @@ func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBloc
 		return nil
 	}
 
-	// Resume support: if the latest stored block falls within the requested
-	// range, skip ahead to avoid re-processing. If it's outside the range
-	// (e.g. backfilling an earlier period), run the full requested range.
-	// Duplicate blocks are safe thanks to ON CONFLICT DO NOTHING.
-	latestBlock, err := s.repo.GetLatestBlock(ctx, wu.oracle.ID)
-	if err != nil {
-		return fmt.Errorf("getting latest block: %w", err)
-	}
-	if latestBlock > 0 && latestBlock >= fromBlock && latestBlock < toBlock {
-		s.logger.Info("resuming from latest stored block",
-			"oracle", wu.oracle.Name,
-			"latestStored", latestBlock,
-			"requestedFrom", fromBlock)
-		fromBlock = latestBlock + 1
-	}
-
 	totalBlocks := toBlock - fromBlock + 1
 	if totalBlocks <= 0 {
 		s.logger.Info("no blocks to process", "oracle", wu.oracle.Name, "from", fromBlock, "to", toBlock)

@@ -268,135 +268,6 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 	}
 }
 
-func TestIntegration_BackfillRun_ResumeFromLatestBlock(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
-
-	ctx := context.Background()
-	logger := testutil.DiscardLogger()
-
-	oracleID := testutil.SeedOracle(t, ctx, pool, "test-resume", "Test Resume", 1, "0x0000000000000000000000000000000000000AAA")
-	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000011", "RSM1", 18)
-	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000012", "RSM2", 18)
-	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
-	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
-
-	// Disable the migration-seeded sparklend oracle so only our test oracle runs
-	_, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`)
-	if err != nil {
-		t.Fatalf("failed to disable sparklend oracle: %v", err)
-	}
-
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
-	if err != nil {
-		t.Fatalf("failed to create repository: %v", err)
-	}
-
-	// First run: blocks 100-104
-	svc, err := NewService(
-		Config{
-			Concurrency: 1,
-			BatchSize:   100,
-			Logger:      logger,
-		},
-		integrationMockHeaderFetcher(),
-		integrationMockMulticallFactory(t, 2),
-		repo,
-	)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
-
-	err = svc.Run(ctx, 100, 104)
-	if err != nil {
-		t.Fatalf("Run (first) failed: %v", err)
-	}
-
-	var countAfterFirst int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&countAfterFirst)
-	if err != nil {
-		t.Fatalf("failed to query price count: %v", err)
-	}
-	// 5 blocks * 2 tokens = 10 prices (all unique due to block-dependent prices)
-	if countAfterFirst != 10 {
-		t.Errorf("expected 10 prices after first run, got %d", countAfterFirst)
-	}
-
-	// Second run: same range should resume from latest block (104) and skip all
-	svc2, err := NewService(
-		Config{
-			Concurrency: 1,
-			BatchSize:   100,
-			Logger:      logger,
-		},
-		integrationMockHeaderFetcher(),
-		integrationMockMulticallFactory(t, 2),
-		repo,
-	)
-	if err != nil {
-		t.Fatalf("NewService (second) failed: %v", err)
-	}
-
-	err = svc2.Run(ctx, 100, 104)
-	if err != nil {
-		t.Fatalf("Run (second) failed: %v", err)
-	}
-
-	// Count should be unchanged (resume detected block 104 as latest, from >= 105)
-	var countAfterSecond int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&countAfterSecond)
-	if err != nil {
-		t.Fatalf("failed to query price count after second run: %v", err)
-	}
-	if countAfterSecond != countAfterFirst {
-		t.Errorf("expected %d prices after second (resumed) run, got %d", countAfterFirst, countAfterSecond)
-	}
-
-	// Third run: extend range 100-109. Should resume from block 105.
-	svc3, err := NewService(
-		Config{
-			Concurrency: 1,
-			BatchSize:   100,
-			Logger:      logger,
-		},
-		integrationMockHeaderFetcher(),
-		integrationMockMulticallFactory(t, 2),
-		repo,
-	)
-	if err != nil {
-		t.Fatalf("NewService (third) failed: %v", err)
-	}
-
-	err = svc3.Run(ctx, 100, 109)
-	if err != nil {
-		t.Fatalf("Run (third) failed: %v", err)
-	}
-
-	var countAfterThird int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&countAfterThird)
-	if err != nil {
-		t.Fatalf("failed to query price count after third run: %v", err)
-	}
-	// Should have 10 (original) + 5 new blocks (105-109) * 2 tokens = 10 more = 20 total
-	expectedTotal := 20
-	if countAfterThird != expectedTotal {
-		t.Errorf("expected %d prices after third (extended) run, got %d", expectedTotal, countAfterThird)
-	}
-
-	// Verify block range coverage
-	var minBlock, maxBlock int64
-	err = pool.QueryRow(ctx, `SELECT MIN(block_number), MAX(block_number) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&minBlock, &maxBlock)
-	if err != nil {
-		t.Fatalf("failed to query block range: %v", err)
-	}
-	if minBlock != 100 {
-		t.Errorf("expected min block 100, got %d", minBlock)
-	}
-	if maxBlock != 109 {
-		t.Errorf("expected max block 109, got %d", maxBlock)
-	}
-}
-
 func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
@@ -845,8 +716,7 @@ func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T)
 		t.Fatalf("expected 10 after first run, got %d", countFirst)
 	}
 
-	// Second run: same range. GetLatestBlock from DB returns 104.
-	// Resume condition: latestBlock(104) < toBlock(104) is false → all blocks re-processed.
+	// Second run: same range. All blocks re-processed.
 	// ON CONFLICT DO NOTHING prevents duplicate rows.
 	if err := newService().Run(ctx, 100, 104); err != nil {
 		t.Fatalf("Run (second): %v", err)
