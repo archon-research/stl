@@ -332,12 +332,12 @@ tf-bootstrap: check-tofu
 	@echo ""
 	@echo "Checking if bootstrap already exists for $(ENV)..."
 	@if [ "$(ENV)" = "sentineldev" ]; then \
-		if [ -f "$(INFRA_DIR)/bootstrap/terraform.tfstate" ]; then \
-			LOCKS_TABLE=$$(cd $(INFRA_DIR)/bootstrap && tofu output -raw locks_table_name 2>/dev/null || echo ""); \
+		if [ -f "$(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV)" ]; then \
+			LOCKS_TABLE=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw locks_table_name 2>/dev/null || echo ""); \
 			if [ -n "$$LOCKS_TABLE" ] && aws dynamodb describe-table --table-name "$$LOCKS_TABLE" --region $(AWS_REGION) &>/dev/null; then \
 				echo "✓ Bootstrap infrastructure already exists for $(ENV)"; \
 				echo "  DynamoDB table: $$LOCKS_TABLE"; \
-				echo "  S3 bucket: $$(cd $(INFRA_DIR)/bootstrap && tofu output -raw state_bucket_name 2>/dev/null || echo 'stl-$(ENV)-terraform-state-*')"; \
+				echo "  S3 bucket: $$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null || echo 'stl-$(ENV)-terraform-state-*')"; \
 				echo ""; \
 				echo "⚠️  Bootstrap is idempotent and only needs to run once per environment"; \
 				echo "==> Skipping bootstrap (already initialized)"; \
@@ -453,7 +453,7 @@ tf-bootstrap: check-tofu
 tf-init:
 	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Initializing main infrastructure for $(ENV) (using AWS profile: $(AWS_PROFILE))..."
 	@echo "==> Checking for backend resources in AWS..."
-	@BUCKET_NAME=$$(cd $(INFRA_DIR) && grep 'bucket' environments/$(ENV).backend.hcl | awk -F'"' '{print $$2}'); \
+	@BUCKET_NAME=$$(cd $(INFRA_DIR) && grep '^bucket' environments/$(ENV).backend.hcl | awk -F'"' '{print $$2}'); \
 	if ! aws s3api head-bucket --bucket "$$BUCKET_NAME" --region $(AWS_REGION) 2>/dev/null; then \
 		echo "Error: Backend S3 bucket '$$BUCKET_NAME' not found. Run 'make tf-bootstrap ENV=$(ENV)' first."; \
 		exit 1; \
@@ -477,7 +477,7 @@ tf-validate:
 tf-plan:
 	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Planning Terraform for $(ENV)..."
 	@if [ "$(ENV)" = "sentineldev" ]; then \
-		SUFFIX=$$(cd $(INFRA_DIR)/bootstrap && tofu output -raw state_bucket_name 2>/dev/null | rev | cut -d- -f1 | rev); \
+		SUFFIX=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null | rev | cut -d- -f1 | rev); \
 		export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu plan -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX"); \
 	else \
 		export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu plan -var-file=environments/$(ENV).tfvars); \
@@ -489,7 +489,7 @@ tf-plan:
 tf-apply:
 	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Applying Terraform for $(ENV)..."
 	@if [ "$(ENV)" = "sentineldev" ]; then \
-		SUFFIX=$$(cd $(INFRA_DIR)/bootstrap && tofu output -raw state_bucket_name 2>/dev/null | rev | cut -d- -f1 | rev); \
+		SUFFIX=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null | rev | cut -d- -f1 | rev); \
 		if [ -n "$$CI" ]; then \
 			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX" -auto-approve); \
 		else \
@@ -515,11 +515,21 @@ tf-destroy:
 		exit 1; \
 	fi
 	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Destroying Terraform infrastructure for $(ENV)..."
-	@if [ -n "$$CI" ]; then \
-		export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -auto-approve); \
+	@if [ "$(ENV)" = "sentineldev" ]; then \
+		SUFFIX=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null | rev | cut -d- -f1 | rev); \
+		if [ -n "$$CI" ]; then \
+			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX" -auto-approve); \
+		else \
+			export AWS_PROFILE=$(AWS_PROFILE) && read -p "Are you sure you want to destroy all infrastructure for $(ENV)? (yes/no) " confirm && \
+			[ "$$confirm" = "yes" ] && (cd ../infra && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX" -auto-approve)) || echo "Destroy cancelled"; \
+		fi; \
 	else \
-		export AWS_PROFILE=$(AWS_PROFILE) && read -p "Are you sure you want to destroy all infrastructure for $(ENV)? (yes/no) " confirm && \
-		[ "$$confirm" = "yes" ] && (cd ../infra && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -auto-approve)) || echo "Destroy cancelled"; \
+		if [ -n "$$CI" ]; then \
+			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -auto-approve); \
+		else \
+			export AWS_PROFILE=$(AWS_PROFILE) && read -p "Are you sure you want to destroy all infrastructure for $(ENV)? (yes/no) " confirm && \
+			[ "$$confirm" = "yes" ] && (cd ../infra && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -auto-approve)) || echo "Destroy cancelled"; \
+		fi; \
 	fi
 
 # Destroy bootstrap backend (S3 + DynamoDB + secrets)
@@ -548,10 +558,16 @@ tf-destroy-bootstrap: check-tofu
 			exit 0; \
 		fi; \
 	fi && \
-	SECRET_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --region $(AWS_REGION) --query SecretString --output text 2>/dev/null || echo '{}') && \
-	export TF_VAR_tigerdata_project_id=$$(echo "$$SECRET_JSON" | jq -r '.project_id // empty') && \
-	export TF_VAR_tigerdata_access_key=$$(echo "$$SECRET_JSON" | jq -r '.access_key // empty') && \
-	export TF_VAR_tigerdata_secret_key=$$(echo "$$SECRET_JSON" | jq -r '.secret_key // empty') && \
+	echo "==> Extracting credentials from AWS Secrets Manager..." && \
+	TIGERDATA_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --region $(AWS_REGION) --query SecretString --output text 2>/dev/null || echo '{}') && \
+	WATCHER_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-watcher-config --region $(AWS_REGION) --query SecretString --output text 2>/dev/null || echo '{}') && \
+	export TF_VAR_tigerdata_project_id=$$(echo "$$TIGERDATA_JSON" | jq -r '.project_id // "dummy"') && \
+	export TF_VAR_tigerdata_access_key=$$(echo "$$TIGERDATA_JSON" | jq -r '.access_key // "dummy"') && \
+	export TF_VAR_tigerdata_secret_key=$$(echo "$$TIGERDATA_JSON" | jq -r '.secret_key // "dummy"') && \
+	export TF_VAR_alchemy_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.alchemy_api_key // "dummy-key-at-least-10-chars"') && \
+	export TF_VAR_coingecko_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.coingecko_api_key // "dummy"') && \
+	export TF_VAR_etherscan_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.etherscan_api_key // "dummy"') && \
+	export TF_VAR_tailscale_auth_key=$$(echo "$$WATCHER_JSON" | jq -r '.tailscale_auth_key // "dummy"') && \
 	cd "$$BOOTSTRAP_DIR" && \
 	tofu destroy -state=terraform.tfstate.$(ENV) -var-file=environments/$(ENV).tfvars -auto-approve
 
