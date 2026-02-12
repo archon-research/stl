@@ -156,7 +156,7 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 	}
 	blockRanges := computeOracleBlockRanges(bindings)
 
-	// Deduplicate by oracle ID (a protocol oracle may also exist as a generic oracle)
+	// Build work units, deduplicating by oracle ID (a protocol oracle may also exist as a generic oracle).
 	seen := make(map[int64]bool)
 	var workUnits []*oracleWorkUnit
 
@@ -178,9 +178,7 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 		// Set valid block ranges from deployment block and protocol bindings.
 		wu.validFrom = oracle.DeploymentBlock
 		if br, ok := blockRanges[oracle.ID]; ok {
-			if br.validFrom > wu.validFrom {
-				wu.validFrom = br.validFrom
-			}
+			wu.validFrom = max(br.validFrom, wu.validFrom)
 			wu.validTo = br.validTo
 		}
 
@@ -397,11 +395,11 @@ func computeOracleBlockRanges(bindings []*entity.ProtocolOracle) map[int64]*orac
 // [validFrom, validTo] range. Returns the clamped from/to and whether any blocks
 // remain (ok=true means from <= to after clamping).
 func clampBlockRange(from, to, validFrom, validTo int64) (int64, int64, bool) {
-	if validFrom > 0 && from < validFrom {
-		from = validFrom
+	if validFrom > 0 {
+		from = max(from, validFrom)
 	}
-	if validTo > 0 && to > validTo {
-		to = validTo
+	if validTo > 0 {
+		to = min(to, validTo)
 	}
 	return from, to, from <= to
 }

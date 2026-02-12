@@ -7,10 +7,10 @@ import "github.com/ethereum/go-ethereum/accounts/abi"
 func GetAaveOracleABI() (*abi.ABI, error) {
 	return ParseABI(`[
 		{
+			"name": "getAssetsPrices",
 			"inputs": [
 				{"name": "assets", "type": "address[]"}
 			],
-			"name": "getAssetsPrices",
 			"outputs": [
 				{"name": "", "type": "uint256[]"}
 			],
@@ -18,10 +18,10 @@ func GetAaveOracleABI() (*abi.ABI, error) {
 			"type": "function"
 		},
 		{
+			"name": "getAssetPrice",
 			"inputs": [
 				{"name": "asset", "type": "address"}
 			],
-			"name": "getAssetPrice",
 			"outputs": [
 				{"name": "", "type": "uint256"}
 			],

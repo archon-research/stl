@@ -790,6 +790,80 @@ func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
 	}
 }
 
+// TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict verifies that
+// re-running the backfill for the same block range doesn't produce duplicate rows
+// or errors. This exercises the ON CONFLICT DO NOTHING clause in UpsertPrices
+// through the full service path.
+func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	logger := testutil.DiscardLogger()
+
+	oracleID := testutil.SeedOracle(t, ctx, pool, "test-dup-safe", "Test Dup Safe", 1, "0x0000000000000000000000000000000000000AAA")
+	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000091", "DUP1", 18)
+	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000092", "DUP2", 18)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
+
+	_, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`)
+	if err != nil {
+		t.Fatalf("failed to disable sparklend oracle: %v", err)
+	}
+
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
+	if err != nil {
+		t.Fatalf("failed to create repository: %v", err)
+	}
+
+	newService := func() *Service {
+		svc, err := NewService(
+			Config{Concurrency: 1, BatchSize: 100, Logger: logger},
+			integrationMockHeaderFetcher(),
+			integrationMockMulticallFactory(t, 2),
+			repo,
+		)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		return svc
+	}
+
+	// First run: blocks 100-104
+	if err := newService().Run(ctx, 100, 104); err != nil {
+		t.Fatalf("Run (first): %v", err)
+	}
+
+	var countFirst int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&countFirst)
+	if err != nil {
+		t.Fatalf("failed to query count: %v", err)
+	}
+	// 5 blocks × 2 tokens = 10
+	if countFirst != 10 {
+		t.Fatalf("expected 10 after first run, got %d", countFirst)
+	}
+
+	// Second run: same range. GetLatestBlock from DB returns 104.
+	// Resume condition: latestBlock(104) < toBlock(104) is false → all blocks re-processed.
+	// ON CONFLICT DO NOTHING prevents duplicate rows.
+	if err := newService().Run(ctx, 100, 104); err != nil {
+		t.Fatalf("Run (second): %v", err)
+	}
+
+	var countSecond int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&countSecond)
+	if err != nil {
+		t.Fatalf("failed to query count: %v", err)
+	}
+
+	// ON CONFLICT DO NOTHING: count must be unchanged
+	if countSecond != countFirst {
+		t.Errorf("expected same count after idempotent re-run: first=%d, second=%d", countFirst, countSecond)
+	}
+}
+
 func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)

@@ -1511,6 +1511,70 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestRun_DuplicateBlocksSafeWithIdempotentUpsert
+// ---------------------------------------------------------------------------
+
+// TestRun_DuplicateBlocksSafeWithIdempotentUpsert verifies that re-processing
+// the same block range succeeds without error. When GetLatestBlock returns a value
+// equal to toBlock (not strictly less), the resume logic does not skip ahead, so all
+// blocks are re-sent to UpsertPrices. The service relies on the repository's
+// ON CONFLICT DO NOTHING to deduplicate — this test proves that the service
+// correctly sends duplicate data without erroring.
+func TestRun_DuplicateBlocksSafeWithIdempotentUpsert(t *testing.T) {
+	repo := defaultRepoSetup()
+
+	header := &mockHeaderFetcher{
+		headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
+			return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
+		},
+	}
+
+	mcFactory := func() (outbound.Multicaller, error) {
+		return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
+	}
+
+	svc, err := NewService(Config{
+		Concurrency: 1,
+		BatchSize:   100,
+		Logger:      testutil.DiscardLogger(),
+	}, header, mcFactory, repo)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	// First run: blocks 100-104
+	err = svc.Run(context.Background(), 100, 104)
+	if err != nil {
+		t.Fatalf("Run (first): %v", err)
+	}
+
+	countAfterFirst := len(repo.getUpserted())
+	if countAfterFirst != 10 { // 5 blocks x 2 tokens
+		t.Fatalf("expected 10 prices after first run, got %d", countAfterFirst)
+	}
+
+	// Simulate GetLatestBlock returning toBlock (104). The resume condition
+	// requires latestBlock < toBlock (104 < 104 = false), so no blocks are
+	// skipped — all 5 blocks are re-processed and sent to UpsertPrices again.
+	repo.getLatestBlockFn = func(_ context.Context, _ int64) (int64, error) {
+		return 104, nil
+	}
+
+	// Second run: same block range
+	err = svc.Run(context.Background(), 100, 104)
+	if err != nil {
+		t.Fatalf("Run (second): %v", err)
+	}
+
+	// The mock repo accumulated 20 total entries (10 from each run).
+	// In production, ON CONFLICT DO NOTHING deduplicates these.
+	countAfterSecond := len(repo.getUpserted())
+	if countAfterSecond != 20 {
+		t.Errorf("expected 20 total upserted prices (10 per run), got %d", countAfterSecond)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TestComputeOracleBlockRanges
 // ---------------------------------------------------------------------------
 
