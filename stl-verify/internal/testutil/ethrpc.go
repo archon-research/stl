@@ -26,6 +26,10 @@ type JSONRPCRequest struct {
 // StartMockEthRPC creates a mock Ethereum node that handles multicall3 and
 // block header requests. Each block returns unique prices so change detection
 // doesn't filter them out.
+//
+// The mock auto-detects whether the caller uses batch getAssetsPrices (1 inner
+// call) or individual getAssetPrice calls (N inner calls) and responds with
+// the appropriate format.
 func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 	t.Helper()
 
@@ -51,23 +55,40 @@ func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 		switch req.Method {
 		case "eth_call":
 			blockNum := parseBlockFromEthCall(req.Params)
-
-			prices := make([]*big.Int, numTokens)
-			for i := range prices {
-				prices[i] = new(big.Int).Mul(
-					big.NewInt(1000+blockNum*10+int64(i)),
-					new(big.Int).SetInt64(1e8),
-				)
-			}
-			pricesData, _ := oracleABI.Methods["getAssetsPrices"].Outputs.Pack(prices)
+			numCalls := countMulticallInnerCalls(req.Params)
 
 			type Result struct {
 				Success    bool
 				ReturnData []byte
 			}
-			aggResult, _ := multicallABI.Methods["aggregate3"].Outputs.Pack([]Result{
-				{Success: true, ReturnData: pricesData},
-			})
+
+			var aggResult []byte
+			if numCalls == 1 {
+				// Batch mode: single getAssetsPrices call returning all prices
+				prices := make([]*big.Int, numTokens)
+				for i := range prices {
+					prices[i] = new(big.Int).Mul(
+						big.NewInt(1000+blockNum*10+int64(i)),
+						new(big.Int).SetInt64(1e8),
+					)
+				}
+				pricesData, _ := oracleABI.Methods["getAssetsPrices"].Outputs.Pack(prices)
+				aggResult, _ = multicallABI.Methods["aggregate3"].Outputs.Pack([]Result{
+					{Success: true, ReturnData: pricesData},
+				})
+			} else {
+				// Individual mode: N getAssetPrice calls, one per token
+				results := make([]Result, numCalls)
+				for i := range results {
+					price := new(big.Int).Mul(
+						big.NewInt(1000+blockNum*10+int64(i)),
+						new(big.Int).SetInt64(1e8),
+					)
+					priceData, _ := oracleABI.Methods["getAssetPrice"].Outputs.Pack(price)
+					results[i] = Result{Success: true, ReturnData: priceData}
+				}
+				aggResult, _ = multicallABI.Methods["aggregate3"].Outputs.Pack(results)
+			}
 
 			resultHex := "0x" + hex.EncodeToString(aggResult)
 			resultJSON, _ := json.Marshal(resultHex)
@@ -124,6 +145,42 @@ func writeBlockHeaderResponse(w http.ResponseWriter, id json.RawMessage, blockNu
 	}
 	headerJSON, _ := json.Marshal(header)
 	WriteRPCResult(w, id, json.RawMessage(headerJSON))
+}
+
+// countMulticallInnerCalls extracts the number of inner calls from an eth_call
+// request by reading the array length from the ABI-encoded aggregate3 input.
+func countMulticallInnerCalls(params json.RawMessage) int {
+	var p []json.RawMessage
+	if err := json.Unmarshal(params, &p); err != nil || len(p) < 1 {
+		return 1
+	}
+	var callObj map[string]interface{}
+	if err := json.Unmarshal(p[0], &callObj); err != nil {
+		return 1
+	}
+	// go-ethereum may use "data" or "input" for the calldata field
+	dataHex, _ := callObj["data"].(string)
+	if dataHex == "" {
+		dataHex, _ = callObj["input"].(string)
+	}
+	if len(dataHex) < 10 {
+		return 1
+	}
+	dataBytes, err := hex.DecodeString(strings.TrimPrefix(dataHex, "0x"))
+	if err != nil {
+		return 1
+	}
+	// Layout: 4-byte selector + 32-byte offset + 32-byte array length + ...
+	// Read the array length at bytes 36-68.
+	if len(dataBytes) < 68 {
+		return 1
+	}
+	arrayLen := new(big.Int).SetBytes(dataBytes[36:68])
+	n := int(arrayLen.Int64())
+	if n < 1 {
+		return 1
+	}
+	return n
 }
 
 func parseBlockFromEthCall(params json.RawMessage) int64 {

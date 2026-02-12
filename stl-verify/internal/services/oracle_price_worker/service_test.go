@@ -57,19 +57,20 @@ func (m *mockConsumer) Close() error {
 
 // mockRepo implements outbound.OnchainPriceRepository.
 type mockRepo struct {
-	mu                            sync.Mutex
-	getOracleFn                   func(ctx context.Context, name string) (*entity.Oracle, error)
-	getEnabledAssetsFn            func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
-	getLatestPricesFn             func(ctx context.Context, oracleID int64) (map[int64]float64, error)
-	getLatestBlockFn              func(ctx context.Context, oracleID int64) (int64, error)
-	getTokenAddressesFn           func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
-	upsertPricesFn                func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
-	getAllEnabledOraclesFn        func(ctx context.Context) ([]*entity.Oracle, error)
-	getOracleByAddressFn          func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
-	insertOracleFn                func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
-	getAllActiveProtocolOraclesFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
-	insertProtocolOracleBindingFn func(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
-	copyOracleAssetsFn            func(ctx context.Context, fromOracleID, toOracleID int64) error
+	mu                             sync.Mutex
+	getOracleFn                    func(ctx context.Context, name string) (*entity.Oracle, error)
+	getEnabledAssetsFn             func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
+	getLatestPricesFn              func(ctx context.Context, oracleID int64) (map[int64]float64, error)
+	getLatestBlockFn               func(ctx context.Context, oracleID int64) (int64, error)
+	getTokenAddressesFn            func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
+	upsertPricesFn                 func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
+	getAllEnabledOraclesFn         func(ctx context.Context) ([]*entity.Oracle, error)
+	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
+	insertOracleFn                 func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
+	getAllActiveProtocolOraclesFn  func(ctx context.Context) ([]*entity.ProtocolOracle, error)
+	insertProtocolOracleBindingFn  func(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
+	copyOracleAssetsFn             func(ctx context.Context, fromOracleID, toOracleID int64) error
+	getAllProtocolOracleBindingsFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
 
 	upsertPricesCalls int
 	lastUpserted      []*entity.OnchainTokenPrice
@@ -161,6 +162,13 @@ func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleI
 		return m.copyOracleAssetsFn(ctx, fromOracleID, toOracleID)
 	}
 	return errors.New("CopyOracleAssets not mocked")
+}
+
+func (m *mockRepo) GetAllProtocolOracleBindings(ctx context.Context) ([]*entity.ProtocolOracle, error) {
+	if m.getAllProtocolOracleBindingsFn != nil {
+		return m.getAllProtocolOracleBindingsFn(ctx)
+	}
+	return nil, nil
 }
 
 // ---------------------------------------------------------------------------

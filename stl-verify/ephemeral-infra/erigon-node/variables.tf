@@ -7,7 +7,7 @@ variable "aws_region" {
 variable "instance_type" {
   description = "EC2 instance type (must be c8gd family for NVMe instance store)"
   type        = string
-  default     = "c8gd.16xlarge"
+  default     = "c8gd.48xlarge"
 }
 
 variable "main_infra_prefix" {
@@ -32,6 +32,12 @@ variable "key_name" {
   description = "SSH key pair name for EC2 access (optional, using Tailscale instead)"
   type        = string
   default     = null
+}
+
+variable "worker_instance_type" {
+  description = "EC2 instance type for the backfill worker"
+  type        = string
+  default     = "t4g.large"
 }
 
 variable "environment" {

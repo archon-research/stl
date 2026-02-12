@@ -21,6 +21,20 @@ func PackAssetPrices(t *testing.T, prices []*big.Int) []byte {
 	return data
 }
 
+// PackAssetPrice ABI-encodes a single price as getAssetPrice() return data (uint256).
+func PackAssetPrice(t *testing.T, price *big.Int) []byte {
+	t.Helper()
+	oracleABI, err := abis.GetAaveOracleABI()
+	if err != nil {
+		t.Fatalf("loading oracle ABI: %v", err)
+	}
+	data, err := oracleABI.Methods["getAssetPrice"].Outputs.Pack(price)
+	if err != nil {
+		t.Fatalf("packing price: %v", err)
+	}
+	return data
+}
+
 // MulticallResult matches the multicall3 aggregate3 output tuple.
 type MulticallResult struct {
 	Success    bool

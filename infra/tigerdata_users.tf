@@ -52,6 +52,12 @@ resource "aws_secretsmanager_secret_version" "tigerdata_app" {
     connection_url = "postgres://stl_read_write:${urlencode(random_password.stl_read_write.result)}@${timescale_service.main.hostname}:${timescale_service.main.port}/tsdb?sslmode=require"
     pooler_url     = "postgres://stl_read_write:${urlencode(random_password.stl_read_write.result)}@${timescale_service.main.pooler_hostname}:${timescale_service.main.port}/tsdb?sslmode=require"
   })
+
+  lifecycle {
+    # Hostname/port may show as changed during resize but typically stay the same.
+    # To force an update, use: tofu taint aws_secretsmanager_secret_version.tigerdata_app
+    ignore_changes = [secret_string]
+  }
 }
 
 resource "aws_secretsmanager_secret" "tigerdata_readonly" {
@@ -81,6 +87,12 @@ resource "aws_secretsmanager_secret_version" "tigerdata_readonly" {
     pooler_url             = "postgres://stl_read_only:${urlencode(random_password.stl_read_only.result)}@${timescale_service.main.pooler_hostname}:${timescale_service.main.port}/tsdb?sslmode=require"
     replica_connection_url = try(timescale_service.main.replica_hostname, null) != null ? "postgres://stl_read_only:${urlencode(random_password.stl_read_only.result)}@${timescale_service.main.replica_hostname}:${timescale_service.main.port}/tsdb?sslmode=require" : ""
   })
+
+  lifecycle {
+    # Hostname/port may show as changed during resize but typically stay the same.
+    # To force an update, use: tofu taint aws_secretsmanager_secret_version.tigerdata_readonly
+    ignore_changes = [secret_string]
+  }
 }
 
 # -----------------------------------------------------------------------------

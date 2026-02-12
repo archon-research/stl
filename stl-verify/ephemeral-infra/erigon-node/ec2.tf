@@ -27,6 +27,14 @@ resource "aws_security_group" "erigon" {
   description = "Security group for Erigon archive node"
   vpc_id      = data.aws_vpc.main.id
 
+  # Erigon RPC: allow worker → Erigon within this security group
+  ingress {
+    from_port = 8545
+    to_port   = 8545
+    protocol  = "tcp"
+    self      = true
+  }
+
   # All outbound: covers Tailscale, NAT (torrent snapshot downloads, packages), S3 endpoint,
   # and TigerData access via VPC peering route.
   egress {

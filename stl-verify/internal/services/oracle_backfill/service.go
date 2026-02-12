@@ -53,6 +53,14 @@ type oracleWorkUnit struct {
 	oracleAddr common.Address
 	tokenAddrs []common.Address
 	tokenIDs   []int64
+	validFrom  int64 // earliest block to query (0 = no lower bound)
+	validTo    int64 // latest block to query (0 = no upper bound)
+}
+
+// oracleBlockRange represents the valid block range for an oracle across all protocols.
+type oracleBlockRange struct {
+	validFrom int64
+	validTo   int64 // 0 = no upper bound (still active)
 }
 
 // Service orchestrates parallel oracle price backfilling.
@@ -141,7 +149,14 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 		return nil, fmt.Errorf("getting enabled oracles: %w", err)
 	}
 
-	// Deduplicate by oracle ID (a protocol oracle may also exist as a generic oracle)
+	// Load all protocol-oracle bindings to compute valid block ranges.
+	bindings, err := s.repo.GetAllProtocolOracleBindings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting protocol oracle bindings: %w", err)
+	}
+	blockRanges := computeOracleBlockRanges(bindings)
+
+	// Build work units, deduplicating by oracle ID (a protocol oracle may also exist as a generic oracle).
 	seen := make(map[int64]bool)
 	var workUnits []*oracleWorkUnit
 
@@ -156,9 +171,18 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 			s.logger.Warn("skipping oracle", "name", oracle.Name, "error", err)
 			continue
 		}
-		if wu != nil {
-			workUnits = append(workUnits, wu)
+		if wu == nil {
+			continue
 		}
+
+		// Set valid block ranges from deployment block and protocol bindings.
+		wu.validFrom = oracle.DeploymentBlock
+		if br, ok := blockRanges[oracle.ID]; ok {
+			wu.validFrom = max(br.validFrom, wu.validFrom)
+			wu.validTo = br.validTo
+		}
+
+		workUnits = append(workUnits, wu)
 	}
 
 	return workUnits, nil
@@ -198,17 +222,15 @@ func (s *Service) buildWorkUnit(ctx context.Context, oracle *entity.Oracle) (*or
 }
 
 func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBlock, toBlock int64) error {
-	// Resume support: skip already-processed blocks
-	latestBlock, err := s.repo.GetLatestBlock(ctx, wu.oracle.ID)
-	if err != nil {
-		return fmt.Errorf("getting latest block: %w", err)
-	}
-	if latestBlock > 0 && latestBlock >= fromBlock {
-		s.logger.Info("resuming from latest stored block",
+	// Clamp the requested block range to this oracle's valid range.
+	var ok bool
+	fromBlock, toBlock, ok = clampBlockRange(fromBlock, toBlock, wu.validFrom, wu.validTo)
+	if !ok {
+		s.logger.Info("no blocks to process after clamping to oracle valid range",
 			"oracle", wu.oracle.Name,
-			"latestStored", latestBlock,
-			"requestedFrom", fromBlock)
-		fromBlock = latestBlock + 1
+			"validFrom", wu.validFrom,
+			"validTo", wu.validTo)
+		return nil
 	}
 
 	totalBlocks := toBlock - fromBlock + 1
@@ -291,6 +313,81 @@ func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBloc
 	return nil
 }
 
+// computeOracleBlockRanges groups protocol-oracle bindings by protocol, then
+// determines each oracle's valid block range as the union across all protocols.
+//
+// For each protocol, bindings are sorted by from_block. An oracle is "superseded"
+// when a newer binding exists for the same protocol; its valid-to for that protocol
+// is the next binding's from_block - 1. If the oracle is the latest binding for
+// any protocol, it has no upper bound (validTo = 0).
+//
+// Across protocols, the oracle's range is the widest (union):
+//   - validFrom = min(from_block) across all protocol bindings
+//   - validTo = 0 if active in any protocol, else max(superseded_block)
+func computeOracleBlockRanges(bindings []*entity.ProtocolOracle) map[int64]*oracleBlockRange {
+	// Group bindings by protocol (already ordered by from_block from DB).
+	byProtocol := make(map[int64][]*entity.ProtocolOracle)
+	for _, b := range bindings {
+		byProtocol[b.ProtocolID] = append(byProtocol[b.ProtocolID], b)
+	}
+
+	// Per-oracle: track min validFrom and whether it's still active somewhere.
+	type rangeAccum struct {
+		minFrom     int64
+		maxTo       int64
+		stillActive bool
+	}
+	accum := make(map[int64]*rangeAccum)
+
+	for _, protocolBindings := range byProtocol {
+		for i, b := range protocolBindings {
+			a, ok := accum[b.OracleID]
+			if !ok {
+				a = &rangeAccum{minFrom: b.FromBlock}
+				accum[b.OracleID] = a
+			}
+			if b.FromBlock < a.minFrom {
+				a.minFrom = b.FromBlock
+			}
+
+			isLast := i == len(protocolBindings)-1
+			if isLast {
+				// Oracle is still active in this protocol.
+				a.stillActive = true
+			} else {
+				// Superseded: next binding's from_block - 1.
+				supersededAt := protocolBindings[i+1].FromBlock - 1
+				if supersededAt > a.maxTo {
+					a.maxTo = supersededAt
+				}
+			}
+		}
+	}
+
+	result := make(map[int64]*oracleBlockRange, len(accum))
+	for oracleID, a := range accum {
+		r := &oracleBlockRange{validFrom: a.minFrom}
+		if !a.stillActive {
+			r.validTo = a.maxTo
+		}
+		result[oracleID] = r
+	}
+	return result
+}
+
+// clampBlockRange restricts the requested [from, to] range to the oracle's valid
+// [validFrom, validTo] range. Returns the clamped from/to and whether any blocks
+// remain (ok=true means from <= to after clamping).
+func clampBlockRange(from, to, validFrom, validTo int64) (int64, int64, bool) {
+	if validFrom > 0 {
+		from = max(from, validFrom)
+	}
+	if validTo > 0 {
+		to = min(to, validTo)
+	}
+	return from, to, from <= to
+}
+
 type backfillStats struct {
 	blocksProcessed atomic.Int64
 	blocksFailed    atomic.Int64
@@ -368,8 +465,9 @@ func (s *Service) processBlock(
 	priceDecimals int,
 	blockNum int64,
 ) ([]*entity.OnchainTokenPrice, error) {
-	// Fetch oracle prices via multicall
-	rawPrices, err := blockchain.FetchOraclePrices(
+	// Fetch oracle prices via individual multicall calls (each with AllowFailure: true).
+	// Tokens without price sources at historical blocks return Success: false and are skipped.
+	results, err := blockchain.FetchOraclePricesIndividual(
 		ctx, mc, s.oracleABI,
 		oracleAddr,
 		tokenAddrs, blockNum,
@@ -378,8 +476,17 @@ func (s *Service) processBlock(
 		return nil, fmt.Errorf("fetching oracle prices: %w", err)
 	}
 
-	if len(rawPrices) != len(tokenIDs) {
-		return nil, fmt.Errorf("price count mismatch: expected %d, got %d", len(tokenIDs), len(rawPrices))
+	// Collect successful token indices in a single pass.
+	// Fast path: if no token succeeded, skip the header fetch entirely.
+	// This avoids a wasted RPC call for blocks where the oracle is deployed but not yet configured.
+	var successIdx []int
+	for i, r := range results {
+		if r.Success {
+			successIdx = append(successIdx, i)
+		}
+	}
+	if len(successIdx) == 0 {
+		return nil, nil
 	}
 
 	// Get block timestamp
@@ -389,9 +496,9 @@ func (s *Service) processBlock(
 	}
 	blockTimestamp := time.Unix(int64(header.Time), 0).UTC()
 
-	prices := make([]*entity.OnchainTokenPrice, 0, len(tokenIDs))
-	for i, rawPrice := range rawPrices {
-		priceUSD := blockchain.ConvertOraclePriceToUSD(rawPrice, priceDecimals)
+	prices := make([]*entity.OnchainTokenPrice, 0, len(successIdx))
+	for _, i := range successIdx {
+		priceUSD := blockchain.ConvertOraclePriceToUSD(results[i].Price, priceDecimals)
 
 		p, err := entity.NewOnchainTokenPrice(
 			tokenIDs[i],
@@ -459,9 +566,11 @@ func (s *Service) startProgressReporter(ctx context.Context, stats *backfillStat
 				if blocksPerSec > 0 {
 					eta = time.Duration(float64(remaining)/blocksPerSec) * time.Second
 				}
+				pct := float64(processed+failed) / float64(totalBlocks) * 100
 
 				s.logger.Info("progress",
 					"oracle", oracleName,
+					"pct", fmt.Sprintf("%.1f%%", pct),
 					"processed", processed,
 					"failed", failed,
 					"stored", stored,

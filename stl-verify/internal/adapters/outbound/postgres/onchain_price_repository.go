@@ -343,6 +343,32 @@ func (r *OnchainPriceRepository) InsertProtocolOracleBinding(ctx context.Context
 	return binding, nil
 }
 
+// GetAllProtocolOracleBindings retrieves ALL protocol-oracle bindings ordered by protocol and from_block.
+func (r *OnchainPriceRepository) GetAllProtocolOracleBindings(ctx context.Context) ([]*entity.ProtocolOracle, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, protocol_id, oracle_id, from_block, created_at
+		FROM protocol_oracle
+		ORDER BY protocol_id, from_block
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("querying protocol oracle bindings: %w", err)
+	}
+	defer rows.Close()
+
+	var bindings []*entity.ProtocolOracle
+	for rows.Next() {
+		var po entity.ProtocolOracle
+		if err := rows.Scan(&po.ID, &po.ProtocolID, &po.OracleID, &po.FromBlock, &po.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scanning protocol oracle binding: %w", err)
+		}
+		bindings = append(bindings, &po)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating protocol oracle bindings: %w", err)
+	}
+	return bindings, nil
+}
+
 // CopyOracleAssets copies all enabled oracle_asset rows from one oracle to another.
 func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
 	_, err := r.pool.Exec(ctx, `
