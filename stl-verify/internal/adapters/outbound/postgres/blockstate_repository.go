@@ -34,21 +34,17 @@ var _ outbound.BlockStateRepository = (*BlockStateRepository)(nil)
 
 // BlockStateRepository is a PostgreSQL implementation of the outbound.BlockStateRepository port.
 type BlockStateRepository struct {
-	pool   *pgxpool.Pool
-	logger *slog.Logger
+	pool    *pgxpool.Pool
+	chainID int64
+	logger  *slog.Logger
 }
 
 // NewBlockStateRepository creates a new PostgreSQL block state repository.
-func NewBlockStateRepository(pool *pgxpool.Pool, logger *slog.Logger) *BlockStateRepository {
+func NewBlockStateRepository(pool *pgxpool.Pool, chainID int64, logger *slog.Logger) *BlockStateRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &BlockStateRepository{pool: pool, logger: logger}
-}
-
-// closeRows closes database rows and logs any error.
-func (r *BlockStateRepository) closeRows(rows pgx.Rows) {
-	rows.Close()
+	return &BlockStateRepository{pool: pool, chainID: chainID, logger: logger}
 }
 
 // Pool returns the underlying database pool for advanced queries.
@@ -108,9 +104,14 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 
 // saveBlockOnce attempts a single save operation with serializable isolation.
 func (r *BlockStateRepository) saveBlockOnce(ctx context.Context, state outbound.BlockState) (int, error) {
-	// Use a transaction with SERIALIZABLE isolation to prevent version race conditions.
-	// This ensures that concurrent SaveBlock calls for the same block number will be serialized.
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	// Use READ COMMITTED isolation with an advisory lock to serialize version assignment.
+	// TimescaleDB hypertables use chunk-level constraints, so SERIALIZABLE isolation
+	// alone cannot detect version races in the assign_block_version() trigger — it
+	// produces unique constraint violations (23505) instead of serialization failures
+	// (40001). The advisory lock serializes inserts for the same (chain_id, number),
+	// and READ COMMITTED allows the trigger to see committed changes from the
+	// lock-holder (SERIALIZABLE snapshots would not).
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -120,10 +121,16 @@ func (r *BlockStateRepository) saveBlockOnce(ctx context.Context, state outbound
 		}
 	}()
 
+	// Acquire advisory lock to serialize version assignment for this block number.
+	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::int, $2::int)`, r.chainID, state.Number)
+	if err != nil {
+		return 0, fmt.Errorf("failed to acquire advisory lock: %w", err)
+	}
+
 	// Check if a block with this hash already exists (duplicate detection).
 	// Done inside the serializable transaction to prevent TOCTOU races.
 	var existingVersion int
-	err = tx.QueryRow(ctx, `SELECT version FROM block_states WHERE hash = $1`, state.Hash).Scan(&existingVersion)
+	err = tx.QueryRow(ctx, `SELECT version FROM block_states WHERE chain_id = $1 AND hash = $2`, r.chainID, state.Hash).Scan(&existingVersion)
 	if err == nil {
 		// Block already exists - return its version without updating
 		return existingVersion, nil
@@ -134,12 +141,12 @@ func (r *BlockStateRepository) saveBlockOnce(ctx context.Context, state outbound
 	// Insert the block - the trigger will assign the version automatically.
 	// RETURNING gives us the version that was assigned by the trigger.
 	query := `
-		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO block_states (chain_id, number, hash, parent_hash, received_at, is_orphaned, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING version
 	`
 	var version int
-	err = tx.QueryRow(ctx, query, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned).Scan(&version)
+	err = tx.QueryRow(ctx, query, r.chainID, state.Number, state.Hash, state.ParentHash, state.ReceivedAt, state.IsOrphaned, time.Unix(state.BlockTimestamp, 0).UTC()).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("failed to save block state: %w", err)
 	}
@@ -183,12 +190,12 @@ func (r *BlockStateRepository) GetLastBlock(ctx context.Context) (*outbound.Bloc
 	query := `
 		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
-		WHERE NOT is_orphaned
+		WHERE chain_id = $1 AND NOT is_orphaned
 		ORDER BY number DESC
 		LIMIT 1
 	`
 	var state outbound.BlockState
-	err := r.pool.QueryRow(ctx, query).Scan(
+	err := r.pool.QueryRow(ctx, query, r.chainID).Scan(
 		&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
 		&state.BlockPublished)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -205,10 +212,10 @@ func (r *BlockStateRepository) GetBlockByNumber(ctx context.Context, number int6
 	query := `
 		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
-		WHERE number = $1 AND NOT is_orphaned
+		WHERE chain_id = $1 AND number = $2 AND NOT is_orphaned
 	`
 	var state outbound.BlockState
-	err := r.pool.QueryRow(ctx, query, number).Scan(
+	err := r.pool.QueryRow(ctx, query, r.chainID, number).Scan(
 		&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
 		&state.BlockPublished)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -237,10 +244,10 @@ func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) 
 	query := `
 		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
-		WHERE hash = $1
+		WHERE chain_id = $1 AND hash = $2
 	`
 	var state outbound.BlockState
-	err := r.pool.QueryRow(ctx, query, hash).Scan(
+	err := r.pool.QueryRow(ctx, query, r.chainID, hash).Scan(
 		&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
 		&state.BlockPublished)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -259,9 +266,9 @@ func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) 
 // GetBlockVersionCount returns the next version number for blocks at a given number.
 // If no blocks exist at that number, returns 0. Otherwise returns MAX(version) + 1.
 func (r *BlockStateRepository) GetBlockVersionCount(ctx context.Context, number int64) (int, error) {
-	query := `SELECT COALESCE(MAX(version), -1) + 1 FROM block_states WHERE number = $1`
+	query := `SELECT COALESCE(MAX(version), -1) + 1 FROM block_states WHERE chain_id = $1 AND number = $2`
 	var count int
-	err := r.pool.QueryRow(ctx, query, number).Scan(&count)
+	err := r.pool.QueryRow(ctx, query, r.chainID, number).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get block version count: %w", err)
 	}
@@ -273,15 +280,15 @@ func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) (
 	query := `
 		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
-		WHERE NOT is_orphaned
+		WHERE chain_id = $1 AND NOT is_orphaned
 		ORDER BY number DESC
-		LIMIT $1
+		LIMIT $2
 	`
-	rows, err := r.pool.Query(ctx, query, limit)
+	rows, err := r.pool.Query(ctx, query, r.chainID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get recent blocks: %w", err)
 	}
-	defer r.closeRows(rows)
+	defer rows.Close()
 
 	var states []outbound.BlockState
 	for rows.Next() {
@@ -301,8 +308,8 @@ func (r *BlockStateRepository) GetRecentBlocks(ctx context.Context, limit int) (
 
 // MarkBlockOrphaned marks a block as orphaned during a reorg.
 func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash string) error {
-	query := `UPDATE block_states SET is_orphaned = TRUE WHERE hash = $1`
-	_, err := r.pool.Exec(ctx, query, hash)
+	query := `UPDATE block_states SET is_orphaned = TRUE WHERE chain_id = $1 AND hash = $2`
+	_, err := r.pool.Exec(ctx, query, r.chainID, hash)
 	if err != nil {
 		return fmt.Errorf("failed to mark block orphaned: %w", err)
 	}
@@ -364,8 +371,8 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 
 // handleReorgAtomicOnce attempts a single reorg operation with SERIALIZABLE isolation.
 func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
-	// Use SERIALIZABLE isolation for consistency with SaveBlock
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	// Use READ COMMITTED with advisory lock, consistent with saveBlockOnce.
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -375,15 +382,15 @@ func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, common
 		}
 	}()
 
-	// 1. Acquire advisory lock for the new block number
-	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, newBlock.Number)
+	// 1. Acquire advisory lock namespaced by chain_id and block number
+	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::int, $2::int)`, r.chainID, newBlock.Number)
 	if err != nil {
 		return 0, fmt.Errorf("failed to acquire advisory lock: %w", err)
 	}
 
 	// 2. Check if this block hash already exists (idempotency)
 	var existingVersion int
-	err = tx.QueryRow(ctx, `SELECT version FROM block_states WHERE hash = $1`, newBlock.Hash).Scan(&existingVersion)
+	err = tx.QueryRow(ctx, `SELECT version FROM block_states WHERE chain_id = $1 AND hash = $2`, r.chainID, newBlock.Hash).Scan(&existingVersion)
 	if err == nil {
 		// Block already exists - commit and return existing version
 		if commitErr := tx.Commit(ctx); commitErr != nil {
@@ -396,17 +403,17 @@ func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, common
 
 	// 3. Save reorg event
 	reorgQuery := `
-		INSERT INTO reorg_events (detected_at, block_number, old_hash, new_hash, depth)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO reorg_events (chain_id, detected_at, block_number, old_hash, new_hash, depth)
+		VALUES ($1, $2, $3, $4, $5, $6)
 	`
-	_, err = tx.Exec(ctx, reorgQuery, event.DetectedAt, event.BlockNumber, event.OldHash, event.NewHash, event.Depth)
+	_, err = tx.Exec(ctx, reorgQuery, r.chainID, event.DetectedAt, event.BlockNumber, event.OldHash, event.NewHash, event.Depth)
 	if err != nil {
 		return 0, fmt.Errorf("failed to save reorg event: %w", err)
 	}
 
 	// 4. Mark old blocks as orphaned
-	orphanQuery := `UPDATE block_states SET is_orphaned = TRUE WHERE number > $1 AND NOT is_orphaned`
-	_, err = tx.Exec(ctx, orphanQuery, commonAncestor)
+	orphanQuery := `UPDATE block_states SET is_orphaned = TRUE WHERE chain_id = $1 AND number > $2 AND NOT is_orphaned`
+	_, err = tx.Exec(ctx, orphanQuery, r.chainID, commonAncestor)
 	if err != nil {
 		return 0, fmt.Errorf("failed to mark blocks orphaned: %w", err)
 	}
@@ -416,12 +423,12 @@ func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, common
 	// the correct version (MAX(version) + 1) atomically.
 	// We use RETURNING version to get the actually assigned version.
 	insertQuery := `
-		INSERT INTO block_states (number, hash, parent_hash, received_at, is_orphaned, version)
-		VALUES ($1, $2, $3, $4, $5, 0)
+		INSERT INTO block_states (chain_id, number, hash, parent_hash, received_at, is_orphaned, version, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 0, $7)
 		RETURNING version
 	`
 	var version int
-	err = tx.QueryRow(ctx, insertQuery, newBlock.Number, newBlock.Hash, newBlock.ParentHash, newBlock.ReceivedAt, newBlock.IsOrphaned).Scan(&version)
+	err = tx.QueryRow(ctx, insertQuery, r.chainID, newBlock.Number, newBlock.Hash, newBlock.ParentHash, newBlock.ReceivedAt, newBlock.IsOrphaned, time.Unix(newBlock.BlockTimestamp, 0).UTC()).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("failed to save new block state: %w", err)
 	}
@@ -438,14 +445,15 @@ func (r *BlockStateRepository) GetReorgEvents(ctx context.Context, limit int) ([
 	query := `
 		SELECT id, detected_at, block_number, old_hash, new_hash, depth
 		FROM reorg_events
+		WHERE chain_id = $1
 		ORDER BY detected_at DESC
-		LIMIT $1
+		LIMIT $2
 	`
-	rows, err := r.pool.Query(ctx, query, limit)
+	rows, err := r.pool.Query(ctx, query, r.chainID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get reorg events: %w", err)
 	}
-	defer r.closeRows(rows)
+	defer rows.Close()
 
 	var events []outbound.ReorgEvent
 	for rows.Next() {
@@ -466,14 +474,14 @@ func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, f
 	query := `
 		SELECT id, detected_at, block_number, old_hash, new_hash, depth
 		FROM reorg_events
-		WHERE block_number >= $1 AND block_number <= $2
+		WHERE chain_id = $1 AND block_number >= $2 AND block_number <= $3
 		ORDER BY block_number DESC, detected_at DESC
 	`
-	rows, err := r.pool.Query(ctx, query, fromBlock, toBlock)
+	rows, err := r.pool.Query(ctx, query, r.chainID, fromBlock, toBlock)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get reorg events by block range: %w", err)
 	}
-	defer r.closeRows(rows)
+	defer rows.Close()
 
 	var events []outbound.ReorgEvent
 	for rows.Next() {
@@ -494,15 +502,15 @@ func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int)
 	query := `
 		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
-		WHERE is_orphaned
+		WHERE chain_id = $1 AND is_orphaned
 		ORDER BY received_at DESC
-		LIMIT $1
+		LIMIT $2
 	`
-	rows, err := r.pool.Query(ctx, query, limit)
+	rows, err := r.pool.Query(ctx, query, r.chainID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get orphaned blocks: %w", err)
 	}
-	defer r.closeRows(rows)
+	defer rows.Close()
 
 	var states []outbound.BlockState
 	for rows.Next() {
@@ -523,8 +531,8 @@ func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int)
 // PruneOldBlocks deletes canonical blocks older than the given number.
 // Orphaned blocks are kept for historical analysis.
 func (r *BlockStateRepository) PruneOldBlocks(ctx context.Context, keepAfter int64) error {
-	query := `DELETE FROM block_states WHERE number < $1 AND NOT is_orphaned`
-	_, err := r.pool.Exec(ctx, query, keepAfter)
+	query := `DELETE FROM block_states WHERE chain_id = $1 AND number < $2 AND NOT is_orphaned`
+	_, err := r.pool.Exec(ctx, query, r.chainID, keepAfter)
 	if err != nil {
 		return fmt.Errorf("failed to prune old blocks: %w", err)
 	}
@@ -533,8 +541,8 @@ func (r *BlockStateRepository) PruneOldBlocks(ctx context.Context, keepAfter int
 
 // PruneOldReorgEvents deletes reorg events older than the given time.
 func (r *BlockStateRepository) PruneOldReorgEvents(ctx context.Context, olderThan time.Time) error {
-	query := `DELETE FROM reorg_events WHERE detected_at < $1`
-	_, err := r.pool.Exec(ctx, query, olderThan)
+	query := `DELETE FROM reorg_events WHERE chain_id = $1 AND detected_at < $2`
+	_, err := r.pool.Exec(ctx, query, r.chainID, olderThan)
 	if err != nil {
 		return fmt.Errorf("failed to prune old reorg events: %w", err)
 	}
@@ -543,9 +551,9 @@ func (r *BlockStateRepository) PruneOldReorgEvents(ctx context.Context, olderTha
 
 // GetMinBlockNumber returns the lowest canonical block number.
 func (r *BlockStateRepository) GetMinBlockNumber(ctx context.Context) (int64, error) {
-	query := `SELECT COALESCE(MIN(number), 0) FROM block_states WHERE NOT is_orphaned`
+	query := `SELECT COALESCE(MIN(number), 0) FROM block_states WHERE chain_id = $1 AND NOT is_orphaned`
 	var minNum int64
-	err := r.pool.QueryRow(ctx, query).Scan(&minNum)
+	err := r.pool.QueryRow(ctx, query, r.chainID).Scan(&minNum)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get min block number: %w", err)
 	}
@@ -554,9 +562,9 @@ func (r *BlockStateRepository) GetMinBlockNumber(ctx context.Context) (int64, er
 
 // GetMaxBlockNumber returns the highest canonical block number.
 func (r *BlockStateRepository) GetMaxBlockNumber(ctx context.Context) (int64, error) {
-	query := `SELECT COALESCE(MAX(number), 0) FROM block_states WHERE NOT is_orphaned`
+	query := `SELECT COALESCE(MAX(number), 0) FROM block_states WHERE chain_id = $1 AND NOT is_orphaned`
 	var maxNum int64
-	err := r.pool.QueryRow(ctx, query).Scan(&maxNum)
+	err := r.pool.QueryRow(ctx, query, r.chainID).Scan(&maxNum)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get max block number: %w", err)
 	}
@@ -567,7 +575,7 @@ func (r *BlockStateRepository) GetMaxBlockNumber(ctx context.Context) (int64, er
 // Blocks at or below this number are guaranteed to have no gaps.
 func (r *BlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64, error) {
 	var watermark int64
-	err := r.pool.QueryRow(ctx, `SELECT watermark FROM backfill_watermark WHERE id = 1`).Scan(&watermark)
+	err := r.pool.QueryRow(ctx, `SELECT watermark FROM backfill_watermark WHERE chain_id = $1`, r.chainID).Scan(&watermark)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get backfill watermark: %w", err)
 	}
@@ -577,7 +585,7 @@ func (r *BlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64,
 // SetBackfillWatermark updates the watermark to the given block number.
 // Should only be called after confirming all blocks up to this number exist.
 func (r *BlockStateRepository) SetBackfillWatermark(ctx context.Context, watermark int64) error {
-	_, err := r.pool.Exec(ctx, `UPDATE backfill_watermark SET watermark = $1 WHERE id = 1`, watermark)
+	_, err := r.pool.Exec(ctx, `UPDATE backfill_watermark SET watermark = $1 WHERE chain_id = $2`, watermark, r.chainID)
 	if err != nil {
 		return fmt.Errorf("failed to set backfill watermark: %w", err)
 	}
@@ -617,11 +625,11 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 		WITH blocks AS (
 			SELECT number
 			FROM block_states
-			WHERE NOT is_orphaned AND number >= $1 AND number <= $2
+			WHERE chain_id = $1 AND NOT is_orphaned AND number >= $2 AND number <= $3
 			ORDER BY number
 		),
 		gaps AS (
-			SELECT 
+			SELECT
 				LAG(number) OVER (ORDER BY number) + 1 AS gap_start,
 				number - 1 AS gap_end
 			FROM blocks
@@ -632,11 +640,11 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 		ORDER BY gap_start
 	`
 
-	rows, err := r.pool.Query(ctx, query, effectiveMin, maxBlock)
+	rows, err := r.pool.Query(ctx, query, r.chainID, effectiveMin, maxBlock)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find gaps: %w", err)
 	}
-	defer r.closeRows(rows)
+	defer rows.Close()
 
 	var gaps []outbound.BlockRange
 	for rows.Next() {
@@ -652,8 +660,8 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 
 	// Also check for gap at the beginning (if effectiveMin is not in the DB)
 	var firstBlock int64
-	checkQuery := `SELECT COALESCE(MIN(number), $2 + 1) FROM block_states WHERE NOT is_orphaned AND number >= $1 AND number <= $2`
-	if err := r.pool.QueryRow(ctx, checkQuery, effectiveMin, maxBlock).Scan(&firstBlock); err != nil {
+	checkQuery := `SELECT COALESCE(MIN(number), $3 + 1) FROM block_states WHERE chain_id = $1 AND NOT is_orphaned AND number >= $2 AND number <= $3`
+	if err := r.pool.QueryRow(ctx, checkQuery, r.chainID, effectiveMin, maxBlock).Scan(&firstBlock); err != nil {
 		return nil, fmt.Errorf("failed to check first block: %w", err)
 	}
 	if firstBlock > effectiveMin {
@@ -679,7 +687,7 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 				LAG(hash) OVER (ORDER BY number) as prev_hash,
 				LAG(number) OVER (ORDER BY number) as prev_number
 			FROM block_states
-			WHERE NOT is_orphaned AND number >= $1 AND number <= $2
+			WHERE chain_id = $1 AND NOT is_orphaned AND number >= $2 AND number <= $3
 		)
 		SELECT number, hash, parent_hash, prev_hash, prev_number
 		FROM ordered_blocks
@@ -692,7 +700,7 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 	var brokenBlock, prevBlockNum int64
 	var blockHash, parentHash, prevHash string
 
-	err := r.pool.QueryRow(ctx, query, fromBlock, toBlock).Scan(
+	err := r.pool.QueryRow(ctx, query, r.chainID, fromBlock, toBlock).Scan(
 		&brokenBlock, &blockHash, &parentHash, &prevHash, &prevBlockNum,
 	)
 	if err != nil {
@@ -721,7 +729,7 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 	)
 	defer span.End()
 
-	query := `UPDATE block_states SET block_published = TRUE WHERE hash = $1`
+	query := `UPDATE block_states SET block_published = TRUE WHERE chain_id = $1 AND hash = $2`
 
 	cfg := retry.Config{
 		MaxRetries:     3,
@@ -744,7 +752,7 @@ func (r *BlockStateRepository) MarkPublishComplete(ctx context.Context, hash str
 	}
 
 	err := retry.DoVoid(ctx, cfg, isRetryableError, onRetry, func() error {
-		result, err := r.pool.Exec(ctx, query, hash)
+		result, err := r.pool.Exec(ctx, query, r.chainID, hash)
 		if err != nil {
 			return err
 		}
@@ -769,17 +777,18 @@ func (r *BlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Contex
 	query := `
 		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
 		FROM block_states
-		WHERE NOT is_orphaned
+		WHERE chain_id = $1
+		  AND NOT is_orphaned
 		  AND NOT block_published
 		ORDER BY number ASC
-		LIMIT $1
+		LIMIT $2
 	`
 
-	rows, err := r.pool.Query(ctx, query, limit)
+	rows, err := r.pool.Query(ctx, query, r.chainID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blocks with incomplete publish: %w", err)
 	}
-	defer r.closeRows(rows)
+	defer rows.Close()
 
 	var states []outbound.BlockState
 	for rows.Next() {

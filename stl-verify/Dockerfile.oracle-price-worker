@@ -1,5 +1,5 @@
 # =============================================================================
-# Watcher Dockerfile
+# Oracle Price Worker Dockerfile
 # =============================================================================
 # Multi-stage build for minimal production image
 
@@ -29,8 +29,8 @@ COPY . .
 # Build the binary for target architecture (ARM64 for Fargate)
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s -extldflags '-static' -X main.GitCommit=${GIT_COMMIT} -X main.GitBranch=${GIT_BRANCH} -X main.BuildTime=${BUILD_TIME}" \
-    -o /watcher \
-    ./cmd/watcher
+    -o /oracle_price_worker \
+    ./cmd/oracle-price-worker
 
 # -----------------------------------------------------------------------------
 # Runtime Stage
@@ -46,13 +46,11 @@ RUN adduser -D -g '' appuser
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /watcher /app/watcher
+COPY --from=builder /oracle_price_worker /app/oracle_price_worker
 
 # Use non-root user
 USER appuser
 
-# Health check placeholder - actual health check in ECS task definition
-HEALTHCHECK NONE
+# Expose no ports - this is a background worker
 
-# Default command (can be overridden by ECS task definition)
-ENTRYPOINT ["/app/watcher"]
+ENTRYPOINT ["/app/oracle_price_worker"]

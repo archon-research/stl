@@ -100,7 +100,7 @@ func setupLargePostgres(b *testing.B) (*pgxpool.Pool, *postgres.BlockStateReposi
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	repo := postgres.NewBlockStateRepository(pool, nil)
+	repo := postgres.NewBlockStateRepository(pool, 1, nil)
 
 	// Run migrations
 	_, currentFile, _, _ := runtime.Caller(0)

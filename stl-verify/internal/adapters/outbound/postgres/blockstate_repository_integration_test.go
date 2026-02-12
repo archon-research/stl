@@ -18,7 +18,7 @@ func setupPostgres(t *testing.T) (*BlockStateRepository, func()) {
 	t.Helper()
 
 	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	repo := NewBlockStateRepository(pool, nil)
+	repo := NewBlockStateRepository(pool, 1, nil)
 	return repo, cleanup
 }
 

@@ -4,6 +4,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,6 +31,17 @@ type DBConfig struct {
 	// MaxConnIdleTime is the maximum amount of time a connection may be idle.
 	// Default: 1 minute
 	MaxConnIdleTime time.Duration
+}
+
+// LogValue implements slog.LogValuer to redact the URL (which contains credentials).
+func (c DBConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("url", "[REDACTED]"),
+		slog.Int("max_conns", int(c.MaxConns)),
+		slog.Int("min_conns", int(c.MinConns)),
+		slog.Duration("max_conn_lifetime", c.MaxConnLifetime),
+		slog.Duration("max_conn_idle_time", c.MaxConnIdleTime),
+	)
 }
 
 // DefaultDBConfig returns a DBConfig with sensible defaults.

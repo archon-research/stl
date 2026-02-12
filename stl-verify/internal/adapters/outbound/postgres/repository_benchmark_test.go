@@ -373,7 +373,7 @@ func BenchmarkProtocolRepository_UpsertSparkLendReserveData(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if err := repo.UpsertSparkLendReserveData(ctx, data); err != nil {
+				if err := repo.UpsertReserveData(ctx, data); err != nil {
 					b.Fatalf("upsert failed: %v", err)
 				}
 			}

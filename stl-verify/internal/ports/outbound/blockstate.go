@@ -19,6 +19,9 @@ type BlockState struct {
 	// ReceivedAt is when we received this block from the subscription.
 	ReceivedAt int64
 
+	// BlockTimestamp is the block's timestamp from the chain (Unix seconds).
+	BlockTimestamp int64
+
 	// IsOrphaned indicates this block was replaced during a chain reorganization.
 	IsOrphaned bool
 

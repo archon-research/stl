@@ -39,6 +39,9 @@ type BackfillConfig struct {
 	// This detects reorgs that happened while the service was down.
 	BoundaryCheckDepth int
 
+	// EnableTraces enables fetching execution traces (trace_block on supported nodes).
+	EnableTraces bool
+
 	// EnableBlobs enables caching blob sidecars (post-Dencun blocks on supported nodes).
 	EnableBlobs bool
 
@@ -437,13 +440,20 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 
 	receivedAt := time.Now()
 
+	// Parse block timestamp for deterministic created_at
+	blockTimestamp, err := hexutil.ParseInt64(header.Timestamp)
+	if err != nil {
+		return fmt.Errorf("failed to parse block timestamp for block %d: %w", blockNum, err)
+	}
+
 	// Save block state to DB - version is assigned atomically to prevent race conditions
 	state := outbound.BlockState{
-		Number:     blockNum,
-		Hash:       header.Hash,
-		ParentHash: header.ParentHash,
-		ReceivedAt: receivedAt.Unix(),
-		IsOrphaned: false,
+		Number:         blockNum,
+		Hash:           header.Hash,
+		ParentHash:     header.ParentHash,
+		ReceivedAt:     receivedAt.Unix(),
+		BlockTimestamp: blockTimestamp,
+		IsOrphaned:     false,
 	}
 
 	version, err := s.stateRepo.SaveBlock(ctx, state)
@@ -671,11 +681,14 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 	if bd.Receipts == nil {
 		return fmt.Errorf("missing receipts data for block %d (no error reported)", blockNum)
 	}
-	if bd.TracesErr != nil {
-		return fmt.Errorf("traces fetch failed for block %d: %w", blockNum, bd.TracesErr)
-	}
-	if bd.Traces == nil {
-		return fmt.Errorf("missing traces data for block %d (no error reported)", blockNum)
+	// Validate traces if enabled
+	if s.config.EnableTraces {
+		if bd.TracesErr != nil {
+			return fmt.Errorf("traces fetch failed for block %d: %w", blockNum, bd.TracesErr)
+		}
+		if bd.Traces == nil {
+			return fmt.Errorf("missing traces data for block %d (no error reported)", blockNum)
+		}
 	}
 
 	// Validate blobs if enabled
@@ -694,8 +707,10 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 	cacheInput := outbound.BlockDataInput{
 		Block:    bd.Block,
 		Receipts: bd.Receipts,
-		Traces:   bd.Traces,
 		Blobs:    blobs,
+	}
+	if s.config.EnableTraces {
+		cacheInput.Traces = bd.Traces
 	}
 	if err := s.cache.SetBlockData(ctx, chainID, blockNum, version, cacheInput); err != nil {
 		return fmt.Errorf("failed to cache block data for block %d: %w", blockNum, err)

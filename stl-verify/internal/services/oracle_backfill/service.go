@@ -335,6 +335,8 @@ func (s *Service) worker(
 		}
 
 		// Change detection: only keep prices that differ from previous block
+		// If there is a duplicate price on the worker block boundary,
+		// it will be sent in both batches but that's acceptable for simplicity
 		var changed []*entity.OnchainTokenPrice
 		for _, p := range prices {
 			if prev, ok := prevPrices[p.TokenID]; ok && prev == p.PriceUSD {

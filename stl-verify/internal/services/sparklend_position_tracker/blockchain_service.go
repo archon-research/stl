@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/big"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -13,36 +14,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
-)
-
-// Constants for getReserveData return value indices
-const (
-	reserveDataUnbackedIdx                = 0
-	reserveDataAccruedToTreasuryIdx       = 1
-	reserveDataTotalATokenIdx             = 2
-	reserveDataTotalStableDebtIdx         = 3
-	reserveDataTotalVariableDebtIdx       = 4
-	reserveDataLiquidityRateIdx           = 5
-	reserveDataVariableBorrowRateIdx      = 6
-	reserveDataStableBorrowRateIdx        = 7
-	reserveDataAverageStableBorrowRateIdx = 8
-	reserveDataLiquidityIndexIdx          = 9
-	reserveDataVariableBorrowIndexIdx     = 10
-	reserveDataLastUpdateTimestampIdx     = 11
-)
-
-// Constants for getReserveConfigurationData return value indices
-const (
-	reserveConfigDecimalsIdx                 = 0
-	reserveConfigLTVIdx                      = 1
-	reserveConfigLiquidationThresholdIdx     = 2
-	reserveConfigLiquidationBonusIdx         = 3
-	reserveConfigReserveFactorIdx            = 4
-	reserveConfigUsageAsCollateralEnabledIdx = 5
-	reserveConfigBorrowingEnabledIdx         = 6
-	reserveConfigStableBorrowRateEnabledIdx  = 7
-	reserveConfigIsActiveIdx                 = 8
-	reserveConfigIsFrozenIdx                 = 9
 )
 
 type TokenMetadata struct {
@@ -56,7 +27,7 @@ type UserReserveData struct {
 	ScaledATokenBalance            *big.Int
 	UsageAsCollateralEnabledOnUser bool
 	ScaledVariableDebt             *big.Int
-	// Aave V3 specific fields (will be zero for Sparklend)
+	// Aave V3 specific fields (will be zero for Sparklend and V2)
 	StableBorrowRate                *big.Int
 	PrincipalStableDebt             *big.Int
 	StableBorrowLastUpdateTimestamp *big.Int
@@ -86,6 +57,7 @@ type blockchainService struct {
 	uiPoolDataProvider                         common.Address
 	poolDataProvider                           common.Address
 	poolAddressesProvider                      common.Address
+	protocolVersion                            blockchain.ProtocolVersion
 	metadataCache                              map[common.Address]TokenMetadata
 	logger                                     *slog.Logger
 }
@@ -127,7 +99,7 @@ func newBlockchainService(
 	uiPoolDataProvider common.Address,
 	poolDataProvider common.Address,
 	poolAddressesProvider common.Address,
-	useAaveABI bool,
+	protocolVersion blockchain.ProtocolVersion,
 	logger *slog.Logger,
 ) (*blockchainService, error) {
 	service := &blockchainService{
@@ -137,24 +109,31 @@ func newBlockchainService(
 		uiPoolDataProvider:    uiPoolDataProvider,
 		poolDataProvider:      poolDataProvider,
 		poolAddressesProvider: poolAddressesProvider,
+		protocolVersion:       protocolVersion,
 		metadataCache:         make(map[common.Address]TokenMetadata),
 		logger:                logger.With("component", "blockchain-service"),
 	}
 
-	if err := service.loadABIs(useAaveABI); err != nil {
+	if err := service.loadABIs(protocolVersion); err != nil {
 		return nil, err
 	}
 
 	return service, nil
 }
 
-func (s *blockchainService) loadABIs(useAaveABI bool) error {
+func (s *blockchainService) loadABIs(protocolVersion blockchain.ProtocolVersion) error {
 	var err error
 
-	if useAaveABI {
+	// Load getUserReservesData ABI based on protocol version
+	switch protocolVersion {
+	case blockchain.ProtocolVersionAaveV2:
 		s.getUserReservesABI, err = abis.GetAaveUserReservesDataABI()
-	} else {
+	case blockchain.ProtocolVersionAaveV3:
+		s.getUserReservesABI, err = abis.GetAaveUserReservesDataABI()
+	case blockchain.ProtocolVersionSparkLend:
 		s.getUserReservesABI, err = abis.GetSparklendUserReservesDataABI()
+	default:
+		return fmt.Errorf("unknown protocol version: %s", protocolVersion)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to load getUserReservesData ABI: %w", err)
@@ -170,7 +149,16 @@ func (s *blockchainService) loadABIs(useAaveABI bool) error {
 		return fmt.Errorf("failed to load getReserveConfigurationData ABI: %w", err)
 	}
 
-	s.getPoolDataProviderReserveDataABI, err = abis.GetPoolDataProviderReserveData()
+	switch protocolVersion {
+	case blockchain.ProtocolVersionAaveV2:
+		s.getPoolDataProviderReserveDataABI, err = abis.GetAaveV2PoolDataProviderReserveDataABI()
+	case blockchain.ProtocolVersionAaveV3:
+		s.getPoolDataProviderReserveDataABI, err = abis.GetPoolDataProviderReserveData()
+	case blockchain.ProtocolVersionSparkLend:
+		s.getPoolDataProviderReserveDataABI, err = abis.GetSparklendPoolDataProviderReserveDataABI()
+	default:
+		return fmt.Errorf("unknown protocol version: %s", protocolVersion)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to load getReserveData ABI: %w", err)
 	}
@@ -216,7 +204,7 @@ func (s *blockchainService) getUserReservesData(
 	// Handle both Aave (7-field UserReserveData) and SparkLend (4-field UserReserveData).
 	switch v := unpacked[0].(type) {
 
-	// Aave V3 layout
+	// Aave V2/V3 layout (7 fields)
 	case []struct {
 		UnderlyingAsset                 common.Address `json:"underlyingAsset"`
 		ScaledATokenBalance             *big.Int       `json:"scaledATokenBalance"`
@@ -243,7 +231,7 @@ func (s *blockchainService) getUserReservesData(
 		}
 		return reserves, nil
 
-	// SparkLend layout
+	// SparkLend layout (4 fields)
 	case []struct {
 		UnderlyingAsset                common.Address `json:"underlyingAsset"`
 		ScaledATokenBalance            *big.Int       `json:"scaledATokenBalance"`
@@ -337,7 +325,7 @@ func (s *blockchainService) batchGetUserReserveData(ctx context.Context, assets 
 			ScaledVariableDebt:       unpacked[4].(*big.Int),
 			StableBorrowRate:         unpacked[5].(*big.Int),
 			LiquidityRate:            unpacked[6].(*big.Int),
-			StableRateLastUpdated:    bi.Uint64(), // ← fixed
+			StableRateLastUpdated:    bi.Uint64(),
 			UsageAsCollateralEnabled: unpacked[8].(bool),
 		}
 	}
@@ -444,12 +432,12 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, asset common
 	calls := []outbound.Call{
 		{
 			Target:       s.poolDataProvider,
-			AllowFailure: false,
+			AllowFailure: true,
 			CallData:     getReserveDataCallData,
 		},
 		{
 			Target:       s.poolDataProvider,
-			AllowFailure: false,
+			AllowFailure: true,
 			CallData:     getConfigCallData,
 		},
 	}
@@ -484,95 +472,234 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, asset common
 	return reserveData, configData, nil
 }
 
-// parseReserveData parses the raw bytes from ProtocolDataProvider.getReserveData into structured data.
 func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvider, error) {
 	unpacked, err := s.getPoolDataProviderReserveDataABI.Unpack("getReserveData", data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unpack getReserveData: %w", err)
 	}
 
-	if len(unpacked) < 12 {
-		return nil, fmt.Errorf("expected 12 values from getReserveData, got %d", len(unpacked))
+	outputs := s.getPoolDataProviderReserveDataABI.Methods["getReserveData"].Outputs
+	fieldIndex := buildFieldIndexMap(outputs)
+
+	switch s.protocolVersion {
+	case blockchain.ProtocolVersionAaveV2:
+		return parseReserveDataAaveV2(unpacked, fieldIndex)
+	case blockchain.ProtocolVersionAaveV3:
+		return parseReserveDataAaveV3(unpacked, fieldIndex)
+	case blockchain.ProtocolVersionSparkLend:
+		return parseReserveDataSparklend(unpacked, fieldIndex)
+	default:
+		return nil, fmt.Errorf("unknown protocol version: %s", s.protocolVersion)
+	}
+}
+
+// parseReserveDataAaveV2 parses Aave V2 reserve data (10 fields).
+func parseReserveDataAaveV2(unpacked []interface{}, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+	if len(unpacked) < 10 {
+		return nil, fmt.Errorf("expected 10 values from getReserveData (Aave V2), got %d", len(unpacked))
 	}
 
-	result := &reserveDataFromProvider{}
-
-	if v, ok := unpacked[reserveDataUnbackedIdx].(*big.Int); ok {
-		result.Unbacked = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (unbacked) expected *big.Int, got %T", reserveDataUnbackedIdx, unpacked[reserveDataUnbackedIdx])
+	result := &reserveDataFromProvider{
+		Unbacked:                big.NewInt(0), // Not available in V2
+		AccruedToTreasuryScaled: big.NewInt(0), // Not available in V2
 	}
 
-	if v, ok := unpacked[reserveDataAccruedToTreasuryIdx].(*big.Int); ok {
-		result.AccruedToTreasuryScaled = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (accruedToTreasuryScaled) expected *big.Int, got %T", reserveDataAccruedToTreasuryIdx, unpacked[reserveDataAccruedToTreasuryIdx])
+	var err error
+
+	// Map availableLiquidity to TotalAToken as proxy
+	result.TotalAToken, err = getBigIntByName(unpacked, fieldIndex, "availableLiquidity")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveDataTotalATokenIdx].(*big.Int); ok {
-		result.TotalAToken = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (totalAToken) expected *big.Int, got %T", reserveDataTotalATokenIdx, unpacked[reserveDataTotalATokenIdx])
+	result.TotalStableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalStableDebt")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveDataTotalStableDebtIdx].(*big.Int); ok {
-		result.TotalStableDebt = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (totalStableDebt) expected *big.Int, got %T", reserveDataTotalStableDebtIdx, unpacked[reserveDataTotalStableDebtIdx])
+	result.TotalVariableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalVariableDebt")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveDataTotalVariableDebtIdx].(*big.Int); ok {
-		result.TotalVariableDebt = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (totalVariableDebt) expected *big.Int, got %T", reserveDataTotalVariableDebtIdx, unpacked[reserveDataTotalVariableDebtIdx])
+	result.LiquidityRate, err = getBigIntByName(unpacked, fieldIndex, "liquidityRate")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveDataLiquidityRateIdx].(*big.Int); ok {
-		result.LiquidityRate = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (liquidityRate) expected *big.Int, got %T", reserveDataLiquidityRateIdx, unpacked[reserveDataLiquidityRateIdx])
+	result.VariableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowRate")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveDataVariableBorrowRateIdx].(*big.Int); ok {
-		result.VariableBorrowRate = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (variableBorrowRate) expected *big.Int, got %T", reserveDataVariableBorrowRateIdx, unpacked[reserveDataVariableBorrowRateIdx])
+	result.StableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "stableBorrowRate")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveDataStableBorrowRateIdx].(*big.Int); ok {
-		result.StableBorrowRate = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (stableBorrowRate) expected *big.Int, got %T", reserveDataStableBorrowRateIdx, unpacked[reserveDataStableBorrowRateIdx])
+	result.AverageStableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "averageStableBorrowRate")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveDataAverageStableBorrowRateIdx].(*big.Int); ok {
-		result.AverageStableBorrowRate = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (averageStableBorrowRate) expected *big.Int, got %T", reserveDataAverageStableBorrowRateIdx, unpacked[reserveDataAverageStableBorrowRateIdx])
+	result.LiquidityIndex, err = getBigIntByName(unpacked, fieldIndex, "liquidityIndex")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveDataLiquidityIndexIdx].(*big.Int); ok {
-		result.LiquidityIndex = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (liquidityIndex) expected *big.Int, got %T", reserveDataLiquidityIndexIdx, unpacked[reserveDataLiquidityIndexIdx])
+	result.VariableBorrowIndex, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowIndex")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveDataVariableBorrowIndexIdx].(*big.Int); ok {
-		result.VariableBorrowIndex = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (variableBorrowIndex) expected *big.Int, got %T", reserveDataVariableBorrowIndexIdx, unpacked[reserveDataVariableBorrowIndexIdx])
+	timestamp, err := getBigIntByName(unpacked, fieldIndex, "lastUpdateTimestamp")
+	if err != nil {
+		return nil, err
 	}
-
-	if v, ok := unpacked[reserveDataLastUpdateTimestampIdx].(*big.Int); ok {
-		result.LastUpdateTimestamp = v.Int64()
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (lastUpdateTimestamp) expected *big.Int, got %T", reserveDataLastUpdateTimestampIdx, unpacked[reserveDataLastUpdateTimestampIdx])
-	}
+	result.LastUpdateTimestamp = timestamp.Int64()
 
 	return result, nil
 }
 
-// parseReserveConfigurationData parses the raw bytes from getReserveConfigurationData.
+// parseReserveDataAaveV3 parses Aave V3 reserve data (12 fields).
+func parseReserveDataAaveV3(unpacked []interface{}, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+	if len(unpacked) < 12 {
+		return nil, fmt.Errorf("expected 12 values from getReserveData (Aave V3), got %d", len(unpacked))
+	}
+
+	result := &reserveDataFromProvider{}
+	var err error
+
+	result.Unbacked, err = getBigIntByName(unpacked, fieldIndex, "unbacked")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AccruedToTreasuryScaled, err = getBigIntByName(unpacked, fieldIndex, "accruedToTreasuryScaled")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalAToken, err = getBigIntByName(unpacked, fieldIndex, "totalAToken")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalStableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalStableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalVariableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalVariableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidityRate, err = getBigIntByName(unpacked, fieldIndex, "liquidityRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.StableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "stableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AverageStableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "averageStableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidityIndex, err = getBigIntByName(unpacked, fieldIndex, "liquidityIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowIndex, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	timestamp, err := getBigIntByName(unpacked, fieldIndex, "lastUpdateTimestamp")
+	if err != nil {
+		return nil, err
+	}
+	result.LastUpdateTimestamp = timestamp.Int64()
+
+	return result, nil
+}
+
+// parseReserveDataSparklend parses Sparklend reserve data (11 fields, no averageStableBorrowRate).
+func parseReserveDataSparklend(unpacked []interface{}, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+	result := &reserveDataFromProvider{}
+	var err error
+
+	result.Unbacked, err = getBigIntByName(unpacked, fieldIndex, "unbacked")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AccruedToTreasuryScaled, err = getBigIntByName(unpacked, fieldIndex, "accruedToTreasuryScaled")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalAToken, err = getBigIntByName(unpacked, fieldIndex, "totalAToken")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalStableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalStableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalVariableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalVariableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidityRate, err = getBigIntByName(unpacked, fieldIndex, "liquidityRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.StableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "stableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AverageStableBorrowRate = big.NewInt(0) // Not available in Sparklend
+
+	result.LiquidityIndex, err = getBigIntByName(unpacked, fieldIndex, "liquidityIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowIndex, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	timestamp, err := getBigIntByName(unpacked, fieldIndex, "lastUpdateTimestamp")
+	if err != nil {
+		return nil, err
+	}
+	result.LastUpdateTimestamp = timestamp.Int64()
+
+	return result, nil
+}
+
 func (s *blockchainService) parseReserveConfigurationData(data []byte) (*reserveConfigData, error) {
 	unpacked, err := s.getPoolDataProviderReserveConfigurationABI.Unpack("getReserveConfigurationData", data)
 	if err != nil {
@@ -583,67 +710,104 @@ func (s *blockchainService) parseReserveConfigurationData(data []byte) (*reserve
 		return nil, fmt.Errorf("expected 10 values from getReserveConfigurationData, got %d", len(unpacked))
 	}
 
+	outputs := s.getPoolDataProviderReserveConfigurationABI.Methods["getReserveConfigurationData"].Outputs
+	fieldIndex := buildFieldIndexMap(outputs)
+
 	result := &reserveConfigData{}
 
-	if v, ok := unpacked[reserveConfigDecimalsIdx].(*big.Int); ok {
-		result.Decimals = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (decimals) expected *big.Int, got %T", reserveConfigDecimalsIdx, unpacked[reserveConfigDecimalsIdx])
+	result.Decimals, err = getBigIntByName(unpacked, fieldIndex, "decimals")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveConfigLTVIdx].(*big.Int); ok {
-		result.LTV = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (ltv) expected *big.Int, got %T", reserveConfigLTVIdx, unpacked[reserveConfigLTVIdx])
+	result.LTV, err = getBigIntByName(unpacked, fieldIndex, "ltv")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveConfigLiquidationThresholdIdx].(*big.Int); ok {
-		result.LiquidationThreshold = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (liquidationThreshold) expected *big.Int, got %T", reserveConfigLiquidationThresholdIdx, unpacked[reserveConfigLiquidationThresholdIdx])
+	result.LiquidationThreshold, err = getBigIntByName(unpacked, fieldIndex, "liquidationThreshold")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveConfigLiquidationBonusIdx].(*big.Int); ok {
-		result.LiquidationBonus = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (liquidationBonus) expected *big.Int, got %T", reserveConfigLiquidationBonusIdx, unpacked[reserveConfigLiquidationBonusIdx])
+	result.LiquidationBonus, err = getBigIntByName(unpacked, fieldIndex, "liquidationBonus")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveConfigReserveFactorIdx].(*big.Int); ok {
-		result.ReserveFactor = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (reserveFactor) expected *big.Int, got %T", reserveConfigReserveFactorIdx, unpacked[reserveConfigReserveFactorIdx])
+	result.ReserveFactor, err = getBigIntByName(unpacked, fieldIndex, "reserveFactor")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveConfigUsageAsCollateralEnabledIdx].(bool); ok {
-		result.UsageAsCollateralEnabled = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (usageAsCollateralEnabled) expected bool, got %T", reserveConfigUsageAsCollateralEnabledIdx, unpacked[reserveConfigUsageAsCollateralEnabledIdx])
+	result.UsageAsCollateralEnabled, err = getBoolByName(unpacked, fieldIndex, "usageAsCollateralEnabled")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveConfigBorrowingEnabledIdx].(bool); ok {
-		result.BorrowingEnabled = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (borrowingEnabled) expected bool, got %T", reserveConfigBorrowingEnabledIdx, unpacked[reserveConfigBorrowingEnabledIdx])
+	result.BorrowingEnabled, err = getBoolByName(unpacked, fieldIndex, "borrowingEnabled")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveConfigStableBorrowRateEnabledIdx].(bool); ok {
-		result.StableBorrowRateEnabled = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (stableBorrowRateEnabled) expected bool, got %T", reserveConfigStableBorrowRateEnabledIdx, unpacked[reserveConfigStableBorrowRateEnabledIdx])
+	result.StableBorrowRateEnabled, err = getBoolByName(unpacked, fieldIndex, "stableBorrowRateEnabled")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveConfigIsActiveIdx].(bool); ok {
-		result.IsActive = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (isActive) expected bool, got %T", reserveConfigIsActiveIdx, unpacked[reserveConfigIsActiveIdx])
+	result.IsActive, err = getBoolByName(unpacked, fieldIndex, "isActive")
+	if err != nil {
+		return nil, err
 	}
 
-	if v, ok := unpacked[reserveConfigIsFrozenIdx].(bool); ok {
-		result.IsFrozen = v
-	} else {
-		return nil, fmt.Errorf("unpacked[%d] (isFrozen) expected bool, got %T", reserveConfigIsFrozenIdx, unpacked[reserveConfigIsFrozenIdx])
+	result.IsFrozen, err = getBoolByName(unpacked, fieldIndex, "isFrozen")
+	if err != nil {
+		return nil, err
 	}
 
 	return result, nil
+}
+
+func buildFieldIndexMap(outputs abi.Arguments) map[string]int {
+	fieldIndex := make(map[string]int, len(outputs))
+	for i, arg := range outputs {
+		fieldIndex[arg.Name] = i
+	}
+	return fieldIndex
+}
+
+func getBigIntByName(unpacked []interface{}, fieldIndex map[string]int, fieldName string) (*big.Int, error) {
+	idx, ok := fieldIndex[fieldName]
+	if !ok {
+		return nil, fmt.Errorf("field %s not found in ABI", fieldName)
+	}
+
+	if idx >= len(unpacked) {
+		return nil, fmt.Errorf("index %d out of range for %s", idx, fieldName)
+	}
+
+	v, ok := unpacked[idx].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("field %s expected *big.Int, got %T", fieldName, unpacked[idx])
+	}
+
+	return v, nil
+}
+
+func getBoolByName(unpacked []interface{}, fieldIndex map[string]int, fieldName string) (bool, error) {
+	idx, ok := fieldIndex[fieldName]
+	if !ok {
+		return false, fmt.Errorf("field %s not found in ABI", fieldName)
+	}
+
+	if idx >= len(unpacked) {
+		return false, fmt.Errorf("index %d out of range for %s", idx, fieldName)
+	}
+
+	v, ok := unpacked[idx].(bool)
+	if !ok {
+		return false, fmt.Errorf("field %s expected bool, got %T", fieldName, unpacked[idx])
+	}
+
+	return v, nil
 }

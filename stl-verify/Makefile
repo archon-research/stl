@@ -1,20 +1,23 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher help \
-        dev-up dev-down dev-ips \
+.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax help \
+        dev-up dev-env dev-down dev-ips generate-er \
         tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
         ecr-login docker-build docker-push docker-release \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
         docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging \
+        docker-build-oracle-price-worker docker-push-oracle-price-worker docker-release-oracle-price-worker \
+        docker-build-oracle-price-worker-staging docker-push-oracle-price-worker-staging docker-release-oracle-price-worker-staging \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
         bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel \
         db-migrate db-set-passwords db-test-app-user \
         erigon-init erigon-validate erigon-plan erigon-apply erigon-apply-auto erigon-destroy erigon-check \
         erigon-status erigon-logs erigon-logs-follow erigon-deploy-readonly erigon-switch-readonly erigon-switch-sync erigon-mode \
-        erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download
+        erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download \
+        build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -24,10 +27,16 @@ run:
 	@echo "==> Running..."
 	go run ./cmd/server
 
-# Run the watcher (requires dev-up first)
+# Run the Ethereum watcher (requires dev-up first)
 run-watcher:
-	@echo "==> Running watcher..."
+	@echo "==> Running Ethereum watcher (chain_id=1)..."
 	@set -a && . cmd/watcher/.env && [ -f cmd/watcher/.env.local ] && . cmd/watcher/.env.local; set +a && go run ./cmd/watcher
+
+# Run the Avalanche watcher (requires dev-up first)
+# Avalanche C-Chain does not support trace_block, so traces are disabled.
+run-watcher-avax:
+	@echo "==> Running Avalanche watcher (chain_id=43114)..."
+	@set -a && . cmd/watcher/.env.avax && [ -f cmd/watcher/.env.avax.local ] && . cmd/watcher/.env.avax.local; set +a && go run ./cmd/watcher --enable-traces=false
 
 # Run tests with race detector
 test-race:
@@ -153,7 +162,13 @@ dev-up:
 	@./localstack-init/init-aws.sh > /dev/null 2>&1
 	@echo "Running database migrations..."
 	@DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" go run ./cmd/migrate
-	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-watcher-config --query SecretString --output text 2>/dev/null | jq -r '.alchemy_api_key // empty') && \
+	@$(MAKE) dev-env
+
+# Generate .env files for all services (fetches secrets from AWS)
+# Can be re-run independently to refresh secrets without restarting services.
+dev-env:
+	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-watcher-config --query SecretString --output text | jq -r '.alchemy_api_key // empty') || \
+		{ echo "WARNING: Failed to fetch ALCHEMY_API_KEY from AWS Secrets Manager. Set it manually in cmd/watcher/.env"; ALCHEMY_API_KEY=''; }; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -175,6 +190,24 @@ dev-up:
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://avax-mainnet.g.alchemy.com/v2" \
+		"ALCHEMY_WS_URL=wss://avax-mainnet.g.alchemy.com/v2" \
+		"CHAIN_ID=43114" \
+		"AWS_SNS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"AWS_SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:stl-avalanche-blocks.fifo" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:6379" \
+		"REDIS_PASSWORD=" \
+		"JAEGER_ENDPOINT=127.0.0.1:4317" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"ENABLE_BACKFILL=false" \
+		> cmd/watcher/.env.avax && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-oracle-price.fifo" \
 		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
@@ -184,7 +217,8 @@ dev-up:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
 		> cmd/oracle-price-worker/.env
-	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text 2>/dev/null | jq -r '.coingecko_api_key // empty') && \
+	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
+		{ echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
@@ -194,14 +228,16 @@ dev-up:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
 		> cmd/oracle-backfill/.env
-	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text 2>/dev/null || echo '') && \
-	TIGERDATA_URL=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-tigerdata-readonly --query SecretString --output text 2>/dev/null | jq -r '.connection_url // empty' | sed 's|@[^:]*:|@localhost:|') && \
+	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text) || \
+		{ echo "WARNING: Failed to fetch ETHERSCAN_API_KEY from AWS Secrets Manager."; ETHERSCAN_API_KEY=''; }; \
+	TIGERDATA_URL=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-tigerdata-readonly --query SecretString --output text | jq -r '.connection_url // empty' | sed 's|@[^:]*:|@localhost:|') || \
+		{ echo "WARNING: Failed to fetch TIGERDATA_URL from AWS Secrets Manager."; TIGERDATA_URL=''; }; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" \
 		"DATABASE_URL=$$TIGERDATA_URL" \
 		> cmd/data-validator/.env
-	@echo "Ready. Secrets fetched from AWS."
+	@echo "Environment files generated."
 	@echo "Note: data-validator uses staging TigerData. Run 'make tigerdata-tunnel' first."
 
 # Stop all local services
@@ -215,6 +251,12 @@ dev-ips:
 	@docker inspect stl-verify-redis --format 'Redis:       {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "Redis: not running"
 	@docker inspect stl-verify-localstack --format 'LocalStack:  {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "LocalStack: not running"
 	@docker inspect stl-verify-jaeger --format 'Jaeger:      {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "Jaeger: not running"
+
+# Generate ER diagram from database schema (requires dev-up)
+generate-er:
+	@echo "==> Generating ER diagram..."
+	@DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" go run ./cmd/generate-er --output ../docs/entity_relation.md
+	@echo "==> Generated: docs/entity_relation.md"
 
 # =============================================================================
 # Terraform Commands
@@ -255,6 +297,12 @@ tf-plan:
 tf-apply:
 	@echo "==> Applying Terraform for $(ENV)..."
 	$(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars)
+
+# Apply Terraform changes (auto-approve)
+# Usage: make tf-apply-auto ENV=sentinelstaging
+tf-apply-auto:
+	@echo "==> Applying Terraform for $(ENV) (auto-approve)..."
+	$(call run_tofu_with_creds,tofu apply -auto-approve -var-file=environments/$(ENV).tfvars)
 
 # Full Terraform workflow: init, validate, plan
 # Usage: make tf-check ENV=sentinelstaging
@@ -504,6 +552,72 @@ docker-release-backup-staging:
 	@$(MAKE) docker-release-backup ENV=sentinelstaging
 
 # =============================================================================
+# Docker Build & Push - Oracle Price Worker
+# =============================================================================
+
+# ECR repository URL for oracle price worker
+ECR_REPO_ORACLE_PRICE_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-oracle-price-worker
+
+# Build Docker image for oracle price worker (ARM64 for Fargate Graviton)
+docker-build-oracle-price-worker:
+	@echo "==> Building Oracle Price Worker Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_ORACLE_PRICE_WORKER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.oracle-price-worker \
+		-t $(ECR_REPO_ORACLE_PRICE_WORKER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_ORACLE_PRICE_WORKER):latest \
+		--load .
+
+# Push oracle price worker Docker image to ECR
+docker-push-oracle-price-worker: ecr-login
+	@echo "==> Pushing Oracle Price Worker Docker image to ECR..."
+	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):latest
+
+# Build and push oracle price worker in one step (captures tag at start to ensure consistency)
+docker-release-oracle-price-worker: ecr-login
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Oracle Price Worker Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_ORACLE_PRICE_WORKER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.oracle-price-worker \
+		-t $(ECR_REPO_ORACLE_PRICE_WORKER):$$TAG \
+		-t $(ECR_REPO_ORACLE_PRICE_WORKER):latest \
+		--load . && \
+	echo "==> Pushing Oracle Price Worker Docker image to ECR..." && \
+	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):$$TAG && \
+	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):latest && \
+	echo "==> Oracle Price Worker Docker image released: $(ECR_REPO_ORACLE_PRICE_WORKER):$$TAG"
+
+# =============================================================================
+# Sentinelstaging Oracle Price Worker Docker Shortcuts
+# =============================================================================
+
+docker-build-oracle-price-worker-staging:
+	@$(MAKE) docker-build-oracle-price-worker ENV=sentinelstaging
+
+docker-push-oracle-price-worker-staging:
+	@$(MAKE) docker-push-oracle-price-worker ENV=sentinelstaging
+
+docker-release-oracle-price-worker-staging:
+	@$(MAKE) docker-release-oracle-price-worker ENV=sentinelstaging
+
+# =============================================================================
 # Erigon Node Terraform Commands
 # =============================================================================
 
@@ -639,27 +753,20 @@ build-oracle-worker:
 	go build -o dist/oracle-price-worker ./cmd/oracle-price-worker
 	@echo "==> Built: dist/oracle-price-worker"
 
-# Build oracle-backfill binary
-build-oracle-backfill:
-	@echo "==> Building oracle-backfill..."
+# Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
+build-oracle-pricing-backfill-arm64:
+	@echo "==> Building oracle-pricing-backfill for ARM64 Linux..."
 	mkdir -p dist
-	go build -o dist/oracle-backfill ./cmd/oracle-backfill
-	@echo "==> Built: dist/oracle-backfill"
+	GOOS=linux GOARCH=arm64 go build -o dist/oracle-pricing-backfill-linux-arm64 ./cmd/oracle-pricing-backfill
+	@echo "==> Built: dist/oracle-pricing-backfill-linux-arm64"
 
-# Build oracle-backfill binary for ARM64 Linux (to run on Erigon node)
-build-oracle-backfill-arm64:
-	@echo "==> Building oracle-backfill for ARM64 Linux..."
-	mkdir -p dist
-	GOOS=linux GOARCH=arm64 go build -o dist/oracle-backfill-linux-arm64 ./cmd/oracle-backfill
-	@echo "==> Built: dist/oracle-backfill-linux-arm64"
-
-# Deploy oracle-backfill to Erigon node
-# Usage: make deploy-oracle-backfill ERIGON_USER=<user> ERIGON_IP=<ip>
-deploy-oracle-backfill: build-oracle-backfill-arm64
+# Deploy oracle-pricing-backfill to Erigon node
+# Usage: make deploy-oracle-pricing-backfill ERIGON_USER=<user> ERIGON_IP=<ip>
+deploy-oracle-pricing-backfill: build-oracle-pricing-backfill-arm64
 	$(call require_erigon_vars)
-	@echo "==> Deploying oracle-backfill to Erigon node..."
-	cat dist/oracle-backfill-linux-arm64 | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > ~/oracle-backfill && chmod +x ~/oracle-backfill'
-	@echo "==> Deployed to ~/oracle-backfill on Erigon node."
+	@echo "==> Deploying oracle-pricing-backfill to Erigon node..."
+	cat dist/oracle-pricing-backfill-linux-arm64 | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > ~/oracle-pricing-backfill && chmod +x ~/oracle-pricing-backfill'
+	@echo "==> Deployed to ~/oracle-pricing-backfill on Erigon node."
 
 # Build bulk-download binary for ARM64 Linux (to run on Erigon node)
 build-bulk-download-arm64:

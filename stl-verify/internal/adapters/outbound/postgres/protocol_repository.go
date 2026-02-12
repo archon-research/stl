@@ -49,21 +49,21 @@ func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 	}, nil
 }
 
-func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, name string, createdAtBlock int64) (int64, error) {
+func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, name string, protocolType string, createdAtBlock int64) (int64, error) {
 	var protocolID int64
-	addressHex := strings.ToLower(address.Hex())
+	addressBytes := address.Bytes()
 
 	err := tx.QueryRow(ctx,
 		`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2`,
-		chainID, addressHex).Scan(&protocolID)
+		chainID, addressBytes).Scan(&protocolID)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		r.logger.Info("auto-creating protocol", "address", address.Hex(), "name", name)
 		err = tx.QueryRow(ctx,
 			`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
-			 VALUES ($1, $2, $3, $4, $5)
-			 RETURNING id`,
-			chainID, addressHex, name, "lending", createdAtBlock).Scan(&protocolID)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id`,
+			chainID, addressBytes, name, "lending", createdAtBlock).Scan(&protocolID)
 		if err != nil {
 			return 0, fmt.Errorf("failed to create protocol: %w", err)
 		}
@@ -105,16 +105,10 @@ func (r *ProtocolRepository) GetProtocolByAddress(ctx context.Context, chainID i
 
 // UpsertSparkLendReserveData upserts SparkLend reserve data records atomically.
 // All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
-func (r *ProtocolRepository) UpsertSparkLendReserveData(ctx context.Context, data []*entity.SparkLendReserveData) error {
+func (r *ProtocolRepository) UpsertReserveData(ctx context.Context, tx pgx.Tx, data []*entity.SparkLendReserveData) error {
 	if len(data) == 0 {
 		return nil
 	}
-
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(data); i += r.batchSize {
 		end := i + r.batchSize
@@ -128,9 +122,6 @@ func (r *ProtocolRepository) UpsertSparkLendReserveData(ctx context.Context, dat
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
 	return nil
 }
 

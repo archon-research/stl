@@ -48,6 +48,9 @@ type ClientConfig struct {
 	// BackoffFactor is the multiplier applied to backoff after each retry.
 	BackoffFactor float64
 
+	// EnableTraces enables fetching execution traces (trace_block on supported nodes).
+	EnableTraces bool
+
 	// EnableBlobs enables fetching blob sidecars (post-Dencun blocks on supported nodes).
 	EnableBlobs bool
 
@@ -370,22 +373,24 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 		}
 	}()
 
-	// Fetch traces
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		req := jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []interface{}{hash}}
-		resp, err := c.call(ctx, req)
-		mu.Lock()
-		defer mu.Unlock()
-		if err != nil {
-			result.TracesErr = err
-		} else if resp.Error != nil {
-			result.TracesErr = fmt.Errorf("block %s traces: %w", hash, resp.Error)
-		} else {
-			result.Traces = resp.Result
-		}
-	}()
+	// Fetch traces (only if enabled)
+	if c.config.EnableTraces {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []interface{}{hash}}
+			resp, err := c.call(ctx, req)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				result.TracesErr = err
+			} else if resp.Error != nil {
+				result.TracesErr = fmt.Errorf("block %s traces: %w", hash, resp.Error)
+			} else {
+				result.Traces = resp.Result
+			}
+		}()
+	}
 
 	// Fetch blobs (only if enabled)
 	if c.config.EnableBlobs {
@@ -413,18 +418,25 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 // getBlockDataByHashBatched fetches block data using a single batched RPC call.
 // This uses fewer API credits but all calls share a single HTTP round-trip.
 func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
-	// Build batch request: 3-4 calls (block, receipts, traces, and optionally blobs)
-	callsCount := 3
+	// Build batch request: 2-4 calls (block, receipts, optionally traces, optionally blobs)
+	callsCount := 2
+	if c.config.EnableTraces {
+		callsCount++
+	}
 	if c.config.EnableBlobs {
-		callsCount = 4
+		callsCount++
 	}
 	requests := make([]jsonRPCRequest, 0, callsCount)
 
 	requests = append(requests,
 		jsonRPCRequest{JSONRPC: "2.0", ID: 0, Method: "eth_getBlockByHash", Params: []interface{}{hash, fullTx}},
 		jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "eth_getBlockReceipts", Params: []interface{}{hash}},
-		jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []interface{}{hash}},
 	)
+	if c.config.EnableTraces {
+		requests = append(requests,
+			jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []interface{}{hash}},
+		)
+	}
 	if c.config.EnableBlobs {
 		requests = append(requests,
 			jsonRPCRequest{JSONRPC: "2.0", ID: 3, Method: "eth_getBlobSidecars", Params: []interface{}{hash}},
@@ -467,15 +479,17 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 		result.ReceiptsErr = fmt.Errorf("missing response for receipts of block %d", blockNum)
 	}
 
-	// Traces
-	if resp := respMap[2]; resp != nil {
-		if resp.Error != nil {
-			result.TracesErr = fmt.Errorf("block %s traces: %w", hash, resp.Error)
+	// Traces (only if enabled)
+	if c.config.EnableTraces {
+		if resp := respMap[2]; resp != nil {
+			if resp.Error != nil {
+				result.TracesErr = fmt.Errorf("block %s traces: %w", hash, resp.Error)
+			} else {
+				result.Traces = resp.Result
+			}
 		} else {
-			result.Traces = resp.Result
+			result.TracesErr = fmt.Errorf("missing response for traces of block %d", blockNum)
 		}
-	} else {
-		result.TracesErr = fmt.Errorf("missing response for traces of block %d", blockNum)
 	}
 
 	// Blobs (only if enabled)
@@ -522,10 +536,13 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		return nil, nil
 	}
 
-	// Build batch request: 3-4 calls per block (block, receipts, traces, and optionally blobs)
-	callsPerBlock := 3
+	// Build batch request: 2-4 calls per block (block, receipts, optionally traces, optionally blobs)
+	callsPerBlock := 2
+	if c.config.EnableTraces {
+		callsPerBlock++
+	}
 	if c.config.EnableBlobs {
-		callsPerBlock = 4
+		callsPerBlock++
 	}
 	requests := make([]jsonRPCRequest, 0, len(blockNums)*callsPerBlock)
 	for i, blockNum := range blockNums {
@@ -535,8 +552,12 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		requests = append(requests,
 			jsonRPCRequest{JSONRPC: "2.0", ID: baseID, Method: "eth_getBlockByNumber", Params: []interface{}{hexNum, fullTx}},
 			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 1, Method: "eth_getBlockReceipts", Params: []interface{}{hexNum}},
-			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 2, Method: "trace_block", Params: []interface{}{hexNum}},
 		)
+		if c.config.EnableTraces {
+			requests = append(requests,
+				jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 2, Method: "trace_block", Params: []interface{}{hexNum}},
+			)
+		}
 		if c.config.EnableBlobs {
 			requests = append(requests,
 				jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 3, Method: "eth_getBlobSidecars", Params: []interface{}{hexNum}},
@@ -583,15 +604,17 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 			results[i].ReceiptsErr = fmt.Errorf("missing response for receipts of block %d", blockNum)
 		}
 
-		// Traces
-		if resp := respMap[baseID+2]; resp != nil {
-			if resp.Error != nil {
-				results[i].TracesErr = fmt.Errorf("block %d traces: %w", blockNum, resp.Error)
+		// Traces (only if enabled)
+		if c.config.EnableTraces {
+			if resp := respMap[baseID+2]; resp != nil {
+				if resp.Error != nil {
+					results[i].TracesErr = fmt.Errorf("block %d traces: %w", blockNum, resp.Error)
+				} else {
+					results[i].Traces = resp.Result
+				}
 			} else {
-				results[i].Traces = resp.Result
+				results[i].TracesErr = fmt.Errorf("missing response for traces of block %d", blockNum)
 			}
-		} else {
-			results[i].TracesErr = fmt.Errorf("missing response for traces of block %d", blockNum)
 		}
 
 		// Blobs (only if enabled)
