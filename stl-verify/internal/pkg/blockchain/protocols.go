@@ -61,7 +61,7 @@ var protocolRegistry = map[common.Address]ProtocolConfig{
 		ProtocolType:          "lending",
 		PoolAddress:           common.HexToAddress("0xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8"),
 		UIPoolDataProvider:    common.HexToAddress("0x91c0eA31b49B69Ea18607702c5d9aC360bf3dE7d"),
-		PoolDataProvider:      common.HexToAddress("0xB85B2bFEbeC4F5f401dbf92ac147A3076391fCD5"),
+		PoolDataProvider:      common.HexToAddress("0x53519c32f73fE1797d10210c4950fFeBa3b21504"),
 		PoolAddressesProvider: common.HexToAddress("0x5D39E06b825C1F2B80bf2756a73e28eFAA128ba0"),
 		ProtocolVersion:       ProtocolVersionAaveV3,
 	},
