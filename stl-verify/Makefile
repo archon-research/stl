@@ -282,6 +282,7 @@ ifneq ($(filter $(TF_TARGETS),$(MAKECMDGOALS)),)
   endif
 endif
 AWS_PROFILE ?= $(ENV)
+export AWS_PROFILE
 
 # Helper script to load credentials from Secrets Manager and run tofu
 # Loads both TigerData credentials and API keys (Alchemy, CoinGecko, Etherscan)
@@ -557,10 +558,10 @@ tf-check: tf-bootstrap tf-init tf-validate tf-plan
 # List Terraform state resources
 # Usage: make tf-state ENV=sentineldev|sentinelstaging|sentinelprod
 tf-state:
-	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Terraform state for $(ENV)..."
-	@cd $(INFRA_DIR) && tofu state list | head -50
+	@echo "==> Terraform state for $(ENV)..."
+	@export AWS_PROFILE=$(AWS_PROFILE) && cd $(INFRA_DIR) && tofu state list | head -50
 	@echo ""
-	@echo "Total resources: $$(cd $(INFRA_DIR) && tofu state list | wc -l)"
+	@echo "Total resources: $$(export AWS_PROFILE=$(AWS_PROFILE) && cd $(INFRA_DIR) && tofu state list | wc -l)"
 	@echo ""
 	@echo "To see details of a specific resource, use:"
 	@echo "  cd infra && tofu state show <resource_name>"
