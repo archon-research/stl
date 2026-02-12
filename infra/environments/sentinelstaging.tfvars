@@ -20,8 +20,8 @@ tigerdata_ha_replicas = 0   # No HA for staging
 # ElastiCache Redis Configuration
 # -----------------------------------------------------------------------------
 
-# Staging: memory-optimized for 2-day block cache (~20GB needed)
-redis_node_type          = "cache.r7g.xlarge" # 26.32 GB, ~$300/month
+# Staging: memory-optimized for block cache (~6GB steady state)
+redis_node_type          = "cache.r7g.large" # 13.07 GB, ~$150/month
 redis_engine_version     = "8.0"              # Valkey 8.0 (AWS Redis-compatible fork)
 redis_num_cache_clusters = 1                  # Single node, no HA
 redis_transit_encryption = false              # No TLS for simplicity
