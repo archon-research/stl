@@ -21,6 +21,12 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
+// Well-known mainnet token addresses for quote currency reference feed identification.
+var quoteCurrencyTokenAddr = map[string]common.Address{
+	"ETH": common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
+	"BTC": common.HexToAddress("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"), // WBTC
+}
+
 // Config holds configuration for the oracle price worker.
 type Config struct {
 	MaxMessages  int
@@ -38,11 +44,14 @@ func configDefaults() Config {
 
 // oracleUnit holds everything needed to fetch prices for one oracle.
 type oracleUnit struct {
-	oracle     *entity.Oracle
-	oracleAddr common.Address
-	tokenAddrs []common.Address  // ordered list of token addresses for oracle call
-	tokenIDs   []int64           // parallel to tokenAddrs
-	priceCache map[int64]float64 // tokenID → last stored price (for change detection)
+	oracle      *entity.Oracle
+	oracleAddr  common.Address
+	tokenAddrs  []common.Address        // for aave_oracle: ordered list of token addresses
+	tokenIDs    []int64                 // parallel to tokenAddrs (aave) or feeds (chainlink_feed)
+	feeds       []blockchain.FeedConfig // for chainlink_feed: per-feed config
+	refFeedIdx  map[string]int          // quote currency → index in feeds[] for USD-denominated reference
+	nonUSDFeeds map[int]string          // feed index → quote currency for non-USD feeds
+	priceCache  map[int64]float64       // tokenID → last stored price (for change detection)
 }
 
 // Service processes SQS block events and fetches oracle prices for each block.
@@ -53,6 +62,7 @@ type Service struct {
 	multicaller outbound.Multicaller
 
 	oracleABI *abi.ABI
+	feedABI   *abi.ABI
 	units     []*oracleUnit
 
 	ctx    context.Context
@@ -93,12 +103,18 @@ func NewService(
 		return nil, fmt.Errorf("loading Oracle ABI: %w", err)
 	}
 
+	feedABI, err := abis.GetAggregatorV3ABI()
+	if err != nil {
+		return nil, fmt.Errorf("loading AggregatorV3 ABI: %w", err)
+	}
+
 	return &Service{
 		config:      config,
 		consumer:    consumer,
 		repo:        repo,
 		multicaller: multicaller,
 		oracleABI:   oracleABI,
+		feedABI:     feedABI,
 		logger:      config.Logger.With("component", "oracle-price-worker"),
 	}, nil
 }
@@ -159,6 +175,15 @@ func (s *Service) initialize(ctx context.Context) error {
 }
 
 func (s *Service) buildOracleUnit(ctx context.Context, oracle *entity.Oracle) (*oracleUnit, error) {
+	switch oracle.OracleType {
+	case "chainlink_feed":
+		return s.buildFeedUnit(ctx, oracle)
+	default:
+		return s.buildAaveUnit(ctx, oracle)
+	}
+}
+
+func (s *Service) buildAaveUnit(ctx context.Context, oracle *entity.Oracle) (*oracleUnit, error) {
 	assets, err := s.repo.GetEnabledAssets(ctx, oracle.ID)
 	if err != nil {
 		return nil, fmt.Errorf("getting enabled assets: %w", err)
@@ -193,7 +218,7 @@ func (s *Service) buildOracleUnit(ctx context.Context, oracle *entity.Oracle) (*
 	for i, addr := range tokenAddrs {
 		tokenHexAddrs[i] = addr.Hex()
 	}
-	s.logger.Info("loaded oracle",
+	s.logger.Info("loaded aave oracle",
 		"name", oracle.Name,
 		"oracleAddr", common.Address(oracle.Address).Hex(),
 		"assets", len(assets),
@@ -207,6 +232,104 @@ func (s *Service) buildOracleUnit(ctx context.Context, oracle *entity.Oracle) (*
 		tokenIDs:   tokenIDs,
 		priceCache: cached,
 	}, nil
+}
+
+func (s *Service) buildFeedUnit(ctx context.Context, oracle *entity.Oracle) (*oracleUnit, error) {
+	assets, err := s.repo.GetEnabledAssets(ctx, oracle.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting enabled assets: %w", err)
+	}
+	if len(assets) == 0 {
+		return nil, nil
+	}
+
+	tokenAddrBytes, err := s.repo.GetTokenAddresses(ctx, oracle.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting token addresses: %w", err)
+	}
+
+	feeds := make([]blockchain.FeedConfig, len(assets))
+	tokenIDs := make([]int64, len(assets))
+	for i, asset := range assets {
+		if len(asset.FeedAddress) == 0 {
+			return nil, fmt.Errorf("feed address missing for token_id %d", asset.TokenID)
+		}
+		decimals := asset.FeedDecimals
+		if decimals == 0 {
+			decimals = oracle.PriceDecimals
+		}
+		quoteCurrency := asset.QuoteCurrency
+		if quoteCurrency == "" {
+			quoteCurrency = "USD"
+		}
+		feeds[i] = blockchain.FeedConfig{
+			TokenID:       asset.TokenID,
+			FeedAddress:   common.BytesToAddress(asset.FeedAddress),
+			FeedDecimals:  decimals,
+			QuoteCurrency: quoteCurrency,
+		}
+		tokenIDs[i] = asset.TokenID
+	}
+
+	refFeedIdx, nonUSDFeeds := buildRefFeedIdx(feeds, tokenAddrBytes)
+
+	cached, err := s.repo.GetLatestPrices(ctx, oracle.ID)
+	if err != nil {
+		return nil, fmt.Errorf("loading latest prices: %w", err)
+	}
+
+	feedAddrs := make([]string, len(feeds))
+	for i, f := range feeds {
+		feedAddrs[i] = f.FeedAddress.Hex()
+	}
+	s.logger.Info("loaded feed oracle",
+		"name", oracle.Name,
+		"feeds", len(feeds),
+		"feedAddrs", feedAddrs,
+		"nonUSDFeeds", len(nonUSDFeeds),
+		"cachedPrices", len(cached))
+
+	return &oracleUnit{
+		oracle:      oracle,
+		tokenIDs:    tokenIDs,
+		feeds:       feeds,
+		refFeedIdx:  refFeedIdx,
+		nonUSDFeeds: nonUSDFeeds,
+		priceCache:  cached,
+	}, nil
+}
+
+// buildRefFeedIdx identifies which feeds serve as USD-denominated reference prices
+// for non-USD quote currencies. It matches token addresses against well-known
+// WETH/WBTC addresses to find feeds that provide ETH/USD and BTC/USD.
+func buildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrBytes map[int64][]byte) (map[string]int, map[int]string) {
+	// Map token ID → token address for lookup.
+	tokenAddr := make(map[int64]common.Address, len(tokenAddrBytes))
+	for tokenID, addrBytes := range tokenAddrBytes {
+		tokenAddr[tokenID] = common.BytesToAddress(addrBytes)
+	}
+
+	refFeedIdx := make(map[string]int)
+	nonUSDFeeds := make(map[int]string)
+
+	for i, feed := range feeds {
+		if feed.QuoteCurrency != "USD" {
+			nonUSDFeeds[i] = feed.QuoteCurrency
+			continue
+		}
+		// Check if this USD-denominated feed's token matches a well-known reference address.
+		addr, ok := tokenAddr[feed.TokenID]
+		if !ok {
+			continue
+		}
+		for currency, refAddr := range quoteCurrencyTokenAddr {
+			if addr == refAddr {
+				refFeedIdx[currency] = i
+			}
+		}
+	}
+
+	return refFeedIdx, nonUSDFeeds
 }
 
 func (s *Service) processLoop() {
@@ -281,9 +404,7 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 		if err := s.processBlockForOracle(ctx, event, unit); err != nil {
 			s.logger.Error("failed to process oracle",
 				"oracle", unit.oracle.Name,
-				"oracleAddr", unit.oracleAddr.Hex(),
 				"block", event.BlockNumber,
-				"assets", len(unit.tokenAddrs),
 				"error", err)
 			errs = append(errs, fmt.Errorf("oracle %s: %w", unit.oracle.Name, err))
 		}
@@ -295,6 +416,15 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 }
 
 func (s *Service) processBlockForOracle(ctx context.Context, event blockEvent, unit *oracleUnit) error {
+	switch unit.oracle.OracleType {
+	case "chainlink_feed":
+		return s.processBlockForFeedOracle(ctx, event, unit)
+	default:
+		return s.processBlockForAaveOracle(ctx, event, unit)
+	}
+}
+
+func (s *Service) processBlockForAaveOracle(ctx context.Context, event blockEvent, unit *oracleUnit) error {
 	prices, err := blockchain.FetchOraclePrices(
 		ctx,
 		s.multicaller,
@@ -331,6 +461,60 @@ func (s *Service) processBlockForOracle(ctx context.Context, event blockEvent, u
 	return nil
 }
 
+func (s *Service) processBlockForFeedOracle(ctx context.Context, event blockEvent, unit *oracleUnit) error {
+	results, err := blockchain.FetchFeedPrices(
+		ctx,
+		s.multicaller,
+		s.feedABI,
+		unit.feeds,
+		event.BlockNumber,
+	)
+	if err != nil {
+		return fmt.Errorf("fetching feed prices at block %d: %w", event.BlockNumber, err)
+	}
+
+	s.convertNonUSDPrices(results, unit, event.BlockNumber)
+
+	changed := s.detectFeedChanges(results, event, unit)
+
+	if len(changed) == 0 {
+		s.logger.Debug("no price changes", "oracle", unit.oracle.Name, "block", event.BlockNumber)
+		return nil
+	}
+
+	if err := s.repo.UpsertPrices(ctx, changed); err != nil {
+		return fmt.Errorf("storing prices at block %d: %w", event.BlockNumber, err)
+	}
+
+	s.logger.Info("stored feed prices",
+		"oracle", unit.oracle.Name,
+		"block", event.BlockNumber,
+		"changed", len(changed),
+		"total", len(unit.feeds))
+
+	return nil
+}
+
+// convertNonUSDPrices converts non-USD feed prices to USD using reference feeds.
+func (s *Service) convertNonUSDPrices(results []blockchain.FeedPriceResult, unit *oracleUnit, blockNum int64) {
+	for feedIdx, quoteCurrency := range unit.nonUSDFeeds {
+		if !results[feedIdx].Success {
+			continue
+		}
+		refIdx, hasRef := unit.refFeedIdx[quoteCurrency]
+		if !hasRef || !results[refIdx].Success {
+			results[feedIdx].Success = false
+			s.logger.Warn("reference price unavailable for conversion",
+				"oracle", unit.oracle.Name,
+				"feed_token", unit.feeds[feedIdx].TokenID,
+				"quote", quoteCurrency,
+				"block", blockNum)
+			continue
+		}
+		results[feedIdx].Price *= results[refIdx].Price
+	}
+}
+
 func (s *Service) detectChanges(rawPrices []*big.Int, event blockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
 	oracleID := int16(unit.oracle.ID)
@@ -362,6 +546,39 @@ func (s *Service) detectChanges(rawPrices []*big.Int, event blockEvent, unit *or
 		}
 		changed = append(changed, price)
 		unit.priceCache[tokenID] = priceUSD
+	}
+
+	return changed
+}
+
+func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event blockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {
+	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
+	oracleID := int16(unit.oracle.ID)
+
+	var changed []*entity.OnchainTokenPrice
+	for _, result := range results {
+		if !result.Success {
+			continue
+		}
+
+		if cachedPrice, ok := unit.priceCache[result.TokenID]; ok && cachedPrice == result.Price {
+			continue
+		}
+
+		price, err := entity.NewOnchainTokenPrice(
+			result.TokenID,
+			oracleID,
+			event.BlockNumber,
+			int16(event.Version),
+			blockTimestamp,
+			result.Price,
+		)
+		if err != nil {
+			s.logger.Error("invalid price entity", "tokenID", result.TokenID, "error", err)
+			continue
+		}
+		changed = append(changed, price)
+		unit.priceCache[result.TokenID] = result.Price
 	}
 
 	return changed
