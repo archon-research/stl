@@ -227,7 +227,7 @@ dev-env:
 	@printf '%s\n' \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
-		> cmd/oracle-backfill/.env
+		> cmd/oracle-pricing-backfill/.env
 	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text) || \
 		{ echo "WARNING: Failed to fetch ETHERSCAN_API_KEY from AWS Secrets Manager."; ETHERSCAN_API_KEY=''; }; \
 	TIGERDATA_URL=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-tigerdata-readonly --query SecretString --output text | jq -r '.connection_url // empty' | sed 's|@[^:]*:|@localhost:|') || \
