@@ -128,7 +128,7 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, enabledAssetCount),
 		repo,
-		nil,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -218,7 +218,7 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactoryConstant(t, constantPrices),
 		repo,
-		nil,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -299,7 +299,7 @@ func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
 		repo,
-		nil,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -379,7 +379,7 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
 		repo,
-		nil,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -428,7 +428,7 @@ func TestIntegration_BackfillRun_RespectsDeploymentBlock(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
 		repo,
-		nil,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -497,7 +497,7 @@ func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
 		repo,
-		nil,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -605,7 +605,7 @@ func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		mcFactory,
 		repo,
-		nil,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -679,7 +679,7 @@ func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T)
 			integrationMockHeaderFetcher(),
 			integrationMockMulticallFactory(t, 2),
 			repo,
-			nil,
+			dummyRPCClient(),
 		)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
@@ -771,7 +771,7 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		mcFactory,
 		repo,
-		nil,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)

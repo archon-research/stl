@@ -1,29 +1,34 @@
 -- Add oracle_type to oracle table for dispatch (aave_oracle vs chainlink_feed)
 ALTER TABLE oracle ADD COLUMN IF NOT EXISTS oracle_type VARCHAR(20) NOT NULL DEFAULT 'aave_oracle';
 
+-- Feed-based oracles (chainlink_feed, chronicle) don't have a single oracle contract;
+-- each asset has its own feed address in oracle_asset.feed_address.
+ALTER TABLE oracle ALTER COLUMN address DROP NOT NULL;
+
 -- Add per-feed columns to oracle_asset for chainlink-style feeds
 ALTER TABLE oracle_asset ADD COLUMN IF NOT EXISTS feed_address BYTEA;
 ALTER TABLE oracle_asset ADD COLUMN IF NOT EXISTS feed_decimals SMALLINT;
 ALTER TABLE oracle_asset ADD COLUMN IF NOT EXISTS quote_currency VARCHAR(10) NOT NULL DEFAULT 'USD';
 
--- Seed Chainlink oracle (oracle_type = 'chainlink_feed', address = zero)
+-- Seed Chainlink oracle (no single contract; feeds stored per-asset)
 INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, price_decimals, enabled)
-VALUES ('chainlink', 'Chainlink', 1, '\x0000000000000000000000000000000000000000', 'chainlink_feed', 10606501, 8, true)
+VALUES ('chainlink', 'Chainlink', 1, NULL, 'chainlink_feed', 10606501, 8, true)
 ON CONFLICT (name) DO NOTHING;
 
 -- Seed Chronicle oracle (uses DirectCaller instead of Multicall3 due to toll/whitelist)
 -- deployment_block = earliest feed (WETH/USD deployed at block 18791466)
 INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, price_decimals, enabled)
-VALUES ('chronicle', 'Chronicle', 1, '\x0000000000000000000000000000000000000000', 'chronicle', 18791466, 18, true)
+VALUES ('chronicle', 'Chronicle', 1, NULL, 'chronicle', 18791466, 18, true)
 ON CONFLICT (name) DO NOTHING;
 
 -- Seed Redstone oracle (same ABI as chainlink_feed)
 -- deployment_block = weETH/USD feed deployed at block 19712153
 INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, price_decimals, enabled)
-VALUES ('redstone', 'RedStone', 1, '\x0000000000000000000000000000000000000000', 'chainlink_feed', 19712153, 8, true)
+VALUES ('redstone', 'RedStone', 1, NULL, 'chainlink_feed', 19712153, 8, true)
 ON CONFLICT (name) DO NOTHING;
 
 -- Chainlink feed assets (16 feeds)
+-- Feed addresses sourced from https://data.chain.link/feeds/ethereum/mainnet
 -- Requires token table to have matching symbols
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
 SELECT o.id, t.id, true,
@@ -98,9 +103,10 @@ SELECT o.id, t.id, true,
 FROM oracle o, token t WHERE o.name = 'chainlink' AND t.symbol = 'rETH'
 ON CONFLICT (oracle_id, token_id) DO NOTHING;
 
+-- wstETH/USD uses WstETHSynchronicityPriceAdapter (composes wstETH/stETH + stETH/ETH + ETH/USD)
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
 SELECT o.id, t.id, true,
-       '\x86392dC19c0b719886221c78AB11eb8Cf5c52812'::BYTEA, 18, 'ETH'
+       '\x8B6851156023f4f5A66F68BEA80851c3D905Ac93'::BYTEA, 8, 'USD'
 FROM oracle o, token t WHERE o.name = 'chainlink' AND t.symbol = 'wstETH'
 ON CONFLICT (oracle_id, token_id) DO NOTHING;
 
@@ -124,6 +130,7 @@ FROM oracle o, token t WHERE o.name = 'chainlink' AND t.symbol = 'LBTC'
 ON CONFLICT (oracle_id, token_id) DO NOTHING;
 
 -- Chronicle feed assets (18 decimals, USD-denominated)
+-- Feed addresses sourced from https://chroniclelabs.org/dashboard/oracles
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
 SELECT o.id, t.id, true,
        '\x46ef0071b1E2fF6B42d36e5A177EA43Ae5917f4E'::BYTEA, 18, 'USD'
