@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // DiscardLogger returns an slog.Logger that writes to io.Discard.
@@ -52,6 +54,15 @@ func WaitFor(t *testing.T, timeout time.Duration, interval time.Duration, condit
 				return true
 			}
 		}
+	}
+}
+
+// DisableAllOracles disables all migration-seeded oracles for test isolation.
+// Call this after SetupTimescaleDB when creating custom test oracles.
+func DisableAllOracles(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false`); err != nil {
+		t.Fatalf("disable seeded oracles: %v", err)
 	}
 }
 

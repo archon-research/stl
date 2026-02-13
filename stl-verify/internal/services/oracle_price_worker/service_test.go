@@ -12,11 +12,18 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+// dummyRPCClient returns a *rpc.Client backed by an in-process server.
+// It won't handle real eth_call requests but satisfies the non-nil requirement.
+func dummyRPCClient() *rpc.Client {
+	return rpc.DialInProc(rpc.NewServer())
+}
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -317,9 +324,20 @@ func TestNewService(t *testing.T) {
 		},
 	}
 
+	// Separate test for nil rpcClient since the table always passes dummyRPCClient().
+	t.Run("error nil rpcClient", func(t *testing.T) {
+		_, err := NewService(validConfig(), consumer, multicaller, repo, nil)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "rpcClient cannot be nil") {
+			t.Errorf("error %q does not contain %q", err.Error(), "rpcClient cannot be nil")
+		}
+	})
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, err := NewService(tc.config, tc.consumer, tc.multicaller, tc.repo)
+			svc, err := NewService(tc.config, tc.consumer, tc.multicaller, tc.repo, dummyRPCClient())
 
 			if tc.wantErr {
 				if err == nil {
@@ -542,7 +560,7 @@ func TestStart(t *testing.T) {
 				new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8)),
 			})
 
-			svc, err := NewService(validConfig(), consumer, mc, repo)
+			svc, err := NewService(validConfig(), consumer, mc, repo, dummyRPCClient())
 			if err != nil {
 				t.Fatalf("NewService failed: %v", err)
 			}
@@ -624,7 +642,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -704,7 +722,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -745,7 +763,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -796,7 +814,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -854,7 +872,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -911,7 +929,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -976,7 +994,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1036,7 +1054,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1102,7 +1120,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1151,7 +1169,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1197,7 +1215,7 @@ func TestStop(t *testing.T) {
 		consumer := &mockConsumer{}
 		mc := &testutil.MockMulticaller{}
 
-		svc, err := NewService(validConfig(), consumer, mc, repo)
+		svc, err := NewService(validConfig(), consumer, mc, repo, dummyRPCClient())
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1227,7 +1245,7 @@ func TestStop(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}

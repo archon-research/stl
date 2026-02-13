@@ -145,6 +145,7 @@ func run(ctx context.Context, args []string) error {
 		consumer,
 		mc,
 		repo,
+		ethClient.Client(),
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)

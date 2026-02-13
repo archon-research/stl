@@ -159,6 +159,7 @@ func run(args []string) error {
 		ethClient,
 		newMulticaller,
 		repo,
+		rpcClient,
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)

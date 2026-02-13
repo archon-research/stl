@@ -12,6 +12,7 @@ type Oracle struct {
 	DisplayName     string
 	ChainID         int
 	Address         [20]byte
+	OracleType      string // "aave_oracle", "chainlink_feed", or "chronicle"
 	DeploymentBlock int64
 	Enabled         bool
 	PriceDecimals   int // default 8 for Chainlink/Aave standard
@@ -21,11 +22,14 @@ type Oracle struct {
 
 // OracleAsset represents a token tracked by an oracle.
 type OracleAsset struct {
-	ID        int64
-	OracleID  int64
-	TokenID   int64
-	Enabled   bool
-	CreatedAt time.Time
+	ID            int64
+	OracleID      int64
+	TokenID       int64
+	Enabled       bool
+	FeedAddress   []byte // nil for aave_oracle; the feed contract address for chainlink_feed
+	FeedDecimals  *int   // nil for aave_oracle; 0 means use oracle.PriceDecimals
+	QuoteCurrency string // "USD" (default), "ETH", or "BTC"
+	CreatedAt     time.Time
 }
 
 // OnchainTokenPrice stores an oracle price for a token at a specific block.

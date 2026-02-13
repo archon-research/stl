@@ -82,6 +82,11 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	// Disable feed-based oracles — the mock multicaller only handles aave_oracle format.
+	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE oracle_type IN ('chainlink_feed', 'chronicle')`); err != nil {
+		t.Fatalf("disable feed oracles: %v", err)
+	}
+
 	// Set deployment_block and protocol binding below the test range so clamping doesn't skip blocks
 	if _, err := pool.Exec(ctx, `UPDATE oracle SET deployment_block = 0 WHERE name = 'sparklend'`); err != nil {
 		t.Fatalf("update deployment_block: %v", err)
@@ -123,6 +128,7 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, enabledAssetCount),
 		repo,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -185,6 +191,8 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	testutil.DisableAllOracles(t, ctx, pool)
+
 	// Create our own oracle to avoid interference from migration seed data.
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-oracle", "Test Oracle", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000001", "TK1", 18)
@@ -201,12 +209,6 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 		t.Fatalf("failed to create repository: %v", err)
 	}
 
-	// Disable the migration-seeded sparklend oracle so only our test oracle runs
-	_, err = pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`)
-	if err != nil {
-		t.Fatalf("failed to disable sparklend oracle: %v", err)
-	}
-
 	svc, err := NewService(
 		Config{
 			Concurrency: 1,
@@ -216,6 +218,7 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactoryConstant(t, constantPrices),
 		repo,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -275,15 +278,11 @@ func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	testutil.DisableAllOracles(t, ctx, pool)
+
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-idempotent", "Test Idempotent", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000021", "IDP1", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
-
-	// Disable the migration-seeded sparklend oracle so only our test oracle runs
-	_, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`)
-	if err != nil {
-		t.Fatalf("failed to disable sparklend oracle: %v", err)
-	}
 
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
 	if err != nil {
@@ -300,6 +299,7 @@ func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
 		repo,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -349,15 +349,11 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	testutil.DisableAllOracles(t, ctx, pool)
+
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-latest-block", "Test Latest Block", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000031", "LB1", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
-
-	// Disable the migration-seeded sparklend oracle so only our test oracle runs
-	_, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`)
-	if err != nil {
-		t.Fatalf("failed to disable sparklend oracle: %v", err)
-	}
 
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
 	if err != nil {
@@ -383,6 +379,7 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
 		repo,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -410,16 +407,12 @@ func TestIntegration_BackfillRun_RespectsDeploymentBlock(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	testutil.DisableAllOracles(t, ctx, pool)
+
 	// Create oracle with deployment block at 200
 	oracleID := testutil.SeedOracleWithDeploymentBlock(t, ctx, pool, "test-deploy", "Test Deploy", 1, "0x0000000000000000000000000000000000000AAA", 200)
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000051", "DEP1", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
-
-	// Disable the migration-seeded sparklend oracle
-	_, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`)
-	if err != nil {
-		t.Fatalf("failed to disable sparklend oracle: %v", err)
-	}
 
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
 	if err != nil {
@@ -435,6 +428,7 @@ func TestIntegration_BackfillRun_RespectsDeploymentBlock(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
 		repo,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -474,6 +468,8 @@ func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	testutil.DisableAllOracles(t, ctx, pool)
+
 	// Create two oracles: oracle1 deployed at block 100, oracle2 deployed at block 150
 	oracle1ID := testutil.SeedOracleWithDeploymentBlock(t, ctx, pool, "test-old-oracle", "Test Old Oracle", 1, "0x0000000000000000000000000000000000000AAA", 100)
 	oracle2ID := testutil.SeedOracleWithDeploymentBlock(t, ctx, pool, "test-new-oracle", "Test New Oracle", 1, "0x0000000000000000000000000000000000000BBB", 150)
@@ -486,12 +482,6 @@ func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
 	protocolID := testutil.SeedProtocol(t, ctx, pool, 1, "0x0000000000000000000000000000000000000FFF", "test-protocol", "lending", 100, "")
 	testutil.SeedProtocolOracle(t, ctx, pool, protocolID, oracle1ID, 100)
 	testutil.SeedProtocolOracle(t, ctx, pool, protocolID, oracle2ID, 160)
-
-	// Disable the migration-seeded sparklend oracle
-	_, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`)
-	if err != nil {
-		t.Fatalf("failed to disable sparklend oracle: %v", err)
-	}
 
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
 	if err != nil {
@@ -507,6 +497,7 @@ func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
 		repo,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -560,6 +551,8 @@ func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	testutil.DisableAllOracles(t, ctx, pool)
+
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-partial", "Test Partial", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000071", "PF1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000072", "PF2", 18)
@@ -567,12 +560,6 @@ func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID3)
-
-	// Disable the migration-seeded sparklend oracle
-	_, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`)
-	if err != nil {
-		t.Fatalf("failed to disable sparklend oracle: %v", err)
-	}
 
 	// token3 (index 2) fails at blocks 100-102 (early blocks), succeeds at 103-104.
 	// This simulates a token that didn't have a price source until a later block.
@@ -618,6 +605,7 @@ func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		mcFactory,
 		repo,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -672,16 +660,13 @@ func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T)
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	testutil.DisableAllOracles(t, ctx, pool)
+
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-dup-safe", "Test Dup Safe", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000091", "DUP1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000092", "DUP2", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
-
-	_, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`)
-	if err != nil {
-		t.Fatalf("failed to disable sparklend oracle: %v", err)
-	}
 
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
 	if err != nil {
@@ -694,6 +679,7 @@ func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T)
 			integrationMockHeaderFetcher(),
 			integrationMockMulticallFactory(t, 2),
 			repo,
+			dummyRPCClient(),
 		)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
@@ -741,17 +727,13 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
+	testutil.DisableAllOracles(t, ctx, pool)
+
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-selective", "Test Selective", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000041", "SC1", 18)
 	tokenID2 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000042", "SC2", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
-
-	// Disable the migration-seeded sparklend oracle so only our test oracle runs
-	_, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`)
-	if err != nil {
-		t.Fatalf("failed to disable sparklend oracle: %v", err)
-	}
 
 	// Block 100: token1=$100, token2=$2500 (new -> stored)
 	// Block 101: token1=$100, token2=$2500 (same -> NOT stored)
@@ -789,6 +771,7 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		mcFactory,
 		repo,
+		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
