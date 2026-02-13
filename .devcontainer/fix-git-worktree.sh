@@ -30,11 +30,6 @@ while [ "$_dir" != "/" ]; do
         printf '%s\n' "ref: refs/heads/$_name" | sudo tee "$_target/HEAD" > /dev/null
         printf '%s\n' "../.." | sudo tee "$_target/commondir" > /dev/null
         sudo chown -R "$(id -u):$(id -g)" "$_bare"
-
-        git -C "$_dir" config user.email "agent@sandbox"
-        git -C "$_dir" config user.name "Agent"
-        git -C "$_dir" add -A >/dev/null 2>&1
-        git -C "$_dir" commit -m "Initial commit from worktree snapshot" >/dev/null 2>&1
         exit 0
     fi
     _dir=$(dirname "$_dir")
