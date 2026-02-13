@@ -3,12 +3,14 @@
 #
 # When a git worktree directory is mounted into a sandbox, the .git file
 # contains a gitdir pointer to the bare repo on the host, which doesn't
-# exist inside the sandbox. This recreates the bare repo structure so
-# git operations work.
+# exist inside the sandbox.
+#
+# Instead of modifying .git (which is a bind mount to the host), this script
+# creates the expected directory structure at the exact path the .git file
+# already points to, using sudo for parent directory permissions.
 #
 # Used as a Claude Code SessionStart hook.
 
-# Don't block on stdin — redirect from /dev/null
 exec < /dev/null
 
 _dir="$PWD"
@@ -16,19 +18,18 @@ while [ "$_dir" != "/" ]; do
     if [ -f "$_dir/.git" ]; then
         _target=$(sed -n 's/^gitdir: //p' "$_dir/.git")
         if [ -z "$_target" ] || [ -d "$_target" ]; then
-            exit 0  # not a worktree pointer, or target exists — nothing to fix
+            exit 0  # not a worktree pointer, or target already exists
         fi
 
         _name=$(basename "$_dir")
-        _bare="/tmp/.git-bare"
-        _wt="$_bare/worktrees/$_name"
+        _bare=$(cd "$_dir" && dirname "$(dirname "$_target")")
 
-        git init --bare "$_bare" >/dev/null 2>&1
-        mkdir -p "$_wt"
-        printf '%s\n' "$_dir/.git" > "$_wt/gitdir"
-        printf '%s\n' "ref: refs/heads/$_name" > "$_wt/HEAD"
-        printf '%s\n' "../.." > "$_wt/commondir"
-        printf '%s\n' "gitdir: $_wt" > "$_dir/.git"
+        sudo git init --bare "$_bare" >/dev/null 2>&1
+        sudo mkdir -p "$_target"
+        printf '%s\n' "$_dir/.git" | sudo tee "$_target/gitdir" > /dev/null
+        printf '%s\n' "ref: refs/heads/$_name" | sudo tee "$_target/HEAD" > /dev/null
+        printf '%s\n' "../.." | sudo tee "$_target/commondir" > /dev/null
+        sudo chown -R "$(id -u):$(id -g)" "$_bare"
 
         git -C "$_dir" config user.email "agent@sandbox"
         git -C "$_dir" config user.name "Agent"
