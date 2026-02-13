@@ -6,5 +6,18 @@
     "code-simplifier@claude-plugins-official": true,
     "superpowers@claude-plugins-official": true,
     "linear@claude-plugins-official": true
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .devcontainer/fix-git-worktree.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
   }
 }
