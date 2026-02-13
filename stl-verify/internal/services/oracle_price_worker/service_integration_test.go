@@ -113,10 +113,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Disable migration-seeded oracle to isolate test data
-	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
-		t.Fatalf("disable sparklend oracle: %v", err)
-	}
+	testutil.DisableAllOracles(t, ctx, pool)
 
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker", "Test Worker", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000051", "WK1", 18)
@@ -146,7 +143,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo)
+	svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -221,10 +218,7 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Disable migration-seeded oracle to isolate test data
-	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
-		t.Fatalf("disable sparklend oracle: %v", err)
-	}
+	testutil.DisableAllOracles(t, ctx, pool)
 
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-cd", "Test Worker CD", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000061", "CD1", 18)
@@ -256,7 +250,7 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo)
+	svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -305,10 +299,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Disable migration-seeded oracle to isolate test data
-	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
-		t.Fatalf("disable sparklend oracle: %v", err)
-	}
+	testutil.DisableAllOracles(t, ctx, pool)
 
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-multi", "Test Worker Multi", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000071", "MT1", 18)
@@ -339,7 +330,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo)
+	svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -389,10 +380,7 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Disable migration-seeded oracle to isolate test data
-	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
-		t.Fatalf("disable sparklend oracle: %v", err)
-	}
+	testutil.DisableAllOracles(t, ctx, pool)
 
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-ss", "Test Worker SS", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000081", "SS1", 18)
@@ -419,7 +407,7 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo)
+	svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -462,7 +450,12 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Count enabled oracle assets from all enabled oracles
+	// Disable feed-based oracles — the mock only handles aave_oracle format.
+	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE oracle_type IN ('chainlink_feed', 'chronicle')`); err != nil {
+		t.Fatalf("disable feed oracles: %v", err)
+	}
+
+	// Count enabled oracle assets from all enabled oracles (sparklend only after disable)
 	var numTokens int
 	err := pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM oracle_asset oa
@@ -494,7 +487,7 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo)
+	svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -533,10 +526,7 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Disable migration-seeded oracle to isolate test data
-	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
-		t.Fatalf("disable sparklend oracle: %v", err)
-	}
+	testutil.DisableAllOracles(t, ctx, pool)
 
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-cache", "Test Worker Cache", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000091", "CA1", 18)
@@ -590,7 +580,7 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo)
+	svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}

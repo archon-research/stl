@@ -84,7 +84,7 @@ func ConvertNonUSDPrices(results []blockchain.FeedPriceResult, unit *OracleUnit,
 
 func buildOracleUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle) (*OracleUnit, error) {
 	switch oracle.OracleType {
-	case "chainlink_feed":
+	case "chainlink_feed", "chronicle":
 		return buildFeedUnit(ctx, repo, oracle)
 	default:
 		return buildAaveUnit(ctx, repo, oracle)
@@ -144,7 +144,10 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		if len(asset.FeedAddress) == 0 {
 			return nil, fmt.Errorf("feed address missing for token_id %d", asset.TokenID)
 		}
-		decimals := asset.FeedDecimals
+		var decimals int
+		if asset.FeedDecimals != nil {
+			decimals = *asset.FeedDecimals
+		}
 		if decimals == 0 {
 			decimals = oracle.PriceDecimals
 		}

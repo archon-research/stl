@@ -12,11 +12,16 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+func dummyRPCClient() *rpc.Client {
+	return rpc.DialInProc(rpc.NewServer())
+}
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -384,9 +389,19 @@ func TestNewService(t *testing.T) {
 		},
 	}
 
+	t.Run("error nil rpcClient", func(t *testing.T) {
+		_, err := NewService(Config{Logger: testutil.DiscardLogger()}, validFetcher, validFactory, &mockRepo{}, nil)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "rpcClient cannot be nil") {
+			t.Errorf("error %q does not contain %q", err.Error(), "rpcClient cannot be nil")
+		}
+	})
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc, err := NewService(tt.config, tt.headerFetcher, tt.newMulticaller, tt.repo)
+			svc, err := NewService(tt.config, tt.headerFetcher, tt.newMulticaller, tt.repo, dummyRPCClient())
 
 			if tt.wantErr {
 				if err == nil {
@@ -1191,7 +1206,7 @@ func TestRun(t *testing.T) {
 			header := tt.setupHeader()
 			mcFactory := tt.setupMC(t)
 
-			svc, err := NewService(tt.config, header, mcFactory, repo)
+			svc, err := NewService(tt.config, header, mcFactory, repo, dummyRPCClient())
 			if err != nil {
 				t.Fatalf("NewService: %v", err)
 			}
@@ -1267,7 +1282,7 @@ func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 		Concurrency: 1,
 		BatchSize:   100,
 		Logger:      testutil.DiscardLogger(),
-	}, header, mcFactory, repo)
+	}, header, mcFactory, repo, dummyRPCClient())
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1345,7 +1360,7 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 		Concurrency: 1,
 		BatchSize:   100,
 		Logger:      testutil.DiscardLogger(),
-	}, header, mcFactory, repo)
+	}, header, mcFactory, repo, dummyRPCClient())
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1417,7 +1432,7 @@ func TestRun_DuplicateBlocksSafeWithIdempotentUpsert(t *testing.T) {
 		Concurrency: 1,
 		BatchSize:   100,
 		Logger:      testutil.DiscardLogger(),
-	}, header, mcFactory, repo)
+	}, header, mcFactory, repo, dummyRPCClient())
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1794,7 +1809,7 @@ func TestRun_BlockRangeClamping(t *testing.T) {
 				Logger:      testutil.DiscardLogger(),
 			}, header, func() (outbound.Multicaller, error) {
 				return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
-			}, repo)
+			}, repo, dummyRPCClient())
 			if err != nil {
 				t.Fatalf("NewService: %v", err)
 			}

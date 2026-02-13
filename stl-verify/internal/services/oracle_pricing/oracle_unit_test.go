@@ -180,7 +180,7 @@ func TestLoadOracleUnits(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{{
 							ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
-							FeedAddress: feedAddr.Bytes(), FeedDecimals: 8, QuoteCurrency: "USD",
+							FeedAddress: feedAddr.Bytes(), FeedDecimals: intPtr(8), QuoteCurrency: "USD",
 						}}, nil
 					},
 					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
@@ -197,6 +197,39 @@ func TestLoadOracleUnits(t *testing.T) {
 				}
 				if u.Feeds[0].FeedAddress != feedAddr {
 					t.Errorf("FeedAddress = %s, want %s", u.Feeds[0].FeedAddress, feedAddr)
+				}
+			},
+		},
+		{
+			name: "success with chronicle oracle (uses feed path)",
+			setupRepo: func() *mockRepo {
+				return &mockRepo{
+					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{{
+							ID: 1, Name: "chronicle", Enabled: true,
+							OracleType: "chronicle", PriceDecimals: 18,
+						}}, nil
+					},
+					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+						return []*entity.OracleAsset{{
+							ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
+							FeedAddress: feedAddr.Bytes(), FeedDecimals: intPtr(18), QuoteCurrency: "USD",
+						}}, nil
+					},
+					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+						return map[int64][]byte{1: wethAddr.Bytes()}, nil
+					},
+				}
+			},
+			wantCount: 1,
+			checkUnits: func(t *testing.T, units []*OracleUnit) {
+				t.Helper()
+				u := units[0]
+				if len(u.Feeds) != 1 {
+					t.Errorf("Feeds len = %d, want 1", len(u.Feeds))
+				}
+				if u.Feeds[0].FeedDecimals != 18 {
+					t.Errorf("FeedDecimals = %d, want 18", u.Feeds[0].FeedDecimals)
 				}
 			},
 		},
@@ -294,7 +327,7 @@ func TestLoadOracleUnits(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{{
 							ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
-							FeedAddress: feedAddr.Bytes(), FeedDecimals: 0, QuoteCurrency: "",
+							FeedAddress: feedAddr.Bytes(), FeedDecimals: nil, QuoteCurrency: "",
 						}}, nil
 					},
 					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
@@ -559,6 +592,8 @@ func TestConvertNonUSDPrices(t *testing.T) {
 		})
 	}
 }
+
+func intPtr(v int) *int { return &v }
 
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))

@@ -21,6 +21,13 @@ func GetAggregatorV3ABI() (*abi.ABI, error) {
 		},
 		{
 			"inputs": [],
+			"name": "latestAnswer",
+			"outputs": [{"name": "", "type": "int256"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
 			"name": "decimals",
 			"outputs": [{"name": "", "type": "uint8"}],
 			"stateMutability": "view",

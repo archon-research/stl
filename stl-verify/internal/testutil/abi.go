@@ -49,6 +49,20 @@ func PackLatestRoundData(t *testing.T, roundID *big.Int, answer *big.Int, starte
 	return data
 }
 
+// PackLatestAnswer ABI-encodes latestAnswer() return data.
+func PackLatestAnswer(t *testing.T, answer *big.Int) []byte {
+	t.Helper()
+	feedABI, err := abis.GetAggregatorV3ABI()
+	if err != nil {
+		t.Fatalf("loading AggregatorV3 ABI: %v", err)
+	}
+	data, err := feedABI.Methods["latestAnswer"].Outputs.Pack(answer)
+	if err != nil {
+		t.Fatalf("packing latestAnswer: %v", err)
+	}
+	return data
+}
+
 // MulticallResult matches the multicall3 aggregate3 output tuple.
 type MulticallResult struct {
 	Success    bool

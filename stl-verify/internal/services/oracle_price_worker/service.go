@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 )
@@ -40,7 +42,8 @@ func configDefaults() Config {
 // for persistent change detection across blocks.
 type oracleUnit struct {
 	*oracle_pricing.OracleUnit
-	priceCache map[int64]float64 // tokenID → last stored price
+	priceCache  map[int64]float64    // tokenID → last stored price
+	multicaller outbound.Multicaller // per-unit multicaller (DirectCaller for chronicle, Multicall3 for others)
 }
 
 // Service processes SQS block events and fetches oracle prices for each block.
@@ -49,6 +52,7 @@ type Service struct {
 	consumer    outbound.SQSConsumer
 	repo        outbound.OnchainPriceRepository
 	multicaller outbound.Multicaller
+	rpcClient   *rpc.Client // for creating DirectCaller instances
 
 	oracleABI *abi.ABI
 	feedABI   *abi.ABI
@@ -65,6 +69,7 @@ func NewService(
 	consumer outbound.SQSConsumer,
 	multicaller outbound.Multicaller,
 	repo outbound.OnchainPriceRepository,
+	rpcClient *rpc.Client,
 ) (*Service, error) {
 	if consumer == nil {
 		return nil, fmt.Errorf("consumer cannot be nil")
@@ -74,6 +79,9 @@ func NewService(
 	}
 	if repo == nil {
 		return nil, fmt.Errorf("repo cannot be nil")
+	}
+	if rpcClient == nil {
+		return nil, fmt.Errorf("rpcClient cannot be nil")
 	}
 
 	defaults := configDefaults()
@@ -102,6 +110,7 @@ func NewService(
 		consumer:    consumer,
 		repo:        repo,
 		multicaller: multicaller,
+		rpcClient:   rpcClient,
 		oracleABI:   oracleABI,
 		feedABI:     feedABI,
 		logger:      config.Logger.With("component", "oracle-price-worker"),
@@ -145,11 +154,17 @@ func (s *Service) initialize(ctx context.Context) error {
 			continue
 		}
 
+		mc := s.multicaller
+		if su.Oracle.OracleType == "chronicle" {
+			mc = multicall.NewDirectCaller(s.rpcClient)
+		}
+
 		s.logOracleUnit(su, cached)
 
 		s.units = append(s.units, &oracleUnit{
-			OracleUnit: su,
-			priceCache: cached,
+			OracleUnit:  su,
+			priceCache:  cached,
+			multicaller: mc,
 		})
 	}
 
@@ -163,13 +178,14 @@ func (s *Service) initialize(ctx context.Context) error {
 
 func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]float64) {
 	switch su.Oracle.OracleType {
-	case "chainlink_feed":
+	case "chainlink_feed", "chronicle":
 		feedAddrs := make([]string, len(su.Feeds))
 		for i, f := range su.Feeds {
 			feedAddrs[i] = f.FeedAddress.Hex()
 		}
 		s.logger.Info("loaded feed oracle",
 			"name", su.Oracle.Name,
+			"type", su.Oracle.OracleType,
 			"feeds", len(su.Feeds),
 			"feedAddrs", feedAddrs,
 			"nonUSDFeeds", len(su.NonUSDFeeds),
@@ -273,7 +289,7 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 
 func (s *Service) processBlockForOracle(ctx context.Context, event blockEvent, unit *oracleUnit) error {
 	switch unit.Oracle.OracleType {
-	case "chainlink_feed":
+	case "chainlink_feed", "chronicle":
 		return s.processBlockForFeedOracle(ctx, event, unit)
 	default:
 		return s.processBlockForAaveOracle(ctx, event, unit)
@@ -320,14 +336,17 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event blockEven
 func (s *Service) processBlockForFeedOracle(ctx context.Context, event blockEvent, unit *oracleUnit) error {
 	results, err := blockchain.FetchFeedPrices(
 		ctx,
-		s.multicaller,
+		unit.multicaller,
 		s.feedABI,
 		unit.Feeds,
 		event.BlockNumber,
+		s.logger,
 	)
 	if err != nil {
 		return fmt.Errorf("fetching feed prices at block %d: %w", event.BlockNumber, err)
 	}
+
+	logFeedFailures(results, unit, s.logger, event.BlockNumber)
 
 	oracle_pricing.ConvertNonUSDPrices(results, unit.OracleUnit, s.logger, event.BlockNumber)
 
@@ -385,6 +404,25 @@ func (s *Service) detectChanges(rawPrices []*big.Int, event blockEvent, unit *or
 	}
 
 	return changed
+}
+
+func logFeedFailures(results []blockchain.FeedPriceResult, unit *oracleUnit, logger *slog.Logger, blockNum int64) {
+	var failCount int
+	for _, r := range results {
+		if !r.Success {
+			failCount++
+			logger.Warn("feed call failed",
+				"oracle", unit.Oracle.Name,
+				"tokenID", r.TokenID,
+				"block", blockNum)
+		}
+	}
+	if failCount == len(results) && len(results) > 0 {
+		logger.Error("all feeds failed for oracle, check configuration",
+			"oracle", unit.Oracle.Name,
+			"block", blockNum,
+			"feedCount", len(results))
+	}
 }
 
 func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event blockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {

@@ -15,10 +15,12 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 )
@@ -52,8 +54,9 @@ func configDefaults() Config {
 // block range information.
 type oracleWorkUnit struct {
 	*oracle_pricing.OracleUnit
-	validFrom int64 // earliest block to query (0 = no lower bound)
-	validTo   int64 // latest block to query (0 = no upper bound)
+	validFrom      int64            // earliest block to query (0 = no lower bound)
+	validTo        int64            // latest block to query (0 = no upper bound)
+	newMulticaller MulticallFactory // per-unit multicall factory (DirectCaller for chronicle)
 }
 
 // oracleBlockRange represents the valid block range for an oracle across all protocols.
@@ -68,6 +71,7 @@ type Service struct {
 	headerFetcher  BlockHeaderFetcher
 	newMulticaller MulticallFactory
 	repo           outbound.OnchainPriceRepository
+	rpcClient      *rpc.Client // for creating DirectCaller instances
 
 	oracleABI *abi.ABI
 	feedABI   *abi.ABI
@@ -81,6 +85,7 @@ func NewService(
 	headerFetcher BlockHeaderFetcher,
 	newMulticaller MulticallFactory,
 	repo outbound.OnchainPriceRepository,
+	rpcClient *rpc.Client,
 ) (*Service, error) {
 	if headerFetcher == nil {
 		return nil, fmt.Errorf("headerFetcher cannot be nil")
@@ -90,6 +95,9 @@ func NewService(
 	}
 	if repo == nil {
 		return nil, fmt.Errorf("repo cannot be nil")
+	}
+	if rpcClient == nil {
+		return nil, fmt.Errorf("rpcClient cannot be nil")
 	}
 
 	defaults := configDefaults()
@@ -118,6 +126,7 @@ func NewService(
 		headerFetcher:  headerFetcher,
 		newMulticaller: newMulticaller,
 		repo:           repo,
+		rpcClient:      rpcClient,
 		oracleABI:      oracleABI,
 		feedABI:        feedABI,
 		logger:         config.Logger.With("component", "oracle-backfill"),
@@ -161,12 +170,22 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 	}
 	blockRanges := computeOracleBlockRanges(bindings)
 
+	directCallerFactory := func() (outbound.Multicaller, error) {
+		return multicall.NewDirectCaller(s.rpcClient), nil
+	}
+
 	// Build work units, deduplicating by oracle ID (a protocol oracle may also exist as a generic oracle).
 	var workUnits []*oracleWorkUnit
 	for _, su := range shared {
+		factory := s.newMulticaller
+		if su.Oracle.OracleType == "chronicle" {
+			factory = directCallerFactory
+		}
+
 		wu := &oracleWorkUnit{
-			OracleUnit: su,
-			validFrom:  su.Oracle.DeploymentBlock,
+			OracleUnit:     su,
+			validFrom:      su.Oracle.DeploymentBlock,
+			newMulticaller: factory,
 		}
 
 		if br, ok := blockRanges[su.Oracle.ID]; ok {
@@ -349,7 +368,7 @@ func (s *Service) worker(
 	priceCh chan<- []*entity.OnchainTokenPrice,
 	stats *backfillStats,
 ) {
-	mc, err := s.newMulticaller()
+	mc, err := wu.newMulticaller()
 	if err != nil {
 		s.logger.Error("failed to create multicall client", "error", err)
 		return
@@ -373,7 +392,7 @@ func (s *Service) worker(
 		var blockErr error
 
 		switch wu.Oracle.OracleType {
-		case "chainlink_feed":
+		case "chainlink_feed", "chronicle":
 			prices, blockErr = s.processBlockFeed(ctx, mc, wu, oracleID, blockNum)
 		default:
 			prices, blockErr = s.processBlockAave(ctx, mc, wu.OracleAddr, wu.TokenAddrs, wu.TokenIDs, oracleID, priceDecimals, blockNum)
@@ -483,10 +502,13 @@ func (s *Service) processBlockFeed(
 	results, err := blockchain.FetchFeedPrices(
 		ctx, mc, s.feedABI,
 		wu.Feeds, blockNum,
+		s.logger,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("fetching feed prices: %w", err)
 	}
+
+	logBackfillFeedFailures(results, wu, s.logger, blockNum)
 
 	oracle_pricing.ConvertNonUSDPrices(results, wu.OracleUnit, s.logger, blockNum)
 
@@ -529,6 +551,25 @@ func (s *Service) processBlockFeed(
 	}
 
 	return prices, nil
+}
+
+func logBackfillFeedFailures(results []blockchain.FeedPriceResult, wu *oracleWorkUnit, logger *slog.Logger, blockNum int64) {
+	var failCount int
+	for _, r := range results {
+		if !r.Success {
+			failCount++
+			logger.Warn("feed call failed",
+				"oracle", wu.Oracle.Name,
+				"tokenID", r.TokenID,
+				"block", blockNum)
+		}
+	}
+	if failCount == len(results) && len(results) > 0 {
+		logger.Error("all feeds failed for oracle, check configuration",
+			"oracle", wu.Oracle.Name,
+			"block", blockNum,
+			"feedCount", len(results))
+	}
 }
 
 func (s *Service) batchWriter(ctx context.Context, priceCh <-chan []*entity.OnchainTokenPrice, stats *backfillStats) error {

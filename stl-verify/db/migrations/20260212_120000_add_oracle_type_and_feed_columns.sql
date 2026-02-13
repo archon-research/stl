@@ -11,14 +11,16 @@ INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployme
 VALUES ('chainlink', 'Chainlink', 1, '\x0000000000000000000000000000000000000000', 'chainlink_feed', 10606501, 8, true)
 ON CONFLICT (name) DO NOTHING;
 
--- Seed Chronicle oracle (same ABI as chainlink_feed, 18 decimals)
+-- Seed Chronicle oracle (uses DirectCaller instead of Multicall3 due to toll/whitelist)
+-- deployment_block = earliest feed (WETH/USD deployed at block 18791466)
 INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, price_decimals, enabled)
-VALUES ('chronicle', 'Chronicle', 1, '\x0000000000000000000000000000000000000000', 'chainlink_feed', 19000000, 18, true)
+VALUES ('chronicle', 'Chronicle', 1, '\x0000000000000000000000000000000000000000', 'chronicle', 18791466, 18, true)
 ON CONFLICT (name) DO NOTHING;
 
 -- Seed Redstone oracle (same ABI as chainlink_feed)
+-- deployment_block = weETH/USD feed deployed at block 19712153
 INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, price_decimals, enabled)
-VALUES ('redstone', 'RedStone', 1, '\x0000000000000000000000000000000000000000', 'chainlink_feed', 19000000, 8, true)
+VALUES ('redstone', 'RedStone', 1, '\x0000000000000000000000000000000000000000', 'chainlink_feed', 19712153, 8, true)
 ON CONFLICT (name) DO NOTHING;
 
 -- Chainlink feed assets (16 feeds)
