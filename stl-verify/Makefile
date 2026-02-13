@@ -3,7 +3,7 @@
 
 .PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax help \
         dev-up dev-env dev-down dev-ips generate-er \
-        tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
+        preflight tf-bootstrap tf-destroy-bootstrap tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check check-tofu \
         ecr-login docker-build docker-push docker-release \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -37,6 +37,14 @@ run-watcher:
 run-watcher-avax:
 	@echo "==> Running Avalanche watcher (chain_id=43114)..."
 	@set -a && . cmd/watcher/.env.avax && [ -f cmd/watcher/.env.avax.local ] && . cmd/watcher/.env.avax.local; set +a && go run ./cmd/watcher --enable-traces=false
+
+# Pre-flight validation
+# Checks that required CLI tools are installed (aws, tofu, curl, jq)
+# Ensures .env file exists (creates from .env.example if missing)
+# Credentials and API keys are validated by Terraform during plan/apply
+# Usage: make preflight
+preflight:
+	@../preflight.sh
 
 # Run tests with race detector
 test-race:
@@ -264,49 +272,319 @@ generate-er:
 
 INFRA_DIR := ../infra
 
-# Helper script to load TigerData credentials and run tofu
+# Require ENV to be explicitly set for Terraform targets
+# Derive AWS_PROFILE from ENV (e.g., sentineldev -> sentineldev profile)
+# Only check ENV when running terraform-related targets
+TF_TARGETS := tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check tf-bootstrap tf-destroy-bootstrap
+ifneq ($(filter $(TF_TARGETS),$(MAKECMDGOALS)),)
+  ifeq ($(ENV),)
+    $(error ENV is required. Usage: make tf-init ENV=sentineldev|sentinelstaging|sentinelprod)
+  endif
+endif
+AWS_PROFILE ?= $(ENV)
+export AWS_PROFILE
+
+# Helper script to load credentials from Secrets Manager and run tofu
+# Loads both TigerData credentials and API keys (Alchemy, CoinGecko, Etherscan)
 # This exports credentials directly in the shell to ensure they're passed to tofu
 define run_tofu_with_creds
-	@SECRET_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --query SecretString --output text 2>/dev/null || echo '{}') && \
-	export TF_VAR_tigerdata_project_id=$$(echo "$$SECRET_JSON" | jq -r '.project_id // empty') && \
-	export TF_VAR_tigerdata_access_key=$$(echo "$$SECRET_JSON" | jq -r '.access_key // empty') && \
-	export TF_VAR_tigerdata_secret_key=$$(echo "$$SECRET_JSON" | jq -r '.secret_key // empty') && \
+	SECRET_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --region $(AWS_REGION) --query SecretString --output text) && \
+	export TF_VAR_tigerdata_project_id=$$(echo "$$SECRET_JSON" | jq -r '.project_id') && \
+	export TF_VAR_tigerdata_access_key=$$(echo "$$SECRET_JSON" | jq -r '.access_key') && \
+	export TF_VAR_tigerdata_secret_key=$$(echo "$$SECRET_JSON" | jq -r '.secret_key') && \
+	WATCHER_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-watcher-config --region $(AWS_REGION) --query SecretString --output text) && \
+	export TF_VAR_alchemy_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.alchemy_api_key') && \
+	export TF_VAR_coingecko_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.coingecko_api_key // "placeholder"') && \
+	export TF_VAR_etherscan_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.etherscan_api_key // "placeholder"') && \
 	cd $(INFRA_DIR) && $(1)
 endef
 
-# Initialize Terraform for an environment
-# Usage: make tf-init ENV=sentinelstaging
+# Check for required tools
+check-tofu:
+	@command -v tofu >/dev/null 2>&1 || (echo "Error: OpenTofu is not installed. Install with: brew install opentofu (macOS) or visit https://opentofu.org/docs/intro/install/" && exit 1)
+	@echo "OpenTofu: $$(tofu version)"
+
+# Bootstrap backend (S3 + DynamoDB) for an environment
+# Creates infrastructure state bucket and locking table
+# Must run once per environment before main tf-init
+#
+# CI/Automation: Only allowed for sentineldev (ephemeral environment)
+# Staging/Prod: Must be run manually when needed (persistent environments)
+#
+# Phase 1: Create S3 state bucket and DynamoDB locks table
+# Phase 2: Extract S3 bucket suffix and update backend.hcl (dev only)
+# Phase 3: Create initial secrets (tigerdata API, watcher config, tailscale key)
+# 
+# Usage: make tf-bootstrap ENV=sentineldev|sentinelstaging|sentinelprod
+# Required credentials: TIGERDATA_PROJECT_ID, TIGERDATA_ACCESS_KEY, TIGERDATA_SECRET_KEY, ALCHEMY_API_KEY
+# Optional: COINGECKO_API_KEY, ETHERSCAN_API_KEY, TAILSCALE_AUTH_KEY
+tf-bootstrap: check-tofu
+	@if [ "$(ENV)" != "sentineldev" ] && [ -n "$$CI" ]; then \
+		echo "Error: CI-based bootstrap is only allowed for sentineldev"; \
+		echo "Staging/Prod bootstrap must be run manually (locally with confirmation)"; \
+		exit 1; \
+	fi
+	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Bootstrapping backend for $(ENV) (using AWS profile: $(AWS_PROFILE))..."
+	@if [ ! -d "$(INFRA_DIR)/bootstrap" ]; then \
+		echo "Error: Bootstrap directory not found at $(INFRA_DIR)/bootstrap"; \
+		exit 1; \
+	fi
+	@echo ""
+	@echo "Checking if bootstrap already exists for $(ENV)..."
+	@if [ "$(ENV)" = "sentineldev" ]; then \
+		if [ -f "$(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV)" ]; then \
+			LOCKS_TABLE=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw locks_table_name 2>/dev/null || echo ""); \
+			if [ -n "$$LOCKS_TABLE" ] && aws dynamodb describe-table --table-name "$$LOCKS_TABLE" --region $(AWS_REGION) &>/dev/null; then \
+				echo "✓ Bootstrap infrastructure already exists for $(ENV)"; \
+				echo "  DynamoDB table: $$LOCKS_TABLE"; \
+				echo "  S3 bucket: $$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null || echo 'stl-$(ENV)-terraform-state-*')"; \
+				echo ""; \
+				echo "⚠️  Bootstrap is idempotent and only needs to run once per environment"; \
+				echo "==> Skipping bootstrap (already initialized)"; \
+				exit 0; \
+			fi; \
+		fi; \
+	else \
+		if aws dynamodb describe-table --table-name stl-$(ENV)-terraform-locks --region $(AWS_REGION) &>/dev/null; then \
+			echo "✓ Bootstrap infrastructure already exists for $(ENV)"; \
+			echo "  DynamoDB table: stl-$(ENV)-terraform-locks"; \
+			echo "  S3 bucket: stl-$(ENV)-terraform-state"; \
+			echo ""; \
+			echo "⚠️  Bootstrap is idempotent and only needs to run once per environment"; \
+			echo "==> Skipping bootstrap (already initialized)"; \
+			exit 0; \
+		fi; \
+	fi
+	@echo ""
+	@echo "Step 1: Creating backend resources (S3 + DynamoDB) with auto-retry (3 attempts)..."
+	@for attempt in 1 2 3; do \
+		echo "  Attempt $$attempt/3..."; \
+		cd $(INFRA_DIR)/bootstrap && \
+		rm -rf .terraform .terraform.lock.hcl && \
+		tofu init -backend=false && \
+		AUTO_APPROVE=""; \
+		if [ -n "$$CI" ]; then AUTO_APPROVE="-auto-approve"; fi; \
+		tofu apply $$AUTO_APPROVE \
+			-state=terraform.tfstate.$(ENV) \
+			-var-file=environments/$(ENV).tfvars \
+			-target=aws_s3_bucket.terraform_state \
+			-target=aws_s3_bucket_versioning.terraform_state \
+			-target=aws_s3_bucket_server_side_encryption_configuration.terraform_state \
+			-target=aws_s3_bucket_public_access_block.terraform_state \
+			-target=aws_dynamodb_table.terraform_locks; \
+		EXIT_CODE=$$?; \
+		if [ $$EXIT_CODE -eq 0 ]; then \
+			echo "✓ Backend resources created"; \
+			break; \
+		elif [ $$EXIT_CODE -eq 1 ] && [ -z "$$CI" ]; then \
+			echo "✗ Cancelled by user or failed"; \
+			exit 1; \
+		elif [ $$attempt -lt 3 ]; then \
+			echo "  Failed, retrying in 5 seconds..."; \
+			sleep 5; \
+		else \
+			echo "✗ Failed after 3 attempts"; \
+			exit 1; \
+		fi; \
+	done
+	@echo ""
+	@echo "Step 2: Extracting bucket suffix and updating backend config (dev only)..."
+	@if [ "$(ENV)" = "sentineldev" ]; then \
+		BUCKET_NAME=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null || echo ""); \
+		LOCKS_TABLE=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw locks_table_name 2>/dev/null || echo ""); \
+		if [ -z "$$BUCKET_NAME" ] || [ -z "$$LOCKS_TABLE" ]; then \
+			echo "Error: Could not extract bucket or locks table from bootstrap output"; \
+			exit 1; \
+		fi; \
+		echo "  Bucket: $$BUCKET_NAME"; \
+		echo "  Locks Table: $$LOCKS_TABLE"; \
+		sed -e "s|^bucket[[:space:]]*=.*|bucket = \"$$BUCKET_NAME\"|" \
+		    -e "s|^dynamodb_table[[:space:]]*=.*|dynamodb_table = \"$$LOCKS_TABLE\"|" \
+		    $(INFRA_DIR)/environments/$(ENV).backend.hcl > $(INFRA_DIR)/environments/$(ENV).backend.hcl.tmp && \
+		mv $(INFRA_DIR)/environments/$(ENV).backend.hcl.tmp $(INFRA_DIR)/environments/$(ENV).backend.hcl; \
+		echo "✓ Backend config updated"; \
+	else \
+		echo "  (Skipping for $(ENV) - using fixed backend name)"; \
+	fi
+	@echo ""
+	@echo "Step 3: Creating secrets with auto-retry (3 attempts)..."
+	@if aws secretsmanager describe-secret --secret-id stl-$(ENV)-tigerdata --region $(AWS_REGION) &>/dev/null 2>&1; then \
+		echo "✓ Secrets already exist for $(ENV)"; \
+		echo "  Skipping secrets creation"; \
+	else \
+		for attempt in 1 2 3; do \
+			echo "  Attempt $$attempt/3..."; \
+			cd $(INFRA_DIR)/bootstrap && \
+			AUTO_APPROVE=""; \
+			if [ -n "$$CI" ]; then AUTO_APPROVE="-auto-approve"; fi; \
+			tofu apply $$AUTO_APPROVE \
+				-state=terraform.tfstate.$(ENV) \
+				-var-file=environments/$(ENV).tfvars \
+				-var="tigerdata_project_id=$(TIGERDATA_PROJECT_ID)" \
+				-var="tigerdata_access_key=$(TIGERDATA_ACCESS_KEY)" \
+				-var="tigerdata_secret_key=$(TIGERDATA_SECRET_KEY)" \
+				-var="alchemy_api_key=$(ALCHEMY_API_KEY)" \
+				-var="coingecko_api_key=$(COINGECKO_API_KEY)" \
+				-var="etherscan_api_key=$(ETHERSCAN_API_KEY)" \
+				-var="tailscale_auth_key=$(TAILSCALE_AUTH_KEY)"; \
+			EXIT_CODE=$$?; \
+			if [ $$EXIT_CODE -eq 0 ]; then \
+				echo "✓ Secrets created"; \
+				break; \
+			elif [ $$EXIT_CODE -eq 1 ] && [ -z "$$CI" ]; then \
+				echo "✗ Cancelled by user or failed"; \
+				exit 1; \
+			elif [ $$attempt -lt 3 ]; then \
+				echo "  Failed, retrying in 5 seconds..."; \
+				sleep 5; \
+			else \
+				echo "✗ Failed after 3 attempts"; \
+				exit 1; \
+			fi; \
+		done; \
+	fi
+	@echo ""
+	@echo "==> Bootstrap complete!"
+	@echo "==> Next: make tf-init ENV=$(ENV)"
+
+# Initialize Terraform for main infrastructure
+# Checks for backend resources (S3 bucket) in AWS before proceeding
+# Usage: make tf-init ENV=sentineldev|sentinelstaging|sentinelprod
 tf-init:
-	@echo "==> Initializing Terraform for $(ENV)..."
-	cd $(INFRA_DIR) && tofu init -backend-config=environments/$(ENV).backend.hcl -reconfigure
+	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Initializing main infrastructure for $(ENV) (using AWS profile: $(AWS_PROFILE))..."
+	@echo "==> Checking for backend resources in AWS..."
+	@BUCKET_NAME=$$(cd $(INFRA_DIR) && grep '^bucket' environments/$(ENV).backend.hcl | awk -F'"' '{print $$2}'); \
+	if ! aws s3api head-bucket --bucket "$$BUCKET_NAME" --region $(AWS_REGION) 2>/dev/null; then \
+		echo "Error: Backend S3 bucket '$$BUCKET_NAME' not found. Run 'make tf-bootstrap ENV=$(ENV)' first."; \
+		exit 1; \
+	fi
+	@echo "✓ Backend resources exist in AWS"
+	@if [ -f "$(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV)" ]; then \
+		echo "==> Backing up bootstrap state file..."; \
+		mkdir -p $(INFRA_DIR)/.terraform; \
+		cp $(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV) $(INFRA_DIR)/.terraform/terraform.tfstate.bak; \
+	fi
+	@export AWS_PROFILE=$(AWS_PROFILE) && cd $(INFRA_DIR) && tofu init -backend-config=environments/$(ENV).backend.hcl -reconfigure
 
 # Validate Terraform configuration
-# Usage: make tf-validate ENV=sentinelstaging
+# Usage: make tf-validate ENV=sentineldev|sentinelstaging|sentinelprod
 tf-validate:
-	@echo "==> Validating Terraform for $(ENV)..."
-	$(call run_tofu_with_creds,tofu validate)
+	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Validating Terraform for $(ENV)..."
+	@export AWS_PROFILE=$(AWS_PROFILE) && cd ../infra && TF_VAR_tigerdata_project_id="dummy" TF_VAR_tigerdata_access_key="dummy" TF_VAR_tigerdata_secret_key="dummy" tofu validate
 
 # Plan Terraform changes
-# Usage: make tf-plan ENV=sentinelstaging
+# Usage: make tf-plan ENV=sentineldev|sentinelstaging|sentinelprod
 tf-plan:
-	@echo "==> Planning Terraform for $(ENV)..."
-	$(call run_tofu_with_creds,tofu plan -var-file=environments/$(ENV).tfvars)
+	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Planning Terraform for $(ENV)..."
+	@if [ "$(ENV)" = "sentineldev" ]; then \
+		SUFFIX=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null | rev | cut -d- -f1 | rev); \
+		export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu plan -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX"); \
+	else \
+		export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu plan -var-file=environments/$(ENV).tfvars); \
+	fi
 
 # Apply Terraform changes
-# Usage: make tf-apply ENV=sentinelstaging
+# Usage: make tf-apply ENV=sentineldev|sentinelstaging|sentinelprod
+# Auto-approves in CI (GitHub Actions), prompts locally
 tf-apply:
-	@echo "==> Applying Terraform for $(ENV)..."
-	$(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars)
+	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Applying Terraform for $(ENV)..."
+	@if [ "$(ENV)" = "sentineldev" ]; then \
+		SUFFIX=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null | rev | cut -d- -f1 | rev); \
+		if [ -n "$$CI" ]; then \
+			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX" -auto-approve); \
+		else \
+			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX"); \
+		fi; \
+	else \
+		if [ -n "$$CI" ]; then \
+			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars -auto-approve); \
+		else \
+			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars); \
+		fi; \
+	fi
 
-# Apply Terraform changes (auto-approve)
-# Usage: make tf-apply-auto ENV=sentinelstaging
-tf-apply-auto:
-	@echo "==> Applying Terraform for $(ENV) (auto-approve)..."
-	$(call run_tofu_with_creds,tofu apply -auto-approve -var-file=environments/$(ENV).tfvars)
+# Destroy Terraform infrastructure
+# WARNING: This is destructive. Only dev should be destroyed via automation.
+# Usage: make tf-destroy ENV=sentineldev|sentinelstaging|sentinelprod
+# Auto-approves in CI (GitHub Actions), prompts locally
+# Staging/prod require manual confirmation to prevent accidents
+tf-destroy:
+	@if [ "$(ENV)" != "sentineldev" ] && [ -n "$$CI" ]; then \
+		echo "Error: CI-based destroy is only allowed for sentineldev"; \
+		echo "Staging/Prod must be destroyed manually (run locally with confirmation)"; \
+		exit 1; \
+	fi
+	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Destroying Terraform infrastructure for $(ENV)..."
+	@if [ "$(ENV)" = "sentineldev" ]; then \
+		SUFFIX=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null | rev | cut -d- -f1 | rev); \
+		if [ -n "$$CI" ]; then \
+			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX" -auto-approve); \
+		else \
+			export AWS_PROFILE=$(AWS_PROFILE) && read -p "Are you sure you want to destroy all infrastructure for $(ENV)? (yes/no) " confirm && \
+			[ "$$confirm" = "yes" ] && (cd ../infra && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX" -auto-approve)) || echo "Destroy cancelled"; \
+		fi; \
+	else \
+		if [ -n "$$CI" ]; then \
+			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -auto-approve); \
+		else \
+			export AWS_PROFILE=$(AWS_PROFILE) && read -p "Are you sure you want to destroy all infrastructure for $(ENV)? (yes/no) " confirm && \
+			[ "$$confirm" = "yes" ] && (cd ../infra && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -auto-approve)) || echo "Destroy cancelled"; \
+		fi; \
+	fi
 
-# Full Terraform workflow: init, validate, plan
-# Usage: make tf-check ENV=sentinelstaging
-tf-check: tf-init tf-validate tf-plan
+# Destroy bootstrap backend (S3 + DynamoDB + secrets)
+# Destroy bootstrap backend (S3 state bucket + DynamoDB locks table + secrets)
+# WARNING: This is destructive and permanent. Only for sentineldev cleanup.
+# 
+# Staging/prod destruction is prevented by:
+#   1. Environment check below (hard-coded to only allow sentineldev)
+#   2. Manual confirmation prompt (skipped in CI with auto-approve)
+#   3. force_destroy = false on S3 bucket (must manually empty first)
+#
+# Usage: make tf-destroy-bootstrap ENV=sentineldev
+tf-destroy-bootstrap: check-tofu
+	@if [ "$(ENV)" != "sentineldev" ]; then \
+		echo "Error: bootstrap destroy is only allowed for sentineldev"; \
+		echo "Staging/Prod must NEVER be destroyed"; \
+		exit 1; \
+	fi && \
+	export AWS_PROFILE=$(AWS_PROFILE) && \
+	echo "==> Destroying bootstrap backend for $(ENV) (S3 + DynamoDB + secrets)..." && \
+	BOOTSTRAP_DIR="$$(cd $(INFRA_DIR)/bootstrap && pwd)" && \
+	if [ -z "$$CI" ]; then \
+		read -p "Are you sure you want to destroy bootstrap backend for $(ENV)? This is permanent. (yes/no) " confirm; \
+		if [ "$$confirm" != "yes" ]; then \
+			echo "Destroy cancelled"; \
+			exit 0; \
+		fi; \
+	fi && \
+	echo "==> Extracting credentials from AWS Secrets Manager..." && \
+	TIGERDATA_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --region $(AWS_REGION) --query SecretString --output text 2>/dev/null || echo '{}') && \
+	WATCHER_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-watcher-config --region $(AWS_REGION) --query SecretString --output text 2>/dev/null || echo '{}') && \
+	export TF_VAR_tigerdata_project_id=$$(echo "$$TIGERDATA_JSON" | jq -r '.project_id // "dummy"') && \
+	export TF_VAR_tigerdata_access_key=$$(echo "$$TIGERDATA_JSON" | jq -r '.access_key // "dummy"') && \
+	export TF_VAR_tigerdata_secret_key=$$(echo "$$TIGERDATA_JSON" | jq -r '.secret_key // "dummy"') && \
+	export TF_VAR_alchemy_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.alchemy_api_key // "dummy-key-at-least-10-chars"') && \
+	export TF_VAR_coingecko_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.coingecko_api_key // "dummy"') && \
+	export TF_VAR_etherscan_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.etherscan_api_key // "dummy"') && \
+	export TF_VAR_tailscale_auth_key=$$(echo "$$WATCHER_JSON" | jq -r '.tailscale_auth_key // "dummy"') && \
+	cd "$$BOOTSTRAP_DIR" && \
+	tofu destroy -state=terraform.tfstate.$(ENV) -var-file=environments/$(ENV).tfvars -auto-approve
+
+# Full Terraform workflow: bootstrap, init, validate, plan
+# Usage: make tf-check ENV=sentineldev|sentinelstaging|sentinelprod
+tf-check: tf-bootstrap tf-init tf-validate tf-plan
+
+# List Terraform state resources
+# Usage: make tf-state ENV=sentineldev|sentinelstaging|sentinelprod
+tf-state:
+	@echo "==> Terraform state for $(ENV)..."
+	@export AWS_PROFILE=$(AWS_PROFILE) && cd $(INFRA_DIR) && tofu state list | head -50
+	@echo ""
+	@echo "Total resources: $$(export AWS_PROFILE=$(AWS_PROFILE) && cd $(INFRA_DIR) && tofu state list | wc -l)"
+	@echo ""
+	@echo "To see details of a specific resource, use:"
+	@echo "  cd infra && tofu state show <resource_name>"
 
 # =============================================================================
 # Docker Build & Push
@@ -382,46 +660,28 @@ docker-clean:
 	-docker builder prune -f
 	@echo "==> Docker cleanup complete"
 
-# =============================================================================
-# Sentinelstaging Docker Shortcuts
-# =============================================================================
-
-docker-build-watcher-staging:
-	@$(MAKE) docker-build ENV=sentinelstaging
-
-docker-push-watcher-staging:
-	@$(MAKE) docker-push ENV=sentinelstaging
-
-docker-release-watcher-staging:
-	@$(MAKE) docker-release ENV=sentinelstaging
-
 # Force new deployment of watcher service (pulls latest image)
+# Usage: make ecs-deploy-watcher ENV=sentineldev|sentinelstaging|sentinelprod
 ecs-deploy-watcher:
 	@echo "==> Forcing new deployment of watcher service..."
 	aws ecs update-service --cluster stl-$(ENV)-cluster --service stl-$(ENV)-watcher --force-new-deployment --region $(AWS_REGION)
 	@echo "==> Deployment initiated. Monitor with: aws ecs describe-services --cluster stl-$(ENV)-cluster --services stl-$(ENV)-watcher --region $(AWS_REGION)"
-
-ecs-deploy-watcher-staging:
-	@$(MAKE) ecs-deploy-watcher ENV=sentinelstaging
 
 # =============================================================================
 # Bastion Host Management
 # =============================================================================
 
 # SSH tunnel to TigerData via bastion (after Tailscale is connected)
-# Usage: make tigerdata-tunnel BASTION_IP=<tailscale-ip>
+# Auto-discovers bastion and TigerData details from AWS
+# Usage: make tigerdata-tunnel ENV=sentineldev
+# Or manual: make tigerdata-tunnel BASTION_IP=<tailscale-ip> TIGERDATA_HOST=<tigerdata-host>
 # Then connect locally: psql "postgres://user:pass@localhost:5432/dbname"
 tigerdata-tunnel:
 	@if [ -z "$(BASTION_IP)" ] || [ -z "$(TIGERDATA_HOST)" ]; then \
 		echo "Error: BASTION_IP and TIGERDATA_HOST are required"; \
-		echo "Usage: make $@ BASTION_IP=<tailscale-ip> TIGERDATA_HOST=<tigerdata-host>"; \
-		echo "Get TIGERDATA_HOST from: aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-connection --query SecretString --output text | jq -r .host"; \
+		echo "Usage: make $@ BASTION_IP=<ip> TIGERDATA_HOST=<tigerdata-host>"; \
 		exit 1; \
 	fi
-	@echo "==> Starting SSH tunnel to TigerData via Tailscale..."
-	@echo "    Local:  localhost:5432"
-	@echo "    Remote: $(TIGERDATA_HOST):5432"
-	@echo "    Press Ctrl+C to stop"
 	ssh -N -L 5432:$(TIGERDATA_HOST):5432 ec2-user@$(BASTION_IP)
 
 # =============================================================================
@@ -445,15 +705,15 @@ db-migrate:
 	@echo "==> Migrations complete"
 
 # Set database user passwords from Secrets Manager
-# Usage: make db-set-passwords DATABASE_URL="postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require" ENV=sentinelstaging
+# Usage: make db-set-passwords DATABASE_URL="postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require" ENV=sentineldev|sentinelstaging|sentinelprod
 # Requires:
 #   1. Tunnel running: make tigerdata-tunnel BASTION_IP=... TIGERDATA_HOST=...
-#   2. Terraform applied: make tf-apply ENV=sentinelstaging (creates secrets with passwords)
+#   2. Terraform applied: make tf-apply ENV=sentineldev|sentinelstaging|sentinelprod (creates secrets with passwords)
 #   3. Migrations run: make db-migrate DATABASE_URL=... (creates users with placeholder passwords)
 db-set-passwords:
 	@if [ -z "$(DATABASE_URL)" ] || [ -z "$(ENV)" ]; then \
 		echo "Error: DATABASE_URL and ENV are required"; \
-		echo "Usage: make $@ DATABASE_URL=\"postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require\" ENV=sentinelstaging"; \
+		echo "Usage: make $@ DATABASE_URL=\"postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require\" ENV=sentineldev|sentinelstaging|sentinelprod"; \
 		exit 1; \
 	fi
 	@echo "==> Setting database user passwords from Secrets Manager..."
@@ -466,12 +726,12 @@ db-set-passwords:
 	echo "==> Database user passwords configured successfully"
 
 # Test database connection with application user
-# Usage: make db-test-app-user ENV=sentinelstaging
+# Usage: make db-test-app-user ENV=sentineldev|sentinelstaging|sentinelprod
 # Requires tunnel to be running first: make tigerdata-tunnel BASTION_IP=... TIGERDATA_HOST=...
 db-test-app-user:
 	@if [ -z "$(ENV)" ]; then \
 		echo "Error: ENV is required"; \
-		echo "Usage: make $@ ENV=sentinelstaging"; \
+		echo "Usage: make $@ ENV=sentineldev|sentinelstaging|sentinelprod"; \
 		exit 1; \
 	fi
 	@echo "==> Testing stl_read_write connection..."

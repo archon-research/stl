@@ -40,6 +40,7 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
 resource "aws_ecr_repository" "watcher" {
   name                 = "${local.prefix}-watcher"
   image_tag_mutability = "MUTABLE"
+  force_delete         = var.environment == "sentineldev"
 
   image_scanning_configuration {
     scan_on_push = true
@@ -132,7 +133,7 @@ data "aws_iam_policy_document" "ecs_secrets_access" {
     ]
 
     resources = [
-      aws_secretsmanager_secret.watcher_config.arn,
+      data.aws_secretsmanager_secret.watcher_config.arn,
       aws_secretsmanager_secret.tigerdata_db.arn,
       aws_secretsmanager_secret.tigerdata_app.arn,
     ]

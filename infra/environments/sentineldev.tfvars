@@ -1,6 +1,6 @@
 # Environment-specific configuration
 aws_region  = "eu-west-1"
-environment = "sentinelstaging"
+environment = "sentineldev"
 
 # -----------------------------------------------------------------------------
 # TigerData (TimescaleDB) Configuration
@@ -11,18 +11,18 @@ environment = "sentinelstaging"
 
 tigerdata_project_id = "p71n930y81" # Get from TigerData console
 
-# Staging: scaled up for oracle backfill (was 500/2)
-tigerdata_milli_cpu   = 2000 # 2 CPU
-tigerdata_memory_gb   = 8    # 8 GB RAM
-tigerdata_ha_replicas = 0    # No HA for staging
+# Dev: smallest instance
+tigerdata_milli_cpu   = 500 # 0.5 CPU
+tigerdata_memory_gb   = 2   # 2 GB RAM
+tigerdata_ha_replicas = 0   # No HA for dev
 
 # -----------------------------------------------------------------------------
 # ElastiCache Redis Configuration
 # -----------------------------------------------------------------------------
 
-# Staging: memory-optimized for block cache (~6GB steady state)
-redis_node_type          = "cache.r7g.large" # 13.07 GB, ~$150/month
-redis_engine_version     = "8.0"              # Valkey 8.0 (AWS Redis-compatible fork)
+# Dev: burstable tier for cost savings
+redis_node_type          = "cache.t4g.small" # 1.55 GB, ~$30/month
+redis_engine_version     = "8.0"             # Valkey 8.0 (AWS Redis-compatible fork)
 redis_num_cache_clusters = 1                  # Single node, no HA
 redis_transit_encryption = false              # No TLS for simplicity
 redis_snapshot_retention = 0                  # No backups
@@ -31,9 +31,9 @@ redis_snapshot_retention = 0                  # No backups
 # ECS Watcher Configuration
 # -----------------------------------------------------------------------------
 
-# Staging: 4 vCPU with 8GB memory (Fargate Graviton)
-watcher_cpu           = 4096     # 4 vCPU
-watcher_memory        = 8192     # 8 GB
+# Dev: minimal sizing for cost savings
+watcher_cpu           = 512      # 0.5 vCPU
+watcher_memory        = 1024     # 1 GB
 watcher_desired_count = 1        # Singleton
 watcher_image_tag     = "latest" # Override in CI/CD
 
@@ -47,24 +47,19 @@ alchemy_ws_url   = "wss://eth-mainnet.g.alchemy.com/v2"
 # ECS Backup Worker Configuration
 # -----------------------------------------------------------------------------
 
-# Staging: minimal resources for backup worker
-backup_worker_cpu           = 2048     # 2 vCPU
-backup_worker_memory        = 4096     # 4 GB
+# Dev: minimal resources for backup worker
+backup_worker_cpu           = 256      # 0.25 vCPU
+backup_worker_memory        = 512      # 0.5 GB
 backup_worker_desired_count = 1        # Single instance
 backup_worker_image_tag     = "latest" # Override in CI/CD
 backup_worker_workers       = 2        # Concurrent workers per task
 
-# -----------------------------------------------------------------------------
 # Bastion Host Configuration
-# -----------------------------------------------------------------------------
+# Dev: bastion ENABLED for TigerData tunnel access
+bastion_enabled = true
 
-# Enable bastion for local access to TigerData and Redis via Tailscale
-bastion_enabled       = true
-bastion_instance_type = "t4g.nano" # Smallest ARM instance (~$3/month)
-
-# Tailscale auth key stored in Secrets Manager (create manually first)
-# Tailscale auth key stored in Secrets Manager (auto-created during bootstrap)
-# Set via: make tf-bootstrap ENV=sentinelstaging TAILSCALE_AUTH_KEY="tskey_..."
-
-# Enable Tailscale for staging only (NOT for production)
+# Tailscale VPN Configuration  
+# Only activated if bastion_enabled=true
 tailscale_enabled = true
+# tailscale_auth_key_secret_name is auto-set to "stl-sentineldev-tailscale-auth-key"
+# (created during bootstrap if TAILSCALE_AUTH_KEY is provided)

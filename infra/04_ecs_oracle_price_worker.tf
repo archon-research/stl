@@ -11,6 +11,7 @@
 resource "aws_ecr_repository" "oracle_price_worker" {
   name                 = "${local.prefix}-oracle-price-worker"
   image_tag_mutability = "MUTABLE"
+  force_delete         = var.environment == "sentineldev"
 
   image_scanning_configuration {
     scan_on_push = true
@@ -174,7 +175,7 @@ resource "aws_ecs_task_definition" "oracle_price_worker" {
       secrets = [
         {
           name      = "ALCHEMY_API_KEY"
-          valueFrom = "${aws_secretsmanager_secret.watcher_config.arn}:alchemy_api_key::"
+          valueFrom = "${data.aws_secretsmanager_secret.watcher_config.arn}:alchemy_api_key::"
         },
         {
           name      = "DATABASE_URL"
