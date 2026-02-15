@@ -2,8 +2,6 @@
 
 > ⚠️ **IMPORTANT:** CHAINLINK/PYTH/REDSTONE/CHRONICLE oracle addresses have not had their pairs properly documented (some are ASSET/USD while others are ASSET/USDC). This needs to be fixed.
 
-> ⚠️ **Note:** ABIs for relevant CHAINLINK/PYTH/REDSTONE/CHRONICLE oracles should be added.
-
 ## Overview
 
 This document provides a comprehensive reference for pricing assets across various protocols and networks. Assets may be assigned **multiple price sources** to enable different use cases:
@@ -19,6 +17,51 @@ This document provides a comprehensive reference for pricing assets across vario
 2. **Sanity Checks**: Use canonical or alternative sources to verify protocol oracle prices
 3. **Alerting**: Trigger alerts when different price sources diverge significantly
 4. **Fallbacks**: Use alternative sources when primary sources are unavailable
+
+### Reasoning for Oracle Selection
+
+**General Principle**: We currently only use oracles when the asset is on the same chain as the oracle. This is a conservative starting restriction while we conduct further research. Many oracles, even when deployed on specific chains, appear to aggregate price sources primarily from other chains or CEXes not directly connected to that chain. We need to:
+- Verify whether oracle price sources actually reflect chain-specific market conditions
+- Determine if the price sources for each oracle can be identified
+- Evaluate whether using oracles on different chains than the asset is valid or potentially even preferable in some cases
+
+Until this research is complete, we default to same-chain usage. If an oracle's price source cannot be determined and it's on a different chain than the asset, we avoid using it.
+
+The following priority order should guide oracle selection:
+
+1. **Protocol-Native Oracles (Primary for Lending Assets)**: For assets within lending protocols (Aave, Morpho, Sparklend), always use the protocol's native oracle as the primary source. This ensures valuation consistency with the protocol itself.
+
+2. **Chronicle (Highest Priority for Canonical Prices)**: Chronicle is our preferred primary oracle provider. However, **we currently only use Chronicle when the asset is on the same chain as the oracle**. Further research is needed to:
+   - Determine whether Chronicle's aggregated price sources are safe to use in all cases
+   - Validate whether using an oracle on a different chain than the asset is acceptable
+
+3. **Chainlink (Second Priority)**: Chainlink is widely adopted and underlies many lending protocol oracles. **Important**: When using Chainlink as a fallback or sanity check, note that it may be the same underlying source as the protocol oracle, reducing independence.
+
+4. **Redstone (Third Priority)**: Redstone push oracles have high price deviation thresholds and limited asset coverage, but provide valuable pricing for tokens without Chronicle or Chainlink alternatives.
+
+5. **Chainlink Pull / Redstone Pull (Deprioritized)**: These pull oracles offer reliable, high-granularity pricing but are deprioritized due to higher technical complexity and monetary costs (gas fees per update). Use only when absolutely necessary.
+
+6. **ERC4626 `totalAssets` (Supplementary Only)**: For ERC4626 vaults, the `totalAssets()` value provides a useful supplement to oracle prices but should **never be the primary choice**. This is not a market price and can be manipulated (e.g., by pausing redemptions).
+
+7. **Issuer APIs (Last Resort)**: API-based pricing from issuers (Centrifuge, Maple, Securitize) should be avoided when possible due to manipulation risk and reliability concerns. **Note**: Some on-chain oracles may ultimately rely on issuer APIs and share the same manipulation vulnerability, but on-chain oracles avoid the downtime and availability issues associated with direct API dependencies.
+
+### Which Assets to Price
+
+**Scope**: Price all assets currently held by Stars and all assets that back those holdings.
+
+**Backing Asset Discovery Methods**:
+- **Lending Markets**: Identify possible collateral assets in protocols like Sparklend, Aave, Morpho
+- **Issuer Websites**: Check composition for products like syrupUSDC via Maple
+- **LP Pool Composition**: Analyze underlying assets in Uniswap and Curve pools
+
+**Coverage Threshold**: This document covers all allocations and their backing assets valued **under $1M**. This cutoff avoids the overhead of pricing deprecated or low value allocations. As a starting point, $1M was chosen as a reasonable threshold, but this should be adjusted over time and the document updated.
+
+**Temporal Scope**:
+- **Current Assets Only**: Fetch current and historical prices for all assets that are **currently** held or backing allocations
+- **Removed Assets**: If an asset was a backing in the past but is no longer, it can be ignored
+- **Newly Added Assets**: When a backing asset is added, fetch all historical prices back to at least the time it was added as a backing
+
+**Maintenance**: This document requires ongoing updates as new allocations are made and backing assets are added or removed from protocols, vaults, and LP pools.
 
 ### Special Value Notation
 
@@ -103,6 +146,8 @@ HELD_ADDRESSES = {
 
 ## Oracle Types
 
+**Historical Data Note:** For push oracles (Chainlink, Chronicle, Redstone), historical prices can be retrieved by calling the "latest" functions (e.g., `latestRoundData()`, `latestAnswer()`) at a specific historical block number. This is the standard method for backfilling historical data, as the contract state at that block will return the price that was current at that time.
+
 ### Core
 Reference the **Core Assets** section below to determine pricing. These are core assets with well-established on-chain oracles.
 
@@ -112,17 +157,130 @@ Assets lent or borrowed on lending protocols (Aave, Morpho, Sparklend, etc.) hav
 ### Chainlink
 Push oracle - each price feed has a dedicated smart contract address. Query the contract directly for the latest price.
 
+**Key ABI Methods:**
+```solidity
+// Get latest price and round data
+function latestRoundData() external view returns (
+    uint80 roundId,
+    int256 answer,
+    uint256 startedAt,
+    uint256 updatedAt,
+    uint80 answeredInRound
+);
+
+// Get latest price only (deprecated, use latestRoundData)
+function latestAnswer() external view returns (int256);
+
+// Get historical round data
+function getRoundData(uint80 _roundId) external view returns (
+    uint80 roundId,
+    int256 answer,
+    uint256 startedAt,
+    uint256 updatedAt,
+    uint80 answeredInRound
+);
+
+// Get historical price only (deprecated, use getRoundData)
+function getAnswer(uint256 roundId) external view returns (int256);
+```
+
 ### Chronicle
 Push oracle - each price feed has a dedicated smart contract address. Query the contract directly for the latest price.
+
+**Key ABI Methods:**
+```solidity
+// Get latest price and round data
+function latestRoundData() external view returns (
+    uint80 roundId,
+    int256 answer,
+    uint256 startedAt,
+    uint256 updatedAt,
+    uint80 answeredInRound
+);
+
+// Get latest price only
+function latestAnswer() external view returns (int256);
+
+// Note: Chronicle does NOT support getRoundData() or getAnswer()
+// However, historical prices can be retrieved by calling latestRoundData() or latestAnswer()
+// at a specific historical block number during backfilling
+```
 
 ### Redstone
 Push oracle - each price feed has a dedicated smart contract address. Query the contract directly for the latest price.
 
+**Key ABI Methods:**
+```solidity
+// Get latest price and round data
+function latestRoundData() external view returns (
+    uint80 roundId,
+    int256 answer,
+    uint256 startedAt,
+    uint256 updatedAt,
+    uint80 answeredInRound
+);
+
+// Get latest price only
+function latestAnswer() external view returns (int256);
+
+// Get round data - ONLY works with roundId = 1
+// Will revert with "GetRoundDataCanBeOnlyCalledWithLatestRound" for any other roundId
+function getRoundData(uint80 requestedRoundId) external view returns (
+    uint80 roundId,
+    int256 answer,
+    uint256 startedAt,
+    uint256 updatedAt,
+    uint80 answeredInRound
+);
+
+// Note: Redstone roundId is ALWAYS 1 - historical rounds are not supported
+```
+
 ### Chainlink Pull
 Pull oracle requiring a paid blockchain transaction to fetch prices. Unlike push oracles, **all prices are fetched from a single contract using an ID** (e.g., `chainlinkId:0x0003...`). Avoid using these oracles where possible due to transaction fees.
 
-### Pyth
+**Key ABI Methods:**
+```solidity
+// Verify and retrieve price data (requires fee payment)
+function verify(
+    bytes calldata payload,
+    bytes calldata parameterPayload
+) external payable returns (bytes memory);
+
+// Verify multiple price updates in bulk
+function verifyBulk(
+    bytes[] calldata payloads,
+    bytes calldata parameterPayload
+) external payable returns (bytes[] memory verifiedReports);
+```
+
+### Pyth Pull
 Pull oracle requiring a paid blockchain transaction to fetch prices. **All prices are fetched from a single contract using an ID** (e.g., `pythId:0xe616...`). Avoid using these oracles where possible due to transaction fees.
+
+**Note:** Pyth does offer push oracles, but they are extremely limited in number.
+
+**Key ABI Methods:**
+```solidity
+// Update price feeds (requires fee payment)
+function updatePriceFeeds(bytes[] calldata updateData) external payable;
+
+// Parse and return price feed updates
+function parsePriceFeedUpdates(
+    bytes[] calldata updateData,
+    bytes32[] calldata priceIds,
+    uint64 minPublishTime,
+    uint64 maxPublishTime
+) external payable returns (PythStructs.PriceFeed[] memory priceFeeds);
+
+// Get latest price (unsafe - may be stale)
+function getPriceUnsafe(bytes32 id) external view returns (PythStructs.Price memory);
+
+// Get latest price with staleness check
+function getPrice(bytes32 id) external view returns (PythStructs.Price memory);
+
+// Query complete price feed data
+function queryPriceFeed(bytes32 id) external view returns (PythStructs.PriceFeed memory);
+```
 
 ### External APIs
 Off-chain data sources requiring HTTP requests. Currently, possible values are:
@@ -163,6 +321,7 @@ Core_ASSETS = {
             "type": "chainlink",
             "address": "0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9"
         },
+        "notes": "Chronicle, Redstone, and Pyth all do not have oracles for DAI on Ethereum.",
         "coingecko_id": "dai"
     },
     "USDC": {
@@ -230,9 +389,14 @@ Core_ASSETS = {
             "address": "0xA770582353b573CbfdCC948751750EeB3Ccf23CF"
         },
         "canonical2": {
-            "type": "pyth",
+            "type": "redstone",
+            "address": "0xe4aE88743c3834d0c492eAbC47384c84BcADC6a6"
+        },
+        "alternative": {
+            "type": "pyth pull",
             "id": "pythId:0x6df640f3b8963d8f8358f791f352b8364513f6ab1cca5ed3f1f7b5448980e784"
         },
+        "notes": "Chainlink does not have oracle for wstETH on Ethereum.",
         "coingecko_id": "wrapped-steth"
     }
 }
@@ -278,13 +442,13 @@ BACKING_ASSETS = {
             {"symbol": "rsETH", "priced_via": "aave oracle", "canonical": **"tbd"**, "coingecko_id": "kelp-dao-restaked-eth"},
             {"symbol": "sDAI", "priced_via": "aave oracle", "canonical": **"tbd"**, "coingecko_id": "savings-dai"},
             {"symbol": "SNX", "priced_via": "aave oracle", "canonical": **"tbd"**, "coingecko_id": "havven"},
-            {"symbol": "sUSDe", "priced_via": "aave oracle", "canonical": "chainlink", "address": "0xFF3BC18cCBd5999CE63E788A1c250a88626aD099", "coingecko_id": "ethena-staked-usde"},
+            {"symbol": "sUSDe", "priced_via": "aave oracle", "canonical": "chainlink", "address": "0xFF3BC18cCBd5999CE63E788A1c250a88626aD099", "notes": "chronicle does not have Ethereum oracle. aave oracle is chainlink", "coingecko_id": "ethena-staked-usde"},
             {"symbol": "syrupUSDC", "priced_via": "aave oracle", "canonical": "erc4626 totalAssets", "coingecko_id": "syrupusdc"},
             {"symbol": "tBTC", "priced_via": "aave oracle", "canonical": **"tbd"**, "coingecko_id": "tbtc"},
             {"symbol": "tETH", "priced_via": "aave oracle", "canonical": **"tbd"**, "coingecko_id": "treehouse-eth"},
             {"symbol": "UNI", "priced_via": "aave oracle", "canonical": **"tbd"**, "coingecko_id": "uniswap"},
             {"symbol": "USDC", "priced_via": "aave oracle", "canonical": "core", "coingecko_id": "usd-coin"},
-            {"symbol": "USDe", "priced_via": "aave oracle", "canonical": "chainlink", "address": "0xa569d910839Ae8865Da8F8e70FfFb0cBA869F961", "coingecko_id": "ethena-usde"},
+            {"symbol": "USDe", "priced_via": "aave oracle", "canonical": "chainlink", "address": "0xa569d910839Ae8865Da8F8e70FfFb0cBA869F961", "notes": "chronicle does not have Ethereum oracle. aave oracle is chainlink", "coingecko_id": "ethena-usde"},
             {"symbol": "USDS", "priced_via": "aave oracle", "canonical": "core", "coingecko_id": "usds"},
             {"symbol": "USDT", "priced_via": "aave oracle", "canonical": "core", "coingecko_id": "tether"},
             {"symbol": "WBTC", "priced_via": "aave oracle", "canonical": "core", "coingecko_id": "wrapped-bitcoin"},
@@ -315,7 +479,7 @@ BACKING_ASSETS = {
             {"symbol": "FRAX", "priced_via": "aave oracle", "canonical": **"tbd"**, "coingecko_id": "frax"},
             {"symbol": "LINK.e", "priced_via": "aave oracle", "canonical": **"tbd"**},
             {"symbol": "sAVAX", "priced_via": "aave oracle", "canonical": **"tbd"**, "coingecko_id": "benqi-liquid-staked-avax"},
-            {"symbol": "sUSDe", "priced_via": "aave oracle", "canonical": "chainlink", "address": "0xFF3BC18cCBd5999CE63E788A1c250a88626aD099", "coingecko_id": "ethena-staked-usde"},
+            {"symbol": "sUSDe", "priced_via": "aave oracle", "canonical": "chainlink", "address": "0xFF3BC18cCBd5999CE63E788A1c250a88626aD099", "notes": "aave oracle is chainlink", "coingecko_id": "ethena-staked-usde"},
             {"symbol": "USDC", "priced_via": "aave oracle", "canonical": **"tbd"**, "coingecko_id": "usd-coin"},
             {"symbol": "USDe", "priced_via": "aave oracle", "canonical": **"tbd"**, "coingecko_id": "ethena-usde"},
             {"symbol": "USDt", "priced_via": "aave oracle", "canonical": **"tbd"**},
@@ -326,7 +490,7 @@ BACKING_ASSETS = {
     },
     "curve1": {
         "ethereum": [
-            {"symbol": "USDT", "priced_via": "canonical", "canonical": **"tbd"**, "coingecko_id": "tether"}
+            {"symbol": "USDT", "priced_via": "core", "canonical": **"tbd"**, "coingecko_id": "tether"}
         ]
     },
     "curve2": {
@@ -336,15 +500,16 @@ BACKING_ASSETS = {
     },
     "maple1": {
         "bitcoin": [
-            {"symbol": "BTC", "priced_via": "core", "canonical": **"tbd"**, "coingecko_id": "bitcoin"}
+            {"symbol": "BTC", "priced_via": "core", "canonical": **"tbd"**, "notes": "Maple's docs state this is liquidated OTC. Suggest we price it by proxy, but note this choice.", "coingecko_id": "bitcoin"}
         ],
         "ethereum": [
-            {"symbol": "LBTC", "priced_via": **"tbd"**, "canonical": **"tbd"**, "coingecko_id": "lombard-staked-btc"},
-            {"symbol": "weETH", "priced_via": **"tbd"**, "canonical": "chronicle", "address": "0x6a906372cA06523bA7FeaeDab18Ab8B665CaeD71", "coingecko_id": "wrapped-eeth"}
+            {"symbol": "LBTC", "priced_via": "aave oracle", "canonical": **"tbd"**, "notes": "Maple's docs state this is liquidated OTC. Suggest we price it by proxy, but note this choice. Chronicle oracle not on Ethereum. Chainlink doesn't have USD base on Ethereum. Aave is using product of Chainlink redemption price and base asset USD price, suggest we just use that.", "coingecko_id": "lombard-staked-btc"},
+            {"symbol": "USTB", "priced_via": "canonical", "canonical": "chronicle", "address": "0x15Fe07Bc9019a0dEc7De49c29E816261a047d252"},
+            {"symbol": "weETH", "priced_via": "canonical", "canonical": "chronicle", "address": "0x6a906372cA06523bA7FeaeDab18Ab8B665CaeD71", "notes": "Maple's docs state this is liquidated OTC. Suggest we price it by proxy, but note this choice.", "coingecko_id": "wrapped-eeth"}
         ],
         "OTC": [
-            {"symbol": "HYPE", "priced_via": **"tbd"**, "canonical": **"tbd"**, "coingecko_id": "hyperliquid"},
-            {"symbol": "XRP", "priced_via": **"tbd"**, "canonical": **"tbd"**, "coingecko_id": "ripple"}
+            {"symbol": "HYPE", "priced_via": **"tbd"**, "canonical": **"tbd"**, "notes": "Maple's docs state this is liquidated OTC. Suggest we price it by proxy, but note this choice.", "coingecko_id": "hyperliquid"},
+            {"symbol": "XRP", "priced_via": **"tbd"**, "canonical": **"tbd"**, "notes": "Maple's docs state this is liquidated OTC. Suggest we price it by proxy, but note this choice.", "coingecko_id": "ripple"}
         ]
     },
     "morpho1": {
@@ -446,7 +611,7 @@ ALLOCATIONS = {
                     "token_address": "0x38464507E02c983F20428a6E8566693fE9e422a9",
                     "held_address_ref": "spark.ethereum.alm",
                     "priced_via": "alternative",
-                    "canonical2": {"type": "none"},
+                    "canonical1": {"type": "none"},
                     "alternative": "erc4626 totalAssets",
                     "coingecko_id": "none"
                 }
@@ -486,9 +651,10 @@ ALLOCATIONS = {
                     "held_address_ref": "spark.ethereum.alm",
                     "backing_ref": "maple1",
                     "priced_via": "alternative",
-                    "canonical1": {"type": "pyth", "id": "pythId:0xe616297dab48626eaacf6d030717b25823b13ae6520b83f4735bf8deec8e2c9a"},
+                    "canonical1": {"type": "pyth pull", "id": "pythId:0xe616297dab48626eaacf6d030717b25823b13ae6520b83f4735bf8deec8e2c9a"},
                     "canonical2": {"type": "maple API"},
                     "alternative": "erc4626 totalAssets",
+                    "notes": "Chonicle and Chainlink (on Ethereum) oracles do not exist for syrupUSDC. Chainlink pull oracle appears to have existed but not any longer.",
                     "coingecko_id": "syrupusdc"
                 }
             ]
@@ -502,7 +668,8 @@ ALLOCATIONS = {
                     "held_address_ref": "spark.ethereum.alm",
                     "priced_via": **"unknown"**,
                     "canonical1": {"type": "chainlink pull", "id": "chainlinkId:0x0003313e5ba57741dd23e2e239730977b3a2a65fcdca08a8609c6e5bac09f88f"},
-                    "canonical2": {"type": "pyth", "id": "pythId:0xc1da1b73d7f01e7ddd54b3766cf7fcd644395ad14f70aa706ec5384c59e76692"},
+                    "canonical2": {"type": "pyth pull", "id": "pythId:0xc1da1b73d7f01e7ddd54b3766cf7fcd644395ad14f70aa706ec5384c59e76692"},
+                    "notes": "Only pull oracles have been found, so we may continue looking for an alternative source.",
                     "coingecko_id": "paypal-usd"
                 }
             ]
@@ -529,7 +696,7 @@ ALLOCATIONS = {
                     "backing_ref": "sparklend",
                     "priced_via": "sparklend oracle",
                     "canonical1": {"type": "chainlink pull", "id": "chainlinkId:0x0003313e5ba57741dd23e2e239730977b3a2a65fcdca08a8609c6e5bac09f88f"},
-                    "canonical2": {"type": "pyth", "id": "pythId:0xc1da1b73d7f01e7ddd54b3766cf7fcd644395ad14f70aa706ec5384c59e76692"},
+                    "canonical2": {"type": "pyth pull", "id": "pythId:0xc1da1b73d7f01e7ddd54b3766cf7fcd644395ad14f70aa706ec5384c59e76692"},
                     "coingecko_id": "n/a"
                 },
                 {
@@ -580,6 +747,8 @@ ALLOCATIONS = {
                     "backing_ref": "aave1",
                     "priced_via": "aave oracle",
                     "canonical1": {"type": "chainlink", "address": "0x26C46B7aD0012cA71F2298ada567dC9Af14E7f2A"},
+                    "canonical2": {"type": "pyth pull", "id": "pythId:0x65652029e7acde632e80192dcaa6ea88e61d84a4c78a982a63e98f4bbcb288d5"},
+                    "notes": "aave is probably using chainlink?",
                     "coingecko_id": "n/a"
                 },
                 {
@@ -591,6 +760,8 @@ ALLOCATIONS = {
                     "backing_ref": "aave2",
                     "priced_via": "aave oracle",
                     "canonical1": {"type": "chainlink", "address": "0x26C46B7aD0012cA71F2298ada567dC9Af14E7f2A"},
+                    "canonical2": {"type": "pyth pull", "id": "pythId:0x65652029e7acde632e80192dcaa6ea88e61d84a4c78a982a63e98f4bbcb288d5"},
+                    "notes": "aave is probably using chainlink?",
                     "coingecko_id": "n/a"
                 },
                 {
@@ -641,7 +812,7 @@ ALLOCATIONS = {
                     "token_address": "0x5a0F93D040De44e78F251b03c43be9CF317Dcf64",
                     "held_address_ref": "grove.ethereum.alm",
                     "priced_via": "canonical1",
-                    "canonical1": {"type": "chronicle"},
+                    "canonical1": {"type": "chronicle", "address": "0x02cf8C9fBa24d79886dAc40cb620f0930C6E8eC0"},
                     "canonical2": {"type": "centrifuge API"},
                     "alternative": "erc4626 totalAssets from vault contract (not token contract)",
                     "coingecko_id": "janus-henderson-anemoy-aaa-clo-fund"
@@ -679,6 +850,7 @@ ALLOCATIONS = {
                     "name": "CURVE LP AUSD/USDC",
                     "token_address": "0xe79c1c7e24755574438a26d5e062ad2626c04662",
                     "held_address_ref": "grove.ethereum.alm",
+                    "backing_ref": "uniswap1",
                     "priced_via": "price underlying backing",
                     "canonical1": {"type": "n/a"},
                     "coingecko_id": "n/a"
@@ -694,6 +866,7 @@ ALLOCATIONS = {
                     "held_address_ref": "grove.avalanche.alm",
                     "priced_via": **"unknown"**,
                     "canonical1": {"type": "none"},
+                    "notes": "no oracle or API known, Grove/Galaxy should be contacted",
                     "coingecko_id": "none"
                 }
             ]
@@ -774,9 +947,10 @@ ALLOCATIONS = {
                     "held_address_ref": "obex.ethereum.alm",
                     "backing_ref": "maple1",
                     "priced_via": "alternative",
-                    "canonical1": {"type": "pyth", "id": "pythId:0xe616297dab48626eaacf6d030717b25823b13ae6520b83f4735bf8deec8e2c9a"},
+                    "canonical1": {"type": "pyth pull", "id": "pythId:0xe616297dab48626eaacf6d030717b25823b13ae6520b83f4735bf8deec8e2c9a"},
                     "canonical2": {"type": "maple API"},
                     "alternative": "erc4626 totalAssets",
+                    "notes": "Chonicle and Chainlink (on Ethereum) oracles do not exist for syrupUSDC. Chainlink pull oracle appears to have existed before but not any longer.",
                     "coingecko_id": "syrupusdc"
                 }
             ]
