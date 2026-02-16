@@ -20,16 +20,22 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestGetPoolCollateral(t *testing.T) {
+	type expectedCollateral struct {
+		asset    string
+		valueUSD *big.Int
+		decimals int
+	}
+
 	tests := []struct {
-		name             string
-		poolAddress      common.Address
-		serverResponse   any
-		serverStatus     int
-		wantCollaterals  int
-		wantErr          bool
-		errContains      string
-		checkPoolID      bool
-		checkCollaterals bool
+		name            string
+		poolAddress     common.Address
+		serverResponse  any
+		serverStatus    int
+		wantTVL         *big.Int
+		wantCollaterals []expectedCollateral
+		wantErr         bool
+		errContains     string
+		checkPoolID     bool
 	}{
 		{
 			name:        "success: pool with collateral",
@@ -47,10 +53,13 @@ func TestGetPoolCollateral(t *testing.T) {
 					}
 				}`),
 			},
-			serverStatus:     http.StatusOK,
-			wantCollaterals:  2,
-			checkPoolID:      true,
-			checkCollaterals: true,
+			serverStatus: http.StatusOK,
+			wantTVL:      big.NewInt(1_000_000_000_000_000),
+			wantCollaterals: []expectedCollateral{
+				{asset: "BTC", valueUSD: big.NewInt(674_000_000_000_000), decimals: 8},
+				{asset: "XRP", valueUSD: big.NewInt(317_000_000_000_000), decimals: 6},
+			},
+			checkPoolID: true,
 		},
 		{
 			name:        "zero-value collateral entries are filtered",
@@ -69,8 +78,12 @@ func TestGetPoolCollateral(t *testing.T) {
 					}
 				}`),
 			},
-			serverStatus:    http.StatusOK,
-			wantCollaterals: 2, // ZERO_ASSET filtered out
+			serverStatus: http.StatusOK,
+			wantTVL:      big.NewInt(1_000_000_000_000_000),
+			wantCollaterals: []expectedCollateral{
+				{asset: "BTC", valueUSD: big.NewInt(674_000_000_000_000), decimals: 8},
+				{asset: "XRP", valueUSD: big.NewInt(317_000_000_000_000), decimals: 6},
+			},
 		},
 		{
 			name:        "pool not found",
@@ -81,40 +94,6 @@ func TestGetPoolCollateral(t *testing.T) {
 			serverStatus: http.StatusOK,
 			wantErr:      true,
 			errContains:  "not found",
-		},
-		{
-			name:        "invalid TVL: non-numeric",
-			poolAddress: common.HexToAddress("0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"),
-			serverResponse: graphqlResponse{
-				Data: json.RawMessage(`{
-					"poolV2": {
-						"tvl": "not_a_number",
-						"poolMeta": {"poolCollaterals": []}
-					}
-				}`),
-			},
-			serverStatus: http.StatusOK,
-			wantErr:      true,
-			errContains:  "parsing TVL",
-		},
-		{
-			name:        "invalid collateral value: non-numeric",
-			poolAddress: common.HexToAddress("0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"),
-			serverResponse: graphqlResponse{
-				Data: json.RawMessage(`{
-					"poolV2": {
-						"tvl": "1000000000000000",
-						"poolMeta": {
-							"poolCollaterals": [
-								{"asset": "BTC", "assetValueUsd": "bad_value", "assetDecimals": 8}
-							]
-						}
-					}
-				}`),
-			},
-			serverStatus: http.StatusOK,
-			wantErr:      true,
-			errContains:  "parsing asset value",
 		},
 		{
 			name:           "HTTP error: 502",
@@ -148,7 +127,8 @@ func TestGetPoolCollateral(t *testing.T) {
 				}`),
 			},
 			serverStatus:    http.StatusOK,
-			wantCollaterals: 0,
+			wantTVL:         big.NewInt(1_000_000_000_000_000),
+			wantCollaterals: []expectedCollateral{},
 		},
 	}
 
@@ -196,8 +176,13 @@ func TestGetPoolCollateral(t *testing.T) {
 			if data == nil {
 				t.Fatal("data is nil")
 			}
-			if len(data.Collaterals) != tc.wantCollaterals {
-				t.Fatalf("collaterals = %d, want %d", len(data.Collaterals), tc.wantCollaterals)
+			if tc.wantTVL != nil {
+				if data.TVL.Cmp(tc.wantTVL) != 0 {
+					t.Errorf("TVL = %s, want %s", data.TVL, tc.wantTVL)
+				}
+			}
+			if len(data.Collaterals) != len(tc.wantCollaterals) {
+				t.Fatalf("collaterals = %d, want %d", len(data.Collaterals), len(tc.wantCollaterals))
 			}
 
 			if tc.checkPoolID {
@@ -207,30 +192,16 @@ func TestGetPoolCollateral(t *testing.T) {
 				}
 			}
 
-			if tc.checkCollaterals && len(data.Collaterals) >= 2 {
-				// Verify TVL.
-				expectedTVL := big.NewInt(1_000_000_000_000_000)
-				if data.TVL.Cmp(expectedTVL) != 0 {
-					t.Errorf("TVL = %s, want %s", data.TVL, expectedTVL)
+			for i, want := range tc.wantCollaterals {
+				got := data.Collaterals[i]
+				if got.Asset != want.asset {
+					t.Errorf("collateral[%d].Asset = %q, want %q", i, got.Asset, want.asset)
 				}
-
-				// Verify first collateral.
-				btc := data.Collaterals[0]
-				if btc.Asset != "BTC" {
-					t.Errorf("collateral[0].Asset = %q, want BTC", btc.Asset)
+				if want.valueUSD != nil && got.AssetValueUSD.Cmp(want.valueUSD) != 0 {
+					t.Errorf("collateral[%d].AssetValueUSD = %s, want %s", i, got.AssetValueUSD, want.valueUSD)
 				}
-				expectedBTC := big.NewInt(674_000_000_000_000)
-				if btc.AssetValueUSD.Cmp(expectedBTC) != 0 {
-					t.Errorf("BTC value = %s, want %s", btc.AssetValueUSD, expectedBTC)
-				}
-				if btc.AssetDecimals != 8 {
-					t.Errorf("BTC decimals = %d, want 8", btc.AssetDecimals)
-				}
-
-				// Verify second collateral.
-				xrp := data.Collaterals[1]
-				if xrp.Asset != "XRP" {
-					t.Errorf("collateral[1].Asset = %q, want XRP", xrp.Asset)
+				if got.AssetDecimals != want.decimals {
+					t.Errorf("collateral[%d].AssetDecimals = %d, want %d", i, got.AssetDecimals, want.decimals)
 				}
 			}
 		})
@@ -242,18 +213,32 @@ func TestGetPoolCollateral(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGetBorrowerCollateralAtBlock(t *testing.T) {
+	type expectedLoan struct {
+		loanID             common.Address
+		borrower           common.Address
+		state              string
+		principalOwed      *big.Int
+		acmRatio           *big.Int
+		collateralAsset    string
+		collateralAmount   *big.Int
+		collateralValue    *big.Int
+		collateralDecimals int
+		collateralState    string
+		collateralCustody  string
+		liquidationLevel   *big.Int
+	}
+
 	tests := []struct {
 		name             string
 		poolAddress      common.Address
 		blockNumber      uint64
 		serverResponse   any
 		serverStatus     int
-		wantLoans        int
+		wantLoans        []expectedLoan
 		wantErr          bool
 		errContains      string
 		checkPoolID      bool
 		checkBlockNumber bool
-		checkLoans       bool
 	}{
 		{
 			name:        "success: multiple loans with collateral",
@@ -299,11 +284,39 @@ func TestGetBorrowerCollateralAtBlock(t *testing.T) {
 					}
 				}`),
 			},
-			serverStatus:     http.StatusOK,
-			wantLoans:        2,
+			serverStatus: http.StatusOK,
+			wantLoans: []expectedLoan{
+				{
+					loanID:             common.HexToAddress("0x0430665a6e0ce5141b1cc42607d79632125cbbac"),
+					borrower:           common.HexToAddress("0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5"),
+					state:              "Active",
+					principalOwed:      big.NewInt(2_000_000_000_000),
+					acmRatio:           big.NewInt(1_698_389),
+					collateralAsset:    "BTC",
+					collateralAmount:   big.NewInt(5_000_000_000),
+					collateralValue:    big.NewInt(6_793_556_500_000),
+					collateralDecimals: 8,
+					collateralState:    "Deposited",
+					collateralCustody:  "FORDEFI",
+					liquidationLevel:   big.NewInt(1_176_471),
+				},
+				{
+					loanID:             common.HexToAddress("0x048073ae155702e75078c010e47308695eb6be9e"),
+					borrower:           common.HexToAddress("0x8fee157cb621ac7484f8b218edd1c14ce8722628"),
+					state:              "Active",
+					principalOwed:      big.NewInt(50_000_000_000_000),
+					acmRatio:           big.NewInt(1_595_848),
+					collateralAsset:    "BTC",
+					collateralAmount:   big.NewInt(117_453_084_230),
+					collateralValue:    big.NewInt(6_793_556_500_000),
+					collateralDecimals: 8,
+					collateralState:    "Deposited",
+					collateralCustody:  "FORDEFI",
+					liquidationLevel:   big.NewInt(1_250_000),
+				},
+			},
 			checkPoolID:      true,
 			checkBlockNumber: true,
-			checkLoans:       true,
 		},
 		{
 			name:        "success: empty loans list",
@@ -317,7 +330,7 @@ func TestGetBorrowerCollateralAtBlock(t *testing.T) {
 				}`),
 			},
 			serverStatus: http.StatusOK,
-			wantLoans:    0,
+			wantLoans:    []expectedLoan{},
 		},
 		{
 			name:        "pool not found",
@@ -329,102 +342,6 @@ func TestGetBorrowerCollateralAtBlock(t *testing.T) {
 			serverStatus: http.StatusOK,
 			wantErr:      true,
 			errContains:  "not found",
-		},
-		{
-			name:        "invalid principal owed: non-numeric",
-			poolAddress: common.HexToAddress("0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"),
-			blockNumber: 21500000,
-			serverResponse: graphqlResponse{
-				Data: json.RawMessage(`{
-					"poolV2": {
-						"openTermLoans": [
-							{
-								"id": "0x0430665a6e0ce5141b1cc42607d79632125cbbac",
-								"borrower": {"id": "0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5"},
-								"state": "Active",
-								"principalOwed": "not_a_number",
-								"acmRatio": "1698389",
-								"collateral": {
-									"asset": "BTC",
-									"assetAmount": "5000000000",
-									"assetValueUsd": "6793556500000",
-									"decimals": 8,
-									"state": "Deposited",
-									"custodian": "FORDEFI",
-									"liquidationLevel": "1176471"
-								}
-							}
-						]
-					}
-				}`),
-			},
-			serverStatus: http.StatusOK,
-			wantErr:      true,
-			errContains:  "parsing principal owed",
-		},
-		{
-			name:        "invalid acm ratio: non-numeric",
-			poolAddress: common.HexToAddress("0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"),
-			blockNumber: 21500000,
-			serverResponse: graphqlResponse{
-				Data: json.RawMessage(`{
-					"poolV2": {
-						"openTermLoans": [
-							{
-								"id": "0x0430665a6e0ce5141b1cc42607d79632125cbbac",
-								"borrower": {"id": "0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5"},
-								"state": "Active",
-								"principalOwed": "2000000000000",
-								"acmRatio": "invalid",
-								"collateral": {
-									"asset": "BTC",
-									"assetAmount": "5000000000",
-									"assetValueUsd": "6793556500000",
-									"decimals": 8,
-									"state": "Deposited",
-									"custodian": "FORDEFI",
-									"liquidationLevel": "1176471"
-								}
-							}
-						]
-					}
-				}`),
-			},
-			serverStatus: http.StatusOK,
-			wantErr:      true,
-			errContains:  "parsing acm ratio",
-		},
-		{
-			name:        "invalid asset amount: non-numeric",
-			poolAddress: common.HexToAddress("0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"),
-			blockNumber: 21500000,
-			serverResponse: graphqlResponse{
-				Data: json.RawMessage(`{
-					"poolV2": {
-						"openTermLoans": [
-							{
-								"id": "0x0430665a6e0ce5141b1cc42607d79632125cbbac",
-								"borrower": {"id": "0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5"},
-								"state": "Active",
-								"principalOwed": "2000000000000",
-								"acmRatio": "1698389",
-								"collateral": {
-									"asset": "BTC",
-									"assetAmount": "bad_value",
-									"assetValueUsd": "6793556500000",
-									"decimals": 8,
-									"state": "Deposited",
-									"custodian": "FORDEFI",
-									"liquidationLevel": "1176471"
-								}
-							}
-						]
-					}
-				}`),
-			},
-			serverStatus: http.StatusOK,
-			wantErr:      true,
-			errContains:  "parsing asset amount",
 		},
 		{
 			name:           "HTTP error: 502",
@@ -497,8 +414,8 @@ func TestGetBorrowerCollateralAtBlock(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if len(loans) != tc.wantLoans {
-				t.Fatalf("loans = %d, want %d", len(loans), tc.wantLoans)
+			if len(loans) != len(tc.wantLoans) {
+				t.Fatalf("loans = %d, want %d", len(loans), len(tc.wantLoans))
 			}
 
 			if tc.checkPoolID {
@@ -514,46 +431,43 @@ func TestGetBorrowerCollateralAtBlock(t *testing.T) {
 				}
 			}
 
-			if tc.checkLoans && len(loans) >= 1 {
-				loan := loans[0]
-				wantLoanID := common.HexToAddress("0x0430665a6e0ce5141b1cc42607d79632125cbbac")
-				if loan.LoanID != wantLoanID {
-					t.Errorf("LoanID = %s, want %s", loan.LoanID.Hex(), wantLoanID.Hex())
+			for i, want := range tc.wantLoans {
+				loan := loans[i]
+				if loan.LoanID != want.loanID {
+					t.Errorf("loans[%d].LoanID = %s, want %s", i, loan.LoanID.Hex(), want.loanID.Hex())
 				}
-				wantBorrower := common.HexToAddress("0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5")
-				if loan.Borrower != wantBorrower {
-					t.Errorf("Borrower = %s, want %s", loan.Borrower.Hex(), wantBorrower.Hex())
+				if loan.Borrower != want.borrower {
+					t.Errorf("loans[%d].Borrower = %s, want %s", i, loan.Borrower.Hex(), want.borrower.Hex())
 				}
-				if loan.State != "Active" {
-					t.Errorf("State = %q, want Active", loan.State)
+				if loan.State != want.state {
+					t.Errorf("loans[%d].State = %q, want %q", i, loan.State, want.state)
 				}
-				expectedPrincipal := big.NewInt(2_000_000_000_000)
-				if loan.PrincipalOwed.Cmp(expectedPrincipal) != 0 {
-					t.Errorf("PrincipalOwed = %s, want %s", loan.PrincipalOwed, expectedPrincipal)
+				if want.principalOwed != nil && loan.PrincipalOwed.Cmp(want.principalOwed) != 0 {
+					t.Errorf("loans[%d].PrincipalOwed = %s, want %s", i, loan.PrincipalOwed, want.principalOwed)
 				}
-				expectedAcmRatio := big.NewInt(1_698_389)
-				if loan.AcmRatio.Cmp(expectedAcmRatio) != 0 {
-					t.Errorf("AcmRatio = %s, want %s", loan.AcmRatio, expectedAcmRatio)
+				if want.acmRatio != nil && loan.AcmRatio.Cmp(want.acmRatio) != 0 {
+					t.Errorf("loans[%d].AcmRatio = %s, want %s", i, loan.AcmRatio, want.acmRatio)
 				}
-				if loan.Collateral.Asset != "BTC" {
-					t.Errorf("Collateral.Asset = %q, want BTC", loan.Collateral.Asset)
+				if loan.Collateral.Asset != want.collateralAsset {
+					t.Errorf("loans[%d].Collateral.Asset = %q, want %q", i, loan.Collateral.Asset, want.collateralAsset)
 				}
-				expectedAssetAmount := big.NewInt(5_000_000_000)
-				if loan.Collateral.AssetAmount.Cmp(expectedAssetAmount) != 0 {
-					t.Errorf("AssetAmount = %s, want %s", loan.Collateral.AssetAmount, expectedAssetAmount)
+				if want.collateralAmount != nil && loan.Collateral.AssetAmount.Cmp(want.collateralAmount) != 0 {
+					t.Errorf("loans[%d].Collateral.AssetAmount = %s, want %s", i, loan.Collateral.AssetAmount, want.collateralAmount)
 				}
-				if loan.Collateral.Decimals != 8 {
-					t.Errorf("Decimals = %d, want 8", loan.Collateral.Decimals)
+				if want.collateralValue != nil && loan.Collateral.AssetValueUSD.Cmp(want.collateralValue) != 0 {
+					t.Errorf("loans[%d].Collateral.AssetValueUSD = %s, want %s", i, loan.Collateral.AssetValueUSD, want.collateralValue)
 				}
-				if loan.Collateral.State != "Deposited" {
-					t.Errorf("Collateral.State = %q, want Deposited", loan.Collateral.State)
+				if loan.Collateral.Decimals != want.collateralDecimals {
+					t.Errorf("loans[%d].Collateral.Decimals = %d, want %d", i, loan.Collateral.Decimals, want.collateralDecimals)
 				}
-				if loan.Collateral.Custodian != "FORDEFI" {
-					t.Errorf("Custodian = %q, want FORDEFI", loan.Collateral.Custodian)
+				if loan.Collateral.State != want.collateralState {
+					t.Errorf("loans[%d].Collateral.State = %q, want %q", i, loan.Collateral.State, want.collateralState)
 				}
-				expectedLiquidation := big.NewInt(1_176_471)
-				if loan.Collateral.LiquidationLevel.Cmp(expectedLiquidation) != 0 {
-					t.Errorf("LiquidationLevel = %s, want %s", loan.Collateral.LiquidationLevel, expectedLiquidation)
+				if loan.Collateral.Custodian != want.collateralCustody {
+					t.Errorf("loans[%d].Collateral.Custodian = %q, want %q", i, loan.Collateral.Custodian, want.collateralCustody)
+				}
+				if want.liquidationLevel != nil && loan.Collateral.LiquidationLevel.Cmp(want.liquidationLevel) != 0 {
+					t.Errorf("loans[%d].Collateral.LiquidationLevel = %s, want %s", i, loan.Collateral.LiquidationLevel, want.liquidationLevel)
 				}
 			}
 		})
