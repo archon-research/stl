@@ -99,7 +99,7 @@ data "aws_iam_policy_document" "oracle_price_worker_sqs" {
       "sqs:GetQueueAttributes",
       "sqs:ChangeMessageVisibility",
     ]
-    resources = [aws_sqs_queue.ethereum_oracle_price.arn]
+    resources = [module.ethereum.sqs_queue_arns["oracle_price"]]
   }
 }
 
@@ -155,7 +155,7 @@ resource "aws_ecs_task_definition" "oracle_price_worker" {
       environment = [
         {
           name  = "AWS_SQS_QUEUE_URL"
-          value = aws_sqs_queue.ethereum_oracle_price.url
+          value = module.ethereum.sqs_queue_urls["oracle_price"]
         },
         {
           name  = "AWS_REGION"

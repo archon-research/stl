@@ -1,12 +1,12 @@
+# =============================================================================
+# S3 Raw Data Storage
+# =============================================================================
+
 locals {
-  # S3-specific locals
-  # Staging buckets keep their existing suffix, new envs use resource_suffix (dev) or no suffix (prod)
-  bucket_suffix = var.environment == "sentinelstaging" ? "-89d540d0" : local.resource_suffix
-  bucket_name   = "${local.prefix_lowercase}-ethereum-raw${local.bucket_suffix}"
+  bucket_name = "${local.prefix_lowercase}-${var.chain_name}-raw${local.bucket_suffix}"
 }
 
-# S3 Bucket - configured to never be deleted and fully private
-resource "aws_s3_bucket" "main" {
+resource "aws_s3_bucket" "raw_data" {
   bucket        = local.bucket_name
   force_destroy = var.environment == "sentineldev" ? true : false
 
@@ -15,18 +15,16 @@ resource "aws_s3_bucket" "main" {
   }
 }
 
-# Enable versioning for data protection and recovery
-resource "aws_s3_bucket_versioning" "main" {
-  bucket = aws_s3_bucket.main.id
+resource "aws_s3_bucket_versioning" "raw_data" {
+  bucket = aws_s3_bucket.raw_data.id
 
   versioning_configuration {
     status = "Enabled"
   }
 }
 
-# Block ALL public access - defense in depth
-resource "aws_s3_bucket_public_access_block" "main" {
-  bucket = aws_s3_bucket.main.id
+resource "aws_s3_bucket_public_access_block" "raw_data" {
+  bucket = aws_s3_bucket.raw_data.id
 
   block_public_acls       = true
   block_public_policy     = true
@@ -34,16 +32,14 @@ resource "aws_s3_bucket_public_access_block" "main" {
   restrict_public_buckets = true
 }
 
-# Enforce bucket ownership controls - disable ACLs
-resource "aws_s3_bucket_ownership_controls" "main" {
-  bucket = aws_s3_bucket.main.id
+resource "aws_s3_bucket_ownership_controls" "raw_data" {
+  bucket = aws_s3_bucket.raw_data.id
 
   rule {
     object_ownership = "BucketOwnerEnforced"
   }
 }
 
-# Policy to enforce SSL/TLS for all requests
 data "aws_iam_policy_document" "enforce_ssl" {
   statement {
     sid    = "EnforceSSLOnly"
@@ -56,8 +52,8 @@ data "aws_iam_policy_document" "enforce_ssl" {
 
     actions = ["s3:*"]
     resources = [
-      aws_s3_bucket.main.arn,
-      "${aws_s3_bucket.main.arn}/*"
+      aws_s3_bucket.raw_data.arn,
+      "${aws_s3_bucket.raw_data.arn}/*"
     ]
 
     condition {
@@ -78,8 +74,8 @@ data "aws_iam_policy_document" "enforce_ssl" {
 
     actions = ["s3:*"]
     resources = [
-      aws_s3_bucket.main.arn,
-      "${aws_s3_bucket.main.arn}/*"
+      aws_s3_bucket.raw_data.arn,
+      "${aws_s3_bucket.raw_data.arn}/*"
     ]
 
     condition {
@@ -91,16 +87,14 @@ data "aws_iam_policy_document" "enforce_ssl" {
 }
 
 resource "aws_s3_bucket_policy" "enforce_ssl" {
-  bucket = aws_s3_bucket.main.id
+  bucket = aws_s3_bucket.raw_data.id
   policy = data.aws_iam_policy_document.enforce_ssl.json
 
-  # Ensure public access block is applied first
-  depends_on = [aws_s3_bucket_public_access_block.main]
+  depends_on = [aws_s3_bucket_public_access_block.raw_data]
 }
 
-# Lifecycle rule for cost optimization on old versions
-resource "aws_s3_bucket_lifecycle_configuration" "main" {
-  bucket = aws_s3_bucket.main.id
+resource "aws_s3_bucket_lifecycle_configuration" "raw_data" {
+  bucket = aws_s3_bucket.raw_data.id
 
   rule {
     id     = "cleanup-old-versions"
@@ -121,20 +115,17 @@ resource "aws_s3_bucket_lifecycle_configuration" "main" {
 # S3 Access Logging
 # =============================================================================
 
-# Dedicated bucket for access logs
-resource "aws_s3_bucket" "logs" {
-  # Preserve existing staging bucket name to avoid data loss
+resource "aws_s3_bucket" "access_logs" {
   bucket = var.environment == "sentinelstaging" ? "${local.prefix_lowercase}-access-logs-89d540d0" : "${local.prefix_lowercase}-access-logs${local.resource_suffix}"
 
   tags = {
-    Name    = "${local.prefix}-access-logs"
+    Name    = "${var.prefix}-access-logs"
     Purpose = "s3-access-logging"
   }
 }
 
-# Block public access on logs bucket
-resource "aws_s3_bucket_public_access_block" "logs" {
-  bucket = aws_s3_bucket.logs.id
+resource "aws_s3_bucket_public_access_block" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
 
   block_public_acls       = true
   block_public_policy     = true
@@ -142,18 +133,16 @@ resource "aws_s3_bucket_public_access_block" "logs" {
   restrict_public_buckets = true
 }
 
-# Ownership controls for logs bucket
-resource "aws_s3_bucket_ownership_controls" "logs" {
-  bucket = aws_s3_bucket.logs.id
+resource "aws_s3_bucket_ownership_controls" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
 
   rule {
     object_ownership = "BucketOwnerPreferred"
   }
 }
 
-# Lifecycle rule to expire old logs
-resource "aws_s3_bucket_lifecycle_configuration" "logs" {
-  bucket = aws_s3_bucket.logs.id
+resource "aws_s3_bucket_lifecycle_configuration" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
 
   rule {
     id     = "expire-old-logs"
@@ -165,10 +154,9 @@ resource "aws_s3_bucket_lifecycle_configuration" "logs" {
   }
 }
 
-# Enable access logging on main bucket
-resource "aws_s3_bucket_logging" "main" {
-  bucket = aws_s3_bucket.main.id
+resource "aws_s3_bucket_logging" "raw_data" {
+  bucket = aws_s3_bucket.raw_data.id
 
-  target_bucket = aws_s3_bucket.logs.id
-  target_prefix = "${local.prefix}-ethereum-raw/"
+  target_bucket = aws_s3_bucket.access_logs.id
+  target_prefix = "${var.prefix}-${var.chain_name}-raw/"
 }

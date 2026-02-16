@@ -55,6 +55,34 @@ backup_worker_image_tag     = "latest" # Override in CI/CD
 backup_worker_workers       = 2        # Concurrent workers per task
 
 # -----------------------------------------------------------------------------
+# Avalanche C-Chain Configuration
+# -----------------------------------------------------------------------------
+
+# RPC endpoints
+avalanche_alchemy_http_url = "https://avax-mainnet.g.alchemy.com/v2"
+avalanche_alchemy_ws_url   = "wss://avax-mainnet.g.alchemy.com/v2"
+
+# Watcher sizing (Fargate Graviton)
+avalanche_watcher_cpu           = 2048     # 2 vCPU
+avalanche_watcher_memory        = 4096     # 4 GB
+avalanche_watcher_desired_count = 1        # Singleton
+avalanche_watcher_image_tag     = "latest" # Override in CI/CD
+
+# Backup worker sizing
+avalanche_backup_worker_cpu           = 1024     # 1 vCPU
+avalanche_backup_worker_memory        = 2048     # 2 GB
+avalanche_backup_worker_desired_count = 1        # Single instance
+avalanche_backup_worker_image_tag     = "latest" # Override in CI/CD
+avalanche_backup_worker_workers       = 2        # Concurrent workers per task
+
+# Redis
+avalanche_redis_node_type          = "cache.r7g.large" # 13.07 GB
+avalanche_redis_engine_version     = "8.0"              # Valkey 8.0
+avalanche_redis_num_cache_clusters = 1                  # Single node, no HA
+avalanche_redis_transit_encryption = false              # No TLS for simplicity
+avalanche_redis_snapshot_retention = 0                  # No backups
+
+# -----------------------------------------------------------------------------
 # Bastion Host Configuration
 # -----------------------------------------------------------------------------
 

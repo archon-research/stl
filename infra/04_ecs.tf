@@ -75,17 +75,44 @@ resource "aws_ecr_lifecycle_policy" "watcher" {
 }
 
 # -----------------------------------------------------------------------------
-# CloudWatch Log Group - Watcher
+# ECR Repository - Backup Worker
 # -----------------------------------------------------------------------------
 
-resource "aws_cloudwatch_log_group" "watcher" {
-  name              = "/ecs/${local.prefix}-watcher"
-  retention_in_days = 30
+resource "aws_ecr_repository" "backup_worker" {
+  name                 = "${local.prefix}-backup-worker"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = var.environment == "sentineldev"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
 
   tags = {
-    Name    = "${local.prefix}-watcher-logs"
-    Service = "watcher"
+    Name    = "${local.prefix}-backup-worker"
+    Service = "backup-worker"
   }
+}
+
+# Lifecycle policy to clean up old images
+resource "aws_ecr_lifecycle_policy" "backup_worker" {
+  repository = aws_ecr_repository.backup_worker.name
+
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Keep last 10 images"
+        selection = {
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = 10
+        }
+        action = {
+          type = "expire"
+        }
+      }
+    ]
+  })
 }
 
 # -----------------------------------------------------------------------------
@@ -136,6 +163,8 @@ data "aws_iam_policy_document" "ecs_secrets_access" {
       data.aws_secretsmanager_secret.watcher_config.arn,
       aws_secretsmanager_secret.tigerdata_db.arn,
       aws_secretsmanager_secret.tigerdata_app.arn,
+      module.ethereum.redis_secret_arn,
+      module.avalanche.redis_secret_arn,
     ]
   }
 }

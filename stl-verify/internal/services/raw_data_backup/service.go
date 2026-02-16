@@ -36,6 +36,11 @@ func DefaultChainExpectations() map[int64]ChainExpectation {
 			ExpectTraces:   true,
 			ExpectBlobs:    false, // Blobs are optional (post-Dencun)
 		},
+		43114: { // Avalanche C-Chain
+			ExpectReceipts: true,
+			ExpectTraces:   false,
+			ExpectBlobs:    false,
+		},
 	}
 }
 
@@ -268,42 +273,48 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (
 		"chainID", event.ChainID,
 	)
 
-	// Fetch all data from cache
+	// Determine chain expectations (used for conditional fetching and validation)
+	expectation := s.chainExpectations[event.ChainID]
+
+	// Fetch block data from cache (always required)
 	blockData, err := s.cache.GetBlock(ctx, event.ChainID, event.BlockNumber, event.Version)
 	if err != nil {
 		return fmt.Errorf("failed to get block from cache: %w", err)
 	}
-
-	receiptsData, err := s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
-	if err != nil {
-		return fmt.Errorf("failed to get receipts from cache: %w", err)
-	}
-
-	tracesData, err := s.cache.GetTraces(ctx, event.ChainID, event.BlockNumber, event.Version)
-	if err != nil {
-		return fmt.Errorf("failed to get traces from cache: %w", err)
-	}
-
-	blobsData, err := s.cache.GetBlobs(ctx, event.ChainID, event.BlockNumber, event.Version)
-	if err != nil {
-		return fmt.Errorf("failed to get blobs from cache: %w", err)
-	}
-
-	// Check if we have at least block data (always required)
 	if blockData == nil {
 		cacheKey := shared.CacheKey(event.ChainID, event.BlockNumber, event.Version, "block")
 		return fmt.Errorf("block data not found in cache for block %d (cacheKey=%s)", event.BlockNumber, cacheKey)
 	}
 
-	// Validate against chain expectations
-	if expectation, ok := s.chainExpectations[event.ChainID]; ok {
-		if expectation.ExpectReceipts && receiptsData == nil {
+	// Conditionally fetch optional data types based on chain expectations
+	var receiptsData, tracesData, blobsData json.RawMessage
+
+	if expectation.ExpectReceipts {
+		receiptsData, err = s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
+		if err != nil {
+			return fmt.Errorf("failed to get receipts from cache: %w", err)
+		}
+		if receiptsData == nil {
 			return fmt.Errorf("receipts data expected but not found in cache for chain %d block %d", event.ChainID, event.BlockNumber)
 		}
-		if expectation.ExpectTraces && tracesData == nil {
+	}
+
+	if expectation.ExpectTraces {
+		tracesData, err = s.cache.GetTraces(ctx, event.ChainID, event.BlockNumber, event.Version)
+		if err != nil {
+			return fmt.Errorf("failed to get traces from cache: %w", err)
+		}
+		if tracesData == nil {
 			return fmt.Errorf("traces data expected but not found in cache for chain %d block %d", event.ChainID, event.BlockNumber)
 		}
-		if expectation.ExpectBlobs && blobsData == nil {
+	}
+
+	if expectation.ExpectBlobs {
+		blobsData, err = s.cache.GetBlobs(ctx, event.ChainID, event.BlockNumber, event.Version)
+		if err != nil {
+			return fmt.Errorf("failed to get blobs from cache: %w", err)
+		}
+		if blobsData == nil {
 			return fmt.Errorf("blobs data expected but not found in cache for chain %d block %d", event.ChainID, event.BlockNumber)
 		}
 	}
@@ -313,16 +324,14 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (
 
 	// Determine which files are expected for a complete backup
 	expectedTypes := []string{"block"}
-	if expectation, ok := s.chainExpectations[event.ChainID]; ok {
-		if expectation.ExpectReceipts {
-			expectedTypes = append(expectedTypes, "receipts")
-		}
-		if expectation.ExpectTraces {
-			expectedTypes = append(expectedTypes, "traces")
-		}
-		if expectation.ExpectBlobs {
-			expectedTypes = append(expectedTypes, "blobs")
-		}
+	if expectation.ExpectReceipts {
+		expectedTypes = append(expectedTypes, "receipts")
+	}
+	if expectation.ExpectTraces {
+		expectedTypes = append(expectedTypes, "traces")
+	}
+	if expectation.ExpectBlobs {
+		expectedTypes = append(expectedTypes, "blobs")
 	}
 
 	// Check if all expected files already exist
