@@ -26,7 +26,8 @@ VALUES ('chainlink', 'Chainlink', 1, NULL, 'chainlink_feed', 10606501, 8, true)
 ON CONFLICT (name) DO NOTHING;
 
 -- Seed Chronicle oracle (uses DirectCaller instead of Multicall3 due to toll/whitelist)
--- deployment_block = earliest feed (WETH/USD deployed at block 18791466)
+-- deployment_block = earliest feed (wstETH/USD deployed at block 18791466)
+-- Note: WETH/USDC/USDT/WBTC feeds were deployed later (~block 22219400, Apr 2025)
 INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, price_decimals, enabled)
 VALUES ('chronicle', 'Chronicle', 1, NULL, 'chronicle', 18791466, 18, true)
 ON CONFLICT (name) DO NOTHING;
@@ -140,13 +141,16 @@ FROM oracle o, token t WHERE o.name = 'chainlink' AND t.symbol = 'LBTC'
 ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL DO NOTHING;
 
 -- Chronicle feed assets (18 decimals, USD-denominated)
--- Feed addresses sourced from https://chroniclelabs.org/dashboard/oracles
+-- Feed addresses sourced from prices_oracles_reference.md (canonical1 addresses)
+
+-- WETH/USD (deployed ~block 22219400, Apr 2025)
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
 SELECT o.id, t.id, true,
-       '\x46ef0071b1E2fF6B42d36e5A177EA43Ae5917f4E'::BYTEA, 18, 'USD'
+       '\xb074EEE1F1e66650DA49A4d96e255c8337A272a9'::BYTEA, 18, 'USD'
 FROM oracle o, token t WHERE o.name = 'chronicle' AND t.symbol = 'WETH'
 ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL DO NOTHING;
 
+-- wstETH/USD
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
 SELECT o.id, t.id, true,
        '\xA770582353b573CbfdCC948751750EeB3Ccf23CF'::BYTEA, 18, 'USD'
@@ -165,6 +169,27 @@ INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decim
 SELECT o.id, t.id, true,
        '\x496470F4835186bF118545Bd76889F123D608E84'::BYTEA, 18, 'USD'
 FROM oracle o, token t WHERE o.name = 'chronicle' AND t.symbol = 'sUSDS'
+ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL DO NOTHING;
+
+-- USDC/USD (deployed ~block 22219400, Apr 2025)
+INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+SELECT o.id, t.id, true,
+       '\xCe701340261a3dc3541C5f8A6d2bE689381C8fCC'::BYTEA, 18, 'USD'
+FROM oracle o, token t WHERE o.name = 'chronicle' AND t.symbol = 'USDC'
+ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL DO NOTHING;
+
+-- USDT/USD (deployed ~block 22219400, Apr 2025)
+INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+SELECT o.id, t.id, true,
+       '\x7084a627a22b2de99E18733DC5aAF40993FA405C'::BYTEA, 18, 'USD'
+FROM oracle o, token t WHERE o.name = 'chronicle' AND t.symbol = 'USDT'
+ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL DO NOTHING;
+
+-- WBTC/USD (deployed ~block 22219400, Apr 2025)
+INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+SELECT o.id, t.id, true,
+       '\x286204401e0C1E63043E95a8DE93236B735d4BF2'::BYTEA, 18, 'USD'
+FROM oracle o, token t WHERE o.name = 'chronicle' AND t.symbol = 'WBTC'
 ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL DO NOTHING;
 
 -- Redstone feed assets (12 feeds)
