@@ -294,6 +294,8 @@ func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBloc
 
 // computeOracleBlockRanges groups protocol-oracle bindings by protocol, then
 // determines each oracle's valid block range as the union across all protocols.
+// Assumes bindings are ordered by (protocol_id, from_block) as returned by
+// GetAllProtocolOracleBindings.
 func computeOracleBlockRanges(bindings []*entity.ProtocolOracle) map[int64]*oracleBlockRange {
 	byProtocol := make(map[int64][]*entity.ProtocolOracle)
 	for _, b := range bindings {
