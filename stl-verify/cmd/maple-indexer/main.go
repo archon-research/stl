@@ -1,6 +1,6 @@
-// Package main implements an SQS consumer that fetches Maple Finance lending
-// positions and pool collateral breakdowns for tracked users on each new
-// Ethereum block, persisting snapshots to PostgreSQL.
+// Package main implements an SQS consumer that fetches Maple Finance borrower
+// debt and collateral snapshots on each new Ethereum block, persisting results
+// to PostgreSQL.
 package main
 
 import (
@@ -139,14 +139,29 @@ func run(ctx context.Context, args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	mapleRepo, err := postgres.NewMapleRepository(pool, logger, 0)
-	if err != nil {
-		return fmt.Errorf("creating maple repository: %w", err)
-	}
-
 	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0)
 	if err != nil {
 		return fmt.Errorf("creating protocol repository: %w", err)
+	}
+
+	positionRepo, err := postgres.NewPositionRepository(pool, logger, 0)
+	if err != nil {
+		return fmt.Errorf("creating position repository: %w", err)
+	}
+
+	userRepo, err := postgres.NewUserRepository(pool, logger, 0)
+	if err != nil {
+		return fmt.Errorf("creating user repository: %w", err)
+	}
+
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0)
+	if err != nil {
+		return fmt.Errorf("creating token repository: %w", err)
+	}
+
+	txManager, err := postgres.NewTxManager(pool, logger)
+	if err != nil {
+		return fmt.Errorf("creating tx manager: %w", err)
 	}
 
 	// Service.
@@ -158,7 +173,10 @@ func run(ctx context.Context, args []string) error {
 		},
 		consumer,
 		mapleClient,
-		mapleRepo,
+		txManager,
+		userRepo,
+		tokenRepo,
+		positionRepo,
 		protocolRepo,
 	)
 	if err != nil {
