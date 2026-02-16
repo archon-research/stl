@@ -488,10 +488,11 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 	}
 	publishBlockEvent(t, ctx, infra, event)
 
-	// Wait for S3 objects to be created (4 files: block, receipts, traces, blobs)
+	// Wait for S3 objects to be created (3 files: block, receipts, traces)
+	// Blobs are not expected for Ethereum (chain 1) per DefaultChainExpectations
 	partition := "12000-12999" // Block 12345 falls in this partition
 	prefix := fmt.Sprintf("%s/", partition)
-	objects := waitForS3Objects(t, ctx, infra, prefix, 4, 10*time.Second)
+	objects := waitForS3Objects(t, ctx, infra, prefix, 3, 10*time.Second)
 
 	// Stop service
 	svc.Stop()
@@ -504,7 +505,6 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 		fmt.Sprintf("%s/%d_%d_block.json.gz", partition, blockNumber, version),
 		fmt.Sprintf("%s/%d_%d_receipts.json.gz", partition, blockNumber, version),
 		fmt.Sprintf("%s/%d_%d_traces.json.gz", partition, blockNumber, version),
-		fmt.Sprintf("%s/%d_%d_blobs.json.gz", partition, blockNumber, version),
 	}
 
 	for _, expected := range expectedFiles {
