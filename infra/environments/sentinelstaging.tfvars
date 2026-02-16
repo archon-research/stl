@@ -32,8 +32,8 @@ redis_snapshot_retention = 0                  # No backups
 # -----------------------------------------------------------------------------
 
 # Staging: 4 vCPU with 8GB memory (Fargate Graviton)
-watcher_cpu           = 4096     # 4 vCPU
-watcher_memory        = 8192     # 8 GB
+watcher_cpu           = 2048
+watcher_memory        = 4096
 watcher_desired_count = 1        # Singleton
 watcher_image_tag     = "latest" # Override in CI/CD
 
@@ -48,11 +48,20 @@ alchemy_ws_url   = "wss://eth-mainnet.g.alchemy.com/v2"
 # -----------------------------------------------------------------------------
 
 # Staging: minimal resources for backup worker
-backup_worker_cpu           = 2048     # 2 vCPU
-backup_worker_memory        = 4096     # 4 GB
+backup_worker_cpu           = 512
+backup_worker_memory        = 1024
 backup_worker_desired_count = 1        # Single instance
 backup_worker_image_tag     = "latest" # Override in CI/CD
 backup_worker_workers       = 2        # Concurrent workers per task
+
+# -----------------------------------------------------------------------------
+# ECS Oracle Price Worker Configuration
+# -----------------------------------------------------------------------------
+
+oracle_price_worker_cpu           = 1024
+oracle_price_worker_memory        = 2048
+oracle_price_worker_desired_count = 1        # Single instance
+oracle_price_worker_image_tag     = "latest" # Override in CI/CD
 
 # -----------------------------------------------------------------------------
 # Avalanche C-Chain Configuration
@@ -69,8 +78,8 @@ avalanche_watcher_desired_count = 1        # Singleton
 avalanche_watcher_image_tag     = "latest" # Override in CI/CD
 
 # Backup worker sizing
-avalanche_backup_worker_cpu           = 1024     # 1 vCPU
-avalanche_backup_worker_memory        = 2048     # 2 GB
+avalanche_backup_worker_cpu           = 512
+avalanche_backup_worker_memory        = 1024
 avalanche_backup_worker_desired_count = 1        # Single instance
 avalanche_backup_worker_image_tag     = "latest" # Override in CI/CD
 avalanche_backup_worker_workers       = 2        # Concurrent workers per task
