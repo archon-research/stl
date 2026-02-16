@@ -1,6 +1,6 @@
 package entity
 
-// EventType represents the type of SparkLend position-changing event
+// EventType represents the type of position-changing event.
 type EventType string
 
 const (
@@ -11,6 +11,7 @@ const (
 	EventLiquidationCall                 EventType = "LiquidationCall"
 	EventReserveUsedAsCollateralEnabled  EventType = "ReserveUsedAsCollateralEnabled"
 	EventReserveUsedAsCollateralDisabled EventType = "ReserveUsedAsCollateralDisabled"
+	EventMapleSnapshot                   EventType = "MapleSnapshot"
 )
 
 // validEventTypes contains all valid event types for quick lookup
@@ -22,6 +23,7 @@ var validEventTypes = map[EventType]bool{
 	EventLiquidationCall:                 true,
 	EventReserveUsedAsCollateralEnabled:  true,
 	EventReserveUsedAsCollateralDisabled: true,
+	EventMapleSnapshot:                   true,
 }
 
 // IsValid returns true if the EventType is a known valid type

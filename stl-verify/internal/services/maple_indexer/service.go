@@ -231,6 +231,10 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 		return fmt.Errorf("invalid block number %d", event.BlockNumber)
 	}
 
+	if event.ChainID != s.config.ChainID {
+		return fmt.Errorf("unexpected chain ID %d for block %d", event.ChainID, event.BlockNumber)
+	}
+
 	if event.BlockHash == "" {
 		return fmt.Errorf("block hash missing for block %d", event.BlockNumber)
 	}
@@ -247,6 +251,7 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 
 	txHash := common.FromHex(event.BlockHash)
 	blockNumber := event.BlockNumber
+	blockVersion := event.Version
 	userCache := make(map[common.Address]int64)
 	tokenCache := make(map[string]int64)
 
@@ -291,10 +296,10 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 				ProtocolID:   s.protocolID,
 				TokenID:      loanTokenID,
 				BlockNumber:  blockNumber,
-				BlockVersion: 0,
+				BlockVersion: blockVersion,
 				Amount:       loan.PrincipalOwed,
 				Change:       big.NewInt(0),
-				EventType:    "MapleSnapshot",
+				EventType:    entity.EventMapleSnapshot,
 				TxHash:       txHash,
 			})
 
@@ -314,10 +319,10 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 				ProtocolID:        s.protocolID,
 				TokenID:           collateralTokenID,
 				BlockNumber:       blockNumber,
-				BlockVersion:      0,
+				BlockVersion:      blockVersion,
 				Amount:            loan.Collateral.AssetAmount,
 				Change:            big.NewInt(0),
-				EventType:         "MapleSnapshot",
+				EventType:         entity.EventMapleSnapshot,
 				TxHash:            txHash,
 				CollateralEnabled: isCollateralEnabled(loan.Collateral.State),
 			})

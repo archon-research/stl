@@ -639,7 +639,7 @@ func TestProcessBlock(t *testing.T) {
 		event := blockEvent{
 			ChainID:        1,
 			BlockNumber:    21000000,
-			Version:        1,
+			Version:        2,
 			BlockHash:      "0xabc",
 			BlockTimestamp: blockTimestamp,
 		}
@@ -656,11 +656,25 @@ func TestProcessBlock(t *testing.T) {
 		if len(positionRepo.lastUpsertedBorrowers) != 1 {
 			t.Errorf("borrowers count = %d, want 1", len(positionRepo.lastUpsertedBorrowers))
 		}
+		borrower := positionRepo.lastUpsertedBorrowers[0]
+		if borrower.EventType != entity.EventMapleSnapshot {
+			t.Errorf("borrower EventType = %v, want %v", borrower.EventType, entity.EventMapleSnapshot)
+		}
+		if borrower.BlockVersion != event.Version {
+			t.Errorf("borrower BlockVersion = %d, want %d", borrower.BlockVersion, event.Version)
+		}
 		if positionRepo.upsertBorrowerCollateralCalls != 1 {
 			t.Errorf("UpsertBorrowerCollateral calls = %d, want 1", positionRepo.upsertBorrowerCollateralCalls)
 		}
 		if len(positionRepo.lastUpsertedCollateral) != 1 {
 			t.Errorf("collateral count = %d, want 1", len(positionRepo.lastUpsertedCollateral))
+		}
+		collateral := positionRepo.lastUpsertedCollateral[0]
+		if collateral.EventType != entity.EventMapleSnapshot {
+			t.Errorf("collateral EventType = %v, want %v", collateral.EventType, entity.EventMapleSnapshot)
+		}
+		if collateral.BlockVersion != event.Version {
+			t.Errorf("collateral BlockVersion = %d, want %d", collateral.BlockVersion, event.Version)
 		}
 	})
 
@@ -811,6 +825,39 @@ func TestProcessBlock(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "collateral write failure") {
 			t.Errorf("error %q should contain 'collateral write failure'", err.Error())
+		}
+	})
+
+	t.Run("chain mismatch returns error", func(t *testing.T) {
+		client := &mockMapleClient{}
+		defaultClientSetup(client)
+
+		protocolRepo := defaultProtocolRepo()
+		svc, err := NewService(
+			validServiceConfig(),
+			blockingConsumer(),
+			client,
+			defaultTxManager(),
+			defaultUserRepo(),
+			defaultTokenRepo(),
+			defaultPositionRepo(),
+			protocolRepo,
+		)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer svc.Stop()
+
+		event := blockEvent{ChainID: 999, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
+		err = svc.processBlock(context.Background(), event)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "unexpected chain ID") {
+			t.Errorf("error %q should contain 'unexpected chain ID'", err.Error())
 		}
 	})
 }
