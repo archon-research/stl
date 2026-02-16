@@ -99,7 +99,7 @@ resource "aws_iam_role" "bastion" {
 
 # Allow reading Tailscale auth key from Secrets Manager
 resource "aws_iam_role_policy" "bastion_secrets" {
-  count = var.bastion_enabled && var.tailscale_auth_key_secret_name != "" ? 1 : 0
+  count = var.bastion_enabled && var.tailscale_enabled ? 1 : 0
 
   name = "${local.prefix}-bastion-secrets-policy"
   role = aws_iam_role.bastion[0].id
@@ -112,7 +112,7 @@ resource "aws_iam_role_policy" "bastion_secrets" {
         Action = [
           "secretsmanager:GetSecretValue"
         ]
-        Resource = "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.tailscale_auth_key_secret_name}*"
+        Resource = "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${local.prefix}-tailscale-auth-key*"
       }
     ]
   })
@@ -160,12 +160,19 @@ resource "aws_instance" "bastion" {
 
   ami                    = data.aws_ami.amazon_linux_2023_arm64[0].id
   instance_type          = var.bastion_instance_type
-  subnet_id              = aws_subnet.private.id
+  subnet_id              = aws_subnet.private.id # Private subnet has NAT gateway for internet access
   vpc_security_group_ids = [aws_security_group.bastion[0].id]
   iam_instance_profile   = aws_iam_instance_profile.bastion[0].name
 
   # No SSH key - use Tailscale or SSM Session Manager
   key_name = null
+
+  lifecycle {
+    precondition {
+      condition     = !var.tailscale_enabled || var.bastion_enabled
+      error_message = "Tailscale requires bastion to be enabled. Set bastion_enabled = true when tailscale_enabled = true."
+    }
+  }
 
   user_data = <<-EOF
     #!/bin/bash
@@ -191,16 +198,16 @@ resource "aws_instance" "bastion" {
 
     %{if var.tailscale_enabled}
     # If auth key is in Secrets Manager, authenticate automatically
-    %{if var.tailscale_auth_key_secret_name != ""}
+    # Use explicit secret name or construct from prefix
+    SECRET_NAME="${var.tailscale_auth_key_secret_name != "" ? var.tailscale_auth_key_secret_name : "${local.prefix}-tailscale-auth-key"}"
     AUTH_KEY=$(aws secretsmanager get-secret-value \
-      --secret-id ${var.tailscale_auth_key_secret_name} \
+      --secret-id "$SECRET_NAME" \
       --query SecretString --output text \
       --region ${var.aws_region} 2>/dev/null || echo "")
     
     if [ -n "$AUTH_KEY" ]; then
       tailscale up --authkey="$AUTH_KEY" --ssh --accept-dns=false --hostname="${local.prefix}-bastion"
     fi
-    %{endif}
     echo "Bastion setup complete with Tailscale. Run 'tailscale up' to authenticate if not done automatically."
     %{else}
     echo "Bastion setup complete. Use SSM Session Manager to connect."
