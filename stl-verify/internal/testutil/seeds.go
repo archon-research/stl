@@ -76,7 +76,7 @@ func SeedOracleAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, orac
 	_, err := pool.Exec(ctx, `
 		INSERT INTO oracle_asset (oracle_id, token_id, enabled)
 		VALUES ($1, $2, true)
-		ON CONFLICT (oracle_id, token_id) DO NOTHING
+		ON CONFLICT (oracle_id, token_id) WHERE feed_address IS NULL DO NOTHING
 	`, oracleID, tokenID)
 	if err != nil {
 		t.Fatalf("failed to insert oracle asset (oracle=%d, token=%d): %v", oracleID, tokenID, err)
