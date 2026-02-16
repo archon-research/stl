@@ -329,9 +329,9 @@ tf-bootstrap: check-tofu
 		echo "Error: Bootstrap directory not found at $(INFRA_DIR)/bootstrap"; \
 		exit 1; \
 	fi
-	@echo ""
-	@echo "Checking if bootstrap already exists for $(ENV)..."
-	@if [ "$(ENV)" = "sentineldev" ]; then \
+	@echo ""; \
+	echo "Checking if bootstrap already exists for $(ENV)..."; \
+	if [ "$(ENV)" = "sentineldev" ]; then \
 		if [ -f "$(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV)" ]; then \
 			LOCKS_TABLE=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw locks_table_name 2>/dev/null || echo ""); \
 			if [ -n "$$LOCKS_TABLE" ] && aws dynamodb describe-table --table-name "$$LOCKS_TABLE" --region $(AWS_REGION) &>/dev/null; then \
@@ -354,10 +354,10 @@ tf-bootstrap: check-tofu
 			echo "==> Skipping bootstrap (already initialized)"; \
 			exit 0; \
 		fi; \
-	fi
-	@echo ""
-	@echo "Step 1: Creating backend resources (S3 + DynamoDB) with auto-retry (3 attempts)..."
-	@for attempt in 1 2 3; do \
+	fi; \
+	echo ""; \
+	echo "Step 1: Creating backend resources (S3 + DynamoDB) with auto-retry (3 attempts)..."; \
+	for attempt in 1 2 3; do \
 		echo "  Attempt $$attempt/3..."; \
 		cd $(INFRA_DIR)/bootstrap && \
 		rm -rf .terraform .terraform.lock.hcl && \
@@ -386,10 +386,11 @@ tf-bootstrap: check-tofu
 			echo "✗ Failed after 3 attempts"; \
 			exit 1; \
 		fi; \
-	done
-	@echo ""
-	@echo "Step 2: Extracting bucket suffix and updating backend config (dev only)..."
-	@if [ "$(ENV)" = "sentineldev" ]; then \
+	done; \
+	cd $(CURDIR); \
+	echo ""; \
+	echo "Step 2: Extracting bucket suffix and updating backend config (dev only)..."; \
+	if [ "$(ENV)" = "sentineldev" ]; then \
 		BUCKET_NAME=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null || echo ""); \
 		LOCKS_TABLE=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw locks_table_name 2>/dev/null || echo ""); \
 		if [ -z "$$BUCKET_NAME" ] || [ -z "$$LOCKS_TABLE" ]; then \
@@ -405,10 +406,10 @@ tf-bootstrap: check-tofu
 		echo "✓ Backend config updated"; \
 	else \
 		echo "  (Skipping for $(ENV) - using fixed backend name)"; \
-	fi
-	@echo ""
-	@echo "Step 3: Creating secrets with auto-retry (3 attempts)..."
-	@if aws secretsmanager describe-secret --secret-id stl-$(ENV)-tigerdata --region $(AWS_REGION) &>/dev/null 2>&1; then \
+	fi; \
+	echo ""; \
+	echo "Step 3: Creating secrets with auto-retry (3 attempts)..."; \
+	if aws secretsmanager describe-secret --secret-id stl-$(ENV)-tigerdata --region $(AWS_REGION) &>/dev/null 2>&1; then \
 		echo "✓ Secrets already exist for $(ENV)"; \
 		echo "  Skipping secrets creation"; \
 	else \
@@ -442,10 +443,10 @@ tf-bootstrap: check-tofu
 				exit 1; \
 			fi; \
 		done; \
-	fi
-	@echo ""
-	@echo "==> Bootstrap complete!"
-	@echo "==> Next: make tf-init ENV=$(ENV)"
+	fi; \
+	echo ""; \
+	echo "==> Bootstrap complete!"; \
+	echo "==> Next: make tf-init ENV=$(ENV)"
 
 # Initialize Terraform for main infrastructure
 # Checks for backend resources (S3 bucket) in AWS before proceeding
