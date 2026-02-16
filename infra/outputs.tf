@@ -423,3 +423,37 @@ output "oracle_price_worker_task_definition_arn" {
   description = "ARN of the Oracle Price Worker task definition"
   value       = aws_ecs_task_definition.oracle_price_worker.arn
 }
+
+# =============================================================================
+# SparkLend Position Tracker Outputs
+# =============================================================================
+
+output "sparklend_position_tracker_ecr_repository_url" {
+  description = "URL of the SparkLend Position Tracker ECR repository"
+  value       = aws_ecr_repository.sparklend_position_tracker.repository_url
+}
+
+output "sparklend_position_tracker_ecr_repository_arn" {
+  description = "ARN of the SparkLend Position Tracker ECR repository"
+  value       = aws_ecr_repository.sparklend_position_tracker.arn
+}
+
+output "sparklend_position_tracker_role_arn" {
+  description = "ARN of the SparkLend Position Tracker ECS task role"
+  value       = aws_iam_role.sparklend_position_tracker.arn
+}
+
+output "sparklend_position_tracker_role_name" {
+  description = "Name of the SparkLend Position Tracker ECS task role"
+  value       = aws_iam_role.sparklend_position_tracker.name
+}
+
+output "sparklend_position_tracker_service_name" {
+  description = "Name of the SparkLend Position Tracker ECS service"
+  value       = aws_ecs_service.sparklend_position_tracker.name
+}
+
+output "sparklend_position_tracker_task_definition_arn" {
+  description = "ARN of the SparkLend Position Tracker task definition"
+  value       = aws_ecs_task_definition.sparklend_position_tracker.arn
+}
