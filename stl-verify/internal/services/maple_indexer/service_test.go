@@ -22,45 +22,7 @@ import (
 // Mocks
 // ---------------------------------------------------------------------------
 
-type mockConsumer struct {
-	mu                  sync.Mutex
-	receiveMessagesFn   func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
-	deleteMessageFn     func(ctx context.Context, receiptHandle string) error
-	closeFn             func() error
-	deleteMessageCalls  int
-	receiveMessageCalls int
-	closeCalls          int
-}
-
-func (m *mockConsumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error) {
-	m.mu.Lock()
-	m.receiveMessageCalls++
-	m.mu.Unlock()
-	if m.receiveMessagesFn != nil {
-		return m.receiveMessagesFn(ctx, maxMessages)
-	}
-	return nil, nil
-}
-
-func (m *mockConsumer) DeleteMessage(ctx context.Context, receiptHandle string) error {
-	m.mu.Lock()
-	m.deleteMessageCalls++
-	m.mu.Unlock()
-	if m.deleteMessageFn != nil {
-		return m.deleteMessageFn(ctx, receiptHandle)
-	}
-	return nil
-}
-
-func (m *mockConsumer) Close() error {
-	m.mu.Lock()
-	m.closeCalls++
-	m.mu.Unlock()
-	if m.closeFn != nil {
-		return m.closeFn()
-	}
-	return nil
-}
+type mockConsumer = testutil.MockSQSConsumer
 
 type mockMapleClient struct {
 	mu                         sync.Mutex
@@ -87,6 +49,10 @@ func (m *mockMapleClient) GetBorrowerCollateralAtBlock(ctx context.Context, pool
 	if m.getBorrowerCollateralFn != nil {
 		return m.getBorrowerCollateralFn(ctx, poolAddress, blockNumber)
 	}
+	return nil, nil
+}
+
+func (m *mockMapleClient) GetAccountPositions(ctx context.Context, address common.Address) ([]outbound.MaplePoolPosition, error) {
 	return nil, nil
 }
 
@@ -307,7 +273,7 @@ func defaultPoolData() *outbound.MaplePoolData {
 
 func blockingConsumer() *mockConsumer {
 	return &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -593,11 +559,11 @@ func TestStartStop(t *testing.T) {
 			t.Errorf("Stop without Start should not error, got: %v", err)
 		}
 
-		consumer.mu.Lock()
-		if consumer.closeCalls != 1 {
-			t.Errorf("Close calls = %d, want 1", consumer.closeCalls)
+		consumer.Mu.Lock()
+		if consumer.CloseCalls != 1 {
+			t.Errorf("Close calls = %d, want 1", consumer.CloseCalls)
 		}
-		consumer.mu.Unlock()
+		consumer.Mu.Unlock()
 	})
 }
 
@@ -653,8 +619,8 @@ func TestProcessBlock(t *testing.T) {
 			t.Errorf("borrowers count = %d, want 1", len(positionRepo.lastUpsertedBorrowers))
 		}
 		borrower := positionRepo.lastUpsertedBorrowers[0]
-		if borrower.EventType != entity.EventMapleSnapshot {
-			t.Errorf("borrower EventType = %v, want %v", borrower.EventType, entity.EventMapleSnapshot)
+		if borrower.EventType != entity.EventSnapshot {
+			t.Errorf("borrower EventType = %v, want %v", borrower.EventType, entity.EventSnapshot)
 		}
 		if borrower.BlockVersion != event.Version {
 			t.Errorf("borrower BlockVersion = %d, want %d", borrower.BlockVersion, event.Version)
@@ -666,8 +632,8 @@ func TestProcessBlock(t *testing.T) {
 			t.Errorf("collateral count = %d, want 1", len(positionRepo.lastUpsertedCollateral))
 		}
 		collateral := positionRepo.lastUpsertedCollateral[0]
-		if collateral.EventType != entity.EventMapleSnapshot {
-			t.Errorf("collateral EventType = %v, want %v", collateral.EventType, entity.EventMapleSnapshot)
+		if collateral.EventType != entity.EventSnapshot {
+			t.Errorf("collateral EventType = %v, want %v", collateral.EventType, entity.EventSnapshot)
 		}
 		if collateral.BlockVersion != event.Version {
 			t.Errorf("collateral BlockVersion = %d, want %d", collateral.BlockVersion, event.Version)
@@ -873,7 +839,7 @@ func TestProcessMessages(t *testing.T) {
 		messageDelivered := false
 		body := makeMapleBlockEventJSON(21000000, blockTimestamp)
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -915,18 +881,18 @@ func TestProcessMessages(t *testing.T) {
 			return positionRepo.upsertBorrowersCalls >= 1
 		}, "UpsertBorrowers to be called")
 
-		consumer.mu.Lock()
-		if consumer.deleteMessageCalls < 1 {
-			t.Errorf("DeleteMessage calls = %d, want >= 1", consumer.deleteMessageCalls)
+		consumer.Mu.Lock()
+		if consumer.DeleteMessageCalls < 1 {
+			t.Errorf("DeleteMessage calls = %d, want >= 1", consumer.DeleteMessageCalls)
 		}
-		consumer.mu.Unlock()
+		consumer.Mu.Unlock()
 
 		svc.Stop()
 	})
 
 	t.Run("SQS receive error: logged, not fatal", func(t *testing.T) {
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(_ context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(_ context.Context, _ int) ([]outbound.SQSMessage, error) {
 				return nil, fmt.Errorf("SQS unavailable")
 			},
 		}
@@ -954,11 +920,11 @@ func TestProcessMessages(t *testing.T) {
 
 		time.Sleep(50 * time.Millisecond)
 
-		consumer.mu.Lock()
-		if consumer.receiveMessageCalls == 0 {
+		consumer.Mu.Lock()
+		if consumer.ReceiveMessageCalls == 0 {
 			t.Error("expected at least one ReceiveMessage call")
 		}
-		consumer.mu.Unlock()
+		consumer.Mu.Unlock()
 
 		svc.Stop()
 	})
@@ -966,7 +932,7 @@ func TestProcessMessages(t *testing.T) {
 	t.Run("empty messages: no processing", func(t *testing.T) {
 		positionRepo := defaultPositionRepo()
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				return nil, nil
 			},
 		}
@@ -1006,7 +972,7 @@ func TestProcessMessages(t *testing.T) {
 	t.Run("invalid JSON: message not deleted", func(t *testing.T) {
 		delivered := false
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -1044,11 +1010,11 @@ func TestProcessMessages(t *testing.T) {
 
 		time.Sleep(50 * time.Millisecond)
 
-		consumer.mu.Lock()
-		if consumer.deleteMessageCalls != 0 {
-			t.Errorf("DeleteMessage calls = %d, want 0 (invalid JSON)", consumer.deleteMessageCalls)
+		consumer.Mu.Lock()
+		if consumer.DeleteMessageCalls != 0 {
+			t.Errorf("DeleteMessage calls = %d, want 0 (invalid JSON)", consumer.DeleteMessageCalls)
 		}
-		consumer.mu.Unlock()
+		consumer.Mu.Unlock()
 
 		svc.Stop()
 	})
@@ -1061,7 +1027,7 @@ func TestProcessMessages(t *testing.T) {
 		delivered := false
 		body := makeMapleBlockEventJSON(21000000, blockTimestamp)
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -1074,7 +1040,7 @@ func TestProcessMessages(t *testing.T) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
-			deleteMessageFn: func(_ context.Context, _ string) error {
+			DeleteMessageFn: func(_ context.Context, _ string) error {
 				return fmt.Errorf("SQS delete failed")
 			},
 		}
@@ -1106,11 +1072,11 @@ func TestProcessMessages(t *testing.T) {
 			return positionRepo.upsertBorrowersCalls >= 1
 		}, "UpsertBorrowers to be called")
 
-		consumer.mu.Lock()
-		if consumer.deleteMessageCalls < 1 {
-			t.Errorf("DeleteMessage calls = %d, want >= 1", consumer.deleteMessageCalls)
+		consumer.Mu.Lock()
+		if consumer.DeleteMessageCalls < 1 {
+			t.Errorf("DeleteMessage calls = %d, want >= 1", consumer.DeleteMessageCalls)
 		}
-		consumer.mu.Unlock()
+		consumer.Mu.Unlock()
 
 		svc.Stop()
 	})
