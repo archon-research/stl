@@ -157,11 +157,71 @@ SELECT o.id, t.id, true,
 FROM oracle o, token t WHERE o.name = 'chronicle' AND t.symbol = 'sUSDS'
 ON CONFLICT (oracle_id, token_id) DO NOTHING;
 
--- Redstone feed asset
+-- Redstone feed assets (10 feeds)
+-- Feed addresses sourced from RedStone relayer manifest (https://app.redstone.finance/app/feeds/)
+-- All feeds use Chainlink AggregatorV3 interface (latestRoundData)
+
+-- USD-denominated feeds
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
 SELECT o.id, t.id, true,
-       '\x0c2c7ded01ccdfab16f04aff82af766b23d6be0a'::BYTEA, 8, 'USD'
+       '\xdDb6F90fFb4d3257dd666b69178e5B3c5Bf41136'::BYTEA, 8, 'USD'
 FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'weETH'
+ON CONFLICT (oracle_id, token_id) DO NOTHING;
+
+INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+SELECT o.id, t.id, true,
+       '\x67F6838e58859d612E4ddF04dA396d6DABB66Dc4'::BYTEA, 8, 'USD'
+FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'WETH'
+ON CONFLICT (oracle_id, token_id) DO NOTHING;
+
+INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+SELECT o.id, t.id, true,
+       '\xAB7f623fb2F6fea6601D4350FA0E2290663C28Fc'::BYTEA, 8, 'USD'
+FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'WBTC'
+ON CONFLICT (oracle_id, token_id) DO NOTHING;
+
+INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+SELECT o.id, t.id, true,
+       '\xe4aE88743c3834d0c492eAbC47384c84BcADC6a6'::BYTEA, 8, 'USD'
+FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'wstETH'
+ON CONFLICT (oracle_id, token_id) DO NOTHING;
+
+INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+SELECT o.id, t.id, true,
+       '\xcE18A2Bf89Fa3c56aF5Bde8A41efF967a6d63d26'::BYTEA, 8, 'USD'
+FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'PYUSD'
+ON CONFLICT (oracle_id, token_id) DO NOTHING;
+
+INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+SELECT o.id, t.id, true,
+       '\xeeF31c7d9F2E82e8A497b140cc60cc082Be4b94e'::BYTEA, 8, 'USD'
+FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'USDC'
+ON CONFLICT (oracle_id, token_id) DO NOTHING;
+
+INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+SELECT o.id, t.id, true,
+       '\x02E1F8d15762047b7a87BA0E5d94B9a0c5b54Ed2'::BYTEA, 8, 'USD'
+FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'USDT'
+ON CONFLICT (oracle_id, token_id) DO NOTHING;
+
+-- ETH-denominated feeds
+INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+SELECT o.id, t.id, true,
+       '\xA736eAe8805dDeFFba40cAB8c99bCB309dEaBd9B'::BYTEA, 8, 'ETH'
+FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'rsETH'
+ON CONFLICT (oracle_id, token_id) DO NOTHING;
+
+INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+SELECT o.id, t.id, true,
+       '\xF4a3e183F59D2599ee3DF213ff78b1B3b1923696'::BYTEA, 8, 'ETH'
+FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'ezETH'
+ON CONFLICT (oracle_id, token_id) DO NOTHING;
+
+-- BTC-denominated feed
+INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+SELECT o.id, t.id, true,
+       '\xb415eAA355D8440ac7eCB602D3fb67ccC1f0bc81'::BYTEA, 8, 'BTC'
+FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'LBTC'
 ON CONFLICT (oracle_id, token_id) DO NOTHING;
 
 INSERT INTO migrations (filename)
