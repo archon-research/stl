@@ -1,0 +1,428 @@
+// Package maple_indexer provides an SQS consumer that fetches Maple Finance
+// lending positions and pool collateral breakdowns on each new block, then
+// persists the snapshots to the database.
+package maple_indexer
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"math/big"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+)
+
+// Config holds configuration for the maple indexer service.
+type Config struct {
+	// MaxMessages is the maximum number of SQS messages to receive per poll.
+	MaxMessages int
+	// PollInterval is the time between SQS polls.
+	PollInterval time.Duration
+	// ChainID is the chain ID for user lookups (default 1 for Ethereum mainnet).
+	ChainID int64
+	// ProtocolAddress identifies the Maple Finance protocol for DB lookup.
+	ProtocolAddress common.Address
+	// Logger is the structured logger.
+	Logger *slog.Logger
+}
+
+func configDefaults() Config {
+	return Config{
+		MaxMessages:  10,
+		PollInterval: 100 * time.Millisecond,
+		ChainID:      1,
+		Logger:       slog.Default(),
+	}
+}
+
+// Service processes SQS block events, fetches Maple positions and collateral
+// breakdowns via GraphQL, and persists the results.
+type Service struct {
+	config       Config
+	consumer     outbound.SQSConsumer
+	mapleAPI     outbound.MapleClient
+	mapleRepo    outbound.MapleRepository
+	protocolRepo outbound.ProtocolRepository
+	protocolID   int64
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	logger *slog.Logger
+}
+
+// NewService creates a new maple indexer service.
+func NewService(
+	config Config,
+	consumer outbound.SQSConsumer,
+	mapleAPI outbound.MapleClient,
+	mapleRepo outbound.MapleRepository,
+	protocolRepo outbound.ProtocolRepository,
+) (*Service, error) {
+	if consumer == nil {
+		return nil, fmt.Errorf("consumer cannot be nil")
+	}
+	if mapleAPI == nil {
+		return nil, fmt.Errorf("mapleAPI cannot be nil")
+	}
+	if mapleRepo == nil {
+		return nil, fmt.Errorf("mapleRepo cannot be nil")
+	}
+	if protocolRepo == nil {
+		return nil, fmt.Errorf("protocolRepo cannot be nil")
+	}
+
+	defaults := configDefaults()
+	if config.MaxMessages == 0 {
+		config.MaxMessages = defaults.MaxMessages
+	}
+	if config.PollInterval == 0 {
+		config.PollInterval = defaults.PollInterval
+	}
+	if config.ChainID == 0 {
+		config.ChainID = defaults.ChainID
+	}
+	if config.Logger == nil {
+		config.Logger = defaults.Logger
+	}
+	if config.ProtocolAddress == (common.Address{}) {
+		return nil, fmt.Errorf("protocolAddress must be set")
+	}
+
+	return &Service{
+		config:       config,
+		consumer:     consumer,
+		mapleAPI:     mapleAPI,
+		mapleRepo:    mapleRepo,
+		protocolRepo: protocolRepo,
+		logger:       config.Logger.With("component", "maple-indexer"),
+	}, nil
+}
+
+// Start begins processing SQS messages.
+func (s *Service) Start(ctx context.Context) error {
+	s.ctx, s.cancel = context.WithCancel(ctx)
+
+	protocol, err := s.protocolRepo.GetProtocolByAddress(s.ctx, s.config.ChainID, s.config.ProtocolAddress)
+	if err != nil {
+		return fmt.Errorf("looking up protocol by address %s: %w", s.config.ProtocolAddress.Hex(), err)
+	}
+	if protocol == nil {
+		return fmt.Errorf("protocol not found for address %s on chain %d", s.config.ProtocolAddress.Hex(), s.config.ChainID)
+	}
+	s.protocolID = protocol.ID
+
+	go s.processLoop()
+
+	s.logger.Info("maple indexer started",
+		"protocolID", s.protocolID,
+		"protocolAddress", s.config.ProtocolAddress.Hex(),
+		"chainID", s.config.ChainID)
+	return nil
+}
+
+// Stop stops the service.
+func (s *Service) Stop() error {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	if err := s.consumer.Close(); err != nil {
+		return fmt.Errorf("closing consumer: %w", err)
+	}
+	s.logger.Info("maple indexer stopped")
+	return nil
+}
+
+func (s *Service) processLoop() {
+	ticker := time.NewTicker(s.config.PollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.processMessages(s.ctx); err != nil {
+				s.logger.Error("error processing messages", "error", err)
+			}
+		}
+	}
+}
+
+func (s *Service) processMessages(ctx context.Context) error {
+	messages, err := s.consumer.ReceiveMessages(ctx, s.config.MaxMessages)
+	if err != nil {
+		return fmt.Errorf("receiving messages: %w", err)
+	}
+
+	if len(messages) == 0 {
+		return nil
+	}
+
+	s.logger.Info("received messages", "count", len(messages))
+
+	var errs []error
+	for _, msg := range messages {
+		if err := s.processMessage(ctx, msg); err != nil {
+			s.logger.Error("failed to process message",
+				"messageID", msg.MessageID,
+				"error", err)
+			errs = append(errs, err)
+			continue
+		}
+
+		if deleteErr := s.consumer.DeleteMessage(ctx, msg.ReceiptHandle); deleteErr != nil {
+			s.logger.Error("failed to delete message", "error", deleteErr)
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
+// blockEvent is the SQS message payload for block events.
+type blockEvent struct {
+	ChainID        int64  `json:"chainId"`
+	BlockNumber    int64  `json:"blockNumber"`
+	Version        int    `json:"version"`
+	BlockHash      string `json:"blockHash"`
+	BlockTimestamp int64  `json:"blockTimestamp"`
+	IsReorg        bool   `json:"isReorg,omitempty"`
+}
+
+func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) error {
+	var event blockEvent
+	if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
+		return fmt.Errorf("parsing block event: %w", err)
+	}
+
+	return s.processBlock(ctx, event)
+}
+
+func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
+	users, err := s.mapleRepo.GetUsersWithMaplePositions(ctx, s.protocolID)
+	if err != nil {
+		return fmt.Errorf("getting maple users: %w", err)
+	}
+
+	if len(users) == 0 {
+		s.logger.Debug("no maple users found", "block", event.BlockNumber)
+		return nil
+	}
+
+	snapshotTime := time.Unix(event.BlockTimestamp, 0)
+
+	var errs []error
+	for _, user := range users {
+		if err := s.processUser(ctx, user, event, snapshotTime); err != nil {
+			s.logger.Error("failed to process user",
+				"userID", user.UserID,
+				"address", user.Address,
+				"block", event.BlockNumber,
+				"error", err)
+			errs = append(errs, fmt.Errorf("user %s: %w", user.Address.Hex(), err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
+func (s *Service) processUser(ctx context.Context, user outbound.MapleTrackedUser, event blockEvent, snapshotTime time.Time) error {
+	positions, err := s.fetchPositions(ctx, user, event, snapshotTime)
+	if err != nil {
+		return fmt.Errorf("fetching positions: %w", err)
+	}
+
+	if len(positions) == 0 {
+		s.logger.Debug("no positions for user",
+			"address", user.Address,
+			"block", event.BlockNumber)
+		return nil
+	}
+
+	if err := s.mapleRepo.UpsertPositions(ctx, positions); err != nil {
+		return fmt.Errorf("persisting positions: %w", err)
+	}
+
+	// Fetch and persist collateral breakdown for each pool.
+	if err := s.fetchAndPersistCollateral(ctx, positions, event, snapshotTime); err != nil {
+		return fmt.Errorf("processing collateral: %w", err)
+	}
+
+	s.logPositionSummary(positions, event.BlockNumber)
+	return nil
+}
+
+func (s *Service) fetchPositions(ctx context.Context, user outbound.MapleTrackedUser, event blockEvent, snapshotTime time.Time) ([]*entity.MaplePosition, error) {
+	apiPositions, err := s.mapleAPI.GetAccountPositions(ctx, user.Address)
+	if err != nil {
+		return nil, fmt.Errorf("querying Maple API: %w", err)
+	}
+
+	positions := make([]*entity.MaplePosition, 0, len(apiPositions))
+	for _, pos := range apiPositions {
+		mp, err := entity.NewMaplePosition(
+			0, // ID assigned by DB
+			user.UserID,
+			s.protocolID,
+			pos.PoolAddress,
+			pos.PoolName,
+			pos.AssetSymbol,
+			pos.AssetDecimals,
+			pos.LendingBalance,
+			event.BlockNumber,
+			snapshotTime,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("creating position entity: %w", err)
+		}
+		positions = append(positions, mp)
+	}
+
+	return positions, nil
+}
+
+func (s *Service) fetchAndPersistCollateral(ctx context.Context, positions []*entity.MaplePosition, event blockEvent, snapshotTime time.Time) error {
+	// Deduplicate pools (multiple users may share the same pool).
+	seen := make(map[string]bool)
+	var allCollaterals []*entity.MaplePoolCollateral
+	var errs []error
+
+	for _, pos := range positions {
+		poolHex := pos.PoolAddress.Hex()
+		if seen[poolHex] {
+			continue
+		}
+		seen[poolHex] = true
+
+		poolData, err := s.mapleAPI.GetPoolCollateral(ctx, pos.PoolAddress)
+		if err != nil {
+			s.logger.Error("failed to fetch pool collateral",
+				"pool", poolHex,
+				"error", err)
+			errs = append(errs, fmt.Errorf("pool %s: %w", poolHex, err))
+			continue
+		}
+
+		collaterals := buildCollateralEntities(s.logger, pos, poolData, event.BlockNumber, snapshotTime)
+		allCollaterals = append(allCollaterals, collaterals...)
+	}
+
+	if len(allCollaterals) == 0 {
+		if len(errs) > 0 {
+			return errors.Join(errs...)
+		}
+		return nil
+	}
+
+	if err := s.mapleRepo.UpsertPoolCollateral(ctx, allCollaterals); err != nil {
+		return fmt.Errorf("persisting pool collateral: %w", err)
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+
+	return nil
+}
+
+func buildCollateralEntities(logger *slog.Logger, pos *entity.MaplePosition, poolData *outbound.MaplePoolData, blockNumber int64, snapshotTime time.Time) []*entity.MaplePoolCollateral {
+	collaterals := make([]*entity.MaplePoolCollateral, 0, len(poolData.Collaterals))
+	for _, col := range poolData.Collaterals {
+		c, err := entity.NewMaplePoolCollateral(
+			0,
+			pos.PoolAddress,
+			pos.PoolName,
+			col.Asset,
+			col.AssetDecimals,
+			col.AssetValueUSD,
+			poolData.TVL,
+			blockNumber,
+			snapshotTime,
+		)
+		if err != nil {
+			logger.Warn("invalid pool collateral entry",
+				"pool", pos.PoolAddress.Hex(),
+				"asset", col.Asset,
+				"error", err)
+			continue
+		}
+		collaterals = append(collaterals, c)
+	}
+	return collaterals
+}
+
+func (s *Service) logPositionSummary(positions []*entity.MaplePosition, blockNumber int64) {
+	for _, pos := range positions {
+		usd := pos.LendingBalanceUSD()
+		usdFloat, _ := usd.Float64()
+		s.logger.Info("maple position snapshot",
+			"pool", pos.PoolName,
+			"poolAddress", pos.PoolAddress.Hex(),
+			"asset", pos.AssetSymbol,
+			"lendingBalanceUSD", fmt.Sprintf("$%.2f", usdFloat),
+			"block", blockNumber)
+	}
+}
+
+// CalculateBackedBreakdown computes how much of a user's position in a pool
+// is backed by each collateral asset. This is a pure calculation function.
+func CalculateBackedBreakdown(lendingBalance *big.Int, poolData *outbound.MaplePoolData) []AssetBacking {
+	if poolData == nil || poolData.TVL.Sign() == 0 || lendingBalance.Sign() == 0 {
+		return nil
+	}
+
+	backings := make([]AssetBacking, 0, len(poolData.Collaterals))
+	lendingFloat := new(big.Float).SetInt(lendingBalance)
+	tvlFloat := new(big.Float).SetInt(poolData.TVL)
+	divisor := new(big.Float).SetFloat64(1e6)
+
+	for _, col := range poolData.Collaterals {
+		if col.AssetValueUSD.Sign() == 0 {
+			continue
+		}
+
+		colFloat := new(big.Float).SetInt(col.AssetValueUSD)
+
+		// asset_pct = assetValueUsd / tvl
+		pct := new(big.Float).Quo(colFloat, tvlFloat)
+		pctFloat, _ := pct.Float64()
+
+		// user_backing = asset_pct * lendingBalance / 1e6
+		userBacking := new(big.Float).Mul(pct, lendingFloat)
+		userBacking = new(big.Float).Quo(userBacking, divisor)
+		userBackingFloat, _ := userBacking.Float64()
+
+		// total pool collateral for this asset in USD
+		totalUSD := new(big.Float).Quo(colFloat, divisor)
+		totalFloat, _ := totalUSD.Float64()
+
+		backings = append(backings, AssetBacking{
+			Symbol:   col.Asset,
+			Percent:  pctFloat,
+			ValueUSD: userBackingFloat,
+			TotalUSD: totalFloat,
+		})
+	}
+
+	return backings
+}
+
+// AssetBacking represents how much of a user's pool position is backed by
+// a single collateral asset.
+type AssetBacking struct {
+	Symbol   string  // "BTC", "ETH", "HYPE", etc.
+	Percent  float64 // 0.2462 = 24.62%
+	ValueUSD float64 // user's dollar amount backed by this asset
+	TotalUSD float64 // total pool-wide collateral for this asset
+}
