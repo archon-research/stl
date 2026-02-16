@@ -132,11 +132,6 @@ variable "watcher_image_tag" {
   type        = string
 }
 
-variable "chain_id" {
-  description = "Blockchain chain ID (1 = Ethereum mainnet)"
-  type        = number
-}
-
 variable "alchemy_api_key" {
   description = "Alchemy API key. Set via TF_VAR_alchemy_api_key env var."
   type        = string
@@ -305,4 +300,32 @@ variable "avalanche_redis_transit_encryption" {
 variable "avalanche_redis_snapshot_retention" {
   description = "Snapshot retention days for Avalanche Redis"
   type        = number
+}
+
+# -----------------------------------------------------------------------------
+# Bastion Host Configuration
+# -----------------------------------------------------------------------------
+
+variable "bastion_enabled" {
+  description = "Whether to create the bastion host"
+  type        = bool
+  default     = false
+}
+
+variable "bastion_instance_type" {
+  description = "EC2 instance type for bastion (t4g.nano is sufficient)"
+  type        = string
+  default     = "t4g.nano"
+}
+
+variable "tailscale_auth_key_secret_name" {
+  description = "Name of the Secrets Manager secret containing the Tailscale auth key"
+  type        = string
+  default     = ""
+}
+
+variable "tailscale_enabled" {
+  description = "Install and configure Tailscale on the bastion host (should only be enabled for sentinelstaging)"
+  type        = bool
+  default     = false
 }

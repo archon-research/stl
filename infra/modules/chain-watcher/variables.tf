@@ -101,6 +101,17 @@ variable "backup_worker_ecr_url" {
   type        = string
 }
 
+variable "access_logs_bucket_id" {
+  description = "S3 bucket ID for access logging (shared across chains)"
+  type        = string
+}
+
+variable "bucket_suffix" {
+  description = "Suffix for S3 raw data bucket name (e.g. '-89d540d0' for legacy Ethereum staging bucket)"
+  type        = string
+  default     = ""
+}
+
 # -----------------------------------------------------------------------------
 # Chain-Specific Config
 # -----------------------------------------------------------------------------

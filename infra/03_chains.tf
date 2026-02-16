@@ -29,6 +29,8 @@ module "ethereum" {
   tigerdata_app_secret_read_policy_arn = aws_iam_policy.tigerdata_app_secret_read.arn
   watcher_ecr_url                      = aws_ecr_repository.watcher.repository_url
   backup_worker_ecr_url                = aws_ecr_repository.backup_worker.repository_url
+  access_logs_bucket_id                = aws_s3_bucket.access_logs.id
+  bucket_suffix                        = var.environment == "sentinelstaging" ? "-89d540d0" : ""
 
   # Chain config
   alchemy_http_url = var.alchemy_http_url
@@ -89,6 +91,7 @@ module "avalanche" {
   tigerdata_app_secret_read_policy_arn = aws_iam_policy.tigerdata_app_secret_read.arn
   watcher_ecr_url                      = aws_ecr_repository.watcher.repository_url
   backup_worker_ecr_url                = aws_ecr_repository.backup_worker.repository_url
+  access_logs_bucket_id                = aws_s3_bucket.access_logs.id
 
   # Chain config
   alchemy_http_url = var.avalanche_alchemy_http_url

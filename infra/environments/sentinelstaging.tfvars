@@ -38,7 +38,6 @@ watcher_desired_count = 1        # Singleton
 watcher_image_tag     = "latest" # Override in CI/CD
 
 # Ethereum mainnet
-chain_id         = 1
 alchemy_http_url = "https://eth-mainnet.g.alchemy.com/v2"
 alchemy_ws_url   = "wss://eth-mainnet.g.alchemy.com/v2"
 # alchemy_api_key - set via TF_VAR_alchemy_api_key environment variable

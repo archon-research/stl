@@ -283,6 +283,7 @@ ifneq ($(filter $(TF_TARGETS),$(MAKECMDGOALS)),)
 endif
 AWS_PROFILE ?= $(ENV)
 export AWS_PROFILE
+export AWS_PAGER=
 
 # Helper script to load credentials from Secrets Manager and run tofu
 # Loads both TigerData credentials and API keys (Alchemy, CoinGecko, Etherscan)

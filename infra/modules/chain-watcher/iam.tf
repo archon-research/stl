@@ -109,6 +109,9 @@ resource "aws_iam_role_policy_attachment" "watcher_cloudwatch" {
 
 # -----------------------------------------------------------------------------
 # Worker Role
+# NOTE: This role exists for Ethereum state compatibility (migrated via moved
+# blocks). It is not currently used as a task_role_arn by any ECS service.
+# The backup worker has its own dedicated role in ecs_backup_worker.tf.
 # -----------------------------------------------------------------------------
 
 resource "aws_iam_role" "worker" {

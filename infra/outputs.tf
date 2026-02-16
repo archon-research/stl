@@ -76,10 +76,76 @@ output "ethereum_backup_worker_task_definition_arn" {
   value       = module.ethereum.backup_worker_task_definition_arn
 }
 
+# SNS / SQS
+output "ethereum_sns_topic_arn" {
+  description = "ARN of the Ethereum blocks SNS FIFO topic"
+  value       = module.ethereum.sns_topic_arn
+}
+
+output "ethereum_sqs_queue_urls" {
+  description = "Map of Ethereum consumer name to SQS queue URL"
+  value       = module.ethereum.sqs_queue_urls
+}
+
+output "ethereum_sqs_queue_arns" {
+  description = "Map of Ethereum consumer name to SQS queue ARN"
+  value       = module.ethereum.sqs_queue_arns
+}
+
+output "ethereum_sqs_dlq_urls" {
+  description = "Map of Ethereum consumer name to DLQ URL"
+  value       = module.ethereum.sqs_dlq_urls
+}
+
+output "ethereum_sqs_dlq_arns" {
+  description = "Map of Ethereum consumer name to DLQ ARN"
+  value       = module.ethereum.sqs_dlq_arns
+}
+
+# Redis
+output "ethereum_redis_endpoint" {
+  description = "Ethereum Redis primary endpoint"
+  value       = module.ethereum.redis_endpoint
+  sensitive   = true
+}
+
+output "ethereum_redis_port" {
+  description = "Ethereum Redis port"
+  value       = module.ethereum.redis_port
+}
+
+output "ethereum_redis_secret_arn" {
+  description = "ARN of the Ethereum Redis credentials secret"
+  value       = module.ethereum.redis_secret_arn
+}
+
+# IAM Policies
+output "ethereum_sns_publish_policy_arn" {
+  description = "ARN of the Ethereum SNS publish policy"
+  value       = module.ethereum.sns_publish_policy_arn
+}
+
+output "ethereum_sqs_consume_policy_arn" {
+  description = "ARN of the Ethereum SQS consume policy"
+  value       = module.ethereum.sqs_consume_policy_arn
+}
+
+# Monitoring
+output "ethereum_redis_alarms_topic_arn" {
+  description = "ARN of the Ethereum Redis alarms SNS topic"
+  value       = module.ethereum.redis_alarms_topic_arn
+}
+
+output "ethereum_messaging_alarms_topic_arn" {
+  description = "ARN of the Ethereum messaging alarms SNS topic"
+  value       = module.ethereum.messaging_alarms_topic_arn
+}
+
 # =============================================================================
 # Avalanche Chain Outputs
 # =============================================================================
 
+# S3
 output "avalanche_bucket_name" {
   description = "Name of the Avalanche S3 bucket"
   value       = module.avalanche.s3_bucket_id
@@ -90,6 +156,7 @@ output "avalanche_bucket_arn" {
   value       = module.avalanche.s3_bucket_arn
 }
 
+# IAM Roles
 output "avalanche_watcher_role_arn" {
   description = "ARN of the Avalanche Watcher ECS task role"
   value       = module.avalanche.watcher_role_arn
@@ -100,6 +167,11 @@ output "avalanche_watcher_service_name" {
   value       = module.avalanche.watcher_service_name
 }
 
+output "avalanche_watcher_task_definition_arn" {
+  description = "ARN of the Avalanche Watcher task definition"
+  value       = module.avalanche.watcher_task_definition_arn
+}
+
 output "avalanche_backup_worker_role_arn" {
   description = "ARN of the Avalanche Backup Worker ECS task role"
   value       = module.avalanche.backup_worker_role_arn
@@ -108,6 +180,76 @@ output "avalanche_backup_worker_role_arn" {
 output "avalanche_backup_worker_service_name" {
   description = "Name of the Avalanche Backup Worker ECS service"
   value       = module.avalanche.backup_worker_service_name
+}
+
+output "avalanche_backup_worker_task_definition_arn" {
+  description = "ARN of the Avalanche Backup Worker task definition"
+  value       = module.avalanche.backup_worker_task_definition_arn
+}
+
+# SNS / SQS
+output "avalanche_sns_topic_arn" {
+  description = "ARN of the Avalanche blocks SNS FIFO topic"
+  value       = module.avalanche.sns_topic_arn
+}
+
+output "avalanche_sqs_queue_urls" {
+  description = "Map of Avalanche consumer name to SQS queue URL"
+  value       = module.avalanche.sqs_queue_urls
+}
+
+output "avalanche_sqs_queue_arns" {
+  description = "Map of Avalanche consumer name to SQS queue ARN"
+  value       = module.avalanche.sqs_queue_arns
+}
+
+output "avalanche_sqs_dlq_urls" {
+  description = "Map of Avalanche consumer name to DLQ URL"
+  value       = module.avalanche.sqs_dlq_urls
+}
+
+output "avalanche_sqs_dlq_arns" {
+  description = "Map of Avalanche consumer name to DLQ ARN"
+  value       = module.avalanche.sqs_dlq_arns
+}
+
+# Redis
+output "avalanche_redis_endpoint" {
+  description = "Avalanche Redis primary endpoint"
+  value       = module.avalanche.redis_endpoint
+  sensitive   = true
+}
+
+output "avalanche_redis_port" {
+  description = "Avalanche Redis port"
+  value       = module.avalanche.redis_port
+}
+
+output "avalanche_redis_secret_arn" {
+  description = "ARN of the Avalanche Redis credentials secret"
+  value       = module.avalanche.redis_secret_arn
+}
+
+# IAM Policies
+output "avalanche_sns_publish_policy_arn" {
+  description = "ARN of the Avalanche SNS publish policy"
+  value       = module.avalanche.sns_publish_policy_arn
+}
+
+output "avalanche_sqs_consume_policy_arn" {
+  description = "ARN of the Avalanche SQS consume policy"
+  value       = module.avalanche.sqs_consume_policy_arn
+}
+
+# Monitoring
+output "avalanche_redis_alarms_topic_arn" {
+  description = "ARN of the Avalanche Redis alarms SNS topic"
+  value       = module.avalanche.redis_alarms_topic_arn
+}
+
+output "avalanche_messaging_alarms_topic_arn" {
+  description = "ARN of the Avalanche messaging alarms SNS topic"
+  value       = module.avalanche.messaging_alarms_topic_arn
 }
 
 # =============================================================================

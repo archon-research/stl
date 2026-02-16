@@ -2,16 +2,12 @@
 # S3 Raw Data Storage
 # =============================================================================
 
-locals {
-  bucket_name = "${local.prefix_lowercase}-${var.chain_name}-raw${local.bucket_suffix}"
-}
-
 resource "aws_s3_bucket" "raw_data" {
-  bucket        = local.bucket_name
+  bucket        = "${local.prefix_lowercase}-${var.chain_name}-raw${var.bucket_suffix}"
   force_destroy = var.environment == "sentineldev" ? true : false
 
   tags = {
-    Name = local.bucket_name
+    Name = "${local.prefix_lowercase}-${var.chain_name}-raw${var.bucket_suffix}"
   }
 }
 
@@ -115,48 +111,9 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw_data" {
 # S3 Access Logging
 # =============================================================================
 
-resource "aws_s3_bucket" "access_logs" {
-  bucket = var.environment == "sentinelstaging" ? "${local.prefix_lowercase}-access-logs-89d540d0" : "${local.prefix_lowercase}-access-logs${local.resource_suffix}"
-
-  tags = {
-    Name    = "${var.prefix}-access-logs"
-    Purpose = "s3-access-logging"
-  }
-}
-
-resource "aws_s3_bucket_public_access_block" "access_logs" {
-  bucket = aws_s3_bucket.access_logs.id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_ownership_controls" "access_logs" {
-  bucket = aws_s3_bucket.access_logs.id
-
-  rule {
-    object_ownership = "BucketOwnerPreferred"
-  }
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "access_logs" {
-  bucket = aws_s3_bucket.access_logs.id
-
-  rule {
-    id     = "expire-old-logs"
-    status = "Enabled"
-
-    expiration {
-      days = 90
-    }
-  }
-}
-
 resource "aws_s3_bucket_logging" "raw_data" {
   bucket = aws_s3_bucket.raw_data.id
 
-  target_bucket = aws_s3_bucket.access_logs.id
+  target_bucket = var.access_logs_bucket_id
   target_prefix = "${var.prefix}-${var.chain_name}-raw/"
 }

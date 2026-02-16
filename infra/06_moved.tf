@@ -128,24 +128,25 @@ moved {
   to   = module.ethereum.aws_s3_bucket_lifecycle_configuration.raw_data
 }
 
+# Access logs bucket stays at root (shared across chains), just renamed
 moved {
   from = aws_s3_bucket.logs
-  to   = module.ethereum.aws_s3_bucket.access_logs
+  to   = aws_s3_bucket.access_logs
 }
 
 moved {
   from = aws_s3_bucket_public_access_block.logs
-  to   = module.ethereum.aws_s3_bucket_public_access_block.access_logs
+  to   = aws_s3_bucket_public_access_block.access_logs
 }
 
 moved {
   from = aws_s3_bucket_ownership_controls.logs
-  to   = module.ethereum.aws_s3_bucket_ownership_controls.access_logs
+  to   = aws_s3_bucket_ownership_controls.access_logs
 }
 
 moved {
   from = aws_s3_bucket_lifecycle_configuration.logs
-  to   = module.ethereum.aws_s3_bucket_lifecycle_configuration.access_logs
+  to   = aws_s3_bucket_lifecycle_configuration.access_logs
 }
 
 moved {
