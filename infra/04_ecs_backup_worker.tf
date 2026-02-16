@@ -11,6 +11,7 @@
 resource "aws_ecr_repository" "backup_worker" {
   name                 = "${local.prefix}-backup-worker"
   image_tag_mutability = "MUTABLE"
+  force_delete         = var.environment == "sentineldev"
 
   image_scanning_configuration {
     scan_on_push = true

@@ -2,35 +2,9 @@
 # ECS Watcher Service
 # =============================================================================
 # Runs the blockchain watcher on Fargate
-
-# -----------------------------------------------------------------------------
-# Watcher Configuration Secret
-# -----------------------------------------------------------------------------
-# Stores sensitive configuration like API keys
-
-resource "aws_secretsmanager_secret" "watcher_config" {
-  name        = "${local.prefix}-watcher-config"
-  description = "Watcher service configuration for ${var.environment}"
-
-  recovery_window_in_days = 7
-
-  tags = {
-    Name    = "${local.prefix}-watcher-config"
-    Service = "watcher"
-  }
-}
-
-# Initial placeholder - update via AWS CLI after deployment
-resource "aws_secretsmanager_secret_version" "watcher_config" {
-  secret_id = aws_secretsmanager_secret.watcher_config.id
-  secret_string = jsonencode({
-    alchemy_api_key = var.alchemy_api_key
-  })
-
-  lifecycle {
-    ignore_changes = [secret_string]
-  }
-}
+# 
+# Note: Watcher configuration secret (stl-{env}-watcher-config) is created
+# during bootstrap (infra/bootstrap/secrets.tf)
 
 # -----------------------------------------------------------------------------
 # ECS Task Definition - Watcher
@@ -108,7 +82,7 @@ resource "aws_ecs_task_definition" "watcher" {
       secrets = [
         {
           name      = "ALCHEMY_API_KEY"
-          valueFrom = "${aws_secretsmanager_secret.watcher_config.arn}:alchemy_api_key::"
+          valueFrom = "${data.aws_secretsmanager_secret.watcher_config.arn}:alchemy_api_key::"
         },
         {
           name      = "DATABASE_URL"

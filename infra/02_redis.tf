@@ -1,15 +1,217 @@
 # =============================================================================
-# Ethereum Redis Monitoring & Alarms
+# ElastiCache Redis Configuration - Ethereum
+# =============================================================================
+# Redis cache for Ethereum blockchain:
+# - Block cache (watcher/worker coordination)
+# Note: Each blockchain gets its own cache cluster
+
+# -----------------------------------------------------------------------------
+# Subnet Group
+# -----------------------------------------------------------------------------
+# Redis runs in the isolated subnet (no internet access)
+
+resource "aws_elasticache_subnet_group" "ethereum_redis" {
+  name       = "${local.prefix}-ethereum-redis"
+  subnet_ids = [aws_subnet.isolated.id]
+
+  tags = {
+    Name       = "${local.prefix}-ethereum-redis-subnet-group"
+    Blockchain = "ethereum"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Parameter Group
+# -----------------------------------------------------------------------------
+# Custom parameters for our use case
+
+resource "aws_elasticache_parameter_group" "ethereum_redis" {
+  name   = "${local.prefix}-ethereum-redis-params"
+  family = "valkey8"
+
+  # Eviction policy: evict least recently used keys when memory is full
+  # allkeys-lru is safer than volatile-lru for caches with ~4 hour TTLs
+  parameter {
+    name  = "maxmemory-policy"
+    value = "allkeys-lru"
+  }
+
+  # Increase eviction accuracy (default 5, higher = more accurate under load)
+  parameter {
+    name  = "maxmemory-samples"
+    value = "10"
+  }
+
+  # TCP keepalive for connection health (seconds)
+  parameter {
+    name  = "tcp-keepalive"
+    value = "300"
+  }
+
+  # Close idle connections after 5 minutes (0 = never)
+  parameter {
+    name  = "timeout"
+    value = "300"
+  }
+
+  # Enable keyspace notifications for expiry events (useful for distributed locks)
+  parameter {
+    name  = "notify-keyspace-events"
+    value = "Ex"
+  }
+
+  tags = {
+    Name       = "${local.prefix}-ethereum-redis-params"
+    Blockchain = "ethereum"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# ElastiCache Redis Cluster - Ethereum
+# -----------------------------------------------------------------------------
+
+resource "aws_elasticache_replication_group" "ethereum_redis" {
+  replication_group_id = "${local.prefix}-eth-redis"
+  description          = "Ethereum block cache for ${var.environment}"
+
+  # Engine configuration (Valkey - AWS's Redis-compatible fork)
+  engine               = "valkey"
+  engine_version       = var.redis_engine_version
+  node_type            = var.redis_node_type
+  parameter_group_name = aws_elasticache_parameter_group.ethereum_redis.name
+
+  # Cluster configuration
+  num_cache_clusters = var.redis_num_cache_clusters
+  port               = 6379
+
+  # Network configuration
+  subnet_group_name  = aws_elasticache_subnet_group.ethereum_redis.name
+  security_group_ids = [aws_security_group.redis.id]
+
+  # Encryption
+  at_rest_encryption_enabled = false
+  transit_encryption_enabled = var.redis_transit_encryption
+  auth_token                 = var.redis_transit_encryption ? random_password.ethereum_redis_auth[0].result : null
+
+  # High availability (only for multi-node)
+  automatic_failover_enabled = var.redis_num_cache_clusters > 1
+  multi_az_enabled           = var.redis_num_cache_clusters > 1
+
+  # Maintenance
+  maintenance_window       = "sun:05:00-sun:06:00"
+  snapshot_window          = var.redis_snapshot_retention > 0 ? "04:00-05:00" : null
+  snapshot_retention_limit = var.redis_snapshot_retention
+
+  # Auto minor version upgrades
+  auto_minor_version_upgrade = true
+
+  # Apply changes immediately in staging, during maintenance window in prod
+  apply_immediately = var.environment != "sentinelprod"
+
+  tags = {
+    Name        = "${local.prefix}-ethereum-redis"
+    Environment = var.environment
+    Blockchain  = "ethereum"
+  }
+
+  timeouts {
+    create = "25m"
+    delete = "25m"
+    update = "80m"
+  }
+
+  lifecycle {
+    ignore_changes = [
+      # Don't replace cluster if engine version is upgraded outside Terraform
+      engine_version,
+    ]
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Auth Token (password) for transit encryption
+# -----------------------------------------------------------------------------
+
+resource "random_password" "ethereum_redis_auth" {
+  count   = var.redis_transit_encryption ? 1 : 0
+  length  = 32
+  special = false # ElastiCache auth token doesn't support all special chars
+}
+
+# -----------------------------------------------------------------------------
+# Store Ethereum Redis credentials in Secrets Manager
+# -----------------------------------------------------------------------------
+
+resource "aws_secretsmanager_secret" "ethereum_redis" {
+  name        = "${local.prefix}-ethereum-redis"
+  description = "Ethereum Redis connection details for ${var.environment}"
+
+  recovery_window_in_days = var.environment == "sentineldev" ? 0 : 7
+
+  tags = {
+    Name       = "${local.prefix}-ethereum-redis"
+    Service    = "redis"
+    Blockchain = "ethereum"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "ethereum_redis" {
+  secret_id = aws_secretsmanager_secret.ethereum_redis.id
+  secret_string = jsonencode({
+    host               = aws_elasticache_replication_group.ethereum_redis.primary_endpoint_address
+    port               = 6379
+    auth_token         = var.redis_transit_encryption ? random_password.ethereum_redis_auth[0].result : null
+    transit_encryption = var.redis_transit_encryption
+    reader_endpoint    = var.redis_num_cache_clusters > 1 ? aws_elasticache_replication_group.ethereum_redis.reader_endpoint_address : null
+  })
+
+  lifecycle {
+    # Ignore changes to prevent Terraform from overwriting credentials if:
+    # 1. Auth token is rotated manually outside of Terraform
+    # 2. Endpoint addresses change during maintenance/failover
+    # To force an update, use: tofu taint aws_secretsmanager_secret_version.ethereum_redis
+    ignore_changes = [secret_string]
+  }
+}
+
+# -----------------------------------------------------------------------------
+# IAM Policy for reading Redis secret
+# -----------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "ethereum_redis_secret_read" {
+  statement {
+    sid    = "ReadEthereumRedisSecret"
+    effect = "Allow"
+
+    actions = [
+      "secretsmanager:GetSecretValue",
+    ]
+
+    resources = [
+      aws_secretsmanager_secret.ethereum_redis.arn,
+    ]
+  }
+}
+
+resource "aws_iam_policy" "ethereum_redis_secret_read" {
+  name        = "${local.prefix}-ethereum-redis-secret-read"
+  description = "Allows reading Ethereum Redis credentials from Secrets Manager"
+  policy      = data.aws_iam_policy_document.ethereum_redis_secret_read.json
+}
+
+resource "aws_iam_role_policy_attachment" "ethereum_redis_secret_access" {
+  role       = aws_iam_role.ethereum_raw_data_access.name
+  policy_arn = aws_iam_policy.ethereum_redis_secret_read.arn
+}
+
+# =============================================================================
+# Section 2: Monitoring & Alarms
 # =============================================================================
 # CloudWatch alarms and dashboard for Ethereum ElastiCache Redis observability
-# Note: Each blockchain gets its own monitoring resources
 
-# -----------------------------------------------------------------------------
-# Local Variables
-# -----------------------------------------------------------------------------
+# Local Variables for Monitoring
 # Use member_clusters attribute for robustness - this dynamically resolves
 # cluster IDs after creation, surviving failovers and ID changes
-
 locals {
   # Convert set to sorted list for consistent indexing
   ethereum_redis_member_clusters = sort(tolist(aws_elasticache_replication_group.ethereum_redis.member_clusters))
@@ -19,10 +221,7 @@ locals {
   ethereum_redis_replica_cluster_ids = slice(local.ethereum_redis_member_clusters, 1, length(local.ethereum_redis_member_clusters))
 }
 
-# -----------------------------------------------------------------------------
 # SNS Topic for Redis Alarms
-# -----------------------------------------------------------------------------
-
 resource "aws_sns_topic" "ethereum_redis_alarms" {
   name = "${local.prefix}-ethereum-redis-alarms"
 
@@ -32,10 +231,7 @@ resource "aws_sns_topic" "ethereum_redis_alarms" {
   }
 }
 
-# -----------------------------------------------------------------------------
-# CPU Utilization Alarms
-# -----------------------------------------------------------------------------
-
+# CPU Utilization - High
 resource "aws_cloudwatch_metric_alarm" "ethereum_redis_cpu_high" {
   alarm_name          = "${local.prefix}-ethereum-redis-cpu-high"
   alarm_description   = "Ethereum Redis CPU utilization exceeds 75%"
@@ -49,7 +245,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_cpu_high" {
   treat_missing_data  = "breaching"
 
   dimensions = {
-    CacheClusterId = "${local.ethereum_redis_primary_cluster_id}"
+    CacheClusterId = local.ethereum_redis_primary_cluster_id
   }
 
   alarm_actions = [aws_sns_topic.ethereum_redis_alarms.arn]
@@ -61,6 +257,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_cpu_high" {
   }
 }
 
+# CPU Utilization - Critical
 resource "aws_cloudwatch_metric_alarm" "ethereum_redis_cpu_critical" {
   alarm_name          = "${local.prefix}-ethereum-redis-cpu-critical"
   alarm_description   = "Ethereum Redis CPU utilization exceeds 90% - CRITICAL"
@@ -74,7 +271,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_cpu_critical" {
   treat_missing_data  = "breaching"
 
   dimensions = {
-    CacheClusterId = "${local.ethereum_redis_primary_cluster_id}"
+    CacheClusterId = local.ethereum_redis_primary_cluster_id
   }
 
   alarm_actions = [aws_sns_topic.ethereum_redis_alarms.arn]
@@ -86,10 +283,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_cpu_critical" {
   }
 }
 
-# -----------------------------------------------------------------------------
-# Memory Utilization Alarms
-# -----------------------------------------------------------------------------
-
+# Memory Utilization - High
 resource "aws_cloudwatch_metric_alarm" "ethereum_redis_memory_high" {
   alarm_name          = "${local.prefix}-ethereum-redis-memory-high"
   alarm_description   = "Ethereum Redis memory usage exceeds 75%"
@@ -103,7 +297,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_memory_high" {
   treat_missing_data  = "breaching"
 
   dimensions = {
-    CacheClusterId = "${local.ethereum_redis_primary_cluster_id}"
+    CacheClusterId = local.ethereum_redis_primary_cluster_id
   }
 
   alarm_actions = [aws_sns_topic.ethereum_redis_alarms.arn]
@@ -115,6 +309,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_memory_high" {
   }
 }
 
+# Memory Utilization - Critical
 resource "aws_cloudwatch_metric_alarm" "ethereum_redis_memory_critical" {
   alarm_name          = "${local.prefix}-ethereum-redis-memory-critical"
   alarm_description   = "Ethereum Redis memory usage exceeds 90% - evictions likely"
@@ -128,7 +323,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_memory_critical" {
   treat_missing_data  = "breaching"
 
   dimensions = {
-    CacheClusterId = "${local.ethereum_redis_primary_cluster_id}"
+    CacheClusterId = local.ethereum_redis_primary_cluster_id
   }
 
   alarm_actions = [aws_sns_topic.ethereum_redis_alarms.arn]
@@ -140,11 +335,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_memory_critical" {
   }
 }
 
-# -----------------------------------------------------------------------------
-# Evictions Alarm
-# -----------------------------------------------------------------------------
-# Evictions indicate memory pressure - keys are being removed before expiry
-
+# Evictions - Indicates memory pressure
 resource "aws_cloudwatch_metric_alarm" "ethereum_redis_evictions" {
   alarm_name          = "${local.prefix}-ethereum-redis-evictions"
   alarm_description   = "Ethereum Redis is evicting keys - memory pressure detected"
@@ -158,7 +349,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_evictions" {
   treat_missing_data  = "notBreaching"
 
   dimensions = {
-    CacheClusterId = "${local.ethereum_redis_primary_cluster_id}"
+    CacheClusterId = local.ethereum_redis_primary_cluster_id
   }
 
   alarm_actions = [aws_sns_topic.ethereum_redis_alarms.arn]
@@ -170,11 +361,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_evictions" {
   }
 }
 
-# -----------------------------------------------------------------------------
-# Cache Hit Rate Alarm
-# -----------------------------------------------------------------------------
-# Low hit rate may indicate cache sizing issues or ineffective caching strategy
-
+# Cache Hit Rate - Low hit rate may indicate sizing issues
 resource "aws_cloudwatch_metric_alarm" "ethereum_redis_cache_hit_rate_low" {
   alarm_name          = "${local.prefix}-ethereum-redis-cache-hit-rate-low"
   alarm_description   = "Ethereum Redis cache hit rate below 80%"
@@ -198,7 +385,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_cache_hit_rate_low" {
       period      = 300
       stat        = "Sum"
       dimensions = {
-        CacheClusterId = "${local.ethereum_redis_primary_cluster_id}"
+        CacheClusterId = local.ethereum_redis_primary_cluster_id
       }
     }
   }
@@ -211,7 +398,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_cache_hit_rate_low" {
       period      = 300
       stat        = "Sum"
       dimensions = {
-        CacheClusterId = "${local.ethereum_redis_primary_cluster_id}"
+        CacheClusterId = local.ethereum_redis_primary_cluster_id
       }
     }
   }
@@ -225,10 +412,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_cache_hit_rate_low" {
   }
 }
 
-# -----------------------------------------------------------------------------
-# Connection Alarms
-# -----------------------------------------------------------------------------
-
+# Connection Count - High connections
 resource "aws_cloudwatch_metric_alarm" "ethereum_redis_connections_high" {
   alarm_name          = "${local.prefix}-ethereum-redis-connections-high"
   alarm_description   = "Ethereum Redis connection count is high"
@@ -242,7 +426,7 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_connections_high" {
   treat_missing_data  = "notBreaching"
 
   dimensions = {
-    CacheClusterId = "${local.ethereum_redis_primary_cluster_id}"
+    CacheClusterId = local.ethereum_redis_primary_cluster_id
   }
 
   alarm_actions = [aws_sns_topic.ethereum_redis_alarms.arn]
@@ -254,15 +438,12 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_connections_high" {
   }
 }
 
-# -----------------------------------------------------------------------------
-# Replication Lag Alarm (for multi-node clusters)
-# -----------------------------------------------------------------------------
-
+# Replication Lag - For multi-node clusters only
 resource "aws_cloudwatch_metric_alarm" "ethereum_redis_replication_lag" {
-  for_each = toset(local.ethereum_redis_replica_cluster_ids)
+  count = var.redis_num_cache_clusters > 1 ? 1 : 0
 
-  alarm_name          = "${local.prefix}-ethereum-redis-replication-lag-${each.key}"
-  alarm_description   = "Ethereum Redis replication lag exceeds 1 second on ${each.key}"
+  alarm_name          = "${local.prefix}-ethereum-redis-replication-lag"
+  alarm_description   = "Ethereum Redis replication lag exceeds 1 second"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 3
   metric_name         = "ReplicationLag"
@@ -273,22 +454,19 @@ resource "aws_cloudwatch_metric_alarm" "ethereum_redis_replication_lag" {
   treat_missing_data  = "notBreaching"
 
   dimensions = {
-    CacheClusterId = each.key
+    ReplicationGroupId = aws_elasticache_replication_group.ethereum_redis.id
   }
 
   alarm_actions = [aws_sns_topic.ethereum_redis_alarms.arn]
   ok_actions    = [aws_sns_topic.ethereum_redis_alarms.arn]
 
   tags = {
-    Name    = "${local.prefix}-ethereum-redis-replication-lag-${each.key}"
+    Name    = "${local.prefix}-ethereum-redis-replication-lag"
     Service = "redis"
   }
 }
 
-# -----------------------------------------------------------------------------
 # CloudWatch Dashboard
-# -----------------------------------------------------------------------------
-
 resource "aws_cloudwatch_dashboard" "redis" {
   dashboard_name = "${local.prefix}-ethereum-redis"
 
@@ -305,7 +483,7 @@ resource "aws_cloudwatch_dashboard" "redis" {
           title  = "CPU Utilization"
           region = var.aws_region
           metrics = [
-            ["AWS/ElastiCache", "CPUUtilization", "CacheClusterId", "${local.ethereum_redis_primary_cluster_id}", { label = "Primary" }]
+            ["AWS/ElastiCache", "CPUUtilization", "CacheClusterId", local.ethereum_redis_primary_cluster_id, { label = "Primary" }]
           ]
           yAxis = { left = { min = 0, max = 100 } }
           annotations = {
@@ -326,7 +504,7 @@ resource "aws_cloudwatch_dashboard" "redis" {
           title  = "Memory Usage %"
           region = var.aws_region
           metrics = [
-            ["AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", "${local.ethereum_redis_primary_cluster_id}", { label = "Primary" }]
+            ["AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", local.ethereum_redis_primary_cluster_id, { label = "Primary" }]
           ]
           yAxis = { left = { min = 0, max = 100 } }
           annotations = {
@@ -347,7 +525,7 @@ resource "aws_cloudwatch_dashboard" "redis" {
           title  = "Current Connections"
           region = var.aws_region
           metrics = [
-            ["AWS/ElastiCache", "CurrConnections", "CacheClusterId", "${local.ethereum_redis_primary_cluster_id}", { label = "Connections" }]
+            ["AWS/ElastiCache", "CurrConnections", "CacheClusterId", local.ethereum_redis_primary_cluster_id, { label = "Connections" }]
           ]
         }
       },
@@ -362,7 +540,7 @@ resource "aws_cloudwatch_dashboard" "redis" {
           title  = "Cache Hits vs Misses"
           region = var.aws_region
           metrics = [
-            ["AWS/ElastiCache", "CacheHits", "CacheClusterId", "${local.ethereum_redis_primary_cluster_id}", { label = "Hits", color = "#2ca02c" }],
+            ["AWS/ElastiCache", "CacheHits", "CacheClusterId", local.ethereum_redis_primary_cluster_id, { label = "Hits", color = "#2ca02c" }],
             [".", "CacheMisses", ".", ".", { label = "Misses", color = "#d62728" }]
           ]
           stat = "Sum"
@@ -378,7 +556,7 @@ resource "aws_cloudwatch_dashboard" "redis" {
           title  = "Evictions"
           region = var.aws_region
           metrics = [
-            ["AWS/ElastiCache", "Evictions", "CacheClusterId", "${local.ethereum_redis_primary_cluster_id}", { label = "Evictions", color = "#d62728" }]
+            ["AWS/ElastiCache", "Evictions", "CacheClusterId", local.ethereum_redis_primary_cluster_id, { label = "Evictions", color = "#d62728" }]
           ]
           stat = "Sum"
         }
@@ -393,7 +571,7 @@ resource "aws_cloudwatch_dashboard" "redis" {
           title  = "Commands Processed"
           region = var.aws_region
           metrics = [
-            ["AWS/ElastiCache", "GetTypeCmds", "CacheClusterId", "${local.ethereum_redis_primary_cluster_id}", { label = "GET commands" }],
+            ["AWS/ElastiCache", "GetTypeCmds", "CacheClusterId", local.ethereum_redis_primary_cluster_id, { label = "GET commands" }],
             [".", "SetTypeCmds", ".", ".", { label = "SET commands" }]
           ]
           stat = "Sum"
@@ -410,7 +588,7 @@ resource "aws_cloudwatch_dashboard" "redis" {
           title  = "Network Throughput"
           region = var.aws_region
           metrics = [
-            ["AWS/ElastiCache", "NetworkBytesIn", "CacheClusterId", "${local.ethereum_redis_primary_cluster_id}", { label = "Bytes In" }],
+            ["AWS/ElastiCache", "NetworkBytesIn", "CacheClusterId", local.ethereum_redis_primary_cluster_id, { label = "Bytes In" }],
             [".", "NetworkBytesOut", ".", ".", { label = "Bytes Out" }]
           ]
           stat = "Sum"
@@ -426,7 +604,7 @@ resource "aws_cloudwatch_dashboard" "redis" {
           title  = "String-Based Command Latency (μs)"
           region = var.aws_region
           metrics = [
-            ["AWS/ElastiCache", "StringBasedCmdsLatency", "CacheClusterId", "${local.ethereum_redis_primary_cluster_id}", { label = "Latency" }]
+            ["AWS/ElastiCache", "StringBasedCmdsLatency", "CacheClusterId", local.ethereum_redis_primary_cluster_id, { label = "Latency" }]
           ]
         }
       },
@@ -440,7 +618,7 @@ resource "aws_cloudwatch_dashboard" "redis" {
           title  = "New Connections/sec"
           region = var.aws_region
           metrics = [
-            ["AWS/ElastiCache", "NewConnections", "CacheClusterId", "${local.ethereum_redis_primary_cluster_id}", { label = "New Connections" }]
+            ["AWS/ElastiCache", "NewConnections", "CacheClusterId", local.ethereum_redis_primary_cluster_id, { label = "New Connections" }]
           ]
           stat = "Sum"
         }
@@ -456,7 +634,7 @@ resource "aws_cloudwatch_dashboard" "redis" {
           title  = "Cached Items"
           region = var.aws_region
           metrics = [
-            ["AWS/ElastiCache", "CurrItems", "CacheClusterId", "${local.ethereum_redis_primary_cluster_id}", { label = "Current Items" }]
+            ["AWS/ElastiCache", "CurrItems", "CacheClusterId", local.ethereum_redis_primary_cluster_id, { label = "Current Items" }]
           ]
         }
       },
@@ -470,7 +648,7 @@ resource "aws_cloudwatch_dashboard" "redis" {
           title  = "Reclaimed (Expired Keys)"
           region = var.aws_region
           metrics = [
-            ["AWS/ElastiCache", "Reclaimed", "CacheClusterId", "${local.ethereum_redis_primary_cluster_id}", { label = "Reclaimed" }]
+            ["AWS/ElastiCache", "Reclaimed", "CacheClusterId", local.ethereum_redis_primary_cluster_id, { label = "Reclaimed" }]
           ]
           stat = "Sum"
         }
@@ -479,9 +657,25 @@ resource "aws_cloudwatch_dashboard" "redis" {
   })
 }
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Outputs
-# -----------------------------------------------------------------------------
+# =============================================================================
+
+output "ethereum_redis_endpoint" {
+  description = "Ethereum Redis primary endpoint"
+  value       = aws_elasticache_replication_group.ethereum_redis.primary_endpoint_address
+  sensitive   = true
+}
+
+output "ethereum_redis_port" {
+  description = "Ethereum Redis port"
+  value       = 6379
+}
+
+output "ethereum_redis_secret_arn" {
+  description = "ARN of the Ethereum Redis credentials secret"
+  value       = aws_secretsmanager_secret.ethereum_redis.arn
+}
 
 output "ethereum_redis_alarms_topic_arn" {
   description = "SNS topic ARN for Redis alarms"

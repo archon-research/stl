@@ -1,3 +1,0 @@
-# Copy this file to terraform.tfvars and fill in your values
-aws_region  = "eu-west-1"
-environment = "sentinelstaging"

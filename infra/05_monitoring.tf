@@ -9,15 +9,15 @@
 # Cost-effective storage with Athena query capability
 
 resource "aws_s3_bucket" "flow_logs" {
-  bucket = "${local.prefix_lowercase}-vpc-flow-logs-${random_id.flow_logs_suffix.hex}"
+  # Preserve existing staging bucket suffix, use resource_suffix for dev
+  bucket = var.environment == "sentinelstaging" ? "${local.prefix_lowercase}-vpc-flow-logs-863ec365" : "${local.prefix_lowercase}-vpc-flow-logs${local.resource_suffix}"
+  
+  # Only allow force_destroy for dev - protect staging/prod logs
+  force_destroy = var.environment == "sentineldev"
 
   tags = {
     Name = "${local.prefix}-vpc-flow-logs"
   }
-}
-
-resource "random_id" "flow_logs_suffix" {
-  byte_length = 4
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "flow_logs" {
@@ -48,7 +48,7 @@ resource "aws_s3_bucket_public_access_block" "flow_logs" {
 }
 
 # Bucket policy required for VPC Flow Logs to write to S3
-data "aws_caller_identity" "current" {}
+# Note: aws_caller_identity data source is defined in 00_validations.tf
 
 data "aws_iam_policy_document" "flow_logs_bucket" {
   statement {
