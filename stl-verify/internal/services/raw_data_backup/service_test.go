@@ -355,7 +355,6 @@ func (m *mockS3Writer) PresetFileExists(bucket, key string) {
 func blockOnlyExpectations() map[int64]ChainExpectation {
 	return map[int64]ChainExpectation{
 		1:     {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
-		42161: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		43114: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 	}
 }
