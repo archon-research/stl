@@ -68,7 +68,7 @@ func blockEventMessage(blockNumber int64, version int, blockTimestamp int64, rec
 func consumerWithMessages(messages []outbound.SQSMessage) *mockConsumer {
 	delivered := false
 	return &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
@@ -87,7 +87,7 @@ func consumerWithMessages(messages []outbound.SQSMessage) *mockConsumer {
 func consumerWithSequentialMessages(batches [][]outbound.SQSMessage) *mockConsumer {
 	callIndex := 0
 	return &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
@@ -202,9 +202,9 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	}
 
 	// Verify delete was called
-	consumer.mu.Lock()
-	deleteCalls := consumer.deleteMessageCalls
-	consumer.mu.Unlock()
+	consumer.Mu.Lock()
+	deleteCalls := consumer.DeleteMessageCalls
+	consumer.Mu.Unlock()
 	if deleteCalls < 1 {
 		t.Errorf("expected at least 1 DeleteMessage call, got %d", deleteCalls)
 	}
@@ -268,9 +268,9 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 
 	// Wait for both messages to be processed (at least 2 receive calls + 2 deletes)
 	testutil.WaitForCondition(t, 5*time.Second, func() bool {
-		consumer.mu.Lock()
-		defer consumer.mu.Unlock()
-		return consumer.deleteMessageCalls >= 2
+		consumer.Mu.Lock()
+		defer consumer.Mu.Unlock()
+		return consumer.DeleteMessageCalls >= 2
 	}, "both messages to be processed")
 
 	// Only the first block should have prices (change detection skips second)
@@ -351,9 +351,9 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 
 	// Wait for all 3 messages to be processed
 	testutil.WaitForCondition(t, 5*time.Second, func() bool {
-		consumer.mu.Lock()
-		defer consumer.mu.Unlock()
-		return consumer.deleteMessageCalls >= 3
+		consumer.Mu.Lock()
+		defer consumer.Mu.Unlock()
+		return consumer.DeleteMessageCalls >= 3
 	}, "all 3 messages to be processed")
 
 	// All 3 blocks should have prices (each has unique prices)
@@ -405,7 +405,7 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 
 	// Consumer that blocks until context is cancelled (no messages)
 	consumer := &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -602,9 +602,9 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 
 	// Wait for the message to be processed (delete indicates processing completed)
 	testutil.WaitForCondition(t, 5*time.Second, func() bool {
-		consumer.mu.Lock()
-		defer consumer.mu.Unlock()
-		return consumer.deleteMessageCalls >= 1
+		consumer.Mu.Lock()
+		defer consumer.Mu.Unlock()
+		return consumer.DeleteMessageCalls >= 1
 	}, "message to be processed")
 
 	// Should still have only 2 prices (the pre-seeded ones)

@@ -52,10 +52,6 @@ func (m *mockMapleClient) GetBorrowerCollateralAtBlock(ctx context.Context, pool
 	return nil, nil
 }
 
-func (m *mockMapleClient) GetAccountPositions(ctx context.Context, address common.Address) ([]outbound.MaplePoolPosition, error) {
-	return nil, nil
-}
-
 func (m *mockMapleClient) GetPoolCollateral(ctx context.Context, poolAddress common.Address) (*outbound.MaplePoolData, error) {
 	return nil, nil
 }
@@ -212,10 +208,6 @@ func defaultProtocolRepo() *mockProtocolRepo {
 // testPoolAddress returns a common.Address for "0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b".
 func testPoolAddress() common.Address {
 	return common.HexToAddress("0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b")
-}
-
-func testPoolAddress2() common.Address {
-	return common.HexToAddress("0x356b8d89c1e1239cbbb9de4815c39a1474d5ba7d")
 }
 
 func makeMapleBlockEventJSON(blockNumber int64, blockTimestamp int64) string {
@@ -619,8 +611,8 @@ func TestProcessBlock(t *testing.T) {
 			t.Errorf("borrowers count = %d, want 1", len(positionRepo.lastUpsertedBorrowers))
 		}
 		borrower := positionRepo.lastUpsertedBorrowers[0]
-		if borrower.EventType != entity.EventSnapshot {
-			t.Errorf("borrower EventType = %v, want %v", borrower.EventType, entity.EventSnapshot)
+		if borrower.EventType != entity.EventMapleSnapshot {
+			t.Errorf("borrower EventType = %v, want %v", borrower.EventType, entity.EventMapleSnapshot)
 		}
 		if borrower.BlockVersion != event.Version {
 			t.Errorf("borrower BlockVersion = %d, want %d", borrower.BlockVersion, event.Version)
@@ -632,8 +624,8 @@ func TestProcessBlock(t *testing.T) {
 			t.Errorf("collateral count = %d, want 1", len(positionRepo.lastUpsertedCollateral))
 		}
 		collateral := positionRepo.lastUpsertedCollateral[0]
-		if collateral.EventType != entity.EventSnapshot {
-			t.Errorf("collateral EventType = %v, want %v", collateral.EventType, entity.EventSnapshot)
+		if collateral.EventType != entity.EventMapleSnapshot {
+			t.Errorf("collateral EventType = %v, want %v", collateral.EventType, entity.EventMapleSnapshot)
 		}
 		if collateral.BlockVersion != event.Version {
 			t.Errorf("collateral BlockVersion = %d, want %d", collateral.BlockVersion, event.Version)

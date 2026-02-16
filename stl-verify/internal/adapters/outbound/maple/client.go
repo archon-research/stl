@@ -308,11 +308,6 @@ type poolsResponse struct {
 	} `json:"data"`
 }
 
-type poolV2Position struct {
-	Pool           poolInfo `json:"pool"`
-	LendingBalance string   `json:"lendingBalance"`
-}
-
 type poolInfo struct {
 	ID    string    `json:"id"`
 	Name  string    `json:"name"`

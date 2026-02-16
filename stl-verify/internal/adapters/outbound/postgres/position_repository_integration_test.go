@@ -105,15 +105,6 @@ func (f *positionTestFixture) queryCollaterals(t *testing.T, ctx context.Context
 	return results
 }
 
-// truncateCollaterals clears the borrower_collateral table between subtests.
-func (f *positionTestFixture) truncateCollaterals(t *testing.T, ctx context.Context) {
-	t.Helper()
-	_, err := f.pool.Exec(ctx, `DELETE FROM borrower_collateral`)
-	if err != nil {
-		t.Fatalf("failed to truncate collaterals: %v", err)
-	}
-}
-
 func TestSaveBorrowerCollaterals_EmptyRecords(t *testing.T) {
 	fixture := setupPositionTest(t)
 	t.Cleanup(fixture.cleanup)
