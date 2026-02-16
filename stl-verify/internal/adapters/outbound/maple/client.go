@@ -94,51 +94,6 @@ func (c *Client) ListPools(ctx context.Context) ([]outbound.MaplePoolInfo, error
 	return pools, nil
 }
 
-// GetAccountPositions queries the user's pool positions.
-func (c *Client) GetAccountPositions(ctx context.Context, address common.Address) ([]outbound.MaplePoolPosition, error) {
-	addrStr := strings.ToLower(address.Hex())
-
-	query := `query($addr: ID!) {
-		account(id: $addr) {
-			poolV2Positions {
-				pool { id name asset { symbol decimals } }
-				lendingBalance
-			}
-		}
-	}`
-
-	variables := map[string]any{"addr": addrStr}
-
-	var resp accountResponse
-	if err := c.execute(ctx, query, variables, &resp); err != nil {
-		return nil, fmt.Errorf("querying account positions: %w", err)
-	}
-
-	if resp.Data.Account == nil {
-		return nil, nil // no account found
-	}
-
-	positions := make([]outbound.MaplePoolPosition, 0, len(resp.Data.Account.PoolV2Positions))
-	for _, pos := range resp.Data.Account.PoolV2Positions {
-		balance, ok := new(big.Int).SetString(pos.LendingBalance, 10)
-		if !ok {
-			return nil, fmt.Errorf("parsing lending balance %q for pool %s", pos.LendingBalance, pos.Pool.ID)
-		}
-
-		poolAddr := common.HexToAddress(pos.Pool.ID)
-
-		positions = append(positions, outbound.MaplePoolPosition{
-			PoolAddress:    poolAddr,
-			PoolName:       pos.Pool.Name,
-			AssetSymbol:    pos.Pool.Asset.Symbol,
-			AssetDecimals:  pos.Pool.Asset.Decimals,
-			LendingBalance: balance,
-		})
-	}
-
-	return positions, nil
-}
-
 // GetPoolCollateral queries a pool's TVL and collateral composition.
 func (c *Client) GetPoolCollateral(ctx context.Context, poolAddress common.Address) (*outbound.MaplePoolData, error) {
 	poolID := strings.ToLower(poolAddress.Hex())
@@ -351,17 +306,6 @@ type poolsResponse struct {
 	Data struct {
 		PoolV2S []poolInfo `json:"poolV2S"`
 	} `json:"data"`
-}
-
-// Account positions response.
-type accountResponse struct {
-	Data struct {
-		Account *accountData `json:"account"`
-	} `json:"data"`
-}
-
-type accountData struct {
-	PoolV2Positions []poolV2Position `json:"poolV2Positions"`
 }
 
 type poolV2Position struct {

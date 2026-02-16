@@ -12,10 +12,6 @@ type MapleClient interface {
 	// ListPools returns all Maple pool definitions.
 	ListPools(ctx context.Context) ([]MaplePoolInfo, error)
 
-	// GetAccountPositions returns the user's pool positions (pool ID, name,
-	// asset info, lending balance) for the given wallet address.
-	GetAccountPositions(ctx context.Context, address common.Address) ([]MaplePoolPosition, error)
-
 	// GetPoolCollateral returns the collateral composition and TVL for a pool.
 	GetPoolCollateral(ctx context.Context, poolAddress common.Address) (*MaplePoolData, error)
 
@@ -31,15 +27,6 @@ type MaplePoolInfo struct {
 	AssetDecimals int
 }
 
-// MaplePoolPosition represents a user's position in a single Maple pool,
-// as returned from the GraphQL API.
-type MaplePoolPosition struct {
-	PoolAddress    common.Address // pool contract address
-	PoolName       string         // e.g. "Syrup USDC"
-	AssetSymbol    string         // pool underlying asset symbol
-	AssetDecimals  int            // pool underlying asset decimals
-	LendingBalance *big.Int       // user's USD value in pool (6 decimals)
-}
 
 // MaplePoolData contains a pool's TVL and collateral breakdown.
 type MaplePoolData struct {

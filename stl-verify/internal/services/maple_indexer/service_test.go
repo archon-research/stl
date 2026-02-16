@@ -90,10 +90,6 @@ func (m *mockMapleClient) GetBorrowerCollateralAtBlock(ctx context.Context, pool
 	return nil, nil
 }
 
-func (m *mockMapleClient) GetAccountPositions(ctx context.Context, address common.Address) ([]outbound.MaplePoolPosition, error) {
-	return nil, nil
-}
-
 func (m *mockMapleClient) GetPoolCollateral(ctx context.Context, poolAddress common.Address) (*outbound.MaplePoolData, error) {
 	return nil, nil
 }
