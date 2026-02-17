@@ -1,42 +1,37 @@
-output "bucket_name" {
-  description = "Name of the S3 bucket"
-  value       = aws_s3_bucket.main.id
-}
-
-output "bucket_arn" {
-  description = "ARN of the S3 bucket"
-  value       = aws_s3_bucket.main.arn
-}
-
-output "bucket_region" {
-  description = "Region of the S3 bucket"
-  value       = aws_s3_bucket.main.region
-}
-
 # =============================================================================
-# Ethereum ECS Task Roles
+# Ethereum Chain Outputs
 # =============================================================================
+
+output "ethereum_bucket_name" {
+  description = "Name of the Ethereum S3 bucket"
+  value       = module.ethereum.s3_bucket_id
+}
+
+output "ethereum_bucket_arn" {
+  description = "ARN of the Ethereum S3 bucket"
+  value       = module.ethereum.s3_bucket_arn
+}
 
 # Watcher Role (SNS publish + read-only resources)
 output "ethereum_watcher_role_arn" {
-  description = "ARN of the Watcher ECS task role (publishes to SNS)"
-  value       = aws_iam_role.ethereum_watcher.arn
+  description = "ARN of the Ethereum Watcher ECS task role"
+  value       = module.ethereum.watcher_role_arn
 }
 
 output "ethereum_watcher_role_name" {
-  description = "Name of the Watcher ECS task role"
-  value       = aws_iam_role.ethereum_watcher.name
+  description = "Name of the Ethereum Watcher ECS task role"
+  value       = module.ethereum.watcher_role_name
 }
 
 # Worker Role (SQS consume + read-only resources)
 output "ethereum_worker_role_arn" {
-  description = "ARN of the Worker ECS task role (consumes from SQS)"
-  value       = aws_iam_role.ethereum_worker.arn
+  description = "ARN of the Ethereum Worker ECS task role"
+  value       = module.ethereum.worker_role_arn
 }
 
 output "ethereum_worker_role_name" {
-  description = "Name of the Worker ECS task role"
-  value       = aws_iam_role.ethereum_worker.name
+  description = "Name of the Ethereum Worker ECS task role"
+  value       = module.ethereum.worker_role_name
 }
 
 # Legacy role (deprecated - kept for backward compatibility)
@@ -48,6 +43,213 @@ output "ethereum_raw_data_role_arn" {
 output "ethereum_raw_data_role_name" {
   description = "DEPRECATED: Use ethereum_watcher_role_name or ethereum_worker_role_name instead"
   value       = aws_iam_role.ethereum_raw_data_access.name
+}
+
+# ECS Services
+output "ethereum_watcher_service_name" {
+  description = "Name of the Ethereum Watcher ECS service"
+  value       = module.ethereum.watcher_service_name
+}
+
+output "ethereum_watcher_task_definition_arn" {
+  description = "ARN of the Ethereum Watcher task definition"
+  value       = module.ethereum.watcher_task_definition_arn
+}
+
+output "ethereum_backup_worker_role_arn" {
+  description = "ARN of the Ethereum Backup Worker ECS task role"
+  value       = module.ethereum.backup_worker_role_arn
+}
+
+output "ethereum_backup_worker_role_name" {
+  description = "Name of the Ethereum Backup Worker ECS task role"
+  value       = module.ethereum.backup_worker_role_name
+}
+
+output "ethereum_backup_worker_service_name" {
+  description = "Name of the Ethereum Backup Worker ECS service"
+  value       = module.ethereum.backup_worker_service_name
+}
+
+output "ethereum_backup_worker_task_definition_arn" {
+  description = "ARN of the Ethereum Backup Worker task definition"
+  value       = module.ethereum.backup_worker_task_definition_arn
+}
+
+# SNS / SQS
+output "ethereum_sns_topic_arn" {
+  description = "ARN of the Ethereum blocks SNS FIFO topic"
+  value       = module.ethereum.sns_topic_arn
+}
+
+output "ethereum_sqs_queue_urls" {
+  description = "Map of Ethereum consumer name to SQS queue URL"
+  value       = module.ethereum.sqs_queue_urls
+}
+
+output "ethereum_sqs_queue_arns" {
+  description = "Map of Ethereum consumer name to SQS queue ARN"
+  value       = module.ethereum.sqs_queue_arns
+}
+
+output "ethereum_sqs_dlq_urls" {
+  description = "Map of Ethereum consumer name to DLQ URL"
+  value       = module.ethereum.sqs_dlq_urls
+}
+
+output "ethereum_sqs_dlq_arns" {
+  description = "Map of Ethereum consumer name to DLQ ARN"
+  value       = module.ethereum.sqs_dlq_arns
+}
+
+# Redis
+output "ethereum_redis_endpoint" {
+  description = "Ethereum Redis primary endpoint"
+  value       = module.ethereum.redis_endpoint
+  sensitive   = true
+}
+
+output "ethereum_redis_port" {
+  description = "Ethereum Redis port"
+  value       = module.ethereum.redis_port
+}
+
+output "ethereum_redis_secret_arn" {
+  description = "ARN of the Ethereum Redis credentials secret"
+  value       = module.ethereum.redis_secret_arn
+}
+
+# IAM Policies
+output "ethereum_sns_publish_policy_arn" {
+  description = "ARN of the Ethereum SNS publish policy"
+  value       = module.ethereum.sns_publish_policy_arn
+}
+
+output "ethereum_sqs_consume_policy_arn" {
+  description = "ARN of the Ethereum SQS consume policy"
+  value       = module.ethereum.sqs_consume_policy_arn
+}
+
+# Monitoring
+output "ethereum_redis_alarms_topic_arn" {
+  description = "ARN of the Ethereum Redis alarms SNS topic"
+  value       = module.ethereum.redis_alarms_topic_arn
+}
+
+output "ethereum_messaging_alarms_topic_arn" {
+  description = "ARN of the Ethereum messaging alarms SNS topic"
+  value       = module.ethereum.messaging_alarms_topic_arn
+}
+
+# =============================================================================
+# Avalanche Chain Outputs
+# =============================================================================
+
+# S3
+output "avalanche_bucket_name" {
+  description = "Name of the Avalanche S3 bucket"
+  value       = module.avalanche.s3_bucket_id
+}
+
+output "avalanche_bucket_arn" {
+  description = "ARN of the Avalanche S3 bucket"
+  value       = module.avalanche.s3_bucket_arn
+}
+
+# IAM Roles
+output "avalanche_watcher_role_arn" {
+  description = "ARN of the Avalanche Watcher ECS task role"
+  value       = module.avalanche.watcher_role_arn
+}
+
+output "avalanche_watcher_service_name" {
+  description = "Name of the Avalanche Watcher ECS service"
+  value       = module.avalanche.watcher_service_name
+}
+
+output "avalanche_watcher_task_definition_arn" {
+  description = "ARN of the Avalanche Watcher task definition"
+  value       = module.avalanche.watcher_task_definition_arn
+}
+
+output "avalanche_backup_worker_role_arn" {
+  description = "ARN of the Avalanche Backup Worker ECS task role"
+  value       = module.avalanche.backup_worker_role_arn
+}
+
+output "avalanche_backup_worker_service_name" {
+  description = "Name of the Avalanche Backup Worker ECS service"
+  value       = module.avalanche.backup_worker_service_name
+}
+
+output "avalanche_backup_worker_task_definition_arn" {
+  description = "ARN of the Avalanche Backup Worker task definition"
+  value       = module.avalanche.backup_worker_task_definition_arn
+}
+
+# SNS / SQS
+output "avalanche_sns_topic_arn" {
+  description = "ARN of the Avalanche blocks SNS FIFO topic"
+  value       = module.avalanche.sns_topic_arn
+}
+
+output "avalanche_sqs_queue_urls" {
+  description = "Map of Avalanche consumer name to SQS queue URL"
+  value       = module.avalanche.sqs_queue_urls
+}
+
+output "avalanche_sqs_queue_arns" {
+  description = "Map of Avalanche consumer name to SQS queue ARN"
+  value       = module.avalanche.sqs_queue_arns
+}
+
+output "avalanche_sqs_dlq_urls" {
+  description = "Map of Avalanche consumer name to DLQ URL"
+  value       = module.avalanche.sqs_dlq_urls
+}
+
+output "avalanche_sqs_dlq_arns" {
+  description = "Map of Avalanche consumer name to DLQ ARN"
+  value       = module.avalanche.sqs_dlq_arns
+}
+
+# Redis
+output "avalanche_redis_endpoint" {
+  description = "Avalanche Redis primary endpoint"
+  value       = module.avalanche.redis_endpoint
+  sensitive   = true
+}
+
+output "avalanche_redis_port" {
+  description = "Avalanche Redis port"
+  value       = module.avalanche.redis_port
+}
+
+output "avalanche_redis_secret_arn" {
+  description = "ARN of the Avalanche Redis credentials secret"
+  value       = module.avalanche.redis_secret_arn
+}
+
+# IAM Policies
+output "avalanche_sns_publish_policy_arn" {
+  description = "ARN of the Avalanche SNS publish policy"
+  value       = module.avalanche.sns_publish_policy_arn
+}
+
+output "avalanche_sqs_consume_policy_arn" {
+  description = "ARN of the Avalanche SQS consume policy"
+  value       = module.avalanche.sqs_consume_policy_arn
+}
+
+# Monitoring
+output "avalanche_redis_alarms_topic_arn" {
+  description = "ARN of the Avalanche Redis alarms SNS topic"
+  value       = module.avalanche.redis_alarms_topic_arn
+}
+
+output "avalanche_messaging_alarms_topic_arn" {
+  description = "ARN of the Avalanche messaging alarms SNS topic"
+  value       = module.avalanche.messaging_alarms_topic_arn
 }
 
 # =============================================================================
@@ -108,8 +310,8 @@ output "worker_security_group_id" {
   value       = aws_security_group.worker.id
 }
 
-output "ethereum_redis_security_group_id" {
-  description = "ID of the Ethereum ElastiCache Redis security group"
+output "redis_security_group_id" {
+  description = "ID of the ElastiCache Redis security group"
   value       = aws_security_group.redis.id
 }
 
@@ -178,24 +380,6 @@ output "watcher_ecr_repository_arn" {
   value       = aws_ecr_repository.watcher.arn
 }
 
-# =============================================================================
-# ECS Service Outputs
-# =============================================================================
-
-output "watcher_service_name" {
-  description = "Name of the Watcher ECS service"
-  value       = aws_ecs_service.watcher.name
-}
-
-output "watcher_task_definition_arn" {
-  description = "ARN of the Watcher task definition"
-  value       = aws_ecs_task_definition.watcher.arn
-}
-
-# =============================================================================
-# Backup Worker Outputs
-# =============================================================================
-
 output "backup_worker_ecr_repository_url" {
   description = "URL of the Backup Worker ECR repository"
   value       = aws_ecr_repository.backup_worker.repository_url
@@ -204,26 +388,6 @@ output "backup_worker_ecr_repository_url" {
 output "backup_worker_ecr_repository_arn" {
   description = "ARN of the Backup Worker ECR repository"
   value       = aws_ecr_repository.backup_worker.arn
-}
-
-output "backup_worker_role_arn" {
-  description = "ARN of the Backup Worker ECS task role"
-  value       = aws_iam_role.backup_worker.arn
-}
-
-output "backup_worker_role_name" {
-  description = "Name of the Backup Worker ECS task role"
-  value       = aws_iam_role.backup_worker.name
-}
-
-output "backup_worker_service_name" {
-  description = "Name of the Backup Worker ECS service"
-  value       = aws_ecs_service.backup_worker.name
-}
-
-output "backup_worker_task_definition_arn" {
-  description = "ARN of the Backup Worker task definition"
-  value       = aws_ecs_task_definition.backup_worker.arn
 }
 
 # =============================================================================

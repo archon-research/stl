@@ -46,6 +46,13 @@ if ! git -C "$WORKTREE_ROOT" rev-parse --quiet --verify HEAD > /dev/null 2>&1; t
     echo "==> Initial commit created."
 fi
 
+echo "==> Authenticating gh CLI..."
+if [ -n "$GH_TOKEN" ]; then
+    echo "$GH_TOKEN" | gh auth login --with-token 2>/dev/null && echo "==> gh authenticated." || echo "==> gh auth skipped (token may be invalid)."
+else
+    echo "==> GH_TOKEN not set, skipping gh auth."
+fi
+
 echo "==> Installing Go tools..."
 
 # Install Go development tools

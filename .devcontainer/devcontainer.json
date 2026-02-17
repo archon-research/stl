@@ -65,6 +65,7 @@
     "source=${localEnv:HOME}/.aws,target=/home/vscode/.aws,type=bind,consistency=cached"
   ],
   "containerEnv": {
-    "GOPRIVATE": "github.com/archon-research/*"
+    "GOPRIVATE": "github.com/archon-research/*",
+    "GH_TOKEN": "${localEnv:GH_TOKEN}"
   }
 }

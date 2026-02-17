@@ -1,7 +1,6 @@
 variable "aws_region" {
   description = "AWS region for resources"
   type        = string
-  default     = "eu-west-1"
 }
 
 variable "project_name" {
@@ -13,7 +12,6 @@ variable "project_name" {
 variable "environment" {
   description = "Environment name (e.g. sentinelstaging, sentinelprod)"
   type        = string
-  # No default - must be specified explicitly
 
   validation {
     condition     = contains(["sentineldev", "sentinelstaging", "sentinelprod"], var.environment)
@@ -30,8 +28,6 @@ variable "resource_suffix" {
 # -----------------------------------------------------------------------------
 # TigerData (TimescaleDB) Configuration
 # -----------------------------------------------------------------------------
-# TigerData (TimescaleDB) Configuration
-# -----------------------------------------------------------------------------
 # Credentials are stored in AWS Secrets Manager (see secrets.tf)
 # These variables are only used on initial secret creation.
 # After that, credentials are read from Secrets Manager and these are ignored.
@@ -39,7 +35,6 @@ variable "resource_suffix" {
 variable "tigerdata_project_id" {
   description = "TigerData project ID from console. Set via TF_VAR_tigerdata_project_id env var."
   type        = string
-  # No default - must be provided via environment variable or -var flag
 
   validation {
     condition     = can(regex("^[a-z0-9-]+$", var.tigerdata_project_id))
@@ -51,7 +46,6 @@ variable "tigerdata_access_key" {
   description = "TigerData API access key. Set via TF_VAR_tigerdata_access_key env var."
   type        = string
   sensitive   = true
-  # No default - must be provided via environment variable or -var flag
 
   validation {
     condition     = length(var.tigerdata_access_key) > 0
@@ -63,7 +57,6 @@ variable "tigerdata_secret_key" {
   description = "TigerData API secret key. Set via TF_VAR_tigerdata_secret_key env var."
   type        = string
   sensitive   = true
-  # No default - must be provided via environment variable or -var flag
 
   validation {
     condition     = length(var.tigerdata_secret_key) > 0
@@ -74,23 +67,20 @@ variable "tigerdata_secret_key" {
 variable "tigerdata_milli_cpu" {
   description = "TigerData CPU in millicores (500, 1000, 2000, 4000, 8000, 16000, 32000)"
   type        = number
-  default     = 500 # 0.5 CPU - smallest for staging
 }
 
 variable "tigerdata_memory_gb" {
   description = "TigerData memory in GB (2, 4, 8, 16, 32, 64, 128)"
   type        = number
-  default     = 2 # Smallest for staging
 }
 
 variable "tigerdata_ha_replicas" {
   description = "Number of HA replicas (0 for staging, 1 for prod)"
   type        = number
-  default     = 0
 }
 
 # -----------------------------------------------------------------------------
-# ElastiCache Redis Configuration
+# Ethereum ElastiCache Redis Configuration
 # -----------------------------------------------------------------------------
 
 variable "redis_node_type" {
@@ -119,47 +109,36 @@ variable "redis_snapshot_retention" {
 }
 
 # -----------------------------------------------------------------------------
-# ECS Watcher Configuration
+# Ethereum ECS Watcher Configuration
 # -----------------------------------------------------------------------------
 
 variable "watcher_cpu" {
   description = "CPU units for Watcher task (256, 512, 1024, 2048, 4096)"
   type        = number
-  default     = 256
 }
 
 variable "watcher_memory" {
   description = "Memory for Watcher task in MB (512, 1024, 2048, etc.)"
   type        = number
-  default     = 512
 }
 
 variable "watcher_desired_count" {
   description = "Number of Watcher tasks to run (should be 1 - singleton)"
   type        = number
-  default     = 1
 }
 
 variable "watcher_image_tag" {
   description = "Docker image tag for Watcher"
   type        = string
-  default     = "latest"
-}
-
-variable "chain_id" {
-  description = "Blockchain chain ID (1 = Ethereum mainnet)"
-  type        = number
-  default     = 1
 }
 
 variable "alchemy_api_key" {
   description = "Alchemy API key. Set via TF_VAR_alchemy_api_key env var."
   type        = string
   sensitive   = true
-  default     = "placeholder" # Will be updated in Secrets Manager
 
   validation {
-    condition     = var.alchemy_api_key != "placeholder" && length(var.alchemy_api_key) > 10
+    condition     = length(var.alchemy_api_key) > 10
     error_message = "Alchemy API key must be set (get from https://dashboard.alchemy.com/apps). Add to .env file or set TF_VAR_alchemy_api_key."
   }
 }
@@ -168,60 +147,51 @@ variable "coingecko_api_key" {
   description = "CoinGecko Pro API key. Set via TF_VAR_coingecko_api_key env var."
   type        = string
   sensitive   = true
-  default     = "placeholder" # Will be updated in Secrets Manager
 }
 
 variable "etherscan_api_key" {
   description = "Etherscan API key. Set via TF_VAR_etherscan_api_key env var."
   type        = string
   sensitive   = true
-  default     = "placeholder" # Will be updated in Secrets Manager
 }
 
 variable "alchemy_http_url" {
   description = "Alchemy HTTP RPC base URL"
   type        = string
-  default     = "https://eth-mainnet.g.alchemy.com/v2"
 }
 
 variable "alchemy_ws_url" {
   description = "Alchemy WebSocket RPC base URL"
   type        = string
-  default     = "wss://eth-mainnet.g.alchemy.com/v2"
 }
 
 # -----------------------------------------------------------------------------
-# ECS Backup Worker Configuration
+# Ethereum ECS Backup Worker Configuration
 # -----------------------------------------------------------------------------
 
 variable "backup_worker_cpu" {
   description = "CPU units for Backup Worker task (256, 512, 1024, 2048, 4096)"
   type        = number
-  default     = 256
 }
 
 variable "backup_worker_memory" {
   description = "Memory for Backup Worker task in MB (512, 1024, 2048, etc.)"
   type        = number
-  default     = 512
 }
 
 variable "backup_worker_desired_count" {
   description = "Number of Backup Worker tasks to run"
   type        = number
-  default     = 1
 }
 
 variable "backup_worker_image_tag" {
   description = "Docker image tag for Backup Worker"
   type        = string
-  default     = "latest"
 }
 
 variable "backup_worker_workers" {
   description = "Number of concurrent workers within each Backup Worker task"
   type        = number
-  default     = 2
 }
 
 # -----------------------------------------------------------------------------
@@ -231,23 +201,131 @@ variable "backup_worker_workers" {
 variable "oracle_price_worker_cpu" {
   description = "CPU units for Oracle Price Worker task (256, 512, 1024, 2048, 4096)"
   type        = number
-  default     = 256
 }
 
 variable "oracle_price_worker_memory" {
   description = "Memory for Oracle Price Worker task in MB (512, 1024, 2048, etc.)"
   type        = number
-  default     = 512
 }
 
 variable "oracle_price_worker_desired_count" {
   description = "Number of Oracle Price Worker tasks to run"
   type        = number
-  default     = 1
 }
 
 variable "oracle_price_worker_image_tag" {
   description = "Docker image tag for Oracle Price Worker"
   type        = string
-  default     = "latest"
+}
+
+# -----------------------------------------------------------------------------
+# Avalanche C-Chain Configuration
+# -----------------------------------------------------------------------------
+
+variable "avalanche_alchemy_http_url" {
+  description = "Alchemy HTTP RPC base URL for Avalanche C-Chain"
+  type        = string
+}
+
+variable "avalanche_alchemy_ws_url" {
+  description = "Alchemy WebSocket RPC base URL for Avalanche C-Chain"
+  type        = string
+}
+
+variable "avalanche_watcher_cpu" {
+  description = "CPU units for Avalanche Watcher task"
+  type        = number
+}
+
+variable "avalanche_watcher_memory" {
+  description = "Memory for Avalanche Watcher task in MB"
+  type        = number
+}
+
+variable "avalanche_watcher_desired_count" {
+  description = "Number of Avalanche Watcher tasks"
+  type        = number
+}
+
+variable "avalanche_watcher_image_tag" {
+  description = "Docker image tag for Avalanche Watcher"
+  type        = string
+}
+
+variable "avalanche_backup_worker_cpu" {
+  description = "CPU units for Avalanche Backup Worker task"
+  type        = number
+}
+
+variable "avalanche_backup_worker_memory" {
+  description = "Memory for Avalanche Backup Worker task in MB"
+  type        = number
+}
+
+variable "avalanche_backup_worker_desired_count" {
+  description = "Number of Avalanche Backup Worker tasks"
+  type        = number
+}
+
+variable "avalanche_backup_worker_image_tag" {
+  description = "Docker image tag for Avalanche Backup Worker"
+  type        = string
+}
+
+variable "avalanche_backup_worker_workers" {
+  description = "Number of concurrent workers per Avalanche Backup Worker task"
+  type        = number
+}
+
+variable "avalanche_redis_node_type" {
+  description = "ElastiCache node type for Avalanche"
+  type        = string
+}
+
+variable "avalanche_redis_engine_version" {
+  description = "Redis engine version for Avalanche"
+  type        = string
+}
+
+variable "avalanche_redis_num_cache_clusters" {
+  description = "Number of cache clusters for Avalanche"
+  type        = number
+}
+
+variable "avalanche_redis_transit_encryption" {
+  description = "Enable TLS for Avalanche Redis"
+  type        = bool
+}
+
+variable "avalanche_redis_snapshot_retention" {
+  description = "Snapshot retention days for Avalanche Redis"
+  type        = number
+}
+
+# -----------------------------------------------------------------------------
+# Bastion Host Configuration
+# -----------------------------------------------------------------------------
+
+variable "bastion_enabled" {
+  description = "Whether to create the bastion host"
+  type        = bool
+  default     = false
+}
+
+variable "bastion_instance_type" {
+  description = "EC2 instance type for bastion (t4g.nano is sufficient)"
+  type        = string
+  default     = "t4g.nano"
+}
+
+variable "tailscale_auth_key_secret_name" {
+  description = "Name of the Secrets Manager secret containing the Tailscale auth key"
+  type        = string
+  default     = ""
+}
+
+variable "tailscale_enabled" {
+  description = "Install and configure Tailscale on the bastion host (should only be enabled for sentinelstaging)"
+  type        = bool
+  default     = false
 }

@@ -5,34 +5,6 @@
 # local machines via Tailscale VPN.
 
 # -----------------------------------------------------------------------------
-# Variables
-# -----------------------------------------------------------------------------
-
-variable "bastion_enabled" {
-  description = "Whether to create the bastion host"
-  type        = bool
-  default     = false
-}
-
-variable "bastion_instance_type" {
-  description = "EC2 instance type for bastion (t4g.nano is sufficient)"
-  type        = string
-  default     = "t4g.nano"
-}
-
-variable "tailscale_auth_key_secret_name" {
-  description = "Name of the Secrets Manager secret containing the Tailscale auth key"
-  type        = string
-  default     = ""
-}
-
-variable "tailscale_enabled" {
-  description = "Install and configure Tailscale on the bastion host (should only be enabled for sentinelstaging)"
-  type        = bool
-  default     = false
-}
-
-# -----------------------------------------------------------------------------
 # Security Group
 # -----------------------------------------------------------------------------
 
