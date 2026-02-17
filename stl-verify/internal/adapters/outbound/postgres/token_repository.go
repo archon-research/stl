@@ -114,10 +114,7 @@ func (r *TokenRepository) UpsertTokens(ctx context.Context, tokens []*entity.Tok
 	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(tokens); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
+		end := min(i+r.batchSize, len(tokens))
 		batch := tokens[i:end]
 
 		if err := r.upsertTokenBatch(ctx, tx, batch); err != nil {
@@ -186,10 +183,7 @@ func (r *TokenRepository) UpsertReceiptTokens(ctx context.Context, tokens []*ent
 	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(tokens); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
+		end := min(i+r.batchSize, len(tokens))
 		batch := tokens[i:end]
 
 		if err := r.upsertReceiptTokenBatch(ctx, tx, batch); err != nil {
@@ -258,10 +252,7 @@ func (r *TokenRepository) UpsertDebtTokens(ctx context.Context, tokens []*entity
 	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(tokens); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
+		end := min(i+r.batchSize, len(tokens))
 		batch := tokens[i:end]
 
 		if err := r.upsertDebtTokenBatch(ctx, tx, batch); err != nil {
