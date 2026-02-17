@@ -242,6 +242,7 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error { //
 		return fmt.Errorf("block hash missing for block %d", event.BlockNumber)
 	}
 
+	// Phase 1: Fetch loans from Maple API
 	loans, err := s.mapleAPI.GetAllActiveLoansAtBlock(ctx, uint64(event.BlockNumber))
 	if err != nil {
 		return fmt.Errorf("fetching active loans: %w", err)
@@ -252,9 +253,16 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error { //
 		return nil
 	}
 
+	// Phase 2: Resolve all users in a single transaction
+	addresses := collectUniqueBorrowerAddresses(loans)
+	userCache, err := s.resolveUsers(ctx, addresses, event.BlockNumber)
+	if err != nil {
+		return fmt.Errorf("resolving users: %w", err)
+	}
+
+	// Phase 3: Build entities (no transactions)
 	blockNumber := event.BlockNumber
 	blockVersion := event.Version
-	userCache := make(map[common.Address]int64)
 	tokenCache := make(map[string]int64)
 
 	var borrowers []*entity.Borrower
@@ -262,15 +270,7 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error { //
 	var errs []error
 
 	for _, loan := range loans {
-		userID, err := s.getOrCreateUserID(ctx, loan.Borrower, blockNumber, userCache)
-		if err != nil {
-			s.logger.Error("failed to resolve borrower user",
-				"borrower", loan.Borrower.Hex(),
-				"pool", loan.PoolName,
-				"error", err)
-			errs = append(errs, fmt.Errorf("borrower %s: %w", loan.Borrower.Hex(), err))
-			continue
-		}
+		userID := userCache[loan.Borrower] // guaranteed present from Phase 2
 
 		loanTokenID, err := s.getTokenID(ctx, loan.PoolAssetSymbol, tokenCache)
 		if err != nil {
@@ -325,7 +325,8 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error { //
 		return errors.Join(errs...)
 	}
 
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error { // Review-6: Should this transaction also include the `getOrCreateUserID` calls? A downsie is that we currently do a lot of graphql api calls in that loop with users though.
+	// Phase 4: Persist positions in a single transaction
+	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if err := s.positionRepo.UpsertBorrowersTx(ctx, tx, borrowers); err != nil {
 			return fmt.Errorf("persisting borrowers: %w", err)
 		}
@@ -338,30 +339,40 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error { //
 	})
 }
 
-func (s *Service) getOrCreateUserID(ctx context.Context, address common.Address, blockNumber int64, cache map[common.Address]int64) (int64, error) {
-	if userID, ok := cache[address]; ok {
-		return userID, nil
-	}
-
-	var userID int64
-	err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		id, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
-			ChainID:        s.config.ChainID,
-			Address:        address,
-			FirstSeenBlock: blockNumber,
-		})
-		if err != nil {
-			return err
+// collectUniqueBorrowerAddresses deduplicates borrower addresses from all loans.
+func collectUniqueBorrowerAddresses(loans []outbound.MapleActiveLoan) []common.Address {
+	seen := make(map[common.Address]struct{}, len(loans))
+	addresses := make([]common.Address, 0, len(loans))
+	for _, loan := range loans {
+		if _, ok := seen[loan.Borrower]; !ok {
+			seen[loan.Borrower] = struct{}{}
+			addresses = append(addresses, loan.Borrower)
 		}
-		userID = id
+	}
+	return addresses
+}
+
+// resolveUsers resolves all borrower addresses to user IDs in a single transaction.
+func (s *Service) resolveUsers(ctx context.Context, addresses []common.Address, blockNumber int64) (map[common.Address]int64, error) {
+	userCache := make(map[common.Address]int64, len(addresses))
+	err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		for _, addr := range addresses {
+			id, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
+				ChainID:        s.config.ChainID,
+				Address:        addr,
+				FirstSeenBlock: blockNumber,
+			})
+			if err != nil {
+				return fmt.Errorf("user %s: %w", addr.Hex(), err)
+			}
+			userCache[addr] = id
+		}
 		return nil
 	})
 	if err != nil {
-		return 0, fmt.Errorf("ensuring user %s: %w", address.Hex(), err)
+		return nil, err
 	}
-
-	cache[address] = userID
-	return userID, nil
+	return userCache, nil
 }
 
 func (s *Service) getTokenID(ctx context.Context, symbol string, cache map[string]int64) (int64, error) {

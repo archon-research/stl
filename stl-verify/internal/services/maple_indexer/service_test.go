@@ -812,6 +812,167 @@ func TestProcessBlock(t *testing.T) {
 		}
 	})
 
+	t.Run("success: exactly 2 WithTransaction calls", func(t *testing.T) {
+		client := &mockMapleClient{}
+		defaultClientSetup(client)
+		txMgr := defaultTxManager()
+
+		protocolRepo := defaultProtocolRepo()
+		svc, err := NewService(
+			validServiceConfig(),
+			blockingConsumer(),
+			client,
+			txMgr,
+			defaultUserRepo(),
+			defaultTokenRepo(),
+			defaultPositionRepo(),
+			protocolRepo,
+		)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer svc.Stop()
+
+		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
+		if err := svc.processBlock(context.Background(), event); err != nil {
+			t.Fatalf("processBlock: %v", err)
+		}
+
+		// 1 for resolveUsers + 1 for position persistence = 2
+		if txMgr.withTransactionCalls != 2 {
+			t.Errorf("WithTransaction calls = %d, want 2", txMgr.withTransactionCalls)
+		}
+	})
+
+	t.Run("deduplication: same borrower across loans calls GetOrCreateUser once", func(t *testing.T) {
+		sameBorrower := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+		client := &mockMapleClient{}
+		client.getAllActiveLoansAtBlockFn = func(_ context.Context, _ uint64) ([]outbound.MapleActiveLoan, error) {
+			return []outbound.MapleActiveLoan{
+				{
+					LoanID:        common.HexToAddress("0xaa"),
+					Borrower:      sameBorrower,
+					State:         "Active",
+					PrincipalOwed: big.NewInt(100_000_000),
+					AcmRatio:      big.NewInt(1_500_000),
+					Collateral: outbound.MapleLoanCollateral{
+						Asset:       "BTC",
+						AssetAmount: big.NewInt(500_000_000),
+						Decimals:    8,
+						State:       "Deposited",
+					},
+					PoolAddress:       testPoolAddress(),
+					PoolName:          "Pool A",
+					PoolAssetSymbol:   "USDC",
+					PoolAssetDecimals: 6,
+				},
+				{
+					LoanID:        common.HexToAddress("0xbb"),
+					Borrower:      sameBorrower,
+					State:         "Active",
+					PrincipalOwed: big.NewInt(200_000_000),
+					AcmRatio:      big.NewInt(1_600_000),
+					Collateral: outbound.MapleLoanCollateral{
+						Asset:       "BTC",
+						AssetAmount: big.NewInt(300_000_000),
+						Decimals:    8,
+						State:       "Deposited",
+					},
+					PoolAddress:       testPoolAddress(),
+					PoolName:          "Pool B",
+					PoolAssetSymbol:   "USDC",
+					PoolAssetDecimals: 6,
+				},
+			}, nil
+		}
+		userRepo := defaultUserRepo()
+		positionRepo := defaultPositionRepo()
+
+		protocolRepo := defaultProtocolRepo()
+		svc, err := NewService(
+			validServiceConfig(),
+			blockingConsumer(),
+			client,
+			defaultTxManager(),
+			userRepo,
+			defaultTokenRepo(),
+			positionRepo,
+			protocolRepo,
+		)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer svc.Stop()
+
+		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
+		if err := svc.processBlock(context.Background(), event); err != nil {
+			t.Fatalf("processBlock: %v", err)
+		}
+
+		userRepo.mu.Lock()
+		defer userRepo.mu.Unlock()
+		// Same borrower appears in 2 loans, but GetOrCreateUser should only be called once
+		if userRepo.getOrCreateUserCalls != 1 {
+			t.Errorf("GetOrCreateUser calls = %d, want 1 (deduplication)", userRepo.getOrCreateUserCalls)
+		}
+
+		positionRepo.mu.Lock()
+		defer positionRepo.mu.Unlock()
+		if len(positionRepo.lastUpsertedBorrowers) != 2 {
+			t.Errorf("borrowers count = %d, want 2", len(positionRepo.lastUpsertedBorrowers))
+		}
+		if len(positionRepo.lastUpsertedCollateral) != 2 {
+			t.Errorf("collateral count = %d, want 2", len(positionRepo.lastUpsertedCollateral))
+		}
+	})
+
+	t.Run("user resolution error causes processBlock to fail", func(t *testing.T) {
+		client := &mockMapleClient{}
+		defaultClientSetup(client)
+		userRepo := &mockUserRepo{
+			getOrCreateUserFn: func(_ context.Context, _ pgx.Tx, _ entity.User) (int64, error) {
+				return 0, fmt.Errorf("database connection lost")
+			},
+		}
+
+		protocolRepo := defaultProtocolRepo()
+		svc, err := NewService(
+			validServiceConfig(),
+			blockingConsumer(),
+			client,
+			defaultTxManager(),
+			userRepo,
+			defaultTokenRepo(),
+			defaultPositionRepo(),
+			protocolRepo,
+		)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer svc.Stop()
+
+		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
+		err = svc.processBlock(context.Background(), event)
+		if err == nil {
+			t.Fatal("expected error from user resolution failure")
+		}
+		if !strings.Contains(err.Error(), "resolving users") {
+			t.Errorf("error %q should contain 'resolving users'", err.Error())
+		}
+		if !strings.Contains(err.Error(), "database connection lost") {
+			t.Errorf("error %q should contain 'database connection lost'", err.Error())
+		}
+	})
+
 	t.Run("chain mismatch returns error", func(t *testing.T) {
 		client := &mockMapleClient{}
 		defaultClientSetup(client)
