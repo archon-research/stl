@@ -327,7 +327,6 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 		}
 	}
 
-
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
@@ -340,7 +339,7 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 		if err := s.positionRepo.UpsertBorrowerCollateralTx(ctx, tx, collaterals); err != nil {
 			return fmt.Errorf("persisting borrower collateral: %w", err)
 		}
-		
+
 		return nil
 	})
 }

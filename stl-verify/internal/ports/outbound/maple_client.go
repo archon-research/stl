@@ -27,7 +27,6 @@ type MaplePoolInfo struct {
 	AssetDecimals int
 }
 
-
 // MaplePoolData contains a pool's TVL and collateral breakdown.
 type MaplePoolData struct {
 	TVL         *big.Int // 6-decimal USD value
