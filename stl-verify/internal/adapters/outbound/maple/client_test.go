@@ -3,6 +3,7 @@ package maple
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -634,6 +635,28 @@ func TestGetAllActiveLoansAtBlock(t *testing.T) {
 			wantErr:      true,
 			errContains:  "rate limit exceeded; secondary error",
 		},
+		{
+			name:        "truncation error: exactly 1000 loans",
+			blockNumber: 21500000,
+			serverResponse: func() any {
+				loans := make([]map[string]any, 1000)
+				for i := range loans {
+					loans[i] = map[string]any{
+						"id":            fmt.Sprintf("0x%040x", i),
+						"borrower":      map[string]any{"id": "0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5"},
+						"state":         "Active",
+						"principalOwed": "1000000000",
+						"acmRatio":      "1000000",
+						"collateral":    map[string]any{"asset": "BTC", "assetAmount": "1000000000", "assetValueUsd": "1000000000", "decimals": 8, "state": "Deposited", "custodian": "FORDEFI"},
+						"fundingPool":   map[string]any{"id": "0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b", "name": "Test Pool", "asset": map[string]any{"symbol": "USDC", "decimals": 6}},
+					}
+				}
+				return graphqlResponse{Data: json.RawMessage(fmt.Sprintf(`{"openTermLoans": %s}`, mustMarshalJSON(loans)))}
+			}(),
+			serverStatus: http.StatusOK,
+			wantErr:      true,
+			errContains:  "potential data truncation",
+		},
 	}
 
 	for _, tc := range tests {
@@ -799,4 +822,13 @@ func TestExecute_invalidJSON(t *testing.T) {
 // graphqlResponse is a helper for encoding test responses.
 type graphqlResponse struct {
 	Data json.RawMessage `json:"data"`
+}
+
+// mustMarshalJSON panics if marshaling fails.
+func mustMarshalJSON(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }

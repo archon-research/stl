@@ -277,6 +277,10 @@ func (c *Client) GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint6
 		return nil, fmt.Errorf("querying all active loans: %w", err)
 	}
 
+	if len(resp.Data.OpenTermLoans) == 1000 {
+		return nil, fmt.Errorf("potential data truncation: received exactly 1000 loans, pagination required")
+	}
+
 	loans := make([]outbound.MapleActiveLoan, 0, len(resp.Data.OpenTermLoans))
 	for _, l := range resp.Data.OpenTermLoans {
 		principalOwed, ok := new(big.Int).SetString(l.PrincipalOwed, 10)
