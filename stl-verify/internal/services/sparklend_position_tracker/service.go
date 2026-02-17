@@ -2,7 +2,6 @@ package sparklend_position_tracker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,9 +11,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared/sqsutil"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -91,42 +88,23 @@ type CollateralData struct {
 	CollateralEnabled bool
 }
 
-type BlockEvent struct {
-	ChainID        int64  `json:"chainId"`
-	BlockNumber    int64  `json:"blockNumber"`
-	Version        int    `json:"version"`
-	BlockHash      string `json:"blockHash"`
-	ParentHash     string `json:"parentHash"`
-	BlockTimestamp int64  `json:"blockTimestamp"`
-	ReceivedAt     string `json:"receivedAt"`
-	IsBackfill     bool   `json:"isBackfill"`
-	IsReorg        bool   `json:"isReorg"`
-}
-
-func (e BlockEvent) CacheKey() string {
-	return fmt.Sprintf("stl:%d:%d:%d:receipts", e.ChainID, e.BlockNumber, e.Version)
-}
-
 type Config struct {
-	QueueURL        string
-	MaxMessages     int32
-	WaitTimeSeconds int32
-	PollInterval    time.Duration
-	Logger          *slog.Logger
+	MaxMessages  int
+	PollInterval time.Duration
+	Logger       *slog.Logger
 }
 
 func ConfigDefaults() Config {
 	return Config{
-		MaxMessages:     10,
-		WaitTimeSeconds: 20,
-		PollInterval:    100 * time.Millisecond,
-		Logger:          slog.Default(),
+		MaxMessages:  10,
+		PollInterval: 100 * time.Millisecond,
+		Logger:       slog.Default(),
 	}
 }
 
 type Service struct {
 	config       Config
-	sqsClient    *sqs.Client
+	consumer     outbound.SQSConsumer
 	redisClient  *redis.Client
 	ethClient    *ethclient.Client
 	txManager    *postgres.TxManager
@@ -148,7 +126,7 @@ type Service struct {
 
 func NewService(
 	config Config,
-	sqsClient *sqs.Client,
+	consumer outbound.SQSConsumer,
 	redisClient *redis.Client,
 	ethClient *ethclient.Client,
 	txManager *postgres.TxManager,
@@ -158,19 +136,13 @@ func NewService(
 	positionRepo *postgres.PositionRepository,
 	eventRepo outbound.EventRepository,
 ) (*Service, error) {
-	if err := validateDependencies(sqsClient, redisClient, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo); err != nil {
+	if err := validateDependencies(consumer, redisClient, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo); err != nil {
 		return nil, err
 	}
 
 	defaults := ConfigDefaults()
-	if config.QueueURL == "" {
-		return nil, fmt.Errorf("queueURL is required")
-	}
 	if config.MaxMessages == 0 {
 		config.MaxMessages = defaults.MaxMessages
-	}
-	if config.WaitTimeSeconds == 0 {
-		config.WaitTimeSeconds = defaults.WaitTimeSeconds
 	}
 	if config.PollInterval == 0 {
 		config.PollInterval = defaults.PollInterval
@@ -196,7 +168,7 @@ func NewService(
 
 	processor := &Service{
 		config:             config,
-		sqsClient:          sqsClient,
+		consumer:           consumer,
 		redisClient:        redisClient,
 		ethClient:          ethClient,
 		txManager:          txManager,
@@ -250,10 +222,14 @@ func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (
 func (s *Service) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	go s.processLoop()
+	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
+		Consumer:     s.consumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+	}, s.processBlockEvent)
 
 	s.logger.Info("sparklend position tracker started",
-		"queue", s.config.QueueURL,
 		"maxMessages", s.config.MaxMessages)
 	return nil
 }
@@ -266,81 +242,11 @@ func (s *Service) Stop() error {
 	return nil
 }
 
-func (s *Service) processLoop() {
-	ticker := time.NewTicker(s.config.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-ticker.C:
-			if err := s.processMessages(s.ctx); err != nil {
-				s.logger.Error("error processing messages", "error", err)
-			}
-		}
-	}
-}
-
-func (s *Service) processMessages(ctx context.Context) error {
-	start := time.Now()
-	defer func() {
-		s.logger.Debug("processMessages completed", "duration", time.Since(start))
-	}()
-
-	result, err := s.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-		QueueUrl:            aws.String(s.config.QueueURL),
-		MaxNumberOfMessages: s.config.MaxMessages,
-		WaitTimeSeconds:     s.config.WaitTimeSeconds,
-		VisibilityTimeout:   30,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to receive messages: %w", err)
-	}
-
-	if len(result.Messages) == 0 {
-		return nil
-	}
-
-	s.logger.Info("received messages", "count", len(result.Messages))
-
-	var errs []error
-	for _, msg := range result.Messages {
-		if err := s.processMessage(ctx, msg); err != nil {
-			s.logger.Error("failed to process message", "error", err)
-			errs = append(errs, err)
-			continue
-		}
-
-		_, deleteErr := s.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-			QueueUrl:      aws.String(s.config.QueueURL),
-			ReceiptHandle: msg.ReceiptHandle,
-		})
-		if deleteErr != nil {
-			s.logger.Error("failed to delete message", "error", deleteErr)
-		}
-	}
-
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	return nil
-}
-
-func (s *Service) processMessage(ctx context.Context, msg types.Message) error {
-	if msg.Body == nil {
-		return fmt.Errorf("message body is nil")
-	}
-
-	var event BlockEvent
-	if err := json.Unmarshal([]byte(*msg.Body), &event); err != nil {
-		return fmt.Errorf("failed to parse block event: %w", err)
-	}
-
+func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) error {
 	return s.fetchAndProcessReceipts(ctx, event)
 }
 
-func (s *Service) fetchAndProcessReceipts(ctx context.Context, event BlockEvent) error {
+func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.BlockEvent) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("fetchAndProcessReceipts completed",
@@ -348,7 +254,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event BlockEvent)
 			"duration", time.Since(start))
 	}()
 
-	cacheKey := event.CacheKey()
+	cacheKey := shared.CacheKey(event.ChainID, event.BlockNumber, event.Version, "receipts")
 	receiptsJSON, err := s.redisClient.Get(ctx, cacheKey).Result()
 	if errors.Is(err, redis.Nil) {
 		s.logger.Warn("cache key expired or not found", "key", cacheKey, "block", event.BlockNumber)
@@ -953,7 +859,7 @@ func (s *Service) convertToDecimalAdjusted(rawAmount *big.Int, decimals int) str
 }
 
 func validateDependencies(
-	sqsClient *sqs.Client,
+	consumer outbound.SQSConsumer,
 	redisClient *redis.Client,
 	ethClient *ethclient.Client,
 	txManager *postgres.TxManager,
@@ -963,8 +869,8 @@ func validateDependencies(
 	positionRepo *postgres.PositionRepository,
 	eventRepo outbound.EventRepository,
 ) error {
-	if sqsClient == nil {
-		return fmt.Errorf("sqsClient is required")
+	if consumer == nil {
+		return fmt.Errorf("consumer is required")
 	}
 	if redisClient == nil {
 		return fmt.Errorf("redisClient is required")
