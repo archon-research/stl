@@ -760,7 +760,7 @@ func TestProcessBlock(t *testing.T) {
 		}
 	})
 
-	t.Run("success: exactly 2 WithTransaction calls", func(t *testing.T) {
+	t.Run("success: single transaction for users and positions", func(t *testing.T) {
 		client := &mockMapleClient{}
 		defaultClientSetup(client)
 		txMgr := defaultTxManager()
@@ -789,9 +789,9 @@ func TestProcessBlock(t *testing.T) {
 			t.Fatalf("processBlock: %v", err)
 		}
 
-		// 1 for resolveUsers + 1 for position persistence = 2
-		if txMgr.withTransactionCalls != 2 {
-			t.Errorf("WithTransaction calls = %d, want 2", txMgr.withTransactionCalls)
+		// User resolution and position persistence now happen in a single transaction
+		if txMgr.withTransactionCalls != 1 {
+			t.Errorf("WithTransaction calls = %d, want 1", txMgr.withTransactionCalls)
 		}
 	})
 

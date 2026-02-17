@@ -20,6 +20,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
+// Track loan metadata for entity creation
+// only used internally while processing a block, not persisted as-is
+type loanData struct {
+	borrower          common.Address
+	loanTokenID       int64
+	collateralTokenID int64
+	loan              outbound.MapleActiveLoan
+}
+
 // Config holds configuration for the maple indexer service.
 type Config struct {
 	// MaxMessages is the maximum number of SQS messages to receive per poll.
@@ -239,7 +248,7 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 		return fmt.Errorf("block hash missing for block %d", event.BlockNumber)
 	}
 
-	// Phase 1: Fetch loans from Maple API
+	// Fetch loans from Maple API
 	loans, err := s.mapleAPI.GetAllActiveLoansAtBlock(ctx, uint64(event.BlockNumber))
 	if err != nil {
 		return fmt.Errorf("fetching active loans: %w", err)
@@ -250,77 +259,77 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 		return nil
 	}
 
-	// Phase 2: Resolve all users in a single transaction
+	// Build entities (no transactions)
 	addresses := collectUniqueBorrowerAddresses(loans)
-	userCache, err := s.resolveUsers(ctx, addresses, event.BlockNumber)
-	if err != nil {
-		return fmt.Errorf("resolving users: %w", err)
-	}
-
-	// Phase 3: Build entities (no transactions)
 	blockNumber := event.BlockNumber
 	blockVersion := event.Version
 	tokenCache := make(map[string]int64)
 
-	var borrowers []*entity.Borrower
-	var collaterals []*entity.BorrowerCollateral
-	var errs []error
+	// Pre-resolve tokens before transaction - fail fast on any error
+	loansWithTokens := make([]loanData, 0, len(loans))
 
 	for _, loan := range loans {
-		userID := userCache[loan.Borrower] // guaranteed present from Phase 2
-
+		// Resolve both tokens - fail immediately if either fails
 		loanTokenID, err := s.getTokenID(ctx, loan.PoolAssetSymbol, tokenCache)
 		if err != nil {
-			s.logger.Error("failed to resolve loan token",
-				"symbol", loan.PoolAssetSymbol,
-				"pool", loan.PoolName,
-				"error", err)
-			errs = append(errs, fmt.Errorf("loan token %s: %w", loan.PoolAssetSymbol, err))
-			continue
+			return fmt.Errorf("resolving loan token %s for pool %s: %w", loan.PoolAssetSymbol, loan.PoolName, err)
 		}
-
-		borrowers = append(borrowers, &entity.Borrower{
-			UserID:       userID,
-			ProtocolID:   s.protocolID,
-			TokenID:      loanTokenID,
-			BlockNumber:  blockNumber,
-			BlockVersion: blockVersion,
-			Amount:       loan.PrincipalOwed,
-			Change:       big.NewInt(0), // For maple we do not have incremental events, only snapshots, so change is always 0
-			EventType:    entity.EventMapleSnapshot,
-			TxHash:       nil,
-		})
 
 		collateralTokenID, err := s.getTokenID(ctx, loan.Collateral.Asset, tokenCache)
 		if err != nil {
-			s.logger.Error("failed to resolve collateral token",
-				"symbol", loan.Collateral.Asset,
-				"pool", loan.PoolName,
-				"error", err)
-			errs = append(errs, fmt.Errorf("collateral token %s: %w", loan.Collateral.Asset, err))
-			continue
+			return fmt.Errorf("resolving collateral token %s for pool %s: %w", loan.Collateral.Asset, loan.PoolName, err)
 		}
 
-		collaterals = append(collaterals, &entity.BorrowerCollateral{
-			UserID:            userID,
-			ProtocolID:        s.protocolID,
-			TokenID:           collateralTokenID,
-			BlockNumber:       blockNumber,
-			BlockVersion:      blockVersion,
-			Amount:            loan.Collateral.AssetAmount,
-			Change:            big.NewInt(0), // For maple we do not have incremental events, only snapshots, so change is always 0
-			EventType:         entity.EventMapleSnapshot,
-			TxHash:            nil,
-			CollateralEnabled: isCollateralEnabled(loan.Collateral.State),
+		loansWithTokens = append(loansWithTokens, loanData{
+			borrower:          loan.Borrower,
+			loanTokenID:       loanTokenID,
+			collateralTokenID: collateralTokenID,
+			loan:              loan,
 		})
 	}
 
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-
-	// Phase 4: Persist positions in a single transaction
+	// Persist users and positions in a single transaction
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		// Resolve users first
+		userCache, err := s.resolveUsersInTx(ctx, tx, addresses, blockNumber)
+		if err != nil {
+			return fmt.Errorf("resolving users: %w", err)
+		}
+
+		// Build entities with user IDs
+		borrowers := make([]*entity.Borrower, 0, len(loansWithTokens))
+		collaterals := make([]*entity.BorrowerCollateral, 0, len(loansWithTokens))
+
+		for _, ld := range loansWithTokens {
+			userID := userCache[ld.borrower]
+
+			borrowers = append(borrowers, &entity.Borrower{
+				UserID:       userID,
+				ProtocolID:   s.protocolID,
+				TokenID:      ld.loanTokenID,
+				BlockNumber:  blockNumber,
+				BlockVersion: blockVersion,
+				Amount:       ld.loan.PrincipalOwed,
+				Change:       big.NewInt(0), // For maple we do not have incremental events, only snapshots, so change is always 0
+				EventType:    entity.EventMapleSnapshot,
+				TxHash:       nil,
+			})
+
+			collaterals = append(collaterals, &entity.BorrowerCollateral{
+				UserID:            userID,
+				ProtocolID:        s.protocolID,
+				TokenID:           ld.collateralTokenID,
+				BlockNumber:       blockNumber,
+				BlockVersion:      blockVersion,
+				Amount:            ld.loan.Collateral.AssetAmount,
+				Change:            big.NewInt(0), // For maple we do not have incremental events, only snapshots, so change is always 0
+				EventType:         entity.EventMapleSnapshot,
+				TxHash:            nil,
+				CollateralEnabled: isCollateralEnabled(ld.loan.Collateral.State),
+			})
+		}
+
+		// Persist positions
 		if err := s.positionRepo.UpsertBorrowersTx(ctx, tx, borrowers); err != nil {
 			return fmt.Errorf("persisting borrowers: %w", err)
 		}
@@ -346,29 +355,21 @@ func collectUniqueBorrowerAddresses(loans []outbound.MapleActiveLoan) []common.A
 	return addresses
 }
 
-// resolveUsers resolves all borrower addresses to user IDs in a single transaction.
-func (s *Service) resolveUsers(ctx context.Context, addresses []common.Address, blockNumber int64) (map[common.Address]int64, error) {
+// resolveUsersInTx resolves all borrower addresses to user IDs within an existing transaction.
+func (s *Service) resolveUsersInTx(ctx context.Context, tx pgx.Tx, addresses []common.Address, blockNumber int64) (map[common.Address]int64, error) {
 	userCache := make(map[common.Address]int64, len(addresses))
-	err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		for _, addr := range addresses {
-			id, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
-				ChainID:        s.config.ChainID,
-				Address:        addr,
-				FirstSeenBlock: blockNumber,
-			})
+	for _, addr := range addresses {
+		id, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
+			ChainID:        s.config.ChainID,
+			Address:        addr,
+			FirstSeenBlock: blockNumber,
+		})
 
-			if err != nil {
-				return fmt.Errorf("user %s: %w", addr.Hex(), err)
-			}
-			userCache[addr] = id
+		if err != nil {
+			return nil, fmt.Errorf("user %s: %w", addr.Hex(), err)
 		}
-		return nil
-	})
-
-	if err != nil {
-		return nil, err
+		userCache[addr] = id
 	}
-
 	return userCache, nil
 }
 
