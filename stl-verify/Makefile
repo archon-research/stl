@@ -157,7 +157,8 @@ tools:
 	go install golang.org/x/tools/gopls@latest
 
 # CI target: everything with strict checks
-ci: test-race vet fmt-check tidy-check vulncheck golangci-lint staticcheck
+# Order: fast checks first (fail fast), then expensive checks
+ci: fmt-check tidy-check vet staticcheck golangci-lint vulncheck test-race
 
 # =============================================================================
 # Local Development
