@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
+	"strings"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -47,4 +49,30 @@ func ParseCompressedJSON(data []byte, v interface{}) error {
 	}
 
 	return json.Unmarshal(data, v)
+}
+
+// FormatAmount converts a raw big.Int token amount to a human-readable
+// decimal-adjusted string. For example, 1500000 with 6 decimals becomes "1.5".
+func FormatAmount(rawAmount *big.Int, decimals int) string {
+	if rawAmount == nil {
+		return "0"
+	}
+	if decimals == 0 {
+		return rawAmount.String()
+	}
+
+	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	integerPart := new(big.Int).Div(rawAmount, divisor)
+	remainder := new(big.Int).Mod(rawAmount, divisor)
+	remainder.Abs(remainder)
+
+	if remainder.Cmp(big.NewInt(0)) == 0 {
+		return integerPart.String()
+	}
+
+	remainderStr := remainder.String()
+	padded := strings.Repeat("0", decimals-len(remainderStr)) + remainderStr
+	padded = strings.TrimRight(padded, "0")
+
+	return fmt.Sprintf("%s.%s", integerPart.String(), padded)
 }
