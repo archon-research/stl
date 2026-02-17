@@ -13,7 +13,6 @@ type MapleClient interface {
 	GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint64) ([]MapleActiveLoan, error)
 }
 
-
 // MapleLoanCollateral represents the collateral for a single loan.
 type MapleLoanCollateral struct {
 	Asset            string   // symbol, e.g. "BTC", "USDC"

@@ -30,7 +30,6 @@ type mockMapleClient struct {
 	getAllActiveLoansAtBlockCalls int
 }
 
-
 func (m *mockMapleClient) GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint64) ([]outbound.MapleActiveLoan, error) {
 	m.mu.Lock()
 	m.getAllActiveLoansAtBlockCalls++
@@ -43,9 +42,7 @@ func (m *mockMapleClient) GetAllActiveLoansAtBlock(ctx context.Context, blockNum
 
 type mockPositionRepo struct {
 	mu                              sync.Mutex
-	upsertBorrowersFn               func(ctx context.Context, borrowers []*entity.Borrower) error
 	upsertBorrowersTxFn             func(ctx context.Context, tx pgx.Tx, borrowers []*entity.Borrower) error
-	upsertBorrowerCollateralFn      func(ctx context.Context, collateral []*entity.BorrowerCollateral) error
 	upsertBorrowerCollateralTxFn    func(ctx context.Context, tx pgx.Tx, collateral []*entity.BorrowerCollateral) error
 	upsertBorrowersTxCalls          int
 	upsertBorrowerCollateralTxCalls int

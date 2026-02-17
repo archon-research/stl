@@ -18,23 +18,23 @@ import (
 )
 
 type expectedActiveLoan struct {
-		loanID             common.Address
-		borrower           common.Address
-		state              string
-		principalOwed      *big.Int
-		acmRatio           *big.Int
-		collateralAsset    string
-		collateralAmount   *big.Int
-		collateralValue    *big.Int
-		collateralDecimals int
-		collateralState    string
-		collateralCustody  string
-		liquidationLevel   *big.Int
-		poolAddress        common.Address
-		poolName           string
-		poolAssetSymbol    string
-		poolAssetDecimals  int
-	}
+	loanID             common.Address
+	borrower           common.Address
+	state              string
+	principalOwed      *big.Int
+	acmRatio           *big.Int
+	collateralAsset    string
+	collateralAmount   *big.Int
+	collateralValue    *big.Int
+	collateralDecimals int
+	collateralState    string
+	collateralCustody  string
+	liquidationLevel   *big.Int
+	poolAddress        common.Address
+	poolName           string
+	poolAssetSymbol    string
+	poolAssetDecimals  int
+}
 
 func assertBigInt(t *testing.T, label string, got, want *big.Int) {
 	t.Helper()
