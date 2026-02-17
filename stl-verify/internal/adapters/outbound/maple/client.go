@@ -277,8 +277,19 @@ func (c *Client) execute(ctx context.Context, query string, variables map[string
 
 	// Check for GraphQL-level errors.
 	var errResp graphqlErrorResponse
-	if err := json.Unmarshal(respBody, &errResp); err == nil && len(errResp.Errors) > 0 {
-		return fmt.Errorf("graphql error: %s", errResp.Errors[0].Message)
+	err = json.Unmarshal(respBody, &errResp)
+	if err != nil {
+		// If we can't decode the error response, log it and return a generic error.
+		c.logger.Warn("decoding GraphQL error response", "error", err, "response", string(respBody))
+		return fmt.Errorf("decoding GraphQL error response. request failed with status %d", resp.StatusCode)
+	}
+	if len(errResp.Errors) > 0 {
+		messages := make([]string, 0, len(errResp.Errors))
+		for _, entry := range errResp.Errors {
+			messages = append(messages, entry.Message)
+		}
+
+		return fmt.Errorf("graphql error: %s", strings.Join(messages, "; "))
 	}
 
 	if err := json.Unmarshal(respBody, result); err != nil {

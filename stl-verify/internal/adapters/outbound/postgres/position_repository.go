@@ -154,6 +154,27 @@ func (r *PositionRepository) UpsertBorrowers(ctx context.Context, borrowers []*e
 	return nil
 }
 
+// UpsertBorrowersTx upserts borrower (debt) position records within an existing transaction.
+func (r *PositionRepository) UpsertBorrowersTx(ctx context.Context, tx pgx.Tx, borrowers []*entity.Borrower) error {
+	if len(borrowers) == 0 {
+		return nil
+	}
+
+	for i := 0; i < len(borrowers); i += r.batchSize {
+		end := i + r.batchSize
+		if end > len(borrowers) {
+			end = len(borrowers)
+		}
+		batch := borrowers[i:end]
+
+		if err := r.upsertBorrowerBatch(ctx, tx, batch); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, tx pgx.Tx, borrowers []*entity.Borrower) error {
 	if len(borrowers) == 0 {
 		return nil
@@ -228,6 +249,27 @@ func (r *PositionRepository) UpsertBorrowerCollateral(ctx context.Context, colla
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
+	return nil
+}
+
+// UpsertBorrowerCollateralTx upserts collateral position records within an existing transaction.
+func (r *PositionRepository) UpsertBorrowerCollateralTx(ctx context.Context, tx pgx.Tx, collateral []*entity.BorrowerCollateral) error {
+	if len(collateral) == 0 {
+		return nil
+	}
+
+	for i := 0; i < len(collateral); i += r.batchSize {
+		end := i + r.batchSize
+		if end > len(collateral) {
+			end = len(collateral)
+		}
+		batch := collateral[i:end]
+
+		if err := r.upsertBorrowerCollateralBatch(ctx, tx, batch); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

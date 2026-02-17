@@ -291,7 +291,6 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 			}
 
 			borrowers = append(borrowers, &entity.Borrower{
-				ID:           1,
 				UserID:       userID,
 				ProtocolID:   s.protocolID,
 				TokenID:      loanTokenID,
@@ -314,7 +313,6 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 			}
 
 			collaterals = append(collaterals, &entity.BorrowerCollateral{
-				ID:                1,
 				UserID:            userID,
 				ProtocolID:        s.protocolID,
 				TokenID:           collateralTokenID,
@@ -329,23 +327,22 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 		}
 	}
 
-	if len(borrowers) > 0 {
-		if err := s.positionRepo.UpsertBorrowers(ctx, borrowers); err != nil {
-			return fmt.Errorf("persisting borrowers: %w", err)
-		}
-	}
-
-	if len(collaterals) > 0 {
-		if err := s.positionRepo.UpsertBorrowerCollateral(ctx, collaterals); err != nil {
-			return fmt.Errorf("persisting borrower collateral: %w", err)
-		}
-	}
 
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
 
-	return nil
+	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		if err := s.positionRepo.UpsertBorrowersTx(ctx, tx, borrowers); err != nil {
+			return fmt.Errorf("persisting borrowers: %w", err)
+		}
+
+		if err := s.positionRepo.UpsertBorrowerCollateralTx(ctx, tx, collaterals); err != nil {
+			return fmt.Errorf("persisting borrower collateral: %w", err)
+		}
+		
+		return nil
+	})
 }
 
 func (s *Service) getOrCreateUserID(ctx context.Context, address common.Address, blockNumber int64, cache map[common.Address]int64) (int64, error) {

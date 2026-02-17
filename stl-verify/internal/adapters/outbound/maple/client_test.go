@@ -109,11 +109,12 @@ func TestGetPoolCollateral(t *testing.T) {
 			serverResponse: map[string]any{
 				"errors": []map[string]string{
 					{"message": "rate limit exceeded"},
+					{"message": "secondary error"},
 				},
 			},
 			serverStatus: http.StatusOK,
 			wantErr:      true,
-			errContains:  "graphql error",
+			errContains:  "rate limit exceeded; secondary error",
 		},
 		{
 			name:        "empty collateral list: returns zero collaterals",
@@ -359,11 +360,12 @@ func TestGetBorrowerCollateralAtBlock(t *testing.T) {
 			serverResponse: map[string]any{
 				"errors": []map[string]string{
 					{"message": "rate limit exceeded"},
+					{"message": "secondary error"},
 				},
 			},
 			serverStatus: http.StatusOK,
 			wantErr:      true,
-			errContains:  "graphql error",
+			errContains:  "rate limit exceeded; secondary error",
 		},
 	}
 
@@ -521,7 +523,7 @@ func TestExecute_invalidJSON(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid JSON response")
 	}
-	if !strings.Contains(err.Error(), "decoding response") {
+	if !strings.Contains(err.Error(), "decoding GraphQL error response") {
 		t.Errorf("error %q should contain 'decoding response'", err.Error())
 	}
 }

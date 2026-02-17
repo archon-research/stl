@@ -57,13 +57,17 @@ func (m *mockMapleClient) GetPoolCollateral(ctx context.Context, poolAddress com
 }
 
 type mockPositionRepo struct {
-	mu                            sync.Mutex
-	upsertBorrowersFn             func(ctx context.Context, borrowers []*entity.Borrower) error
-	upsertBorrowerCollateralFn    func(ctx context.Context, collateral []*entity.BorrowerCollateral) error
-	upsertBorrowersCalls          int
-	upsertBorrowerCollateralCalls int
-	lastUpsertedBorrowers         []*entity.Borrower
-	lastUpsertedCollateral        []*entity.BorrowerCollateral
+	mu                              sync.Mutex
+	upsertBorrowersFn               func(ctx context.Context, borrowers []*entity.Borrower) error
+	upsertBorrowersTxFn             func(ctx context.Context, tx pgx.Tx, borrowers []*entity.Borrower) error
+	upsertBorrowerCollateralFn      func(ctx context.Context, collateral []*entity.BorrowerCollateral) error
+	upsertBorrowerCollateralTxFn    func(ctx context.Context, tx pgx.Tx, collateral []*entity.BorrowerCollateral) error
+	upsertBorrowersCalls            int
+	upsertBorrowersTxCalls          int
+	upsertBorrowerCollateralCalls   int
+	upsertBorrowerCollateralTxCalls int
+	lastUpsertedBorrowers           []*entity.Borrower
+	lastUpsertedCollateral          []*entity.BorrowerCollateral
 }
 
 func (m *mockPositionRepo) UpsertBorrowers(ctx context.Context, borrowers []*entity.Borrower) error {
@@ -77,6 +81,17 @@ func (m *mockPositionRepo) UpsertBorrowers(ctx context.Context, borrowers []*ent
 	return nil
 }
 
+func (m *mockPositionRepo) UpsertBorrowersTx(ctx context.Context, tx pgx.Tx, borrowers []*entity.Borrower) error {
+	m.mu.Lock()
+	m.upsertBorrowersTxCalls++
+	m.lastUpsertedBorrowers = borrowers
+	m.mu.Unlock()
+	if m.upsertBorrowersTxFn != nil {
+		return m.upsertBorrowersTxFn(ctx, tx, borrowers)
+	}
+	return nil
+}
+
 func (m *mockPositionRepo) UpsertBorrowerCollateral(ctx context.Context, collateral []*entity.BorrowerCollateral) error {
 	m.mu.Lock()
 	m.upsertBorrowerCollateralCalls++
@@ -84,6 +99,17 @@ func (m *mockPositionRepo) UpsertBorrowerCollateral(ctx context.Context, collate
 	m.mu.Unlock()
 	if m.upsertBorrowerCollateralFn != nil {
 		return m.upsertBorrowerCollateralFn(ctx, collateral)
+	}
+	return nil
+}
+
+func (m *mockPositionRepo) UpsertBorrowerCollateralTx(ctx context.Context, tx pgx.Tx, collateral []*entity.BorrowerCollateral) error {
+	m.mu.Lock()
+	m.upsertBorrowerCollateralTxCalls++
+	m.lastUpsertedCollateral = collateral
+	m.mu.Unlock()
+	if m.upsertBorrowerCollateralTxFn != nil {
+		return m.upsertBorrowerCollateralTxFn(ctx, tx, collateral)
 	}
 	return nil
 }
@@ -604,26 +630,38 @@ func TestProcessBlock(t *testing.T) {
 
 		positionRepo.mu.Lock()
 		defer positionRepo.mu.Unlock()
-		if positionRepo.upsertBorrowersCalls != 1 {
-			t.Errorf("UpsertBorrowers calls = %d, want 1", positionRepo.upsertBorrowersCalls)
+		if positionRepo.upsertBorrowersCalls != 0 {
+			t.Errorf("UpsertBorrowers calls = %d, want 0", positionRepo.upsertBorrowersCalls)
+		}
+		if positionRepo.upsertBorrowersTxCalls != 1 {
+			t.Errorf("UpsertBorrowersTx calls = %d, want 1", positionRepo.upsertBorrowersTxCalls)
 		}
 		if len(positionRepo.lastUpsertedBorrowers) != 1 {
 			t.Errorf("borrowers count = %d, want 1", len(positionRepo.lastUpsertedBorrowers))
 		}
 		borrower := positionRepo.lastUpsertedBorrowers[0]
+		if borrower.ID != 0 {
+			t.Errorf("borrower ID = %d, want 0", borrower.ID)
+		}
 		if borrower.EventType != entity.EventMapleSnapshot {
 			t.Errorf("borrower EventType = %v, want %v", borrower.EventType, entity.EventMapleSnapshot)
 		}
 		if borrower.BlockVersion != event.Version {
 			t.Errorf("borrower BlockVersion = %d, want %d", borrower.BlockVersion, event.Version)
 		}
-		if positionRepo.upsertBorrowerCollateralCalls != 1 {
-			t.Errorf("UpsertBorrowerCollateral calls = %d, want 1", positionRepo.upsertBorrowerCollateralCalls)
+		if positionRepo.upsertBorrowerCollateralCalls != 0 {
+			t.Errorf("UpsertBorrowerCollateral calls = %d, want 0", positionRepo.upsertBorrowerCollateralCalls)
+		}
+		if positionRepo.upsertBorrowerCollateralTxCalls != 1 {
+			t.Errorf("UpsertBorrowerCollateralTx calls = %d, want 1", positionRepo.upsertBorrowerCollateralTxCalls)
 		}
 		if len(positionRepo.lastUpsertedCollateral) != 1 {
 			t.Errorf("collateral count = %d, want 1", len(positionRepo.lastUpsertedCollateral))
 		}
 		collateral := positionRepo.lastUpsertedCollateral[0]
+		if collateral.ID != 0 {
+			t.Errorf("collateral ID = %d, want 0", collateral.ID)
+		}
 		if collateral.EventType != entity.EventMapleSnapshot {
 			t.Errorf("collateral EventType = %v, want %v", collateral.EventType, entity.EventMapleSnapshot)
 		}
@@ -712,7 +750,7 @@ func TestProcessBlock(t *testing.T) {
 		client := &mockMapleClient{}
 		defaultClientSetup(client)
 		positionRepo := defaultPositionRepo()
-		positionRepo.upsertBorrowersFn = func(_ context.Context, _ []*entity.Borrower) error {
+		positionRepo.upsertBorrowersTxFn = func(_ context.Context, _ pgx.Tx, _ []*entity.Borrower) error {
 			return fmt.Errorf("database write failure")
 		}
 
@@ -749,7 +787,7 @@ func TestProcessBlock(t *testing.T) {
 		client := &mockMapleClient{}
 		defaultClientSetup(client)
 		positionRepo := defaultPositionRepo()
-		positionRepo.upsertBorrowerCollateralFn = func(_ context.Context, _ []*entity.BorrowerCollateral) error {
+		positionRepo.upsertBorrowerCollateralTxFn = func(_ context.Context, _ pgx.Tx, _ []*entity.BorrowerCollateral) error {
 			return fmt.Errorf("collateral write failure")
 		}
 
@@ -870,7 +908,7 @@ func TestProcessMessages(t *testing.T) {
 		testutil.WaitForCondition(t, 2*time.Second, func() bool {
 			positionRepo.mu.Lock()
 			defer positionRepo.mu.Unlock()
-			return positionRepo.upsertBorrowersCalls >= 1
+			return positionRepo.upsertBorrowersTxCalls >= 1
 		}, "UpsertBorrowers to be called")
 
 		consumer.Mu.Lock()
@@ -1061,7 +1099,7 @@ func TestProcessMessages(t *testing.T) {
 		testutil.WaitForCondition(t, 2*time.Second, func() bool {
 			positionRepo.mu.Lock()
 			defer positionRepo.mu.Unlock()
-			return positionRepo.upsertBorrowersCalls >= 1
+			return positionRepo.upsertBorrowersTxCalls >= 1
 		}, "UpsertBorrowers to be called")
 
 		consumer.Mu.Lock()
