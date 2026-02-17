@@ -1,60 +1,17 @@
 # =============================================================================
 # ECS Raw Data Backup Worker Service
 # =============================================================================
-# Consumes block events from SQS, fetches data from Redis cache,
-# and stores it to S3 for long-term backup.
 
 # -----------------------------------------------------------------------------
-# ECR Repository - Backup Worker
-# -----------------------------------------------------------------------------
-
-resource "aws_ecr_repository" "backup_worker" {
-  name                 = "${local.prefix}-backup-worker"
-  image_tag_mutability = "MUTABLE"
-  force_delete         = var.environment == "sentineldev"
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-
-  tags = {
-    Name    = "${local.prefix}-backup-worker"
-    Service = "backup-worker"
-  }
-}
-
-# Lifecycle policy to clean up old images
-resource "aws_ecr_lifecycle_policy" "backup_worker" {
-  repository = aws_ecr_repository.backup_worker.name
-
-  policy = jsonencode({
-    rules = [
-      {
-        rulePriority = 1
-        description  = "Keep last 10 images"
-        selection = {
-          tagStatus   = "any"
-          countType   = "imageCountMoreThan"
-          countNumber = 10
-        }
-        action = {
-          type = "expire"
-        }
-      }
-    ]
-  })
-}
-
-# -----------------------------------------------------------------------------
-# CloudWatch Log Group - Backup Worker
+# CloudWatch Log Group
 # -----------------------------------------------------------------------------
 
 resource "aws_cloudwatch_log_group" "backup_worker" {
-  name              = "/ecs/${local.prefix}-backup-worker"
+  name              = "/ecs/${local.name_prefix}-backup-worker"
   retention_in_days = 30
 
   tags = {
-    Name    = "${local.prefix}-backup-worker-logs"
+    Name    = "${local.name_prefix}-backup-worker-logs"
     Service = "backup-worker"
   }
 }
@@ -62,10 +19,6 @@ resource "aws_cloudwatch_log_group" "backup_worker" {
 # -----------------------------------------------------------------------------
 # IAM Role - Backup Worker (Task Role)
 # -----------------------------------------------------------------------------
-# Minimal permissions for backup worker:
-# - SQS: Consume from backup queue only
-# - S3: Write to raw data bucket
-# - Redis: Access via network (no IAM needed)
 
 data "aws_iam_policy_document" "backup_worker_assume_role" {
   statement {
@@ -79,11 +32,11 @@ data "aws_iam_policy_document" "backup_worker_assume_role" {
 }
 
 resource "aws_iam_role" "backup_worker" {
-  name               = "${local.prefix}-backup-worker"
+  name               = "${local.name_prefix}-backup-worker"
   assume_role_policy = data.aws_iam_policy_document.backup_worker_assume_role.json
 
   tags = {
-    Name    = "${local.prefix}-backup-worker"
+    Name    = "${local.name_prefix}-backup-worker"
     Service = "backup-worker"
   }
 }
@@ -99,12 +52,12 @@ data "aws_iam_policy_document" "backup_worker_sqs" {
       "sqs:GetQueueAttributes",
       "sqs:ChangeMessageVisibility",
     ]
-    resources = [aws_sqs_queue.ethereum_backup.arn]
+    resources = [aws_sqs_queue.consumer["backup"].arn]
   }
 }
 
 resource "aws_iam_policy" "backup_worker_sqs" {
-  name        = "${local.prefix}-backup-worker-sqs"
+  name        = "${local.name_prefix}-backup-worker-sqs"
   description = "Allows backup worker to consume from backup SQS queue"
   policy      = data.aws_iam_policy_document.backup_worker_sqs.json
 }
@@ -114,9 +67,8 @@ resource "aws_iam_role_policy_attachment" "backup_worker_sqs" {
   policy_arn = aws_iam_policy.backup_worker_sqs.arn
 }
 
-# S3 write policy - raw data bucket only
+# S3 write policy
 data "aws_iam_policy_document" "backup_worker_s3" {
-  # Check if file exists (for idempotency)
   statement {
     sid    = "GetObjects"
     effect = "Allow"
@@ -124,32 +76,30 @@ data "aws_iam_policy_document" "backup_worker_s3" {
       "s3:GetObject",
       "s3:GetObjectVersion",
     ]
-    resources = ["${aws_s3_bucket.main.arn}/*"]
+    resources = ["${aws_s3_bucket.raw_data.arn}/*"]
   }
 
-  # Write backup files
   statement {
     sid    = "WriteObjects"
     effect = "Allow"
     actions = [
       "s3:PutObject",
     ]
-    resources = ["${aws_s3_bucket.main.arn}/*"]
+    resources = ["${aws_s3_bucket.raw_data.arn}/*"]
   }
 
-  # List bucket (for prefix checks)
   statement {
     sid    = "ListBucket"
     effect = "Allow"
     actions = [
       "s3:ListBucket",
     ]
-    resources = [aws_s3_bucket.main.arn]
+    resources = [aws_s3_bucket.raw_data.arn]
   }
 }
 
 resource "aws_iam_policy" "backup_worker_s3" {
-  name        = "${local.prefix}-backup-worker-s3"
+  name        = "${local.name_prefix}-backup-worker-s3"
   description = "Allows backup worker to write to S3 raw data bucket"
   policy      = data.aws_iam_policy_document.backup_worker_s3.json
 }
@@ -159,7 +109,6 @@ resource "aws_iam_role_policy_attachment" "backup_worker_s3" {
   policy_arn = aws_iam_policy.backup_worker_s3.arn
 }
 
-# Backup worker gets CloudWatch write access for ADOT metrics
 resource "aws_iam_role_policy_attachment" "backup_worker_cloudwatch" {
   role       = aws_iam_role.backup_worker.name
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
@@ -170,15 +119,14 @@ resource "aws_iam_role_policy_attachment" "backup_worker_cloudwatch" {
 # -----------------------------------------------------------------------------
 
 resource "aws_ecs_task_definition" "backup_worker" {
-  family                   = "${local.prefix}-backup-worker"
+  family                   = "${local.name_prefix}-backup-worker"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.backup_worker_cpu
   memory                   = var.backup_worker_memory
-  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  execution_role_arn       = var.ecs_task_execution_role_arn
   task_role_arn            = aws_iam_role.backup_worker.arn
 
-  # Use ARM64 for Graviton (cost-effective)
   runtime_platform {
     operating_system_family = "LINUX"
     cpu_architecture        = "ARM64"
@@ -187,10 +135,9 @@ resource "aws_ecs_task_definition" "backup_worker" {
   container_definitions = jsonencode([
     {
       name      = "backup-worker"
-      image     = "${aws_ecr_repository.backup_worker.repository_url}:${var.backup_worker_image_tag}"
+      image     = "${var.backup_worker_ecr_url}:${var.backup_worker_image_tag}"
       essential = true
 
-      # Environment variables
       environment = [
         {
           name  = "CHAIN_ID"
@@ -198,15 +145,15 @@ resource "aws_ecs_task_definition" "backup_worker" {
         },
         {
           name  = "SQS_QUEUE_URL"
-          value = aws_sqs_queue.ethereum_backup.url
+          value = aws_sqs_queue.consumer["backup"].url
         },
         {
           name  = "S3_BUCKET"
-          value = aws_s3_bucket.main.id
+          value = aws_s3_bucket.raw_data.id
         },
         {
           name  = "REDIS_ADDR"
-          value = "${aws_elasticache_replication_group.ethereum_redis.primary_endpoint_address}:6379"
+          value = "${aws_elasticache_replication_group.redis.primary_endpoint_address}:6379"
         },
         {
           name  = "AWS_REGION"
@@ -222,7 +169,6 @@ resource "aws_ecs_task_definition" "backup_worker" {
         },
       ]
 
-      # Logging configuration
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -232,7 +178,6 @@ resource "aws_ecs_task_definition" "backup_worker" {
         }
       }
 
-      # Health check - the worker is long-running, basic health check
       healthCheck = {
         command     = ["CMD-SHELL", "pgrep raw_data_backup || exit 1"]
         interval    = 30
@@ -241,13 +186,12 @@ resource "aws_ecs_task_definition" "backup_worker" {
         startPeriod = 60
       }
     },
-    # ADOT Collector sidecar for CloudWatch metrics
+    # ADOT Collector sidecar
     {
       name      = "adot-collector"
       image     = "public.ecr.aws/aws-observability/aws-otel-collector:v0.40.0"
-      essential = false # Don't kill the task if collector fails
+      essential = false
 
-      # Use custom config that binds to localhost only
       command = ["--config=env:AOT_CONFIG_CONTENT"]
 
       environment = [
@@ -262,12 +206,8 @@ resource "aws_ecs_task_definition" "backup_worker" {
             receivers = {
               otlp = {
                 protocols = {
-                  grpc = {
-                    endpoint = "localhost:4317"
-                  }
-                  http = {
-                    endpoint = "localhost:4318"
-                  }
+                  grpc = { endpoint = "localhost:4317" }
+                  http = { endpoint = "localhost:4318" }
                 }
               }
             }
@@ -283,7 +223,7 @@ resource "aws_ecs_task_definition" "backup_worker" {
               awsemf = {
                 namespace               = "STL/Backup"
                 region                  = var.aws_region
-                log_group_name          = "/ecs/${local.prefix}-backup-worker/metrics"
+                log_group_name          = "/ecs/${local.name_prefix}-backup-worker/metrics"
                 dimension_rollup_option = "ZeroAndSingleDimensionRollup"
               }
             }
@@ -301,11 +241,9 @@ resource "aws_ecs_task_definition" "backup_worker" {
         }
       ]
 
-      # Resource limits for sidecar
       cpu    = 256
       memory = 512
 
-      # Logging configuration
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -315,7 +253,6 @@ resource "aws_ecs_task_definition" "backup_worker" {
         }
       }
 
-      # Health check for ADOT
       healthCheck = {
         command     = ["CMD", "/healthcheck"]
         interval    = 30
@@ -327,7 +264,7 @@ resource "aws_ecs_task_definition" "backup_worker" {
   ])
 
   tags = {
-    Name    = "${local.prefix}-backup-worker"
+    Name    = "${local.name_prefix}-backup-worker"
     Service = "backup-worker"
   }
 }
@@ -337,38 +274,23 @@ resource "aws_ecs_task_definition" "backup_worker" {
 # -----------------------------------------------------------------------------
 
 resource "aws_ecs_service" "backup_worker" {
-  name            = "${local.prefix}-backup-worker"
-  cluster         = aws_ecs_cluster.main.id
+  name            = "${local.name_prefix}-backup-worker"
+  cluster         = var.ecs_cluster_id
   task_definition = aws_ecs_task_definition.backup_worker.arn
   desired_count   = var.backup_worker_desired_count
   launch_type     = "FARGATE"
 
-  # Deployment configuration
-  deployment_minimum_healthy_percent = 0   # Allow stopping old task first
-  deployment_maximum_percent         = 100 # Only one task at a time
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
 
-  # Network configuration
   network_configuration {
-    subnets          = [aws_subnet.private.id]
-    security_groups  = [aws_security_group.worker.id]
+    subnets          = [var.private_subnet_id]
+    security_groups  = [var.worker_sg_id]
     assign_public_ip = false
   }
 
   tags = {
-    Name    = "${local.prefix}-backup-worker"
+    Name    = "${local.name_prefix}-backup-worker"
     Service = "backup-worker"
   }
-
-  depends_on = [
-    aws_iam_role_policy_attachment.ecs_task_execution_policy,
-    aws_iam_role_policy_attachment.ecs_secrets_access,
-  ]
 }
-
-# -----------------------------------------------------------------------------
-# Security Group Rule - Backup Worker to Redis
-# -----------------------------------------------------------------------------
-# The worker security group already has egress to Redis and internet.
-# We need to ensure Redis allows ingress from the backup worker.
-# This is already covered by redis_from_worker in security_groups.tf
-# since we're reusing the worker security group.

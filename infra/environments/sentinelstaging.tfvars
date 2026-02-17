@@ -32,13 +32,12 @@ redis_snapshot_retention = 0                  # No backups
 # -----------------------------------------------------------------------------
 
 # Staging: 4 vCPU with 8GB memory (Fargate Graviton)
-watcher_cpu           = 4096     # 4 vCPU
-watcher_memory        = 8192     # 8 GB
+watcher_cpu           = 4096
+watcher_memory        = 8192
 watcher_desired_count = 1        # Singleton
 watcher_image_tag     = "latest" # Override in CI/CD
 
 # Ethereum mainnet
-chain_id         = 1
 alchemy_http_url = "https://eth-mainnet.g.alchemy.com/v2"
 alchemy_ws_url   = "wss://eth-mainnet.g.alchemy.com/v2"
 # alchemy_api_key - set via TF_VAR_alchemy_api_key environment variable
@@ -48,11 +47,48 @@ alchemy_ws_url   = "wss://eth-mainnet.g.alchemy.com/v2"
 # -----------------------------------------------------------------------------
 
 # Staging: minimal resources for backup worker
-backup_worker_cpu           = 2048     # 2 vCPU
-backup_worker_memory        = 4096     # 4 GB
+backup_worker_cpu           = 1024
+backup_worker_memory        = 2048
 backup_worker_desired_count = 1        # Single instance
 backup_worker_image_tag     = "latest" # Override in CI/CD
 backup_worker_workers       = 2        # Concurrent workers per task
+
+# -----------------------------------------------------------------------------
+# ECS Oracle Price Worker Configuration
+# -----------------------------------------------------------------------------
+
+oracle_price_worker_cpu           = 1024
+oracle_price_worker_memory        = 2048
+oracle_price_worker_desired_count = 1        # Single instance
+oracle_price_worker_image_tag     = "latest" # Override in CI/CD
+
+# -----------------------------------------------------------------------------
+# Avalanche C-Chain Configuration
+# -----------------------------------------------------------------------------
+
+# RPC endpoints
+avalanche_alchemy_http_url = "https://avax-mainnet.g.alchemy.com/v2"
+avalanche_alchemy_ws_url   = "wss://avax-mainnet.g.alchemy.com/v2"
+
+# Watcher sizing (Fargate Graviton)
+avalanche_watcher_cpu           = 4096
+avalanche_watcher_memory        = 8192
+avalanche_watcher_desired_count = 1        # Singleton
+avalanche_watcher_image_tag     = "latest" # Override in CI/CD
+
+# Backup worker sizing
+avalanche_backup_worker_cpu           = 1024
+avalanche_backup_worker_memory        = 2048
+avalanche_backup_worker_desired_count = 1        # Single instance
+avalanche_backup_worker_image_tag     = "latest" # Override in CI/CD
+avalanche_backup_worker_workers       = 2        # Concurrent workers per task
+
+# Redis
+avalanche_redis_node_type          = "cache.r7g.large" # 13.07 GB
+avalanche_redis_engine_version     = "8.0"              # Valkey 8.0
+avalanche_redis_num_cache_clusters = 1                  # Single node, no HA
+avalanche_redis_transit_encryption = false              # No TLS for simplicity
+avalanche_redis_snapshot_retention = 0                  # No backups
 
 # -----------------------------------------------------------------------------
 # Bastion Host Configuration
