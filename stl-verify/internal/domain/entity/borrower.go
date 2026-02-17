@@ -71,8 +71,5 @@ func (b *Borrower) validate() error {
 	if !b.EventType.IsValid() {
 		return fmt.Errorf("invalid eventType: %s", b.EventType)
 	}
-	if len(b.TxHash) == 0 {
-		return fmt.Errorf("txHash must not be empty")
-	}
 	return nil
 }

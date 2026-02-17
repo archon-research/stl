@@ -128,6 +128,9 @@ func NewService(
 func (s *Service) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
+	// REVIEW-1: I am not sure i like s.protocolID state. It puts a requirement that we dont accidentally remove
+	// these next few lines. It is only set in `Start` and then used in `processBlock`.
+	// We could consider passing the protocolID as an argument to processBlock instead of storing it on the service struct.
 	protocol, err := s.protocolRepo.GetProtocolByAddress(s.ctx, s.config.ChainID, s.config.ProtocolAddress)
 	if err != nil {
 		return fmt.Errorf("looking up protocol by address %s: %w", s.config.ProtocolAddress.Hex(), err)
@@ -208,7 +211,7 @@ func (s *Service) processMessages(ctx context.Context) error {
 }
 
 // blockEvent is the SQS message payload for block events.
-type blockEvent struct {
+type blockEvent struct { // // Review-2: A lot of this queue related things are duplicated 4-5 places (see other Review-2 comment-tags as examples)
 	ChainID        int64  `json:"chainId"`
 	BlockNumber    int64  `json:"blockNumber"`
 	Version        int    `json:"version"`
@@ -217,7 +220,7 @@ type blockEvent struct {
 	IsReorg        bool   `json:"isReorg,omitempty"`
 }
 
-func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) error {
+func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) error { // Review-2
 	var event blockEvent
 	if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
 		return fmt.Errorf("parsing block event: %w", err)
@@ -226,7 +229,7 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) e
 	return s.processBlock(ctx, event)
 }
 
-func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
+func (s *Service) processBlock(ctx context.Context, event blockEvent) error { // Review-2
 	if event.BlockNumber <= 0 {
 		return fmt.Errorf("invalid block number %d", event.BlockNumber)
 	}
@@ -239,7 +242,7 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 		return fmt.Errorf("block hash missing for block %d", event.BlockNumber)
 	}
 
-	pools, err := s.mapleAPI.ListPools(ctx)
+	pools, err := s.mapleAPI.ListPools(ctx) // Review-3: Since this might return a lot of pools, and we do another api call per pool we should consider if we can do this more efficiently and batch calls.
 	if err != nil {
 		return fmt.Errorf("listing maple pools: %w", err)
 	}
@@ -249,7 +252,6 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 		return nil
 	}
 
-	txHash := common.FromHex(event.BlockHash)
 	blockNumber := event.BlockNumber
 	blockVersion := event.Version
 	userCache := make(map[common.Address]int64)
@@ -297,11 +299,14 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 				BlockNumber:  blockNumber,
 				BlockVersion: blockVersion,
 				Amount:       loan.PrincipalOwed,
-				Change:       big.NewInt(0),
+				Change:       big.NewInt(0), // For maple we do not have incremental events, only snapshots, so change is always 0
 				EventType:    entity.EventMapleSnapshot,
-				TxHash:       txHash,
+				TxHash:       nil,
 			})
 
+			// Review-5: Maple only returns a symbol. This query doesnt take chain into account. I think we should consider to not store collateral token ids from maple as they aren't 100% trustworthy
+			// Perhaps we need to just create a new table protocol_assets or something like that (or maple_assets if maple is very different from others)
+			//
 			collateralTokenID, err := s.getTokenID(ctx, loan.Collateral.Asset, tokenCache)
 			if err != nil {
 				s.logger.Error("failed to resolve collateral token",
@@ -319,9 +324,9 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 				BlockNumber:       blockNumber,
 				BlockVersion:      blockVersion,
 				Amount:            loan.Collateral.AssetAmount,
-				Change:            big.NewInt(0),
+				Change:            big.NewInt(0), // For maple we do not have incremental events, only snapshots, so change is always 0
 				EventType:         entity.EventMapleSnapshot,
-				TxHash:            txHash,
+				TxHash:            nil,
 				CollateralEnabled: isCollateralEnabled(loan.Collateral.State),
 			})
 		}
@@ -331,7 +336,7 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 		return errors.Join(errs...)
 	}
 
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error { // Review-6: Should this transaction also include the `getOrCreateUserID` calls? A downsie is that we currently do a lot of graphql api calls in that loop with users though.
 		if err := s.positionRepo.UpsertBorrowersTx(ctx, tx, borrowers); err != nil {
 			return fmt.Errorf("persisting borrowers: %w", err)
 		}
