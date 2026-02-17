@@ -128,9 +128,6 @@ func NewService(
 func (s *Service) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	// REVIEW-1: I am not sure i like s.protocolID state. It puts a requirement that we dont accidentally remove
-	// these next few lines. It is only set in `Start` and then used in `processBlock`.
-	// We could consider passing the protocolID as an argument to processBlock instead of storing it on the service struct.
 	protocol, err := s.protocolRepo.GetProtocolByAddress(s.ctx, s.config.ChainID, s.config.ProtocolAddress)
 	if err != nil {
 		return fmt.Errorf("looking up protocol by address %s: %w", s.config.ProtocolAddress.Hex(), err)
@@ -211,7 +208,7 @@ func (s *Service) processMessages(ctx context.Context) error {
 }
 
 // blockEvent is the SQS message payload for block events.
-type blockEvent struct { // // Review-2: A lot of this queue related things are duplicated 4-5 places (see other Review-2 comment-tags as examples)
+type blockEvent struct {
 	ChainID        int64  `json:"chainId"`
 	BlockNumber    int64  `json:"blockNumber"`
 	Version        int    `json:"version"`
@@ -220,7 +217,7 @@ type blockEvent struct { // // Review-2: A lot of this queue related things are 
 	IsReorg        bool   `json:"isReorg,omitempty"`
 }
 
-func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) error { // Review-2
+func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) error {
 	var event blockEvent
 	if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
 		return fmt.Errorf("parsing block event: %w", err)
@@ -229,7 +226,7 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) e
 	return s.processBlock(ctx, event)
 }
 
-func (s *Service) processBlock(ctx context.Context, event blockEvent) error { // Review-2
+func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 	if event.BlockNumber <= 0 {
 		return fmt.Errorf("invalid block number %d", event.BlockNumber)
 	}
@@ -294,9 +291,6 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error { //
 			TxHash:       nil,
 		})
 
-		// Review-5: Maple only returns a symbol. This query doesnt take chain into account. I think we should consider to not store collateral token ids from maple as they aren't 100% trustworthy
-		// Perhaps we need to just create a new table protocol_assets or something like that (or maple_assets if maple is very different from others)
-		//
 		collateralTokenID, err := s.getTokenID(ctx, loan.Collateral.Asset, tokenCache)
 		if err != nil {
 			s.logger.Error("failed to resolve collateral token",
