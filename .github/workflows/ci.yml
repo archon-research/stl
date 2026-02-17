@@ -50,3 +50,125 @@ jobs:
             git diff --name-only
             exit 1
           fi
+
+  infra-security-scan:
+    name: Infrastructure Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write  # For posting comments on PRs
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Checkov security scan
+        id: checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infra
+          framework: terraform
+          output_format: cli,sarif,json
+          output_file_path: console,checkov-results.sarif,checkov-results.json
+          soft_fail: true  # Block PRs with HIGH/CRITICAL findings
+          skip_check: CKV_AWS_126  # Skip VPC Flow Logs check (already configured)
+          quiet: false
+          download_external_modules: false
+
+      - name: Upload Checkov SARIF results to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-results.sarif
+          category: checkov-infra
+
+      - name: Upload Checkov results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-infra-results
+          path: |
+            checkov-results.sarif
+            checkov-results.json
+          retention-days: 30
+
+      - name: Comment Checkov findings on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            
+            // Read Checkov JSON results
+            let checkovResults;
+            try {
+              const data = fs.readFileSync('checkov-results.json', 'utf8');
+              checkovResults = JSON.parse(data);
+            } catch (error) {
+              console.log('No Checkov results to post');
+              return;
+            }
+            
+            const summary = checkovResults.summary || {};
+            const passed = summary.passed || 0;
+            const failed = summary.failed || 0;
+            const skipped = summary.skipped || 0;
+            
+            // Determine status emoji
+            const statusEmoji = failed === 0 ? '✅' : '⚠️';
+            
+            // Build comment body
+            let commentBody = `## ${statusEmoji} Infrastructure Security Scan (Checkov)\n\n`;
+            commentBody += `| Status | Count |\n`;
+            commentBody += `|--------|-------|\n`;
+            commentBody += `| ✅ Passed | ${passed} |\n`;
+            commentBody += `| ❌ Failed | ${failed} |\n`;
+            commentBody += `| ⏭️ Skipped | ${skipped} |\n\n`;
+            
+            if (failed > 0) {
+              commentBody += `### ⚠️ Security Issues Found\n\n`;
+              commentBody += `Checkov found ${failed} security issue(s) in the infrastructure code.\n\n`;
+              commentBody += `**View detailed findings:**\n`;
+              commentBody += `- Check the [Security tab](${context.payload.repository.html_url}/security/code-scanning) for SARIF results\n`;
+              commentBody += `- Review the [workflow logs](${context.payload.repository.html_url}/actions/runs/${context.runId}) for details\n\n`;
+              commentBody += `Common issues to check:\n`;
+              commentBody += `- Missing encryption (S3, RDS, ElastiCache)\n`;
+              commentBody += `- Overly permissive security groups\n`;
+              commentBody += `- Public access to resources\n`;
+              commentBody += `- Missing CloudTrail/GuardDuty\n`;
+            } else {
+              commentBody += `### ✅ No Security Issues Found\n\n`;
+              commentBody += `All Checkov security checks passed!\n`;
+            }
+            
+            // Find existing comment to update
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const existingComment = comments.find(comment => 
+              comment.user.login === 'github-actions[bot]' && 
+              comment.body.includes('Infrastructure Security Scan (Checkov)')
+            );
+            
+            // Update or create comment
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
