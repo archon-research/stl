@@ -25,11 +25,13 @@ import (
 type mockConsumer = testutil.MockSQSConsumer
 
 type mockMapleClient struct {
-	mu                         sync.Mutex
-	listPoolsFn                func(ctx context.Context) ([]outbound.MaplePoolInfo, error)
-	getBorrowerCollateralFn    func(ctx context.Context, poolAddress common.Address, blockNumber uint64) ([]outbound.MapleBorrowerLoan, error)
-	listPoolsCalls             int
-	getBorrowerCollateralCalls int
+	mu                            sync.Mutex
+	listPoolsFn                   func(ctx context.Context) ([]outbound.MaplePoolInfo, error)
+	getBorrowerCollateralFn       func(ctx context.Context, poolAddress common.Address, blockNumber uint64) ([]outbound.MapleBorrowerLoan, error)
+	getAllActiveLoansAtBlockFn    func(ctx context.Context, blockNumber uint64) ([]outbound.MapleActiveLoan, error)
+	listPoolsCalls                int
+	getBorrowerCollateralCalls    int
+	getAllActiveLoansAtBlockCalls int
 }
 
 func (m *mockMapleClient) ListPools(ctx context.Context) ([]outbound.MaplePoolInfo, error) {
@@ -53,6 +55,16 @@ func (m *mockMapleClient) GetBorrowerCollateralAtBlock(ctx context.Context, pool
 }
 
 func (m *mockMapleClient) GetPoolCollateral(ctx context.Context, poolAddress common.Address) (*outbound.MaplePoolData, error) {
+	return nil, nil
+}
+
+func (m *mockMapleClient) GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint64) ([]outbound.MapleActiveLoan, error) {
+	m.mu.Lock()
+	m.getAllActiveLoansAtBlockCalls++
+	m.mu.Unlock()
+	if m.getAllActiveLoansAtBlockFn != nil {
+		return m.getAllActiveLoansAtBlockFn(ctx, blockNumber)
+	}
 	return nil, nil
 }
 
@@ -248,19 +260,8 @@ func makeMapleBlockEventJSON(blockNumber int64, blockTimestamp int64) string {
 	return string(data)
 }
 
-func defaultPools() []outbound.MaplePoolInfo {
-	return []outbound.MaplePoolInfo{
-		{
-			Address:       testPoolAddress(),
-			Name:          "Syrup USDC",
-			AssetSymbol:   "USDC",
-			AssetDecimals: 6,
-		},
-	}
-}
-
-func defaultLoans() []outbound.MapleBorrowerLoan {
-	return []outbound.MapleBorrowerLoan{
+func defaultLoans() []outbound.MapleActiveLoan {
+	return []outbound.MapleActiveLoan{
 		{
 			LoanID:        common.HexToAddress("0x00000000000000000000000000000000000000aa"),
 			Borrower:      common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e"),
@@ -275,16 +276,10 @@ func defaultLoans() []outbound.MapleBorrowerLoan {
 				State:         "Deposited",
 				Custodian:     "ANCHORAGE",
 			},
-		},
-	}
-}
-
-func defaultPoolData() *outbound.MaplePoolData {
-	return &outbound.MaplePoolData{
-		TVL: big.NewInt(1_000_000_000_000_000), // $1B with 6 decimals
-		Collaterals: []outbound.MapleCollateral{
-			{Asset: "BTC", AssetValueUSD: big.NewInt(674_000_000_000_000), AssetDecimals: 8},
-			{Asset: "XRP", AssetValueUSD: big.NewInt(317_000_000_000_000), AssetDecimals: 6},
+			PoolAddress:       testPoolAddress(),
+			PoolName:          "Syrup USDC",
+			PoolAssetSymbol:   "USDC",
+			PoolAssetDecimals: 6,
 		},
 	}
 }
@@ -299,10 +294,7 @@ func blockingConsumer() *mockConsumer {
 }
 
 func defaultClientSetup(client *mockMapleClient) {
-	client.listPoolsFn = func(_ context.Context) ([]outbound.MaplePoolInfo, error) {
-		return defaultPools(), nil
-	}
-	client.getBorrowerCollateralFn = func(_ context.Context, _ common.Address, _ uint64) ([]outbound.MapleBorrowerLoan, error) {
+	client.getAllActiveLoansAtBlockFn = func(_ context.Context, _ uint64) ([]outbound.MapleActiveLoan, error) {
 		return defaultLoans(), nil
 	}
 }
@@ -670,9 +662,9 @@ func TestProcessBlock(t *testing.T) {
 		}
 	})
 
-	t.Run("no pools found: no borrower fetches", func(t *testing.T) {
+	t.Run("no loans found: no upserts", func(t *testing.T) {
 		client := &mockMapleClient{}
-		client.listPoolsFn = func(_ context.Context) ([]outbound.MaplePoolInfo, error) {
+		client.getAllActiveLoansAtBlockFn = func(_ context.Context, _ uint64) ([]outbound.MapleActiveLoan, error) {
 			return nil, nil
 		}
 		positionRepo := defaultPositionRepo()
@@ -701,19 +693,19 @@ func TestProcessBlock(t *testing.T) {
 			t.Fatalf("processBlock: %v", err)
 		}
 
-		client.mu.Lock()
-		if client.getBorrowerCollateralCalls != 0 {
-			t.Errorf("GetBorrowerCollateralAtBlock calls = %d, want 0", client.getBorrowerCollateralCalls)
+		positionRepo.mu.Lock()
+		if positionRepo.upsertBorrowersTxCalls != 0 {
+			t.Errorf("UpsertBorrowersTx calls = %d, want 0", positionRepo.upsertBorrowersTxCalls)
 		}
-		client.mu.Unlock()
+		if positionRepo.upsertBorrowerCollateralTxCalls != 0 {
+			t.Errorf("UpsertBorrowerCollateralTx calls = %d, want 0", positionRepo.upsertBorrowerCollateralTxCalls)
+		}
+		positionRepo.mu.Unlock()
 	})
 
-	t.Run("borrower fetch error propagates", func(t *testing.T) {
+	t.Run("GetAllActiveLoansAtBlock error propagates", func(t *testing.T) {
 		client := &mockMapleClient{}
-		client.listPoolsFn = func(_ context.Context) ([]outbound.MaplePoolInfo, error) {
-			return defaultPools(), nil
-		}
-		client.getBorrowerCollateralFn = func(_ context.Context, _ common.Address, _ uint64) ([]outbound.MapleBorrowerLoan, error) {
+		client.getAllActiveLoansAtBlockFn = func(_ context.Context, _ uint64) ([]outbound.MapleActiveLoan, error) {
 			return nil, fmt.Errorf("graphql timeout")
 		}
 

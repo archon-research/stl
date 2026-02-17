@@ -476,6 +476,274 @@ func TestGetBorrowerCollateralAtBlock(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// TestGetAllActiveLoansAtBlock
+// ---------------------------------------------------------------------------
+
+func TestGetAllActiveLoansAtBlock(t *testing.T) {
+	type expectedActiveLoan struct {
+		loanID             common.Address
+		borrower           common.Address
+		state              string
+		principalOwed      *big.Int
+		acmRatio           *big.Int
+		collateralAsset    string
+		collateralAmount   *big.Int
+		collateralValue    *big.Int
+		collateralDecimals int
+		collateralState    string
+		collateralCustody  string
+		liquidationLevel   *big.Int
+		poolAddress        common.Address
+		poolName           string
+		poolAssetSymbol    string
+		poolAssetDecimals  int
+	}
+
+	tests := []struct {
+		name             string
+		blockNumber      uint64
+		serverResponse   any
+		serverStatus     int
+		wantLoans        []expectedActiveLoan
+		wantErr          bool
+		errContains      string
+		checkBlockNumber bool
+	}{
+		{
+			name:        "success: multiple loans with pool info",
+			blockNumber: 21500000,
+			serverResponse: graphqlResponse{
+				Data: json.RawMessage(`{
+					"openTermLoans": [
+						{
+							"id": "0x0430665a6e0ce5141b1cc42607d79632125cbbac",
+							"borrower": {"id": "0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5"},
+							"state": "Active",
+							"principalOwed": "2000000000000",
+							"acmRatio": "1698389",
+							"collateral": {
+								"asset": "BTC",
+								"assetAmount": "5000000000",
+								"assetValueUsd": "6793556500000",
+								"decimals": 8,
+								"state": "Deposited",
+								"custodian": "FORDEFI",
+								"liquidationLevel": "1176471"
+							},
+							"fundingPool": {
+								"id": "0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b",
+								"name": "Syrup USDC",
+								"asset": {"symbol": "USDC", "decimals": 6}
+							}
+						},
+						{
+							"id": "0x048073ae155702e75078c010e47308695eb6be9e",
+							"borrower": {"id": "0x8fee157cb621ac7484f8b218edd1c14ce8722628"},
+							"state": "Active",
+							"principalOwed": "50000000000000",
+							"acmRatio": "1595848",
+							"collateral": {
+								"asset": "BTC",
+								"assetAmount": "117453084230",
+								"assetValueUsd": "6793556500000",
+								"decimals": 8,
+								"state": "Deposited",
+								"custodian": "FORDEFI",
+								"liquidationLevel": "1250000"
+							},
+							"fundingPool": {
+								"id": "0x196cbfc42ebb05e3b1ae1e7b45adcd5c0596d9f2",
+								"name": "Syrup USDT",
+								"asset": {"symbol": "USDT", "decimals": 6}
+							}
+						}
+					]
+				}`),
+			},
+			serverStatus: http.StatusOK,
+			wantLoans: []expectedActiveLoan{
+				{
+					loanID:             common.HexToAddress("0x0430665a6e0ce5141b1cc42607d79632125cbbac"),
+					borrower:           common.HexToAddress("0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5"),
+					state:              "Active",
+					principalOwed:      big.NewInt(2_000_000_000_000),
+					acmRatio:           big.NewInt(1_698_389),
+					collateralAsset:    "BTC",
+					collateralAmount:   big.NewInt(5_000_000_000),
+					collateralValue:    big.NewInt(6_793_556_500_000),
+					collateralDecimals: 8,
+					collateralState:    "Deposited",
+					collateralCustody:  "FORDEFI",
+					liquidationLevel:   big.NewInt(1_176_471),
+					poolAddress:        common.HexToAddress("0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"),
+					poolName:           "Syrup USDC",
+					poolAssetSymbol:    "USDC",
+					poolAssetDecimals:  6,
+				},
+				{
+					loanID:             common.HexToAddress("0x048073ae155702e75078c010e47308695eb6be9e"),
+					borrower:           common.HexToAddress("0x8fee157cb621ac7484f8b218edd1c14ce8722628"),
+					state:              "Active",
+					principalOwed:      big.NewInt(50_000_000_000_000),
+					acmRatio:           big.NewInt(1_595_848),
+					collateralAsset:    "BTC",
+					collateralAmount:   big.NewInt(117_453_084_230),
+					collateralValue:    big.NewInt(6_793_556_500_000),
+					collateralDecimals: 8,
+					collateralState:    "Deposited",
+					collateralCustody:  "FORDEFI",
+					liquidationLevel:   big.NewInt(1_250_000),
+					poolAddress:        common.HexToAddress("0x196cbfc42ebb05e3b1ae1e7b45adcd5c0596d9f2"),
+					poolName:           "Syrup USDT",
+					poolAssetSymbol:    "USDT",
+					poolAssetDecimals:  6,
+				},
+			},
+			checkBlockNumber: true,
+		},
+		{
+			name:        "success: empty loans list",
+			blockNumber: 21500000,
+			serverResponse: graphqlResponse{
+				Data: json.RawMessage(`{
+					"openTermLoans": []
+				}`),
+			},
+			serverStatus: http.StatusOK,
+			wantLoans:    []expectedActiveLoan{},
+		},
+		{
+			name:           "HTTP error: 502",
+			blockNumber:    21500000,
+			serverResponse: `bad gateway`,
+			serverStatus:   http.StatusBadGateway,
+			wantErr:        true,
+			errContains:    "unexpected status 502",
+		},
+		{
+			name:        "GraphQL error in response",
+			blockNumber: 21500000,
+			serverResponse: map[string]any{
+				"errors": []map[string]string{
+					{"message": "rate limit exceeded"},
+					{"message": "secondary error"},
+				},
+			},
+			serverStatus: http.StatusOK,
+			wantErr:      true,
+			errContains:  "rate limit exceeded; secondary error",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedBlockNumber uint64
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req graphqlRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+					if block, ok := req.Variables["block"].(map[string]any); ok {
+						if num, ok := block["number"].(float64); ok {
+							capturedBlockNumber = uint64(num)
+						}
+					}
+				}
+
+				w.WriteHeader(tc.serverStatus)
+				_ = json.NewEncoder(w).Encode(tc.serverResponse)
+			}))
+			defer server.Close()
+
+			client, err := NewClient(Config{
+				Endpoint: server.URL,
+				Logger:   testutil.DiscardLogger(),
+			})
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			loans, err := client.GetAllActiveLoansAtBlock(ctx, tc.blockNumber)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Errorf("error %q should contain %q", err.Error(), tc.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(loans) != len(tc.wantLoans) {
+				t.Fatalf("loans = %d, want %d", len(loans), len(tc.wantLoans))
+			}
+
+			if tc.checkBlockNumber {
+				if capturedBlockNumber != tc.blockNumber {
+					t.Errorf("captured block number = %d, want %d", capturedBlockNumber, tc.blockNumber)
+				}
+			}
+
+			for i, want := range tc.wantLoans {
+				loan := loans[i]
+				if loan.LoanID != want.loanID {
+					t.Errorf("loans[%d].LoanID = %s, want %s", i, loan.LoanID.Hex(), want.loanID.Hex())
+				}
+				if loan.Borrower != want.borrower {
+					t.Errorf("loans[%d].Borrower = %s, want %s", i, loan.Borrower.Hex(), want.borrower.Hex())
+				}
+				if loan.State != want.state {
+					t.Errorf("loans[%d].State = %q, want %q", i, loan.State, want.state)
+				}
+				if want.principalOwed != nil && loan.PrincipalOwed.Cmp(want.principalOwed) != 0 {
+					t.Errorf("loans[%d].PrincipalOwed = %s, want %s", i, loan.PrincipalOwed, want.principalOwed)
+				}
+				if want.acmRatio != nil && loan.AcmRatio.Cmp(want.acmRatio) != 0 {
+					t.Errorf("loans[%d].AcmRatio = %s, want %s", i, loan.AcmRatio, want.acmRatio)
+				}
+				if loan.Collateral.Asset != want.collateralAsset {
+					t.Errorf("loans[%d].Collateral.Asset = %q, want %q", i, loan.Collateral.Asset, want.collateralAsset)
+				}
+				if want.collateralAmount != nil && loan.Collateral.AssetAmount.Cmp(want.collateralAmount) != 0 {
+					t.Errorf("loans[%d].Collateral.AssetAmount = %s, want %s", i, loan.Collateral.AssetAmount, want.collateralAmount)
+				}
+				if want.collateralValue != nil && loan.Collateral.AssetValueUSD.Cmp(want.collateralValue) != 0 {
+					t.Errorf("loans[%d].Collateral.AssetValueUSD = %s, want %s", i, loan.Collateral.AssetValueUSD, want.collateralValue)
+				}
+				if loan.Collateral.Decimals != want.collateralDecimals {
+					t.Errorf("loans[%d].Collateral.Decimals = %d, want %d", i, loan.Collateral.Decimals, want.collateralDecimals)
+				}
+				if loan.Collateral.State != want.collateralState {
+					t.Errorf("loans[%d].Collateral.State = %q, want %q", i, loan.Collateral.State, want.collateralState)
+				}
+				if loan.Collateral.Custodian != want.collateralCustody {
+					t.Errorf("loans[%d].Collateral.Custodian = %q, want %q", i, loan.Collateral.Custodian, want.collateralCustody)
+				}
+				if want.liquidationLevel != nil && loan.Collateral.LiquidationLevel.Cmp(want.liquidationLevel) != 0 {
+					t.Errorf("loans[%d].Collateral.LiquidationLevel = %s, want %s", i, loan.Collateral.LiquidationLevel, want.liquidationLevel)
+				}
+				if loan.PoolAddress != want.poolAddress {
+					t.Errorf("loans[%d].PoolAddress = %s, want %s", i, loan.PoolAddress.Hex(), want.poolAddress.Hex())
+				}
+				if loan.PoolName != want.poolName {
+					t.Errorf("loans[%d].PoolName = %q, want %q", i, loan.PoolName, want.poolName)
+				}
+				if loan.PoolAssetSymbol != want.poolAssetSymbol {
+					t.Errorf("loans[%d].PoolAssetSymbol = %q, want %q", i, loan.PoolAssetSymbol, want.poolAssetSymbol)
+				}
+				if loan.PoolAssetDecimals != want.poolAssetDecimals {
+					t.Errorf("loans[%d].PoolAssetDecimals = %d, want %d", i, loan.PoolAssetDecimals, want.poolAssetDecimals)
+				}
+			}
+		})
+	}
+}
+
 func TestExecute_contextCanceled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Block until client gives up.

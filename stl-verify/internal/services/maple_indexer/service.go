@@ -242,13 +242,13 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error { //
 		return fmt.Errorf("block hash missing for block %d", event.BlockNumber)
 	}
 
-	pools, err := s.mapleAPI.ListPools(ctx) // Review-3: Since this might return a lot of pools, and we do another api call per pool we should consider if we can do this more efficiently and batch calls.
+	loans, err := s.mapleAPI.GetAllActiveLoansAtBlock(ctx, uint64(event.BlockNumber))
 	if err != nil {
-		return fmt.Errorf("listing maple pools: %w", err)
+		return fmt.Errorf("fetching active loans: %w", err)
 	}
 
-	if len(pools) == 0 {
-		s.logger.Debug("no maple pools found", "block", event.BlockNumber)
+	if len(loans) == 0 {
+		s.logger.Debug("no active loans found", "block", event.BlockNumber)
 		return nil
 	}
 
@@ -261,75 +261,64 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error { //
 	var collaterals []*entity.BorrowerCollateral
 	var errs []error
 
-	for _, pool := range pools {
-		loans, err := s.mapleAPI.GetBorrowerCollateralAtBlock(ctx, pool.Address, uint64(blockNumber))
+	for _, loan := range loans {
+		userID, err := s.getOrCreateUserID(ctx, loan.Borrower, blockNumber, userCache)
 		if err != nil {
-			s.logger.Error("failed to fetch borrower collateral",
-				"pool", pool.Address.Hex(),
+			s.logger.Error("failed to resolve borrower user",
+				"borrower", loan.Borrower.Hex(),
+				"pool", loan.PoolName,
 				"error", err)
-			errs = append(errs, fmt.Errorf("pool %s: %w", pool.Address.Hex(), err))
+			errs = append(errs, fmt.Errorf("borrower %s: %w", loan.Borrower.Hex(), err))
 			continue
 		}
 
-		for _, loan := range loans {
-			userID, err := s.getOrCreateUserID(ctx, loan.Borrower, blockNumber, userCache)
-			if err != nil {
-				s.logger.Error("failed to resolve borrower user",
-					"borrower", loan.Borrower.Hex(),
-					"pool", pool.Address.Hex(),
-					"error", err)
-				errs = append(errs, fmt.Errorf("borrower %s: %w", loan.Borrower.Hex(), err))
-				continue
-			}
-
-			loanTokenID, err := s.getTokenID(ctx, pool.AssetSymbol, tokenCache)
-			if err != nil {
-				s.logger.Error("failed to resolve loan token",
-					"symbol", pool.AssetSymbol,
-					"pool", pool.Address.Hex(),
-					"error", err)
-				errs = append(errs, fmt.Errorf("loan token %s: %w", pool.AssetSymbol, err))
-				continue
-			}
-
-			borrowers = append(borrowers, &entity.Borrower{
-				UserID:       userID,
-				ProtocolID:   s.protocolID,
-				TokenID:      loanTokenID,
-				BlockNumber:  blockNumber,
-				BlockVersion: blockVersion,
-				Amount:       loan.PrincipalOwed,
-				Change:       big.NewInt(0), // For maple we do not have incremental events, only snapshots, so change is always 0
-				EventType:    entity.EventMapleSnapshot,
-				TxHash:       nil,
-			})
-
-			// Review-5: Maple only returns a symbol. This query doesnt take chain into account. I think we should consider to not store collateral token ids from maple as they aren't 100% trustworthy
-			// Perhaps we need to just create a new table protocol_assets or something like that (or maple_assets if maple is very different from others)
-			//
-			collateralTokenID, err := s.getTokenID(ctx, loan.Collateral.Asset, tokenCache)
-			if err != nil {
-				s.logger.Error("failed to resolve collateral token",
-					"symbol", loan.Collateral.Asset,
-					"pool", pool.Address.Hex(),
-					"error", err)
-				errs = append(errs, fmt.Errorf("collateral token %s: %w", loan.Collateral.Asset, err))
-				continue
-			}
-
-			collaterals = append(collaterals, &entity.BorrowerCollateral{
-				UserID:            userID,
-				ProtocolID:        s.protocolID,
-				TokenID:           collateralTokenID,
-				BlockNumber:       blockNumber,
-				BlockVersion:      blockVersion,
-				Amount:            loan.Collateral.AssetAmount,
-				Change:            big.NewInt(0), // For maple we do not have incremental events, only snapshots, so change is always 0
-				EventType:         entity.EventMapleSnapshot,
-				TxHash:            nil,
-				CollateralEnabled: isCollateralEnabled(loan.Collateral.State),
-			})
+		loanTokenID, err := s.getTokenID(ctx, loan.PoolAssetSymbol, tokenCache)
+		if err != nil {
+			s.logger.Error("failed to resolve loan token",
+				"symbol", loan.PoolAssetSymbol,
+				"pool", loan.PoolName,
+				"error", err)
+			errs = append(errs, fmt.Errorf("loan token %s: %w", loan.PoolAssetSymbol, err))
+			continue
 		}
+
+		borrowers = append(borrowers, &entity.Borrower{
+			UserID:       userID,
+			ProtocolID:   s.protocolID,
+			TokenID:      loanTokenID,
+			BlockNumber:  blockNumber,
+			BlockVersion: blockVersion,
+			Amount:       loan.PrincipalOwed,
+			Change:       big.NewInt(0), // For maple we do not have incremental events, only snapshots, so change is always 0
+			EventType:    entity.EventMapleSnapshot,
+			TxHash:       nil,
+		})
+
+		// Review-5: Maple only returns a symbol. This query doesnt take chain into account. I think we should consider to not store collateral token ids from maple as they aren't 100% trustworthy
+		// Perhaps we need to just create a new table protocol_assets or something like that (or maple_assets if maple is very different from others)
+		//
+		collateralTokenID, err := s.getTokenID(ctx, loan.Collateral.Asset, tokenCache)
+		if err != nil {
+			s.logger.Error("failed to resolve collateral token",
+				"symbol", loan.Collateral.Asset,
+				"pool", loan.PoolName,
+				"error", err)
+			errs = append(errs, fmt.Errorf("collateral token %s: %w", loan.Collateral.Asset, err))
+			continue
+		}
+
+		collaterals = append(collaterals, &entity.BorrowerCollateral{
+			UserID:            userID,
+			ProtocolID:        s.protocolID,
+			TokenID:           collateralTokenID,
+			BlockNumber:       blockNumber,
+			BlockVersion:      blockVersion,
+			Amount:            loan.Collateral.AssetAmount,
+			Change:            big.NewInt(0), // For maple we do not have incremental events, only snapshots, so change is always 0
+			EventType:         entity.EventMapleSnapshot,
+			TxHash:            nil,
+			CollateralEnabled: isCollateralEnabled(loan.Collateral.State),
+		})
 	}
 
 	if len(errs) > 0 {

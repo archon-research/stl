@@ -17,6 +17,9 @@ type MapleClient interface {
 
 	// GetBorrowerCollateralAtBlock returns the active loans and their collateral for a pool at a specific block.
 	GetBorrowerCollateralAtBlock(ctx context.Context, poolAddress common.Address, blockNumber uint64) ([]MapleBorrowerLoan, error)
+
+	// GetAllActiveLoansAtBlock returns all active open-term loans across all pools at a specific block number.
+	GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint64) ([]MapleActiveLoan, error)
 }
 
 // MaplePoolInfo represents a Maple pool definition.
@@ -59,4 +62,18 @@ type MapleLoanCollateral struct {
 	State            string   // "Deposited" or "DepositPending"
 	Custodian        string   // e.g. "FORDEFI", "ANCHORAGE"
 	LiquidationLevel *big.Int // ratio for liquidation trigger
+}
+
+// MapleActiveLoan represents an active open-term loan with its funding pool info.
+type MapleActiveLoan struct {
+	LoanID            common.Address
+	Borrower          common.Address
+	State             string
+	PrincipalOwed     *big.Int
+	AcmRatio          *big.Int
+	Collateral        MapleLoanCollateral
+	PoolAddress       common.Address
+	PoolName          string
+	PoolAssetSymbol   string
+	PoolAssetDecimals int
 }
