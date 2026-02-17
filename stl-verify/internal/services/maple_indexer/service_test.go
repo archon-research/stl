@@ -26,37 +26,10 @@ type mockConsumer = testutil.MockSQSConsumer
 
 type mockMapleClient struct {
 	mu                            sync.Mutex
-	listPoolsFn                   func(ctx context.Context) ([]outbound.MaplePoolInfo, error)
-	getBorrowerCollateralFn       func(ctx context.Context, poolAddress common.Address, blockNumber uint64) ([]outbound.MapleBorrowerLoan, error)
 	getAllActiveLoansAtBlockFn    func(ctx context.Context, blockNumber uint64) ([]outbound.MapleActiveLoan, error)
-	listPoolsCalls                int
-	getBorrowerCollateralCalls    int
 	getAllActiveLoansAtBlockCalls int
 }
 
-func (m *mockMapleClient) ListPools(ctx context.Context) ([]outbound.MaplePoolInfo, error) {
-	m.mu.Lock()
-	m.listPoolsCalls++
-	m.mu.Unlock()
-	if m.listPoolsFn != nil {
-		return m.listPoolsFn(ctx)
-	}
-	return nil, nil
-}
-
-func (m *mockMapleClient) GetBorrowerCollateralAtBlock(ctx context.Context, poolAddress common.Address, blockNumber uint64) ([]outbound.MapleBorrowerLoan, error) {
-	m.mu.Lock()
-	m.getBorrowerCollateralCalls++
-	m.mu.Unlock()
-	if m.getBorrowerCollateralFn != nil {
-		return m.getBorrowerCollateralFn(ctx, poolAddress, blockNumber)
-	}
-	return nil, nil
-}
-
-func (m *mockMapleClient) GetPoolCollateral(ctx context.Context, poolAddress common.Address) (*outbound.MaplePoolData, error) {
-	return nil, nil
-}
 
 func (m *mockMapleClient) GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint64) ([]outbound.MapleActiveLoan, error) {
 	m.mu.Lock()
@@ -74,22 +47,13 @@ type mockPositionRepo struct {
 	upsertBorrowersTxFn             func(ctx context.Context, tx pgx.Tx, borrowers []*entity.Borrower) error
 	upsertBorrowerCollateralFn      func(ctx context.Context, collateral []*entity.BorrowerCollateral) error
 	upsertBorrowerCollateralTxFn    func(ctx context.Context, tx pgx.Tx, collateral []*entity.BorrowerCollateral) error
-	upsertBorrowersCalls            int
 	upsertBorrowersTxCalls          int
-	upsertBorrowerCollateralCalls   int
 	upsertBorrowerCollateralTxCalls int
 	lastUpsertedBorrowers           []*entity.Borrower
 	lastUpsertedCollateral          []*entity.BorrowerCollateral
 }
 
 func (m *mockPositionRepo) UpsertBorrowers(ctx context.Context, borrowers []*entity.Borrower) error {
-	m.mu.Lock()
-	m.upsertBorrowersCalls++
-	m.lastUpsertedBorrowers = borrowers
-	m.mu.Unlock()
-	if m.upsertBorrowersFn != nil {
-		return m.upsertBorrowersFn(ctx, borrowers)
-	}
 	return nil
 }
 
@@ -105,13 +69,6 @@ func (m *mockPositionRepo) UpsertBorrowersTx(ctx context.Context, tx pgx.Tx, bor
 }
 
 func (m *mockPositionRepo) UpsertBorrowerCollateral(ctx context.Context, collateral []*entity.BorrowerCollateral) error {
-	m.mu.Lock()
-	m.upsertBorrowerCollateralCalls++
-	m.lastUpsertedCollateral = collateral
-	m.mu.Unlock()
-	if m.upsertBorrowerCollateralFn != nil {
-		return m.upsertBorrowerCollateralFn(ctx, collateral)
-	}
 	return nil
 }
 
@@ -622,9 +579,6 @@ func TestProcessBlock(t *testing.T) {
 
 		positionRepo.mu.Lock()
 		defer positionRepo.mu.Unlock()
-		if positionRepo.upsertBorrowersCalls != 0 {
-			t.Errorf("UpsertBorrowers calls = %d, want 0", positionRepo.upsertBorrowersCalls)
-		}
 		if positionRepo.upsertBorrowersTxCalls != 1 {
 			t.Errorf("UpsertBorrowersTx calls = %d, want 1", positionRepo.upsertBorrowersTxCalls)
 		}
@@ -640,9 +594,6 @@ func TestProcessBlock(t *testing.T) {
 		}
 		if borrower.BlockVersion != event.Version {
 			t.Errorf("borrower BlockVersion = %d, want %d", borrower.BlockVersion, event.Version)
-		}
-		if positionRepo.upsertBorrowerCollateralCalls != 0 {
-			t.Errorf("UpsertBorrowerCollateral calls = %d, want 0", positionRepo.upsertBorrowerCollateralCalls)
 		}
 		if positionRepo.upsertBorrowerCollateralTxCalls != 1 {
 			t.Errorf("UpsertBorrowerCollateralTx calls = %d, want 1", positionRepo.upsertBorrowerCollateralTxCalls)
@@ -1144,8 +1095,8 @@ func TestProcessMessages(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		positionRepo.mu.Lock()
-		if positionRepo.upsertBorrowersCalls != 0 {
-			t.Errorf("UpsertBorrowers calls = %d, want 0", positionRepo.upsertBorrowersCalls)
+		if positionRepo.upsertBorrowersTxCalls != 0 {
+			t.Errorf("UpsertBorrowersTx calls = %d, want 0", positionRepo.upsertBorrowersTxCalls)
 		}
 		positionRepo.mu.Unlock()
 
