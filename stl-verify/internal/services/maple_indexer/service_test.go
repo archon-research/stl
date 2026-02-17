@@ -606,7 +606,7 @@ func TestProcessBlock(t *testing.T) {
 		if err := svc.Start(context.Background()); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		defer svc.Stop()
+		defer func() { _ = svc.Stop() }()
 
 		event := blockEvent{
 			ChainID:        1,
@@ -686,7 +686,7 @@ func TestProcessBlock(t *testing.T) {
 		if err := svc.Start(context.Background()); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		defer svc.Stop()
+		defer func() { _ = svc.Stop() }()
 
 		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		if err := svc.processBlock(context.Background(), event); err != nil {
@@ -726,7 +726,7 @@ func TestProcessBlock(t *testing.T) {
 		if err := svc.Start(context.Background()); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		defer svc.Stop()
+		defer func() { _ = svc.Stop() }()
 
 		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		err = svc.processBlock(context.Background(), event)
@@ -763,7 +763,7 @@ func TestProcessBlock(t *testing.T) {
 		if err := svc.Start(context.Background()); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		defer svc.Stop()
+		defer func() { _ = svc.Stop() }()
 
 		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		err = svc.processBlock(context.Background(), event)
@@ -800,7 +800,7 @@ func TestProcessBlock(t *testing.T) {
 		if err := svc.Start(context.Background()); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		defer svc.Stop()
+		defer func() { _ = svc.Stop() }()
 
 		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		err = svc.processBlock(context.Background(), event)
@@ -834,7 +834,7 @@ func TestProcessBlock(t *testing.T) {
 		if err := svc.Start(context.Background()); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		defer svc.Stop()
+		defer func() { _ = svc.Stop() }()
 
 		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		if err := svc.processBlock(context.Background(), event); err != nil {
@@ -908,7 +908,7 @@ func TestProcessBlock(t *testing.T) {
 		if err := svc.Start(context.Background()); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		defer svc.Stop()
+		defer func() { _ = svc.Stop() }()
 
 		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		if err := svc.processBlock(context.Background(), event); err != nil {
@@ -958,7 +958,7 @@ func TestProcessBlock(t *testing.T) {
 		if err := svc.Start(context.Background()); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		defer svc.Stop()
+		defer func() { _ = svc.Stop() }()
 
 		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		err = svc.processBlock(context.Background(), event)
@@ -994,7 +994,7 @@ func TestProcessBlock(t *testing.T) {
 		if err := svc.Start(context.Background()); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		defer svc.Stop()
+		defer func() { _ = svc.Stop() }()
 
 		event := blockEvent{ChainID: 999, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		err = svc.processBlock(context.Background(), event)
@@ -1070,7 +1070,7 @@ func TestProcessMessages(t *testing.T) {
 		}
 		consumer.Mu.Unlock()
 
-		svc.Stop()
+		_ = svc.Stop()
 	})
 
 	t.Run("SQS receive error: logged, not fatal", func(t *testing.T) {
@@ -1109,7 +1109,7 @@ func TestProcessMessages(t *testing.T) {
 		}
 		consumer.Mu.Unlock()
 
-		svc.Stop()
+		_ = svc.Stop()
 	})
 
 	t.Run("empty messages: no processing", func(t *testing.T) {
@@ -1149,7 +1149,7 @@ func TestProcessMessages(t *testing.T) {
 		}
 		positionRepo.mu.Unlock()
 
-		svc.Stop()
+		_ = svc.Stop()
 	})
 
 	t.Run("invalid JSON: message not deleted", func(t *testing.T) {
@@ -1199,7 +1199,7 @@ func TestProcessMessages(t *testing.T) {
 		}
 		consumer.Mu.Unlock()
 
-		svc.Stop()
+		_ = svc.Stop()
 	})
 
 	t.Run("delete message error: logged but processing continues", func(t *testing.T) {
@@ -1261,6 +1261,6 @@ func TestProcessMessages(t *testing.T) {
 		}
 		consumer.Mu.Unlock()
 
-		svc.Stop()
+		_ = svc.Stop()
 	})
 }

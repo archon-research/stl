@@ -760,13 +760,10 @@ func TestGetAllActiveLoansAtBlock_Pagination(t *testing.T) {
 		callCount++
 
 		remaining := totalLoans - skip
-		count := remaining
-		if count > first {
-			count = first
-		}
+		count := min(remaining, first)
 
 		loans := make([]map[string]any, count)
-		for i := 0; i < count; i++ {
+		for i := range count {
 			loans[i] = map[string]any{
 				"id":            fmt.Sprintf("0x%040x", skip+i),
 				"borrower":      map[string]any{"id": "0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5"},

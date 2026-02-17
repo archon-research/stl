@@ -247,32 +247,31 @@ func (c *Client) GetBorrowerCollateralAtBlock(ctx context.Context, poolAddress c
 func (c *Client) GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint64) ([]outbound.MapleActiveLoan, error) {
 	const batchSize = 1000
 	var allLoans []outbound.MapleActiveLoan
+	query := `query GetAllActiveLoans($block: Block_height!, $first: Int!, $skip: Int!) {
+		openTermLoans(block: $block, first: $first, skip: $skip, where: { state: Active }) {
+			id
+			borrower { id }
+			state
+			principalOwed
+			acmRatio
+			collateral {
+				asset
+				assetAmount
+				assetValueUsd
+				decimals
+				state
+				custodian
+				liquidationLevel
+			}
+			fundingPool {
+				id
+				name
+				asset { symbol decimals }
+			}
+		}
+	}`
 
 	for skip := 0; ; skip += batchSize {
-		query := `query GetAllActiveLoans($block: Block_height!, $first: Int!, $skip: Int!) {
-			openTermLoans(block: $block, first: $first, skip: $skip, where: { state: Active }) {
-				id
-				borrower { id }
-				state
-				principalOwed
-				acmRatio
-				collateral {
-					asset
-					assetAmount
-					assetValueUsd
-					decimals
-					state
-					custodian
-					liquidationLevel
-				}
-				fundingPool {
-					id
-					name
-					asset { symbol decimals }
-				}
-			}
-		}`
-
 		variables := map[string]any{
 			"block": map[string]any{"number": blockNumber},
 			"first": batchSize,
