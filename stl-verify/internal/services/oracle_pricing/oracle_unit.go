@@ -72,8 +72,11 @@ func ConvertNonUSDPrices(results []blockchain.FeedPriceResult, unit *OracleUnit,
 		refIdx, hasRef := unit.RefFeedIdx[quoteCurrency]
 		if !hasRef || !results[refIdx].Success {
 			results[feedIdx].Success = false
-			logger.Debug("reference price unavailable for conversion",
+			results[feedIdx].Price = 0
+			logger.Warn("reference price unavailable, discarding non-USD feed price",
+				"oracle", unit.Oracle.Name,
 				"feed_token", unit.Feeds[feedIdx].TokenID,
+				"feedAddress", unit.Feeds[feedIdx].FeedAddress.Hex(),
 				"quote", quoteCurrency,
 				"block", blockNum)
 			continue

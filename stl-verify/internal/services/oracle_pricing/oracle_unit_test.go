@@ -539,7 +539,7 @@ func TestConvertNonUSDPrices(t *testing.T) {
 			},
 			want: []blockchain.FeedPriceResult{
 				{TokenID: 1, Price: 0, Success: false},
-				{TokenID: 2, Price: 0.5, Success: false}, // marked failed
+				{TokenID: 2, Price: 0, Success: false}, // marked failed, price zeroed
 			},
 		},
 		{
@@ -554,7 +554,33 @@ func TestConvertNonUSDPrices(t *testing.T) {
 				RefFeedIdx:  map[string]int{}, // no ETH ref
 			},
 			want: []blockchain.FeedPriceResult{
-				{TokenID: 1, Price: 0.5, Success: false},
+				{TokenID: 1, Price: 0, Success: false}, // price zeroed
+			},
+		},
+		{
+			name: "failed reference zeroes price and logs at warn",
+			results: []blockchain.FeedPriceResult{
+				{TokenID: 1, Price: 2000.0, Success: true}, // WETH/USD reference
+				{TokenID: 2, Price: 0, Success: false},     // WBTC/USD reference failed
+				{TokenID: 3, Price: 1.05, Success: true},   // weETH/ETH
+				{TokenID: 4, Price: 0.98, Success: true},   // LBTC/BTC
+			},
+			unit: &OracleUnit{
+				Oracle: &entity.Oracle{Name: "chainlink"},
+				Feeds: []blockchain.FeedConfig{
+					{TokenID: 1, FeedAddress: common.HexToAddress("0x01")},
+					{TokenID: 2, FeedAddress: common.HexToAddress("0x02")},
+					{TokenID: 3, FeedAddress: common.HexToAddress("0x03")},
+					{TokenID: 4, FeedAddress: common.HexToAddress("0x04")},
+				},
+				NonUSDFeeds: map[int]string{2: "ETH", 3: "BTC"},
+				RefFeedIdx:  map[string]int{"ETH": 0, "BTC": 1},
+			},
+			want: []blockchain.FeedPriceResult{
+				{TokenID: 1, Price: 2000.0, Success: true},
+				{TokenID: 2, Price: 0, Success: false},
+				{TokenID: 3, Price: 2000.0 * 1.05, Success: true}, // ETH ref OK
+				{TokenID: 4, Price: 0, Success: false},            // BTC ref failed → price must be zeroed
 			},
 		},
 		{

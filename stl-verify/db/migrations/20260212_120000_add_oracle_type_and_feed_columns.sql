@@ -258,13 +258,6 @@ SELECT o.id, t.id, true,
 FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'ezETH'
 ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL DO NOTHING;
 
--- stETH-denominated feed
-INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
-SELECT o.id, t.id, true,
-       '\xa7B0247d2dA6B11FF2740491cB433a1520d5DA98'::BYTEA, 8, 'stETH'
-FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'wstETH'
-ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL DO NOTHING;
-
 -- BTC-denominated feed
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
 SELECT o.id, t.id, true,
