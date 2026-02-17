@@ -134,11 +134,6 @@ jobs:
               commentBody += `**View detailed findings:**\n`;
               commentBody += `- Check the [Security tab](${context.payload.repository.html_url}/security/code-scanning) for SARIF results\n`;
               commentBody += `- Review the [workflow logs](${context.payload.repository.html_url}/actions/runs/${context.runId}) for details\n\n`;
-              commentBody += `Common issues to check:\n`;
-              commentBody += `- Missing encryption (S3, RDS, ElastiCache)\n`;
-              commentBody += `- Overly permissive security groups\n`;
-              commentBody += `- Public access to resources\n`;
-              commentBody += `- Missing CloudTrail/GuardDuty\n`;
             } else {
               commentBody += `### ✅ No Security Issues Found\n\n`;
               commentBody += `All Checkov security checks passed!\n`;
