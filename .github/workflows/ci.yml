@@ -50,3 +50,32 @@ jobs:
             git diff --name-only
             exit 1
           fi
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: check
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: stl-verify
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.7"
+          cache: true
+          cache-dependency-path: "stl-verify/go.sum"
+
+      # Integration tests require Docker services (PostgreSQL, Redis, Jaeger)
+      # testcontainers will spin up these services automatically
+      - name: Run integration tests
+        run: make test-integration
+
+      - name: Run integration tests with race detector
+        run: go test -race -tags=integration -v -timeout=5m ./...
