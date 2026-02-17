@@ -5,7 +5,6 @@ package oracle_price_worker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,6 +18,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared/sqsutil"
 )
 
 // Config holds configuration for the oracle price worker.
@@ -111,7 +111,12 @@ func (s *Service) Start(ctx context.Context) error {
 		return fmt.Errorf("initializing: %w", err)
 	}
 
-	go s.processLoop()
+	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
+		Consumer:     s.consumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+	}, s.processBlock)
 
 	s.logger.Info("oracle price worker started",
 		"oracles", len(s.units))
@@ -209,73 +214,7 @@ func (s *Service) buildOracleUnit(ctx context.Context, oracle *entity.Oracle) (*
 	}, nil
 }
 
-func (s *Service) processLoop() {
-	ticker := time.NewTicker(s.config.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-ticker.C:
-			if err := s.processMessages(s.ctx); err != nil {
-				s.logger.Error("error processing messages", "error", err)
-			}
-		}
-	}
-}
-
-func (s *Service) processMessages(ctx context.Context) error {
-	messages, err := s.consumer.ReceiveMessages(ctx, s.config.MaxMessages)
-	if err != nil {
-		return fmt.Errorf("receiving messages: %w", err)
-	}
-
-	if len(messages) == 0 {
-		return nil
-	}
-
-	s.logger.Info("received messages", "count", len(messages))
-
-	var errs []error
-	for _, msg := range messages {
-		if err := s.processMessage(ctx, msg); err != nil {
-			s.logger.Error("failed to process message", "error", err)
-			errs = append(errs, err)
-			continue
-		}
-
-		if deleteErr := s.consumer.DeleteMessage(ctx, msg.ReceiptHandle); deleteErr != nil {
-			s.logger.Error("failed to delete message", "error", deleteErr)
-		}
-	}
-
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	return nil
-}
-
-// blockEvent is the SQS message payload for block events.
-type blockEvent struct {
-	ChainID        int64  `json:"chainId"`
-	BlockNumber    int64  `json:"blockNumber"`
-	Version        int    `json:"version"`
-	BlockHash      string `json:"blockHash"`
-	BlockTimestamp int64  `json:"blockTimestamp"`
-	IsReorg        bool   `json:"isReorg,omitempty"`
-}
-
-func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) error {
-	var event blockEvent
-	if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
-		return fmt.Errorf("parsing block event: %w", err)
-	}
-
-	return s.processBlock(ctx, event)
-}
-
-func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
+func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) error {
 	var errs []error
 	for _, unit := range s.units {
 		if err := s.processBlockForOracle(ctx, event, unit); err != nil {
@@ -294,7 +233,7 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 	return nil
 }
 
-func (s *Service) processBlockForOracle(ctx context.Context, event blockEvent, unit *oracleUnit) error {
+func (s *Service) processBlockForOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
 	prices, err := blockchain.FetchOraclePrices(
 		ctx,
 		s.multicaller,
@@ -331,7 +270,7 @@ func (s *Service) processBlockForOracle(ctx context.Context, event blockEvent, u
 	return nil
 }
 
-func (s *Service) detectChanges(rawPrices []*big.Int, event blockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {
+func (s *Service) detectChanges(rawPrices []*big.Int, event outbound.BlockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
 	oracleID := int16(unit.oracle.ID)
 	priceDecimals := unit.oracle.PriceDecimals
