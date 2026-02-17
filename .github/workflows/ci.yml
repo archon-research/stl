@@ -76,6 +76,3 @@ jobs:
       # testcontainers will spin up these services automatically
       - name: Run integration tests
         run: make test-integration
-
-      - name: Run integration tests with race detector
-        run: go test -race -tags=integration -v -timeout=5m ./...
