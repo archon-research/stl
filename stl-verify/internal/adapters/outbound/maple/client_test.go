@@ -635,28 +635,6 @@ func TestGetAllActiveLoansAtBlock(t *testing.T) {
 			wantErr:      true,
 			errContains:  "rate limit exceeded; secondary error",
 		},
-		{
-			name:        "truncation error: exactly 1000 loans",
-			blockNumber: 21500000,
-			serverResponse: func() any {
-				loans := make([]map[string]any, 1000)
-				for i := range loans {
-					loans[i] = map[string]any{
-						"id":            fmt.Sprintf("0x%040x", i),
-						"borrower":      map[string]any{"id": "0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5"},
-						"state":         "Active",
-						"principalOwed": "1000000000",
-						"acmRatio":      "1000000",
-						"collateral":    map[string]any{"asset": "BTC", "assetAmount": "1000000000", "assetValueUsd": "1000000000", "decimals": 8, "state": "Deposited", "custodian": "FORDEFI"},
-						"fundingPool":   map[string]any{"id": "0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b", "name": "Test Pool", "asset": map[string]any{"symbol": "USDC", "decimals": 6}},
-					}
-				}
-				return graphqlResponse{Data: json.RawMessage(fmt.Sprintf(`{"openTermLoans": %s}`, mustMarshalJSON(loans)))}
-			}(),
-			serverStatus: http.StatusOK,
-			wantErr:      true,
-			errContains:  "potential data truncation",
-		},
 	}
 
 	for _, tc := range tests {
@@ -767,6 +745,70 @@ func TestGetAllActiveLoansAtBlock(t *testing.T) {
 	}
 }
 
+func TestGetAllActiveLoansAtBlock_Pagination(t *testing.T) {
+	callCount := 0
+	totalLoans := 2500
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req graphqlRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+
+		skip := int(req.Variables["skip"].(float64))
+		first := int(req.Variables["first"].(float64))
+		callCount++
+
+		remaining := totalLoans - skip
+		count := remaining
+		if count > first {
+			count = first
+		}
+
+		loans := make([]map[string]any, count)
+		for i := 0; i < count; i++ {
+			loans[i] = map[string]any{
+				"id":            fmt.Sprintf("0x%040x", skip+i),
+				"borrower":      map[string]any{"id": "0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5"},
+				"state":         "Active",
+				"principalOwed": "1000000000",
+				"acmRatio":      "1000000",
+				"collateral":    map[string]any{"asset": "BTC", "assetAmount": "1000000000", "assetValueUsd": "1000000000", "decimals": 8, "state": "Deposited", "custodian": "FORDEFI"},
+				"fundingPool":   map[string]any{"id": "0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b", "name": "Test Pool", "asset": map[string]any{"symbol": "USDC", "decimals": 6}},
+			}
+		}
+
+		resp := map[string]any{"data": map[string]any{"openTermLoans": loans}}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		Endpoint: server.URL,
+		Logger:   testutil.DiscardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	loans, err := client.GetAllActiveLoansAtBlock(ctx, 21500000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(loans) != totalLoans {
+		t.Errorf("got %d loans, want %d", len(loans), totalLoans)
+	}
+
+	if callCount != 3 {
+		t.Errorf("expected 3 API calls (1000 + 1000 + 500), got %d", callCount)
+	}
+}
+
 func TestExecute_contextCanceled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Block until client gives up.
@@ -822,13 +864,4 @@ func TestExecute_invalidJSON(t *testing.T) {
 // graphqlResponse is a helper for encoding test responses.
 type graphqlResponse struct {
 	Data json.RawMessage `json:"data"`
-}
-
-// mustMarshalJSON panics if marshaling fails.
-func mustMarshalJSON(v any) []byte {
-	b, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return b
 }

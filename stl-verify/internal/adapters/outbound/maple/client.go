@@ -243,98 +243,107 @@ func (c *Client) GetBorrowerCollateralAtBlock(ctx context.Context, poolAddress c
 }
 
 // GetAllActiveLoansAtBlock queries all active open-term loans across all pools at a specific block.
+// Uses pagination to handle cases where there are more than 1000 loans.
 func (c *Client) GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint64) ([]outbound.MapleActiveLoan, error) {
-	query := `query GetAllActiveLoans($block: Block_height!) {
-		openTermLoans(block: $block, first: 1000, where: { state: Active }) {
-			id
-			borrower { id }
-			state
-			principalOwed
-			acmRatio
-			collateral {
-				asset
-				assetAmount
-				assetValueUsd
-				decimals
-				state
-				custodian
-				liquidationLevel
-			}
-			fundingPool {
+	const batchSize = 1000
+	var allLoans []outbound.MapleActiveLoan
+
+	for skip := 0; ; skip += batchSize {
+		query := `query GetAllActiveLoans($block: Block_height!, $first: Int!, $skip: Int!) {
+			openTermLoans(block: $block, first: $first, skip: $skip, where: { state: Active }) {
 				id
-				name
-				asset { symbol decimals }
+				borrower { id }
+				state
+				principalOwed
+				acmRatio
+				collateral {
+					asset
+					assetAmount
+					assetValueUsd
+					decimals
+					state
+					custodian
+					liquidationLevel
+				}
+				fundingPool {
+					id
+					name
+					asset { symbol decimals }
+				}
 			}
-		}
-	}`
+		}`
 
-	variables := map[string]any{
-		"block": map[string]any{"number": blockNumber},
-	}
-
-	var resp allActiveLoansResponse
-	if err := c.execute(ctx, query, variables, &resp); err != nil {
-		return nil, fmt.Errorf("querying all active loans: %w", err)
-	}
-
-	if len(resp.Data.OpenTermLoans) == 1000 {
-		return nil, fmt.Errorf("potential data truncation: received exactly 1000 loans, pagination required")
-	}
-
-	loans := make([]outbound.MapleActiveLoan, 0, len(resp.Data.OpenTermLoans))
-	for _, l := range resp.Data.OpenTermLoans {
-		principalOwed, ok := new(big.Int).SetString(l.PrincipalOwed, 10)
-		if !ok {
-			return nil, fmt.Errorf("parsing principal owed %q for loan %s", l.PrincipalOwed, l.ID)
+		variables := map[string]any{
+			"block": map[string]any{"number": blockNumber},
+			"first": batchSize,
+			"skip":  skip,
 		}
 
-		acmRatio, ok := new(big.Int).SetString(l.AcmRatio, 10)
-		if !ok {
-			return nil, fmt.Errorf("parsing acm ratio %q for loan %s", l.AcmRatio, l.ID)
+		var resp allActiveLoansResponse
+		if err := c.execute(ctx, query, variables, &resp); err != nil {
+			return nil, fmt.Errorf("querying all active loans: %w", err)
 		}
 
-		assetAmount, ok := new(big.Int).SetString(l.Collateral.AssetAmount, 10)
-		if !ok {
-			return nil, fmt.Errorf("parsing asset amount %q for loan %s", l.Collateral.AssetAmount, l.ID)
-		}
-
-		assetValueUSD, ok := new(big.Int).SetString(l.Collateral.AssetValueUSD, 10)
-		if !ok {
-			return nil, fmt.Errorf("parsing asset value usd %q for loan %s", l.Collateral.AssetValueUSD, l.ID)
-		}
-
-		var liquidationLevel *big.Int
-		if l.Collateral.LiquidationLevel != "" {
-			liquidationLevel, ok = new(big.Int).SetString(l.Collateral.LiquidationLevel, 10)
+		for _, l := range resp.Data.OpenTermLoans {
+			principalOwed, ok := new(big.Int).SetString(l.PrincipalOwed, 10)
 			if !ok {
-				return nil, fmt.Errorf("parsing liquidation level %q for loan %s", l.Collateral.LiquidationLevel, l.ID)
+				return nil, fmt.Errorf("parsing principal owed %q for loan %s", l.PrincipalOwed, l.ID)
 			}
+
+			acmRatio, ok := new(big.Int).SetString(l.AcmRatio, 10)
+			if !ok {
+				return nil, fmt.Errorf("parsing acm ratio %q for loan %s", l.AcmRatio, l.ID)
+			}
+
+			assetAmount, ok := new(big.Int).SetString(l.Collateral.AssetAmount, 10)
+			if !ok {
+				return nil, fmt.Errorf("parsing asset amount %q for loan %s", l.Collateral.AssetAmount, l.ID)
+			}
+
+			assetValueUSD, ok := new(big.Int).SetString(l.Collateral.AssetValueUSD, 10)
+			if !ok {
+				return nil, fmt.Errorf("parsing asset value usd %q for loan %s", l.Collateral.AssetValueUSD, l.ID)
+			}
+
+			var liquidationLevel *big.Int
+			if l.Collateral.LiquidationLevel != "" {
+				liquidationLevel, ok = new(big.Int).SetString(l.Collateral.LiquidationLevel, 10)
+				if !ok {
+					return nil, fmt.Errorf("parsing liquidation level %q for loan %s", l.Collateral.LiquidationLevel, l.ID)
+				}
+			}
+
+			allLoans = append(allLoans, outbound.MapleActiveLoan{
+				LoanID:        common.HexToAddress(l.ID),
+				Borrower:      common.HexToAddress(l.Borrower.ID),
+				State:         l.State,
+				PrincipalOwed: principalOwed,
+				AcmRatio:      acmRatio,
+				Collateral: outbound.MapleLoanCollateral{
+					Asset:            l.Collateral.Asset,
+					AssetAmount:      assetAmount,
+					AssetValueUSD:    assetValueUSD,
+					Decimals:         l.Collateral.Decimals,
+					State:            l.Collateral.State,
+					Custodian:        l.Collateral.Custodian,
+					LiquidationLevel: liquidationLevel,
+				},
+				PoolAddress:       common.HexToAddress(l.FundingPool.ID),
+				PoolName:          l.FundingPool.Name,
+				PoolAssetSymbol:   l.FundingPool.Asset.Symbol,
+				PoolAssetDecimals: l.FundingPool.Asset.Decimals,
+			})
 		}
 
-		loans = append(loans, outbound.MapleActiveLoan{
-			LoanID:        common.HexToAddress(l.ID),
-			Borrower:      common.HexToAddress(l.Borrower.ID),
-			State:         l.State,
-			PrincipalOwed: principalOwed,
-			AcmRatio:      acmRatio,
-			Collateral: outbound.MapleLoanCollateral{
-				Asset:            l.Collateral.Asset,
-				AssetAmount:      assetAmount,
-				AssetValueUSD:    assetValueUSD,
-				Decimals:         l.Collateral.Decimals,
-				State:            l.Collateral.State,
-				Custodian:        l.Collateral.Custodian,
-				LiquidationLevel: liquidationLevel,
-			},
-			PoolAddress:       common.HexToAddress(l.FundingPool.ID),
-			PoolName:          l.FundingPool.Name,
-			PoolAssetSymbol:   l.FundingPool.Asset.Symbol,
-			PoolAssetDecimals: l.FundingPool.Asset.Decimals,
-		})
+		if len(resp.Data.OpenTermLoans) < batchSize {
+			break
+		}
 	}
 
-	return loans, nil
+	return allLoans, nil
 }
+
+// execute sends a GraphQL request and decodes the response.
 func (c *Client) execute(ctx context.Context, query string, variables map[string]any, result any) error {
 	reqBody := graphqlRequest{
 		Query:     query,
