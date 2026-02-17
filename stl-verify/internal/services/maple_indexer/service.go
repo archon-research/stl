@@ -356,6 +356,7 @@ func (s *Service) resolveUsers(ctx context.Context, addresses []common.Address, 
 				Address:        addr,
 				FirstSeenBlock: blockNumber,
 			})
+
 			if err != nil {
 				return fmt.Errorf("user %s: %w", addr.Hex(), err)
 			}
@@ -363,9 +364,11 @@ func (s *Service) resolveUsers(ctx context.Context, addresses []common.Address, 
 		}
 		return nil
 	})
+
 	if err != nil {
 		return nil, err
 	}
+
 	return userCache, nil
 }
 
