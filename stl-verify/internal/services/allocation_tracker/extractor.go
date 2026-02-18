@@ -7,31 +7,37 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// ERC20 Transfer(address,address,uint256) event signature
 var transferEventTopic = common.HexToHash("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
 
-// TransferExtractor finds ERC20 Transfer events involving known ALM proxy addresses.
+// TransferEvent is a parsed ERC20 Transfer involving a known proxy.
+type TransferEvent struct {
+	TokenAddress common.Address
+	From         common.Address
+	To           common.Address
+	Amount       *big.Int
+	Direction    Direction
+	Star         string
+	ProxyAddress common.Address
+	TxHash       string
+	LogIndex     int
+}
+
 type TransferExtractor struct {
 	proxyLookup map[common.Address]ProxyConfig
 }
 
 func NewTransferExtractor(proxies []ProxyConfig) *TransferExtractor {
-	return &TransferExtractor{
-		proxyLookup: BuildProxyLookup(proxies),
-	}
+	return &TransferExtractor{proxyLookup: BuildProxyLookup(proxies)}
 }
 
-// ExtractFromReceipt scans all logs in a receipt for Transfer events involving a proxy.
-func (e *TransferExtractor) ExtractFromReceipt(receipt TransactionReceipt, chainID int64, blockNumber int64, blockVersion int) []*AllocationEvent {
-	var events []*AllocationEvent
+func (e *TransferExtractor) Extract(receipt TransactionReceipt) []*TransferEvent {
+	var events []*TransferEvent
 
 	for _, log := range receipt.Logs {
 		if len(log.Topics) < 3 {
 			continue
 		}
-
-		topic0 := common.HexToHash(log.Topics[0])
-		if topic0 != transferEventTopic {
+		if common.HexToHash(log.Topics[0]) != transferEventTopic {
 			continue
 		}
 
@@ -46,45 +52,25 @@ func (e *TransferExtractor) ExtractFromReceipt(receipt TransactionReceipt, chain
 		}
 
 		amount := new(big.Int)
-		dataBytes := common.FromHex(log.Data)
-		if len(dataBytes) >= 32 {
-			amount.SetBytes(dataBytes[:32])
+		if data := common.FromHex(log.Data); len(data) >= 32 {
+			amount.SetBytes(data[:32])
 		}
 
-		tokenAddress := common.HexToAddress(log.Address)
-		logIndex := parseHexInt(log.LogIndex)
+		token := common.HexToAddress(log.Address)
+		idx := parseHexInt(log.LogIndex)
 
 		if fromIsProxy {
-			events = append(events, &AllocationEvent{
-				ChainID:      chainID,
-				BlockNumber:  blockNumber,
-				BlockVersion: blockVersion,
-				TxHash:       receipt.TransactionHash,
-				LogIndex:     logIndex,
-				TokenAddress: tokenAddress,
-				From:         from,
-				To:           to,
-				Amount:       new(big.Int).Set(amount),
-				Direction:    DirectionOut,
-				Star:         proxyFrom.Star,
-				ProxyAddress: proxyFrom.Address,
+			events = append(events, &TransferEvent{
+				TokenAddress: token, From: from, To: to, Amount: new(big.Int).Set(amount),
+				Direction: DirectionOut, Star: proxyFrom.Star, ProxyAddress: proxyFrom.Address,
+				TxHash: receipt.TransactionHash, LogIndex: idx,
 			})
 		}
-
 		if toIsProxy {
-			events = append(events, &AllocationEvent{
-				ChainID:      chainID,
-				BlockNumber:  blockNumber,
-				BlockVersion: blockVersion,
-				TxHash:       receipt.TransactionHash,
-				LogIndex:     logIndex,
-				TokenAddress: tokenAddress,
-				From:         from,
-				To:           to,
-				Amount:       new(big.Int).Set(amount),
-				Direction:    DirectionIn,
-				Star:         proxyTo.Star,
-				ProxyAddress: proxyTo.Address,
+			events = append(events, &TransferEvent{
+				TokenAddress: token, From: from, To: to, Amount: new(big.Int).Set(amount),
+				Direction: DirectionIn, Star: proxyTo.Star, ProxyAddress: proxyTo.Address,
+				TxHash: receipt.TransactionHash, LogIndex: idx,
 			})
 		}
 	}
@@ -97,7 +83,7 @@ func parseHexInt(s string) int {
 	if s == "" {
 		return 0
 	}
-	val := new(big.Int)
-	val.SetString(s, 16)
-	return int(val.Int64())
+	v := new(big.Int)
+	v.SetString(s, 16)
+	return int(v.Int64())
 }

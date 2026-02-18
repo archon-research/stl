@@ -16,11 +16,14 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
-	"github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
+	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
 )
 
 func main() {
@@ -28,7 +31,8 @@ func main() {
 	queueURL := flag.String("queue", "", "SQS Queue URL")
 	redisAddr := flag.String("redis", "", "Redis address")
 	maxMessages := flag.Int("max", 10, "Max messages per poll")
-	waitTime := flag.Int("wait", 20, "Wait time in seconds (long polling)")
+	waitTime := flag.Int("wait", 20, "Wait time seconds")
+	sweepMinutes := flag.Int("sweep", 5, "Sweep interval minutes")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -39,31 +43,26 @@ func main() {
 	if *queueURL == "" {
 		*queueURL = env.Get("AWS_SQS_QUEUE_URL", "")
 	}
-	if *queueURL == "" {
-		logger.Error("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_URL env var)")
-		os.Exit(1)
-	}
-
 	if *redisAddr == "" {
 		*redisAddr = env.Get("REDIS_ADDR", "")
 	}
+
+	if *queueURL == "" {
+		logger.Error("queue URL required (-queue or AWS_SQS_QUEUE_URL)")
+		os.Exit(1)
+	}
 	if *redisAddr == "" {
-		logger.Error("Redis address not provided (use -redis flag or REDIS_ADDR env var)")
+		logger.Error("redis address required (-redis or REDIS_ADDR)")
 		os.Exit(1)
 	}
 
-	alchemyAPIKey := requireEnv("ALCHEMY_API_KEY", logger)
-	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
-	fullAlchemyURL := fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
-
-	logger.Info("starting allocation tracker",
-		"queue", *queueURL,
-		"redis", *redisAddr)
+	alchemyKey := requireEnv("ALCHEMY_API_KEY", logger)
+	rpcURL := fmt.Sprintf("%s/%s", env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2"), alchemyKey)
 
 	ctx := context.Background()
 
-	// AWS / SQS
-	cfg, err := config.LoadDefaultConfig(ctx,
+	// AWS SQS
+	awsCfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(env.Get("AWS_REGION", "us-east-1")),
 		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
 			return aws.Credentials{
@@ -74,13 +73,13 @@ func main() {
 		})),
 	)
 	if err != nil {
-		logger.Error("failed to load AWS config", "error", err)
+		logger.Error("aws config", "error", err)
 		os.Exit(1)
 	}
 
-	sqsClient := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
-		if endpoint := env.Get("AWS_SQS_ENDPOINT", ""); endpoint != "" {
-			o.BaseEndpoint = aws.String(endpoint)
+	sqsClient := sqs.NewFromConfig(awsCfg, func(o *sqs.Options) {
+		if ep := env.Get("AWS_SQS_ENDPOINT", ""); ep != "" {
+			o.BaseEndpoint = aws.String(ep)
 		}
 	})
 
@@ -88,62 +87,109 @@ func main() {
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     *redisAddr,
 		Password: env.Get("REDIS_PASSWORD", ""),
-		DB:       0,
 	})
 	if err := redisClient.Ping(ctx).Err(); err != nil {
-		logger.Error("failed to connect to Redis", "error", err)
+		logger.Error("redis ping", "error", err)
 		os.Exit(1)
 	}
-	defer func() {
-		if err := redisClient.Close(); err != nil {
-			logger.Warn("failed to close Redis", "error", err)
-		}
-	}()
-	logger.Info("Redis connected", "addr", *redisAddr)
+	defer redisClient.Close()
+	logger.Info("redis connected", "addr", *redisAddr)
 
-	// Ethereum client (for token metadata via multicall)
-	ethClient, err := ethclient.Dial(fullAlchemyURL)
+	// Ethereum multicall
+	ethClient, err := ethclient.Dial(rpcURL)
 	if err != nil {
-		logger.Error("failed to connect to Ethereum node", "error", err)
+		logger.Error("eth dial", "error", err)
 		os.Exit(1)
 	}
-	logger.Info("Ethereum node connected")
-
 	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
-		logger.Error("failed to create multicall client", "error", err)
+		logger.Error("multicall client", "error", err)
 		os.Exit(1)
 	}
 
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
-		logger.Error("failed to load ERC20 ABI", "error", err)
+		logger.Error("erc20 abi", "error", err)
 		os.Exit(1)
 	}
 
-	tokenCache := allocation_tracker.NewTokenCache(mc, erc20ABI, logger)
+	// Build source registry
+	registry := at.NewSourceRegistry(logger)
 
-	// Handler — just log for now, swap in a DB handler later
-	handler := allocation_tracker.NewLogHandler(logger)
-
-	// Service
-	svcConfig := allocation_tracker.Config{
-		QueueURL:        *queueURL,
-		MaxMessages:     int32(*maxMessages),
-		WaitTimeSeconds: int32(*waitTime),
-		Logger:          logger,
+	// 1. Skip sources (existing worker handles these)
+	for _, s := range at.DefaultSkipSources(logger) {
+		registry.Register(s)
 	}
 
-	service, err := allocation_tracker.NewService(
-		svcConfig,
+	// 2. BalanceOf source (erc20, buidl, securitize, superstate, curve, proxy)
+	registry.Register(at.NewBalanceOfSource(mc, erc20ABI, logger))
+
+	// 3. ERC4626 source (morpho, maple, fluid, arkis, steakhouse, sUSDS, sUSDe)
+	erc4626, err := at.NewERC4626Source(mc, logger)
+	if err != nil {
+		logger.Error("erc4626 source", "error", err)
+		os.Exit(1)
+	}
+	registry.Register(erc4626)
+
+	// 4. Stub sources (not yet implemented)
+	for _, s := range at.DefaultStubSources(logger) {
+		registry.Register(s)
+	}
+
+	// Service
+	entries := at.DefaultTokenEntries()
+
+	// Handler setup
+	var handler at.AllocationHandler
+
+	dbURL := env.Get("DATABASE_URL", "")
+	if dbURL != "" {
+		// Postgres
+		dbPool, err := pgxpool.New(ctx, dbURL)
+		if err != nil {
+			logger.Error("db connect", "error", err)
+			os.Exit(1)
+		}
+		defer dbPool.Close()
+		if err := dbPool.Ping(ctx); err != nil {
+			logger.Error("db ping", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("postgres connected")
+
+		tokenRepo, err := postgres.NewTokenRepository(dbPool, logger, 1)
+		if err != nil {
+			logger.Error("token repo", "error", err)
+			os.Exit(1)
+		}
+		allocRepo := postgres.NewAllocationRepository(dbPool, tokenRepo, logger)
+		pgHandler := at.NewPostgresHandler(allocRepo, mc, erc20ABI, logger)
+
+		handler = at.NewMultiHandler(at.NewLogHandler(logger), pgHandler)
+	} else {
+		logger.Warn("DATABASE_URL not set — running log-only mode")
+		handler = at.NewLogHandler(logger)
+	}
+
+	svc, err := at.NewService(
+		at.Config{
+			QueueURL:        *queueURL,
+			MaxMessages:     int32(*maxMessages),
+			WaitTimeSeconds: int32(*waitTime),
+			SweepInterval:   time.Duration(*sweepMinutes) * time.Minute,
+			Logger:          logger,
+		},
 		sqsClient,
 		redisClient,
-		tokenCache,
+		ethClient,
+		registry,
+		entries,
 		handler,
-		allocation_tracker.DefaultProxies(),
+		at.DefaultProxies(),
 	)
 	if err != nil {
-		logger.Error("failed to create service", "error", err)
+		logger.Error("create service", "error", err)
 		os.Exit(1)
 	}
 
@@ -154,42 +200,39 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	if err := service.Start(ctx); err != nil {
-		logger.Error("failed to start service", "error", err)
+	if err := svc.Start(ctx); err != nil {
+		logger.Error("start", "error", err)
 		os.Exit(1)
 	}
 
-	logger.Info("allocation tracker running, waiting for messages...")
-
+	logger.Info("running", "entries", len(entries), "sweep", fmt.Sprintf("%dm", *sweepMinutes))
 	sig := <-sigChan
-	logger.Info("received signal, shutting down...", "signal", sig)
+	logger.Info("shutting down", "signal", sig)
 	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer shutdownCancel()
 
-	shutdownDone := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
-		defer close(shutdownDone)
-		if err := service.Stop(); err != nil {
-			logger.Error("error stopping service", "error", err)
-		}
+		defer close(done)
+		_ = svc.Stop()
 	}()
 
 	select {
-	case <-shutdownDone:
+	case <-done:
 		logger.Info("shutdown complete")
 	case <-shutdownCtx.Done():
-		logger.Error("shutdown timed out, forcing exit")
+		logger.Error("shutdown timeout")
 		os.Exit(1)
 	}
 }
 
 func requireEnv(key string, logger *slog.Logger) string {
-	value := os.Getenv(key)
-	if value == "" {
-		logger.Error("required environment variable not set", "key", key)
+	v := os.Getenv(key)
+	if v == "" {
+		logger.Error("required env var missing", "key", key)
 		os.Exit(1)
 	}
-	return value
+	return v
 }
