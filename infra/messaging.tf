@@ -10,10 +10,8 @@
 #     │     └── DLQ (ethereum-transformer-dlq.fifo)
 #     ├── SQS FIFO (ethereum-backup.fifo) → Backup capability
 #     │     └── DLQ (ethereum-backup-dlq.fifo)
-#     ├── SQS FIFO (ethereum-oracle-price.fifo) → Oracle price tracking
-#     │     └── DLQ (ethereum-oracle-price-dlq.fifo)
-#     └── SQS FIFO (ethereum-sparklend-position.fifo) → SparkLend position tracking
-#           └── DLQ (ethereum-sparklend-position-dlq.fifo)
+#     └── SQS FIFO (ethereum-oracle-price.fifo) → Oracle price tracking
+#           └── DLQ (ethereum-oracle-price-dlq.fifo)
 
 # -----------------------------------------------------------------------------
 # SNS FIFO Topic - Ethereum Blocks
@@ -307,97 +305,6 @@ resource "aws_sns_topic_subscription" "ethereum_oracle_price" {
 }
 
 # -----------------------------------------------------------------------------
-# SQS FIFO Queue - SparkLend Position Tracker
-# -----------------------------------------------------------------------------
-# Receives block events for SparkLend position tracking
-
-resource "aws_sqs_queue" "ethereum_sparklend_position_dlq" {
-  name                        = "${local.prefix}-ethereum-sparklend-position-dlq.fifo"
-  fifo_queue                  = true
-  content_based_deduplication = true
-
-  # DLQ retention: 14 days for debugging failed messages
-  message_retention_seconds = 1209600
-
-  tags = {
-    Name       = "${local.prefix}-ethereum-sparklend-position-dlq"
-    Blockchain = "ethereum"
-    Service    = "messaging"
-    Type       = "dlq"
-  }
-}
-
-# Allow redrive from sparklend position DLQ back to source queue
-resource "aws_sqs_queue_redrive_allow_policy" "ethereum_sparklend_position_dlq" {
-  queue_url = aws_sqs_queue.ethereum_sparklend_position_dlq.id
-
-  redrive_allow_policy = jsonencode({
-    redrivePermission = "byQueue"
-    sourceQueueArns   = [aws_sqs_queue.ethereum_sparklend_position.arn]
-  })
-}
-
-resource "aws_sqs_queue" "ethereum_sparklend_position" {
-  name                        = "${local.prefix}-ethereum-sparklend-position.fifo"
-  fifo_queue                  = true
-  content_based_deduplication = true
-
-  # Visibility timeout: 5 minutes for processing
-  visibility_timeout_seconds = 300
-
-  # Message retention: 14 days (max allowed by SQS)
-  message_retention_seconds = 1209600
-
-  # Dead letter queue configuration
-  redrive_policy = jsonencode({
-    deadLetterTargetArn = aws_sqs_queue.ethereum_sparklend_position_dlq.arn
-    maxReceiveCount     = 3
-  })
-
-  tags = {
-    Name       = "${local.prefix}-ethereum-sparklend-position"
-    Blockchain = "ethereum"
-    Service    = "messaging"
-    Consumer   = "sparklend-position"
-  }
-}
-
-# Allow SNS to send messages to sparklend position queue
-data "aws_iam_policy_document" "ethereum_sparklend_position_queue" {
-  statement {
-    sid    = "AllowSNSPublish"
-    effect = "Allow"
-
-    principals {
-      type        = "Service"
-      identifiers = ["sns.amazonaws.com"]
-    }
-
-    actions   = ["sqs:SendMessage"]
-    resources = [aws_sqs_queue.ethereum_sparklend_position.arn]
-
-    condition {
-      test     = "ArnEquals"
-      variable = "aws:SourceArn"
-      values   = [aws_sns_topic.ethereum_blocks.arn]
-    }
-  }
-}
-
-resource "aws_sqs_queue_policy" "ethereum_sparklend_position" {
-  queue_url = aws_sqs_queue.ethereum_sparklend_position.id
-  policy    = data.aws_iam_policy_document.ethereum_sparklend_position_queue.json
-}
-
-# SNS subscription with raw message delivery
-resource "aws_sns_topic_subscription" "ethereum_sparklend_position" {
-  topic_arn            = aws_sns_topic.ethereum_blocks.arn
-  protocol             = "sqs"
-  endpoint             = aws_sqs_queue.ethereum_sparklend_position.arn
-  raw_message_delivery = true
-}
-
-# -----------------------------------------------------------------------------
 # IAM Policy for Publishing to SNS
 # -----------------------------------------------------------------------------
 # Allows Watcher to publish block events
@@ -441,7 +348,6 @@ data "aws_iam_policy_document" "ethereum_sqs_consume" {
       aws_sqs_queue.ethereum_transformer.arn,
       aws_sqs_queue.ethereum_backup.arn,
       aws_sqs_queue.ethereum_oracle_price.arn,
-      aws_sqs_queue.ethereum_sparklend_position.arn,
     ]
   }
 
@@ -459,7 +365,6 @@ data "aws_iam_policy_document" "ethereum_sqs_consume" {
       aws_sqs_queue.ethereum_transformer_dlq.arn,
       aws_sqs_queue.ethereum_backup_dlq.arn,
       aws_sqs_queue.ethereum_oracle_price_dlq.arn,
-      aws_sqs_queue.ethereum_sparklend_position_dlq.arn,
     ]
   }
 }
@@ -522,19 +427,4 @@ output "ethereum_oracle_price_queue_arn" {
 output "ethereum_oracle_price_dlq_url" {
   description = "URL of the Ethereum oracle price dead letter queue"
   value       = aws_sqs_queue.ethereum_oracle_price_dlq.url
-}
-
-output "ethereum_sparklend_position_queue_url" {
-  description = "URL of the Ethereum sparklend position SQS FIFO queue"
-  value       = aws_sqs_queue.ethereum_sparklend_position.url
-}
-
-output "ethereum_sparklend_position_queue_arn" {
-  description = "ARN of the Ethereum sparklend position SQS FIFO queue"
-  value       = aws_sqs_queue.ethereum_sparklend_position.arn
-}
-
-output "ethereum_sparklend_position_dlq_url" {
-  description = "URL of the Ethereum sparklend position dead letter queue"
-  value       = aws_sqs_queue.ethereum_sparklend_position_dlq.url
 }

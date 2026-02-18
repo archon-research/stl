@@ -329,31 +329,3 @@ variable "tailscale_enabled" {
   type        = bool
   default     = false
 }
-
-# -----------------------------------------------------------------------------
-# ECS SparkLend Position Tracker Configuration
-# -----------------------------------------------------------------------------
-
-variable "sparklend_position_tracker_cpu" {
-  description = "CPU units for SparkLend Position Tracker task (256, 512, 1024, 2048, 4096)"
-  type        = number
-  default     = 256
-}
-
-variable "sparklend_position_tracker_memory" {
-  description = "Memory for SparkLend Position Tracker task in MB (512, 1024, 2048, etc.)"
-  type        = number
-  default     = 512
-}
-
-variable "sparklend_position_tracker_desired_count" {
-  description = "Number of SparkLend Position Tracker tasks to run"
-  type        = number
-  default     = 1
-}
-
-variable "sparklend_position_tracker_image_tag" {
-  description = "Docker image tag for SparkLend Position Tracker"
-  type        = string
-  default     = "latest"
-}
