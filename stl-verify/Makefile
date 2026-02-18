@@ -9,6 +9,8 @@
         docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging \
         docker-build-oracle-price-worker docker-push-oracle-price-worker docker-release-oracle-price-worker \
         docker-build-oracle-price-worker-staging docker-push-oracle-price-worker-staging docker-release-oracle-price-worker-staging \
+        docker-build-sparklend-position-tracker docker-push-sparklend-position-tracker docker-release-sparklend-position-tracker \
+        docker-build-sparklend-position-tracker-staging docker-push-sparklend-position-tracker-staging docker-release-sparklend-position-tracker-staging \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
         bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel \
@@ -147,7 +149,8 @@ tools:
 	go install golang.org/x/tools/gopls@latest
 
 # CI target: everything with strict checks
-ci: test-race vet fmt-check tidy-check vulncheck golangci-lint staticcheck
+# Order: fast checks first (fail fast), then expensive checks
+ci: fmt-check tidy-check vet staticcheck golangci-lint vulncheck test-race
 
 # =============================================================================
 # Local Development
@@ -215,6 +218,21 @@ dev-env:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
 		> cmd/oracle-price-worker/.env
+	@printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-sparklend-position.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:6379" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=1" \
+		"LOG_LEVEL=debug" \
+		> cmd/sparklend-position-tracker/.env
 	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
 		{ echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
 	printf '%s\n' \
@@ -548,6 +566,72 @@ docker-release-oracle-price-worker-staging:
 	@$(MAKE) docker-release-oracle-price-worker ENV=sentinelstaging
 
 # =============================================================================
+# Docker Build & Push - SparkLend Position Tracker
+# =============================================================================
+
+# ECR repository URL for sparklend position tracker
+ECR_REPO_SPARKLEND_POSITION_TRACKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-sparklend-position-tracker
+
+# Build Docker image for sparklend position tracker (ARM64 for Fargate Graviton)
+docker-build-sparklend-position-tracker:
+	@echo "==> Building SparkLend Position Tracker Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.sparklend-position-tracker \
+		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest \
+		--load .
+
+# Push sparklend position tracker Docker image to ECR
+docker-push-sparklend-position-tracker: ecr-login
+	@echo "==> Pushing SparkLend Position Tracker Docker image to ECR..."
+	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest
+
+# Build and push sparklend position tracker in one step (captures tag at start to ensure consistency)
+docker-release-sparklend-position-tracker: ecr-login
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building SparkLend Position Tracker Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.sparklend-position-tracker \
+		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$$TAG \
+		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest \
+		--load . && \
+	echo "==> Pushing SparkLend Position Tracker Docker image to ECR..." && \
+	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$$TAG && \
+	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest && \
+	echo "==> SparkLend Position Tracker Docker image released: $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$$TAG"
+
+# =============================================================================
+# Sentinelstaging SparkLend Position Tracker Docker Shortcuts
+# =============================================================================
+
+docker-build-sparklend-position-tracker-staging:
+	@$(MAKE) docker-build-sparklend-position-tracker ENV=sentinelstaging
+
+docker-push-sparklend-position-tracker-staging:
+	@$(MAKE) docker-push-sparklend-position-tracker ENV=sentinelstaging
+
+docker-release-sparklend-position-tracker-staging:
+	@$(MAKE) docker-release-sparklend-position-tracker ENV=sentinelstaging
+
+# =============================================================================
 # Erigon Node Management (via Tailscale)
 # =============================================================================
 
@@ -638,6 +722,13 @@ build-oracle-worker:
 	mkdir -p dist
 	go build -o dist/oracle-price-worker ./cmd/oracle-price-worker
 	@echo "==> Built: dist/oracle-price-worker"
+
+# Build sparklend-position-tracker binary
+build-sparklend-position-tracker:
+	@echo "==> Building sparklend-position-tracker..."
+	mkdir -p dist
+	go build -o dist/sparklend-position-tracker ./cmd/sparklend-position-tracker
+	@echo "==> Built: dist/sparklend-position-tracker"
 
 # Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
 build-oracle-pricing-backfill-arm64:

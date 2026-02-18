@@ -11,19 +11,45 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
 )
+
+// Build-time variables - can be set via ldflags, otherwise populated from Go's build info
+var (
+	GitCommit string
+	GitBranch string
+	BuildTime string
+)
+
+func init() {
+	// Use Go's built-in build info (Go 1.18+) if ldflags weren't provided
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				if GitCommit == "" {
+					GitCommit = setting.Value
+				}
+			case "vcs.time":
+				if BuildTime == "" {
+					BuildTime = setting.Value
+				}
+			}
+		}
+	}
+}
 
 func main() {
 	queueURL := flag.String("queue", "", "SQS Queue URL")
@@ -59,7 +85,7 @@ func main() {
 	fullAlchemyURL := fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
 
 	if *redisAddr == "" {
-		*redisAddr = requireEnv("REDIS_ADDR", logger)
+		*redisAddr = env.Get("REDIS_ADDR", "")
 	}
 	if *redisAddr == "" {
 		logger.Error("Redis address not provided (use -redis flag or REDIS_ADDR env var)")
@@ -77,26 +103,50 @@ func main() {
 
 	ctx := context.Background()
 
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(env.Get("AWS_REGION", "us-east-1")),
-		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
+	// Configure AWS SDK for LocalStack or production
+	// In production (ECS/Fargate), use the default credential chain which picks up IAM role credentials.
+	// For local development with LocalStack, use static credentials from environment variables.
+	awsRegion := env.Get("AWS_REGION", "us-east-1")
+	opts := []func(*config.LoadOptions) error{
+		config.WithRegion(awsRegion),
+	}
+
+	// Only use static credentials if explicitly set (for LocalStack)
+	// In ECS/Fargate, these won't be set and the SDK will use the IAM role
+	if accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID"); accessKeyID != "" {
+		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+		opts = append(opts, config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
 			return aws.Credentials{
-				AccessKeyID:     env.Get("AWS_ACCESS_KEY_ID", "test"),
-				SecretAccessKey: env.Get("AWS_SECRET_ACCESS_KEY", "test"),
-				Source:          "Static",
+				AccessKeyID:     accessKeyID,
+				SecretAccessKey: secretKey,
+				Source:          "StaticCredentials",
 			}, nil
-		})),
-	)
+		})))
+		logger.Debug("using static AWS credentials from environment")
+	} else {
+		logger.Debug("using default AWS credential chain (IAM role)")
+	}
+
+	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		logger.Error("failed to load AWS config", "error", err)
 		os.Exit(1)
 	}
 
-	sqsClient := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
-		if endpoint := env.Get("AWS_SQS_ENDPOINT", ""); endpoint != "" {
-			o.BaseEndpoint = aws.String(endpoint)
+	sqsConsumer, err := sqsAdapter.NewConsumer(cfg, sqsAdapter.Config{
+		QueueURL:        *queueURL,
+		WaitTimeSeconds: int32(*waitTime),
+		BaseEndpoint:    env.Get("AWS_SQS_ENDPOINT", ""),
+	}, logger)
+	if err != nil {
+		logger.Error("failed to create SQS consumer", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := sqsConsumer.Close(); err != nil {
+			logger.Warn("failed to close SQS consumer", "error", err)
 		}
-	})
+	}()
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     *redisAddr,
@@ -162,15 +212,13 @@ func main() {
 	eventRepo := postgres.NewEventRepository(logger)
 
 	processorConfig := sparklend_position_tracker.Config{
-		QueueURL:        *queueURL,
-		MaxMessages:     int32(*maxMessages),
-		WaitTimeSeconds: int32(*waitTime),
-		Logger:          logger,
+		MaxMessages: *maxMessages,
+		Logger:      logger,
 	}
 
 	processor, err := sparklend_position_tracker.NewService(
 		processorConfig,
-		sqsClient,
+		sqsConsumer,
 		redisClient,
 		ethClient,
 		txManager,

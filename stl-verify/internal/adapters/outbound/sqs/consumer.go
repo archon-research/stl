@@ -29,12 +29,22 @@ type Config struct {
 	// WaitTimeSeconds is how long to wait for messages (long polling).
 	// Max is 20 seconds.
 	WaitTimeSeconds int32
+
+	// VisibilityTimeout is how long a message is hidden from other consumers
+	// after being received. Should exceed the maximum expected processing time.
+	// Defaults to 30 seconds.
+	VisibilityTimeout int32
+
+	// BaseEndpoint is an optional override for the SQS endpoint.
+	// Used for local development with LocalStack or similar.
+	BaseEndpoint string
 }
 
 // ConfigDefaults returns sensible defaults for SQS consumer configuration.
 func ConfigDefaults() Config {
 	return Config{
-		WaitTimeSeconds: 20,
+		WaitTimeSeconds:   20,
+		VisibilityTimeout: 30,
 	}
 }
 
@@ -67,9 +77,21 @@ func NewConsumerWithOptions(cfg aws.Config, sqsConfig Config, logger *slog.Logge
 	if sqsConfig.WaitTimeSeconds == 0 {
 		sqsConfig.WaitTimeSeconds = defaults.WaitTimeSeconds
 	}
+	if sqsConfig.VisibilityTimeout == 0 {
+		sqsConfig.VisibilityTimeout = defaults.VisibilityTimeout
+	}
+
+	// Build option functions with BaseEndpoint override if provided
+	finalOptFns := optFns
+	if sqsConfig.BaseEndpoint != "" {
+		endpointOptFn := func(o *sqs.Options) {
+			o.BaseEndpoint = aws.String(sqsConfig.BaseEndpoint)
+		}
+		finalOptFns = append([]func(*sqs.Options){endpointOptFn}, optFns...)
+	}
 
 	return &Consumer{
-		client:   sqs.NewFromConfig(cfg, optFns...),
+		client:   sqs.NewFromConfig(cfg, finalOptFns...),
 		queueURL: sqsConfig.QueueURL,
 		config:   sqsConfig,
 		logger:   logger,
@@ -89,6 +111,7 @@ func (c *Consumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outb
 		QueueUrl:            aws.String(c.queueURL),
 		MaxNumberOfMessages: int32(maxMessages),
 		WaitTimeSeconds:     c.config.WaitTimeSeconds,
+		VisibilityTimeout:   c.config.VisibilityTimeout,
 		// Request all message attributes
 		MessageAttributeNames: []string{"All"},
 	})

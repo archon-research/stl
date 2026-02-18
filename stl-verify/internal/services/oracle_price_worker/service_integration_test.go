@@ -48,7 +48,7 @@ func integrationMulticallerBlockDependent(numTokens int) *testutil.MockMulticall
 
 // blockEventMessage creates an outbound.SQSMessage containing a block event.
 func blockEventMessage(blockNumber int64, version int, blockTimestamp int64, receiptHandle string) outbound.SQSMessage {
-	event := blockEvent{
+	event := outbound.BlockEvent{
 		ChainID:        1,
 		BlockNumber:    blockNumber,
 		Version:        version,
