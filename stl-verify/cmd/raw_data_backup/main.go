@@ -20,6 +20,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	rawdatabackup "github.com/archon-research/stl/stl-verify/internal/services/raw_data_backup"
 )
 
@@ -160,7 +161,8 @@ func Main() {
 
 	// Create SQS consumer
 	consumer, err := sqs.NewConsumer(awsCfg, sqs.Config{
-		QueueURL: queueURL,
+		QueueURL:     queueURL,
+		BaseEndpoint: env.Get("AWS_SQS_ENDPOINT", ""),
 	}, logger)
 	if err != nil {
 		logger.Error("failed to create SQS consumer", "error", err)

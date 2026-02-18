@@ -95,6 +95,7 @@ func main() {
 	sqsConsumer, err := sqsAdapter.NewConsumer(cfg, sqsAdapter.Config{
 		QueueURL:        *queueURL,
 		WaitTimeSeconds: int32(*waitTime),
+		BaseEndpoint:    env.Get("AWS_SQS_ENDPOINT", ""),
 	}, logger)
 	if err != nil {
 		logger.Error("failed to create SQS consumer", "error", err)
