@@ -16,11 +16,11 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
 )
@@ -92,11 +92,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	sqsClient := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
-		if endpoint := env.Get("AWS_SQS_ENDPOINT", ""); endpoint != "" {
-			o.BaseEndpoint = aws.String(endpoint)
+	sqsConsumer, err := sqsAdapter.NewConsumer(cfg, sqsAdapter.Config{
+		QueueURL:        *queueURL,
+		WaitTimeSeconds: int32(*waitTime),
+		BaseEndpoint:    env.Get("AWS_SQS_ENDPOINT", ""),
+	}, logger)
+	if err != nil {
+		logger.Error("failed to create SQS consumer", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := sqsConsumer.Close(); err != nil {
+			logger.Warn("failed to close SQS consumer", "error", err)
 		}
-	})
+	}()
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     *redisAddr,
@@ -162,15 +171,13 @@ func main() {
 	eventRepo := postgres.NewEventRepository(logger)
 
 	processorConfig := sparklend_position_tracker.Config{
-		QueueURL:        *queueURL,
-		MaxMessages:     int32(*maxMessages),
-		WaitTimeSeconds: int32(*waitTime),
-		Logger:          logger,
+		MaxMessages: *maxMessages,
+		Logger:      logger,
 	}
 
 	processor, err := sparklend_position_tracker.NewService(
 		processorConfig,
-		sqsClient,
+		sqsConsumer,
 		redisClient,
 		ethClient,
 		txManager,
