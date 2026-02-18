@@ -1,4 +1,3 @@
-// stl-verify/internal/services/shared/sqsutil/process_loop_test.go
 package sqsutil
 
 import (

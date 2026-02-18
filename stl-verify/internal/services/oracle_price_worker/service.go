@@ -14,11 +14,11 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/shared/sqsutil"
 )
 
 // Config holds configuration for the oracle price worker.

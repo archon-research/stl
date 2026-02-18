@@ -1,4 +1,4 @@
-// stl-verify/internal/services/shared/sqsutil/process_loop.go
+// Package sqsutil provides shared utilities for SQS message processing.
 package sqsutil
 
 import (
