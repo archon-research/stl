@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -24,6 +25,31 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
 )
+
+// Build-time variables - can be set via ldflags, otherwise populated from Go's build info
+var (
+	GitCommit string
+	GitBranch string
+	BuildTime string
+)
+
+func init() {
+	// Use Go's built-in build info (Go 1.18+) if ldflags weren't provided
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				if GitCommit == "" {
+					GitCommit = setting.Value
+				}
+			case "vcs.time":
+				if BuildTime == "" {
+					BuildTime = setting.Value
+				}
+			}
+		}
+	}
+}
 
 func main() {
 	queueURL := flag.String("queue", "", "SQS Queue URL")
