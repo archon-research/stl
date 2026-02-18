@@ -127,6 +127,9 @@ make ci
 ```bash
 make tools
 ```
+### Add a new service to Infrastructure
+
+When you add a new service (e.g., a new worker or cmd entrypoint) that needs to run in AWS, provision the required AWS resources in the [Infrastructure repo](https://github.com/archon-research/infrastructure).
 
 ### View Traces
 
