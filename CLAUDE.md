@@ -105,9 +105,6 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 - **Testing**: Table-driven tests, mock outbound ports for unit tests
 - **Libraries**: Use the standard library as much as possible
 
-## Infrastructure 
-Infrastructure code lives in a separate repository. See that repo's `docs/` for Terraform structure and deployment workflows.
-
 ## Do NOT
 
 - Import adapters in domain or application layer
