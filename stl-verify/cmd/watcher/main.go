@@ -242,7 +242,7 @@ func main() {
 		Addr:      redisAddr,
 		Password:  env.Get("REDIS_PASSWORD", ""),
 		DB:        0,
-		TTL:       5 * 24 * time.Hour, // 5 days
+		TTL:       2 * 24 * time.Hour, // 2 days - allows retry of failed backups
 		KeyPrefix: "stl",
 	}, logger)
 	if err != nil {
