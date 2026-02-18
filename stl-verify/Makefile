@@ -12,6 +12,7 @@
         docker-build-oracle-price-worker-staging docker-push-oracle-price-worker-staging docker-release-oracle-price-worker-staging \
         docker-build-sparklend-position-tracker docker-push-sparklend-position-tracker docker-release-sparklend-position-tracker \
         docker-build-sparklend-position-tracker-staging docker-push-sparklend-position-tracker-staging docker-release-sparklend-position-tracker-staging \
+        docker-release-all docker-release-all-staging \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
         bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel \
@@ -686,6 +687,45 @@ ecs-deploy-watcher:
 	@echo "==> Forcing new deployment of watcher service..."
 	aws ecs update-service --cluster stl-$(ENV)-cluster --service stl-$(ENV)-watcher --force-new-deployment --region $(AWS_REGION)
 	@echo "==> Deployment initiated. Monitor with: aws ecs describe-services --cluster stl-$(ENV)-cluster --services stl-$(ENV)-watcher --region $(AWS_REGION)"
+
+# =============================================================================
+# Sentinelstaging Watcher Docker Shortcuts
+# =============================================================================
+
+docker-build-watcher-staging:
+	@$(MAKE) docker-build ENV=sentinelstaging
+
+docker-push-watcher-staging:
+	@$(MAKE) docker-push ENV=sentinelstaging
+
+docker-release-watcher-staging:
+	@$(MAKE) docker-release ENV=sentinelstaging
+
+ecs-deploy-watcher-staging:
+	@$(MAKE) ecs-deploy-watcher ENV=sentinelstaging
+
+# =============================================================================
+# Combined Docker Release (All Services)
+# =============================================================================
+
+# Release all services for a given environment
+# Usage: make docker-release-all ENV=sentineldev|sentinelstaging|sentinelprod
+docker-release-all: ecr-login
+	@echo "==> Releasing all Docker images for ENV=$(ENV)..."
+	@echo ""
+	@$(MAKE) docker-release ENV=$(ENV)
+	@echo ""
+	@$(MAKE) docker-release-backup ENV=$(ENV)
+	@echo ""
+	@$(MAKE) docker-release-oracle-price-worker ENV=$(ENV)
+	@echo ""
+	@$(MAKE) docker-release-sparklend-position-tracker ENV=$(ENV)
+	@echo ""
+	@echo "==> All Docker images released for ENV=$(ENV)"
+
+# Shortcut: Release all services for sentinelstaging
+docker-release-all-staging:
+	@$(MAKE) docker-release-all ENV=sentinelstaging
 
 # =============================================================================
 # Bastion Host Management
