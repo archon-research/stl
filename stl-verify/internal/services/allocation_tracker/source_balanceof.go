@@ -30,7 +30,6 @@ func NewBalanceOfSource(multicaller outbound.Multicaller, erc20ABI *abi.ABI, log
 			"buidl":      true,
 			"securitize": true,
 			"superstate": true,
-			"curve":      true,
 			"proxy":      true,
 		},
 	}

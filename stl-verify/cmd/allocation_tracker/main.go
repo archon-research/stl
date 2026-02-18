@@ -121,7 +121,7 @@ func main() {
 		registry.Register(s)
 	}
 
-	// 2. BalanceOf source (erc20, buidl, securitize, superstate, curve, proxy)
+	// 2. BalanceOf source (erc20, buidl, securitize, superstate, proxy)
 	registry.Register(at.NewBalanceOfSource(mc, erc20ABI, logger))
 
 	// 3. ERC4626 source (morpho, maple, fluid, arkis, steakhouse, sUSDS, sUSDe)
@@ -132,7 +132,15 @@ func main() {
 	}
 	registry.Register(erc4626)
 
-	// 4. Stub sources (not yet implemented)
+	// 4. Curve source (LP pools → calc_withdraw_one_coin)
+	curve, err := at.NewCurveSource(mc, logger)
+	if err != nil {
+		logger.Error("curve source", "error", err)
+		os.Exit(1)
+	}
+	registry.Register(curve)
+
+	// 5. Stub sources (not yet implemented)
 	for _, s := range at.DefaultStubSources(logger) {
 		registry.Register(s)
 	}
