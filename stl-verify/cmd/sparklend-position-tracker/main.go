@@ -85,7 +85,7 @@ func main() {
 	fullAlchemyURL := fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
 
 	if *redisAddr == "" {
-		*redisAddr = requireEnv("REDIS_ADDR", logger)
+		*redisAddr = env.Get("REDIS_ADDR", "")
 	}
 	if *redisAddr == "" {
 		logger.Error("Redis address not provided (use -redis flag or REDIS_ADDR env var)")
@@ -103,16 +103,31 @@ func main() {
 
 	ctx := context.Background()
 
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(env.Get("AWS_REGION", "us-east-1")),
-		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
+	// Configure AWS SDK for LocalStack or production
+	// In production (ECS/Fargate), use the default credential chain which picks up IAM role credentials.
+	// For local development with LocalStack, use static credentials from environment variables.
+	awsRegion := env.Get("AWS_REGION", "us-east-1")
+	opts := []func(*config.LoadOptions) error{
+		config.WithRegion(awsRegion),
+	}
+
+	// Only use static credentials if explicitly set (for LocalStack)
+	// In ECS/Fargate, these won't be set and the SDK will use the IAM role
+	if accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID"); accessKeyID != "" {
+		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+		opts = append(opts, config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
 			return aws.Credentials{
-				AccessKeyID:     env.Get("AWS_ACCESS_KEY_ID", "test"),
-				SecretAccessKey: env.Get("AWS_SECRET_ACCESS_KEY", "test"),
-				Source:          "Static",
+				AccessKeyID:     accessKeyID,
+				SecretAccessKey: secretKey,
+				Source:          "StaticCredentials",
 			}, nil
-		})),
-	)
+		})))
+		logger.Debug("using static AWS credentials from environment")
+	} else {
+		logger.Debug("using default AWS credential chain (IAM role)")
+	}
+
+	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		logger.Error("failed to load AWS config", "error", err)
 		os.Exit(1)
