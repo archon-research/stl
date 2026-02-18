@@ -29,5 +29,5 @@ GRANT SELECT ON allocation_position TO stl_readonly;
 GRANT SELECT, INSERT, UPDATE, DELETE ON allocation_position TO stl_readwrite;
 GRANT USAGE, SELECT ON SEQUENCE allocation_position_id_seq TO stl_readwrite;
 
-INSERT INTO migrations (filename) VALUES ('20260218_120000_create_allocation_position.sql')
+INSERT INTO migrations (filename) VALUES ('20260216_120000_create_allocation_position.sql')
 ON CONFLICT (filename) DO NOTHING;
