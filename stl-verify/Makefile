@@ -5,6 +5,7 @@
         dev-up dev-env dev-down dev-ips generate-er \
         preflight tf-bootstrap tf-destroy-bootstrap tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check check-tofu \
         ecr-login docker-build docker-push docker-release \
+        docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
         docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging \
@@ -688,18 +689,28 @@ ecs-deploy-watcher:
 	aws ecs update-service --cluster stl-$(ENV)-cluster --service stl-$(ENV)-watcher --force-new-deployment --region $(AWS_REGION)
 	@echo "==> Deployment initiated. Monitor with: aws ecs describe-services --cluster stl-$(ENV)-cluster --services stl-$(ENV)-watcher --region $(AWS_REGION)"
 
+# Named aliases for consistency with other service targets
+docker-build-watcher:
+	@$(MAKE) docker-build
+
+docker-push-watcher:
+	@$(MAKE) docker-push
+
+docker-release-watcher:
+	@$(MAKE) docker-release
+
 # =============================================================================
 # Sentinelstaging Watcher Docker Shortcuts
 # =============================================================================
 
 docker-build-watcher-staging:
-	@$(MAKE) docker-build ENV=sentinelstaging
+	@$(MAKE) docker-build-watcher ENV=sentinelstaging
 
 docker-push-watcher-staging:
-	@$(MAKE) docker-push ENV=sentinelstaging
+	@$(MAKE) docker-push-watcher ENV=sentinelstaging
 
 docker-release-watcher-staging:
-	@$(MAKE) docker-release ENV=sentinelstaging
+	@$(MAKE) docker-release-watcher ENV=sentinelstaging
 
 ecs-deploy-watcher-staging:
 	@$(MAKE) ecs-deploy-watcher ENV=sentinelstaging
