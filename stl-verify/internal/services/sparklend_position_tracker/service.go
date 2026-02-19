@@ -285,6 +285,13 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 func (s *Service) processReceipt(ctx context.Context, receipt TransactionReceipt, chainID, blockNumber int64, blockVersion int) error {
 	var errs []error
 	for _, log := range receipt.Logs {
+		
+		// Only process logs from known protocol addresses
+		protocolAddress := common.HexToAddress(log.Address)
+		if !blockchain.IsKnownProtocol(protocolAddress) {
+			continue
+		}
+
 		if s.isPositionEvent(log) {
 			if err := s.processPositionEventLog(ctx, log, receipt.TransactionHash, chainID, blockNumber, blockVersion); err != nil {
 				s.logger.Error("failed to process position event", "error", err, "tx", receipt.TransactionHash)
@@ -325,12 +332,12 @@ func (s *Service) processPositionEventLog(ctx context.Context, log Log, txHash s
 			"duration", time.Since(start))
 	}()
 
+	protocolAddress := common.HexToAddress(log.Address)
+
 	eventData, err := s.eventExtractor.ExtractEventData(log)
 	if err != nil {
 		return fmt.Errorf("failed to extract event data: %w", err)
 	}
-
-	protocolAddress := common.HexToAddress(log.Address)
 
 	s.logger.Info("Position event detected",
 		"event_type", eventData.EventType,
@@ -407,12 +414,12 @@ func (s *Service) processReserveEventLog(ctx context.Context, log Log, txHash st
 			"duration", time.Since(start))
 	}()
 
+	protocolAddress := common.HexToAddress(log.Address)
+
 	reserveEventData, err := s.eventExtractor.ExtractReserveEventData(log)
 	if err != nil {
 		return fmt.Errorf("failed to extract reserve event data: %w", err)
 	}
-
-	protocolAddress := common.HexToAddress(log.Address)
 
 	s.logger.Info("ReserveDataUpdated event detected",
 		"reserve", reserveEventData.Reserve.Hex(),
