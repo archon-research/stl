@@ -287,6 +287,33 @@ query GlobalSyrupStats {
 
 ### Position Backing (Collateral Composition)
 
+There are two ways to query collateral data:
+
+1. **Pool Collateral** - Aggregate collateral data at the pool level
+2. **Individual Loans** - Detailed collateral data for each active loan (see [Individual Loans section](#individual-loans))
+
+---
+
+#### Pool Collateral
+
+**⚠️ DATA QUALITY WARNING:**
+
+**The `poolCollaterals` data has a known discrepancy between breakdown and totals:**
+
+- ✅ The `assetValueUsd` values appear to be **accurate** and match the collateral breakdown shown on Maple's frontend
+- ✅ The **sum of `assetValueUsd` values** appear to represent the true total collateral backing
+- ❌ However, the `collateralValue` field appears to be an **underestimate** for unknown reasons
+- ❌ Maple's frontend displays `collateralValue` as the total, which **does not match** the sum of the breakdown values
+
+**Summary:** There is an internal inconsistency where the collateral breakdown (asset-by-asset) is accurate, but the aggregate `collateralValue` field underreports the total. 
+
+**Recommendation:** 
+1. Use the `assetValueUsd` values and sum them for accurate total collateral
+2. Further research is needed to understand why `collateralValue` is lower
+3. See the **Individual Loans** section below for additional per-loan collateral details
+
+---
+
 **GraphQL Query:**
 
 ```graphql
@@ -298,7 +325,7 @@ query PoolCollateralData($poolAddress: ID!) {
         asset              # e.g., "BTC", "ETH", "weETH", "HYPE"
         assetAmount        # Total collateral amount (integer string)
         assetDecimals      # Decimals for assetAmount
-        assetValueUsd      # USD value (integer, 6 decimals)
+        assetValueUsd      # Total USD value of this asset (integer, 6 decimals)
         addresses          # Collateral holder addresses
       }
     }
@@ -361,6 +388,160 @@ const hypePercent = (hypeValueUsd / totalCollateralUsd) * 100; // 10%
 ```
 
 **Key Point:** All SyrupUSDC holders have the **same backing composition** - it's determined by the pool's total collateral, not individual user positions.
+
+---
+
+#### Individual Loans
+
+**⚠️ IMPORTANT: External vs. Internal Loans**
+
+Individual loans include both:
+1. **External loans** - Loans made to external parties with traditional collateral backing
+2. **Internal loans** - Loans made internally to Maple for strategies and positions (identified by `loanMeta.type` = `"amm"` or `"strategy"`)
+
+On Maple's frontend, they explicitly report collateral backing for **external parties' collateral only**. If following this methodology, internal Maple loan collateral should be filtered out. 
+
+**Note:** More research is needed to determine whether the backing for Syrup pools is truly isolated from the collateral backing for internal loans. Additionally, internal Maple strategies called **`skyStrategies`** may also need to be fetched if it is determined they are backing the pools (see [Sky Strategies section](#sky-strategies) below).
+
+---
+
+For more granular collateral data, you can query individual active loans and their collateral backing.
+
+**GraphQL Query:**
+
+```graphql
+query GetAllActiveLoans($block: Block_height!, $first: Int!, $skip: Int!) {
+  openTermLoans(block: $block, first: $first, skip: $skip, where: { state: Active }) {
+    id
+    borrower { id }
+    state
+    principalOwed
+    acmRatio
+    collateral {
+      asset
+      assetAmount
+      assetValueUsd
+      decimals
+      state
+      custodian
+      liquidationLevel
+    }
+    loanMeta {
+      type
+      assetSymbol
+      dexName
+      location
+      walletAddress
+      walletType
+    }
+    fundingPool {
+      id
+      name
+      asset { symbol decimals }
+    }
+  }
+}
+```
+
+**Field Descriptions:**
+
+- `id`: Loan contract address
+- `borrower.id`: Borrower's address
+- `principalOwed`: Outstanding principal (integer string, 6 decimals for USDC/USDT)
+- `acmRatio`: Asset Coverage Margin ratio (6 decimals, e.g., `1445731` = 144.57%)
+- `collateral.assetValueUsd`: **Asset price per unit in USD** (integer, 8 decimals) - multiply by `assetAmount` to get total value
+- `loanMeta`: Metadata about internal Maple positions (see warning below)
+
+**Usage:**
+
+This query supports pagination (required for >1000 loans) and returns all active loans across all pools. You can:
+1. Sum `collateral.assetValueUsd` by asset type to get per-asset collateral totals
+2. Group loans by `fundingPool.id` to analyze collateral backing for a specific pool
+3. Calculate collateralization ratios using `principalOwed` and `collateral.assetValueUsd`
+
+---
+
+**⚠️ IMPORTANT: `loanMeta` and Internal Maple Positions**
+
+When `loanMeta` is **not null** and `loanMeta.type` is either `"amm"` or `"strategy"`, the loan represents an **internal Maple position** (e.g., DeFi strategy, LP position).
+
+**For these loans:**
+- ❌ The `collateral` field **may not accurately represent** the actual backing
+- ⚠️ The real asset is a DeFi position described by `loanMeta`, not the collateral asset shown
+- ⚠️ The underlying asset details may be **incomplete or unavailable**
+
+**Example - Incomplete Asset Information:**
+
+```json
+{
+  "id": "0x5d8839ef73532e035f7f9ad3049be5d4ff170ca9",
+  "acmRatio": "1000000",
+  "collateral": {
+    "asset": "USDC",
+    "assetAmount": "20000000000000",
+    "assetValueUsd": "100000000",
+    "decimals": 6
+  },
+  "principalOwed": "20000000000000",
+  "loanMeta": {
+    "type": "amm",
+    "assetSymbol": null,
+    "dexName": "Aerodrome",
+    "location": null,
+    "walletAddress": "0x2570fAF7C8A0da87d3F123B35cC722EC3fCC3e08",
+    "walletType": "BASE"
+  }
+}
+```
+
+In this case:
+- ✅ We know it's an AMM position on **Base blockchain** (Aerodrome DEX)
+- ✅ We know the **wallet address** holding the position
+- ❌ We **don't know** the underlying LP token contract address
+- ❌ We **don't know** which trading pair it represents
+- ⚠️ The `collateral.asset` ("USDC") may not reflect the actual position
+
+**Recommendation:** When aggregating collateral data, flag loans with `loanMeta.type` in `["amm", "strategy"]` as having potentially incomplete asset information.
+
+---
+
+#### Sky Strategies
+
+In addition to individual loans, Maple has internal **Sky Strategies** that deploy pool assets into DeFi positions. These may also contribute to pool backing and should be investigated if comprehensive collateral tracking is needed.
+
+**GraphQL Query:**
+
+```graphql
+query GetSkyStrategies($poolId: ID!, $first: Int!, $skip: Int!) {
+  skyStrategies(first: $first, skip: $skip, where: { pool: $poolId }) {
+    id
+    pool { id name }
+    state
+    currentlyDeployed
+    depositedAssets
+    withdrawnAssets
+    strategyFeeRate
+    totalFeesCollected
+    version
+  }
+}
+```
+
+**Field Descriptions:**
+
+- `id`: Strategy identifier
+- `pool`: The pool this strategy belongs to
+- `state`: Current state of the strategy
+- `currentlyDeployed`: Amount currently deployed in the strategy (integer string)
+- `depositedAssets`: Total assets deposited into the strategy (integer string)
+- `withdrawnAssets`: Total assets withdrawn from the strategy (integer string)
+- `strategyFeeRate`: Fee rate for the strategy (integer, likely 6 decimals)
+- `totalFeesCollected`: Total fees collected by the strategy (integer string)
+
+**Note:** Further investigation is needed to determine:
+1. Whether Sky Strategies contribute to Syrup pool backing
+2. The underlying assets and positions held by each strategy
+3. How to value these positions for collateral calculations
 
 ### TVL (Total Value Locked)
 
