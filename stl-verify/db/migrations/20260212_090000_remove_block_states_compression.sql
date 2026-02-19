@@ -17,3 +17,7 @@ FROM show_chunks('block_states') c;
 
 -- 3. Disable compression on the hypertable
 ALTER TABLE block_states SET (timescaledb.compress = false);
+
+INSERT INTO migrations (filename)
+VALUES ('20260212_090000_remove_block_states_compression.sql')
+ON CONFLICT (filename) DO NOTHING;

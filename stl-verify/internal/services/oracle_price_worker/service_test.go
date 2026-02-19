@@ -210,7 +210,7 @@ func newOracleMulticallerWithT(t *testing.T, prices []*big.Int) *testutil.MockMu
 }
 
 func makeBlockEventJSON(blockNumber int64, version int, blockTimestamp int64) string {
-	event := blockEvent{
+	event := outbound.BlockEvent{
 		ChainID:        1,
 		BlockNumber:    blockNumber,
 		Version:        version,
@@ -632,7 +632,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		repo.mu.Unlock()
 
 		// Directly call processBlock to test change detection without SQS timing complexity
-		event2 := blockEvent{
+		event2 := outbound.BlockEvent{
 			ChainID:        1,
 			BlockNumber:    18000001,
 			Version:        1,
@@ -1131,7 +1131,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}
 
 		// Directly call processBlock with blockNumber=0 to trigger entity validation error
-		event := blockEvent{
+		event := outbound.BlockEvent{
 			ChainID:        1,
 			BlockNumber:    0, // will fail entity validation: "blockNumber must be positive"
 			Version:        1,
