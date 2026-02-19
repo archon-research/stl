@@ -203,7 +203,7 @@ func testPoolAddress() common.Address {
 }
 
 func makeMapleBlockEventJSON(blockNumber int64, blockTimestamp int64) string {
-	event := blockEvent{
+	event := outbound.BlockEvent{
 		ChainID:        1,
 		BlockNumber:    blockNumber,
 		Version:        1,
@@ -562,7 +562,7 @@ func TestProcessBlock(t *testing.T) {
 		}
 		defer func() { _ = svc.Stop() }()
 
-		event := blockEvent{
+		event := outbound.BlockEvent{
 			ChainID:        1,
 			BlockNumber:    21000000,
 			Version:        2,
@@ -636,7 +636,7 @@ func TestProcessBlock(t *testing.T) {
 		}
 		defer func() { _ = svc.Stop() }()
 
-		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
+		event := outbound.BlockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		if err := svc.processBlock(context.Background(), event); err != nil {
 			t.Fatalf("processBlock: %v", err)
 		}
@@ -676,7 +676,7 @@ func TestProcessBlock(t *testing.T) {
 		}
 		defer func() { _ = svc.Stop() }()
 
-		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
+		event := outbound.BlockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		err = svc.processBlock(context.Background(), event)
 		if err == nil {
 			t.Fatal("expected error")
@@ -713,7 +713,7 @@ func TestProcessBlock(t *testing.T) {
 		}
 		defer func() { _ = svc.Stop() }()
 
-		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
+		event := outbound.BlockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		err = svc.processBlock(context.Background(), event)
 		if err == nil {
 			t.Fatal("expected error")
@@ -750,7 +750,7 @@ func TestProcessBlock(t *testing.T) {
 		}
 		defer func() { _ = svc.Stop() }()
 
-		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
+		event := outbound.BlockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		err = svc.processBlock(context.Background(), event)
 		if err == nil {
 			t.Fatal("expected error")
@@ -784,7 +784,7 @@ func TestProcessBlock(t *testing.T) {
 		}
 		defer func() { _ = svc.Stop() }()
 
-		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
+		event := outbound.BlockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		if err := svc.processBlock(context.Background(), event); err != nil {
 			t.Fatalf("processBlock: %v", err)
 		}
@@ -858,7 +858,7 @@ func TestProcessBlock(t *testing.T) {
 		}
 		defer func() { _ = svc.Stop() }()
 
-		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
+		event := outbound.BlockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		if err := svc.processBlock(context.Background(), event); err != nil {
 			t.Fatalf("processBlock: %v", err)
 		}
@@ -908,7 +908,7 @@ func TestProcessBlock(t *testing.T) {
 		}
 		defer func() { _ = svc.Stop() }()
 
-		event := blockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
+		event := outbound.BlockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		err = svc.processBlock(context.Background(), event)
 		if err == nil {
 			t.Fatal("expected error from user resolution failure")
@@ -944,7 +944,7 @@ func TestProcessBlock(t *testing.T) {
 		}
 		defer func() { _ = svc.Stop() }()
 
-		event := blockEvent{ChainID: 999, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
+		event := outbound.BlockEvent{ChainID: 999, BlockNumber: 21000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
 		err = svc.processBlock(context.Background(), event)
 		if err == nil {
 			t.Fatal("expected error")
