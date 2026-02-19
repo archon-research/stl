@@ -41,6 +41,8 @@ ON CONFLICT (name) DO NOTHING;
 -- Chainlink feed assets (16 feeds)
 -- Feed addresses sourced from https://data.chain.link/feeds/ethereum/mainnet
 -- Requires token table to have matching symbols
+-- Note: ETH/USD feed prices WETH (1:1 wrapped ETH; no native ETH ERC-20 exists).
+-- Similarly, BTC/USD feed prices WBTC below.
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
 SELECT o.id, t.id, true,
        '\x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419'::BYTEA, 8, 'USD'

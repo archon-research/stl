@@ -143,7 +143,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
+	svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
+	svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
+	svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
+	svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
+	svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -580,7 +580,7 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 		Logger:       logger,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo, dummyRPCClient())
+	svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
