@@ -285,7 +285,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 func (s *Service) processReceipt(ctx context.Context, receipt TransactionReceipt, chainID, blockNumber int64, blockVersion int) error {
 	var errs []error
 	for _, log := range receipt.Logs {
-		
+
 		// Only process logs from known protocol addresses
 		protocolAddress := common.HexToAddress(log.Address)
 		if !blockchain.IsKnownProtocol(protocolAddress) {
