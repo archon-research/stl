@@ -5,8 +5,6 @@ package maple_indexer
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -16,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -146,7 +145,12 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 	s.protocolID = protocol.ID
 
-	go s.processLoop()
+	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
+		Consumer:     s.consumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+	}, s.processBlock)
 
 	s.logger.Info("maple indexer started",
 		"protocolID", s.protocolID,
@@ -167,75 +171,7 @@ func (s *Service) Stop() error {
 	return nil
 }
 
-func (s *Service) processLoop() {
-	ticker := time.NewTicker(s.config.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-ticker.C:
-			if err := s.processMessages(s.ctx); err != nil {
-				s.logger.Error("error processing messages", "error", err)
-			}
-		}
-	}
-}
-
-func (s *Service) processMessages(ctx context.Context) error {
-	messages, err := s.consumer.ReceiveMessages(ctx, s.config.MaxMessages)
-	if err != nil {
-		return fmt.Errorf("receiving messages: %w", err)
-	}
-
-	if len(messages) == 0 {
-		return nil
-	}
-
-	s.logger.Info("received messages", "count", len(messages))
-
-	var errs []error
-	for _, msg := range messages {
-		if err := s.processMessage(ctx, msg); err != nil {
-			s.logger.Error("failed to process message",
-				"messageID", msg.MessageID,
-				"error", err)
-			errs = append(errs, err)
-			continue
-		}
-
-		if deleteErr := s.consumer.DeleteMessage(ctx, msg.ReceiptHandle); deleteErr != nil {
-			s.logger.Error("failed to delete message", "error", deleteErr)
-		}
-	}
-
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	return nil
-}
-
-// blockEvent is the SQS message payload for block events.
-type blockEvent struct {
-	ChainID        int64  `json:"chainId"`
-	BlockNumber    int64  `json:"blockNumber"`
-	Version        int    `json:"version"`
-	BlockHash      string `json:"blockHash"`
-	BlockTimestamp int64  `json:"blockTimestamp"`
-	IsReorg        bool   `json:"isReorg,omitempty"`
-}
-
-func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) error {
-	var event blockEvent
-	if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
-		return fmt.Errorf("parsing block event: %w", err)
-	}
-
-	return s.processBlock(ctx, event)
-}
-
-func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
+func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) error {
 	if event.BlockNumber <= 0 {
 		return fmt.Errorf("invalid block number %d", event.BlockNumber)
 	}
