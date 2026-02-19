@@ -56,7 +56,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	alchemyKey := requireEnv("ALCHEMY_API_KEY", logger)
+	alchemyKey := env.Require("ALCHEMY_API_KEY", logger)
 	rpcURL := fmt.Sprintf("%s/%s", env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2"), alchemyKey)
 
 	ctx := context.Background()
@@ -234,13 +234,4 @@ func main() {
 		logger.Error("shutdown timeout")
 		os.Exit(1)
 	}
-}
-
-func requireEnv(key string, logger *slog.Logger) string {
-	v := os.Getenv(key)
-	if v == "" {
-		logger.Error("required env var missing", "key", key)
-		os.Exit(1)
-	}
-	return v
 }
