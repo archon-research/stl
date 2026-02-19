@@ -186,9 +186,9 @@ func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (
 		return svc, nil
 	}
 
-	protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
+	protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
 	if !exists {
-		return nil, fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
+		return nil, fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
 	}
 
 	// Construct outside the lock - this hits the network.
@@ -388,9 +388,9 @@ func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEven
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
+		protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
 		if !exists {
-			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
+			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
 		}
 
 		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
@@ -445,7 +445,7 @@ func (s *Service) processReserveEventLog(ctx context.Context, log sparklend.Log,
 
 // saveReserveDataSnapshot fetches reserve data from chain and persists it.
 func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Address, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int, txHash string) error {
-	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
+	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
 		return fmt.Errorf("failed to get blockchain service: %w", err)
 	}
@@ -567,7 +567,7 @@ func (s *Service) buildReserveDataEntity(
 
 // saveCollateralToggleEvent handles ReserveUsedAsCollateralEnabled/Disabled events
 func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
-	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
+	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
 		return fmt.Errorf("failed to get blockchain service: %w", err)
 	}
@@ -583,7 +583,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 		return fmt.Errorf("token metadata not found for %s", eventData.Reserve.Hex())
 	}
 
-	collaterals, err := s.extractCollateralData(ctx, eventData.User, protocolAddress, blockNumber, eventData.TxHash)
+	collaterals, err := s.extractCollateralData(ctx, eventData.User, protocolAddress, chainID, blockNumber, eventData.TxHash)
 	if err != nil {
 		s.logger.Warn("failed to extract collateral data", "error", err, "tx", eventData.TxHash)
 		collaterals = []CollateralData{}
@@ -610,9 +610,9 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 			return fmt.Errorf("failed to ensure user: %w", err)
 		}
 
-		protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
+		protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
 		if !exists {
-			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
+			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
 		}
 
 		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
@@ -649,7 +649,7 @@ func (s *Service) saveLiquidationEvent(ctx context.Context, eventData *PositionE
 }
 
 func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
-	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
+	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
 		return fmt.Errorf("failed to get blockchain service: %w", err)
 	}
@@ -674,7 +674,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 		return fmt.Errorf("token decimals not found for %s", eventData.Reserve.Hex())
 	}
 
-	collaterals, err := s.extractCollateralData(ctx, eventData.User, protocolAddress, blockNumber, eventData.TxHash)
+	collaterals, err := s.extractCollateralData(ctx, eventData.User, protocolAddress, chainID, blockNumber, eventData.TxHash)
 	if err != nil {
 		s.logger.Warn("failed to extract collateral data", "error", err, "tx", eventData.TxHash, "block", blockNumber)
 		collaterals = []CollateralData{}
@@ -690,9 +690,9 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			return fmt.Errorf("failed to ensure user: %w", err)
 		}
 
-		protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
+		protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
 		if !exists {
-			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
+			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
 		}
 
 		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
@@ -750,9 +750,9 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 		return fmt.Errorf("failed to ensure user: %w", err)
 	}
 
-	protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
+	protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
 	if !exists {
-		return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
+		return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
 	}
 
 	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
@@ -761,7 +761,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	}
 
 	txHashHex := common.BytesToHash(txHash).Hex()
-	collaterals, err := s.extractCollateralData(ctx, user, protocolAddress, blockNumber, txHashHex)
+	collaterals, err := s.extractCollateralData(ctx, user, protocolAddress, chainID, blockNumber, txHashHex)
 	if err != nil {
 		s.logger.Warn("failed to extract collateral data for user", "user", user.Hex(), "error", err)
 		collaterals = []CollateralData{}
@@ -796,8 +796,8 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	return nil
 }
 
-func (s *Service) extractCollateralData(ctx context.Context, user common.Address, protocolAddress common.Address, blockNumber int64, txHash string) ([]CollateralData, error) {
-	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
+func (s *Service) extractCollateralData(ctx context.Context, user common.Address, protocolAddress common.Address, chainID, blockNumber int64, txHash string) ([]CollateralData, error) {
+	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blockchain service: %w", err)
 	}

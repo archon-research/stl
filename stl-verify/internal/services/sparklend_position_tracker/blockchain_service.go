@@ -216,7 +216,16 @@ func (s *blockchainService) getUserReservesData(
 
 	unpacked, err := s.getUserReservesABI.Unpack("getUserReservesData", result)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unpack getUserReservesData result: %w", err)
+		// Fallback: some chains (e.g. Avalanche C-Chain) encode booleans as uint256,
+		// which the strict Go ABI decoder rejects. Try raw decoding.
+		reserves, rawErr := decodeUserReservesRaw(result)
+		if rawErr != nil {
+			return nil, fmt.Errorf("failed to unpack getUserReservesData: %w (raw fallback: %v)", err, rawErr)
+		}
+		s.logger.Debug("used raw decoder for getUserReservesData",
+			"user", user.Hex(),
+			"reserves", len(reserves))
+		return reserves, nil
 	}
 	if len(unpacked) == 0 {
 		return []UserReserveData{}, nil
