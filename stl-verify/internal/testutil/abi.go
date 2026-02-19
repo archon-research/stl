@@ -63,6 +63,20 @@ func PackLatestAnswer(t *testing.T, answer *big.Int) []byte {
 	return data
 }
 
+// PackDecimals ABI-encodes a uint8 decimals value as decimals() return data.
+func PackDecimals(t *testing.T, decimals uint8) []byte {
+	t.Helper()
+	feedABI, err := abis.GetAggregatorV3ABI()
+	if err != nil {
+		t.Fatalf("loading AggregatorV3 ABI: %v", err)
+	}
+	data, err := feedABI.Methods["decimals"].Outputs.Pack(decimals)
+	if err != nil {
+		t.Fatalf("packing decimals: %v", err)
+	}
+	return data
+}
+
 // MulticallResult matches the multicall3 aggregate3 output tuple.
 type MulticallResult struct {
 	Success    bool

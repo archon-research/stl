@@ -283,9 +283,44 @@ func feedOracleRepoSetup() *mockRepo {
 	}
 }
 
+// decimalsPassFactory wraps a feed MulticallFactory so the first multicaller
+// instance (used by decimals validation) returns matching decimals data.
+// Subsequent instances are created by the inner factory.
+func decimalsPassFactory(t *testing.T, decimalsValues []uint8, inner MulticallFactory) MulticallFactory {
+	t.Helper()
+	var mu sync.Mutex
+	first := true
+	return func() (outbound.Multicaller, error) {
+		mu.Lock()
+		isFirst := first
+		first = false
+		mu.Unlock()
+
+		if isFirst {
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					results := make([]outbound.Result, len(calls))
+					for i := range calls {
+						if i < len(decimalsValues) {
+							results[i] = outbound.Result{
+								Success:    true,
+								ReturnData: testutil.PackDecimals(t, decimalsValues[i]),
+							}
+						} else {
+							results[i] = outbound.Result{Success: false}
+						}
+					}
+					return results, nil
+				},
+			}, nil
+		}
+		return inner()
+	}
+}
+
 func feedMulticallFactory(t *testing.T, answers []*big.Int) MulticallFactory {
 	t.Helper()
-	return func() (outbound.Multicaller, error) {
+	inner := func() (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 				results := make([]outbound.Result, len(calls))
@@ -304,11 +339,17 @@ func feedMulticallFactory(t *testing.T, answers []*big.Int) MulticallFactory {
 			},
 		}, nil
 	}
+	// All test feed oracles use decimals=8
+	decimals := make([]uint8, len(answers))
+	for i := range decimals {
+		decimals[i] = 8
+	}
+	return decimalsPassFactory(t, decimals, inner)
 }
 
 func blockDependentFeedPrices(t *testing.T, numFeeds int) MulticallFactory {
 	t.Helper()
-	return func() (outbound.Multicaller, error) {
+	inner := func() (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				bn := blockNumber.Int64()
@@ -327,6 +368,12 @@ func blockDependentFeedPrices(t *testing.T, numFeeds int) MulticallFactory {
 			},
 		}, nil
 	}
+	// For blockDependentFeedPrices, pass matching decimals for all feeds (all use decimals=8)
+	decimals := make([]uint8, numFeeds)
+	for i := range decimals {
+		decimals[i] = 8
+	}
+	return decimalsPassFactory(t, decimals, inner)
 }
 
 // ---------------------------------------------------------------------------
@@ -2196,7 +2243,7 @@ func TestRun_FeedOracle_ChangeDetection(t *testing.T) {
 		},
 	}
 
-	mcFactory := func() (outbound.Multicaller, error) {
+	innerFactory := func() (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				bn := blockNumber.Int64()
@@ -2213,6 +2260,7 @@ func TestRun_FeedOracle_ChangeDetection(t *testing.T) {
 			},
 		}, nil
 	}
+	mcFactory := decimalsPassFactory(t, []uint8{8}, innerFactory)
 
 	svc, err := NewService(Config{
 		Concurrency: 1,
@@ -2268,4 +2316,108 @@ func TestRun_FeedOracle_ChangeDetection(t *testing.T) {
 			t.Errorf("unexpected price stored for block=%d token=%d", unexp.block, unexp.tokenID)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRun_FeedDecimalsValidation — eager validation in backfill
+// ---------------------------------------------------------------------------
+
+func TestRun_FeedDecimalsValidation(t *testing.T) {
+	t.Run("mismatch halts backfill", func(t *testing.T) {
+		repo := feedOracleRepoSetup()
+
+		// Factory returns a multicaller that reports decimals=18 (config says 8)
+		mcFactory := func() (outbound.Multicaller, error) {
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					// decimals() call returns 18
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 18)},
+					}, nil
+				},
+			}, nil
+		}
+
+		svc, err := NewService(
+			Config{Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+			&mockHeaderFetcher{},
+			mcFactory,
+			repo,
+			dummyRPCClient(),
+		)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+
+		err = svc.Run(context.Background(), 100, 105)
+		if err == nil {
+			t.Fatal("expected decimals mismatch error, got nil")
+		}
+		if !strings.Contains(err.Error(), "feed decimals") {
+			t.Errorf("error = %q, expected it to contain 'feed decimals'", err)
+		}
+
+		// No prices should have been stored
+		upserted := repo.getUpserted()
+		if len(upserted) != 0 {
+			t.Errorf("upserted = %d, want 0 (backfill should have halted)", len(upserted))
+		}
+	})
+
+	t.Run("matching decimals proceeds", func(t *testing.T) {
+		repo := feedOracleRepoSetup()
+
+		callCount := 0
+		mcFactory := func() (outbound.Multicaller, error) {
+			callCount++
+			if callCount == 1 {
+				// First multicaller is for decimals validation
+				return &testutil.MockMulticaller{
+					ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						return []outbound.Result{
+							{Success: true, ReturnData: testutil.PackDecimals(t, 8)},
+						}, nil
+					},
+				}, nil
+			}
+			// Subsequent multicaller for worker: returns latestRoundData
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+					bn := blockNumber.Int64()
+					results := make([]outbound.Result, len(calls))
+					for i := range calls {
+						answer := new(big.Int).Mul(big.NewInt(bn*100), big.NewInt(1_000_000))
+						results[i] = outbound.Result{
+							Success: true,
+							ReturnData: testutil.PackLatestRoundData(t,
+								big.NewInt(1), answer, big.NewInt(1000), big.NewInt(1000), big.NewInt(1)),
+						}
+					}
+					return results, nil
+				},
+			}, nil
+		}
+
+		svc, err := NewService(
+			Config{Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+			&mockHeaderFetcher{},
+			mcFactory,
+			repo,
+			dummyRPCClient(),
+		)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+
+		err = svc.Run(context.Background(), 100, 102)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		// Prices should have been stored
+		upserted := repo.getUpserted()
+		if len(upserted) == 0 {
+			t.Error("expected prices to be stored after successful decimals validation")
+		}
+	})
 }

@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
+	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -24,6 +26,7 @@ var quoteCurrencyTokenAddr = map[string]common.Address{
 // OracleUnit holds everything needed to fetch prices for one oracle.
 type OracleUnit struct {
 	Oracle      *entity.Oracle
+	OracleID    int16 // safe int16 conversion of Oracle.ID, validated at load time
 	OracleAddr  common.Address
 	TokenAddrs  []common.Address        // for aave_oracle: ordered list of token addresses
 	TokenIDs    []int64                 // parallel to TokenAddrs (aave) or Feeds (chainlink_feed)
@@ -113,13 +116,35 @@ func LogFeedFailures(results []blockchain.FeedPriceResult, unit *OracleUnit, log
 	}
 }
 
+// safeOracleID converts an int64 oracle ID to int16, returning an error if the
+// value is out of the valid range [1, math.MaxInt16].
+func safeOracleID(id int64) (int16, error) {
+	if id < 1 || id > math.MaxInt16 {
+		return 0, fmt.Errorf("oracle ID %d out of int16 range [1, %d]", id, math.MaxInt16)
+	}
+	return int16(id), nil
+}
+
 func buildOracleUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle) (*OracleUnit, error) {
+	oracleID, err := safeOracleID(oracle.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	var unit *OracleUnit
 	switch oracle.OracleType {
 	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle:
-		return buildFeedUnit(ctx, repo, oracle)
+		unit, err = buildFeedUnit(ctx, repo, oracle)
 	default:
-		return buildAaveUnit(ctx, repo, oracle)
+		unit, err = buildAaveUnit(ctx, repo, oracle)
 	}
+	if err != nil {
+		return nil, err
+	}
+	if unit != nil {
+		unit.OracleID = oracleID
+	}
+	return unit, nil
 }
 
 func buildAaveUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle) (*OracleUnit, error) {
@@ -197,6 +222,10 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 
 	refFeedIdx, nonUSDFeeds := buildRefFeedIdx(feeds, tokenAddrBytes)
 
+	if err := validateRefFeeds(nonUSDFeeds, refFeedIdx, oracle.Name); err != nil {
+		return nil, err
+	}
+
 	return &OracleUnit{
 		Oracle:      oracle,
 		TokenIDs:    tokenIDs,
@@ -204,6 +233,34 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		RefFeedIdx:  refFeedIdx,
 		NonUSDFeeds: nonUSDFeeds,
 	}, nil
+}
+
+// validateRefFeeds verifies that every non-USD quote currency used by feeds has a
+// corresponding USD-denominated reference feed. Returns an error listing all
+// missing reference currencies.
+func validateRefFeeds(nonUSDFeeds map[int]string, refFeedIdx map[string]int, oracleName string) error {
+	if len(nonUSDFeeds) == 0 {
+		return nil
+	}
+
+	needed := make(map[string]bool)
+	for _, currency := range nonUSDFeeds {
+		needed[currency] = true
+	}
+
+	var missing []string
+	for currency := range needed {
+		if _, ok := refFeedIdx[currency]; !ok {
+			missing = append(missing, currency)
+		}
+	}
+
+	if len(missing) == 0 {
+		return nil
+	}
+
+	sort.Strings(missing)
+	return fmt.Errorf("oracle %s: missing USD reference feeds for currencies: %v", oracleName, missing)
 }
 
 // buildRefFeedIdx identifies which feeds serve as USD-denominated reference prices

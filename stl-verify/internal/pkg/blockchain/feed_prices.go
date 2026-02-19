@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -150,6 +151,10 @@ func fetchWithLatestRoundData(
 // retryWithLatestAnswer retries failed feeds using latestAnswer().
 // Some adapters (e.g. Aave SynchronicityPriceAdapter for sDAI/USD) only
 // implement latestAnswer() and not the full latestRoundData() interface.
+//
+// Limitation: latestAnswer() returns only int256 (the price). Unlike
+// latestRoundData(), it does not expose updatedAt, so round-completeness
+// and staleness cannot be verified for feeds that only support this method.
 func retryWithLatestAnswer(
 	ctx context.Context,
 	multicaller outbound.Multicaller,
@@ -202,8 +207,9 @@ func retryWithLatestAnswer(
 			continue
 		}
 
-		logger.Debug("feed recovered via latestAnswer",
-			"feedIndex", i, "tokenID", feeds[i].TokenID, "block", blockNum)
+		logger.Warn("feed recovered via latestAnswer (no round-completeness check)",
+			"feedIndex", i, "tokenID", feeds[i].TokenID, "block", blockNum,
+			"note", "latestAnswer() returns only int256; unlike latestRoundData(), updatedAt cannot be verified")
 		out[i].Price = ScaleByDecimals(answer, feeds[i].FeedDecimals)
 		out[i].Success = true
 	}
@@ -228,4 +234,89 @@ func unpackLatestRoundData(feedABI *abi.ABI, data []byte) (*big.Int, *big.Int, e
 	answer := unpacked[1].(*big.Int)
 	updatedAt := unpacked[3].(*big.Int)
 	return answer, updatedAt, nil
+}
+
+// ValidateFeedDecimals calls decimals() on each feed and compares the on-chain
+// result against the configured FeedDecimals. A mismatch would cause prices to
+// be off by orders of magnitude, so any mismatch is a hard error.
+// Feeds where decimals() reverts are logged as warnings and skipped (the feed
+// may not exist at the given block).
+func ValidateFeedDecimals(
+	ctx context.Context,
+	multicaller outbound.Multicaller,
+	feedABI *abi.ABI,
+	feeds []FeedConfig,
+	blockNum int64,
+	logger *slog.Logger,
+) error {
+	if len(feeds) == 0 {
+		return nil
+	}
+
+	callData, err := feedABI.Pack("decimals")
+	if err != nil {
+		return fmt.Errorf("packing decimals(): %w", err)
+	}
+
+	calls := make([]outbound.Call, len(feeds))
+	for i, feed := range feeds {
+		calls[i] = outbound.Call{
+			Target:       feed.FeedAddress,
+			AllowFailure: true,
+			CallData:     callData,
+		}
+	}
+
+	block := new(big.Int).SetInt64(blockNum)
+	results, err := multicaller.Execute(ctx, calls, block)
+	if err != nil {
+		return fmt.Errorf("executing decimals() multicall at block %d: %w", blockNum, err)
+	}
+
+	if len(results) != len(feeds) {
+		return fmt.Errorf("decimals() multicall: expected %d results, got %d", len(feeds), len(results))
+	}
+
+	var mismatches []string
+	for i, r := range results {
+		if !r.Success {
+			logger.Warn("decimals() call reverted, skipping validation",
+				"feedIndex", i,
+				"tokenID", feeds[i].TokenID,
+				"feedAddress", feeds[i].FeedAddress.Hex(),
+				"block", blockNum)
+			continue
+		}
+
+		onChain, err := unpackDecimals(feedABI, r.ReturnData)
+		if err != nil {
+			logger.Warn("failed to unpack decimals(), skipping validation",
+				"feedIndex", i,
+				"tokenID", feeds[i].TokenID,
+				"feedAddress", feeds[i].FeedAddress.Hex(),
+				"block", blockNum,
+				"error", err)
+			continue
+		}
+
+		if int(onChain) != feeds[i].FeedDecimals {
+			mismatches = append(mismatches,
+				fmt.Sprintf("feed %s (tokenID %d): on-chain decimals=%d, configured=%d",
+					feeds[i].FeedAddress.Hex(), feeds[i].TokenID, onChain, feeds[i].FeedDecimals))
+		}
+	}
+
+	if len(mismatches) > 0 {
+		return fmt.Errorf("feed decimals mismatch — prices would be wrong:\n  %s", strings.Join(mismatches, "\n  "))
+	}
+
+	return nil
+}
+
+func unpackDecimals(feedABI *abi.ABI, data []byte) (uint8, error) {
+	unpacked, err := feedABI.Unpack("decimals", data)
+	if err != nil {
+		return 0, err
+	}
+	return unpacked[0].(uint8), nil
 }

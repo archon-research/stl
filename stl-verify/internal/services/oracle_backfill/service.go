@@ -144,6 +144,10 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		return nil
 	}
 
+	if err := s.validateFeedDecimals(ctx, workUnits, toBlock); err != nil {
+		return fmt.Errorf("feed decimals validation: %w", err)
+	}
+
 	s.logger.Info("loaded oracles for backfill", "count", len(workUnits))
 
 	for _, wu := range workUnits {
@@ -152,6 +156,28 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		}
 	}
 
+	return nil
+}
+
+func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleWorkUnit, blockNum int64) error {
+	for _, wu := range workUnits {
+		switch wu.Oracle.OracleType {
+		case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle:
+			// feed oracle — validate decimals
+		default:
+			continue // aave or other non-feed oracles don't have per-feed decimals
+		}
+		mc, err := wu.newMulticaller()
+		if err != nil {
+			return fmt.Errorf("oracle %s: creating multicaller for decimals validation: %w", wu.Oracle.Name, err)
+		}
+		if err := blockchain.ValidateFeedDecimals(
+			ctx, mc, s.feedABI,
+			wu.Feeds, blockNum, s.logger,
+		); err != nil {
+			return fmt.Errorf("oracle %s: %w", wu.Oracle.Name, err)
+		}
+	}
 	return nil
 }
 
@@ -382,7 +408,7 @@ func (s *Service) worker(
 		return
 	}
 
-	oracleID := int16(wu.Oracle.ID)
+	oracleID := wu.OracleID
 	priceDecimals := wu.Oracle.PriceDecimals
 	if priceDecimals == 0 {
 		priceDecimals = 8

@@ -1404,6 +1404,7 @@ func TestProcessBlock_FeedOracle(t *testing.T) {
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	svc.decimalsValidated = true // skip decimals validation for this test
 
 	// Directly call processBlock
 	event := blockEvent{
@@ -1474,6 +1475,7 @@ func TestProcessBlock_FeedOracle_ChangeDetection(t *testing.T) {
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	svc.decimalsValidated = true // skip decimals validation for this test
 
 	// First block: prices are new, should be upserted
 	event1 := blockEvent{
@@ -1582,6 +1584,7 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	svc.decimalsValidated = true // skip decimals validation for this test
 
 	event := blockEvent{
 		ChainID:        1,
@@ -1677,6 +1680,7 @@ func TestProcessBlock_FeedOracle_AllFeedsFail(t *testing.T) {
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	svc.decimalsValidated = true // skip decimals validation for this test
 
 	event := blockEvent{
 		ChainID:        1,
@@ -1699,6 +1703,245 @@ func TestProcessBlock_FeedOracle_AllFeedsFail(t *testing.T) {
 	if stopErr := svc.Stop(); stopErr != nil {
 		t.Errorf("Stop: %v", stopErr)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// TestProcessBlock_FeedDecimalsValidation — lazy validation tests
+// ---------------------------------------------------------------------------
+
+func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
+	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+
+	t.Run("decimals mismatch blocks processing", func(t *testing.T) {
+		repo := &mockRepo{}
+		feedOracleSetup(repo)
+
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+
+		// Return decimals=18 but config says 8 → mismatch
+		callCount := 0
+		mc := &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				callCount++
+				if callCount == 1 {
+					// decimals() call
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 18)},
+					}, nil
+				}
+				// Should not be called because decimals validation fails
+				t.Fatal("unexpected Execute call after decimals validation failure")
+				return nil, nil
+			},
+		}
+
+		svc, err := NewService(validConfig(), consumer, mc, repo, dummyMulticallerFactory())
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		event := blockEvent{
+			ChainID: 1, BlockNumber: 18000000, Version: 1,
+			BlockHash: "0xdecfail", BlockTimestamp: blockTimestamp,
+		}
+		err = svc.processBlock(context.Background(), event)
+		if err == nil {
+			t.Fatal("expected decimals mismatch error, got nil")
+		}
+		if !strings.Contains(err.Error(), "feed decimals") {
+			t.Errorf("error = %q, expected it to contain 'feed decimals'", err)
+		}
+
+		if stopErr := svc.Stop(); stopErr != nil {
+			t.Errorf("Stop: %v", stopErr)
+		}
+	})
+
+	t.Run("matching decimals allows processing", func(t *testing.T) {
+		repo := &mockRepo{}
+		feedOracleSetup(repo)
+
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+
+		callCount := 0
+		mc := &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				callCount++
+				if callCount == 1 {
+					// decimals() returns 8, matching config
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 8)},
+					}, nil
+				}
+				// latestRoundData call
+				results := make([]outbound.Result, len(calls))
+				for i := range calls {
+					results[i] = outbound.Result{
+						Success: true,
+						ReturnData: testutil.PackLatestRoundData(t,
+							big.NewInt(1), big.NewInt(200_000_000_000),
+							big.NewInt(1000), big.NewInt(1000), big.NewInt(1)),
+					}
+				}
+				return results, nil
+			},
+		}
+
+		svc, err := NewService(validConfig(), consumer, mc, repo, dummyMulticallerFactory())
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		event := blockEvent{
+			ChainID: 1, BlockNumber: 18000000, Version: 1,
+			BlockHash: "0xdecok", BlockTimestamp: blockTimestamp,
+		}
+		if err := svc.processBlock(context.Background(), event); err != nil {
+			t.Fatalf("processBlock: %v", err)
+		}
+
+		// Verify prices were stored
+		repo.mu.Lock()
+		if repo.upsertPricesCalls < 1 {
+			t.Error("expected UpsertPrices to be called after successful decimals validation")
+		}
+		repo.mu.Unlock()
+
+		if stopErr := svc.Stop(); stopErr != nil {
+			t.Errorf("Stop: %v", stopErr)
+		}
+	})
+
+	t.Run("validation runs only once", func(t *testing.T) {
+		repo := &mockRepo{}
+		feedOracleSetup(repo)
+
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+
+		decimalsCallCount := 0
+		mc := &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				// Peek at call data to detect decimals() vs latestRoundData()
+				// decimals() calldata is 4 bytes, latestRoundData() is 4 bytes too, but
+				// we can use callCount to distinguish: first call is decimals(), rest are latestRoundData().
+				if decimalsCallCount == 0 {
+					decimalsCallCount++
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 8)},
+					}, nil
+				}
+				// latestRoundData
+				results := make([]outbound.Result, len(calls))
+				for i := range calls {
+					results[i] = outbound.Result{
+						Success: true,
+						ReturnData: testutil.PackLatestRoundData(t,
+							big.NewInt(1), big.NewInt(200_000_000_000),
+							big.NewInt(1000), big.NewInt(1000), big.NewInt(1)),
+					}
+				}
+				return results, nil
+			},
+		}
+
+		svc, err := NewService(validConfig(), consumer, mc, repo, dummyMulticallerFactory())
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		event1 := blockEvent{
+			ChainID: 1, BlockNumber: 18000000, Version: 1,
+			BlockHash: "0xonce1", BlockTimestamp: blockTimestamp,
+		}
+		if err := svc.processBlock(context.Background(), event1); err != nil {
+			t.Fatalf("processBlock 1: %v", err)
+		}
+
+		prevDecimalsCount := decimalsCallCount
+
+		event2 := blockEvent{
+			ChainID: 1, BlockNumber: 18000001, Version: 1,
+			BlockHash: "0xonce2", BlockTimestamp: blockTimestamp + 12,
+		}
+		if err := svc.processBlock(context.Background(), event2); err != nil {
+			t.Fatalf("processBlock 2: %v", err)
+		}
+
+		if decimalsCallCount != prevDecimalsCount {
+			t.Errorf("decimals validated again on second block: count went from %d to %d",
+				prevDecimalsCount, decimalsCallCount)
+		}
+
+		if stopErr := svc.Stop(); stopErr != nil {
+			t.Errorf("Stop: %v", stopErr)
+		}
+	})
+
+	t.Run("aave oracle skips decimals validation", func(t *testing.T) {
+		repo := &mockRepo{}
+		defaultRepoSetup(repo) // aave oracle
+
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+
+		mc := newOracleMulticallerWithT(t, []*big.Int{
+			new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8)),
+			new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8)),
+		})
+
+		svc, err := NewService(validConfig(), consumer, mc, repo, dummyMulticallerFactory())
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		event := blockEvent{
+			ChainID: 1, BlockNumber: 18000000, Version: 1,
+			BlockHash: "0xaave", BlockTimestamp: blockTimestamp,
+		}
+		// Should succeed because aave oracles skip decimals validation
+		if err := svc.processBlock(context.Background(), event); err != nil {
+			t.Fatalf("processBlock: %v", err)
+		}
+
+		if !svc.decimalsValidated {
+			t.Error("decimalsValidated should be true after first processBlock")
+		}
+
+		if stopErr := svc.Stop(); stopErr != nil {
+			t.Errorf("Stop: %v", stopErr)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

@@ -551,3 +551,108 @@ func TestFetchFeedPrices_VerifiesCallTargets(t *testing.T) {
 		t.Errorf("results[1] = %+v, want Success=true, Price=2.0", results[1])
 	}
 }
+
+func TestValidateFeedDecimals(t *testing.T) {
+	feedABI := testFeedABI(t)
+	blockNum := int64(12345678)
+
+	feed1 := common.HexToAddress("0x0000000000000000000000000000000000000AAA")
+	feed2 := common.HexToAddress("0x0000000000000000000000000000000000000BBB")
+
+	tests := []struct {
+		name        string
+		feeds       []FeedConfig
+		mock        *mockMulticaller
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name: "matching decimals passes",
+			feeds: []FeedConfig{
+				{TokenID: 1, FeedAddress: feed1, FeedDecimals: 8, QuoteCurrency: "USD"},
+				{TokenID: 2, FeedAddress: feed2, FeedDecimals: 18, QuoteCurrency: "USD"},
+			},
+			mock: &mockMulticaller{
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 8)},
+						{Success: true, ReturnData: testutil.PackDecimals(t, 18)},
+					}, nil
+				},
+			},
+		},
+		{
+			name: "mismatching decimals returns error",
+			feeds: []FeedConfig{
+				{TokenID: 1, FeedAddress: feed1, FeedDecimals: 8, QuoteCurrency: "USD"},
+			},
+			mock: &mockMulticaller{
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 18)},
+					}, nil
+				},
+			},
+			wantErr:     true,
+			errContains: "feed decimals mismatch",
+		},
+		{
+			name: "decimals call reverts - warn and skip",
+			feeds: []FeedConfig{
+				{TokenID: 1, FeedAddress: feed1, FeedDecimals: 8, QuoteCurrency: "USD"},
+			},
+			mock: &mockMulticaller{
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: false},
+					}, nil
+				},
+			},
+		},
+		{
+			name:  "empty feeds is no-op",
+			feeds: []FeedConfig{},
+			mock:  &mockMulticaller{},
+		},
+		{
+			name: "multicall error propagates",
+			feeds: []FeedConfig{
+				{TokenID: 1, FeedAddress: feed1, FeedDecimals: 8, QuoteCurrency: "USD"},
+			},
+			mock: &mockMulticaller{
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return nil, errors.New("RPC connection refused")
+				},
+			},
+			wantErr:     true,
+			errContains: "executing decimals() multicall",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateFeedDecimals(
+				context.Background(),
+				tt.mock,
+				feedABI,
+				tt.feeds,
+				blockNum,
+				testutil.DiscardLogger(),
+			)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.errContains)
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error = %q, want it to contain %q", err.Error(), tt.errContains)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}

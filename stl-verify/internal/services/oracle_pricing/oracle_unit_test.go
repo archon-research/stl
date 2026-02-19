@@ -3,6 +3,7 @@ package oracle_pricing
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 
@@ -347,6 +348,80 @@ func TestLoadOracleUnits(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "oracle ID overflow is skipped with warning",
+			setupRepo: func() *mockRepo {
+				return &mockRepo{
+					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{{
+							ID: 40000, Name: "too-big-id", Address: [20]byte{0xBB},
+							Enabled: true, OracleType: entity.OracleTypeAave,
+						}}, nil
+					},
+					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+						return []*entity.OracleAsset{
+							{ID: 1, OracleID: 40000, TokenID: 1, Enabled: true},
+						}, nil
+					},
+					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+						return map[int64][]byte{1: wethAddr.Bytes()}, nil
+					},
+				}
+			},
+			wantCount: 0,
+		},
+		{
+			name: "OracleID field is set on loaded units",
+			setupRepo: func() *mockRepo {
+				return &mockRepo{
+					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{{
+							ID: 42, Name: "sparklend", Address: [20]byte{0xBB},
+							Enabled: true, OracleType: entity.OracleTypeAave,
+						}}, nil
+					},
+					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+						return []*entity.OracleAsset{
+							{ID: 1, OracleID: 42, TokenID: 1, Enabled: true},
+						}, nil
+					},
+					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+						return map[int64][]byte{1: wethAddr.Bytes()}, nil
+					},
+				}
+			},
+			wantCount: 1,
+			checkUnits: func(t *testing.T, units []*OracleUnit) {
+				t.Helper()
+				if units[0].OracleID != 42 {
+					t.Errorf("OracleID = %d, want 42", units[0].OracleID)
+				}
+			},
+		},
+		{
+			name: "feed oracle with ETH-denominated feed but no WETH token is skipped",
+			setupRepo: func() *mockRepo {
+				nonWethAddr := common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F") // DAI
+				return &mockRepo{
+					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{{
+							ID: 1, Name: "missing-ref", Enabled: true,
+							OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
+						}}, nil
+					},
+					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+						return []*entity.OracleAsset{{
+							ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
+							FeedAddress: feedAddr.Bytes(), FeedDecimals: intPtr(8), QuoteCurrency: "ETH",
+						}}, nil
+					},
+					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+						return map[int64][]byte{1: nonWethAddr.Bytes()}, nil
+					},
+				}
+			},
+			wantCount: 0, // skipped because no WETH/USD reference feed exists
+		},
 	}
 
 	for _, tt := range tests {
@@ -615,6 +690,102 @@ func TestConvertNonUSDPrices(t *testing.T) {
 				if got.Price != want.Price {
 					t.Errorf("result[%d].Price = %f, want %f", i, got.Price, want.Price)
 				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test_safeOracleID
+// ---------------------------------------------------------------------------
+
+func Test_safeOracleID(t *testing.T) {
+	tests := []struct {
+		name    string
+		id      int64
+		want    int16
+		wantErr bool
+	}{
+		{name: "valid min", id: 1, want: 1},
+		{name: "valid typical", id: 42, want: 42},
+		{name: "valid max int16", id: math.MaxInt16, want: math.MaxInt16},
+		{name: "zero", id: 0, wantErr: true},
+		{name: "negative", id: -1, wantErr: true},
+		{name: "overflow int16", id: math.MaxInt16 + 1, wantErr: true},
+		{name: "large overflow", id: 40000, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := safeOracleID(tt.id)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for id=%d, got nil", tt.id)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("safeOracleID(%d) = %d, want %d", tt.id, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test_validateRefFeeds
+// ---------------------------------------------------------------------------
+
+func Test_validateRefFeeds(t *testing.T) {
+	tests := []struct {
+		name        string
+		nonUSDFeeds map[int]string
+		refFeedIdx  map[string]int
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:        "no non-USD feeds is ok",
+			nonUSDFeeds: map[int]string{},
+			refFeedIdx:  map[string]int{},
+		},
+		{
+			name:        "all refs present",
+			nonUSDFeeds: map[int]string{1: "ETH"},
+			refFeedIdx:  map[string]int{"ETH": 0},
+		},
+		{
+			name:        "missing ETH ref",
+			nonUSDFeeds: map[int]string{1: "ETH"},
+			refFeedIdx:  map[string]int{},
+			wantErr:     true,
+			errContains: "ETH",
+		},
+		{
+			name:        "missing BTC ref among multiple",
+			nonUSDFeeds: map[int]string{1: "ETH", 2: "BTC"},
+			refFeedIdx:  map[string]int{"ETH": 0},
+			wantErr:     true,
+			errContains: "BTC",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRefFeeds(tt.nonUSDFeeds, tt.refFeedIdx, "test-oracle")
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q does not contain %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}

@@ -61,6 +61,8 @@ type Service struct {
 	feedABI   *abi.ABI
 	units     []*oracleUnit
 
+	decimalsValidated bool // set after first successful feed decimals check
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	logger *slog.Logger
@@ -278,7 +280,32 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) e
 	return s.processBlock(ctx, event)
 }
 
+func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) error {
+	for _, unit := range s.units {
+		switch unit.Oracle.OracleType {
+		case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle:
+			// feed oracle — validate decimals
+		default:
+			continue // aave or other non-feed oracles don't have per-feed decimals
+		}
+		if err := blockchain.ValidateFeedDecimals(
+			ctx, unit.multicaller, s.feedABI,
+			unit.Feeds, blockNum, s.logger,
+		); err != nil {
+			return fmt.Errorf("oracle %s: %w", unit.Oracle.Name, err)
+		}
+	}
+	return nil
+}
+
 func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
+	if !s.decimalsValidated {
+		if err := s.validateFeedDecimals(ctx, event.BlockNumber); err != nil {
+			return fmt.Errorf("feed decimals validation: %w", err)
+		}
+		s.decimalsValidated = true
+	}
+
 	var errs []error
 	for _, unit := range s.units {
 		if err := s.processBlockForOracle(ctx, event, unit); err != nil {
@@ -380,7 +407,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event blockEven
 
 func (s *Service) detectChanges(rawPrices []*big.Int, event blockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
-	oracleID := int16(unit.Oracle.ID)
+	oracleID := unit.OracleID
 	priceDecimals := unit.Oracle.PriceDecimals
 	if priceDecimals == 0 {
 		priceDecimals = 8
@@ -416,7 +443,7 @@ func (s *Service) detectChanges(rawPrices []*big.Int, event blockEvent, unit *or
 
 func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event blockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
-	oracleID := int16(unit.Oracle.ID)
+	oracleID := unit.OracleID
 
 	var changed []*entity.OnchainTokenPrice
 	for _, result := range results {
