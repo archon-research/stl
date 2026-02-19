@@ -14,9 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/maple"
@@ -108,16 +106,10 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("loading AWS config: %w", err)
 	}
 
-	var sqsOptFns []func(*sqs.Options)
-	if endpoint := env.Get("AWS_SQS_ENDPOINT", ""); endpoint != "" {
-		sqsOptFns = append(sqsOptFns, func(o *sqs.Options) {
-			o.BaseEndpoint = aws.String(endpoint)
-		})
-	}
-
-	consumer, err := sqsadapter.NewConsumerWithOptions(awsCfg, sqsadapter.Config{
-		QueueURL: cfg.queueURL,
-	}, logger, sqsOptFns...)
+	consumer, err := sqsadapter.NewConsumer(awsCfg, sqsadapter.Config{
+		QueueURL:     cfg.queueURL,
+		BaseEndpoint: env.Get("AWS_SQS_ENDPOINT", ""),
+	}, logger)
 	if err != nil {
 		return fmt.Errorf("creating SQS consumer: %w", err)
 	}
