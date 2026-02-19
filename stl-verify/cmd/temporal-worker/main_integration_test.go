@@ -117,7 +117,8 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 
 	// Start Temporal dev server
 	devServer, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{
-		LogLevel: "error",
+		ClientOptions: &client.Options{Namespace: "sentinel"},
+		LogLevel:      "error",
 	})
 	require.NoError(t, err, "failed to start Temporal dev server (requires temporal CLI)")
 	t.Cleanup(func() { devServer.Stop() })

@@ -71,6 +71,15 @@ func run(ctx context.Context) error {
 		"buildTime", BuildTime,
 	)
 
+	// Validate required configuration before opening expensive connections.
+	chainID, err := getChainID()
+	if err != nil {
+		return err
+	}
+	if err := validateRequiredEnv(); err != nil {
+		return err
+	}
+
 	temporalClient, err := createTemporalClient()
 	if err != nil {
 		return fmt.Errorf("creating temporal client: %w", err)
@@ -82,11 +91,6 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("connecting to database: %w", err)
 	}
 	defer pool.Close()
-
-	chainID, err := getChainID()
-	if err != nil {
-		return err
-	}
 
 	w := worker.New(temporalClient, temporaladapter.TaskQueue, worker.Options{})
 
@@ -302,6 +306,15 @@ func createCoinGeckoProvider(logger *slog.Logger) (*coingecko.Client, error) {
 		BaseURL: os.Getenv("COINGECKO_BASE_URL"),
 		Logger:  logger,
 	})
+}
+
+// validateRequiredEnv checks that all required environment variables are set
+// before opening expensive connections (DB, Temporal).
+func validateRequiredEnv() error {
+	if os.Getenv("COINGECKO_API_KEY") == "" {
+		return fmt.Errorf("COINGECKO_API_KEY environment variable is required")
+	}
+	return nil
 }
 
 func getChainID() (int, error) {
