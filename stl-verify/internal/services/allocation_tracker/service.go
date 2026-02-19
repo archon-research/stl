@@ -338,19 +338,22 @@ func (s *Service) sweepLoop() {
 func (s *Service) sweep(ctx context.Context) error {
 	start := time.Now()
 
+	// Only sweep ethereum entries until multi-chain RPC is available
+	ethEntries := EntriesForChain(s.entries, "ethereum")
+
 	// Get current block number before fetching balances
 	blockNum, err := s.ethClient.BlockNumber(ctx)
 	if err != nil {
 		return fmt.Errorf("get block number: %w", err)
 	}
 
-	balances, err := s.registry.FetchAll(ctx, s.entries, 0) // 0 = latest
+	balances, err := s.registry.FetchAll(ctx, ethEntries, 0) // 0 = latest
 	if err != nil {
 		s.logger.Warn("sweep partial failure", "error", err)
 	}
 
 	var snapshots []*PositionSnapshot
-	for _, entry := range s.entries {
+	for _, entry := range ethEntries {
 		bal, ok := balances[entry.Key()]
 		if !ok {
 			continue
