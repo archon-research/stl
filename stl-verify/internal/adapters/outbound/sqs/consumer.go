@@ -32,7 +32,7 @@ type Config struct {
 
 	// VisibilityTimeout is how long a message is hidden from other consumers
 	// after being received. Should exceed the maximum expected processing time.
-	// Defaults to 30 seconds.
+	// Defaults to 300 seconds (5 minutes).
 	VisibilityTimeout int32
 
 	// BaseEndpoint is an optional override for the SQS endpoint.
@@ -44,7 +44,7 @@ type Config struct {
 func ConfigDefaults() Config {
 	return Config{
 		WaitTimeSeconds:   20,
-		VisibilityTimeout: 30,
+		VisibilityTimeout: 300,
 	}
 }
 
