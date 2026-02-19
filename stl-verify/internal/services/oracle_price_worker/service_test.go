@@ -248,7 +248,7 @@ func newOracleMulticallerWithT(t *testing.T, prices []*big.Int) *testutil.MockMu
 }
 
 func makeBlockEventJSON(blockNumber int64, version int, blockTimestamp int64) string {
-	event := blockEvent{
+	event := outbound.BlockEvent{
 		ChainID:        1,
 		BlockNumber:    blockNumber,
 		Version:        version,
@@ -681,7 +681,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		repo.mu.Unlock()
 
 		// Directly call processBlock to test change detection without SQS timing complexity
-		event2 := blockEvent{
+		event2 := outbound.BlockEvent{
 			ChainID:        1,
 			BlockNumber:    18000001,
 			Version:        1,
@@ -1180,7 +1180,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}
 
 		// Directly call processBlock with blockNumber=0 to trigger entity validation error
-		event := blockEvent{
+		event := outbound.BlockEvent{
 			ChainID:        1,
 			BlockNumber:    0, // will fail entity validation: "blockNumber must be positive"
 			Version:        1,
@@ -1407,7 +1407,7 @@ func TestProcessBlock_FeedOracle(t *testing.T) {
 	svc.decimalsValidated = true // skip decimals validation for this test
 
 	// Directly call processBlock
-	event := blockEvent{
+	event := outbound.BlockEvent{
 		ChainID:        1,
 		BlockNumber:    18000000,
 		Version:        1,
@@ -1478,7 +1478,7 @@ func TestProcessBlock_FeedOracle_ChangeDetection(t *testing.T) {
 	svc.decimalsValidated = true // skip decimals validation for this test
 
 	// First block: prices are new, should be upserted
-	event1 := blockEvent{
+	event1 := outbound.BlockEvent{
 		ChainID:        1,
 		BlockNumber:    18000000,
 		Version:        1,
@@ -1496,7 +1496,7 @@ func TestProcessBlock_FeedOracle_ChangeDetection(t *testing.T) {
 	repo.mu.Unlock()
 
 	// Second block: same price, should NOT be upserted
-	event2 := blockEvent{
+	event2 := outbound.BlockEvent{
 		ChainID:        1,
 		BlockNumber:    18000001,
 		Version:        1,
@@ -1586,7 +1586,7 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 	}
 	svc.decimalsValidated = true // skip decimals validation for this test
 
-	event := blockEvent{
+	event := outbound.BlockEvent{
 		ChainID:        1,
 		BlockNumber:    18000000,
 		Version:        1,
@@ -1682,7 +1682,7 @@ func TestProcessBlock_FeedOracle_AllFeedsFail(t *testing.T) {
 	}
 	svc.decimalsValidated = true // skip decimals validation for this test
 
-	event := blockEvent{
+	event := outbound.BlockEvent{
 		ChainID:        1,
 		BlockNumber:    18000000,
 		Version:        1,
@@ -1748,7 +1748,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 			t.Fatalf("Start: %v", err)
 		}
 
-		event := blockEvent{
+		event := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000000, Version: 1,
 			BlockHash: "0xdecfail", BlockTimestamp: blockTimestamp,
 		}
@@ -1808,7 +1808,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 			t.Fatalf("Start: %v", err)
 		}
 
-		event := blockEvent{
+		event := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000000, Version: 1,
 			BlockHash: "0xdecok", BlockTimestamp: blockTimestamp,
 		}
@@ -1873,7 +1873,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 			t.Fatalf("Start: %v", err)
 		}
 
-		event1 := blockEvent{
+		event1 := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000000, Version: 1,
 			BlockHash: "0xonce1", BlockTimestamp: blockTimestamp,
 		}
@@ -1883,7 +1883,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 
 		prevDecimalsCount := decimalsCallCount
 
-		event2 := blockEvent{
+		event2 := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000001, Version: 1,
 			BlockHash: "0xonce2", BlockTimestamp: blockTimestamp + 12,
 		}
@@ -1925,7 +1925,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 			t.Fatalf("Start: %v", err)
 		}
 
-		event := blockEvent{
+		event := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000000, Version: 1,
 			BlockHash: "0xaave", BlockTimestamp: blockTimestamp,
 		}

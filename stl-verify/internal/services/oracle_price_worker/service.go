@@ -5,7 +5,6 @@ package oracle_price_worker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 
+	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -130,7 +130,12 @@ func (s *Service) Start(ctx context.Context) error {
 		return fmt.Errorf("initializing: %w", err)
 	}
 
-	go s.processLoop()
+	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
+		Consumer:     s.consumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+	}, s.processBlock)
 
 	s.logger.Info("oracle price worker started",
 		"oracles", len(s.units))
@@ -214,72 +219,6 @@ func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]
 	}
 }
 
-func (s *Service) processLoop() {
-	ticker := time.NewTicker(s.config.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-ticker.C:
-			if err := s.processMessages(s.ctx); err != nil {
-				s.logger.Error("error processing messages", "error", err)
-			}
-		}
-	}
-}
-
-func (s *Service) processMessages(ctx context.Context) error {
-	messages, err := s.consumer.ReceiveMessages(ctx, s.config.MaxMessages)
-	if err != nil {
-		return fmt.Errorf("receiving messages: %w", err)
-	}
-
-	if len(messages) == 0 {
-		return nil
-	}
-
-	s.logger.Info("received messages", "count", len(messages))
-
-	var errs []error
-	for _, msg := range messages {
-		if err := s.processMessage(ctx, msg); err != nil {
-			s.logger.Error("failed to process message", "error", err)
-			errs = append(errs, err)
-			continue
-		}
-
-		if deleteErr := s.consumer.DeleteMessage(ctx, msg.ReceiptHandle); deleteErr != nil {
-			s.logger.Error("failed to delete message", "error", deleteErr)
-		}
-	}
-
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	return nil
-}
-
-// blockEvent is the SQS message payload for block events.
-type blockEvent struct {
-	ChainID        int64  `json:"chainId"`
-	BlockNumber    int64  `json:"blockNumber"`
-	Version        int    `json:"version"`
-	BlockHash      string `json:"blockHash"`
-	BlockTimestamp int64  `json:"blockTimestamp"`
-	IsReorg        bool   `json:"isReorg,omitempty"`
-}
-
-func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) error {
-	var event blockEvent
-	if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
-		return fmt.Errorf("parsing block event: %w", err)
-	}
-
-	return s.processBlock(ctx, event)
-}
-
 func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) error {
 	for _, unit := range s.units {
 		switch unit.Oracle.OracleType {
@@ -298,7 +237,7 @@ func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) erro
 	return nil
 }
 
-func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
+func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) error {
 	if !s.decimalsValidated {
 		if err := s.validateFeedDecimals(ctx, event.BlockNumber); err != nil {
 			return fmt.Errorf("feed decimals validation: %w", err)
@@ -322,7 +261,7 @@ func (s *Service) processBlock(ctx context.Context, event blockEvent) error {
 	return nil
 }
 
-func (s *Service) processBlockForOracle(ctx context.Context, event blockEvent, unit *oracleUnit) error {
+func (s *Service) processBlockForOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
 	switch unit.Oracle.OracleType {
 	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle:
 		return s.processBlockForFeedOracle(ctx, event, unit)
@@ -331,7 +270,7 @@ func (s *Service) processBlockForOracle(ctx context.Context, event blockEvent, u
 	}
 }
 
-func (s *Service) processBlockForAaveOracle(ctx context.Context, event blockEvent, unit *oracleUnit) error {
+func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
 	prices, err := blockchain.FetchOraclePrices(
 		ctx,
 		s.multicaller,
@@ -368,7 +307,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event blockEven
 	return nil
 }
 
-func (s *Service) processBlockForFeedOracle(ctx context.Context, event blockEvent, unit *oracleUnit) error {
+func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
 	results, err := blockchain.FetchFeedPrices(
 		ctx,
 		unit.multicaller,
@@ -405,7 +344,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event blockEven
 	return nil
 }
 
-func (s *Service) detectChanges(rawPrices []*big.Int, event blockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {
+func (s *Service) detectChanges(rawPrices []*big.Int, event outbound.BlockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
 	oracleID := unit.OracleID
 	priceDecimals := unit.Oracle.PriceDecimals
@@ -441,7 +380,7 @@ func (s *Service) detectChanges(rawPrices []*big.Int, event blockEvent, unit *or
 	return changed
 }
 
-func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event blockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {
+func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event outbound.BlockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
 	oracleID := unit.OracleID
 

@@ -3,18 +3,18 @@
 
 .PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax help \
         dev-up dev-env dev-down dev-ips generate-er \
-        preflight tf-bootstrap tf-destroy-bootstrap tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check check-tofu \
         ecr-login docker-build docker-push docker-release \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
         docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging \
         docker-build-oracle-price-worker docker-push-oracle-price-worker docker-release-oracle-price-worker \
         docker-build-oracle-price-worker-staging docker-push-oracle-price-worker-staging docker-release-oracle-price-worker-staging \
+        docker-build-sparklend-position-tracker docker-push-sparklend-position-tracker docker-release-sparklend-position-tracker \
+        docker-build-sparklend-position-tracker-staging docker-push-sparklend-position-tracker-staging docker-release-sparklend-position-tracker-staging \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
         bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel \
         db-migrate db-set-passwords db-test-app-user \
-        erigon-init erigon-validate erigon-plan erigon-apply erigon-apply-auto erigon-destroy erigon-check \
         erigon-status erigon-logs erigon-logs-follow erigon-deploy-readonly erigon-switch-readonly erigon-switch-sync erigon-mode \
         erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download \
         build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill deploy-oracle-pricing-backfill-worker
@@ -37,14 +37,6 @@ run-watcher:
 run-watcher-avax:
 	@echo "==> Running Avalanche watcher (chain_id=43114)..."
 	@set -a && . cmd/watcher/.env.avax && [ -f cmd/watcher/.env.avax.local ] && . cmd/watcher/.env.avax.local; set +a && go run ./cmd/watcher --enable-traces=false
-
-# Pre-flight validation
-# Checks that required CLI tools are installed (aws, tofu, curl, jq)
-# Ensures .env file exists (creates from .env.example if missing)
-# Credentials and API keys are validated by Terraform during plan/apply
-# Usage: make preflight
-preflight:
-	@../preflight.sh
 
 # Run tests with race detector
 test-race:
@@ -157,7 +149,8 @@ tools:
 	go install golang.org/x/tools/gopls@latest
 
 # CI target: everything with strict checks
-ci: test-race vet fmt-check tidy-check vulncheck golangci-lint staticcheck
+# Order: fast checks first (fail fast), then expensive checks
+ci: fmt-check tidy-check vet staticcheck golangci-lint vulncheck test-race
 
 # =============================================================================
 # Local Development
@@ -225,6 +218,21 @@ dev-env:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
 		> cmd/oracle-price-worker/.env
+	@printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-sparklend-position.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:6379" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=1" \
+		"LOG_LEVEL=debug" \
+		> cmd/sparklend-position-tracker/.env
 	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
 		{ echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
 	printf '%s\n' \
@@ -265,328 +273,6 @@ generate-er:
 	@echo "==> Generating ER diagram..."
 	@DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" go run ./cmd/generate-er --output ../docs/entity_relation.md
 	@echo "==> Generated: docs/entity_relation.md"
-
-# =============================================================================
-# Terraform Commands
-# =============================================================================
-
-INFRA_DIR := ../infra
-
-# Require ENV to be explicitly set for Terraform targets
-# Derive AWS_PROFILE from ENV (e.g., sentineldev -> sentineldev profile)
-# Only check ENV when running terraform-related targets
-TF_TARGETS := tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check tf-bootstrap tf-destroy-bootstrap
-ifneq ($(filter $(TF_TARGETS),$(MAKECMDGOALS)),)
-  ifeq ($(ENV),)
-    $(error ENV is required. Usage: make tf-init ENV=sentineldev|sentinelstaging|sentinelprod)
-  endif
-endif
-AWS_PROFILE ?= $(ENV)
-export AWS_PROFILE
-export AWS_PAGER=
-
-# Helper script to load credentials from Secrets Manager and run tofu
-# Loads both TigerData credentials and API keys (Alchemy, CoinGecko, Etherscan)
-# This exports credentials directly in the shell to ensure they're passed to tofu
-define run_tofu_with_creds
-	SECRET_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --region $(AWS_REGION) --query SecretString --output text) && \
-	export TF_VAR_tigerdata_project_id=$$(echo "$$SECRET_JSON" | jq -r '.project_id') && \
-	export TF_VAR_tigerdata_access_key=$$(echo "$$SECRET_JSON" | jq -r '.access_key') && \
-	export TF_VAR_tigerdata_secret_key=$$(echo "$$SECRET_JSON" | jq -r '.secret_key') && \
-	WATCHER_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-watcher-config --region $(AWS_REGION) --query SecretString --output text) && \
-	export TF_VAR_alchemy_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.alchemy_api_key') && \
-	export TF_VAR_coingecko_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.coingecko_api_key // "placeholder"') && \
-	export TF_VAR_etherscan_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.etherscan_api_key // "placeholder"') && \
-	cd $(INFRA_DIR) && $(1)
-endef
-
-# Check for required tools
-check-tofu:
-	@command -v tofu >/dev/null 2>&1 || (echo "Error: OpenTofu is not installed. Install with: brew install opentofu (macOS) or visit https://opentofu.org/docs/intro/install/" && exit 1)
-	@echo "OpenTofu: $$(tofu version)"
-
-# Bootstrap backend (S3 + DynamoDB) for an environment
-# Creates infrastructure state bucket and locking table
-# Must run once per environment before main tf-init
-#
-# CI/Automation: Only allowed for sentineldev (ephemeral environment)
-# Staging/Prod: Must be run manually when needed (persistent environments)
-#
-# Phase 1: Create S3 state bucket and DynamoDB locks table
-# Phase 2: Extract S3 bucket suffix and update backend.hcl (dev only)
-# Phase 3: Create initial secrets (tigerdata API, watcher config, tailscale key)
-# 
-# Usage: make tf-bootstrap ENV=sentineldev|sentinelstaging|sentinelprod
-# Required credentials: TIGERDATA_PROJECT_ID, TIGERDATA_ACCESS_KEY, TIGERDATA_SECRET_KEY, ALCHEMY_API_KEY
-# Optional: COINGECKO_API_KEY, ETHERSCAN_API_KEY, TAILSCALE_AUTH_KEY
-tf-bootstrap: check-tofu
-	@if [ "$(ENV)" != "sentineldev" ] && [ -n "$$CI" ]; then \
-		echo "Error: CI-based bootstrap is only allowed for sentineldev"; \
-		echo "Staging/Prod bootstrap must be run manually (locally with confirmation)"; \
-		exit 1; \
-	fi
-	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Bootstrapping backend for $(ENV) (using AWS profile: $(AWS_PROFILE))..."
-	@if [ ! -d "$(INFRA_DIR)/bootstrap" ]; then \
-		echo "Error: Bootstrap directory not found at $(INFRA_DIR)/bootstrap"; \
-		exit 1; \
-	fi
-	@echo ""; \
-	echo "Checking if bootstrap already exists for $(ENV)..."; \
-	if [ "$(ENV)" = "sentineldev" ]; then \
-		if [ -f "$(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV)" ]; then \
-			LOCKS_TABLE=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw locks_table_name 2>/dev/null || echo ""); \
-			if [ -n "$$LOCKS_TABLE" ] && aws dynamodb describe-table --table-name "$$LOCKS_TABLE" --region $(AWS_REGION) &>/dev/null; then \
-				echo "✓ Bootstrap infrastructure already exists for $(ENV)"; \
-				echo "  DynamoDB table: $$LOCKS_TABLE"; \
-				echo "  S3 bucket: $$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null || echo 'stl-$(ENV)-terraform-state-*')"; \
-				echo ""; \
-				echo "⚠️  Bootstrap is idempotent and only needs to run once per environment"; \
-				echo "==> Skipping bootstrap (already initialized)"; \
-				exit 0; \
-			fi; \
-		fi; \
-	else \
-		if aws dynamodb describe-table --table-name stl-$(ENV)-terraform-locks --region $(AWS_REGION) &>/dev/null; then \
-			echo "✓ Bootstrap infrastructure already exists for $(ENV)"; \
-			echo "  DynamoDB table: stl-$(ENV)-terraform-locks"; \
-			echo "  S3 bucket: stl-$(ENV)-terraform-state"; \
-			echo ""; \
-			echo "⚠️  Bootstrap is idempotent and only needs to run once per environment"; \
-			echo "==> Skipping bootstrap (already initialized)"; \
-			exit 0; \
-		fi; \
-	fi; \
-	echo ""; \
-	echo "Step 1: Creating backend resources (S3 + DynamoDB) with auto-retry (3 attempts)..."; \
-	for attempt in 1 2 3; do \
-		echo "  Attempt $$attempt/3..."; \
-		cd $(INFRA_DIR)/bootstrap && \
-		rm -rf .terraform .terraform.lock.hcl && \
-		tofu init -backend=false && \
-		AUTO_APPROVE=""; \
-		if [ -n "$$CI" ]; then AUTO_APPROVE="-auto-approve"; fi; \
-		tofu apply $$AUTO_APPROVE \
-			-state=terraform.tfstate.$(ENV) \
-			-var-file=environments/$(ENV).tfvars \
-			-target=aws_s3_bucket.terraform_state \
-			-target=aws_s3_bucket_versioning.terraform_state \
-			-target=aws_s3_bucket_server_side_encryption_configuration.terraform_state \
-			-target=aws_s3_bucket_public_access_block.terraform_state \
-			-target=aws_dynamodb_table.terraform_locks; \
-		EXIT_CODE=$$?; \
-		if [ $$EXIT_CODE -eq 0 ]; then \
-			echo "✓ Backend resources created"; \
-			break; \
-		elif [ $$EXIT_CODE -eq 1 ] && [ -z "$$CI" ]; then \
-			echo "✗ Cancelled by user or failed"; \
-			exit 1; \
-		elif [ $$attempt -lt 3 ]; then \
-			echo "  Failed, retrying in 5 seconds..."; \
-			sleep 5; \
-		else \
-			echo "✗ Failed after 3 attempts"; \
-			exit 1; \
-		fi; \
-	done; \
-	cd $(CURDIR); \
-	echo ""; \
-	echo "Step 2: Extracting bucket suffix and updating backend config (dev only)..."; \
-	if [ "$(ENV)" = "sentineldev" ]; then \
-		BUCKET_NAME=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null || echo ""); \
-		LOCKS_TABLE=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw locks_table_name 2>/dev/null || echo ""); \
-		if [ -z "$$BUCKET_NAME" ] || [ -z "$$LOCKS_TABLE" ]; then \
-			echo "Error: Could not extract bucket or locks table from bootstrap output"; \
-			exit 1; \
-		fi; \
-		echo "  Bucket: $$BUCKET_NAME"; \
-		echo "  Locks Table: $$LOCKS_TABLE"; \
-		sed -e "s|^bucket[[:space:]]*=.*|bucket = \"$$BUCKET_NAME\"|" \
-		    -e "s|^dynamodb_table[[:space:]]*=.*|dynamodb_table = \"$$LOCKS_TABLE\"|" \
-		    $(INFRA_DIR)/environments/$(ENV).backend.hcl > $(INFRA_DIR)/environments/$(ENV).backend.hcl.tmp && \
-		mv $(INFRA_DIR)/environments/$(ENV).backend.hcl.tmp $(INFRA_DIR)/environments/$(ENV).backend.hcl; \
-		echo "✓ Backend config updated"; \
-	else \
-		echo "  (Skipping for $(ENV) - using fixed backend name)"; \
-	fi; \
-	echo ""; \
-	echo "Step 3: Creating secrets with auto-retry (3 attempts)..."; \
-	if aws secretsmanager describe-secret --secret-id stl-$(ENV)-tigerdata --region $(AWS_REGION) &>/dev/null 2>&1; then \
-		echo "✓ Secrets already exist for $(ENV)"; \
-		echo "  Skipping secrets creation"; \
-	else \
-		for attempt in 1 2 3; do \
-			echo "  Attempt $$attempt/3..."; \
-			cd $(INFRA_DIR)/bootstrap && \
-			AUTO_APPROVE=""; \
-			if [ -n "$$CI" ]; then AUTO_APPROVE="-auto-approve"; fi; \
-			tofu apply $$AUTO_APPROVE \
-				-state=terraform.tfstate.$(ENV) \
-				-var-file=environments/$(ENV).tfvars \
-				-var="tigerdata_project_id=$(TIGERDATA_PROJECT_ID)" \
-				-var="tigerdata_access_key=$(TIGERDATA_ACCESS_KEY)" \
-				-var="tigerdata_secret_key=$(TIGERDATA_SECRET_KEY)" \
-				-var="alchemy_api_key=$(ALCHEMY_API_KEY)" \
-				-var="coingecko_api_key=$(COINGECKO_API_KEY)" \
-				-var="etherscan_api_key=$(ETHERSCAN_API_KEY)" \
-				-var="tailscale_auth_key=$(TAILSCALE_AUTH_KEY)"; \
-			EXIT_CODE=$$?; \
-			if [ $$EXIT_CODE -eq 0 ]; then \
-				echo "✓ Secrets created"; \
-				break; \
-			elif [ $$EXIT_CODE -eq 1 ] && [ -z "$$CI" ]; then \
-				echo "✗ Cancelled by user or failed"; \
-				exit 1; \
-			elif [ $$attempt -lt 3 ]; then \
-				echo "  Failed, retrying in 5 seconds..."; \
-				sleep 5; \
-			else \
-				echo "✗ Failed after 3 attempts"; \
-				exit 1; \
-			fi; \
-		done; \
-	fi; \
-	echo ""; \
-	echo "==> Bootstrap complete!"; \
-	echo "==> Next: make tf-init ENV=$(ENV)"
-
-# Initialize Terraform for main infrastructure
-# Checks for backend resources (S3 bucket) in AWS before proceeding
-# Usage: make tf-init ENV=sentineldev|sentinelstaging|sentinelprod
-tf-init:
-	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Initializing main infrastructure for $(ENV) (using AWS profile: $(AWS_PROFILE))..."
-	@echo "==> Checking for backend resources in AWS..."
-	@BUCKET_NAME=$$(cd $(INFRA_DIR) && grep '^bucket' environments/$(ENV).backend.hcl | awk -F'"' '{print $$2}'); \
-	if ! aws s3api head-bucket --bucket "$$BUCKET_NAME" --region $(AWS_REGION) 2>/dev/null; then \
-		echo "Error: Backend S3 bucket '$$BUCKET_NAME' not found. Run 'make tf-bootstrap ENV=$(ENV)' first."; \
-		exit 1; \
-	fi
-	@echo "✓ Backend resources exist in AWS"
-	@if [ -f "$(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV)" ]; then \
-		echo "==> Backing up bootstrap state file..."; \
-		mkdir -p $(INFRA_DIR)/.terraform; \
-		cp $(INFRA_DIR)/bootstrap/terraform.tfstate.$(ENV) $(INFRA_DIR)/.terraform/terraform.tfstate.bak; \
-	fi
-	@export AWS_PROFILE=$(AWS_PROFILE) && cd $(INFRA_DIR) && tofu init -backend-config=environments/$(ENV).backend.hcl -reconfigure
-
-# Validate Terraform configuration
-# Usage: make tf-validate ENV=sentineldev|sentinelstaging|sentinelprod
-tf-validate:
-	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Validating Terraform for $(ENV)..."
-	@export AWS_PROFILE=$(AWS_PROFILE) && cd ../infra && TF_VAR_tigerdata_project_id="dummy" TF_VAR_tigerdata_access_key="dummy" TF_VAR_tigerdata_secret_key="dummy" tofu validate
-
-# Plan Terraform changes
-# Usage: make tf-plan ENV=sentineldev|sentinelstaging|sentinelprod
-tf-plan:
-	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Planning Terraform for $(ENV)..."
-	@if [ "$(ENV)" = "sentineldev" ]; then \
-		SUFFIX=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null | rev | cut -d- -f1 | rev); \
-		export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu plan -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX"); \
-	else \
-		export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu plan -var-file=environments/$(ENV).tfvars); \
-	fi
-
-# Apply Terraform changes
-# Usage: make tf-apply ENV=sentineldev|sentinelstaging|sentinelprod
-# Auto-approves in CI (GitHub Actions), prompts locally
-tf-apply:
-	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Applying Terraform for $(ENV)..."
-	@if [ "$(ENV)" = "sentineldev" ]; then \
-		SUFFIX=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null | rev | cut -d- -f1 | rev); \
-		if [ -n "$$CI" ]; then \
-			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX" -auto-approve); \
-		else \
-			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX"); \
-		fi; \
-	else \
-		if [ -n "$$CI" ]; then \
-			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars -auto-approve); \
-		else \
-			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars); \
-		fi; \
-	fi
-
-# Destroy Terraform infrastructure
-# WARNING: This is destructive. Only dev should be destroyed via automation.
-# Usage: make tf-destroy ENV=sentineldev|sentinelstaging|sentinelprod
-# Auto-approves in CI (GitHub Actions), prompts locally
-# Staging/prod require manual confirmation to prevent accidents
-tf-destroy:
-	@if [ "$(ENV)" != "sentineldev" ] && [ -n "$$CI" ]; then \
-		echo "Error: CI-based destroy is only allowed for sentineldev"; \
-		echo "Staging/Prod must be destroyed manually (run locally with confirmation)"; \
-		exit 1; \
-	fi
-	@export AWS_PROFILE=$(AWS_PROFILE) && echo "==> Destroying Terraform infrastructure for $(ENV)..."
-	@if [ "$(ENV)" = "sentineldev" ]; then \
-		SUFFIX=$$(cd $(INFRA_DIR)/bootstrap && tofu output -state=terraform.tfstate.$(ENV) -raw state_bucket_name 2>/dev/null | rev | cut -d- -f1 | rev); \
-		if [ -n "$$CI" ]; then \
-			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX" -auto-approve); \
-		else \
-			export AWS_PROFILE=$(AWS_PROFILE) && read -p "Are you sure you want to destroy all infrastructure for $(ENV)? (yes/no) " confirm && \
-			[ "$$confirm" = "yes" ] && (cd ../infra && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -var "resource_suffix=$$SUFFIX" -auto-approve)) || echo "Destroy cancelled"; \
-		fi; \
-	else \
-		if [ -n "$$CI" ]; then \
-			export AWS_PROFILE=$(AWS_PROFILE) && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -auto-approve); \
-		else \
-			export AWS_PROFILE=$(AWS_PROFILE) && read -p "Are you sure you want to destroy all infrastructure for $(ENV)? (yes/no) " confirm && \
-			[ "$$confirm" = "yes" ] && (cd ../infra && $(call run_tofu_with_creds,tofu destroy -var-file=environments/$(ENV).tfvars -auto-approve)) || echo "Destroy cancelled"; \
-		fi; \
-	fi
-
-# Destroy bootstrap backend (S3 + DynamoDB + secrets)
-# Destroy bootstrap backend (S3 state bucket + DynamoDB locks table + secrets)
-# WARNING: This is destructive and permanent. Only for sentineldev cleanup.
-# 
-# Staging/prod destruction is prevented by:
-#   1. Environment check below (hard-coded to only allow sentineldev)
-#   2. Manual confirmation prompt (skipped in CI with auto-approve)
-#   3. force_destroy = false on S3 bucket (must manually empty first)
-#
-# Usage: make tf-destroy-bootstrap ENV=sentineldev
-tf-destroy-bootstrap: check-tofu
-	@if [ "$(ENV)" != "sentineldev" ]; then \
-		echo "Error: bootstrap destroy is only allowed for sentineldev"; \
-		echo "Staging/Prod must NEVER be destroyed"; \
-		exit 1; \
-	fi && \
-	export AWS_PROFILE=$(AWS_PROFILE) && \
-	echo "==> Destroying bootstrap backend for $(ENV) (S3 + DynamoDB + secrets)..." && \
-	BOOTSTRAP_DIR="$$(cd $(INFRA_DIR)/bootstrap && pwd)" && \
-	if [ -z "$$CI" ]; then \
-		read -p "Are you sure you want to destroy bootstrap backend for $(ENV)? This is permanent. (yes/no) " confirm; \
-		if [ "$$confirm" != "yes" ]; then \
-			echo "Destroy cancelled"; \
-			exit 0; \
-		fi; \
-	fi && \
-	echo "==> Extracting credentials from AWS Secrets Manager..." && \
-	TIGERDATA_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --region $(AWS_REGION) --query SecretString --output text 2>/dev/null || echo '{}') && \
-	WATCHER_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-watcher-config --region $(AWS_REGION) --query SecretString --output text 2>/dev/null || echo '{}') && \
-	export TF_VAR_tigerdata_project_id=$$(echo "$$TIGERDATA_JSON" | jq -r '.project_id // "dummy"') && \
-	export TF_VAR_tigerdata_access_key=$$(echo "$$TIGERDATA_JSON" | jq -r '.access_key // "dummy"') && \
-	export TF_VAR_tigerdata_secret_key=$$(echo "$$TIGERDATA_JSON" | jq -r '.secret_key // "dummy"') && \
-	export TF_VAR_alchemy_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.alchemy_api_key // "dummy-key-at-least-10-chars"') && \
-	export TF_VAR_coingecko_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.coingecko_api_key // "dummy"') && \
-	export TF_VAR_etherscan_api_key=$$(echo "$$WATCHER_JSON" | jq -r '.etherscan_api_key // "dummy"') && \
-	export TF_VAR_tailscale_auth_key=$$(echo "$$WATCHER_JSON" | jq -r '.tailscale_auth_key // "dummy"') && \
-	cd "$$BOOTSTRAP_DIR" && \
-	tofu destroy -state=terraform.tfstate.$(ENV) -var-file=environments/$(ENV).tfvars -auto-approve
-
-# Full Terraform workflow: bootstrap, init, validate, plan
-# Usage: make tf-check ENV=sentineldev|sentinelstaging|sentinelprod
-tf-check: tf-bootstrap tf-init tf-validate tf-plan
-
-# List Terraform state resources
-# Usage: make tf-state ENV=sentineldev|sentinelstaging|sentinelprod
-tf-state:
-	@echo "==> Terraform state for $(ENV)..."
-	@export AWS_PROFILE=$(AWS_PROFILE) && cd $(INFRA_DIR) && tofu state list | head -50
-	@echo ""
-	@echo "Total resources: $$(export AWS_PROFILE=$(AWS_PROFILE) && cd $(INFRA_DIR) && tofu state list | wc -l)"
-	@echo ""
-	@echo "To see details of a specific resource, use:"
-	@echo "  cd infra && tofu state show <resource_name>"
 
 # =============================================================================
 # Docker Build & Push
@@ -710,7 +396,7 @@ db-migrate:
 # Usage: make db-set-passwords DATABASE_URL="postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require" ENV=sentineldev|sentinelstaging|sentinelprod
 # Requires:
 #   1. Tunnel running: make tigerdata-tunnel BASTION_IP=... TIGERDATA_HOST=...
-#   2. Terraform applied: make tf-apply ENV=sentineldev|sentinelstaging|sentinelprod (creates secrets with passwords)
+#   2. Terraform applied (from infrastructure repo): make tf-apply ENV=sentineldev|sentinelstaging|sentinelprod (creates secrets with passwords)
 #   3. Migrations run: make db-migrate DATABASE_URL=... (creates users with placeholder passwords)
 db-set-passwords:
 	@if [ -z "$(DATABASE_URL)" ] || [ -z "$(ENV)" ]; then \
@@ -880,58 +566,70 @@ docker-release-oracle-price-worker-staging:
 	@$(MAKE) docker-release-oracle-price-worker ENV=sentinelstaging
 
 # =============================================================================
-# Erigon Node Terraform Commands
+# Docker Build & Push - SparkLend Position Tracker
 # =============================================================================
 
-ERIGON_DIR := ephemeral-infra/erigon-node
+# ECR repository URL for sparklend position tracker
+ECR_REPO_SPARKLEND_POSITION_TRACKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-sparklend-position-tracker
 
-# Helper to check AWS_PROFILE_ERIGON is set
-define require_aws_profile_erigon
-	@if [ -z "$(AWS_PROFILE_ERIGON)" ]; then \
-		echo "Error: AWS_PROFILE_ERIGON is required"; \
-		echo "Usage: make $@ AWS_PROFILE_ERIGON=<profile-name>"; \
-		exit 1; \
-	fi
-endef
+# Build Docker image for sparklend position tracker (ARM64 for Fargate Graviton)
+docker-build-sparklend-position-tracker:
+	@echo "==> Building SparkLend Position Tracker Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.sparklend-position-tracker \
+		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest \
+		--load .
 
-# Initialize Erigon Terraform
-erigon-init:
-	$(call require_aws_profile_erigon)
-	@echo "==> Initializing Erigon Terraform..."
-	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu init -backend-config=environments/sentinelstaging.backend.hcl
+# Push sparklend position tracker Docker image to ECR
+docker-push-sparklend-position-tracker: ecr-login
+	@echo "==> Pushing SparkLend Position Tracker Docker image to ECR..."
+	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest
 
-# Validate Erigon Terraform configuration
-erigon-validate:
-	$(call require_aws_profile_erigon)
-	@echo "==> Validating Erigon Terraform..."
-	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu validate
+# Build and push sparklend position tracker in one step (captures tag at start to ensure consistency)
+docker-release-sparklend-position-tracker: ecr-login
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building SparkLend Position Tracker Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.sparklend-position-tracker \
+		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$$TAG \
+		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest \
+		--load . && \
+	echo "==> Pushing SparkLend Position Tracker Docker image to ECR..." && \
+	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$$TAG && \
+	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest && \
+	echo "==> SparkLend Position Tracker Docker image released: $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$$TAG"
 
-# Plan Erigon Terraform changes
-erigon-plan:
-	$(call require_aws_profile_erigon)
-	@echo "==> Planning Erigon Terraform..."
-	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu plan
+# =============================================================================
+# Sentinelstaging SparkLend Position Tracker Docker Shortcuts
+# =============================================================================
 
-# Apply Erigon Terraform changes
-erigon-apply:
-	$(call require_aws_profile_erigon)
-	@echo "==> Applying Erigon Terraform..."
-	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu apply
+docker-build-sparklend-position-tracker-staging:
+	@$(MAKE) docker-build-sparklend-position-tracker ENV=sentinelstaging
 
-# Apply Erigon Terraform changes (auto-approve)
-erigon-apply-auto:
-	$(call require_aws_profile_erigon)
-	@echo "==> Applying Erigon Terraform (auto-approve)..."
-	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu apply -auto-approve
+docker-push-sparklend-position-tracker-staging:
+	@$(MAKE) docker-push-sparklend-position-tracker ENV=sentinelstaging
 
-# Destroy Erigon infrastructure
-erigon-destroy:
-	$(call require_aws_profile_erigon)
-	@echo "==> Destroying Erigon infrastructure..."
-	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu destroy
-
-# Full Erigon workflow: init, validate, plan
-erigon-check: erigon-init erigon-validate erigon-plan
+docker-release-sparklend-position-tracker-staging:
+	@$(MAKE) docker-release-sparklend-position-tracker ENV=sentinelstaging
 
 # =============================================================================
 # Erigon Node Management (via Tailscale)
@@ -981,7 +679,7 @@ erigon-logs-follow:
 erigon-deploy-readonly:
 	$(call require_erigon_vars)
 	@echo "==> Deploying erigon-readonly.service to Erigon node..."
-	cat $(ERIGON_DIR)/erigon-readonly.service | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > /etc/systemd/system/erigon-readonly.service && systemctl daemon-reload'
+	cat erigon/erigon-readonly.service | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > /etc/systemd/system/erigon-readonly.service && systemctl daemon-reload'
 	@echo "==> Service deployed. Use 'make erigon-switch-readonly' to switch modes."
 
 # Switch to read-only mode (for bulk downloading)
@@ -1024,6 +722,13 @@ build-oracle-worker:
 	mkdir -p dist
 	go build -o dist/oracle-price-worker ./cmd/oracle-price-worker
 	@echo "==> Built: dist/oracle-price-worker"
+
+# Build sparklend-position-tracker binary
+build-sparklend-position-tracker:
+	@echo "==> Building sparklend-position-tracker..."
+	mkdir -p dist
+	go build -o dist/sparklend-position-tracker ./cmd/sparklend-position-tracker
+	@echo "==> Built: dist/sparklend-position-tracker"
 
 # Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
 build-oracle-pricing-backfill-arm64:
