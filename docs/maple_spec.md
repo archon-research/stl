@@ -296,98 +296,17 @@ There are two ways to query collateral data:
 
 #### Pool Collateral
 
-**⚠️ DATA QUALITY WARNING:**
+**⚠️ LIMITATION:**
 
-**The `poolCollaterals` data has a known discrepancy between breakdown and totals:**
+The `poolCollaterals` query returns **aggregate collateral data for external loans only**. This means:
 
-- ✅ The `assetValueUsd` values appear to be **accurate** and match the collateral breakdown shown on Maple's frontend
-- ✅ The **sum of `assetValueUsd` values** appear to represent the true total collateral backing
-- ❌ However, the `collateralValue` field appears to be an **underestimate** for unknown reasons
-- ❌ Maple's frontend displays `collateralValue` as the total, which **does not match** the sum of the breakdown values
+- ✅ It accurately shows collateral backing external borrower loans
+- ❌ It **does not include** internal loans made to Maple (e.g., for strategies, AMM positions)
+- ❌ It **does not accurately represent** the total backing for Syrup assets like syrupUSDC
 
-**Summary:** There is an internal inconsistency where the collateral breakdown (asset-by-asset) is accurate, but the aggregate `collateralValue` field underreports the total. 
+**Why this matters:** Pools have excess liquidity that may be deployed internally to Maple strategies. This internal deployment is not captured in `poolCollaterals`, making it insufficient for calculating the true backing composition of Syrup pool tokens.
 
-**Recommendation:** 
-1. Use the `assetValueUsd` values and sum them for accurate total collateral
-2. Further research is needed to understand why `collateralValue` is lower
-3. See the **Individual Loans** section below for additional per-loan collateral details
-
----
-
-**GraphQL Query:**
-
-```graphql
-query PoolCollateralData($poolAddress: ID!) {
-  poolV2(id: $poolAddress) {
-    poolMeta {
-      poolName
-      poolCollaterals {
-        asset              # e.g., "BTC", "ETH", "weETH", "HYPE"
-        assetAmount        # Total collateral amount (integer string)
-        assetDecimals      # Decimals for assetAmount
-        assetValueUsd      # Total USD value of this asset (integer, 6 decimals)
-        addresses          # Collateral holder addresses
-      }
-    }
-    assets               # Pool liquid assets
-    collateralValue      # Total collateral USD value
-    principalOut         # Outstanding loan principal
-    tvl                  # Total value locked
-  }
-}
-```
-
-**Example Response:**
-
-```json
-{
-  "poolV2": {
-    "poolMeta": {
-      "poolCollaterals": [
-        {
-          "asset": "BTC",
-          "assetValueUsd": "600000000000"
-        },
-        {
-          "asset": "ETH",
-          "assetValueUsd": "300000000000"
-        },
-        {
-          "asset": "HYPE",
-          "assetValueUsd": "100000000000"
-        }
-      ]
-    },
-    "collateralValue": "1000000000000",
-    "principalOut": "800000000000"
-  }
-}
-```
-
-**Calculate Backing Composition:**
-
-```typescript
-// User holds $1,000 worth of SyrupUSDC
-const userPositionUsd = 1000;
-
-// Pool collateral (from GraphQL, 6 decimals):
-const btcValueUsd = 600000000000 / 1e6;   // $600,000
-const ethValueUsd = 300000000000 / 1e6;   // $300,000
-const hypeValueUsd = 100000000000 / 1e6;  // $100,000
-const totalCollateralUsd = 1000000;       // $1,000,000 total
-
-// Calculate backing percentages:
-const btcPercent = (btcValueUsd / totalCollateralUsd) * 100;   // 60%
-const ethPercent = (ethValueUsd / totalCollateralUsd) * 100;   // 30%
-const hypePercent = (hypeValueUsd / totalCollateralUsd) * 100; // 10%
-
-// User's $1,000 position is backed by:
-// - $600 worth of BTC (60% of $1,000 = $600)
-// - $300 worth of ETH (30% of $1,000 = $300)
-// - $100 worth of HYPE (10% of $1,000 = $100)
-```
-
-**Key Point:** All SyrupUSDC holders have the **same backing composition** - it's determined by the pool's total collateral, not individual user positions.
+**Recommendation:** Use the **Individual Loans** section below to query all active loans (both external and internal) for a complete view of pool backing.
 
 ---
 
