@@ -239,13 +239,7 @@ SELECT o.id, t.id, true,
 FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'USDT'
 ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL DO NOTHING;
 
--- ETH-denominated feeds
-INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
-SELECT o.id, t.id, true,
-       '\x8751F736E94F6CD167e8C5B97E245680FbD9CC36'::BYTEA, 8, 'ETH'
-FROM oracle o, token t WHERE o.name = 'redstone' AND t.symbol = 'weETH'
-ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL DO NOTHING;
-
+-- ETH-denominated feeds (weETH excluded: already has a direct USD feed above)
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
 SELECT o.id, t.id, true,
        '\xA736eAe8805dDeFFba40cAB8c99bCB309dEaBd9B'::BYTEA, 8, 'ETH'

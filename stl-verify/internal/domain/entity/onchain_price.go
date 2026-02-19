@@ -5,6 +5,15 @@ import (
 	"time"
 )
 
+// OracleType identifies the kind of oracle price provider.
+type OracleType string
+
+const (
+	OracleTypeAave          OracleType = "aave_oracle"
+	OracleTypeChainlinkFeed OracleType = "chainlink_feed"
+	OracleTypeChronicle     OracleType = "chronicle"
+)
+
 // Oracle represents an onchain oracle price provider (e.g., SparkLend).
 type Oracle struct {
 	ID              int64
@@ -12,7 +21,7 @@ type Oracle struct {
 	DisplayName     string
 	ChainID         int
 	Address         [20]byte
-	OracleType      string // "aave_oracle", "chainlink_feed", or "chronicle"
+	OracleType      OracleType
 	DeploymentBlock int64
 	Enabled         bool
 	PriceDecimals   int // default 8 for Chainlink/Aave standard
@@ -67,6 +76,9 @@ func (p *OnchainTokenPrice) validate() error {
 	}
 	if p.BlockNumber <= 0 {
 		return fmt.Errorf("blockNumber must be positive, got %d", p.BlockNumber)
+	}
+	if p.BlockVersion < 0 {
+		return fmt.Errorf("blockVersion must be non-negative, got %d", p.BlockVersion)
 	}
 	if p.Timestamp.IsZero() {
 		return fmt.Errorf("timestamp must not be zero")

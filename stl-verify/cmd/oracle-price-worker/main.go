@@ -24,6 +24,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_price_worker"
 )
 
@@ -145,7 +146,9 @@ func run(ctx context.Context, args []string) error {
 		consumer,
 		mc,
 		repo,
-		ethClient.Client(),
+		func() (outbound.Multicaller, error) {
+			return multicall.NewDirectCaller(ethClient.Client())
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)

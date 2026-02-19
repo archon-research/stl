@@ -20,6 +20,18 @@ type FeedConfig struct {
 	QuoteCurrency string // "USD", "ETH", or "BTC"
 }
 
+func validateFeeds(feeds []FeedConfig) error {
+	for i, f := range feeds {
+		if f.FeedAddress == (common.Address{}) {
+			return fmt.Errorf("feed %d (tokenID %d): zero feed address", i, f.TokenID)
+		}
+		if f.FeedDecimals <= 0 {
+			return fmt.Errorf("feed %d (tokenID %d): invalid feed decimals %d", i, f.TokenID, f.FeedDecimals)
+		}
+	}
+	return nil
+}
+
 // FeedPriceResult holds the result of a latestRoundData() call for one feed.
 type FeedPriceResult struct {
 	TokenID int64
@@ -43,6 +55,10 @@ func FetchFeedPrices(
 ) ([]FeedPriceResult, error) {
 	if len(feeds) == 0 {
 		return nil, nil
+	}
+
+	if err := validateFeeds(feeds); err != nil {
+		return nil, fmt.Errorf("invalid feed config: %w", err)
 	}
 
 	block := new(big.Int).SetInt64(blockNum)
@@ -113,16 +129,18 @@ func fetchWithLatestRoundData(
 
 		if answer.Sign() <= 0 {
 			logger.Warn("feed returned non-positive answer",
-				"feedIndex", i, "tokenID", feeds[i].TokenID, "block", blockNum)
+				"feedIndex", i, "tokenID", feeds[i].TokenID,
+				"feedAddress", feeds[i].FeedAddress.Hex(), "block", blockNum)
 			continue
 		}
 		if updatedAt.Sign() == 0 {
 			logger.Warn("feed round not complete",
-				"feedIndex", i, "tokenID", feeds[i].TokenID, "block", blockNum)
+				"feedIndex", i, "tokenID", feeds[i].TokenID,
+				"feedAddress", feeds[i].FeedAddress.Hex(), "block", blockNum)
 			continue
 		}
 
-		out[i].Price = ConvertOraclePriceToUSD(answer, feeds[i].FeedDecimals)
+		out[i].Price = ScaleByDecimals(answer, feeds[i].FeedDecimals)
 		out[i].Success = true
 	}
 
@@ -179,13 +197,14 @@ func retryWithLatestAnswer(
 
 		if answer.Sign() <= 0 {
 			logger.Warn("latestAnswer returned non-positive value",
-				"feedIndex", i, "tokenID", feeds[i].TokenID, "block", blockNum)
+				"feedIndex", i, "tokenID", feeds[i].TokenID,
+				"feedAddress", feeds[i].FeedAddress.Hex(), "block", blockNum)
 			continue
 		}
 
 		logger.Debug("feed recovered via latestAnswer",
 			"feedIndex", i, "tokenID", feeds[i].TokenID, "block", blockNum)
-		out[i].Price = ConvertOraclePriceToUSD(answer, feeds[i].FeedDecimals)
+		out[i].Price = ScaleByDecimals(answer, feeds[i].FeedDecimals)
 		out[i].Success = true
 	}
 

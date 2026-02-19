@@ -13,6 +13,9 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
+// Compile-time interface check.
+var _ outbound.Multicaller = (*DirectCaller)(nil)
+
 // DirectCaller implements outbound.Multicaller by making individual eth_call
 // per target using JSON-RPC batching instead of the Multicall3 contract. This
 // is needed for contracts like Chronicle that use toll/whitelist access control
@@ -24,9 +27,12 @@ type DirectCaller struct {
 	rpcClient *rpc.Client
 }
 
-// NewDirectCaller creates a new DirectCaller from an ethclient.
-func NewDirectCaller(rpcClient *rpc.Client) *DirectCaller {
-	return &DirectCaller{rpcClient: rpcClient}
+// NewDirectCaller creates a new DirectCaller.
+func NewDirectCaller(rpcClient *rpc.Client) (*DirectCaller, error) {
+	if rpcClient == nil {
+		return nil, fmt.Errorf("rpcClient cannot be nil")
+	}
+	return &DirectCaller{rpcClient: rpcClient}, nil
 }
 
 // ethCallArg mirrors go-ethereum's internal callMsg JSON encoding for eth_call.
@@ -41,7 +47,10 @@ func (c *DirectCaller) Execute(ctx context.Context, calls []outbound.Call, block
 		return []outbound.Result{}, nil
 	}
 
-	blockArg := toBlockNumArg(blockNumber)
+	blockArg, err := toBlockNumArg(blockNumber)
+	if err != nil {
+		return nil, err
+	}
 
 	elems := make([]rpc.BatchElem, len(calls))
 	hexResults := make([]hexutil.Bytes, len(calls))
@@ -88,12 +97,12 @@ func (c *DirectCaller) Address() common.Address {
 	return common.Address{}
 }
 
-func toBlockNumArg(number *big.Int) string {
+func toBlockNumArg(number *big.Int) (string, error) {
 	if number == nil {
-		return "latest"
+		return "", fmt.Errorf("block number is required (nil would silently query latest)")
 	}
-	if number.Sign() >= 0 {
-		return hexutil.EncodeBig(number)
+	if number.Sign() < 0 {
+		return "", fmt.Errorf("negative block number: %s", number)
 	}
-	return "latest"
+	return hexutil.EncodeBig(number), nil
 }

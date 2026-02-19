@@ -171,14 +171,14 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 	blockRanges := computeOracleBlockRanges(bindings)
 
 	directCallerFactory := func() (outbound.Multicaller, error) {
-		return multicall.NewDirectCaller(s.rpcClient), nil
+		return multicall.NewDirectCaller(s.rpcClient)
 	}
 
 	// Build work units, deduplicating by oracle ID (a protocol oracle may also exist as a generic oracle).
 	var workUnits []*oracleWorkUnit
 	for _, su := range shared {
 		factory := s.newMulticaller
-		if su.Oracle.OracleType == "chronicle" {
+		if su.Oracle.OracleType == entity.OracleTypeChronicle {
 			factory = directCallerFactory
 		}
 
@@ -372,7 +372,13 @@ func (s *Service) worker(
 ) {
 	mc, err := wu.newMulticaller()
 	if err != nil {
-		s.logger.Error("failed to create multicall client", "error", err)
+		rangeSize := toBlock - fromBlock + 1
+		stats.blocksFailed.Add(rangeSize)
+		s.logger.Error("failed to create multicall client",
+			"error", err,
+			"fromBlock", fromBlock,
+			"toBlock", toBlock,
+			"blocksDropped", rangeSize)
 		return
 	}
 
@@ -394,7 +400,7 @@ func (s *Service) worker(
 		var blockErr error
 
 		switch wu.Oracle.OracleType {
-		case "chainlink_feed", "chronicle":
+		case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle:
 			prices, blockErr = s.processBlockFeed(ctx, mc, wu, oracleID, blockNum)
 		default:
 			prices, blockErr = s.processBlockAave(ctx, mc, wu.OracleAddr, wu.TokenAddrs, wu.TokenIDs, oracleID, priceDecimals, blockNum)
@@ -474,7 +480,7 @@ func (s *Service) processBlockAave(
 
 	prices := make([]*entity.OnchainTokenPrice, 0, len(successIdx))
 	for _, i := range successIdx {
-		priceUSD := blockchain.ConvertOraclePriceToUSD(results[i].Price, priceDecimals)
+		priceUSD := blockchain.ScaleByDecimals(results[i].Price, priceDecimals)
 
 		p, err := entity.NewOnchainTokenPrice(
 			tokenIDs[i],
@@ -510,7 +516,7 @@ func (s *Service) processBlockFeed(
 		return nil, fmt.Errorf("fetching feed prices: %w", err)
 	}
 
-	logBackfillFeedFailures(results, wu, s.logger, blockNum)
+	oracle_pricing.LogFeedFailures(results, wu.OracleUnit, s.logger, blockNum)
 
 	oracle_pricing.ConvertNonUSDPrices(results, wu.OracleUnit, s.logger, blockNum)
 
@@ -553,25 +559,6 @@ func (s *Service) processBlockFeed(
 	}
 
 	return prices, nil
-}
-
-func logBackfillFeedFailures(results []blockchain.FeedPriceResult, wu *oracleWorkUnit, logger *slog.Logger, blockNum int64) {
-	var failCount int
-	for _, r := range results {
-		if !r.Success {
-			failCount++
-			logger.Warn("feed call failed",
-				"oracle", wu.Oracle.Name,
-				"tokenID", r.TokenID,
-				"block", blockNum)
-		}
-	}
-	if failCount == len(results) && len(results) > 0 {
-		logger.Error("all feeds failed for oracle, check configuration",
-			"oracle", wu.Oracle.Name,
-			"block", blockNum,
-			"feedCount", len(results))
-	}
 }
 
 func (s *Service) batchWriter(ctx context.Context, priceCh <-chan []*entity.OnchainTokenPrice, stats *backfillStats) error {

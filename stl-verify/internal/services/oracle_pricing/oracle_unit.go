@@ -14,9 +14,9 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// QuoteCurrencyTokenAddr maps quote currencies to their well-known mainnet
+// quoteCurrencyTokenAddr maps quote currencies to their well-known mainnet
 // token addresses, used for reference feed identification.
-var QuoteCurrencyTokenAddr = map[string]common.Address{
+var quoteCurrencyTokenAddr = map[string]common.Address{
 	"ETH": common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
 	"BTC": common.HexToAddress("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"), // WBTC
 }
@@ -42,6 +42,7 @@ func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, 
 
 	seen := make(map[int64]bool)
 	var units []*OracleUnit
+	var skipped int
 
 	for _, oracle := range allOracles {
 		if seen[oracle.ID] {
@@ -52,12 +53,18 @@ func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, 
 		unit, err := buildOracleUnit(ctx, repo, oracle)
 		if err != nil {
 			logger.Warn("skipping oracle", "name", oracle.Name, "error", err)
+			skipped++
 			continue
 		}
 		if unit != nil {
 			units = append(units, unit)
 		}
 	}
+
+	logger.Info("loaded oracle units",
+		"loaded", len(units),
+		"total", len(seen),
+		"skipped", skipped)
 
 	return units, nil
 }
@@ -85,9 +92,30 @@ func ConvertNonUSDPrices(results []blockchain.FeedPriceResult, unit *OracleUnit,
 	}
 }
 
+// LogFeedFailures logs individual feed failures and emits an error if all feeds failed.
+func LogFeedFailures(results []blockchain.FeedPriceResult, unit *OracleUnit, logger *slog.Logger, blockNum int64) {
+	var failCount int
+	for i, r := range results {
+		if !r.Success {
+			failCount++
+			logger.Warn("feed call failed",
+				"oracle", unit.Oracle.Name,
+				"tokenID", r.TokenID,
+				"feedAddress", unit.Feeds[i].FeedAddress.Hex(),
+				"block", blockNum)
+		}
+	}
+	if failCount == len(results) && len(results) > 0 {
+		logger.Error("all feeds failed for oracle, check configuration",
+			"oracle", unit.Oracle.Name,
+			"block", blockNum,
+			"feedCount", len(results))
+	}
+}
+
 func buildOracleUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle) (*OracleUnit, error) {
 	switch oracle.OracleType {
-	case "chainlink_feed", "chronicle":
+	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle:
 		return buildFeedUnit(ctx, repo, oracle)
 	default:
 		return buildAaveUnit(ctx, repo, oracle)
@@ -167,7 +195,7 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		tokenIDs[i] = asset.TokenID
 	}
 
-	refFeedIdx, nonUSDFeeds := BuildRefFeedIdx(feeds, tokenAddrBytes)
+	refFeedIdx, nonUSDFeeds := buildRefFeedIdx(feeds, tokenAddrBytes)
 
 	return &OracleUnit{
 		Oracle:      oracle,
@@ -178,10 +206,10 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 	}, nil
 }
 
-// BuildRefFeedIdx identifies which feeds serve as USD-denominated reference prices
+// buildRefFeedIdx identifies which feeds serve as USD-denominated reference prices
 // for non-USD quote currencies. It matches token addresses against well-known
 // WETH/WBTC addresses to find feeds that provide ETH/USD and BTC/USD.
-func BuildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrBytes map[int64][]byte) (map[string]int, map[int]string) {
+func buildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrBytes map[int64][]byte) (map[string]int, map[int]string) {
 	tokenAddr := make(map[int64]common.Address, len(tokenAddrBytes))
 	for tokenID, addrBytes := range tokenAddrBytes {
 		tokenAddr[tokenID] = common.BytesToAddress(addrBytes)
@@ -199,7 +227,7 @@ func BuildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrBytes map[int64][]b
 		if !ok {
 			continue
 		}
-		for currency, refAddr := range QuoteCurrencyTokenAddr {
+		for currency, refAddr := range quoteCurrencyTokenAddr {
 			if addr == refAddr {
 				refFeedIdx[currency] = i
 			}

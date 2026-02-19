@@ -290,21 +290,19 @@ func (r *OnchainPriceRepository) GetOracleByAddress(ctx context.Context, chainID
 
 // InsertOracle inserts a new oracle and returns it with the generated ID.
 func (r *OnchainPriceRepository) InsertOracle(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error) {
-	oracleType := oracle.OracleType
-	if oracleType == "" {
-		oracleType = "aave_oracle"
+	if oracle.OracleType == "" {
+		return nil, fmt.Errorf("inserting oracle: oracle_type is required")
 	}
 	err := r.pool.QueryRow(ctx, `
 		INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, enabled, price_decimals)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id, created_at, updated_at
 	`, oracle.Name, oracle.DisplayName, oracle.ChainID, oracle.Address[:],
-		oracleType, oracle.DeploymentBlock, oracle.Enabled, oracle.PriceDecimals,
+		oracle.OracleType, oracle.DeploymentBlock, oracle.Enabled, oracle.PriceDecimals,
 	).Scan(&oracle.ID, &oracle.CreatedAt, &oracle.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("inserting oracle: %w", err)
 	}
-	oracle.OracleType = oracleType
 	return oracle, nil
 }
 

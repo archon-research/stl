@@ -16,10 +16,14 @@ package alchemy
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -256,6 +260,8 @@ func (s *Subscriber) connectAndSubscribe() error {
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: s.config.HandshakeTimeout,
+		Proxy:            http.ProxyFromEnvironment,
+		TLSClientConfig:  proxyTLSConfig(),
 	}
 	conn, _, err := dialer.DialContext(s.ctx, s.config.WebSocketURL, nil)
 	if err != nil {
@@ -501,4 +507,31 @@ func (s *Subscriber) HealthCheck(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// proxyTLSConfig returns a TLS config that trusts an additional CA certificate
+// specified by the SSL_CERT_FILE environment variable.
+//
+// This is needed for local development behind a TLS-intercepting proxy (e.g.
+// Zscaler, corporate firewall). Such proxies terminate the TLS connection to
+// Alchemy's WebSocket endpoint and re-sign it with their own CA. Without adding
+// that CA to the trust pool, the dialer rejects the proxy's certificate.
+//
+// In production (ECS Fargate) SSL_CERT_FILE is not set, so this returns nil and
+// the dialer uses Go's default system cert pool — no behaviour change.
+func proxyTLSConfig() *tls.Config {
+	certFile := os.Getenv("SSL_CERT_FILE")
+	if certFile == "" {
+		return nil
+	}
+	pem, err := os.ReadFile(certFile)
+	if err != nil {
+		return nil
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		pool = x509.NewCertPool()
+	}
+	pool.AppendCertsFromPEM(pem)
+	return &tls.Config{RootCAs: pool} //nolint:gosec // only adds extra CA
 }

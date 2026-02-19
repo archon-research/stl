@@ -136,7 +136,7 @@ func TestLoadOracleUnits(t *testing.T) {
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "sparklend", Address: [20]byte{0xBB},
-							Enabled: true, OracleType: "aave_oracle",
+							Enabled: true, OracleType: entity.OracleTypeAave,
 						}}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -175,7 +175,7 @@ func TestLoadOracleUnits(t *testing.T) {
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "chainlink", Enabled: true,
-							OracleType: "chainlink_feed", PriceDecimals: 8,
+							OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
 						}}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -208,7 +208,7 @@ func TestLoadOracleUnits(t *testing.T) {
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "chronicle", Enabled: true,
-							OracleType: "chronicle", PriceDecimals: 18,
+							OracleType: entity.OracleTypeChronicle, PriceDecimals: 18,
 						}}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -299,7 +299,7 @@ func TestLoadOracleUnits(t *testing.T) {
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "feed", Enabled: true,
-							OracleType: "chainlink_feed", PriceDecimals: 8,
+							OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
 						}}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -322,7 +322,7 @@ func TestLoadOracleUnits(t *testing.T) {
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "feed", Enabled: true,
-							OracleType: "chainlink_feed", PriceDecimals: 8,
+							OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
 						}}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -379,10 +379,10 @@ func TestLoadOracleUnits(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestBuildRefFeedIdx
+// Test_buildRefFeedIdx
 // ---------------------------------------------------------------------------
 
-func TestBuildRefFeedIdx(t *testing.T) {
+func Test_buildRefFeedIdx(t *testing.T) {
 	wethAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
 	wbtcAddr := common.HexToAddress("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599")
 	daiAddr := common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F")
@@ -459,7 +459,7 @@ func TestBuildRefFeedIdx(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			refFeedIdx, nonUSD := BuildRefFeedIdx(tt.feeds, tt.tokenAddrBytes)
+			refFeedIdx, nonUSD := buildRefFeedIdx(tt.feeds, tt.tokenAddrBytes)
 
 			if len(refFeedIdx) != len(tt.wantRefFeedIdx) {
 				t.Fatalf("refFeedIdx len = %d, want %d", len(refFeedIdx), len(tt.wantRefFeedIdx))

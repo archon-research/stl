@@ -210,6 +210,33 @@ func TestFetchFeedPrices(t *testing.T) {
 				{TokenID: 2, Price: 2500.0, Success: true},
 			},
 		},
+		{
+			name: "zero feed address returns validation error",
+			feeds: []FeedConfig{
+				{TokenID: 1, FeedAddress: common.Address{}, FeedDecimals: 8, QuoteCurrency: "USD"},
+			},
+			mock:        &mockMulticaller{},
+			wantErr:     true,
+			errContains: "zero feed address",
+		},
+		{
+			name: "zero feed decimals returns validation error",
+			feeds: []FeedConfig{
+				{TokenID: 1, FeedAddress: feed1, FeedDecimals: 0, QuoteCurrency: "USD"},
+			},
+			mock:        &mockMulticaller{},
+			wantErr:     true,
+			errContains: "invalid feed decimals",
+		},
+		{
+			name: "negative feed decimals returns validation error",
+			feeds: []FeedConfig{
+				{TokenID: 1, FeedAddress: feed1, FeedDecimals: -1, QuoteCurrency: "USD"},
+			},
+			mock:        &mockMulticaller{},
+			wantErr:     true,
+			errContains: "invalid feed decimals",
+		},
 	}
 
 	for _, tt := range tests {
