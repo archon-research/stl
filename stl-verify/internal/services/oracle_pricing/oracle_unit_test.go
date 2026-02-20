@@ -372,7 +372,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			},
 		},
 		{
-			name: "large oracle ID is accepted",
+			name: "oracle ID overflow returns error",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
@@ -391,13 +391,8 @@ func TestLoadOracleUnits(t *testing.T) {
 					},
 				}
 			},
-			wantCount: 1,
-			checkUnits: func(t *testing.T, units []*OracleUnit) {
-				t.Helper()
-				if units[0].OracleID != 40000 {
-					t.Errorf("OracleID = %d, want 40000", units[0].OracleID)
-				}
-			},
+			wantErr:     true,
+			errContains: "out of int16 range",
 		},
 		{
 			name: "OracleID field is set on loaded units",

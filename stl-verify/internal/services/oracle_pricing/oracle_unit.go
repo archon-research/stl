@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -25,7 +26,7 @@ var quoteCurrencyTokenAddr = map[string]common.Address{
 // OracleUnit holds everything needed to fetch prices for one oracle.
 type OracleUnit struct {
 	Oracle      *entity.Oracle
-	OracleID    int64
+	OracleID    int16
 	OracleAddr  common.Address
 	TokenAddrs  []common.Address        // for aave_oracle: ordered list of token addresses
 	TokenIDs    []int64                 // parallel to TokenAddrs (aave) or Feeds (chainlink_feed)
@@ -110,7 +111,10 @@ func buildOracleUnit(ctx context.Context, repo outbound.OnchainPriceRepository, 
 		return nil, err
 	}
 	if unit != nil {
-		unit.OracleID = oracle.ID
+		if oracle.ID < 1 || oracle.ID > math.MaxInt16 {
+			return nil, fmt.Errorf("oracle ID %d out of int16 range [1, %d]", oracle.ID, math.MaxInt16)
+		}
+		unit.OracleID = int16(oracle.ID)
 	}
 	return unit, nil
 }

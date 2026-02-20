@@ -67,7 +67,7 @@ type OracleAsset struct {
 // OnchainTokenPrice stores an oracle price for a token at a specific block.
 type OnchainTokenPrice struct {
 	TokenID      int64
-	OracleID     int64
+	OracleID     int16
 	BlockNumber  int64
 	BlockVersion int16
 	Timestamp    time.Time
@@ -75,7 +75,7 @@ type OnchainTokenPrice struct {
 }
 
 // NewOnchainTokenPrice creates a new OnchainTokenPrice entity with validation.
-func NewOnchainTokenPrice(tokenID int64, oracleID int64, blockNumber int64, blockVersion int16, timestamp time.Time, priceUSD float64) (*OnchainTokenPrice, error) {
+func NewOnchainTokenPrice(tokenID int64, oracleID int16, blockNumber int64, blockVersion int16, timestamp time.Time, priceUSD float64) (*OnchainTokenPrice, error) {
 	p := &OnchainTokenPrice{
 		TokenID:      tokenID,
 		OracleID:     oracleID,

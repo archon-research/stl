@@ -451,7 +451,7 @@ func (s *Service) processBlockAave(
 	oracleAddr common.Address,
 	tokenAddrs []common.Address,
 	tokenIDs []int64,
-	oracleID int64,
+	oracleID int16,
 	priceDecimals int,
 	blockNum int64,
 ) ([]*entity.OnchainTokenPrice, error) {
@@ -510,7 +510,7 @@ func (s *Service) processBlockFeed(
 	ctx context.Context,
 	mc outbound.Multicaller,
 	wu *oracleWorkUnit,
-	oracleID int64,
+	oracleID int16,
 	blockNum int64,
 ) ([]*entity.OnchainTokenPrice, error) {
 	results, err := blockchain.FetchFeedPrices(
