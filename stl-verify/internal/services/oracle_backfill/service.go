@@ -54,8 +54,8 @@ func configDefaults() Config {
 // block range information.
 type oracleWorkUnit struct {
 	*oracle_pricing.OracleUnit
-	validFrom      int64                                          // earliest block to query (0 = no lower bound)
-	validTo        int64                                          // latest block to query (0 = no upper bound)
+	validFrom      int64                                // earliest block to query (0 = no lower bound)
+	validTo        int64                                // latest block to query (0 = no upper bound)
 	newMulticaller func() (outbound.Multicaller, error) // per-unit factory with oracle type bound
 }
 

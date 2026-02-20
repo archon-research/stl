@@ -16,13 +16,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-func testFeedABI(t *testing.T) *abi.ABI {
+func feedABI(t *testing.T) *abi.ABI {
 	t.Helper()
-	feedABI, err := abis.GetAggregatorV3ABI()
+	parsed, err := abis.GetAggregatorV3ABI()
 	if err != nil {
 		t.Fatalf("loading AggregatorV3 ABI: %v", err)
 	}
-	return feedABI
+	return parsed
 }
 
 func packRoundData(t *testing.T, answer *big.Int, updatedAt *big.Int) []byte {
@@ -36,8 +36,13 @@ func packRoundData(t *testing.T, answer *big.Int, updatedAt *big.Int) []byte {
 	)
 }
 
+func packLatestAnswer(t *testing.T, answer *big.Int) []byte {
+	t.Helper()
+	return testutil.PackLatestAnswer(t, answer)
+}
+
 func TestFetchFeedPrices(t *testing.T) {
-	feedABI := testFeedABI(t)
+	fABI := feedABI(t)
 	blockNum := int64(12345678)
 
 	feed1 := common.HexToAddress("0x0000000000000000000000000000000000000AAA")
@@ -105,20 +110,6 @@ func TestFetchFeedPrices(t *testing.T) {
 				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: packRoundData(t, big.NewInt(0), big.NewInt(1000))}, // zero answer
-					}, nil
-				},
-			},
-			wantResults: []FeedPriceResult{
-				{TokenID: 1, Success: false},
-			},
-		},
-		{
-			name:  "updatedAt == 0 marks feed as failed",
-			feeds: feeds[:1],
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-					return []outbound.Result{
-						{Success: true, ReturnData: packRoundData(t, big.NewInt(200000000000), big.NewInt(0))}, // updatedAt=0
 					}, nil
 				},
 			},
@@ -244,7 +235,7 @@ func TestFetchFeedPrices(t *testing.T) {
 			results, err := FetchFeedPrices(
 				context.Background(),
 				tt.mock,
-				feedABI,
+				fABI,
 				tt.feeds,
 				blockNum,
 				testutil.DiscardLogger(),
@@ -290,13 +281,8 @@ func TestFetchFeedPrices(t *testing.T) {
 	}
 }
 
-func packLatestAnswer(t *testing.T, answer *big.Int) []byte {
-	t.Helper()
-	return testutil.PackLatestAnswer(t, answer)
-}
-
 func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
-	feedABI := testFeedABI(t)
+	fABI := feedABI(t)
 	blockNum := int64(12345678)
 
 	feed1 := common.HexToAddress("0x0000000000000000000000000000000000000AAA")
@@ -440,7 +426,7 @@ func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
 			results, err := FetchFeedPrices(
 				context.Background(),
 				mock,
-				feedABI,
+				fABI,
 				tt.feeds,
 				blockNum,
 				testutil.DiscardLogger(),
@@ -500,7 +486,7 @@ func (m *callCountMock) Address() common.Address {
 }
 
 func TestFetchFeedPrices_VerifiesCallTargets(t *testing.T) {
-	feedABI := testFeedABI(t)
+	fABI := feedABI(t)
 
 	feed1 := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 	feed2 := common.HexToAddress("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
@@ -537,7 +523,7 @@ func TestFetchFeedPrices_VerifiesCallTargets(t *testing.T) {
 		},
 	}
 
-	results, err := FetchFeedPrices(context.Background(), mock, feedABI, feeds, 99, testutil.DiscardLogger())
+	results, err := FetchFeedPrices(context.Background(), mock, fABI, feeds, 99, testutil.DiscardLogger())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -553,7 +539,7 @@ func TestFetchFeedPrices_VerifiesCallTargets(t *testing.T) {
 }
 
 func TestValidateFeedDecimals(t *testing.T) {
-	feedABI := testFeedABI(t)
+	fABI := feedABI(t)
 	blockNum := int64(12345678)
 
 	feed1 := common.HexToAddress("0x0000000000000000000000000000000000000AAA")
@@ -634,7 +620,7 @@ func TestValidateFeedDecimals(t *testing.T) {
 			err := ValidateFeedDecimals(
 				context.Background(),
 				tt.mock,
-				feedABI,
+				fABI,
 				tt.feeds,
 				blockNum,
 				testutil.DiscardLogger(),

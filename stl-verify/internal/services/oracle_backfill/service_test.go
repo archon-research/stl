@@ -18,14 +18,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// dummyMulticallFactory returns a MulticallFactory that creates a mock multicaller
-// for any oracle type. It satisfies the non-nil factory requirement for NewService.
-func dummyMulticallFactory() MulticallFactory {
-	return func(_ entity.OracleType) (outbound.Multicaller, error) {
-		return &testutil.MockMulticaller{}, nil
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------

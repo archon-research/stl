@@ -46,6 +46,9 @@ type FeedPriceResult struct {
 // Each call uses AllowFailure: true so individual feeds can fail independently.
 // Returns prices in the feed's native quote currency (not necessarily USD).
 // Quote currency conversion (ETH→USD, BTC→USD) is handled by the caller.
+//
+// feedABI is passed as a parameter rather than stored in FeedConfig because
+// all feeds share the same ABI (AggregatorV3Interface).
 func FetchFeedPrices(
 	ctx context.Context,
 	multicaller outbound.Multicaller,
@@ -64,13 +67,13 @@ func FetchFeedPrices(
 
 	block := new(big.Int).SetInt64(blockNum)
 
-	out, failedIdx, err := fetchWithLatestRoundData(ctx, multicaller, feedABI, feeds, block, blockNum, logger)
+	out, failedFeedResults, err := fetchWithLatestRoundData(ctx, multicaller, feedABI, feeds, block, blockNum, logger)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(failedIdx) > 0 {
-		if err := retryWithLatestAnswer(ctx, multicaller, feedABI, feeds, block, blockNum, logger, out, failedIdx); err != nil {
+	if len(failedFeedResults) > 0 {
+		if err := retryWithLatestAnswer(ctx, multicaller, feedABI, feeds, block, blockNum, logger, out, failedFeedResults); err != nil {
 			return nil, err
 		}
 	}
@@ -113,16 +116,16 @@ func fetchWithLatestRoundData(
 	}
 
 	out := make([]FeedPriceResult, len(feeds))
-	var failedIdx []int
+	var failedFeedResults []int
 	for i, r := range results {
 		out[i].TokenID = feeds[i].TokenID
 
 		if !r.Success {
-			failedIdx = append(failedIdx, i)
+			failedFeedResults = append(failedFeedResults, i)
 			continue
 		}
 
-		answer, updatedAt, err := unpackLatestRoundData(feedABI, r.ReturnData)
+		answer, err := unpackLatestRoundData(feedABI, r.ReturnData)
 		if err != nil {
 			return nil, nil, fmt.Errorf("unpacking latestRoundData for feed %d at block %d: %w",
 				i, blockNum, err)
@@ -134,18 +137,12 @@ func fetchWithLatestRoundData(
 				"feedAddress", feeds[i].FeedAddress.Hex(), "block", blockNum)
 			continue
 		}
-		if updatedAt.Sign() == 0 {
-			logger.Warn("feed round not complete",
-				"feedIndex", i, "tokenID", feeds[i].TokenID,
-				"feedAddress", feeds[i].FeedAddress.Hex(), "block", blockNum)
-			continue
-		}
 
 		out[i].Price = ScaleByDecimals(answer, feeds[i].FeedDecimals)
 		out[i].Success = true
 	}
 
-	return out, failedIdx, nil
+	return out, failedFeedResults, nil
 }
 
 // retryWithLatestAnswer retries failed feeds using latestAnswer().
@@ -164,15 +161,15 @@ func retryWithLatestAnswer(
 	blockNum int64,
 	logger *slog.Logger,
 	out []FeedPriceResult,
-	failedIdx []int,
+	failedFeedResults []int,
 ) error {
 	callData, err := feedABI.Pack("latestAnswer")
 	if err != nil {
 		return fmt.Errorf("packing latestAnswer: %w", err)
 	}
 
-	calls := make([]outbound.Call, len(failedIdx))
-	for j, i := range failedIdx {
+	calls := make([]outbound.Call, len(failedFeedResults))
+	for j, i := range failedFeedResults {
 		calls[j] = outbound.Call{
 			Target:       feeds[i].FeedAddress,
 			AllowFailure: true,
@@ -185,12 +182,12 @@ func retryWithLatestAnswer(
 		return fmt.Errorf("executing latestAnswer multicall at block %d: %w", blockNum, err)
 	}
 
-	if len(results) != len(failedIdx) {
-		return fmt.Errorf("latestAnswer: expected %d results, got %d", len(failedIdx), len(results))
+	if len(results) != len(failedFeedResults) {
+		return fmt.Errorf("latestAnswer: expected %d results, got %d", len(failedFeedResults), len(results))
 	}
 
 	for j, r := range results {
-		i := failedIdx[j]
+		i := failedFeedResults[j]
 		if !r.Success {
 			continue
 		}
@@ -222,18 +219,24 @@ func unpackLatestAnswer(feedABI *abi.ABI, data []byte) (*big.Int, error) {
 	if err != nil {
 		return nil, err
 	}
-	return unpacked[0].(*big.Int), nil
+	answer, ok := unpacked[0].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("latestAnswer: expected *big.Int, got %T", unpacked[0])
+	}
+	return answer, nil
 }
 
-func unpackLatestRoundData(feedABI *abi.ABI, data []byte) (*big.Int, *big.Int, error) {
+func unpackLatestRoundData(feedABI *abi.ABI, data []byte) (*big.Int, error) {
 	unpacked, err := feedABI.Unpack("latestRoundData", data)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// latestRoundData returns: (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)
-	answer := unpacked[1].(*big.Int)
-	updatedAt := unpacked[3].(*big.Int)
-	return answer, updatedAt, nil
+	answer, ok := unpacked[1].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("latestRoundData answer: expected *big.Int, got %T", unpacked[1])
+	}
+	return answer, nil
 }
 
 // ValidateFeedDecimals calls decimals() on each feed and compares the on-chain
@@ -318,5 +321,9 @@ func unpackDecimals(feedABI *abi.ABI, data []byte) (uint8, error) {
 	if err != nil {
 		return 0, err
 	}
-	return unpacked[0].(uint8), nil
+	decimals, ok := unpacked[0].(uint8)
+	if !ok {
+		return 0, fmt.Errorf("decimals: expected uint8, got %T", unpacked[0])
+	}
+	return decimals, nil
 }

@@ -672,7 +672,7 @@ func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T)
 			integrationMockHeaderFetcher(),
 			integrationMockMulticallFactory(t, 2),
 			repo,
-			)
+		)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
