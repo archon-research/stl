@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/big"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
@@ -114,6 +115,7 @@ type Service struct {
 	positionRepo *postgres.PositionRepository
 	eventRepo    outbound.EventRepository
 
+	mu                 sync.Mutex
 	blockchainServices map[common.Address]*blockchainService
 	multicallClient    outbound.Multicaller
 	erc20ABI           *abi.ABI
@@ -188,7 +190,11 @@ func NewService(
 }
 
 func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (*blockchainService, error) {
-	if svc, exists := s.blockchainServices[protocolAddress]; exists {
+	// First check: read map under lock.
+	s.mu.Lock()
+	svc, exists := s.blockchainServices[protocolAddress]
+	s.mu.Unlock()
+	if exists {
 		return svc, nil
 	}
 
@@ -197,7 +203,8 @@ func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (
 		return nil, fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
 	}
 
-	svc, err := newBlockchainService(
+	// Construct outside the lock - this hits the network.
+	newSvc, err := newBlockchainService(
 		s.ethClient,
 		s.multicallClient,
 		s.erc20ABI,
@@ -211,10 +218,16 @@ func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (
 		return nil, fmt.Errorf("failed to create blockchain service for %s: %w", protocolConfig.Name, err)
 	}
 
-	s.blockchainServices[protocolAddress] = svc
-	s.logger.Info("created blockchain service",
-		"protocol", protocolConfig.Name,
-		"address", protocolAddress.Hex())
+	// Second check: re-acquire lock, another goroutine may have created it.
+	s.mu.Lock()
+	if svc, exists = s.blockchainServices[protocolAddress]; !exists {
+		s.blockchainServices[protocolAddress] = newSvc
+		svc = newSvc
+		s.logger.Info("created blockchain service",
+			"protocol", protocolConfig.Name,
+			"address", protocolAddress.Hex())
+	}
+	s.mu.Unlock()
 
 	return svc, nil
 }
