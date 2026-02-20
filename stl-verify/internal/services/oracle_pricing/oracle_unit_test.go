@@ -253,7 +253,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			wantCount: 1,
 		},
 		{
-			name: "skips oracle with no enabled assets",
+			name: "oracle with no enabled assets returns error",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
@@ -264,7 +264,8 @@ func TestLoadOracleUnits(t *testing.T) {
 					},
 				}
 			},
-			wantCount: 0,
+			wantErr:     true,
+			errContains: "no enabled assets",
 		},
 		{
 			name: "error from GetAllEnabledOracles",
@@ -279,7 +280,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			errContains: "getting enabled oracles",
 		},
 		{
-			name: "skips oracle with build error",
+			name: "build error is returned",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
@@ -290,10 +291,11 @@ func TestLoadOracleUnits(t *testing.T) {
 					},
 				}
 			},
-			wantCount: 0,
+			wantErr:     true,
+			errContains: "building oracle unit",
 		},
 		{
-			name: "feed oracle missing feed address returns error and skips",
+			name: "feed oracle missing feed address returns error",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
@@ -313,10 +315,11 @@ func TestLoadOracleUnits(t *testing.T) {
 					},
 				}
 			},
-			wantCount: 0,
+			wantErr:     true,
+			errContains: "feed address missing",
 		},
 		{
-			name: "feed oracle with missing quote currency is skipped with warning",
+			name: "feed oracle with missing quote currency returns error",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
@@ -336,7 +339,8 @@ func TestLoadOracleUnits(t *testing.T) {
 					},
 				}
 			},
-			wantCount: 0,
+			wantErr:     true,
+			errContains: "quote currency missing",
 		},
 		{
 			name: "feed oracle inherits decimals from oracle when zero",
@@ -424,7 +428,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			},
 		},
 		{
-			name: "feed oracle with ETH-denominated feed but no WETH token is skipped",
+			name: "feed oracle with ETH-denominated feed but no WETH token returns error",
 			setupRepo: func() *mockRepo {
 				nonWethAddr := common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F") // DAI
 				return &mockRepo{
@@ -445,7 +449,8 @@ func TestLoadOracleUnits(t *testing.T) {
 					},
 				}
 			},
-			wantCount: 0, // skipped because no WETH/USD reference feed exists
+			wantErr:     true,
+			errContains: "missing USD reference feeds",
 		},
 	}
 

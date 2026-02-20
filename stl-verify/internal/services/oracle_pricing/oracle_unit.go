@@ -44,7 +44,6 @@ func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, 
 
 	seen := make(map[int64]bool)
 	var units []*OracleUnit
-	var skipped int
 
 	for _, oracle := range allOracles {
 		if seen[oracle.ID] {
@@ -54,22 +53,17 @@ func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, 
 
 		unit, err := buildOracleUnit(ctx, repo, oracle)
 		if err != nil {
-			logger.Warn("skipping oracle", "name", oracle.Name, "error", err)
-			skipped++
-			continue
+			return nil, fmt.Errorf("building oracle unit %q: %w", oracle.Name, err)
 		}
 		if unit == nil {
-			logger.Info("skipping oracle with no enabled assets", "name", oracle.Name)
-			skipped++
-			continue
+			return nil, fmt.Errorf("oracle %q has no enabled assets", oracle.Name)
 		}
 		units = append(units, unit)
 	}
 
 	logger.Info("loaded oracle units",
 		"loaded", len(units),
-		"total", len(seen),
-		"skipped", skipped)
+		"total", len(seen))
 
 	return units, nil
 }

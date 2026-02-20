@@ -276,7 +276,10 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 		return fmt.Errorf("price count mismatch: expected %d, got %d", len(unit.TokenIDs), len(prices))
 	}
 
-	changed := s.detectChanges(prices, event, unit)
+	changed, err := s.detectChanges(prices, event, unit)
+	if err != nil {
+		return fmt.Errorf("detecting changes at block %d: %w", event.BlockNumber, err)
+	}
 
 	if len(changed) == 0 {
 		s.logger.Debug("no price changes", "oracle", unit.Oracle.Name, "block", event.BlockNumber)
@@ -311,7 +314,10 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 
 	results = oracle_pricing.ConvertNonUSDPrices(results, unit.OracleUnit, s.logger, event.BlockNumber)
 
-	changed := s.detectFeedChanges(results, event, unit)
+	changed, err := s.detectFeedChanges(results, event, unit)
+	if err != nil {
+		return fmt.Errorf("detecting feed changes at block %d: %w", event.BlockNumber, err)
+	}
 
 	if len(changed) == 0 {
 		s.logger.Debug("no price changes", "oracle", unit.Oracle.Name, "block", event.BlockNumber)
@@ -331,7 +337,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 	return nil
 }
 
-func (s *Service) detectChanges(rawPrices []*big.Int, event outbound.BlockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {
+func (s *Service) detectChanges(rawPrices []*big.Int, event outbound.BlockEvent, unit *oracleUnit) ([]*entity.OnchainTokenPrice, error) {
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
 	oracleID := unit.OracleID
 	priceDecimals := unit.Oracle.PriceDecimals
@@ -357,17 +363,16 @@ func (s *Service) detectChanges(rawPrices []*big.Int, event outbound.BlockEvent,
 			priceUSD,
 		)
 		if err != nil {
-			s.logger.Error("invalid price entity", "tokenID", tokenID, "error", err)
-			continue
+			return nil, fmt.Errorf("invalid price entity for tokenID %d: %w", tokenID, err)
 		}
 		changed = append(changed, price)
 		unit.priceCache[tokenID] = priceUSD
 	}
 
-	return changed
+	return changed, nil
 }
 
-func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event outbound.BlockEvent, unit *oracleUnit) []*entity.OnchainTokenPrice {
+func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event outbound.BlockEvent, unit *oracleUnit) ([]*entity.OnchainTokenPrice, error) {
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
 	oracleID := unit.OracleID
 
@@ -390,12 +395,11 @@ func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event 
 			result.Price,
 		)
 		if err != nil {
-			s.logger.Error("invalid price entity", "tokenID", result.TokenID, "error", err)
-			continue
+			return nil, fmt.Errorf("invalid price entity for tokenID %d: %w", result.TokenID, err)
 		}
 		changed = append(changed, price)
 		unit.priceCache[result.TokenID] = result.Price
 	}
 
-	return changed
+	return changed, nil
 }

@@ -2,7 +2,6 @@ package entity
 
 import (
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -68,7 +67,7 @@ type OracleAsset struct {
 // OnchainTokenPrice stores an oracle price for a token at a specific block.
 type OnchainTokenPrice struct {
 	TokenID      int64
-	OracleID     int16
+	OracleID     int64
 	BlockNumber  int64
 	BlockVersion int16
 	Timestamp    time.Time
@@ -76,14 +75,10 @@ type OnchainTokenPrice struct {
 }
 
 // NewOnchainTokenPrice creates a new OnchainTokenPrice entity with validation.
-// oracleID is accepted as int64 for caller convenience and validated to fit int16.
 func NewOnchainTokenPrice(tokenID int64, oracleID int64, blockNumber int64, blockVersion int16, timestamp time.Time, priceUSD float64) (*OnchainTokenPrice, error) {
-	if oracleID < 1 || oracleID > math.MaxInt16 {
-		return nil, fmt.Errorf("oracleID %d out of int16 range [1, %d]", oracleID, math.MaxInt16)
-	}
 	p := &OnchainTokenPrice{
 		TokenID:      tokenID,
-		OracleID:     int16(oracleID),
+		OracleID:     oracleID,
 		BlockNumber:  blockNumber,
 		BlockVersion: blockVersion,
 		Timestamp:    timestamp,
@@ -98,6 +93,9 @@ func NewOnchainTokenPrice(tokenID int64, oracleID int64, blockNumber int64, bloc
 func (p *OnchainTokenPrice) validate() error {
 	if p.TokenID <= 0 {
 		return fmt.Errorf("tokenID must be positive, got %d", p.TokenID)
+	}
+	if p.OracleID <= 0 {
+		return fmt.Errorf("oracleID must be positive, got %d", p.OracleID)
 	}
 	if p.BlockNumber <= 0 {
 		return fmt.Errorf("blockNumber must be positive, got %d", p.BlockNumber)

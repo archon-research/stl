@@ -63,15 +63,14 @@ func TestNewOnchainTokenPrice(t *testing.T) {
 			errContains:  "oracleID",
 		},
 		{
-			name:         "oracleID overflow",
+			name:         "large oracleID is accepted",
 			tokenID:      1,
 			oracleID:     40000,
 			blockNumber:  100,
 			blockVersion: 0,
 			timestamp:    validTime,
 			priceUSD:     1.0,
-			wantErr:      true,
-			errContains:  "oracleID",
+			wantErr:      false,
 		},
 		{
 			name:         "zero blockNumber",

@@ -498,8 +498,7 @@ func (s *Service) processBlockAave(
 			priceUSD,
 		)
 		if err != nil {
-			s.logger.Error("invalid price entity", "tokenID", tokenIDs[i], "error", err)
-			continue
+			return nil, fmt.Errorf("invalid price entity for tokenID %d: %w", tokenIDs[i], err)
 		}
 		prices = append(prices, p)
 	}
@@ -552,8 +551,7 @@ func (s *Service) processBlockFeed(
 			result.Price,
 		)
 		if err != nil {
-			s.logger.Error("invalid price entity", "tokenID", result.TokenID, "error", err)
-			continue
+			return nil, fmt.Errorf("invalid price entity for tokenID %d: %w", result.TokenID, err)
 		}
 		prices = append(prices, p)
 	}

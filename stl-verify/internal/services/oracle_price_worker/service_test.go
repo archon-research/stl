@@ -413,7 +413,7 @@ func TestStart(t *testing.T) {
 			errContains: "getting enabled oracles",
 		},
 		{
-			name: "error GetEnabledAssets fails is warned and skipped",
+			name: "error GetEnabledAssets fails returns error",
 			setupRepo: func(r *mockRepo) {
 				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{defaultOracle()}, nil
@@ -423,10 +423,10 @@ func TestStart(t *testing.T) {
 				}
 			},
 			wantErr:     true,
-			errContains: "no oracles with enabled assets found",
+			errContains: "building oracle unit",
 		},
 		{
-			name: "error no enabled assets returns no oracles error",
+			name: "error no enabled assets returns error",
 			setupRepo: func(r *mockRepo) {
 				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{defaultOracle()}, nil
@@ -436,10 +436,10 @@ func TestStart(t *testing.T) {
 				}
 			},
 			wantErr:     true,
-			errContains: "no oracles with enabled assets found",
+			errContains: "no enabled assets",
 		},
 		{
-			name: "error token address not found is warned and skipped",
+			name: "error token address not found returns error",
 			setupRepo: func(r *mockRepo) {
 				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{defaultOracle()}, nil
@@ -454,7 +454,7 @@ func TestStart(t *testing.T) {
 				}
 			},
 			wantErr:     true,
-			errContains: "no oracles with enabled assets found",
+			errContains: "token address not found",
 		},
 		{
 			name: "error GetLatestPrices fails is warned and skipped",
@@ -1182,12 +1182,12 @@ func TestStartAndProcessMessages(t *testing.T) {
 			BlockTimestamp: blockTimestamp,
 		}
 		err = svc.processBlock(context.Background(), event)
-		// processBlock should succeed (no price changes after all entities fail validation)
-		if err != nil {
-			t.Errorf("processBlock with blockNumber=0 returned unexpected error: %v", err)
+		// processBlock should return an error because entity validation fails hard
+		if err == nil {
+			t.Error("processBlock with blockNumber=0 should have returned an error")
 		}
 
-		// No prices should have been upserted (all failed validation)
+		// No prices should have been upserted (validation failed before upsert)
 		repo.mu.Lock()
 		if repo.upsertPricesCalls != 0 {
 			t.Errorf("UpsertPrices call count = %d, want 0", repo.upsertPricesCalls)

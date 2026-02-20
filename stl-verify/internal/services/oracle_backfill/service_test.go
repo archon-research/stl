@@ -662,7 +662,7 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:      "success no oracles with enabled assets returns nil",
+			name:      "error no oracles with enabled assets",
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
@@ -687,13 +687,8 @@ func TestRun(t *testing.T) {
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func(_ entity.OracleType) (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
-			wantErr: false,
-			checkResult: func(t *testing.T, repo *mockRepo) {
-				t.Helper()
-				if len(repo.getUpserted()) != 0 {
-					t.Error("expected no upserted prices when no enabled assets")
-				}
-			},
+			wantErr:     true,
+			errContains: "no enabled assets",
 		},
 		{
 			name:      "error GetAllEnabledOracles fails",
@@ -719,7 +714,7 @@ func TestRun(t *testing.T) {
 			errContains: "getting enabled oracles",
 		},
 		{
-			name:      "error GetEnabledAssets fails is warned and skipped",
+			name:      "error GetEnabledAssets fails returns error",
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
@@ -741,17 +736,11 @@ func TestRun(t *testing.T) {
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func(_ entity.OracleType) (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
-			// With the new multi-oracle flow, buildWorkUnit errors are warned + skipped
-			wantErr: false,
-			checkResult: func(t *testing.T, repo *mockRepo) {
-				t.Helper()
-				if len(repo.getUpserted()) != 0 {
-					t.Error("expected no upserted prices when GetEnabledAssets fails")
-				}
-			},
+			wantErr:     true,
+			errContains: "building oracle unit",
 		},
 		{
-			name:      "error token address not found for token_id is warned and skipped",
+			name:      "error token address not found for token_id returns error",
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
@@ -778,14 +767,8 @@ func TestRun(t *testing.T) {
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func(_ entity.OracleType) (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
-			// buildWorkUnit errors are warned + skipped
-			wantErr: false,
-			checkResult: func(t *testing.T, repo *mockRepo) {
-				t.Helper()
-				if len(repo.getUpserted()) != 0 {
-					t.Error("expected no upserted prices when token address not found")
-				}
-			},
+			wantErr:     true,
+			errContains: "token address not found",
 		},
 		{
 			name:      "success with small batch size triggers mid-loop flush",
