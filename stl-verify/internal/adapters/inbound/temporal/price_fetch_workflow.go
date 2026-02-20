@@ -38,7 +38,7 @@ func PriceFetchWorkflow(ctx workflow.Context, input PriceFetchWorkflowInput) (*P
 
 	var activities *PriceFetchActivities
 	var result FetchCurrentPricesOutput
-	err := workflow.ExecuteActivity(ctx, activities.FetchCurrentPrices, FetchCurrentPricesInput{AssetIDs: input.AssetIDs}).Get(ctx, &result)
+	err := workflow.ExecuteActivity(ctx, activities.FetchCurrentPrices, FetchCurrentPricesInput(input)).Get(ctx, &result)
 	if err != nil {
 		return nil, fmt.Errorf("executing FetchCurrentPrices activity: %w", err)
 	}

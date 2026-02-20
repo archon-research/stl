@@ -28,27 +28,44 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/offchain_price_fetcher"
 )
 
+// Build metadata injected via -X ldflags at build time.
+// readBuildMetadata() falls back to vcs.* from debug.ReadBuildInfo() for local runs.
 var (
 	GitCommit string
 	GitBranch string
 	BuildTime string
 )
 
-func init() {
+// buildMetadata holds resolved build info for logging.
+type buildMetadata struct {
+	commit    string
+	branch    string
+	buildTime string
+}
+
+// readBuildMetadata returns build metadata, preferring ldflag values and
+// falling back to vcs.* settings embedded by the Go toolchain.
+func readBuildMetadata() buildMetadata {
+	m := buildMetadata{
+		commit:    GitCommit,
+		branch:    GitBranch,
+		buildTime: BuildTime,
+	}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, setting := range info.Settings {
 			switch setting.Key {
 			case "vcs.revision":
-				if GitCommit == "" {
-					GitCommit = setting.Value
+				if m.commit == "" {
+					m.commit = setting.Value
 				}
 			case "vcs.time":
-				if BuildTime == "" {
-					BuildTime = setting.Value
+				if m.buildTime == "" {
+					m.buildTime = setting.Value
 				}
 			}
 		}
 	}
+	return m
 }
 
 func main() {
@@ -67,10 +84,11 @@ func run(ctx context.Context) error {
 	}))
 	slog.SetDefault(logger)
 
+	meta := readBuildMetadata()
 	logger.Info("starting temporal worker",
-		"commit", GitCommit,
-		"branch", GitBranch,
-		"buildTime", BuildTime,
+		"commit", meta.commit,
+		"branch", meta.branch,
+		"buildTime", meta.buildTime,
 	)
 
 	// Validate required configuration before opening expensive connections.
@@ -82,17 +100,17 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	temporalClient, err := createTemporalClient()
-	if err != nil {
-		return fmt.Errorf("creating temporal client: %w", err)
-	}
-	defer temporalClient.Close()
-
 	pool, err := openDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("connecting to database: %w", err)
 	}
 	defer pool.Close()
+
+	temporalClient, err := createTemporalClient()
+	if err != nil {
+		return fmt.Errorf("creating temporal client: %w", err)
+	}
+	defer temporalClient.Close()
 
 	w := worker.New(temporalClient, temporaladapter.TaskQueue, worker.Options{})
 
@@ -241,6 +259,12 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, c
 		},
 	})
 	if err != nil {
+		var alreadyExists *serviceerror.AlreadyExists
+		if errors.As(err, &alreadyExists) {
+			// Another worker created the schedule concurrently; treat as success.
+			logger.Info("schedule already exists", "scheduleID", cfg.ID)
+			return nil
+		}
 		return fmt.Errorf("creating schedule %q: %w", cfg.ID, err)
 	}
 

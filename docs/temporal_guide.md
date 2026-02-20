@@ -27,7 +27,7 @@ STL Verify uses [Temporal](https://temporal.io) for recurring scheduled jobs. A 
 
 | Job | Schedule | Purpose |
 |-----|----------|---------|
-| Price Fetch | Every 5m | Fetch offchain token prices from CoinGecko |
+| Price Fetch | Every 5m | Fetch off-chain token prices from CoinGecko |
 | Data Validation | Every 1h | Cross-check stored block data against Etherscan |
 
 Price Fetch is always enabled. Data Validation is optional — it activates only when `ETHERSCAN_API_KEY` is set.
@@ -38,7 +38,7 @@ Price Fetch is always enabled. Data Validation is optional — it activates only
 
 Temporal adapters live in `internal/adapters/inbound/temporal/` following hexagonal architecture:
 
-```
+```text
 cmd/temporal-worker/main.go              ← Composition root: wires deps, registers, runs
 internal/adapters/inbound/temporal/
 ├── constants.go                         ← Shared task queue name + schedule IDs
@@ -51,7 +51,7 @@ internal/adapters/inbound/temporal/
 
 Each activity file defines a **port interface** that a domain service satisfies:
 
-```
+```text
 Temporal Schedule → Workflow (orchestration) → Activity (delegates to interface) → Domain Service
 ```
 
@@ -121,7 +121,7 @@ The activity converts the `Report` struct into a flat `ValidateDataOutput` with 
 
 ### Startup Flow
 
-```
+```text
 1. Parse log level, create logger
 2. Connect to Temporal Server (TEMPORAL_HOST_PORT, namespace "sentinel")
 3. Connect to PostgreSQL (DATABASE_URL)

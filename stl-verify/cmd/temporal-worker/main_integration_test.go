@@ -200,32 +200,46 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	}
 }
 
-func TestRunIntegration_BadDatabaseURL(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+func TestRunIntegration_StartupErrors(t *testing.T) {
+	tests := []struct {
+		name        string
+		env         map[string]string
+		errContains string
+	}{
+		{
+			name: "bad database URL",
+			env: map[string]string{
+				"TEMPORAL_HOST_PORT": "localhost:7233",
+				"DATABASE_URL":       "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
+				"COINGECKO_API_KEY":  "test-api-key",
+				"CHAIN_ID":           "1",
+			},
+			errContains: "database",
+		},
+		{
+			name: "missing CoinGecko API key",
+			env: map[string]string{
+				"TEMPORAL_HOST_PORT": "localhost:7233",
+				"DATABASE_URL":       "postgres://postgres:postgres@localhost:5432/test?connect_timeout=1",
+				"COINGECKO_API_KEY":  "",
+				"CHAIN_ID":           "1",
+			},
+			errContains: "COINGECKO_API_KEY",
+		},
+	}
 
-	t.Setenv("TEMPORAL_HOST_PORT", "localhost:7233")
-	t.Setenv("DATABASE_URL", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1")
-	t.Setenv("COINGECKO_API_KEY", "test-api-key")
-	t.Setenv("CHAIN_ID", "1")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
 
-	err := run(ctx)
-	require.Error(t, err)
-	assert.True(t,
-		strings.Contains(err.Error(), "database") || strings.Contains(err.Error(), "connect"),
-		"expected database/connect error, got: %v", err)
-}
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
 
-func TestRunIntegration_MissingCoinGeckoKey(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	t.Setenv("TEMPORAL_HOST_PORT", "localhost:7233")
-	t.Setenv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/test?connect_timeout=1")
-	t.Setenv("COINGECKO_API_KEY", "")
-	t.Setenv("CHAIN_ID", "1")
-
-	err := run(ctx)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "COINGECKO_API_KEY")
+			err := run(ctx)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errContains)
+		})
+	}
 }
