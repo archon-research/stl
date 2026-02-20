@@ -98,7 +98,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	bgCtx := context.Background()
 
 	// Disable feed-based oracles — the mock RPC only handles aave_oracle format.
-	if _, err := pool.Exec(bgCtx, `UPDATE oracle SET enabled = false WHERE oracle_type IN ('chainlink_feed', 'chronicle')`); err != nil {
+	if _, err := pool.Exec(bgCtx, `UPDATE oracle SET enabled = false WHERE oracle_type IN ('chainlink_feed', 'chronicle', 'redstone')`); err != nil {
 		t.Fatalf("disable feed oracles: %v", err)
 	}
 
