@@ -47,8 +47,8 @@ type cliConfig struct {
 func parseFlags(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("sparklend-backfill", flag.ContinueOnError)
 	rpcURL := fs.String("rpc-url", "", "Ethereum HTTP RPC endpoint (e.g., http://erigon:8545)")
-	fromBlock := fs.Int64("from", 0, "Start block number (required)")
-	toBlock := fs.Int64("to", 0, "End block number (required)")
+	fromBlock := fs.Int64("from", -1, "Start block number (required)")
+	toBlock := fs.Int64("to", -1, "End block number (required)")
 	concurrency := fs.Int("concurrency", 10, "Number of concurrent workers")
 	bucket := fs.String("bucket", "", "S3 bucket containing transaction receipts")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
@@ -73,10 +73,10 @@ func parseFlags(args []string) (cliConfig, error) {
 	if cfg.rpcURL == "" {
 		return cliConfig{}, fmt.Errorf("--rpc-url is required")
 	}
-	if cfg.fromBlock == 0 {
+	if cfg.fromBlock < 0 {
 		return cliConfig{}, fmt.Errorf("--from is required")
 	}
-	if cfg.toBlock == 0 {
+	if cfg.toBlock < 0 {
 		return cliConfig{}, fmt.Errorf("--to is required")
 	}
 	if cfg.toBlock < cfg.fromBlock {
