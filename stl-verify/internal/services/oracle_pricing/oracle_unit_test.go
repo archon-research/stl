@@ -331,7 +331,7 @@ func TestLoadOracleUnits(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{{
 							ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
-							FeedAddress: feedAddr, FeedDecimals: 0, QuoteCurrency: "",
+							FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "",
 						}}, nil
 					},
 					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
@@ -343,7 +343,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			errContains: "quote currency missing",
 		},
 		{
-			name: "feed oracle inherits decimals from oracle when zero",
+			name: "feed oracle with zero decimals returns error",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
@@ -363,13 +363,8 @@ func TestLoadOracleUnits(t *testing.T) {
 					},
 				}
 			},
-			wantCount: 1,
-			checkUnits: func(t *testing.T, units []*OracleUnit) {
-				t.Helper()
-				if units[0].Feeds[0].FeedDecimals != 8 {
-					t.Errorf("FeedDecimals = %d, want 8 (inherited from oracle)", units[0].Feeds[0].FeedDecimals)
-				}
-			},
+			wantErr:     true,
+			errContains: "invalid feed decimals",
 		},
 		{
 			name: "oracle ID overflow returns error",

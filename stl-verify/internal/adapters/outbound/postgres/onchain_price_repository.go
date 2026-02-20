@@ -389,7 +389,7 @@ func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracl
 		SELECT $2, token_id, enabled, feed_address, feed_decimals, quote_currency
 		FROM oracle_asset
 		WHERE oracle_id = $1 AND enabled = true
-		ON CONFLICT (oracle_id, token_id) WHERE feed_address IS NULL DO NOTHING
+		ON CONFLICT DO NOTHING
 	`, fromOracleID, toOracleID)
 	if err != nil {
 		return fmt.Errorf("copying oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)

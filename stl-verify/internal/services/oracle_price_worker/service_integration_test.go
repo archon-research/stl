@@ -27,7 +27,8 @@ func integrationMulticaller(t *testing.T, prices []*big.Int) *testutil.MockMulti
 }
 
 // integrationMulticallerBlockDependent creates a mock multicaller where prices depend on block number.
-func integrationMulticallerBlockDependent(numTokens int) *testutil.MockMulticaller {
+func integrationMulticallerBlockDependent(t *testing.T, numTokens int) *testutil.MockMulticaller {
+	t.Helper()
 	return &testutil.MockMulticaller{
 		ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 			bn := blockNumber.Int64()
@@ -38,7 +39,7 @@ func integrationMulticallerBlockDependent(numTokens int) *testutil.MockMulticall
 					big.NewInt(int64(i+1)*100_000_000),
 				)
 			}
-			pricesData := testutil.PackAssetPrices(&testing.T{}, prices)
+			pricesData := testutil.PackAssetPrices(t, prices)
 			return []outbound.Result{
 				{Success: true, ReturnData: pricesData},
 			}, nil
@@ -313,7 +314,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	}
 
 	// Block-dependent prices: each block gets unique prices
-	mc := integrationMulticallerBlockDependent(2)
+	mc := integrationMulticallerBlockDependent(t, 2)
 
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
 
@@ -474,7 +475,7 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 		t.Fatalf("failed to create repository: %v", err)
 	}
 
-	mc := integrationMulticallerBlockDependent(numTokens)
+	mc := integrationMulticallerBlockDependent(t, numTokens)
 
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
 	messages := []outbound.SQSMessage{

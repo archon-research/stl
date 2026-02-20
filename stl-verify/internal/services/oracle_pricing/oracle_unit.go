@@ -173,8 +173,8 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 			return nil, fmt.Errorf("feed address missing for token_id %d", asset.TokenID)
 		}
 		decimals := asset.FeedDecimals
-		if decimals == 0 {
-			decimals = oracle.PriceDecimals
+		if decimals <= 0 {
+			return nil, fmt.Errorf("invalid feed decimals for token_id %d: %d", asset.TokenID, decimals)
 		}
 		if asset.QuoteCurrency == "" {
 			return nil, fmt.Errorf("quote currency missing for token_id %d", asset.TokenID)
