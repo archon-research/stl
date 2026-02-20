@@ -27,8 +27,8 @@ BEGIN
     -- 3. Disable compression on the hypertable
     ALTER TABLE block_states SET (timescaledb.compress = false);
 EXCEPTION
-    WHEN OTHERS THEN
-        RAISE NOTICE 'Skipping block_states compression removal: %', SQLERRM;
+    WHEN undefined_object THEN
+        RAISE NOTICE 'Skipping block_states compression removal (TimescaleDB compression not available): %', SQLERRM;
 END;
 $$;
 
