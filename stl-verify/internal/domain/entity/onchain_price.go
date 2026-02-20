@@ -3,7 +3,39 @@ package entity
 import (
 	"fmt"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
+
+// OracleType identifies the kind of oracle price provider.
+type OracleType string
+
+const (
+	OracleTypeAave          OracleType = "aave_oracle"
+	OracleTypeChainlinkFeed OracleType = "chainlink_feed"
+	OracleTypeChronicle     OracleType = "chronicle"
+	OracleTypeRedstone      OracleType = "redstone"
+)
+
+// QuoteCurrency identifies the denomination of a feed price.
+type QuoteCurrency string
+
+const (
+	QuoteCurrencyUSD QuoteCurrency = "USD"
+	QuoteCurrencyETH QuoteCurrency = "ETH"
+	QuoteCurrencyBTC QuoteCurrency = "BTC"
+)
+
+// IsFeedOracle returns true for oracle types that use per-feed price fetching
+// (chainlink_feed, chronicle, redstone) as opposed to the Aave aggregator pattern.
+func (t OracleType) IsFeedOracle() bool {
+	switch t {
+	case OracleTypeChainlinkFeed, OracleTypeChronicle, OracleTypeRedstone:
+		return true
+	default:
+		return false
+	}
+}
 
 // Oracle represents an onchain oracle price provider (e.g., SparkLend).
 type Oracle struct {
@@ -11,7 +43,8 @@ type Oracle struct {
 	Name            string
 	DisplayName     string
 	ChainID         int
-	Address         [20]byte
+	Address         common.Address
+	OracleType      OracleType
 	DeploymentBlock int64
 	Enabled         bool
 	PriceDecimals   int // default 8 for Chainlink/Aave standard
@@ -21,11 +54,14 @@ type Oracle struct {
 
 // OracleAsset represents a token tracked by an oracle.
 type OracleAsset struct {
-	ID        int64
-	OracleID  int64
-	TokenID   int64
-	Enabled   bool
-	CreatedAt time.Time
+	ID            int64
+	OracleID      int64
+	TokenID       int64
+	Enabled       bool
+	FeedAddress   common.Address // zero for aave_oracle; the feed contract address for feed oracles
+	FeedDecimals  int            // 0 for aave_oracle; falls back to oracle.PriceDecimals
+	QuoteCurrency QuoteCurrency  // "USD" (default), "ETH", or "BTC"
+	CreatedAt     time.Time
 }
 
 // OnchainTokenPrice stores an oracle price for a token at a specific block.
@@ -63,6 +99,9 @@ func (p *OnchainTokenPrice) validate() error {
 	}
 	if p.BlockNumber <= 0 {
 		return fmt.Errorf("blockNumber must be positive, got %d", p.BlockNumber)
+	}
+	if p.BlockVersion < 0 {
+		return fmt.Errorf("blockVersion must be non-negative, got %d", p.BlockVersion)
 	}
 	if p.Timestamp.IsZero() {
 		return fmt.Errorf("timestamp must not be zero")

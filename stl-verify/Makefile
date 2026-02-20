@@ -1,7 +1,7 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax help \
+.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker help \
         dev-up dev-env dev-down dev-ips generate-er \
         ecr-login docker-build docker-push docker-release \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -37,6 +37,11 @@ run-watcher:
 run-watcher-avax:
 	@echo "==> Running Avalanche watcher (chain_id=43114)..."
 	@set -a && . cmd/watcher/.env.avax && [ -f cmd/watcher/.env.avax.local ] && . cmd/watcher/.env.avax.local; set +a && go run ./cmd/watcher --enable-traces=false
+
+# Run the oracle price worker (requires dev-up first)
+run-oracle-price-worker:
+	@echo "==> Running oracle price worker..."
+	@set -a && . cmd/oracle-price-worker/.env && [ -f cmd/oracle-price-worker/.env.local ] && . cmd/oracle-price-worker/.env.local; set +a && go run ./cmd/oracle-price-worker
 
 # Run tests with race detector
 test-race:

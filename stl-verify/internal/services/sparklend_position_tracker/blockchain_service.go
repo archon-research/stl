@@ -333,7 +333,7 @@ func (s *blockchainService) batchGetUserReserveData(ctx context.Context, assets 
 	return dataMap, nil
 }
 
-func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens map[common.Address]bool) (map[common.Address]TokenMetadata, error) {
+func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens map[common.Address]bool, blockNumber *big.Int) (map[common.Address]TokenMetadata, error) {
 	tokensToFetch := make([]common.Address, 0)
 	result := make(map[common.Address]TokenMetadata)
 
@@ -362,7 +362,7 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 		)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, calls, nil)
+	results, err := s.multicallClient.Execute(ctx, calls, blockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("multicall failed: %w", err)
 	}

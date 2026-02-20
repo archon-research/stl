@@ -439,7 +439,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 
 	// Get token metadata for the reserve
 	tokensToFetch := map[common.Address]bool{reserve: true}
-	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {
 		return fmt.Errorf("failed to get token metadata: %w", err)
 	}
@@ -544,7 +544,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 	}
 
 	tokensToFetch := map[common.Address]bool{eventData.Reserve: true}
-	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {
 		return fmt.Errorf("failed to get token metadata: %w", err)
 	}
@@ -626,7 +626,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 	}
 
 	tokensToFetch := map[common.Address]bool{eventData.Reserve: true}
-	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {
 		s.logger.Warn("failed to batch get token metadata", "error", err, "tx", eventData.TxHash, "block", blockNumber)
 		metadataMap = make(map[common.Address]TokenMetadata)
@@ -797,7 +797,7 @@ func (s *Service) extractCollateralData(ctx context.Context, user common.Address
 		tokensToFetch[asset] = true
 	}
 
-	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {
 		s.logger.Warn("failed to batch get token metadata", "error", err, "tx", txHash, "block", blockNumber)
 		return []CollateralData{}, fmt.Errorf("failed to get token metadata: %w", err)
