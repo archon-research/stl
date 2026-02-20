@@ -33,10 +33,11 @@ func TestConcurrentLiveAndBackfill(t *testing.T) {
 
 	// Seed the state repo with block 1 so backfill knows where to start
 	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     1,
-		Hash:       client.GetHeader(1).Hash,
-		ParentHash: client.GetHeader(1).ParentHash,
-		ReceivedAt: time.Now().Unix(),
+		Number:         1,
+		Hash:           client.GetHeader(1).Hash,
+		ParentHash:     client.GetHeader(1).ParentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}); err != nil {
 		t.Fatalf("failed to save block: %v", err)
 	}

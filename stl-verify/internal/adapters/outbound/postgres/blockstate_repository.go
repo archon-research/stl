@@ -58,6 +58,10 @@ func (r *BlockStateRepository) Pool() *pgxpool.Pool {
 // If it's a new block, the database trigger assigns the version atomically.
 // The provided state.Version is ignored; the actual assigned version is returned.
 func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
+	if state.BlockTimestamp == 0 {
+		return 0, fmt.Errorf("BlockTimestamp is required (used as created_at for hypertable partitioning)")
+	}
+
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "postgres.SaveBlock",
 		trace.WithSpanKind(trace.SpanKindClient),
@@ -325,6 +329,10 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 // Uses SERIALIZABLE isolation (consistent with SaveBlock) and includes retry logic
 // for transient tx errors (SQLSTATE 40001 serialization failure, 40P01 deadlock).
 func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+	if newBlock.BlockTimestamp == 0 {
+		return 0, fmt.Errorf("BlockTimestamp is required (used as created_at for hypertable partitioning)")
+	}
+
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "postgres.HandleReorgAtomic",
 		trace.WithSpanKind(trace.SpanKindClient),

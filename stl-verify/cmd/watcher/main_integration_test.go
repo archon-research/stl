@@ -482,16 +482,14 @@ func TestMultiChain_ReorgIsolation(t *testing.T) {
 	ethRepo := postgres.NewBlockStateRepository(infra.Pool, 1, logger)
 	avaxRepo := postgres.NewBlockStateRepository(infra.Pool, 43114, logger)
 
-	now := time.Now().Unix()
-
 	// Save blocks 100-102 on both chains
 	for i := int64(100); i <= 102; i++ {
 		_, err := ethRepo.SaveBlock(ctx, outbound.BlockState{
 			Number:         i,
 			Hash:           fmt.Sprintf("0x1_reorg_%d", i),
 			ParentHash:     fmt.Sprintf("0x1_reorg_%d", i-1),
-			ReceivedAt:     now,
-			BlockTimestamp: now,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save eth block %d: %v", i, err)
@@ -501,8 +499,8 @@ func TestMultiChain_ReorgIsolation(t *testing.T) {
 			Number:         i,
 			Hash:           fmt.Sprintf("0x2_reorg_%d", i),
 			ParentHash:     fmt.Sprintf("0x2_reorg_%d", i-1),
-			ReceivedAt:     now,
-			BlockTimestamp: now,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save avalanche block %d: %v", i, err)
@@ -521,8 +519,8 @@ func TestMultiChain_ReorgIsolation(t *testing.T) {
 		Number:         101,
 		Hash:           "0x1_reorg_101_new",
 		ParentHash:     "0x1_reorg_100",
-		ReceivedAt:     now,
-		BlockTimestamp: now,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}
 
 	_, err := ethRepo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock)

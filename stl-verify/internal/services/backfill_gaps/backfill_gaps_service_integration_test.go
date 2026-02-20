@@ -29,11 +29,12 @@ func setupPostgres(t *testing.T) (*postgres.BlockStateRepository, func()) {
 func saveBlock(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, number int64) {
 	t.Helper()
 	_, err := repo.SaveBlock(ctx, outbound.BlockState{
-		Number:     number,
-		Hash:       fmt.Sprintf("0x%064x", number),
-		ParentHash: fmt.Sprintf("0x%064x", number-1),
-		ReceivedAt: time.Now().Unix(),
-		IsOrphaned: false,
+		Number:         number,
+		Hash:           fmt.Sprintf("0x%064x", number),
+		ParentHash:     fmt.Sprintf("0x%064x", number-1),
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+		IsOrphaned:     false,
 	})
 	if err != nil {
 		t.Fatalf("failed to save block %d: %v", number, err)
@@ -393,11 +394,12 @@ func TestSaveBlock_ConcurrentVersionRaceCondition(t *testing.T) {
 			// 1. Get version count
 			// 2. Save block - version is now assigned atomically by SaveBlock
 			_, err := repo.SaveBlock(ctx, outbound.BlockState{
-				Number:     blockNum,
-				Hash:       fmt.Sprintf("0x%064x_%d", blockNum, id),
-				ParentHash: fmt.Sprintf("0x%064x", blockNum-1),
-				ReceivedAt: time.Now().Unix(),
-				IsOrphaned: false,
+				Number:         blockNum,
+				Hash:           fmt.Sprintf("0x%064x_%d", blockNum, id),
+				ParentHash:     fmt.Sprintf("0x%064x", blockNum-1),
+				ReceivedAt:     time.Now().Unix(),
+				BlockTimestamp: time.Now().Unix(),
+				IsOrphaned:     false,
 			})
 			if err != nil {
 				doneCh <- fmt.Errorf("goroutine %d: SaveBlock failed: %w", id, err)
@@ -505,11 +507,12 @@ func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
 
 	// Save block 6 with WRONG parent_hash (points to block 3 instead of 5)
 	_, err := repo.SaveBlock(ctx, outbound.BlockState{
-		Number:     6,
-		Hash:       fmt.Sprintf("0x%064x", 6),
-		ParentHash: fmt.Sprintf("0x%064x", 3), // Wrong! Should be 5
-		ReceivedAt: time.Now().Unix(),
-		IsOrphaned: false,
+		Number:         6,
+		Hash:           fmt.Sprintf("0x%064x", 6),
+		ParentHash:     fmt.Sprintf("0x%064x", 3), // Wrong! Should be 5
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+		IsOrphaned:     false,
 	})
 	if err != nil {
 		t.Fatalf("failed to save block 6: %v", err)
@@ -619,9 +622,10 @@ func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
 
 	// 2. Initial State: Block 99 exists with Hash A
 	block99 := outbound.BlockState{
-		Number:  99,
-		Hash:    "0xAAAAAAAAAAAAAAAA",
-		Version: 0,
+		Number:         99,
+		Hash:           "0xAAAAAAAAAAAAAAAA",
+		Version:        0,
+		BlockTimestamp: time.Now().Unix(),
 	}
 	if _, err := pgRepo.SaveBlock(ctx, block99); err != nil {
 		t.Fatalf("failed to save initial block: %v", err)
@@ -644,9 +648,10 @@ func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
 			// Force update Block 99 to "0xCCCCCCCCCCCCCCCC" (Hash C)
 			pgRepo.MarkBlockOrphaned(ctx, "0xAAAAAAAAAAAAAAAA") // Orphan A
 			pgRepo.SaveBlock(ctx, outbound.BlockState{          // Save C
-				Number:     99,
-				Hash:       "0xCCCCCCCCCCCCCCCC",
-				ParentHash: "0xOLD_PARENT",
+				Number:         99,
+				Hash:           "0xCCCCCCCCCCCCCCCC",
+				ParentHash:     "0xOLD_PARENT",
+				BlockTimestamp: time.Now().Unix(),
 			})
 		}
 	}
