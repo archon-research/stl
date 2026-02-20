@@ -2,6 +2,7 @@ package entity
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -25,6 +26,17 @@ const (
 	QuoteCurrencyETH QuoteCurrency = "ETH"
 	QuoteCurrencyBTC QuoteCurrency = "BTC"
 )
+
+// IsFeedOracle returns true for oracle types that use per-feed price fetching
+// (chainlink_feed, chronicle, redstone) as opposed to the Aave aggregator pattern.
+func (t OracleType) IsFeedOracle() bool {
+	switch t {
+	case OracleTypeChainlinkFeed, OracleTypeChronicle, OracleTypeRedstone:
+		return true
+	default:
+		return false
+	}
+}
 
 // Oracle represents an onchain oracle price provider (e.g., SparkLend).
 type Oracle struct {
@@ -64,10 +76,14 @@ type OnchainTokenPrice struct {
 }
 
 // NewOnchainTokenPrice creates a new OnchainTokenPrice entity with validation.
-func NewOnchainTokenPrice(tokenID int64, oracleID int16, blockNumber int64, blockVersion int16, timestamp time.Time, priceUSD float64) (*OnchainTokenPrice, error) {
+// oracleID is accepted as int64 for caller convenience and validated to fit int16.
+func NewOnchainTokenPrice(tokenID int64, oracleID int64, blockNumber int64, blockVersion int16, timestamp time.Time, priceUSD float64) (*OnchainTokenPrice, error) {
+	if oracleID < 1 || oracleID > math.MaxInt16 {
+		return nil, fmt.Errorf("oracleID %d out of int16 range [1, %d]", oracleID, math.MaxInt16)
+	}
 	p := &OnchainTokenPrice{
 		TokenID:      tokenID,
-		OracleID:     oracleID,
+		OracleID:     int16(oracleID),
 		BlockNumber:  blockNumber,
 		BlockVersion: blockVersion,
 		Timestamp:    timestamp,
@@ -82,9 +98,6 @@ func NewOnchainTokenPrice(tokenID int64, oracleID int16, blockNumber int64, bloc
 func (p *OnchainTokenPrice) validate() error {
 	if p.TokenID <= 0 {
 		return fmt.Errorf("tokenID must be positive, got %d", p.TokenID)
-	}
-	if p.OracleID <= 0 {
-		return fmt.Errorf("oracleID must be positive, got %d", p.OracleID)
 	}
 	if p.BlockNumber <= 0 {
 		return fmt.Errorf("blockNumber must be positive, got %d", p.BlockNumber)

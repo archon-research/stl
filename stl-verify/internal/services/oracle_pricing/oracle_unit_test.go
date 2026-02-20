@@ -3,7 +3,6 @@ package oracle_pricing
 import (
 	"context"
 	"errors"
-	"math"
 	"strings"
 	"testing"
 
@@ -369,12 +368,12 @@ func TestLoadOracleUnits(t *testing.T) {
 			},
 		},
 		{
-			name: "oracle ID overflow is skipped with warning",
+			name: "large oracle ID is accepted",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
-							ID: 40000, Name: "too-big-id", Address: [20]byte{0xBB},
+							ID: 40000, Name: "large-id", Address: [20]byte{0xBB},
 							Enabled: true, OracleType: entity.OracleTypeAave,
 						}}, nil
 					},
@@ -388,7 +387,13 @@ func TestLoadOracleUnits(t *testing.T) {
 					},
 				}
 			},
-			wantCount: 0,
+			wantCount: 1,
+			checkUnits: func(t *testing.T, units []*OracleUnit) {
+				t.Helper()
+				if units[0].OracleID != 40000 {
+					t.Errorf("OracleID = %d, want 40000", units[0].OracleID)
+				}
+			},
 		},
 		{
 			name: "OracleID field is set on loaded units",
@@ -485,14 +490,14 @@ func Test_buildRefFeedIdx(t *testing.T) {
 	tests := []struct {
 		name           string
 		feeds          []blockchain.FeedConfig
-		tokenAddrBytes map[int64][]byte
+		tokenAddrs     map[int64]common.Address
 		wantRefFeedIdx map[string]int
 		wantNonUSD     map[int]string
 	}{
 		{
 			name:           "empty feeds",
 			feeds:          nil,
-			tokenAddrBytes: nil,
+			tokenAddrs:     nil,
 			wantRefFeedIdx: map[string]int{},
 			wantNonUSD:     map[int]string{},
 		},
@@ -502,9 +507,9 @@ func Test_buildRefFeedIdx(t *testing.T) {
 				{TokenID: 1, QuoteCurrency: "USD"}, // WETH/USD
 				{TokenID: 2, QuoteCurrency: "USD"}, // DAI/USD
 			},
-			tokenAddrBytes: map[int64][]byte{
-				1: wethAddr.Bytes(),
-				2: daiAddr.Bytes(),
+			tokenAddrs: map[int64]common.Address{
+				1: wethAddr,
+				2: daiAddr,
 			},
 			wantRefFeedIdx: map[string]int{"ETH": 0},
 			wantNonUSD:     map[int]string{},
@@ -516,10 +521,10 @@ func Test_buildRefFeedIdx(t *testing.T) {
 				{TokenID: 2, QuoteCurrency: "ETH"}, // some/ETH -> non-USD
 				{TokenID: 3, QuoteCurrency: "USD"}, // DAI/USD
 			},
-			tokenAddrBytes: map[int64][]byte{
-				1: wethAddr.Bytes(),
-				2: daiAddr.Bytes(),
-				3: daiAddr.Bytes(),
+			tokenAddrs: map[int64]common.Address{
+				1: wethAddr,
+				2: daiAddr,
+				3: daiAddr,
 			},
 			wantRefFeedIdx: map[string]int{"ETH": 0},
 			wantNonUSD:     map[int]string{1: "ETH"},
@@ -532,11 +537,11 @@ func Test_buildRefFeedIdx(t *testing.T) {
 				{TokenID: 3, QuoteCurrency: "ETH"}, // X/ETH
 				{TokenID: 4, QuoteCurrency: "BTC"}, // Y/BTC
 			},
-			tokenAddrBytes: map[int64][]byte{
-				1: wethAddr.Bytes(),
-				2: wbtcAddr.Bytes(),
-				3: daiAddr.Bytes(),
-				4: daiAddr.Bytes(),
+			tokenAddrs: map[int64]common.Address{
+				1: wethAddr,
+				2: wbtcAddr,
+				3: daiAddr,
+				4: daiAddr,
 			},
 			wantRefFeedIdx: map[string]int{"ETH": 0, "BTC": 1},
 			wantNonUSD:     map[int]string{2: "ETH", 3: "BTC"},
@@ -546,7 +551,7 @@ func Test_buildRefFeedIdx(t *testing.T) {
 			feeds: []blockchain.FeedConfig{
 				{TokenID: 999, QuoteCurrency: "USD"},
 			},
-			tokenAddrBytes: map[int64][]byte{},
+			tokenAddrs:     map[int64]common.Address{},
 			wantRefFeedIdx: map[string]int{},
 			wantNonUSD:     map[int]string{},
 		},
@@ -554,7 +559,7 @@ func Test_buildRefFeedIdx(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			refFeedIdx, nonUSD := buildRefFeedIdx(tt.feeds, tt.tokenAddrBytes)
+			refFeedIdx, nonUSD := buildRefFeedIdx(tt.feeds, tt.tokenAddrs)
 
 			if len(refFeedIdx) != len(tt.wantRefFeedIdx) {
 				t.Fatalf("refFeedIdx len = %d, want %d", len(refFeedIdx), len(tt.wantRefFeedIdx))
@@ -700,9 +705,9 @@ func TestConvertNonUSDPrices(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logger := testutil.DiscardLogger()
-			ConvertNonUSDPrices(tt.results, tt.unit, logger, 12345)
+			got := ConvertNonUSDPrices(tt.results, tt.unit, logger, 12345)
 
-			for i, got := range tt.results {
+			for i, got := range got {
 				want := tt.want[i]
 				if got.Success != want.Success {
 					t.Errorf("result[%d].Success = %v, want %v", i, got.Success, want.Success)
@@ -710,45 +715,6 @@ func TestConvertNonUSDPrices(t *testing.T) {
 				if got.Price != want.Price {
 					t.Errorf("result[%d].Price = %f, want %f", i, got.Price, want.Price)
 				}
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Test_safeOracleID
-// ---------------------------------------------------------------------------
-
-func Test_safeOracleID(t *testing.T) {
-	tests := []struct {
-		name    string
-		id      int64
-		want    int16
-		wantErr bool
-	}{
-		{name: "valid min", id: 1, want: 1},
-		{name: "valid typical", id: 42, want: 42},
-		{name: "valid max int16", id: math.MaxInt16, want: math.MaxInt16},
-		{name: "zero", id: 0, wantErr: true},
-		{name: "negative", id: -1, wantErr: true},
-		{name: "overflow int16", id: math.MaxInt16 + 1, wantErr: true},
-		{name: "large overflow", id: 40000, wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := safeOracleID(tt.id)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error for id=%d, got nil", tt.id)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("safeOracleID(%d) = %d, want %d", tt.id, got, tt.want)
 			}
 		})
 	}

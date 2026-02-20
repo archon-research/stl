@@ -182,8 +182,7 @@ func (s *Service) initialize(ctx context.Context) error {
 }
 
 func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]float64) {
-	switch su.Oracle.OracleType {
-	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
+	if su.Oracle.OracleType.IsFeedOracle() {
 		feedAddrs := make([]string, len(su.Feeds))
 		for i, f := range su.Feeds {
 			feedAddrs[i] = f.FeedAddress.Hex()
@@ -195,13 +194,14 @@ func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]
 			"feedAddrs", feedAddrs,
 			"nonUSDFeeds", len(su.NonUSDFeeds),
 			"cachedPrices", len(cached))
-	default:
+	} else {
 		tokenHexAddrs := make([]string, len(su.TokenAddrs))
 		for i, addr := range su.TokenAddrs {
 			tokenHexAddrs[i] = addr.Hex()
 		}
-		s.logger.Info("loaded aave oracle",
+		s.logger.Info("loaded oracle",
 			"name", su.Oracle.Name,
+			"type", su.Oracle.OracleType,
 			"oracleAddr", su.OracleAddr.Hex(),
 			"assets", len(su.TokenAddrs),
 			"tokenAddrs", tokenHexAddrs,
@@ -211,11 +211,8 @@ func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]
 
 func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) error {
 	for _, unit := range s.units {
-		switch unit.Oracle.OracleType {
-		case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
-			// feed oracle — validate decimals
-		default:
-			continue // aave or other non-feed oracles don't have per-feed decimals
+		if !unit.Oracle.OracleType.IsFeedOracle() {
+			continue
 		}
 		if err := blockchain.ValidateFeedDecimals(
 			ctx, unit.multicaller, s.feedABI,
@@ -255,8 +252,10 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 	switch unit.Oracle.OracleType {
 	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
 		return s.processBlockForFeedOracle(ctx, event, unit)
-	default:
+	case entity.OracleTypeAave:
 		return s.processBlockForAaveOracle(ctx, event, unit)
+	default:
+		return fmt.Errorf("unsupported oracle type: %s", unit.Oracle.OracleType)
 	}
 }
 
@@ -310,9 +309,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 		return fmt.Errorf("fetching feed prices at block %d: %w", event.BlockNumber, err)
 	}
 
-	oracle_pricing.LogFeedFailures(results, unit.OracleUnit, s.logger, event.BlockNumber)
-
-	oracle_pricing.ConvertNonUSDPrices(results, unit.OracleUnit, s.logger, event.BlockNumber)
+	results = oracle_pricing.ConvertNonUSDPrices(results, unit.OracleUnit, s.logger, event.BlockNumber)
 
 	changed := s.detectFeedChanges(results, event, unit)
 

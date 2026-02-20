@@ -78,7 +78,29 @@ func FetchFeedPrices(
 		}
 	}
 
+	logFeedFailures(out, feeds, blockNum, logger)
+
 	return out, nil
+}
+
+// logFeedFailures logs individual feed failures and emits an error-level message
+// when all feeds for an oracle have failed.
+func logFeedFailures(results []FeedPriceResult, feeds []FeedConfig, blockNum int64, logger *slog.Logger) {
+	var failCount int
+	for i, r := range results {
+		if !r.Success {
+			failCount++
+			logger.Warn("feed call failed",
+				"tokenID", r.TokenID,
+				"feedAddress", feeds[i].FeedAddress.Hex(),
+				"block", blockNum)
+		}
+	}
+	if failCount == len(results) && len(results) > 0 {
+		logger.Error("all feeds failed, check configuration",
+			"block", blockNum,
+			"feedCount", len(results))
+	}
 }
 
 // fetchWithLatestRoundData calls latestRoundData() on all feeds. Returns

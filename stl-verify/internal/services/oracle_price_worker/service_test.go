@@ -203,6 +203,7 @@ func defaultOracle() *entity.Oracle {
 		DisplayName:     "Spark: aave Oracle",
 		ChainID:         1,
 		Address:         common.HexToAddress("0x8105f69D9C41644c6A0803fDA7D03Aa70996cFD9"),
+		OracleType:      entity.OracleTypeAave,
 		DeploymentBlock: 17000000,
 		Enabled:         true,
 	}
@@ -503,6 +504,7 @@ func TestStart(t *testing.T) {
 					DisplayName:     "Aave V3 Oracle",
 					ChainID:         1,
 					Address:         common.HexToAddress("0x54586bE62E3c3580375aE3723C145253060Ca0C2"),
+					OracleType:      entity.OracleTypeAave,
 					DeploymentBlock: 18000000,
 					Enabled:         true,
 				}

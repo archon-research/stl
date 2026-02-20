@@ -99,7 +99,7 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
     For main.go files, only create integration tests.
     For services, create both unit and integration tests.
     Integration tests are only allowed to mock our data sources that we cannot control, e.g. Alchemy
-- **Binaries/Building**: Output to `stl/dist`
+- **Binaries/Building**: When building binaries using `go build`, output to `stl/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.
 - **Function composition**: Compose large functions from smaller functions. Large functions should read like prose, with each step delegated to a well-named helper function.
 - **Libraries**: Use the standard library as much as possible

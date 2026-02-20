@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -26,7 +25,7 @@ var quoteCurrencyTokenAddr = map[string]common.Address{
 // OracleUnit holds everything needed to fetch prices for one oracle.
 type OracleUnit struct {
 	Oracle      *entity.Oracle
-	OracleID    int16 // safe int16 conversion of Oracle.ID, validated at load time
+	OracleID    int64
 	OracleAddr  common.Address
 	TokenAddrs  []common.Address        // for aave_oracle: ordered list of token addresses
 	TokenIDs    []int64                 // parallel to TokenAddrs (aave) or Feeds (chainlink_feed)
@@ -59,9 +58,12 @@ func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, 
 			skipped++
 			continue
 		}
-		if unit != nil {
-			units = append(units, unit)
+		if unit == nil {
+			logger.Info("skipping oracle with no enabled assets", "name", oracle.Name)
+			skipped++
+			continue
 		}
+		units = append(units, unit)
 	}
 
 	logger.Info("loaded oracle units",
@@ -73,16 +75,20 @@ func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, 
 }
 
 // ConvertNonUSDPrices converts non-USD feed prices to USD using reference feeds.
-// Modifies results in-place. Feeds without available reference prices are marked as failed.
-func ConvertNonUSDPrices(results []blockchain.FeedPriceResult, unit *OracleUnit, logger *slog.Logger, blockNum int64) {
+// Returns a new slice with converted prices. Feeds without available reference
+// prices are marked as failed in the returned slice.
+func ConvertNonUSDPrices(results []blockchain.FeedPriceResult, unit *OracleUnit, logger *slog.Logger, blockNum int64) []blockchain.FeedPriceResult {
+	out := make([]blockchain.FeedPriceResult, len(results))
+	copy(out, results)
+
 	for feedIdx, quoteCurrency := range unit.NonUSDFeeds {
-		if !results[feedIdx].Success {
+		if !out[feedIdx].Success {
 			continue
 		}
 		refIdx, hasRef := unit.RefFeedIdx[quoteCurrency]
-		if !hasRef || !results[refIdx].Success {
-			results[feedIdx].Success = false
-			results[feedIdx].Price = 0
+		if !hasRef || !out[refIdx].Success {
+			out[feedIdx].Success = false
+			out[feedIdx].Price = 0
 			logger.Warn("reference price unavailable, discarding non-USD feed price",
 				"oracle", unit.Oracle.Name,
 				"feed_token", unit.Feeds[feedIdx].TokenID,
@@ -91,58 +97,26 @@ func ConvertNonUSDPrices(results []blockchain.FeedPriceResult, unit *OracleUnit,
 				"block", blockNum)
 			continue
 		}
-		results[feedIdx].Price *= results[refIdx].Price
+		out[feedIdx].Price *= out[refIdx].Price
 	}
-}
-
-// LogFeedFailures logs individual feed failures and emits an error if all feeds failed.
-func LogFeedFailures(results []blockchain.FeedPriceResult, unit *OracleUnit, logger *slog.Logger, blockNum int64) {
-	var failCount int
-	for i, r := range results {
-		if !r.Success {
-			failCount++
-			logger.Warn("feed call failed",
-				"oracle", unit.Oracle.Name,
-				"tokenID", r.TokenID,
-				"feedAddress", unit.Feeds[i].FeedAddress.Hex(),
-				"block", blockNum)
-		}
-	}
-	if failCount == len(results) && len(results) > 0 {
-		logger.Error("all feeds failed for oracle, check configuration",
-			"oracle", unit.Oracle.Name,
-			"block", blockNum,
-			"feedCount", len(results))
-	}
-}
-
-// safeOracleID converts an int64 oracle ID to int16, returning an error if the
-// value is out of the valid range [1, math.MaxInt16].
-func safeOracleID(id int64) (int16, error) {
-	if id < 1 || id > math.MaxInt16 {
-		return 0, fmt.Errorf("oracle ID %d out of int16 range [1, %d]", id, math.MaxInt16)
-	}
-	return int16(id), nil
+	return out
 }
 
 func buildOracleUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle) (*OracleUnit, error) {
-	oracleID, err := safeOracleID(oracle.ID)
-	if err != nil {
-		return nil, err
-	}
-
-	var unit *OracleUnit
-	switch oracle.OracleType {
-	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
+	var (
+		unit *OracleUnit
+		err  error
+	)
+	if oracle.OracleType.IsFeedOracle() {
 		unit, err = buildFeedUnit(ctx, repo, oracle)
-	default:
+	} else {
 		unit, err = buildAaveUnit(ctx, repo, oracle)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if unit != nil {
-		unit.OracleID = oracleID
+		unit.OracleID = oracle.ID
 	}
 	return unit, nil
 }
@@ -216,7 +190,8 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		tokenIDs[i] = asset.TokenID
 	}
 
-	refFeedIdx, nonUSDFeeds := buildRefFeedIdx(feeds, tokenAddrBytes)
+	tokenAddrs := bytesToAddressMap(tokenAddrBytes)
+	refFeedIdx, nonUSDFeeds := buildRefFeedIdx(feeds, tokenAddrs)
 
 	if err := validateRefFeeds(nonUSDFeeds, refFeedIdx, oracle.Name); err != nil {
 		return nil, err
@@ -262,12 +237,7 @@ func validateRefFeeds(nonUSDFeeds map[int]string, refFeedIdx map[string]int, ora
 // buildRefFeedIdx identifies which feeds serve as USD-denominated reference prices
 // for non-USD quote currencies. It matches token addresses against well-known
 // WETH/WBTC addresses to find feeds that provide ETH/USD and BTC/USD.
-func buildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrBytes map[int64][]byte) (map[string]int, map[int]string) {
-	tokenAddr := make(map[int64]common.Address, len(tokenAddrBytes))
-	for tokenID, addrBytes := range tokenAddrBytes {
-		tokenAddr[tokenID] = common.BytesToAddress(addrBytes)
-	}
-
+func buildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrs map[int64]common.Address) (map[string]int, map[int]string) {
 	refFeedIdx := make(map[string]int)
 	nonUSDFeeds := make(map[int]string)
 
@@ -276,7 +246,7 @@ func buildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrBytes map[int64][]b
 			nonUSDFeeds[i] = feed.QuoteCurrency
 			continue
 		}
-		addr, ok := tokenAddr[feed.TokenID]
+		addr, ok := tokenAddrs[feed.TokenID]
 		if !ok {
 			continue
 		}
@@ -288,4 +258,12 @@ func buildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrBytes map[int64][]b
 	}
 
 	return refFeedIdx, nonUSDFeeds
+}
+
+func bytesToAddressMap(raw map[int64][]byte) map[int64]common.Address {
+	out := make(map[int64]common.Address, len(raw))
+	for id, b := range raw {
+		out[id] = common.BytesToAddress(b)
+	}
+	return out
 }

@@ -12,7 +12,7 @@ func TestNewOnchainTokenPrice(t *testing.T) {
 	tests := []struct {
 		name         string
 		tokenID      int64
-		oracleID     int16
+		oracleID     int64
 		blockNumber  int64
 		blockVersion int16
 		timestamp    time.Time
@@ -60,7 +60,18 @@ func TestNewOnchainTokenPrice(t *testing.T) {
 			timestamp:    validTime,
 			priceUSD:     1.0,
 			wantErr:      true,
-			errContains:  "oracleID must be positive",
+			errContains:  "oracleID",
+		},
+		{
+			name:         "oracleID overflow",
+			tokenID:      1,
+			oracleID:     40000,
+			blockNumber:  100,
+			blockVersion: 0,
+			timestamp:    validTime,
+			priceUSD:     1.0,
+			wantErr:      true,
+			errContains:  "oracleID",
 		},
 		{
 			name:         "zero blockNumber",

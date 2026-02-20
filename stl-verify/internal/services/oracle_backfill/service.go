@@ -54,9 +54,8 @@ func configDefaults() Config {
 // block range information.
 type oracleWorkUnit struct {
 	*oracle_pricing.OracleUnit
-	validFrom      int64                                // earliest block to query (0 = no lower bound)
-	validTo        int64                                // latest block to query (0 = no upper bound)
-	newMulticaller func() (outbound.Multicaller, error) // per-unit factory with oracle type bound
+	validFrom int64 // earliest block to query (0 = no lower bound)
+	validTo   int64 // latest block to query (0 = no upper bound)
 }
 
 // oracleBlockRange represents the valid block range for an oracle across all protocols.
@@ -155,13 +154,10 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 
 func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleWorkUnit, blockNum int64) error {
 	for _, wu := range workUnits {
-		switch wu.Oracle.OracleType {
-		case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
-			// feed oracle — validate decimals
-		default:
-			continue // aave or other non-feed oracles don't have per-feed decimals
+		if !wu.Oracle.OracleType.IsFeedOracle() {
+			continue
 		}
-		mc, err := wu.newMulticaller()
+		mc, err := s.newMulticaller(wu.Oracle.OracleType)
 		if err != nil {
 			return fmt.Errorf("oracle %s: creating multicaller for decimals validation: %w", wu.Oracle.Name, err)
 		}
@@ -192,13 +188,9 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 
 	var workUnits []*oracleWorkUnit
 	for _, su := range shared {
-		oracleType := su.Oracle.OracleType
 		wu := &oracleWorkUnit{
 			OracleUnit: su,
 			validFrom:  su.Oracle.DeploymentBlock,
-			newMulticaller: func() (outbound.Multicaller, error) {
-				return s.newMulticaller(oracleType)
-			},
 		}
 
 		if br, ok := blockRanges[su.Oracle.ID]; ok {
@@ -383,7 +375,7 @@ func (s *Service) worker(
 	priceCh chan<- []*entity.OnchainTokenPrice,
 	stats *backfillStats,
 ) {
-	mc, err := wu.newMulticaller()
+	mc, err := s.newMulticaller(wu.Oracle.OracleType)
 	if err != nil {
 		rangeSize := toBlock - fromBlock + 1
 		stats.blocksFailed.Add(rangeSize)
@@ -415,8 +407,10 @@ func (s *Service) worker(
 		switch wu.Oracle.OracleType {
 		case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
 			prices, blockErr = s.processBlockFeed(ctx, mc, wu, oracleID, blockNum)
-		default:
+		case entity.OracleTypeAave:
 			prices, blockErr = s.processBlockAave(ctx, mc, wu.OracleAddr, wu.TokenAddrs, wu.TokenIDs, oracleID, priceDecimals, blockNum)
+		default:
+			blockErr = fmt.Errorf("unsupported oracle type: %s", wu.Oracle.OracleType)
 		}
 
 		if blockErr != nil {
@@ -457,7 +451,7 @@ func (s *Service) processBlockAave(
 	oracleAddr common.Address,
 	tokenAddrs []common.Address,
 	tokenIDs []int64,
-	oracleID int16,
+	oracleID int64,
 	priceDecimals int,
 	blockNum int64,
 ) ([]*entity.OnchainTokenPrice, error) {
@@ -517,7 +511,7 @@ func (s *Service) processBlockFeed(
 	ctx context.Context,
 	mc outbound.Multicaller,
 	wu *oracleWorkUnit,
-	oracleID int16,
+	oracleID int64,
 	blockNum int64,
 ) ([]*entity.OnchainTokenPrice, error) {
 	results, err := blockchain.FetchFeedPrices(
@@ -529,18 +523,15 @@ func (s *Service) processBlockFeed(
 		return nil, fmt.Errorf("fetching feed prices: %w", err)
 	}
 
-	oracle_pricing.LogFeedFailures(results, wu.OracleUnit, s.logger, blockNum)
+	results = oracle_pricing.ConvertNonUSDPrices(results, wu.OracleUnit, s.logger, blockNum)
 
-	oracle_pricing.ConvertNonUSDPrices(results, wu.OracleUnit, s.logger, blockNum)
-
-	hasSuccess := false
+	var successResults []blockchain.FeedPriceResult
 	for _, r := range results {
 		if r.Success {
-			hasSuccess = true
-			break
+			successResults = append(successResults, r)
 		}
 	}
-	if !hasSuccess {
+	if len(successResults) == 0 {
 		return nil, nil
 	}
 
@@ -550,12 +541,8 @@ func (s *Service) processBlockFeed(
 	}
 	blockTimestamp := time.Unix(int64(header.Time), 0).UTC()
 
-	prices := make([]*entity.OnchainTokenPrice, 0, len(wu.Feeds))
-	for _, result := range results {
-		if !result.Success {
-			continue
-		}
-
+	prices := make([]*entity.OnchainTokenPrice, 0, len(successResults))
+	for _, result := range successResults {
 		p, err := entity.NewOnchainTokenPrice(
 			result.TokenID,
 			oracleID,
