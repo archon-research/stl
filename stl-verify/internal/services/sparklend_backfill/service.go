@@ -130,9 +130,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	// Worker goroutines
 	var wg sync.WaitGroup
 	for range s.config.Concurrency {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for blockNum := range blockCh {
 				if err := s.processBlock(ctx, blockNum); err != nil {
 					logger.Error("failed to process block", "block", blockNum, "error", err)
@@ -145,7 +143,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 					processed.Add(1)
 				}
 			}
-		}()
+		})
 	}
 
 	// Feed blocks into channel

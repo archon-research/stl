@@ -14,7 +14,7 @@ func TestPositionEventData_ToJSON(t *testing.T) {
 		name       string
 		event      *PositionEventData
 		wantKeys   []string
-		wantValues map[string]interface{}
+		wantValues map[string]any
 		wantErr    bool
 	}{
 		{
@@ -26,7 +26,7 @@ func TestPositionEventData_ToJSON(t *testing.T) {
 				Amount:    big.NewInt(1000000),
 			},
 			wantKeys: []string{"eventType", "user", "reserve", "amount"},
-			wantValues: map[string]interface{}{
+			wantValues: map[string]any{
 				"eventType": "Borrow",
 				"user":      common.HexToAddress("0x1234").Hex(),
 				"reserve":   common.HexToAddress("0x5678").Hex(),
@@ -45,7 +45,7 @@ func TestPositionEventData_ToJSON(t *testing.T) {
 				LiquidatedCollateralAmount: big.NewInt(600),
 			},
 			wantKeys: []string{"eventType", "user", "liquidator", "collateralAsset", "debtAsset", "debtToCover", "liquidatedCollateralAmount"},
-			wantValues: map[string]interface{}{
+			wantValues: map[string]any{
 				"eventType":                  "LiquidationCall",
 				"debtToCover":                "500",
 				"liquidatedCollateralAmount": "600",
@@ -60,7 +60,7 @@ func TestPositionEventData_ToJSON(t *testing.T) {
 				CollateralEnabled: true,
 			},
 			wantKeys: []string{"eventType", "user", "reserve", "collateralEnabled"},
-			wantValues: map[string]interface{}{
+			wantValues: map[string]any{
 				"eventType":         "ReserveUsedAsCollateralEnabled",
 				"collateralEnabled": true,
 			},
@@ -74,7 +74,7 @@ func TestPositionEventData_ToJSON(t *testing.T) {
 				CollateralEnabled: false,
 			},
 			wantKeys: []string{"eventType", "user", "reserve", "collateralEnabled"},
-			wantValues: map[string]interface{}{
+			wantValues: map[string]any{
 				"eventType":         "ReserveUsedAsCollateralDisabled",
 				"collateralEnabled": false,
 			},
@@ -91,7 +91,7 @@ func TestPositionEventData_ToJSON(t *testing.T) {
 				return
 			}
 
-			var result map[string]interface{}
+			var result map[string]any
 			if err := json.Unmarshal(raw, &result); err != nil {
 				t.Fatalf("failed to unmarshal result: %v", err)
 			}

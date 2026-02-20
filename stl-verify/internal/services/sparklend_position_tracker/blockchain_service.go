@@ -503,7 +503,7 @@ func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvi
 }
 
 // parseReserveDataAaveV2 parses Aave V2 reserve data (10 fields).
-func parseReserveDataAaveV2(unpacked []interface{}, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+func parseReserveDataAaveV2(unpacked []any, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
 	if len(unpacked) < 10 {
 		return nil, fmt.Errorf("expected 10 values from getReserveData (Aave V2), got %d", len(unpacked))
 	}
@@ -571,7 +571,7 @@ func parseReserveDataAaveV2(unpacked []interface{}, fieldIndex map[string]int) (
 }
 
 // parseReserveDataAaveV3 parses Aave V3 reserve data (12 fields).
-func parseReserveDataAaveV3(unpacked []interface{}, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+func parseReserveDataAaveV3(unpacked []any, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
 	if len(unpacked) < 12 {
 		return nil, fmt.Errorf("expected 12 values from getReserveData (Aave V3), got %d", len(unpacked))
 	}
@@ -644,7 +644,7 @@ func parseReserveDataAaveV3(unpacked []interface{}, fieldIndex map[string]int) (
 }
 
 // parseReserveDataSparklend parses Sparklend reserve data (11 fields, no averageStableBorrowRate).
-func parseReserveDataSparklend(unpacked []interface{}, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+func parseReserveDataSparklend(unpacked []any, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
 	result := &reserveDataFromProvider{}
 	var err error
 
@@ -785,7 +785,7 @@ func buildFieldIndexMap(outputs abi.Arguments) map[string]int {
 	return fieldIndex
 }
 
-func getBigIntByName(unpacked []interface{}, fieldIndex map[string]int, fieldName string) (*big.Int, error) {
+func getBigIntByName(unpacked []any, fieldIndex map[string]int, fieldName string) (*big.Int, error) {
 	idx, ok := fieldIndex[fieldName]
 	if !ok {
 		return nil, fmt.Errorf("field %s not found in ABI", fieldName)
@@ -803,7 +803,7 @@ func getBigIntByName(unpacked []interface{}, fieldIndex map[string]int, fieldNam
 	return v, nil
 }
 
-func getBoolByName(unpacked []interface{}, fieldIndex map[string]int, fieldName string) (bool, error) {
+func getBoolByName(unpacked []any, fieldIndex map[string]int, fieldName string) (bool, error) {
 	idx, ok := fieldIndex[fieldName]
 	if !ok {
 		return false, fmt.Errorf("field %s not found in ABI", fieldName)
