@@ -75,7 +75,7 @@ func TestValidateData(t *testing.T) {
 				},
 				Passed: 1,
 			},
-			wantSuccess: true,
+			wantSuccess:      true,
 			wantFailedChecks: 0,
 		},
 		{
