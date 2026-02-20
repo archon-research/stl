@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"sync"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -47,6 +48,7 @@ type ActualUserReserveData struct {
 }
 
 type blockchainService struct {
+	mu                                         sync.RWMutex
 	ethClient                                  *ethclient.Client
 	multicallClient                            outbound.Multicaller
 	erc20ABI                                   *abi.ABI
@@ -337,6 +339,7 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 	tokensToFetch := make([]common.Address, 0)
 	result := make(map[common.Address]TokenMetadata)
 
+	s.mu.RLock()
 	for token := range tokens {
 		if cached, ok := s.metadataCache[token]; ok {
 			result[token] = cached
@@ -344,6 +347,7 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 			tokensToFetch = append(tokensToFetch, token)
 		}
 	}
+	s.mu.RUnlock()
 
 	if len(tokensToFetch) == 0 {
 		return result, nil
@@ -409,7 +413,9 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 			Name:     name,
 		}
 
+		s.mu.Lock()
 		s.metadataCache[token] = metadata
+		s.mu.Unlock()
 		result[token] = metadata
 	}
 
