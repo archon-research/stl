@@ -91,7 +91,7 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 		))
 	}
 
-	version, err := retry.Do(ctx, cfg, isSerializationFailure, onRetry, func() (int, error) {
+	version, err := retry.Do(ctx, cfg, isRetryableTxError, onRetry, func() (int, error) {
 		return r.saveBlockOnce(ctx, state)
 	})
 
@@ -158,9 +158,9 @@ func (r *BlockStateRepository) saveBlockOnce(ctx context.Context, state outbound
 	return version, nil
 }
 
-// isSerializationFailure checks if the error is a PostgreSQL serialization failure (SQLSTATE 40001)
+// isRetryableTxError checks if the error is a PostgreSQL serialization failure (SQLSTATE 40001)
 // or deadlock (SQLSTATE 40P01). Both are transient and safe to retry.
-func isSerializationFailure(err error) bool {
+func isRetryableTxError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -360,7 +360,7 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 		))
 	}
 
-	version, err := retry.Do(ctx, cfg, isSerializationFailure, onRetry, func() (int, error) {
+	version, err := retry.Do(ctx, cfg, isRetryableTxError, onRetry, func() (int, error) {
 		return r.handleReorgAtomicOnce(ctx, commonAncestor, event, newBlock)
 	})
 
