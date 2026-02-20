@@ -80,7 +80,7 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 	}
 
 	onRetry := func(attempt int, err error, backoff time.Duration) {
-		r.logger.Debug("serialization failure, retrying",
+		r.logger.Debug("retryable tx error, retrying",
 			"attempt", attempt,
 			"block", state.Number,
 			"hash", state.Hash,
@@ -323,7 +323,7 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 // The commonAncestor is derived from the ReorgEvent (BlockNumber - Depth).
 //
 // Uses SERIALIZABLE isolation (consistent with SaveBlock) and includes retry logic
-// for transient serialization failures (SQLSTATE 40001).
+// for transient tx errors (SQLSTATE 40001 serialization failure, 40P01 deadlock).
 func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "postgres.HandleReorgAtomic",
@@ -349,7 +349,7 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 	}
 
 	onRetry := func(attempt int, err error, backoff time.Duration) {
-		r.logger.Debug("serialization failure in HandleReorgAtomic, retrying",
+		r.logger.Debug("retryable tx error in HandleReorgAtomic, retrying",
 			"attempt", attempt,
 			"block", newBlock.Number,
 			"hash", newBlock.Hash,

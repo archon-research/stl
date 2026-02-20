@@ -8,8 +8,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// TestIsSerializationFailure tests the isRetryableTxError helper function.
-func TestIsSerializationFailure(t *testing.T) {
+// TestIsRetryableTxError tests the isRetryableTxError helper function.
+func TestIsRetryableTxError(t *testing.T) {
 	tests := []struct {
 		name     string
 		err      error
