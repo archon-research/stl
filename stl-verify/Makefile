@@ -4,7 +4,8 @@
 .PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax help \
         dev-up dev-env dev-down dev-ips generate-er \
         preflight tf-bootstrap tf-destroy-bootstrap tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check check-tofu \
-        ecr-login docker-build docker-push docker-release \
+		ecr-login docker-build docker-push docker-release \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -655,7 +656,9 @@ docker-push: ecr-login
 	docker push $(ECR_REPO):latest
 
 # Build and push in one step (single recipe to ensure consistent IMAGE_TAG)
-docker-release: ecr-login
+docker-release: ecr-login _docker-release-internal
+
+_docker-release-internal:
 	@IMAGE_TAG=$$(git rev-parse --short HEAD) && \
 	GIT_COMMIT_FULL=$$(git rev-parse HEAD) && \
 	GIT_BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
@@ -721,16 +724,21 @@ ecs-deploy-watcher-staging:
 
 # Release all services for a given environment
 # Usage: make docker-release-all ENV=sentineldev|sentinelstaging|sentinelprod
-docker-release-all: ecr-login
+docker-release-all:
+	@if [ -z "$(ENV)" ]; then \
+		echo "Error: ENV is required. Usage: make docker-release-all ENV=sentineldev|sentinelstaging|sentinelprod"; \
+		exit 1; \
+	fi
+	@$(MAKE) ecr-login ENV=$(ENV)
 	@echo "==> Releasing all Docker images for ENV=$(ENV)..."
 	@echo ""
-	@$(MAKE) docker-release ENV=$(ENV)
+	@$(MAKE) _docker-release-internal ENV=$(ENV)
 	@echo ""
-	@$(MAKE) docker-release-backup ENV=$(ENV)
+	@$(MAKE) _docker-release-backup-internal ENV=$(ENV)
 	@echo ""
-	@$(MAKE) docker-release-oracle-price-worker ENV=$(ENV)
+	@$(MAKE) _docker-release-oracle-price-worker-internal ENV=$(ENV)
 	@echo ""
-	@$(MAKE) docker-release-sparklend-position-tracker ENV=$(ENV)
+	@$(MAKE) _docker-release-sparklend-position-tracker-internal ENV=$(ENV)
 	@echo ""
 	@echo "==> All Docker images released for ENV=$(ENV)"
 
@@ -846,7 +854,9 @@ docker-push-backup: ecr-login
 	docker push $(ECR_REPO_BACKUP):latest
 
 # Build and push backup worker in one step (captures tag at start to ensure consistency)
-docker-release-backup: ecr-login
+docker-release-backup: ecr-login _docker-release-backup-internal
+
+_docker-release-backup-internal:
 	@TAG=$$(git rev-parse --short HEAD) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
@@ -912,7 +922,9 @@ docker-push-oracle-price-worker: ecr-login
 	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):latest
 
 # Build and push oracle price worker in one step (captures tag at start to ensure consistency)
-docker-release-oracle-price-worker: ecr-login
+docker-release-oracle-price-worker: ecr-login _docker-release-oracle-price-worker-internal
+
+_docker-release-oracle-price-worker-internal:
 	@TAG=$$(git rev-parse --short HEAD) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
@@ -978,7 +990,9 @@ docker-push-sparklend-position-tracker: ecr-login
 	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest
 
 # Build and push sparklend position tracker in one step (captures tag at start to ensure consistency)
-docker-release-sparklend-position-tracker: ecr-login
+docker-release-sparklend-position-tracker: ecr-login _docker-release-sparklend-position-tracker-internal
+
+_docker-release-sparklend-position-tracker-internal:
 	@TAG=$$(git rev-parse --short HEAD) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
