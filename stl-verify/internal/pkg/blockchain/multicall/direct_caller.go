@@ -99,7 +99,7 @@ func (c *DirectCaller) Address() common.Address {
 
 func toBlockNumArg(number *big.Int) (string, error) {
 	if number == nil {
-		return "", fmt.Errorf("block number is required (nil would silently query latest)")
+		return "", fmt.Errorf("block number is required")
 	}
 	if number.Sign() < 0 {
 		return "", fmt.Errorf("negative block number: %s", number)

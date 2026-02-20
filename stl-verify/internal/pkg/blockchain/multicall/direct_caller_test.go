@@ -15,38 +15,31 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
-// jsonRPCRequest represents a single JSON-RPC 2.0 request.
-type jsonRPCRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
-	ID      json.RawMessage `json:"id"`
-}
-
 // startBatchRPCServer starts an HTTP server that handles JSON-RPC batch requests.
 // handler is called for each individual request within the batch.
-func startBatchRPCServer(t *testing.T, handler func(req jsonRPCRequest) (json.RawMessage, *rpcError)) *httptest.Server {
+func startBatchRPCServer(t *testing.T, handler func(req testutil.JSONRPCRequest) (json.RawMessage, *rpcError)) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 
 		// Try batch first (array of requests)
-		var batch []jsonRPCRequest
+		var batch []testutil.JSONRPCRequest
 		if err := json.Unmarshal(body, &batch); err != nil {
 			// Single request
-			var single jsonRPCRequest
+			var single testutil.JSONRPCRequest
 			if err := json.Unmarshal(body, &single); err != nil {
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
-			batch = []jsonRPCRequest{single}
+			batch = []testutil.JSONRPCRequest{single}
 		}
 
 		responses := make([]json.RawMessage, len(batch))
@@ -174,8 +167,13 @@ func TestDirectCaller_Execute(t *testing.T) {
 	callData := []byte{0xAB, 0xCD}
 
 	t.Run("empty calls returns empty results", func(t *testing.T) {
-		// No server needed — short-circuits before any RPC.
-		dc := &DirectCaller{} // nil rpcClient OK: Execute returns early for empty calls
+		srv := startBatchRPCServer(t, func(req testutil.JSONRPCRequest) (json.RawMessage, *rpcError) {
+			t.Fatal("no RPC call expected for empty calls")
+			return nil, nil
+		})
+		defer srv.Close()
+
+		dc := newTestDirectCaller(t, srv.URL)
 		results, err := dc.Execute(context.Background(), nil, big.NewInt(100))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -186,7 +184,13 @@ func TestDirectCaller_Execute(t *testing.T) {
 	})
 
 	t.Run("negative block number returns error", func(t *testing.T) {
-		dc := &DirectCaller{} // nil rpcClient OK: Execute returns early for negative block
+		srv := startBatchRPCServer(t, func(req testutil.JSONRPCRequest) (json.RawMessage, *rpcError) {
+			t.Fatal("no RPC call expected for negative block number")
+			return nil, nil
+		})
+		defer srv.Close()
+
+		dc := newTestDirectCaller(t, srv.URL)
 		calls := []outbound.Call{{Target: target, CallData: callData}}
 		_, err := dc.Execute(context.Background(), calls, big.NewInt(-5))
 		if err == nil {
@@ -199,7 +203,7 @@ func TestDirectCaller_Execute(t *testing.T) {
 
 	t.Run("single successful call", func(t *testing.T) {
 		returnData := []byte{0x01, 0x02, 0x03}
-		srv := startBatchRPCServer(t, func(req jsonRPCRequest) (json.RawMessage, *rpcError) {
+		srv := startBatchRPCServer(t, func(req testutil.JSONRPCRequest) (json.RawMessage, *rpcError) {
 			hex := fmt.Sprintf(`"0x%x"`, returnData)
 			return json.RawMessage(hex), nil
 		})
@@ -223,7 +227,7 @@ func TestDirectCaller_Execute(t *testing.T) {
 	})
 
 	t.Run("multiple calls all succeed", func(t *testing.T) {
-		srv := startBatchRPCServer(t, func(req jsonRPCRequest) (json.RawMessage, *rpcError) {
+		srv := startBatchRPCServer(t, func(req testutil.JSONRPCRequest) (json.RawMessage, *rpcError) {
 			return json.RawMessage(`"0xdeadbeef"`), nil
 		})
 		defer srv.Close()
@@ -250,7 +254,7 @@ func TestDirectCaller_Execute(t *testing.T) {
 
 	t.Run("AllowFailure true — individual call error is tolerated", func(t *testing.T) {
 		callCount := 0
-		srv := startBatchRPCServer(t, func(req jsonRPCRequest) (json.RawMessage, *rpcError) {
+		srv := startBatchRPCServer(t, func(req testutil.JSONRPCRequest) (json.RawMessage, *rpcError) {
 			callCount++
 			if callCount == 2 {
 				return nil, &rpcError{Code: -32000, Message: "execution reverted"}
@@ -284,7 +288,7 @@ func TestDirectCaller_Execute(t *testing.T) {
 	})
 
 	t.Run("AllowFailure false — individual call error returns error", func(t *testing.T) {
-		srv := startBatchRPCServer(t, func(req jsonRPCRequest) (json.RawMessage, *rpcError) {
+		srv := startBatchRPCServer(t, func(req testutil.JSONRPCRequest) (json.RawMessage, *rpcError) {
 			return nil, &rpcError{Code: -32000, Message: "execution reverted"}
 		})
 		defer srv.Close()
@@ -327,7 +331,13 @@ func TestDirectCaller_Execute(t *testing.T) {
 	})
 
 	t.Run("nil block number returns error", func(t *testing.T) {
-		dc := &DirectCaller{} // nil rpcClient OK: Execute returns early for nil block
+		srv := startBatchRPCServer(t, func(req testutil.JSONRPCRequest) (json.RawMessage, *rpcError) {
+			t.Fatal("no RPC call expected for nil block number")
+			return nil, nil
+		})
+		defer srv.Close()
+
+		dc := newTestDirectCaller(t, srv.URL)
 		calls := []outbound.Call{{Target: target, AllowFailure: true, CallData: callData}}
 		_, err := dc.Execute(context.Background(), calls, nil)
 		if err == nil {
