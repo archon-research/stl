@@ -187,6 +187,7 @@ feedLoop:
 func (s *Service) processBlock(ctx context.Context, blockNum int64) error {
 	key := fmt.Sprintf("%s/%d_1_receipts.json.gz", partition.GetPartition(blockNum), blockNum)
 
+	// StreamFile transparently decompresses .gz files, so no manual gzip decoding is needed.
 	rc, err := s.s3Reader.StreamFile(ctx, s.bucket, key)
 	if err != nil {
 		return fmt.Errorf("streaming S3 file %s: %w", key, err)
