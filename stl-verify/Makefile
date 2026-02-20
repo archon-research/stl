@@ -15,6 +15,7 @@
         docker-build-sparklend-position-tracker-staging docker-push-sparklend-position-tracker-staging docker-release-sparklend-position-tracker-staging \
         docker-release-all docker-release-all-staging \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
+        ecs-deploy-oracle-price-worker ecs-deploy-oracle-price-worker-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
         bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel \
         db-migrate db-set-passwords db-test-app-user \
@@ -632,6 +633,16 @@ docker-push-oracle-price-worker-staging:
 
 docker-release-oracle-price-worker-staging:
 	@$(MAKE) docker-release-oracle-price-worker ENV=sentinelstaging
+
+# Force new deployment of oracle price worker service (pulls latest image)
+# Usage: make ecs-deploy-oracle-price-worker ENV=sentineldev|sentinelstaging|sentinelprod
+ecs-deploy-oracle-price-worker:
+	@echo "==> Forcing new deployment of oracle price worker service..."
+	aws ecs update-service --cluster stl-$(ENV)-cluster --service stl-$(ENV)-oracle-price-worker --force-new-deployment --region $(AWS_REGION)
+	@echo "==> Deployment initiated. Monitor with: aws ecs describe-services --cluster stl-$(ENV)-cluster --services stl-$(ENV)-oracle-price-worker --region $(AWS_REGION)"
+
+ecs-deploy-oracle-price-worker-staging:
+	@$(MAKE) ecs-deploy-oracle-price-worker ENV=sentinelstaging
 
 # =============================================================================
 # Docker Build & Push - SparkLend Position Tracker
