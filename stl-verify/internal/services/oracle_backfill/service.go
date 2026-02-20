@@ -15,12 +15,10 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 )
@@ -31,9 +29,11 @@ type BlockHeaderFetcher interface {
 	HeaderByNumber(ctx context.Context, number *big.Int) (*ethtypes.Header, error)
 }
 
-// MulticallFactory creates a new Multicaller instance.
+// MulticallFactory creates a new Multicaller for the given oracle type.
 // Each backfill worker needs its own multicall client for concurrent use.
-type MulticallFactory func() (outbound.Multicaller, error)
+// The factory returns the appropriate implementation (e.g. Multicall3 for
+// Chainlink/Aave, DirectCaller for Chronicle).
+type MulticallFactory func(entity.OracleType) (outbound.Multicaller, error)
 
 // Config holds configuration for the backfill service.
 type Config struct {
@@ -54,9 +54,9 @@ func configDefaults() Config {
 // block range information.
 type oracleWorkUnit struct {
 	*oracle_pricing.OracleUnit
-	validFrom      int64            // earliest block to query (0 = no lower bound)
-	validTo        int64            // latest block to query (0 = no upper bound)
-	newMulticaller MulticallFactory // per-unit multicall factory (DirectCaller for chronicle)
+	validFrom      int64                                          // earliest block to query (0 = no lower bound)
+	validTo        int64                                          // latest block to query (0 = no upper bound)
+	newMulticaller func() (outbound.Multicaller, error) // per-unit factory with oracle type bound
 }
 
 // oracleBlockRange represents the valid block range for an oracle across all protocols.
@@ -71,7 +71,6 @@ type Service struct {
 	headerFetcher  BlockHeaderFetcher
 	newMulticaller MulticallFactory
 	repo           outbound.OnchainPriceRepository
-	rpcClient      *rpc.Client // for creating DirectCaller instances
 
 	oracleABI *abi.ABI
 	feedABI   *abi.ABI
@@ -85,7 +84,6 @@ func NewService(
 	headerFetcher BlockHeaderFetcher,
 	newMulticaller MulticallFactory,
 	repo outbound.OnchainPriceRepository,
-	rpcClient *rpc.Client,
 ) (*Service, error) {
 	if headerFetcher == nil {
 		return nil, fmt.Errorf("headerFetcher cannot be nil")
@@ -95,9 +93,6 @@ func NewService(
 	}
 	if repo == nil {
 		return nil, fmt.Errorf("repo cannot be nil")
-	}
-	if rpcClient == nil {
-		return nil, fmt.Errorf("rpcClient cannot be nil")
 	}
 
 	defaults := configDefaults()
@@ -126,7 +121,6 @@ func NewService(
 		headerFetcher:  headerFetcher,
 		newMulticaller: newMulticaller,
 		repo:           repo,
-		rpcClient:      rpcClient,
 		oracleABI:      oracleABI,
 		feedABI:        feedABI,
 		logger:         config.Logger.With("component", "oracle-backfill"),
@@ -196,22 +190,15 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 	}
 	blockRanges := computeOracleBlockRanges(bindings)
 
-	directCallerFactory := func() (outbound.Multicaller, error) {
-		return multicall.NewDirectCaller(s.rpcClient)
-	}
-
-	// Build work units, deduplicating by oracle ID (a protocol oracle may also exist as a generic oracle).
 	var workUnits []*oracleWorkUnit
 	for _, su := range shared {
-		factory := s.newMulticaller
-		if su.Oracle.OracleType == entity.OracleTypeChronicle {
-			factory = directCallerFactory
-		}
-
+		oracleType := su.Oracle.OracleType
 		wu := &oracleWorkUnit{
-			OracleUnit:     su,
-			validFrom:      su.Oracle.DeploymentBlock,
-			newMulticaller: factory,
+			OracleUnit: su,
+			validFrom:  su.Oracle.DeploymentBlock,
+			newMulticaller: func() (outbound.Multicaller, error) {
+				return s.newMulticaller(oracleType)
+			},
 		}
 
 		if br, ok := blockRanges[su.Oracle.ID]; ok {

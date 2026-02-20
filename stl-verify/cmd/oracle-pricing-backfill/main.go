@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -133,7 +134,10 @@ func run(args []string) error {
 	ethClient := ethclient.NewClient(rpcClient)
 	logger.Info("Ethereum RPC connected", "url", cfg.rpcURL)
 
-	newMulticaller := func() (outbound.Multicaller, error) {
+	newMulticaller := func(oracleType entity.OracleType) (outbound.Multicaller, error) {
+		if oracleType == entity.OracleTypeChronicle {
+			return multicall.NewDirectCaller(rpcClient)
+		}
 		return multicall.NewClient(ethClient, blockchain.Multicall3)
 	}
 
@@ -159,7 +163,6 @@ func run(args []string) error {
 		ethClient,
 		newMulticaller,
 		repo,
-		rpcClient,
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)

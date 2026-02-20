@@ -18,11 +18,18 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// dummyMulticallerFactory returns a MulticallerFactory that creates a mock multicaller.
-// It satisfies the non-nil factory requirement for NewService.
+// dummyMulticallerFactory returns a MulticallerFactory that creates a mock multicaller
+// for any oracle type. It satisfies the non-nil factory requirement for NewService.
 func dummyMulticallerFactory() MulticallerFactory {
-	return func() (outbound.Multicaller, error) {
+	return func(_ entity.OracleType) (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{}, nil
+	}
+}
+
+// multicallFactoryFor returns a MulticallerFactory that always returns the given multicaller.
+func multicallFactoryFor(mc outbound.Multicaller) MulticallerFactory {
+	return func(_ entity.OracleType) (outbound.Multicaller, error) {
+		return mc, nil
 	}
 }
 
@@ -265,14 +272,12 @@ func makeBlockEventJSON(blockNumber int64, version int, blockTimestamp int64) st
 
 func TestNewService(t *testing.T) {
 	consumer := &mockConsumer{}
-	multicaller := &testutil.MockMulticaller{}
 	repo := &mockRepo{}
 
 	tests := []struct {
 		name        string
 		config      Config
 		consumer    outbound.SQSConsumer
-		multicaller outbound.Multicaller
 		repo        outbound.OnchainPriceRepository
 		wantErr     bool
 		errContains string
@@ -280,18 +285,16 @@ func TestNewService(t *testing.T) {
 		checkDefaults bool
 	}{
 		{
-			name:        "success with all valid params",
-			config:      validConfig(),
-			consumer:    consumer,
-			multicaller: multicaller,
-			repo:        repo,
-			wantErr:     false,
+			name:     "success with all valid params",
+			config:   validConfig(),
+			consumer: consumer,
+			repo:     repo,
+			wantErr:  false,
 		},
 		{
 			name:          "success with default config values",
 			config:        Config{},
 			consumer:      consumer,
-			multicaller:   multicaller,
 			repo:          repo,
 			wantErr:       false,
 			checkDefaults: true,
@@ -300,45 +303,34 @@ func TestNewService(t *testing.T) {
 			name:        "error nil consumer",
 			config:      validConfig(),
 			consumer:    nil,
-			multicaller: multicaller,
 			repo:        repo,
 			wantErr:     true,
 			errContains: "consumer cannot be nil",
 		},
 		{
-			name:        "error nil multicaller",
-			config:      validConfig(),
-			consumer:    consumer,
-			multicaller: nil,
-			repo:        repo,
-			wantErr:     true,
-			errContains: "multicaller cannot be nil",
-		},
-		{
 			name:        "error nil repo",
 			config:      validConfig(),
 			consumer:    consumer,
-			multicaller: multicaller,
 			repo:        nil,
 			wantErr:     true,
 			errContains: "repo cannot be nil",
 		},
 	}
 
-	// Separate test for nil newDirectCaller since the table always passes dummyMulticallerFactory().
-	t.Run("error nil newDirectCaller", func(t *testing.T) {
-		_, err := NewService(validConfig(), consumer, multicaller, repo, nil)
+	// Separate test for nil newMulticaller since the table always passes dummyMulticallerFactory().
+	t.Run("error nil newMulticaller", func(t *testing.T) {
+		_, err := NewService(validConfig(), consumer, repo, nil)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if !strings.Contains(err.Error(), "newDirectCaller cannot be nil") {
-			t.Errorf("error %q does not contain %q", err.Error(), "newDirectCaller cannot be nil")
+		if !strings.Contains(err.Error(), "newMulticaller cannot be nil") {
+			t.Errorf("error %q does not contain %q", err.Error(), "newMulticaller cannot be nil")
 		}
 	})
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, err := NewService(tc.config, tc.consumer, tc.multicaller, tc.repo, dummyMulticallerFactory())
+			svc, err := NewService(tc.config, tc.consumer, tc.repo, dummyMulticallerFactory())
 
 			if tc.wantErr {
 				if err == nil {
@@ -364,8 +356,8 @@ func TestNewService(t *testing.T) {
 			if svc.consumer == nil {
 				t.Error("consumer should not be nil")
 			}
-			if svc.multicaller == nil {
-				t.Error("multicaller should not be nil")
+			if svc.newMulticaller == nil {
+				t.Error("newMulticaller should not be nil")
 			}
 			if svc.repo == nil {
 				t.Error("repo should not be nil")
@@ -561,7 +553,7 @@ func TestStart(t *testing.T) {
 				new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8)),
 			})
 
-			svc, err := NewService(validConfig(), consumer, mc, repo, dummyMulticallerFactory())
+			svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
 			if err != nil {
 				t.Fatalf("NewService failed: %v", err)
 			}
@@ -643,7 +635,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -723,7 +715,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -764,7 +756,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -815,7 +807,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -873,7 +865,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -930,7 +922,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -995,7 +987,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1055,7 +1047,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1121,7 +1113,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1170,7 +1162,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1275,7 +1267,7 @@ func TestStart_FeedOracle(t *testing.T) {
 
 	mc := newFeedMulticaller(t, []*big.Int{big.NewInt(200_000_000_000)})
 
-	svc, err := NewService(validConfig(), consumer, mc, repo, dummyMulticallerFactory())
+	svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1342,10 +1334,15 @@ func TestStart_ChronicleOracle(t *testing.T) {
 		},
 	}
 
-	// The service-level multicaller is used for aave oracles; chronicle gets its own via newDirectCaller.
-	mc := &testutil.MockMulticaller{}
+	// Track which oracle type the factory was called with.
+	var factoryCalledWith entity.OracleType
+	chronicleMC := &testutil.MockMulticaller{}
+	factory := func(ot entity.OracleType) (outbound.Multicaller, error) {
+		factoryCalledWith = ot
+		return chronicleMC, nil
+	}
 
-	svc, err := NewService(validConfig(), consumer, mc, repo, dummyMulticallerFactory())
+	svc, err := NewService(validConfig(), consumer, repo, factory)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1363,9 +1360,14 @@ func TestStart_ChronicleOracle(t *testing.T) {
 		t.Errorf("OracleType = %q, want %q", unit.Oracle.OracleType, entity.OracleTypeChronicle)
 	}
 
-	// The unit's multicaller should NOT be the service-level MockMulticaller (it should be from newDirectCaller).
-	if unit.multicaller == mc {
-		t.Error("chronicle unit should use its own eth_call multicaller, not the service-level one")
+	// Verify the factory was called with the chronicle oracle type.
+	if factoryCalledWith != entity.OracleTypeChronicle {
+		t.Errorf("factory called with %q, want %q", factoryCalledWith, entity.OracleTypeChronicle)
+	}
+
+	// The unit's multicaller should be the one returned by the factory.
+	if unit.multicaller != chronicleMC {
+		t.Error("chronicle unit should use the multicaller returned by the factory")
 	}
 
 	if stopErr := svc.Stop(); stopErr != nil {
@@ -1396,7 +1398,7 @@ func TestProcessBlock_FeedOracle(t *testing.T) {
 	cfg := validConfig()
 	cfg.PollInterval = 1 * time.Millisecond
 
-	svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1467,7 +1469,7 @@ func TestProcessBlock_FeedOracle_ChangeDetection(t *testing.T) {
 	cfg := validConfig()
 	cfg.PollInterval = 1 * time.Millisecond
 
-	svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1576,7 +1578,7 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 	cfg := validConfig()
 	cfg.PollInterval = 1 * time.Millisecond
 
-	svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1672,7 +1674,7 @@ func TestProcessBlock_FeedOracle_AllFeedsFail(t *testing.T) {
 	cfg := validConfig()
 	cfg.PollInterval = 1 * time.Millisecond
 
-	svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1740,7 +1742,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 			},
 		}
 
-		svc, err := NewService(validConfig(), consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1800,7 +1802,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 			},
 		}
 
-		svc, err := NewService(validConfig(), consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1865,7 +1867,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 			},
 		}
 
-		svc, err := NewService(validConfig(), consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1917,7 +1919,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 			new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8)),
 		})
 
-		svc, err := NewService(validConfig(), consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1954,7 +1956,7 @@ func TestStop(t *testing.T) {
 		consumer := &mockConsumer{}
 		mc := &testutil.MockMulticaller{}
 
-		svc, err := NewService(validConfig(), consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1984,7 +1986,7 @@ func TestStop(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo, dummyMulticallerFactory())
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}

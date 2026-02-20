@@ -35,7 +35,7 @@ func integrationMockHeaderFetcher() *mockHeaderFetcher {
 // Uses individual getAssetPrice results (one per token) matching FetchOraclePricesIndividual.
 func integrationMockMulticallFactory(t *testing.T, numTokens int) MulticallFactory {
 	t.Helper()
-	return func() (outbound.Multicaller, error) {
+	return func(_ entity.OracleType) (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				bn := blockNumber.Int64()
@@ -64,7 +64,7 @@ func integrationMockMulticallFactory(t *testing.T, numTokens int) MulticallFacto
 // Uses individual getAssetPrice results (one per token) matching FetchOraclePricesIndividual.
 func integrationMockMulticallFactoryConstant(t *testing.T, prices []*big.Int) MulticallFactory {
 	t.Helper()
-	return func() (outbound.Multicaller, error) {
+	return func(_ entity.OracleType) (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: defaultMulticallExecute(t, prices, nil),
 		}, nil
@@ -128,7 +128,6 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, enabledAssetCount),
 		repo,
-		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -218,7 +217,6 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactoryConstant(t, constantPrices),
 		repo,
-		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -299,7 +297,6 @@ func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
 		repo,
-		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -379,7 +376,6 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
 		repo,
-		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -428,7 +424,6 @@ func TestIntegration_BackfillRun_RespectsDeploymentBlock(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
 		repo,
-		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -497,7 +492,6 @@ func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
 		repo,
-		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -563,7 +557,7 @@ func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
 
 	// token3 (index 2) fails at blocks 100-102 (early blocks), succeeds at 103-104.
 	// This simulates a token that didn't have a price source until a later block.
-	mcFactory := func() (outbound.Multicaller, error) {
+	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				bn := blockNumber.Int64()
@@ -605,7 +599,6 @@ func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		mcFactory,
 		repo,
-		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -679,8 +672,7 @@ func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T)
 			integrationMockHeaderFetcher(),
 			integrationMockMulticallFactory(t, 2),
 			repo,
-			dummyRPCClient(),
-		)
+			)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -748,7 +740,7 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 		104: {big.NewInt(200_00000000), big.NewInt(3000_00000000)},
 	}
 
-	mcFactory := func() (outbound.Multicaller, error) {
+	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				prices := pricesByBlock[blockNumber.Int64()]
@@ -771,7 +763,6 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 		integrationMockHeaderFetcher(),
 		mcFactory,
 		repo,
-		dummyRPCClient(),
 	)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)

@@ -21,10 +21,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 )
 
-// MulticallerFactory creates a new Multicaller. Used to provide an alternative
-// multicaller for oracles that require direct eth_call (e.g. Chronicle, where
-// msg.sender must be address(0) to pass the toll gate).
-type MulticallerFactory func() (outbound.Multicaller, error)
+// MulticallerFactory creates a new Multicaller for the given oracle type.
+// Returns the appropriate implementation (e.g. Multicall3 for Chainlink/Aave,
+// DirectCaller for Chronicle where msg.sender must be address(0)).
+type MulticallerFactory func(entity.OracleType) (outbound.Multicaller, error)
 
 // Config holds configuration for the oracle price worker.
 type Config struct {
@@ -51,11 +51,10 @@ type oracleUnit struct {
 
 // Service processes SQS block events and fetches oracle prices for each block.
 type Service struct {
-	config          Config
-	consumer        outbound.SQSConsumer
-	repo            outbound.OnchainPriceRepository
-	multicaller     outbound.Multicaller
-	newDirectCaller MulticallerFactory // for chronicle oracles
+	config         Config
+	consumer       outbound.SQSConsumer
+	repo           outbound.OnchainPriceRepository
+	newMulticaller MulticallerFactory
 
 	oracleABI *abi.ABI
 	feedABI   *abi.ABI
@@ -72,21 +71,17 @@ type Service struct {
 func NewService(
 	config Config,
 	consumer outbound.SQSConsumer,
-	multicaller outbound.Multicaller,
 	repo outbound.OnchainPriceRepository,
-	newDirectCaller MulticallerFactory,
+	newMulticaller MulticallerFactory,
 ) (*Service, error) {
 	if consumer == nil {
 		return nil, fmt.Errorf("consumer cannot be nil")
 	}
-	if multicaller == nil {
-		return nil, fmt.Errorf("multicaller cannot be nil")
-	}
 	if repo == nil {
 		return nil, fmt.Errorf("repo cannot be nil")
 	}
-	if newDirectCaller == nil {
-		return nil, fmt.Errorf("newDirectCaller cannot be nil")
+	if newMulticaller == nil {
+		return nil, fmt.Errorf("newMulticaller cannot be nil")
 	}
 
 	defaults := configDefaults()
@@ -111,14 +106,13 @@ func NewService(
 	}
 
 	return &Service{
-		config:          config,
-		consumer:        consumer,
-		repo:            repo,
-		multicaller:     multicaller,
-		newDirectCaller: newDirectCaller,
-		oracleABI:       oracleABI,
-		feedABI:         feedABI,
-		logger:          config.Logger.With("component", "oracle-price-worker"),
+		config:         config,
+		consumer:       consumer,
+		repo:           repo,
+		newMulticaller: newMulticaller,
+		oracleABI:      oracleABI,
+		feedABI:        feedABI,
+		logger:         config.Logger.With("component", "oracle-price-worker"),
 	}, nil
 }
 
@@ -164,14 +158,10 @@ func (s *Service) initialize(ctx context.Context) error {
 			continue
 		}
 
-		mc := s.multicaller
-		if su.Oracle.OracleType == entity.OracleTypeChronicle {
-			dc, err := s.newDirectCaller()
-			if err != nil {
-				s.logger.Warn("skipping oracle", "name", su.Oracle.Name, "error", fmt.Errorf("creating direct caller: %w", err))
-				continue
-			}
-			mc = dc
+		mc, err := s.newMulticaller(su.Oracle.OracleType)
+		if err != nil {
+			s.logger.Warn("skipping oracle", "name", su.Oracle.Name, "error", fmt.Errorf("creating multicaller: %w", err))
+			continue
 		}
 
 		s.logOracleUnit(su, cached)
@@ -273,7 +263,7 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
 	prices, err := blockchain.FetchOraclePrices(
 		ctx,
-		s.multicaller,
+		unit.multicaller,
 		s.oracleABI,
 		unit.OracleAddr,
 		unit.TokenAddrs,

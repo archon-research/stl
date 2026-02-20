@@ -12,15 +12,18 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-func dummyRPCClient() *rpc.Client {
-	return rpc.DialInProc(rpc.NewServer())
+// dummyMulticallFactory returns a MulticallFactory that creates a mock multicaller
+// for any oracle type. It satisfies the non-nil factory requirement for NewService.
+func dummyMulticallFactory() MulticallFactory {
+	return func(_ entity.OracleType) (outbound.Multicaller, error) {
+		return &testutil.MockMulticaller{}, nil
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +293,7 @@ func decimalsPassFactory(t *testing.T, decimalsValues []uint8, inner MulticallFa
 	t.Helper()
 	var mu sync.Mutex
 	first := true
-	return func() (outbound.Multicaller, error) {
+	return func(ot entity.OracleType) (outbound.Multicaller, error) {
 		mu.Lock()
 		isFirst := first
 		first = false
@@ -314,13 +317,13 @@ func decimalsPassFactory(t *testing.T, decimalsValues []uint8, inner MulticallFa
 				},
 			}, nil
 		}
-		return inner()
+		return inner(ot)
 	}
 }
 
 func feedMulticallFactory(t *testing.T, answers []*big.Int) MulticallFactory {
 	t.Helper()
-	inner := func() (outbound.Multicaller, error) {
+	inner := func(_ entity.OracleType) (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 				results := make([]outbound.Result, len(calls))
@@ -349,7 +352,7 @@ func feedMulticallFactory(t *testing.T, answers []*big.Int) MulticallFactory {
 
 func blockDependentFeedPrices(t *testing.T, numFeeds int) MulticallFactory {
 	t.Helper()
-	inner := func() (outbound.Multicaller, error) {
+	inner := func(_ entity.OracleType) (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				bn := blockNumber.Int64()
@@ -382,7 +385,7 @@ func blockDependentFeedPrices(t *testing.T, numFeeds int) MulticallFactory {
 
 func TestNewService(t *testing.T) {
 	validFetcher := &mockHeaderFetcher{}
-	validFactory := func() (outbound.Multicaller, error) {
+	validFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{}, nil
 	}
 	validRepo := &mockRepo{}
@@ -506,19 +509,9 @@ func TestNewService(t *testing.T) {
 		},
 	}
 
-	t.Run("error nil rpcClient", func(t *testing.T) {
-		_, err := NewService(Config{Logger: testutil.DiscardLogger()}, validFetcher, validFactory, &mockRepo{}, nil)
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		if !strings.Contains(err.Error(), "rpcClient cannot be nil") {
-			t.Errorf("error %q does not contain %q", err.Error(), "rpcClient cannot be nil")
-		}
-	})
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc, err := NewService(tt.config, tt.headerFetcher, tt.newMulticaller, tt.repo, dummyRPCClient())
+			svc, err := NewService(tt.config, tt.headerFetcher, tt.newMulticaller, tt.repo)
 
 			if tt.wantErr {
 				if err == nil {
@@ -588,7 +581,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
@@ -622,7 +615,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
@@ -656,7 +649,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{
 						ExecuteFn: defaultMulticallExecute(t, standardPrices, nil),
 					}, nil
@@ -701,7 +694,7 @@ func TestRun(t *testing.T) {
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
+				return func(_ entity.OracleType) (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
 			wantErr: false,
 			checkResult: func(t *testing.T, repo *mockRepo) {
@@ -729,7 +722,7 @@ func TestRun(t *testing.T) {
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
+				return func(_ entity.OracleType) (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
 			wantErr:     true,
 			errContains: "getting enabled oracles",
@@ -755,7 +748,7 @@ func TestRun(t *testing.T) {
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
+				return func(_ entity.OracleType) (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
 			// With the new multi-oracle flow, buildWorkUnit errors are warned + skipped
 			wantErr: false,
@@ -792,7 +785,7 @@ func TestRun(t *testing.T) {
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
+				return func(_ entity.OracleType) (outbound.Multicaller, error) { return &testutil.MockMulticaller{}, nil }
 			},
 			// buildWorkUnit errors are warned + skipped
 			wantErr: false,
@@ -823,7 +816,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
@@ -861,7 +854,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
@@ -892,7 +885,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
@@ -913,7 +906,7 @@ func TestRun(t *testing.T) {
 			},
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return nil, errors.New("cannot connect to RPC")
 				}
 			},
@@ -945,7 +938,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{
 						ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 							bn := blockNumber.Int64()
@@ -1001,7 +994,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
@@ -1040,7 +1033,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{
 						ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 							bn := blockNumber.Int64()
@@ -1097,7 +1090,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{
 						ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 							bn := blockNumber.Int64()
@@ -1153,7 +1146,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{
 						ExecuteFn: defaultMulticallExecute(t, []*big.Int{big.NewInt(100_000_000), big.NewInt(250_000_000_000)}, nil),
 					}, nil
@@ -1190,7 +1183,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
@@ -1228,7 +1221,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 				}
 			},
@@ -1414,7 +1407,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{
 						ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 							results := make([]outbound.Result, len(calls))
@@ -1436,7 +1429,7 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:      "success chronicle oracle uses DirectCaller factory",
+			name:      "success chronicle oracle uses factory with oracle type",
 			fromBlock: 100,
 			toBlock:   100,
 			config: Config{
@@ -1473,19 +1466,18 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				// This factory is for the aave multicall path; chronicle uses DirectCaller
-				// from rpcClient internally. The dummy RPC client won't return valid data,
-				// so the feed call will fail, but the service itself should not error.
-				return func() (outbound.Multicaller, error) {
-					return &testutil.MockMulticaller{}, nil
-				}
+				t.Helper()
+				// Chronicle is a feed oracle: use feedMulticallFactory which handles
+				// both decimals validation and latestRoundData responses.
+				return feedMulticallFactory(t, []*big.Int{big.NewInt(42_00000000)})
 			},
 			wantErr: false,
 			checkResult: func(t *testing.T, repo *mockRepo) {
 				t.Helper()
-				// The DirectCaller uses the dummy RPC client which won't return valid data,
-				// so no prices will be stored, but crucially no error is returned.
-				// This test verifies the chronicle factory routing works without panics or errors.
+				upserted := repo.getUpserted()
+				if len(upserted) != 1 {
+					t.Errorf("upserted count = %d, want 1", len(upserted))
+				}
 			},
 		},
 		{
@@ -1538,7 +1530,7 @@ func TestRun(t *testing.T) {
 				}
 			},
 			setupMC: func(t *testing.T) MulticallFactory {
-				return func() (outbound.Multicaller, error) {
+				return func(_ entity.OracleType) (outbound.Multicaller, error) {
 					return &testutil.MockMulticaller{
 						ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 							// Individual calls: oracle1 has 2 tokens (2 calls), oracle2 has 1 token (1 call)
@@ -1569,7 +1561,7 @@ func TestRun(t *testing.T) {
 			header := tt.setupHeader()
 			mcFactory := tt.setupMC(t)
 
-			svc, err := NewService(tt.config, header, mcFactory, repo, dummyRPCClient())
+			svc, err := NewService(tt.config, header, mcFactory, repo)
 			if err != nil {
 				t.Fatalf("NewService: %v", err)
 			}
@@ -1631,7 +1623,7 @@ func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 		},
 	}
 
-	mcFactory := func() (outbound.Multicaller, error) {
+	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				bn := blockNumber.Int64()
@@ -1645,7 +1637,7 @@ func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 		Concurrency: 1,
 		BatchSize:   100,
 		Logger:      testutil.DiscardLogger(),
-	}, header, mcFactory, repo, dummyRPCClient())
+	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1713,7 +1705,7 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 
 	rawPrices := []*big.Int{big.NewInt(100_000_000), big.NewInt(250_000_000_000)}
 
-	mcFactory := func() (outbound.Multicaller, error) {
+	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: defaultMulticallExecute(t, rawPrices, nil),
 		}, nil
@@ -1723,7 +1715,7 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 		Concurrency: 1,
 		BatchSize:   100,
 		Logger:      testutil.DiscardLogger(),
-	}, header, mcFactory, repo, dummyRPCClient())
+	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1787,7 +1779,7 @@ func TestRun_DuplicateBlocksSafeWithIdempotentUpsert(t *testing.T) {
 		},
 	}
 
-	mcFactory := func() (outbound.Multicaller, error) {
+	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 	}
 
@@ -1795,7 +1787,7 @@ func TestRun_DuplicateBlocksSafeWithIdempotentUpsert(t *testing.T) {
 		Concurrency: 1,
 		BatchSize:   100,
 		Logger:      testutil.DiscardLogger(),
-	}, header, mcFactory, repo, dummyRPCClient())
+	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -2170,9 +2162,9 @@ func TestRun_BlockRangeClamping(t *testing.T) {
 				Concurrency: 1,
 				BatchSize:   1000,
 				Logger:      testutil.DiscardLogger(),
-			}, header, func() (outbound.Multicaller, error) {
+			}, header, func(_ entity.OracleType) (outbound.Multicaller, error) {
 				return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
-			}, repo, dummyRPCClient())
+			}, repo)
 			if err != nil {
 				t.Fatalf("NewService: %v", err)
 			}
@@ -2243,7 +2235,7 @@ func TestRun_FeedOracle_ChangeDetection(t *testing.T) {
 		},
 	}
 
-	innerFactory := func() (outbound.Multicaller, error) {
+	innerFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				bn := blockNumber.Int64()
@@ -2266,7 +2258,7 @@ func TestRun_FeedOracle_ChangeDetection(t *testing.T) {
 		Concurrency: 1,
 		BatchSize:   100,
 		Logger:      testutil.DiscardLogger(),
-	}, header, mcFactory, repo, dummyRPCClient())
+	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -2327,7 +2319,7 @@ func TestRun_FeedDecimalsValidation(t *testing.T) {
 		repo := feedOracleRepoSetup()
 
 		// Factory returns a multicaller that reports decimals=18 (config says 8)
-		mcFactory := func() (outbound.Multicaller, error) {
+		mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
 			return &testutil.MockMulticaller{
 				ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					// decimals() call returns 18
@@ -2343,7 +2335,6 @@ func TestRun_FeedDecimalsValidation(t *testing.T) {
 			&mockHeaderFetcher{},
 			mcFactory,
 			repo,
-			dummyRPCClient(),
 		)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
@@ -2368,7 +2359,7 @@ func TestRun_FeedDecimalsValidation(t *testing.T) {
 		repo := feedOracleRepoSetup()
 
 		callCount := 0
-		mcFactory := func() (outbound.Multicaller, error) {
+		mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
 			callCount++
 			if callCount == 1 {
 				// First multicaller is for decimals validation
@@ -2403,7 +2394,6 @@ func TestRun_FeedDecimalsValidation(t *testing.T) {
 			&mockHeaderFetcher{},
 			mcFactory,
 			repo,
-			dummyRPCClient(),
 		)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
