@@ -26,34 +26,34 @@ reviews:
     - "!docs/**"
 
   path_instructions:
-    - path: "internal/ports/**"
+    - path: "stl-verify/internal/ports/**"
       instructions: |
         This is the ports layer (interface definitions only).
         Interfaces should be small and focused — flag large interfaces that could be split.
         Use the -er suffix for behavior interfaces (Reader, Publisher, etc.).
         No implementation logic should appear here.
 
-    - path: "internal/services/**"
+    - path: "stl-verify/internal/services/**"
       instructions: |
         This is the application/services layer. It must only depend on domain entities and port interfaces.
         Flag any direct import of `internal/adapters/` as a CRITICAL architecture violation.
         Flag any business logic that belongs in the domain layer.
         All new or modified service files should have corresponding tests.
 
-    - path: "internal/adapters/**"
+    - path: "stl-verify/internal/adapters/**"
       instructions: |
         This is the adapters layer. Adapters implement port interfaces and may use external dependencies.
         Flag any business logic that belongs in the domain or services layer.
         Check for resource leaks: unclosed DB connections, HTTP response bodies, file handles.
         Ensure errors are wrapped with context using fmt.Errorf("doing X: %w", err).
 
-    - path: "cmd/**/main.go"
+    - path: "stl-verify/cmd/**/main.go"
       instructions: |
         main() should be at the top of the file.
         main() should be thin — delegate to well-named helper functions.
         Flag any business logic that belongs in services or domain.
 
-    - path: "db/migrations/**"
+    - path: "stl-verify/db/migrations/**"
       instructions: |
         Flag any migration that adds a foreign key column without a corresponding index.
         Flag destructive operations (DROP COLUMN, DROP TABLE, TRUNCATE) without a clear comment explaining the rollback strategy.
