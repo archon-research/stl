@@ -1,7 +1,7 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker help \
+.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker help ci ci-checks \
         dev-up dev-env dev-down dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal \
@@ -156,9 +156,12 @@ tools:
 	go install github.com/go-delve/delve/cmd/dlv@latest
 	go install golang.org/x/tools/gopls@latest
 
+# CI target for lint/format/static/security checks
+ci-checks: fmt-check tidy-check vet staticcheck golangci-lint vulncheck
+
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
-ci: fmt-check tidy-check vet staticcheck golangci-lint vulncheck test-race
+ci: ci-checks test-race
 
 # =============================================================================
 # Local Development
@@ -854,4 +857,3 @@ erigon-bulk-download:
 		--end-block=$(END) \
 		--bucket=$(BUCKET) \
 		$(if $(filter true,$(DRY_RUN)),--dry-run,)'
-
