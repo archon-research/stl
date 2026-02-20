@@ -104,8 +104,8 @@ func ConfigDefaults() Config {
 
 type Service struct {
 	config       Config
-	consumer     outbound.SQSConsumer
-	redisClient  *redis.Client
+	consumer     outbound.SQSConsumer // may be nil in backfill mode (ProcessReceipts only)
+	redisClient  *redis.Client        // may be nil in backfill mode (ProcessReceipts only)
 	ethClient    *ethclient.Client
 	txManager    *postgres.TxManager
 	userRepo     *postgres.UserRepository
@@ -874,12 +874,7 @@ func validateDependencies(
 	positionRepo *postgres.PositionRepository,
 	eventRepo outbound.EventRepository,
 ) error {
-	if consumer == nil {
-		return fmt.Errorf("consumer is required")
-	}
-	if redisClient == nil {
-		return fmt.Errorf("redisClient is required")
-	}
+	// consumer and redisClient may be nil in backfill mode (ProcessReceipts only).
 	if ethClient == nil {
 		return fmt.Errorf("ethClient is required")
 	}
