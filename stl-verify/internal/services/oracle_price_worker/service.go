@@ -183,7 +183,7 @@ func (s *Service) initialize(ctx context.Context) error {
 
 func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]float64) {
 	switch su.Oracle.OracleType {
-	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle:
+	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
 		feedAddrs := make([]string, len(su.Feeds))
 		for i, f := range su.Feeds {
 			feedAddrs[i] = f.FeedAddress.Hex()
@@ -212,7 +212,7 @@ func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]
 func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) error {
 	for _, unit := range s.units {
 		switch unit.Oracle.OracleType {
-		case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle:
+		case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
 			// feed oracle — validate decimals
 		default:
 			continue // aave or other non-feed oracles don't have per-feed decimals
@@ -253,7 +253,7 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) e
 
 func (s *Service) processBlockForOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
 	switch unit.Oracle.OracleType {
-	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle:
+	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
 		return s.processBlockForFeedOracle(ctx, event, unit)
 	default:
 		return s.processBlockForAaveOracle(ctx, event, unit)

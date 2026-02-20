@@ -12,6 +12,7 @@ const (
 	OracleTypeAave          OracleType = "aave_oracle"
 	OracleTypeChainlinkFeed OracleType = "chainlink_feed"
 	OracleTypeChronicle     OracleType = "chronicle"
+	OracleTypeRedstone      OracleType = "redstone"
 )
 
 // Oracle represents an onchain oracle price provider (e.g., SparkLend).

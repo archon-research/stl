@@ -133,7 +133,7 @@ func buildOracleUnit(ctx context.Context, repo outbound.OnchainPriceRepository, 
 
 	var unit *OracleUnit
 	switch oracle.OracleType {
-	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle:
+	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
 		unit, err = buildFeedUnit(ctx, repo, oracle)
 	default:
 		unit, err = buildAaveUnit(ctx, repo, oracle)

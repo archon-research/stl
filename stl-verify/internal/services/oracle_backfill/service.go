@@ -156,7 +156,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleWorkUnit, blockNum int64) error {
 	for _, wu := range workUnits {
 		switch wu.Oracle.OracleType {
-		case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle:
+		case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
 			// feed oracle — validate decimals
 		default:
 			continue // aave or other non-feed oracles don't have per-feed decimals
@@ -413,7 +413,7 @@ func (s *Service) worker(
 		var blockErr error
 
 		switch wu.Oracle.OracleType {
-		case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle:
+		case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
 			prices, blockErr = s.processBlockFeed(ctx, mc, wu, oracleID, blockNum)
 		default:
 			prices, blockErr = s.processBlockAave(ctx, mc, wu.OracleAddr, wu.TokenAddrs, wu.TokenIDs, oracleID, priceDecimals, blockNum)

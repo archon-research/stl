@@ -32,10 +32,10 @@ INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployme
 VALUES ('chronicle', 'Chronicle', 1, NULL, 'chronicle', 18791466, 18, true)
 ON CONFLICT (name) DO NOTHING;
 
--- Seed Redstone oracle (same ABI as chainlink_feed)
+-- Seed Redstone oracle (uses Chainlink AggregatorV3 ABI but is a distinct provider)
 -- deployment_block = weETH/USD feed deployed at block 19712153
 INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, price_decimals, enabled)
-VALUES ('redstone', 'RedStone', 1, NULL, 'chainlink_feed', 19712153, 8, true)
+VALUES ('redstone', 'RedStone', 1, NULL, 'redstone', 19712153, 8, true)
 ON CONFLICT (name) DO NOTHING;
 
 -- Chainlink feed assets (16 feeds)

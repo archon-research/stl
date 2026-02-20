@@ -376,8 +376,8 @@ func (r *OnchainPriceRepository) GetAllProtocolOracleBindings(ctx context.Contex
 // CopyOracleAssets copies all enabled oracle_asset rows from one oracle to another.
 func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
 	_, err := r.pool.Exec(ctx, `
-		INSERT INTO oracle_asset (oracle_id, token_id, enabled)
-		SELECT $2, token_id, enabled
+		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+		SELECT $2, token_id, enabled, feed_address, feed_decimals, quote_currency
 		FROM oracle_asset
 		WHERE oracle_id = $1 AND enabled = true
 		ON CONFLICT (oracle_id, token_id) WHERE feed_address IS NULL DO NOTHING
