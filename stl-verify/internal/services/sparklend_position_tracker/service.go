@@ -269,13 +269,18 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		return fmt.Errorf("failed to unmarshal receipts: %w", err)
 	}
 
+	return s.ProcessReceipts(ctx, event.ChainID, event.BlockNumber, event.Version, receipts)
+}
+
+// ProcessReceipts processes a slice of transaction receipts for a given block.
+// It is safe to call from the backfill service without Redis or SQS.
+func (s *Service) ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []TransactionReceipt) error {
 	var errs []error
 	for _, receipt := range receipts {
-		if err := s.processReceipt(ctx, receipt, event.ChainID, event.BlockNumber, event.Version); err != nil {
+		if err := s.processReceipt(ctx, receipt, chainID, blockNumber, version); err != nil {
 			errs = append(errs, err)
 		}
 	}
-
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
