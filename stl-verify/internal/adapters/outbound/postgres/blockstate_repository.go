@@ -158,7 +158,8 @@ func (r *BlockStateRepository) saveBlockOnce(ctx context.Context, state outbound
 	return version, nil
 }
 
-// isSerializationFailure checks if the error is a PostgreSQL serialization failure (SQLSTATE 40001).
+// isSerializationFailure checks if the error is a PostgreSQL serialization failure (SQLSTATE 40001)
+// or deadlock (SQLSTATE 40P01). Both are transient and safe to retry.
 func isSerializationFailure(err error) bool {
 	if err == nil {
 		return false
@@ -167,7 +168,8 @@ func isSerializationFailure(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		// SQLSTATE 40001 = serialization_failure
-		return pgErr.Code == "40001"
+		// SQLSTATE 40P01 = deadlock_detected
+		return pgErr.Code == "40001" || pgErr.Code == "40P01"
 	}
 	return false
 }

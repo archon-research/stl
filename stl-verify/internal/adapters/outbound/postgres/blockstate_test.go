@@ -58,7 +58,7 @@ func TestIsSerializationFailure(t *testing.T) {
 				Code:    "40P01",
 				Message: "deadlock detected",
 			},
-			expected: false,
+			expected: true,
 		},
 		{
 			name:     "generic error without pgconn.PgError",
