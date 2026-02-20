@@ -188,8 +188,12 @@ func GetProtocolRegistry() map[common.Address]ProtocolConfig {
 }
 
 func IsKnownProtocol(protocolAddress common.Address) bool {
-	_, exists := protocolRegistry[protocolAddress]
-	return exists
+	for key := range protocolRegistry {
+		if key.PoolAddress == protocolAddress {
+			return true
+		}
+	}
+	return false
 }
 
 // GetPoolDataProviderForBlock is a convenience function that returns the correct

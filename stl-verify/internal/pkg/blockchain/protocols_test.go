@@ -38,6 +38,11 @@ func TestIsKnownProtocol(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "Aave V3 Avalanche",
+			address:  "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expected: true,
+		},
+		{
 			name:     "unknown protocol - RedemptionIdle",
 			address:  "0x4c21B7577C8FE8b0B0669165ee7C8f67fa1454Cf",
 			expected: false,
@@ -68,6 +73,7 @@ func TestIsKnownProtocol(t *testing.T) {
 func TestGetProtocolConfig(t *testing.T) {
 	tests := []struct {
 		name         string
+		chainID      int64
 		address      string
 		expectExists bool
 		expectName   string
@@ -75,6 +81,7 @@ func TestGetProtocolConfig(t *testing.T) {
 	}{
 		{
 			name:         "Sparklend mainnet",
+			chainID:      1,
 			address:      "0xC13e21B648A5Ee794902342038FF3aDAB66BE987",
 			expectExists: true,
 			expectName:   "Sparklend",
@@ -82,13 +89,35 @@ func TestGetProtocolConfig(t *testing.T) {
 		},
 		{
 			name:         "Aave V3 mainnet",
+			chainID:      1,
 			address:      "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
 			expectExists: true,
 			expectName:   "Aave V3",
 			expectType:   "lending",
 		},
 		{
+			name:         "Aave V3 Avalanche",
+			chainID:      43114,
+			address:      "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expectExists: true,
+			expectName:   "Aave V3 Avalanche",
+			expectType:   "lending",
+		},
+		{
+			name:         "Aave V3 address on wrong chain",
+			chainID:      43114,
+			address:      "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+			expectExists: false,
+		},
+		{
+			name:         "Avalanche address on Ethereum",
+			chainID:      1,
+			address:      "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expectExists: false,
+		},
+		{
 			name:         "unknown address",
+			chainID:      1,
 			address:      "0x4c21B7577C8FE8b0B0669165ee7C8f67fa1454Cf",
 			expectExists: false,
 		},
@@ -97,17 +126,17 @@ func TestGetProtocolConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			addr := common.HexToAddress(tt.address)
-			config, exists := GetProtocolConfig(addr)
+			config, exists := GetProtocolConfig(tt.chainID, addr)
 			if exists != tt.expectExists {
-				t.Errorf("GetProtocolConfig(%s) exists = %v, want %v", tt.address, exists, tt.expectExists)
+				t.Errorf("GetProtocolConfig(%d, %s) exists = %v, want %v", tt.chainID, tt.address, exists, tt.expectExists)
 				return
 			}
 			if tt.expectExists {
 				if config.Name != tt.expectName {
-					t.Errorf("GetProtocolConfig(%s).Name = %v, want %v", tt.address, config.Name, tt.expectName)
+					t.Errorf("GetProtocolConfig(%d, %s).Name = %v, want %v", tt.chainID, tt.address, config.Name, tt.expectName)
 				}
 				if config.ProtocolType != tt.expectType {
-					t.Errorf("GetProtocolConfig(%s).ProtocolType = %v, want %v", tt.address, config.ProtocolType, tt.expectType)
+					t.Errorf("GetProtocolConfig(%d, %s).ProtocolType = %v, want %v", tt.chainID, tt.address, config.ProtocolType, tt.expectType)
 				}
 			}
 		})
