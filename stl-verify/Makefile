@@ -3,7 +3,9 @@
 
 .PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker help \
         dev-up dev-env dev-down dev-ips generate-er \
-        ecr-login docker-build docker-push docker-release \
+		ecr-login docker-build docker-push docker-release \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal \
+        docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
         docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging \
@@ -11,6 +13,7 @@
         docker-build-oracle-price-worker-staging docker-push-oracle-price-worker-staging docker-release-oracle-price-worker-staging \
         docker-build-sparklend-position-tracker docker-push-sparklend-position-tracker docker-release-sparklend-position-tracker \
         docker-build-sparklend-position-tracker-staging docker-push-sparklend-position-tracker-staging docker-release-sparklend-position-tracker-staging \
+        docker-release-all docker-release-all-staging \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
         bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel \
@@ -326,7 +329,9 @@ docker-push: ecr-login
 	docker push $(ECR_REPO):latest
 
 # Build and push in one step (single recipe to ensure consistent IMAGE_TAG)
-docker-release: ecr-login
+docker-release: ecr-login _docker-release-internal
+
+_docker-release-internal:
 	@IMAGE_TAG=$$(git rev-parse --short HEAD) && \
 	GIT_COMMIT_FULL=$$(git rev-parse HEAD) && \
 	GIT_BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
@@ -359,6 +364,60 @@ ecs-deploy-watcher:
 	@echo "==> Forcing new deployment of watcher service..."
 	aws ecs update-service --cluster stl-$(ENV)-cluster --service stl-$(ENV)-watcher --force-new-deployment --region $(AWS_REGION)
 	@echo "==> Deployment initiated. Monitor with: aws ecs describe-services --cluster stl-$(ENV)-cluster --services stl-$(ENV)-watcher --region $(AWS_REGION)"
+
+# Named aliases for consistency with other service targets
+docker-build-watcher:
+	@$(MAKE) docker-build
+
+docker-push-watcher:
+	@$(MAKE) docker-push
+
+docker-release-watcher:
+	@$(MAKE) docker-release
+
+# =============================================================================
+# Sentinelstaging Watcher Docker Shortcuts
+# =============================================================================
+
+docker-build-watcher-staging:
+	@$(MAKE) docker-build-watcher ENV=sentinelstaging
+
+docker-push-watcher-staging:
+	@$(MAKE) docker-push-watcher ENV=sentinelstaging
+
+docker-release-watcher-staging:
+	@$(MAKE) docker-release-watcher ENV=sentinelstaging
+
+ecs-deploy-watcher-staging:
+	@$(MAKE) ecs-deploy-watcher ENV=sentinelstaging
+
+# =============================================================================
+# Combined Docker Release (All Services)
+# =============================================================================
+
+# Release all services for a given environment
+# Usage: make docker-release-all ENV=sentineldev|sentinelstaging|sentinelprod
+docker-release-all:
+	@if [ -z "$(ENV)" ]; then \
+		echo "Error: ENV is required. Usage: make docker-release-all ENV=sentineldev|sentinelstaging|sentinelprod"; \
+		exit 1; \
+	fi
+	@$(MAKE) ecr-login ENV=$(ENV)
+	@echo "==> Releasing all Docker images for ENV=$(ENV)..."
+	@echo ""
+	@$(MAKE) _docker-release-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-backup-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-oracle-price-worker-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-sparklend-position-tracker-internal ENV=$(ENV)
+	@echo ""
+	@echo "==> All Docker images released for ENV=$(ENV)"
+
+# Shortcut: Release all services for sentinelstaging
+docker-release-all-staging:
+	@$(MAKE) docker-release-all ENV=sentinelstaging
 
 # =============================================================================
 # Bastion Host Management
@@ -468,7 +527,9 @@ docker-push-backup: ecr-login
 	docker push $(ECR_REPO_BACKUP):latest
 
 # Build and push backup worker in one step (captures tag at start to ensure consistency)
-docker-release-backup: ecr-login
+docker-release-backup: ecr-login _docker-release-backup-internal
+
+_docker-release-backup-internal:
 	@TAG=$$(git rev-parse --short HEAD) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
@@ -534,7 +595,9 @@ docker-push-oracle-price-worker: ecr-login
 	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):latest
 
 # Build and push oracle price worker in one step (captures tag at start to ensure consistency)
-docker-release-oracle-price-worker: ecr-login
+docker-release-oracle-price-worker: ecr-login _docker-release-oracle-price-worker-internal
+
+_docker-release-oracle-price-worker-internal:
 	@TAG=$$(git rev-parse --short HEAD) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
@@ -600,7 +663,9 @@ docker-push-sparklend-position-tracker: ecr-login
 	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest
 
 # Build and push sparklend position tracker in one step (captures tag at start to ensure consistency)
-docker-release-sparklend-position-tracker: ecr-login
+docker-release-sparklend-position-tracker: ecr-login _docker-release-sparklend-position-tracker-internal
+
+_docker-release-sparklend-position-tracker-internal:
 	@TAG=$$(git rev-parse --short HEAD) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
