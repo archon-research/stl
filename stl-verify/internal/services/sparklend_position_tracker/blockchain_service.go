@@ -502,7 +502,13 @@ func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvi
 	}
 }
 
-// parseReserveDataAaveV2 parses Aave V2 reserve data (10 fields).
+// parseReserveDataAaveV2 parses Aave V2 getReserveData output into a reserveDataFromProvider.
+// It expects the ABI-unpacked output to contain 10 values; returns an error if fewer values are present.
+// Because Aave V2 does not provide `unbacked` or `accruedToTreasuryScaled`, those fields are set to zero.
+// The V2 `availableLiquidity` value is used as a proxy for `TotalAToken`. The function extracts and
+// populates TotalStableDebt, TotalVariableDebt, LiquidityRate, VariableBorrowRate, StableBorrowRate,
+// AverageStableBorrowRate, LiquidityIndex, VariableBorrowIndex, and LastUpdateTimestamp.
+// Returns a populated reserveDataFromProvider or an error if required fields are missing or have unexpected types.
 func parseReserveDataAaveV2(unpacked []any, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
 	if len(unpacked) < 10 {
 		return nil, fmt.Errorf("expected 10 values from getReserveData (Aave V2), got %d", len(unpacked))
@@ -570,7 +576,14 @@ func parseReserveDataAaveV2(unpacked []any, fieldIndex map[string]int) (*reserve
 	return result, nil
 }
 
-// parseReserveDataAaveV3 parses Aave V3 reserve data (12 fields).
+// parseReserveDataAaveV3 parses the 12-field return value from getReserveData for Aave V3
+// and constructs a reserveDataFromProvider with the parsed numeric fields.
+// It validates that the unpacked slice contains the expected fields, extracts the following
+// values by name: `unbacked`, `accruedToTreasuryScaled`, `totalAToken`, `totalStableDebt`,
+// `totalVariableDebt`, `liquidityRate`, `variableBorrowRate`, `stableBorrowRate`,
+// `averageStableBorrowRate`, `liquidityIndex`, `variableBorrowIndex`, and `lastUpdateTimestamp`.
+// The `lastUpdateTimestamp` is converted to an int64 and stored in LastUpdateTimestamp.
+// Returns an error if required fields are missing or cannot be interpreted as big integers.
 func parseReserveDataAaveV3(unpacked []any, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
 	if len(unpacked) < 12 {
 		return nil, fmt.Errorf("expected 12 values from getReserveData (Aave V3), got %d", len(unpacked))
@@ -643,7 +656,10 @@ func parseReserveDataAaveV3(unpacked []any, fieldIndex map[string]int) (*reserve
 	return result, nil
 }
 
-// parseReserveDataSparklend parses Sparklend reserve data (11 fields, no averageStableBorrowRate).
+// parseReserveDataSparklend parses ABI-unpacked reserve data for the Sparklend protocol and returns a populated reserveDataFromProvider.
+// It expects the unpacked slice and a map of ABI output names to indexes and extracts the reserve fields present in Sparklend.
+// The returned struct's AverageStableBorrowRate is set to zero because Sparklend does not provide that field.
+// Returns an error if any required field is missing or has an unexpected type.
 func parseReserveDataSparklend(unpacked []any, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
 	result := &reserveDataFromProvider{}
 	var err error
@@ -777,6 +793,8 @@ func (s *blockchainService) parseReserveConfigurationData(data []byte) (*reserve
 	return result, nil
 }
 
+// buildFieldIndexMap returns a map from each ABI output name to its index in the provided Arguments slice.
+ // If an output has an empty name the map will contain an entry with the empty string key.
 func buildFieldIndexMap(outputs abi.Arguments) map[string]int {
 	fieldIndex := make(map[string]int, len(outputs))
 	for i, arg := range outputs {
@@ -785,6 +803,9 @@ func buildFieldIndexMap(outputs abi.Arguments) map[string]int {
 	return fieldIndex
 }
 
+// getBigIntByName retrieves a *big.Int value from an ABI unpacked output slice by field name.
+// It uses fieldIndex to resolve the field's index and returns the corresponding *big.Int.
+// Returns an error if the field name is not present, the index is out of range, or the value is not a *big.Int.
 func getBigIntByName(unpacked []any, fieldIndex map[string]int, fieldName string) (*big.Int, error) {
 	idx, ok := fieldIndex[fieldName]
 	if !ok {
@@ -803,6 +824,8 @@ func getBigIntByName(unpacked []any, fieldIndex map[string]int, fieldName string
 	return v, nil
 }
 
+// getBoolByName extracts a boolean value identified by fieldName from an unpacked ABI output using fieldIndex.
+// It returns the boolean or an error if the field is not present, the index is out of range, or the value is not a bool.
 func getBoolByName(unpacked []any, fieldIndex map[string]int, fieldName string) (bool, error) {
 	idx, ok := fieldIndex[fieldName]
 	if !ok {

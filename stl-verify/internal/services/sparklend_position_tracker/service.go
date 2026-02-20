@@ -126,6 +126,9 @@ type Service struct {
 	logger *slog.Logger
 }
 
+// NewService creates and initializes a Service with the supplied configuration, optional SQS consumer and Redis client, Ethereum client, transaction manager, and repositories.
+// It applies default values for MaxMessages, PollInterval, and Logger when those fields are zero or nil.
+// Returns the constructed Service or an error if required dependencies are missing or if initialization of required helpers (multicall client, ERC20 ABI, or event extractor) fails.
 func NewService(
 	config Config,
 	consumer outbound.SQSConsumer,
@@ -880,6 +883,10 @@ func (s *Service) convertToDecimalAdjusted(rawAmount *big.Int, decimals int) str
 	return fmt.Sprintf("%s.%s", integerPart.String(), fractionalStr)
 }
 
+// validateDependencies verifies that all required service dependencies are present.
+// Consumer and redisClient may be nil in backfill mode (when only ProcessReceipts is used).
+// Returns an error if any of the following required dependencies is nil: ethClient,
+// txManager, userRepo, protocolRepo, tokenRepo, positionRepo, or eventRepo.
 func validateDependencies(
 	consumer outbound.SQSConsumer,
 	redisClient *redis.Client,
