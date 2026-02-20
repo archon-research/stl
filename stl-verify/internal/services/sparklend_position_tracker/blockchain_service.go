@@ -413,6 +413,9 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 			Name:     name,
 		}
 
+		// Token metadata (symbol, decimals, name) is immutable, so a concurrent
+		// cache miss producing duplicate fetches is safe — both writes produce
+		// the same value.
 		s.mu.Lock()
 		s.metadataCache[token] = metadata
 		s.mu.Unlock()
