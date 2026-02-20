@@ -4,20 +4,22 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"go.temporal.io/api/serviceerror"
+	workflowservicepb "go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 
 	temporaladapter "github.com/archon-research/stl/stl-verify/internal/adapters/inbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coingecko"
@@ -112,6 +114,10 @@ func run(ctx context.Context) error {
 	}
 	defer temporalClient.Close()
 
+	if err := waitForTemporal(ctx, temporalClient, logger); err != nil {
+		return fmt.Errorf("waiting for Temporal: %w", err)
+	}
+
 	w := worker.New(temporalClient, temporaladapter.TaskQueue, worker.Options{})
 
 	// --- Price Fetcher (required) ---
@@ -158,6 +164,27 @@ func createTemporalClient() (client.Client, error) {
 		HostPort:  hostPort,
 		Namespace: namespace,
 	})
+}
+
+// waitForTemporal polls the Temporal server until it is reachable or ctx is cancelled.
+// This handles the startup race where the worker launches before Temporal has finished
+// initializing (common in docker-compose dev environments).
+func waitForTemporal(ctx context.Context, c client.Client, logger *slog.Logger) error {
+	for {
+		_, err := c.WorkflowService().GetSystemInfo(ctx, &workflowservicepb.GetSystemInfoRequest{})
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		logger.Info("waiting for Temporal to become ready", "error", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -230,20 +257,14 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, c
 		return fmt.Errorf("parsing %s %q: %w", cfg.IntervalEnv, interval, err)
 	}
 
-	handle := c.ScheduleClient().GetHandle(ctx, cfg.ID)
-	if _, err := handle.Describe(ctx); err != nil {
-		var notFound *serviceerror.NotFound
-		if !errors.As(err, &notFound) {
-			return fmt.Errorf("checking schedule %q: %w", cfg.ID, err)
-		}
-	} else {
-		// Schedule already exists. Note: changes to the interval env var will NOT
-		// take effect until the existing schedule is deleted from Temporal and the
-		// worker is restarted. Use the Temporal UI or CLI to delete a schedule.
-		logger.Info("schedule already exists", "scheduleID", cfg.ID)
-		return nil
-	}
-
+	// Attempt to create the schedule directly. Temporal returns AlreadyExists if it is
+	// already present (normal after any restart). Skipping a Describe-first check avoids
+	// a race window and also sidesteps the case where Describe returns an internal error
+	// due to a stuck workflow task left over from a previous run.
+	//
+	// Note: changes to the interval env var will NOT take effect until the existing
+	// schedule is deleted from Temporal and the worker is restarted.
+	// Use the Temporal UI or CLI to delete a schedule.
 	_, err = c.ScheduleClient().Create(ctx, client.ScheduleOptions{
 		ID: cfg.ID,
 		Spec: client.ScheduleSpec{
@@ -259,9 +280,10 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, c
 		},
 	})
 	if err != nil {
-		var alreadyExists *serviceerror.AlreadyExists
-		if errors.As(err, &alreadyExists) {
-			// Another worker created the schedule concurrently; treat as success.
+		// The Temporal SDK wraps the gRPC AlreadyExists error inconsistently across
+		// SDK versions, so we check both the gRPC status code and the error message.
+		if grpcstatus.Code(err) == codes.AlreadyExists || strings.Contains(err.Error(), "already registered") {
+			// Schedule already exists (normal on restart or concurrent worker startup).
 			logger.Info("schedule already exists", "scheduleID", cfg.ID)
 			return nil
 		}
