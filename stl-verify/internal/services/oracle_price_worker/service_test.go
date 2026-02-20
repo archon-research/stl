@@ -1202,8 +1202,6 @@ func TestStartAndProcessMessages(t *testing.T) {
 // Feed oracle helpers
 // ---------------------------------------------------------------------------
 
-func intPtr(v int) *int { return &v }
-
 // feedOracleSetup configures the mock repo for a chainlink_feed oracle with one USD feed.
 func feedOracleSetup(r *mockRepo) {
 	feedAddr := common.HexToAddress("0x0000000000000000000000000000000000000F01")
@@ -1217,7 +1215,7 @@ func feedOracleSetup(r *mockRepo) {
 	r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 		return []*entity.OracleAsset{{
 			ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
-			FeedAddress: feedAddr.Bytes(), FeedDecimals: intPtr(8), QuoteCurrency: "USD",
+			FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 		}}, nil
 	}
 	r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
@@ -1317,7 +1315,7 @@ func TestStart_ChronicleOracle(t *testing.T) {
 	repo.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 		return []*entity.OracleAsset{{
 			ID: 1, OracleID: 2, TokenID: 1, Enabled: true,
-			FeedAddress: feedAddr.Bytes(), FeedDecimals: intPtr(18), QuoteCurrency: "USD",
+			FeedAddress: feedAddr, FeedDecimals: 18, QuoteCurrency: "USD",
 		}}, nil
 	}
 	repo.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
@@ -1544,11 +1542,11 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 		return []*entity.OracleAsset{
 			{
 				ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
-				FeedAddress: feedAddr1.Bytes(), FeedDecimals: intPtr(8), QuoteCurrency: "USD",
+				FeedAddress: feedAddr1, FeedDecimals: 8, QuoteCurrency: "USD",
 			},
 			{
 				ID: 2, OracleID: 1, TokenID: 2, Enabled: true,
-				FeedAddress: feedAddr2.Bytes(), FeedDecimals: intPtr(8), QuoteCurrency: "ETH",
+				FeedAddress: feedAddr2, FeedDecimals: 8, QuoteCurrency: "ETH",
 			},
 		}, nil
 	}

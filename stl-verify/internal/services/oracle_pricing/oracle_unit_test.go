@@ -182,7 +182,7 @@ func TestLoadOracleUnits(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{{
 							ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
-							FeedAddress: feedAddr.Bytes(), FeedDecimals: intPtr(8), QuoteCurrency: "USD",
+							FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 						}}, nil
 					},
 					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
@@ -215,7 +215,7 @@ func TestLoadOracleUnits(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{{
 							ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
-							FeedAddress: feedAddr.Bytes(), FeedDecimals: intPtr(18), QuoteCurrency: "USD",
+							FeedAddress: feedAddr, FeedDecimals: 18, QuoteCurrency: "USD",
 						}}, nil
 					},
 					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
@@ -306,7 +306,7 @@ func TestLoadOracleUnits(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{{
 							ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
-							FeedAddress: nil, // missing
+							// FeedAddress zero value — missing
 						}}, nil
 					},
 					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
@@ -317,7 +317,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			wantCount: 0,
 		},
 		{
-			name: "feed oracle defaults quote currency to USD",
+			name: "feed oracle with missing quote currency is skipped with warning",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
@@ -329,7 +329,30 @@ func TestLoadOracleUnits(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{{
 							ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
-							FeedAddress: feedAddr.Bytes(), FeedDecimals: nil, QuoteCurrency: "",
+							FeedAddress: feedAddr, FeedDecimals: 0, QuoteCurrency: "",
+						}}, nil
+					},
+					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+						return map[int64][]byte{1: wethAddr.Bytes()}, nil
+					},
+				}
+			},
+			wantCount: 0,
+		},
+		{
+			name: "feed oracle inherits decimals from oracle when zero",
+			setupRepo: func() *mockRepo {
+				return &mockRepo{
+					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{{
+							ID: 1, Name: "feed", Enabled: true,
+							OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
+						}}, nil
+					},
+					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+						return []*entity.OracleAsset{{
+							ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
+							FeedAddress: feedAddr, FeedDecimals: 0, QuoteCurrency: "USD",
 						}}, nil
 					},
 					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
@@ -340,9 +363,6 @@ func TestLoadOracleUnits(t *testing.T) {
 			wantCount: 1,
 			checkUnits: func(t *testing.T, units []*OracleUnit) {
 				t.Helper()
-				if units[0].Feeds[0].QuoteCurrency != "USD" {
-					t.Errorf("QuoteCurrency = %q, want USD", units[0].Feeds[0].QuoteCurrency)
-				}
 				if units[0].Feeds[0].FeedDecimals != 8 {
 					t.Errorf("FeedDecimals = %d, want 8 (inherited from oracle)", units[0].Feeds[0].FeedDecimals)
 				}
@@ -412,7 +432,7 @@ func TestLoadOracleUnits(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{{
 							ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
-							FeedAddress: feedAddr.Bytes(), FeedDecimals: intPtr(8), QuoteCurrency: "ETH",
+							FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "ETH",
 						}}, nil
 					},
 					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
@@ -790,5 +810,3 @@ func Test_validateRefFeeds(t *testing.T) {
 		})
 	}
 }
-
-func intPtr(v int) *int { return &v }

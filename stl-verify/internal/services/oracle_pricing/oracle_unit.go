@@ -174,7 +174,7 @@ func buildAaveUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 
 	return &OracleUnit{
 		Oracle:     oracle,
-		OracleAddr: common.Address(oracle.Address),
+		OracleAddr: oracle.Address,
 		TokenAddrs: tokenAddrs,
 		TokenIDs:   tokenIDs,
 	}, nil
@@ -197,25 +197,21 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 	feeds := make([]blockchain.FeedConfig, len(assets))
 	tokenIDs := make([]int64, len(assets))
 	for i, asset := range assets {
-		if len(asset.FeedAddress) == 0 {
+		if asset.FeedAddress == (common.Address{}) {
 			return nil, fmt.Errorf("feed address missing for token_id %d", asset.TokenID)
 		}
-		var decimals int
-		if asset.FeedDecimals != nil {
-			decimals = *asset.FeedDecimals
-		}
+		decimals := asset.FeedDecimals
 		if decimals == 0 {
 			decimals = oracle.PriceDecimals
 		}
-		quoteCurrency := asset.QuoteCurrency
-		if quoteCurrency == "" {
-			quoteCurrency = "USD"
+		if asset.QuoteCurrency == "" {
+			return nil, fmt.Errorf("quote currency missing for token_id %d", asset.TokenID)
 		}
 		feeds[i] = blockchain.FeedConfig{
 			TokenID:       asset.TokenID,
-			FeedAddress:   common.BytesToAddress(asset.FeedAddress),
+			FeedAddress:   asset.FeedAddress,
 			FeedDecimals:  decimals,
-			QuoteCurrency: quoteCurrency,
+			QuoteCurrency: string(asset.QuoteCurrency),
 		}
 		tokenIDs[i] = asset.TokenID
 	}

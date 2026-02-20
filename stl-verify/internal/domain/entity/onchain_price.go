@@ -3,6 +3,8 @@ package entity
 import (
 	"fmt"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // OracleType identifies the kind of oracle price provider.
@@ -15,13 +17,22 @@ const (
 	OracleTypeRedstone      OracleType = "redstone"
 )
 
+// QuoteCurrency identifies the denomination of a feed price.
+type QuoteCurrency string
+
+const (
+	QuoteCurrencyUSD QuoteCurrency = "USD"
+	QuoteCurrencyETH QuoteCurrency = "ETH"
+	QuoteCurrencyBTC QuoteCurrency = "BTC"
+)
+
 // Oracle represents an onchain oracle price provider (e.g., SparkLend).
 type Oracle struct {
 	ID              int64
 	Name            string
 	DisplayName     string
 	ChainID         int
-	Address         [20]byte
+	Address         common.Address
 	OracleType      OracleType
 	DeploymentBlock int64
 	Enabled         bool
@@ -36,9 +47,9 @@ type OracleAsset struct {
 	OracleID      int64
 	TokenID       int64
 	Enabled       bool
-	FeedAddress   []byte // nil for aave_oracle; the feed contract address for chainlink_feed
-	FeedDecimals  *int   // nil for aave_oracle; 0 means use oracle.PriceDecimals
-	QuoteCurrency string // "USD" (default), "ETH", or "BTC"
+	FeedAddress   common.Address // zero for aave_oracle; the feed contract address for feed oracles
+	FeedDecimals  int            // 0 for aave_oracle; falls back to oracle.PriceDecimals
+	QuoteCurrency QuoteCurrency  // "USD" (default), "ETH", or "BTC"
 	CreatedAt     time.Time
 }
 

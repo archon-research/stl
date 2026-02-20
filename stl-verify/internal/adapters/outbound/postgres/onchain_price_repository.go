@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -82,9 +83,17 @@ func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID 
 	var assets []*entity.OracleAsset
 	for rows.Next() {
 		var oa entity.OracleAsset
+		var feedAddrBytes []byte
+		var feedDecimals *int
 		if err := rows.Scan(&oa.ID, &oa.OracleID, &oa.TokenID, &oa.Enabled,
-			&oa.FeedAddress, &oa.FeedDecimals, &oa.QuoteCurrency, &oa.CreatedAt); err != nil {
+			&feedAddrBytes, &feedDecimals, &oa.QuoteCurrency, &oa.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scanning oracle asset: %w", err)
+		}
+		if len(feedAddrBytes) > 0 {
+			oa.FeedAddress = common.BytesToAddress(feedAddrBytes)
+		}
+		if feedDecimals != nil {
+			oa.FeedDecimals = *feedDecimals
 		}
 		assets = append(assets, &oa)
 	}
@@ -297,7 +306,7 @@ func (r *OnchainPriceRepository) InsertOracle(ctx context.Context, oracle *entit
 		INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, enabled, price_decimals)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id, created_at, updated_at
-	`, oracle.Name, oracle.DisplayName, oracle.ChainID, oracle.Address[:],
+	`, oracle.Name, oracle.DisplayName, oracle.ChainID, oracle.Address.Bytes(),
 		oracle.OracleType, oracle.DeploymentBlock, oracle.Enabled, oracle.PriceDecimals,
 	).Scan(&oracle.ID, &oracle.CreatedAt, &oracle.UpdatedAt)
 	if err != nil {

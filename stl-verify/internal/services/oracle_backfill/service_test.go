@@ -262,8 +262,6 @@ func defaultRepoSetup() *mockRepo {
 	}
 }
 
-func intPtr(v int) *int { return &v }
-
 func feedOracleRepoSetup() *mockRepo {
 	feedAddr := common.HexToAddress("0x0000000000000000000000000000000000000F01")
 	wethAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
@@ -277,7 +275,7 @@ func feedOracleRepoSetup() *mockRepo {
 		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return []*entity.OracleAsset{{
 				ID: 1, OracleID: 1, TokenID: 10, Enabled: true,
-				FeedAddress: feedAddr.Bytes(), FeedDecimals: intPtr(8), QuoteCurrency: "USD",
+				FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 			}}, nil
 		},
 		getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
@@ -1330,11 +1328,11 @@ func TestRun(t *testing.T) {
 						return []*entity.OracleAsset{
 							{
 								ID: 1, OracleID: 1, TokenID: 10, Enabled: true,
-								FeedAddress: feedAddr1.Bytes(), FeedDecimals: intPtr(8), QuoteCurrency: "USD",
+								FeedAddress: feedAddr1, FeedDecimals: 8, QuoteCurrency: "USD",
 							},
 							{
 								ID: 2, OracleID: 1, TokenID: 20, Enabled: true,
-								FeedAddress: feedAddr2.Bytes(), FeedDecimals: intPtr(8), QuoteCurrency: "ETH",
+								FeedAddress: feedAddr2, FeedDecimals: 8, QuoteCurrency: "ETH",
 							},
 						}, nil
 					},
@@ -1450,7 +1448,7 @@ func TestRun(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{{
 							ID: 1, OracleID: 1, TokenID: 10, Enabled: true,
-							FeedAddress: feedAddr.Bytes(), FeedDecimals: intPtr(8), QuoteCurrency: "USD",
+							FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 						}}, nil
 					},
 					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
@@ -2221,7 +2219,7 @@ func TestRun_FeedOracle_ChangeDetection(t *testing.T) {
 		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return []*entity.OracleAsset{{
 				ID: 1, OracleID: 1, TokenID: 10, Enabled: true,
-				FeedAddress: feedAddr.Bytes(), FeedDecimals: intPtr(8), QuoteCurrency: "USD",
+				FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 			}}, nil
 		},
 		getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
