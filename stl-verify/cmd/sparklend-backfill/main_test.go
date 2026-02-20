@@ -6,9 +6,6 @@ import (
 )
 
 func TestParseFlags(t *testing.T) {
-	// Unset DATABASE_URL before each test so env doesn't bleed across cases.
-	t.Cleanup(func() { os.Unsetenv("DATABASE_URL") })
-
 	tests := []struct {
 		name    string
 		args    []string
@@ -100,6 +97,11 @@ func TestParseFlags(t *testing.T) {
 				concurrency: 4,
 				awsRegion:   "eu-west-1",
 			},
+		},
+		{
+			name:    "unknown flag is rejected",
+			args:    []string{"--unknown-flag", "value"},
+			wantErr: true,
 		},
 	}
 

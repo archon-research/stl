@@ -8,12 +8,23 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_backfill"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
 )
+
+// failingReader is an io.ReadCloser whose Read always returns an error.
+// It is used to exercise the io.ReadAll error path in processBlock.
+type failingReader struct{}
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	return 0, fmt.Errorf("simulated read error")
+}
+
+func (r *failingReader) Close() error { return nil }
 
 // mockS3Reader is a configurable mock for outbound.S3Reader.
 // streamFn, if set, is called for StreamFile; otherwise returns an empty JSON array.
@@ -260,12 +271,28 @@ func TestRun(t *testing.T) {
 			fromBlock: 500,
 			toBlock:   502,
 			buildS3: func() *mockS3Reader {
+				// Fail on the 2nd call regardless of key format.
+				var callCount atomic.Int32
 				return &mockS3Reader{
 					streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
-						if strings.Contains(key, fmt.Sprintf("%d_1_receipts", 501)) {
-							return nil, errors.New("s3 read failure")
+						if callCount.Add(1) == 2 {
+							return nil, fmt.Errorf("simulated S3 error")
 						}
 						return io.NopCloser(strings.NewReader("[]")), nil
+					},
+				}
+			},
+			buildProc: func() *mockProcessor { return &mockProcessor{} },
+			wantErr:   true,
+		},
+		{
+			name:      "S3 ReadCloser read error causes Run to return an error",
+			fromBlock: 600,
+			toBlock:   600,
+			buildS3: func() *mockS3Reader {
+				return &mockS3Reader{
+					streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+						return &failingReader{}, nil
 					},
 				}
 			},
