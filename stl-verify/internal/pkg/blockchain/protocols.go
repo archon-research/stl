@@ -71,3 +71,8 @@ func GetProtocolConfig(protocolAddress common.Address) (ProtocolConfig, bool) {
 	config, exists := protocolRegistry[protocolAddress]
 	return config, exists
 }
+
+func IsKnownProtocol(protocolAddress common.Address) bool {
+	_, exists := protocolRegistry[protocolAddress]
+	return exists
+}
