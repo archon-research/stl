@@ -154,9 +154,10 @@ func fetchWithLatestRoundData(
 		}
 
 		if answer.Sign() <= 0 {
-			logger.Warn("feed returned non-positive answer",
+			logger.Warn("feed returned non-positive answer, will retry with latestAnswer",
 				"feedIndex", i, "tokenID", feeds[i].TokenID,
 				"feedAddress", feeds[i].FeedAddress.Hex(), "block", blockNum)
+			failedFeedResults = append(failedFeedResults, i)
 			continue
 		}
 

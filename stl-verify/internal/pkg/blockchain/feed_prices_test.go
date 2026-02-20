@@ -104,20 +104,6 @@ func TestFetchFeedPrices(t *testing.T) {
 			},
 		},
 		{
-			name:  "answer <= 0 marks feed as failed",
-			feeds: feeds[:1],
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-					return []outbound.Result{
-						{Success: true, ReturnData: packRoundData(t, big.NewInt(0), big.NewInt(1000))}, // zero answer
-					}, nil
-				},
-			},
-			wantResults: []FeedPriceResult{
-				{TokenID: 1, Success: false},
-			},
-		},
-		{
 			name:  "unpack error on Success true returns error",
 			feeds: feeds[:1],
 			mock: &mockMulticaller{
@@ -164,20 +150,6 @@ func TestFetchFeedPrices(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: "expected 2 multicall results, got 1",
-		},
-		{
-			name:  "negative answer marks feed as failed",
-			feeds: feeds[:1],
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-					return []outbound.Result{
-						{Success: true, ReturnData: packRoundData(t, big.NewInt(-100), big.NewInt(1000))},
-					}, nil
-				},
-			},
-			wantResults: []FeedPriceResult{
-				{TokenID: 1, Success: false},
-			},
 		},
 		{
 			name: "mixed decimals: 8 and 18",
@@ -392,6 +364,52 @@ func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: "executing latestAnswer multicall",
+		},
+		{
+			name:  "zero answer retries with latestAnswer, also fails",
+			feeds: feeds[:1],
+			mock: func(t *testing.T) *callCountMock {
+				return &callCountMock{
+					executeFns: []func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error){
+						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+							return []outbound.Result{
+								{Success: true, ReturnData: packRoundData(t, big.NewInt(0), big.NewInt(1000))},
+							}, nil
+						},
+						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+							return []outbound.Result{
+								{Success: true, ReturnData: packLatestAnswer(t, big.NewInt(0))},
+							}, nil
+						},
+					},
+				}
+			},
+			wantResults: []FeedPriceResult{
+				{TokenID: 1, Success: false},
+			},
+		},
+		{
+			name:  "negative answer retries with latestAnswer, recovers",
+			feeds: feeds[:1],
+			mock: func(t *testing.T) *callCountMock {
+				return &callCountMock{
+					executeFns: []func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error){
+						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+							return []outbound.Result{
+								{Success: true, ReturnData: packRoundData(t, big.NewInt(-100), big.NewInt(1000))},
+							}, nil
+						},
+						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+							return []outbound.Result{
+								{Success: true, ReturnData: packLatestAnswer(t, big.NewInt(100_000_000))},
+							}, nil
+						},
+					},
+				}
+			},
+			wantResults: []FeedPriceResult{
+				{TokenID: 1, Price: 1.0, Success: true},
+			},
 		},
 		{
 			name:  "all feeds succeed on latestRoundData, no fallback needed",
