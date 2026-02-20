@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/testsuite"
 
@@ -43,7 +44,10 @@ func startMockCoinGecko(t *testing.T) *httptest.Server {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			http.Error(w, "failed to encode mock CoinGecko response", http.StatusInternalServerError)
+			t.Fatalf("encoding mock CoinGecko response: %v", err)
+		}
 	})
 
 	return httptest.NewServer(mux)
@@ -151,16 +155,19 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 		errCh <- run(workerCtx)
 	}()
 
-	// Give worker time to register and start polling
-	time.Sleep(3 * time.Second)
-
-	// Submit a workflow via a separate Temporal client
+	// Create a separate Temporal client for testing
 	tc, err := client.Dial(client.Options{
 		HostPort:  devServer.FrontendHostPort(),
 		Namespace: "sentinel",
 	})
 	require.NoError(t, err)
 	defer tc.Close()
+
+	// Wait for worker to register and start polling the task queue.
+	require.Eventually(t, func() bool {
+		resp, err := tc.DescribeTaskQueue(ctx, temporaladapter.TaskQueue, enumspb.TASK_QUEUE_TYPE_WORKFLOW)
+		return err == nil && len(resp.Pollers) > 0
+	}, 15*time.Second, 250*time.Millisecond, "worker did not start polling within 15s")
 
 	workflowRun, err := tc.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        "test-price-fetch",

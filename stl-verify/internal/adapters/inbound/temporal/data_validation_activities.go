@@ -28,16 +28,27 @@ func NewDataValidationActivities(validator DataValidator) (*DataValidationActivi
 	return &DataValidationActivities{validator: validator}, nil
 }
 
+// FailedCheck is a summary of a single failed or errored validation check,
+// included in the activity output so operators can inspect failures directly
+// from the Temporal UI without digging through logs.
+type FailedCheck struct {
+	Name    string         `json:"name"`
+	Status  string         `json:"status"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details,omitempty"`
+}
+
 // ValidateDataOutput is the output of the ValidateData activity.
 type ValidateDataOutput struct {
-	Success    bool   `json:"success"`
-	Passed     int    `json:"passed"`
-	Failed     int    `json:"failed"`
-	Errors     int    `json:"errors"`
-	FromBlock  int64  `json:"from_block"`
-	ToBlock    int64  `json:"to_block"`
-	DurationMs int64  `json:"duration_ms"`
-	ReportText string `json:"report_text"`
+	Success      bool          `json:"success"`
+	Passed       int           `json:"passed"`
+	Failed       int           `json:"failed"`
+	Errors       int           `json:"errors"`
+	FromBlock    int64         `json:"from_block"`
+	ToBlock      int64         `json:"to_block"`
+	DurationMs   int64         `json:"duration_ms"`
+	ReportText   string        `json:"report_text"`
+	FailedChecks []FailedCheck `json:"failed_checks,omitempty"`
 }
 
 // ValidateData runs the data validation and returns a summary.
@@ -60,13 +71,31 @@ func (a *DataValidationActivities) ValidateData(ctx context.Context) (*ValidateD
 	)
 
 	return &ValidateDataOutput{
-		Success:    report.Success(),
-		Passed:     report.Passed,
-		Failed:     report.Failed,
-		Errors:     report.Errors,
-		FromBlock:  report.FromBlock,
-		ToBlock:    report.ToBlock,
-		DurationMs: report.Duration.Milliseconds(),
-		ReportText: report.FormatText(),
+		Success:      report.Success(),
+		Passed:       report.Passed,
+		Failed:       report.Failed,
+		Errors:       report.Errors,
+		FromBlock:    report.FromBlock,
+		ToBlock:      report.ToBlock,
+		DurationMs:   report.Duration.Milliseconds(),
+		ReportText:   report.FormatText(),
+		FailedChecks: extractFailedChecks(report),
 	}, nil
+}
+
+// extractFailedChecks returns summaries of all non-passing checks from the report.
+func extractFailedChecks(report *data_validator.Report) []FailedCheck {
+	var failed []FailedCheck
+	for _, c := range report.Checks {
+		if c.Status == data_validator.StatusPassed {
+			continue
+		}
+		failed = append(failed, FailedCheck{
+			Name:    c.Name,
+			Status:  c.Status,
+			Message: c.Message,
+			Details: c.Details,
+		})
+	}
+	return failed
 }

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
@@ -183,8 +185,11 @@ func ensurePriceFetchSchedule(ctx context.Context, c client.Client, logger *slog
 		IntervalEnv:     "PRICE_FETCH_INTERVAL",
 		IntervalDefault: "5m",
 		Workflow:        temporaladapter.PriceFetchWorkflow,
-		Args:            []any{temporaladapter.PriceFetchWorkflowInput{AssetIDs: []string{}}},
-		WorkflowID:      "scheduled-price-fetch",
+		// Empty AssetIDs signals the price fetcher service to load all known
+		// assets from the database at execution time rather than being
+		// constrained to a static list baked into the schedule.
+		Args:       []any{temporaladapter.PriceFetchWorkflowInput{AssetIDs: []string{}}},
+		WorkflowID: "scheduled-price-fetch",
 	})
 }
 
@@ -208,7 +213,15 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, c
 	}
 
 	handle := c.ScheduleClient().GetHandle(ctx, cfg.ID)
-	if _, err := handle.Describe(ctx); err == nil {
+	if _, err := handle.Describe(ctx); err != nil {
+		var notFound *serviceerror.NotFound
+		if !errors.As(err, &notFound) {
+			return fmt.Errorf("checking schedule %q: %w", cfg.ID, err)
+		}
+	} else {
+		// Schedule already exists. Note: changes to the interval env var will NOT
+		// take effect until the existing schedule is deleted from Temporal and the
+		// worker is restarted. Use the Temporal UI or CLI to delete a schedule.
 		logger.Info("schedule already exists", "scheduleID", cfg.ID)
 		return nil
 	}

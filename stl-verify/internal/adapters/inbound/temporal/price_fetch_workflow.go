@@ -31,13 +31,14 @@ func PriceFetchWorkflow(ctx workflow.Context, input PriceFetchWorkflowInput) (*P
 			InitialInterval:    time.Second,
 			BackoffCoefficient: 2.0,
 			MaximumInterval:    30 * time.Second,
+			MaximumAttempts:    5,
 		},
 	}
 	ctx = workflow.WithActivityOptions(ctx, activityOptions)
 
 	var activities *PriceFetchActivities
 	var result FetchCurrentPricesOutput
-	err := workflow.ExecuteActivity(ctx, activities.FetchCurrentPrices, FetchCurrentPricesInput(input)).Get(ctx, &result)
+	err := workflow.ExecuteActivity(ctx, activities.FetchCurrentPrices, FetchCurrentPricesInput{AssetIDs: input.AssetIDs}).Get(ctx, &result)
 	if err != nil {
 		return nil, fmt.Errorf("executing FetchCurrentPrices activity: %w", err)
 	}

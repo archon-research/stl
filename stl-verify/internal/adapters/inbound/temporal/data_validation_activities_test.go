@@ -56,12 +56,13 @@ func TestNewDataValidationActivities(t *testing.T) {
 
 func TestValidateData(t *testing.T) {
 	tests := []struct {
-		name        string
-		report      *data_validator.Report
-		validateErr error
-		wantErr     bool
-		errContains string
-		wantSuccess bool
+		name             string
+		report           *data_validator.Report
+		validateErr      error
+		wantErr          bool
+		errContains      string
+		wantSuccess      bool
+		wantFailedChecks int
 	}{
 		{
 			name: "all checks passed",
@@ -75,6 +76,7 @@ func TestValidateData(t *testing.T) {
 				Passed: 1,
 			},
 			wantSuccess: true,
+			wantFailedChecks: 0,
 		},
 		{
 			name: "some checks failed",
@@ -85,11 +87,14 @@ func TestValidateData(t *testing.T) {
 				Checks: []data_validator.CheckResult{
 					{Name: "Chain Integrity", Status: data_validator.StatusPassed},
 					{Name: "Spot Check Block 150", Status: data_validator.StatusFailed, Message: "hash mismatch"},
+					{Name: "Spot Check Block 175", Status: data_validator.StatusError, Message: "timeout"},
 				},
 				Passed: 1,
 				Failed: 1,
+				Errors: 1,
 			},
-			wantSuccess: false,
+			wantSuccess:      false,
+			wantFailedChecks: 2,
 		},
 		{
 			name:        "validation returns error",
@@ -128,6 +133,7 @@ func TestValidateData(t *testing.T) {
 			assert.Equal(t, tt.report.ToBlock, output.ToBlock)
 			assert.Equal(t, tt.report.Passed, output.Passed)
 			assert.Equal(t, tt.report.Failed, output.Failed)
+			assert.Len(t, output.FailedChecks, tt.wantFailedChecks)
 		})
 	}
 }

@@ -27,6 +27,7 @@ func TestDataValidationWorkflow(t *testing.T) {
 				FromBlock:  100,
 				ToBlock:    200,
 				DurationMs: 5000,
+				ReportText: "All checks passed.",
 			},
 		},
 		{
@@ -39,6 +40,11 @@ func TestDataValidationWorkflow(t *testing.T) {
 				FromBlock:  100,
 				ToBlock:    200,
 				DurationMs: 8000,
+				ReportText: "2 checks failed.",
+				FailedChecks: []FailedCheck{
+					{Name: "Check A", Status: "failed", Message: "mismatch"},
+					{Name: "Check B", Status: "failed", Message: "missing"},
+				},
 			},
 		},
 		{
@@ -75,6 +81,8 @@ func TestDataValidationWorkflow(t *testing.T) {
 			assert.Equal(t, tt.activityResult.Success, result.Success)
 			assert.Equal(t, tt.activityResult.Passed, result.Passed)
 			assert.Equal(t, tt.activityResult.Failed, result.Failed)
+			assert.Equal(t, tt.activityResult.ReportText, result.ReportText)
+			assert.Equal(t, len(tt.activityResult.FailedChecks), len(result.FailedChecks))
 		})
 	}
 }
