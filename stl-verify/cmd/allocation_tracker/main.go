@@ -27,7 +27,13 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+		os.Exit(1)
+	}
+}
 
+func run() error {
 	queueURL := flag.String("queue", "", "SQS Queue URL")
 	redisAddr := flag.String("redis", "", "Redis address")
 	maxMessages := flag.Int("max", 10, "Max messages per poll")
@@ -38,8 +44,6 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
-	slog.SetDefault(logger)
-
 	if *queueURL == "" {
 		*queueURL = env.Get("AWS_SQS_QUEUE_URL", "")
 	}
@@ -48,12 +52,10 @@ func main() {
 	}
 
 	if *queueURL == "" {
-		logger.Error("queue URL required (-queue or AWS_SQS_QUEUE_URL)")
-		os.Exit(1)
+		return fmt.Errorf("queue URL required (-queue or AWS_SQS_QUEUE_URL)")
 	}
 	if *redisAddr == "" {
-		logger.Error("redis address required (-redis or REDIS_ADDR)")
-		os.Exit(1)
+		return fmt.Errorf("redis address required (-redis or REDIS_ADDR)")
 	}
 
 	alchemyKey := env.Require("ALCHEMY_API_KEY", logger)
@@ -73,8 +75,7 @@ func main() {
 		})),
 	)
 	if err != nil {
-		logger.Error("aws config", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("aws config: %w", err)
 	}
 
 	sqsClient := sqs.NewFromConfig(awsCfg, func(o *sqs.Options) {
@@ -89,8 +90,7 @@ func main() {
 		Password: env.Get("REDIS_PASSWORD", ""),
 	})
 	if err := redisClient.Ping(ctx).Err(); err != nil {
-		logger.Error("redis ping", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("redis ping: %w", err)
 	}
 	defer redisClient.Close()
 	logger.Info("redis connected", "addr", *redisAddr)
@@ -98,19 +98,17 @@ func main() {
 	// Ethereum multicall
 	ethClient, err := ethclient.Dial(rpcURL)
 	if err != nil {
-		logger.Error("eth dial", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("eth dial: %w", err)
 	}
+	defer ethClient.Close()
 	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
-		logger.Error("multicall client", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("multicall client: %w", err)
 	}
 
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
-		logger.Error("erc20 abi", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("erc20 abi: %w", err)
 	}
 
 	// Build source registry
@@ -127,16 +125,14 @@ func main() {
 	// 3. ERC4626 source (morpho, maple, fluid, arkis, steakhouse, sUSDS, sUSDe)
 	erc4626, err := at.NewERC4626Source(mc, logger)
 	if err != nil {
-		logger.Error("erc4626 source", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("erc4626 source: %w", err)
 	}
 	registry.Register(erc4626)
 
 	// 4. Curve source (LP pools → calc_withdraw_one_coin)
 	curve, err := at.NewCurveSource(mc, logger)
 	if err != nil {
-		logger.Error("curve source", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("curve source: %w", err)
 	}
 	registry.Register(curve)
 
@@ -156,20 +152,17 @@ func main() {
 		// Postgres
 		dbPool, err := pgxpool.New(ctx, dbURL)
 		if err != nil {
-			logger.Error("db connect", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("db connect: %w", err)
 		}
 		defer dbPool.Close()
 		if err := dbPool.Ping(ctx); err != nil {
-			logger.Error("db ping", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("db ping: %w", err)
 		}
 		logger.Info("postgres connected")
 
 		tokenRepo, err := postgres.NewTokenRepository(dbPool, logger, 1)
 		if err != nil {
-			logger.Error("token repo", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("token repo: %w", err)
 		}
 		allocRepo := postgres.NewAllocationRepository(dbPool, tokenRepo, logger)
 		pgHandler := at.NewPostgresHandler(allocRepo, mc, erc20ABI, logger)
@@ -197,8 +190,7 @@ func main() {
 		at.DefaultProxies(),
 	)
 	if err != nil {
-		logger.Error("create service", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("create service: %w", err)
 	}
 
 	// Start
@@ -209,8 +201,7 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	if err := svc.Start(ctx); err != nil {
-		logger.Error("start", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("start: %w", err)
 	}
 
 	logger.Info("running", "entries", len(entries), "sweep", fmt.Sprintf("%dm", *sweepMinutes))
@@ -231,7 +222,8 @@ func main() {
 	case <-done:
 		logger.Info("shutdown complete")
 	case <-shutdownCtx.Done():
-		logger.Error("shutdown timeout")
-		os.Exit(1)
+		return fmt.Errorf("shutdown timeout")
 	}
+
+	return nil
 }

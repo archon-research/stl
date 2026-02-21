@@ -53,28 +53,33 @@ type BlockEvent struct {
 }
 
 func (e BlockEvent) CacheKey() string {
-	return fmt.Sprintf("stl:%d:%d:%d:receipts", e.ChainID, e.BlockNumber, e.Version)
-}
-
-// Service is the main allocation tracker worker.
-type Service struct {
-	config      Config
-	sqsClient   *sqs.Client
-	redis       *redis.Client
-	ethClient   EthClient
-	extractor   *TransferExtractor
-	registry    *SourceRegistry
-	entryLookup map[EntryKey]*TokenEntry
-	entries     []*TokenEntry
-	handler     AllocationHandler
-	ctx         context.Context
-	cancel      context.CancelFunc
-	logger      *slog.Logger
+	return fmt.Sprintf(
+		"stl:%d:%d:%d:receipts",
+		e.ChainID, e.BlockNumber, e.Version,
+	)
 }
 
 // EthClient is the minimal interface for querying block numbers.
 type EthClient interface {
 	BlockNumber(ctx context.Context) (uint64, error)
+	FinalizedBlockNumber(ctx context.Context) (uint64, error)
+}
+
+// Service is the main allocation tracker worker.
+type Service struct {
+	config             Config
+	sqsClient          *sqs.Client
+	redis              *redis.Client
+	ethClient          EthClient
+	extractor          *TransferExtractor
+	registry           *SourceRegistry
+	entryLookup        map[EntryKey]*TokenEntry
+	entries            []*TokenEntry
+	handler            AllocationHandler
+	ctx                context.Context
+	cancel             context.CancelFunc
+	logger             *slog.Logger
+	lastFinalizedBlock uint64
 }
 
 func NewService(
@@ -131,7 +136,10 @@ func (s *Service) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	go s.processLoop()
 	go s.sweepLoop()
-	s.logger.Info("started", "queue", s.config.QueueURL, "entries", len(s.entries), "sweep", s.config.SweepInterval)
+	s.logger.Info("started",
+		"queue", s.config.QueueURL,
+		"entries", len(s.entries),
+		"sweep", s.config.SweepInterval)
 	return nil
 }
 
@@ -192,7 +200,10 @@ func (s *Service) pollMessages(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) processMessage(ctx context.Context, msg types.Message) error {
+func (s *Service) processMessage(
+	ctx context.Context,
+	msg types.Message,
+) error {
 	if msg.Body == nil {
 		return fmt.Errorf("nil body")
 	}
@@ -203,12 +214,34 @@ func (s *Service) processMessage(ctx context.Context, msg types.Message) error {
 	return s.processBlock(ctx, event)
 }
 
-func (s *Service) processBlock(ctx context.Context, event BlockEvent) error {
+func (s *Service) processBlock(
+	ctx context.Context,
+	event BlockEvent,
+) error {
 	start := time.Now()
+
+	// Skip reorged blocks that are already finalized on-chain
+	if event.IsReorg {
+		finalized, err := s.ethClient.FinalizedBlockNumber(ctx)
+		if err != nil {
+			s.logger.Warn("finalized block check failed",
+				"error", err)
+		} else {
+			s.lastFinalizedBlock = finalized
+			if uint64(event.BlockNumber) <= finalized {
+				s.logger.Warn("ignoring reorg below finality",
+					"block", event.BlockNumber,
+					"finalized", finalized)
+				return nil
+			}
+		}
+	}
 
 	receiptsJSON, err := s.redis.Get(ctx, event.CacheKey()).Result()
 	if errors.Is(err, redis.Nil) {
-		s.logger.Warn("cache miss", "block", event.BlockNumber, "chain", event.ChainID)
+		s.logger.Warn("cache miss",
+			"block", event.BlockNumber,
+			"chain", event.ChainID)
 		return nil
 	}
 	if err != nil {
@@ -216,7 +249,9 @@ func (s *Service) processBlock(ctx context.Context, event BlockEvent) error {
 	}
 
 	var receipts []TransactionReceipt
-	if err := shared.ParseCompressedJSON([]byte(receiptsJSON), &receipts); err != nil {
+	if err := shared.ParseCompressedJSON(
+		[]byte(receiptsJSON), &receipts,
+	); err != nil {
 		return fmt.Errorf("parse receipts: %w", err)
 	}
 
@@ -236,13 +271,17 @@ func (s *Service) processBlock(ctx context.Context, event BlockEvent) error {
 	}
 
 	// Fetch balances via source registry
-	balances, err := s.registry.FetchAll(ctx, affected, event.BlockNumber)
+	balances, err := s.registry.FetchAll(
+		ctx, affected, event.BlockNumber,
+	)
 	if err != nil {
 		s.logger.Warn("partial balance fetch", "error", err)
 	}
 
 	// Build and dispatch snapshots
-	snapshots := s.buildSnapshots(affected, balances, transfers, event)
+	snapshots := s.buildSnapshots(
+		affected, balances, transfers, event,
+	)
 	if len(snapshots) == 0 {
 		return nil
 	}
@@ -261,11 +300,16 @@ func (s *Service) processBlock(ctx context.Context, event BlockEvent) error {
 	return nil
 }
 
-func (s *Service) matchTransfers(transfers []*TransferEvent) []*TokenEntry {
+func (s *Service) matchTransfers(
+	transfers []*TransferEvent,
+) []*TokenEntry {
 	seen := make(map[EntryKey]bool)
 	var matched []*TokenEntry
 	for _, t := range transfers {
-		key := EntryKey{ContractAddress: t.TokenAddress, WalletAddress: t.ProxyAddress}
+		key := EntryKey{
+			ContractAddress: t.TokenAddress,
+			WalletAddress:   t.ProxyAddress,
+		}
 		if seen[key] {
 			continue
 		}
@@ -286,7 +330,10 @@ func (s *Service) buildSnapshots(
 	// Build transfer lookup
 	tLookup := make(map[EntryKey]*TransferEvent)
 	for _, t := range transfers {
-		key := EntryKey{ContractAddress: t.TokenAddress, WalletAddress: t.ProxyAddress}
+		key := EntryKey{
+			ContractAddress: t.TokenAddress,
+			WalletAddress:   t.ProxyAddress,
+		}
 		if _, exists := tLookup[key]; !exists {
 			tLookup[key] = t
 		}
@@ -376,6 +423,8 @@ func (s *Service) sweep(ctx context.Context) error {
 		return fmt.Errorf("sweep handler: %w", err)
 	}
 
-	s.logger.Info("sweep complete", "snapshots", len(snapshots), "duration", time.Since(start))
+	s.logger.Info("sweep complete",
+		"snapshots", len(snapshots),
+		"duration", time.Since(start))
 	return nil
 }

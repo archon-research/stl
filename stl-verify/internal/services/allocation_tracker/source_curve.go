@@ -121,9 +121,13 @@ func (s *CurveSource) FetchBalances(ctx context.Context, entries []*TokenEntry, 
 		if _, ok := coinIndices[e.Key()]; ok {
 			toConvert = append(toConvert, e)
 		} else {
+			assetHex := "<nil>"
+			if e.AssetAddress != nil {
+				assetHex = e.AssetAddress.Hex()
+			}
 			s.logger.Warn("coin index not found for asset, using shares as fallback",
 				"pool", e.ContractAddress.Hex(),
-				"asset", e.AssetAddress.Hex())
+				"asset", assetHex)
 			sh := shares[e.Key()]
 			results[e.Key()] = &PositionBalance{
 				Balance:       new(big.Int).Set(sh),
