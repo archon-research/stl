@@ -61,18 +61,25 @@ func FormatAmount(rawAmount *big.Int, decimals int) string {
 		return rawAmount.String()
 	}
 
+	negative := rawAmount.Sign() < 0
+	absAmount := new(big.Int).Abs(rawAmount)
+
 	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
-	integerPart := new(big.Int).Div(rawAmount, divisor)
-	remainder := new(big.Int).Mod(rawAmount, divisor)
-	remainder.Abs(remainder)
+	integerPart := new(big.Int).Div(absAmount, divisor)
+	remainder := new(big.Int).Mod(absAmount, divisor)
+
+	prefix := ""
+	if negative {
+		prefix = "-"
+	}
 
 	if remainder.Cmp(big.NewInt(0)) == 0 {
-		return integerPart.String()
+		return prefix + integerPart.String()
 	}
 
 	remainderStr := remainder.String()
 	padded := strings.Repeat("0", decimals-len(remainderStr)) + remainderStr
 	padded = strings.TrimRight(padded, "0")
 
-	return fmt.Sprintf("%s.%s", integerPart.String(), padded)
+	return fmt.Sprintf("%s%s.%s", prefix, integerPart.String(), padded)
 }

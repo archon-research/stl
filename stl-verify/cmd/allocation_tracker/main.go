@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,6 +28,23 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
 )
+
+// ethClientWrapper adapts *ethclient.Client to the at.EthClient interface.
+type ethClientWrapper struct {
+	client *ethclient.Client
+}
+
+func (w *ethClientWrapper) BlockNumber(ctx context.Context) (uint64, error) {
+	return w.client.BlockNumber(ctx)
+}
+
+func (w *ethClientWrapper) FinalizedBlockNumber(ctx context.Context) (uint64, error) {
+	header, err := w.client.HeaderByNumber(ctx, big.NewInt(int64(rpc.FinalizedBlockNumber)))
+	if err != nil {
+		return 0, err
+	}
+	return header.Number.Uint64(), nil
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -44,6 +64,7 @@ func run() error {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
+
 	if *queueURL == "" {
 		*queueURL = env.Get("AWS_SQS_QUEUE_URL", "")
 	}
@@ -58,22 +79,35 @@ func run() error {
 		return fmt.Errorf("redis address required (-redis or REDIS_ADDR)")
 	}
 
-	alchemyKey := env.Require("ALCHEMY_API_KEY", logger)
-	rpcURL := fmt.Sprintf("%s/%s", env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2"), alchemyKey)
+	alchemyKey := env.Get("ALCHEMY_API_KEY", "")
+	if alchemyKey == "" {
+		return fmt.Errorf("ALCHEMY_API_KEY is required")
+	}
+	rpcURL := fmt.Sprintf(
+		"%s/%s",
+		env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2"),
+		alchemyKey,
+	)
 
 	ctx := context.Background()
 
 	// AWS SQS
-	awsCfg, err := config.LoadDefaultConfig(ctx,
+	var awsOpts []func(*config.LoadOptions) error
+	awsOpts = append(awsOpts,
 		config.WithRegion(env.Get("AWS_REGION", "us-east-1")),
-		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
-			return aws.Credentials{
-				AccessKeyID:     env.Get("AWS_ACCESS_KEY_ID", "test"),
-				SecretAccessKey: env.Get("AWS_SECRET_ACCESS_KEY", "test"),
-				Source:          "Static",
-			}, nil
-		})),
 	)
+
+	accessKey := env.Get("AWS_ACCESS_KEY_ID", "")
+	secretKey := env.Get("AWS_SECRET_ACCESS_KEY", "")
+	if accessKey != "" && secretKey != "" {
+		awsOpts = append(awsOpts,
+			config.WithCredentialsProvider(
+				credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
+			),
+		)
+	}
+
+	awsCfg, err := config.LoadDefaultConfig(ctx, awsOpts...)
 	if err != nil {
 		return fmt.Errorf("aws config: %w", err)
 	}
@@ -95,13 +129,15 @@ func run() error {
 	defer redisClient.Close()
 	logger.Info("redis connected", "addr", *redisAddr)
 
-	// Ethereum multicall
-	ethClient, err := ethclient.Dial(rpcURL)
+	// Ethereum
+	rawClient, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return fmt.Errorf("eth dial: %w", err)
 	}
-	defer ethClient.Close()
-	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
+	defer rawClient.Close()
+	ethClient := &ethClientWrapper{client: rawClient}
+
+	mc, err := multicall.NewClient(rawClient, blockchain.Multicall3)
 	if err != nil {
 		return fmt.Errorf("multicall client: %w", err)
 	}
@@ -119,24 +155,24 @@ func run() error {
 		registry.Register(s)
 	}
 
-	// 2. BalanceOf source (erc20, buidl, securitize, superstate, proxy)
+	// 2. BalanceOf source
 	registry.Register(at.NewBalanceOfSource(mc, erc20ABI, logger))
 
-	// 3. ERC4626 source (morpho, maple, fluid, arkis, steakhouse, sUSDS, sUSDe)
+	// 3. ERC4626 source
 	erc4626, err := at.NewERC4626Source(mc, logger)
 	if err != nil {
 		return fmt.Errorf("erc4626 source: %w", err)
 	}
 	registry.Register(erc4626)
 
-	// 4. Curve source (LP pools → calc_withdraw_one_coin)
+	// 4. Curve source
 	curve, err := at.NewCurveSource(mc, logger)
 	if err != nil {
 		return fmt.Errorf("curve source: %w", err)
 	}
 	registry.Register(curve)
 
-	// 5. Stub sources (not yet implemented)
+	// 5. Stub sources
 	for _, s := range at.DefaultStubSources(logger) {
 		registry.Register(s)
 	}
@@ -149,7 +185,6 @@ func run() error {
 
 	dbURL := env.Get("DATABASE_URL", "")
 	if dbURL != "" {
-		// Postgres
 		dbPool, err := pgxpool.New(ctx, dbURL)
 		if err != nil {
 			return fmt.Errorf("db connect: %w", err)
@@ -204,7 +239,9 @@ func run() error {
 		return fmt.Errorf("start: %w", err)
 	}
 
-	logger.Info("running", "entries", len(entries), "sweep", fmt.Sprintf("%dm", *sweepMinutes))
+	logger.Info("running",
+		"entries", len(entries),
+		"sweep", fmt.Sprintf("%dm", *sweepMinutes))
 	sig := <-sigChan
 	logger.Info("shutting down", "signal", sig)
 	cancel()

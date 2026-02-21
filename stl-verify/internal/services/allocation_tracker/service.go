@@ -394,7 +394,7 @@ func (s *Service) sweep(ctx context.Context) error {
 		return fmt.Errorf("get block number: %w", err)
 	}
 
-	balances, err := s.registry.FetchAll(ctx, ethEntries, 0) // 0 = latest
+	balances, err := s.registry.FetchAll(ctx, ethEntries, int64(blockNum))
 	if err != nil {
 		s.logger.Warn("sweep partial failure", "error", err)
 	}

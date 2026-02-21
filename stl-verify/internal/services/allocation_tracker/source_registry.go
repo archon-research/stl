@@ -2,6 +2,7 @@ package allocation_tracker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 )
@@ -66,7 +67,7 @@ func (r *SourceRegistry) FetchAll(ctx context.Context, entries []*TokenEntry, bl
 	}
 
 	if len(errs) > 0 {
-		return results, fmt.Errorf("partial fetch failures: %v", errs)
+		return results, fmt.Errorf("partial fetch failures: %w", errors.Join(errs...))
 	}
 	return results, nil
 }
