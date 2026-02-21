@@ -224,16 +224,14 @@ func (s *Service) processBlock(
 	if event.IsReorg {
 		finalized, err := s.ethClient.FinalizedBlockNumber(ctx)
 		if err != nil {
-			s.logger.Warn("finalized block check failed",
-				"error", err)
-		} else {
-			s.lastFinalizedBlock = finalized
-			if uint64(event.BlockNumber) <= finalized {
-				s.logger.Warn("ignoring reorg below finality",
-					"block", event.BlockNumber,
-					"finalized", finalized)
-				return nil
-			}
+			return fmt.Errorf("finalized block check for reorg: %w", err)
+		}
+		s.lastFinalizedBlock = finalized
+		if uint64(event.BlockNumber) <= finalized {
+			s.logger.Warn("ignoring reorg below finality",
+				"block", event.BlockNumber,
+				"finalized", finalized)
+			return nil
 		}
 	}
 
