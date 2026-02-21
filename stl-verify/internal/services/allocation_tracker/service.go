@@ -59,8 +59,8 @@ func (e BlockEvent) CacheKey() string {
 	)
 }
 
-// EthClient is the minimal interface for querying block numbers.
-type EthClient interface {
+// BlockQuerier is the minimal interface for querying block numbers.
+type BlockQuerier interface {
 	BlockNumber(ctx context.Context) (uint64, error)
 	FinalizedBlockNumber(ctx context.Context) (uint64, error)
 }
@@ -70,7 +70,7 @@ type Service struct {
 	config             Config
 	sqsClient          *sqs.Client
 	redis              *redis.Client
-	ethClient          EthClient
+	ethClient          BlockQuerier
 	extractor          *TransferExtractor
 	registry           *SourceRegistry
 	entryLookup        map[EntryKey]*TokenEntry
@@ -86,7 +86,7 @@ func NewService(
 	config Config,
 	sqsClient *sqs.Client,
 	redisClient *redis.Client,
-	ethClient EthClient,
+	ethClient BlockQuerier,
 	registry *SourceRegistry,
 	entries []*TokenEntry,
 	handler AllocationHandler,

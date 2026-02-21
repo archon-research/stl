@@ -185,7 +185,9 @@ func (s *CurveSource) FetchBalances(
 				ScaledBalance: sh,
 			}
 		}
-		return results, fmt.Errorf("calc_withdraw_one_coin multicall: %w", err)
+		s.logger.Warn("calc_withdraw_one_coin multicall failed, using shares as fallback",
+			"error", err)
+		return results, nil
 	}
 
 	for i, e := range valid3 {

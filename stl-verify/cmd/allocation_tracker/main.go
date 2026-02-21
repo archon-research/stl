@@ -29,7 +29,7 @@ import (
 	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
 )
 
-// ethClientWrapper adapts *ethclient.Client to the at.EthClient interface.
+// ethClientWrapper adapts *ethclient.Client to the at.BlockQuerier interface.
 type ethClientWrapper struct {
 	client *ethclient.Client
 }
@@ -256,13 +256,17 @@ func run() error {
 	defer shutdownCancel()
 
 	done := make(chan struct{})
+	var stopErr error
 	go func() {
 		defer close(done)
-		_ = svc.Stop()
+		stopErr = svc.Stop()
 	}()
 
 	select {
 	case <-done:
+		if stopErr != nil {
+			return fmt.Errorf("stop: %w", stopErr)
+		}
 		logger.Info("shutdown complete")
 	case <-shutdownCtx.Done():
 		return fmt.Errorf("shutdown timeout")
