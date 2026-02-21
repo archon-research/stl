@@ -35,13 +35,19 @@ type ethClientWrapper struct {
 }
 
 func (w *ethClientWrapper) BlockNumber(ctx context.Context) (uint64, error) {
-	return w.client.BlockNumber(ctx)
+	n, err := w.client.BlockNumber(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("eth block number: %w", err)
+	}
+	return n, nil
 }
 
 func (w *ethClientWrapper) FinalizedBlockNumber(ctx context.Context) (uint64, error) {
-	header, err := w.client.HeaderByNumber(ctx, big.NewInt(int64(rpc.FinalizedBlockNumber)))
+	header, err := w.client.HeaderByNumber(
+		ctx, big.NewInt(int64(rpc.FinalizedBlockNumber)),
+	)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("eth finalized block header: %w", err)
 	}
 	return header.Number.Uint64(), nil
 }

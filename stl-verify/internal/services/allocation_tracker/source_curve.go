@@ -233,6 +233,12 @@ func (s *CurveSource) fetchShares(
 			s.logger.Warn("pack balanceOf failed",
 				"pool", e.ContractAddress.Hex(),
 				"error", err)
+			calls = append(calls, outbound.Call{
+				Target:       e.ContractAddress,
+				AllowFailure: true,
+				CallData:     []byte{},
+			})
+			valid = append(valid, e)
 			continue
 		}
 		calls = append(calls, outbound.Call{
