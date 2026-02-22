@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -144,6 +145,15 @@ func run(args []string) error {
 		},
 	}
 
+	alchemyClient, err := alchemy.NewClient(alchemy.ClientConfig{
+		HTTPURL:    cfg.rpcURL,
+		HTTPClient: httpClient,
+		Logger:     logger,
+	})
+	if err != nil {
+		return fmt.Errorf("creating alchemy client: %w", err)
+	}
+
 	rpcClient, err := rpc.DialOptions(ctx, cfg.rpcURL, rpc.WithHTTPClient(httpClient))
 	if err != nil {
 		return fmt.Errorf("connecting to RPC: %w", err)
@@ -231,6 +241,7 @@ func run(args []string) error {
 		},
 		s3Reader,
 		trackerSvc,
+		alchemyClient, // RPC fallback for blocks absent from S3
 		cfg.bucket,
 		cfg.chainID,
 	)
