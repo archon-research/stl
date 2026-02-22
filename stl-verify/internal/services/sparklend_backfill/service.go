@@ -257,6 +257,34 @@ func parseReceiptKey(key string) (blockNum int64, version int, ok bool) {
 	return bn, ver, true
 }
 
+// ScanVersions lists all S3 receipt keys in the partitions overlapping
+// [fromBlock, toBlock] and returns a map of blockNum → highest version.
+// It makes one ListPrefix call per 1000-block partition.
+// Exported for testing.
+func (s *Service) ScanVersions(ctx context.Context, fromBlock, toBlock int64) (map[int64]int, error) {
+	versions := make(map[int64]int)
+
+	// Iterate over each 1000-block partition that overlaps [fromBlock, toBlock].
+	firstPartition := (fromBlock / partition.BlockRangeSize) * partition.BlockRangeSize
+	for partStart := firstPartition; partStart <= toBlock; partStart += partition.BlockRangeSize {
+		partEnd := partStart + partition.BlockRangeSize - 1
+		prefix := fmt.Sprintf("%d-%d/", partStart, partEnd)
+
+		keys, err := s.s3Reader.ListPrefix(ctx, s.bucket, prefix)
+		if err != nil {
+			return nil, fmt.Errorf("listing S3 prefix %s: %w", prefix, err)
+		}
+
+		for blockNum, ver := range BuildVersionMap(keys) {
+			if existing, seen := versions[blockNum]; !seen || ver > existing {
+				versions[blockNum] = ver
+			}
+		}
+	}
+
+	return versions, nil
+}
+
 // processBlock reads receipts for blockNum from S3 and processes them.
 func (s *Service) processBlock(ctx context.Context, blockNum int64) error {
 	key := fmt.Sprintf("%s/%d_1_receipts.json.gz", partition.GetPartition(blockNum), blockNum)

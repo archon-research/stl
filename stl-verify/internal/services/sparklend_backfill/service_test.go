@@ -28,9 +28,11 @@ func (r *failingReader) Close() error { return nil }
 
 // mockS3Reader is a configurable mock for outbound.S3Reader.
 // streamFn, if set, is called for StreamFile; otherwise returns an empty JSON array.
-// streamFn is set once at construction and never mutated, so no mutex is needed.
+// listPrefixFn, if set, is called for ListPrefix; otherwise returns nil, nil.
+// Both are set once at construction and never mutated, so no mutex is needed on the fns themselves.
 type mockS3Reader struct {
-	streamFn func(ctx context.Context, bucket, key string) (io.ReadCloser, error)
+	streamFn     func(ctx context.Context, bucket, key string) (io.ReadCloser, error)
+	listPrefixFn func(ctx context.Context, bucket, prefix string) ([]string, error)
 }
 
 func (m *mockS3Reader) ListFiles(ctx context.Context, bucket, prefix string) ([]outbound.S3File, error) {
@@ -38,6 +40,9 @@ func (m *mockS3Reader) ListFiles(ctx context.Context, bucket, prefix string) ([]
 }
 
 func (m *mockS3Reader) ListPrefix(ctx context.Context, bucket, prefix string) ([]string, error) {
+	if m.listPrefixFn != nil {
+		return m.listPrefixFn(ctx, bucket, prefix)
+	}
 	return nil, nil
 }
 
@@ -177,6 +182,129 @@ func TestBuildVersionMap(t *testing.T) {
 				}
 				if gotVer != wantVer {
 					t.Errorf("block %d: got version %d, want %d", blockNum, gotVer, wantVer)
+				}
+			}
+		})
+	}
+}
+
+func TestScanVersions(t *testing.T) {
+	tests := []struct {
+		name         string
+		fromBlock    int64
+		toBlock      int64
+		listPrefixFn func(t *testing.T) func(ctx context.Context, bucket, prefix string) ([]string, error)
+		wantVersions map[int64]int
+		wantErr      bool
+		wantPrefixes []string // prefixes that must have been requested
+	}{
+		{
+			name:      "single partition returns correct versions",
+			fromBlock: 100,
+			toBlock:   200,
+			listPrefixFn: func(t *testing.T) func(ctx context.Context, bucket, prefix string) ([]string, error) {
+				return func(ctx context.Context, bucket, prefix string) ([]string, error) {
+					if prefix == "0-999/" {
+						return []string{
+							"0-999/100_0_receipts.json.gz",
+							"0-999/150_1_receipts.json.gz",
+							"0-999/200_2_receipts.json.gz",
+						}, nil
+					}
+					return nil, nil
+				}
+			},
+			wantVersions: map[int64]int{100: 0, 150: 1, 200: 2},
+			wantPrefixes: []string{"0-999/"},
+		},
+		{
+			name:      "two partitions are both scanned",
+			fromBlock: 900,
+			toBlock:   1100,
+			listPrefixFn: func(t *testing.T) func(ctx context.Context, bucket, prefix string) ([]string, error) {
+				return func(ctx context.Context, bucket, prefix string) ([]string, error) {
+					switch prefix {
+					case "0-999/":
+						return []string{"0-999/900_0_receipts.json.gz"}, nil
+					case "1000-1999/":
+						return []string{"1000-1999/1100_1_receipts.json.gz"}, nil
+					}
+					return nil, nil
+				}
+			},
+			wantVersions: map[int64]int{900: 0, 1100: 1},
+			wantPrefixes: []string{"0-999/", "1000-1999/"},
+		},
+		{
+			name:      "ListPrefix error is returned",
+			fromBlock: 100,
+			toBlock:   100,
+			listPrefixFn: func(t *testing.T) func(ctx context.Context, bucket, prefix string) ([]string, error) {
+				return func(ctx context.Context, bucket, prefix string) ([]string, error) {
+					return nil, fmt.Errorf("s3 unavailable")
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name:      "empty bucket returns empty map",
+			fromBlock: 500,
+			toBlock:   600,
+			listPrefixFn: func(t *testing.T) func(ctx context.Context, bucket, prefix string) ([]string, error) {
+				return func(ctx context.Context, bucket, prefix string) ([]string, error) {
+					return nil, nil
+				}
+			},
+			wantVersions: map[int64]int{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requestedPrefixes []string
+			var mu sync.Mutex
+			rawFn := tt.listPrefixFn(t)
+
+			s3 := &mockS3Reader{
+				listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+					mu.Lock()
+					requestedPrefixes = append(requestedPrefixes, prefix)
+					mu.Unlock()
+					return rawFn(ctx, bucket, prefix)
+				},
+			}
+			svc := newTestService(t, s3, &mockProcessor{})
+
+			got, err := svc.ScanVersions(context.Background(), tt.fromBlock, tt.toBlock)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if len(got) != len(tt.wantVersions) {
+				t.Fatalf("map size: got %d, want %d\ngot:  %v\nwant: %v", len(got), len(tt.wantVersions), got, tt.wantVersions)
+			}
+			for blockNum, wantVer := range tt.wantVersions {
+				if gotVer, ok := got[blockNum]; !ok || gotVer != wantVer {
+					t.Errorf("block %d: got version %d (ok=%v), want %d", blockNum, gotVer, ok, wantVer)
+				}
+			}
+
+			for _, wantPrefix := range tt.wantPrefixes {
+				found := false
+				for _, p := range requestedPrefixes {
+					if p == wantPrefix {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected ListPrefix to be called with %q, got calls: %v", wantPrefix, requestedPrefixes)
 				}
 			}
 		})
