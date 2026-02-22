@@ -65,11 +65,12 @@ type mockProcessor struct {
 type processCall struct {
 	chainID     int64
 	blockNumber int64
+	version     int
 }
 
 func (m *mockProcessor) ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []sparklend_position_tracker.TransactionReceipt) error {
 	m.mu.Lock()
-	m.calls = append(m.calls, processCall{chainID: chainID, blockNumber: blockNumber})
+	m.calls = append(m.calls, processCall{chainID: chainID, blockNumber: blockNumber, version: version})
 	m.mu.Unlock()
 	if m.errFn != nil {
 		return m.errFn(chainID, blockNumber)
@@ -402,7 +403,19 @@ func TestRun(t *testing.T) {
 			name:      "success: multiple blocks processed",
 			fromBlock: 100,
 			toBlock:   104,
-			buildS3:   func() *mockS3Reader { return &mockS3Reader{} },
+			buildS3: func() *mockS3Reader {
+				return &mockS3Reader{
+					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+						return []string{
+							"0-999/100_0_receipts.json.gz",
+							"0-999/101_0_receipts.json.gz",
+							"0-999/102_0_receipts.json.gz",
+							"0-999/103_0_receipts.json.gz",
+							"0-999/104_0_receipts.json.gz",
+						}, nil
+					},
+				}
+			},
 			buildProc: func() *mockProcessor { return &mockProcessor{} },
 			wantErr:   false,
 			checkCalls: func(t *testing.T, calls []processCall) {
@@ -428,7 +441,13 @@ func TestRun(t *testing.T) {
 			name:      "single block range processes exactly one block",
 			fromBlock: 200,
 			toBlock:   200,
-			buildS3:   func() *mockS3Reader { return &mockS3Reader{} },
+			buildS3: func() *mockS3Reader {
+				return &mockS3Reader{
+					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+						return []string{"0-999/200_0_receipts.json.gz"}, nil
+					},
+				}
+			},
 			buildProc: func() *mockProcessor { return &mockProcessor{} },
 			wantErr:   false,
 			checkCalls: func(t *testing.T, calls []processCall) {
@@ -486,9 +505,15 @@ func TestRun(t *testing.T) {
 			fromBlock: 500,
 			toBlock:   502,
 			buildS3: func() *mockS3Reader {
-				// Fail on the 2nd call regardless of key format.
 				var callCount atomic.Int32
 				return &mockS3Reader{
+					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+						return []string{
+							"0-999/500_0_receipts.json.gz",
+							"0-999/501_0_receipts.json.gz",
+							"0-999/502_0_receipts.json.gz",
+						}, nil
+					},
 					streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
 						if callCount.Add(1) == 2 {
 							return nil, fmt.Errorf("simulated S3 error")
@@ -506,6 +531,9 @@ func TestRun(t *testing.T) {
 			toBlock:   600,
 			buildS3: func() *mockS3Reader {
 				return &mockS3Reader{
+					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+						return []string{"0-999/600_0_receipts.json.gz"}, nil
+					},
 					streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
 						return &failingReader{}, nil
 					},
@@ -518,7 +546,17 @@ func TestRun(t *testing.T) {
 			name:      "processor error for a block causes Run to return an error",
 			fromBlock: 300,
 			toBlock:   302,
-			buildS3:   func() *mockS3Reader { return &mockS3Reader{} },
+			buildS3: func() *mockS3Reader {
+				return &mockS3Reader{
+					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+						return []string{
+							"0-999/300_0_receipts.json.gz",
+							"0-999/301_0_receipts.json.gz",
+							"0-999/302_0_receipts.json.gz",
+						}, nil
+					},
+				}
+			},
 			buildProc: func() *mockProcessor {
 				return &mockProcessor{
 					errFn: func(chainID, blockNumber int64) error {
@@ -530,6 +568,118 @@ func TestRun(t *testing.T) {
 				}
 			},
 			wantErr: true,
+		},
+		{
+			name:      "uses version from scan — version 0",
+			fromBlock: 100,
+			toBlock:   100,
+			buildS3: func() *mockS3Reader {
+				return &mockS3Reader{
+					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+						return []string{"0-999/100_0_receipts.json.gz"}, nil
+					},
+					streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+						// Assert the key uses version 0
+						wantKey := "0-999/100_0_receipts.json.gz"
+						if key != wantKey {
+							return nil, fmt.Errorf("unexpected key %q, want %q", key, wantKey)
+						}
+						return io.NopCloser(strings.NewReader("[]")), nil
+					},
+				}
+			},
+			buildProc: func() *mockProcessor { return &mockProcessor{} },
+			wantErr:   false,
+			checkCalls: func(t *testing.T, calls []processCall) {
+				t.Helper()
+				if len(calls) != 1 {
+					t.Fatalf("expected 1 call, got %d", len(calls))
+				}
+				if calls[0].version != 0 {
+					t.Errorf("expected version 0, got %d", calls[0].version)
+				}
+			},
+		},
+		{
+			name:      "uses highest version when multiple exist",
+			fromBlock: 100,
+			toBlock:   100,
+			buildS3: func() *mockS3Reader {
+				return &mockS3Reader{
+					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+						return []string{
+							"0-999/100_0_receipts.json.gz",
+							"0-999/100_1_receipts.json.gz",
+							"0-999/100_2_receipts.json.gz",
+						}, nil
+					},
+					streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+						wantKey := "0-999/100_2_receipts.json.gz"
+						if key != wantKey {
+							return nil, fmt.Errorf("unexpected key %q, want %q", key, wantKey)
+						}
+						return io.NopCloser(strings.NewReader("[]")), nil
+					},
+				}
+			},
+			buildProc: func() *mockProcessor { return &mockProcessor{} },
+			wantErr:   false,
+			checkCalls: func(t *testing.T, calls []processCall) {
+				t.Helper()
+				if len(calls) != 1 {
+					t.Fatalf("expected 1 call, got %d", len(calls))
+				}
+				if calls[0].version != 2 {
+					t.Errorf("expected version 2, got %d", calls[0].version)
+				}
+			},
+		},
+		{
+			name:      "skips block not found in version map",
+			fromBlock: 100,
+			toBlock:   102,
+			buildS3: func() *mockS3Reader {
+				return &mockS3Reader{
+					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+						// Only block 101 exists in S3
+						return []string{"0-999/101_0_receipts.json.gz"}, nil
+					},
+				}
+			},
+			buildProc: func() *mockProcessor { return &mockProcessor{} },
+			wantErr:   false,
+			checkCalls: func(t *testing.T, calls []processCall) {
+				t.Helper()
+				if len(calls) != 1 {
+					t.Fatalf("expected 1 processor call (only block 101), got %d: %v", len(calls), calls)
+				}
+				if calls[0].blockNumber != 101 {
+					t.Errorf("expected block 101, got %d", calls[0].blockNumber)
+				}
+				if calls[0].version != 0 {
+					t.Errorf("expected version 0, got %d", calls[0].version)
+				}
+			},
+		},
+		{
+			name:      "ScanVersions error causes Run to return error",
+			fromBlock: 100,
+			toBlock:   100,
+			buildS3: func() *mockS3Reader {
+				return &mockS3Reader{
+					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+						return nil, fmt.Errorf("S3 scan failed")
+					},
+				}
+			},
+			buildProc: func() *mockProcessor { return &mockProcessor{} },
+			wantErr:   true,
+			checkErr: func(t *testing.T, err error) {
+				t.Helper()
+				if err == nil || !strings.Contains(err.Error(), "S3 scan failed") {
+					t.Errorf("expected S3 scan error, got: %v", err)
+				}
+			},
 		},
 	}
 

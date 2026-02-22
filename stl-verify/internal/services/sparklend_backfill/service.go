@@ -81,6 +81,11 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		return fmt.Errorf("toBlock (%d) must be >= fromBlock (%d)", toBlock, fromBlock)
 	}
 
+	versionMap, err := s.ScanVersions(ctx, fromBlock, toBlock)
+	if err != nil {
+		return fmt.Errorf("scanning S3 versions: %w", err)
+	}
+
 	totalBlocks := toBlock - fromBlock + 1
 	logger := s.config.Logger.With("component", "sparklend-backfill")
 	logger.Info("starting backfill",
@@ -93,9 +98,10 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	blockCh := make(chan int64, s.config.Concurrency*2)
 	errCh := make(chan error, 1)
 
-	var processed, failed atomic.Int64
+	var processed, skipped, failed atomic.Int64
 
-	// Progress reporter
+	// Use Background context so the progress reporter runs until Run() finishes,
+	// independent of the caller's context being cancelled.
 	progressCtx, progressCancel := context.WithCancel(context.Background())
 	progressDone := make(chan struct{})
 	startTime := time.Now()
@@ -108,7 +114,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 			case <-progressCtx.Done():
 				return
 			case <-ticker.C:
-				s.logProgress(logger, startTime, totalBlocks, &processed, &failed)
+				s.logProgress(logger, startTime, totalBlocks, &processed, &skipped, &failed)
 			}
 		}
 	}()
@@ -118,7 +124,13 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	for range s.config.Concurrency {
 		wg.Go(func() {
 			for blockNum := range blockCh {
-				if err := s.processBlock(ctx, blockNum); err != nil {
+				version, ok := versionMap[blockNum]
+				if !ok {
+					logger.Warn("block not found in S3, skipping", "block", blockNum)
+					skipped.Add(1)
+					continue
+				}
+				if err := s.processBlock(ctx, blockNum, version); err != nil {
 					logger.Error("failed to process block", "block", blockNum, "error", err)
 					failed.Add(1)
 					select {
@@ -141,6 +153,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 
 	logger.Info("backfill complete",
 		"processed", processed.Load(),
+		"skipped", skipped.Load(),
 		"failed", failed.Load(),
 		"total", totalBlocks,
 		"elapsed", time.Since(startTime).String(),
@@ -164,9 +177,11 @@ func (s *Service) logProgress(
 	startTime time.Time,
 	totalBlocks int64,
 	processed *atomic.Int64,
+	skipped *atomic.Int64,
 	failed *atomic.Int64,
 ) {
 	p := processed.Load()
+	sk := skipped.Load()
 	f := failed.Load()
 	elapsed := time.Since(startTime).Seconds()
 
@@ -176,13 +191,14 @@ func (s *Service) logProgress(
 	}
 
 	var eta float64
-	remaining := totalBlocks - p - f
+	remaining := totalBlocks - p - sk - f
 	if rate > 0 {
 		eta = float64(remaining) / rate
 	}
 
 	logger.Info("backfill progress",
 		"processed", p,
+		"skipped", sk,
 		"failed", f,
 		"total", totalBlocks,
 		"rate_per_sec", fmt.Sprintf("%.2f", rate),
@@ -259,6 +275,9 @@ func parseReceiptKey(key string) (blockNum int64, version int, ok bool) {
 // ScanVersions lists all S3 receipt keys in the partitions overlapping
 // [fromBlock, toBlock] and returns a map of blockNum → highest version.
 // It makes one ListPrefix call per partition (partition.BlockRangeSize blocks each).
+// The returned map may contain block numbers outside [fromBlock, toBlock] because
+// whole partitions are listed; callers should only access entries for blocks they
+// intend to process.
 func (s *Service) ScanVersions(ctx context.Context, fromBlock, toBlock int64) (map[int64]int, error) {
 	versions := make(map[int64]int)
 
@@ -283,9 +302,9 @@ func (s *Service) ScanVersions(ctx context.Context, fromBlock, toBlock int64) (m
 	return versions, nil
 }
 
-// processBlock reads receipts for blockNum from S3 and processes them.
-func (s *Service) processBlock(ctx context.Context, blockNum int64) error {
-	key := fmt.Sprintf("%s/%d_1_receipts.json.gz", partition.GetPartition(blockNum), blockNum)
+// processBlock reads receipts for blockNum from S3 using the given version and processes them.
+func (s *Service) processBlock(ctx context.Context, blockNum int64, version int) error {
+	key := fmt.Sprintf("%s/%d_%d_receipts.json.gz", partition.GetPartition(blockNum), blockNum, version)
 
 	// StreamFile transparently decompresses .gz files, so no manual gzip decoding is needed.
 	rc, err := s.s3Reader.StreamFile(ctx, s.bucket, key)
@@ -304,7 +323,7 @@ func (s *Service) processBlock(ctx context.Context, blockNum int64) error {
 		return fmt.Errorf("unmarshalling receipts for block %d: %w", blockNum, err)
 	}
 
-	if err := s.processor.ProcessReceipts(ctx, s.chainID, blockNum, 1, receipts); err != nil {
+	if err := s.processor.ProcessReceipts(ctx, s.chainID, blockNum, version, receipts); err != nil {
 		return fmt.Errorf("processing receipts for block %d: %w", blockNum, err)
 	}
 
