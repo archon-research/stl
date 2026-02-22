@@ -18,7 +18,7 @@ import (
 )
 
 // failingReader is an io.ReadCloser whose Read always returns an error.
-// It is used to exercise the io.ReadAll error path in processBlock.
+// It is used to exercise the io.ReadAll error path in processBlockFromS3.
 type failingReader struct{}
 
 func (r *failingReader) Read(p []byte) (int, error) {

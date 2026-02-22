@@ -133,8 +133,8 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 				version, ok := versionMap[blockNum]
 				if !ok {
 					logger.Info("block not found in S3, fetching from RPC", "block", blockNum)
-					if err := s.fetchReceiptsFromRPC(ctx, blockNum); err != nil {
-						logger.Error("failed to fetch block from RPC", "block", blockNum, "error", err)
+					if err := s.processBlockFromRPC(ctx, blockNum); err != nil {
+						logger.Error("failed to process block from RPC", "block", blockNum, "error", err)
 						failed.Add(1)
 						select {
 						case errCh <- err:
@@ -145,8 +145,8 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 					}
 					continue
 				}
-				if err := s.processBlock(ctx, blockNum, version); err != nil {
-					logger.Error("failed to process block", "block", blockNum, "error", err)
+				if err := s.processBlockFromS3(ctx, blockNum, version); err != nil {
+					logger.Error("failed to process block from S3", "block", blockNum, "error", err)
 					failed.Add(1)
 					select {
 					case errCh <- err:
@@ -313,8 +313,8 @@ func (s *Service) ScanVersions(ctx context.Context, fromBlock, toBlock int64) (m
 	return versions, nil
 }
 
-// processBlock reads receipts for blockNum from S3 using the given version and processes them.
-func (s *Service) processBlock(ctx context.Context, blockNum int64, version int) error {
+// processBlockFromS3 reads receipts for blockNum from S3 using the given version and processes them.
+func (s *Service) processBlockFromS3(ctx context.Context, blockNum int64, version int) error {
 	key := fmt.Sprintf("%s/%d_%d_receipts.json.gz", partition.GetPartition(blockNum), blockNum, version)
 
 	// StreamFile transparently decompresses .gz files, so no manual gzip decoding is needed.
@@ -341,9 +341,9 @@ func (s *Service) processBlock(ctx context.Context, blockNum int64, version int)
 	return nil
 }
 
-// fetchReceiptsFromRPC fetches receipts for blockNum via the RPC fallback and
+// processBlockFromRPC fetches receipts for blockNum via the RPC fallback and
 // processes them with version 0 (canonical chain, no reorg).
-func (s *Service) fetchReceiptsFromRPC(ctx context.Context, blockNum int64) error {
+func (s *Service) processBlockFromRPC(ctx context.Context, blockNum int64) error {
 	raw, err := s.rpcFallback.GetBlockReceipts(ctx, blockNum)
 	if err != nil {
 		return fmt.Errorf("fetching receipts from RPC for block %d: %w", blockNum, err)
