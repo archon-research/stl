@@ -129,27 +129,9 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	var wg sync.WaitGroup
 	for range s.config.Concurrency {
 		wg.Go(func() {
-			handleResult := func(blockNum int64, err error) {
-				if err != nil {
-					logger.Error("failed to process block", "block", blockNum, "error", err)
-					failed.Add(1)
-					select {
-					case errCh <- err:
-					default:
-					}
-				} else {
-					processed.Add(1)
-				}
-			}
-
 			for blockNum := range blockCh {
-				version, ok := versionMap[blockNum]
-				if !ok {
-					logger.Info("block not found in S3, fetching from RPC", "block", blockNum)
-					handleResult(blockNum, s.processBlockFromRPC(ctx, blockNum))
-				} else {
-					handleResult(blockNum, s.processBlockFromS3(ctx, blockNum, version))
-				}
+				err := s.processBlock(ctx, logger, versionMap, blockNum)
+				s.handleResult(logger, errCh, &processed, &failed, blockNum, err)
 			}
 		})
 	}
@@ -178,6 +160,36 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		return err
 	default:
 		return nil
+	}
+}
+
+func (s *Service) processBlock(ctx context.Context, logger *slog.Logger, versionMap map[int64]int, blockNum int64) error {
+	if version, ok := versionMap[blockNum]; ok {
+		return s.processBlockFromS3(ctx, blockNum, version)
+	}
+
+	logger.Info("block not found in S3, fetching from RPC", "block", blockNum)
+	return s.processBlockFromRPC(ctx, blockNum)
+}
+
+func (s *Service) handleResult(
+	logger *slog.Logger,
+	errCh chan<- error,
+	processed *atomic.Int64,
+	failed *atomic.Int64,
+	blockNum int64,
+	err error,
+) {
+	if err == nil {
+		processed.Add(1)
+		return
+	}
+
+	logger.Error("failed to process block", "block", blockNum, "error", err)
+	failed.Add(1)
+	select {
+	case errCh <- err:
+	default:
 	}
 }
 
