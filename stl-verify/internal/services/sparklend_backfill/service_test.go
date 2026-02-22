@@ -425,6 +425,7 @@ func TestRun(t *testing.T) {
 		cancelCtx  bool
 		buildS3    func() *mockS3Reader
 		buildProc  func() *mockProcessor
+		buildRPC   func() *mockBlockReceiptsReader
 		wantErr    bool
 		checkErr   func(t *testing.T, err error)
 		checkCalls func(t *testing.T, calls []processCall)
@@ -665,29 +666,39 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:      "skips block not found in version map",
+			name:      "blocks absent from S3 are fetched via RPC fallback",
 			fromBlock: 100,
 			toBlock:   102,
 			buildS3: func() *mockS3Reader {
 				return &mockS3Reader{
 					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
-						// Only block 101 exists in S3
+						// Only block 101 exists in S3; blocks 100 and 102 fall back to RPC
 						return []string{"0-999/101_0_receipts.json.gz"}, nil
 					},
 				}
 			},
 			buildProc: func() *mockProcessor { return &mockProcessor{} },
-			wantErr:   false,
+			buildRPC: func() *mockBlockReceiptsReader {
+				return &mockBlockReceiptsReader{
+					getFn: func(ctx context.Context, blockNum int64) (json.RawMessage, error) {
+						return json.RawMessage("[]"), nil
+					},
+				}
+			},
+			wantErr: false,
 			checkCalls: func(t *testing.T, calls []processCall) {
 				t.Helper()
-				if len(calls) != 1 {
-					t.Fatalf("expected 1 processor call (only block 101), got %d: %v", len(calls), calls)
+				if len(calls) != 3 {
+					t.Fatalf("expected 3 processor calls (101 from S3, 100 and 102 via RPC), got %d: %v", len(calls), calls)
 				}
-				if calls[0].blockNumber != 101 {
-					t.Errorf("expected block 101, got %d", calls[0].blockNumber)
+				seen := make(map[int64]bool)
+				for _, c := range calls {
+					seen[c.blockNumber] = true
 				}
-				if calls[0].version != 0 {
-					t.Errorf("expected version 0, got %d", calls[0].version)
+				for blk := int64(100); blk <= 102; blk++ {
+					if !seen[blk] {
+						t.Errorf("block %d was not processed", blk)
+					}
 				}
 			},
 		},
@@ -711,13 +722,118 @@ func TestRun(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:      "RPC fallback: block absent from S3 is fetched via RPC with version 0",
+			fromBlock: 100,
+			toBlock:   100,
+			buildS3: func() *mockS3Reader {
+				return &mockS3Reader{
+					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+						// No receipts for block 100 in S3
+						return nil, nil
+					},
+				}
+			},
+			buildProc: func() *mockProcessor { return &mockProcessor{} },
+			buildRPC: func() *mockBlockReceiptsReader {
+				return &mockBlockReceiptsReader{
+					getFn: func(ctx context.Context, blockNum int64) (json.RawMessage, error) {
+						if blockNum == 100 {
+							return json.RawMessage("[]"), nil
+						}
+						return nil, fmt.Errorf("unexpected block %d", blockNum)
+					},
+				}
+			},
+			wantErr: false,
+			checkCalls: func(t *testing.T, calls []processCall) {
+				t.Helper()
+				if len(calls) != 1 {
+					t.Fatalf("expected 1 processor call, got %d", len(calls))
+				}
+				if calls[0].blockNumber != 100 {
+					t.Errorf("expected block 100, got %d", calls[0].blockNumber)
+				}
+				if calls[0].version != 0 {
+					t.Errorf("expected version 0 for RPC fallback, got %d", calls[0].version)
+				}
+			},
+		},
+		{
+			name:      "RPC fallback: error fetching from RPC causes Run to return error",
+			fromBlock: 100,
+			toBlock:   100,
+			buildS3: func() *mockS3Reader {
+				return &mockS3Reader{
+					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+						return nil, nil
+					},
+				}
+			},
+			buildProc: func() *mockProcessor { return &mockProcessor{} },
+			buildRPC: func() *mockBlockReceiptsReader {
+				return &mockBlockReceiptsReader{
+					getFn: func(ctx context.Context, blockNum int64) (json.RawMessage, error) {
+						return nil, fmt.Errorf("rpc unavailable")
+					},
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name:      "RPC fallback: S3 block uses S3 version, not forced to 0",
+			fromBlock: 100,
+			toBlock:   101,
+			buildS3: func() *mockS3Reader {
+				return &mockS3Reader{
+					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+						return []string{
+							"0-999/100_2_receipts.json.gz", // block 100 in S3 with version 2
+							// block 101 absent from S3
+						}, nil
+					},
+				}
+			},
+			buildProc: func() *mockProcessor { return &mockProcessor{} },
+			buildRPC: func() *mockBlockReceiptsReader {
+				return &mockBlockReceiptsReader{
+					getFn: func(ctx context.Context, blockNum int64) (json.RawMessage, error) {
+						if blockNum == 101 {
+							return json.RawMessage("[]"), nil
+						}
+						return nil, fmt.Errorf("unexpected RPC call for block %d", blockNum)
+					},
+				}
+			},
+			wantErr: false,
+			checkCalls: func(t *testing.T, calls []processCall) {
+				t.Helper()
+				if len(calls) != 2 {
+					t.Fatalf("expected 2 processor calls, got %d", len(calls))
+				}
+				byBlock := make(map[int64]processCall)
+				for _, c := range calls {
+					byBlock[c.blockNumber] = c
+				}
+				if byBlock[100].version != 2 {
+					t.Errorf("block 100: expected version 2 (from S3), got %d", byBlock[100].version)
+				}
+				if byBlock[101].version != 0 {
+					t.Errorf("block 101: expected version 0 (RPC fallback), got %d", byBlock[101].version)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s3 := tt.buildS3()
 			proc := tt.buildProc()
-			svc := newTestService(t, s3, proc, &mockBlockReceiptsReader{})
+			rpcMock := &mockBlockReceiptsReader{}
+			if tt.buildRPC != nil {
+				rpcMock = tt.buildRPC()
+			}
+			svc := newTestService(t, s3, proc, rpcMock)
 
 			ctx := context.Background()
 			if tt.cancelCtx {

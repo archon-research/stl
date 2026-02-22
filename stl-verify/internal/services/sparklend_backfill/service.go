@@ -132,8 +132,17 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 			for blockNum := range blockCh {
 				version, ok := versionMap[blockNum]
 				if !ok {
-					logger.Warn("block not found in S3, skipping", "block", blockNum)
-					skipped.Add(1)
+					logger.Info("block not found in S3, fetching from RPC", "block", blockNum)
+					if err := s.fetchReceiptsFromRPC(ctx, blockNum); err != nil {
+						logger.Error("failed to fetch block from RPC", "block", blockNum, "error", err)
+						failed.Add(1)
+						select {
+						case errCh <- err:
+						default:
+						}
+					} else {
+						processed.Add(1)
+					}
 					continue
 				}
 				if err := s.processBlock(ctx, blockNum, version); err != nil {
@@ -331,6 +340,26 @@ func (s *Service) processBlock(ctx context.Context, blockNum int64, version int)
 
 	if err := s.processor.ProcessReceipts(ctx, s.chainID, blockNum, version, receipts); err != nil {
 		return fmt.Errorf("processing receipts for block %d: %w", blockNum, err)
+	}
+
+	return nil
+}
+
+// fetchReceiptsFromRPC fetches receipts for blockNum via the RPC fallback and
+// processes them with version 0 (canonical chain, no reorg).
+func (s *Service) fetchReceiptsFromRPC(ctx context.Context, blockNum int64) error {
+	raw, err := s.rpcFallback.GetBlockReceipts(ctx, blockNum)
+	if err != nil {
+		return fmt.Errorf("fetching receipts from RPC for block %d: %w", blockNum, err)
+	}
+
+	var receipts []sparklend_position_tracker.TransactionReceipt
+	if err := json.Unmarshal(raw, &receipts); err != nil {
+		return fmt.Errorf("unmarshalling RPC receipts for block %d: %w", blockNum, err)
+	}
+
+	if err := s.processor.ProcessReceipts(ctx, s.chainID, blockNum, 0, receipts); err != nil {
+		return fmt.Errorf("processing RPC receipts for block %d: %w", blockNum, err)
 	}
 
 	return nil
