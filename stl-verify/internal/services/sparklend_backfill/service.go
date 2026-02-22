@@ -104,7 +104,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	blockCh := make(chan int64, s.config.Concurrency*2)
 	errCh := make(chan error, 1)
 
-	var processed, skipped, failed atomic.Int64
+	var processed, failed atomic.Int64
 
 	// Use Background context so the progress reporter runs until Run() finishes,
 	// independent of the caller's context being cancelled.
@@ -120,7 +120,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 			case <-progressCtx.Done():
 				return
 			case <-ticker.C:
-				s.logProgress(logger, startTime, totalBlocks, &processed, &skipped, &failed)
+				s.logProgress(logger, startTime, totalBlocks, &processed, &failed)
 			}
 		}
 	}()
@@ -168,7 +168,6 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 
 	logger.Info("backfill complete",
 		"processed", processed.Load(),
-		"skipped", skipped.Load(),
 		"failed", failed.Load(),
 		"total", totalBlocks,
 		"elapsed", time.Since(startTime).String(),
@@ -192,11 +191,9 @@ func (s *Service) logProgress(
 	startTime time.Time,
 	totalBlocks int64,
 	processed *atomic.Int64,
-	skipped *atomic.Int64,
 	failed *atomic.Int64,
 ) {
 	p := processed.Load()
-	sk := skipped.Load()
 	f := failed.Load()
 	elapsed := time.Since(startTime).Seconds()
 
@@ -206,14 +203,13 @@ func (s *Service) logProgress(
 	}
 
 	var eta float64
-	remaining := totalBlocks - p - sk - f
+	remaining := totalBlocks - p - f
 	if rate > 0 {
 		eta = float64(remaining) / rate
 	}
 
 	logger.Info("backfill progress",
 		"processed", p,
-		"skipped", sk,
 		"failed", f,
 		"total", totalBlocks,
 		"rate_per_sec", fmt.Sprintf("%.2f", rate),
