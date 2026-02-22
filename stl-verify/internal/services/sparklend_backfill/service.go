@@ -33,11 +33,12 @@ type Config struct {
 
 // Service backfills historical SparkLend position data from S3.
 type Service struct {
-	config    Config
-	s3Reader  outbound.S3Reader
-	processor ReceiptProcessor
-	bucket    string
-	chainID   int64
+	config      Config
+	s3Reader    outbound.S3Reader
+	processor   ReceiptProcessor
+	rpcFallback outbound.BlockReceiptsReader
+	bucket      string
+	chainID     int64
 }
 
 // NewService creates a Service configured to backfill SparkLend receipts.
@@ -48,6 +49,7 @@ func NewService(
 	config Config,
 	s3Reader outbound.S3Reader,
 	processor ReceiptProcessor,
+	rpcFallback outbound.BlockReceiptsReader,
 	bucket string,
 	chainID int64,
 ) (*Service, error) {
@@ -60,6 +62,9 @@ func NewService(
 	if processor == nil {
 		return nil, fmt.Errorf("processor is required")
 	}
+	if rpcFallback == nil {
+		return nil, fmt.Errorf("rpcFallback is required")
+	}
 	if bucket == "" {
 		return nil, fmt.Errorf("bucket is required")
 	}
@@ -67,11 +72,12 @@ func NewService(
 		config.Concurrency = 1
 	}
 	return &Service{
-		config:    config,
-		s3Reader:  s3Reader,
-		processor: processor,
-		bucket:    bucket,
-		chainID:   chainID,
+		config:      config,
+		s3Reader:    s3Reader,
+		processor:   processor,
+		rpcFallback: rpcFallback,
+		bucket:      bucket,
+		chainID:     chainID,
 	}, nil
 }
 

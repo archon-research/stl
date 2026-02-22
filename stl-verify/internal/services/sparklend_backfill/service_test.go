@@ -2,6 +2,7 @@ package sparklend_backfill_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -86,13 +87,26 @@ func (m *mockProcessor) calledWith() []processCall {
 	return out
 }
 
-func newTestService(t *testing.T, s3 outbound.S3Reader, proc sparklend_backfill.ReceiptProcessor) *sparklend_backfill.Service {
+// mockBlockReceiptsReader is a configurable mock for outbound.BlockReceiptsReader.
+type mockBlockReceiptsReader struct {
+	getFn func(ctx context.Context, blockNum int64) (json.RawMessage, error)
+}
+
+func (m *mockBlockReceiptsReader) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
+	if m.getFn != nil {
+		return m.getFn(ctx, blockNum)
+	}
+	return json.RawMessage("[]"), nil
+}
+
+func newTestService(t *testing.T, s3 outbound.S3Reader, proc sparklend_backfill.ReceiptProcessor, rpc outbound.BlockReceiptsReader) *sparklend_backfill.Service {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc, err := sparklend_backfill.NewService(
 		sparklend_backfill.Config{Concurrency: 2, Logger: logger},
 		s3,
 		proc,
+		rpc,
 		"test-bucket",
 		1,
 	)
@@ -274,7 +288,7 @@ func TestScanVersions(t *testing.T) {
 					return rawFn(ctx, bucket, prefix)
 				},
 			}
-			svc := newTestService(t, s3, &mockProcessor{})
+			svc := newTestService(t, s3, &mockProcessor{}, &mockBlockReceiptsReader{})
 
 			got, err := svc.ScanVersions(context.Background(), tt.fromBlock, tt.toBlock)
 			if tt.wantErr {
@@ -320,6 +334,7 @@ func TestNewService_Validation(t *testing.T) {
 		config    sparklend_backfill.Config
 		s3Reader  outbound.S3Reader
 		processor sparklend_backfill.ReceiptProcessor
+		rpc       outbound.BlockReceiptsReader
 		bucket    string
 		chainID   int64
 		wantErr   bool
@@ -329,6 +344,7 @@ func TestNewService_Validation(t *testing.T) {
 			config:    sparklend_backfill.Config{Concurrency: 1, Logger: nil},
 			s3Reader:  &mockS3Reader{},
 			processor: &mockProcessor{},
+			rpc:       &mockBlockReceiptsReader{},
 			bucket:    "test-bucket",
 			chainID:   1,
 			wantErr:   true,
@@ -338,6 +354,7 @@ func TestNewService_Validation(t *testing.T) {
 			config:    sparklend_backfill.Config{Concurrency: 1, Logger: logger},
 			s3Reader:  nil,
 			processor: &mockProcessor{},
+			rpc:       &mockBlockReceiptsReader{},
 			bucket:    "test-bucket",
 			chainID:   1,
 			wantErr:   true,
@@ -347,6 +364,17 @@ func TestNewService_Validation(t *testing.T) {
 			config:    sparklend_backfill.Config{Concurrency: 1, Logger: logger},
 			s3Reader:  &mockS3Reader{},
 			processor: nil,
+			rpc:       &mockBlockReceiptsReader{},
+			bucket:    "test-bucket",
+			chainID:   1,
+			wantErr:   true,
+		},
+		{
+			name:      "nil rpcFallback",
+			config:    sparklend_backfill.Config{Concurrency: 1, Logger: logger},
+			s3Reader:  &mockS3Reader{},
+			processor: &mockProcessor{},
+			rpc:       nil,
 			bucket:    "test-bucket",
 			chainID:   1,
 			wantErr:   true,
@@ -356,6 +384,7 @@ func TestNewService_Validation(t *testing.T) {
 			config:    sparklend_backfill.Config{Concurrency: 1, Logger: logger},
 			s3Reader:  &mockS3Reader{},
 			processor: &mockProcessor{},
+			rpc:       &mockBlockReceiptsReader{},
 			bucket:    "",
 			chainID:   1,
 			wantErr:   true,
@@ -365,6 +394,7 @@ func TestNewService_Validation(t *testing.T) {
 			config:    sparklend_backfill.Config{Concurrency: 0, Logger: logger},
 			s3Reader:  &mockS3Reader{},
 			processor: &mockProcessor{},
+			rpc:       &mockBlockReceiptsReader{},
 			bucket:    "test-bucket",
 			chainID:   1,
 			wantErr:   false,
@@ -373,7 +403,7 @@ func TestNewService_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc, err := sparklend_backfill.NewService(tt.config, tt.s3Reader, tt.processor, tt.bucket, tt.chainID)
+			svc, err := sparklend_backfill.NewService(tt.config, tt.s3Reader, tt.processor, tt.rpc, tt.bucket, tt.chainID)
 			if tt.wantErr && err == nil {
 				t.Errorf("expected error, got nil")
 			}
@@ -687,7 +717,7 @@ func TestRun(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s3 := tt.buildS3()
 			proc := tt.buildProc()
-			svc := newTestService(t, s3, proc)
+			svc := newTestService(t, s3, proc, &mockBlockReceiptsReader{})
 
 			ctx := context.Background()
 			if tt.cancelCtx {
