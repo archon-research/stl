@@ -153,6 +153,7 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating alchemy client: %w", err)
 	}
+	logger.Info("alchemy client created", "url", cfg.rpcURL)
 
 	rpcClient, err := rpc.DialOptions(ctx, cfg.rpcURL, rpc.WithHTTPClient(httpClient))
 	if err != nil {
