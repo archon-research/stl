@@ -35,6 +35,48 @@ func PackAssetPrice(t *testing.T, price *big.Int) []byte {
 	return data
 }
 
+// PackLatestRoundData ABI-encodes latestRoundData() return data.
+func PackLatestRoundData(t *testing.T, roundID *big.Int, answer *big.Int, startedAt *big.Int, updatedAt *big.Int, answeredInRound *big.Int) []byte {
+	t.Helper()
+	feedABI, err := abis.GetAggregatorV3ABI()
+	if err != nil {
+		t.Fatalf("loading AggregatorV3 ABI: %v", err)
+	}
+	data, err := feedABI.Methods["latestRoundData"].Outputs.Pack(roundID, answer, startedAt, updatedAt, answeredInRound)
+	if err != nil {
+		t.Fatalf("packing latestRoundData: %v", err)
+	}
+	return data
+}
+
+// PackLatestAnswer ABI-encodes latestAnswer() return data.
+func PackLatestAnswer(t *testing.T, answer *big.Int) []byte {
+	t.Helper()
+	feedABI, err := abis.GetAggregatorV3ABI()
+	if err != nil {
+		t.Fatalf("loading AggregatorV3 ABI: %v", err)
+	}
+	data, err := feedABI.Methods["latestAnswer"].Outputs.Pack(answer)
+	if err != nil {
+		t.Fatalf("packing latestAnswer: %v", err)
+	}
+	return data
+}
+
+// PackDecimals ABI-encodes a uint8 decimals value as decimals() return data.
+func PackDecimals(t *testing.T, decimals uint8) []byte {
+	t.Helper()
+	feedABI, err := abis.GetAggregatorV3ABI()
+	if err != nil {
+		t.Fatalf("loading AggregatorV3 ABI: %v", err)
+	}
+	data, err := feedABI.Methods["decimals"].Outputs.Pack(decimals)
+	if err != nil {
+		t.Fatalf("packing decimals: %v", err)
+	}
+	return data
+}
+
 // MulticallResult matches the multicall3 aggregate3 output tuple.
 type MulticallResult struct {
 	Success    bool

@@ -19,9 +19,11 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_price_worker"
 )
 
@@ -113,11 +115,6 @@ func run(ctx context.Context, args []string) error {
 	}
 	logger.Info("Ethereum node connected")
 
-	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
-	if err != nil {
-		return fmt.Errorf("creating multicall client: %w", err)
-	}
-
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
 	if err != nil {
 		return fmt.Errorf("connecting to database: %w", err)
@@ -135,8 +132,13 @@ func run(ctx context.Context, args []string) error {
 			Logger: logger,
 		},
 		consumer,
-		mc,
 		repo,
+		func(oracleType entity.OracleType) (outbound.Multicaller, error) {
+			if oracleType == entity.OracleTypeChronicle {
+				return multicall.NewDirectCaller(ethClient.Client())
+			}
+			return multicall.NewClient(ethClient, blockchain.Multicall3)
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)

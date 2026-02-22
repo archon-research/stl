@@ -405,16 +405,22 @@ func TestMultiChain_BackfillWithGaps(t *testing.T) {
 
 	t.Run("gaps_are_chain_scoped", func(t *testing.T) {
 		// Reset watermarks for this subtest
-		ethRepo.SetBackfillWatermark(ctx, 0)
-		avaxRepo.SetBackfillWatermark(ctx, 0)
+		if err := ethRepo.SetBackfillWatermark(ctx, 0); err != nil {
+			t.Fatalf("failed to reset eth watermark: %v", err)
+		}
+		if err := avaxRepo.SetBackfillWatermark(ctx, 0); err != nil {
+			t.Fatalf("failed to reset avalanche watermark: %v", err)
+		}
 
 		// Save eth blocks 1, 2, 5 (gap at 3-4)
+		now := time.Now().Unix()
 		for _, num := range []int64{1, 2, 5} {
 			_, err := ethRepo.SaveBlock(ctx, outbound.BlockState{
-				Number:     num,
-				Hash:       fmt.Sprintf("0x1_gap_%d", num),
-				ParentHash: fmt.Sprintf("0x1_gap_%d", num-1),
-				ReceivedAt: time.Now().Unix(),
+				Number:         num,
+				Hash:           fmt.Sprintf("0x1_gap_%d", num),
+				ParentHash:     fmt.Sprintf("0x1_gap_%d", num-1),
+				ReceivedAt:     now,
+				BlockTimestamp: now,
 			})
 			if err != nil {
 				t.Fatalf("failed to save eth block %d: %v", num, err)
@@ -424,10 +430,11 @@ func TestMultiChain_BackfillWithGaps(t *testing.T) {
 		// Save avalanche blocks 1-5 (no gap)
 		for i := int64(1); i <= 5; i++ {
 			_, err := avaxRepo.SaveBlock(ctx, outbound.BlockState{
-				Number:     i,
-				Hash:       fmt.Sprintf("0x2_gap_%d", i),
-				ParentHash: fmt.Sprintf("0x2_gap_%d", i-1),
-				ReceivedAt: time.Now().Unix(),
+				Number:         i,
+				Hash:           fmt.Sprintf("0x2_gap_%d", i),
+				ParentHash:     fmt.Sprintf("0x2_gap_%d", i-1),
+				ReceivedAt:     now,
+				BlockTimestamp: now,
 			})
 			if err != nil {
 				t.Fatalf("failed to save avalanche block %d: %v", i, err)

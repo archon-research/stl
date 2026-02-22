@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 )
 
 func TestEventExtractor_NewEventExtractor(t *testing.T) {
@@ -918,6 +919,51 @@ func TestEventExtractor_ExtractReserveEventData(t *testing.T) {
 
 			if result.TxHash != tt.wantTxHash {
 				t.Errorf("TxHash = %s, want %s", result.TxHash, tt.wantTxHash)
+			}
+		})
+	}
+}
+
+func TestService_IsKnownProtocol_FilterLogic(t *testing.T) {
+	tests := []struct {
+		name       string
+		address    string
+		expectSkip bool
+	}{
+		{
+			name:       "Aave V3 - should process",
+			address:    "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+			expectSkip: false,
+		},
+		{
+			name:       "Sparklend - should process",
+			address:    "0xC13e21B648A5Ee794902342038FF3aDAB66BE987",
+			expectSkip: false,
+		},
+		{
+			name:       "Aave V2 - should process",
+			address:    "0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9",
+			expectSkip: false,
+		},
+		{
+			name:       "RedemptionIdle - should skip",
+			address:    "0x4c21B7577C8FE8b0B0669165ee7C8f67fa1454Cf",
+			expectSkip: true,
+		},
+		{
+			name:       "Random unknown - should skip",
+			address:    "0x1234567890123456789012345678901234567890",
+			expectSkip: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr := common.HexToAddress(tt.address)
+			skip := !blockchain.IsKnownProtocol(addr)
+
+			if skip != tt.expectSkip {
+				t.Errorf("IsKnownProtocol(%s) = %v, want skip=%v", tt.address, skip, tt.expectSkip)
 			}
 		})
 	}

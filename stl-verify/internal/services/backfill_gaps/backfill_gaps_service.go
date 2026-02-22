@@ -923,6 +923,17 @@ func (s *BackfillService) retryBlockPublish(ctx context.Context, block outbound.
 	)
 	defer span.End()
 
+	// Re-check if the block has been published since GetBlocksWithIncompletePublish.
+	// The live service may have completed publishing between the query and now.
+	current, err := s.stateRepo.GetBlockByHash(ctx, block.Hash)
+	if err != nil {
+		s.logger.Warn("failed to re-check block publish status", "block", block.Number, "error", err)
+		// Continue with retry on error — worst case is a harmless duplicate publish
+	} else if current != nil && current.BlockPublished {
+		s.logger.Debug("block already published, skipping retry", "block", block.Number)
+		return nil
+	}
+
 	// Fetch block data by hash to ensure we get the exact block we have in DB
 	bd, err := s.client.GetBlockDataByHash(ctx, block.Number, block.Hash, true)
 	if err != nil {
