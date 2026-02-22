@@ -384,7 +384,7 @@ func TestBlockchainService_ParseUserReservesData(t *testing.T) {
 
 			reserves := make([]UserReserveData, 0, arrayLen)
 
-			for i := uint64(0); i < arrayLen; i++ {
+			for i := range arrayLen {
 				structOffset := dataStart + (i * structSize)
 				structData := result[structOffset : structOffset+structSize]
 

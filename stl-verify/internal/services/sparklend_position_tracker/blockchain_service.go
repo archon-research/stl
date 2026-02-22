@@ -794,7 +794,7 @@ func (s *blockchainService) parseReserveConfigurationData(data []byte) (*reserve
 }
 
 // buildFieldIndexMap returns a map from each ABI output name to its index in the provided Arguments slice.
- // If an output has an empty name the map will contain an entry with the empty string key.
+// If an output has an empty name the map will contain an entry with the empty string key.
 func buildFieldIndexMap(outputs abi.Arguments) map[string]int {
 	fieldIndex := make(map[string]int, len(outputs))
 	for i, arg := range outputs {

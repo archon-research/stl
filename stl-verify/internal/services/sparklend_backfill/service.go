@@ -38,7 +38,6 @@ type Service struct {
 	chainID   int64
 }
 
-// NewService creates a new backfill Service. Returns an error if any required
 // NewService creates a Service configured to backfill SparkLend receipts.
 // It validates that Logger, s3Reader, processor, and bucket are provided and returns an error if any are missing.
 // If config.Concurrency is less than or equal to zero it is defaulted to 10.
@@ -63,7 +62,7 @@ func NewService(
 		return nil, fmt.Errorf("bucket is required")
 	}
 	if config.Concurrency <= 0 {
-		config.Concurrency = 10
+		config.Concurrency = 1
 	}
 	return &Service{
 		config:    config,
@@ -150,15 +149,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	}
 
 	// Feed blocks into channel
-feedLoop:
-	for blockNum := fromBlock; blockNum <= toBlock; blockNum++ {
-		select {
-		case <-ctx.Done():
-			break feedLoop
-		case blockCh <- blockNum:
-		}
-	}
-	close(blockCh)
+	s.enqueueBlocks(ctx, blockCh, fromBlock, toBlock)
 
 	wg.Wait()
 	progressCancel()
@@ -181,6 +172,17 @@ feedLoop:
 		return err
 	default:
 		return nil
+	}
+}
+
+func (s *Service) enqueueBlocks(ctx context.Context, blockCh chan<- int64, fromBlock, toBlock int64) {
+	defer close(blockCh)
+	for blockNum := fromBlock; blockNum <= toBlock; blockNum++ {
+		select {
+		case <-ctx.Done():
+			return
+		case blockCh <- blockNum:
+		}
 	}
 }
 

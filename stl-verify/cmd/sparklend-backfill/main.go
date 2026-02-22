@@ -103,7 +103,7 @@ func parseFlags(args []string) (cliConfig, error) {
 
 // run parses CLI flags, initializes logging, network, AWS, and database clients and services,
 // then executes the SparkLend backfill for the configured block range.
- // It returns an error if flag validation, any initialization step, or the backfill run fails.
+// It returns an error if flag validation, any initialization step, or the backfill run fails.
 func run(args []string) error {
 	cfg, err := parseFlags(args)
 	if err != nil {
@@ -148,6 +148,7 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("connecting to RPC: %w", err)
 	}
+	defer rpcClient.Close()
 	ethClient := ethclient.NewClient(rpcClient)
 	logger.Info("Ethereum RPC connected", "url", cfg.rpcURL)
 
