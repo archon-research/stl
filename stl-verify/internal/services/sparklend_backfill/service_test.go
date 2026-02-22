@@ -96,6 +96,93 @@ func newTestService(t *testing.T, s3 outbound.S3Reader, proc sparklend_backfill.
 	return svc
 }
 
+func TestBuildVersionMap(t *testing.T) {
+	tests := []struct {
+		name string
+		keys []string
+		want map[int64]int
+	}{
+		{
+			name: "empty input returns empty map",
+			keys: nil,
+			want: map[int64]int{},
+		},
+		{
+			name: "single key version 0",
+			keys: []string{"0-999/100_0_receipts.json.gz"},
+			want: map[int64]int{100: 0},
+		},
+		{
+			name: "single key version 1",
+			keys: []string{"0-999/100_1_receipts.json.gz"},
+			want: map[int64]int{100: 1},
+		},
+		{
+			name: "keeps highest version when multiple exist",
+			keys: []string{
+				"0-999/100_0_receipts.json.gz",
+				"0-999/100_1_receipts.json.gz",
+				"0-999/100_2_receipts.json.gz",
+			},
+			want: map[int64]int{100: 2},
+		},
+		{
+			name: "multiple blocks across same partition",
+			keys: []string{
+				"0-999/100_0_receipts.json.gz",
+				"0-999/200_1_receipts.json.gz",
+			},
+			want: map[int64]int{100: 0, 200: 1},
+		},
+		{
+			name: "ignores non-receipts files",
+			keys: []string{
+				"0-999/100_0_block.json.gz",
+				"0-999/100_0_traces.json.gz",
+				"0-999/100_1_receipts.json.gz",
+			},
+			want: map[int64]int{100: 1},
+		},
+		{
+			name: "ignores malformed keys",
+			keys: []string{
+				"not-a-valid-key",
+				"0-999/abc_0_receipts.json.gz",
+				"0-999/100_xyz_receipts.json.gz",
+				"0-999/100_1_receipts.json.gz",
+			},
+			want: map[int64]int{100: 1},
+		},
+		{
+			name: "blocks across multiple partitions",
+			keys: []string{
+				"0-999/500_0_receipts.json.gz",
+				"1000-1999/1500_2_receipts.json.gz",
+			},
+			want: map[int64]int{500: 0, 1500: 2},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sparklend_backfill.BuildVersionMap(tt.keys)
+			if len(got) != len(tt.want) {
+				t.Fatalf("map length: got %d, want %d\ngot:  %v\nwant: %v", len(got), len(tt.want), got, tt.want)
+			}
+			for blockNum, wantVer := range tt.want {
+				gotVer, ok := got[blockNum]
+				if !ok {
+					t.Errorf("missing block %d in result", blockNum)
+					continue
+				}
+				if gotVer != wantVer {
+					t.Errorf("block %d: got version %d, want %d", blockNum, gotVer, wantVer)
+				}
+			}
+		})
+	}
+}
+
 func TestNewService_Validation(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 

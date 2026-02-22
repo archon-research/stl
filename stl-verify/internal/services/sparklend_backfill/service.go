@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -106,25 +108,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 			case <-progressCtx.Done():
 				return
 			case <-ticker.C:
-				p := processed.Load()
-				f := failed.Load()
-				elapsed := time.Since(startTime).Seconds()
-				var rate float64
-				if elapsed > 0 {
-					rate = float64(p) / elapsed
-				}
-				var eta float64
-				remaining := totalBlocks - p - f
-				if rate > 0 {
-					eta = float64(remaining) / rate
-				}
-				logger.Info("backfill progress",
-					"processed", p,
-					"failed", f,
-					"total", totalBlocks,
-					"rate_per_sec", fmt.Sprintf("%.2f", rate),
-					"eta_sec", fmt.Sprintf("%.0f", eta),
-				)
+				s.logProgress(logger, startTime, totalBlocks, &processed, &failed)
 			}
 		}
 	}()
@@ -175,6 +159,37 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	}
 }
 
+func (s *Service) logProgress(
+	logger *slog.Logger,
+	startTime time.Time,
+	totalBlocks int64,
+	processed *atomic.Int64,
+	failed *atomic.Int64,
+) {
+	p := processed.Load()
+	f := failed.Load()
+	elapsed := time.Since(startTime).Seconds()
+
+	var rate float64
+	if elapsed > 0 {
+		rate = float64(p) / elapsed
+	}
+
+	var eta float64
+	remaining := totalBlocks - p - f
+	if rate > 0 {
+		eta = float64(remaining) / rate
+	}
+
+	logger.Info("backfill progress",
+		"processed", p,
+		"failed", f,
+		"total", totalBlocks,
+		"rate_per_sec", fmt.Sprintf("%.2f", rate),
+		"eta_sec", fmt.Sprintf("%.0f", eta),
+	)
+}
+
 func (s *Service) enqueueBlocks(ctx context.Context, blockCh chan<- int64, fromBlock, toBlock int64) {
 	defer close(blockCh)
 	for blockNum := fromBlock; blockNum <= toBlock; blockNum++ {
@@ -184,6 +199,62 @@ func (s *Service) enqueueBlocks(ctx context.Context, blockCh chan<- int64, fromB
 		case blockCh <- blockNum:
 		}
 	}
+}
+
+// BuildVersionMap parses a slice of S3 key strings and returns a map from
+// block number to the highest receipt-file version seen for that block.
+// Keys that are not receipts files or that cannot be parsed are silently ignored.
+// Exported for testing.
+func BuildVersionMap(keys []string) map[int64]int {
+	versions := make(map[int64]int)
+	for _, key := range keys {
+		blockNum, version, ok := parseReceiptKey(key)
+		if !ok {
+			continue
+		}
+		if existing, seen := versions[blockNum]; !seen || version > existing {
+			versions[blockNum] = version
+		}
+	}
+	return versions
+}
+
+// parseReceiptKey parses an S3 key of the form
+// "{partition}/{blockNum}_{version}_receipts.json.gz"
+// and returns (blockNum, version, true) on success, or (0, 0, false) if the
+// key is not a receipts file or cannot be parsed.
+func parseReceiptKey(key string) (blockNum int64, version int, ok bool) {
+	// Extract filename: everything after the last "/"
+	slash := strings.LastIndex(key, "/")
+	filename := key
+	if slash >= 0 {
+		filename = key[slash+1:]
+	}
+
+	// Must end in "_receipts.json.gz"
+	const suffix = "_receipts.json.gz"
+	if !strings.HasSuffix(filename, suffix) {
+		return 0, 0, false
+	}
+	stem := filename[:len(filename)-len(suffix)] // e.g. "100_1"
+
+	// Split on "_" — must have exactly two parts: blockNum and version
+	parts := strings.SplitN(stem, "_", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+
+	bn, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+
+	ver, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, false
+	}
+
+	return bn, ver, true
 }
 
 // processBlock reads receipts for blockNum from S3 and processes them.
