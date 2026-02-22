@@ -259,8 +259,7 @@ func parseReceiptKey(key string) (blockNum int64, version int, ok bool) {
 
 // ScanVersions lists all S3 receipt keys in the partitions overlapping
 // [fromBlock, toBlock] and returns a map of blockNum → highest version.
-// It makes one ListPrefix call per 1000-block partition.
-// Exported for testing.
+// It makes one ListPrefix call per partition (partition.BlockRangeSize blocks each).
 func (s *Service) ScanVersions(ctx context.Context, fromBlock, toBlock int64) (map[int64]int, error) {
 	versions := make(map[int64]int)
 

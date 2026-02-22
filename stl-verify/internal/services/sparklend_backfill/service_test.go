@@ -193,7 +193,7 @@ func TestScanVersions(t *testing.T) {
 		name         string
 		fromBlock    int64
 		toBlock      int64
-		listPrefixFn func(t *testing.T) func(ctx context.Context, bucket, prefix string) ([]string, error)
+		listPrefixFn func() func(ctx context.Context, bucket, prefix string) ([]string, error)
 		wantVersions map[int64]int
 		wantErr      bool
 		wantPrefixes []string // prefixes that must have been requested
@@ -202,7 +202,7 @@ func TestScanVersions(t *testing.T) {
 			name:      "single partition returns correct versions",
 			fromBlock: 100,
 			toBlock:   200,
-			listPrefixFn: func(t *testing.T) func(ctx context.Context, bucket, prefix string) ([]string, error) {
+			listPrefixFn: func() func(ctx context.Context, bucket, prefix string) ([]string, error) {
 				return func(ctx context.Context, bucket, prefix string) ([]string, error) {
 					if prefix == "0-999/" {
 						return []string{
@@ -221,7 +221,7 @@ func TestScanVersions(t *testing.T) {
 			name:      "two partitions are both scanned",
 			fromBlock: 900,
 			toBlock:   1100,
-			listPrefixFn: func(t *testing.T) func(ctx context.Context, bucket, prefix string) ([]string, error) {
+			listPrefixFn: func() func(ctx context.Context, bucket, prefix string) ([]string, error) {
 				return func(ctx context.Context, bucket, prefix string) ([]string, error) {
 					switch prefix {
 					case "0-999/":
@@ -239,7 +239,7 @@ func TestScanVersions(t *testing.T) {
 			name:      "ListPrefix error is returned",
 			fromBlock: 100,
 			toBlock:   100,
-			listPrefixFn: func(t *testing.T) func(ctx context.Context, bucket, prefix string) ([]string, error) {
+			listPrefixFn: func() func(ctx context.Context, bucket, prefix string) ([]string, error) {
 				return func(ctx context.Context, bucket, prefix string) ([]string, error) {
 					return nil, fmt.Errorf("s3 unavailable")
 				}
@@ -250,7 +250,7 @@ func TestScanVersions(t *testing.T) {
 			name:      "empty bucket returns empty map",
 			fromBlock: 500,
 			toBlock:   600,
-			listPrefixFn: func(t *testing.T) func(ctx context.Context, bucket, prefix string) ([]string, error) {
+			listPrefixFn: func() func(ctx context.Context, bucket, prefix string) ([]string, error) {
 				return func(ctx context.Context, bucket, prefix string) ([]string, error) {
 					return nil, nil
 				}
@@ -263,7 +263,7 @@ func TestScanVersions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var requestedPrefixes []string
 			var mu sync.Mutex
-			rawFn := tt.listPrefixFn(t)
+			rawFn := tt.listPrefixFn()
 
 			s3 := &mockS3Reader{
 				listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
