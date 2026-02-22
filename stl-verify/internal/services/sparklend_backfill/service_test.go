@@ -232,7 +232,7 @@ func TestNewService_Validation(t *testing.T) {
 			wantErr:   true,
 		},
 		{
-			name:      "zero concurrency defaults to 10",
+			name:      "zero concurrency defaults to 1",
 			config:    sparklend_backfill.Config{Concurrency: 0, Logger: logger},
 			s3Reader:  &mockS3Reader{},
 			processor: &mockProcessor{},
