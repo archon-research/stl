@@ -40,7 +40,7 @@ type Service struct {
 
 // NewService creates a Service configured to backfill SparkLend receipts.
 // It validates that Logger, s3Reader, processor, and bucket are provided and returns an error if any are missing.
-// If config.Concurrency is less than or equal to zero it is defaulted to 10.
+// If config.Concurrency is less than or equal to zero it is defaulted to 1.
 // The returned Service is initialized with the provided s3Reader, processor, bucket, chainID, and the (possibly adjusted) config.
 func NewService(
 	config Config,
