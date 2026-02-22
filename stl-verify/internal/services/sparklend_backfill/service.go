@@ -129,24 +129,9 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	var wg sync.WaitGroup
 	for range s.config.Concurrency {
 		wg.Go(func() {
-			for blockNum := range blockCh {
-				version, ok := versionMap[blockNum]
-				if !ok {
-					logger.Info("block not found in S3, fetching from RPC", "block", blockNum)
-					if err := s.processBlockFromRPC(ctx, blockNum); err != nil {
-						logger.Error("failed to process block from RPC", "block", blockNum, "error", err)
-						failed.Add(1)
-						select {
-						case errCh <- err:
-						default:
-						}
-					} else {
-						processed.Add(1)
-					}
-					continue
-				}
-				if err := s.processBlockFromS3(ctx, blockNum, version); err != nil {
-					logger.Error("failed to process block from S3", "block", blockNum, "error", err)
+			handleResult := func(blockNum int64, err error) {
+				if err != nil {
+					logger.Error("failed to process block", "block", blockNum, "error", err)
 					failed.Add(1)
 					select {
 					case errCh <- err:
@@ -154,6 +139,16 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 					}
 				} else {
 					processed.Add(1)
+				}
+			}
+
+			for blockNum := range blockCh {
+				version, ok := versionMap[blockNum]
+				if !ok {
+					logger.Info("block not found in S3, fetching from RPC", "block", blockNum)
+					handleResult(blockNum, s.processBlockFromRPC(ctx, blockNum))
+				} else {
+					handleResult(blockNum, s.processBlockFromS3(ctx, blockNum, version))
 				}
 			}
 		})
