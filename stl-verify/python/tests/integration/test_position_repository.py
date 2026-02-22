@@ -145,12 +145,13 @@ async def test_list_latest_user_positions(repository, db_sessionmaker):
         await session.commit()
 
     # Test with limit=1
-    positions = await repository.list_latest_user_positions(protocol_id, limit=1)
+    positions = await repository.list_latest_user_positions(protocol_id, chain_id=1, limit=1)
 
     assert len(positions) == 1, f"Expected 1 user with limit=1, got {len(positions)}"
 
     position = positions[0]
     assert position.user_address == "0x1111111111111111111111111111111111111111"
+    assert position.chain_id == 1
 
     # Should have 1 debt entry (USDS with amount 150 from block 10 version 0, not version 1)
     assert len(position.debt) == 1, f"Expected 1 debt entry, got {len(position.debt)}"
@@ -158,6 +159,8 @@ async def test_list_latest_user_positions(repository, db_sessionmaker):
     assert debt.token_address == "0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa"
     assert debt.symbol == "USDS"
     assert debt.amount == 150
+    assert debt.decimals == 18
+    assert debt.chain_id == 1
 
     # Should have 1 collateral entry (USDS with amount 4)
     # WBTC should be excluded (amount 0)
@@ -166,11 +169,13 @@ async def test_list_latest_user_positions(repository, db_sessionmaker):
     assert collateral.token_address == "0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa"
     assert collateral.symbol == "USDS"
     assert collateral.amount == 4
+    assert collateral.decimals == 18
+    assert collateral.chain_id == 1
 
     # Verify no zero amounts in result
     for asset in position.debt + position.collateral:
         assert asset.amount != 0, f"Found zero amount for {asset.symbol}"
 
     # Test without limit - should return only user1 (user2 has no debt and collateral is disabled)
-    positions_all = await repository.list_latest_user_positions(protocol_id, limit=0)
+    positions_all = await repository.list_latest_user_positions(protocol_id, chain_id=1, limit=0)
     assert len(positions_all) == 1, f"Expected 1 user total, got {len(positions_all)}"
