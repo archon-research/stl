@@ -204,7 +204,6 @@ func (s *Service) enqueueBlocks(ctx context.Context, blockCh chan<- int64, fromB
 // BuildVersionMap parses a slice of S3 key strings and returns a map from
 // block number to the highest receipt-file version seen for that block.
 // Keys that are not receipts files or that cannot be parsed are silently ignored.
-// Exported for testing.
 func BuildVersionMap(keys []string) map[int64]int {
 	versions := make(map[int64]int)
 	for _, key := range keys {
@@ -263,7 +262,7 @@ func parseReceiptKey(key string) (blockNum int64, version int, ok bool) {
 func (s *Service) ScanVersions(ctx context.Context, fromBlock, toBlock int64) (map[int64]int, error) {
 	versions := make(map[int64]int)
 
-	// Iterate over each 1000-block partition that overlaps [fromBlock, toBlock].
+	// Iterate over each partition (partition.BlockRangeSize blocks) that overlaps [fromBlock, toBlock].
 	firstPartition := (fromBlock / partition.BlockRangeSize) * partition.BlockRangeSize
 	for partStart := firstPartition; partStart <= toBlock; partStart += partition.BlockRangeSize {
 		partEnd := partStart + partition.BlockRangeSize - 1
