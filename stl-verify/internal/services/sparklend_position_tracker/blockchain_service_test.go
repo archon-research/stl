@@ -703,7 +703,7 @@ func TestBlockchainService_BatchGetTokenMetadata_ConcurrentAccess(t *testing.T) 
 		go func() {
 			defer wg.Done()
 			tokens := map[common.Address]bool{token: true}
-			_, err := svc.batchGetTokenMetadata(context.Background(), tokens)
+			_, err := svc.batchGetTokenMetadata(context.Background(), tokens, big.NewInt(1))
 			if err != nil {
 				t.Errorf("batchGetTokenMetadata() unexpected error: %v", err)
 			}
