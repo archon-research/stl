@@ -256,7 +256,7 @@ func (m *largeBenchmarkClient) GetBlockTraces(ctx context.Context, blockNum int6
 	return json.RawMessage(`[]`), nil
 }
 
-func (m *largeBenchmarkClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+func (m *largeBenchmarkClient) GetBlockTracesByHash(ctx context.Context, blockNum int64, hash string) (json.RawMessage, error) {
 	return json.RawMessage(`[]`), nil
 }
 

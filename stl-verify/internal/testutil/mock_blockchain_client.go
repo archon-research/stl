@@ -211,7 +211,7 @@ func (m *MockBlockchainClient) GetBlockTraces(ctx context.Context, blockNum int6
 	return nil, fmt.Errorf("traces for block %d not found", blockNum)
 }
 
-func (m *MockBlockchainClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+func (m *MockBlockchainClient) GetBlockTracesByHash(ctx context.Context, blockNum int64, hash string) (json.RawMessage, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

@@ -1107,6 +1107,362 @@ func TestClient_BatchRetriesOn5xxErrors(t *testing.T) {
 	}
 }
 
+// --- Test: verifyTraceBlockHash ---
+
+func TestVerifyTraceBlockHash_MatchingHash(t *testing.T) {
+	traces := json.RawMessage(`[{"blockHash":"0xabc123","action":{"callType":"call"}}]`)
+	err := verifyTraceBlockHash(traces, "0xabc123")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+}
+
+func TestVerifyTraceBlockHash_CaseInsensitive(t *testing.T) {
+	traces := json.RawMessage(`[{"blockHash":"0xABC123","action":{"callType":"call"}}]`)
+	err := verifyTraceBlockHash(traces, "0xabc123")
+	if err != nil {
+		t.Fatalf("expected no error for case-insensitive match, got %v", err)
+	}
+}
+
+func TestVerifyTraceBlockHash_Mismatch(t *testing.T) {
+	traces := json.RawMessage(`[{"blockHash":"0xdifferent","action":{"callType":"call"}}]`)
+	err := verifyTraceBlockHash(traces, "0xabc123")
+	if err == nil {
+		t.Fatal("expected error for hash mismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "likely reorg") {
+		t.Errorf("expected reorg error, got %v", err)
+	}
+}
+
+func TestVerifyTraceBlockHash_EmptyTraces(t *testing.T) {
+	err := verifyTraceBlockHash(json.RawMessage(`[]`), "0xabc123")
+	if err != nil {
+		t.Fatalf("expected no error for empty array, got %v", err)
+	}
+}
+
+func TestVerifyTraceBlockHash_NilTraces(t *testing.T) {
+	err := verifyTraceBlockHash(nil, "0xabc123")
+	if err != nil {
+		t.Fatalf("expected no error for nil traces, got %v", err)
+	}
+}
+
+func TestVerifyTraceBlockHash_InvalidJSON(t *testing.T) {
+	err := verifyTraceBlockHash(json.RawMessage(`not json`), "0xabc123")
+	if err != nil {
+		t.Fatalf("expected no error for unparseable traces, got %v", err)
+	}
+}
+
+// --- Test: GetBlockDataByHash ---
+
+func TestGetBlockDataByHash_Parallel_Success(t *testing.T) {
+	hash := "0xabc123"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("failed to decode request: %v", err)
+		}
+
+		var resp jsonRPCResponse
+		switch req.Method {
+		case "eth_getBlockByHash":
+			resp = jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{"number":"0x64","hash":"` + hash + `"}`)}
+		case "eth_getBlockReceipts":
+			resp = jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`[{"status":"0x1"}]`)}
+		case "trace_block":
+			resp = jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`[{"blockHash":"` + hash + `","action":{"callType":"call"}}]`)}
+		default:
+			t.Errorf("unexpected method: %s", req.Method)
+		}
+
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL, EnableTraces: true, ParallelRPC: true})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	result, err := client.GetBlockDataByHash(context.Background(), 100, hash, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Block == nil {
+		t.Error("expected Block, got nil")
+	}
+	if result.Receipts == nil {
+		t.Error("expected Receipts, got nil")
+	}
+	if result.Traces == nil {
+		t.Error("expected Traces, got nil")
+	}
+	if result.HasErrors() {
+		t.Errorf("expected no errors, got Block=%v Receipts=%v Traces=%v", result.BlockErr, result.ReceiptsErr, result.TracesErr)
+	}
+}
+
+func TestGetBlockDataByHash_Parallel_ReorgDetected(t *testing.T) {
+	hash := "0xabc123"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("failed to decode request: %v", err)
+		}
+
+		var resp jsonRPCResponse
+		switch req.Method {
+		case "eth_getBlockByHash":
+			resp = jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{"number":"0x64","hash":"` + hash + `"}`)}
+		case "eth_getBlockReceipts":
+			resp = jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`[]`)}
+		case "trace_block":
+			// Return traces with a different block hash (simulating reorg)
+			resp = jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`[{"blockHash":"0xdifferent","action":{"callType":"call"}}]`)}
+		}
+
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL, EnableTraces: true, ParallelRPC: true})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	result, err := client.GetBlockDataByHash(context.Background(), 100, hash, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Block and receipts should be fine
+	if result.Block == nil {
+		t.Error("expected Block, got nil")
+	}
+	if result.Receipts == nil {
+		t.Error("expected Receipts, got nil")
+	}
+
+	// Traces should be nil with an error due to reorg detection
+	if result.Traces != nil {
+		t.Error("expected Traces to be nil after reorg detection")
+	}
+	if result.TracesErr == nil {
+		t.Fatal("expected TracesErr for reorg, got nil")
+	}
+	if !strings.Contains(result.TracesErr.Error(), "likely reorg") {
+		t.Errorf("expected reorg error, got %v", result.TracesErr)
+	}
+}
+
+func TestGetBlockDataByHash_Batched_Success(t *testing.T) {
+	hash := "0xabc123"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var requests []jsonRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&requests); err != nil {
+			t.Errorf("failed to decode requests: %v", err)
+		}
+
+		responses := make([]jsonRPCResponse, len(requests))
+		for i, req := range requests {
+			switch req.Method {
+			case "eth_getBlockByHash":
+				responses[i] = jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{"number":"0x64","hash":"` + hash + `"}`)}
+			case "eth_getBlockReceipts":
+				responses[i] = jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`[{"status":"0x1"}]`)}
+			case "trace_block":
+				responses[i] = jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`[{"blockHash":"` + hash + `","action":{"callType":"call"}}]`)}
+			}
+		}
+
+		if err := json.NewEncoder(w).Encode(responses); err != nil {
+			t.Errorf("failed to encode responses: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL, EnableTraces: true, ParallelRPC: false})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	result, err := client.GetBlockDataByHash(context.Background(), 100, hash, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Block == nil {
+		t.Error("expected Block, got nil")
+	}
+	if result.Receipts == nil {
+		t.Error("expected Receipts, got nil")
+	}
+	if result.Traces == nil {
+		t.Error("expected Traces, got nil")
+	}
+	if result.HasErrors() {
+		t.Errorf("expected no errors, got Block=%v Receipts=%v Traces=%v", result.BlockErr, result.ReceiptsErr, result.TracesErr)
+	}
+}
+
+func TestGetBlockDataByHash_Batched_ReorgDetected(t *testing.T) {
+	hash := "0xabc123"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var requests []jsonRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&requests); err != nil {
+			t.Errorf("failed to decode requests: %v", err)
+		}
+
+		responses := make([]jsonRPCResponse, len(requests))
+		for i, req := range requests {
+			switch req.Method {
+			case "eth_getBlockByHash":
+				responses[i] = jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{"number":"0x64","hash":"` + hash + `"}`)}
+			case "eth_getBlockReceipts":
+				responses[i] = jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`[]`)}
+			case "trace_block":
+				responses[i] = jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`[{"blockHash":"0xdifferent"}]`)}
+			}
+		}
+
+		if err := json.NewEncoder(w).Encode(responses); err != nil {
+			t.Errorf("failed to encode responses: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL, EnableTraces: true, ParallelRPC: false})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	result, err := client.GetBlockDataByHash(context.Background(), 100, hash, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Traces != nil {
+		t.Error("expected Traces to be nil after reorg detection")
+	}
+	if result.TracesErr == nil {
+		t.Fatal("expected TracesErr for reorg, got nil")
+	}
+	if !strings.Contains(result.TracesErr.Error(), "likely reorg") {
+		t.Errorf("expected reorg error, got %v", result.TracesErr)
+	}
+}
+
+func TestGetBlockDataByHash_TracesDisabled(t *testing.T) {
+	hash := "0xabc123"
+	tracesCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Single request (parallel mode)
+		var req jsonRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("failed to decode request: %v", err)
+		}
+		if req.Method == "trace_block" {
+			tracesCalled = true
+		}
+
+		resp := jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{}`)}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL, EnableTraces: false, ParallelRPC: true})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	result, err := client.GetBlockDataByHash(context.Background(), 100, hash, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tracesCalled {
+		t.Error("trace_block should not be called when traces are disabled")
+	}
+	if result.Traces != nil {
+		t.Error("expected nil Traces when disabled")
+	}
+	if result.TracesErr != nil {
+		t.Errorf("expected nil TracesErr when disabled, got %v", result.TracesErr)
+	}
+}
+
+// --- Test: GetBlockTracesByHash ---
+
+func TestGetBlockTracesByHash_Success(t *testing.T) {
+	hash := "0xabc123"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("failed to decode request: %v", err)
+		}
+
+		if req.Method != "trace_block" {
+			t.Errorf("expected method=trace_block, got %s", req.Method)
+		}
+		// Verify it passes block number, not hash
+		if req.Params[0] != "0x64" {
+			t.Errorf("expected param=0x64, got %v", req.Params[0])
+		}
+
+		resp := jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      1,
+			Result:  json.RawMessage(`[{"blockHash":"` + hash + `","action":{"callType":"call"}}]`),
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client := testClient(t, server.URL)
+	result, err := client.GetBlockTracesByHash(context.Background(), 100, hash)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected result, got nil")
+	}
+}
+
+func TestGetBlockTracesByHash_ReorgDetected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      1,
+			Result:  json.RawMessage(`[{"blockHash":"0xdifferent","action":{"callType":"call"}}]`),
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client := testClient(t, server.URL)
+	_, err := client.GetBlockTracesByHash(context.Background(), 100, "0xabc123")
+	if err == nil {
+		t.Fatal("expected error for reorg detection, got nil")
+	}
+	if !strings.Contains(err.Error(), "likely reorg") {
+		t.Errorf("expected reorg error, got %v", err)
+	}
+}
+
 func TestClientConfigDefaults_IncludesRetryConfig(t *testing.T) {
 	defaults := ClientConfigDefaults()
 

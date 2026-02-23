@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -258,18 +259,24 @@ func (c *Client) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMe
 	return resp.Result, nil
 }
 
-// GetBlockTracesByHash fetches execution traces for a block by hash.
-// Use this to prevent TOCTOU race conditions during reorgs.
-func (c *Client) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+// GetBlockTracesByHash fetches execution traces for a block identified by hash.
+// Since trace_block only accepts block numbers (not hashes), blockNum is required.
+// The hash is used for post-fetch verification to detect reorgs.
+func (c *Client) GetBlockTracesByHash(ctx context.Context, blockNum int64, hash string) (json.RawMessage, error) {
+	hexNum := fmt.Sprintf("0x%x", blockNum)
 	req := jsonRPCRequest{
 		JSONRPC: "2.0",
 		ID:      1,
 		Method:  "trace_block",
-		Params:  []interface{}{hash},
+		Params:  []interface{}{hexNum},
 	}
 
 	resp, err := c.call(ctx, req)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := verifyTraceBlockHash(resp.Result, hash); err != nil {
 		return nil, err
 	}
 
@@ -378,14 +385,15 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			req := jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []interface{}{hash}}
+			hexNum := fmt.Sprintf("0x%x", blockNum)
+			req := jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []interface{}{hexNum}}
 			resp, err := c.call(ctx, req)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
 				result.TracesErr = err
 			} else if resp.Error != nil {
-				result.TracesErr = fmt.Errorf("block %s traces: %w", hash, resp.Error)
+				result.TracesErr = fmt.Errorf("block %d traces: %w", blockNum, resp.Error)
 			} else {
 				result.Traces = resp.Result
 			}
@@ -412,6 +420,15 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 	}
 
 	wg.Wait()
+
+	// Verify trace data belongs to the expected block (guards against reorg during fetch)
+	if c.config.EnableTraces && result.Traces != nil && result.TracesErr == nil {
+		if err := verifyTraceBlockHash(result.Traces, hash); err != nil {
+			result.TracesErr = err
+			result.Traces = nil
+		}
+	}
+
 	return result, nil
 }
 
@@ -433,8 +450,9 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 		jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "eth_getBlockReceipts", Params: []interface{}{hash}},
 	)
 	if c.config.EnableTraces {
+		hexNum := fmt.Sprintf("0x%x", blockNum)
 		requests = append(requests,
-			jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []interface{}{hash}},
+			jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []interface{}{hexNum}},
 		)
 	}
 	if c.config.EnableBlobs {
@@ -502,6 +520,14 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 			}
 		} else {
 			result.BlobsErr = fmt.Errorf("missing response for blobs of block %d", blockNum)
+		}
+	}
+
+	// Verify trace data belongs to the expected block (guards against reorg during fetch)
+	if c.config.EnableTraces && result.Traces != nil && result.TracesErr == nil {
+		if err := verifyTraceBlockHash(result.Traces, hash); err != nil {
+			result.TracesErr = err
+			result.Traces = nil
 		}
 	}
 
@@ -948,4 +974,34 @@ func (c *Client) doWithRetry(ctx context.Context, method string, fn func() error
 		"error", lastErr)
 
 	return fmt.Errorf("after %d retries: %w", c.config.MaxRetries, lastErr)
+}
+
+// verifyTraceBlockHash checks that trace_block returned data for the expected block hash.
+// Since trace_block only accepts block numbers (not hashes), a reorg between the
+// hash-based fetches (eth_getBlockByHash, eth_getBlockReceipts) and the number-based
+// trace_block call could return traces for a different block. This post-fetch validation
+// detects that inconsistency.
+func verifyTraceBlockHash(traces json.RawMessage, expectedHash string) error {
+	if len(traces) == 0 {
+		return nil // empty traces (e.g., block with no transactions) are valid
+	}
+
+	// trace_block returns an array of trace objects, each with a "blockHash" field.
+	// Parse just enough to extract the blockHash from the first entry.
+	var entries []struct {
+		BlockHash string `json:"blockHash"`
+	}
+	if err := json.Unmarshal(traces, &entries); err != nil {
+		return nil // can't verify — don't fail on parse errors for raw data we pass through
+	}
+	if len(entries) == 0 {
+		return nil // empty array is valid (no traces in block)
+	}
+
+	gotHash := strings.ToLower(entries[0].BlockHash)
+	wantHash := strings.ToLower(expectedHash)
+	if gotHash != wantHash {
+		return fmt.Errorf("trace_block returned data for block %s, expected %s (likely reorg during fetch)", gotHash, wantHash)
+	}
+	return nil
 }
