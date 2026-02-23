@@ -38,10 +38,10 @@ func main() {
 }
 
 type cliConfig struct {
-	queueURL           string
-	dbURL              string
-	alchemyURL         string
-	alchemyHTTPBaseURL string
+	queueURL       string
+	dbURL          string
+	rpcURL         string
+	rpcHTTPBaseURL string
 }
 
 func parseConfig(args []string) (cliConfig, error) {
@@ -71,12 +71,15 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("database URL not provided (use -db flag or DATABASE_URL env var)")
 	}
 
-	alchemyAPIKey := os.Getenv("ALCHEMY_API_KEY")
-	if alchemyAPIKey == "" {
-		return cliConfig{}, fmt.Errorf("ALCHEMY_API_KEY environment variable is required")
+	rpcAPIKey := os.Getenv("ETH_RPC_API_KEY")
+	if rpcAPIKey == "" {
+		return cliConfig{}, fmt.Errorf("ETH_RPC_API_KEY environment variable is required")
 	}
-	cfg.alchemyHTTPBaseURL = env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
-	cfg.alchemyURL = fmt.Sprintf("%s/%s", cfg.alchemyHTTPBaseURL, alchemyAPIKey)
+	cfg.rpcHTTPBaseURL = env.Get("ETH_RPC_HTTP_URL", "")
+	if cfg.rpcHTTPBaseURL == "" {
+		return cliConfig{}, fmt.Errorf("ETH_RPC_HTTP_URL environment variable is required")
+	}
+	cfg.rpcURL = fmt.Sprintf("%s/%s", cfg.rpcHTTPBaseURL, rpcAPIKey)
 
 	return cfg, nil
 }
@@ -109,7 +112,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating SQS consumer: %w", err)
 	}
 
-	ethClient, err := ethclient.Dial(cfg.alchemyURL)
+	ethClient, err := ethclient.Dial(cfg.rpcURL)
 	if err != nil {
 		return fmt.Errorf("connecting to Ethereum node: %w", err)
 	}

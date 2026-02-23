@@ -6,14 +6,14 @@ A real-time Ethereum block watcher service that subscribes to new blocks via Web
 
 The watcher consists of two main services:
 
-- **Live Data Service**: Subscribes to new block headers via Alchemy WebSocket, fetches full block data (receipts, traces, blobs), detects and handles chain reorgs, and publishes events to SNS
+- **Live Data Service**: Subscribes to new block headers via Ethereum WebSocket, fetches full block data (receipts, traces, blobs), detects and handles chain reorgs, and publishes events to SNS
 - **Backfill Service** (optional): Fills gaps in block data by polling the database for missing blocks and fetching them via HTTP
 
 ## Prerequisites
 
 - Go 1.25+
 - Docker and Docker Compose
-- Alchemy API key (for Ethereum mainnet access)
+- Ethereum RPC API key (Alchemy, Infura, or compatible provider)
 
 ## Quick Start
 
@@ -35,10 +35,11 @@ This starts:
 
 ```bash
 # Required
-ALCHEMY_API_KEY=your_alchemy_api_key_here
+ETH_RPC_API_KEY=your_api_key_here
+ETH_RPC_HTTP_URL=https://your-provider.example.com/v2
+ETH_RPC_WS_URL=wss://your-provider.example.com/v2
 
 # Optional (defaults shown)
-ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable
 REDIS_ADDR=localhost:6379
 REDIS_PASSWORD=
@@ -86,7 +87,9 @@ go run ./cmd/watcher -disable-blobs -pprof :6060
 
 | Variable | Description |
 |----------|-------------|
-| `ALCHEMY_API_KEY` | Alchemy API key for Ethereum mainnet |
+| `ETH_RPC_API_KEY` | Ethereum RPC API key (Alchemy, Infura, or compatible provider) |
+| `ETH_RPC_HTTP_URL` | Ethereum HTTP RPC base URL (e.g., `https://mainnet.infura.io/v3`) |
+| `ETH_RPC_WS_URL` | Ethereum WebSocket RPC base URL (e.g., `wss://mainnet.infura.io/ws/v3`) |
 
 ### Optional
 

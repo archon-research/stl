@@ -1,10 +1,10 @@
-// client.go implements the BlockchainClient interface using Alchemy's HTTP JSON-RPC API.
+// client.go implements the BlockchainClient interface using Ethereum HTTP JSON-RPC.
 // It provides methods for fetching blocks, receipts, traces, and blob sidecars with:
 //   - Automatic retry logic with exponential backoff for transient failures
 //   - Configurable timeouts and backoff parameters
 //   - OpenTelemetry instrumentation for metrics and tracing
 //   - Batch request support for efficient bulk data fetching
-package alchemy
+package ethrpc
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ var _ outbound.BlockchainClient = (*Client)(nil)
 
 // ClientConfig holds configuration for the HTTP RPC client.
 type ClientConfig struct {
-	// HTTPURL is the Alchemy HTTP JSON-RPC endpoint URL.
+	// HTTPURL is the HTTP JSON-RPC endpoint URL.
 	HTTPURL string
 
 	// Timeout is the maximum time to wait for a single HTTP request.
@@ -83,7 +83,7 @@ func ClientConfigDefaults() ClientConfig {
 	}
 }
 
-// Client implements BlockchainClient using Alchemy's HTTP JSON-RPC API.
+// Client implements BlockchainClient using Ethereum HTTP JSON-RPC.
 type Client struct {
 	config     ClientConfig
 	httpClient *http.Client
@@ -91,7 +91,7 @@ type Client struct {
 	telemetry  *Telemetry
 }
 
-// NewClient creates a new Alchemy HTTP RPC client.
+// NewClient creates a new Ethereum HTTP RPC client.
 func NewClient(config ClientConfig) (*Client, error) {
 	if config.HTTPURL == "" {
 		return nil, errors.New("HTTPURL is required")
@@ -125,7 +125,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 			Timeout: config.Timeout,
 			Transport: otelhttp.NewTransport(http.DefaultTransport,
 				otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
-					return "alchemy.http"
+					return "ethrpc.http"
 				}),
 			),
 		}
@@ -134,7 +134,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 	return &Client{
 		config:     config,
 		httpClient: httpClient,
-		logger:     config.Logger.With("component", "alchemy-client"),
+		logger:     config.Logger.With("component", "ethrpc-client"),
 		telemetry:  config.Telemetry,
 	}, nil
 }
@@ -745,7 +745,7 @@ func (c *Client) GetTracesBatch(ctx context.Context, blockNums []int64) (map[int
 	return traces, errs
 }
 
-// callBatch makes a batched HTTP JSON-RPC call to the Alchemy API with retry.
+// callBatch makes a batched HTTP JSON-RPC call with retry.
 func (c *Client) callBatch(ctx context.Context, requests []jsonRPCRequest) ([]jsonRPCResponse, error) {
 	// Start span if telemetry is enabled
 	if c.telemetry != nil {
@@ -810,7 +810,7 @@ func (c *Client) callBatch(ctx context.Context, requests []jsonRPCRequest) ([]js
 	return rpcResponses, nil
 }
 
-// call makes an HTTP JSON-RPC call to the Alchemy API with retry.
+// call makes an HTTP JSON-RPC call with retry.
 func (c *Client) call(ctx context.Context, req jsonRPCRequest) (*jsonRPCResponse, error) {
 	// Start span if telemetry is enabled
 	if c.telemetry != nil {

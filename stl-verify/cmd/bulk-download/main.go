@@ -31,7 +31,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/ethrpc"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -345,7 +345,7 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	return nil
 }
 
-func createRPCClient(cfg Config, logger *slog.Logger) (*alchemy.Client, error) {
+func createRPCClient(cfg Config, logger *slog.Logger) (*ethrpc.Client, error) {
 	totalRPCWorkers := cfg.BlockReceiptWorkers + cfg.TraceWorkers
 
 	httpClient := &http.Client{
@@ -365,7 +365,7 @@ func createRPCClient(cfg Config, logger *slog.Logger) (*alchemy.Client, error) {
 		},
 	}
 
-	client, err := alchemy.NewClient(alchemy.ClientConfig{
+	client, err := ethrpc.NewClient(ethrpc.ClientConfig{
 		HTTPURL:        cfg.RPCURL,
 		Timeout:        DefaultTimeout,
 		MaxRetries:     DefaultMaxRetries,
@@ -531,7 +531,7 @@ func (p *pipeline) startTraceCollector(ctx context.Context, cfg Config, cache *P
 	}()
 }
 
-func (p *pipeline) startBlockReceiptWorkers(ctx context.Context, client *alchemy.Client, cache *PartitionCache, cfg Config, stats *Stats, logger *slog.Logger) {
+func (p *pipeline) startBlockReceiptWorkers(ctx context.Context, client *ethrpc.Client, cache *PartitionCache, cfg Config, stats *Stats, logger *slog.Logger) {
 	for i := 0; i < p.blockWorkers; i++ {
 		p.blockWg.Add(1)
 		go func(workerID int) {
@@ -541,7 +541,7 @@ func (p *pipeline) startBlockReceiptWorkers(ctx context.Context, client *alchemy
 	}
 }
 
-func (p *pipeline) startTraceWorkers(ctx context.Context, client *alchemy.Client, cache *PartitionCache, bucket string, stats *Stats, logger *slog.Logger) {
+func (p *pipeline) startTraceWorkers(ctx context.Context, client *ethrpc.Client, cache *PartitionCache, bucket string, stats *Stats, logger *slog.Logger) {
 	for i := 0; i < p.traceWorkers; i++ {
 		p.traceWg.Add(1)
 		go func(workerID int) {
@@ -579,7 +579,7 @@ func (p *pipeline) waitForCompletion() {
 func blockReceiptWorker(
 	ctx context.Context,
 	workerID int,
-	client *alchemy.Client,
+	client *ethrpc.Client,
 	partitionCache *PartitionCache,
 	cfg Config,
 	workCh <-chan int64,
@@ -789,7 +789,7 @@ func traceCollector(
 func traceWorker(
 	ctx context.Context,
 	workerID int,
-	client *alchemy.Client,
+	client *ethrpc.Client,
 	partitionCache *PartitionCache,
 	bucket string,
 	workCh <-chan []int64,

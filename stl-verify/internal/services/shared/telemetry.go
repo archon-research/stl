@@ -19,7 +19,7 @@ const (
 )
 
 // ServiceTelemetry provides OpenTelemetry metrics for service-level domain events.
-// This is separate from adapter-level telemetry (e.g., alchemy.Telemetry) which
+// This is separate from adapter-level telemetry (e.g., ethrpc.Telemetry) which
 // tracks infrastructure concerns like HTTP requests and WebSocket connections.
 type ServiceTelemetry struct {
 	meter metric.Meter

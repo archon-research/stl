@@ -58,7 +58,7 @@ stl-verify/
 │   │   └── outbound/       # Infrastructure interfaces
 │   ├── adapters/
 │   │   ├── inbound/        # HTTP, gRPC, CLI handlers
-│   │   └── outbound/       # Implementations: alchemy, postgres, redis, sns, sqs, s3, telemetry
+│   │   └── outbound/       # Implementations: ethrpc, postgres, redis, sns, sqs, s3, telemetry
 │   └── services/           # Use case implementations (live_data, backfill_gaps, raw_data_backup)
 └── db/migrations/          # SQL migrations (auto-applied)
 ```
@@ -67,14 +67,14 @@ stl-verify/
 
 ### Core Services
 
-1. **Live Data Service** - WebSocket subscription to Alchemy for new blocks, handles chain reorgs, publishes to SNS FIFO
+1. **Live Data Service** - WebSocket subscription to Ethereum node for new blocks, handles chain reorgs, publishes to SNS FIFO
 2. **Backfill Service** - Fills gaps in block data via HTTP polling
 3. **Raw Data Backup** - Backs up block data to S3
 
 ### Data Flow
 
 ```
-Alchemy WebSocket → Live Data Service → PostgreSQL (TimescaleDB) + Redis (cache) + SNS FIFO → SQS consumers
+Ethereum WebSocket → Live Data Service → PostgreSQL (TimescaleDB) + Redis (cache) + SNS FIFO → SQS consumers
 ```
 
 ### Cache Key Convention
@@ -98,7 +98,7 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
     You can move the main.go code into a function and only call that from main() so that you can test it properly.
     For main.go files, only create integration tests.
     For services, create both unit and integration tests.
-    Integration tests are only allowed to mock our data sources that we cannot control, e.g. Alchemy
+    Integration tests are only allowed to mock our data sources that we cannot control, e.g. Ethereum RPC providers
 - **Binaries/Building**: When building binaries using `go build`, output to `stl/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.
 - **Function composition**: Compose large functions from smaller functions. Large functions should read like prose, with each step delegated to a well-named helper function.
@@ -117,4 +117,4 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 - Go 1.25+
 - Docker for local development (PostgreSQL, Redis, Jaeger, LocalStack)
 - AWS for production (ECS Fargate ARM64, RDS Aurora, ElastiCache, SNS/SQS, S3)
-- Alchemy API key required for Ethereum mainnet access
+- Ethereum RPC API key required for mainnet access (Alchemy, Infura, or compatible provider)

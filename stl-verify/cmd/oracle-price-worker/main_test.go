@@ -17,14 +17,14 @@ func TestParseConfig(t *testing.T) {
 			name: "all flags provided via CLI",
 			args: []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue", "-db", "postgres://localhost:5432/testdb"},
 			envVars: map[string]string{
-				"ALCHEMY_API_KEY":  "test-key",
-				"ALCHEMY_HTTP_URL": "https://eth.example.com",
+				"ETH_RPC_API_KEY":  "test-key",
+				"ETH_RPC_HTTP_URL": "https://eth.example.com",
 			},
 			wantCfg: cliConfig{
-				queueURL:           "https://sqs.us-east-1.amazonaws.com/123/my-queue",
-				dbURL:              "postgres://localhost:5432/testdb",
-				alchemyHTTPBaseURL: "https://eth.example.com",
-				alchemyURL:         "https://eth.example.com/test-key",
+				queueURL:       "https://sqs.us-east-1.amazonaws.com/123/my-queue",
+				dbURL:          "postgres://localhost:5432/testdb",
+				rpcHTTPBaseURL: "https://eth.example.com",
+				rpcURL:         "https://eth.example.com/test-key",
 			},
 		},
 		{
@@ -32,39 +32,41 @@ func TestParseConfig(t *testing.T) {
 			args: []string{"-db", "postgres://localhost:5432/testdb"},
 			envVars: map[string]string{
 				"AWS_SQS_QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/123/env-queue",
-				"ALCHEMY_API_KEY":   "test-key",
+				"ETH_RPC_API_KEY":   "test-key",
+				"ETH_RPC_HTTP_URL":  "https://eth.example.com",
 			},
 			wantCfg: cliConfig{
-				queueURL:           "https://sqs.us-east-1.amazonaws.com/123/env-queue",
-				dbURL:              "postgres://localhost:5432/testdb",
-				alchemyHTTPBaseURL: "https://eth-mainnet.g.alchemy.com/v2",
-				alchemyURL:         "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				queueURL:       "https://sqs.us-east-1.amazonaws.com/123/env-queue",
+				dbURL:          "postgres://localhost:5432/testdb",
+				rpcHTTPBaseURL: "https://eth.example.com",
+				rpcURL:         "https://eth.example.com/test-key",
 			},
 		},
 		{
 			name: "db from env var",
 			args: []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue"},
 			envVars: map[string]string{
-				"DATABASE_URL":    "postgres://localhost:5432/envdb",
-				"ALCHEMY_API_KEY": "test-key",
+				"DATABASE_URL":     "postgres://localhost:5432/envdb",
+				"ETH_RPC_API_KEY":  "test-key",
+				"ETH_RPC_HTTP_URL": "https://eth.example.com",
 			},
 			wantCfg: cliConfig{
-				queueURL:           "https://sqs.us-east-1.amazonaws.com/123/my-queue",
-				dbURL:              "postgres://localhost:5432/envdb",
-				alchemyHTTPBaseURL: "https://eth-mainnet.g.alchemy.com/v2",
-				alchemyURL:         "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				queueURL:       "https://sqs.us-east-1.amazonaws.com/123/my-queue",
+				dbURL:          "postgres://localhost:5432/envdb",
+				rpcHTTPBaseURL: "https://eth.example.com",
+				rpcURL:         "https://eth.example.com/test-key",
 			},
 		},
 		{
 			name:      "missing queue URL - no flag no env",
 			args:      []string{"-db", "postgres://localhost:5432/testdb"},
-			envVars:   map[string]string{"ALCHEMY_API_KEY": "test-key"},
+			envVars:   map[string]string{"ETH_RPC_API_KEY": "test-key"},
 			wantError: "queue URL not provided",
 		},
 		{
 			name:      "missing database URL - no flag no env",
 			args:      []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue"},
-			envVars:   map[string]string{"ALCHEMY_API_KEY": "test-key"},
+			envVars:   map[string]string{"ETH_RPC_API_KEY": "test-key"},
 			wantError: "database URL not provided",
 		},
 		{
@@ -78,13 +80,14 @@ func TestParseConfig(t *testing.T) {
 			envVars: map[string]string{
 				"AWS_SQS_QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/123/env-queue",
 				"DATABASE_URL":      "postgres://localhost/env-db",
-				"ALCHEMY_API_KEY":   "test-key",
+				"ETH_RPC_API_KEY":   "test-key",
+				"ETH_RPC_HTTP_URL":  "https://eth.example.com",
 			},
 			wantCfg: cliConfig{
-				queueURL:           "https://sqs.us-east-1.amazonaws.com/123/cli-queue",
-				dbURL:              "postgres://localhost/cli-db",
-				alchemyHTTPBaseURL: "https://eth-mainnet.g.alchemy.com/v2",
-				alchemyURL:         "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				queueURL:       "https://sqs.us-east-1.amazonaws.com/123/cli-queue",
+				dbURL:          "postgres://localhost/cli-db",
+				rpcHTTPBaseURL: "https://eth.example.com",
+				rpcURL:         "https://eth.example.com/test-key",
 			},
 		},
 		{
@@ -93,28 +96,40 @@ func TestParseConfig(t *testing.T) {
 			envVars: map[string]string{
 				"AWS_SQS_QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/123/env-queue",
 				"DATABASE_URL":      "postgres://localhost/env-db",
-				"ALCHEMY_API_KEY":   "test-key",
+				"ETH_RPC_API_KEY":   "test-key",
+				"ETH_RPC_HTTP_URL":  "https://eth.example.com",
 			},
 			wantCfg: cliConfig{
-				queueURL:           "https://sqs.us-east-1.amazonaws.com/123/env-queue",
-				dbURL:              "postgres://localhost/env-db",
-				alchemyHTTPBaseURL: "https://eth-mainnet.g.alchemy.com/v2",
-				alchemyURL:         "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				queueURL:       "https://sqs.us-east-1.amazonaws.com/123/env-queue",
+				dbURL:          "postgres://localhost/env-db",
+				rpcHTTPBaseURL: "https://eth.example.com",
+				rpcURL:         "https://eth.example.com/test-key",
 			},
 		},
 		{
-			name: "missing ALCHEMY_API_KEY",
+			name: "missing ETH_RPC_API_KEY",
 			args: []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue", "-db", "postgres://localhost/db"},
-			// No ALCHEMY_API_KEY set
-			wantError: "ALCHEMY_API_KEY",
+			// No ETH_RPC_API_KEY set
+			wantError: "ETH_RPC_API_KEY",
+		},
+		{
+			name: "missing ETH_RPC_HTTP_URL",
+			args: []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue", "-db", "postgres://localhost/db"},
+			envVars: map[string]string{
+				"ETH_RPC_API_KEY": "test-key",
+			},
+			wantError: "ETH_RPC_HTTP_URL",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Ensure ALCHEMY_API_KEY is empty unless provided in envVars.
-			if _, has := tt.envVars["ALCHEMY_API_KEY"]; !has {
-				t.Setenv("ALCHEMY_API_KEY", "")
+			// Ensure RPC env vars are empty unless provided in envVars.
+			if _, has := tt.envVars["ETH_RPC_API_KEY"]; !has {
+				t.Setenv("ETH_RPC_API_KEY", "")
+			}
+			if _, has := tt.envVars["ETH_RPC_HTTP_URL"]; !has {
+				t.Setenv("ETH_RPC_HTTP_URL", "")
 			}
 
 			for k, v := range tt.envVars {
@@ -143,11 +158,11 @@ func TestParseConfig(t *testing.T) {
 			if cfg.dbURL != tt.wantCfg.dbURL {
 				t.Errorf("dbURL: expected %q, got %q", tt.wantCfg.dbURL, cfg.dbURL)
 			}
-			if cfg.alchemyURL != tt.wantCfg.alchemyURL {
-				t.Errorf("alchemyURL: expected %q, got %q", tt.wantCfg.alchemyURL, cfg.alchemyURL)
+			if cfg.rpcURL != tt.wantCfg.rpcURL {
+				t.Errorf("rpcURL: expected %q, got %q", tt.wantCfg.rpcURL, cfg.rpcURL)
 			}
-			if cfg.alchemyHTTPBaseURL != tt.wantCfg.alchemyHTTPBaseURL {
-				t.Errorf("alchemyHTTPBaseURL: expected %q, got %q", tt.wantCfg.alchemyHTTPBaseURL, cfg.alchemyHTTPBaseURL)
+			if cfg.rpcHTTPBaseURL != tt.wantCfg.rpcHTTPBaseURL {
+				t.Errorf("rpcHTTPBaseURL: expected %q, got %q", tt.wantCfg.rpcHTTPBaseURL, cfg.rpcHTTPBaseURL)
 			}
 		})
 	}

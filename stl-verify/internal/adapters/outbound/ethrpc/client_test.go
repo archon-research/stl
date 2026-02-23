@@ -1,4 +1,4 @@
-package alchemy
+package ethrpc
 
 import (
 	"context"
@@ -33,7 +33,7 @@ func testClientWithBlobs(t *testing.T, url string) *Client {
 // --- Test: NewClient ---
 
 func TestNewClient_CreatesClientWithConfig(t *testing.T) {
-	url := "https://eth-mainnet.g.alchemy.com/v2/demo"
+	url := "https://eth.example.com/v2/demo"
 	client, err := NewClient(ClientConfig{HTTPURL: url})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

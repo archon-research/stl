@@ -80,9 +80,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	alchemyAPIKey := requireEnv("ALCHEMY_API_KEY", logger)
-	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
-	fullAlchemyURL := fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
+	rpcAPIKey := requireEnv("ETH_RPC_API_KEY", logger)
+	rpcHTTPURL := env.Get("ETH_RPC_HTTP_URL", "")
+	if rpcHTTPURL == "" {
+		logger.Error("ETH_RPC_HTTP_URL environment variable is required")
+		os.Exit(1)
+	}
+	rpcURL := fmt.Sprintf("%s/%s", rpcHTTPURL, rpcAPIKey)
 
 	if *redisAddr == "" {
 		*redisAddr = env.Get("REDIS_ADDR", "")
@@ -165,7 +169,7 @@ func main() {
 	}()
 	logger.Info("Redis connected", "addr", *redisAddr)
 
-	ethClient, err := ethclient.Dial(fullAlchemyURL)
+	ethClient, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		logger.Error("failed to connect to Ethereum node", "error", err)
 		os.Exit(1)

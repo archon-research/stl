@@ -23,7 +23,7 @@ type BlockHeader struct {
 }
 
 // BlockSubscriber defines the interface for subscribing to new blockchain blocks.
-// This port is designed for WebSocket-based subscriptions like Alchemy's eth_newHeads.
+// This port is designed for WebSocket-based subscriptions using eth_subscribe("newHeads").
 type BlockSubscriber interface {
 	// Subscribe starts listening for new block headers.
 	// The returned channel emits BlockHeader events as new blocks are mined.
