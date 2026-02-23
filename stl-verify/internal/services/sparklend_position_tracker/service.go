@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/big"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,6 +102,22 @@ func ConfigDefaults() Config {
 		PollInterval: 100 * time.Millisecond,
 		Logger:       slog.Default(),
 	}
+}
+
+func normalizeProtocolType(protocolType string) string {
+	if strings.TrimSpace(protocolType) == "" {
+		return "lending"
+	}
+
+	return protocolType
+}
+
+func normalizeTokenSymbol(symbol string) string {
+	if strings.TrimSpace(symbol) == "" {
+		return "UNKNOWN"
+	}
+
+	return symbol
 }
 
 type Service struct {
@@ -405,7 +422,7 @@ func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEven
 			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
 		}
 
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
@@ -491,7 +508,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		// Get or create token
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reserve, tokenMetadata.Symbol, tokenMetadata.Decimals, blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reserve, normalizeTokenSymbol(tokenMetadata.Symbol), tokenMetadata.Decimals, blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get token: %w", err)
 		}
@@ -611,12 +628,12 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
 		}
 
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
 
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, metadata.Symbol, metadata.Decimals, blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, normalizeTokenSymbol(metadata.Symbol), metadata.Decimals, blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get token: %w", err)
 		}
@@ -691,13 +708,13 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
 		}
 
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
 
 		if eventData.EventType == EventBorrow || eventData.EventType == EventRepay {
-			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, tokenMetadata.Symbol, tokenMetadata.Decimals, blockNumber)
+			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, normalizeTokenSymbol(tokenMetadata.Symbol), tokenMetadata.Decimals, blockNumber)
 			if err != nil {
 				return fmt.Errorf("failed to get token: %w", err)
 			}
@@ -709,7 +726,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 
 		records := make([]postgres.CollateralRecord, 0, len(collaterals))
 		for _, col := range collaterals {
-			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, col.Symbol, col.Decimals, blockNumber)
+			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, normalizeTokenSymbol(col.Symbol), col.Decimals, blockNumber)
 			if err != nil {
 				s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err, "tx", eventData.TxHash)
 				continue
@@ -751,7 +768,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 		return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
 	}
 
-	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
+	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
 	if err != nil {
 		return fmt.Errorf("failed to get protocol: %w", err)
 	}
@@ -765,7 +782,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 
 	records := make([]postgres.CollateralRecord, 0, len(collaterals))
 	for _, col := range collaterals {
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, col.Symbol, col.Decimals, blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, normalizeTokenSymbol(col.Symbol), col.Decimals, blockNumber)
 		if err != nil {
 			s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err, "tx", txHashHex)
 			continue

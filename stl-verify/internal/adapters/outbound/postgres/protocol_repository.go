@@ -61,7 +61,7 @@ func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx,
 		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (chain_id, address) DO NOTHING
 		 RETURNING id`,
-		chainID, addressBytes, name, "lending", createdAtBlock).Scan(&protocolID)
+		chainID, addressBytes, name, protocolType, createdAtBlock).Scan(&protocolID)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Another worker won the race — fetch the row it inserted.

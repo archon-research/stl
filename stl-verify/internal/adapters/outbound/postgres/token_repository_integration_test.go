@@ -100,7 +100,7 @@ func TestGetOrCreateToken_IdempotentReturnsSameID(t *testing.T) {
 	}
 }
 
-func TestGetOrCreateToken_EmptySymbolDefaultsToUnknown(t *testing.T) {
+func TestGetOrCreateToken_EmptySymbolIsPersistedAsProvided(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -133,8 +133,8 @@ func TestGetOrCreateToken_EmptySymbolDefaultsToUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	if symbol != "UNKNOWN" {
-		t.Errorf("symbol = %q, want UNKNOWN", symbol)
+	if symbol != "" {
+		t.Errorf("symbol = %q, want empty string", symbol)
 	}
 }
 

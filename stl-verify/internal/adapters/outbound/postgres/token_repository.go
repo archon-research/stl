@@ -51,10 +51,6 @@ func NewTokenRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) 
 // GetOrCreateToken retrieves a token by address or creates it if it doesn't exist.
 // This method participates in an external transaction.
 func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
-	if symbol == "" {
-		symbol = "UNKNOWN"
-	}
-
 	var tokenID int64
 
 	// Upsert with DO NOTHING so concurrent workers racing to insert the same token
