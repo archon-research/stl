@@ -365,9 +365,10 @@ docker-clean:
 # Force new deployment of watcher service (pulls latest image)
 # Usage: make ecs-deploy-watcher ENV=sentineldev|sentinelstaging|sentinelprod
 ecs-deploy-watcher:
-	@echo "==> Forcing new deployment of watcher service..."
-	aws ecs update-service --cluster stl-$(ENV)-cluster --service stl-$(ENV)-watcher --force-new-deployment --region $(AWS_REGION)
-	@echo "==> Deployment initiated. Monitor with: aws ecs describe-services --cluster stl-$(ENV)-cluster --services stl-$(ENV)-watcher --region $(AWS_REGION)"
+	@echo "==> Forcing new deployment of watcher service on all chains..."
+	aws ecs update-service --cluster stl-$(ENV)-cluster --service stl-$(ENV)-ethereum-watcher --force-new-deployment --region $(AWS_REGION)
+	aws ecs update-service --cluster stl-$(ENV)-cluster --service stl-$(ENV)-avalanche-watcher --force-new-deployment --region $(AWS_REGION)
+	@echo "==> Deployment initiated for ethereum and avalanche clusters."
 
 # Named aliases for consistency with other service targets
 docker-build-watcher:
