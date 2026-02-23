@@ -51,31 +51,37 @@ func NewTokenRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) 
 // GetOrCreateToken retrieves a token by address or creates it if it doesn't exist.
 // This method participates in an external transaction.
 func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
-	var tokenID int64
-
-	err := tx.QueryRow(ctx,
-		`SELECT id FROM token WHERE chain_id = $1 AND address = $2`,
-		chainID, address.Bytes()).Scan(&tokenID)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		if symbol == "" {
-			symbol = "UNKNOWN"
-		}
-		r.logger.Info("auto-creating token", "address", address.Hex(), "symbol", symbol, "decimals", decimals)
-		err = tx.QueryRow(ctx,
-			`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, '{}', NOW())
-			 RETURNING id`,
-			chainID, address.Bytes(), symbol, decimals, createdAtBlock).Scan(&tokenID)
-		if err != nil {
-			return 0, fmt.Errorf("failed to create token: %w", err)
-		}
-		r.logger.Debug("token created", "address", address.Hex(), "id", tokenID, "symbol", symbol, "decimals", decimals)
-		return tokenID, nil
-	} else if err != nil {
-		return 0, fmt.Errorf("failed to get token: %w", err)
+	if symbol == "" {
+		symbol = "UNKNOWN"
 	}
 
+	var tokenID int64
+
+	// Upsert with DO NOTHING so concurrent workers racing to insert the same token
+	// don't get a unique constraint violation. RETURNING id is only populated for the
+	// winning INSERT; if this worker lost the race, we fall through to a SELECT.
+	err := tx.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, '{}', NOW())
+		 ON CONFLICT (chain_id, address) DO NOTHING
+		 RETURNING id`,
+		chainID, address.Bytes(), symbol, decimals, createdAtBlock).Scan(&tokenID)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Another worker won the race — fetch the row it inserted.
+		err = tx.QueryRow(ctx,
+			`SELECT id FROM token WHERE chain_id = $1 AND address = $2`,
+			chainID, address.Bytes()).Scan(&tokenID)
+		if err != nil {
+			return 0, fmt.Errorf("failed to get token after conflict: %w", err)
+		}
+		return tokenID, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to create token: %w", err)
+	}
+
+	r.logger.Debug("token created", "address", address.Hex(), "id", tokenID, "symbol", symbol, "decimals", decimals)
 	return tokenID, nil
 }
 

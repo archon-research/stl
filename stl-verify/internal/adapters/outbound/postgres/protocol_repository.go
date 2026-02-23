@@ -53,25 +53,31 @@ func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx,
 	var protocolID int64
 	addressBytes := address.Bytes()
 
+	// Upsert with DO NOTHING so concurrent workers racing to insert the same protocol
+	// don't get a unique constraint violation. RETURNING id is only populated for the
+	// winning INSERT; if this worker lost the race, we fall through to a SELECT.
 	err := tx.QueryRow(ctx,
-		`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2`,
-		chainID, addressBytes).Scan(&protocolID)
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (chain_id, address) DO NOTHING
+		 RETURNING id`,
+		chainID, addressBytes, name, "lending", createdAtBlock).Scan(&protocolID)
 
 	if errors.Is(err, pgx.ErrNoRows) {
-		r.logger.Info("auto-creating protocol", "address", address.Hex(), "name", name)
+		// Another worker won the race — fetch the row it inserted.
 		err = tx.QueryRow(ctx,
-			`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING id`,
-			chainID, addressBytes, name, "lending", createdAtBlock).Scan(&protocolID)
+			`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2`,
+			chainID, addressBytes).Scan(&protocolID)
 		if err != nil {
-			return 0, fmt.Errorf("failed to create protocol: %w", err)
+			return 0, fmt.Errorf("failed to get protocol after conflict: %w", err)
 		}
 		return protocolID, nil
-	} else if err != nil {
-		return 0, fmt.Errorf("failed to get protocol: %w", err)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to create protocol: %w", err)
 	}
 
+	r.logger.Info("auto-created protocol", "address", address.Hex(), "name", name, "id", protocolID)
 	return protocolID, nil
 }
 
