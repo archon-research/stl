@@ -111,7 +111,7 @@ func TestGetOrCreateUser_FirstSeenBlockUsesLeast(t *testing.T) {
 	}
 
 	addr := common.HexToAddress("0x3333333333333333333333333333333333333333")
-	
+
 	// First call: block 500 (a later block, as if a later block was processed first).
 	tx1, err := pool.Begin(ctx)
 	if err != nil {
