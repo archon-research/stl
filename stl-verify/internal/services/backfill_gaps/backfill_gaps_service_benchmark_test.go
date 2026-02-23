@@ -235,10 +235,11 @@ func newResettableBlockStateRepository(blockCount int64, gapBlocks []int64) *res
 			continue
 		}
 		block := outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		}
 		initialBlocks = append(initialBlocks, block)
 		if _, err := repo.SaveBlock(ctx, block); err != nil {

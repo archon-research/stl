@@ -485,20 +485,22 @@ func TestMultiChain_ReorgIsolation(t *testing.T) {
 	// Save blocks 100-102 on both chains
 	for i := int64(100); i <= 102; i++ {
 		_, err := ethRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x1_reorg_%d", i),
-			ParentHash: fmt.Sprintf("0x1_reorg_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x1_reorg_%d", i),
+			ParentHash:     fmt.Sprintf("0x1_reorg_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save eth block %d: %v", i, err)
 		}
 
 		_, err = avaxRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x2_reorg_%d", i),
-			ParentHash: fmt.Sprintf("0x2_reorg_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x2_reorg_%d", i),
+			ParentHash:     fmt.Sprintf("0x2_reorg_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save avalanche block %d: %v", i, err)
@@ -514,10 +516,11 @@ func TestMultiChain_ReorgIsolation(t *testing.T) {
 		Depth:       1,
 	}
 	newBlock := outbound.BlockState{
-		Number:     101,
-		Hash:       "0x1_reorg_101_new",
-		ParentHash: "0x1_reorg_100",
-		ReceivedAt: time.Now().Unix(),
+		Number:         101,
+		Hash:           "0x1_reorg_101_new",
+		ParentHash:     "0x1_reorg_100",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}
 
 	_, err := ethRepo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock)

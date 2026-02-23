@@ -218,10 +218,11 @@ func TestLargeDataset_QueryPerformance(t *testing.T) {
 		nextBlock := int64(totalRows + 1)
 		runQueryBenchmark(t, "SaveBlock(append)", 100, func() error {
 			_, err := repo.SaveBlock(ctx, outbound.BlockState{
-				Number:     nextBlock,
-				Hash:       fmt.Sprintf("0xnew_%d_%d", nextBlock, time.Now().UnixNano()),
-				ParentHash: fmt.Sprintf("0x%064d", nextBlock-1),
-				ReceivedAt: time.Now().Unix(),
+				Number:         nextBlock,
+				Hash:           fmt.Sprintf("0xnew_%d_%d", nextBlock, time.Now().UnixNano()),
+				ParentHash:     fmt.Sprintf("0x%064d", nextBlock-1),
+				ReceivedAt:     time.Now().Unix(),
+				BlockTimestamp: time.Now().Unix(),
 			})
 			nextBlock++
 			return err
@@ -234,10 +235,11 @@ func TestLargeDataset_QueryPerformance(t *testing.T) {
 		for i := 0; i < 100; i++ {
 			blockNum := totalRows + 1000 + int64(i)
 			repo.SaveBlock(ctx, outbound.BlockState{
-				Number:     blockNum,
-				Hash:       fmt.Sprintf("0xorphan_%d", blockNum),
-				ParentHash: fmt.Sprintf("0x%064d", blockNum-1),
-				ReceivedAt: time.Now().Unix(),
+				Number:         blockNum,
+				Hash:           fmt.Sprintf("0xorphan_%d", blockNum),
+				ParentHash:     fmt.Sprintf("0x%064d", blockNum-1),
+				ReceivedAt:     time.Now().Unix(),
+				BlockTimestamp: time.Now().Unix(),
 			})
 		}
 
