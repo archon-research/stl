@@ -26,7 +26,6 @@ import (
 
 // Compile-time check that Client implements outbound.BlockchainClient
 var _ outbound.BlockchainClient = (*Client)(nil)
-var _ outbound.BlockReceiptsReader = (*Client)(nil)
 
 // ClientConfig holds configuration for the HTTP RPC client.
 type ClientConfig struct {

@@ -2,7 +2,6 @@ package sparklend_backfill_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -87,26 +86,13 @@ func (m *mockProcessor) calledWith() []processCall {
 	return out
 }
 
-// mockBlockReceiptsReader is a configurable mock for outbound.BlockReceiptsReader.
-type mockBlockReceiptsReader struct {
-	getFn func(ctx context.Context, blockNum int64) (json.RawMessage, error)
-}
-
-func (m *mockBlockReceiptsReader) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-	if m.getFn != nil {
-		return m.getFn(ctx, blockNum)
-	}
-	return json.RawMessage("[]"), nil
-}
-
-func newTestService(t *testing.T, s3 outbound.S3Reader, proc sparklend_backfill.ReceiptProcessor, rpc outbound.BlockReceiptsReader) *sparklend_backfill.Service {
+func newTestService(t *testing.T, s3 outbound.S3Reader, proc sparklend_backfill.ReceiptProcessor) *sparklend_backfill.Service {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc, err := sparklend_backfill.NewService(
 		sparklend_backfill.Config{Concurrency: 2, Logger: logger},
 		s3,
 		proc,
-		rpc,
 		"test-bucket",
 		1,
 	)
@@ -288,7 +274,7 @@ func TestScanVersions(t *testing.T) {
 					return rawFn(ctx, bucket, prefix)
 				},
 			}
-			svc := newTestService(t, s3, &mockProcessor{}, &mockBlockReceiptsReader{})
+			svc := newTestService(t, s3, &mockProcessor{})
 
 			got, err := svc.ScanVersions(context.Background(), tt.fromBlock, tt.toBlock)
 			if tt.wantErr {
@@ -334,7 +320,6 @@ func TestNewService_Validation(t *testing.T) {
 		config    sparklend_backfill.Config
 		s3Reader  outbound.S3Reader
 		processor sparklend_backfill.ReceiptProcessor
-		rpc       outbound.BlockReceiptsReader
 		bucket    string
 		chainID   int64
 		wantErr   bool
@@ -344,7 +329,6 @@ func TestNewService_Validation(t *testing.T) {
 			config:    sparklend_backfill.Config{Concurrency: 1, Logger: nil},
 			s3Reader:  &mockS3Reader{},
 			processor: &mockProcessor{},
-			rpc:       &mockBlockReceiptsReader{},
 			bucket:    "test-bucket",
 			chainID:   1,
 			wantErr:   true,
@@ -354,7 +338,6 @@ func TestNewService_Validation(t *testing.T) {
 			config:    sparklend_backfill.Config{Concurrency: 1, Logger: logger},
 			s3Reader:  nil,
 			processor: &mockProcessor{},
-			rpc:       &mockBlockReceiptsReader{},
 			bucket:    "test-bucket",
 			chainID:   1,
 			wantErr:   true,
@@ -364,17 +347,6 @@ func TestNewService_Validation(t *testing.T) {
 			config:    sparklend_backfill.Config{Concurrency: 1, Logger: logger},
 			s3Reader:  &mockS3Reader{},
 			processor: nil,
-			rpc:       &mockBlockReceiptsReader{},
-			bucket:    "test-bucket",
-			chainID:   1,
-			wantErr:   true,
-		},
-		{
-			name:      "nil rpcFallback",
-			config:    sparklend_backfill.Config{Concurrency: 1, Logger: logger},
-			s3Reader:  &mockS3Reader{},
-			processor: &mockProcessor{},
-			rpc:       nil,
 			bucket:    "test-bucket",
 			chainID:   1,
 			wantErr:   true,
@@ -384,7 +356,6 @@ func TestNewService_Validation(t *testing.T) {
 			config:    sparklend_backfill.Config{Concurrency: 1, Logger: logger},
 			s3Reader:  &mockS3Reader{},
 			processor: &mockProcessor{},
-			rpc:       &mockBlockReceiptsReader{},
 			bucket:    "",
 			chainID:   1,
 			wantErr:   true,
@@ -394,7 +365,6 @@ func TestNewService_Validation(t *testing.T) {
 			config:    sparklend_backfill.Config{Concurrency: 0, Logger: logger},
 			s3Reader:  &mockS3Reader{},
 			processor: &mockProcessor{},
-			rpc:       &mockBlockReceiptsReader{},
 			bucket:    "test-bucket",
 			chainID:   1,
 			wantErr:   false,
@@ -403,7 +373,7 @@ func TestNewService_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc, err := sparklend_backfill.NewService(tt.config, tt.s3Reader, tt.processor, tt.rpc, tt.bucket, tt.chainID)
+			svc, err := sparklend_backfill.NewService(tt.config, tt.s3Reader, tt.processor, tt.bucket, tt.chainID)
 			if tt.wantErr && err == nil {
 				t.Errorf("expected error, got nil")
 			}
@@ -425,7 +395,6 @@ func TestRun(t *testing.T) {
 		cancelCtx  bool
 		buildS3    func() *mockS3Reader
 		buildProc  func() *mockProcessor
-		buildRPC   func() *mockBlockReceiptsReader
 		wantErr    bool
 		checkErr   func(t *testing.T, err error)
 		checkCalls func(t *testing.T, calls []processCall)
@@ -666,39 +635,23 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:      "blocks absent from S3 are fetched via RPC fallback",
+			name:      "block absent from S3 causes Run to return error",
 			fromBlock: 100,
 			toBlock:   102,
 			buildS3: func() *mockS3Reader {
 				return &mockS3Reader{
 					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
-						// Only block 101 exists in S3; blocks 100 and 102 fall back to RPC
+						// Only block 101 exists in S3; blocks 100 and 102 are missing
 						return []string{"0-999/101_0_receipts.json.gz"}, nil
 					},
 				}
 			},
 			buildProc: func() *mockProcessor { return &mockProcessor{} },
-			buildRPC: func() *mockBlockReceiptsReader {
-				return &mockBlockReceiptsReader{
-					getFn: func(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-						return json.RawMessage("[]"), nil
-					},
-				}
-			},
-			wantErr: false,
-			checkCalls: func(t *testing.T, calls []processCall) {
+			wantErr:   true,
+			checkErr: func(t *testing.T, err error) {
 				t.Helper()
-				if len(calls) != 3 {
-					t.Fatalf("expected 3 processor calls (101 from S3, 100 and 102 via RPC), got %d: %v", len(calls), calls)
-				}
-				seen := make(map[int64]bool)
-				for _, c := range calls {
-					seen[c.blockNumber] = true
-				}
-				for blk := int64(100); blk <= 102; blk++ {
-					if !seen[blk] {
-						t.Errorf("block %d was not processed", blk)
-					}
+				if err == nil || !strings.Contains(err.Error(), "not found in S3") {
+					t.Errorf("expected 'not found in S3' error, got: %v", err)
 				}
 			},
 		},
@@ -723,7 +676,7 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:      "RPC fallback: block absent from S3 is fetched via RPC with version 0",
+			name:      "single block absent from S3 returns error",
 			fromBlock: 100,
 			toBlock:   100,
 			buildS3: func() *mockS3Reader {
@@ -735,91 +688,36 @@ func TestRun(t *testing.T) {
 				}
 			},
 			buildProc: func() *mockProcessor { return &mockProcessor{} },
-			buildRPC: func() *mockBlockReceiptsReader {
-				return &mockBlockReceiptsReader{
-					getFn: func(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-						if blockNum == 100 {
-							return json.RawMessage("[]"), nil
-						}
-						return nil, fmt.Errorf("unexpected block %d", blockNum)
-					},
-				}
-			},
-			wantErr: false,
-			checkCalls: func(t *testing.T, calls []processCall) {
+			wantErr:   true,
+			checkErr: func(t *testing.T, err error) {
 				t.Helper()
-				if len(calls) != 1 {
-					t.Fatalf("expected 1 processor call, got %d", len(calls))
-				}
-				if calls[0].blockNumber != 100 {
-					t.Errorf("expected block 100, got %d", calls[0].blockNumber)
-				}
-				if calls[0].version != 0 {
-					t.Errorf("expected version 0 for RPC fallback, got %d", calls[0].version)
+				if err == nil || !strings.Contains(err.Error(), "block 100 not found in S3") {
+					t.Errorf("expected 'block 100 not found in S3' error, got: %v", err)
 				}
 			},
 		},
 		{
-			name:      "RPC fallback: error fetching from RPC causes Run to return error",
+			name:      "S3 block uses S3 version",
 			fromBlock: 100,
 			toBlock:   100,
 			buildS3: func() *mockS3Reader {
 				return &mockS3Reader{
 					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
-						return nil, nil
-					},
-				}
-			},
-			buildProc: func() *mockProcessor { return &mockProcessor{} },
-			buildRPC: func() *mockBlockReceiptsReader {
-				return &mockBlockReceiptsReader{
-					getFn: func(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-						return nil, fmt.Errorf("rpc unavailable")
-					},
-				}
-			},
-			wantErr: true,
-		},
-		{
-			name:      "RPC fallback: S3 block uses S3 version, not forced to 0",
-			fromBlock: 100,
-			toBlock:   101,
-			buildS3: func() *mockS3Reader {
-				return &mockS3Reader{
-					listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
 						return []string{
 							"0-999/100_2_receipts.json.gz", // block 100 in S3 with version 2
-							// block 101 absent from S3
 						}, nil
 					},
 				}
 			},
 			buildProc: func() *mockProcessor { return &mockProcessor{} },
-			buildRPC: func() *mockBlockReceiptsReader {
-				return &mockBlockReceiptsReader{
-					getFn: func(ctx context.Context, blockNum int64) (json.RawMessage, error) {
-						if blockNum == 101 {
-							return json.RawMessage("[]"), nil
-						}
-						return nil, fmt.Errorf("unexpected RPC call for block %d", blockNum)
-					},
-				}
-			},
-			wantErr: false,
+			wantErr:   false,
 			checkCalls: func(t *testing.T, calls []processCall) {
 				t.Helper()
-				if len(calls) != 2 {
-					t.Fatalf("expected 2 processor calls, got %d", len(calls))
+				if len(calls) != 1 {
+					t.Fatalf("expected 1 processor call, got %d", len(calls))
 				}
-				byBlock := make(map[int64]processCall)
-				for _, c := range calls {
-					byBlock[c.blockNumber] = c
-				}
-				if byBlock[100].version != 2 {
-					t.Errorf("block 100: expected version 2 (from S3), got %d", byBlock[100].version)
-				}
-				if byBlock[101].version != 0 {
-					t.Errorf("block 101: expected version 0 (RPC fallback), got %d", byBlock[101].version)
+				if calls[0].version != 2 {
+					t.Errorf("block 100: expected version 2 (from S3), got %d", calls[0].version)
 				}
 			},
 		},
@@ -829,11 +727,7 @@ func TestRun(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s3 := tt.buildS3()
 			proc := tt.buildProc()
-			rpcMock := &mockBlockReceiptsReader{}
-			if tt.buildRPC != nil {
-				rpcMock = tt.buildRPC()
-			}
-			svc := newTestService(t, s3, proc, rpcMock)
+			svc := newTestService(t, s3, proc)
 
 			ctx := context.Background()
 			if tt.cancelCtx {

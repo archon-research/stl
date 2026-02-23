@@ -33,12 +33,11 @@ type Config struct {
 
 // Service backfills historical SparkLend position data from S3.
 type Service struct {
-	config      Config
-	s3Reader    outbound.S3Reader
-	processor   ReceiptProcessor
-	rpcFallback outbound.BlockReceiptsReader
-	bucket      string
-	chainID     int64
+	config    Config
+	s3Reader  outbound.S3Reader
+	processor ReceiptProcessor
+	bucket    string
+	chainID   int64
 }
 
 // NewService creates a Service configured to backfill SparkLend receipts.
@@ -49,7 +48,6 @@ func NewService(
 	config Config,
 	s3Reader outbound.S3Reader,
 	processor ReceiptProcessor,
-	rpcFallback outbound.BlockReceiptsReader,
 	bucket string,
 	chainID int64,
 ) (*Service, error) {
@@ -62,9 +60,6 @@ func NewService(
 	if processor == nil {
 		return nil, fmt.Errorf("processor is required")
 	}
-	if rpcFallback == nil {
-		return nil, fmt.Errorf("rpcFallback is required")
-	}
 	if bucket == "" {
 		return nil, fmt.Errorf("bucket is required")
 	}
@@ -72,12 +67,11 @@ func NewService(
 		config.Concurrency = 1
 	}
 	return &Service{
-		config:      config,
-		s3Reader:    s3Reader,
-		processor:   processor,
-		rpcFallback: rpcFallback,
-		bucket:      bucket,
-		chainID:     chainID,
+		config:    config,
+		s3Reader:  s3Reader,
+		processor: processor,
+		bucket:    bucket,
+		chainID:   chainID,
 	}, nil
 }
 
@@ -130,7 +124,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	for range s.config.Concurrency {
 		wg.Go(func() {
 			for blockNum := range blockCh {
-				err := s.processBlock(ctx, logger, versionMap, blockNum)
+				err := s.processBlock(ctx, versionMap, blockNum)
 				s.handleResult(logger, errCh, &processed, &failed, blockNum, err)
 			}
 		})
@@ -163,13 +157,12 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	}
 }
 
-func (s *Service) processBlock(ctx context.Context, logger *slog.Logger, versionMap map[int64]int, blockNum int64) error {
-	if version, ok := versionMap[blockNum]; ok {
-		return s.processBlockFromS3(ctx, blockNum, version)
+func (s *Service) processBlock(ctx context.Context, versionMap map[int64]int, blockNum int64) error {
+	version, ok := versionMap[blockNum]
+	if !ok {
+		return fmt.Errorf("block %d not found in S3", blockNum)
 	}
-
-	logger.Info("block not found in S3, fetching from RPC", "block", blockNum)
-	return s.processBlockFromRPC(ctx, blockNum)
+	return s.processBlockFromS3(ctx, blockNum, version)
 }
 
 func (s *Service) handleResult(
@@ -343,26 +336,6 @@ func (s *Service) processBlockFromS3(ctx context.Context, blockNum int64, versio
 
 	if err := s.processor.ProcessReceipts(ctx, s.chainID, blockNum, version, receipts); err != nil {
 		return fmt.Errorf("processing receipts for block %d: %w", blockNum, err)
-	}
-
-	return nil
-}
-
-// processBlockFromRPC fetches receipts for blockNum via the RPC fallback and
-// processes them with version 0 (canonical chain, no reorg).
-func (s *Service) processBlockFromRPC(ctx context.Context, blockNum int64) error {
-	raw, err := s.rpcFallback.GetBlockReceipts(ctx, blockNum)
-	if err != nil {
-		return fmt.Errorf("fetching receipts from RPC for block %d: %w", blockNum, err)
-	}
-
-	var receipts []sparklend_position_tracker.TransactionReceipt
-	if err := json.Unmarshal(raw, &receipts); err != nil {
-		return fmt.Errorf("unmarshalling RPC receipts for block %d: %w", blockNum, err)
-	}
-
-	if err := s.processor.ProcessReceipts(ctx, s.chainID, blockNum, 0, receipts); err != nil {
-		return fmt.Errorf("processing RPC receipts for block %d: %w", blockNum, err)
 	}
 
 	return nil
