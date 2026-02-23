@@ -228,7 +228,8 @@ func retryWithLatestAnswer(
 		}
 
 		logger.Debug("feed recovered via latestAnswer (no round-completeness check)",
-			"feedIndex", i, "tokenID", feeds[i].TokenID, "block", blockNum)
+			"feedIndex", i, "tokenID", feeds[i].TokenID, "block", blockNum,
+			"note", "latestAnswer() returns only int256; unlike latestRoundData(), updatedAt cannot be verified")
 		out[i].Price = ScaleByDecimals(answer, feeds[i].FeedDecimals)
 		out[i].Success = true
 	}
