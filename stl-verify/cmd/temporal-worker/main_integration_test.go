@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/testsuite"
@@ -90,25 +88,33 @@ func seedTestData(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 
 	addressBytes, err := testutil.HexToBytes("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("HexToBytes: %v", err)
+	}
 
 	_, err = pool.Exec(ctx, `
 		INSERT INTO token (id, chain_id, address, symbol, decimals, updated_at)
 		VALUES ($1, $2, $3, $4, 18, NOW())
 		ON CONFLICT (id) DO NOTHING
 	`, 1, 1, addressBytes, "WETH")
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("inserting token: %v", err)
+	}
 
 	var sourceID int64
 	err = pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID)
-	require.NoError(t, err, "coingecko source must be seeded by migrations")
+	if err != nil {
+		t.Fatalf("coingecko source must be seeded by migrations: %v", err)
+	}
 
 	_, err = pool.Exec(ctx, `
 		INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, symbol, name, enabled, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, true, NOW(), NOW())
 		ON CONFLICT (source_id, source_asset_id) DO UPDATE SET token_id = $3
 	`, sourceID, "ethereum", 1, "WETH", "Wrapped Ether")
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("inserting offchain_price_asset: %v", err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -124,7 +130,9 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 		ClientOptions: &client.Options{Namespace: "sentinel"},
 		LogLevel:      "error",
 	})
-	require.NoError(t, err, "failed to start Temporal dev server (requires temporal CLI)")
+	if err != nil {
+		t.Fatalf("failed to start Temporal dev server: %v", err)
+	}
 	t.Cleanup(func() { devServer.Stop() })
 
 	// Start TimescaleDB via testcontainers
@@ -160,14 +168,25 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 		HostPort:  devServer.FrontendHostPort(),
 		Namespace: "sentinel",
 	})
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("dialing Temporal: %v", err)
+	}
 	defer tc.Close()
 
 	// Wait for worker to register and start polling the task queue.
-	require.Eventually(t, func() bool {
+	deadline := time.Now().Add(15 * time.Second)
+	var workerReady bool
+	for time.Now().Before(deadline) {
 		resp, err := tc.DescribeTaskQueue(ctx, temporaladapter.TaskQueue, enumspb.TASK_QUEUE_TYPE_WORKFLOW)
-		return err == nil && len(resp.Pollers) > 0
-	}, 15*time.Second, 250*time.Millisecond, "worker did not start polling within 15s")
+		if err == nil && len(resp.Pollers) > 0 {
+			workerReady = true
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !workerReady {
+		t.Fatal("worker did not start polling within 15s")
+	}
 
 	workflowRun, err := tc.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        "test-price-fetch",
@@ -175,26 +194,36 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	}, temporaladapter.PriceFetchWorkflow, temporaladapter.PriceFetchWorkflowInput{
 		AssetIDs: []string{"ethereum"},
 	})
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("executing workflow: %v", err)
+	}
 
 	// Wait for workflow to complete
 	var result temporaladapter.PriceFetchWorkflowOutput
-	err = workflowRun.Get(ctx, &result)
-	require.NoError(t, err)
-	assert.True(t, result.Success)
+	if err := workflowRun.Get(ctx, &result); err != nil {
+		t.Fatalf("getting workflow result: %v", err)
+	}
+	if !result.Success {
+		t.Error("expected workflow result.Success to be true")
+	}
 
 	// Verify price was saved to DB
 	var priceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price`).Scan(&priceCount)
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, priceCount, 1, "expected at least 1 price record in DB")
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price`).Scan(&priceCount); err != nil {
+		t.Fatalf("querying price count: %v", err)
+	}
+	if priceCount < 1 {
+		t.Errorf("expected at least 1 price record in DB, got %d", priceCount)
+	}
 
 	// Cancel worker and verify graceful shutdown
 	workerCancel()
 
 	select {
 	case err := <-errCh:
-		assert.NoError(t, err)
+		if err != nil {
+			t.Errorf("expected clean shutdown, got error: %v", err)
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("worker did not shut down within 10 seconds")
 	}
@@ -238,8 +267,12 @@ func TestRunIntegration_StartupErrors(t *testing.T) {
 			}
 
 			err := run(ctx)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tt.errContains)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.errContains) {
+				t.Errorf("error %q should contain %q", err.Error(), tt.errContains)
+			}
 		})
 	}
 }

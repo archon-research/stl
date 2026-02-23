@@ -3,11 +3,10 @@ package temporal
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/archon-research/stl/stl-verify/internal/services/data_validator"
@@ -43,13 +42,23 @@ func TestNewDataValidationActivities(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			activities, err := NewDataValidationActivities(tt.validator)
 			if tt.wantErr {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errContains)
-				assert.Nil(t, activities)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.errContains)
+				}
+				if activities != nil {
+					t.Errorf("expected nil activities, got %v", activities)
+				}
 				return
 			}
-			require.NoError(t, err)
-			assert.NotNil(t, activities)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if activities == nil {
+				t.Fatal("expected non-nil activities")
+			}
 		})
 	}
 }
@@ -114,26 +123,48 @@ func TestValidateData(t *testing.T) {
 					return tt.report, tt.validateErr
 				},
 			})
-			require.NoError(t, err)
+			if err != nil {
+				t.Fatalf("unexpected error creating activities: %v", err)
+			}
 
 			activityEnv.RegisterActivity(activities.ValidateData)
 			result, err := activityEnv.ExecuteActivity(activities.ValidateData)
 
 			if tt.wantErr {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errContains)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.errContains)
+				}
 				return
 			}
 
-			require.NoError(t, err)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			var output ValidateDataOutput
-			require.NoError(t, result.Get(&output))
-			assert.Equal(t, tt.wantSuccess, output.Success)
-			assert.Equal(t, tt.report.FromBlock, output.FromBlock)
-			assert.Equal(t, tt.report.ToBlock, output.ToBlock)
-			assert.Equal(t, tt.report.Passed, output.Passed)
-			assert.Equal(t, tt.report.Failed, output.Failed)
-			assert.Len(t, output.FailedChecks, tt.wantFailedChecks)
+			if err := result.Get(&output); err != nil {
+				t.Fatalf("failed to get output: %v", err)
+			}
+			if output.Success != tt.wantSuccess {
+				t.Errorf("Success: got %v, want %v", output.Success, tt.wantSuccess)
+			}
+			if output.FromBlock != tt.report.FromBlock {
+				t.Errorf("FromBlock: got %d, want %d", output.FromBlock, tt.report.FromBlock)
+			}
+			if output.ToBlock != tt.report.ToBlock {
+				t.Errorf("ToBlock: got %d, want %d", output.ToBlock, tt.report.ToBlock)
+			}
+			if output.Passed != tt.report.Passed {
+				t.Errorf("Passed: got %d, want %d", output.Passed, tt.report.Passed)
+			}
+			if output.Failed != tt.report.Failed {
+				t.Errorf("Failed: got %d, want %d", output.Failed, tt.report.Failed)
+			}
+			if len(output.FailedChecks) != tt.wantFailedChecks {
+				t.Errorf("FailedChecks length: got %d, want %d", len(output.FailedChecks), tt.wantFailedChecks)
+			}
 		})
 	}
 }

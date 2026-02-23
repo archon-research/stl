@@ -3,10 +3,9 @@ package temporal
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/testsuite"
 )
 
@@ -40,13 +39,23 @@ func TestNewPriceFetchActivities(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			activities, err := NewPriceFetchActivities(tt.priceFetcher)
 			if tt.wantErr {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errContains)
-				assert.Nil(t, activities)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.errContains)
+				}
+				if activities != nil {
+					t.Errorf("expected nil activities, got %v", activities)
+				}
 				return
 			}
-			require.NoError(t, err)
-			assert.NotNil(t, activities)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if activities == nil {
+				t.Fatal("expected non-nil activities")
+			}
 		})
 	}
 }
@@ -88,22 +97,41 @@ func TestFetchCurrentPrices(t *testing.T) {
 					return tt.fetchErr
 				},
 			})
-			require.NoError(t, err)
+			if err != nil {
+				t.Fatalf("unexpected error creating activities: %v", err)
+			}
 
 			activityEnv.RegisterActivity(activities.FetchCurrentPrices)
 			result, err := activityEnv.ExecuteActivity(activities.FetchCurrentPrices, tt.input)
 
 			if tt.wantErr {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errContains)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.errContains)
+				}
 				return
 			}
 
-			require.NoError(t, err)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			var output FetchCurrentPricesOutput
-			require.NoError(t, result.Get(&output))
-			assert.True(t, output.Success)
-			assert.Equal(t, tt.input.AssetIDs, calledWith)
+			if err := result.Get(&output); err != nil {
+				t.Fatalf("failed to get output: %v", err)
+			}
+			if !output.Success {
+				t.Error("expected output.Success to be true")
+			}
+			if len(tt.input.AssetIDs) != len(calledWith) {
+				t.Fatalf("expected %d asset IDs, got %d", len(tt.input.AssetIDs), len(calledWith))
+			}
+			for i, id := range tt.input.AssetIDs {
+				if calledWith[i] != id {
+					t.Errorf("asset ID[%d]: got %q, want %q", i, calledWith[i], id)
+				}
+			}
 		})
 	}
 }

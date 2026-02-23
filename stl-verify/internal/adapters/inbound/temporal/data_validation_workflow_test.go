@@ -1,11 +1,12 @@
 package temporal
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
 )
 
@@ -49,7 +50,7 @@ func TestDataValidationWorkflow(t *testing.T) {
 		},
 		{
 			name:        "activity returns error",
-			activityErr: assert.AnError,
+			activityErr: errors.New("activity failed"),
 			wantErr:     true,
 			errContains: "executing ValidateData activity",
 		},
@@ -60,29 +61,54 @@ func TestDataValidationWorkflow(t *testing.T) {
 			suite := &testsuite.WorkflowTestSuite{}
 			env := suite.NewTestWorkflowEnvironment()
 
-			var a *DataValidationActivities
-			env.OnActivity(a.ValidateData, mock.Anything).
-				Return(tt.activityResult, tt.activityErr)
+			result := tt.activityResult
+			activityErr := tt.activityErr
+			env.RegisterActivityWithOptions(
+				func(_ context.Context) (*ValidateDataOutput, error) {
+					return result, activityErr
+				},
+				activity.RegisterOptions{Name: "ValidateData"},
+			)
 
 			env.ExecuteWorkflow(DataValidationWorkflow)
 
-			require.True(t, env.IsWorkflowCompleted())
+			if !env.IsWorkflowCompleted() {
+				t.Fatal("expected workflow to be completed")
+			}
 
 			err := env.GetWorkflowError()
 			if tt.wantErr {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errContains)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.errContains)
+				}
 				return
 			}
 
-			require.NoError(t, err)
-			var result DataValidationWorkflowOutput
-			require.NoError(t, env.GetWorkflowResult(&result))
-			assert.Equal(t, tt.activityResult.Success, result.Success)
-			assert.Equal(t, tt.activityResult.Passed, result.Passed)
-			assert.Equal(t, tt.activityResult.Failed, result.Failed)
-			assert.Equal(t, tt.activityResult.ReportText, result.ReportText)
-			assert.Equal(t, len(tt.activityResult.FailedChecks), len(result.FailedChecks))
+			if err != nil {
+				t.Fatalf("unexpected workflow error: %v", err)
+			}
+			var wfResult DataValidationWorkflowOutput
+			if err := env.GetWorkflowResult(&wfResult); err != nil {
+				t.Fatalf("failed to get workflow result: %v", err)
+			}
+			if wfResult.Success != tt.activityResult.Success {
+				t.Errorf("Success: got %v, want %v", wfResult.Success, tt.activityResult.Success)
+			}
+			if wfResult.Passed != tt.activityResult.Passed {
+				t.Errorf("Passed: got %d, want %d", wfResult.Passed, tt.activityResult.Passed)
+			}
+			if wfResult.Failed != tt.activityResult.Failed {
+				t.Errorf("Failed: got %d, want %d", wfResult.Failed, tt.activityResult.Failed)
+			}
+			if wfResult.ReportText != tt.activityResult.ReportText {
+				t.Errorf("ReportText: got %q, want %q", wfResult.ReportText, tt.activityResult.ReportText)
+			}
+			if len(wfResult.FailedChecks) != len(tt.activityResult.FailedChecks) {
+				t.Errorf("FailedChecks length: got %d, want %d", len(wfResult.FailedChecks), len(tt.activityResult.FailedChecks))
+			}
 		})
 	}
 }

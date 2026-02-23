@@ -1,11 +1,12 @@
 package temporal
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
 )
 
@@ -31,7 +32,7 @@ func TestPriceFetchWorkflow(t *testing.T) {
 		{
 			name:        "activity returns error",
 			input:       PriceFetchWorkflowInput{AssetIDs: []string{"bitcoin"}},
-			activityErr: assert.AnError,
+			activityErr: errors.New("activity failed"),
 			wantErr:     true,
 			errContains: "executing FetchCurrentPrices activity",
 		},
@@ -42,25 +43,42 @@ func TestPriceFetchWorkflow(t *testing.T) {
 			suite := &testsuite.WorkflowTestSuite{}
 			env := suite.NewTestWorkflowEnvironment()
 
-			var a *PriceFetchActivities
-			env.OnActivity(a.FetchCurrentPrices, mock.Anything, mock.Anything).
-				Return(tt.activityResult, tt.activityErr)
+			result := tt.activityResult
+			activityErr := tt.activityErr
+			env.RegisterActivityWithOptions(
+				func(_ context.Context, _ FetchCurrentPricesInput) (*FetchCurrentPricesOutput, error) {
+					return result, activityErr
+				},
+				activity.RegisterOptions{Name: "FetchCurrentPrices"},
+			)
 
 			env.ExecuteWorkflow(PriceFetchWorkflow, tt.input)
 
-			require.True(t, env.IsWorkflowCompleted())
+			if !env.IsWorkflowCompleted() {
+				t.Fatal("expected workflow to be completed")
+			}
 
 			err := env.GetWorkflowError()
 			if tt.wantErr {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errContains)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.errContains)
+				}
 				return
 			}
 
-			require.NoError(t, err)
-			var result PriceFetchWorkflowOutput
-			require.NoError(t, env.GetWorkflowResult(&result))
-			assert.True(t, result.Success)
+			if err != nil {
+				t.Fatalf("unexpected workflow error: %v", err)
+			}
+			var wfResult PriceFetchWorkflowOutput
+			if err := env.GetWorkflowResult(&wfResult); err != nil {
+				t.Fatalf("failed to get workflow result: %v", err)
+			}
+			if !wfResult.Success {
+				t.Error("expected result.Success to be true")
+			}
 		})
 	}
 }
