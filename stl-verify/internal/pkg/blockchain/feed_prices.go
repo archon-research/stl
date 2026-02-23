@@ -227,7 +227,7 @@ func retryWithLatestAnswer(
 			continue
 		}
 
-		logger.Debug("feed using latestAnswer fallback",
+		logger.Debug("feed recovered via latestAnswer (no round-completeness check)",
 			"feedIndex", i, "tokenID", feeds[i].TokenID, "block", blockNum)
 		out[i].Price = ScaleByDecimals(answer, feeds[i].FeedDecimals)
 		out[i].Success = true
