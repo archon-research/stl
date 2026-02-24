@@ -15,7 +15,10 @@ type MorphoVaultState struct {
 	TotalSupply   *big.Int // total vault shares
 	// AccrueInterest raw data (nil when not triggered by AccrueInterest)
 	FeeShares      *big.Int
-	NewTotalAssets *big.Int // V2 only
+	NewTotalAssets *big.Int
+	// V2-only AccrueInterest fields
+	Interest  *big.Int
+	FeeAssets *big.Int
 }
 
 // NewMorphoVaultState creates a new MorphoVaultState entity with validation.
@@ -34,9 +37,11 @@ func NewMorphoVaultState(morphoVaultID, blockNumber int64, blockVersion int, tot
 }
 
 // WithAccrueInterest sets the AccrueInterest event data on the vault state.
-func (s *MorphoVaultState) WithAccrueInterest(feeShares, newTotalAssets *big.Int) {
+func (s *MorphoVaultState) WithAccrueInterest(feeShares, newTotalAssets, interest, feeAssets *big.Int) {
 	s.FeeShares = feeShares
 	s.NewTotalAssets = newTotalAssets
+	s.Interest = interest
+	s.FeeAssets = feeAssets
 }
 
 func (s *MorphoVaultState) validate() error {

@@ -50,6 +50,23 @@ func GetMetaMorphoEventsABI() (*abi.ABI, error) {
 	]`)
 }
 
+// GetMetaMorphoV2AccrueInterestABI returns a separate ABI for the V2 AccrueInterest event.
+// V2 has a different signature: AccrueInterest(uint256,uint256,uint256,uint256) vs V1's AccrueInterest(uint256,uint256).
+// Since go-ethereum can't have two events with the same name in one ABI, this must be a separate ABI.
+func GetMetaMorphoV2AccrueInterestABI() (*abi.ABI, error) {
+	return ParseABI(`[{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": false, "name": "newTotalAssets", "type": "uint256"},
+			{"indexed": false, "name": "interest", "type": "uint256"},
+			{"indexed": false, "name": "feeShares", "type": "uint256"},
+			{"indexed": false, "name": "feeAssets", "type": "uint256"}
+		],
+		"name": "AccrueInterest",
+		"type": "event"
+	}]`)
+}
+
 // GetMetaMorphoReadABI returns the ABI for MetaMorpho vault read functions.
 func GetMetaMorphoReadABI() (*abi.ABI, error) {
 	return ParseABI(`[

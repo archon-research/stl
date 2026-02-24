@@ -8,6 +8,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 // ReserveEventData contains the data extracted from a ReserveDataUpdated event.
@@ -92,7 +94,7 @@ func (e *EventExtractor) loadEventABIs() error {
 }
 
 // IsPositionEvent checks if the log contains a tracked SparkLend position event.
-func (e *EventExtractor) IsPositionEvent(log Log) bool {
+func (e *EventExtractor) IsPositionEvent(log shared.Log) bool {
 	if len(log.Topics) == 0 {
 		return false
 	}
@@ -102,7 +104,7 @@ func (e *EventExtractor) IsPositionEvent(log Log) bool {
 }
 
 // IsReserveEvent checks if the log contains a ReserveDataUpdated event.
-func (e *EventExtractor) IsReserveEvent(log Log) bool {
+func (e *EventExtractor) IsReserveEvent(log shared.Log) bool {
 	if len(log.Topics) == 0 {
 		return false
 	}
@@ -112,7 +114,7 @@ func (e *EventExtractor) IsReserveEvent(log Log) bool {
 }
 
 // ExtractEventData parses a position log and returns structured event data.
-func (e *EventExtractor) ExtractEventData(log Log) (*PositionEventData, error) {
+func (e *EventExtractor) ExtractEventData(log shared.Log) (*PositionEventData, error) {
 	if len(log.Topics) == 0 {
 		return nil, fmt.Errorf("no topics")
 	}
@@ -346,7 +348,7 @@ func (e *EventExtractor) extractCollateralDisabledData(eventData map[string]inte
 }
 
 // ExtractReserveEventData parses a ReserveDataUpdated log and returns the reserve address.
-func (e *EventExtractor) ExtractReserveEventData(log Log) (*ReserveEventData, error) {
+func (e *EventExtractor) ExtractReserveEventData(log shared.Log) (*ReserveEventData, error) {
 	if len(log.Topics) < 2 {
 		return nil, fmt.Errorf("ReserveDataUpdated event requires at least 2 topics")
 	}

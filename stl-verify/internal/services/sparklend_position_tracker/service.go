@@ -18,7 +18,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -34,36 +33,6 @@ const (
 	EventReserveUsedAsCollateralEnabled  = entity.EventReserveUsedAsCollateralEnabled
 	EventReserveUsedAsCollateralDisabled = entity.EventReserveUsedAsCollateralDisabled
 )
-
-type TransactionReceipt struct {
-	Type              string  `json:"type"`
-	Status            string  `json:"status"`
-	CumulativeGasUsed string  `json:"cumulativeGasUsed"`
-	Logs              []Log   `json:"logs"`
-	LogsBloom         string  `json:"logsBloom"`
-	TransactionHash   string  `json:"transactionHash"`
-	TransactionIndex  string  `json:"transactionIndex"`
-	BlockHash         string  `json:"blockHash"`
-	BlockNumber       string  `json:"blockNumber"`
-	GasUsed           string  `json:"gasUsed"`
-	EffectiveGasPrice string  `json:"effectiveGasPrice"`
-	From              string  `json:"from"`
-	To                string  `json:"to"`
-	ContractAddress   *string `json:"contractAddress"`
-}
-
-type Log struct {
-	Address          string   `json:"address"`
-	Topics           []string `json:"topics"`
-	Data             string   `json:"data"`
-	BlockHash        string   `json:"blockHash"`
-	BlockNumber      string   `json:"blockNumber"`
-	BlockTimestamp   string   `json:"blockTimestamp"`
-	TransactionHash  string   `json:"transactionHash"`
-	TransactionIndex string   `json:"transactionIndex"`
-	LogIndex         string   `json:"logIndex"`
-	Removed          bool     `json:"removed"`
-}
 
 type PositionEventData struct {
 	EventType                  entity.EventType
@@ -88,17 +57,15 @@ type CollateralData struct {
 	CollateralEnabled bool
 }
 
+// Config holds service configuration.
 type Config struct {
-	MaxMessages  int
-	PollInterval time.Duration
-	Logger       *slog.Logger
+	shared.SQSConsumerConfig
 }
 
+// ConfigDefaults returns default configuration values.
 func ConfigDefaults() Config {
 	return Config{
-		MaxMessages:  10,
-		PollInterval: 100 * time.Millisecond,
-		Logger:       slog.Default(),
+		SQSConsumerConfig: shared.SQSConsumerConfigDefaults(),
 	}
 }
 
@@ -107,11 +74,11 @@ type Service struct {
 	consumer     outbound.SQSConsumer
 	redisClient  *redis.Client
 	ethClient    *ethclient.Client
-	txManager    *postgres.TxManager
-	userRepo     *postgres.UserRepository
-	protocolRepo *postgres.ProtocolRepository
-	tokenRepo    *postgres.TokenRepository
-	positionRepo *postgres.PositionRepository
+	txManager    outbound.TxManager
+	userRepo     outbound.UserRepository
+	protocolRepo outbound.ProtocolRepository
+	tokenRepo    outbound.TokenRepository
+	positionRepo outbound.PositionRepository
 	eventRepo    outbound.EventRepository
 
 	blockchainServices map[common.Address]*blockchainService
@@ -129,27 +96,18 @@ func NewService(
 	consumer outbound.SQSConsumer,
 	redisClient *redis.Client,
 	ethClient *ethclient.Client,
-	txManager *postgres.TxManager,
-	userRepo *postgres.UserRepository,
-	protocolRepo *postgres.ProtocolRepository,
-	tokenRepo *postgres.TokenRepository,
-	positionRepo *postgres.PositionRepository,
+	txManager outbound.TxManager,
+	userRepo outbound.UserRepository,
+	protocolRepo outbound.ProtocolRepository,
+	tokenRepo outbound.TokenRepository,
+	positionRepo outbound.PositionRepository,
 	eventRepo outbound.EventRepository,
 ) (*Service, error) {
 	if err := validateDependencies(consumer, redisClient, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo); err != nil {
 		return nil, err
 	}
 
-	defaults := ConfigDefaults()
-	if config.MaxMessages == 0 {
-		config.MaxMessages = defaults.MaxMessages
-	}
-	if config.PollInterval == 0 {
-		config.PollInterval = defaults.PollInterval
-	}
-	if config.Logger == nil {
-		config.Logger = defaults.Logger
-	}
+	config.SQSConsumerConfig.ApplyDefaults()
 
 	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
@@ -264,7 +222,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		return fmt.Errorf("failed to fetch from Redis: %w", err)
 	}
 
-	var receipts []TransactionReceipt
+	var receipts []shared.TransactionReceipt
 	if err := shared.ParseCompressedJSON([]byte(receiptsJSON), &receipts); err != nil {
 		return fmt.Errorf("failed to unmarshal receipts: %w", err)
 	}
@@ -282,7 +240,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 	return nil
 }
 
-func (s *Service) processReceipt(ctx context.Context, receipt TransactionReceipt, chainID, blockNumber int64, blockVersion int) error {
+func (s *Service) processReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, blockVersion int) error {
 	var errs []error
 	for _, log := range receipt.Logs {
 
@@ -315,15 +273,15 @@ func (s *Service) processReceipt(ctx context.Context, receipt TransactionReceipt
 	return nil
 }
 
-func (s *Service) isPositionEvent(log Log) bool {
+func (s *Service) isPositionEvent(log shared.Log) bool {
 	return s.eventExtractor.IsPositionEvent(log)
 }
 
-func (s *Service) isReserveEvent(log Log) bool {
+func (s *Service) isReserveEvent(log shared.Log) bool {
 	return s.eventExtractor.IsReserveEvent(log)
 }
 
-func (s *Service) processPositionEventLog(ctx context.Context, log Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
+func (s *Service) processPositionEventLog(ctx context.Context, log shared.Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("processEventLog completed",
@@ -405,7 +363,7 @@ func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEven
 }
 
 // processReserveEventLog handles ReserveDataUpdated events by fetching and storing reserve data.
-func (s *Service) processReserveEventLog(ctx context.Context, log Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
+func (s *Service) processReserveEventLog(ctx context.Context, log shared.Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("processReserveEventLog completed",
@@ -682,7 +640,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			}
 		}
 
-		records := make([]postgres.CollateralRecord, 0, len(collaterals))
+		records := make([]outbound.CollateralRecord, 0, len(collaterals))
 		for _, col := range collaterals {
 			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, col.Symbol, col.Decimals, blockNumber)
 			if err != nil {
@@ -690,7 +648,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 				continue
 			}
 
-			records = append(records, postgres.CollateralRecord{
+			records = append(records, outbound.CollateralRecord{
 				UserID:            userID,
 				ProtocolID:        protocolID,
 				TokenID:           tokenID,
@@ -738,7 +696,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 		collaterals = []CollateralData{}
 	}
 
-	records := make([]postgres.CollateralRecord, 0, len(collaterals))
+	records := make([]outbound.CollateralRecord, 0, len(collaterals))
 	for _, col := range collaterals {
 		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, col.Symbol, col.Decimals, blockNumber)
 		if err != nil {
@@ -746,7 +704,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 			continue
 		}
 
-		records = append(records, postgres.CollateralRecord{
+		records = append(records, outbound.CollateralRecord{
 			UserID:            userID,
 			ProtocolID:        protocolID,
 			TokenID:           tokenID,
@@ -869,11 +827,11 @@ func validateDependencies(
 	consumer outbound.SQSConsumer,
 	redisClient *redis.Client,
 	ethClient *ethclient.Client,
-	txManager *postgres.TxManager,
-	userRepo *postgres.UserRepository,
-	protocolRepo *postgres.ProtocolRepository,
-	tokenRepo *postgres.TokenRepository,
-	positionRepo *postgres.PositionRepository,
+	txManager outbound.TxManager,
+	userRepo outbound.UserRepository,
+	protocolRepo outbound.ProtocolRepository,
+	tokenRepo outbound.TokenRepository,
+	positionRepo outbound.PositionRepository,
 	eventRepo outbound.EventRepository,
 ) error {
 	if consumer == nil {

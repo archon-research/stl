@@ -1,9 +1,12 @@
 package morpho_position_tracker
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -15,8 +18,8 @@ func TestNewEventExtractor(t *testing.T) {
 	if len(e.morphoBlueSignatures) != 10 {
 		t.Errorf("expected 10 Morpho Blue event signatures, got %d", len(e.morphoBlueSignatures))
 	}
-	if len(e.metaMorphoSignatures) != 4 {
-		t.Errorf("expected 4 MetaMorpho event signatures, got %d", len(e.metaMorphoSignatures))
+	if len(e.metaMorphoSignatures) != 5 {
+		t.Errorf("expected 5 MetaMorpho event signatures, got %d", len(e.metaMorphoSignatures))
 	}
 }
 
@@ -31,22 +34,22 @@ func TestIsMorphoBlueEvent(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		log    Log
+		log    shared.Log
 		expect bool
 	}{
 		{
 			name:   "Supply event",
-			log:    Log{Topics: []string{supplyTopic}},
+			log:    shared.Log{Topics: []string{supplyTopic}},
 			expect: true,
 		},
 		{
 			name:   "unknown topic",
-			log:    Log{Topics: []string{"0x0000000000000000000000000000000000000000000000000000000000000001"}},
+			log:    shared.Log{Topics: []string{"0x0000000000000000000000000000000000000000000000000000000000000001"}},
 			expect: false,
 		},
 		{
 			name:   "no topics",
-			log:    Log{Topics: nil},
+			log:    shared.Log{Topics: nil},
 			expect: false,
 		},
 	}
@@ -71,22 +74,22 @@ func TestIsMetaMorphoEvent(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		log    Log
+		log    shared.Log
 		expect bool
 	}{
 		{
 			name:   "Deposit event",
-			log:    Log{Topics: []string{depositTopic}},
+			log:    shared.Log{Topics: []string{depositTopic}},
 			expect: true,
 		},
 		{
 			name:   "Transfer event",
-			log:    Log{Topics: []string{transferTopic}},
+			log:    shared.Log{Topics: []string{transferTopic}},
 			expect: true,
 		},
 		{
 			name:   "unknown topic",
-			log:    Log{Topics: []string{"0x0000000000000000000000000000000000000000000000000000000000000001"}},
+			log:    shared.Log{Topics: []string{"0x0000000000000000000000000000000000000000000000000000000000000001"}},
 			expect: false,
 		},
 	}
@@ -119,7 +122,7 @@ func TestExtractMorphoBlueEvent_AccrueInterest(t *testing.T) {
 		t.Fatalf("packing data: %v", err)
 	}
 
-	log := Log{
+	log := shared.Log{
 		Topics:          []string{accrueEvent.ID.Hex(), marketID.Hex()},
 		Data:            common.Bytes2Hex(data),
 		TransactionHash: "0xabc123",
@@ -161,7 +164,7 @@ func TestExtractMorphoBlueEvent_SetFee(t *testing.T) {
 		t.Fatalf("packing data: %v", err)
 	}
 
-	log := Log{
+	log := shared.Log{
 		Topics:          []string{setFeeEvent.ID.Hex(), marketID.Hex()},
 		Data:            common.Bytes2Hex(data),
 		TransactionHash: "0xdef456",
@@ -195,7 +198,7 @@ func TestExtractMetaMorphoEvent_Transfer(t *testing.T) {
 		t.Fatalf("packing data: %v", err)
 	}
 
-	log := Log{
+	log := shared.Log{
 		Topics: []string{
 			transferEvent.ID.Hex(),
 			common.BytesToHash(from.Bytes()).Hex(),
@@ -237,7 +240,7 @@ func TestExtractMetaMorphoEvent_AccrueInterest(t *testing.T) {
 		t.Fatalf("packing data: %v", err)
 	}
 
-	log := Log{
+	log := shared.Log{
 		Topics:          []string{accrueEvent.ID.Hex()},
 		Data:            common.Bytes2Hex(data),
 		TransactionHash: "0xbbb222",
@@ -294,5 +297,103 @@ func TestMetaMorphoEventData_ToJSON(t *testing.T) {
 	}
 	if len(jsonData) == 0 {
 		t.Fatal("ToJSON() returned empty")
+	}
+}
+
+func TestExtractMetaMorphoEvent_AccrueInterestV2(t *testing.T) {
+	e, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor() error: %v", err)
+	}
+
+	// Get the V2 ABI to construct the V2 event log
+	v2ABI, err := abis.GetMetaMorphoV2AccrueInterestABI()
+	if err != nil {
+		t.Fatalf("GetMetaMorphoV2AccrueInterestABI() error: %v", err)
+	}
+	v2Event := v2ABI.Events["AccrueInterest"]
+
+	// Pack 4 fields: newTotalAssets, interest, feeShares, feeAssets
+	data, err := v2Event.Inputs.NonIndexed().Pack(
+		bigFromStr("3000000"),
+		bigFromStr("50000"),
+		bigFromStr("200"),
+		bigFromStr("150"),
+	)
+	if err != nil {
+		t.Fatalf("packing data: %v", err)
+	}
+
+	log := shared.Log{
+		Topics:          []string{v2Event.ID.Hex()},
+		Data:            common.Bytes2Hex(data),
+		TransactionHash: "0xccc333",
+	}
+
+	result, err := e.ExtractMetaMorphoEvent(log)
+	if err != nil {
+		t.Fatalf("ExtractMetaMorphoEvent() error: %v", err)
+	}
+
+	if result.EventType != entity.MorphoEventVaultAccrueInterest {
+		t.Errorf("EventType = %s, want VaultAccrueInterest", result.EventType)
+	}
+	if result.NewTotalAssets.Int64() != 3000000 {
+		t.Errorf("NewTotalAssets = %s, want 3000000", result.NewTotalAssets)
+	}
+	if result.Interest.Int64() != 50000 {
+		t.Errorf("Interest = %s, want 50000", result.Interest)
+	}
+	if result.FeeShares.Int64() != 200 {
+		t.Errorf("FeeShares = %s, want 200", result.FeeShares)
+	}
+	if result.FeeAssets.Int64() != 150 {
+		t.Errorf("FeeAssets = %s, want 150", result.FeeAssets)
+	}
+}
+
+func TestMetaMorphoEventData_ToJSON_AccrueInterestV2(t *testing.T) {
+	data := &MetaMorphoEventData{
+		EventType:      entity.MorphoEventVaultAccrueInterest,
+		TxHash:         "0xv2test",
+		NewTotalAssets: bigFromStr("3000000"),
+		FeeShares:      bigFromStr("200"),
+		Interest:       bigFromStr("50000"),
+		FeeAssets:      bigFromStr("150"),
+	}
+
+	jsonData, err := data.ToJSON()
+	if err != nil {
+		t.Fatalf("ToJSON() error: %v", err)
+	}
+
+	jsonStr := string(jsonData)
+	for _, field := range []string{`"interest":"50000"`, `"feeAssets":"150"`, `"newTotalAssets":"3000000"`, `"feeShares":"200"`} {
+		if !strings.Contains(jsonStr, field) {
+			t.Errorf("ToJSON() missing field %s in %s", field, jsonStr)
+		}
+	}
+}
+
+func TestMetaMorphoEventData_ToJSON_AccrueInterestV1(t *testing.T) {
+	data := &MetaMorphoEventData{
+		EventType:      entity.MorphoEventVaultAccrueInterest,
+		TxHash:         "0xv1test",
+		NewTotalAssets: bigFromStr("2000000"),
+		FeeShares:      bigFromStr("100"),
+	}
+
+	jsonData, err := data.ToJSON()
+	if err != nil {
+		t.Fatalf("ToJSON() error: %v", err)
+	}
+
+	jsonStr := string(jsonData)
+	// V1 should NOT have interest or feeAssets
+	if strings.Contains(jsonStr, `"interest"`) {
+		t.Errorf("V1 ToJSON() should not contain interest field, got %s", jsonStr)
+	}
+	if strings.Contains(jsonStr, `"feeAssets"`) {
+		t.Errorf("V1 ToJSON() should not contain feeAssets field, got %s", jsonStr)
 	}
 }

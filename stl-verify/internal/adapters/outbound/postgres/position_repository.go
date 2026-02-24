@@ -78,25 +78,11 @@ func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.
 	return nil
 }
 
-// CollateralRecord represents a single collateral record for batch insertion.
-// This is a simplified struct that matches the service layer's data format.
-type CollateralRecord struct {
-	UserID            int64
-	ProtocolID        int64
-	TokenID           int64
-	BlockNumber       int64
-	BlockVersion      int
-	Amount            string // decimal-adjusted amount string
-	EventType         string
-	TxHash            []byte
-	CollateralEnabled bool
-}
-
 // SaveBorrowerCollaterals saves multiple borrower collateral position records using pgx.Batch.
 // Uses ON CONFLICT DO NOTHING to ensure immutability - existing records are never modified.
 // This is critical for reproducible calculations: data used in a calculation must not change.
 // Returns nil if records slice is empty.
-func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx.Tx, records []CollateralRecord) error {
+func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx.Tx, records []outbound.CollateralRecord) error {
 	if len(records) == 0 {
 		return nil
 	}

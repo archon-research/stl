@@ -28,7 +28,6 @@ CREATE INDEX IF NOT EXISTS idx_morpho_market_collateral_token ON morpho_market (
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS morpho_market_state
 (
-    id                   BIGSERIAL,
     morpho_market_id     BIGINT      NOT NULL REFERENCES morpho_market (id),
     block_number         BIGINT      NOT NULL,
     block_version        INT         NOT NULL DEFAULT 0,
@@ -43,8 +42,7 @@ CREATE TABLE IF NOT EXISTS morpho_market_state
     interest_accrued     NUMERIC,
     fee_shares           NUMERIC,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id, block_number),
-    CONSTRAINT morpho_market_state_unique UNIQUE (morpho_market_id, block_number, block_version)
+    PRIMARY KEY (morpho_market_id, block_number, block_version)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_number',
@@ -59,7 +57,6 @@ CREATE INDEX IF NOT EXISTS idx_morpho_market_state_block ON morpho_market_state 
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS morpho_position
 (
-    id               BIGSERIAL,
     user_id          BIGINT      NOT NULL REFERENCES "user" (id),
     morpho_market_id BIGINT      NOT NULL REFERENCES morpho_market (id),
     block_number     BIGINT      NOT NULL,
@@ -72,8 +69,7 @@ CREATE TABLE IF NOT EXISTS morpho_position
     event_type       TEXT        NOT NULL,
     tx_hash          BYTEA       NOT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id, block_number),
-    CONSTRAINT morpho_position_unique UNIQUE (user_id, morpho_market_id, block_number, block_version)
+    PRIMARY KEY (user_id, morpho_market_id, block_number, block_version)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_number',
@@ -110,7 +106,6 @@ CREATE INDEX IF NOT EXISTS idx_morpho_vault_asset_token ON morpho_vault (asset_t
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS morpho_vault_state
 (
-    id               BIGSERIAL,
     morpho_vault_id  BIGINT      NOT NULL REFERENCES morpho_vault (id),
     block_number     BIGINT      NOT NULL,
     block_version    INT         NOT NULL DEFAULT 0,
@@ -118,10 +113,11 @@ CREATE TABLE IF NOT EXISTS morpho_vault_state
     total_supply     NUMERIC     NOT NULL, -- total vault shares
     -- AccrueInterest raw data (nullable, only set when triggered by AccrueInterest)
     fee_shares       NUMERIC,
-    new_total_assets NUMERIC,    -- V2 only
+    new_total_assets NUMERIC,
+    interest         NUMERIC,       -- V2 only: interest accrued
+    fee_assets       NUMERIC,       -- V2 only: fee in asset terms
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id, block_number),
-    CONSTRAINT morpho_vault_state_unique UNIQUE (morpho_vault_id, block_number, block_version)
+    PRIMARY KEY (morpho_vault_id, block_number, block_version)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_number',
@@ -136,7 +132,6 @@ CREATE INDEX IF NOT EXISTS idx_morpho_vault_state_block ON morpho_vault_state (b
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS morpho_vault_position
 (
-    id              BIGSERIAL,
     user_id         BIGINT      NOT NULL REFERENCES "user" (id),
     morpho_vault_id BIGINT      NOT NULL REFERENCES morpho_vault (id),
     block_number    BIGINT      NOT NULL,
@@ -146,8 +141,7 @@ CREATE TABLE IF NOT EXISTS morpho_vault_position
     event_type      TEXT        NOT NULL,
     tx_hash         BYTEA       NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id, block_number),
-    CONSTRAINT morpho_vault_position_unique UNIQUE (user_id, morpho_vault_id, block_number, block_version)
+    PRIMARY KEY (user_id, morpho_vault_id, block_number, block_version)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_number',

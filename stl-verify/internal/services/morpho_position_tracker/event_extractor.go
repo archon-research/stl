@@ -10,6 +10,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 // MorphoBlueEventData holds parsed data from a Morpho Blue event.
@@ -71,9 +72,12 @@ type MetaMorphoEventData struct {
 	To    common.Address
 	Value *big.Int
 
-	// AccrueInterest fields
+	// AccrueInterest fields (V1 + V2)
 	NewTotalAssets *big.Int
 	FeeShares      *big.Int
+	// V2-only AccrueInterest fields
+	Interest  *big.Int
+	FeeAssets *big.Int
 }
 
 // ToJSON converts MorphoBlueEventData to JSON for protocol_event storage.
@@ -159,6 +163,12 @@ func (e *MetaMorphoEventData) ToJSON() (json.RawMessage, error) {
 	case entity.MorphoEventVaultAccrueInterest:
 		data["newTotalAssets"] = e.NewTotalAssets.String()
 		data["feeShares"] = e.FeeShares.String()
+		if e.Interest != nil {
+			data["interest"] = e.Interest.String()
+		}
+		if e.FeeAssets != nil {
+			data["feeAssets"] = e.FeeAssets.String()
+		}
 	}
 
 	raw, err := json.Marshal(data)
@@ -202,7 +212,7 @@ func (e *EventExtractor) loadABIs() error {
 	for _, name := range morphoEventNames {
 		event, ok := e.morphoBlueABI.Events[name]
 		if !ok {
-			return fmt.Errorf("Morpho Blue %s event not found in ABI", name)
+			return fmt.Errorf("morpho Blue %s event not found in ABI", name)
 		}
 		e.morphoBlueSignatures[event.ID] = &event
 	}
@@ -217,16 +227,24 @@ func (e *EventExtractor) loadABIs() error {
 	for _, name := range metaMorphoEventNames {
 		event, ok := e.metaMorphoABI.Events[name]
 		if !ok {
-			return fmt.Errorf("MetaMorpho %s event not found in ABI", name)
+			return fmt.Errorf("metaMorpho %s event not found in ABI", name)
 		}
 		e.metaMorphoSignatures[event.ID] = &event
 	}
+
+	// Register V2 AccrueInterest (different topic hash due to different signature)
+	v2ABI, err := abis.GetMetaMorphoV2AccrueInterestABI()
+	if err != nil {
+		return fmt.Errorf("failed to parse MetaMorpho V2 AccrueInterest ABI: %w", err)
+	}
+	v2Event := v2ABI.Events["AccrueInterest"]
+	e.metaMorphoSignatures[v2Event.ID] = &v2Event
 
 	return nil
 }
 
 // IsMorphoBlueEvent returns true if the log matches a known Morpho Blue event.
-func (e *EventExtractor) IsMorphoBlueEvent(log Log) bool {
+func (e *EventExtractor) IsMorphoBlueEvent(log shared.Log) bool {
 	if len(log.Topics) == 0 {
 		return false
 	}
@@ -235,7 +253,7 @@ func (e *EventExtractor) IsMorphoBlueEvent(log Log) bool {
 }
 
 // IsMetaMorphoEvent returns true if the log matches a known MetaMorpho event.
-func (e *EventExtractor) IsMetaMorphoEvent(log Log) bool {
+func (e *EventExtractor) IsMetaMorphoEvent(log shared.Log) bool {
 	if len(log.Topics) == 0 {
 		return false
 	}
@@ -244,7 +262,7 @@ func (e *EventExtractor) IsMetaMorphoEvent(log Log) bool {
 }
 
 // ExtractMorphoBlueEvent parses a Morpho Blue event from a log entry.
-func (e *EventExtractor) ExtractMorphoBlueEvent(log Log) (*MorphoBlueEventData, error) {
+func (e *EventExtractor) ExtractMorphoBlueEvent(log shared.Log) (*MorphoBlueEventData, error) {
 	if len(log.Topics) == 0 {
 		return nil, fmt.Errorf("no topics")
 	}
@@ -291,7 +309,7 @@ func (e *EventExtractor) ExtractMorphoBlueEvent(log Log) (*MorphoBlueEventData, 
 }
 
 // ExtractMetaMorphoEvent parses a MetaMorpho event from a log entry.
-func (e *EventExtractor) ExtractMetaMorphoEvent(log Log) (*MetaMorphoEventData, error) {
+func (e *EventExtractor) ExtractMetaMorphoEvent(log shared.Log) (*MetaMorphoEventData, error) {
 	if len(log.Topics) == 0 {
 		return nil, fmt.Errorf("no topics")
 	}
@@ -411,14 +429,6 @@ func extractCreateMarket(eventData map[string]any, txHash string) (*MorphoBlueEv
 	mp, ok := eventData["marketParams"]
 	if !ok {
 		return nil, fmt.Errorf("missing field: marketParams")
-	}
-
-	type marketParamsTuple struct {
-		LoanToken       common.Address `abi:"loanToken"`
-		CollateralToken common.Address `abi:"collateralToken"`
-		Oracle          common.Address `abi:"oracle"`
-		Irm             common.Address `abi:"irm"`
-		Lltv            *big.Int       `abi:"lltv"`
 	}
 
 	// The ABI unpacker returns a struct for tuple types
@@ -840,10 +850,20 @@ func extractVaultAccrueInterest(eventData map[string]any, txHash string) (*MetaM
 		return nil, err
 	}
 
-	return &MetaMorphoEventData{
+	result := &MetaMorphoEventData{
 		EventType:      entity.MorphoEventVaultAccrueInterest,
 		TxHash:         txHash,
 		NewTotalAssets: newTotalAssets,
 		FeeShares:      feeShares,
-	}, nil
+	}
+
+	// V2 fields (only present when parsed from V2 ABI)
+	if interest, err := getBigInt(eventData, "interest"); err == nil {
+		result.Interest = interest
+	}
+	if feeAssets, err := getBigInt(eventData, "feeAssets"); err == nil {
+		result.FeeAssets = feeAssets
+	}
+
+	return result, nil
 }

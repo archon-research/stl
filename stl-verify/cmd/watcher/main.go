@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"runtime/debug"
 	"runtime/trace"
 	"strconv"
 	"syscall"
@@ -22,6 +21,8 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -41,21 +42,7 @@ var (
 )
 
 func init() {
-	// Use Go's built-in build info (Go 1.18+) if ldflags weren't provided
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, setting := range info.Settings {
-			switch setting.Key {
-			case "vcs.revision":
-				if GitCommit == "" {
-					GitCommit = setting.Value
-				}
-			case "vcs.time":
-				if BuildTime == "" {
-					BuildTime = setting.Value
-				}
-			}
-		}
-	}
+	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
 }
 
 func main() {
@@ -121,47 +108,14 @@ func main() {
 		}()
 	}
 
-	// Initialize OpenTelemetry tracer
-	// JAEGER_ENDPOINT is the OTLP endpoint - works with ADOT/X-Ray in AWS or Jaeger locally
-	traceEndpoint := env.Get("JAEGER_ENDPOINT", "localhost:4317")
-	shutdownTracer, err := telemetry.InitTracer(ctx, telemetry.TracerConfig{
+	// Initialize OpenTelemetry tracing and metrics
+	shutdownOTEL := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
 		ServiceName:    "stl-watcher",
 		ServiceVersion: GitCommit,
 		BuildTime:      BuildTime,
-		Environment:    env.Get("ENVIRONMENT", "development"),
-		JaegerEndpoint: traceEndpoint,
+		Logger:         logger,
 	})
-	if err != nil {
-		logger.Warn("failed to init tracer, continuing without tracing", "error", err)
-	} else {
-		defer func() {
-			if err := shutdownTracer(context.Background()); err != nil {
-				logger.Warn("failed to shutdown tracer", "error", err)
-			}
-		}()
-		logger.Info("tracer initialized", "endpoint", traceEndpoint)
-	}
-
-	// Initialize OpenTelemetry metrics
-	otelEndpoint := env.Get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-	shutdownMetrics, err := telemetry.InitMetrics(ctx, telemetry.MetricConfig{
-		ServiceName:    "stl-watcher",
-		ServiceVersion: "0.1.0",
-		Environment:    env.Get("ENVIRONMENT", "development"),
-		OTLPEndpoint:   otelEndpoint,
-	})
-	if err != nil {
-		logger.Warn("failed to init metrics, continuing without metrics export", "error", err)
-	} else {
-		defer func() {
-			if err := shutdownMetrics(context.Background()); err != nil {
-				logger.Warn("failed to shutdown metrics", "error", err)
-			}
-		}()
-		if otelEndpoint != "" {
-			logger.Info("metrics initialized", "endpoint", otelEndpoint)
-		}
-	}
+	defer shutdownOTEL(context.Background())
 
 	// Get configuration from environment
 	alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")

@@ -5,11 +5,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -18,59 +16,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
-
-// ---------------------------------------------------------------------------
-// Mock SQS server (AWS JSON 1.0 protocol)
-// ---------------------------------------------------------------------------
-
-type mockSQSServer struct {
-	mu                sync.Mutex
-	receiveCallCount  int
-	deleteCallCount   int
-	firstCallReceived chan struct{}
-}
-
-func startMockSQS(t *testing.T) (*httptest.Server, *mockSQSServer) {
-	t.Helper()
-
-	state := &mockSQSServer{
-		firstCallReceived: make(chan struct{}, 1),
-	}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.ReadAll(r.Body)
-		target := r.Header.Get("X-Amz-Target")
-
-		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
-
-		switch {
-		case strings.Contains(target, "ReceiveMessage"):
-			state.mu.Lock()
-			state.receiveCallCount++
-			state.mu.Unlock()
-
-			// Signal first call received
-			select {
-			case state.firstCallReceived <- struct{}{}:
-			default:
-			}
-
-			// Always return empty - we just want to test startup/shutdown
-			fmt.Fprint(w, `{"Messages":[]}`)
-
-		case strings.Contains(target, "DeleteMessage"):
-			state.mu.Lock()
-			state.deleteCallCount++
-			state.mu.Unlock()
-			fmt.Fprint(w, `{}`)
-
-		default:
-			fmt.Fprint(w, `{}`)
-		}
-	}))
-
-	return server, state
-}
 
 // ---------------------------------------------------------------------------
 // Integration tests for run()
@@ -153,8 +98,8 @@ func TestRunIntegration_MissingRedisAddr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing Redis address")
 	}
-	if !strings.Contains(err.Error(), "Redis address") {
-		t.Errorf("expected 'Redis address' error, got: %v", err)
+	if !strings.Contains(err.Error(), "redis address") {
+		t.Errorf("expected 'redis address' error, got: %v", err)
 	}
 }
 
@@ -168,7 +113,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	}))
 	defer rpcServer.Close()
 
-	sqsServer, sqsState := startMockSQS(t)
+	sqsServer, sqsState := testutil.StartMockSQS(t)
 	defer sqsServer.Close()
 
 	redisAddr, redisCleanup := startRedisContainer(t)
@@ -195,7 +140,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 
 	// Wait for the service to start (SQS ReceiveMessage call indicates it's polling)
 	select {
-	case <-sqsState.firstCallReceived:
+	case <-sqsState.FirstCallReceived:
 	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for service to start")
 	}
@@ -214,10 +159,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	}
 
 	// Verify SQS was polled
-	sqsState.mu.Lock()
-	receives := sqsState.receiveCallCount
-	sqsState.mu.Unlock()
-	if receives < 1 {
+	if receives := sqsState.Receives(); receives < 1 {
 		t.Errorf("expected at least 1 ReceiveMessage call, got %d", receives)
 	}
 }

@@ -7,9 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"syscall"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -18,10 +16,14 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_position_tracker"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 var (
@@ -31,20 +33,7 @@ var (
 )
 
 func init() {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, setting := range info.Settings {
-			switch setting.Key {
-			case "vcs.revision":
-				if GitCommit == "" {
-					GitCommit = setting.Value
-				}
-			case "vcs.time":
-				if BuildTime == "" {
-					BuildTime = setting.Value
-				}
-			}
-		}
-	}
+	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
 }
 
 func main() {
@@ -111,7 +100,7 @@ func parseConfig(args []string) (cliConfig, error) {
 		cfg.redisAddr = env.Get("REDIS_ADDR", "")
 	}
 	if cfg.redisAddr == "" {
-		return cliConfig{}, fmt.Errorf("Redis address not provided (use -redis flag or REDIS_ADDR env var)")
+		return cliConfig{}, fmt.Errorf("redis address not provided (use -redis flag or REDIS_ADDR env var)")
 	}
 
 	chainIDStr := env.Get("CHAIN_ID", "1")
@@ -137,6 +126,21 @@ func run(ctx context.Context, args []string) error {
 		"redis", cfg.redisAddr,
 		"chainID", cfg.chainID,
 		"commit", GitCommit)
+
+	// Initialize OpenTelemetry tracing and metrics
+	shutdownOTEL := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "morpho-position-tracker",
+		ServiceVersion: GitCommit,
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	defer shutdownOTEL(context.Background())
+
+	// Service telemetry
+	morphoTelemetry, err := morpho_position_tracker.NewTelemetry()
+	if err != nil {
+		logger.Warn("failed to create morpho telemetry", "error", err)
+	}
 
 	// AWS config
 	awsRegion := env.Get("AWS_REGION", "us-east-1")
@@ -235,9 +239,12 @@ func run(ctx context.Context, args []string) error {
 
 	// Service
 	svcConfig := morpho_position_tracker.Config{
-		MaxMessages: cfg.maxMessages,
-		ChainID:     cfg.chainID,
-		Logger:      logger,
+		SQSConsumerConfig: shared.SQSConsumerConfig{
+			MaxMessages: cfg.maxMessages,
+			Logger:      logger,
+		},
+		ChainID:   cfg.chainID,
+		Telemetry: morphoTelemetry,
 	}
 
 	service, err := morpho_position_tracker.NewService(
@@ -256,33 +263,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating service: %w", err)
 	}
 
-	if err := service.Start(ctx); err != nil {
-		return fmt.Errorf("starting service: %w", err)
-	}
-
 	logger.Info("morpho position tracker started, waiting for messages...")
 
-	// Block until context is cancelled (signal or test cancellation).
-	<-ctx.Done()
-	logger.Info("shutting down...")
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer shutdownCancel()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if err := service.Stop(); err != nil {
-			logger.Error("error stopping service", "error", err)
-		}
-	}()
-
-	select {
-	case <-done:
-		logger.Info("shutdown complete")
-	case <-shutdownCtx.Done():
-		return fmt.Errorf("shutdown timed out")
-	}
-
-	return nil
+	return lifecycle.Run(ctx, logger, service)
 }

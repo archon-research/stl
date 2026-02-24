@@ -79,13 +79,21 @@ func TestMorphoVaultState_WithAccrueInterest(t *testing.T) {
 
 	feeShares := big.NewInt(10)
 	newTotalAssets := big.NewInt(1100)
-	state.WithAccrueInterest(feeShares, newTotalAssets)
+	interest := big.NewInt(50)
+	feeAssets := big.NewInt(5)
+	state.WithAccrueInterest(feeShares, newTotalAssets, interest, feeAssets)
 
 	if state.FeeShares.Cmp(feeShares) != 0 {
 		t.Errorf("FeeShares = %s, want %s", state.FeeShares, feeShares)
 	}
 	if state.NewTotalAssets.Cmp(newTotalAssets) != 0 {
 		t.Errorf("NewTotalAssets = %s, want %s", state.NewTotalAssets, newTotalAssets)
+	}
+	if state.Interest.Cmp(interest) != 0 {
+		t.Errorf("Interest = %s, want %s", state.Interest, interest)
+	}
+	if state.FeeAssets.Cmp(feeAssets) != 0 {
+		t.Errorf("FeeAssets = %s, want %s", state.FeeAssets, feeAssets)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -190,8 +191,8 @@ func (m *mockRepo) GetAllProtocolOracleBindings(ctx context.Context) ([]*entity.
 // Helpers
 // ---------------------------------------------------------------------------
 
-func validConfig() Config {
-	return Config{
+func validConfig() shared.SQSConsumerConfig {
+	return shared.SQSConsumerConfig{
 		Logger: testutil.DiscardLogger(),
 	}
 }
@@ -277,7 +278,7 @@ func TestNewService(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		config      Config
+		config      shared.SQSConsumerConfig
 		consumer    outbound.SQSConsumer
 		repo        outbound.OnchainPriceRepository
 		wantErr     bool
@@ -294,7 +295,7 @@ func TestNewService(t *testing.T) {
 		},
 		{
 			name:          "success with default config values",
-			config:        Config{},
+			config:        shared.SQSConsumerConfig{},
 			consumer:      consumer,
 			repo:          repo,
 			wantErr:       false,
@@ -371,7 +372,7 @@ func TestNewService(t *testing.T) {
 			}
 
 			if tc.checkDefaults {
-				defaults := configDefaults()
+				defaults := shared.SQSConsumerConfigDefaults()
 				if svc.config.MaxMessages != defaults.MaxMessages {
 					t.Errorf("MaxMessages = %d, want %d", svc.config.MaxMessages, defaults.MaxMessages)
 				}
