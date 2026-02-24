@@ -128,15 +128,15 @@ Since the mock server replays renumbered blocks that don't exist on-chain, the w
   - README.md
 - stl/stl-verify/cmd/mock-blockchain-server/main.go — Binary entry point
 - stl/stl-verify/cmd/stress-data-export/main.go — Data exporter entry point
-- stl/stl-verify/internal/stress/mockchain/ — Mock server package
+- stl/stl-verify/internal/testutil/mockchain/ — Mock server package (extends existing testutil patterns)
   - server.go — Top-level server (wires WS + HTTP + Admin)
   - websocket.go — eth\_subscribe, notifications, keepalive
-  - jsonrpc.go — HTTP JSON-RPC handler (single + batch)
+  - jsonrpc.go — HTTP JSON-RPC handler (builds on testutil/ethrpc.go patterns)
   - admin.go — Admin API (start/stop/speed/status/reorg)
   - replayer.go — Template looping, renumbering, hash generation
   - reorg.go — Reorg simulation logic
   - datastore.go — In-memory block data store (loaded from S3)
-- stl/stl-verify/internal/stress/export/ — Data exporter package
+- stl/stl-verify/internal/testutil/export/ — Data exporter package
   - redis.go — Read from staging Redis
   - s3.go — Read from staging S3 / upload to stress-test S3
 - stl/stl-verify/Dockerfile.mock-blockchain-server
