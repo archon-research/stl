@@ -8,13 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
 )
@@ -236,54 +235,16 @@ func (s *Service) enqueueBlocks(ctx context.Context, blockCh chan<- int64, fromB
 // Keys that are not receipts files or that cannot be parsed are silently ignored.
 func BuildVersionMap(keys []string) map[int64]int {
 	versions := make(map[int64]int)
-	for _, key := range keys {
-		blockNum, version, ok := parseReceiptKey(key)
-		if !ok {
+	for _, raw := range keys {
+		parsed, ok := s3key.Parse(raw)
+		if !ok || parsed.DataType != s3key.Receipts {
 			continue
 		}
-		if existing, seen := versions[blockNum]; !seen || version > existing {
-			versions[blockNum] = version
+		if existing, seen := versions[parsed.BlockNumber]; !seen || parsed.Version > existing {
+			versions[parsed.BlockNumber] = parsed.Version
 		}
 	}
 	return versions
-}
-
-// parseReceiptKey parses an S3 key of the form
-// "{partition}/{blockNum}_{version}_receipts.json.gz"
-// and returns (blockNum, version, true) on success, or (0, 0, false) if the
-// key is not a receipts file or cannot be parsed.
-func parseReceiptKey(key string) (blockNum int64, version int, ok bool) {
-	// Extract filename: everything after the last "/"
-	slash := strings.LastIndex(key, "/")
-	filename := key
-	if slash >= 0 {
-		filename = key[slash+1:]
-	}
-
-	// Must end in "_receipts.json.gz"
-	const suffix = "_receipts.json.gz"
-	if !strings.HasSuffix(filename, suffix) {
-		return 0, 0, false
-	}
-	stem := filename[:len(filename)-len(suffix)] // e.g. "100_1"
-
-	// Split on "_" — must have exactly two parts: blockNum and version
-	parts := strings.SplitN(stem, "_", 2)
-	if len(parts) != 2 {
-		return 0, 0, false
-	}
-
-	bn, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return 0, 0, false
-	}
-
-	ver, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, 0, false
-	}
-
-	return bn, ver, true
 }
 
 // ScanVersions lists all S3 receipt keys in the partitions overlapping
@@ -318,7 +279,7 @@ func (s *Service) ScanVersions(ctx context.Context, fromBlock, toBlock int64) (m
 
 // processBlockFromS3 reads receipts for blockNum from S3 using the given version and processes them.
 func (s *Service) processBlockFromS3(ctx context.Context, blockNum int64, version int) error {
-	key := fmt.Sprintf("%s/%d_%d_receipts.json.gz", partition.GetPartition(blockNum), blockNum, version)
+	key := s3key.Build(blockNum, version, s3key.Receipts)
 
 	// StreamFile transparently decompresses .gz files, so no manual gzip decoding is needed.
 	rc, err := s.s3Reader.StreamFile(ctx, s.bucket, key)
