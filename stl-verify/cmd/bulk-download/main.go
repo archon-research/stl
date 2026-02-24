@@ -100,8 +100,8 @@ type Stats struct {
 type UploadJob struct {
 	Bucket   string
 	Key      string
-	Data     []byte // Raw uncompressed data (S3 writer handles compression)
-	DataType string // "block", "receipts", or "traces"
+	Data     []byte         // Raw uncompressed data (S3 writer handles compression)
+	DataType s3key.DataType // block, receipts, or traces
 	BlockNum int64
 }
 
@@ -228,9 +228,9 @@ func (pc *PartitionCache) HasTraces(ctx context.Context, blockNum int64) (bool, 
 	return exists, nil
 }
 
-func (pc *PartitionCache) MarkWritten(blockNum int64, dataType string) {
+func (pc *PartitionCache) MarkWritten(blockNum int64, dataType s3key.DataType) {
 	partition := partition.GetPartition(blockNum)
-	key := s3key.BuildWithPartition(partition, blockNum, 1, s3key.DataType(dataType))
+	key := s3key.BuildWithPartition(partition, blockNum, 1, dataType)
 
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
@@ -680,7 +680,7 @@ func blockReceiptWorker(
 					Bucket:   cfg.Bucket,
 					Key:      s3key.BuildWithPartition(partition, r.BlockNumber, 1, s3key.Block),
 					Data:     r.Block,
-					DataType: "block",
+					DataType: s3key.Block,
 					BlockNum: r.BlockNumber,
 				}:
 					stats.uploadsQueued.Add(1)
@@ -696,7 +696,7 @@ func blockReceiptWorker(
 					Bucket:   cfg.Bucket,
 					Key:      s3key.BuildWithPartition(partition, r.BlockNumber, 1, s3key.Receipts),
 					Data:     r.Receipts,
-					DataType: "receipts",
+					DataType: s3key.Receipts,
 					BlockNum: r.BlockNumber,
 				}:
 					stats.uploadsQueued.Add(1)
@@ -832,7 +832,7 @@ func traceWorker(
 				Bucket:   bucket,
 				Key:      s3key.BuildWithPartition(partition, blockNum, 1, s3key.Traces),
 				Data:     traceData,
-				DataType: "traces",
+				DataType: s3key.Traces,
 				BlockNum: blockNum,
 			}:
 				stats.uploadsQueued.Add(1)
@@ -877,9 +877,9 @@ func uploadWorker(
 
 		if written {
 			switch job.DataType {
-			case "block", "receipts":
+			case s3key.Block, s3key.Receipts:
 				stats.blockBytesWritten.Add(int64(len(job.Data)))
-			case "traces":
+			case s3key.Traces:
 				stats.traceBytesWritten.Add(int64(len(job.Data)))
 			}
 			partitionCache.MarkWritten(job.BlockNum, job.DataType)

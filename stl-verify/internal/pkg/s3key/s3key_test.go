@@ -242,32 +242,35 @@ func TestParse(t *testing.T) {
 func TestBuildThenParse(t *testing.T) {
 	// Round-trip: Build a key and parse it back, verify we get the same values.
 	tests := []struct {
+		name        string
 		blockNumber int64
 		version     int
 		dataType    DataType
 	}{
-		{0, 1, Block},
-		{999, 1, Receipts},
-		{1000, 2, Traces},
-		{21000042, 3, Blobs},
-		{99999999, 100, Block},
+		{name: "block partition zero", blockNumber: 0, version: 1, dataType: Block},
+		{name: "receipts upper edge partition", blockNumber: 999, version: 1, dataType: Receipts},
+		{name: "traces next partition", blockNumber: 1000, version: 2, dataType: Traces},
+		{name: "blobs large block", blockNumber: 21000042, version: 3, dataType: Blobs},
+		{name: "high block high version", blockNumber: 99999999, version: 100, dataType: Block},
 	}
 
 	for _, tt := range tests {
-		key := Build(tt.blockNumber, tt.version, tt.dataType)
-		got, ok := Parse(key)
-		if !ok {
-			t.Errorf("Parse(Build(%d, %d, %q)) failed", tt.blockNumber, tt.version, tt.dataType)
-			continue
-		}
-		if got.BlockNumber != tt.blockNumber {
-			t.Errorf("round-trip BlockNumber = %d, want %d", got.BlockNumber, tt.blockNumber)
-		}
-		if got.Version != tt.version {
-			t.Errorf("round-trip Version = %d, want %d", got.Version, tt.version)
-		}
-		if got.DataType != tt.dataType {
-			t.Errorf("round-trip DataType = %q, want %q", got.DataType, tt.dataType)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			key := Build(tt.blockNumber, tt.version, tt.dataType)
+			got, ok := Parse(key)
+			if !ok {
+				t.Errorf("Parse(Build(%d, %d, %q)) failed", tt.blockNumber, tt.version, tt.dataType)
+				return
+			}
+			if got.BlockNumber != tt.blockNumber {
+				t.Errorf("round-trip BlockNumber = %d, want %d", got.BlockNumber, tt.blockNumber)
+			}
+			if got.Version != tt.version {
+				t.Errorf("round-trip Version = %d, want %d", got.Version, tt.version)
+			}
+			if got.DataType != tt.dataType {
+				t.Errorf("round-trip DataType = %q, want %q", got.DataType, tt.dataType)
+			}
+		})
 	}
 }

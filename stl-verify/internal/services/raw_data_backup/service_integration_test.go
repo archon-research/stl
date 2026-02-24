@@ -661,7 +661,7 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 		Version:     0,
 		BlockHash:   "0xfirst",
 	}
-	key := fmt.Sprintf("0-999/%d_0_block.json.gz", blockNumber)
+	key := s3key.BuildWithPartition("0-999", blockNumber, 0, s3key.Block)
 
 	publishBlockEvent(t, ctx, infra, event)
 
@@ -767,7 +767,7 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event0)
 
 	// Wait for version 0 to be written
-	keyV0 := fmt.Sprintf("1000-1999/%d_0_block.json.gz", blockNumber)
+	keyV0 := s3key.BuildWithPartition("1000-1999", blockNumber, 0, s3key.Block)
 	waitForS3Object(t, ctx, infra, keyV0, 10*time.Second)
 
 	// Publish version 1
@@ -884,7 +884,7 @@ func TestIntegration_LargeBlockData(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event)
 
 	// Wait for file to be created
-	key := fmt.Sprintf("2000-2999/%d_0_block.json.gz", blockNumber)
+	key := s3key.BuildWithPartition("2000-2999", blockNumber, 0, s3key.Block)
 	waitForS3Object(t, ctx, infra, key, 15*time.Second)
 
 	svc.Stop()

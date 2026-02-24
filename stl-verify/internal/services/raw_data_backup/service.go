@@ -324,15 +324,15 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (
 	partitionKey := partition.GetPartition(event.BlockNumber)
 
 	// Determine which files are expected for a complete backup
-	expectedTypes := []string{"block"}
+	expectedTypes := []s3key.DataType{s3key.Block}
 	if expectation.ExpectReceipts {
-		expectedTypes = append(expectedTypes, "receipts")
+		expectedTypes = append(expectedTypes, s3key.Receipts)
 	}
 	if expectation.ExpectTraces {
-		expectedTypes = append(expectedTypes, "traces")
+		expectedTypes = append(expectedTypes, s3key.Traces)
 	}
 	if expectation.ExpectBlobs {
-		expectedTypes = append(expectedTypes, "blobs")
+		expectedTypes = append(expectedTypes, s3key.Blobs)
 	}
 
 	// Check if all expected files already exist
@@ -355,24 +355,24 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (
 	}
 
 	// Write all available data to S3 (overwriting if necessary to ensure consistency)
-	if err := s.writeToS3(ctx, partitionKey, event, "block", blockData); err != nil {
+	if err := s.writeToS3(ctx, partitionKey, event, s3key.Block, blockData); err != nil {
 		return err
 	}
 
 	if receiptsData != nil {
-		if err := s.writeToS3(ctx, partitionKey, event, "receipts", receiptsData); err != nil {
+		if err := s.writeToS3(ctx, partitionKey, event, s3key.Receipts, receiptsData); err != nil {
 			return err
 		}
 	}
 
 	if tracesData != nil {
-		if err := s.writeToS3(ctx, partitionKey, event, "traces", tracesData); err != nil {
+		if err := s.writeToS3(ctx, partitionKey, event, s3key.Traces, tracesData); err != nil {
 			return err
 		}
 	}
 
 	if blobsData != nil {
-		if err := s.writeToS3(ctx, partitionKey, event, "blobs", blobsData); err != nil {
+		if err := s.writeToS3(ctx, partitionKey, event, s3key.Blobs, blobsData); err != nil {
 			return err
 		}
 	}
@@ -386,13 +386,13 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (
 }
 
 // generateKey creates the S3 key for a given data type.
-func (s *Service) generateKey(partition string, event outbound.BlockEvent, dataType string) string {
-	return s3key.BuildWithPartition(partition, event.BlockNumber, event.Version, s3key.DataType(dataType))
+func (s *Service) generateKey(partition string, event outbound.BlockEvent, dataType s3key.DataType) string {
+	return s3key.BuildWithPartition(partition, event.BlockNumber, event.Version, dataType)
 }
 
 // writeToS3 writes data to S3 with the appropriate key structure.
 // Key format: {partition}/{blockNumber}_{version}_{dataType}.json.gz
-func (s *Service) writeToS3(ctx context.Context, partition string, event outbound.BlockEvent, dataType string, data json.RawMessage) error {
+func (s *Service) writeToS3(ctx context.Context, partition string, event outbound.BlockEvent, dataType s3key.DataType, data json.RawMessage) error {
 	key := s.generateKey(partition, event, dataType)
 
 	// Write to S3 with gzip compression, only if not exists to avoid overwritten races
