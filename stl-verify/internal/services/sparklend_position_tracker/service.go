@@ -57,20 +57,8 @@ type CollateralData struct {
 	CollateralEnabled bool
 }
 
-// Config holds service configuration.
-type Config struct {
-	shared.SQSConsumerConfig
-}
-
-// ConfigDefaults returns default configuration values.
-func ConfigDefaults() Config {
-	return Config{
-		SQSConsumerConfig: shared.SQSConsumerConfigDefaults(),
-	}
-}
-
 type Service struct {
-	config       Config
+	config       shared.SQSConsumerConfig
 	consumer     outbound.SQSConsumer
 	redisClient  *redis.Client
 	ethClient    *ethclient.Client
@@ -92,7 +80,7 @@ type Service struct {
 }
 
 func NewService(
-	config Config,
+	config shared.SQSConsumerConfig,
 	consumer outbound.SQSConsumer,
 	redisClient *redis.Client,
 	ethClient *ethclient.Client,
@@ -107,7 +95,7 @@ func NewService(
 		return nil, err
 	}
 
-	config.SQSConsumerConfig.ApplyDefaults()
+	config.ApplyDefaults()
 
 	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {

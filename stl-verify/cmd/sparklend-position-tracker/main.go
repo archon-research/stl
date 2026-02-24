@@ -221,11 +221,9 @@ func run(ctx context.Context, args []string) error {
 
 	// Service
 	service, err := sparklend_position_tracker.NewService(
-		sparklend_position_tracker.Config{
-			SQSConsumerConfig: shared.SQSConsumerConfig{
-				MaxMessages: cfg.maxMessages,
-				Logger:      logger,
-			},
+		shared.SQSConsumerConfig{
+			MaxMessages: cfg.maxMessages,
+			Logger:      logger,
 		},
 		sqsConsumer,
 		redisClient,
