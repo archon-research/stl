@@ -1,4 +1,4 @@
-package morpho_position_tracker
+package morpho_indexer
 
 import (
 	"context"
@@ -39,7 +39,7 @@ func ConfigDefaults() Config {
 	}
 }
 
-// Service is the Morpho position tracker SQS consumer service.
+// Service is the Morpho indexer SQS consumer service.
 type Service struct {
 	config       Config
 	consumer     outbound.SQSConsumer
@@ -61,7 +61,7 @@ type Service struct {
 	logger *slog.Logger
 }
 
-// NewService creates a new Morpho position tracker service.
+// NewService creates a new Morpho indexer service.
 func NewService(
 	config Config,
 	consumer outbound.SQSConsumer,
@@ -112,7 +112,7 @@ func NewService(
 		eventExtractor: eventExtractor,
 		vaultRegistry:  NewVaultRegistry(config.Logger),
 		telemetry:      config.Telemetry,
-		logger:         config.Logger.With("component", "morpho-position-tracker"),
+		logger:         config.Logger.With("component", "morpho-indexer"),
 	}, nil
 }
 
@@ -132,7 +132,7 @@ func (s *Service) Start(ctx context.Context) error {
 		Logger:       s.logger,
 	}, s.processBlockEvent)
 
-	s.logger.Info("morpho position tracker started",
+	s.logger.Info("morpho indexer started",
 		"maxMessages", s.config.MaxMessages,
 		"vaults", s.vaultRegistry.Count())
 	return nil
@@ -143,7 +143,7 @@ func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	s.logger.Info("morpho position tracker stopped")
+	s.logger.Info("morpho indexer stopped")
 	return nil
 }
 

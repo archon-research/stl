@@ -23,7 +23,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
-	"github.com/archon-research/stl/stl-verify/internal/services/morpho_position_tracker"
+	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -59,7 +59,7 @@ type cliConfig struct {
 }
 
 func parseConfig(args []string) (cliConfig, error) {
-	fs := flag.NewFlagSet("morpho-position-tracker", flag.ContinueOnError)
+	fs := flag.NewFlagSet("morpho-indexer", flag.ContinueOnError)
 	queueURL := fs.String("queue", "", "SQS Queue URL")
 	redisAddr := fs.String("redis", "", "Redis address")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
@@ -143,7 +143,7 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
-	logger.Info("starting morpho position tracker",
+	logger.Info("starting morpho indexer",
 		"queue", cfg.queueURL,
 		"redis", cfg.redisAddr,
 		"chainID", cfg.chainID,
@@ -151,7 +151,7 @@ func run(ctx context.Context, args []string) error {
 
 	// Initialize OpenTelemetry tracing and metrics
 	shutdownOTEL := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "morpho-position-tracker",
+		ServiceName:    "morpho-indexer",
 		ServiceVersion: GitCommit,
 		BuildTime:      BuildTime,
 		Logger:         logger,
@@ -159,7 +159,7 @@ func run(ctx context.Context, args []string) error {
 	defer shutdownOTEL(context.Background())
 
 	// Service telemetry
-	morphoTelemetry, err := morpho_position_tracker.NewTelemetry()
+	morphoTelemetry, err := morpho_indexer.NewTelemetry()
 	if err != nil {
 		logger.Warn("failed to create morpho telemetry", "error", err)
 	}
@@ -261,7 +261,7 @@ func run(ctx context.Context, args []string) error {
 	eventRepo := postgres.NewEventRepository(logger)
 
 	// Service
-	svcConfig := morpho_position_tracker.Config{
+	svcConfig := morpho_indexer.Config{
 		SQSConsumerConfig: shared.SQSConsumerConfig{
 			MaxMessages: cfg.maxMessages,
 			Logger:      logger,
@@ -270,7 +270,7 @@ func run(ctx context.Context, args []string) error {
 		Telemetry: morphoTelemetry,
 	}
 
-	service, err := morpho_position_tracker.NewService(
+	service, err := morpho_indexer.NewService(
 		svcConfig,
 		sqsConsumer,
 		redisClient,
@@ -286,7 +286,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating service: %w", err)
 	}
 
-	logger.Info("morpho position tracker started, waiting for messages...")
+	logger.Info("morpho indexer started, waiting for messages...")
 
 	return lifecycle.Run(ctx, logger, service)
 }

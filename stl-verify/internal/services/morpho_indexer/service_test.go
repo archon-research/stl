@@ -1,4 +1,4 @@
-package morpho_position_tracker
+package morpho_indexer
 
 import (
 	"testing"

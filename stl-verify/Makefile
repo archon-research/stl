@@ -1,7 +1,7 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-position-tracker help ci ci-checks \
+.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer help ci ci-checks \
         dev-up dev-env dev-down dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal \
@@ -47,10 +47,10 @@ run-oracle-price-worker:
 	@echo "==> Running oracle price worker..."
 	@set -a && . cmd/oracle-price-worker/.env && [ -f cmd/oracle-price-worker/.env.local ] && . cmd/oracle-price-worker/.env.local; set +a && go run ./cmd/oracle-price-worker
 
-# Run the Morpho position tracker (requires dev-up first)
-run-morpho-position-tracker:
-	@echo "==> Running Morpho position tracker..."
-	@set -a && . cmd/morpho-position-tracker/.env && [ -f cmd/morpho-position-tracker/.env.local ] && . cmd/morpho-position-tracker/.env.local; set +a && go run ./cmd/morpho-position-tracker
+# Run the Morpho indexer (requires dev-up first)
+run-morpho-indexer:
+	@echo "==> Running Morpho indexer..."
+	@set -a && . cmd/morpho-indexer/.env && [ -f cmd/morpho-indexer/.env.local ] && . cmd/morpho-indexer/.env.local; set +a && go run ./cmd/morpho-indexer
 
 # Run tests with race detector
 test-race:
@@ -268,7 +268,7 @@ dev-env:
 		"SQS_WAIT_TIME=1" \
 		"SQS_VISIBILITY_TIMEOUT=30" \
 		"LOG_LEVEL=debug" \
-		> cmd/morpho-position-tracker/.env
+		> cmd/morpho-indexer/.env
 	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
 		{ echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
 	printf '%s\n' \

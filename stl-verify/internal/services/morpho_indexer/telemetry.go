@@ -1,4 +1,4 @@
-package morpho_position_tracker
+package morpho_indexer
 
 import (
 	"context"
@@ -12,9 +12,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/morpho_position_tracker"
+const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 
-// Telemetry provides OpenTelemetry metrics and tracing for the Morpho position tracker.
+// Telemetry provides OpenTelemetry metrics and tracing for the Morpho indexer.
 type Telemetry struct {
 	tracer trace.Tracer
 	meter  metric.Meter

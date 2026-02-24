@@ -113,8 +113,8 @@ $AWS sns subscribe \
   --attributes RawMessageDelivery=true \
   --region $REGION
 
-# Morpho position tracker is Ethereum-only
-echo "Creating Ethereum morpho position queues..."
+# Morpho indexer is Ethereum-only
+echo "Creating Ethereum morpho indexing queues..."
 $AWS sqs create-queue \
   --queue-name stl-ethereum-morpho-indexing-dlq.fifo \
   --attributes FifoQueue=true,ContentBasedDeduplication=true \
