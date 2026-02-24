@@ -29,11 +29,11 @@ The pipeline has two categories of downstream workers:
 | Worker | Reads | On-chain RPC calls | Writes |
 |--------|-------|---------------------|--------|
 | raw-data-backup | SQS + Redis | None — pure byte copy | S3 |
-| oracle-price-worker | SQS + PostgreSQL | eth\_call via Multicall3 (oracle prices per block) | PostgreSQL |
-| sparklend-position-tracker | SQS + Redis | Heavy eth\_call via Multicall3 (user reserves, balances, configs) | PostgreSQL |
+| oracle-price-worker | SQS + PostgreSQL | `eth_call` via Multicall3 (oracle prices per block) | PostgreSQL |
+| sparklend-position-tracker | SQS + Redis | Heavy `eth_call` via Multicall3 (user reserves, balances, configs) | PostgreSQL |
 
-- **Phase 1**: Watcher + raw-data-backup. Neither makes on-chain RPC calls. All data is either opaque metadata (block\_states) or raw cached bytes (Redis to S3). The mock-blockchain-server only needs to serve the 5 JSON-RPC methods the watcher calls.
-- **Phase 2**: oracle-price-worker + sparklend-position-tracker. Both make eth\_call/Multicall3 calls at specific block numbers. These responses are not cached anywhere — they are consumed, transformed into domain entities, and discarded. Supporting these workers requires capturing and replaying eth\_call responses (see Phase 2 section below).
+- **Phase 1**: Watcher + raw-data-backup. Neither makes on-chain RPC calls. All data is either opaque metadata (`block_states`) or raw cached bytes (Redis to S3). The mock-blockchain-server only needs to serve the 5 JSON-RPC methods the watcher calls.
+- **Phase 2**: oracle-price-worker + sparklend-position-tracker. Both make `eth_call`/Multicall3 calls at specific block numbers. These responses are not cached anywhere — they are consumed, transformed into domain entities, and discarded. Supporting these workers requires capturing and replaying `eth_call` responses (see Phase 2 section below).
 
 ### Mock Blockchain Server
 
@@ -120,26 +120,26 @@ Since the mock server replays renumbered blocks that don't exist on-chain, the w
 
 ## Repository Structure
 
-- stl/stress-test/ — Non-Go artifacts
+- stress-test/ — Non-Go artifacts
   - k6/watcher-sustained.js — Sustained throughput test
   - k6/watcher-burst.js — Burst/accelerated test
   - k6/watcher-reorg.js — Reorg simulation test
   - verify/checks.sql — Post-test verification queries
   - README.md
-- stl/stl-verify/cmd/mock-blockchain-server/main.go — Binary entry point
-- stl/stl-verify/cmd/stress-data-export/main.go — Data exporter entry point
-- stl/stl-verify/internal/testutil/mockchain/ — Mock server package (extends existing testutil patterns)
+- stl-verify/cmd/mock-blockchain-server/main.go — Binary entry point
+- stl-verify/cmd/stress-data-export/main.go — Data exporter entry point
+- stl-verify/internal/testutil/mockchain/ — Mock server package (extends existing testutil patterns)
   - server.go — Top-level server (wires WS + HTTP + Admin)
-  - websocket.go — eth\_subscribe, notifications, keepalive
+  - websocket.go — `eth_subscribe`, notifications, keepalive
   - jsonrpc.go — HTTP JSON-RPC handler (builds on testutil/ethrpc.go patterns)
   - admin.go — Admin API (start/stop/speed/status/reorg)
   - replayer.go — Template looping, renumbering, hash generation
   - reorg.go — Reorg simulation logic
   - datastore.go — In-memory block data store (loaded from S3)
-- stl/stl-verify/internal/testutil/export/ — Data exporter package
+- stl-verify/internal/testutil/export/ — Data exporter package
   - redis.go — Read from staging Redis
   - s3.go — Read from staging S3 / upload to stress-test S3
-- stl/stl-verify/Dockerfile.mock-blockchain-server
+- stl-verify/Dockerfile.mock-blockchain-server
 
 ## Consequences
 
