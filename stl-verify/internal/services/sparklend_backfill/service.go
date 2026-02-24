@@ -235,8 +235,8 @@ func (s *Service) enqueueBlocks(ctx context.Context, blockCh chan<- int64, fromB
 // Keys that are not receipts files or that cannot be parsed are silently ignored.
 func BuildVersionMap(keys []string) map[int64]int {
 	versions := make(map[int64]int)
-	for _, raw := range keys {
-		parsed, ok := s3key.Parse(raw)
+	for _, key := range keys {
+		parsed, ok := s3key.Parse(key)
 		if !ok || parsed.DataType != s3key.Receipts {
 			continue
 		}
