@@ -613,8 +613,11 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 		return nil, fmt.Errorf("MORPHO() call failed — not a MetaMorpho vault: %s", vaultAddress.Hex())
 	}
 	morphoUnpacked, err := s.metaMorphoABI.Unpack("MORPHO", results[4].ReturnData)
-	if err != nil || len(morphoUnpacked) == 0 {
+	if err != nil {
 		return nil, fmt.Errorf("unpacking MORPHO(): %w", err)
+	}
+	if len(morphoUnpacked) == 0 {
+		return nil, fmt.Errorf("MORPHO() returned no values for %s", vaultAddress.Hex())
 	}
 	morphoAddr, ok := morphoUnpacked[0].(common.Address)
 	if !ok || morphoAddr != MorphoBlueAddress {
