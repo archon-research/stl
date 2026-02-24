@@ -550,8 +550,10 @@ func (s *Service) handleVaultTransfer(ctx context.Context, eventData *MetaMorpho
 		return fmt.Errorf("vault not found in registry: %s", vaultAddress.Hex())
 	}
 
-	hasFrom := eventData.From != (common.Address{})
-	hasTo := eventData.To != (common.Address{})
+	// Filter out mint/burn (zero address) and internal vault accounting (vault address).
+	// Mints and burns are already covered by Deposit/Withdraw handlers.
+	hasFrom := eventData.From != (common.Address{}) && eventData.From != vaultAddress
+	hasTo := eventData.To != (common.Address{}) && eventData.To != vaultAddress
 
 	// Fetch vault state + both balances in a single RPC call when both addresses are present.
 	var vs *VaultState
@@ -606,10 +608,10 @@ func (s *Service) handleVaultAccrueInterest(ctx context.Context, eventData *Meta
 	}
 
 	accrueData := &vaultAccrueData{
-		FeeShares:      eventData.FeeShares,
-		NewTotalAssets: eventData.NewTotalAssets,
-		Interest:       eventData.Interest,
-		FeeAssets:      eventData.FeeAssets,
+		FeeShares:           eventData.FeeShares,
+		NewTotalAssets:      eventData.NewTotalAssets,
+		PreviousTotalAssets: eventData.PreviousTotalAssets,
+		ManagementFeeShares: eventData.ManagementFeeShares,
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
@@ -647,10 +649,10 @@ type accrueInterestData struct {
 }
 
 type vaultAccrueData struct {
-	FeeShares      *big.Int
-	NewTotalAssets *big.Int
-	Interest       *big.Int // V2 only
-	FeeAssets      *big.Int // V2 only
+	FeeShares           *big.Int // V1: single fee, V2: performanceFeeShares
+	NewTotalAssets      *big.Int
+	PreviousTotalAssets *big.Int // V2 only
+	ManagementFeeShares *big.Int // V2 only
 }
 
 // ensureMarket ensures the market exists in the database and returns its ID.
@@ -740,7 +742,7 @@ func (s *Service) saveVaultStateSnapshotInTx(ctx context.Context, tx pgx.Tx, vau
 	}
 
 	if accrueData != nil {
-		state.WithAccrueInterest(accrueData.FeeShares, accrueData.NewTotalAssets, accrueData.Interest, accrueData.FeeAssets)
+		state.WithAccrueInterest(accrueData.FeeShares, accrueData.NewTotalAssets, accrueData.PreviousTotalAssets, accrueData.ManagementFeeShares)
 	}
 
 	return s.morphoRepo.SaveVaultState(ctx, tx, state)

@@ -254,7 +254,7 @@ func (r *MorphoRepository) SaveVaultState(ctx context.Context, tx pgx.Tx, state 
 		return fmt.Errorf("converting total_supply: %w", err)
 	}
 
-	var feeShares, newTotalAssets, interest, feeAssets *string
+	var feeShares, newTotalAssets, previousTotalAssets, managementFeeShares *string
 	if state.FeeShares != nil {
 		s := state.FeeShares.String()
 		feeShares = &s
@@ -263,27 +263,27 @@ func (r *MorphoRepository) SaveVaultState(ctx context.Context, tx pgx.Tx, state 
 		s := state.NewTotalAssets.String()
 		newTotalAssets = &s
 	}
-	if state.Interest != nil {
-		s := state.Interest.String()
-		interest = &s
+	if state.PreviousTotalAssets != nil {
+		s := state.PreviousTotalAssets.String()
+		previousTotalAssets = &s
 	}
-	if state.FeeAssets != nil {
-		s := state.FeeAssets.String()
-		feeAssets = &s
+	if state.ManagementFeeShares != nil {
+		s := state.ManagementFeeShares.String()
+		managementFeeShares = &s
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_vault_state (morpho_vault_id, block_number, block_version, total_assets, total_supply, fee_shares, new_total_assets, interest, fee_assets)
+		`INSERT INTO morpho_vault_state (morpho_vault_id, block_number, block_version, total_assets, total_supply, fee_shares, new_total_assets, previous_total_assets, management_fee_shares)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (morpho_vault_id, block_number, block_version) DO UPDATE SET
 			total_assets = EXCLUDED.total_assets,
 			total_supply = EXCLUDED.total_supply,
 			fee_shares = EXCLUDED.fee_shares,
 			new_total_assets = EXCLUDED.new_total_assets,
-			interest = EXCLUDED.interest,
-			fee_assets = EXCLUDED.fee_assets`,
+			previous_total_assets = EXCLUDED.previous_total_assets,
+			management_fee_shares = EXCLUDED.management_fee_shares`,
 		state.MorphoVaultID, state.BlockNumber, state.BlockVersion,
-		totalAssets, totalSupply, feeShares, newTotalAssets, interest, feeAssets,
+		totalAssets, totalSupply, feeShares, newTotalAssets, previousTotalAssets, managementFeeShares,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho vault state: %w", err)

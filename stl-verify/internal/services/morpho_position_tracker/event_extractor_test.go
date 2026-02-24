@@ -313,10 +313,10 @@ func TestExtractMetaMorphoEvent_AccrueInterestV2(t *testing.T) {
 	}
 	v2Event := v2ABI.Events["AccrueInterest"]
 
-	// Pack 4 fields: newTotalAssets, interest, feeShares, feeAssets
+	// Pack 4 fields: previousTotalAssets, newTotalAssets, performanceFeeShares, managementFeeShares
 	data, err := v2Event.Inputs.NonIndexed().Pack(
+		bigFromStr("2900000"),
 		bigFromStr("3000000"),
-		bigFromStr("50000"),
 		bigFromStr("200"),
 		bigFromStr("150"),
 	)
@@ -338,28 +338,28 @@ func TestExtractMetaMorphoEvent_AccrueInterestV2(t *testing.T) {
 	if result.EventType != entity.MorphoEventVaultAccrueInterest {
 		t.Errorf("EventType = %s, want VaultAccrueInterest", result.EventType)
 	}
+	if result.PreviousTotalAssets.Int64() != 2900000 {
+		t.Errorf("PreviousTotalAssets = %s, want 2900000", result.PreviousTotalAssets)
+	}
 	if result.NewTotalAssets.Int64() != 3000000 {
 		t.Errorf("NewTotalAssets = %s, want 3000000", result.NewTotalAssets)
 	}
-	if result.Interest.Int64() != 50000 {
-		t.Errorf("Interest = %s, want 50000", result.Interest)
-	}
 	if result.FeeShares.Int64() != 200 {
-		t.Errorf("FeeShares = %s, want 200", result.FeeShares)
+		t.Errorf("FeeShares (performanceFeeShares) = %s, want 200", result.FeeShares)
 	}
-	if result.FeeAssets.Int64() != 150 {
-		t.Errorf("FeeAssets = %s, want 150", result.FeeAssets)
+	if result.ManagementFeeShares.Int64() != 150 {
+		t.Errorf("ManagementFeeShares = %s, want 150", result.ManagementFeeShares)
 	}
 }
 
 func TestMetaMorphoEventData_ToJSON_AccrueInterestV2(t *testing.T) {
 	data := &MetaMorphoEventData{
-		EventType:      entity.MorphoEventVaultAccrueInterest,
-		TxHash:         "0xv2test",
-		NewTotalAssets: bigFromStr("3000000"),
-		FeeShares:      bigFromStr("200"),
-		Interest:       bigFromStr("50000"),
-		FeeAssets:      bigFromStr("150"),
+		EventType:           entity.MorphoEventVaultAccrueInterest,
+		TxHash:              "0xv2test",
+		NewTotalAssets:      bigFromStr("3000000"),
+		FeeShares:           bigFromStr("200"),
+		PreviousTotalAssets: bigFromStr("2900000"),
+		ManagementFeeShares: bigFromStr("150"),
 	}
 
 	jsonData, err := data.ToJSON()
@@ -368,7 +368,7 @@ func TestMetaMorphoEventData_ToJSON_AccrueInterestV2(t *testing.T) {
 	}
 
 	jsonStr := string(jsonData)
-	for _, field := range []string{`"interest":"50000"`, `"feeAssets":"150"`, `"newTotalAssets":"3000000"`, `"feeShares":"200"`} {
+	for _, field := range []string{`"previousTotalAssets":"2900000"`, `"managementFeeShares":"150"`, `"newTotalAssets":"3000000"`, `"feeShares":"200"`} {
 		if !strings.Contains(jsonStr, field) {
 			t.Errorf("ToJSON() missing field %s in %s", field, jsonStr)
 		}
@@ -389,11 +389,11 @@ func TestMetaMorphoEventData_ToJSON_AccrueInterestV1(t *testing.T) {
 	}
 
 	jsonStr := string(jsonData)
-	// V1 should NOT have interest or feeAssets
-	if strings.Contains(jsonStr, `"interest"`) {
-		t.Errorf("V1 ToJSON() should not contain interest field, got %s", jsonStr)
+	// V1 should NOT have V2-only fields
+	if strings.Contains(jsonStr, `"previousTotalAssets"`) {
+		t.Errorf("V1 ToJSON() should not contain previousTotalAssets field, got %s", jsonStr)
 	}
-	if strings.Contains(jsonStr, `"feeAssets"`) {
-		t.Errorf("V1 ToJSON() should not contain feeAssets field, got %s", jsonStr)
+	if strings.Contains(jsonStr, `"managementFeeShares"`) {
+		t.Errorf("V1 ToJSON() should not contain managementFeeShares field, got %s", jsonStr)
 	}
 }

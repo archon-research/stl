@@ -944,7 +944,7 @@ func TestSaveVaultState_WithAccrueInterest(t *testing.T) {
 		TotalAssets:   big.NewInt(6000000000000),
 		TotalSupply:   big.NewInt(6000000000000000000),
 	}
-	state.WithAccrueInterest(big.NewInt(12345678), big.NewInt(6000100000000), nil, nil)
+	state.WithAccrueInterest(big.NewInt(12345678), big.NewInt(6000100000000), nil, nil) // V1: no previousTotalAssets or managementFeeShares
 
 	tx, err := fixture.pool.Begin(ctx)
 	if err != nil {

@@ -84,10 +84,10 @@ type MetaMorphoEventData struct {
 
 	// AccrueInterest fields (V1 + V2)
 	NewTotalAssets *big.Int
-	FeeShares      *big.Int
+	FeeShares      *big.Int // V1: single fee, V2: performanceFeeShares
 	// V2-only AccrueInterest fields
-	Interest  *big.Int
-	FeeAssets *big.Int
+	PreviousTotalAssets *big.Int
+	ManagementFeeShares *big.Int
 }
 
 // ToJSON converts MorphoBlueEventData to JSON for protocol_event storage.
@@ -173,11 +173,11 @@ func (e *MetaMorphoEventData) ToJSON() (json.RawMessage, error) {
 	case entity.MorphoEventVaultAccrueInterest:
 		data["newTotalAssets"] = e.NewTotalAssets.String()
 		data["feeShares"] = e.FeeShares.String()
-		if e.Interest != nil {
-			data["interest"] = e.Interest.String()
+		if e.PreviousTotalAssets != nil {
+			data["previousTotalAssets"] = e.PreviousTotalAssets.String()
 		}
-		if e.FeeAssets != nil {
-			data["feeAssets"] = e.FeeAssets.String()
+		if e.ManagementFeeShares != nil {
+			data["managementFeeShares"] = e.ManagementFeeShares.String()
 		}
 	}
 
@@ -850,9 +850,14 @@ func extractVaultAccrueInterest(eventData map[string]any, txHash string) (*MetaM
 	if err != nil {
 		return nil, err
 	}
+
+	// V1 uses "feeShares", V2 uses "performanceFeeShares" for the same concept.
 	feeShares, err := getBigInt(eventData, "feeShares")
 	if err != nil {
-		return nil, err
+		feeShares, err = getBigInt(eventData, "performanceFeeShares")
+		if err != nil {
+			return nil, fmt.Errorf("missing both feeShares and performanceFeeShares")
+		}
 	}
 
 	result := &MetaMorphoEventData{
@@ -863,11 +868,11 @@ func extractVaultAccrueInterest(eventData map[string]any, txHash string) (*MetaM
 	}
 
 	// V2 fields (only present when parsed from V2 ABI)
-	if interest, err := getBigInt(eventData, "interest"); err == nil {
-		result.Interest = interest
+	if prev, err := getBigInt(eventData, "previousTotalAssets"); err == nil {
+		result.PreviousTotalAssets = prev
 	}
-	if feeAssets, err := getBigInt(eventData, "feeAssets"); err == nil {
-		result.FeeAssets = feeAssets
+	if mgmt, err := getBigInt(eventData, "managementFeeShares"); err == nil {
+		result.ManagementFeeShares = mgmt
 	}
 
 	return result, nil

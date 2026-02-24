@@ -114,8 +114,8 @@ CREATE TABLE IF NOT EXISTS morpho_vault_state
     -- AccrueInterest raw data (nullable, only set when triggered by AccrueInterest)
     fee_shares       NUMERIC,
     new_total_assets NUMERIC,
-    interest         NUMERIC,       -- V2 only: interest accrued
-    fee_assets       NUMERIC,       -- V2 only: fee in asset terms
+    previous_total_assets  NUMERIC,  -- V2 only: previousTotalAssets
+    management_fee_shares  NUMERIC,  -- V2 only: managementFeeShares
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (morpho_vault_id, block_number, block_version)
 ) WITH (
