@@ -55,6 +55,16 @@ type MarketParams struct {
 	LLTV            *big.Int
 }
 
+// abiMarketParams mirrors the ABI tuple field names for safe conversion via abi.ConvertType.
+// Field names must match the capitalized ABI parameter names exactly (e.g. "lltv" → "Lltv").
+type abiMarketParams struct {
+	LoanToken       common.Address
+	CollateralToken common.Address
+	Oracle          common.Address
+	Irm             common.Address
+	Lltv            *big.Int
+}
+
 // MetaMorphoEventData holds parsed data from a MetaMorpho vault event.
 type MetaMorphoEventData struct {
 	EventType entity.MorphoEventType
@@ -431,16 +441,11 @@ func extractCreateMarket(eventData map[string]any, txHash string) (*MorphoBlueEv
 		return nil, fmt.Errorf("missing field: marketParams")
 	}
 
-	// The ABI unpacker returns a struct for tuple types
-	mps, ok := mp.(struct {
-		LoanToken       common.Address `json:"loanToken"`
-		CollateralToken common.Address `json:"collateralToken"`
-		Oracle          common.Address `json:"oracle"`
-		Irm             common.Address `json:"irm"`
-		Lltv            *big.Int       `json:"lltv"`
-	})
+	// Use abi.ConvertType for safe conversion from the ABI-generated anonymous struct.
+	converted := abi.ConvertType(mp, abiMarketParams{})
+	mps, ok := converted.(abiMarketParams)
 	if !ok {
-		return nil, fmt.Errorf("invalid marketParams type: %T", mp)
+		return nil, fmt.Errorf("failed to convert marketParams: %T", mp)
 	}
 
 	return &MorphoBlueEventData{

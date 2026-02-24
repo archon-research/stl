@@ -181,6 +181,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("connecting to Ethereum node: %w", err)
 	}
+	defer ethClient.Close()
 	logger.Info("Ethereum node connected")
 
 	// PostgreSQL

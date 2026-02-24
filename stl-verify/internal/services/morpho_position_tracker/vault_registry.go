@@ -36,9 +36,8 @@ func (r *VaultRegistry) LoadFromDB(ctx context.Context, repo outbound.MorphoRepo
 		return fmt.Errorf("loading vault addresses: %w", err)
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
+	// Fetch all vault details before acquiring the lock to avoid holding it during DB queries.
+	loaded := make(map[common.Address]*entity.MorphoVault, len(addresses))
 	for _, addr := range addresses {
 		vault, err := repo.GetVaultByAddress(ctx, addr)
 		if err != nil {
@@ -46,8 +45,15 @@ func (r *VaultRegistry) LoadFromDB(ctx context.Context, repo outbound.MorphoRepo
 			continue
 		}
 		if vault != nil {
-			r.vaults[addr] = vault
+			loaded[addr] = vault
 		}
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for addr, vault := range loaded {
+		r.vaults[addr] = vault
 	}
 
 	r.logger.Info("loaded vaults from database", "count", len(r.vaults))
