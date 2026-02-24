@@ -719,12 +719,12 @@ func (s *Service) savePositionSnapshot(ctx context.Context, tx pgx.Tx, user comm
 	supplyAssets := entity.ComputeSupplyAssets(ps.SupplyShares, ms.TotalSupplyAssets, ms.TotalSupplyShares)
 	borrowAssets := entity.ComputeBorrowAssets(ps.BorrowShares, ms.TotalBorrowAssets, ms.TotalBorrowShares)
 
-	position, err := entity.NewMorphoPosition(userID, morphoMarketID, blockNumber, blockVersion, ps.SupplyShares, ps.BorrowShares, ps.Collateral, supplyAssets, borrowAssets, eventType, common.FromHex(txHash))
+	position, err := entity.NewMorphoMarketPosition(userID, morphoMarketID, blockNumber, blockVersion, ps.SupplyShares, ps.BorrowShares, ps.Collateral, supplyAssets, borrowAssets, eventType, common.FromHex(txHash))
 	if err != nil {
 		return fmt.Errorf("creating position entity: %w", err)
 	}
 
-	return s.morphoRepo.SavePosition(ctx, tx, position)
+	return s.morphoRepo.SaveMarketPosition(ctx, tx, position)
 }
 
 func (s *Service) saveVaultStateSnapshotInTx(ctx context.Context, tx pgx.Tx, vaultID, blockNumber int64, blockVersion int, vs *VaultState, accrueData *vaultAccrueData) error {

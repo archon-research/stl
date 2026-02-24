@@ -53,9 +53,9 @@ CREATE INDEX IF NOT EXISTS idx_morpho_market_state_market ON morpho_market_state
 CREATE INDEX IF NOT EXISTS idx_morpho_market_state_block ON morpho_market_state (block_number);
 
 -- ============================================================================
--- morpho_position: User position snapshots in Morpho Blue markets (hypertable)
+-- morpho_market_position: User position snapshots in Morpho Blue markets (hypertable)
 -- ============================================================================
-CREATE TABLE IF NOT EXISTS morpho_position
+CREATE TABLE IF NOT EXISTS morpho_market_position
 (
     user_id          BIGINT      NOT NULL REFERENCES "user" (id),
     morpho_market_id BIGINT      NOT NULL REFERENCES morpho_market (id),
@@ -76,10 +76,10 @@ CREATE TABLE IF NOT EXISTS morpho_position
     tsdb.chunk_interval = 100000
 );
 
-CREATE INDEX IF NOT EXISTS idx_morpho_position_user ON morpho_position (user_id);
-CREATE INDEX IF NOT EXISTS idx_morpho_position_market ON morpho_position (morpho_market_id);
-CREATE INDEX IF NOT EXISTS idx_morpho_position_block ON morpho_position (block_number);
-CREATE INDEX IF NOT EXISTS idx_morpho_position_user_market ON morpho_position (user_id, morpho_market_id);
+CREATE INDEX IF NOT EXISTS idx_morpho_market_position_user ON morpho_market_position (user_id);
+CREATE INDEX IF NOT EXISTS idx_morpho_market_position_market ON morpho_market_position (morpho_market_id);
+CREATE INDEX IF NOT EXISTS idx_morpho_market_position_block ON morpho_market_position (block_number);
+CREATE INDEX IF NOT EXISTS idx_morpho_market_position_user_market ON morpho_market_position (user_id, morpho_market_id);
 
 -- ============================================================================
 -- morpho_vault: MetaMorpho vault registry

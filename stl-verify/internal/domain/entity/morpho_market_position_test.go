@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestNewMorphoPosition(t *testing.T) {
+func TestNewMorphoMarketPosition(t *testing.T) {
 	zero := big.NewInt(0)
 	txHash := []byte{0x01, 0x02}
 
@@ -99,7 +99,7 @@ func TestNewMorphoPosition(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewMorphoPosition(tt.userID, tt.marketID, tt.block, tt.version, tt.supShares, tt.borShares, tt.collateral, tt.supAssets, tt.borAssets, tt.eventType, tt.txHash)
+			got, err := NewMorphoMarketPosition(tt.userID, tt.marketID, tt.block, tt.version, tt.supShares, tt.borShares, tt.collateral, tt.supAssets, tt.borAssets, tt.eventType, tt.txHash)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")

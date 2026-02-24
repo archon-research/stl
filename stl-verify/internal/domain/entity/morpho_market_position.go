@@ -5,8 +5,8 @@ import (
 	"math/big"
 )
 
-// MorphoPosition represents a user's position snapshot in a Morpho Blue market at a specific block.
-type MorphoPosition struct {
+// MorphoMarketPosition represents a user's position snapshot in a Morpho Blue market at a specific block.
+type MorphoMarketPosition struct {
 	ID             int64
 	UserID         int64
 	MorphoMarketID int64
@@ -21,9 +21,9 @@ type MorphoPosition struct {
 	TxHash         []byte
 }
 
-// NewMorphoPosition creates a new MorphoPosition entity with validation.
-func NewMorphoPosition(userID, morphoMarketID, blockNumber int64, blockVersion int, supplyShares, borrowShares, collateral, supplyAssets, borrowAssets *big.Int, eventType MorphoEventType, txHash []byte) (*MorphoPosition, error) {
-	p := &MorphoPosition{
+// NewMorphoMarketPosition creates a new MorphoMarketPosition entity with validation.
+func NewMorphoMarketPosition(userID, morphoMarketID, blockNumber int64, blockVersion int, supplyShares, borrowShares, collateral, supplyAssets, borrowAssets *big.Int, eventType MorphoEventType, txHash []byte) (*MorphoMarketPosition, error) {
+	p := &MorphoMarketPosition{
 		UserID:         userID,
 		MorphoMarketID: morphoMarketID,
 		BlockNumber:    blockNumber,
@@ -42,7 +42,7 @@ func NewMorphoPosition(userID, morphoMarketID, blockNumber int64, blockVersion i
 	return p, nil
 }
 
-func (p *MorphoPosition) validate() error {
+func (p *MorphoMarketPosition) validate() error {
 	if p.UserID <= 0 {
 		return fmt.Errorf("userID must be positive, got %d", p.UserID)
 	}

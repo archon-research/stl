@@ -109,4 +109,3 @@ func (r *VaultRegistry) Count() int {
 	defer r.mu.RUnlock()
 	return len(r.vaults)
 }
-

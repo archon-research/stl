@@ -22,8 +22,8 @@ type MorphoRepository interface {
 	// SaveMarketState saves a market state snapshot within an external transaction.
 	SaveMarketState(ctx context.Context, tx pgx.Tx, state *entity.MorphoMarketState) error
 
-	// SavePosition saves a user position snapshot within an external transaction.
-	SavePosition(ctx context.Context, tx pgx.Tx, position *entity.MorphoPosition) error
+	// SaveMarketPosition saves a user market position snapshot within an external transaction.
+	SaveMarketPosition(ctx context.Context, tx pgx.Tx, position *entity.MorphoMarketPosition) error
 
 	// GetOrCreateVault retrieves or creates a MetaMorpho vault.
 	// Returns the vault's database ID.

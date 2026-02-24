@@ -143,8 +143,8 @@ func (r *MorphoRepository) SaveMarketState(ctx context.Context, tx pgx.Tx, state
 	return nil
 }
 
-// SavePosition saves a user position snapshot within an external transaction.
-func (r *MorphoRepository) SavePosition(ctx context.Context, tx pgx.Tx, position *entity.MorphoPosition) error {
+// SaveMarketPosition saves a user market position snapshot within an external transaction.
+func (r *MorphoRepository) SaveMarketPosition(ctx context.Context, tx pgx.Tx, position *entity.MorphoMarketPosition) error {
 	supplyShares, err := bigIntToNumeric(position.SupplyShares)
 	if err != nil {
 		return fmt.Errorf("converting supply_shares: %w", err)
@@ -167,7 +167,7 @@ func (r *MorphoRepository) SavePosition(ctx context.Context, tx pgx.Tx, position
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_position (user_id, morpho_market_id, block_number, block_version, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets, event_type, tx_hash)
+		`INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets, event_type, tx_hash)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 ON CONFLICT (user_id, morpho_market_id, block_number, block_version) DO UPDATE SET
 			supply_shares = EXCLUDED.supply_shares,
@@ -182,7 +182,7 @@ func (r *MorphoRepository) SavePosition(ctx context.Context, tx pgx.Tx, position
 		string(position.EventType), position.TxHash,
 	)
 	if err != nil {
-		return fmt.Errorf("saving morpho position: %w", err)
+		return fmt.Errorf("saving morpho market position: %w", err)
 	}
 	return nil
 }

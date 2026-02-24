@@ -49,4 +49,3 @@ func TestVaultRegistry(t *testing.T) {
 		t.Error("GetVault should return nil for unknown vault")
 	}
 }
-

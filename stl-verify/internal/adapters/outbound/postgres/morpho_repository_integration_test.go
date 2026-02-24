@@ -465,7 +465,7 @@ func TestSaveMarketState_UpsertOnConflict(t *testing.T) {
 
 // --- Position Tests ---
 
-func TestSavePosition_Basic(t *testing.T) {
+func TestSaveMarketPosition_Basic(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	t.Cleanup(fixture.cleanup)
 
@@ -474,7 +474,7 @@ func TestSavePosition_Basic(t *testing.T) {
 	copy(marketID, []byte("position-test-market-id-1234567"))
 	marketDBID := fixture.createTestMarket(t, ctx, marketID)
 
-	position := &entity.MorphoPosition{
+	position := &entity.MorphoMarketPosition{
 		UserID:         fixture.userID,
 		MorphoMarketID: marketDBID,
 		BlockNumber:    19000300,
@@ -494,9 +494,9 @@ func TestSavePosition_Basic(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	err = fixture.repo.SavePosition(ctx, tx, position)
+	err = fixture.repo.SaveMarketPosition(ctx, tx, position)
 	if err != nil {
-		t.Fatalf("SavePosition failed: %v", err)
+		t.Fatalf("SaveMarketPosition failed: %v", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -508,7 +508,7 @@ func TestSavePosition_Basic(t *testing.T) {
 	var txHash []byte
 	err = fixture.pool.QueryRow(ctx,
 		`SELECT supply_shares, borrow_shares, collateral, supply_assets, borrow_assets, event_type, tx_hash
-		 FROM morpho_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3`,
+		 FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3`,
 		fixture.userID, marketDBID, int64(19000300),
 	).Scan(&supplyShares, &borrowShares, &collateral, &supplyAssets, &borrowAssets, &eventType, &txHash)
 	if err != nil {
@@ -525,7 +525,7 @@ func TestSavePosition_Basic(t *testing.T) {
 	}
 }
 
-func TestSavePosition_UpsertOnConflict(t *testing.T) {
+func TestSaveMarketPosition_UpsertOnConflict(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	t.Cleanup(fixture.cleanup)
 
@@ -535,7 +535,7 @@ func TestSavePosition_UpsertOnConflict(t *testing.T) {
 	marketDBID := fixture.createTestMarket(t, ctx, marketID)
 
 	// Insert initial position
-	pos1 := &entity.MorphoPosition{
+	pos1 := &entity.MorphoMarketPosition{
 		UserID:         fixture.userID,
 		MorphoMarketID: marketDBID,
 		BlockNumber:    19000400,
@@ -553,15 +553,15 @@ func TestSavePosition_UpsertOnConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to begin tx1: %v", err)
 	}
-	if err := fixture.repo.SavePosition(ctx, tx1, pos1); err != nil {
-		t.Fatalf("first SavePosition failed: %v", err)
+	if err := fixture.repo.SaveMarketPosition(ctx, tx1, pos1); err != nil {
+		t.Fatalf("first SaveMarketPosition failed: %v", err)
 	}
 	if err := tx1.Commit(ctx); err != nil {
 		t.Fatalf("failed to commit tx1: %v", err)
 	}
 
 	// Upsert with updated values
-	pos2 := &entity.MorphoPosition{
+	pos2 := &entity.MorphoMarketPosition{
 		UserID:         fixture.userID,
 		MorphoMarketID: marketDBID,
 		BlockNumber:    19000400,
@@ -579,8 +579,8 @@ func TestSavePosition_UpsertOnConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to begin tx2: %v", err)
 	}
-	if err := fixture.repo.SavePosition(ctx, tx2, pos2); err != nil {
-		t.Fatalf("upsert SavePosition failed: %v", err)
+	if err := fixture.repo.SaveMarketPosition(ctx, tx2, pos2); err != nil {
+		t.Fatalf("upsert SaveMarketPosition failed: %v", err)
 	}
 	if err := tx2.Commit(ctx); err != nil {
 		t.Fatalf("failed to commit tx2: %v", err)
@@ -589,7 +589,7 @@ func TestSavePosition_UpsertOnConflict(t *testing.T) {
 	// Verify updated
 	var supplyShares, eventType string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT supply_shares, event_type FROM morpho_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3`,
+		`SELECT supply_shares, event_type FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3`,
 		fixture.userID, marketDBID, int64(19000400),
 	).Scan(&supplyShares, &eventType)
 	if err != nil {
@@ -603,7 +603,7 @@ func TestSavePosition_UpsertOnConflict(t *testing.T) {
 	}
 }
 
-func TestSavePosition_Rollback(t *testing.T) {
+func TestSaveMarketPosition_Rollback(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	t.Cleanup(fixture.cleanup)
 
@@ -612,7 +612,7 @@ func TestSavePosition_Rollback(t *testing.T) {
 	copy(marketID, []byte("pos-rollback-test-market-1234567"))
 	marketDBID := fixture.createTestMarket(t, ctx, marketID)
 
-	position := &entity.MorphoPosition{
+	position := &entity.MorphoMarketPosition{
 		UserID:         fixture.userID,
 		MorphoMarketID: marketDBID,
 		BlockNumber:    19000500,
@@ -631,9 +631,9 @@ func TestSavePosition_Rollback(t *testing.T) {
 		t.Fatalf("failed to begin transaction: %v", err)
 	}
 
-	err = fixture.repo.SavePosition(ctx, tx, position)
+	err = fixture.repo.SaveMarketPosition(ctx, tx, position)
 	if err != nil {
-		t.Fatalf("SavePosition failed: %v", err)
+		t.Fatalf("SaveMarketPosition failed: %v", err)
 	}
 
 	// Rollback instead of commit
@@ -644,7 +644,7 @@ func TestSavePosition_Rollback(t *testing.T) {
 	// Verify no records exist after rollback
 	var count int
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM morpho_position WHERE morpho_market_id = $1 AND block_number = $2`,
+		`SELECT COUNT(*) FROM morpho_market_position WHERE morpho_market_id = $1 AND block_number = $2`,
 		marketDBID, int64(19000500),
 	).Scan(&count)
 	if err != nil {
@@ -655,7 +655,7 @@ func TestSavePosition_Rollback(t *testing.T) {
 	}
 }
 
-func TestSavePosition_LargeBigIntPrecision(t *testing.T) {
+func TestSaveMarketPosition_LargeBigIntPrecision(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	t.Cleanup(fixture.cleanup)
 
@@ -667,7 +667,7 @@ func TestSavePosition_LargeBigIntPrecision(t *testing.T) {
 	// max uint256
 	maxUint256, _ := new(big.Int).SetString("115792089237316195423570985008687907853269984665640564039457584007913129639935", 10)
 
-	position := &entity.MorphoPosition{
+	position := &entity.MorphoMarketPosition{
 		UserID:         fixture.userID,
 		MorphoMarketID: marketDBID,
 		BlockNumber:    19000600,
@@ -687,9 +687,9 @@ func TestSavePosition_LargeBigIntPrecision(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	err = fixture.repo.SavePosition(ctx, tx, position)
+	err = fixture.repo.SaveMarketPosition(ctx, tx, position)
 	if err != nil {
-		t.Fatalf("SavePosition with large values failed: %v", err)
+		t.Fatalf("SaveMarketPosition with large values failed: %v", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -699,7 +699,7 @@ func TestSavePosition_LargeBigIntPrecision(t *testing.T) {
 	// Verify precision preserved
 	var supplyShares string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT supply_shares FROM morpho_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3`,
+		`SELECT supply_shares FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3`,
 		fixture.userID, marketDBID, int64(19000600),
 	).Scan(&supplyShares)
 	if err != nil {
@@ -1146,7 +1146,7 @@ func TestTransactionAcrossMultipleTables(t *testing.T) {
 	}
 
 	// Save position
-	position := &entity.MorphoPosition{
+	position := &entity.MorphoMarketPosition{
 		UserID:         fixture.userID,
 		MorphoMarketID: marketDBID,
 		BlockNumber:    19300000,
@@ -1159,8 +1159,8 @@ func TestTransactionAcrossMultipleTables(t *testing.T) {
 		EventType:      entity.MorphoEventSupply,
 		TxHash:         []byte{0xcc},
 	}
-	if err := fixture.repo.SavePosition(ctx, tx, position); err != nil {
-		t.Fatalf("SavePosition in tx failed: %v", err)
+	if err := fixture.repo.SaveMarketPosition(ctx, tx, position); err != nil {
+		t.Fatalf("SaveMarketPosition in tx failed: %v", err)
 	}
 
 	// Save vault state
@@ -1198,7 +1198,7 @@ func TestTransactionAcrossMultipleTables(t *testing.T) {
 	// Verify all records exist
 	var msCount, mpCount, vsCount, vpCount int
 	fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_market_state WHERE block_number = 19300000`).Scan(&msCount)
-	fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_position WHERE block_number = 19300000`).Scan(&mpCount)
+	fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_market_position WHERE block_number = 19300000`).Scan(&mpCount)
 	fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_vault_state WHERE block_number = 19300000`).Scan(&vsCount)
 	fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_vault_position WHERE block_number = 19300000`).Scan(&vpCount)
 
@@ -1247,7 +1247,7 @@ func TestTransactionRollbackAcrossMultipleTables(t *testing.T) {
 		t.Fatalf("SaveMarketState failed: %v", err)
 	}
 
-	position := &entity.MorphoPosition{
+	position := &entity.MorphoMarketPosition{
 		UserID:         fixture.userID,
 		MorphoMarketID: marketDBID,
 		BlockNumber:    19400000,
@@ -1260,8 +1260,8 @@ func TestTransactionRollbackAcrossMultipleTables(t *testing.T) {
 		EventType:      entity.MorphoEventSupply,
 		TxHash:         []byte{0xee},
 	}
-	if err := fixture.repo.SavePosition(ctx, tx, position); err != nil {
-		t.Fatalf("SavePosition failed: %v", err)
+	if err := fixture.repo.SaveMarketPosition(ctx, tx, position); err != nil {
+		t.Fatalf("SaveMarketPosition failed: %v", err)
 	}
 
 	// Rollback
@@ -1272,7 +1272,7 @@ func TestTransactionRollbackAcrossMultipleTables(t *testing.T) {
 	// Verify nothing was persisted
 	var msCount, mpCount int
 	fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_market_state WHERE block_number = 19400000`).Scan(&msCount)
-	fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_position WHERE block_number = 19400000`).Scan(&mpCount)
+	fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_market_position WHERE block_number = 19400000`).Scan(&mpCount)
 
 	if msCount != 0 {
 		t.Errorf("expected 0 market states after rollback, got %d", msCount)
