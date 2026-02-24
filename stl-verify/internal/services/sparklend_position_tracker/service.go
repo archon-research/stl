@@ -225,9 +225,9 @@ func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (
 		s.ethClient,
 		s.multicallClient,
 		s.erc20ABI,
-		protocolConfig.UIPoolDataProvider,
-		protocolConfig.PoolDataProvider,
-		protocolConfig.PoolAddressesProvider,
+		protocolConfig.UIPoolDataProvider.Address,
+		protocolConfig.PoolAddress.Address,
+		protocolConfig.PoolAddressesProvider.Address,
 		protocolConfig.ProtocolVersion,
 		s.logger,
 	)
@@ -491,6 +491,18 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 	// Fetch reserve data and configuration from chain
 	reserveData, configData, err := blockchainSvc.getFullReserveData(ctx, reserve, blockNumber)
 	if err != nil {
+		// If reserve doesn't exist at this block, log and skip (non-fatal).
+		// This can happen when the configured PoolDataProvider address didn't exist
+		// at the historical block being queried (e.g., contract was upgraded/redeployed).
+		if errors.Is(err, ErrReserveNotFound) {
+			s.logger.Warn("Reserve not found at block, skipping snapshot",
+				"reserve", reserve.Hex(),
+				"protocol", protocolAddress.Hex(),
+				"block", blockNumber,
+				"tx", txHash,
+				"error", err)
+			return nil
+		}
 		return fmt.Errorf("failed to get reserve data: %w", err)
 	}
 

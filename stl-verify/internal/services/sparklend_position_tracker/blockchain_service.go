@@ -2,6 +2,7 @@ package sparklend_position_tracker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -16,6 +17,11 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 )
+
+// ErrReserveNotFound is returned when reserve data cannot be fetched at the queried block.
+// This typically happens when the configured PoolDataProvider contract didn't exist at
+// the historical block (e.g., the contract was upgraded/redeployed after that block).
+var ErrReserveNotFound = errors.New("reserve not found at block")
 
 type TokenMetadata struct {
 	Symbol   string
@@ -47,6 +53,9 @@ type ActualUserReserveData struct {
 	StableRateLastUpdated    uint64
 }
 
+// ErrNoPoolDataProvider is returned when no PoolDataProvider exists for the queried block.
+var ErrNoPoolDataProvider = errors.New("no PoolDataProvider available for block")
+
 type blockchainService struct {
 	mu                                         sync.RWMutex
 	ethClient                                  *ethclient.Client
@@ -57,7 +66,7 @@ type blockchainService struct {
 	getPoolDataProviderReserveConfigurationABI *abi.ABI
 	getPoolDataProviderReserveDataABI          *abi.ABI
 	uiPoolDataProvider                         common.Address
-	poolDataProvider                           common.Address
+	poolAddress                                common.Address
 	poolAddressesProvider                      common.Address
 	protocolVersion                            blockchain.ProtocolVersion
 	metadataCache                              map[common.Address]TokenMetadata
@@ -99,7 +108,7 @@ func newBlockchainService(
 	multicallClient outbound.Multicaller,
 	erc20ABI *abi.ABI,
 	uiPoolDataProvider common.Address,
-	poolDataProvider common.Address,
+	poolAddress common.Address,
 	poolAddressesProvider common.Address,
 	protocolVersion blockchain.ProtocolVersion,
 	logger *slog.Logger,
@@ -109,7 +118,7 @@ func newBlockchainService(
 		multicallClient:       multicallClient,
 		erc20ABI:              erc20ABI,
 		uiPoolDataProvider:    uiPoolDataProvider,
-		poolDataProvider:      poolDataProvider,
+		poolAddress:           poolAddress,
 		poolAddressesProvider: poolAddressesProvider,
 		protocolVersion:       protocolVersion,
 		metadataCache:         make(map[common.Address]TokenMetadata),
@@ -121,6 +130,16 @@ func newBlockchainService(
 	}
 
 	return service, nil
+}
+
+// getPoolDataProviderForBlock returns the correct PoolDataProvider address for the given block.
+// Returns an error if no PoolDataProvider was active at that block.
+func (s *blockchainService) getPoolDataProviderForBlock(blockNumber uint64) (common.Address, error) {
+	provider, ok := blockchain.GetPoolDataProviderForBlock(s.poolAddress, blockNumber)
+	if !ok {
+		return common.Address{}, fmt.Errorf("%w: pool=%s block=%d", ErrNoPoolDataProvider, s.poolAddress.Hex(), blockNumber)
+	}
+	return provider, nil
 }
 
 func (s *blockchainService) loadABIs(protocolVersion blockchain.ProtocolVersion) error {
@@ -267,6 +286,12 @@ func (s *blockchainService) batchGetUserReserveData(ctx context.Context, assets 
 		return make(map[common.Address]ActualUserReserveData), nil
 	}
 
+	// Get the correct PoolDataProvider for this block
+	poolDataProvider, err := s.getPoolDataProviderForBlock(uint64(blockNumber))
+	if err != nil {
+		return nil, err
+	}
+
 	calls := make([]outbound.Call, 0, len(assets))
 	for _, asset := range assets {
 		callData, err := s.getUserReserveDataABI.Pack("getUserReserveData", asset, user)
@@ -276,7 +301,7 @@ func (s *blockchainService) batchGetUserReserveData(ctx context.Context, assets 
 		}
 
 		calls = append(calls, outbound.Call{
-			Target:       s.poolDataProvider,
+			Target:       poolDataProvider,
 			AllowFailure: true,
 			CallData:     callData,
 		})
@@ -427,6 +452,12 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 
 // getFullReserveData fetches both reserve data and configuration data from ProtocolDataProvider.
 func (s *blockchainService) getFullReserveData(ctx context.Context, asset common.Address, blockNumber int64) (*reserveDataFromProvider, *reserveConfigData, error) {
+	// Get the correct PoolDataProvider for this block
+	poolDataProvider, err := s.getPoolDataProviderForBlock(uint64(blockNumber))
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// Build multicall requests for both getReserveData and getReserveConfigurationData
 	getReserveDataCallData, err := s.getPoolDataProviderReserveDataABI.Pack("getReserveData", asset)
 	if err != nil {
@@ -440,12 +471,12 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, asset common
 
 	calls := []outbound.Call{
 		{
-			Target:       s.poolDataProvider,
+			Target:       poolDataProvider,
 			AllowFailure: true,
 			CallData:     getReserveDataCallData,
 		},
 		{
-			Target:       s.poolDataProvider,
+			Target:       poolDataProvider,
 			AllowFailure: true,
 			CallData:     getConfigCallData,
 		},
@@ -464,6 +495,9 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, asset common
 	if !results[0].Success {
 		return nil, nil, fmt.Errorf("getReserveData call failed for asset %s at block %d", asset.Hex(), blockNumber)
 	}
+	if len(results[0].ReturnData) == 0 {
+		return nil, nil, fmt.Errorf("%w: getReserveData returned empty data for asset %s at block %d", ErrReserveNotFound, asset.Hex(), blockNumber)
+	}
 	reserveData, err := s.parseReserveData(results[0].ReturnData)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse reserve data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
@@ -472,6 +506,9 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, asset common
 	// Parse getReserveConfigurationData result
 	if !results[1].Success {
 		return nil, nil, fmt.Errorf("getReserveConfigurationData call failed for asset %s at block %d", asset.Hex(), blockNumber)
+	}
+	if len(results[1].ReturnData) == 0 {
+		return nil, nil, fmt.Errorf("%w: getReserveConfigurationData returned empty data for asset %s at block %d", ErrReserveNotFound, asset.Hex(), blockNumber)
 	}
 	configData, err := s.parseReserveConfigurationData(results[1].ReturnData)
 	if err != nil {
