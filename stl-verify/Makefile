@@ -14,6 +14,9 @@
         docker-build-sparklend-position-tracker docker-push-sparklend-position-tracker docker-release-sparklend-position-tracker \
         docker-build-sparklend-position-tracker-staging docker-push-sparklend-position-tracker-staging docker-release-sparklend-position-tracker-staging \
         docker-release-all docker-release-all-staging \
+        docker-build-temporal-worker docker-push-temporal-worker docker-release-temporal-worker \
+        docker-build-temporal-worker-staging docker-push-temporal-worker-staging docker-release-temporal-worker-staging \
+        run-temporal-worker build-temporal-worker \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         ecs-deploy-oracle-price-worker ecs-deploy-oracle-price-worker-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
@@ -717,6 +720,72 @@ docker-release-sparklend-position-tracker-staging:
 	@$(MAKE) docker-release-sparklend-position-tracker ENV=sentinelstaging
 
 # =============================================================================
+# Docker Build & Push - Temporal Worker
+# =============================================================================
+
+# ECR repository URL for temporal worker
+ECR_REPO_TEMPORAL_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-temporal-worker
+
+# Build Docker image for temporal worker (ARM64 for Fargate Graviton)
+docker-build-temporal-worker:
+	@echo "==> Building Temporal Worker Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_TEMPORAL_WORKER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.temporal-worker \
+		-t $(ECR_REPO_TEMPORAL_WORKER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_TEMPORAL_WORKER):latest \
+		--load .
+
+# Push temporal worker Docker image to ECR
+docker-push-temporal-worker: ecr-login
+	@echo "==> Pushing Temporal Worker Docker image to ECR..."
+	docker push $(ECR_REPO_TEMPORAL_WORKER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_TEMPORAL_WORKER):latest
+
+# Build and push temporal worker in one step (captures tag at start to ensure consistency)
+docker-release-temporal-worker: ecr-login
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Temporal Worker Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_TEMPORAL_WORKER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.temporal-worker \
+		-t $(ECR_REPO_TEMPORAL_WORKER):$$TAG \
+		-t $(ECR_REPO_TEMPORAL_WORKER):latest \
+		--load . && \
+	echo "==> Pushing Temporal Worker Docker image to ECR..." && \
+	docker push $(ECR_REPO_TEMPORAL_WORKER):$$TAG && \
+	docker push $(ECR_REPO_TEMPORAL_WORKER):latest && \
+	echo "==> Temporal Worker Docker image released: $(ECR_REPO_TEMPORAL_WORKER):$$TAG"
+
+# =============================================================================
+# Sentinelstaging Temporal Worker Docker Shortcuts
+# =============================================================================
+
+docker-build-temporal-worker-staging:
+	@$(MAKE) docker-build-temporal-worker ENV=sentinelstaging
+
+docker-push-temporal-worker-staging:
+	@$(MAKE) docker-push-temporal-worker ENV=sentinelstaging
+
+docker-release-temporal-worker-staging:
+	@$(MAKE) docker-release-temporal-worker ENV=sentinelstaging
+
+# =============================================================================
 # Erigon Node Management (via Tailscale)
 # =============================================================================
 
@@ -814,6 +883,18 @@ build-sparklend-position-tracker:
 	mkdir -p dist
 	go build -o dist/sparklend-position-tracker ./cmd/sparklend-position-tracker
 	@echo "==> Built: dist/sparklend-position-tracker"
+
+# Build temporal-worker binary
+build-temporal-worker:
+	@echo "==> Building temporal-worker..."
+	mkdir -p dist
+	go build -o dist/temporal-worker ./cmd/temporal-worker
+	@echo "==> Built: dist/temporal-worker"
+
+# Run temporal-worker locally (requires dev-up first for Temporal server)
+run-temporal-worker:
+	@echo "==> Running Temporal Worker..."
+	COINGECKO_API_KEY=$${COINGECKO_API_KEY} go run ./cmd/temporal-worker
 
 # Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
 build-oracle-pricing-backfill-arm64:
