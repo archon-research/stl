@@ -2,6 +2,7 @@ package entity
 
 import (
 	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -85,7 +86,7 @@ func TestNewMorphoMarketState(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected error, got nil")
 				}
-				if tt.errContains != "" && !containsSubstring(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("error %q should contain %q", err.Error(), tt.errContains)
 				}
 				return

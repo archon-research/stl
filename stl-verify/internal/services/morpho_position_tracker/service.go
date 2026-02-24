@@ -185,6 +185,17 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 
 	span.SetAttributes(attribute.Int("receipts.count", len(receipts)))
 
+	totalLogs := 0
+	for _, r := range receipts {
+		totalLogs += len(r.Logs)
+	}
+	s.logger.Debug("processing block",
+		"block", event.BlockNumber,
+		"version", event.Version,
+		"receipts", len(receipts),
+		"logs", totalLogs,
+		"knownVaults", s.vaultRegistry.Count())
+
 	var errs []error
 	for _, receipt := range receipts {
 		if err := s.processReceipt(ctx, receipt, event.ChainID, event.BlockNumber, event.Version); err != nil {
@@ -208,9 +219,16 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 
 	for _, log := range receipt.Logs {
 		logAddress := common.HexToAddress(log.Address)
+		isMorphoBlue := s.eventExtractor.IsMorphoBlueEvent(log)
+		isMetaMorpho := s.eventExtractor.IsMetaMorphoEvent(log)
+
+		if !isMorphoBlue && !isMetaMorpho {
+			continue
+		}
 
 		// Check Morpho Blue events
-		if logAddress == morphoBlueAddr && s.eventExtractor.IsMorphoBlueEvent(log) {
+		if logAddress == morphoBlueAddr && isMorphoBlue {
+			s.logger.Debug("processing Morpho Blue event", "tx", receipt.TransactionHash, "topic", log.Topics[0])
 			if err := s.processMorphoBlueLog(ctx, log, chainID, blockNumber, blockVersion); err != nil {
 				s.logger.Error("failed to process Morpho Blue event", "error", err, "tx", receipt.TransactionHash)
 				errs = append(errs, err)
@@ -218,8 +236,15 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 			continue
 		}
 
+		// Skip Morpho Blue address events that aren't Morpho Blue events (shouldn't happen, but be safe)
+		if logAddress == morphoBlueAddr {
+			s.logger.Debug("skipping morpho blue address event", "logAddress", logAddress.Hex(), "morphoBlueAddr", morphoBlueAddr.Hex(), "tx", receipt.TransactionHash, "topic", log.Topics[0])
+			continue
+		}
+
 		// Check MetaMorpho vault events
-		if s.vaultRegistry.IsKnownVault(logAddress) && s.eventExtractor.IsMetaMorphoEvent(log) {
+		if s.vaultRegistry.IsKnownVault(logAddress) && isMetaMorpho {
+			s.logger.Debug("processing MetaMorpho event", "tx", receipt.TransactionHash, "vault", logAddress.Hex(), "topic", log.Topics[0])
 			if err := s.processMetaMorphoLog(ctx, log, logAddress, chainID, blockNumber, blockVersion); err != nil {
 				s.logger.Error("failed to process MetaMorpho event", "error", err, "tx", receipt.TransactionHash)
 				errs = append(errs, err)
@@ -227,11 +252,16 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 			continue
 		}
 
+		// Skip addresses already known to not be vaults
+		if s.vaultRegistry.IsKnownNotVault(logAddress) {
+			continue
+		}
+
 		// Try to discover new vaults from unknown addresses
-		if logAddress != morphoBlueAddr && !s.vaultRegistry.IsKnownVault(logAddress) && s.eventExtractor.IsMetaMorphoEvent(log) {
-			if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockVersion); err != nil {
-				s.logger.Debug("vault discovery attempt failed", "address", logAddress.Hex(), "error", err)
-			}
+		s.logger.Debug("attempting vault discovery", "address", logAddress.Hex(), "tx", receipt.TransactionHash)
+		if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockVersion); err != nil {
+			s.vaultRegistry.MarkNotVault(logAddress)
+			s.logger.Debug("vault discovery failed, marked as non-vault", "address", logAddress.Hex(), "error", err)
 		}
 	}
 

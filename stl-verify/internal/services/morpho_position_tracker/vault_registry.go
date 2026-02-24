@@ -16,16 +16,18 @@ import (
 // It is loaded from the database on startup and updated dynamically when
 // new vaults are discovered from event logs.
 type VaultRegistry struct {
-	mu     sync.RWMutex
-	vaults map[common.Address]*entity.MorphoVault
-	logger *slog.Logger
+	mu        sync.RWMutex
+	vaults    map[common.Address]*entity.MorphoVault
+	notVaults map[common.Address]struct{} // addresses confirmed to not be vaults
+	logger    *slog.Logger
 }
 
 // NewVaultRegistry creates a new empty VaultRegistry.
 func NewVaultRegistry(logger *slog.Logger) *VaultRegistry {
 	return &VaultRegistry{
-		vaults: make(map[common.Address]*entity.MorphoVault),
-		logger: logger.With("component", "vault-registry"),
+		vaults:    make(map[common.Address]*entity.MorphoVault),
+		notVaults: make(map[common.Address]struct{}),
+		logger:    logger.With("component", "vault-registry"),
 	}
 }
 
@@ -66,6 +68,21 @@ func (r *VaultRegistry) IsKnownVault(address common.Address) bool {
 	defer r.mu.RUnlock()
 	_, ok := r.vaults[address]
 	return ok
+}
+
+// IsKnownNotVault returns true if the address has been tried and confirmed to not be a vault.
+func (r *VaultRegistry) IsKnownNotVault(address common.Address) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.notVaults[address]
+	return ok
+}
+
+// MarkNotVault records an address as confirmed not a vault, so it won't be retried.
+func (r *VaultRegistry) MarkNotVault(address common.Address) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notVaults[address] = struct{}{}
 }
 
 // GetVault returns the vault entity for the given address, or nil if unknown.

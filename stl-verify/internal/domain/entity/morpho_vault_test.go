@@ -1,6 +1,9 @@
 package entity
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNewMorphoVault(t *testing.T) {
 	validAddr := make([]byte, 20)
@@ -66,7 +69,7 @@ func TestNewMorphoVault(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected error, got nil")
 				}
-				if tt.errContains != "" && !containsSubstring(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("error %q should contain %q", err.Error(), tt.errContains)
 				}
 				return

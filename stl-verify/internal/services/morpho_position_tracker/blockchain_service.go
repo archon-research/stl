@@ -192,11 +192,28 @@ func (s *blockchainService) getMarketParams(ctx context.Context, marketID [32]by
 		return nil, fmt.Errorf("unexpected idToMarketParams() return length: %d", len(unpacked))
 	}
 
+	loanToken, ok := unpacked[0].(common.Address)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type for loanToken: %T", unpacked[0])
+	}
+	collateralToken, ok := unpacked[1].(common.Address)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type for collateralToken: %T", unpacked[1])
+	}
+	oracle, ok := unpacked[2].(common.Address)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type for oracle: %T", unpacked[2])
+	}
+	irm, ok := unpacked[3].(common.Address)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type for irm: %T", unpacked[3])
+	}
+
 	return &MarketParamsState{
-		LoanToken:       unpacked[0].(common.Address),
-		CollateralToken: unpacked[1].(common.Address),
-		Oracle:          unpacked[2].(common.Address),
-		Irm:             unpacked[3].(common.Address),
+		LoanToken:       loanToken,
+		CollateralToken: collateralToken,
+		Oracle:          oracle,
+		Irm:             irm,
 		LLTV:            bigIntFromAny(unpacked[4]),
 	}, nil
 }
@@ -713,7 +730,7 @@ func (s *blockchainService) getTokenMetadata(ctx context.Context, tokenAddress c
 	if len(results) > 1 && results[1].Success && len(results[1].ReturnData) > 0 {
 		decimalsUnpacked, err := s.erc20ABI.Unpack("decimals", results[1].ReturnData)
 		if err == nil && len(decimalsUnpacked) > 0 {
-			md.Decimals = int(decimalsUnpacked[0].(uint8))
+			md.Decimals = intFromAny(decimalsUnpacked[0])
 		}
 	}
 
@@ -797,7 +814,7 @@ func (s *blockchainService) getTokenPairMetadata(ctx context.Context, tokenA, to
 	if len(results) > 1 && results[1].Success && len(results[1].ReturnData) > 0 {
 		decimalsUnpacked, err := s.erc20ABI.Unpack("decimals", results[1].ReturnData)
 		if err == nil && len(decimalsUnpacked) > 0 {
-			mdA.Decimals = int(decimalsUnpacked[0].(uint8))
+			mdA.Decimals = intFromAny(decimalsUnpacked[0])
 		}
 	}
 	if len(results) > 2 && results[2].Success && len(results[2].ReturnData) > 0 {
@@ -809,7 +826,7 @@ func (s *blockchainService) getTokenPairMetadata(ctx context.Context, tokenA, to
 	if len(results) > 3 && results[3].Success && len(results[3].ReturnData) > 0 {
 		decimalsUnpacked, err := s.erc20ABI.Unpack("decimals", results[3].ReturnData)
 		if err == nil && len(decimalsUnpacked) > 0 {
-			mdB.Decimals = int(decimalsUnpacked[0].(uint8))
+			mdB.Decimals = intFromAny(decimalsUnpacked[0])
 		}
 	}
 
@@ -830,5 +847,22 @@ func bigIntFromAny(v any) *big.Int {
 		return new(big.Int).Set(val)
 	default:
 		return new(big.Int)
+	}
+}
+
+// intFromAny safely converts an interface value to int.
+// Handles uint8 (ERC20 decimals) and other numeric types from ABI unpacking.
+func intFromAny(v any) int {
+	switch val := v.(type) {
+	case uint8:
+		return int(val)
+	case int:
+		return val
+	case int64:
+		return int(val)
+	case uint64:
+		return int(val)
+	default:
+		return 0
 	}
 }
