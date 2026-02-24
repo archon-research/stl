@@ -37,7 +37,7 @@ The pipeline has two categories of downstream workers:
 
 ### Mock Blockchain Server
 
-Build a standalone Go binary (mock-blockchain-server) that speaks the real Ethereum JSON-RPC protocols — both WebSocket (subscription notifications) and HTTP (batch RPC). The watcher connects to it via ALCHEMY\_WS\_URL and ALCHEMY\_HTTP\_URL environment variable overrides, with zero code changes.
+Build a standalone Go binary (mock-blockchain-server) that speaks the real Ethereum JSON-RPC protocols — both WebSocket (subscription notifications) and HTTP (batch RPC). The watcher connects to it via ETH\_RPC\_WS\_URL and ETH\_RPC\_HTTP\_URL environment variable overrides, with zero code changes.
 
 Why a mock server instead of alternatives:
 
