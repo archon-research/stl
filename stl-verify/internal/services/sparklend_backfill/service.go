@@ -66,6 +66,9 @@ func NewService(
 	if config.Concurrency <= 0 {
 		config.Concurrency = 1
 	}
+	if chainID <= 0 {
+		return nil, fmt.Errorf("chainID must be positive, got %d", chainID)
+	}
 	return &Service{
 		config:    config,
 		s3Reader:  s3Reader,
@@ -103,6 +106,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	// Use Background context so the progress reporter runs until Run() finishes,
 	// independent of the caller's context being cancelled.
 	progressCtx, progressCancel := context.WithCancel(context.Background())
+	defer progressCancel()
 	progressDone := make(chan struct{})
 	startTime := time.Now()
 	go func() {
@@ -134,7 +138,6 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	s.enqueueBlocks(ctx, blockCh, fromBlock, toBlock)
 
 	wg.Wait()
-	progressCancel()
 	<-progressDone
 
 	logger.Info("backfill complete",

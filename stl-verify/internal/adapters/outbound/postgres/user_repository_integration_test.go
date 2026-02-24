@@ -72,6 +72,7 @@ func TestGetOrCreateUser_IdempotentReturnsSameID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin tx1: %v", err)
 	}
+	defer tx1.Rollback(ctx)
 	id1, err := repo.GetOrCreateUser(ctx, tx1, user)
 	if err != nil {
 		t.Fatalf("first GetOrCreateUser: %v", err)
@@ -84,6 +85,7 @@ func TestGetOrCreateUser_IdempotentReturnsSameID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin tx2: %v", err)
 	}
+	defer tx2.Rollback(ctx)
 	id2, err := repo.GetOrCreateUser(ctx, tx2, user)
 	if err != nil {
 		t.Fatalf("second GetOrCreateUser: %v", err)
@@ -117,6 +119,7 @@ func TestGetOrCreateUser_FirstSeenBlockUsesLeast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin tx1: %v", err)
 	}
+	defer tx1.Rollback(ctx)
 	if _, err := repo.GetOrCreateUser(ctx, tx1, entity.User{ChainID: 1, Address: addr, FirstSeenBlock: 500}); err != nil {
 		t.Fatalf("first GetOrCreateUser: %v", err)
 	}
@@ -129,6 +132,7 @@ func TestGetOrCreateUser_FirstSeenBlockUsesLeast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin tx2: %v", err)
 	}
+	defer tx2.Rollback(ctx)
 	if _, err := repo.GetOrCreateUser(ctx, tx2, entity.User{ChainID: 1, Address: addr, FirstSeenBlock: 100}); err != nil {
 		t.Fatalf("second GetOrCreateUser: %v", err)
 	}

@@ -25,7 +25,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
 )
 
-// main is the program entry point; it invokes run with command-line arguments, logs a fatal error and exits with status 1 if run returns an error, and logs successful completion otherwise.
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		slog.Error("fatal", "error", err)
@@ -45,10 +44,6 @@ type cliConfig struct {
 	awsRegion   string
 }
 
-// parseFlags parses the provided command-line arguments into a cliConfig and validates required options.
-// It enforces presence of --rpc-url, --from, --to, and --bucket, ensures --to is greater than or equal to --from,
-// falls back to the DATABASE_URL environment variable when --db is not provided, and returns an error describing
-// any validation or parsing failure.
 func parseFlags(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("sparklend-backfill", flag.ContinueOnError)
 	rpcURL := fs.String("rpc-url", "", "Ethereum HTTP RPC endpoint (e.g., http://erigon:8545)")
@@ -101,9 +96,6 @@ func parseFlags(args []string) (cliConfig, error) {
 	return cfg, nil
 }
 
-// run parses CLI flags, initializes logging, network, AWS, and database clients and services,
-// then executes the SparkLend backfill for the configured block range.
-// It returns an error if flag validation, any initialization step, or the backfill run fails.
 func run(args []string) error {
 	cfg, err := parseFlags(args)
 	if err != nil {
@@ -120,6 +112,7 @@ func run(args []string) error {
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
 	go func() {
 		sig := <-sigChan
 		logger.Info("received signal, shutting down...", "signal", sig)
@@ -165,11 +158,9 @@ func run(args []string) error {
 		return fmt.Errorf("loading AWS config: %w", err)
 	}
 
-	// Create S3 reader
 	s3Reader := s3adapter.NewReader(awsCfg, logger)
 	logger.Info("S3 reader created")
 
-	// Connect to PostgreSQL
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
 	if err != nil {
 		return fmt.Errorf("connecting to database: %w", err)

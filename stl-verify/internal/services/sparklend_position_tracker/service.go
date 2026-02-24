@@ -254,7 +254,7 @@ func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (
 
 func (s *Service) Start(ctx context.Context) error {
 	if s.consumer == nil {
-		return fmt.Errorf("Start() called on service without SQS consumer (backfill mode)")
+		return fmt.Errorf("Start() called on service without SQS consumer")
 	}
 
 	s.ctx, s.cancel = context.WithCancel(ctx)
