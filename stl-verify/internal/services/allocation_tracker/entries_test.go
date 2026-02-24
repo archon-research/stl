@@ -93,15 +93,6 @@ func TestDefaultTokenEntries_NoDuplicateKeys(t *testing.T) {
 	}
 }
 
-func TestDefaultTokenEntries_ChainsHaveIDs(t *testing.T) {
-	entries := DefaultTokenEntries()
-	for _, e := range entries {
-		if _, ok := ChainNameToID[e.Chain]; !ok {
-			t.Errorf("entry %s on chain %q: chain not in ChainNameToID", e.ContractAddress.Hex(), e.Chain)
-		}
-	}
-}
-
 func TestDefaultTokenEntries_StarsAreValid(t *testing.T) {
 	validStars := map[string]bool{"spark": true, "grove": true}
 	entries := DefaultTokenEntries()
@@ -114,13 +105,13 @@ func TestDefaultTokenEntries_StarsAreValid(t *testing.T) {
 
 func TestEntriesForChain(t *testing.T) {
 	entries := DefaultTokenEntries()
-	eth := EntriesForChain(entries, "ethereum")
+	eth := EntriesForChain(entries, "mainnet")
 	if len(eth) == 0 {
-		t.Fatal("expected ethereum entries")
+		t.Fatal("expected mainnet entries")
 	}
 	for _, e := range eth {
-		if e.Chain != "ethereum" {
-			t.Errorf("EntriesForChain(ethereum) returned entry with chain %q", e.Chain)
+		if e.Chain != "mainnet" {
+			t.Errorf("EntriesForChain(mainnet) returned entry with chain %q", e.Chain)
 		}
 	}
 }

@@ -2,30 +2,26 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
-	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// Compile-time check
 var _ outbound.AllocationRepository = (*AllocationRepository)(nil)
 
-// AllocationRepository is a PostgreSQL implementation of outbound.AllocationRepository.
 type AllocationRepository struct {
 	pool      *pgxpool.Pool
+	txm       *TxManager
 	tokenRepo outbound.TokenRepository
 	logger    *slog.Logger
-
-	// In-memory token ID cache: (chainID, address) → token_id
-	mu       sync.RWMutex
-	tokenIDs map[tokenCacheKey]int64
 }
 
 type tokenCacheKey struct {
@@ -33,89 +29,96 @@ type tokenCacheKey struct {
 	Address common.Address
 }
 
-// NewAllocationRepository creates a new PostgreSQL allocation repository.
-func NewAllocationRepository(pool *pgxpool.Pool, tokenRepo outbound.TokenRepository, logger *slog.Logger) *AllocationRepository {
+func NewAllocationRepository(
+	pool *pgxpool.Pool,
+	txm *TxManager,
+	tokenRepo outbound.TokenRepository,
+	logger *slog.Logger,
+) *AllocationRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &AllocationRepository{
 		pool:      pool,
+		txm:       txm,
 		tokenRepo: tokenRepo,
 		logger:    logger,
-		tokenIDs:  make(map[tokenCacheKey]int64),
 	}
 }
 
-// SavePositions persists a batch of allocation position snapshots.
-func (r *AllocationRepository) SavePositions(ctx context.Context, positions []*outbound.AllocationPosition) error {
+func (r *AllocationRepository) SavePositions(
+	ctx context.Context,
+	positions []*entity.AllocationPosition,
+) error {
 	if len(positions) == 0 {
 		return nil
 	}
 
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() {
-		if err := tx.Rollback(ctx); err != nil && err != pgx.ErrTxClosed {
-			r.logger.Warn("rollback failed", "error", err)
-		}
-	}()
-
-	// Resolve all token IDs within this transaction
-	tokenIDs, err := r.resolveTokenIDs(ctx, tx, positions)
-	if err != nil {
-		return fmt.Errorf("resolve token IDs: %w", err)
-	}
-
-	// Batch insert with savepoints
-	inserted := 0
 	for i, pos := range positions {
-		key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
-		tokenID, ok := tokenIDs[key]
-		if !ok {
-			r.logger.Warn("no token_id, skipping",
-				"chain", pos.ChainID,
-				"address", pos.TokenAddress.Hex())
-			continue
+		if err := pos.Validate(); err != nil {
+			return fmt.Errorf("position %d: %w", i, err)
+		}
+	}
+
+	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		tokenIDs, err := r.resolveTokenIDs(ctx, tx, positions)
+		if err != nil {
+			return fmt.Errorf("resolve token IDs: %w", err)
 		}
 
-		sp := fmt.Sprintf("sp_insert_%d", i)
-		if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
-			r.logger.Warn("savepoint failed", "error", err)
-			continue
-		}
-
-		if err := r.insertPosition(ctx, tx, pos, tokenID); err != nil {
-			if _, rbErr := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp); rbErr != nil {
-				r.logger.Warn("savepoint rollback failed", "error", rbErr)
+		for _, pos := range positions {
+			key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
+			if _, ok := tokenIDs[key]; !ok {
+				return fmt.Errorf(
+					"token ID not resolved for chain=%d address=%s",
+					pos.ChainID, pos.TokenAddress.Hex(),
+				)
 			}
-			r.logger.Warn("insert failed",
-				"address", pos.TokenAddress.Hex(),
-				"error", err)
-			continue
 		}
 
-		if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+sp); err != nil {
-			r.logger.Warn("savepoint release failed", "error", err)
+		batch := &pgx.Batch{}
+		for _, pos := range positions {
+			key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
+			tokenID := tokenIDs[key]
+
+			query, args, err := r.buildInsertArgs(pos, tokenID)
+			if err != nil {
+				return fmt.Errorf(
+					"build insert for chain=%d address=%s block=%d: %w",
+					pos.ChainID, pos.TokenAddress.Hex(), pos.BlockNumber, err,
+				)
+			}
+			batch.Queue(query, args...)
 		}
-		inserted++
-	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
+		results := tx.SendBatch(ctx, batch)
+		for i := range positions {
+			if _, err := results.Exec(); err != nil {
+				_ = results.Close()
+				return fmt.Errorf(
+					"insert position %d (chain=%d address=%s block=%d): %w",
+					i, positions[i].ChainID,
+					positions[i].TokenAddress.Hex(),
+					positions[i].BlockNumber, err,
+				)
+			}
+		}
+		if err := results.Close(); err != nil {
+			return fmt.Errorf("close batch: %w", err)
+		}
 
-	r.logger.Debug("positions saved", "inserted", inserted, "total", len(positions))
-	return nil
+		r.logger.Debug("positions saved", "inserted", len(positions))
+		return nil
+	})
 }
 
-func (r *AllocationRepository) insertPosition(ctx context.Context, tx pgx.Tx, pos *outbound.AllocationPosition, tokenID int64) error {
-	// Balance and TxAmount are denominated in the underlying asset (e.g., USDC 6 decimals)
-	// ScaledBalance is denominated in the vault token (e.g., morpho vault 18 decimals)
-	balanceDecimals := pos.AssetDecimals
-	if balanceDecimals == 0 {
-		balanceDecimals = pos.TokenDecimals
+func (r *AllocationRepository) buildInsertArgs(
+	pos *entity.AllocationPosition,
+	tokenID int64,
+) (string, []interface{}, error) {
+	balanceDecimals := pos.TokenDecimals
+	if pos.AssetDecimals != nil {
+		balanceDecimals = *pos.AssetDecimals
 	}
 
 	balanceStr := shared.FormatAmount(pos.Balance, balanceDecimals)
@@ -131,17 +134,12 @@ func (r *AllocationRepository) insertPosition(ctx context.Context, tx pgx.Tx, po
 		txAmountStr = shared.FormatAmount(pos.TxAmount, balanceDecimals)
 	}
 
-	direction := pos.Direction
-	if direction == "" {
-		direction = "in"
+	txHashBytes, err := encodeTxHash(pos)
+	if err != nil {
+		return "", nil, fmt.Errorf("encode tx_hash: %w", err)
 	}
 
-	txHash := pos.TxHash
-	if txHash == "" {
-		txHash = fmt.Sprintf("sweep:%d", pos.BlockNumber)
-	}
-
-	_, err := tx.Exec(ctx, `
+	query := `
 		INSERT INTO allocation_position (
 			chain_id, token_id, star, proxy_address,
 			balance, scaled_balance,
@@ -151,8 +149,11 @@ func (r *AllocationRepository) insertPosition(ctx context.Context, tx pgx.Tx, po
 		ON CONFLICT (chain_id, token_id, proxy_address, block_number, block_version, tx_hash, log_index, direction)
 		DO UPDATE SET
 			balance = EXCLUDED.balance,
-			scaled_balance = EXCLUDED.scaled_balance
-	`,
+			scaled_balance = EXCLUDED.scaled_balance,
+			tx_amount = EXCLUDED.tx_amount
+	`
+
+	args := []interface{}{
 		pos.ChainID,
 		tokenID,
 		pos.Star,
@@ -161,56 +162,48 @@ func (r *AllocationRepository) insertPosition(ctx context.Context, tx pgx.Tx, po
 		scaledStr,
 		pos.BlockNumber,
 		pos.BlockVersion,
-		common.FromHex(txHash),
+		txHashBytes,
 		pos.LogIndex,
 		txAmountStr,
-		direction,
-	)
-	return err
+		pos.Direction,
+	}
+
+	return query, args, nil
 }
 
-func (r *AllocationRepository) resolveTokenIDs(ctx context.Context, tx pgx.Tx, positions []*outbound.AllocationPosition) (map[tokenCacheKey]int64, error) {
-	result := make(map[tokenCacheKey]int64)
-	var toResolve []*outbound.AllocationPosition
+func encodeTxHash(pos *entity.AllocationPosition) ([]byte, error) {
+	if pos.TxHash != "" {
+		b := common.FromHex(pos.TxHash)
+		if len(b) == 0 {
+			return nil, fmt.Errorf("invalid hex tx_hash: %s", pos.TxHash)
+		}
+		return b, nil
+	}
 
-	// Check in-memory cache first
-	r.mu.RLock()
+	input := fmt.Sprintf("sweep:%d:%d:%s:%s",
+		pos.ChainID,
+		pos.BlockNumber,
+		pos.TokenAddress.Hex(),
+		pos.ProxyAddress.Hex(),
+	)
+	h := sha256.Sum256([]byte(input))
+	return h[:], nil
+}
+
+func (r *AllocationRepository) resolveTokenIDs(
+	ctx context.Context,
+	tx pgx.Tx,
+	positions []*entity.AllocationPosition,
+) (map[tokenCacheKey]int64, error) {
+	result := make(map[tokenCacheKey]int64)
+	toResolve := make(map[tokenCacheKey]*entity.AllocationPosition)
+
 	for _, pos := range positions {
 		key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
-		if id, ok := r.tokenIDs[key]; ok {
-			result[key] = id
-		} else {
-			toResolve = append(toResolve, pos)
-		}
-	}
-	r.mu.RUnlock()
-
-	if len(toResolve) == 0 {
-		return result, nil
+		toResolve[key] = pos
 	}
 
-	// Deduplicate
-	seen := make(map[tokenCacheKey]bool)
-	var unique []*outbound.AllocationPosition
-	for _, pos := range toResolve {
-		key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
-		if !seen[key] {
-			seen[key] = true
-			unique = append(unique, pos)
-		}
-	}
-
-	// Resolve via GetOrCreateToken — use savepoints so one failure doesn't abort the tx
-	for i, pos := range unique {
-		key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
-		sp := fmt.Sprintf("sp_token_%d", i)
-
-		// Create savepoint
-		if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
-			r.logger.Warn("savepoint failed", "error", err)
-			continue
-		}
-
+	for key, pos := range toResolve {
 		tokenID, err := r.tokenRepo.GetOrCreateToken(
 			ctx, tx,
 			pos.ChainID,
@@ -220,28 +213,12 @@ func (r *AllocationRepository) resolveTokenIDs(ctx context.Context, tx pgx.Tx, p
 			pos.CreatedAtBlock,
 		)
 		if err != nil {
-			// Rollback to savepoint — tx stays usable
-			if _, rbErr := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp); rbErr != nil {
-				r.logger.Warn("savepoint rollback failed", "error", rbErr)
-			}
-			r.logger.Warn("GetOrCreateToken failed",
-				"chain", pos.ChainID,
-				"address", pos.TokenAddress.Hex(),
-				"error", err)
-			continue
+			return nil, fmt.Errorf(
+				"GetOrCreateToken chain=%d address=%s: %w",
+				pos.ChainID, pos.TokenAddress.Hex(), err,
+			)
 		}
-
-		// Release savepoint
-		if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+sp); err != nil {
-			r.logger.Warn("savepoint release failed", "error", err)
-		}
-
 		result[key] = tokenID
-
-		// Cache for future batches
-		r.mu.Lock()
-		r.tokenIDs[key] = tokenID
-		r.mu.Unlock()
 	}
 
 	return result, nil

@@ -1,7 +1,7 @@
 package env
 
 import (
-	"log/slog"
+	"fmt"
 	"os"
 )
 
@@ -13,12 +13,10 @@ func Get(key, defaultValue string) string {
 	return defaultValue
 }
 
-// Require returns the value of the environment variable or exits if not set.
-func Require(key string, logger *slog.Logger) string {
+// Require returns the value of the environment variable or an error if not set.
+func Require(key string) (string, error) {
 	if value := os.Getenv(key); value != "" {
-		return value
+		return value, nil
 	}
-	logger.Error("required env var missing", "key", key)
-	os.Exit(1)
-	return "" // unreachable
+	return "", fmt.Errorf("required env var %s is not set", key)
 }

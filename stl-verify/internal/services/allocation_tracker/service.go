@@ -9,37 +9,24 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// TransactionReceipt mirrors the JSON receipt from Redis.
 type TransactionReceipt struct {
-	TransactionHash string `json:"transactionHash"`
-	BlockNumber     string `json:"blockNumber"`
-	BlockHash       string `json:"blockHash"`
-	From            string `json:"from"`
-	To              string `json:"to"`
-	Status          string `json:"status"`
-	Logs            []Log  `json:"logs"`
+	TransactionHash string      `json:"transactionHash"`
+	BlockNumber     string      `json:"blockNumber"`
+	BlockHash       string      `json:"blockHash"`
+	From            string      `json:"from"`
+	To              string      `json:"to"`
+	Status          string      `json:"status"`
+	Logs            []types.Log `json:"logs"`
 }
 
-type Log struct {
-	Address          string   `json:"address"`
-	Topics           []string `json:"topics"`
-	Data             string   `json:"data"`
-	BlockNumber      string   `json:"blockNumber"`
-	TransactionHash  string   `json:"transactionHash"`
-	TransactionIndex string   `json:"transactionIndex"`
-	LogIndex         string   `json:"logIndex"`
-	Removed          bool     `json:"removed"`
-}
-
-// BlockEvent is an SQS message with block metadata.
 type BlockEvent struct {
 	ChainID        int64  `json:"chainId"`
 	BlockNumber    int64  `json:"blockNumber"`
@@ -59,16 +46,14 @@ func (e BlockEvent) CacheKey() string {
 	)
 }
 
-// BlockQuerier is the minimal interface for querying block numbers.
 type BlockQuerier interface {
 	BlockNumber(ctx context.Context) (uint64, error)
 	FinalizedBlockNumber(ctx context.Context) (uint64, error)
 }
 
-// Service is the main allocation tracker worker.
 type Service struct {
 	config             Config
-	sqsClient          *sqs.Client
+	sqsConsumer        outbound.SQSConsumer
 	redis              *redis.Client
 	ethClient          BlockQuerier
 	extractor          *TransferExtractor
@@ -84,7 +69,7 @@ type Service struct {
 
 func NewService(
 	config Config,
-	sqsClient *sqs.Client,
+	sqsConsumer outbound.SQSConsumer,
 	redisClient *redis.Client,
 	ethClient BlockQuerier,
 	registry *SourceRegistry,
@@ -93,14 +78,8 @@ func NewService(
 	proxies []ProxyConfig,
 ) (*Service, error) {
 	defaults := ConfigDefaults()
-	if config.QueueURL == "" {
-		return nil, fmt.Errorf("queueURL is required")
-	}
 	if config.MaxMessages == 0 {
 		config.MaxMessages = defaults.MaxMessages
-	}
-	if config.WaitTimeSeconds == 0 {
-		config.WaitTimeSeconds = defaults.WaitTimeSeconds
 	}
 	if config.PollInterval == 0 {
 		config.PollInterval = defaults.PollInterval
@@ -120,7 +99,7 @@ func NewService(
 
 	return &Service{
 		config:      config,
-		sqsClient:   sqsClient,
+		sqsConsumer: sqsConsumer,
 		redis:       redisClient,
 		ethClient:   ethClient,
 		extractor:   NewTransferExtractor(proxies),
@@ -137,7 +116,6 @@ func (s *Service) Start(ctx context.Context) error {
 	go s.processLoop()
 	go s.sweepLoop()
 	s.logger.Info("started",
-		"queue", s.config.QueueURL,
 		"entries", len(s.entries),
 		"sweep", s.config.SweepInterval)
 	return nil
@@ -150,8 +128,6 @@ func (s *Service) Stop() error {
 	s.logger.Info("stopped")
 	return nil
 }
-
-// ── Event-driven loop ──
 
 func (s *Service) processLoop() {
 	ticker := time.NewTicker(s.config.PollInterval)
@@ -169,28 +145,20 @@ func (s *Service) processLoop() {
 }
 
 func (s *Service) pollMessages(ctx context.Context) error {
-	result, err := s.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-		QueueUrl:            aws.String(s.config.QueueURL),
-		MaxNumberOfMessages: s.config.MaxMessages,
-		WaitTimeSeconds:     s.config.WaitTimeSeconds,
-		VisibilityTimeout:   30,
-	})
+	messages, err := s.sqsConsumer.ReceiveMessages(ctx, s.config.MaxMessages)
 	if err != nil {
 		return fmt.Errorf("receive: %w", err)
 	}
 
 	var errs []error
-	for _, msg := range result.Messages {
+	for _, msg := range messages {
 		if err := s.processMessage(ctx, msg); err != nil {
 			s.logger.Error("process failed", "error", err)
 			errs = append(errs, err)
 			continue
 		}
-		if _, deleteErr := s.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-			QueueUrl:      aws.String(s.config.QueueURL),
-			ReceiptHandle: msg.ReceiptHandle,
-		}); deleteErr != nil {
-			s.logger.Error("delete failed", "error", deleteErr)
+		if err := s.sqsConsumer.DeleteMessage(ctx, msg.ReceiptHandle); err != nil {
+			s.logger.Error("delete failed", "error", err)
 		}
 	}
 
@@ -202,13 +170,10 @@ func (s *Service) pollMessages(ctx context.Context) error {
 
 func (s *Service) processMessage(
 	ctx context.Context,
-	msg types.Message,
+	msg outbound.SQSMessage,
 ) error {
-	if msg.Body == nil {
-		return fmt.Errorf("nil body")
-	}
 	var event BlockEvent
-	if err := json.Unmarshal([]byte(*msg.Body), &event); err != nil {
+	if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
 		return fmt.Errorf("parse event: %w", err)
 	}
 	return s.processBlock(ctx, event)
@@ -220,7 +185,6 @@ func (s *Service) processBlock(
 ) error {
 	start := time.Now()
 
-	// Skip reorged blocks that are already finalized on-chain
 	if event.IsReorg {
 		finalized, err := s.ethClient.FinalizedBlockNumber(ctx)
 		if err != nil {
@@ -253,7 +217,6 @@ func (s *Service) processBlock(
 		return fmt.Errorf("parse receipts: %w", err)
 	}
 
-	// Extract transfers involving proxies
 	var transfers []*TransferEvent
 	for _, receipt := range receipts {
 		transfers = append(transfers, s.extractor.Extract(receipt)...)
@@ -262,13 +225,11 @@ func (s *Service) processBlock(
 		return nil
 	}
 
-	// Match to registry entries
 	affected := s.matchTransfers(transfers)
 	if len(affected) == 0 {
 		return nil
 	}
 
-	// Fetch balances via source registry
 	balances, err := s.registry.FetchAll(
 		ctx, affected, event.BlockNumber,
 	)
@@ -276,7 +237,6 @@ func (s *Service) processBlock(
 		s.logger.Warn("partial balance fetch", "error", err)
 	}
 
-	// Build and dispatch snapshots
 	snapshots := s.buildSnapshots(
 		affected, balances, transfers, event,
 	)
@@ -325,7 +285,6 @@ func (s *Service) buildSnapshots(
 	transfers []*TransferEvent,
 	event BlockEvent,
 ) []*PositionSnapshot {
-	// Build transfer lookup
 	tLookup := make(map[EntryKey]*TransferEvent)
 	for _, t := range transfers {
 		key := EntryKey{
@@ -341,7 +300,7 @@ func (s *Service) buildSnapshots(
 	for _, entry := range entries {
 		bal, ok := balances[entry.Key()]
 		if !ok {
-			continue // skip/stub source
+			continue
 		}
 
 		snap := &PositionSnapshot{
@@ -363,8 +322,6 @@ func (s *Service) buildSnapshots(
 	return snapshots
 }
 
-// ── Periodic sweep ──
-
 func (s *Service) sweepLoop() {
 	ticker := time.NewTicker(s.config.SweepInterval)
 	defer ticker.Stop()
@@ -383,10 +340,8 @@ func (s *Service) sweepLoop() {
 func (s *Service) sweep(ctx context.Context) error {
 	start := time.Now()
 
-	// Only sweep ethereum entries until multi-chain RPC is available
-	ethEntries := EntriesForChain(s.entries, "ethereum")
+	ethEntries := EntriesForChain(s.entries, "mainnet")
 
-	// Get current block number before fetching balances
 	blockNum, err := s.ethClient.BlockNumber(ctx)
 	if err != nil {
 		return fmt.Errorf("get block number: %w", err)
@@ -407,9 +362,10 @@ func (s *Service) sweep(ctx context.Context) error {
 			Entry:         entry,
 			Balance:       bal.Balance,
 			ScaledBalance: bal.ScaledBalance,
-			ChainID:       ChainNameToID[entry.Chain],
+			ChainID:       int64(entity.ChainNameToID[entry.Chain]),
 			BlockNumber:   int64(blockNum),
 			TxAmount:      big.NewInt(0),
+			Direction:     DirectionSweep,
 		})
 	}
 

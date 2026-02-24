@@ -4,40 +4,45 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// PostgresHandler converts PositionSnapshots to AllocationPositions and persists them.
-type PostgresHandler struct {
+type PrimePositionHandler struct {
 	repo     outbound.AllocationRepository
 	metadata *metadataCache
 	logger   *slog.Logger
 }
 
-func NewPostgresHandler(
+func NewPrimePositionHandler(
 	repo outbound.AllocationRepository,
 	multicaller outbound.Multicaller,
 	erc20ABI *abi.ABI,
 	logger *slog.Logger,
-) *PostgresHandler {
-	return &PostgresHandler{
+) *PrimePositionHandler {
+	return &PrimePositionHandler{
 		repo:     repo,
 		metadata: newMetadataCache(multicaller, erc20ABI, logger),
 		logger:   logger.With("component", "postgres-handler"),
 	}
 }
 
-func (h *PostgresHandler) HandleSnapshots(ctx context.Context, snapshots []*PositionSnapshot) error {
+func (h *PrimePositionHandler) HandleSnapshots(
+	ctx context.Context,
+	snapshots []*PositionSnapshot,
+) error {
 	if len(snapshots) == 0 {
 		return nil
 	}
 
-	// Fetch token metadata for contracts AND underlying assets
+	blockNum := snapshots[0].BlockNumber
+
 	var addrs []common.Address
 	for _, s := range snapshots {
 		addrs = append(addrs, s.Entry.ContractAddress)
@@ -45,21 +50,31 @@ func (h *PostgresHandler) HandleSnapshots(ctx context.Context, snapshots []*Posi
 			addrs = append(addrs, *s.Entry.AssetAddress)
 		}
 	}
-	if err := h.metadata.fetchMissing(ctx, addrs); err != nil {
-		h.logger.Warn("metadata fetch partial failure", "error", err)
+	if err := h.metadata.fetchMissing(ctx, addrs, blockNum); err != nil {
+		return fmt.Errorf("metadata fetch: %w", err)
 	}
 
-	// Convert to AllocationPositions
-	positions := make([]*outbound.AllocationPosition, 0, len(snapshots))
+	positions := make([]*entity.AllocationPosition, 0, len(snapshots))
 	for _, s := range snapshots {
-		meta := h.metadata.getOrDefault(s.Entry.ContractAddress)
+		meta, ok := h.metadata.get(s.Entry.ContractAddress)
+		if !ok {
+			return fmt.Errorf(
+				"metadata missing for token %s",
+				s.Entry.ContractAddress.Hex(),
+			)
+		}
 
-		// For erc4626: Balance is in underlying asset units, use asset decimals
-		// For everything else: Balance is in token units, use token decimals
-		assetDecimals := meta.decimals
+		var assetDecimals *int
 		if s.Entry.AssetAddress != nil {
-			assetMeta := h.metadata.getOrDefault(*s.Entry.AssetAddress)
-			assetDecimals = assetMeta.decimals
+			assetMeta, ok := h.metadata.get(*s.Entry.AssetAddress)
+			if !ok {
+				return fmt.Errorf(
+					"metadata missing for asset %s (token %s)",
+					s.Entry.AssetAddress.Hex(),
+					s.Entry.ContractAddress.Hex(),
+				)
+			}
+			assetDecimals = &assetMeta.decimals
 		}
 
 		var createdAtBlock int64
@@ -67,7 +82,7 @@ func (h *PostgresHandler) HandleSnapshots(ctx context.Context, snapshots []*Posi
 			createdAtBlock = *s.Entry.CreatedAtBlock
 		}
 
-		positions = append(positions, &outbound.AllocationPosition{
+		positions = append(positions, &entity.AllocationPosition{
 			ChainID:        s.ChainID,
 			TokenAddress:   s.Entry.ContractAddress,
 			TokenSymbol:    meta.symbol,
@@ -90,8 +105,6 @@ func (h *PostgresHandler) HandleSnapshots(ctx context.Context, snapshots []*Posi
 	return h.repo.SavePositions(ctx, positions)
 }
 
-// ── Minimal metadata cache for symbol/decimals ──
-
 type tokenMeta struct {
 	symbol   string
 	decimals int
@@ -105,7 +118,11 @@ type metadataCache struct {
 	logger      *slog.Logger
 }
 
-func newMetadataCache(multicaller outbound.Multicaller, erc20ABI *abi.ABI, logger *slog.Logger) *metadataCache {
+func newMetadataCache(
+	multicaller outbound.Multicaller,
+	erc20ABI *abi.ABI,
+	logger *slog.Logger,
+) *metadataCache {
 	return &metadataCache{
 		cache:       make(map[common.Address]tokenMeta),
 		multicaller: multicaller,
@@ -121,16 +138,12 @@ func (c *metadataCache) get(addr common.Address) (tokenMeta, bool) {
 	return m, ok
 }
 
-func (c *metadataCache) getOrDefault(addr common.Address) tokenMeta {
-	if m, ok := c.get(addr); ok {
-		return m
-	}
-	return tokenMeta{symbol: "UNKNOWN", decimals: 18}
-}
-
-func (c *metadataCache) fetchMissing(ctx context.Context, addrs []common.Address) error {
-	// Deduplicate and filter already cached
-	seen := make(map[common.Address]bool)
+func (c *metadataCache) fetchMissing(
+	ctx context.Context,
+	addrs []common.Address,
+	blockNumber int64,
+) error {
+	uniqueAddresses := make(map[common.Address]bool)
 	var missing []common.Address
 
 	c.mu.RLock()
@@ -138,8 +151,8 @@ func (c *metadataCache) fetchMissing(ctx context.Context, addrs []common.Address
 		if _, ok := c.cache[addr]; ok {
 			continue
 		}
-		if !seen[addr] {
-			seen[addr] = true
+		if !uniqueAddresses[addr] {
+			uniqueAddresses[addr] = true
 			missing = append(missing, addr)
 		}
 	}
@@ -149,48 +162,83 @@ func (c *metadataCache) fetchMissing(ctx context.Context, addrs []common.Address
 		return nil
 	}
 
-	// Multicall: decimals + symbol per token
 	calls := make([]outbound.Call, 0, len(missing)*2)
 	for _, addr := range missing {
 		decimalsData, _ := c.erc20ABI.Pack("decimals")
 		symbolData, _ := c.erc20ABI.Pack("symbol")
 		calls = append(calls,
-			outbound.Call{Target: addr, AllowFailure: true, CallData: decimalsData},
-			outbound.Call{Target: addr, AllowFailure: true, CallData: symbolData},
+			outbound.Call{
+				Target:       addr,
+				AllowFailure: true,
+				CallData:     decimalsData,
+			},
+			outbound.Call{
+				Target:       addr,
+				AllowFailure: true,
+				CallData:     symbolData,
+			},
 		)
 	}
 
-	results, err := c.multicaller.Execute(ctx, calls, nil)
+	block := big.NewInt(blockNumber)
+	results, err := c.multicaller.Execute(ctx, calls, block)
 	if err != nil {
 		return fmt.Errorf("multicall metadata: %w", err)
 	}
+
+	var fetchErrors []error
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	for i, addr := range missing {
-		meta := tokenMeta{symbol: "UNKNOWN", decimals: 18}
 		decIdx := i * 2
 		symIdx := i*2 + 1
 
-		if decIdx < len(results) && results[decIdx].Success && len(results[decIdx].ReturnData) > 0 {
-			if unpacked, err := c.erc20ABI.Unpack("decimals", results[decIdx].ReturnData); err == nil && len(unpacked) > 0 {
+		decimals := -1
+		if decIdx < len(results) &&
+			results[decIdx].Success &&
+			len(results[decIdx].ReturnData) > 0 {
+			unpacked, err := c.erc20ABI.Unpack(
+				"decimals", results[decIdx].ReturnData,
+			)
+			if err == nil && len(unpacked) > 0 {
 				if d, ok := unpacked[0].(uint8); ok {
-					meta.decimals = int(d)
+					decimals = int(d)
 				}
 			}
 		}
 
-		if symIdx < len(results) && results[symIdx].Success && len(results[symIdx].ReturnData) > 0 {
-			if unpacked, err := c.erc20ABI.Unpack("symbol", results[symIdx].ReturnData); err == nil && len(unpacked) > 0 {
+		if decimals < 0 {
+			fetchErrors = append(fetchErrors, fmt.Errorf(
+				"decimals fetch failed for %s", addr.Hex(),
+			))
+			continue
+		}
+
+		symbol := "UNKNOWN"
+		if symIdx < len(results) &&
+			results[symIdx].Success &&
+			len(results[symIdx].ReturnData) > 0 {
+			unpacked, err := c.erc20ABI.Unpack(
+				"symbol", results[symIdx].ReturnData,
+			)
+			if err == nil && len(unpacked) > 0 {
 				if s, ok := unpacked[0].(string); ok {
-					meta.symbol = s
+					symbol = s
 				}
 			}
 		}
 
-		c.cache[addr] = meta
-		c.logger.Debug("cached metadata", "address", addr.Hex(), "symbol", meta.symbol, "decimals", meta.decimals)
+		c.cache[addr] = tokenMeta{symbol: symbol, decimals: decimals}
+		c.logger.Debug("cached metadata",
+			"address", addr.Hex(),
+			"symbol", symbol,
+			"decimals", decimals)
+	}
+
+	if len(fetchErrors) > 0 {
+		return fmt.Errorf("metadata incomplete: %v", fetchErrors)
 	}
 
 	return nil

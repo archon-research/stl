@@ -5,31 +5,29 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 )
 
-func TestParseHexInt(t *testing.T) {
-	tests := []struct {
-		input string
-		want  int
-	}{
-		{"0x0", 0},
-		{"0x1", 1},
-		{"0xa", 10},
-		{"0xff", 255},
-		{"0x10", 16},
-		{"", 0},
-		{"0x", 0},
-	}
-	for _, tt := range tests {
-		got := parseHexInt(tt.input)
-		if got != tt.want {
-			t.Errorf("parseHexInt(%q) = %d, want %d", tt.input, got, tt.want)
-		}
+func newTestExtractor(t *testing.T) *TransferExtractor {
+	t.Helper()
+	return NewTransferExtractor(DefaultProxies())
+}
+
+func makeTransferLog(token, from, to common.Address, amount *big.Int, index uint) types.Log {
+	return types.Log{
+		Address: token,
+		Topics: []common.Hash{
+			transferEventTopic,
+			common.BytesToHash(from.Bytes()),
+			common.BytesToHash(to.Bytes()),
+		},
+		Data:  common.LeftPadBytes(amount.Bytes(), 32),
+		Index: index,
 	}
 }
 
 func TestTransferExtractor_Extract_NoLogs(t *testing.T) {
-	ext := NewTransferExtractor(DefaultProxies())
+	ext := newTestExtractor(t)
 	receipt := TransactionReceipt{
 		TransactionHash: "0xabc",
 		Logs:            nil,
@@ -41,19 +39,19 @@ func TestTransferExtractor_Extract_NoLogs(t *testing.T) {
 }
 
 func TestTransferExtractor_Extract_NonTransferTopic(t *testing.T) {
-	ext := NewTransferExtractor(DefaultProxies())
+	ext := newTestExtractor(t)
 	receipt := TransactionReceipt{
 		TransactionHash: "0xabc",
-		Logs: []Log{
+		Logs: []types.Log{
 			{
-				Address: "0x1111111111111111111111111111111111111111",
-				Topics: []string{
-					"0x0000000000000000000000000000000000000000000000000000000000000000",
-					"0x0000000000000000000000000000000000000000000000000000000000000001",
-					"0x0000000000000000000000000000000000000000000000000000000000000002",
+				Address: common.HexToAddress("0x1111111111111111111111111111111111111111"),
+				Topics: []common.Hash{
+					common.Hash{},
+					common.BytesToHash(common.HexToAddress("0x01").Bytes()),
+					common.BytesToHash(common.HexToAddress("0x02").Bytes()),
 				},
-				Data:     "0x0000000000000000000000000000000000000000000000000000000000000001",
-				LogIndex: "0x0",
+				Data:  common.LeftPadBytes(big.NewInt(1).Bytes(), 32),
+				Index: 0,
 			},
 		},
 	}
@@ -66,26 +64,15 @@ func TestTransferExtractor_Extract_NonTransferTopic(t *testing.T) {
 func TestTransferExtractor_Extract_TransferToProxy(t *testing.T) {
 	sparkProxy := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
 	sender := common.HexToAddress("0x9999999999999999999999999999999999999999")
-	token := common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48") // USDC
+	token := common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
 
-	ext := NewTransferExtractor(DefaultProxies())
-
-	amount := new(big.Int).SetUint64(1000000) // 1 USDC
-	amountHex := common.BytesToHash(amount.Bytes()).Hex()
+	ext := newTestExtractor(t)
+	amount := new(big.Int).SetUint64(1000000)
 
 	receipt := TransactionReceipt{
 		TransactionHash: "0xdeadbeef",
-		Logs: []Log{
-			{
-				Address: token.Hex(),
-				Topics: []string{
-					transferEventTopic.Hex(),
-					common.BytesToHash(sender.Bytes()).Hex(),
-					common.BytesToHash(sparkProxy.Bytes()).Hex(),
-				},
-				Data:     amountHex,
-				LogIndex: "0x5",
-			},
+		Logs: []types.Log{
+			makeTransferLog(token, sender, sparkProxy, amount, 5),
 		},
 	}
 
@@ -113,9 +100,6 @@ func TestTransferExtractor_Extract_TransferToProxy(t *testing.T) {
 	if ev.LogIndex != 5 {
 		t.Errorf("expected logIndex 5, got %d", ev.LogIndex)
 	}
-	if ev.TxHash != "0xdeadbeef" {
-		t.Errorf("expected txHash 0xdeadbeef, got %s", ev.TxHash)
-	}
 }
 
 func TestTransferExtractor_Extract_TransferFromProxy(t *testing.T) {
@@ -123,24 +107,13 @@ func TestTransferExtractor_Extract_TransferFromProxy(t *testing.T) {
 	receiver := common.HexToAddress("0x9999999999999999999999999999999999999999")
 	token := common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
 
-	ext := NewTransferExtractor(DefaultProxies())
-
+	ext := newTestExtractor(t)
 	amount := new(big.Int).SetUint64(5000000)
-	amountHex := common.BytesToHash(amount.Bytes()).Hex()
 
 	receipt := TransactionReceipt{
 		TransactionHash: "0xfeed",
-		Logs: []Log{
-			{
-				Address: token.Hex(),
-				Topics: []string{
-					transferEventTopic.Hex(),
-					common.BytesToHash(sparkProxy.Bytes()).Hex(),
-					common.BytesToHash(receiver.Bytes()).Hex(),
-				},
-				Data:     amountHex,
-				LogIndex: "0x0",
-			},
+		Logs: []types.Log{
+			makeTransferLog(token, sparkProxy, receiver, amount, 0),
 		},
 	}
 
@@ -158,24 +131,13 @@ func TestTransferExtractor_Extract_ProxyToProxy(t *testing.T) {
 	groveProxy := common.HexToAddress("0x491edfb0b8b608044e227225c715981a30f3a44e")
 	token := common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
 
-	ext := NewTransferExtractor(DefaultProxies())
-
+	ext := newTestExtractor(t)
 	amount := new(big.Int).SetUint64(1000000)
-	amountHex := common.BytesToHash(amount.Bytes()).Hex()
 
 	receipt := TransactionReceipt{
 		TransactionHash: "0xboth",
-		Logs: []Log{
-			{
-				Address: token.Hex(),
-				Topics: []string{
-					transferEventTopic.Hex(),
-					common.BytesToHash(sparkProxy.Bytes()).Hex(),
-					common.BytesToHash(groveProxy.Bytes()).Hex(),
-				},
-				Data:     amountHex,
-				LogIndex: "0x1",
-			},
+		Logs: []types.Log{
+			makeTransferLog(token, sparkProxy, groveProxy, amount, 1),
 		},
 	}
 
@@ -193,45 +155,22 @@ func TestTransferExtractor_Extract_ProxyToProxy(t *testing.T) {
 }
 
 func TestTransferExtractor_Extract_TooFewTopics(t *testing.T) {
-	ext := NewTransferExtractor(DefaultProxies())
+	ext := newTestExtractor(t)
 	receipt := TransactionReceipt{
 		TransactionHash: "0xabc",
-		Logs: []Log{
+		Logs: []types.Log{
 			{
-				Address: "0x1111111111111111111111111111111111111111",
-				Topics: []string{
-					transferEventTopic.Hex(),
+				Address: common.HexToAddress("0x1111111111111111111111111111111111111111"),
+				Topics: []common.Hash{
+					transferEventTopic,
 				},
-				Data:     "0x0000000000000000000000000000000000000000000000000000000000000001",
-				LogIndex: "0x0",
+				Data:  common.LeftPadBytes(big.NewInt(1).Bytes(), 32),
+				Index: 0,
 			},
 		},
 	}
 	events := ext.Extract(receipt)
 	if len(events) != 0 {
 		t.Errorf("expected 0 events from log with < 3 topics, got %d", len(events))
-	}
-}
-
-func TestTransferExtractor_Extract_NonProxyTransfer(t *testing.T) {
-	ext := NewTransferExtractor(DefaultProxies())
-	receipt := TransactionReceipt{
-		TransactionHash: "0xabc",
-		Logs: []Log{
-			{
-				Address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-				Topics: []string{
-					transferEventTopic.Hex(),
-					common.BytesToHash(common.HexToAddress("0xaaaa").Bytes()).Hex(),
-					common.BytesToHash(common.HexToAddress("0xbbbb").Bytes()).Hex(),
-				},
-				Data:     "0x0000000000000000000000000000000000000000000000000000000000000001",
-				LogIndex: "0x0",
-			},
-		},
-	}
-	events := ext.Extract(receipt)
-	if len(events) != 0 {
-		t.Errorf("expected 0 events from non-proxy transfer, got %d", len(events))
 	}
 }

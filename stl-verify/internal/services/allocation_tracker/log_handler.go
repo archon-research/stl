@@ -4,11 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-
-	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// LogHandler prints position snapshots to the logger.
 type LogHandler struct {
 	logger *slog.Logger
 }
@@ -19,27 +16,24 @@ func NewLogHandler(logger *slog.Logger) *LogHandler {
 
 func (h *LogHandler) HandleSnapshots(ctx context.Context, snapshots []*PositionSnapshot) error {
 	for _, s := range snapshots {
-		decimals := 18
-		balanceStr := shared.FormatAmount(s.Balance, decimals)
-
 		fields := []any{
 			"star", s.Entry.Star,
 			"chain", s.Entry.Chain,
 			"protocol", s.Entry.Protocol,
 			"type", s.Entry.TokenType,
 			"contract", s.Entry.ContractAddress.Hex(),
-			"balance", balanceStr,
+			"balance_raw", s.Balance.String(),
 			"block", s.BlockNumber,
 		}
 
 		if s.ScaledBalance != nil {
-			fields = append(fields, "scaled", shared.FormatAmount(s.ScaledBalance, decimals))
+			fields = append(fields, "scaled_raw", s.ScaledBalance.String())
 		}
 
 		if s.TxHash != "" {
 			fields = append(fields,
 				"direction", string(s.Direction),
-				"tx_amount", shared.FormatAmount(s.TxAmount, decimals),
+				"tx_amount_raw", s.TxAmount.String(),
 				"tx", s.TxHash,
 			)
 		}
@@ -49,7 +43,6 @@ func (h *LogHandler) HandleSnapshots(ctx context.Context, snapshots []*PositionS
 	return nil
 }
 
-// MultiHandler fans out to multiple handlers.
 type MultiHandler struct {
 	handlers []AllocationHandler
 }

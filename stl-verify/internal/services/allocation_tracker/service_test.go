@@ -45,19 +45,12 @@ func TestBlockEvent_CacheKey_DifferentVersions(t *testing.T) {
 
 // ── NewService ──
 
-func TestNewService_RequiresQueueURL(t *testing.T) {
-	_, err := NewService(Config{}, nil, nil, nil, nil, nil, nil, nil)
-	if err == nil {
-		t.Error("expected error for empty QueueURL")
-	}
-}
-
 func TestNewService_FillsDefaults(t *testing.T) {
 	handler := &testHandler{}
 	registry := NewSourceRegistry(ConfigDefaults().Logger)
 
 	svc, err := NewService(
-		Config{QueueURL: "https://sqs.test/queue"},
+		Config{},
 		nil, nil, nil, registry, nil, handler, nil,
 	)
 	if err != nil {
@@ -81,7 +74,7 @@ func TestMatchTransfers_MatchesKnownEntry(t *testing.T) {
 	wallet := common.HexToAddress("0xbbbb")
 
 	entries := []*TokenEntry{
-		{ContractAddress: contract, WalletAddress: wallet, Star: "spark", Chain: "ethereum", TokenType: "erc20"},
+		{ContractAddress: contract, WalletAddress: wallet, Star: "spark", Chain: "mainnet", TokenType: "erc20"},
 	}
 	svc := &Service{
 		entryLookup: BuildEntryLookup(entries),
@@ -133,7 +126,6 @@ func TestMatchTransfers_Deduplicates(t *testing.T) {
 		entryLookup: BuildEntryLookup(entries),
 	}
 
-	// Two transfers for the same token+wallet
 	transfers := []*TransferEvent{
 		{TokenAddress: contract, ProxyAddress: wallet, Direction: DirectionIn, TxHash: "0x1"},
 		{TokenAddress: contract, ProxyAddress: wallet, Direction: DirectionOut, TxHash: "0x2"},
@@ -175,7 +167,7 @@ func TestBuildSnapshots_Basic(t *testing.T) {
 	contract := common.HexToAddress("0xaaaa")
 	wallet := common.HexToAddress("0xbbbb")
 
-	entry := &TokenEntry{ContractAddress: contract, WalletAddress: wallet, Star: "spark", Chain: "ethereum"}
+	entry := &TokenEntry{ContractAddress: contract, WalletAddress: wallet, Star: "spark", Chain: "mainnet"}
 
 	balances := map[EntryKey]*PositionBalance{
 		entry.Key(): {Balance: big.NewInt(1000000), ScaledBalance: big.NewInt(2000000)},
@@ -224,7 +216,6 @@ func TestBuildSnapshots_SkipsMissingBalance(t *testing.T) {
 		WalletAddress:   common.HexToAddress("0xbbbb"),
 	}
 
-	// Empty balances map — entry not fetched (skip/stub source)
 	balances := map[EntryKey]*PositionBalance{}
 	event := BlockEvent{ChainID: 1, BlockNumber: 100}
 

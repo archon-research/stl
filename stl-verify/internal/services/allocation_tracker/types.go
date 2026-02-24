@@ -11,8 +11,9 @@ import (
 type Direction string
 
 const (
-	DirectionIn  Direction = "in"
-	DirectionOut Direction = "out"
+	DirectionIn    Direction = "in"
+	DirectionOut   Direction = "out"
+	DirectionSweep Direction = "sweep"
 )
 
 // TokenEntry represents a single known position from the TOKENS_DATA registry.

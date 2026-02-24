@@ -11,10 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/redis/go-redis/v9"
@@ -22,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
@@ -29,7 +28,6 @@ import (
 	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
 )
 
-// ethClientWrapper adapts *ethclient.Client to the at.BlockQuerier interface.
 type ethClientWrapper struct {
 	client *ethclient.Client
 }
@@ -64,7 +62,7 @@ func run() error {
 	redisAddr := flag.String("redis", "", "Redis address")
 	maxMessages := flag.Int("max", 10, "Max messages per poll")
 	waitTime := flag.Int("wait", 20, "Wait time seconds")
-	sweepMinutes := flag.Int("sweep", 5, "Sweep interval minutes")
+	sweepMinutes := flag.Int("sweep", 15, "Sweep interval minutes")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -85,9 +83,9 @@ func run() error {
 		return fmt.Errorf("redis address required (-redis or REDIS_ADDR)")
 	}
 
-	alchemyKey := env.Get("ALCHEMY_API_KEY", "")
-	if alchemyKey == "" {
-		return fmt.Errorf("ALCHEMY_API_KEY is required")
+	alchemyKey, err := env.Require("ALCHEMY_API_KEY")
+	if err != nil {
+		return err
 	}
 	rpcURL := fmt.Sprintf(
 		"%s/%s",
@@ -97,7 +95,7 @@ func run() error {
 
 	ctx := context.Background()
 
-	// AWS SQS
+	// AWS
 	var awsOpts []func(*config.LoadOptions) error
 	awsOpts = append(awsOpts,
 		config.WithRegion(env.Get("AWS_REGION", "us-east-1")),
@@ -118,11 +116,17 @@ func run() error {
 		return fmt.Errorf("aws config: %w", err)
 	}
 
-	sqsClient := sqs.NewFromConfig(awsCfg, func(o *sqs.Options) {
-		if ep := env.Get("AWS_SQS_ENDPOINT", ""); ep != "" {
-			o.BaseEndpoint = aws.String(ep)
-		}
-	})
+	// SQS consumer
+	sqsConsumer, err := sqsAdapter.NewConsumer(awsCfg, sqsAdapter.Config{
+		QueueURL:          *queueURL,
+		WaitTimeSeconds:   int32(*waitTime),
+		VisibilityTimeout: 30,
+		BaseEndpoint:      env.Get("AWS_SQS_ENDPOINT", ""),
+	}, logger)
+	if err != nil {
+		return fmt.Errorf("sqs consumer: %w", err)
+	}
+	defer sqsConsumer.Close()
 
 	// Redis
 	redisClient := redis.NewClient(&redis.Options{
@@ -156,73 +160,68 @@ func run() error {
 	// Build source registry
 	registry := at.NewSourceRegistry(logger)
 
-	// 1. Skip sources (existing worker handles these)
 	for _, s := range at.DefaultSkipSources(logger) {
 		registry.Register(s)
 	}
 
-	// 2. BalanceOf source
 	registry.Register(at.NewBalanceOfSource(mc, erc20ABI, logger))
 
-	// 3. ERC4626 source
 	erc4626, err := at.NewERC4626Source(mc, logger)
 	if err != nil {
 		return fmt.Errorf("erc4626 source: %w", err)
 	}
 	registry.Register(erc4626)
 
-	// 4. Curve source
-	curve, err := at.NewCurveSource(mc, logger)
+	curveABI, err := abis.GetCurvePoolABI()
 	if err != nil {
-		return fmt.Errorf("curve source: %w", err)
+		return fmt.Errorf("curve abi: %w", err)
 	}
-	registry.Register(curve)
+	registry.Register(at.NewCurveSource(mc, curveABI, logger))
 
-	// 5. Stub sources
 	for _, s := range at.DefaultStubSources(logger) {
 		registry.Register(s)
 	}
 
-	// Service
+	// Token entries to index
 	entries := at.DefaultTokenEntries()
 
-	// Handler setup
-	var handler at.AllocationHandler
-
-	dbURL := env.Get("DATABASE_URL", "")
-	if dbURL != "" {
-		dbPool, err := pgxpool.New(ctx, dbURL)
-		if err != nil {
-			return fmt.Errorf("db connect: %w", err)
-		}
-		defer dbPool.Close()
-		if err := dbPool.Ping(ctx); err != nil {
-			return fmt.Errorf("db ping: %w", err)
-		}
-		logger.Info("postgres connected")
-
-		tokenRepo, err := postgres.NewTokenRepository(dbPool, logger, 1)
-		if err != nil {
-			return fmt.Errorf("token repo: %w", err)
-		}
-		allocRepo := postgres.NewAllocationRepository(dbPool, tokenRepo, logger)
-		pgHandler := at.NewPostgresHandler(allocRepo, mc, erc20ABI, logger)
-
-		handler = at.NewMultiHandler(at.NewLogHandler(logger), pgHandler)
-	} else {
-		logger.Warn("DATABASE_URL not set — running log-only mode")
-		handler = at.NewLogHandler(logger)
+	// Database
+	dbURL, err := env.Require("DATABASE_URL")
+	if err != nil {
+		return err
 	}
+
+	dbPool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		return fmt.Errorf("db connect: %w", err)
+	}
+	defer dbPool.Close()
+	if err := dbPool.Ping(ctx); err != nil {
+		return fmt.Errorf("db ping: %w", err)
+	}
+	logger.Info("postgres connected")
+
+	txm, err := postgres.NewTxManager(dbPool, logger)
+	if err != nil {
+		return fmt.Errorf("tx manager: %w", err)
+	}
+
+	tokenRepo, err := postgres.NewTokenRepository(dbPool, logger, 1)
+	if err != nil {
+		return fmt.Errorf("token repo: %w", err)
+	}
+	allocRepo := postgres.NewAllocationRepository(dbPool, txm, tokenRepo, logger)
+	pgHandler := at.NewPrimePositionHandler(allocRepo, mc, erc20ABI, logger)
+
+	handler := at.NewMultiHandler(at.NewLogHandler(logger), pgHandler)
 
 	svc, err := at.NewService(
 		at.Config{
-			QueueURL:        *queueURL,
-			MaxMessages:     int32(*maxMessages),
-			WaitTimeSeconds: int32(*waitTime),
-			SweepInterval:   time.Duration(*sweepMinutes) * time.Minute,
-			Logger:          logger,
+			MaxMessages:   *maxMessages,
+			SweepInterval: time.Duration(*sweepMinutes) * time.Minute,
+			Logger:        logger,
 		},
-		sqsClient,
+		sqsConsumer,
 		redisClient,
 		ethClient,
 		registry,

@@ -5,37 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
-	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
-
-const curveABIJson = `[
-	{
-		"inputs": [{"name": "account", "type": "address"}],
-		"name": "balanceOf",
-		"outputs": [{"name": "", "type": "uint256"}],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"inputs": [{"name": "i", "type": "uint256"}],
-		"name": "coins",
-		"outputs": [{"name": "", "type": "address"}],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"inputs": [{"name": "_token_amount", "type": "uint256"}, {"name": "i", "type": "int128"}],
-		"name": "calc_withdraw_one_coin",
-		"outputs": [{"name": "", "type": "uint256"}],
-		"stateMutability": "view",
-		"type": "function"
-	}
-]`
 
 // CurveSource fetches Curve LP positions via three multicall rounds:
 //  1. balanceOf(wallet) → LP shares (stored as ScaledBalance)
@@ -49,17 +24,14 @@ type CurveSource struct {
 
 func NewCurveSource(
 	multicaller outbound.Multicaller,
+	curveABI *abi.ABI,
 	logger *slog.Logger,
-) (*CurveSource, error) {
-	parsed, err := abi.JSON(strings.NewReader(curveABIJson))
-	if err != nil {
-		return nil, fmt.Errorf("parse curve ABI: %w", err)
-	}
+) *CurveSource {
 	return &CurveSource{
 		multicaller: multicaller,
-		poolABI:     parsed,
+		poolABI:     *curveABI,
 		logger:      logger.With("source", "curve"),
-	}, nil
+	}
 }
 
 func (s *CurveSource) Name() string { return "curve" }
@@ -281,8 +253,6 @@ func (s *CurveSource) fetchShares(
 	return shares, valid, nil
 }
 
-// discoverCoinIndices calls coins(0)..coins(maxCoins-1) on each pool
-// and returns the index that matches the entry's AssetAddress.
 func (s *CurveSource) discoverCoinIndices(
 	ctx context.Context,
 	entries []*TokenEntry,
@@ -295,7 +265,6 @@ func (s *CurveSource) discoverCoinIndices(
 		for i := 0; i < maxCoins; i++ {
 			data, err := s.poolABI.Pack("coins", big.NewInt(int64(i)))
 			if err != nil {
-				// Pad with empty call to keep alignment
 				calls = append(calls, outbound.Call{
 					Target:       e.ContractAddress,
 					AllowFailure: true,

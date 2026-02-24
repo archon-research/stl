@@ -2,14 +2,20 @@ package allocation_tracker
 
 import (
 	"math/big"
-	"strings"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 )
 
 var transferEventTopic = common.HexToHash("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
 
-// TransferEvent is a parsed ERC20 Transfer involving a known proxy.
+var transferAmountArgs abi.Arguments
+
+func init() {
+	uint256Type, _ := abi.NewType("uint256", "", nil)
+	transferAmountArgs = abi.Arguments{{Type: uint256Type}}
+}
+
 type TransferEvent struct {
 	TokenAddress common.Address
 	From         common.Address
@@ -27,7 +33,9 @@ type TransferExtractor struct {
 }
 
 func NewTransferExtractor(proxies []ProxyConfig) *TransferExtractor {
-	return &TransferExtractor{proxyLookup: BuildProxyLookup(proxies)}
+	return &TransferExtractor{
+		proxyLookup: BuildProxyLookup(proxies),
+	}
 }
 
 func (e *TransferExtractor) Extract(receipt TransactionReceipt) []*TransferEvent {
@@ -37,12 +45,12 @@ func (e *TransferExtractor) Extract(receipt TransactionReceipt) []*TransferEvent
 		if len(log.Topics) < 3 {
 			continue
 		}
-		if common.HexToHash(log.Topics[0]) != transferEventTopic {
+		if log.Topics[0] != transferEventTopic {
 			continue
 		}
 
-		from := common.HexToAddress(log.Topics[1])
-		to := common.HexToAddress(log.Topics[2])
+		from := common.BytesToAddress(log.Topics[1].Bytes())
+		to := common.BytesToAddress(log.Topics[2].Bytes())
 
 		proxyFrom, fromIsProxy := e.proxyLookup[from]
 		proxyTo, toIsProxy := e.proxyLookup[to]
@@ -52,38 +60,42 @@ func (e *TransferExtractor) Extract(receipt TransactionReceipt) []*TransferEvent
 		}
 
 		amount := new(big.Int)
-		if data := common.FromHex(log.Data); len(data) >= 32 {
-			amount.SetBytes(data[:32])
+		if len(log.Data) >= 32 {
+			values, err := transferAmountArgs.Unpack(log.Data)
+			if err == nil && len(values) > 0 {
+				if v, ok := values[0].(*big.Int); ok {
+					amount = v
+				}
+			}
 		}
-
-		token := common.HexToAddress(log.Address)
-		idx := parseHexInt(log.LogIndex)
 
 		if fromIsProxy {
 			events = append(events, &TransferEvent{
-				TokenAddress: token, From: from, To: to, Amount: new(big.Int).Set(amount),
-				Direction: DirectionOut, Star: proxyFrom.Star, ProxyAddress: proxyFrom.Address,
-				TxHash: receipt.TransactionHash, LogIndex: idx,
+				TokenAddress: log.Address,
+				From:         from,
+				To:           to,
+				Amount:       new(big.Int).Set(amount),
+				Direction:    DirectionOut,
+				Star:         proxyFrom.Star,
+				ProxyAddress: proxyFrom.Address,
+				TxHash:       log.TxHash.Hex(),
+				LogIndex:     int(log.Index),
 			})
 		}
 		if toIsProxy {
 			events = append(events, &TransferEvent{
-				TokenAddress: token, From: from, To: to, Amount: new(big.Int).Set(amount),
-				Direction: DirectionIn, Star: proxyTo.Star, ProxyAddress: proxyTo.Address,
-				TxHash: receipt.TransactionHash, LogIndex: idx,
+				TokenAddress: log.Address,
+				From:         from,
+				To:           to,
+				Amount:       new(big.Int).Set(amount),
+				Direction:    DirectionIn,
+				Star:         proxyTo.Star,
+				ProxyAddress: proxyTo.Address,
+				TxHash:       log.TxHash.Hex(),
+				LogIndex:     int(log.Index),
 			})
 		}
 	}
 
 	return events
-}
-
-func parseHexInt(s string) int {
-	s = strings.TrimPrefix(s, "0x")
-	if s == "" {
-		return 0
-	}
-	v := new(big.Int)
-	v.SetString(s, 16)
-	return int(v.Int64())
 }
