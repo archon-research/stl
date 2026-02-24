@@ -114,10 +114,11 @@ func TestLateBlockAfterPruning(t *testing.T) {
 
 	// Seed the state repo with block 1
 	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     1,
-		Hash:       client.GetHeader(1).Hash,
-		ParentHash: client.GetHeader(1).ParentHash,
-		ReceivedAt: time.Now().Unix(),
+		Number:         1,
+		Hash:           client.GetHeader(1).Hash,
+		ParentHash:     client.GetHeader(1).ParentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}); err != nil {
 		t.Fatalf("failed to save block: %v", err)
 	}
@@ -300,8 +301,9 @@ func TestIsDuplicateBlock_FoundInDB(t *testing.T) {
 
 	// Pre-populate the state repo with a block
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 50,
-		Hash:   "0xdb_block_hash",
+		Number:         50,
+		Hash:           "0xdb_block_hash",
+		BlockTimestamp: time.Now().Unix(),
 	})
 
 	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
@@ -414,10 +416,10 @@ func TestDetectReorg_NextBlock_ParentMatches_NoReorg(t *testing.T) {
 
 	// Pre-populate DB with blocks 99-100
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 99, Hash: "0xblock99", ParentHash: "0xblock98",
+		Number: 99, Hash: "0xblock99", ParentHash: "0xblock98", BlockTimestamp: time.Now().Unix(),
 	})
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99",
+		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
 	})
 
 	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
@@ -460,10 +462,10 @@ func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
 
 	// Pre-populate DB with blocks 99-100
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 99, Hash: "0xblock99", ParentHash: "0xblock98",
+		Number: 99, Hash: "0xblock99", ParentHash: "0xblock98", BlockTimestamp: time.Now().Unix(),
 	})
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99",
+		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
 	})
 
 	svc, err := NewLiveService(LiveConfig{
@@ -513,13 +515,13 @@ func TestDetectReorg_LowerBlockNumber_Reorg(t *testing.T) {
 
 	// Pre-populate DB with blocks 98-100
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 98, Hash: "0xblock98", ParentHash: "0xblock97",
+		Number: 98, Hash: "0xblock98", ParentHash: "0xblock97", BlockTimestamp: time.Now().Unix(),
 	})
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 99, Hash: "0xblock99", ParentHash: "0xblock98",
+		Number: 99, Hash: "0xblock99", ParentHash: "0xblock98", BlockTimestamp: time.Now().Unix(),
 	})
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99",
+		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
 	})
 
 	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
@@ -561,7 +563,7 @@ func TestDetectReorg_Gap_NoReorg(t *testing.T) {
 
 	// Pre-populate DB with block 100
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99",
+		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
 	})
 
 	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
@@ -603,12 +605,12 @@ func TestHandleReorg_FindsCommonAncestorInDB(t *testing.T) {
 
 	// Pre-populate DB with blocks 95-100
 	blocks := []outbound.BlockState{
-		{Number: 95, Hash: "0xblock95", ParentHash: "0xblock94"},
-		{Number: 96, Hash: "0xblock96", ParentHash: "0xblock95"},
-		{Number: 97, Hash: "0xblock97", ParentHash: "0xblock96"},
-		{Number: 98, Hash: "0xblock98", ParentHash: "0xblock97"},
-		{Number: 99, Hash: "0xblock99", ParentHash: "0xblock98"},
-		{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99"},
+		{Number: 95, Hash: "0xblock95", ParentHash: "0xblock94", BlockTimestamp: time.Now().Unix()},
+		{Number: 96, Hash: "0xblock96", ParentHash: "0xblock95", BlockTimestamp: time.Now().Unix()},
+		{Number: 97, Hash: "0xblock97", ParentHash: "0xblock96", BlockTimestamp: time.Now().Unix()},
+		{Number: 98, Hash: "0xblock98", ParentHash: "0xblock97", BlockTimestamp: time.Now().Unix()},
+		{Number: 99, Hash: "0xblock99", ParentHash: "0xblock98", BlockTimestamp: time.Now().Unix()},
+		{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix()},
 	}
 	for _, b := range blocks {
 		_, _ = stateRepo.SaveBlock(ctx, b)
@@ -647,10 +649,11 @@ func TestHandleReorg_FindsCommonAncestorInDB(t *testing.T) {
 
 	// Simulate what happens after HandleReorgAtomic: mark orphaned blocks and save new block
 	_, _ = stateRepo.HandleReorgAtomic(ctx, ancestor, *reorgEvent, outbound.BlockState{
-		Number:     block.Number,
-		Hash:       block.Hash,
-		ParentHash: block.ParentHash,
-		ReceivedAt: time.Now().Unix(),
+		Number:         block.Number,
+		Hash:           block.Hash,
+		ParentHash:     block.ParentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	})
 
 	// After HandleReorgAtomic, DB should have blocks 95-98 (non-orphaned) + 99_alt (new block) = 5 blocks
@@ -692,12 +695,12 @@ func TestHandleReorg_WalksBackViaNetwork(t *testing.T) {
 
 	// Pre-populate DB with blocks 95-100
 	blocks := []outbound.BlockState{
-		{Number: 95, Hash: "0xblock95", ParentHash: "0xblock94"},
-		{Number: 96, Hash: "0xblock96", ParentHash: "0xblock95"},
-		{Number: 97, Hash: "0xblock97", ParentHash: "0xblock96"},
-		{Number: 98, Hash: "0xblock98", ParentHash: "0xblock97"},
-		{Number: 99, Hash: "0xblock99", ParentHash: "0xblock98"},
-		{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99"},
+		{Number: 95, Hash: "0xblock95", ParentHash: "0xblock94", BlockTimestamp: time.Now().Unix()},
+		{Number: 96, Hash: "0xblock96", ParentHash: "0xblock95", BlockTimestamp: time.Now().Unix()},
+		{Number: 97, Hash: "0xblock97", ParentHash: "0xblock96", BlockTimestamp: time.Now().Unix()},
+		{Number: 98, Hash: "0xblock98", ParentHash: "0xblock97", BlockTimestamp: time.Now().Unix()},
+		{Number: 99, Hash: "0xblock99", ParentHash: "0xblock98", BlockTimestamp: time.Now().Unix()},
+		{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix()},
 	}
 	for _, b := range blocks {
 		_, _ = stateRepo.SaveBlock(ctx, b)
@@ -742,7 +745,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 
 		// Pre-populate DB with block 100 (latest)
 		_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number: 100, Hash: "0xblock100", ParentHash: "0xblock99",
+			Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
 		})
 
 		svc, err := NewLiveService(LiveConfig{
@@ -782,7 +785,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 
 		// Pre-populate DB with our chain (completely different from the unknown chain)
 		_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number: 100, Hash: "0xblock100", ParentHash: "0xblock99",
+			Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
 		})
 
 		svc, err := NewLiveService(LiveConfig{
@@ -815,13 +818,13 @@ func TestHandleReorg_ReturnsReorgEvent(t *testing.T) {
 
 	// Pre-populate DB with our chain
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 98, Hash: "0xblock98", ParentHash: "0xblock97",
+		Number: 98, Hash: "0xblock98", ParentHash: "0xblock97", BlockTimestamp: time.Now().Unix(),
 	})
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 99, Hash: "0xblock99", ParentHash: "0xblock98",
+		Number: 99, Hash: "0xblock99", ParentHash: "0xblock98", BlockTimestamp: time.Now().Unix(),
 	})
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99",
+		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
 	})
 
 	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
@@ -937,7 +940,7 @@ func TestProcessBlock_SkipsDuplicate(t *testing.T) {
 
 	// Pre-populate DB with block
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 100, Hash: "0x64", ParentHash: "0x63",
+		Number: 100, Hash: "0x64", ParentHash: "0x63", BlockTimestamp: time.Now().Unix(),
 	})
 
 	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
@@ -985,7 +988,7 @@ func TestProcessBlock_AddsBlockToChain(t *testing.T) {
 
 	// Pre-populate DB with block 100
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 100, Hash: header100.Hash, ParentHash: header100.ParentHash,
+		Number: 100, Hash: header100.Hash, ParentHash: header100.ParentHash, BlockTimestamp: time.Now().Unix(),
 	})
 
 	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
@@ -1632,13 +1635,13 @@ func TestProcessBlock_WithMetrics_RecordsReorg(t *testing.T) {
 	// Pre-populate DB with blocks
 	ctx := context.Background()
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 98, Hash: "0x98", ParentHash: "0x97",
+		Number: 98, Hash: "0x98", ParentHash: "0x97", BlockTimestamp: time.Now().Unix(),
 	})
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 99, Hash: "0x99", ParentHash: "0x98",
+		Number: 99, Hash: "0x99", ParentHash: "0x98", BlockTimestamp: time.Now().Unix(),
 	})
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 100, Hash: "0x100", ParentHash: "0x99",
+		Number: 100, Hash: "0x100", ParentHash: "0x99", BlockTimestamp: time.Now().Unix(),
 	})
 
 	svc, err := NewLiveService(LiveConfig{
@@ -1694,7 +1697,7 @@ func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
 
 	// Pre-populate DB with block
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 100, Hash: "0x100", ParentHash: "0x99",
+		Number: 100, Hash: "0x100", ParentHash: "0x99", BlockTimestamp: time.Now().Unix(),
 	})
 
 	svc, err := NewLiveService(LiveConfig{
@@ -1822,16 +1825,18 @@ func TestProcessBlock_VersionIsCorrectAfterReorg(t *testing.T) {
 
 	// Pre-save block 99 (common ancestor)
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     99,
-		Hash:       "0x99",
-		ParentHash: "0x98",
+		Number:         99,
+		Hash:           "0x99",
+		ParentHash:     "0x98",
+		BlockTimestamp: time.Now().Unix(),
 	})
 
 	// Pre-save a block at height 100 (this is version 0)
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     100,
-		Hash:       "0x100_original",
-		ParentHash: "0x99",
+		Number:         100,
+		Hash:           "0x100_original",
+		ParentHash:     "0x99",
+		BlockTimestamp: time.Now().Unix(),
 	})
 
 	// Verify there's 1 block at height 100
@@ -1899,9 +1904,10 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 
 	// Pre-save block 99 so the common ancestor can be found during reorg detection
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     99,
-		Hash:       "0x99",
-		ParentHash: "0x98",
+		Number:         99,
+		Hash:           "0x99",
+		ParentHash:     "0x98",
+		BlockTimestamp: time.Now().Unix(),
 	})
 
 	// Process first block at height 100 (version 0)
@@ -1930,10 +1936,11 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 	// This mimics what happens when MarkBlocksOrphanedAfter runs and then
 	// a new block is processed
 	_, err = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     100,
-		Hash:       "0x100_v1",
-		ParentHash: "0x99",
-		Version:    1, // Manually set version to 1 as it should be
+		Number:         100,
+		Hash:           "0x100_v1",
+		ParentHash:     "0x99",
+		Version:        1, // Manually set version to 1 as it should be
+		BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save second block: %v", err)
@@ -2554,7 +2561,7 @@ func TestProcessBlock_RollsBackInMemoryChainOnDBFailure(t *testing.T) {
 
 	// Pre-populate DB with block 99
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 99, Hash: block99Hash, ParentHash: "0xblock98",
+		Number: 99, Hash: block99Hash, ParentHash: "0xblock98", BlockTimestamp: time.Now().Unix(),
 	})
 
 	// Configure repo to fail on SaveBlock for the next block
@@ -2844,12 +2851,12 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 
 	// Set up initial DB state: blocks 95-100 (what service will load on Start)
 	initialBlocks := []outbound.BlockState{
-		{Number: 95, Hash: "0xblock95", ParentHash: "0xblock94", ReceivedAt: time.Now().Unix()},
-		{Number: 96, Hash: "0xblock96", ParentHash: "0xblock95", ReceivedAt: time.Now().Unix()},
-		{Number: 97, Hash: "0xblock97", ParentHash: "0xblock96", ReceivedAt: time.Now().Unix()},
-		{Number: 98, Hash: "0xblock98", ParentHash: "0xblock97", ReceivedAt: time.Now().Unix()},
-		{Number: 99, Hash: "0xblock99", ParentHash: "0xblock98", ReceivedAt: time.Now().Unix()},
-		{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", ReceivedAt: time.Now().Unix()},
+		{Number: 95, Hash: "0xblock95", ParentHash: "0xblock94", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix()},
+		{Number: 96, Hash: "0xblock96", ParentHash: "0xblock95", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix()},
+		{Number: 97, Hash: "0xblock97", ParentHash: "0xblock96", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix()},
+		{Number: 98, Hash: "0xblock98", ParentHash: "0xblock97", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix()},
+		{Number: 99, Hash: "0xblock99", ParentHash: "0xblock98", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix()},
+		{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix()},
 	}
 	for _, b := range initialBlocks {
 		if _, err := stateRepo.SaveBlock(ctx, b); err != nil {
@@ -2879,16 +2886,18 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 	// These blocks (93, 94) are now in DB but NOT in the service's in-memory chain.
 	// This simulates the race condition where backfill runs concurrently with live service.
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     93,
-		Hash:       "0xblock93",
-		ParentHash: "0xblock92",
-		ReceivedAt: time.Now().Unix(),
+		Number:         93,
+		Hash:           "0xblock93",
+		ParentHash:     "0xblock92",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	})
 	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     94,
-		Hash:       "0xblock94",
-		ParentHash: "0xblock93",
-		ReceivedAt: time.Now().Unix(),
+		Number:         94,
+		Hash:           "0xblock94",
+		ParentHash:     "0xblock93",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	})
 
 	// Send a reorg block via the subscriber (simulating WebSocket notification)
@@ -3037,10 +3046,11 @@ func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
 	for i := int64(98); i <= 100; i++ {
 		h := client.GetHeader(i)
 		_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       h.Hash,
-			ParentHash: h.ParentHash,
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           h.Hash,
+			ParentHash:     h.ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 	}
 
@@ -3069,9 +3079,9 @@ func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
 	// IMPORTANT: Use the ORIGINAL block headers, not from client (which will be overwritten with reorg block)
 	// (in the old implementation, these were NOT in memory, causing the bug)
 	backfillBlocks := []outbound.BlockState{
-		{Number: 101, Hash: block101.Hash, ParentHash: client.GetHeader(100).Hash},
-		{Number: 102, Hash: originalBlock102.Hash, ParentHash: block101.Hash},
-		{Number: 103, Hash: client.GetHeader(103).Hash, ParentHash: originalBlock102.Hash},
+		{Number: 101, Hash: block101.Hash, ParentHash: client.GetHeader(100).Hash, BlockTimestamp: time.Now().Unix()},
+		{Number: 102, Hash: originalBlock102.Hash, ParentHash: block101.Hash, BlockTimestamp: time.Now().Unix()},
+		{Number: 103, Hash: client.GetHeader(103).Hash, ParentHash: originalBlock102.Hash, BlockTimestamp: time.Now().Unix()},
 	}
 	for _, b := range backfillBlocks {
 		b.ReceivedAt = time.Now().Unix()

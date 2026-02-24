@@ -185,11 +185,12 @@ func seedLargeDataset(b *testing.B, pool *pgxpool.Pool, rowCount int64, gapRange
 		}
 
 		batch = append(batch, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
-			ReceivedAt: receivedAt,
-			IsOrphaned: false,
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			ReceivedAt:     receivedAt,
+			BlockTimestamp: receivedAt,
+			IsOrphaned:     false,
 		})
 
 		// Flush when batch is full

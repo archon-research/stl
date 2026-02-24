@@ -30,7 +30,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25.7"
+          go-version: "1.26.0"
           cache: true
           cache-dependency-path: "stl-verify/go.sum"
 
@@ -38,9 +38,13 @@ jobs:
       - name: Install tools
         run: make tools
 
-      # Run full CI suite: test-race, vet, fmt-check, tidy, staticcheck, vulncheck, golangci-lint
-      - name: Run CI checks
-        run: make ci
+      # Run lint/format/static/security checks
+      - name: Run lint/static checks
+        run: make ci-checks
+
+      # Run unit tests with race detector
+      - name: Run unit tests
+        run: make test-race
 
       # Fail if any files were modified (e.g., by go mod tidy, go fmt or something else)
       - name: Check for uncommitted changes
@@ -68,7 +72,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25.7"
+          go-version: "1.26.0"
           cache: true
           cache-dependency-path: "stl-verify/go.sum"
 
