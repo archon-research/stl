@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
+	"golang.org/x/sync/errgroup"
 )
 
 // ReceiptProcessor processes transaction receipts for a given block.
@@ -39,10 +39,7 @@ type Service struct {
 	chainID   int64
 }
 
-// NewService creates a Service configured to backfill SparkLend receipts.
-// It validates that Logger, s3Reader, processor, and bucket are provided and returns an error if any are missing.
-// If config.Concurrency is less than or equal to zero it is defaulted to 1.
-// The returned Service is initialized with the provided s3Reader, processor, bucket, chainID, and the (possibly adjusted) config.
+// NewService creates a new Service, validating required fields and defaulting Concurrency to 1 if unset.
 func NewService(
 	config Config,
 	s3Reader outbound.S3Reader,
@@ -83,10 +80,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		return fmt.Errorf("toBlock (%d) must be >= fromBlock (%d)", toBlock, fromBlock)
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	versionMap, err := s.ScanVersions(runCtx, fromBlock, toBlock)
+	versionMap, err := s.ScanVersions(ctx, fromBlock, toBlock)
 	if err != nil {
 		return fmt.Errorf("scanning S3 versions: %w", err)
 	}
@@ -100,15 +94,10 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		"concurrency", s.config.Concurrency,
 	)
 
-	blockCh := make(chan int64, s.config.Concurrency*2)
-	errCh := make(chan error, 1)
-
 	var processed atomic.Int64
-
-	// Progress reporting follows runCtx so it stops on fail-fast cancellation,
-	// caller cancellation, or when Run() completes.
-
 	progressDone := make(chan struct{})
+	progressCtx, stopProgressLogging := context.WithCancel(ctx)
+	defer stopProgressLogging()
 	startTime := time.Now()
 	go func() {
 		defer close(progressDone)
@@ -116,7 +105,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-runCtx.Done():
+			case <-progressCtx.Done():
 				return
 			case <-ticker.C:
 				s.logProgress(logger, startTime, totalBlocks, &processed)
@@ -124,74 +113,47 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		}
 	}()
 
-	// Worker goroutines
-	var wg sync.WaitGroup
-	for range s.config.Concurrency {
-		wg.Go(func() {
-			for blockNum := range blockCh {
-				if runCtx.Err() != nil {
-					return
-				}
+	g, workerCtx := errgroup.WithContext(ctx)
+	g.SetLimit(s.config.Concurrency)
 
-				err := s.processBlock(runCtx, versionMap, blockNum)
-				s.handleResult(logger, errCh, cancel, &processed, blockNum, err)
+	for blockNum := fromBlock; blockNum <= toBlock; blockNum++ {
+		if workerCtx.Err() != nil {
+			break
+		}
+
+		g.Go(func() error {
+			version, ok := versionMap[blockNum]
+			if !ok {
+				return fmt.Errorf("block %d not found in S3", blockNum)
 			}
+
+			if err := s.processBlockFromS3(workerCtx, blockNum, version); err != nil {
+				logger.Error("failed to process block", "block", blockNum, "error", err)
+				return err
+			}
+
+			processed.Add(1)
+			return nil
 		})
 	}
 
-	// Feed blocks into channel
-	s.enqueueBlocks(runCtx, blockCh, fromBlock, toBlock)
-
-	wg.Wait()
-	cancel()
+	err = g.Wait()
+	stopProgressLogging()
 	<-progressDone
+
+	if err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("backfill cancelled: %w", ctx.Err())
+	}
 
 	logger.Info("backfill complete",
 		"processed", processed.Load(),
 		"total", totalBlocks,
 		"elapsed", time.Since(startTime).String(),
 	)
-
-	if ctx.Err() != nil {
-		return fmt.Errorf("backfill cancelled: %w", ctx.Err())
-	}
-
-	// Return first error from errCh, if any
-	select {
-	case err := <-errCh:
-		return err
-	default:
-		return nil
-	}
-}
-
-func (s *Service) processBlock(ctx context.Context, versionMap map[int64]int, blockNum int64) error {
-	version, ok := versionMap[blockNum]
-	if !ok {
-		return fmt.Errorf("block %d not found in S3", blockNum)
-	}
-	return s.processBlockFromS3(ctx, blockNum, version)
-}
-
-func (s *Service) handleResult(
-	logger *slog.Logger,
-	errCh chan<- error,
-	cancel context.CancelFunc,
-	processed *atomic.Int64,
-	blockNum int64,
-	err error,
-) {
-	if err == nil {
-		processed.Add(1)
-		return
-	}
-
-	select {
-	case errCh <- err:
-		logger.Error("failed to process block", "block", blockNum, "error", err)
-		cancel()
-	default:
-	}
+	return nil
 }
 
 func (s *Service) logProgress(
@@ -222,17 +184,6 @@ func (s *Service) logProgress(
 	)
 }
 
-func (s *Service) enqueueBlocks(ctx context.Context, blockCh chan<- int64, fromBlock, toBlock int64) {
-	defer close(blockCh)
-	for blockNum := fromBlock; blockNum <= toBlock; blockNum++ {
-		select {
-		case <-ctx.Done():
-			return
-		case blockCh <- blockNum:
-		}
-	}
-}
-
 // BuildVersionMap parses a slice of S3 key strings and returns a map from
 // block number to the highest receipt-file version seen for that block.
 // Keys that are not receipts files or that cannot be parsed are silently ignored.
@@ -253,9 +204,6 @@ func BuildVersionMap(keys []string) map[int64]int {
 // ScanVersions lists all S3 receipt keys in the partitions overlapping
 // [fromBlock, toBlock] and returns a map of blockNum → highest version.
 // It makes one ListPrefix call per partition (partition.BlockRangeSize blocks each).
-// The returned map may contain block numbers outside [fromBlock, toBlock] because
-// whole partitions are listed; callers should only access entries for blocks they
-// intend to process.
 func (s *Service) ScanVersions(ctx context.Context, fromBlock, toBlock int64) (map[int64]int, error) {
 	versions := make(map[int64]int)
 
@@ -284,7 +232,6 @@ func (s *Service) ScanVersions(ctx context.Context, fromBlock, toBlock int64) (m
 func (s *Service) processBlockFromS3(ctx context.Context, blockNum int64, version int) error {
 	key := s3key.Build(blockNum, version, s3key.Receipts)
 
-	// StreamFile transparently decompresses .gz files, so no manual gzip decoding is needed.
 	rc, err := s.s3Reader.StreamFile(ctx, s.bucket, key)
 	if err != nil {
 		return fmt.Errorf("streaming S3 file %s: %w", key, err)
