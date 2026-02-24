@@ -83,7 +83,10 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		return fmt.Errorf("toBlock (%d) must be >= fromBlock (%d)", toBlock, fromBlock)
 	}
 
-	versionMap, err := s.ScanVersions(ctx, fromBlock, toBlock)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	versionMap, err := s.ScanVersions(runCtx, fromBlock, toBlock)
 	if err != nil {
 		return fmt.Errorf("scanning S3 versions: %w", err)
 	}
@@ -100,12 +103,11 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	blockCh := make(chan int64, s.config.Concurrency*2)
 	errCh := make(chan error, 1)
 
-	var processed, failed atomic.Int64
+	var processed atomic.Int64
 
-	// Use Background context so the progress reporter runs until Run() finishes,
-	// independent of the caller's context being cancelled.
-	progressCtx, progressCancel := context.WithCancel(context.Background())
-	defer progressCancel()
+	// Progress reporting follows runCtx so it stops on fail-fast cancellation,
+	// caller cancellation, or when Run() completes.
+
 	progressDone := make(chan struct{})
 	startTime := time.Now()
 	go func() {
@@ -114,10 +116,10 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-progressCtx.Done():
+			case <-runCtx.Done():
 				return
 			case <-ticker.C:
-				s.logProgress(logger, startTime, totalBlocks, &processed, &failed)
+				s.logProgress(logger, startTime, totalBlocks, &processed)
 			}
 		}
 	}()
@@ -127,21 +129,25 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 	for range s.config.Concurrency {
 		wg.Go(func() {
 			for blockNum := range blockCh {
-				err := s.processBlock(ctx, versionMap, blockNum)
-				s.handleResult(logger, errCh, &processed, &failed, blockNum, err)
+				if runCtx.Err() != nil {
+					return
+				}
+
+				err := s.processBlock(runCtx, versionMap, blockNum)
+				s.handleResult(logger, errCh, cancel, &processed, blockNum, err)
 			}
 		})
 	}
 
 	// Feed blocks into channel
-	s.enqueueBlocks(ctx, blockCh, fromBlock, toBlock)
+	s.enqueueBlocks(runCtx, blockCh, fromBlock, toBlock)
 
 	wg.Wait()
+	cancel()
 	<-progressDone
 
 	logger.Info("backfill complete",
 		"processed", processed.Load(),
-		"failed", failed.Load(),
 		"total", totalBlocks,
 		"elapsed", time.Since(startTime).String(),
 	)
@@ -170,8 +176,8 @@ func (s *Service) processBlock(ctx context.Context, versionMap map[int64]int, bl
 func (s *Service) handleResult(
 	logger *slog.Logger,
 	errCh chan<- error,
+	cancel context.CancelFunc,
 	processed *atomic.Int64,
-	failed *atomic.Int64,
 	blockNum int64,
 	err error,
 ) {
@@ -180,10 +186,10 @@ func (s *Service) handleResult(
 		return
 	}
 
-	logger.Error("failed to process block", "block", blockNum, "error", err)
-	failed.Add(1)
 	select {
 	case errCh <- err:
+		logger.Error("failed to process block", "block", blockNum, "error", err)
+		cancel()
 	default:
 	}
 }
@@ -193,10 +199,8 @@ func (s *Service) logProgress(
 	startTime time.Time,
 	totalBlocks int64,
 	processed *atomic.Int64,
-	failed *atomic.Int64,
 ) {
 	p := processed.Load()
-	f := failed.Load()
 	elapsed := time.Since(startTime).Seconds()
 
 	var rate float64
@@ -205,14 +209,13 @@ func (s *Service) logProgress(
 	}
 
 	var eta float64
-	remaining := totalBlocks - p - f
+	remaining := totalBlocks - p
 	if rate > 0 {
 		eta = float64(remaining) / rate
 	}
 
 	logger.Info("backfill progress",
 		"processed", p,
-		"failed", f,
 		"total", totalBlocks,
 		"rate_per_sec", fmt.Sprintf("%.2f", rate),
 		"eta_sec", fmt.Sprintf("%.0f", eta),

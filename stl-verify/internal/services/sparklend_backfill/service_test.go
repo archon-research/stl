@@ -754,3 +754,49 @@ func TestRun(t *testing.T) {
 		})
 	}
 }
+
+func TestRun_FailFastOnFirstProcessingError(t *testing.T) {
+	s3 := &mockS3Reader{
+		listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
+			return []string{
+				"0-999/300_0_receipts.json.gz",
+				"0-999/301_0_receipts.json.gz",
+				"0-999/302_0_receipts.json.gz",
+			}, nil
+		},
+	}
+
+	proc := &mockProcessor{
+		errFn: func(chainID, blockNumber int64) error {
+			if blockNumber == 300 {
+				return errors.New("processor failure")
+			}
+			return nil
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc, err := sparklend_backfill.NewService(
+		sparklend_backfill.Config{Concurrency: 1, Logger: logger},
+		s3,
+		proc,
+		"test-bucket",
+		1,
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	err = svc.Run(context.Background(), 300, 302)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+
+	calls := proc.calledWith()
+	if len(calls) != 1 {
+		t.Fatalf("expected fail-fast processing to stop after first error, got %d calls", len(calls))
+	}
+	if calls[0].blockNumber != 300 {
+		t.Fatalf("expected first failed block 300, got %d", calls[0].blockNumber)
+	}
+}
