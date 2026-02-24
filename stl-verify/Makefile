@@ -254,7 +254,7 @@ dev-env:
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
-		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-morpho-position.fifo" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-morpho-indexing.fifo" \
 		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
 		"AWS_ACCESS_KEY_ID=test" \
 		"AWS_SECRET_ACCESS_KEY=test" \
