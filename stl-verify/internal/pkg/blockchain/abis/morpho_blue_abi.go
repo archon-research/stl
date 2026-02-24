@@ -24,7 +24,7 @@ func GetMorphoBlueEventsABI() (*abi.ABI, error) {
 			"anonymous": false,
 			"inputs": [
 				{"indexed": true, "name": "id", "type": "bytes32"},
-				{"indexed": false, "name": "caller", "type": "address"},
+				{"indexed": true, "name": "caller", "type": "address"},
 				{"indexed": true, "name": "onBehalf", "type": "address"},
 				{"indexed": false, "name": "assets", "type": "uint256"},
 				{"indexed": false, "name": "shares", "type": "uint256"}
@@ -62,7 +62,7 @@ func GetMorphoBlueEventsABI() (*abi.ABI, error) {
 			"anonymous": false,
 			"inputs": [
 				{"indexed": true, "name": "id", "type": "bytes32"},
-				{"indexed": false, "name": "caller", "type": "address"},
+				{"indexed": true, "name": "caller", "type": "address"},
 				{"indexed": true, "name": "onBehalf", "type": "address"},
 				{"indexed": false, "name": "assets", "type": "uint256"},
 				{"indexed": false, "name": "shares", "type": "uint256"}
@@ -74,7 +74,7 @@ func GetMorphoBlueEventsABI() (*abi.ABI, error) {
 			"anonymous": false,
 			"inputs": [
 				{"indexed": true, "name": "id", "type": "bytes32"},
-				{"indexed": false, "name": "caller", "type": "address"},
+				{"indexed": true, "name": "caller", "type": "address"},
 				{"indexed": true, "name": "onBehalf", "type": "address"},
 				{"indexed": false, "name": "assets", "type": "uint256"}
 			],
@@ -97,7 +97,7 @@ func GetMorphoBlueEventsABI() (*abi.ABI, error) {
 			"anonymous": false,
 			"inputs": [
 				{"indexed": true, "name": "id", "type": "bytes32"},
-				{"indexed": false, "name": "caller", "type": "address"},
+				{"indexed": true, "name": "caller", "type": "address"},
 				{"indexed": true, "name": "borrower", "type": "address"},
 				{"indexed": false, "name": "repaidAssets", "type": "uint256"},
 				{"indexed": false, "name": "repaidShares", "type": "uint256"},

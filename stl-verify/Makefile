@@ -265,6 +265,8 @@ dev-env:
 		"CHAIN_ID=1" \
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"SQS_WAIT_TIME=1" \
+		"SQS_VISIBILITY_TIMEOUT=30" \
 		"LOG_LEVEL=debug" \
 		> cmd/morpho-position-tracker/.env
 	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \

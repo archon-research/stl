@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -47,13 +48,14 @@ func main() {
 }
 
 type cliConfig struct {
-	queueURL    string
-	redisAddr   string
-	dbURL       string
-	alchemyURL  string
-	maxMessages int
-	waitTime    int
-	chainID     int64
+	queueURL          string
+	redisAddr         string
+	dbURL             string
+	alchemyURL        string
+	maxMessages       int
+	waitTime          int
+	visibilityTimeout int
+	chainID           int64
 }
 
 func parseConfig(args []string) (cliConfig, error) {
@@ -63,16 +65,18 @@ func parseConfig(args []string) (cliConfig, error) {
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
 	maxMessages := fs.Int("max", 10, "Max messages per poll")
 	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
+	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
 	if err := fs.Parse(args); err != nil {
 		return cliConfig{}, err
 	}
 
 	cfg := cliConfig{
-		queueURL:    *queueURL,
-		redisAddr:   *redisAddr,
-		dbURL:       *dbURL,
-		maxMessages: *maxMessages,
-		waitTime:    *waitTime,
+		queueURL:          *queueURL,
+		redisAddr:         *redisAddr,
+		dbURL:             *dbURL,
+		maxMessages:       *maxMessages,
+		waitTime:          *waitTime,
+		visibilityTimeout: *visibilityTimeout,
 	}
 
 	if cfg.queueURL == "" {
@@ -103,9 +107,27 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("redis address not provided (use -redis flag or REDIS_ADDR env var)")
 	}
 
+	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
+		v, err := strconv.Atoi(waitTimeStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
+		}
+		cfg.waitTime = v
+	}
+	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
+		v, err := strconv.Atoi(visTimeStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
+		}
+		cfg.visibilityTimeout = v
+	}
+
 	chainIDStr := env.Get("CHAIN_ID", "1")
-	cfg.chainID = 1
-	_, _ = fmt.Sscanf(chainIDStr, "%d", &cfg.chainID)
+	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	if err != nil {
+		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
+	}
+	cfg.chainID = chainID
 
 	return cfg, nil
 }
@@ -168,7 +190,7 @@ func run(ctx context.Context, args []string) error {
 	sqsConsumer, err := sqsAdapter.NewConsumer(awsCfg, sqsAdapter.Config{
 		QueueURL:          cfg.queueURL,
 		WaitTimeSeconds:   int32(cfg.waitTime),
-		VisibilityTimeout: 300,
+		VisibilityTimeout: int32(cfg.visibilityTimeout),
 		BaseEndpoint:      env.Get("AWS_SQS_ENDPOINT", ""),
 	}, logger)
 	if err != nil {

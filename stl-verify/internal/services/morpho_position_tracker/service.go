@@ -601,7 +601,8 @@ func (s *Service) handleVaultTransfer(ctx context.Context, eventData *MetaMorpho
 		vs, err = s.blockchainSvc.getVaultState(ctx, vaultAddress, blockNumber)
 	}
 	if err != nil {
-		return fmt.Errorf("fetching vault state and balances: %w", err)
+		return fmt.Errorf("fetching vault state and balances for vault=%s from=%s to=%s block=%d: %w",
+			vaultAddress.Hex(), eventData.From.Hex(), eventData.To.Hex(), blockNumber, err)
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {

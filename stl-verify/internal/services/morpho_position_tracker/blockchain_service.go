@@ -632,19 +632,39 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 	if err != nil {
 		return nil, fmt.Errorf("packing decimals call: %w", err)
 	}
+	morphoData, err := s.metaMorphoABI.Pack("MORPHO")
+	if err != nil {
+		return nil, fmt.Errorf("packing MORPHO call: %w", err)
+	}
 
 	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
 		{Target: vaultAddress, AllowFailure: false, CallData: nameData},
 		{Target: vaultAddress, AllowFailure: false, CallData: symbolData},
 		{Target: vaultAddress, AllowFailure: false, CallData: assetData},
 		{Target: vaultAddress, AllowFailure: false, CallData: decimalsData},
+		{Target: vaultAddress, AllowFailure: false, CallData: morphoData},
 	}, big.NewInt(blockNumber))
 	if err != nil {
 		return nil, fmt.Errorf("multicall vault metadata: %w", err)
 	}
 
-	if len(results) < 4 {
-		return nil, fmt.Errorf("expected 4 results, got %d", len(results))
+	if len(results) < 5 {
+		return nil, fmt.Errorf("expected 5 results, got %d", len(results))
+	}
+
+	// Verify MORPHO() returns the Morpho Blue singleton address.
+	// This distinguishes real MetaMorpho vaults from other ERC4626 vaults
+	// (e.g. Yearn, Aave) that share the same Transfer/Deposit/Withdraw event topics.
+	if !results[4].Success || len(results[4].ReturnData) == 0 {
+		return nil, fmt.Errorf("MORPHO() call failed — not a MetaMorpho vault: %s", vaultAddress.Hex())
+	}
+	morphoUnpacked, err := s.metaMorphoABI.Unpack("MORPHO", results[4].ReturnData)
+	if err != nil || len(morphoUnpacked) == 0 {
+		return nil, fmt.Errorf("unpacking MORPHO(): %w", err)
+	}
+	morphoAddr, ok := morphoUnpacked[0].(common.Address)
+	if !ok || morphoAddr != MorphoBlueAddress {
+		return nil, fmt.Errorf("MORPHO() returned %s, expected %s — not a MetaMorpho vault", morphoAddr.Hex(), MorphoBlueAddress.Hex())
 	}
 
 	md := &VaultMetadata{}
