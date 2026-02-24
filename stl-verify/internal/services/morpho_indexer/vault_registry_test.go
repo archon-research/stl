@@ -50,25 +50,3 @@ func TestVaultRegistry(t *testing.T) {
 	}
 }
 
-func TestDetectVaultVersion(t *testing.T) {
-	tests := []struct {
-		name    string
-		dataLen int
-		want    entity.MorphoVaultVersion
-	}{
-		{"V1.1 - 64 bytes", 64, entity.MorphoVaultV1},
-		{"V2 - 128 bytes", 128, entity.MorphoVaultV2},
-		{"V2 - more than 128", 256, entity.MorphoVaultV2},
-		{"empty data", 0, entity.MorphoVaultV1},
-		{"32 bytes", 32, entity.MorphoVaultV1},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := DetectVaultVersion(tt.dataLen)
-			if got != tt.want {
-				t.Errorf("DetectVaultVersion(%d) = %d, want %d", tt.dataLen, got, tt.want)
-			}
-		})
-	}
-}

@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -56,6 +57,7 @@ type VaultMetadata struct {
 	Symbol   string
 	Asset    common.Address
 	Decimals uint8
+	Version  entity.MorphoVaultVersion
 }
 
 // TokenMetadata holds token metadata from on-chain reads.
@@ -102,6 +104,92 @@ func newBlockchainService(
 	}, nil
 }
 
+// unpackMarketState validates and unpacks a market() multicall result.
+func (s *blockchainService) unpackMarketState(result outbound.Result) (*MarketState, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return nil, fmt.Errorf("market() call failed")
+	}
+	unpacked, err := s.morphoBlueABI.Unpack("market", result.ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking market(): %w", err)
+	}
+	if len(unpacked) < 6 {
+		return nil, fmt.Errorf("unexpected market() return length: %d", len(unpacked))
+	}
+	return &MarketState{
+		TotalSupplyAssets: bigIntFromAny(unpacked[0]),
+		TotalSupplyShares: bigIntFromAny(unpacked[1]),
+		TotalBorrowAssets: bigIntFromAny(unpacked[2]),
+		TotalBorrowShares: bigIntFromAny(unpacked[3]),
+		LastUpdate:        bigIntFromAny(unpacked[4]),
+		Fee:               bigIntFromAny(unpacked[5]),
+	}, nil
+}
+
+// unpackPositionState validates and unpacks a position() multicall result.
+func (s *blockchainService) unpackPositionState(result outbound.Result, label string) (*PositionState, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return nil, fmt.Errorf("position(%s) call failed", label)
+	}
+	unpacked, err := s.morphoBlueABI.Unpack("position", result.ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking position(%s): %w", label, err)
+	}
+	if len(unpacked) < 3 {
+		return nil, fmt.Errorf("unexpected position(%s) return length: %d", label, len(unpacked))
+	}
+	return &PositionState{
+		SupplyShares: bigIntFromAny(unpacked[0]),
+		BorrowShares: bigIntFromAny(unpacked[1]),
+		Collateral:   bigIntFromAny(unpacked[2]),
+	}, nil
+}
+
+// unpackVaultState validates and unpacks totalAssets() + totalSupply() multicall results.
+func (s *blockchainService) unpackVaultState(totalAssetsResult, totalSupplyResult outbound.Result, vaultAddress common.Address) (*VaultState, error) {
+	if !totalAssetsResult.Success || len(totalAssetsResult.ReturnData) == 0 {
+		return nil, fmt.Errorf("totalAssets() call failed for vault %s", vaultAddress.Hex())
+	}
+	totalAssetsUnpacked, err := s.metaMorphoABI.Unpack("totalAssets", totalAssetsResult.ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking totalAssets(): %w", err)
+	}
+	if len(totalAssetsUnpacked) == 0 {
+		return nil, fmt.Errorf("totalAssets() returned no values for vault %s", vaultAddress.Hex())
+	}
+
+	if !totalSupplyResult.Success || len(totalSupplyResult.ReturnData) == 0 {
+		return nil, fmt.Errorf("totalSupply() call failed for vault %s", vaultAddress.Hex())
+	}
+	totalSupplyUnpacked, err := s.metaMorphoABI.Unpack("totalSupply", totalSupplyResult.ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking totalSupply(): %w", err)
+	}
+	if len(totalSupplyUnpacked) == 0 {
+		return nil, fmt.Errorf("totalSupply() returned no values for vault %s", vaultAddress.Hex())
+	}
+
+	return &VaultState{
+		TotalAssets: bigIntFromAny(totalAssetsUnpacked[0]),
+		TotalSupply: bigIntFromAny(totalSupplyUnpacked[0]),
+	}, nil
+}
+
+// unpackBalance validates and unpacks a balanceOf() multicall result.
+func (s *blockchainService) unpackBalance(result outbound.Result, label string, vaultAddress common.Address) (*big.Int, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return nil, fmt.Errorf("balanceOf(%s) call failed for vault %s", label, vaultAddress.Hex())
+	}
+	unpacked, err := s.metaMorphoABI.Unpack("balanceOf", result.ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking balanceOf(%s): %w", label, err)
+	}
+	if len(unpacked) == 0 {
+		return nil, fmt.Errorf("balanceOf(%s) returned no values for vault %s", label, vaultAddress.Hex())
+	}
+	return bigIntFromAny(unpacked[0]), nil
+}
+
 // getMarketState fetches the market state from Morpho Blue at a specific block.
 func (s *blockchainService) getMarketState(ctx context.Context, marketID [32]byte, blockNumber int64) (retState *MarketState, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getMarketState",
@@ -129,27 +217,11 @@ func (s *blockchainService) getMarketState(ctx context.Context, marketID [32]byt
 		return nil, fmt.Errorf("multicall market(): %w", err)
 	}
 
-	if len(results) == 0 || !results[0].Success || len(results[0].ReturnData) == 0 {
-		return nil, fmt.Errorf("market() call failed for market %x", marketID[:8])
+	if len(results) == 0 {
+		return nil, fmt.Errorf("expected 1 result, got 0")
 	}
 
-	unpacked, err := s.morphoBlueABI.Unpack("market", results[0].ReturnData)
-	if err != nil {
-		return nil, fmt.Errorf("unpacking market() result: %w", err)
-	}
-
-	if len(unpacked) < 6 {
-		return nil, fmt.Errorf("unexpected market() return length: %d", len(unpacked))
-	}
-
-	return &MarketState{
-		TotalSupplyAssets: bigIntFromAny(unpacked[0]),
-		TotalSupplyShares: bigIntFromAny(unpacked[1]),
-		TotalBorrowAssets: bigIntFromAny(unpacked[2]),
-		TotalBorrowShares: bigIntFromAny(unpacked[3]),
-		LastUpdate:        bigIntFromAny(unpacked[4]),
-		Fee:               bigIntFromAny(unpacked[5]),
-	}, nil
+	return s.unpackMarketState(results[0])
 }
 
 // getMarketParams fetches market parameters from Morpho Blue.
@@ -253,41 +325,14 @@ func (s *blockchainService) getMarketAndPositionState(ctx context.Context, marke
 		return nil, nil, fmt.Errorf("expected 2 results, got %d", len(results))
 	}
 
-	// Parse market state
-	if !results[0].Success || len(results[0].ReturnData) == 0 {
-		return nil, nil, fmt.Errorf("market() call failed")
-	}
-	marketUnpacked, err := s.morphoBlueABI.Unpack("market", results[0].ReturnData)
+	ms, err := s.unpackMarketState(results[0])
 	if err != nil {
-		return nil, nil, fmt.Errorf("unpacking market(): %w", err)
-	}
-	if len(marketUnpacked) < 6 {
-		return nil, nil, fmt.Errorf("unexpected market() return length: %d", len(marketUnpacked))
-	}
-	ms := &MarketState{
-		TotalSupplyAssets: bigIntFromAny(marketUnpacked[0]),
-		TotalSupplyShares: bigIntFromAny(marketUnpacked[1]),
-		TotalBorrowAssets: bigIntFromAny(marketUnpacked[2]),
-		TotalBorrowShares: bigIntFromAny(marketUnpacked[3]),
-		LastUpdate:        bigIntFromAny(marketUnpacked[4]),
-		Fee:               bigIntFromAny(marketUnpacked[5]),
+		return nil, nil, err
 	}
 
-	// Parse position state
-	if !results[1].Success || len(results[1].ReturnData) == 0 {
-		return nil, nil, fmt.Errorf("position() call failed")
-	}
-	posUnpacked, err := s.morphoBlueABI.Unpack("position", results[1].ReturnData)
+	ps, err := s.unpackPositionState(results[1], "")
 	if err != nil {
-		return nil, nil, fmt.Errorf("unpacking position(): %w", err)
-	}
-	if len(posUnpacked) < 3 {
-		return nil, nil, fmt.Errorf("unexpected position() return length: %d", len(posUnpacked))
-	}
-	ps := &PositionState{
-		SupplyShares: bigIntFromAny(posUnpacked[0]),
-		BorrowShares: bigIntFromAny(posUnpacked[1]),
-		Collateral:   bigIntFromAny(posUnpacked[2]),
+		return nil, nil, err
 	}
 
 	return ms, ps, nil
@@ -335,58 +380,19 @@ func (s *blockchainService) getMarketAndTwoPositionStates(ctx context.Context, m
 		return nil, nil, nil, fmt.Errorf("expected 3 results, got %d", len(results))
 	}
 
-	// Parse market state
-	if !results[0].Success || len(results[0].ReturnData) == 0 {
-		return nil, nil, nil, fmt.Errorf("market() call failed")
-	}
-	marketUnpacked, err := s.morphoBlueABI.Unpack("market", results[0].ReturnData)
+	ms, err := s.unpackMarketState(results[0])
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("unpacking market(): %w", err)
-	}
-	if len(marketUnpacked) < 6 {
-		return nil, nil, nil, fmt.Errorf("unexpected market() return length: %d", len(marketUnpacked))
-	}
-	ms := &MarketState{
-		TotalSupplyAssets: bigIntFromAny(marketUnpacked[0]),
-		TotalSupplyShares: bigIntFromAny(marketUnpacked[1]),
-		TotalBorrowAssets: bigIntFromAny(marketUnpacked[2]),
-		TotalBorrowShares: bigIntFromAny(marketUnpacked[3]),
-		LastUpdate:        bigIntFromAny(marketUnpacked[4]),
-		Fee:               bigIntFromAny(marketUnpacked[5]),
+		return nil, nil, nil, err
 	}
 
-	// Parse position A
-	if !results[1].Success || len(results[1].ReturnData) == 0 {
-		return nil, nil, nil, fmt.Errorf("position(A) call failed")
-	}
-	posAUnpacked, err := s.morphoBlueABI.Unpack("position", results[1].ReturnData)
+	psA, err := s.unpackPositionState(results[1], "A")
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("unpacking position(A): %w", err)
-	}
-	if len(posAUnpacked) < 3 {
-		return nil, nil, nil, fmt.Errorf("unexpected position(A) return length: %d", len(posAUnpacked))
-	}
-	psA := &PositionState{
-		SupplyShares: bigIntFromAny(posAUnpacked[0]),
-		BorrowShares: bigIntFromAny(posAUnpacked[1]),
-		Collateral:   bigIntFromAny(posAUnpacked[2]),
+		return nil, nil, nil, err
 	}
 
-	// Parse position B
-	if !results[2].Success || len(results[2].ReturnData) == 0 {
-		return nil, nil, nil, fmt.Errorf("position(B) call failed")
-	}
-	posBUnpacked, err := s.morphoBlueABI.Unpack("position", results[2].ReturnData)
+	psB, err := s.unpackPositionState(results[2], "B")
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("unpacking position(B): %w", err)
-	}
-	if len(posBUnpacked) < 3 {
-		return nil, nil, nil, fmt.Errorf("unexpected position(B) return length: %d", len(posBUnpacked))
-	}
-	psB := &PositionState{
-		SupplyShares: bigIntFromAny(posBUnpacked[0]),
-		BorrowShares: bigIntFromAny(posBUnpacked[1]),
-		Collateral:   bigIntFromAny(posBUnpacked[2]),
+		return nil, nil, nil, err
 	}
 
 	return ms, psA, psB, nil
@@ -427,26 +433,7 @@ func (s *blockchainService) getVaultState(ctx context.Context, vaultAddress comm
 		return nil, fmt.Errorf("expected 2 results, got %d", len(results))
 	}
 
-	if !results[0].Success || len(results[0].ReturnData) == 0 {
-		return nil, fmt.Errorf("totalAssets() call failed for vault %s", vaultAddress.Hex())
-	}
-	totalAssetsUnpacked, err := s.metaMorphoABI.Unpack("totalAssets", results[0].ReturnData)
-	if err != nil {
-		return nil, fmt.Errorf("unpacking totalAssets(): %w", err)
-	}
-
-	if !results[1].Success || len(results[1].ReturnData) == 0 {
-		return nil, fmt.Errorf("totalSupply() call failed for vault %s", vaultAddress.Hex())
-	}
-	totalSupplyUnpacked, err := s.metaMorphoABI.Unpack("totalSupply", results[1].ReturnData)
-	if err != nil {
-		return nil, fmt.Errorf("unpacking totalSupply(): %w", err)
-	}
-
-	return &VaultState{
-		TotalAssets: bigIntFromAny(totalAssetsUnpacked[0]),
-		TotalSupply: bigIntFromAny(totalSupplyUnpacked[0]),
-	}, nil
+	return s.unpackVaultState(results[0], results[1], vaultAddress)
 }
 
 // getVaultStateAndBalance fetches vault state and a user's balance in a single Multicall3 batch.
@@ -488,35 +475,17 @@ func (s *blockchainService) getVaultStateAndBalance(ctx context.Context, vaultAd
 		return nil, nil, fmt.Errorf("expected 3 results, got %d", len(results))
 	}
 
-	if !results[0].Success || len(results[0].ReturnData) == 0 {
-		return nil, nil, fmt.Errorf("totalAssets() call failed for vault %s", vaultAddress.Hex())
-	}
-	totalAssetsUnpacked, err := s.metaMorphoABI.Unpack("totalAssets", results[0].ReturnData)
+	vs, err := s.unpackVaultState(results[0], results[1], vaultAddress)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unpacking totalAssets(): %w", err)
+		return nil, nil, err
 	}
 
-	if !results[1].Success || len(results[1].ReturnData) == 0 {
-		return nil, nil, fmt.Errorf("totalSupply() call failed for vault %s", vaultAddress.Hex())
-	}
-	totalSupplyUnpacked, err := s.metaMorphoABI.Unpack("totalSupply", results[1].ReturnData)
+	balance, err := s.unpackBalance(results[2], "", vaultAddress)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unpacking totalSupply(): %w", err)
+		return nil, nil, err
 	}
 
-	if !results[2].Success || len(results[2].ReturnData) == 0 {
-		return nil, nil, fmt.Errorf("balanceOf() call failed for vault %s", vaultAddress.Hex())
-	}
-	balanceUnpacked, err := s.metaMorphoABI.Unpack("balanceOf", results[2].ReturnData)
-	if err != nil {
-		return nil, nil, fmt.Errorf("unpacking balanceOf(): %w", err)
-	}
-
-	vs := &VaultState{
-		TotalAssets: bigIntFromAny(totalAssetsUnpacked[0]),
-		TotalSupply: bigIntFromAny(totalSupplyUnpacked[0]),
-	}
-	return vs, bigIntFromAny(balanceUnpacked[0]), nil
+	return vs, balance, nil
 }
 
 // getVaultStateAndTwoBalances fetches vault state and two user balances in a single Multicall3 batch.
@@ -564,43 +533,22 @@ func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vau
 		return nil, nil, nil, fmt.Errorf("expected 4 results, got %d", len(results))
 	}
 
-	if !results[0].Success || len(results[0].ReturnData) == 0 {
-		return nil, nil, nil, fmt.Errorf("totalAssets() call failed for vault %s", vaultAddress.Hex())
-	}
-	totalAssetsUnpacked, err := s.metaMorphoABI.Unpack("totalAssets", results[0].ReturnData)
+	vs, err := s.unpackVaultState(results[0], results[1], vaultAddress)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("unpacking totalAssets(): %w", err)
+		return nil, nil, nil, err
 	}
 
-	if !results[1].Success || len(results[1].ReturnData) == 0 {
-		return nil, nil, nil, fmt.Errorf("totalSupply() call failed for vault %s", vaultAddress.Hex())
-	}
-	totalSupplyUnpacked, err := s.metaMorphoABI.Unpack("totalSupply", results[1].ReturnData)
+	balA, err := s.unpackBalance(results[2], "A", vaultAddress)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("unpacking totalSupply(): %w", err)
+		return nil, nil, nil, err
 	}
 
-	if !results[2].Success || len(results[2].ReturnData) == 0 {
-		return nil, nil, nil, fmt.Errorf("balanceOf(A) call failed for vault %s", vaultAddress.Hex())
-	}
-	balanceAUnpacked, err := s.metaMorphoABI.Unpack("balanceOf", results[2].ReturnData)
+	balB, err := s.unpackBalance(results[3], "B", vaultAddress)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("unpacking balanceOf(A): %w", err)
+		return nil, nil, nil, err
 	}
 
-	if !results[3].Success || len(results[3].ReturnData) == 0 {
-		return nil, nil, nil, fmt.Errorf("balanceOf(B) call failed for vault %s", vaultAddress.Hex())
-	}
-	balanceBUnpacked, err := s.metaMorphoABI.Unpack("balanceOf", results[3].ReturnData)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("unpacking balanceOf(B): %w", err)
-	}
-
-	vs := &VaultState{
-		TotalAssets: bigIntFromAny(totalAssetsUnpacked[0]),
-		TotalSupply: bigIntFromAny(totalSupplyUnpacked[0]),
-	}
-	return vs, bigIntFromAny(balanceAUnpacked[0]), bigIntFromAny(balanceBUnpacked[0]), nil
+	return vs, balA, balB, nil
 }
 
 // getVaultMetadata fetches vault name, symbol, and asset address in a single Multicall3 batch.
@@ -636,6 +584,11 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 	if err != nil {
 		return nil, fmt.Errorf("packing MORPHO call: %w", err)
 	}
+	// skimRecipient() only exists on MetaMorpho V2; reverts on V1.1.
+	skimRecipientData, err := s.metaMorphoABI.Pack("skimRecipient")
+	if err != nil {
+		return nil, fmt.Errorf("packing skimRecipient call: %w", err)
+	}
 
 	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
 		{Target: vaultAddress, AllowFailure: false, CallData: nameData},
@@ -643,13 +596,14 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 		{Target: vaultAddress, AllowFailure: false, CallData: assetData},
 		{Target: vaultAddress, AllowFailure: false, CallData: decimalsData},
 		{Target: vaultAddress, AllowFailure: false, CallData: morphoData},
+		{Target: vaultAddress, AllowFailure: true, CallData: skimRecipientData},
 	}, big.NewInt(blockNumber))
 	if err != nil {
 		return nil, fmt.Errorf("multicall vault metadata: %w", err)
 	}
 
-	if len(results) < 5 {
-		return nil, fmt.Errorf("expected 5 results, got %d", len(results))
+	if len(results) < 6 {
+		return nil, fmt.Errorf("expected 6 results, got %d", len(results))
 	}
 
 	// Verify MORPHO() returns the Morpho Blue singleton address.
@@ -667,7 +621,11 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 		return nil, fmt.Errorf("MORPHO() returned %s, expected %s — not a MetaMorpho vault", morphoAddr.Hex(), MorphoBlueAddress.Hex())
 	}
 
-	md := &VaultMetadata{}
+	md := &VaultMetadata{Version: entity.MorphoVaultV1}
+	// skimRecipient() only exists on V2 — success means V2.
+	if results[5].Success {
+		md.Version = entity.MorphoVaultV2
+	}
 
 	if results[0].Success && len(results[0].ReturnData) > 0 {
 		nameUnpacked, err := s.metaMorphoABI.Unpack("name", results[0].ReturnData)

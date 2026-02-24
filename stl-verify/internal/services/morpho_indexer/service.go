@@ -209,6 +209,12 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 	return nil
 }
 
+// processReceipt processes all Morpho-related logs in a single transaction receipt.
+//
+// Note: eth_call reads return end-of-block state. Multiple events for the same
+// entity within one block produce identical on-chain snapshots. The ON CONFLICT
+// clause means only the last-written event_type/tx_hash is retained, but the
+// on-chain state (shares, assets, collateral) is always correct.
 func (s *Service) processReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, blockVersion int) error {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.processReceipt",
 		attribute.String("tx.hash", receipt.TransactionHash))
@@ -302,10 +308,9 @@ func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chai
 	switch eventData.EventType {
 	case entity.MorphoEventCreateMarket:
 		return s.handleCreateMarket(ctx, eventData, chainID, blockNumber, blockVersion)
-	case entity.MorphoEventSupply, entity.MorphoEventWithdraw, entity.MorphoEventBorrow, entity.MorphoEventRepay:
+	case entity.MorphoEventSupply, entity.MorphoEventWithdraw, entity.MorphoEventBorrow, entity.MorphoEventRepay,
+		entity.MorphoEventSupplyCollateral, entity.MorphoEventWithdrawCollateral:
 		return s.handlePositionEvent(ctx, eventData, chainID, blockNumber, blockVersion)
-	case entity.MorphoEventSupplyCollateral, entity.MorphoEventWithdrawCollateral:
-		return s.handleCollateralEvent(ctx, eventData, chainID, blockNumber, blockVersion)
 	case entity.MorphoEventLiquidate:
 		return s.handleLiquidateEvent(ctx, eventData, chainID, blockNumber, blockVersion)
 	case entity.MorphoEventAccrueInterest:
@@ -338,10 +343,8 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 		"block", blockNumber)
 
 	switch eventData.EventType {
-	case entity.MorphoEventVaultDeposit:
-		return s.handleVaultDeposit(ctx, eventData, vaultAddress, chainID, blockNumber, blockVersion)
-	case entity.MorphoEventVaultWithdraw:
-		return s.handleVaultWithdraw(ctx, eventData, vaultAddress, chainID, blockNumber, blockVersion)
+	case entity.MorphoEventVaultDeposit, entity.MorphoEventVaultWithdraw:
+		return s.saveVaultEventSnapshot(ctx, eventData.Owner, vaultAddress, chainID, blockNumber, blockVersion, eventData.EventType, eventData.TxHash)
 	case entity.MorphoEventVaultTransfer:
 		return s.handleVaultTransfer(ctx, eventData, vaultAddress, chainID, blockNumber, blockVersion)
 	case entity.MorphoEventVaultAccrueInterest:
@@ -357,22 +360,15 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 		attribute.String("vault.address", vaultAddress.Hex()))
 	defer span.End()
 
-	eventData, err := s.eventExtractor.ExtractMetaMorphoEvent(log)
-	if err != nil {
+	// Validate this is a decodable MetaMorpho event before making on-chain calls.
+	if _, err := s.eventExtractor.ExtractMetaMorphoEvent(log); err != nil {
 		return fmt.Errorf("event decode failed: %w", err)
 	}
 
-	// Fetch vault metadata from on-chain
+	// Fetch vault metadata (including version) from on-chain.
 	metadata, err := s.blockchainSvc.getVaultMetadata(ctx, vaultAddress, blockNumber)
 	if err != nil {
 		return fmt.Errorf("fetching vault metadata: %w", err)
-	}
-
-	// Detect version from AccrueInterest data length
-	version := entity.MorphoVaultV1
-	if eventData.EventType == entity.MorphoEventVaultAccrueInterest {
-		dataLen := len(common.FromHex(log.Data))
-		version = DetectVaultVersion(dataLen)
 	}
 
 	// Persist the vault
@@ -393,7 +389,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 			return fmt.Errorf("getting protocol: %w", err)
 		}
 
-		vault, err := entity.NewMorphoVault(protocolID, vaultAddress.Bytes(), metadata.Name, metadata.Symbol, tokenID, version, blockNumber)
+		vault, err := entity.NewMorphoVault(protocolID, vaultAddress.Bytes(), metadata.Name, metadata.Symbol, tokenID, metadata.Version, blockNumber)
 		if err != nil {
 			return fmt.Errorf("creating vault entity: %w", err)
 		}
@@ -487,29 +483,6 @@ func (s *Service) handlePositionEvent(ctx context.Context, eventData *MorphoBlue
 	})
 }
 
-// handleCollateralEvent handles SupplyCollateral and WithdrawCollateral events.
-func (s *Service) handleCollateralEvent(ctx context.Context, eventData *MorphoBlueEventData, chainID, blockNumber int64, blockVersion int) error {
-	user := eventData.OnBehalf
-
-	ms, ps, err := s.blockchainSvc.getMarketAndPositionState(ctx, eventData.MarketID, user, blockNumber)
-	if err != nil {
-		return fmt.Errorf("fetching on-chain state: %w", err)
-	}
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		marketID, err := s.ensureMarket(ctx, tx, eventData.MarketID, chainID, blockNumber)
-		if err != nil {
-			return err
-		}
-
-		if err := s.saveMarketStateSnapshot(ctx, tx, marketID, blockNumber, blockVersion, ms, nil); err != nil {
-			return err
-		}
-
-		return s.savePositionSnapshot(ctx, tx, user, marketID, blockNumber, blockVersion, ps, ms, eventData.EventType, eventData.TxHash, chainID)
-	})
-}
-
 // handleLiquidateEvent handles Liquidate events by snapshotting both borrower and liquidator.
 func (s *Service) handleLiquidateEvent(ctx context.Context, eventData *MorphoBlueEventData, chainID, blockNumber int64, blockVersion int) error {
 	borrower := eventData.Borrower
@@ -559,18 +532,6 @@ func (s *Service) handleAccrueInterest(ctx context.Context, eventData *MorphoBlu
 		}
 		return s.saveMarketStateSnapshot(ctx, tx, marketID, blockNumber, blockVersion, ms, accrueData)
 	})
-}
-
-// handleVaultDeposit handles vault Deposit events.
-func (s *Service) handleVaultDeposit(ctx context.Context, eventData *MetaMorphoEventData, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
-	owner := eventData.Owner
-	return s.saveVaultEventSnapshot(ctx, owner, vaultAddress, chainID, blockNumber, blockVersion, eventData.EventType, eventData.TxHash)
-}
-
-// handleVaultWithdraw handles vault Withdraw events.
-func (s *Service) handleVaultWithdraw(ctx context.Context, eventData *MetaMorphoEventData, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
-	owner := eventData.Owner
-	return s.saveVaultEventSnapshot(ctx, owner, vaultAddress, chainID, blockNumber, blockVersion, eventData.EventType, eventData.TxHash)
 }
 
 // handleVaultTransfer handles vault Transfer events.

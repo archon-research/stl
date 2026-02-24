@@ -126,6 +126,13 @@ func GetMetaMorphoReadABI() (*abi.ABI, error) {
 			"outputs": [{"name": "", "type": "address"}],
 			"stateMutability": "view",
 			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "skimRecipient",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
 		}
 	]`)
 }

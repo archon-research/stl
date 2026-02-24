@@ -193,7 +193,8 @@ func (r *MorphoRepository) GetOrCreateVault(ctx context.Context, tx pgx.Tx, vaul
 	err := tx.QueryRow(ctx,
 		`INSERT INTO morpho_vault (protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 ON CONFLICT (protocol_id, address) DO UPDATE SET protocol_id = EXCLUDED.protocol_id
+		 ON CONFLICT (protocol_id, address) DO UPDATE SET
+			vault_version = GREATEST(morpho_vault.vault_version, EXCLUDED.vault_version)
 		 RETURNING id`,
 		vault.ProtocolID, vault.Address, vault.Name, vault.Symbol,
 		vault.AssetTokenID, vault.VaultVersion, vault.CreatedAtBlock,

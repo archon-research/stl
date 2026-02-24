@@ -110,13 +110,3 @@ func (r *VaultRegistry) Count() int {
 	return len(r.vaults)
 }
 
-// DetectVaultVersion determines if a vault is V1.1 or V2 based on AccrueInterest event data length.
-// V1.1 AccrueInterest has 64 bytes (2 uint256: newTotalAssets, feeShares).
-// V2 AccrueInterest has 128 bytes (4 uint256: newTotalAssets, interest, feeShares, feeAssets).
-// If detection fails, defaults to V1.
-func DetectVaultVersion(accrueInterestDataLen int) entity.MorphoVaultVersion {
-	if accrueInterestDataLen >= 128 {
-		return entity.MorphoVaultV2
-	}
-	return entity.MorphoVaultV1
-}
