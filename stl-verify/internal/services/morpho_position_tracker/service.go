@@ -391,10 +391,15 @@ func (s *Service) handleCreateMarket(ctx context.Context, eventData *MorphoBlueE
 		return fmt.Errorf("CreateMarket event missing marketParams")
 	}
 
-	// Fetch both token metadata in a single RPC call.
+	// Fetch token metadata and initial market state.
 	loanMetadata, collMetadata, err := s.blockchainSvc.getTokenPairMetadata(ctx, mp.LoanToken, mp.CollateralToken, blockNumber)
 	if err != nil {
 		return fmt.Errorf("getting token pair metadata: %w", err)
+	}
+
+	ms, err := s.blockchainSvc.getMarketState(ctx, eventData.MarketID, blockNumber)
+	if err != nil {
+		return fmt.Errorf("fetching initial market state: %w", err)
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
@@ -418,8 +423,12 @@ func (s *Service) handleCreateMarket(ctx context.Context, eventData *MorphoBlueE
 			return fmt.Errorf("creating market entity: %w", err)
 		}
 
-		_, err = s.morphoRepo.GetOrCreateMarket(ctx, tx, market)
-		return err
+		marketID, err := s.morphoRepo.GetOrCreateMarket(ctx, tx, market)
+		if err != nil {
+			return err
+		}
+
+		return s.saveMarketStateSnapshot(ctx, tx, marketID, blockNumber, blockVersion, ms, nil)
 	})
 }
 
