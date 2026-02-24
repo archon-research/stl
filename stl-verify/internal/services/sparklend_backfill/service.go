@@ -122,6 +122,14 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		}
 
 		g.Go(func() error {
+			// Check for cancellation before starting work.
+			// This is needed because g.Go queues goroutines and they may
+			// start after another goroutine has already failed.
+			if workerCtx.Err() != nil {
+				return nil
+			}
+
+			// Check if a file exists on S3 or fail early
 			version, ok := versionMap[blockNum]
 			if !ok {
 				return fmt.Errorf("block %d not found in S3", blockNum)

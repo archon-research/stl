@@ -21,7 +21,8 @@
         db-migrate db-set-passwords db-test-app-user \
         erigon-status erigon-logs erigon-logs-follow erigon-deploy-readonly erigon-switch-readonly erigon-switch-sync erigon-mode \
         erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download \
-        build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill deploy-oracle-pricing-backfill-worker
+		build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill deploy-oracle-pricing-backfill-worker \
+		build-sparklend-backfill-arm64 deploy-sparklend-backfill erigon-sparklend-backfill
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -868,3 +869,42 @@ erigon-bulk-download:
 		--end-block=$(END) \
 		--bucket=$(BUCKET) \
 		$(if $(filter true,$(DRY_RUN)),--dry-run,)'
+
+# Build sparklend-backfill binary for ARM64 Linux (to run on Erigon node)
+build-sparklend-backfill-arm64:
+	@echo "==> Building sparklend-backfill for ARM64 Linux..."
+	mkdir -p dist
+	GOOS=linux GOARCH=arm64 go build -o dist/sparklend-backfill-linux-arm64 ./cmd/sparklend-backfill
+	@echo "==> Built: dist/sparklend-backfill-linux-arm64"
+
+# Deploy sparklend-backfill to Erigon node
+# Usage: make deploy-sparklend-backfill ERIGON_USER=<user> ERIGON_IP=<ip>
+deploy-sparklend-backfill: build-sparklend-backfill-arm64
+	$(call require_erigon_vars)
+	@echo "==> Deploying sparklend-backfill to Erigon node..."
+	cat dist/sparklend-backfill-linux-arm64 | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > ~/sparklend-backfill && chmod +x ~/sparklend-backfill'
+	@echo "==> Deployed to ~/sparklend-backfill on Erigon node."
+
+# Run sparklend-backfill on Erigon node
+# Usage: make erigon-sparklend-backfill ERIGON_USER=<user> ERIGON_IP=<ip> BUCKET=<bucket> START=<start> END=<end> DB_URL=<postgres-url> [RPC_URL=http://127.0.0.1:8545] [CONCURRENCY=10] [CHAIN_ID=1] [BACKFILL_AWS_REGION=us-east-1]
+RPC_URL ?= http://127.0.0.1:8545
+CONCURRENCY ?= 10
+CHAIN_ID ?= 1
+BACKFILL_AWS_REGION ?= us-east-1
+erigon-sparklend-backfill:
+	$(call require_erigon_vars)
+	@if [ -z "$(BUCKET)" ] || [ -z "$(START)" ] || [ -z "$(END)" ] || [ -z "$(DB_URL)" ]; then \
+		echo "Error: BUCKET, START, END, and DB_URL are required"; \
+		echo "Usage: make $@ ERIGON_USER=<user> ERIGON_IP=<ip> BUCKET=<bucket> START=<start> END=<end> DB_URL=<postgres-url>"; \
+		exit 1; \
+	fi
+	@echo "==> Running sparklend-backfill on Erigon node..."
+	tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) '~/sparklend-backfill \
+		--rpc-url=$(RPC_URL) \
+		--from=$(START) \
+		--to=$(END) \
+		--bucket=$(BUCKET) \
+		--db=$(DB_URL) \
+		--concurrency=$(CONCURRENCY) \
+		--chain-id=$(CHAIN_ID) \
+		--aws-region=$(BACKFILL_AWS_REGION)'
