@@ -178,6 +178,14 @@ func waitForTemporal(ctx context.Context, c client.Client, logger *slog.Logger) 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if st, ok := grpcstatus.FromError(err); ok {
+			switch st.Code() {
+			case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted:
+				// Transient — keep retrying.
+			default:
+				return fmt.Errorf("unexpected Temporal error: %w", err)
+			}
+		}
 		logger.Info("waiting for Temporal to become ready", "error", err)
 		select {
 		case <-ctx.Done():
