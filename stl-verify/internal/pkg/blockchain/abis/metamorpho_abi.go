@@ -2,8 +2,8 @@ package abis
 
 import "github.com/ethereum/go-ethereum/accounts/abi"
 
-// GetMetaMorphoEventsABI returns the ABI for MetaMorpho vault events.
-func GetMetaMorphoEventsABI() (*abi.ABI, error) {
+// GetMetaMorphoV1EventsABI returns the ABI for MetaMorpho V1 vault events.
+func GetMetaMorphoV1EventsABI() (*abi.ABI, error) {
 	return ParseABI(`[
 		{
 			"anonymous": false,

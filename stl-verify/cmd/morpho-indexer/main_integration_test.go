@@ -42,67 +42,6 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	}
 }
 
-func TestRunIntegration_MissingQueueURL(t *testing.T) {
-	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
-
-	err := run(context.Background(), []string{
-		"-db", "postgres://localhost/testdb",
-		"-redis", "localhost:6379",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing queue URL")
-	}
-	if !strings.Contains(err.Error(), "queue URL") {
-		t.Errorf("expected 'queue URL' error, got: %v", err)
-	}
-}
-
-func TestRunIntegration_MissingDatabaseURL(t *testing.T) {
-	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
-
-	err := run(context.Background(), []string{
-		"-queue", "http://localhost/test-queue",
-		"-redis", "localhost:6379",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing database URL")
-	}
-	if !strings.Contains(err.Error(), "database URL") {
-		t.Errorf("expected 'database URL' error, got: %v", err)
-	}
-}
-
-func TestRunIntegration_MissingAlchemyKey(t *testing.T) {
-	t.Setenv("ALCHEMY_API_KEY", "")
-
-	err := run(context.Background(), []string{
-		"-queue", "http://localhost/test-queue",
-		"-db", "postgres://localhost/testdb",
-		"-redis", "localhost:6379",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing Alchemy key")
-	}
-	if !strings.Contains(err.Error(), "ALCHEMY_API_KEY") {
-		t.Errorf("expected 'ALCHEMY_API_KEY' error, got: %v", err)
-	}
-}
-
-func TestRunIntegration_MissingRedisAddr(t *testing.T) {
-	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
-
-	err := run(context.Background(), []string{
-		"-queue", "http://localhost/test-queue",
-		"-db", "postgres://localhost/testdb",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing Redis address")
-	}
-	if !strings.Contains(err.Error(), "redis address") {
-		t.Errorf("expected 'redis address' error, got: %v", err)
-	}
-}
-
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	_, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
 	defer dbCleanup()

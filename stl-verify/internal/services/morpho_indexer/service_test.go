@@ -462,7 +462,9 @@ func TestProcessBlockEvent_VaultTransfer(t *testing.T) {
 			h := newTestHarness(t)
 			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV1)
 
+			var callCount int
 			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				callCount = len(calls)
 				switch len(calls) {
 				case 2:
 					return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
@@ -488,6 +490,9 @@ func TestProcessBlockEvent_VaultTransfer(t *testing.T) {
 				t.Fatalf("processBlock: %v", err)
 			}
 
+			if callCount != tt.wantCalls {
+				t.Errorf("multicall received %d calls, want %d", callCount, tt.wantCalls)
+			}
 			if posCount != tt.wantPositions {
 				t.Errorf("SaveVaultPosition called %d times, want %d", posCount, tt.wantPositions)
 			}
@@ -766,12 +771,39 @@ func TestProcessBlockEvent_VaultDiscovery_DBError(t *testing.T) {
 	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
 	receipt := makeReceipt(testTxHash, log)
 
+	// DB errors are transient — processBlock should succeed (vault discovery logged as warning, not fatal).
 	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
 		t.Fatalf("processBlock: %v", err)
 	}
 
-	if !h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
-		t.Error("vault should be marked as not-vault on DB error")
+	// Transient failure must NOT permanently mark the address as non-vault.
+	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
+		t.Error("vault should NOT be marked as not-vault on transient DB error")
+	}
+}
+
+func TestProcessBlockEvent_VaultDiscovery_RPCTransientError(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	// Simulate a transient RPC failure during vault metadata fetch.
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 6 {
+			return nil, fmt.Errorf("connection timeout")
+		}
+		return nil, fmt.Errorf("unexpected %d calls", len(calls))
+	}
+
+	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	// Transient RPC failure must NOT permanently mark the address as non-vault.
+	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
+		t.Error("vault should NOT be marked as not-vault on transient RPC error")
 	}
 }
 
@@ -852,7 +884,7 @@ func TestProcessBlockEvent_EnsureMarket_LookupError(t *testing.T) {
 	h.setupPositionEventMulticall()
 
 	dbErr := errors.New("db timeout")
-	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ common.Hash) (*entity.MorphoMarket, error) {
+	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ int64, _ common.Hash) (*entity.MorphoMarket, error) {
 		return nil, dbErr
 	}
 
@@ -1095,7 +1127,7 @@ func TestStartStop(t *testing.T) {
 	h := newTestHarness(t)
 
 	// Override GetAllVaults to return a vault.
-	h.morphoRepo.GetAllVaultsFn = func(_ context.Context) (map[common.Address]*entity.MorphoVault, error) {
+	h.morphoRepo.GetAllVaultsFn = func(_ context.Context, _ int64) (map[common.Address]*entity.MorphoVault, error) {
 		return map[common.Address]*entity.MorphoVault{
 			testVaultAddr: {
 				ID:             1,
@@ -1127,7 +1159,7 @@ func TestStartStop(t *testing.T) {
 
 func TestStart_EmptyRegistry(t *testing.T) {
 	h := newTestHarness(t)
-	h.morphoRepo.GetAllVaultsFn = func(_ context.Context) (map[common.Address]*entity.MorphoVault, error) {
+	h.morphoRepo.GetAllVaultsFn = func(_ context.Context, _ int64) (map[common.Address]*entity.MorphoVault, error) {
 		return nil, nil
 	}
 
@@ -1145,17 +1177,18 @@ func TestStart_EmptyRegistry(t *testing.T) {
 
 func TestStart_RegistryLoadFailure(t *testing.T) {
 	h := newTestHarness(t)
-	h.morphoRepo.GetAllVaultsFn = func(_ context.Context) (map[common.Address]*entity.MorphoVault, error) {
+	h.morphoRepo.GetAllVaultsFn = func(_ context.Context, _ int64) (map[common.Address]*entity.MorphoVault, error) {
 		return nil, errors.New("db unavailable")
 	}
 
-	ctx := context.Background()
-	// Start should succeed even if registry load fails (non-fatal).
-	if err := h.svc.Start(ctx); err != nil {
-		t.Fatalf("Start should not error on registry load failure: %v", err)
+	err := h.svc.Start(context.Background())
+	if err == nil {
+		_ = h.svc.Stop()
+		t.Fatal("Start should fail when vault registry cannot be loaded")
 	}
-
-	_ = h.svc.Stop()
+	if !strings.Contains(err.Error(), "loading vault registry") {
+		t.Errorf("expected 'loading vault registry' error, got: %v", err)
+	}
 }
 
 func TestStop_NilCancel(t *testing.T) {
@@ -1375,7 +1408,7 @@ func TestProcessBlockEvent_AccrueInterest_EnsureMarketError(t *testing.T) {
 		return nil, fmt.Errorf("unexpected %d calls", len(calls))
 	}
 
-	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ common.Hash) (*entity.MorphoMarket, error) {
+	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ int64, _ common.Hash) (*entity.MorphoMarket, error) {
 		return nil, errors.New("db lookup failed")
 	}
 
@@ -1656,7 +1689,7 @@ func TestProcessBlockEvent_EnsureMarket_GetMarketParamsError(t *testing.T) {
 	h.setupPositionEventMulticall()
 
 	// Market not in DB.
-	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ common.Hash) (*entity.MorphoMarket, error) {
+	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ int64, _ common.Hash) (*entity.MorphoMarket, error) {
 		return nil, nil
 	}
 
@@ -1918,8 +1951,9 @@ func TestProcessBlockEvent_VaultDiscovery_GetTokenMetadataError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("processBlock should not error on vault discovery failure: %v", err)
 	}
-	if !h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
-		t.Error("vault should be marked as not-vault on token metadata error")
+	// Token metadata RPC error is transient — vault should NOT be permanently marked as non-vault
+	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
+		t.Error("vault should NOT be marked as not-vault on transient token metadata error")
 	}
 }
 
@@ -1949,8 +1983,9 @@ func TestProcessBlockEvent_VaultDiscovery_GetOrCreateTokenError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("processBlock should not error on vault discovery failure: %v", err)
 	}
-	if !h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
-		t.Error("vault should be marked as not-vault on token creation error")
+	// Token creation DB error is transient — vault should NOT be permanently marked as non-vault
+	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
+		t.Error("vault should NOT be marked as not-vault on transient token creation error")
 	}
 }
 
@@ -2000,7 +2035,7 @@ func TestProcessBlockEvent_EnsureMarket_TokenPairMetadataError(t *testing.T) {
 	h := newTestHarness(t)
 
 	// Market not in DB.
-	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ common.Hash) (*entity.MorphoMarket, error) {
+	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ int64, _ common.Hash) (*entity.MorphoMarket, error) {
 		return nil, nil
 	}
 
@@ -2048,7 +2083,7 @@ func TestProcessBlockEvent_Liquidate_EnsureMarketError(t *testing.T) {
 		return nil, fmt.Errorf("unexpected %d calls", len(calls))
 	}
 
-	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ common.Hash) (*entity.MorphoMarket, error) {
+	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ int64, _ common.Hash) (*entity.MorphoMarket, error) {
 		return nil, errors.New("db lookup failed")
 	}
 

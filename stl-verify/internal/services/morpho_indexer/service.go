@@ -21,6 +21,14 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
+// errNotVault signals that an address is definitively not a MetaMorpho vault.
+// Transient failures (network, DB) must NOT be wrapped with this type so that
+// discovery is retried on the next event from that address.
+type errNotVault struct{ err error }
+
+func (e *errNotVault) Error() string { return e.err.Error() }
+func (e *errNotVault) Unwrap() error { return e.err }
+
 // morphoBlueDeployBlocks maps chain IDs to the block at which Morpho Blue
 // was deployed on that chain. Morpho Blue is deployed via CREATE2 at the
 // same address on all chains, but each deployment occurred at a different block.
@@ -89,17 +97,17 @@ func NewService(
 	eventRepo outbound.EventRepository,
 ) (*Service, error) {
 	if err := validateDependencies(consumer, cache, multicallClient, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("validating dependencies: %w", err)
 	}
 
 	config.SQSConsumerConfig.ApplyDefaults()
 	if err := config.SQSConsumerConfig.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("validating config: %w", err)
 	}
 
 	deployBlock, err := MorphoBlueDeployBlock(config.ChainID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getting deploy block: %w", err)
 	}
 
 	erc20ABI, err := abis.GetERC20ABI()
@@ -141,8 +149,8 @@ func (s *Service) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
 	// Load known vaults from database
-	if err := s.vaultRegistry.LoadFromDB(ctx, s.morphoRepo); err != nil {
-		s.logger.Warn("failed to load vault registry from DB (continuing with empty registry)", "error", err)
+	if err := s.vaultRegistry.LoadFromDB(ctx, s.morphoRepo, s.config.ChainID); err != nil {
+		return fmt.Errorf("loading vault registry: %w", err)
 	}
 
 	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
@@ -251,43 +259,39 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 		if !isMorphoBlue && !isMetaMorpho {
 			continue
 		}
+		if logAddress != morphoBlueAddr && s.vaultRegistry.IsKnownNotVault(logAddress) {
+			continue
+		}
 
-		// Check Morpho Blue events
-		if logAddress == morphoBlueAddr && isMorphoBlue {
+		switch {
+		case logAddress == morphoBlueAddr && isMorphoBlue:
 			s.logger.Debug("processing Morpho Blue event", "tx", receipt.TransactionHash, "topic", log.Topics[0])
 			if err := s.processMorphoBlueLog(ctx, log, chainID, blockNumber, blockVersion); err != nil {
 				s.logger.Error("failed to process Morpho Blue event", "error", err, "tx", receipt.TransactionHash)
 				errs = append(errs, err)
 			}
-			continue
-		}
 
-		// Skip Morpho Blue address events that aren't Morpho Blue events (shouldn't happen, but be safe)
-		if logAddress == morphoBlueAddr {
-			s.logger.Debug("skipping morpho blue address event", "logAddress", logAddress.Hex(), "morphoBlueAddr", morphoBlueAddr.Hex(), "tx", receipt.TransactionHash, "topic", log.Topics[0])
-			continue
-		}
+		case logAddress == morphoBlueAddr:
+			s.logger.Debug("skipping morpho blue address event", "logAddress", logAddress.Hex(), "tx", receipt.TransactionHash, "topic", log.Topics[0])
 
-		// Check MetaMorpho vault events
-		if s.vaultRegistry.IsKnownVault(logAddress) && isMetaMorpho {
+		case s.vaultRegistry.IsKnownVault(logAddress) && isMetaMorpho:
 			s.logger.Debug("processing MetaMorpho event", "tx", receipt.TransactionHash, "vault", logAddress.Hex(), "topic", log.Topics[0])
 			if err := s.processMetaMorphoLog(ctx, log, logAddress, chainID, blockNumber, blockVersion); err != nil {
 				s.logger.Error("failed to process MetaMorpho event", "error", err, "tx", receipt.TransactionHash)
 				errs = append(errs, err)
 			}
-			continue
-		}
 
-		// Skip addresses already known to not be vaults
-		if s.vaultRegistry.IsKnownNotVault(logAddress) {
-			continue
-		}
-
-		// Try to discover new vaults from unknown addresses
-		s.logger.Debug("attempting vault discovery", "address", logAddress.Hex(), "tx", receipt.TransactionHash)
-		if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockVersion); err != nil {
-			s.vaultRegistry.MarkNotVault(logAddress)
-			s.logger.Debug("vault discovery failed, marked as non-vault", "address", logAddress.Hex(), "error", err)
+		default:
+			s.logger.Debug("attempting vault discovery", "address", logAddress.Hex(), "tx", receipt.TransactionHash)
+			if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockVersion); err != nil {
+				var nv *errNotVault
+				if errors.As(err, &nv) {
+					s.vaultRegistry.MarkNotVault(logAddress)
+					s.logger.Debug("not a MetaMorpho vault", "address", logAddress.Hex(), "reason", err)
+				} else {
+					s.logger.Warn("vault discovery failed (will retry)", "address", logAddress.Hex(), "error", err)
+				}
+			}
 		}
 	}
 
@@ -382,7 +386,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 
 	// Validate this is a decodable MetaMorpho event before making on-chain calls.
 	if _, err := s.eventExtractor.ExtractMetaMorphoEvent(log); err != nil {
-		return fmt.Errorf("event decode failed: %w", err)
+		return &errNotVault{err: fmt.Errorf("event decode failed: %w", err)}
 	}
 
 	// Fetch vault metadata (including version) from on-chain.
@@ -423,7 +427,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 		s.vaultRegistry.RegisterVault(vaultAddress, vault)
 		return nil
 	}); err != nil {
-		return err
+		return fmt.Errorf("persisting vault: %w", err)
 	}
 
 	// Now process the event
@@ -471,7 +475,7 @@ func (s *Service) handleCreateMarket(ctx context.Context, eventData *MorphoBlueE
 
 		marketID, err := s.morphoRepo.GetOrCreateMarket(ctx, tx, market)
 		if err != nil {
-			return err
+			return fmt.Errorf("creating market: %w", err)
 		}
 
 		return s.saveMarketStateSnapshot(ctx, tx, marketID, blockNumber, blockVersion, ms, nil)
@@ -490,12 +494,12 @@ func (s *Service) handlePositionEvent(ctx context.Context, eventData *MorphoBlue
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		marketID, err := s.ensureMarket(ctx, tx, eventData.MarketID, chainID, blockNumber)
 		if err != nil {
-			return err
+			return fmt.Errorf("ensuring market: %w", err)
 		}
 
 		// Save market state snapshot
 		if err := s.saveMarketStateSnapshot(ctx, tx, marketID, blockNumber, blockVersion, ms, nil); err != nil {
-			return err
+			return fmt.Errorf("saving market state: %w", err)
 		}
 
 		// Save user position snapshot
@@ -517,11 +521,11 @@ func (s *Service) handleLiquidateEvent(ctx context.Context, eventData *MorphoBlu
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		marketID, err := s.ensureMarket(ctx, tx, eventData.MarketID, chainID, blockNumber)
 		if err != nil {
-			return err
+			return fmt.Errorf("ensuring market: %w", err)
 		}
 
 		if err := s.saveMarketStateSnapshot(ctx, tx, marketID, blockNumber, blockVersion, ms, nil); err != nil {
-			return err
+			return fmt.Errorf("saving market state: %w", err)
 		}
 
 		if err := s.savePositionSnapshot(ctx, tx, borrower, marketID, blockNumber, blockVersion, borrowerPos, ms, eventData.EventType, eventData.TxHash, chainID); err != nil {
@@ -548,7 +552,7 @@ func (s *Service) handleAccrueInterest(ctx context.Context, eventData *MorphoBlu
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		marketID, err := s.ensureMarket(ctx, tx, eventData.MarketID, chainID, blockNumber)
 		if err != nil {
-			return err
+			return fmt.Errorf("ensuring market: %w", err)
 		}
 		return s.saveMarketStateSnapshot(ctx, tx, marketID, blockNumber, blockVersion, ms, accrueData)
 	})
@@ -588,7 +592,7 @@ func (s *Service) handleVaultTransfer(ctx context.Context, eventData *MetaMorpho
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if err := s.saveVaultStateSnapshotInTx(ctx, tx, vault.ID, blockNumber, blockVersion, vs, nil); err != nil {
-			return err
+			return fmt.Errorf("saving vault state: %w", err)
 		}
 
 		if hasFrom {
@@ -646,7 +650,7 @@ func (s *Service) saveVaultEventSnapshot(ctx context.Context, user common.Addres
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if err := s.saveVaultStateSnapshotInTx(ctx, tx, vault.ID, blockNumber, blockVersion, vs, nil); err != nil {
-			return err
+			return fmt.Errorf("saving vault state: %w", err)
 		}
 		return s.saveVaultPositionInTx(ctx, tx, user, vault.ID, blockNumber, blockVersion, balance, vs, eventType, txHash, chainID)
 	})
@@ -670,7 +674,7 @@ type vaultAccrueData struct {
 // ensureMarket ensures the market exists in the database and returns its ID.
 func (s *Service) ensureMarket(ctx context.Context, tx pgx.Tx, marketID [32]byte, chainID, blockNumber int64) (int64, error) {
 	// Check if market already exists
-	existing, err := s.morphoRepo.GetMarketByMarketID(ctx, common.Hash(marketID))
+	existing, err := s.morphoRepo.GetMarketByMarketID(ctx, chainID, common.Hash(marketID))
 	if err != nil {
 		return 0, fmt.Errorf("checking market existence: %w", err)
 	}

@@ -53,12 +53,15 @@ func setupMorphoTest(t *testing.T) *morphoTestFixture {
 func (f *morphoTestFixture) createTestFixtures(t *testing.T, ctx context.Context) {
 	t.Helper()
 
-	// Get the Morpho Blue protocol ID (seeded by migration)
+	// Create the Morpho Blue protocol (previously seeded by migration, now created at runtime by GetOrCreateProtocol)
 	err := f.pool.QueryRow(ctx,
-		`SELECT id FROM protocol WHERE name = 'Morpho Blue' LIMIT 1`,
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+		 VALUES (1, '\xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb'::bytea, 'Morpho Blue', 'lending', 18883124, NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id`,
 	).Scan(&f.protocolID)
 	if err != nil {
-		t.Fatalf("failed to get Morpho Blue protocol: %v", err)
+		t.Fatalf("failed to create Morpho Blue protocol: %v", err)
 	}
 
 	// Create test tokens (loan and collateral)
@@ -193,7 +196,7 @@ func TestGetOrCreateMarket_CreateNew(t *testing.T) {
 	}
 
 	// Verify via GetMarketByMarketID
-	got, err := fixture.repo.GetMarketByMarketID(ctx, marketID)
+	got, err := fixture.repo.GetMarketByMarketID(ctx, 1, marketID)
 	if err != nil {
 		t.Fatalf("GetMarketByMarketID failed: %v", err)
 	}
@@ -267,7 +270,7 @@ func TestGetMarketByMarketID_NotFound(t *testing.T) {
 
 	ctx := context.Background()
 
-	got, err := fixture.repo.GetMarketByMarketID(ctx, common.BytesToHash([]byte("this-market-does-not-exist-1234")))
+	got, err := fixture.repo.GetMarketByMarketID(ctx, 1, common.BytesToHash([]byte("this-market-does-not-exist-1234")))
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -735,7 +738,7 @@ func TestGetOrCreateVault_CreateNew(t *testing.T) {
 	}
 
 	// Verify via GetVaultByAddress
-	got, err := fixture.repo.GetVaultByAddress(ctx, common.BytesToAddress(vaultAddr))
+	got, err := fixture.repo.GetVaultByAddress(ctx, 1, common.BytesToAddress(vaultAddr))
 	if err != nil {
 		t.Fatalf("GetVaultByAddress failed: %v", err)
 	}
@@ -810,7 +813,7 @@ func TestGetVaultByAddress_NotFound(t *testing.T) {
 	ctx := context.Background()
 	nonExistentAddr := common.HexToAddress("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
 
-	got, err := fixture.repo.GetVaultByAddress(ctx, nonExistentAddr)
+	got, err := fixture.repo.GetVaultByAddress(ctx, 1, nonExistentAddr)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -825,7 +828,7 @@ func TestGetAllVaults_Empty(t *testing.T) {
 
 	ctx := context.Background()
 
-	vaults, err := fixture.repo.GetAllVaults(ctx)
+	vaults, err := fixture.repo.GetAllVaults(ctx, 1)
 	if err != nil {
 		t.Fatalf("GetAllVaults failed: %v", err)
 	}
@@ -847,7 +850,7 @@ func TestGetAllVaults_MultipleVaults(t *testing.T) {
 		fixture.createTestVault(t, ctx, addr)
 	}
 
-	vaults, err := fixture.repo.GetAllVaults(ctx)
+	vaults, err := fixture.repo.GetAllVaults(ctx, 1)
 	if err != nil {
 		t.Fatalf("GetAllVaults failed: %v", err)
 	}

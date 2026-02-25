@@ -62,14 +62,13 @@ func (r *MorphoRepository) GetOrCreateMarket(ctx context.Context, tx pgx.Tx, mar
 	return id, nil
 }
 
-// GetMarketByMarketID retrieves a market by its 32-byte market ID hash.
-func (r *MorphoRepository) GetMarketByMarketID(ctx context.Context, marketID common.Hash) (*entity.MorphoMarket, error) {
+// GetMarketByMarketID retrieves a market by its chain ID and 32-byte market ID hash.
+func (r *MorphoRepository) GetMarketByMarketID(ctx context.Context, chainID int64, marketID common.Hash) (*entity.MorphoMarket, error) {
 	var (
 		lltvStr            string
-		marketIDBytes      []byte
 		oracleAddressBytes []byte
 		irmAddressBytes    []byte
-		id, chainID        int64
+		id                 int64
 		protocolID         int64
 		loanTokenID        int64
 		collateralTokenID  int64
@@ -77,10 +76,10 @@ func (r *MorphoRepository) GetMarketByMarketID(ctx context.Context, marketID com
 	)
 
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block
-		 FROM morpho_market WHERE market_id = $1`,
-		marketID.Bytes(),
-	).Scan(&id, &chainID, &protocolID, &marketIDBytes, &loanTokenID, &collateralTokenID,
+		`SELECT id, protocol_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block
+		 FROM morpho_market WHERE chain_id = $1 AND market_id = $2`,
+		chainID, marketID.Bytes(),
+	).Scan(&id, &protocolID, &loanTokenID, &collateralTokenID,
 		&oracleAddressBytes, &irmAddressBytes, &lltvStr, &createdAtBlock)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -99,7 +98,7 @@ func (r *MorphoRepository) GetMarketByMarketID(ctx context.Context, marketID com
 		ID:                id,
 		ChainID:           chainID,
 		ProtocolID:        protocolID,
-		MarketID:          common.BytesToHash(marketIDBytes),
+		MarketID:          marketID,
 		LoanTokenID:       loanTokenID,
 		CollateralTokenID: collateralTokenID,
 		OracleAddress:     common.BytesToAddress(oracleAddressBytes),
@@ -236,14 +235,14 @@ func (r *MorphoRepository) GetOrCreateVault(ctx context.Context, tx pgx.Tx, vaul
 	return id, nil
 }
 
-// GetVaultByAddress retrieves a vault by its contract address.
-func (r *MorphoRepository) GetVaultByAddress(ctx context.Context, address common.Address) (*entity.MorphoVault, error) {
+// GetVaultByAddress retrieves a vault by its chain ID and contract address.
+func (r *MorphoRepository) GetVaultByAddress(ctx context.Context, chainID int64, address common.Address) (*entity.MorphoVault, error) {
 	var v entity.MorphoVault
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block
-		 FROM morpho_vault WHERE address = $1`,
-		address.Bytes(),
-	).Scan(&v.ID, &v.ChainID, &v.ProtocolID, &v.Address, &v.Name, &v.Symbol, &v.AssetTokenID, &v.VaultVersion, &v.CreatedAtBlock)
+		`SELECT id, protocol_id, name, symbol, asset_token_id, vault_version, created_at_block
+		 FROM morpho_vault WHERE chain_id = $1 AND address = $2`,
+		chainID, address.Bytes(),
+	).Scan(&v.ID, &v.ProtocolID, &v.Name, &v.Symbol, &v.AssetTokenID, &v.VaultVersion, &v.CreatedAtBlock)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -251,14 +250,16 @@ func (r *MorphoRepository) GetVaultByAddress(ctx context.Context, address common
 	if err != nil {
 		return nil, fmt.Errorf("querying morpho vault: %w", err)
 	}
+	v.ChainID = chainID
+	v.Address = address.Bytes()
 	return &v, nil
 }
 
-// GetAllVaults retrieves all known vaults, keyed by contract address.
-func (r *MorphoRepository) GetAllVaults(ctx context.Context) (map[common.Address]*entity.MorphoVault, error) {
+// GetAllVaults retrieves all known vaults for a chain, keyed by contract address.
+func (r *MorphoRepository) GetAllVaults(ctx context.Context, chainID int64) (map[common.Address]*entity.MorphoVault, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block
-		 FROM morpho_vault`)
+		`SELECT id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block
+		 FROM morpho_vault WHERE chain_id = $1`, chainID)
 	if err != nil {
 		return nil, fmt.Errorf("querying vaults: %w", err)
 	}
@@ -267,9 +268,10 @@ func (r *MorphoRepository) GetAllVaults(ctx context.Context) (map[common.Address
 	vaults := make(map[common.Address]*entity.MorphoVault)
 	for rows.Next() {
 		var v entity.MorphoVault
-		if err := rows.Scan(&v.ID, &v.ChainID, &v.ProtocolID, &v.Address, &v.Name, &v.Symbol, &v.AssetTokenID, &v.VaultVersion, &v.CreatedAtBlock); err != nil {
+		if err := rows.Scan(&v.ID, &v.ProtocolID, &v.Address, &v.Name, &v.Symbol, &v.AssetTokenID, &v.VaultVersion, &v.CreatedAtBlock); err != nil {
 			return nil, fmt.Errorf("scanning vault: %w", err)
 		}
+		v.ChainID = chainID
 		vaults[common.BytesToAddress(v.Address)] = &v
 	}
 

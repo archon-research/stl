@@ -610,18 +610,18 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 	// This distinguishes real MetaMorpho vaults from other ERC4626 vaults
 	// (e.g. Yearn, Aave) that share the same Transfer/Deposit/Withdraw event topics.
 	if !results[4].Success || len(results[4].ReturnData) == 0 {
-		return nil, fmt.Errorf("MORPHO() call failed — not a MetaMorpho vault: %s", vaultAddress.Hex())
+		return nil, &errNotVault{err: fmt.Errorf("MORPHO() call failed — not a MetaMorpho vault: %s", vaultAddress.Hex())}
 	}
 	morphoUnpacked, err := s.metaMorphoABI.Unpack("MORPHO", results[4].ReturnData)
 	if err != nil {
-		return nil, fmt.Errorf("unpacking MORPHO(): %w", err)
+		return nil, &errNotVault{err: fmt.Errorf("unpacking MORPHO(): %w", err)}
 	}
 	if len(morphoUnpacked) == 0 {
-		return nil, fmt.Errorf("MORPHO() returned no values for %s", vaultAddress.Hex())
+		return nil, &errNotVault{err: fmt.Errorf("MORPHO() returned no values for %s", vaultAddress.Hex())}
 	}
 	morphoAddr, ok := morphoUnpacked[0].(common.Address)
 	if !ok || morphoAddr != MorphoBlueAddress {
-		return nil, fmt.Errorf("MORPHO() returned %s, expected %s — not a MetaMorpho vault", morphoAddr.Hex(), MorphoBlueAddress.Hex())
+		return nil, &errNotVault{err: fmt.Errorf("MORPHO() returned %s, expected %s — not a MetaMorpho vault", morphoAddr.Hex(), MorphoBlueAddress.Hex())}
 	}
 
 	md := &VaultMetadata{Version: entity.MorphoVaultV1}
@@ -659,7 +659,7 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 	}
 
 	if md.Asset == (common.Address{}) {
-		return nil, fmt.Errorf("failed to get vault asset address for %s", vaultAddress.Hex())
+		return nil, &errNotVault{err: fmt.Errorf("failed to get vault asset address for %s", vaultAddress.Hex())}
 	}
 
 	return md, nil

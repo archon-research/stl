@@ -151,12 +151,15 @@ func run(ctx context.Context, args []string) error {
 		"commit", GitCommit)
 
 	// Initialize OpenTelemetry tracing and metrics
-	shutdownOTEL := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
 		ServiceName:    "morpho-indexer",
 		ServiceVersion: GitCommit,
 		BuildTime:      BuildTime,
 		Logger:         logger,
 	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
 	defer shutdownOTEL(context.Background())
 
 	// Service telemetry

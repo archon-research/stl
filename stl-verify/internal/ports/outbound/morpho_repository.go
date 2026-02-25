@@ -15,9 +15,9 @@ type MorphoRepository interface {
 	// Returns the market's database ID.
 	GetOrCreateMarket(ctx context.Context, tx pgx.Tx, market *entity.MorphoMarket) (int64, error)
 
-	// GetMarketByMarketID retrieves a market by its 32-byte market ID hash.
+	// GetMarketByMarketID retrieves a market by its chain ID and 32-byte market ID hash.
 	// Returns nil, nil if the market doesn't exist.
-	GetMarketByMarketID(ctx context.Context, marketID common.Hash) (*entity.MorphoMarket, error)
+	GetMarketByMarketID(ctx context.Context, chainID int64, marketID common.Hash) (*entity.MorphoMarket, error)
 
 	// SaveMarketState saves a market state snapshot within an external transaction.
 	SaveMarketState(ctx context.Context, tx pgx.Tx, state *entity.MorphoMarketState) error
@@ -29,12 +29,12 @@ type MorphoRepository interface {
 	// Returns the vault's database ID.
 	GetOrCreateVault(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault) (int64, error)
 
-	// GetVaultByAddress retrieves a vault by its contract address.
+	// GetVaultByAddress retrieves a vault by its chain ID and contract address.
 	// Returns nil, nil if the vault doesn't exist.
-	GetVaultByAddress(ctx context.Context, address common.Address) (*entity.MorphoVault, error)
+	GetVaultByAddress(ctx context.Context, chainID int64, address common.Address) (*entity.MorphoVault, error)
 
-	// GetAllVaults retrieves all known vaults, keyed by contract address.
-	GetAllVaults(ctx context.Context) (map[common.Address]*entity.MorphoVault, error)
+	// GetAllVaults retrieves all known vaults for a chain, keyed by contract address.
+	GetAllVaults(ctx context.Context, chainID int64) (map[common.Address]*entity.MorphoVault, error)
 
 	// SaveVaultState saves a vault state snapshot within an external transaction.
 	SaveVaultState(ctx context.Context, tx pgx.Tx, state *entity.MorphoVaultState) error

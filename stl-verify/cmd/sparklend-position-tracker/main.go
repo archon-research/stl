@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -107,8 +108,11 @@ func parseConfig(args []string) (cliConfig, error) {
 	}
 
 	chainIDStr := env.Get("CHAIN_ID", "1")
-	cfg.chainID = 1
-	_, _ = fmt.Sscanf(chainIDStr, "%d", &cfg.chainID)
+	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	if err != nil {
+		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
+	}
+	cfg.chainID = chainID
 
 	return cfg, nil
 }

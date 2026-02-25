@@ -157,14 +157,6 @@ CREATE INDEX IF NOT EXISTS idx_morpho_vault_position_vault ON morpho_vault_posit
 CREATE INDEX IF NOT EXISTS idx_morpho_vault_position_block ON morpho_vault_position (block_number);
 CREATE INDEX IF NOT EXISTS idx_morpho_vault_position_user_vault ON morpho_vault_position (user_id, morpho_vault_id);
 
--- ============================================================================
--- Seed data: Morpho Blue protocol
--- ============================================================================
-INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
-VALUES (1, '\xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb'::bytea, 'Morpho Blue', 'lending', 18883124, NOW(),
-        '{}'::jsonb)
-ON CONFLICT (chain_id, address) DO NOTHING;
-
 INSERT INTO migrations (filename)
 VALUES ('20260224_100000_create_morpho_tables.sql')
 ON CONFLICT (filename) DO NOTHING;

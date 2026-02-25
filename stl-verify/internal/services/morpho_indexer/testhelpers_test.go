@@ -94,9 +94,9 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 	if err != nil {
 		t.Fatalf("GetMorphoBlueEventsABI: %v", err)
 	}
-	metaMorphoEventsABI, err := abis.GetMetaMorphoEventsABI()
+	metaMorphoEventsABI, err := abis.GetMetaMorphoV1EventsABI()
 	if err != nil {
-		t.Fatalf("GetMetaMorphoEventsABI: %v", err)
+		t.Fatalf("GetMetaMorphoV1EventsABI: %v", err)
 	}
 	v2AccrueABI, err := abis.GetMetaMorphoV2AccrueInterestABI()
 	if err != nil {
@@ -628,7 +628,7 @@ func (h *serviceTestHarness) setupPositionEventMulticall() {
 
 // setupMarketExistsInDB configures morphoRepo to return a market with the given ID.
 func (h *serviceTestHarness) setupMarketExistsInDB(marketID [32]byte, dbID int64) {
-	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, id common.Hash) (*entity.MorphoMarket, error) {
+	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ int64, id common.Hash) (*entity.MorphoMarket, error) {
 		if id == common.Hash(marketID) {
 			return &entity.MorphoMarket{ID: dbID, MarketID: id}, nil
 		}

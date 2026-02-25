@@ -91,7 +91,7 @@ func TestVaultRegistry_LoadFromDB(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := NewVaultRegistry(slog.Default())
 			repo := &testutil.MockMorphoRepository{
-				GetAllVaultsFn: func(_ context.Context) (map[common.Address]*entity.MorphoVault, error) {
+				GetAllVaultsFn: func(_ context.Context, _ int64) (map[common.Address]*entity.MorphoVault, error) {
 					if tt.err != nil {
 						return nil, tt.err
 					}
@@ -99,7 +99,7 @@ func TestVaultRegistry_LoadFromDB(t *testing.T) {
 				},
 			}
 
-			err := registry.LoadFromDB(context.Background(), repo)
+			err := registry.LoadFromDB(context.Background(), repo, 1)
 
 			if tt.wantErr {
 				if err == nil {

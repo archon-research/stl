@@ -164,12 +164,16 @@ func Main() {
 	logger.Info("S3 writer created", "bucket", bucket)
 
 	// Initialize OpenTelemetry tracing and metrics
-	shutdownOTEL := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
 		ServiceName:    "raw-data-backup",
 		ServiceVersion: GitCommit,
 		BuildTime:      BuildTime,
 		Logger:         logger,
 	})
+	if err != nil {
+		logger.Error("failed to initialize telemetry", "error", err)
+		os.Exit(1)
+	}
 	defer shutdownOTEL(context.Background())
 
 	metricsRec, err := telemetry.NewMetrics("stl-verify/raw_data_backup")

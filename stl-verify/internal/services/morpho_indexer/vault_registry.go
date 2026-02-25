@@ -31,9 +31,9 @@ func NewVaultRegistry(logger *slog.Logger) *VaultRegistry {
 	}
 }
 
-// LoadFromDB loads all known vaults from the database in a single query.
-func (r *VaultRegistry) LoadFromDB(ctx context.Context, repo outbound.MorphoRepository) error {
-	loaded, err := repo.GetAllVaults(ctx)
+// LoadFromDB loads all known vaults for the given chain from the database.
+func (r *VaultRegistry) LoadFromDB(ctx context.Context, repo outbound.MorphoRepository, chainID int64) error {
+	loaded, err := repo.GetAllVaults(ctx, chainID)
 	if err != nil {
 		return fmt.Errorf("loading vaults: %w", err)
 	}

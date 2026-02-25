@@ -85,12 +85,18 @@ func ProcessMessages(
 		}
 
 		if event.ChainID != cfg.ChainID {
-			cfg.Logger.Error("chain ID mismatch, skipping event",
+			cfg.Logger.Error("chain ID mismatch, deleting message",
 				"messageID", msg.MessageID,
 				"expected", cfg.ChainID,
 				"got", event.ChainID,
 				"block", event.BlockNumber)
-			errs = append(errs, fmt.Errorf("chain ID mismatch for message %s: expected %d, got %d", msg.MessageID, cfg.ChainID, event.ChainID))
+			// Chain ID is immutable in the message — retrying will never succeed.
+			// Delete to avoid infinite retry. Investigate queue subscription if this occurs.
+			if deleteErr := cfg.Consumer.DeleteMessage(ctx, msg.ReceiptHandle); deleteErr != nil {
+				cfg.Logger.Error("failed to delete mismatched message",
+					"messageID", msg.MessageID,
+					"error", deleteErr)
+			}
 			continue
 		}
 

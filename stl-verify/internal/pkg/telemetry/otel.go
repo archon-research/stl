@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -19,7 +20,7 @@ type OTELConfig struct {
 // It reads JAEGER_ENDPOINT, OTEL_EXPORTER_OTLP_ENDPOINT, and ENVIRONMENT
 // from environment variables. Returns a shutdown function that should be
 // deferred by the caller.
-func InitOTEL(ctx context.Context, config OTELConfig) func(context.Context) {
+func InitOTEL(ctx context.Context, config OTELConfig) (func(context.Context), error) {
 	logger := config.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -39,11 +40,10 @@ func InitOTEL(ctx context.Context, config OTELConfig) func(context.Context) {
 		JaegerEndpoint: traceEndpoint,
 	})
 	if err != nil {
-		logger.Warn("failed to init tracer, continuing without tracing", "error", err)
-	} else {
-		shutdowns = append(shutdowns, shutdownTracer)
-		logger.Info("tracer initialized", "endpoint", traceEndpoint)
+		return nil, fmt.Errorf("initializing tracer: %w", err)
 	}
+	shutdowns = append(shutdowns, shutdownTracer)
+	logger.Info("tracer initialized", "endpoint", traceEndpoint)
 
 	// Metrics
 	otelEndpoint := env.Get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
@@ -54,12 +54,11 @@ func InitOTEL(ctx context.Context, config OTELConfig) func(context.Context) {
 		OTLPEndpoint:   otelEndpoint,
 	})
 	if err != nil {
-		logger.Warn("failed to init metrics, continuing without metrics export", "error", err)
-	} else {
-		shutdowns = append(shutdowns, shutdownMetrics)
-		if otelEndpoint != "" {
-			logger.Info("metrics initialized", "endpoint", otelEndpoint)
-		}
+		return nil, fmt.Errorf("initializing metrics: %w", err)
+	}
+	shutdowns = append(shutdowns, shutdownMetrics)
+	if otelEndpoint != "" {
+		logger.Info("metrics initialized", "endpoint", otelEndpoint)
 	}
 
 	return func(ctx context.Context) {
@@ -68,5 +67,5 @@ func InitOTEL(ctx context.Context, config OTELConfig) func(context.Context) {
 				logger.Warn("failed to shutdown telemetry", "error", err)
 			}
 		}
-	}
+	}, nil
 }

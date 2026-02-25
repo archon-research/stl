@@ -12,12 +12,12 @@ import (
 // MockMorphoRepository implements outbound.MorphoRepository for testing.
 type MockMorphoRepository struct {
 	GetOrCreateMarketFn   func(ctx context.Context, tx pgx.Tx, market *entity.MorphoMarket) (int64, error)
-	GetMarketByMarketIDFn func(ctx context.Context, marketID common.Hash) (*entity.MorphoMarket, error)
+	GetMarketByMarketIDFn func(ctx context.Context, chainID int64, marketID common.Hash) (*entity.MorphoMarket, error)
 	SaveMarketStateFn     func(ctx context.Context, tx pgx.Tx, state *entity.MorphoMarketState) error
 	SaveMarketPositionFn  func(ctx context.Context, tx pgx.Tx, position *entity.MorphoMarketPosition) error
 	GetOrCreateVaultFn    func(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault) (int64, error)
-	GetVaultByAddressFn   func(ctx context.Context, address common.Address) (*entity.MorphoVault, error)
-	GetAllVaultsFn        func(ctx context.Context) (map[common.Address]*entity.MorphoVault, error)
+	GetVaultByAddressFn   func(ctx context.Context, chainID int64, address common.Address) (*entity.MorphoVault, error)
+	GetAllVaultsFn        func(ctx context.Context, chainID int64) (map[common.Address]*entity.MorphoVault, error)
 	SaveVaultStateFn      func(ctx context.Context, tx pgx.Tx, state *entity.MorphoVaultState) error
 	SaveVaultPositionFn   func(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error
 }
@@ -29,9 +29,9 @@ func (m *MockMorphoRepository) GetOrCreateMarket(ctx context.Context, tx pgx.Tx,
 	return 1, nil
 }
 
-func (m *MockMorphoRepository) GetMarketByMarketID(ctx context.Context, marketID common.Hash) (*entity.MorphoMarket, error) {
+func (m *MockMorphoRepository) GetMarketByMarketID(ctx context.Context, chainID int64, marketID common.Hash) (*entity.MorphoMarket, error) {
 	if m.GetMarketByMarketIDFn != nil {
-		return m.GetMarketByMarketIDFn(ctx, marketID)
+		return m.GetMarketByMarketIDFn(ctx, chainID, marketID)
 	}
 	return nil, nil
 }
@@ -57,16 +57,16 @@ func (m *MockMorphoRepository) GetOrCreateVault(ctx context.Context, tx pgx.Tx, 
 	return 1, nil
 }
 
-func (m *MockMorphoRepository) GetVaultByAddress(ctx context.Context, address common.Address) (*entity.MorphoVault, error) {
+func (m *MockMorphoRepository) GetVaultByAddress(ctx context.Context, chainID int64, address common.Address) (*entity.MorphoVault, error) {
 	if m.GetVaultByAddressFn != nil {
-		return m.GetVaultByAddressFn(ctx, address)
+		return m.GetVaultByAddressFn(ctx, chainID, address)
 	}
 	return nil, nil
 }
 
-func (m *MockMorphoRepository) GetAllVaults(ctx context.Context) (map[common.Address]*entity.MorphoVault, error) {
+func (m *MockMorphoRepository) GetAllVaults(ctx context.Context, chainID int64) (map[common.Address]*entity.MorphoVault, error) {
 	if m.GetAllVaultsFn != nil {
-		return m.GetAllVaultsFn(ctx)
+		return m.GetAllVaultsFn(ctx, chainID)
 	}
 	return nil, nil
 }

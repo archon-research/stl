@@ -72,7 +72,7 @@ func NewService(
 
 	config.ApplyDefaults()
 	if err := config.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("validating config: %w", err)
 	}
 
 	oracleABI, err := abis.GetAaveOracleABI()

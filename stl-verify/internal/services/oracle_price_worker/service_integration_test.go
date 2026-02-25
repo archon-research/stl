@@ -143,6 +143,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
 	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
@@ -250,6 +251,7 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
 	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
@@ -330,6 +332,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
 	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
@@ -407,6 +410,7 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
 	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
@@ -487,6 +491,7 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
 	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
@@ -580,6 +585,7 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
 	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))

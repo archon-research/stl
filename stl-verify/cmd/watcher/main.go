@@ -109,12 +109,16 @@ func main() {
 	}
 
 	// Initialize OpenTelemetry tracing and metrics
-	shutdownOTEL := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
 		ServiceName:    "stl-watcher",
 		ServiceVersion: GitCommit,
 		BuildTime:      BuildTime,
 		Logger:         logger,
 	})
+	if err != nil {
+		logger.Error("failed to initialize telemetry", "error", err)
+		os.Exit(1)
+	}
 	defer shutdownOTEL(context.Background())
 
 	// Get configuration from environment

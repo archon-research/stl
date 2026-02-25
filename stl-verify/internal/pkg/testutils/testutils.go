@@ -2,7 +2,6 @@ package testutils
 
 import (
 	"math/big"
-	"strings"
 	"testing"
 )
 
@@ -15,9 +14,4 @@ func BigFromStr(t testing.TB, s string) *big.Int {
 		t.Fatalf("BigFromStr: invalid decimal string: %q", s)
 	}
 	return n
-}
-
-// ContainsSubstring returns whether s contains substr.
-func ContainsSubstring(s, substr string) bool {
-	return strings.Contains(s, substr)
 }

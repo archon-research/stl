@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -180,17 +179,15 @@ func TestProcessMessages_ChainIDMismatch_SkipsHandler(t *testing.T) {
 	cfg.ChainID = 1 // expect chain 1, event has chain 42
 
 	err := ProcessMessages(context.Background(), cfg, handler)
-	if err == nil {
-		t.Fatal("expected error for chain ID mismatch")
+	// Chain ID mismatch is deterministic — message is deleted, no error returned
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if called {
 		t.Error("handler should not be called when chain ID mismatches")
 	}
-	if !strings.Contains(err.Error(), "chain ID mismatch") {
-		t.Errorf("error should mention chain ID mismatch, got: %v", err)
-	}
-	if len(consumer.deletedHandles) != 0 {
-		t.Errorf("expected no deletes on chain ID mismatch, got %v", consumer.deletedHandles)
+	if len(consumer.deletedHandles) != 1 || consumer.deletedHandles[0] != "h1" {
+		t.Errorf("expected mismatched message to be deleted, got deletes: %v", consumer.deletedHandles)
 	}
 }
 

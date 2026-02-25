@@ -227,7 +227,7 @@ func (e *EventExtractor) loadABIs() error {
 		e.morphoBlueSignatures[event.ID] = &event
 	}
 
-	metaMorphoABI, err := abis.GetMetaMorphoEventsABI()
+	metaMorphoABI, err := abis.GetMetaMorphoV1EventsABI()
 	if err != nil {
 		return fmt.Errorf("failed to parse MetaMorpho events ABI: %w", err)
 	}
