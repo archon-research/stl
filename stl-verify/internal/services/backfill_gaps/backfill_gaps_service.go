@@ -254,50 +254,64 @@ func (s *BackfillService) findAndFillGaps() error {
 	}
 
 	if len(gaps) == 0 {
-		s.logger.Debug("no gaps to backfill", "minBlock", minBlock, "maxBlock", maxBlock)
+		// Check for unpublished blocks even when there are no gaps, so operators
+		// can see that blocks exist but need retry (saved but cache/publish failed).
+		hasUnpublishedBlocks := false
+		incomplete, err := s.stateRepo.GetBlocksWithIncompletePublish(ctx, 1)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to check incomplete publishes")
+			return fmt.Errorf("failed to check incomplete publishes: %w", err)
+		}
+		hasUnpublishedBlocks = len(incomplete) > 0
+		s.logger.Debug("no gaps to backfill",
+			"minBlock", minBlock,
+			"maxBlock", maxBlock,
+			"hasUnpublishedBlocks", hasUnpublishedBlocks)
 		span.SetAttributes(
 			attribute.Int("backfill.gaps_count", 0),
 			attribute.Int64("backfill.min_block", minBlock),
 			attribute.Int64("backfill.max_block", maxBlock),
+			attribute.Bool("backfill.has_unpublished_blocks", hasUnpublishedBlocks),
 		)
-		return nil
-	}
-
-	// Calculate total missing blocks
-	totalMissing := int64(0)
-	for _, gap := range gaps {
-		totalMissing += gap.To - gap.From + 1
-	}
-
-	span.SetAttributes(
-		attribute.Int("backfill.gaps_count", len(gaps)),
-		attribute.Int64("backfill.total_missing", totalMissing),
-		attribute.Int64("backfill.min_block", minBlock),
-		attribute.Int64("backfill.max_block", maxBlock),
-	)
-
-	s.logger.Info("found gaps to backfill",
-		"gaps", len(gaps),
-		"totalMissing", totalMissing,
-		"minBlock", minBlock,
-		"maxBlock", maxBlock)
-
-	// Process each gap
-	for _, gap := range gaps {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+	} else {
+		// Calculate total missing blocks
+		totalMissing := int64(0)
+		for _, gap := range gaps {
+			totalMissing += gap.To - gap.From + 1
 		}
 
-		if err := s.fillGapWithTracing(ctx, gap); err != nil {
-			s.logger.Warn("failed to fill gap", "from", gap.From, "to", gap.To, "error", err)
-			// Continue with other gaps
+		span.SetAttributes(
+			attribute.Int("backfill.gaps_count", len(gaps)),
+			attribute.Int64("backfill.total_missing", totalMissing),
+			attribute.Int64("backfill.min_block", minBlock),
+			attribute.Int64("backfill.max_block", maxBlock),
+		)
+
+		s.logger.Info("found gaps to backfill",
+			"gaps", len(gaps),
+			"totalMissing", totalMissing,
+			"minBlock", minBlock,
+			"maxBlock", maxBlock)
+
+		// Process each gap
+		for _, gap := range gaps {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			if err := s.fillGapWithTracing(ctx, gap); err != nil {
+				s.logger.Warn("failed to fill gap", "from", gap.From, "to", gap.To, "error", err)
+				// Continue with other gaps
+			}
 		}
 	}
 
 	// Retry blocks that were saved but not fully published (cache/publish failed).
-	// This ensures eventual consistency for blocks that had transient failures.
+	// This runs on EVERY pass, not just when gaps exist, because blocks can be
+	// present in the DB (no gap) but have failed cache/publish (block_published=false).
 	if err := s.retryIncompletePublishes(ctx); err != nil {
 		s.logger.Warn("failed to retry incomplete publishes", "error", err)
 		// Continue - this will be retried on the next pass
