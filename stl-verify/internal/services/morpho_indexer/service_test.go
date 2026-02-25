@@ -1070,20 +1070,19 @@ func TestProcessBlockEvent_LogAtMorphoBlueAddress_UnknownTopic(t *testing.T) {
 func TestStartStop(t *testing.T) {
 	h := newTestHarness(t)
 
-	// Override GetAllVaultAddresses to return some addresses.
-	h.morphoRepo.GetAllVaultAddressesFn = func(_ context.Context) ([]common.Address, error) {
-		return []common.Address{testVaultAddr}, nil
-	}
-	h.morphoRepo.GetVaultByAddressFn = func(_ context.Context, addr common.Address) (*entity.MorphoVault, error) {
-		return &entity.MorphoVault{
-			ID:             1,
-			ProtocolID:     1,
-			Address:        addr.Bytes(),
-			Name:           "Test",
-			Symbol:         "TST",
-			AssetTokenID:   1,
-			VaultVersion:   entity.MorphoVaultV1,
-			CreatedAtBlock: 18000000,
+	// Override GetAllVaults to return a vault.
+	h.morphoRepo.GetAllVaultsFn = func(_ context.Context) (map[common.Address]*entity.MorphoVault, error) {
+		return map[common.Address]*entity.MorphoVault{
+			testVaultAddr: {
+				ID:             1,
+				ProtocolID:     1,
+				Address:        testVaultAddr.Bytes(),
+				Name:           "Test",
+				Symbol:         "TST",
+				AssetTokenID:   1,
+				VaultVersion:   entity.MorphoVaultV1,
+				CreatedAtBlock: 18000000,
+			},
 		}, nil
 	}
 
@@ -1103,7 +1102,7 @@ func TestStartStop(t *testing.T) {
 
 func TestStart_EmptyRegistry(t *testing.T) {
 	h := newTestHarness(t)
-	h.morphoRepo.GetAllVaultAddressesFn = func(_ context.Context) ([]common.Address, error) {
+	h.morphoRepo.GetAllVaultsFn = func(_ context.Context) (map[common.Address]*entity.MorphoVault, error) {
 		return nil, nil
 	}
 
@@ -1121,7 +1120,7 @@ func TestStart_EmptyRegistry(t *testing.T) {
 
 func TestStart_RegistryLoadFailure(t *testing.T) {
 	h := newTestHarness(t)
-	h.morphoRepo.GetAllVaultAddressesFn = func(_ context.Context) ([]common.Address, error) {
+	h.morphoRepo.GetAllVaultsFn = func(_ context.Context) (map[common.Address]*entity.MorphoVault, error) {
 		return nil, errors.New("db unavailable")
 	}
 

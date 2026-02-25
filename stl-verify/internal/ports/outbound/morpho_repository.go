@@ -33,8 +33,8 @@ type MorphoRepository interface {
 	// Returns nil, nil if the vault doesn't exist.
 	GetVaultByAddress(ctx context.Context, address common.Address) (*entity.MorphoVault, error)
 
-	// GetAllVaultAddresses retrieves all known vault addresses.
-	GetAllVaultAddresses(ctx context.Context) ([]common.Address, error)
+	// GetAllVaults retrieves all known vaults, keyed by contract address.
+	GetAllVaults(ctx context.Context) (map[common.Address]*entity.MorphoVault, error)
 
 	// SaveVaultState saves a vault state snapshot within an external transaction.
 	SaveVaultState(ctx context.Context, tx pgx.Tx, state *entity.MorphoVaultState) error

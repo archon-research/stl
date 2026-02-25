@@ -9,11 +9,10 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"time"
-
 	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -215,7 +214,7 @@ func run(ctx context.Context, args []string) error {
 	logger.Info("Redis connected", "addr", cfg.redisAddr)
 
 	// Ethereum
-	ethClient, err := ethclient.Dial(cfg.alchemyURL)
+	ethClient, err := ethclient.DialContext(ctx, cfg.alchemyURL)
 	if err != nil {
 		return fmt.Errorf("connecting to Ethereum node: %w", err)
 	}

@@ -45,8 +45,14 @@ func StartLocalStack(t *testing.T, ctx context.Context, services string) (testco
 		t.Fatalf("failed to start localstack: %v", err)
 	}
 
-	host, _ := container.Host(ctx)
-	port, _ := container.MappedPort(ctx, "4566")
+	host, err := container.Host(ctx)
+	if err != nil {
+		t.Fatalf("failed to get localstack host: %v", err)
+	}
+	port, err := container.MappedPort(ctx, "4566")
+	if err != nil {
+		t.Fatalf("failed to get localstack port: %v", err)
+	}
 	config.Endpoint = fmt.Sprintf("http://%s:%s", host, port.Port())
 
 	return container, config

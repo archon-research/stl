@@ -21,6 +21,7 @@ import (
 
 // serviceTestHarness provides a fully wired Service with mock dependencies.
 type serviceTestHarness struct {
+	t            testing.TB
 	svc          *Service
 	multicaller  *testutil.MockMulticaller
 	txManager    *testutil.MockTxManager
@@ -102,6 +103,7 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 	}
 
 	return &serviceTestHarness{
+		t:            t,
 		svc:          svc,
 		multicaller:  multicaller,
 		txManager:    txManager,
@@ -642,7 +644,7 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 		case 1:
 			// getMarketParams or getMarketState
 			return []outbound.Result{
-				{Success: true, ReturnData: h.packMarketParams(testLoanToken, testCollToken, testOracle, testIrm, testutils.BigFromStr("800000000000000000"))},
+				{Success: true, ReturnData: h.packMarketParams(testLoanToken, testCollToken, testOracle, testIrm, testutils.BigFromStr(h.t, "800000000000000000"))},
 			}, nil
 		case 2:
 			// Could be market+position or vault totalAssets+totalSupply or token metadata
@@ -691,6 +693,3 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 		}
 	}
 }
-
-// Suppress unused import warnings.
-var _ = testutils.BigFromStr

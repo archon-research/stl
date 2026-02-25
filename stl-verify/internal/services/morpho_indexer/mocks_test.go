@@ -78,15 +78,15 @@ var errCacheClosed = errors.New("cache connection closed")
 
 // mockMorphoRepo implements outbound.MorphoRepository for testing.
 type mockMorphoRepo struct {
-	GetOrCreateMarketFn    func(ctx context.Context, tx pgx.Tx, market *entity.MorphoMarket) (int64, error)
-	GetMarketByMarketIDFn  func(ctx context.Context, marketID []byte) (*entity.MorphoMarket, error)
-	SaveMarketStateFn      func(ctx context.Context, tx pgx.Tx, state *entity.MorphoMarketState) error
-	SaveMarketPositionFn   func(ctx context.Context, tx pgx.Tx, position *entity.MorphoMarketPosition) error
-	GetOrCreateVaultFn     func(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault) (int64, error)
-	GetVaultByAddressFn    func(ctx context.Context, address common.Address) (*entity.MorphoVault, error)
-	GetAllVaultAddressesFn func(ctx context.Context) ([]common.Address, error)
-	SaveVaultStateFn       func(ctx context.Context, tx pgx.Tx, state *entity.MorphoVaultState) error
-	SaveVaultPositionFn    func(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error
+	GetOrCreateMarketFn   func(ctx context.Context, tx pgx.Tx, market *entity.MorphoMarket) (int64, error)
+	GetMarketByMarketIDFn func(ctx context.Context, marketID []byte) (*entity.MorphoMarket, error)
+	SaveMarketStateFn     func(ctx context.Context, tx pgx.Tx, state *entity.MorphoMarketState) error
+	SaveMarketPositionFn  func(ctx context.Context, tx pgx.Tx, position *entity.MorphoMarketPosition) error
+	GetOrCreateVaultFn    func(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault) (int64, error)
+	GetVaultByAddressFn   func(ctx context.Context, address common.Address) (*entity.MorphoVault, error)
+	GetAllVaultsFn        func(ctx context.Context) (map[common.Address]*entity.MorphoVault, error)
+	SaveVaultStateFn      func(ctx context.Context, tx pgx.Tx, state *entity.MorphoVaultState) error
+	SaveVaultPositionFn   func(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error
 }
 
 func (m *mockMorphoRepo) GetOrCreateMarket(ctx context.Context, tx pgx.Tx, market *entity.MorphoMarket) (int64, error) {
@@ -131,9 +131,9 @@ func (m *mockMorphoRepo) GetVaultByAddress(ctx context.Context, address common.A
 	return nil, nil
 }
 
-func (m *mockMorphoRepo) GetAllVaultAddresses(ctx context.Context) ([]common.Address, error) {
-	if m.GetAllVaultAddressesFn != nil {
-		return m.GetAllVaultAddressesFn(ctx)
+func (m *mockMorphoRepo) GetAllVaults(ctx context.Context) (map[common.Address]*entity.MorphoVault, error) {
+	if m.GetAllVaultsFn != nil {
+		return m.GetAllVaultsFn(ctx)
 	}
 	return nil, nil
 }

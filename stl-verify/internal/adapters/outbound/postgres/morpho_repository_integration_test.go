@@ -833,22 +833,22 @@ func TestGetVaultByAddress_NotFound(t *testing.T) {
 	}
 }
 
-func TestGetAllVaultAddresses_Empty(t *testing.T) {
+func TestGetAllVaults_Empty(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
-	addrs, err := fixture.repo.GetAllVaultAddresses(ctx)
+	vaults, err := fixture.repo.GetAllVaults(ctx)
 	if err != nil {
-		t.Fatalf("GetAllVaultAddresses failed: %v", err)
+		t.Fatalf("GetAllVaults failed: %v", err)
 	}
-	if len(addrs) != 0 {
-		t.Errorf("expected 0 addresses, got %d", len(addrs))
+	if len(vaults) != 0 {
+		t.Errorf("expected 0 vaults, got %d", len(vaults))
 	}
 }
 
-func TestGetAllVaultAddresses_MultipleVaults(t *testing.T) {
+func TestGetAllVaults_MultipleVaults(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	t.Cleanup(fixture.cleanup)
 
@@ -861,12 +861,22 @@ func TestGetAllVaultAddresses_MultipleVaults(t *testing.T) {
 		fixture.createTestVault(t, ctx, addr)
 	}
 
-	addrs, err := fixture.repo.GetAllVaultAddresses(ctx)
+	vaults, err := fixture.repo.GetAllVaults(ctx)
 	if err != nil {
-		t.Fatalf("GetAllVaultAddresses failed: %v", err)
+		t.Fatalf("GetAllVaults failed: %v", err)
 	}
-	if len(addrs) != 3 {
-		t.Errorf("expected 3 addresses, got %d", len(addrs))
+	if len(vaults) != 3 {
+		t.Errorf("expected 3 vaults, got %d", len(vaults))
+	}
+
+	// Verify vault details are populated
+	for addr, vault := range vaults {
+		if vault.ID == 0 {
+			t.Errorf("vault %s has zero ID", addr.Hex())
+		}
+		if vault.Name == "" {
+			t.Errorf("vault %s has empty name", addr.Hex())
+		}
 	}
 }
 

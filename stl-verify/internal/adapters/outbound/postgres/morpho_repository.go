@@ -224,24 +224,26 @@ func (r *MorphoRepository) GetVaultByAddress(ctx context.Context, address common
 	return &v, nil
 }
 
-// GetAllVaultAddresses retrieves all known vault addresses.
-func (r *MorphoRepository) GetAllVaultAddresses(ctx context.Context) ([]common.Address, error) {
-	rows, err := r.pool.Query(ctx, `SELECT address FROM morpho_vault`)
+// GetAllVaults retrieves all known vaults, keyed by contract address.
+func (r *MorphoRepository) GetAllVaults(ctx context.Context) (map[common.Address]*entity.MorphoVault, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block
+		 FROM morpho_vault`)
 	if err != nil {
-		return nil, fmt.Errorf("querying vault addresses: %w", err)
+		return nil, fmt.Errorf("querying vaults: %w", err)
 	}
 	defer rows.Close()
 
-	var addresses []common.Address
+	vaults := make(map[common.Address]*entity.MorphoVault)
 	for rows.Next() {
-		var addrBytes []byte
-		if err := rows.Scan(&addrBytes); err != nil {
-			return nil, fmt.Errorf("scanning vault address: %w", err)
+		var v entity.MorphoVault
+		if err := rows.Scan(&v.ID, &v.ProtocolID, &v.Address, &v.Name, &v.Symbol, &v.AssetTokenID, &v.VaultVersion, &v.CreatedAtBlock); err != nil {
+			return nil, fmt.Errorf("scanning vault: %w", err)
 		}
-		addresses = append(addresses, common.BytesToAddress(addrBytes))
+		vaults[common.BytesToAddress(v.Address)] = &v
 	}
 
-	return addresses, rows.Err()
+	return vaults, rows.Err()
 }
 
 // SaveVaultState saves a vault state snapshot within an external transaction.

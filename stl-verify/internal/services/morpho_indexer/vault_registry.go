@@ -31,24 +31,11 @@ func NewVaultRegistry(logger *slog.Logger) *VaultRegistry {
 	}
 }
 
-// LoadFromDB loads all known vault addresses from the database.
+// LoadFromDB loads all known vaults from the database in a single query.
 func (r *VaultRegistry) LoadFromDB(ctx context.Context, repo outbound.MorphoRepository) error {
-	addresses, err := repo.GetAllVaultAddresses(ctx)
+	loaded, err := repo.GetAllVaults(ctx)
 	if err != nil {
-		return fmt.Errorf("loading vault addresses: %w", err)
-	}
-
-	// Fetch all vault details before acquiring the lock to avoid holding it during DB queries.
-	loaded := make(map[common.Address]*entity.MorphoVault, len(addresses))
-	for _, addr := range addresses {
-		vault, err := repo.GetVaultByAddress(ctx, addr)
-		if err != nil {
-			r.logger.Warn("failed to load vault details", "address", addr.Hex(), "error", err)
-			continue
-		}
-		if vault != nil {
-			loaded[addr] = vault
-		}
+		return fmt.Errorf("loading vaults: %w", err)
 	}
 
 	r.mu.Lock()
