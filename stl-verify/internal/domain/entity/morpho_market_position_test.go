@@ -156,6 +156,20 @@ func TestComputeSupplyAssets(t *testing.T) {
 			want:        big.NewInt(0),
 		},
 		{
+			name:        "nil shares",
+			shares:      nil,
+			totalAssets: big.NewInt(2000),
+			totalShares: big.NewInt(1000),
+			want:        big.NewInt(0),
+		},
+		{
+			name:        "nil total assets",
+			shares:      big.NewInt(1000),
+			totalAssets: nil,
+			totalShares: big.NewInt(1000),
+			want:        big.NewInt(0),
+		},
+		{
 			name:        "zero shares",
 			shares:      big.NewInt(0),
 			totalAssets: big.NewInt(2000),
@@ -208,6 +222,20 @@ func TestComputeBorrowAssets(t *testing.T) {
 			shares:      big.NewInt(1000),
 			totalAssets: big.NewInt(2000),
 			totalShares: nil,
+			want:        big.NewInt(0),
+		},
+		{
+			name:        "nil shares",
+			shares:      nil,
+			totalAssets: big.NewInt(2000),
+			totalShares: big.NewInt(1000),
+			want:        big.NewInt(0),
+		},
+		{
+			name:        "nil total assets",
+			shares:      big.NewInt(1000),
+			totalAssets: nil,
+			totalShares: big.NewInt(1000),
 			want:        big.NewInt(0),
 		},
 		{

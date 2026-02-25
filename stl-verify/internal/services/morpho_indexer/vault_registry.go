@@ -41,9 +41,7 @@ func (r *VaultRegistry) LoadFromDB(ctx context.Context, repo outbound.MorphoRepo
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	for addr, vault := range loaded {
-		r.vaults[addr] = vault
-	}
+	r.vaults = loaded
 
 	r.logger.Info("loaded vaults from database", "count", len(r.vaults))
 	return nil
@@ -84,6 +82,7 @@ func (r *VaultRegistry) RegisterVault(address common.Address, vault *entity.Morp
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.vaults[address] = vault
+	delete(r.notVaults, address)
 	r.logger.Info("registered new vault",
 		"address", address.Hex(),
 		"name", vault.Name,

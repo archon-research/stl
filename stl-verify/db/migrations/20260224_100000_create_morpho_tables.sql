@@ -7,18 +7,20 @@
 CREATE TABLE IF NOT EXISTS morpho_market
 (
     id                  BIGSERIAL PRIMARY KEY,
+    chain_id            INT         NOT NULL REFERENCES chain (chain_id),
     protocol_id         BIGINT      NOT NULL REFERENCES protocol (id),
-    market_id           BYTEA       NOT NULL, -- 32-byte keccak256 hash identifying the market
+    market_id           BYTEA       NOT NULL,
     loan_token_id       BIGINT      NOT NULL REFERENCES token (id),
     collateral_token_id BIGINT      NOT NULL REFERENCES token (id),
-    oracle_address      BYTEA       NOT NULL, -- 20 bytes
-    irm_address         BYTEA       NOT NULL, -- 20 bytes (interest rate model)
-    lltv                NUMERIC     NOT NULL, -- liquidation loan-to-value (scaled by 1e18)
+    oracle_address      BYTEA       NOT NULL,
+    irm_address         BYTEA       NOT NULL,
+    lltv                NUMERIC     NOT NULL,
     created_at_block    BIGINT      NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (protocol_id, market_id)
+    UNIQUE (chain_id, market_id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_morpho_market_chain_id ON morpho_market (chain_id);
 CREATE INDEX IF NOT EXISTS idx_morpho_market_market_id ON morpho_market (market_id);
 CREATE INDEX IF NOT EXISTS idx_morpho_market_loan_token ON morpho_market (loan_token_id);
 CREATE INDEX IF NOT EXISTS idx_morpho_market_collateral_token ON morpho_market (collateral_token_id);
@@ -35,9 +37,9 @@ CREATE TABLE IF NOT EXISTS morpho_market_state
     total_supply_shares  NUMERIC     NOT NULL,
     total_borrow_assets  NUMERIC     NOT NULL,
     total_borrow_shares  NUMERIC     NOT NULL,
-    last_update          BIGINT      NOT NULL, -- timestamp of last interest accrual
-    fee                  NUMERIC     NOT NULL, -- protocol fee (scaled by 1e18)
-    -- AccrueInterest event data (nullable, only set when triggered by AccrueInterest)
+    last_update          BIGINT      NOT NULL,
+    fee                  NUMERIC     NOT NULL,
+    -- AccrueInterest raw data (nullable, only set when triggered by the AccrueInterest event)
     prev_borrow_rate     NUMERIC,
     interest_accrued     NUMERIC,
     fee_shares           NUMERIC,
@@ -64,8 +66,8 @@ CREATE TABLE IF NOT EXISTS morpho_market_position
     supply_shares    NUMERIC     NOT NULL,
     borrow_shares    NUMERIC     NOT NULL,
     collateral       NUMERIC     NOT NULL,
-    supply_assets    NUMERIC     NOT NULL, -- computed: supplyShares * totalSupplyAssets / totalSupplyShares
-    borrow_assets    NUMERIC     NOT NULL, -- computed: round-up division
+    supply_assets    NUMERIC     NOT NULL,
+    borrow_assets    NUMERIC     NOT NULL,
     event_type       TEXT        NOT NULL,
     tx_hash          BYTEA       NOT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -87,17 +89,19 @@ CREATE INDEX IF NOT EXISTS idx_morpho_market_position_user_market ON morpho_mark
 CREATE TABLE IF NOT EXISTS morpho_vault
 (
     id               BIGSERIAL PRIMARY KEY,
+    chain_id         INT         NOT NULL REFERENCES chain (chain_id),
     protocol_id      BIGINT      NOT NULL REFERENCES protocol (id),
-    address          BYTEA       NOT NULL, -- 20 bytes
+    address          BYTEA       NOT NULL,
     name             VARCHAR(255),
     symbol           VARCHAR(50),
     asset_token_id   BIGINT      NOT NULL REFERENCES token (id),
-    vault_version    SMALLINT    NOT NULL, -- 1 = V1.1 (MetaMorpho), 2 = V2 (MetaMorpho V2)
+    vault_version    SMALLINT    NOT NULL,
     created_at_block BIGINT      NOT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (protocol_id, address)
+    UNIQUE (chain_id, address)
 );
 
+CREATE INDEX IF NOT EXISTS idx_morpho_vault_chain_id ON morpho_vault (chain_id);
 CREATE INDEX IF NOT EXISTS idx_morpho_vault_address ON morpho_vault (address);
 CREATE INDEX IF NOT EXISTS idx_morpho_vault_asset_token ON morpho_vault (asset_token_id);
 
@@ -110,12 +114,12 @@ CREATE TABLE IF NOT EXISTS morpho_vault_state
     block_number     BIGINT      NOT NULL,
     block_version    INT         NOT NULL DEFAULT 0,
     total_assets     NUMERIC     NOT NULL,
-    total_supply     NUMERIC     NOT NULL, -- total vault shares
-    -- AccrueInterest raw data (nullable, only set when triggered by AccrueInterest)
+    total_shares     NUMERIC     NOT NULL,
+    -- AccrueInterest raw data (nullable, only set when triggered by the AccrueInterest event)
     fee_shares       NUMERIC,
     new_total_assets NUMERIC,
-    previous_total_assets  NUMERIC,  -- V2 only: previousTotalAssets
-    management_fee_shares  NUMERIC,  -- V2 only: managementFeeShares
+    previous_total_assets  NUMERIC,
+    management_fee_shares  NUMERIC,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (morpho_vault_id, block_number, block_version)
 ) WITH (
@@ -137,7 +141,7 @@ CREATE TABLE IF NOT EXISTS morpho_vault_position
     block_number    BIGINT      NOT NULL,
     block_version   INT         NOT NULL DEFAULT 0,
     shares          NUMERIC     NOT NULL,
-    assets          NUMERIC     NOT NULL, -- computed: shares * totalAssets / totalSupply
+    assets          NUMERIC     NOT NULL,
     event_type      TEXT        NOT NULL,
     tx_hash         BYTEA       NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),

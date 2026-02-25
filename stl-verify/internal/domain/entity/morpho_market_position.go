@@ -82,10 +82,9 @@ func (p *MorphoMarketPosition) validate() error {
 // ComputeSupplyAssets calculates supply assets from shares using: supplyShares * totalSupplyAssets / totalSupplyShares (round down).
 // Returns 0 if totalSupplyShares is zero.
 func ComputeSupplyAssets(supplyShares, totalSupplyAssets, totalSupplyShares *big.Int) *big.Int {
-	if totalSupplyShares == nil || totalSupplyShares.Sign() == 0 {
+	if supplyShares == nil || totalSupplyAssets == nil || totalSupplyShares == nil || totalSupplyShares.Sign() == 0 {
 		return new(big.Int)
 	}
-	// supplyShares * totalSupplyAssets / totalSupplyShares
 	num := new(big.Int).Mul(supplyShares, totalSupplyAssets)
 	return new(big.Int).Div(num, totalSupplyShares)
 }
@@ -93,7 +92,7 @@ func ComputeSupplyAssets(supplyShares, totalSupplyAssets, totalSupplyShares *big
 // ComputeBorrowAssets calculates borrow assets from shares using: (borrowShares * totalBorrowAssets + totalBorrowShares - 1) / totalBorrowShares (round up).
 // Returns 0 if totalBorrowShares is zero.
 func ComputeBorrowAssets(borrowShares, totalBorrowAssets, totalBorrowShares *big.Int) *big.Int {
-	if totalBorrowShares == nil || totalBorrowShares.Sign() == 0 {
+	if borrowShares == nil || totalBorrowAssets == nil || totalBorrowShares == nil || totalBorrowShares.Sign() == 0 {
 		return new(big.Int)
 	}
 	if borrowShares.Sign() == 0 {

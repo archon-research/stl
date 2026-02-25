@@ -409,7 +409,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 			return fmt.Errorf("getting protocol: %w", err)
 		}
 
-		vault, err := entity.NewMorphoVault(protocolID, vaultAddress.Bytes(), metadata.Name, metadata.Symbol, tokenID, metadata.Version, blockNumber)
+		vault, err := entity.NewMorphoVault(chainID, protocolID, vaultAddress.Bytes(), metadata.Name, metadata.Symbol, tokenID, metadata.Version, blockNumber)
 		if err != nil {
 			return fmt.Errorf("creating vault entity: %w", err)
 		}
@@ -464,7 +464,7 @@ func (s *Service) handleCreateMarket(ctx context.Context, eventData *MorphoBlueE
 			return fmt.Errorf("getting collateral token: %w", err)
 		}
 
-		market, err := entity.NewMorphoMarket(protocolID, eventData.MarketID[:], loanTokenID, collTokenID, mp.Oracle.Bytes(), mp.Irm.Bytes(), mp.LLTV, blockNumber)
+		market, err := entity.NewMorphoMarket(chainID, protocolID, common.BytesToHash(eventData.MarketID[:]), loanTokenID, collTokenID, mp.Oracle, mp.Irm, mp.LLTV, blockNumber)
 		if err != nil {
 			return fmt.Errorf("creating market entity: %w", err)
 		}
@@ -670,7 +670,7 @@ type vaultAccrueData struct {
 // ensureMarket ensures the market exists in the database and returns its ID.
 func (s *Service) ensureMarket(ctx context.Context, tx pgx.Tx, marketID [32]byte, chainID, blockNumber int64) (int64, error) {
 	// Check if market already exists
-	existing, err := s.morphoRepo.GetMarketByMarketID(ctx, marketID[:])
+	existing, err := s.morphoRepo.GetMarketByMarketID(ctx, common.BytesToHash(marketID[:]))
 	if err != nil {
 		return 0, fmt.Errorf("checking market existence: %w", err)
 	}
@@ -705,7 +705,7 @@ func (s *Service) ensureMarket(ctx context.Context, tx pgx.Tx, marketID [32]byte
 		return 0, fmt.Errorf("getting collateral token: %w", err)
 	}
 
-	market, err := entity.NewMorphoMarket(protocolID, marketID[:], loanTokenID, collTokenID, params.Oracle.Bytes(), params.Irm.Bytes(), params.LLTV, blockNumber)
+	market, err := entity.NewMorphoMarket(chainID, protocolID, common.BytesToHash(marketID[:]), loanTokenID, collTokenID, params.Oracle, params.Irm, params.LLTV, blockNumber)
 	if err != nil {
 		return 0, fmt.Errorf("creating market entity: %w", err)
 	}

@@ -13,7 +13,7 @@ type MorphoVaultPosition struct {
 	BlockNumber   int64
 	BlockVersion  int
 	Shares        *big.Int
-	Assets        *big.Int // computed: shares * totalAssets / totalSupply
+	Assets        *big.Int
 	EventType     MorphoEventType
 	TxHash        []byte
 }

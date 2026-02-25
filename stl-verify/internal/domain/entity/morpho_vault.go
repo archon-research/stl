@@ -13,6 +13,7 @@ const (
 // MorphoVault represents a MetaMorpho vault.
 type MorphoVault struct {
 	ID             int64
+	ChainID        int64
 	ProtocolID     int64
 	Address        []byte // 20 bytes
 	Name           string
@@ -23,8 +24,9 @@ type MorphoVault struct {
 }
 
 // NewMorphoVault creates a new MorphoVault entity with validation.
-func NewMorphoVault(protocolID int64, address []byte, name, symbol string, assetTokenID int64, vaultVersion MorphoVaultVersion, createdAtBlock int64) (*MorphoVault, error) {
+func NewMorphoVault(chainID, protocolID int64, address []byte, name, symbol string, assetTokenID int64, vaultVersion MorphoVaultVersion, createdAtBlock int64) (*MorphoVault, error) {
 	v := &MorphoVault{
+		ChainID:        chainID,
 		ProtocolID:     protocolID,
 		Address:        address,
 		Name:           name,
@@ -40,6 +42,9 @@ func NewMorphoVault(protocolID int64, address []byte, name, symbol string, asset
 }
 
 func (v *MorphoVault) validate() error {
+	if v.ChainID <= 0 {
+		return fmt.Errorf("chainID must be positive, got %d", v.ChainID)
+	}
 	if v.ProtocolID <= 0 {
 		return fmt.Errorf("protocolID must be positive, got %d", v.ProtocolID)
 	}

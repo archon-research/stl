@@ -12,7 +12,7 @@ type MorphoVaultState struct {
 	BlockNumber   int64
 	BlockVersion  int
 	TotalAssets   *big.Int
-	TotalSupply   *big.Int // total vault shares
+	TotalShares   *big.Int
 	// AccrueInterest raw data (nil when not triggered by AccrueInterest)
 	FeeShares      *big.Int // V1: single fee, V2: performanceFeeShares
 	NewTotalAssets *big.Int
@@ -22,13 +22,13 @@ type MorphoVaultState struct {
 }
 
 // NewMorphoVaultState creates a new MorphoVaultState entity with validation.
-func NewMorphoVaultState(morphoVaultID, blockNumber int64, blockVersion int, totalAssets, totalSupply *big.Int) (*MorphoVaultState, error) {
+func NewMorphoVaultState(morphoVaultID, blockNumber int64, blockVersion int, totalAssets, totalShares *big.Int) (*MorphoVaultState, error) {
 	s := &MorphoVaultState{
 		MorphoVaultID: morphoVaultID,
 		BlockNumber:   blockNumber,
 		BlockVersion:  blockVersion,
 		TotalAssets:   totalAssets,
-		TotalSupply:   totalSupply,
+		TotalShares:   totalShares,
 	}
 	if err := s.validate(); err != nil {
 		return nil, err
@@ -57,18 +57,18 @@ func (s *MorphoVaultState) validate() error {
 	if s.TotalAssets == nil {
 		return fmt.Errorf("totalAssets must not be nil")
 	}
-	if s.TotalSupply == nil {
-		return fmt.Errorf("totalSupply must not be nil")
+	if s.TotalShares == nil {
+		return fmt.Errorf("totalShares must not be nil")
 	}
 	return nil
 }
 
 // ComputeVaultAssets calculates vault user assets from shares: shares * totalAssets / totalSupply (round down).
 // Returns 0 if totalSupply is zero.
-func ComputeVaultAssets(shares, totalAssets, totalSupply *big.Int) *big.Int {
-	if totalSupply == nil || totalSupply.Sign() == 0 {
+func ComputeVaultAssets(shares, totalAssets, totalShares *big.Int) *big.Int {
+	if shares == nil || totalAssets == nil || totalShares == nil || totalShares.Sign() == 0 {
 		return new(big.Int)
 	}
 	num := new(big.Int).Mul(shares, totalAssets)
-	return new(big.Int).Div(num, totalSupply)
+	return new(big.Int).Div(num, totalShares)
 }

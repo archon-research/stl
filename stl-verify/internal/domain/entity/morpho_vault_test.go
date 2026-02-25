@@ -10,6 +10,7 @@ func TestNewMorphoVault(t *testing.T) {
 
 	tests := []struct {
 		name        string
+		chainID     int64
 		protocolID  int64
 		address     []byte
 		vaultName   string
@@ -21,41 +22,47 @@ func TestNewMorphoVault(t *testing.T) {
 		errContains string
 	}{
 		{
-			name: "valid V1 vault", protocolID: 1, address: validAddr,
+			name: "valid V1 vault", chainID: 1, protocolID: 1, address: validAddr,
 			vaultName: "Steakhouse USDC", symbol: "steakUSDC", assetToken: 1,
 			version: MorphoVaultV1, block: 19000000,
 		},
 		{
-			name: "valid V2 vault", protocolID: 1, address: validAddr,
+			name: "valid V2 vault", chainID: 1, protocolID: 1, address: validAddr,
 			vaultName: "Gauntlet WETH", symbol: "gtWETH", assetToken: 2,
 			version: MorphoVaultV2, block: 20000000,
 		},
 		{
-			name: "zero protocol ID", protocolID: 0, address: validAddr,
+			name: "zero chain ID", chainID: 0, protocolID: 1, address: validAddr,
+			vaultName: "test", symbol: "T", assetToken: 1,
+			version: MorphoVaultV1, block: 1,
+			wantErr: true, errContains: "chainID must be positive",
+		},
+		{
+			name: "zero protocol ID", chainID: 1, protocolID: 0, address: validAddr,
 			vaultName: "test", symbol: "T", assetToken: 1,
 			version: MorphoVaultV1, block: 1,
 			wantErr: true, errContains: "protocolID must be positive",
 		},
 		{
-			name: "short address", protocolID: 1, address: make([]byte, 10),
+			name: "short address", chainID: 1, protocolID: 1, address: make([]byte, 10),
 			vaultName: "test", symbol: "T", assetToken: 1,
 			version: MorphoVaultV1, block: 1,
 			wantErr: true, errContains: "address must be 20 bytes",
 		},
 		{
-			name: "zero asset token", protocolID: 1, address: validAddr,
+			name: "zero asset token", chainID: 1, protocolID: 1, address: validAddr,
 			vaultName: "test", symbol: "T", assetToken: 0,
 			version: MorphoVaultV1, block: 1,
 			wantErr: true, errContains: "assetTokenID must be positive",
 		},
 		{
-			name: "invalid version", protocolID: 1, address: validAddr,
+			name: "invalid version", chainID: 1, protocolID: 1, address: validAddr,
 			vaultName: "test", symbol: "T", assetToken: 1,
 			version: MorphoVaultVersion(3), block: 1,
 			wantErr: true, errContains: "vaultVersion must be 1 or 2",
 		},
 		{
-			name: "zero block", protocolID: 1, address: validAddr,
+			name: "zero block", chainID: 1, protocolID: 1, address: validAddr,
 			vaultName: "test", symbol: "T", assetToken: 1,
 			version: MorphoVaultV1, block: 0,
 			wantErr: true, errContains: "createdAtBlock must be positive",
@@ -64,7 +71,7 @@ func TestNewMorphoVault(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewMorphoVault(tt.protocolID, tt.address, tt.vaultName, tt.symbol, tt.assetToken, tt.version, tt.block)
+			got, err := NewMorphoVault(tt.chainID, tt.protocolID, tt.address, tt.vaultName, tt.symbol, tt.assetToken, tt.version, tt.block)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")

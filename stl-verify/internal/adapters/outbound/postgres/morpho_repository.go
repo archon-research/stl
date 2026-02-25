@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -45,13 +46,14 @@ func (r *MorphoRepository) GetOrCreateMarket(ctx context.Context, tx pgx.Tx, mar
 	}
 
 	var id int64
+	// The no-op SET is required so that DO UPDATE ... RETURNING id works on conflict.
 	err = tx.QueryRow(ctx,
-		`INSERT INTO morpho_market (protocol_id, market_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 ON CONFLICT (protocol_id, market_id) DO UPDATE SET protocol_id = EXCLUDED.protocol_id
+		`INSERT INTO morpho_market (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 ON CONFLICT (chain_id, market_id) DO UPDATE SET protocol_id = EXCLUDED.protocol_id
 		 RETURNING id`,
-		market.ProtocolID, market.MarketID, market.LoanTokenID, market.CollateralTokenID,
-		market.OracleAddress, market.IrmAddress, lltv, market.CreatedAtBlock,
+		market.ChainID, market.ProtocolID, market.MarketID.Bytes(), market.LoanTokenID, market.CollateralTokenID,
+		market.OracleAddress.Bytes(), market.IrmAddress.Bytes(), lltv, market.CreatedAtBlock,
 	).Scan(&id)
 
 	if err != nil {
@@ -61,26 +63,51 @@ func (r *MorphoRepository) GetOrCreateMarket(ctx context.Context, tx pgx.Tx, mar
 }
 
 // GetMarketByMarketID retrieves a market by its 32-byte market ID hash.
-func (r *MorphoRepository) GetMarketByMarketID(ctx context.Context, marketID []byte) (*entity.MorphoMarket, error) {
-	var m entity.MorphoMarket
-	var lltvStr string
+func (r *MorphoRepository) GetMarketByMarketID(ctx context.Context, marketID common.Hash) (*entity.MorphoMarket, error) {
+	var (
+		lltvStr            string
+		marketIDBytes      []byte
+		oracleAddressBytes []byte
+		irmAddressBytes    []byte
+		id, chainID        int64
+		protocolID         int64
+		loanTokenID        int64
+		collateralTokenID  int64
+		createdAtBlock     int64
+	)
 
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, protocol_id, market_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block
+		`SELECT id, chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block
 		 FROM morpho_market WHERE market_id = $1`,
-		marketID,
-	).Scan(&m.ID, &m.ProtocolID, &m.MarketID, &m.LoanTokenID, &m.CollateralTokenID,
-		&m.OracleAddress, &m.IrmAddress, &lltvStr, &m.CreatedAtBlock)
+		marketID.Bytes(),
+	).Scan(&id, &chainID, &protocolID, &marketIDBytes, &loanTokenID, &collateralTokenID,
+		&oracleAddressBytes, &irmAddressBytes, &lltvStr, &createdAtBlock)
 
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("querying morpho market: %w", err)
 	}
 
-	m.LLTV = numericToBigInt(lltvStr)
-	return &m, nil
+	lltv, err := numericToBigInt(lltvStr)
+	if err != nil {
+		return nil, fmt.Errorf("converting lltv: %w", err)
+	}
+
+	m := &entity.MorphoMarket{
+		ID:                id,
+		ChainID:           chainID,
+		ProtocolID:        protocolID,
+		MarketID:          common.BytesToHash(marketIDBytes),
+		LoanTokenID:       loanTokenID,
+		CollateralTokenID: collateralTokenID,
+		OracleAddress:     common.BytesToAddress(oracleAddressBytes),
+		IrmAddress:        common.BytesToAddress(irmAddressBytes),
+		LLTV:              lltv,
+		CreatedAtBlock:    createdAtBlock,
+	}
+	return m, nil
 }
 
 // SaveMarketState saves a market state snapshot within an external transaction.
@@ -120,6 +147,9 @@ func (r *MorphoRepository) SaveMarketState(ctx context.Context, tx pgx.Tx, state
 		feeShares = &s
 	}
 
+	// ON CONFLICT UPDATE: Multiple events within one block yield the same on-chain
+	// snapshot (eth_call reads end-of-block state). The upsert ensures only the
+	// latest event_type/tx_hash is kept while the state values remain correct.
 	_, err = tx.Exec(ctx,
 		`INSERT INTO morpho_market_state (morpho_market_id, block_number, block_version, total_supply_assets, total_supply_shares, total_borrow_assets, total_borrow_shares, last_update, fee, prev_borrow_rate, interest_accrued, fee_shares)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -191,12 +221,12 @@ func (r *MorphoRepository) SaveMarketPosition(ctx context.Context, tx pgx.Tx, po
 func (r *MorphoRepository) GetOrCreateVault(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault) (int64, error) {
 	var id int64
 	err := tx.QueryRow(ctx,
-		`INSERT INTO morpho_vault (protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 ON CONFLICT (protocol_id, address) DO UPDATE SET
+		`INSERT INTO morpho_vault (chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET
 			vault_version = GREATEST(morpho_vault.vault_version, EXCLUDED.vault_version)
 		 RETURNING id`,
-		vault.ProtocolID, vault.Address, vault.Name, vault.Symbol,
+		vault.ChainID, vault.ProtocolID, vault.Address, vault.Name, vault.Symbol,
 		vault.AssetTokenID, vault.VaultVersion, vault.CreatedAtBlock,
 	).Scan(&id)
 
@@ -210,12 +240,12 @@ func (r *MorphoRepository) GetOrCreateVault(ctx context.Context, tx pgx.Tx, vaul
 func (r *MorphoRepository) GetVaultByAddress(ctx context.Context, address common.Address) (*entity.MorphoVault, error) {
 	var v entity.MorphoVault
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block
+		`SELECT id, chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block
 		 FROM morpho_vault WHERE address = $1`,
 		address.Bytes(),
-	).Scan(&v.ID, &v.ProtocolID, &v.Address, &v.Name, &v.Symbol, &v.AssetTokenID, &v.VaultVersion, &v.CreatedAtBlock)
+	).Scan(&v.ID, &v.ChainID, &v.ProtocolID, &v.Address, &v.Name, &v.Symbol, &v.AssetTokenID, &v.VaultVersion, &v.CreatedAtBlock)
 
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -227,7 +257,7 @@ func (r *MorphoRepository) GetVaultByAddress(ctx context.Context, address common
 // GetAllVaults retrieves all known vaults, keyed by contract address.
 func (r *MorphoRepository) GetAllVaults(ctx context.Context) (map[common.Address]*entity.MorphoVault, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block
+		`SELECT id, chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block
 		 FROM morpho_vault`)
 	if err != nil {
 		return nil, fmt.Errorf("querying vaults: %w", err)
@@ -237,13 +267,16 @@ func (r *MorphoRepository) GetAllVaults(ctx context.Context) (map[common.Address
 	vaults := make(map[common.Address]*entity.MorphoVault)
 	for rows.Next() {
 		var v entity.MorphoVault
-		if err := rows.Scan(&v.ID, &v.ProtocolID, &v.Address, &v.Name, &v.Symbol, &v.AssetTokenID, &v.VaultVersion, &v.CreatedAtBlock); err != nil {
+		if err := rows.Scan(&v.ID, &v.ChainID, &v.ProtocolID, &v.Address, &v.Name, &v.Symbol, &v.AssetTokenID, &v.VaultVersion, &v.CreatedAtBlock); err != nil {
 			return nil, fmt.Errorf("scanning vault: %w", err)
 		}
 		vaults[common.BytesToAddress(v.Address)] = &v
 	}
 
-	return vaults, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating vaults: %w", err)
+	}
+	return vaults, nil
 }
 
 // SaveVaultState saves a vault state snapshot within an external transaction.
@@ -252,9 +285,9 @@ func (r *MorphoRepository) SaveVaultState(ctx context.Context, tx pgx.Tx, state 
 	if err != nil {
 		return fmt.Errorf("converting total_assets: %w", err)
 	}
-	totalSupply, err := bigIntToNumeric(state.TotalSupply)
+	totalShares, err := bigIntToNumeric(state.TotalShares)
 	if err != nil {
-		return fmt.Errorf("converting total_supply: %w", err)
+		return fmt.Errorf("converting total_shares: %w", err)
 	}
 
 	var feeShares, newTotalAssets, previousTotalAssets, managementFeeShares *string
@@ -276,17 +309,17 @@ func (r *MorphoRepository) SaveVaultState(ctx context.Context, tx pgx.Tx, state 
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_vault_state (morpho_vault_id, block_number, block_version, total_assets, total_supply, fee_shares, new_total_assets, previous_total_assets, management_fee_shares)
+		`INSERT INTO morpho_vault_state (morpho_vault_id, block_number, block_version, total_assets, total_shares, fee_shares, new_total_assets, previous_total_assets, management_fee_shares)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (morpho_vault_id, block_number, block_version) DO UPDATE SET
 			total_assets = EXCLUDED.total_assets,
-			total_supply = EXCLUDED.total_supply,
+			total_shares = EXCLUDED.total_shares,
 			fee_shares = EXCLUDED.fee_shares,
 			new_total_assets = EXCLUDED.new_total_assets,
 			previous_total_assets = EXCLUDED.previous_total_assets,
 			management_fee_shares = EXCLUDED.management_fee_shares`,
 		state.MorphoVaultID, state.BlockNumber, state.BlockVersion,
-		totalAssets, totalSupply, feeShares, newTotalAssets, previousTotalAssets, managementFeeShares,
+		totalAssets, totalShares, feeShares, newTotalAssets, previousTotalAssets, managementFeeShares,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho vault state: %w", err)
@@ -323,8 +356,10 @@ func (r *MorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, pos
 }
 
 // numericToBigInt converts a numeric string from Postgres to *big.Int.
-func numericToBigInt(s string) *big.Int {
-	n := new(big.Int)
-	n.SetString(s, 10)
-	return n
+func numericToBigInt(s string) (*big.Int, error) {
+	n, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid numeric string: %q", s)
+	}
+	return n, nil
 }

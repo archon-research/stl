@@ -3,24 +3,28 @@ package entity
 import (
 	"fmt"
 	"math/big"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // MorphoMarket represents a Morpho Blue isolated market.
 type MorphoMarket struct {
 	ID                int64
+	ChainID           int64
 	ProtocolID        int64
-	MarketID          []byte // 32-byte keccak256 hash
+	MarketID          common.Hash
 	LoanTokenID       int64
 	CollateralTokenID int64
-	OracleAddress     []byte   // 20 bytes
-	IrmAddress        []byte   // 20 bytes (interest rate model)
-	LLTV              *big.Int // liquidation loan-to-value (scaled by 1e18)
+	OracleAddress     common.Address
+	IrmAddress        common.Address
+	LLTV              *big.Int
 	CreatedAtBlock    int64
 }
 
 // NewMorphoMarket creates a new MorphoMarket entity with validation.
-func NewMorphoMarket(protocolID int64, marketID []byte, loanTokenID, collateralTokenID int64, oracleAddress, irmAddress []byte, lltv *big.Int, createdAtBlock int64) (*MorphoMarket, error) {
+func NewMorphoMarket(chainID, protocolID int64, marketID common.Hash, loanTokenID, collateralTokenID int64, oracleAddress, irmAddress common.Address, lltv *big.Int, createdAtBlock int64) (*MorphoMarket, error) {
 	m := &MorphoMarket{
+		ChainID:           chainID,
 		ProtocolID:        protocolID,
 		MarketID:          marketID,
 		LoanTokenID:       loanTokenID,
@@ -37,23 +41,20 @@ func NewMorphoMarket(protocolID int64, marketID []byte, loanTokenID, collateralT
 }
 
 func (m *MorphoMarket) validate() error {
+	if m.ChainID <= 0 {
+		return fmt.Errorf("chainID must be positive, got %d", m.ChainID)
+	}
 	if m.ProtocolID <= 0 {
 		return fmt.Errorf("protocolID must be positive, got %d", m.ProtocolID)
 	}
-	if len(m.MarketID) != 32 {
-		return fmt.Errorf("marketID must be 32 bytes, got %d", len(m.MarketID))
+	if m.MarketID == (common.Hash{}) {
+		return fmt.Errorf("marketID must not be empty")
 	}
 	if m.LoanTokenID <= 0 {
 		return fmt.Errorf("loanTokenID must be positive, got %d", m.LoanTokenID)
 	}
 	if m.CollateralTokenID <= 0 {
 		return fmt.Errorf("collateralTokenID must be positive, got %d", m.CollateralTokenID)
-	}
-	if len(m.OracleAddress) != 20 {
-		return fmt.Errorf("oracleAddress must be 20 bytes, got %d", len(m.OracleAddress))
-	}
-	if len(m.IrmAddress) != 20 {
-		return fmt.Errorf("irmAddress must be 20 bytes, got %d", len(m.IrmAddress))
 	}
 	if m.LLTV == nil {
 		return fmt.Errorf("lltv must not be nil")

@@ -852,7 +852,7 @@ func TestProcessBlockEvent_EnsureMarket_LookupError(t *testing.T) {
 	h.setupPositionEventMulticall()
 
 	dbErr := errors.New("db timeout")
-	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ []byte) (*entity.MorphoMarket, error) {
+	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ common.Hash) (*entity.MorphoMarket, error) {
 		return nil, dbErr
 	}
 
@@ -1099,6 +1099,7 @@ func TestStartStop(t *testing.T) {
 		return map[common.Address]*entity.MorphoVault{
 			testVaultAddr: {
 				ID:             1,
+				ChainID:        1,
 				ProtocolID:     1,
 				Address:        testVaultAddr.Bytes(),
 				Name:           "Test",
@@ -1374,7 +1375,7 @@ func TestProcessBlockEvent_AccrueInterest_EnsureMarketError(t *testing.T) {
 		return nil, fmt.Errorf("unexpected %d calls", len(calls))
 	}
 
-	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ []byte) (*entity.MorphoMarket, error) {
+	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ common.Hash) (*entity.MorphoMarket, error) {
 		return nil, errors.New("db lookup failed")
 	}
 
@@ -1655,7 +1656,7 @@ func TestProcessBlockEvent_EnsureMarket_GetMarketParamsError(t *testing.T) {
 	h.setupPositionEventMulticall()
 
 	// Market not in DB.
-	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ []byte) (*entity.MorphoMarket, error) {
+	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ common.Hash) (*entity.MorphoMarket, error) {
 		return nil, nil
 	}
 
@@ -1999,7 +2000,7 @@ func TestProcessBlockEvent_EnsureMarket_TokenPairMetadataError(t *testing.T) {
 	h := newTestHarness(t)
 
 	// Market not in DB.
-	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ []byte) (*entity.MorphoMarket, error) {
+	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ common.Hash) (*entity.MorphoMarket, error) {
 		return nil, nil
 	}
 
@@ -2047,7 +2048,7 @@ func TestProcessBlockEvent_Liquidate_EnsureMarketError(t *testing.T) {
 		return nil, fmt.Errorf("unexpected %d calls", len(calls))
 	}
 
-	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ []byte) (*entity.MorphoMarket, error) {
+	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ common.Hash) (*entity.MorphoMarket, error) {
 		return nil, errors.New("db lookup failed")
 	}
 

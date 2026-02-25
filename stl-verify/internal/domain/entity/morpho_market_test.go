@@ -4,89 +4,87 @@ import (
 	"math/big"
 	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestNewMorphoMarket(t *testing.T) {
-	validMarketID := make([]byte, 32)
-	validAddr := make([]byte, 20)
+	validMarketID := common.BytesToHash([]byte("test-market-id-32-bytes-long!!!!"))
+	validOracle := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	validIrm := common.HexToAddress("0x2222222222222222222222222222222222222222")
 
 	tests := []struct {
 		name        string
+		chainID     int64
 		protocolID  int64
-		marketID    []byte
+		marketID    common.Hash
 		loanToken   int64
 		collToken   int64
-		oracle      []byte
-		irm         []byte
+		oracle      common.Address
+		irm         common.Address
 		lltv        *big.Int
 		block       int64
 		wantErr     bool
 		errContains string
 	}{
 		{
-			name:       "valid market",
-			protocolID: 1, marketID: validMarketID, loanToken: 1, collToken: 2,
-			oracle: validAddr, irm: validAddr, lltv: big.NewInt(860000000000000000), block: 18883124,
+			name:    "valid market",
+			chainID: 1, protocolID: 1, marketID: validMarketID, loanToken: 1, collToken: 2,
+			oracle: validOracle, irm: validIrm, lltv: big.NewInt(860000000000000000), block: 18883124,
 		},
 		{
-			name:       "zero protocol ID",
-			protocolID: 0, marketID: validMarketID, loanToken: 1, collToken: 2,
-			oracle: validAddr, irm: validAddr, lltv: big.NewInt(0), block: 1,
+			name:    "zero chain ID",
+			chainID: 0, protocolID: 1, marketID: validMarketID, loanToken: 1, collToken: 2,
+			oracle: validOracle, irm: validIrm, lltv: big.NewInt(0), block: 1,
+			wantErr: true, errContains: "chainID must be positive",
+		},
+		{
+			name:    "zero protocol ID",
+			chainID: 1, protocolID: 0, marketID: validMarketID, loanToken: 1, collToken: 2,
+			oracle: validOracle, irm: validIrm, lltv: big.NewInt(0), block: 1,
 			wantErr: true, errContains: "protocolID must be positive",
 		},
 		{
-			name:       "short market ID",
-			protocolID: 1, marketID: make([]byte, 16), loanToken: 1, collToken: 2,
-			oracle: validAddr, irm: validAddr, lltv: big.NewInt(0), block: 1,
-			wantErr: true, errContains: "marketID must be 32 bytes",
+			name:    "empty market ID",
+			chainID: 1, protocolID: 1, marketID: common.Hash{}, loanToken: 1, collToken: 2,
+			oracle: validOracle, irm: validIrm, lltv: big.NewInt(0), block: 1,
+			wantErr: true, errContains: "marketID must not be empty",
 		},
 		{
-			name:       "zero loan token",
-			protocolID: 1, marketID: validMarketID, loanToken: 0, collToken: 2,
-			oracle: validAddr, irm: validAddr, lltv: big.NewInt(0), block: 1,
+			name:    "zero loan token",
+			chainID: 1, protocolID: 1, marketID: validMarketID, loanToken: 0, collToken: 2,
+			oracle: validOracle, irm: validIrm, lltv: big.NewInt(0), block: 1,
 			wantErr: true, errContains: "loanTokenID must be positive",
 		},
 		{
-			name:       "zero collateral token",
-			protocolID: 1, marketID: validMarketID, loanToken: 1, collToken: 0,
-			oracle: validAddr, irm: validAddr, lltv: big.NewInt(0), block: 1,
+			name:    "zero collateral token",
+			chainID: 1, protocolID: 1, marketID: validMarketID, loanToken: 1, collToken: 0,
+			oracle: validOracle, irm: validIrm, lltv: big.NewInt(0), block: 1,
 			wantErr: true, errContains: "collateralTokenID must be positive",
 		},
 		{
-			name:       "short oracle address",
-			protocolID: 1, marketID: validMarketID, loanToken: 1, collToken: 2,
-			oracle: make([]byte, 10), irm: validAddr, lltv: big.NewInt(0), block: 1,
-			wantErr: true, errContains: "oracleAddress must be 20 bytes",
-		},
-		{
-			name:       "short irm address",
-			protocolID: 1, marketID: validMarketID, loanToken: 1, collToken: 2,
-			oracle: validAddr, irm: make([]byte, 10), lltv: big.NewInt(0), block: 1,
-			wantErr: true, errContains: "irmAddress must be 20 bytes",
-		},
-		{
-			name:       "nil lltv",
-			protocolID: 1, marketID: validMarketID, loanToken: 1, collToken: 2,
-			oracle: validAddr, irm: validAddr, lltv: nil, block: 1,
+			name:    "nil lltv",
+			chainID: 1, protocolID: 1, marketID: validMarketID, loanToken: 1, collToken: 2,
+			oracle: validOracle, irm: validIrm, lltv: nil, block: 1,
 			wantErr: true, errContains: "lltv must not be nil",
 		},
 		{
-			name:       "negative lltv",
-			protocolID: 1, marketID: validMarketID, loanToken: 1, collToken: 2,
-			oracle: validAddr, irm: validAddr, lltv: big.NewInt(-1), block: 1,
+			name:    "negative lltv",
+			chainID: 1, protocolID: 1, marketID: validMarketID, loanToken: 1, collToken: 2,
+			oracle: validOracle, irm: validIrm, lltv: big.NewInt(-1), block: 1,
 			wantErr: true, errContains: "lltv must be non-negative",
 		},
 		{
-			name:       "zero block",
-			protocolID: 1, marketID: validMarketID, loanToken: 1, collToken: 2,
-			oracle: validAddr, irm: validAddr, lltv: big.NewInt(0), block: 0,
+			name:    "zero block",
+			chainID: 1, protocolID: 1, marketID: validMarketID, loanToken: 1, collToken: 2,
+			oracle: validOracle, irm: validIrm, lltv: big.NewInt(0), block: 0,
 			wantErr: true, errContains: "createdAtBlock must be positive",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewMorphoMarket(tt.protocolID, tt.marketID, tt.loanToken, tt.collToken, tt.oracle, tt.irm, tt.lltv, tt.block)
+			got, err := NewMorphoMarket(tt.chainID, tt.protocolID, tt.marketID, tt.loanToken, tt.collToken, tt.oracle, tt.irm, tt.lltv, tt.block)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")

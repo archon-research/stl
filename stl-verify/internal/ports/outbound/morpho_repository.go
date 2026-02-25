@@ -17,7 +17,7 @@ type MorphoRepository interface {
 
 	// GetMarketByMarketID retrieves a market by its 32-byte market ID hash.
 	// Returns nil, nil if the market doesn't exist.
-	GetMarketByMarketID(ctx context.Context, marketID []byte) (*entity.MorphoMarket, error)
+	GetMarketByMarketID(ctx context.Context, marketID common.Hash) (*entity.MorphoMarket, error)
 
 	// SaveMarketState saves a market state snapshot within an external transaction.
 	SaveMarketState(ctx context.Context, tx pgx.Tx, state *entity.MorphoMarketState) error

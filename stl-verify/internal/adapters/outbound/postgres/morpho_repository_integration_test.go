@@ -93,12 +93,13 @@ func (f *morphoTestFixture) createTestMarket(t *testing.T, ctx context.Context, 
 	t.Helper()
 
 	market := &entity.MorphoMarket{
+		ChainID:           1,
 		ProtocolID:        f.protocolID,
-		MarketID:          marketIDBytes,
+		MarketID:          common.BytesToHash(marketIDBytes),
 		LoanTokenID:       f.loanTokenID,
 		CollateralTokenID: f.collTokenID,
-		OracleAddress:     make([]byte, 20),
-		IrmAddress:        make([]byte, 20),
+		OracleAddress:     common.Address{},
+		IrmAddress:        common.Address{},
 		LLTV:              big.NewInt(860000000000000000),
 		CreatedAtBlock:    18883124,
 	}
@@ -125,6 +126,7 @@ func (f *morphoTestFixture) createTestVault(t *testing.T, ctx context.Context, a
 	t.Helper()
 
 	vault := &entity.MorphoVault{
+		ChainID:        1,
 		ProtocolID:     f.protocolID,
 		Address:        address,
 		Name:           "Gauntlet USDC Core",
@@ -158,16 +160,16 @@ func TestGetOrCreateMarket_CreateNew(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	marketID := make([]byte, 32)
-	copy(marketID, []byte("test-market-id-1234567890abcdef"))
+	marketID := common.BytesToHash([]byte("test-market-id-1234567890abcdef"))
 
 	market := &entity.MorphoMarket{
+		ChainID:           1,
 		ProtocolID:        fixture.protocolID,
 		MarketID:          marketID,
 		LoanTokenID:       fixture.loanTokenID,
 		CollateralTokenID: fixture.collTokenID,
-		OracleAddress:     make([]byte, 20),
-		IrmAddress:        make([]byte, 20),
+		OracleAddress:     common.Address{},
+		IrmAddress:        common.Address{},
 		LLTV:              big.NewInt(860000000000000000),
 		CreatedAtBlock:    18883124,
 	}
@@ -214,16 +216,16 @@ func TestGetOrCreateMarket_Idempotent(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	marketID := make([]byte, 32)
-	copy(marketID, []byte("idempotent-market-test-12345678"))
+	marketID := common.BytesToHash([]byte("idempotent-market-test-12345678"))
 
 	market := &entity.MorphoMarket{
+		ChainID:           1,
 		ProtocolID:        fixture.protocolID,
 		MarketID:          marketID,
 		LoanTokenID:       fixture.loanTokenID,
 		CollateralTokenID: fixture.collTokenID,
-		OracleAddress:     make([]byte, 20),
-		IrmAddress:        make([]byte, 20),
+		OracleAddress:     common.Address{},
+		IrmAddress:        common.Address{},
 		LLTV:              big.NewInt(945000000000000000),
 		CreatedAtBlock:    18883124,
 	}
@@ -264,10 +266,8 @@ func TestGetMarketByMarketID_NotFound(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	nonExistentID := make([]byte, 32)
-	copy(nonExistentID, []byte("this-market-does-not-exist-1234"))
 
-	got, err := fixture.repo.GetMarketByMarketID(ctx, nonExistentID)
+	got, err := fixture.repo.GetMarketByMarketID(ctx, common.BytesToHash([]byte("this-market-does-not-exist-1234")))
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -283,9 +283,7 @@ func TestSaveMarketState_Basic(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	marketID := make([]byte, 32)
-	copy(marketID, []byte("state-test-market-id-12345678ab"))
-	marketDBID := fixture.createTestMarket(t, ctx, marketID)
+	marketDBID := fixture.createTestMarket(t, ctx, []byte("state-test-market-id-12345678ab"))
 
 	state := &entity.MorphoMarketState{
 		MorphoMarketID:    marketDBID,
@@ -336,9 +334,7 @@ func TestSaveMarketState_WithAccrueInterest(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	marketID := make([]byte, 32)
-	copy(marketID, []byte("accrue-interest-test-market-1234"))
-	marketDBID := fixture.createTestMarket(t, ctx, marketID)
+	marketDBID := fixture.createTestMarket(t, ctx, []byte("accrue-interest-test-market-1234"))
 
 	state := &entity.MorphoMarketState{
 		MorphoMarketID:    marketDBID,
@@ -397,9 +393,7 @@ func TestSaveMarketState_UpsertOnConflict(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	marketID := make([]byte, 32)
-	copy(marketID, []byte("upsert-state-test-market-123456"))
-	marketDBID := fixture.createTestMarket(t, ctx, marketID)
+	marketDBID := fixture.createTestMarket(t, ctx, []byte("upsert-state-test-market-123456"))
 
 	// Insert first state
 	state1 := &entity.MorphoMarketState{
@@ -470,9 +464,7 @@ func TestSaveMarketPosition_Basic(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	marketID := make([]byte, 32)
-	copy(marketID, []byte("position-test-market-id-1234567"))
-	marketDBID := fixture.createTestMarket(t, ctx, marketID)
+	marketDBID := fixture.createTestMarket(t, ctx, []byte("position-test-market-id-1234567"))
 
 	position := &entity.MorphoMarketPosition{
 		UserID:         fixture.userID,
@@ -530,9 +522,7 @@ func TestSaveMarketPosition_UpsertOnConflict(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	marketID := make([]byte, 32)
-	copy(marketID, []byte("pos-upsert-test-market-12345678"))
-	marketDBID := fixture.createTestMarket(t, ctx, marketID)
+	marketDBID := fixture.createTestMarket(t, ctx, []byte("pos-upsert-test-market-12345678"))
 
 	// Insert initial position
 	pos1 := &entity.MorphoMarketPosition{
@@ -608,9 +598,7 @@ func TestSaveMarketPosition_Rollback(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	marketID := make([]byte, 32)
-	copy(marketID, []byte("pos-rollback-test-market-1234567"))
-	marketDBID := fixture.createTestMarket(t, ctx, marketID)
+	marketDBID := fixture.createTestMarket(t, ctx, []byte("pos-rollback-test-market-1234567"))
 
 	position := &entity.MorphoMarketPosition{
 		UserID:         fixture.userID,
@@ -660,9 +648,7 @@ func TestSaveMarketPosition_LargeBigIntPrecision(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	marketID := make([]byte, 32)
-	copy(marketID, []byte("large-int-test-market-1234567890"))
-	marketDBID := fixture.createTestMarket(t, ctx, marketID)
+	marketDBID := fixture.createTestMarket(t, ctx, []byte("large-int-test-market-1234567890"))
 
 	// max uint256
 	maxUint256, _ := new(big.Int).SetString("115792089237316195423570985008687907853269984665640564039457584007913129639935", 10)
@@ -717,10 +703,10 @@ func TestGetOrCreateVault_CreateNew(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	vaultAddr := make([]byte, 20)
-	copy(vaultAddr, []byte("vault-addr-1234567890"))
+	vaultAddr := []byte("vault-addr-123456789")
 
 	vault := &entity.MorphoVault{
+		ChainID:        1,
 		ProtocolID:     fixture.protocolID,
 		Address:        vaultAddr,
 		Name:           "Gauntlet USDC Core",
@@ -775,10 +761,10 @@ func TestGetOrCreateVault_Idempotent(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	vaultAddr := make([]byte, 20)
-	copy(vaultAddr, []byte("vault-idemp-12345678"))
+	vaultAddr := []byte("vault-idemp-12345678")
 
 	vault := &entity.MorphoVault{
+		ChainID:        1,
 		ProtocolID:     fixture.protocolID,
 		Address:        vaultAddr,
 		Name:           "Test Vault",
@@ -887,16 +873,14 @@ func TestSaveVaultState_Basic(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	vaultAddr := make([]byte, 20)
-	copy(vaultAddr, []byte("vstate-test-12345678"))
-	vaultDBID := fixture.createTestVault(t, ctx, vaultAddr)
+	vaultDBID := fixture.createTestVault(t, ctx, []byte("vstate-test-12345678"))
 
 	state := &entity.MorphoVaultState{
 		MorphoVaultID: vaultDBID,
 		BlockNumber:   19100000,
 		BlockVersion:  0,
 		TotalAssets:   big.NewInt(5000000000000),
-		TotalSupply:   big.NewInt(5000000000000000000),
+		TotalShares:   big.NewInt(5000000000000000000),
 	}
 
 	tx, err := fixture.pool.Begin(ctx)
@@ -915,20 +899,20 @@ func TestSaveVaultState_Basic(t *testing.T) {
 	}
 
 	// Verify
-	var totalAssets, totalSupply string
+	var totalAssets, totalShares string
 	var feeShares, newTotalAssets *string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT total_assets, total_supply, fee_shares, new_total_assets FROM morpho_vault_state WHERE morpho_vault_id = $1 AND block_number = $2`,
+		`SELECT total_assets, total_shares, fee_shares, new_total_assets FROM morpho_vault_state WHERE morpho_vault_id = $1 AND block_number = $2`,
 		vaultDBID, int64(19100000),
-	).Scan(&totalAssets, &totalSupply, &feeShares, &newTotalAssets)
+	).Scan(&totalAssets, &totalShares, &feeShares, &newTotalAssets)
 	if err != nil {
 		t.Fatalf("failed to query vault state: %v", err)
 	}
 	if totalAssets != "5000000000000" {
 		t.Errorf("totalAssets mismatch: got %s", totalAssets)
 	}
-	if totalSupply != "5000000000000000000" {
-		t.Errorf("totalSupply mismatch: got %s", totalSupply)
+	if totalShares != "5000000000000000000" {
+		t.Errorf("totalShares mismatch: got %s", totalShares)
 	}
 	if feeShares != nil {
 		t.Errorf("expected nil feeShares, got %v", feeShares)
@@ -943,16 +927,14 @@ func TestSaveVaultState_WithAccrueInterest(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	vaultAddr := make([]byte, 20)
-	copy(vaultAddr, []byte("vs-accrue-test-123456"))
-	vaultDBID := fixture.createTestVault(t, ctx, vaultAddr)
+	vaultDBID := fixture.createTestVault(t, ctx, []byte("vs-accrue-test-12345"))
 
 	state := &entity.MorphoVaultState{
 		MorphoVaultID: vaultDBID,
 		BlockNumber:   19100100,
 		BlockVersion:  0,
 		TotalAssets:   big.NewInt(6000000000000),
-		TotalSupply:   big.NewInt(6000000000000000000),
+		TotalShares:   big.NewInt(6000000000000000000),
 	}
 	state.WithAccrueInterest(big.NewInt(12345678), big.NewInt(6000100000000), nil, nil) // V1: no previousTotalAssets or managementFeeShares
 
@@ -994,9 +976,7 @@ func TestSaveVaultPosition_Basic(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	vaultAddr := make([]byte, 20)
-	copy(vaultAddr, []byte("vpos-test-1234567890"))
-	vaultDBID := fixture.createTestVault(t, ctx, vaultAddr)
+	vaultDBID := fixture.createTestVault(t, ctx, []byte("vpos-test-1234567890"))
 
 	position := &entity.MorphoVaultPosition{
 		UserID:        fixture.userID,
@@ -1049,9 +1029,7 @@ func TestSaveVaultPosition_UpsertOnConflict(t *testing.T) {
 	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
-	vaultAddr := make([]byte, 20)
-	copy(vaultAddr, []byte("vpos-upsert-12345678"))
-	vaultDBID := fixture.createTestVault(t, ctx, vaultAddr)
+	vaultDBID := fixture.createTestVault(t, ctx, []byte("vpos-upsert-12345678"))
 
 	// Insert initial
 	pos1 := &entity.MorphoVaultPosition{
@@ -1125,13 +1103,8 @@ func TestTransactionAcrossMultipleTables(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a market and vault, then save state + position in single tx
-	marketID := make([]byte, 32)
-	copy(marketID, []byte("cross-table-tx-test-market-12345"))
-	marketDBID := fixture.createTestMarket(t, ctx, marketID)
-
-	vaultAddr := make([]byte, 20)
-	copy(vaultAddr, []byte("cross-table-vault-12"))
-	vaultDBID := fixture.createTestVault(t, ctx, vaultAddr)
+	marketDBID := fixture.createTestMarket(t, ctx, []byte("cross-table-tx-test-market-12345"))
+	vaultDBID := fixture.createTestVault(t, ctx, []byte("cross-table-vault-12"))
 
 	tx, err := fixture.pool.Begin(ctx)
 	if err != nil {
@@ -1179,7 +1152,7 @@ func TestTransactionAcrossMultipleTables(t *testing.T) {
 		BlockNumber:   19300000,
 		BlockVersion:  0,
 		TotalAssets:   big.NewInt(2000),
-		TotalSupply:   big.NewInt(2000),
+		TotalShares:   big.NewInt(2000),
 	}
 	if err := fixture.repo.SaveVaultState(ctx, tx, vaultState); err != nil {
 		t.Fatalf("SaveVaultState in tx failed: %v", err)
@@ -1207,10 +1180,18 @@ func TestTransactionAcrossMultipleTables(t *testing.T) {
 
 	// Verify all records exist
 	var msCount, mpCount, vsCount, vpCount int
-	fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_market_state WHERE block_number = 19300000`).Scan(&msCount)
-	fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_market_position WHERE block_number = 19300000`).Scan(&mpCount)
-	fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_vault_state WHERE block_number = 19300000`).Scan(&vsCount)
-	fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_vault_position WHERE block_number = 19300000`).Scan(&vpCount)
+	if err := fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_market_state WHERE block_number = 19300000`).Scan(&msCount); err != nil {
+		t.Fatalf("scanning market state count: %v", err)
+	}
+	if err := fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_market_position WHERE block_number = 19300000`).Scan(&mpCount); err != nil {
+		t.Fatalf("scanning market position count: %v", err)
+	}
+	if err := fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_vault_state WHERE block_number = 19300000`).Scan(&vsCount); err != nil {
+		t.Fatalf("scanning vault state count: %v", err)
+	}
+	if err := fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM morpho_vault_position WHERE block_number = 19300000`).Scan(&vpCount); err != nil {
+		t.Fatalf("scanning vault position count: %v", err)
+	}
 
 	if msCount != 1 {
 		t.Errorf("expected 1 market state, got %d", msCount)
@@ -1232,9 +1213,7 @@ func TestTransactionRollbackAcrossMultipleTables(t *testing.T) {
 
 	ctx := context.Background()
 
-	marketID := make([]byte, 32)
-	copy(marketID, []byte("rollback-cross-table-test-123456"))
-	marketDBID := fixture.createTestMarket(t, ctx, marketID)
+	marketDBID := fixture.createTestMarket(t, ctx, []byte("rollback-cross-table-test-123456"))
 
 	tx, err := fixture.pool.Begin(ctx)
 	if err != nil {
