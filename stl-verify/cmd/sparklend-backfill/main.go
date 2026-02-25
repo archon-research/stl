@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 
@@ -158,7 +159,16 @@ func run(args []string) error {
 		return fmt.Errorf("loading AWS config: %w", err)
 	}
 
-	s3Reader := s3adapter.NewReader(awsCfg, logger)
+	// When a custom endpoint is configured (e.g. LocalStack), path-style addressing
+	// is required because virtual-hosted-style URLs won't resolve correctly.
+	var s3Reader *s3adapter.Reader
+	if os.Getenv("AWS_ENDPOINT_URL") != "" {
+		s3Reader = s3adapter.NewReaderWithOptions(awsCfg, logger, func(o *s3.Options) {
+			o.UsePathStyle = true
+		})
+	} else {
+		s3Reader = s3adapter.NewReader(awsCfg, logger)
+	}
 	logger.Info("S3 reader created")
 
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))

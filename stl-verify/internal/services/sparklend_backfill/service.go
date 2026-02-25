@@ -14,14 +14,14 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
+	"github.com/archon-research/stl/stl-verify/internal/services/sparklend"
 	"golang.org/x/sync/errgroup"
 )
 
 // ReceiptProcessor processes transaction receipts for a given block.
 // Satisfied by *sparklend_position_tracker.Service.
 type ReceiptProcessor interface {
-	ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []sparklend_position_tracker.TransactionReceipt) error
+	ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []sparklend.TransactionReceipt) error
 }
 
 // Config holds configuration for the backfill service.
@@ -80,7 +80,7 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		return fmt.Errorf("toBlock (%d) must be >= fromBlock (%d)", toBlock, fromBlock)
 	}
 
-	versionMap, err := s.ScanVersions(ctx, fromBlock, toBlock)
+	versionMap, err := s.scanVersions(ctx, fromBlock, toBlock)
 	if err != nil {
 		return fmt.Errorf("scanning S3 versions: %w", err)
 	}
@@ -192,10 +192,10 @@ func (s *Service) logProgress(
 	)
 }
 
-// BuildVersionMap parses a slice of S3 key strings and returns a map from
+// buildVersionMap parses a slice of S3 key strings and returns a map from
 // block number to the highest receipt-file version seen for that block.
 // Keys that are not receipts files or that cannot be parsed are silently ignored.
-func BuildVersionMap(keys []string) map[int64]int {
+func buildVersionMap(keys []string) map[int64]int {
 	versions := make(map[int64]int)
 	for _, key := range keys {
 		parsed, ok := s3key.Parse(key)
@@ -209,10 +209,10 @@ func BuildVersionMap(keys []string) map[int64]int {
 	return versions
 }
 
-// ScanVersions lists all S3 receipt keys in the partitions overlapping
+// scanVersions lists all S3 receipt keys in the partitions overlapping
 // [fromBlock, toBlock] and returns a map of blockNum → highest version.
 // It makes one ListPrefix call per partition (partition.BlockRangeSize blocks each).
-func (s *Service) ScanVersions(ctx context.Context, fromBlock, toBlock int64) (map[int64]int, error) {
+func (s *Service) scanVersions(ctx context.Context, fromBlock, toBlock int64) (map[int64]int, error) {
 	versions := make(map[int64]int)
 
 	// Iterate over each partition (partition.BlockRangeSize blocks) that overlaps [fromBlock, toBlock].
@@ -226,7 +226,7 @@ func (s *Service) ScanVersions(ctx context.Context, fromBlock, toBlock int64) (m
 			return nil, fmt.Errorf("listing S3 prefix %s: %w", prefix, err)
 		}
 
-		for blockNum, ver := range BuildVersionMap(keys) {
+		for blockNum, ver := range buildVersionMap(keys) {
 			if existing, seen := versions[blockNum]; !seen || ver > existing {
 				versions[blockNum] = ver
 			}
@@ -251,7 +251,7 @@ func (s *Service) processBlockFromS3(ctx context.Context, blockNum int64, versio
 		return fmt.Errorf("reading S3 file %s: %w", key, err)
 	}
 
-	var receipts []sparklend_position_tracker.TransactionReceipt
+	var receipts []sparklend.TransactionReceipt
 	if err := json.Unmarshal(data, &receipts); err != nil {
 		return fmt.Errorf("unmarshalling receipts for block %d: %w", blockNum, err)
 	}

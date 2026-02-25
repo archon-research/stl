@@ -97,6 +97,60 @@ func TestGetOrCreateProtocol_IdempotentReturnsSameID(t *testing.T) {
 	}
 }
 
+// TestGetOrCreateProtocol_CreatedAtBlockUsesLeast verifies that when the same protocol
+// is upserted with a later block first and an earlier block second, the stored
+// created_at_block is updated to the minimum (matching GetOrCreateUser behavior).
+func TestGetOrCreateProtocol_CreatedAtBlockUsesLeast(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	repo, err := NewProtocolRepository(pool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewProtocolRepository: %v", err)
+	}
+
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+
+	// First call: block 500 (a later block, as if processed first out of order).
+	tx1, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin tx1: %v", err)
+	}
+	defer tx1.Rollback(ctx)
+	if _, err := repo.GetOrCreateProtocol(ctx, tx1, 1, addr, "TestProtocol", "lending", 500); err != nil {
+		t.Fatalf("first GetOrCreateProtocol: %v", err)
+	}
+	if err := tx1.Commit(ctx); err != nil {
+		t.Fatalf("Commit tx1: %v", err)
+	}
+
+	// Second call: block 100 (the true first seen block, processed out of order).
+	tx2, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin tx2: %v", err)
+	}
+	defer tx2.Rollback(ctx)
+	if _, err := repo.GetOrCreateProtocol(ctx, tx2, 1, addr, "TestProtocol", "lending", 100); err != nil {
+		t.Fatalf("second GetOrCreateProtocol: %v", err)
+	}
+	if err := tx2.Commit(ctx); err != nil {
+		t.Fatalf("Commit tx2: %v", err)
+	}
+
+	var createdAtBlock int64
+	err = pool.QueryRow(ctx,
+		`SELECT created_at_block FROM protocol WHERE chain_id = $1 AND address = $2`,
+		1, addr.Bytes(),
+	).Scan(&createdAtBlock)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if createdAtBlock != 100 {
+		t.Errorf("created_at_block = %d, want 100 (LEAST of 500 and 100)", createdAtBlock)
+	}
+}
+
 // TestGetOrCreateProtocol_ConcurrentRaceReturnsSameID simulates concurrent workers
 // both racing to insert the same new protocol. Both must succeed without error and
 // return the same protocol id.

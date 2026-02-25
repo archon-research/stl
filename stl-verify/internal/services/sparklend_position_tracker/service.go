@@ -14,6 +14,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+	"github.com/archon-research/stl/stl-verify/internal/services/sparklend"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -36,36 +37,6 @@ const (
 	EventReserveUsedAsCollateralEnabled  = entity.EventReserveUsedAsCollateralEnabled
 	EventReserveUsedAsCollateralDisabled = entity.EventReserveUsedAsCollateralDisabled
 )
-
-type TransactionReceipt struct {
-	Type              string  `json:"type"`
-	Status            string  `json:"status"`
-	CumulativeGasUsed string  `json:"cumulativeGasUsed"`
-	Logs              []Log   `json:"logs"`
-	LogsBloom         string  `json:"logsBloom"`
-	TransactionHash   string  `json:"transactionHash"`
-	TransactionIndex  string  `json:"transactionIndex"`
-	BlockHash         string  `json:"blockHash"`
-	BlockNumber       string  `json:"blockNumber"`
-	GasUsed           string  `json:"gasUsed"`
-	EffectiveGasPrice string  `json:"effectiveGasPrice"`
-	From              string  `json:"from"`
-	To                string  `json:"to"`
-	ContractAddress   *string `json:"contractAddress"`
-}
-
-type Log struct {
-	Address          string   `json:"address"`
-	Topics           []string `json:"topics"`
-	Data             string   `json:"data"`
-	BlockHash        string   `json:"blockHash"`
-	BlockNumber      string   `json:"blockNumber"`
-	BlockTimestamp   string   `json:"blockTimestamp"`
-	TransactionHash  string   `json:"transactionHash"`
-	TransactionIndex string   `json:"transactionIndex"`
-	LogIndex         string   `json:"logIndex"`
-	Removed          bool     `json:"removed"`
-}
 
 type PositionEventData struct {
 	EventType                  entity.EventType
@@ -132,7 +103,7 @@ type Service struct {
 	positionRepo *postgres.PositionRepository
 	eventRepo    outbound.EventRepository
 
-	mu                 sync.Mutex
+	mu                 sync.RWMutex
 	blockchainServices map[common.Address]*blockchainService
 	multicallClient    outbound.Multicaller
 	erc20ABI           *abi.ABI
@@ -207,10 +178,10 @@ func NewService(
 }
 
 func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (*blockchainService, error) {
-	// First check: read map under lock.
-	s.mu.Lock()
+	// First check: read map under read lock.
+	s.mu.RLock()
 	svc, exists := s.blockchainServices[protocolAddress]
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	if exists {
 		return svc, nil
 	}
@@ -252,6 +223,9 @@ func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (
 func (s *Service) Start(ctx context.Context) error {
 	if s.consumer == nil {
 		return fmt.Errorf("Start() called on service without SQS consumer")
+	}
+	if s.redisClient == nil {
+		return fmt.Errorf("Start() called on service without Redis client")
 	}
 
 	s.ctx, s.cancel = context.WithCancel(ctx)
@@ -298,7 +272,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		return fmt.Errorf("failed to fetch from Redis: %w", err)
 	}
 
-	var receipts []TransactionReceipt
+	var receipts []sparklend.TransactionReceipt
 	if err := shared.ParseCompressedJSON([]byte(receiptsJSON), &receipts); err != nil {
 		return fmt.Errorf("failed to unmarshal receipts: %w", err)
 	}
@@ -308,7 +282,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 
 // ProcessReceipts processes a slice of transaction receipts for a given block.
 // It is safe to call from the backfill service without Redis or SQS.
-func (s *Service) ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []TransactionReceipt) error {
+func (s *Service) ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []sparklend.TransactionReceipt) error {
 	var errs []error
 	for _, receipt := range receipts {
 		if err := s.processReceipt(ctx, receipt, chainID, blockNumber, version); err != nil {
@@ -321,7 +295,7 @@ func (s *Service) ProcessReceipts(ctx context.Context, chainID, blockNumber int6
 	return nil
 }
 
-func (s *Service) processReceipt(ctx context.Context, receipt TransactionReceipt, chainID, blockNumber int64, blockVersion int) error {
+func (s *Service) processReceipt(ctx context.Context, receipt sparklend.TransactionReceipt, chainID, blockNumber int64, blockVersion int) error {
 	var errs []error
 	for _, log := range receipt.Logs {
 
@@ -354,15 +328,15 @@ func (s *Service) processReceipt(ctx context.Context, receipt TransactionReceipt
 	return nil
 }
 
-func (s *Service) isPositionEvent(log Log) bool {
+func (s *Service) isPositionEvent(log sparklend.Log) bool {
 	return s.eventExtractor.IsPositionEvent(log)
 }
 
-func (s *Service) isReserveEvent(log Log) bool {
+func (s *Service) isReserveEvent(log sparklend.Log) bool {
 	return s.eventExtractor.IsReserveEvent(log)
 }
 
-func (s *Service) processPositionEventLog(ctx context.Context, log Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
+func (s *Service) processPositionEventLog(ctx context.Context, log sparklend.Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("processEventLog completed",
@@ -444,7 +418,7 @@ func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEven
 }
 
 // processReserveEventLog handles ReserveDataUpdated events by fetching and storing reserve data.
-func (s *Service) processReserveEventLog(ctx context.Context, log Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
+func (s *Service) processReserveEventLog(ctx context.Context, log sparklend.Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("processReserveEventLog completed",
@@ -491,11 +465,15 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 	// Fetch reserve data and configuration from chain
 	reserveData, configData, err := blockchainSvc.getFullReserveData(ctx, reserve, blockNumber)
 	if err != nil {
-		// If reserve doesn't exist at this block, log and skip (non-fatal).
-		// This can happen when the configured PoolDataProvider address didn't exist
-		// at the historical block being queried (e.g., contract was upgraded/redeployed).
-		if errors.Is(err, ErrReserveNotFound) {
-			s.logger.Warn("Reserve not found at block, skipping snapshot",
+		// If reserve doesn't exist at this block or no PoolDataProvider was active,
+		// log and skip (non-fatal). This can happen when:
+		// - The configured PoolDataProvider address didn't exist at the historical block
+		//   (e.g., contract was upgraded/redeployed)
+		// - The pool was deployed before its first PoolDataProvider became active
+		//   (e.g., SparkLend pool deployed at block 16568452, but first PoolDataProvider
+		//   only active from block 17007586)
+		if errors.Is(err, ErrReserveNotFound) || errors.Is(err, ErrNoPoolDataProvider) {
+			s.logger.Warn("Reserve data unavailable at block, skipping snapshot",
 				"reserve", reserve.Hex(),
 				"protocol", protocolAddress.Hex(),
 				"block", blockNumber,

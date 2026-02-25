@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -53,31 +52,26 @@ func NewTokenRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) 
 func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
 	var tokenID int64
 
-	// Upsert with DO NOTHING so concurrent workers racing to insert the same token
-	// don't get a unique constraint violation. RETURNING id is only populated for the
-	// winning INSERT; if this worker lost the race, we fall through to a SELECT.
+	// Upsert: on conflict preserve the earliest created_at_block via LEAST().
+	// This is safe for concurrent workers processing different blocks for the same token —
+	// whichever worker wins the INSERT race, subsequent LEAST() merges still produce
+	// the correct minimum created_at_block.
 	err := tx.QueryRow(ctx,
 		`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, '{}', NOW())
-		 ON CONFLICT (chain_id, address) DO NOTHING
+		 ON CONFLICT (chain_id, address) DO UPDATE SET
+		     created_at_block = LEAST(token.created_at_block, EXCLUDED.created_at_block),
+		     updated_at = CASE
+		         WHEN EXCLUDED.created_at_block < token.created_at_block THEN NOW()
+		         ELSE token.updated_at
+		     END
 		 RETURNING id`,
 		chainID, address.Bytes(), symbol, decimals, createdAtBlock).Scan(&tokenID)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Another worker won the race — fetch the row it inserted.
-		err = tx.QueryRow(ctx,
-			`SELECT id FROM token WHERE chain_id = $1 AND address = $2`,
-			chainID, address.Bytes()).Scan(&tokenID)
-		if err != nil {
-			return 0, fmt.Errorf("failed to get token after conflict: %w", err)
-		}
-		return tokenID, nil
-	}
 	if err != nil {
-		return 0, fmt.Errorf("failed to create token: %w", err)
+		return 0, fmt.Errorf("failed to get or create token: %w", err)
 	}
 
-	r.logger.Debug("token created", "address", address.Hex(), "id", tokenID, "symbol", symbol, "decimals", decimals)
+	r.logger.Debug("token upserted", "address", address.Hex(), "id", tokenID, "symbol", symbol, "decimals", decimals)
 	return tokenID, nil
 }
 

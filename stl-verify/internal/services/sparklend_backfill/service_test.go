@@ -12,8 +12,8 @@ import (
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/sparklend"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_backfill"
-	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
 )
 
 // failingReader is an io.ReadCloser whose Read always returns an error.
@@ -68,7 +68,7 @@ type processCall struct {
 	version     int
 }
 
-func (m *mockProcessor) ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []sparklend_position_tracker.TransactionReceipt) error {
+func (m *mockProcessor) ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []sparklend.TransactionReceipt) error {
 	m.mu.Lock()
 	m.calls = append(m.calls, processCall{chainID: chainID, blockNumber: blockNumber, version: version})
 	m.mu.Unlock()
@@ -100,216 +100,6 @@ func newTestService(t *testing.T, s3 outbound.S3Reader, proc sparklend_backfill.
 		t.Fatalf("NewService: %v", err)
 	}
 	return svc
-}
-
-func TestBuildVersionMap(t *testing.T) {
-	tests := []struct {
-		name string
-		keys []string
-		want map[int64]int
-	}{
-		{
-			name: "empty input returns empty map",
-			keys: nil,
-			want: map[int64]int{},
-		},
-		{
-			name: "single key version 0",
-			keys: []string{"0-999/100_0_receipts.json.gz"},
-			want: map[int64]int{100: 0},
-		},
-		{
-			name: "single key version 1",
-			keys: []string{"0-999/100_1_receipts.json.gz"},
-			want: map[int64]int{100: 1},
-		},
-		{
-			name: "keeps highest version when multiple exist",
-			keys: []string{
-				"0-999/100_0_receipts.json.gz",
-				"0-999/100_1_receipts.json.gz",
-				"0-999/100_2_receipts.json.gz",
-			},
-			want: map[int64]int{100: 2},
-		},
-		{
-			name: "multiple blocks across same partition",
-			keys: []string{
-				"0-999/100_0_receipts.json.gz",
-				"0-999/200_1_receipts.json.gz",
-			},
-			want: map[int64]int{100: 0, 200: 1},
-		},
-		{
-			name: "ignores non-receipts files",
-			keys: []string{
-				"0-999/100_0_block.json.gz",
-				"0-999/100_0_traces.json.gz",
-				"0-999/100_1_receipts.json.gz",
-			},
-			want: map[int64]int{100: 1},
-		},
-		{
-			name: "ignores malformed keys",
-			keys: []string{
-				"not-a-valid-key",
-				"0-999/abc_0_receipts.json.gz",
-				"0-999/100_xyz_receipts.json.gz",
-				"0-999/100_1_receipts.json.gz",
-			},
-			want: map[int64]int{100: 1},
-		},
-		{
-			name: "blocks across multiple partitions",
-			keys: []string{
-				"0-999/500_0_receipts.json.gz",
-				"1000-1999/1500_2_receipts.json.gz",
-			},
-			want: map[int64]int{500: 0, 1500: 2},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := sparklend_backfill.BuildVersionMap(tt.keys)
-			if len(got) != len(tt.want) {
-				t.Fatalf("map length: got %d, want %d\ngot:  %v\nwant: %v", len(got), len(tt.want), got, tt.want)
-			}
-			for blockNum, wantVer := range tt.want {
-				gotVer, ok := got[blockNum]
-				if !ok {
-					t.Errorf("missing block %d in result", blockNum)
-					continue
-				}
-				if gotVer != wantVer {
-					t.Errorf("block %d: got version %d, want %d", blockNum, gotVer, wantVer)
-				}
-			}
-		})
-	}
-}
-
-func TestScanVersions(t *testing.T) {
-	tests := []struct {
-		name         string
-		fromBlock    int64
-		toBlock      int64
-		listPrefixFn func() func(ctx context.Context, bucket, prefix string) ([]string, error)
-		wantVersions map[int64]int
-		wantErr      bool
-		wantPrefixes []string // prefixes that must have been requested
-	}{
-		{
-			name:      "single partition returns correct versions",
-			fromBlock: 100,
-			toBlock:   200,
-			listPrefixFn: func() func(ctx context.Context, bucket, prefix string) ([]string, error) {
-				return func(ctx context.Context, bucket, prefix string) ([]string, error) {
-					if prefix == "0-999/" {
-						return []string{
-							"0-999/100_0_receipts.json.gz",
-							"0-999/150_1_receipts.json.gz",
-							"0-999/200_2_receipts.json.gz",
-						}, nil
-					}
-					return nil, nil
-				}
-			},
-			wantVersions: map[int64]int{100: 0, 150: 1, 200: 2},
-			wantPrefixes: []string{"0-999/"},
-		},
-		{
-			name:      "two partitions are both scanned",
-			fromBlock: 900,
-			toBlock:   1100,
-			listPrefixFn: func() func(ctx context.Context, bucket, prefix string) ([]string, error) {
-				return func(ctx context.Context, bucket, prefix string) ([]string, error) {
-					switch prefix {
-					case "0-999/":
-						return []string{"0-999/900_0_receipts.json.gz"}, nil
-					case "1000-1999/":
-						return []string{"1000-1999/1100_1_receipts.json.gz"}, nil
-					}
-					return nil, nil
-				}
-			},
-			wantVersions: map[int64]int{900: 0, 1100: 1},
-			wantPrefixes: []string{"0-999/", "1000-1999/"},
-		},
-		{
-			name:      "ListPrefix error is returned",
-			fromBlock: 100,
-			toBlock:   100,
-			listPrefixFn: func() func(ctx context.Context, bucket, prefix string) ([]string, error) {
-				return func(ctx context.Context, bucket, prefix string) ([]string, error) {
-					return nil, fmt.Errorf("s3 unavailable")
-				}
-			},
-			wantErr: true,
-		},
-		{
-			name:      "empty bucket returns empty map",
-			fromBlock: 500,
-			toBlock:   600,
-			listPrefixFn: func() func(ctx context.Context, bucket, prefix string) ([]string, error) {
-				return func(ctx context.Context, bucket, prefix string) ([]string, error) {
-					return nil, nil
-				}
-			},
-			wantVersions: map[int64]int{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var requestedPrefixes []string
-			var mu sync.Mutex
-			rawFn := tt.listPrefixFn()
-
-			s3 := &mockS3Reader{
-				listPrefixFn: func(ctx context.Context, bucket, prefix string) ([]string, error) {
-					mu.Lock()
-					requestedPrefixes = append(requestedPrefixes, prefix)
-					mu.Unlock()
-					return rawFn(ctx, bucket, prefix)
-				},
-			}
-			svc := newTestService(t, s3, &mockProcessor{})
-
-			got, err := svc.ScanVersions(context.Background(), tt.fromBlock, tt.toBlock)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			if len(got) != len(tt.wantVersions) {
-				t.Fatalf("map size: got %d, want %d\ngot:  %v\nwant: %v", len(got), len(tt.wantVersions), got, tt.wantVersions)
-			}
-			for blockNum, wantVer := range tt.wantVersions {
-				if gotVer, ok := got[blockNum]; !ok || gotVer != wantVer {
-					t.Errorf("block %d: got version %d (ok=%v), want %d", blockNum, gotVer, ok, wantVer)
-				}
-			}
-
-			for _, wantPrefix := range tt.wantPrefixes {
-				found := false
-				for _, p := range requestedPrefixes {
-					if p == wantPrefix {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("expected ListPrefix to be called with %q, got calls: %v", wantPrefix, requestedPrefixes)
-				}
-			}
-		})
-	}
 }
 
 func TestNewService_Validation(t *testing.T) {

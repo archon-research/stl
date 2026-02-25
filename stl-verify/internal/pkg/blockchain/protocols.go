@@ -16,7 +16,11 @@ package blockchain
 // A contract may be deployed earlier but only becomes the active provider when
 // the PoolAddressesProvider is updated.
 
-import "github.com/ethereum/go-ethereum/common"
+import (
+	"sort"
+
+	"github.com/ethereum/go-ethereum/common"
+)
 
 type ProtocolVersion string
 
@@ -129,6 +133,17 @@ var protocolRegistry = map[common.Address]ProtocolConfig{
 			{Address: common.HexToAddress("0x53519c32f73fE1797d10210c4950fFeBa3b21504"), ActiveAtBlock: 23125535},
 		},
 	},
+}
+
+func init() {
+	// Sort all PoolDataProviderHistory slices by ActiveAtBlock ascending.
+	// This ensures GetForBlock works correctly regardless of declaration order.
+	for addr, config := range protocolRegistry {
+		sort.Slice(config.PoolDataProviderHistory, func(i, j int) bool {
+			return config.PoolDataProviderHistory[i].ActiveAtBlock < config.PoolDataProviderHistory[j].ActiveAtBlock
+		})
+		protocolRegistry[addr] = config
+	}
 }
 
 // GetPoolDataProviderForBlock returns the PoolDataProvider address that was active at the given block.
