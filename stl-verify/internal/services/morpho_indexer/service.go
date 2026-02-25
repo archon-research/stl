@@ -2,6 +2,7 @@ package morpho_indexer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
-	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
@@ -43,7 +43,7 @@ func ConfigDefaults() Config {
 type Service struct {
 	config       Config
 	consumer     outbound.SQSConsumer
-	redisClient  *redis.Client
+	cache        outbound.BlockCache
 	txManager    outbound.TxManager
 	userRepo     outbound.UserRepository
 	protocolRepo outbound.ProtocolRepository
@@ -65,7 +65,7 @@ type Service struct {
 func NewService(
 	config Config,
 	consumer outbound.SQSConsumer,
-	redisClient *redis.Client,
+	cache outbound.BlockCache,
 	multicallClient outbound.Multicaller,
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,
@@ -74,7 +74,7 @@ func NewService(
 	morphoRepo outbound.MorphoRepository,
 	eventRepo outbound.EventRepository,
 ) (*Service, error) {
-	if err := validateDependencies(consumer, redisClient, multicallClient, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo); err != nil {
+	if err := validateDependencies(consumer, cache, multicallClient, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo); err != nil {
 		return nil, err
 	}
 
@@ -101,7 +101,7 @@ func NewService(
 	return &Service{
 		config:         config,
 		consumer:       consumer,
-		redisClient:    redisClient,
+		cache:          cache,
 		txManager:      txManager,
 		userRepo:       userRepo,
 		protocolRepo:   protocolRepo,
@@ -168,19 +168,18 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 			"duration", duration)
 	}()
 
-	cacheKey := shared.CacheKey(event.ChainID, event.BlockNumber, event.Version, "receipts")
-	receiptsJSON, err := s.redisClient.Get(ctx, cacheKey).Result()
-	if errors.Is(err, redis.Nil) {
-		s.logger.Warn("cache key expired or not found", "key", cacheKey, "block", event.BlockNumber)
-		return nil
-	}
+	receiptsJSON, err := s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
 	if err != nil {
-		return fmt.Errorf("failed to fetch from Redis: %w", err)
+		return fmt.Errorf("fetching receipts from cache: %w", err)
+	}
+	if receiptsJSON == nil {
+		s.logger.Warn("cache miss for receipts", "block", event.BlockNumber)
+		return nil
 	}
 
 	var receipts []shared.TransactionReceipt
-	if err := shared.ParseCompressedJSON([]byte(receiptsJSON), &receipts); err != nil {
-		return fmt.Errorf("failed to unmarshal receipts: %w", err)
+	if err := json.Unmarshal(receiptsJSON, &receipts); err != nil {
+		return fmt.Errorf("unmarshalling receipts: %w", err)
 	}
 
 	span.SetAttributes(attribute.Int("receipts.count", len(receipts)))
@@ -793,7 +792,7 @@ func (s *Service) saveProtocolEvent(ctx context.Context, eventData *MorphoBlueEv
 
 func validateDependencies(
 	consumer outbound.SQSConsumer,
-	redisClient *redis.Client,
+	cache outbound.BlockCache,
 	multicallClient outbound.Multicaller,
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,
@@ -805,8 +804,8 @@ func validateDependencies(
 	if consumer == nil {
 		return fmt.Errorf("consumer is required")
 	}
-	if redisClient == nil {
-		return fmt.Errorf("redisClient is required")
+	if cache == nil {
+		return fmt.Errorf("cache is required")
 	}
 	if multicallClient == nil {
 		return fmt.Errorf("multicallClient is required")
