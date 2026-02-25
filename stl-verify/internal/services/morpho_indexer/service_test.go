@@ -67,15 +67,15 @@ func TestMorphoBlueDeployBlock(t *testing.T) {
 // --- NewService validation ---
 
 func TestNewService_ValidateDependencies(t *testing.T) {
-	rc := newMockBlockCache()
+	rc := testutil.NewMockBlockCache()
 	mc := testutil.NewMockMulticaller()
 	tm := &testutil.MockTxManager{}
 	ur := &testutil.MockUserRepository{}
 	pr := &testutil.MockProtocolRepository{}
 	tr := &testutil.MockTokenRepository{}
-	mRepo := &mockMorphoRepo{}
+	mRepo := &testutil.MockMorphoRepository{}
 	er := &testutil.MockEventRepository{}
-	cons := &mockSQSConsumer{}
+	cons := &testutil.MockSQSConsumer{}
 
 	sqsCfg := shared.SQSConsumerConfigDefaults()
 	sqsCfg.ChainID = 1
@@ -884,7 +884,7 @@ func TestProcessBlockEvent_RedisCacheMiss(t *testing.T) {
 func TestProcessBlockEvent_CacheConnectionError(t *testing.T) {
 	h := newTestHarness(t)
 	// Set an error on the mock cache to simulate a connection failure.
-	h.cache.SetError(errCacheClosed)
+	h.cache.SetError(testutil.ErrCacheClosed)
 
 	err := h.svc.processBlockEvent(context.Background(), outbound.BlockEvent{
 		ChainID: 1, BlockNumber: 99999, Version: 0,
@@ -1727,7 +1727,7 @@ func TestProcessBlockEvent_MorphoBlueLog_ExtractionError(t *testing.T) {
 		Address: MorphoBlueAddress.Hex(),
 		Topics: []string{
 			supplyEvent.ID.Hex(),
-			common.BytesToHash(testMarketID[:]).Hex(),
+			common.Hash(testMarketID).Hex(),
 			common.BytesToHash(testCaller.Bytes()).Hex(),
 			common.BytesToHash(testOnBehalf.Bytes()).Hex(),
 		},

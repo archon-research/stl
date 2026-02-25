@@ -464,7 +464,7 @@ func (s *Service) handleCreateMarket(ctx context.Context, eventData *MorphoBlueE
 			return fmt.Errorf("getting collateral token: %w", err)
 		}
 
-		market, err := entity.NewMorphoMarket(chainID, protocolID, common.BytesToHash(eventData.MarketID[:]), loanTokenID, collTokenID, mp.Oracle, mp.Irm, mp.LLTV, blockNumber)
+		market, err := entity.NewMorphoMarket(chainID, protocolID, common.Hash(eventData.MarketID), loanTokenID, collTokenID, mp.Oracle, mp.Irm, mp.LLTV, blockNumber)
 		if err != nil {
 			return fmt.Errorf("creating market entity: %w", err)
 		}
@@ -670,7 +670,7 @@ type vaultAccrueData struct {
 // ensureMarket ensures the market exists in the database and returns its ID.
 func (s *Service) ensureMarket(ctx context.Context, tx pgx.Tx, marketID [32]byte, chainID, blockNumber int64) (int64, error) {
 	// Check if market already exists
-	existing, err := s.morphoRepo.GetMarketByMarketID(ctx, common.BytesToHash(marketID[:]))
+	existing, err := s.morphoRepo.GetMarketByMarketID(ctx, common.Hash(marketID))
 	if err != nil {
 		return 0, fmt.Errorf("checking market existence: %w", err)
 	}
@@ -705,7 +705,7 @@ func (s *Service) ensureMarket(ctx context.Context, tx pgx.Tx, marketID [32]byte
 		return 0, fmt.Errorf("getting collateral token: %w", err)
 	}
 
-	market, err := entity.NewMorphoMarket(chainID, protocolID, common.BytesToHash(marketID[:]), loanTokenID, collTokenID, params.Oracle, params.Irm, params.LLTV, blockNumber)
+	market, err := entity.NewMorphoMarket(chainID, protocolID, common.Hash(marketID), loanTokenID, collTokenID, params.Oracle, params.Irm, params.LLTV, blockNumber)
 	if err != nil {
 		return 0, fmt.Errorf("creating market entity: %w", err)
 	}

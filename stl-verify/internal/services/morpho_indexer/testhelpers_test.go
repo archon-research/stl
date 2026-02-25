@@ -28,10 +28,10 @@ type serviceTestHarness struct {
 	userRepo     *testutil.MockUserRepository
 	protocolRepo *testutil.MockProtocolRepository
 	tokenRepo    *testutil.MockTokenRepository
-	morphoRepo   *mockMorphoRepo
+	morphoRepo   *testutil.MockMorphoRepository
 	eventRepo    *testutil.MockEventRepository
-	consumer     *mockSQSConsumer
-	cache        *mockBlockCache
+	consumer     *testutil.MockSQSConsumer
+	cache        *testutil.MockBlockCache
 
 	// ABIs for building multicall return data.
 	morphoBlueReadABI *abi.ABI
@@ -47,16 +47,16 @@ type serviceTestHarness struct {
 func newTestHarness(t *testing.T) *serviceTestHarness {
 	t.Helper()
 
-	cache := newMockBlockCache()
+	cache := testutil.NewMockBlockCache()
 
 	multicaller := testutil.NewMockMulticaller()
 	txManager := &testutil.MockTxManager{}
 	userRepo := &testutil.MockUserRepository{}
 	protocolRepo := &testutil.MockProtocolRepository{}
 	tokenRepo := &testutil.MockTokenRepository{}
-	morphoRepo := &mockMorphoRepo{}
+	morphoRepo := &testutil.MockMorphoRepository{}
 	eventRepo := &testutil.MockEventRepository{}
-	consumer := &mockSQSConsumer{}
+	consumer := &testutil.MockSQSConsumer{}
 
 	// Set up sequential token IDs for GetOrCreateToken.
 	var tokenCounter int64
@@ -278,7 +278,7 @@ func (h *serviceTestHarness) makeSupplyLog(marketID [32]byte, caller, onBehalf c
 		Address: MorphoBlueAddress.Hex(),
 		Topics: []string{
 			event.ID.Hex(),
-			common.BytesToHash(marketID[:]).Hex(),
+			common.Hash(marketID).Hex(),
 			common.BytesToHash(caller.Bytes()).Hex(),
 			common.BytesToHash(onBehalf.Bytes()).Hex(),
 		},
@@ -300,7 +300,7 @@ func (h *serviceTestHarness) makeWithdrawLog(marketID [32]byte, caller, onBehalf
 		Address: MorphoBlueAddress.Hex(),
 		Topics: []string{
 			event.ID.Hex(),
-			common.BytesToHash(marketID[:]).Hex(),
+			common.Hash(marketID).Hex(),
 			common.BytesToHash(onBehalf.Bytes()).Hex(),
 			common.BytesToHash(receiver.Bytes()).Hex(),
 		},
@@ -322,7 +322,7 @@ func (h *serviceTestHarness) makeBorrowLog(marketID [32]byte, caller, onBehalf, 
 		Address: MorphoBlueAddress.Hex(),
 		Topics: []string{
 			event.ID.Hex(),
-			common.BytesToHash(marketID[:]).Hex(),
+			common.Hash(marketID).Hex(),
 			common.BytesToHash(onBehalf.Bytes()).Hex(),
 			common.BytesToHash(receiver.Bytes()).Hex(),
 		},
@@ -344,7 +344,7 @@ func (h *serviceTestHarness) makeRepayLog(marketID [32]byte, caller, onBehalf co
 		Address: MorphoBlueAddress.Hex(),
 		Topics: []string{
 			event.ID.Hex(),
-			common.BytesToHash(marketID[:]).Hex(),
+			common.Hash(marketID).Hex(),
 			common.BytesToHash(caller.Bytes()).Hex(),
 			common.BytesToHash(onBehalf.Bytes()).Hex(),
 		},
@@ -366,7 +366,7 @@ func (h *serviceTestHarness) makeSupplyCollateralLog(marketID [32]byte, caller, 
 		Address: MorphoBlueAddress.Hex(),
 		Topics: []string{
 			event.ID.Hex(),
-			common.BytesToHash(marketID[:]).Hex(),
+			common.Hash(marketID).Hex(),
 			common.BytesToHash(caller.Bytes()).Hex(),
 			common.BytesToHash(onBehalf.Bytes()).Hex(),
 		},
@@ -388,7 +388,7 @@ func (h *serviceTestHarness) makeWithdrawCollateralLog(marketID [32]byte, caller
 		Address: MorphoBlueAddress.Hex(),
 		Topics: []string{
 			event.ID.Hex(),
-			common.BytesToHash(marketID[:]).Hex(),
+			common.Hash(marketID).Hex(),
 			common.BytesToHash(onBehalf.Bytes()).Hex(),
 			common.BytesToHash(receiver.Bytes()).Hex(),
 		},
@@ -415,7 +415,7 @@ func (h *serviceTestHarness) makeCreateMarketLog(marketID [32]byte, loan, coll, 
 	}
 	return shared.Log{
 		Address:         MorphoBlueAddress.Hex(),
-		Topics:          []string{event.ID.Hex(), common.BytesToHash(marketID[:]).Hex()},
+		Topics:          []string{event.ID.Hex(), common.Hash(marketID).Hex()},
 		Data:            common.Bytes2Hex(data),
 		TransactionHash: testTxHash,
 		LogIndex:        "0x0",
@@ -431,7 +431,7 @@ func (h *serviceTestHarness) makeAccrueInterestLog(marketID [32]byte, prevBorrow
 	}
 	return shared.Log{
 		Address:         MorphoBlueAddress.Hex(),
-		Topics:          []string{event.ID.Hex(), common.BytesToHash(marketID[:]).Hex()},
+		Topics:          []string{event.ID.Hex(), common.Hash(marketID).Hex()},
 		Data:            common.Bytes2Hex(data),
 		TransactionHash: testTxHash,
 		LogIndex:        "0x0",
@@ -450,7 +450,7 @@ func (h *serviceTestHarness) makeLiquidateLog(marketID [32]byte, caller, borrowe
 		Address: MorphoBlueAddress.Hex(),
 		Topics: []string{
 			event.ID.Hex(),
-			common.BytesToHash(marketID[:]).Hex(),
+			common.Hash(marketID).Hex(),
 			common.BytesToHash(caller.Bytes()).Hex(),
 			common.BytesToHash(borrower.Bytes()).Hex(),
 		},
@@ -469,7 +469,7 @@ func (h *serviceTestHarness) makeSetFeeLog(marketID [32]byte, newFee *big.Int) s
 	}
 	return shared.Log{
 		Address:         MorphoBlueAddress.Hex(),
-		Topics:          []string{event.ID.Hex(), common.BytesToHash(marketID[:]).Hex()},
+		Topics:          []string{event.ID.Hex(), common.Hash(marketID).Hex()},
 		Data:            common.Bytes2Hex(data),
 		TransactionHash: testTxHash,
 		LogIndex:        "0x0",
@@ -603,6 +603,7 @@ func (h *serviceTestHarness) processBlock(t *testing.T, chainID, blockNumber int
 func (h *serviceTestHarness) registerTestVault(vaultAddr common.Address, vaultID int64, version entity.MorphoVaultVersion) {
 	vault := &entity.MorphoVault{
 		ID:             vaultID,
+		ChainID:        1,
 		ProtocolID:     1,
 		Address:        vaultAddr.Bytes(),
 		Name:           "Test Vault",
@@ -627,8 +628,8 @@ func (h *serviceTestHarness) setupPositionEventMulticall() {
 
 // setupMarketExistsInDB configures morphoRepo to return a market with the given ID.
 func (h *serviceTestHarness) setupMarketExistsInDB(marketID [32]byte, dbID int64) {
-	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, id []byte) (*entity.MorphoMarket, error) {
-		if common.BytesToHash(id) == common.BytesToHash(marketID[:]) {
+	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, id common.Hash) (*entity.MorphoMarket, error) {
+		if id == common.Hash(marketID) {
 			return &entity.MorphoMarket{ID: dbID, MarketID: id}, nil
 		}
 		return nil, nil

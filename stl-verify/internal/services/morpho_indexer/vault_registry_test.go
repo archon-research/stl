@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 func TestVaultRegistry(t *testing.T) {
@@ -89,7 +90,7 @@ func TestVaultRegistry_LoadFromDB(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := NewVaultRegistry(slog.Default())
-			repo := &mockMorphoRepo{
+			repo := &testutil.MockMorphoRepository{
 				GetAllVaultsFn: func(_ context.Context) (map[common.Address]*entity.MorphoVault, error) {
 					if tt.err != nil {
 						return nil, tt.err
