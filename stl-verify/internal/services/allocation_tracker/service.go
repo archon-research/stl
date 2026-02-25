@@ -245,6 +245,10 @@ func (s *Service) buildSnapshots(
 	return snapshots
 }
 
+// sweepLoop runs periodic reconciliation to capture balance changes that don't
+// emit Transfer events — e.g. aToken interest accrual, ERC4626 yield compounding,
+// and BUIDL rebases. Without this, positions would drift between transfer-triggered
+// snapshots.
 func (s *Service) sweepLoop() {
 	ticker := time.NewTicker(s.config.SweepInterval)
 	defer ticker.Stop()
