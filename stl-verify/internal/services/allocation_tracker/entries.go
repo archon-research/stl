@@ -236,8 +236,8 @@ func avalancheEntries() []*TokenEntry {
 
 	return []*TokenEntry{
 		{ContractAddress: common.HexToAddress("0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d"), WalletAddress: spark, AssetAddress: addr("0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e"), Star: "spark", Chain: "avalanche-c", Protocol: "spark", AllocationType: "allocation", TokenType: "erc4626", CreatedAtBlock: blockNum(69983672)},
-		{ContractAddress: common.HexToAddress("0x58f93d6b1ef2f44ec379cb975657c132cbed3b6b"), WalletAddress: grove, AssetAddress: addr("0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e"), Star: "grove", Chain: "avalanche-c", Protocol: "centrifuge", AllocationType: "allocation", TokenType: "centrifuge"},
-		{ContractAddress: common.HexToAddress("0x2c0adff8e114f3ca106051144353ac703d24b901"), WalletAddress: grove, AssetAddress: addr("0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e"), Star: "grove", Chain: "avalanche-c", Protocol: "arch", AllocationType: "allocation", TokenType: "galaxy_clo", CreatedAtBlock: blockNum(72633046)},
+		{ContractAddress: common.HexToAddress("0x58f93d6b1ef2f44ec379cb975657c132cbed3b6b"), WalletAddress: grove, Star: "grove", Chain: "avalanche-c", Protocol: "janus-henderson", AllocationType: "allocation", TokenType: "erc20"},
+		{ContractAddress: common.HexToAddress("0x2c0adff8e114f3ca106051144353ac703d24b901"), WalletAddress: grove, Star: "grove", Chain: "avalanche-c", Protocol: "arch", AllocationType: "allocation", TokenType: "erc20", CreatedAtBlock: blockNum(72633046)},
 	}
 }
 
