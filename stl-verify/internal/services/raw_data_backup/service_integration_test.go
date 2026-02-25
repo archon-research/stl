@@ -27,6 +27,7 @@ import (
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -463,9 +464,9 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 	t.Logf("S3 objects created: %v", objects)
 
 	expectedFiles := []string{
-		fmt.Sprintf("%s/%d_%d_block.json.gz", partition, blockNumber, version),
-		fmt.Sprintf("%s/%d_%d_receipts.json.gz", partition, blockNumber, version),
-		fmt.Sprintf("%s/%d_%d_traces.json.gz", partition, blockNumber, version),
+		s3key.BuildWithPartition(partition, blockNumber, version, s3key.Block),
+		s3key.BuildWithPartition(partition, blockNumber, version, s3key.Receipts),
+		s3key.BuildWithPartition(partition, blockNumber, version, s3key.Traces),
 	}
 
 	for _, expected := range expectedFiles {
@@ -482,7 +483,7 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 	}
 
 	// Verify content of block file
-	blockKey := fmt.Sprintf("%s/%d_%d_block.json.gz", partition, blockNumber, version)
+	blockKey := s3key.BuildWithPartition(partition, blockNumber, version, s3key.Block)
 	content := getS3Object(t, ctx, infra, blockKey)
 	t.Logf("Block content: %s", string(content))
 
@@ -740,7 +741,7 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event1)
 
 	// Wait for version 1 to be written
-	keyV1 := fmt.Sprintf("1000-1999/%d_1_block.json.gz", blockNumber)
+	keyV1 := s3key.BuildWithPartition("1000-1999", blockNumber, 1, s3key.Block)
 	waitForS3Object(t, ctx, infra, keyV1, 10*time.Second)
 
 	svc.Stop()
@@ -752,8 +753,8 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 	objects := listS3Objects(t, ctx, infra, prefix)
 	t.Logf("S3 objects: %v", objects)
 
-	expectedV0 := fmt.Sprintf("1000-1999/%d_0_block.json.gz", blockNumber)
-	expectedV1 := fmt.Sprintf("1000-1999/%d_1_block.json.gz", blockNumber)
+	expectedV0 := s3key.BuildWithPartition("1000-1999", blockNumber, 0, s3key.Block)
+	expectedV1 := s3key.BuildWithPartition("1000-1999", blockNumber, 1, s3key.Block)
 
 	foundV0, foundV1 := false, false
 	for _, obj := range objects {
@@ -990,7 +991,7 @@ func TestIntegration_RaceConditionIdempotency(t *testing.T) {
 	}
 
 	// Wait for at least one file to be created
-	key := fmt.Sprintf("7000-7999/%d_%d_block.json.gz", blockNumber, version)
+	key := s3key.BuildWithPartition("7000-7999", blockNumber, version, s3key.Block)
 	waitForS3Object(t, ctx, infra, key, 15*time.Second)
 
 	// Wait a bit for any concurrent writes to complete
@@ -1092,7 +1093,7 @@ func TestIntegration_PartialWriteFailure(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event)
 
 	// Wait for block file to be created
-	key := fmt.Sprintf("8000-8999/%d_%d_block.json.gz", blockNumber, version)
+	key := s3key.BuildWithPartition("8000-8999", blockNumber, version, s3key.Block)
 	waitForS3Object(t, ctx, infra, key, 10*time.Second)
 
 	svc.Stop()
@@ -1328,7 +1329,7 @@ func TestIntegration_GzipContentIntegrity(t *testing.T) {
 	}
 	publishBlockEvent(t, ctx, infra, event)
 
-	key := fmt.Sprintf("6000-6999/%d_%d_block.json.gz", blockNumber, version)
+	key := s3key.BuildWithPartition("6000-6999", blockNumber, version, s3key.Block)
 	waitForS3Object(t, ctx, infra, key, 10*time.Second)
 
 	svc.Stop()
@@ -1523,9 +1524,9 @@ func TestIntegration_ChainExpectationsMetSuccessfully(t *testing.T) {
 
 	// Verify all expected files exist
 	expectedFiles := map[string]bool{
-		fmt.Sprintf("3000-3999/%d_%d_block.json.gz", blockNumber, version):    false,
-		fmt.Sprintf("3000-3999/%d_%d_receipts.json.gz", blockNumber, version): false,
-		fmt.Sprintf("3000-3999/%d_%d_traces.json.gz", blockNumber, version):   false,
+		s3key.BuildWithPartition("3000-3999", blockNumber, version, s3key.Block):    false,
+		s3key.BuildWithPartition("3000-3999", blockNumber, version, s3key.Receipts): false,
+		s3key.BuildWithPartition("3000-3999", blockNumber, version, s3key.Traces):   false,
 	}
 
 	for _, obj := range objects {
@@ -1600,7 +1601,7 @@ func TestIntegration_UnknownChainNoExpectations(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event)
 
 	// Wait for block file to be created
-	key := fmt.Sprintf("2000-2999/%d_%d_block.json.gz", blockNumber, version)
+	key := s3key.BuildWithPartition("2000-2999", blockNumber, version, s3key.Block)
 	waitForS3Object(t, ctx, infra, key, 10*time.Second)
 
 	svc.Stop()

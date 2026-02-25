@@ -34,6 +34,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/aws/aws-sdk-go-v2/config"
 )
@@ -165,8 +166,8 @@ func (pc *PartitionCache) HasBlockAndReceipts(ctx context.Context, blockNum int6
 		return false, err
 	}
 
-	blockKey := fmt.Sprintf("%s/%d_1_block.json.gz", partition, blockNum)
-	receiptsKey := fmt.Sprintf("%s/%d_1_receipts.json.gz", partition, blockNum)
+	blockKey := s3key.BuildWithPartition(partition, blockNum, 1, s3key.Block)
+	receiptsKey := s3key.BuildWithPartition(partition, blockNum, 1, s3key.Receipts)
 
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
@@ -189,9 +190,9 @@ func (pc *PartitionCache) HasAllData(ctx context.Context, blockNum int64) (bool,
 		return false, err
 	}
 
-	blockKey := fmt.Sprintf("%s/%d_1_block.json.gz", partition, blockNum)
-	receiptsKey := fmt.Sprintf("%s/%d_1_receipts.json.gz", partition, blockNum)
-	tracesKey := fmt.Sprintf("%s/%d_1_traces.json.gz", partition, blockNum)
+	blockKey := s3key.BuildWithPartition(partition, blockNum, 1, s3key.Block)
+	receiptsKey := s3key.BuildWithPartition(partition, blockNum, 1, s3key.Receipts)
+	tracesKey := s3key.BuildWithPartition(partition, blockNum, 1, s3key.Traces)
 
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
@@ -213,7 +214,7 @@ func (pc *PartitionCache) HasTraces(ctx context.Context, blockNum int64) (bool, 
 		return false, err
 	}
 
-	tracesKey := fmt.Sprintf("%s/%d_1_traces.json.gz", partition, blockNum)
+	tracesKey := s3key.BuildWithPartition(partition, blockNum, 1, s3key.Traces)
 
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
@@ -229,7 +230,7 @@ func (pc *PartitionCache) HasTraces(ctx context.Context, blockNum int64) (bool, 
 
 func (pc *PartitionCache) MarkWritten(blockNum int64, dataType string) {
 	partition := partition.GetPartition(blockNum)
-	key := fmt.Sprintf("%s/%d_1_%s.json.gz", partition, blockNum, dataType)
+	key := s3key.BuildWithPartition(partition, blockNum, 1, s3key.DataType(dataType))
 
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
@@ -677,7 +678,7 @@ func blockReceiptWorker(
 				select {
 				case uploadCh <- UploadJob{
 					Bucket:   cfg.Bucket,
-					Key:      fmt.Sprintf("%s/%d_1_block.json.gz", partition, r.BlockNumber),
+					Key:      s3key.BuildWithPartition(partition, r.BlockNumber, 1, s3key.Block),
 					Data:     r.Block,
 					DataType: "block",
 					BlockNum: r.BlockNumber,
@@ -693,7 +694,7 @@ func blockReceiptWorker(
 				select {
 				case uploadCh <- UploadJob{
 					Bucket:   cfg.Bucket,
-					Key:      fmt.Sprintf("%s/%d_1_receipts.json.gz", partition, r.BlockNumber),
+					Key:      s3key.BuildWithPartition(partition, r.BlockNumber, 1, s3key.Receipts),
 					Data:     r.Receipts,
 					DataType: "receipts",
 					BlockNum: r.BlockNumber,
@@ -829,7 +830,7 @@ func traceWorker(
 			select {
 			case uploadCh <- UploadJob{
 				Bucket:   bucket,
-				Key:      fmt.Sprintf("%s/%d_1_traces.json.gz", partition, blockNum),
+				Key:      s3key.BuildWithPartition(partition, blockNum, 1, s3key.Traces),
 				Data:     traceData,
 				DataType: "traces",
 				BlockNum: blockNum,
