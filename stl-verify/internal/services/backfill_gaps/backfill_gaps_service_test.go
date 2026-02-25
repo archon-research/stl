@@ -1633,3 +1633,103 @@ func TestPublishNeverHappensWithoutCache(t *testing.T) {
 		})
 	}
 }
+
+// TestBackfillService_RetriesIncompletePublishes_WhenNoGaps reproduces the bug where
+// blocks saved to DB but not published (block_published=false) are never retried
+// when there are no missing block numbers (no gaps).
+//
+// Scenario:
+// 1. LiveService saves blocks 1-10 to DB
+// 2. Cache/SNS publish fails for blocks 3,5,7 → block_published=false
+// 3. Backfill runs, FindGaps() returns 0 gaps (all block numbers exist)
+// 4. BUG: retryIncompletePublishes() is never called due to early return
+// 5. Blocks 3,5,7 remain unpublished forever
+func TestBackfillService_RetriesIncompletePublishes_WhenNoGaps(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Pre-populate client with blocks 1-10
+	for i := int64(1); i <= 10; i++ {
+		client.AddBlock(i, "")
+	}
+
+	// Save ALL blocks 1-10 to DB (simulating LiveService saved them)
+	for i := int64(1); i <= 10; i++ {
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:         i,
+			Hash:           client.GetHeader(i).Hash,
+			ParentHash:     client.GetHeader(i).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Mark most blocks as published (simulating successful cache+SNS)
+	for i := int64(1); i <= 10; i++ {
+		if i == 3 || i == 5 || i == 7 {
+			continue // Leave these UNpublished (simulating cache/SNS failure)
+		}
+		if err := stateRepo.MarkPublishComplete(ctx, client.GetHeader(i).Hash); err != nil {
+			t.Fatalf("failed to mark block %d published: %v", i, err)
+		}
+	}
+
+	// Verify precondition: blocks 3,5,7 are unpublished
+	incomplete, err := stateRepo.GetBlocksWithIncompletePublish(ctx, 100)
+	if err != nil {
+		t.Fatalf("failed to get incomplete publishes: %v", err)
+	}
+	if len(incomplete) != 3 {
+		t.Fatalf("expected 3 incomplete publishes, got %d", len(incomplete))
+	}
+
+	config := BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		BoundaryCheckDepth: -1, // Disable boundary check (not relevant to this test)
+		Logger:             slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Run a single backfill pass
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatalf("backfill failed: %v", err)
+	}
+
+	// After backfill, ALL blocks should be published (blocks 3,5,7 should have been retried)
+	stillIncomplete, err := stateRepo.GetBlocksWithIncompletePublish(ctx, 100)
+	if err != nil {
+		t.Fatalf("failed to get incomplete publishes after backfill: %v", err)
+	}
+	if len(stillIncomplete) != 0 {
+		unpublishedNums := make([]int64, len(stillIncomplete))
+		for i, b := range stillIncomplete {
+			unpublishedNums[i] = b.Number
+		}
+		t.Errorf("expected 0 incomplete publishes after backfill, got %d (blocks: %v)",
+			len(stillIncomplete), unpublishedNums)
+	}
+
+	// Verify events were published for the retried blocks
+	blockEvents := eventSink.GetBlockEvents()
+	retriedBlocks := map[int64]bool{}
+	for _, e := range blockEvents {
+		retriedBlocks[e.BlockNumber] = true
+	}
+	for _, num := range []int64{3, 5, 7} {
+		if !retriedBlocks[num] {
+			t.Errorf("block %d was not retried/published", num)
+		}
+	}
+}
