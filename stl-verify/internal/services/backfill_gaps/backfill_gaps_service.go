@@ -256,19 +256,23 @@ func (s *BackfillService) findAndFillGaps() error {
 	if len(gaps) == 0 {
 		// Check for unpublished blocks even when there are no gaps, so operators
 		// can see that blocks exist but need retry (saved but cache/publish failed).
-		incompleteCount := 0
-		if incomplete, err := s.stateRepo.GetBlocksWithIncompletePublish(ctx, 1); err == nil {
-			incompleteCount = len(incomplete)
+		hasUnpublishedBlocks := false
+		incomplete, err := s.stateRepo.GetBlocksWithIncompletePublish(ctx, 1)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to check incomplete publishes")
+			return fmt.Errorf("failed to check incomplete publishes: %w", err)
 		}
+		hasUnpublishedBlocks = len(incomplete) > 0
 		s.logger.Debug("no gaps to backfill",
 			"minBlock", minBlock,
 			"maxBlock", maxBlock,
-			"unpublishedBlocks", incompleteCount)
+			"hasUnpublishedBlocks", hasUnpublishedBlocks)
 		span.SetAttributes(
 			attribute.Int("backfill.gaps_count", 0),
 			attribute.Int64("backfill.min_block", minBlock),
 			attribute.Int64("backfill.max_block", maxBlock),
-			attribute.Int("backfill.unpublished_blocks", incompleteCount),
+			attribute.Bool("backfill.has_unpublished_blocks", hasUnpublishedBlocks),
 		)
 	} else {
 		// Calculate total missing blocks
