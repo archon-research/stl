@@ -27,9 +27,6 @@ func TestConfigDefaults(t *testing.T) {
 	if defaults.PollInterval == 0 {
 		t.Error("PollInterval should not be zero")
 	}
-	if defaults.ChainID != 1 {
-		t.Errorf("ChainID = %d, want 1", defaults.ChainID)
-	}
 	if defaults.Logger == nil {
 		t.Error("Logger should not be nil")
 	}
@@ -39,6 +36,31 @@ func TestMorphoBlueAddress(t *testing.T) {
 	expected := "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
 	if MorphoBlueAddress.Hex() != expected {
 		t.Errorf("MorphoBlueAddress = %s, want %s", MorphoBlueAddress.Hex(), expected)
+	}
+}
+
+func TestMorphoBlueDeployBlock(t *testing.T) {
+	tests := []struct {
+		name    string
+		chainID int64
+		want    int64
+		wantErr bool
+	}{
+		{"ethereum mainnet", 1, 18883124, false},
+		{"base", 8453, 18925795, false},
+		{"arbitrum", 42161, 226833208, false},
+		{"unknown chain", 999, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := MorphoBlueDeployBlock(tt.chainID)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("MorphoBlueDeployBlock(%d) error = %v, wantErr %v", tt.chainID, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("MorphoBlueDeployBlock(%d) = %d, want %d", tt.chainID, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -55,7 +77,9 @@ func TestNewService_ValidateDependencies(t *testing.T) {
 	er := &testutil.MockEventRepository{}
 	cons := &mockSQSConsumer{}
 
-	config := Config{SQSConsumerConfig: shared.SQSConsumerConfigDefaults(), ChainID: 1}
+	sqsCfg := shared.SQSConsumerConfigDefaults()
+	sqsCfg.ChainID = 1
+	config := Config{SQSConsumerConfig: sqsCfg}
 
 	tests := []struct {
 		name        string

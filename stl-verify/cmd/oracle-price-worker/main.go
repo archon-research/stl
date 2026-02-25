@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -44,6 +45,7 @@ type cliConfig struct {
 	dbURL              string
 	alchemyURL         string
 	alchemyHTTPBaseURL string
+	chainID            int64
 }
 
 func parseConfig(args []string) (cliConfig, error) {
@@ -80,6 +82,13 @@ func parseConfig(args []string) (cliConfig, error) {
 	cfg.alchemyHTTPBaseURL = env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
 	cfg.alchemyURL = fmt.Sprintf("%s/%s", cfg.alchemyHTTPBaseURL, alchemyAPIKey)
 
+	chainIDStr := env.Get("CHAIN_ID", "1")
+	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	if err != nil {
+		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
+	}
+	cfg.chainID = chainID
+
 	return cfg, nil
 }
 
@@ -94,7 +103,7 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
-	logger.Info("starting oracle price worker", "queue", cfg.queueURL)
+	logger.Info("starting oracle price worker", "queue", cfg.queueURL, "chainID", cfg.chainID)
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
 		awsconfig.WithRegion(env.Get("AWS_REGION", "eu-west-1")),
@@ -131,7 +140,8 @@ func run(ctx context.Context, args []string) error {
 
 	service, err := oracle_price_worker.NewService(
 		shared.SQSConsumerConfig{
-			Logger: logger,
+			Logger:  logger,
+			ChainID: cfg.chainID,
 		},
 		consumer,
 		repo,

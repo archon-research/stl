@@ -1,6 +1,7 @@
 package shared
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -10,6 +11,7 @@ type SQSConsumerConfig struct {
 	MaxMessages  int
 	PollInterval time.Duration
 	Logger       *slog.Logger
+	ChainID      int64
 }
 
 // SQSConsumerConfigDefaults returns default values for SQS consumer configuration.
@@ -33,4 +35,12 @@ func (c *SQSConsumerConfig) ApplyDefaults() {
 	if c.Logger == nil {
 		c.Logger = defaults.Logger
 	}
+}
+
+// Validate checks that required fields are set.
+func (c *SQSConsumerConfig) Validate() error {
+	if c.ChainID == 0 {
+		return fmt.Errorf("ChainID must be set")
+	}
+	return nil
 }

@@ -193,7 +193,8 @@ func (m *mockRepo) GetAllProtocolOracleBindings(ctx context.Context) ([]*entity.
 
 func validConfig() shared.SQSConsumerConfig {
 	return shared.SQSConsumerConfig{
-		Logger: testutil.DiscardLogger(),
+		Logger:  testutil.DiscardLogger(),
+		ChainID: 1,
 	}
 }
 
@@ -295,7 +296,7 @@ func TestNewService(t *testing.T) {
 		},
 		{
 			name:          "success with default config values",
-			config:        shared.SQSConsumerConfig{},
+			config:        shared.SQSConsumerConfig{ChainID: 1},
 			consumer:      consumer,
 			repo:          repo,
 			wantErr:       false,

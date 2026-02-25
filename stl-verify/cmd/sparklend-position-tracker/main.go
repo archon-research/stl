@@ -225,6 +225,7 @@ func run(ctx context.Context, args []string) error {
 		shared.SQSConsumerConfig{
 			MaxMessages: cfg.maxMessages,
 			Logger:      logger,
+			ChainID:     cfg.chainID,
 		},
 		sqsConsumer,
 		redisClient,

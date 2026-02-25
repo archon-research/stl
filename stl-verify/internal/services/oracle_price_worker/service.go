@@ -71,6 +71,9 @@ func NewService(
 	}
 
 	config.ApplyDefaults()
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
 
 	oracleABI, err := abis.GetAaveOracleABI()
 	if err != nil {
@@ -106,6 +109,7 @@ func (s *Service) Start(ctx context.Context) error {
 		MaxMessages:  s.config.MaxMessages,
 		PollInterval: s.config.PollInterval,
 		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
 	}, s.processBlock)
 
 	s.logger.Info("oracle price worker started",

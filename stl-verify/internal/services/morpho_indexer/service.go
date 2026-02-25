@@ -21,13 +21,27 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// MorphoBlueDeployBlock is the block at which Morpho Blue was deployed.
-const MorphoBlueDeployBlock = 18883124
+// morphoBlueDeployBlocks maps chain IDs to the block at which Morpho Blue
+// was deployed on that chain. Morpho Blue is deployed via CREATE2 at the
+// same address on all chains, but each deployment occurred at a different block.
+var morphoBlueDeployBlocks = map[int64]int64{
+	1:     18883124,  // Ethereum mainnet
+	8453:  18925795,  // Base
+	42161: 226833208, // Arbitrum
+}
+
+// MorphoBlueDeployBlock returns the deploy block for the given chain ID.
+func MorphoBlueDeployBlock(chainID int64) (int64, error) {
+	block, ok := morphoBlueDeployBlocks[chainID]
+	if !ok {
+		return 0, fmt.Errorf("unsupported chain ID %d for Morpho Blue: no known deploy block", chainID)
+	}
+	return block, nil
+}
 
 // Config holds service configuration.
 type Config struct {
 	shared.SQSConsumerConfig
-	ChainID   int64
 	Telemetry *Telemetry // optional, nil-safe
 }
 
@@ -35,13 +49,13 @@ type Config struct {
 func ConfigDefaults() Config {
 	return Config{
 		SQSConsumerConfig: shared.SQSConsumerConfigDefaults(),
-		ChainID:           1,
 	}
 }
 
 // Service is the Morpho indexer SQS consumer service.
 type Service struct {
 	config       Config
+	deployBlock  int64 // resolved Morpho Blue deploy block for the configured chain
 	consumer     outbound.SQSConsumer
 	cache        outbound.BlockCache
 	txManager    outbound.TxManager
@@ -79,8 +93,13 @@ func NewService(
 	}
 
 	config.SQSConsumerConfig.ApplyDefaults()
-	if config.ChainID == 0 {
-		config.ChainID = ConfigDefaults().ChainID
+	if err := config.SQSConsumerConfig.Validate(); err != nil {
+		return nil, err
+	}
+
+	deployBlock, err := MorphoBlueDeployBlock(config.ChainID)
+	if err != nil {
+		return nil, err
 	}
 
 	erc20ABI, err := abis.GetERC20ABI()
@@ -100,6 +119,7 @@ func NewService(
 
 	return &Service{
 		config:         config,
+		deployBlock:    deployBlock,
 		consumer:       consumer,
 		cache:          cache,
 		txManager:      txManager,
@@ -130,6 +150,7 @@ func (s *Service) Start(ctx context.Context) error {
 		MaxMessages:  s.config.MaxMessages,
 		PollInterval: s.config.PollInterval,
 		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
 	}, s.processBlockEvent)
 
 	s.logger.Info("morpho indexer started",
@@ -383,7 +404,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 			return fmt.Errorf("getting asset token: %w", err)
 		}
 
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", MorphoBlueDeployBlock)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", s.deployBlock)
 		if err != nil {
 			return fmt.Errorf("getting protocol: %w", err)
 		}
@@ -428,7 +449,7 @@ func (s *Service) handleCreateMarket(ctx context.Context, eventData *MorphoBlueE
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", MorphoBlueDeployBlock)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", s.deployBlock)
 		if err != nil {
 			return fmt.Errorf("getting protocol: %w", err)
 		}
@@ -669,7 +690,7 @@ func (s *Service) ensureMarket(ctx context.Context, tx pgx.Tx, marketID [32]byte
 		return 0, fmt.Errorf("getting token pair metadata: %w", err)
 	}
 
-	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", MorphoBlueDeployBlock)
+	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", s.deployBlock)
 	if err != nil {
 		return 0, fmt.Errorf("getting protocol: %w", err)
 	}
@@ -766,7 +787,7 @@ func (s *Service) saveProtocolEvent(ctx context.Context, eventData *MorphoBlueEv
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", MorphoBlueDeployBlock)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", s.deployBlock)
 		if err != nil {
 			return fmt.Errorf("getting protocol: %w", err)
 		}

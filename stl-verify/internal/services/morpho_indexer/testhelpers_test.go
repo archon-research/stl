@@ -65,9 +65,10 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 		return tokenCounter, nil
 	}
 
+	sqsCfg := shared.SQSConsumerConfigDefaults()
+	sqsCfg.ChainID = 1
 	config := Config{
-		SQSConsumerConfig: shared.SQSConsumerConfigDefaults(),
-		ChainID:           1,
+		SQSConsumerConfig: sqsCfg,
 	}
 
 	svc, err := NewService(config, consumer, cache, multicaller, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo)

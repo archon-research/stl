@@ -268,8 +268,8 @@ func run(ctx context.Context, args []string) error {
 		SQSConsumerConfig: shared.SQSConsumerConfig{
 			MaxMessages: cfg.maxMessages,
 			Logger:      logger,
+			ChainID:     cfg.chainID,
 		},
-		ChainID:   cfg.chainID,
 		Telemetry: morphoTelemetry,
 	}
 

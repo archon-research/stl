@@ -96,6 +96,9 @@ func NewService(
 	}
 
 	config.ApplyDefaults()
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
 
 	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
@@ -173,6 +176,7 @@ func (s *Service) Start(ctx context.Context) error {
 		MaxMessages:  s.config.MaxMessages,
 		PollInterval: s.config.PollInterval,
 		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
 	}, s.processBlockEvent)
 
 	s.logger.Info("sparklend position tracker started",
