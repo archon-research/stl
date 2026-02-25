@@ -101,7 +101,7 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	infra.Cache = cache
 
 	// Start LocalStack (with S3, SNS, SQS)
-	localstackContainer, localstackCfg := startLocalStack(t, ctx)
+	localstackContainer, localstackCfg := testutil.StartLocalStack(t, ctx, "sns,sqs,s3")
 	infra.containers = append(infra.containers, localstackContainer)
 	cleanupFuncs = append(cleanupFuncs, func() {
 		// Use background context for cleanup since test context may be canceled
@@ -254,45 +254,6 @@ func startRedis(t *testing.T, ctx context.Context) (testcontainers.Container, Re
 	host, _ := container.Host(ctx)
 	port, _ := container.MappedPort(ctx, "6379")
 	config.Addr = fmt.Sprintf("%s:%s", host, port.Port())
-
-	return container, config
-}
-
-type LocalStackTestConfig struct {
-	Endpoint string
-	Region   string
-}
-
-func startLocalStack(t *testing.T, ctx context.Context) (testcontainers.Container, LocalStackTestConfig) {
-	t.Helper()
-
-	config := LocalStackTestConfig{
-		Region: "us-east-1",
-	}
-
-	req := testcontainers.ContainerRequest{
-		Image:        "localstack/localstack:latest",
-		ExposedPorts: []string{"4566/tcp"},
-		Env: map[string]string{
-			"SERVICES": "sns,sqs,s3",
-			"DEBUG":    "0",
-		},
-		WaitingFor: wait.ForHTTP("/_localstack/health").
-			WithPort("4566/tcp").
-			WithStartupTimeout(120 * time.Second),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		t.Fatalf("failed to start localstack: %v", err)
-	}
-
-	host, _ := container.Host(ctx)
-	port, _ := container.MappedPort(ctx, "4566")
-	config.Endpoint = fmt.Sprintf("http://%s:%s", host, port.Port())
 
 	return container, config
 }
