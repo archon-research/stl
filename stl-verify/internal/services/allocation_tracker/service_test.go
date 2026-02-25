@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -20,29 +21,6 @@ func (m *testHandler) HandleSnapshots(ctx context.Context, snapshots []*Position
 	return m.err
 }
 
-// ── BlockEvent ──
-
-func TestBlockEvent_CacheKey(t *testing.T) {
-	event := BlockEvent{
-		ChainID:     1,
-		BlockNumber: 12345,
-		Version:     0,
-	}
-	got := event.CacheKey()
-	want := "stl:1:12345:0:receipts"
-	if got != want {
-		t.Errorf("CacheKey() = %q, want %q", got, want)
-	}
-}
-
-func TestBlockEvent_CacheKey_DifferentVersions(t *testing.T) {
-	e1 := BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0}
-	e2 := BlockEvent{ChainID: 1, BlockNumber: 100, Version: 1}
-	if e1.CacheKey() == e2.CacheKey() {
-		t.Error("different versions should produce different cache keys")
-	}
-}
-
 // ── NewService ──
 
 func TestNewService_FillsDefaults(t *testing.T) {
@@ -50,7 +28,7 @@ func TestNewService_FillsDefaults(t *testing.T) {
 	registry := NewSourceRegistry(ConfigDefaults().Logger)
 
 	svc, err := NewService(
-		Config{},
+		Config{ChainID: 1},
 		nil, nil, nil, registry, nil, handler, nil,
 	)
 	if err != nil {
@@ -63,7 +41,20 @@ func TestNewService_FillsDefaults(t *testing.T) {
 		t.Errorf("SweepInterval not filled: got %v", svc.config.SweepInterval)
 	}
 	if len(svc.entries) == 0 {
-		t.Error("entries should default to DefaultTokenEntries")
+		t.Error("entries should default to DefaultTokenEntries for chain")
+	}
+}
+
+func TestNewService_RequiresChainID(t *testing.T) {
+	handler := &testHandler{}
+	registry := NewSourceRegistry(ConfigDefaults().Logger)
+
+	_, err := NewService(
+		Config{},
+		nil, nil, nil, registry, nil, handler, nil,
+	)
+	if err == nil {
+		t.Fatal("expected error when ChainID is 0")
 	}
 }
 
@@ -177,7 +168,7 @@ func TestBuildSnapshots_Basic(t *testing.T) {
 		{TokenAddress: contract, ProxyAddress: wallet, Amount: big.NewInt(500), Direction: DirectionIn, TxHash: "0xabc", LogIndex: 3},
 	}
 
-	event := BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0}
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0}
 
 	svc := &Service{}
 	snapshots := svc.buildSnapshots([]*TokenEntry{entry}, balances, transfers, event)
@@ -217,7 +208,7 @@ func TestBuildSnapshots_SkipsMissingBalance(t *testing.T) {
 	}
 
 	balances := map[EntryKey]*PositionBalance{}
-	event := BlockEvent{ChainID: 1, BlockNumber: 100}
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100}
 
 	svc := &Service{}
 	snapshots := svc.buildSnapshots([]*TokenEntry{entry}, balances, nil, event)
@@ -235,7 +226,7 @@ func TestBuildSnapshots_NoTransferContext(t *testing.T) {
 		entry.Key(): {Balance: big.NewInt(100), ScaledBalance: nil},
 	}
 
-	event := BlockEvent{ChainID: 1, BlockNumber: 50}
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 50}
 	svc := &Service{}
 	snapshots := svc.buildSnapshots([]*TokenEntry{entry}, balances, nil, event)
 

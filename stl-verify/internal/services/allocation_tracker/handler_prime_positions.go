@@ -186,8 +186,6 @@ func (c *metadataCache) fetchMissing(
 		return fmt.Errorf("multicall metadata: %w", err)
 	}
 
-	var fetchErrors []error
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -210,10 +208,7 @@ func (c *metadataCache) fetchMissing(
 		}
 
 		if decimals < 0 {
-			fetchErrors = append(fetchErrors, fmt.Errorf(
-				"decimals fetch failed for %s", addr.Hex(),
-			))
-			continue
+			return fmt.Errorf("decimals fetch failed for %s", addr.Hex())
 		}
 
 		symbol := "UNKNOWN"
@@ -235,10 +230,6 @@ func (c *metadataCache) fetchMissing(
 			"address", addr.Hex(),
 			"symbol", symbol,
 			"decimals", decimals)
-	}
-
-	if len(fetchErrors) > 0 {
-		return fmt.Errorf("metadata incomplete: %v", fetchErrors)
 	}
 
 	return nil

@@ -5,18 +5,18 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/redis/go-redis/v9"
 
+	ethAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/eth"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -27,28 +27,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
 )
-
-type ethClientWrapper struct {
-	client *ethclient.Client
-}
-
-func (w *ethClientWrapper) BlockNumber(ctx context.Context) (uint64, error) {
-	n, err := w.client.BlockNumber(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("eth block number: %w", err)
-	}
-	return n, nil
-}
-
-func (w *ethClientWrapper) FinalizedBlockNumber(ctx context.Context) (uint64, error) {
-	header, err := w.client.HeaderByNumber(
-		ctx, big.NewInt(int64(rpc.FinalizedBlockNumber)),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("eth finalized block header: %w", err)
-	}
-	return header.Number.Uint64(), nil
-}
 
 func main() {
 	if err := run(); err != nil {
@@ -81,6 +59,15 @@ func run() error {
 	}
 	if *redisAddr == "" {
 		return fmt.Errorf("redis address required (-redis or REDIS_ADDR)")
+	}
+
+	chainIDStr, err := env.Require("CHAIN_ID")
+	if err != nil {
+		return err
+	}
+	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid CHAIN_ID %q: %w", chainIDStr, err)
 	}
 
 	alchemyKey, err := env.Require("ALCHEMY_API_KEY")
@@ -145,7 +132,7 @@ func run() error {
 		return fmt.Errorf("eth dial: %w", err)
 	}
 	defer rawClient.Close()
-	ethClient := &ethClientWrapper{client: rawClient}
+	ethClient := ethAdapter.NewBlockQuerier(rawClient)
 
 	mc, err := multicall.NewClient(rawClient, blockchain.Multicall3)
 	if err != nil {
@@ -182,8 +169,13 @@ func run() error {
 		registry.Register(s)
 	}
 
-	// Token entries to index
-	entries := at.DefaultTokenEntries()
+	// Token entries filtered by chain
+	entries := at.EntriesForChainID(at.DefaultTokenEntries(), chainID)
+	if len(entries) == 0 {
+		return fmt.Errorf("no token entries for chain ID %d", chainID)
+	}
+
+	proxies := at.ProxiesForChainID(at.DefaultProxies(), chainID)
 
 	// Database
 	dbURL, err := env.Require("DATABASE_URL")
@@ -219,6 +211,7 @@ func run() error {
 		at.Config{
 			MaxMessages:   *maxMessages,
 			SweepInterval: time.Duration(*sweepMinutes) * time.Minute,
+			ChainID:       chainID,
 			Logger:        logger,
 		},
 		sqsConsumer,
@@ -227,7 +220,7 @@ func run() error {
 		registry,
 		entries,
 		handler,
-		at.DefaultProxies(),
+		proxies,
 	)
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
@@ -245,6 +238,7 @@ func run() error {
 	}
 
 	logger.Info("running",
+		"chainID", chainID,
 		"entries", len(entries),
 		"sweep", fmt.Sprintf("%dm", *sweepMinutes))
 	sig := <-sigChan

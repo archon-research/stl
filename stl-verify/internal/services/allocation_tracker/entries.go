@@ -1,6 +1,9 @@
 package allocation_tracker
 
-import "github.com/ethereum/go-ethereum/common"
+import (
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/ethereum/go-ethereum/common"
+)
 
 func addr(hex string) *common.Address {
 	a := common.HexToAddress(hex)
@@ -35,6 +38,28 @@ func EntriesForChain(entries []*TokenEntry, chain string) []*TokenEntry {
 	for _, e := range entries {
 		if e.Chain == chain {
 			result = append(result, e)
+		}
+	}
+	return result
+}
+
+func EntriesForChainID(entries []*TokenEntry, chainID int64) []*TokenEntry {
+	chain, ok := entity.ChainIDToName[int(chainID)]
+	if !ok {
+		return nil
+	}
+	return EntriesForChain(entries, chain)
+}
+
+func ProxiesForChainID(proxies []ProxyConfig, chainID int64) []ProxyConfig {
+	chain, ok := entity.ChainIDToName[int(chainID)]
+	if !ok {
+		return nil
+	}
+	var result []ProxyConfig
+	for _, p := range proxies {
+		if p.Chain == chain {
+			result = append(result, p)
 		}
 	}
 	return result

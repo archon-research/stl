@@ -17,6 +17,7 @@ type Config struct {
 	MaxMessages   int
 	PollInterval  time.Duration
 	SweepInterval time.Duration
+	ChainID       int64
 	Logger        *slog.Logger
 }
 
