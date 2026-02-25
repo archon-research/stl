@@ -381,6 +381,13 @@ func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, rece
 	if err := s.cacheAndPublishBlockData(ctx, header, blockNum, version, receivedAt, isReorg, prefetch.blockData); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to cache and publish block data")
+		// Log at ERROR level: block is saved to DB but NOT published.
+		// The backfill service will retry, but this needs operator attention.
+		s.logger.Error("block saved to DB but cache/publish FAILED - block_published=false, will be retried by backfill",
+			"block", blockNum,
+			"hash", header.Hash,
+			"version", version,
+			"error", err)
 		return fmt.Errorf("failed to cache and publish block data: %w", err)
 	}
 
