@@ -9,9 +9,11 @@ import (
 
 const wordSize = 32
 
-// decodeUserReservesRaw manually decodes getUserReservesData output when the standard
-// ABI decoder fails due to non-strict boolean encoding (e.g. Avalanche C-Chain encodes
-// booleans as uint256 where any non-zero value is true).
+// decodeUserReservesRaw is a fallback decoder for getUserReservesData output
+// when the standard ABI decoder rejects non-strict boolean encoding (e.g.
+// Avalanche C-Chain encodes booleans as arbitrary non-zero uint256 values).
+// The correct ABI is already selected by protocol version in loadABIs();
+// this only handles the wire-encoding edge case.
 //
 // Return layout (ABI-encoded):
 //
