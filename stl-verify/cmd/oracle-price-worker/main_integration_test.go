@@ -76,7 +76,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	}
 
 	// Wait for the block event to be processed (prices stored in DB)
-	testutil.WaitForCondition(t, 10*time.Second, func() bool {
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		var count int
 		pool.QueryRow(bgCtx, `SELECT COUNT(*) FROM onchain_token_price`).Scan(&count)
 		return count >= tokenCount

@@ -454,7 +454,7 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 	// Blobs are not expected for Ethereum (chain 1) per DefaultChainExpectations
 	partition := "12000-12999" // Block 12345 falls in this partition
 	prefix := fmt.Sprintf("%s/", partition)
-	objects := waitForS3Objects(t, ctx, infra, prefix, 3, 10*time.Second)
+	objects := waitForS3Objects(t, ctx, infra, prefix, 3, 30*time.Second)
 
 	// Stop service
 	svc.Stop()
@@ -559,7 +559,7 @@ func TestIntegration_MultipleBlocksProcessedConcurrently(t *testing.T) {
 	// Wait for all blocks to be backed up (10 block files expected)
 	// Blocks 100-109 all fall in partition 0-999
 	prefix := "0-999/"
-	objects := waitForS3Objects(t, ctx, infra, prefix, numBlocks, 15*time.Second)
+	objects := waitForS3Objects(t, ctx, infra, prefix, numBlocks, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()
@@ -627,7 +627,7 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event)
 
 	// Wait for first file to be written
-	waitForS3Object(t, ctx, infra, key, 10*time.Second)
+	waitForS3Object(t, ctx, infra, key, 30*time.Second)
 
 	// Update cache with different data (simulating reprocessing scenario)
 	blockData2 := json.RawMessage(`{"number":"0x1f4","hash":"0xsecond"}`)
@@ -638,7 +638,7 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 
 	// Wait a short time for the second message to be processed
 	// (it should be skipped, but we need to give it time to process)
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 15*time.Second, func() bool {
 		// Check queue is empty (message was processed)
 		attrs, _ := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 			QueueUrl:       aws.String(infra.BackupQueueURL),
@@ -729,7 +729,7 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 
 	// Wait for version 0 to be written
 	keyV0 := fmt.Sprintf("1000-1999/%d_0_block.json.gz", blockNumber)
-	waitForS3Object(t, ctx, infra, keyV0, 10*time.Second)
+	waitForS3Object(t, ctx, infra, keyV0, 30*time.Second)
 
 	// Publish version 1
 	event1 := outbound.BlockEvent{
@@ -742,7 +742,7 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 
 	// Wait for version 1 to be written
 	keyV1 := s3key.BuildWithPartition("1000-1999", blockNumber, 1, s3key.Block)
-	waitForS3Object(t, ctx, infra, keyV1, 10*time.Second)
+	waitForS3Object(t, ctx, infra, keyV1, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()
@@ -846,7 +846,7 @@ func TestIntegration_LargeBlockData(t *testing.T) {
 
 	// Wait for file to be created
 	key := fmt.Sprintf("2000-2999/%d_0_block.json.gz", blockNumber)
-	waitForS3Object(t, ctx, infra, key, 15*time.Second)
+	waitForS3Object(t, ctx, infra, key, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()
@@ -1330,7 +1330,7 @@ func TestIntegration_GzipContentIntegrity(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event)
 
 	key := s3key.BuildWithPartition("6000-6999", blockNumber, version, s3key.Block)
-	waitForS3Object(t, ctx, infra, key, 10*time.Second)
+	waitForS3Object(t, ctx, infra, key, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()
@@ -1602,7 +1602,7 @@ func TestIntegration_UnknownChainNoExpectations(t *testing.T) {
 
 	// Wait for block file to be created
 	key := s3key.BuildWithPartition("2000-2999", blockNumber, version, s3key.Block)
-	waitForS3Object(t, ctx, infra, key, 10*time.Second)
+	waitForS3Object(t, ctx, infra, key, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()

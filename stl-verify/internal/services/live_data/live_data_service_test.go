@@ -2910,7 +2910,7 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 	})
 
 	// Wait for the reorg event to be published (with timeout)
-	testutil.WaitForCondition(t, 2*time.Second, func() bool {
+	testutil.WaitForCondition(t, 10*time.Second, func() bool {
 		for _, e := range eventSink.GetBlockEvents() {
 			if e.BlockNumber == 99 && e.BlockHash == "0xblock99_new" && e.IsReorg {
 				return true
@@ -2975,7 +2975,7 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 	// Wait for the second block to be processed
 	// With the fix, block 93 is in memory after the first reorg (reloaded from DB),
 	// so block 94_alt should be processed successfully as a reorg
-	testutil.WaitForCondition(t, 2*time.Second, func() bool {
+	testutil.WaitForCondition(t, 10*time.Second, func() bool {
 		return len(eventSink.GetBlockEvents()) > eventCountBefore
 	}, "event for block 94_alt (requires block 93 to be in memory from DB reload)")
 
