@@ -16,7 +16,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/redis/go-redis/v9"
 
-	ethAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/eth"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -132,7 +131,6 @@ func run() error {
 		return fmt.Errorf("eth dial: %w", err)
 	}
 	defer rawClient.Close()
-	ethClient := ethAdapter.NewBlockQuerier(rawClient)
 
 	mc, err := multicall.NewClient(rawClient, blockchain.Multicall3)
 	if err != nil {
@@ -216,7 +214,6 @@ func run() error {
 		},
 		sqsConsumer,
 		redisClient,
-		ethClient,
 		registry,
 		entries,
 		handler,

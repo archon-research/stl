@@ -30,7 +30,6 @@ type Service struct {
 	config           Config
 	sqsConsumer      outbound.SQSConsumer
 	redis            *redis.Client
-	ethClient        outbound.BlockQuerier
 	extractor        *TransferExtractor
 	registry         *SourceRegistry
 	entryLookup      map[EntryKey]*TokenEntry
@@ -46,7 +45,6 @@ func NewService(
 	config Config,
 	sqsConsumer outbound.SQSConsumer,
 	redisClient *redis.Client,
-	ethClient outbound.BlockQuerier,
 	registry *SourceRegistry,
 	entries []*TokenEntry,
 	handler AllocationHandler,
@@ -79,7 +77,6 @@ func NewService(
 		config:      config,
 		sqsConsumer: sqsConsumer,
 		redis:       redisClient,
-		ethClient:   ethClient,
 		extractor:   NewTransferExtractor(proxies),
 		registry:    registry,
 		entryLookup: BuildEntryLookup(entries),

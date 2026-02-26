@@ -29,7 +29,7 @@ func TestNewService_FillsDefaults(t *testing.T) {
 
 	svc, err := NewService(
 		Config{ChainID: 1},
-		nil, nil, nil, registry, nil, handler, nil,
+		nil, nil, registry, nil, handler, nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -51,7 +51,7 @@ func TestNewService_RequiresChainID(t *testing.T) {
 
 	_, err := NewService(
 		Config{},
-		nil, nil, nil, registry, nil, handler, nil,
+		nil, nil, registry, nil, handler, nil,
 	)
 	if err == nil {
 		t.Fatal("expected error when ChainID is 0")
