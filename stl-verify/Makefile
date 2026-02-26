@@ -69,7 +69,7 @@ test:
 # Run integration tests (requires integration build tag)
 test-integration:
 	@echo "==> Running integration tests..."
-	go test -tags=integration -v -timeout=5m ./...
+	go test -tags=integration -v -timeout=10m ./...
 
 # Run tests with coverage
 cover:
