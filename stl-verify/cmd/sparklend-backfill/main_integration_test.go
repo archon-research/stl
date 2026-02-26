@@ -12,9 +12,9 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -787,15 +787,15 @@ func startLocalStackS3(t *testing.T, ctx context.Context) (*s3.Client, string, f
 	t.Helper()
 
 	req := testcontainers.ContainerRequest{
-		Image:        "localstack/localstack:latest",
+		Image:        "localstack/localstack:4.3",
 		ExposedPorts: []string{"4566/tcp"},
 		Env: map[string]string{
-			"SERVICES": "s3",
-			"DEBUG":    "0",
+			"SERVICES":               "s3",
+			"DEBUG":                  "0",
+			"DISABLE_EVENTS":         "1",
+			"SKIP_SSL_CERT_DOWNLOAD": "1",
 		},
-		WaitingFor: wait.ForHTTP("/_localstack/health").
-			WithPort("4566/tcp").
-			WithStartupTimeout(120 * time.Second),
+		WaitingFor: wait.ForLog("Ready."),
 	}
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -809,6 +809,16 @@ func startLocalStackS3(t *testing.T, ctx context.Context) (*s3.Client, string, f
 	host, _ := container.Host(ctx)
 	port, _ := container.MappedPort(ctx, "4566")
 	endpoint := fmt.Sprintf("http://%s:%s", host, port.Port())
+
+	// Ensure the container host bypasses the HTTP proxy. In containerised CI
+	// environments testcontainers resolves the Docker bridge gateway IP (e.g.
+	// 172.17.0.1) which is typically NOT in NO_PROXY.
+	if noProxy := os.Getenv("NO_PROXY"); !strings.Contains(noProxy, host) {
+		t.Setenv("NO_PROXY", noProxy+","+host)
+	}
+	if noProxy := os.Getenv("no_proxy"); !strings.Contains(noProxy, host) {
+		t.Setenv("no_proxy", noProxy+","+host)
+	}
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
 		awsconfig.WithRegion("us-east-1"),

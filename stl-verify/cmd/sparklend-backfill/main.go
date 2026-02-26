@@ -209,7 +209,8 @@ func run(args []string) error {
 	// Build position tracker (nil consumer and nil redisClient for backfill mode)
 	trackerSvc, err := sparklend_position_tracker.NewService(
 		shared.SQSConsumerConfig{
-			Logger: logger,
+			Logger:  logger,
+			ChainID: cfg.chainID,
 		},
 		nil,
 		nil,
