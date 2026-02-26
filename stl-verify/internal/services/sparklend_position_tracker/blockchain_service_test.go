@@ -1,14 +1,18 @@
 package sparklend_position_tracker
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
@@ -350,7 +354,7 @@ func TestBlockchainService_ParseUserReservesData(t *testing.T) {
 			length := big.NewInt(int64(arrayLength))
 			copy(result[32:64], common.LeftPadBytes(length.Bytes(), 32))
 
-			for i := 0; i < arrayLength; i++ {
+			for i := range arrayLength {
 				structStart := 64 + (i * structSize)
 
 				asset := common.HexToAddress(fmt.Sprintf("0x%040x", i+1))
@@ -376,14 +380,11 @@ func TestBlockchainService_ParseUserReservesData(t *testing.T) {
 			availableBytes := uint64(len(result)) - dataStart
 			actualArrayLength := availableBytes / structSize
 
-			arrayLen := arrayLengthClaimed
-			if actualArrayLength < arrayLengthClaimed {
-				arrayLen = actualArrayLength
-			}
+			arrayLen := min(actualArrayLength, arrayLengthClaimed)
 
 			reserves := make([]UserReserveData, 0, arrayLen)
 
-			for i := uint64(0); i < arrayLen; i++ {
+			for i := range arrayLen {
 				structOffset := dataStart + (i * structSize)
 				structData := result[structOffset : structOffset+structSize]
 
@@ -450,12 +451,12 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 				{
 					name: "valid reserve data",
 					mockData: func() []byte {
-						var values []interface{}
+						var values []any
 
 						// Different protocols have different field counts
 						if proto.version == "aave-v2" {
 							// Aave V2: 10 fields
-							values = []interface{}{
+							values = []any{
 								big.NewInt(1000),       // availableLiquidity
 								big.NewInt(4000),       // totalStableDebt
 								big.NewInt(5000),       // totalVariableDebt
@@ -469,7 +470,7 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 							}
 						} else if proto.version == "sparklend" {
 							// Sparklend: 11 fields (no averageStableBorrowRate)
-							values = []interface{}{
+							values = []any{
 								big.NewInt(1000),       // unbacked
 								big.NewInt(2000),       // accruedToTreasuryScaled
 								big.NewInt(3000),       // totalAToken
@@ -484,7 +485,7 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 							}
 						} else {
 							// Aave V3: 12 fields
-							values = []interface{}{
+							values = []any{
 								big.NewInt(1000),       // unbacked
 								big.NewInt(2000),       // accruedToTreasuryScaled
 								big.NewInt(3000),       // totalAToken
@@ -586,7 +587,7 @@ func TestBlockchainService_ParseReserveConfigurationData(t *testing.T) {
 		{
 			name: "valid configuration data",
 			mockData: func() []byte {
-				values := []interface{}{
+				values := []any{
 					big.NewInt(18),    // decimals
 					big.NewInt(8000),  // ltv (80%)
 					big.NewInt(8250),  // liquidationThreshold
@@ -664,4 +665,49 @@ func TestBlockchainService_ParseReserveConfigurationData(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBlockchainService_BatchGetTokenMetadata_ConcurrentAccess verifies that
+// concurrent calls to batchGetTokenMetadata on a shared blockchainService do
+// not race on the metadataCache map. Run with -race to detect violations.
+func TestBlockchainService_BatchGetTokenMetadata_ConcurrentAccess(t *testing.T) {
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	token := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+
+	// Mock returns 3 failure results per token (no unpacking, but write still occurs).
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i := range results {
+			results[i] = outbound.Result{Success: false}
+		}
+		return results, nil
+	}
+
+	svc := &blockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		multicallClient: mock,
+		protocolVersion: "sparklend",
+	}
+
+	const goroutines = 10
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			tokens := map[common.Address]bool{token: true}
+			_, err := svc.batchGetTokenMetadata(context.Background(), tokens, big.NewInt(1))
+			if err != nil {
+				t.Errorf("batchGetTokenMetadata() unexpected error: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
 }
