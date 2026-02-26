@@ -223,7 +223,10 @@ func (s *blockchainService) getUserReservesData(
 		// which the strict Go ABI decoder rejects. Try raw decoding.
 		reserves, rawErr := decodeUserReservesRaw(result)
 		if rawErr != nil {
-			return nil, fmt.Errorf("failed to unpack getUserReservesData: %w (raw fallback: %v)", err, rawErr)
+			return nil, fmt.Errorf(
+				"failed to decode getUserReservesData: %w",
+				errors.Join(err, fmt.Errorf("raw fallback decode failed: %w", rawErr)),
+			)
 		}
 		s.logger.Debug("used raw decoder for getUserReservesData",
 			"user", user.Hex(),

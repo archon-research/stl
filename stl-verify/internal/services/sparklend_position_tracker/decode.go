@@ -46,9 +46,11 @@ func decodeUserReservesRaw(data []byte) ([]UserReserveData, error) {
 		return nil, fmt.Errorf("response too short: %d bytes", len(data))
 	}
 
-	// Read offset to the dynamic array
+	// Read offset to the dynamic array.
+	// Use subtraction on the safe side to avoid uint64 overflow on the addition.
+	// The len(data) >= 2*wordSize guard above ensures the subtraction is safe.
 	arrayOffset := new(big.Int).SetBytes(data[0:wordSize]).Uint64()
-	if arrayOffset+wordSize > uint64(len(data)) {
+	if arrayOffset > uint64(len(data))-wordSize {
 		return nil, fmt.Errorf("array offset %d out of bounds (len=%d)", arrayOffset, len(data))
 	}
 
