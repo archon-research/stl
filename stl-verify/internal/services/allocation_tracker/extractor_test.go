@@ -46,7 +46,7 @@ func TestTransferExtractor_Extract_NonTransferTopic(t *testing.T) {
 			{
 				Address: common.HexToAddress("0x1111111111111111111111111111111111111111"),
 				Topics: []common.Hash{
-					common.Hash{},
+					{},
 					common.BytesToHash(common.HexToAddress("0x01").Bytes()),
 					common.BytesToHash(common.HexToAddress("0x02").Bytes()),
 				},
