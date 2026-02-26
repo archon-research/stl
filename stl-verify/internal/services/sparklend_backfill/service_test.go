@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/sparklend"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_backfill"
 )
 
@@ -68,7 +68,7 @@ type processCall struct {
 	version     int
 }
 
-func (m *mockProcessor) ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []sparklend.TransactionReceipt) error {
+func (m *mockProcessor) ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []shared.TransactionReceipt) error {
 	m.mu.Lock()
 	m.calls = append(m.calls, processCall{chainID: chainID, blockNumber: blockNumber, version: version})
 	m.mu.Unlock()
