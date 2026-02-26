@@ -68,7 +68,7 @@ func parseConfig(args []string) (cliConfig, error) {
 	maxMessages := fs.Int("max", 10, "Max messages per poll")
 	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
 	if err := fs.Parse(args); err != nil {
-		return cliConfig{}, err
+		return cliConfig{}, fmt.Errorf("parsing CLI flags: %w", err)
 	}
 
 	cfg := cliConfig{
@@ -142,6 +142,9 @@ func run(ctx context.Context, args []string) error {
 
 	if accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID"); accessKeyID != "" {
 		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+		if secretKey == "" {
+			return fmt.Errorf("AWS_ACCESS_KEY_ID is set but AWS_SECRET_ACCESS_KEY is missing")
+		}
 		awsOpts = append(awsOpts, awsconfig.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
 			return aws.Credentials{
 				AccessKeyID:     accessKeyID,

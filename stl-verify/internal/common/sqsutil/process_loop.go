@@ -62,6 +62,10 @@ func ProcessMessages(
 	cfg Config,
 	handler BlockEventHandler,
 ) error {
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
+
 	messages, err := cfg.Consumer.ReceiveMessages(ctx, cfg.MaxMessages)
 	if err != nil {
 		return fmt.Errorf("receiving messages: %w", err)

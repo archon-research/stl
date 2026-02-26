@@ -24,6 +24,7 @@ CREATE INDEX IF NOT EXISTS idx_morpho_market_chain_id ON morpho_market (chain_id
 CREATE INDEX IF NOT EXISTS idx_morpho_market_market_id ON morpho_market (market_id);
 CREATE INDEX IF NOT EXISTS idx_morpho_market_loan_token ON morpho_market (loan_token_id);
 CREATE INDEX IF NOT EXISTS idx_morpho_market_collateral_token ON morpho_market (collateral_token_id);
+CREATE INDEX IF NOT EXISTS idx_morpho_market_protocol_id ON morpho_market (protocol_id);
 
 -- ============================================================================
 -- morpho_market_state: Market state snapshots (hypertable)
@@ -104,6 +105,7 @@ CREATE TABLE IF NOT EXISTS morpho_vault
 CREATE INDEX IF NOT EXISTS idx_morpho_vault_chain_id ON morpho_vault (chain_id);
 CREATE INDEX IF NOT EXISTS idx_morpho_vault_address ON morpho_vault (address);
 CREATE INDEX IF NOT EXISTS idx_morpho_vault_asset_token ON morpho_vault (asset_token_id);
+CREATE INDEX IF NOT EXISTS idx_morpho_vault_protocol_id ON morpho_vault (protocol_id);
 
 -- ============================================================================
 -- morpho_vault_state: Vault state snapshots (hypertable)

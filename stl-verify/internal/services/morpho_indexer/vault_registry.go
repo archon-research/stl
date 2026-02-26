@@ -41,7 +41,11 @@ func (r *VaultRegistry) LoadFromDB(ctx context.Context, repo outbound.MorphoRepo
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.vaults = loaded
+	if loaded != nil {
+		r.vaults = loaded
+	} else {
+		r.vaults = make(map[common.Address]*entity.MorphoVault)
+	}
 
 	r.logger.Info("loaded vaults from database", "count", len(r.vaults))
 	return nil

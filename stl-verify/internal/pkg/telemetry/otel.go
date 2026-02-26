@@ -31,7 +31,7 @@ func InitOTEL(ctx context.Context, config OTELConfig) (func(context.Context), er
 	var shutdowns []func(context.Context) error
 
 	// Tracer
-	traceEndpoint := env.Get("JAEGER_ENDPOINT", "localhost:4317")
+	traceEndpoint := env.Get("JAEGER_ENDPOINT", "")
 	shutdownTracer, err := InitTracer(ctx, TracerConfig{
 		ServiceName:    config.ServiceName,
 		ServiceVersion: config.ServiceVersion,

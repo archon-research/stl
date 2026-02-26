@@ -408,6 +408,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 	}
 
 	// Persist the vault
+	var vault *entity.MorphoVault
 	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		// Get or create the asset token
 		assetMetadata, err := s.blockchainSvc.getTokenMetadata(ctx, metadata.Asset, blockNumber)
@@ -425,7 +426,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 			return fmt.Errorf("getting protocol: %w", err)
 		}
 
-		vault, err := entity.NewMorphoVault(chainID, protocolID, vaultAddress.Bytes(), metadata.Name, metadata.Symbol, tokenID, metadata.Version, blockNumber)
+		vault, err = entity.NewMorphoVault(chainID, protocolID, vaultAddress.Bytes(), metadata.Name, metadata.Symbol, tokenID, metadata.Version, blockNumber)
 		if err != nil {
 			return fmt.Errorf("creating vault entity: %w", err)
 		}
@@ -436,11 +437,12 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 		}
 
 		vault.ID = vaultID
-		s.vaultRegistry.RegisterVault(vaultAddress, vault)
 		return nil
 	}); err != nil {
 		return fmt.Errorf("persisting vault: %w", err)
 	}
+
+	s.vaultRegistry.RegisterVault(vaultAddress, vault)
 
 	// Now process the event
 	return s.processMetaMorphoLog(ctx, log, vaultAddress, chainID, blockNumber, blockVersion)

@@ -21,7 +21,7 @@ import (
 // Integration tests for run()
 // ---------------------------------------------------------------------------
 
-func TestRunIntegration_BadDatabaseURL(t *testing.T) {
+func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer rpcServer.Close()
 

@@ -851,7 +851,10 @@ func TestProcessBlockEvent_EnsureMarket_ExistsInDB(t *testing.T) {
 		t.Fatalf("processBlock: %v", err)
 	}
 
-	if savedState != nil && savedState.MorphoMarketID != 42 {
+	if savedState == nil {
+		t.Fatal("SaveMarketState was not called")
+	}
+	if savedState.MorphoMarketID != 42 {
 		t.Errorf("should reuse existing market ID 42, got %d", savedState.MorphoMarketID)
 	}
 }

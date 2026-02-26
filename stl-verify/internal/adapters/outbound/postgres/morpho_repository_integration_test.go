@@ -238,6 +238,7 @@ func TestGetOrCreateMarket_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to begin tx1: %v", err)
 	}
+	defer tx1.Rollback(ctx)
 	id1, err := fixture.repo.GetOrCreateMarket(ctx, tx1, market)
 	if err != nil {
 		t.Fatalf("first GetOrCreateMarket failed: %v", err)
@@ -251,6 +252,7 @@ func TestGetOrCreateMarket_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to begin tx2: %v", err)
 	}
+	defer tx2.Rollback(ctx)
 	id2, err := fixture.repo.GetOrCreateMarket(ctx, tx2, market)
 	if err != nil {
 		t.Fatalf("second GetOrCreateMarket failed: %v", err)
