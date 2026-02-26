@@ -136,12 +136,10 @@ func run(ctx context.Context, args []string) error {
 		"chainID", cfg.chainID,
 		"commit", GitCommit)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Configure AWS SDK for LocalStack or production
-	// In production (ECS/Fargate), use the default credential chain which picks up IAM role credentials.
-	// For local development with LocalStack, use static credentials from environment variables.
+	// AWS config
 	awsRegion := env.Get("AWS_REGION", "us-east-1")
 	awsOpts := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(awsRegion),
@@ -179,7 +177,7 @@ func run(ctx context.Context, args []string) error {
 	defer sqsConsumer.Close()
 
 	blockCache, err := redis.NewBlockCache(redis.Config{
-		Addr:     *redisAddr,
+		Addr:     cfg.redisAddr,
 		Password: env.Get("REDIS_PASSWORD", ""),
 		DB:       0,
 	}, logger)
@@ -192,9 +190,9 @@ func run(ctx context.Context, args []string) error {
 			logger.Warn("failed to close BlockCache", "error", err)
 		}
 	}()
-	logger.Info("BlockCache connected", "addr", *redisAddr)
+	logger.Info("BlockCache connected", "addr", cfg.redisAddr)
 
-	s3Reader := s3adapter.NewReader(cfg, logger)
+	s3Reader := s3adapter.NewReader(awsCfg, logger)
 	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, env.Get("S3_BUCKET", ""), logger)
 	if err != nil {
 		logger.Error("failed to create cache reader", "error", err)

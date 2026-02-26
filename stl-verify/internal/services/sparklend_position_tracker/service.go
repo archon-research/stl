@@ -232,7 +232,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		return nil
 	}
 
-	var receipts []sparklend.TransactionReceipt
+	var receipts []shared.TransactionReceipt
 	if err := shared.ParseCompressedJSON(receiptsData, &receipts); err != nil {
 		return fmt.Errorf("failed to unmarshal receipts: %w", err)
 	}
