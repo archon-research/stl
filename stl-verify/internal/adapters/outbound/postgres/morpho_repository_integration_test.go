@@ -4,7 +4,9 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 	"math/big"
+	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -393,7 +395,7 @@ func TestSaveMarketState_WithAccrueInterest(t *testing.T) {
 	}
 }
 
-func TestSaveMarketState_UpsertOnConflict(t *testing.T) {
+func TestSaveMarketState_DuplicateIgnored(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	t.Cleanup(fixture.cleanup)
 
@@ -424,7 +426,7 @@ func TestSaveMarketState_UpsertOnConflict(t *testing.T) {
 		t.Fatalf("failed to commit tx1: %v", err)
 	}
 
-	// Upsert with different values at same key
+	// Insert duplicate with different values at same key — should be ignored
 	state2 := &entity.MorphoMarketState{
 		MorphoMarketID:    marketDBID,
 		BlockNumber:       19000200,
@@ -442,13 +444,13 @@ func TestSaveMarketState_UpsertOnConflict(t *testing.T) {
 		t.Fatalf("failed to begin tx2: %v", err)
 	}
 	if err := fixture.repo.SaveMarketState(ctx, tx2, state2); err != nil {
-		t.Fatalf("upsert SaveMarketState failed: %v", err)
+		t.Fatalf("duplicate SaveMarketState failed: %v", err)
 	}
 	if err := tx2.Commit(ctx); err != nil {
 		t.Fatalf("failed to commit tx2: %v", err)
 	}
 
-	// Verify updated values
+	// Verify first write preserved (DO NOTHING semantics)
 	var totalSupplyAssets string
 	err = fixture.pool.QueryRow(ctx,
 		`SELECT total_supply_assets FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2 AND block_version = 0`,
@@ -457,8 +459,8 @@ func TestSaveMarketState_UpsertOnConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
-	if totalSupplyAssets != "9999" {
-		t.Errorf("expected upserted value 9999, got %s", totalSupplyAssets)
+	if totalSupplyAssets != "1000" {
+		t.Errorf("expected first write preserved (1000), got %s", totalSupplyAssets)
 	}
 }
 
@@ -522,7 +524,7 @@ func TestSaveMarketPosition_Basic(t *testing.T) {
 	}
 }
 
-func TestSaveMarketPosition_UpsertOnConflict(t *testing.T) {
+func TestSaveMarketPosition_DuplicateIgnored(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	t.Cleanup(fixture.cleanup)
 
@@ -555,7 +557,7 @@ func TestSaveMarketPosition_UpsertOnConflict(t *testing.T) {
 		t.Fatalf("failed to commit tx1: %v", err)
 	}
 
-	// Upsert with updated values
+	// Insert duplicate with different values — should be ignored
 	pos2 := &entity.MorphoMarketPosition{
 		UserID:         fixture.userID,
 		MorphoMarketID: marketDBID,
@@ -575,13 +577,13 @@ func TestSaveMarketPosition_UpsertOnConflict(t *testing.T) {
 		t.Fatalf("failed to begin tx2: %v", err)
 	}
 	if err := fixture.repo.SaveMarketPosition(ctx, tx2, pos2); err != nil {
-		t.Fatalf("upsert SaveMarketPosition failed: %v", err)
+		t.Fatalf("duplicate SaveMarketPosition failed: %v", err)
 	}
 	if err := tx2.Commit(ctx); err != nil {
 		t.Fatalf("failed to commit tx2: %v", err)
 	}
 
-	// Verify updated
+	// Verify first write preserved (DO NOTHING semantics)
 	var supplyShares, eventType string
 	err = fixture.pool.QueryRow(ctx,
 		`SELECT supply_shares, event_type FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3`,
@@ -590,11 +592,11 @@ func TestSaveMarketPosition_UpsertOnConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
-	if supplyShares != "999" {
-		t.Errorf("expected upserted supply_shares 999, got %s", supplyShares)
+	if supplyShares != "100" {
+		t.Errorf("expected first write preserved (supply_shares 100), got %s", supplyShares)
 	}
-	if eventType != "Withdraw" {
-		t.Errorf("expected upserted event_type Withdraw, got %s", eventType)
+	if eventType != "Supply" {
+		t.Errorf("expected first write preserved (event_type Supply), got %s", eventType)
 	}
 }
 
@@ -1029,7 +1031,7 @@ func TestSaveVaultPosition_Basic(t *testing.T) {
 	}
 }
 
-func TestSaveVaultPosition_UpsertOnConflict(t *testing.T) {
+func TestSaveVaultPosition_DuplicateIgnored(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	t.Cleanup(fixture.cleanup)
 
@@ -1059,7 +1061,7 @@ func TestSaveVaultPosition_UpsertOnConflict(t *testing.T) {
 		t.Fatalf("failed to commit tx1: %v", err)
 	}
 
-	// Upsert with updated values
+	// Insert duplicate with different values — should be ignored
 	pos2 := &entity.MorphoVaultPosition{
 		UserID:        fixture.userID,
 		MorphoVaultID: vaultDBID,
@@ -1076,13 +1078,13 @@ func TestSaveVaultPosition_UpsertOnConflict(t *testing.T) {
 		t.Fatalf("failed to begin tx2: %v", err)
 	}
 	if err := fixture.repo.SaveVaultPosition(ctx, tx2, pos2); err != nil {
-		t.Fatalf("upsert SaveVaultPosition failed: %v", err)
+		t.Fatalf("duplicate SaveVaultPosition failed: %v", err)
 	}
 	if err := tx2.Commit(ctx); err != nil {
 		t.Fatalf("failed to commit tx2: %v", err)
 	}
 
-	// Verify updated
+	// Verify first write preserved (DO NOTHING semantics)
 	var shares, eventType string
 	err = fixture.pool.QueryRow(ctx,
 		`SELECT shares, event_type FROM morpho_vault_position WHERE user_id = $1 AND morpho_vault_id = $2 AND block_number = $3`,
@@ -1091,11 +1093,11 @@ func TestSaveVaultPosition_UpsertOnConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
-	if shares != "999" {
-		t.Errorf("expected upserted shares 999, got %s", shares)
+	if shares != "100" {
+		t.Errorf("expected first write preserved (shares 100), got %s", shares)
 	}
-	if eventType != "VaultWithdraw" {
-		t.Errorf("expected upserted event_type VaultWithdraw, got %s", eventType)
+	if eventType != "VaultDeposit" {
+		t.Errorf("expected first write preserved (event_type VaultDeposit), got %s", eventType)
 	}
 }
 
@@ -1273,5 +1275,209 @@ func TestTransactionRollbackAcrossMultipleTables(t *testing.T) {
 	}
 	if mpCount != 0 {
 		t.Errorf("expected 0 positions after rollback, got %d", mpCount)
+	}
+}
+
+// --- Concurrency Tests ---
+
+// TestConcurrentWorkers_AllTablesAppendOnly simulates 10 concurrent workers indexing
+// the same block for the same market/vault/user. All workers write to every table
+// (market state, market position, vault state, vault position) with the same key but
+// different values. Under DO NOTHING semantics, exactly one write wins per table and
+// the first-written values are preserved. Under no-op DO UPDATE (GetOrCreate*),
+// all workers get the same ID back.
+func TestConcurrentWorkers_AllTablesAppendOnly(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	t.Cleanup(fixture.cleanup)
+
+	ctx := context.Background()
+
+	const workers = 10
+	const blockNumber = int64(20000000)
+	const blockVersion = 0
+
+	// Pre-create market and vault (these are dimension rows, not per-block data)
+	marketDBID := fixture.createTestMarket(t, ctx, []byte("concurrent-test-market-12345678"))
+	vaultDBID := fixture.createTestVault(t, ctx, []byte("concurrent-vault-12"))
+
+	type result struct {
+		marketID int64
+		vaultID  int64
+		err      error
+	}
+
+	results := make([]result, workers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+
+			tx, err := fixture.pool.Begin(ctx)
+			if err != nil {
+				results[idx].err = fmt.Errorf("begin tx: %w", err)
+				return
+			}
+			defer tx.Rollback(ctx)
+
+			// Each worker tries GetOrCreateMarket with the same market
+			mid, err := fixture.repo.GetOrCreateMarket(ctx, tx, &entity.MorphoMarket{
+				ChainID:           1,
+				ProtocolID:        fixture.protocolID,
+				MarketID:          common.BytesToHash([]byte("concurrent-test-market-12345678")),
+				LoanTokenID:       fixture.loanTokenID,
+				CollateralTokenID: fixture.collTokenID,
+				OracleAddress:     common.Address{},
+				IrmAddress:        common.Address{},
+				LLTV:              big.NewInt(860000000000000000),
+				CreatedAtBlock:    18883124,
+			})
+			if err != nil {
+				results[idx].err = fmt.Errorf("GetOrCreateMarket: %w", err)
+				return
+			}
+			results[idx].marketID = mid
+
+			// Each worker tries GetOrCreateVault with the same vault
+			vid, err := fixture.repo.GetOrCreateVault(ctx, tx, &entity.MorphoVault{
+				ChainID:        1,
+				ProtocolID:     fixture.protocolID,
+				Address:        []byte("concurrent-vault-12"),
+				Name:           "Gauntlet USDC Core",
+				Symbol:         "gtUSDCcore",
+				AssetTokenID:   fixture.loanTokenID,
+				VaultVersion:   entity.MorphoVaultV1,
+				CreatedAtBlock: 19000000,
+			})
+			if err != nil {
+				results[idx].err = fmt.Errorf("GetOrCreateVault: %w", err)
+				return
+			}
+			results[idx].vaultID = vid
+
+			// Each worker writes market state with a unique value per worker
+			val := big.NewInt(int64(1000 + idx))
+			if err := fixture.repo.SaveMarketState(ctx, tx, &entity.MorphoMarketState{
+				MorphoMarketID:    marketDBID,
+				BlockNumber:       blockNumber,
+				BlockVersion:      blockVersion,
+				TotalSupplyAssets: val,
+				TotalSupplyShares: val,
+				TotalBorrowAssets: big.NewInt(500),
+				TotalBorrowShares: big.NewInt(500),
+				LastUpdate:        1700000000,
+				Fee:               big.NewInt(0),
+			}); err != nil {
+				results[idx].err = fmt.Errorf("SaveMarketState: %w", err)
+				return
+			}
+
+			// Each worker writes market position with a unique value per worker
+			if err := fixture.repo.SaveMarketPosition(ctx, tx, &entity.MorphoMarketPosition{
+				UserID:         fixture.userID,
+				MorphoMarketID: marketDBID,
+				BlockNumber:    blockNumber,
+				BlockVersion:   blockVersion,
+				SupplyShares:   val,
+				BorrowShares:   big.NewInt(0),
+				Collateral:     big.NewInt(0),
+				SupplyAssets:   val,
+				BorrowAssets:   big.NewInt(0),
+				EventType:      entity.MorphoEventSupply,
+				TxHash:         []byte{byte(idx)},
+			}); err != nil {
+				results[idx].err = fmt.Errorf("SaveMarketPosition: %w", err)
+				return
+			}
+
+			// Each worker writes vault state with a unique value per worker
+			if err := fixture.repo.SaveVaultState(ctx, tx, &entity.MorphoVaultState{
+				MorphoVaultID: vaultDBID,
+				BlockNumber:   blockNumber,
+				BlockVersion:  blockVersion,
+				TotalAssets:   val,
+				TotalShares:   val,
+			}); err != nil {
+				results[idx].err = fmt.Errorf("SaveVaultState: %w", err)
+				return
+			}
+
+			// Each worker writes vault position with a unique value per worker
+			if err := fixture.repo.SaveVaultPosition(ctx, tx, &entity.MorphoVaultPosition{
+				UserID:        fixture.userID,
+				MorphoVaultID: vaultDBID,
+				BlockNumber:   blockNumber,
+				BlockVersion:  blockVersion,
+				Shares:        val,
+				Assets:        val,
+				EventType:     entity.MorphoEventVaultDeposit,
+				TxHash:        []byte{byte(idx)},
+			}); err != nil {
+				results[idx].err = fmt.Errorf("SaveVaultPosition: %w", err)
+				return
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				results[idx].err = fmt.Errorf("commit: %w", err)
+				return
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	// All workers must succeed
+	for i, r := range results {
+		if r.err != nil {
+			t.Errorf("worker %d failed: %v", i, r.err)
+		}
+	}
+
+	// All workers must get the same market ID and vault ID back
+	for i, r := range results {
+		if r.marketID != marketDBID {
+			t.Errorf("worker %d: GetOrCreateMarket returned %d, want %d", i, r.marketID, marketDBID)
+		}
+		if r.vaultID != vaultDBID {
+			t.Errorf("worker %d: GetOrCreateVault returned %d, want %d", i, r.vaultID, vaultDBID)
+		}
+	}
+
+	// Exactly one row per table for this block (DO NOTHING means no duplicates)
+	tables := []string{"morpho_market_state", "morpho_market_position", "morpho_vault_state", "morpho_vault_position"}
+	for _, table := range tables {
+		var count int
+		err := fixture.pool.QueryRow(ctx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE block_number = $1`, table),
+			blockNumber,
+		).Scan(&count)
+		if err != nil {
+			t.Fatalf("counting %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Errorf("%s: expected 1 row, got %d", table, count)
+		}
+	}
+
+	// The surviving row's value must be one of the workers' values (1000..1009)
+	var totalSupplyAssets string
+	err := fixture.pool.QueryRow(ctx,
+		`SELECT total_supply_assets FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2`,
+		marketDBID, blockNumber,
+	).Scan(&totalSupplyAssets)
+	if err != nil {
+		t.Fatalf("querying market state: %v", err)
+	}
+	// Parse and verify it's in the valid range
+	got, ok := new(big.Int).SetString(totalSupplyAssets, 10)
+	if !ok {
+		t.Fatalf("invalid total_supply_assets: %s", totalSupplyAssets)
+	}
+	if got.Int64() < 1000 || got.Int64() > 1000+workers-1 {
+		t.Errorf("total_supply_assets = %s, expected value in range [1000, %d]", totalSupplyAssets, 1000+workers-1)
 	}
 }

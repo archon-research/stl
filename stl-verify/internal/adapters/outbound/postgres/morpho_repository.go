@@ -146,22 +146,13 @@ func (r *MorphoRepository) SaveMarketState(ctx context.Context, tx pgx.Tx, state
 		feeShares = &s
 	}
 
-	// ON CONFLICT UPDATE: Multiple events within one block yield the same on-chain
-	// snapshot (eth_call reads end-of-block state). The upsert ensures only the
-	// latest event_type/tx_hash is kept while the state values remain correct.
+	// ON CONFLICT DO NOTHING: all events within one block yield the same on-chain
+	// snapshot (eth_call reads end-of-block state), so the first insert captures
+	// the correct state. Reorgs use a different block_version, so they insert cleanly.
 	_, err = tx.Exec(ctx,
 		`INSERT INTO morpho_market_state (morpho_market_id, block_number, block_version, total_supply_assets, total_supply_shares, total_borrow_assets, total_borrow_shares, last_update, fee, prev_borrow_rate, interest_accrued, fee_shares)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		 ON CONFLICT (morpho_market_id, block_number, block_version) DO UPDATE SET
-			total_supply_assets = EXCLUDED.total_supply_assets,
-			total_supply_shares = EXCLUDED.total_supply_shares,
-			total_borrow_assets = EXCLUDED.total_borrow_assets,
-			total_borrow_shares = EXCLUDED.total_borrow_shares,
-			last_update = EXCLUDED.last_update,
-			fee = EXCLUDED.fee,
-			prev_borrow_rate = EXCLUDED.prev_borrow_rate,
-			interest_accrued = EXCLUDED.interest_accrued,
-			fee_shares = EXCLUDED.fee_shares`,
+		 ON CONFLICT (morpho_market_id, block_number, block_version) DO NOTHING`,
 		state.MorphoMarketID, state.BlockNumber, state.BlockVersion,
 		totalSupplyAssets, totalSupplyShares, totalBorrowAssets, totalBorrowShares,
 		state.LastUpdate, fee, prevBorrowRate, interestAccrued, feeShares,
@@ -198,14 +189,7 @@ func (r *MorphoRepository) SaveMarketPosition(ctx context.Context, tx pgx.Tx, po
 	_, err = tx.Exec(ctx,
 		`INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets, event_type, tx_hash)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		 ON CONFLICT (user_id, morpho_market_id, block_number, block_version) DO UPDATE SET
-			supply_shares = EXCLUDED.supply_shares,
-			borrow_shares = EXCLUDED.borrow_shares,
-			collateral = EXCLUDED.collateral,
-			supply_assets = EXCLUDED.supply_assets,
-			borrow_assets = EXCLUDED.borrow_assets,
-			event_type = EXCLUDED.event_type,
-			tx_hash = EXCLUDED.tx_hash`,
+		 ON CONFLICT (user_id, morpho_market_id, block_number, block_version) DO NOTHING`,
 		position.UserID, position.MorphoMarketID, position.BlockNumber, position.BlockVersion,
 		supplyShares, borrowShares, collateral, supplyAssets, borrowAssets,
 		string(position.EventType), position.TxHash,
@@ -219,11 +203,11 @@ func (r *MorphoRepository) SaveMarketPosition(ctx context.Context, tx pgx.Tx, po
 // GetOrCreateVault retrieves or creates a MetaMorpho vault.
 func (r *MorphoRepository) GetOrCreateVault(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault) (int64, error) {
 	var id int64
+	// The no-op SET is required so that DO UPDATE ... RETURNING id works on conflict.
 	err := tx.QueryRow(ctx,
 		`INSERT INTO morpho_vault (chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 ON CONFLICT (chain_id, address) DO UPDATE SET
-			vault_version = GREATEST(morpho_vault.vault_version, EXCLUDED.vault_version)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET id = morpho_vault.id
 		 RETURNING id`,
 		vault.ChainID, vault.ProtocolID, vault.Address, vault.Name, vault.Symbol,
 		vault.AssetTokenID, vault.VaultVersion, vault.CreatedAtBlock,
@@ -313,13 +297,7 @@ func (r *MorphoRepository) SaveVaultState(ctx context.Context, tx pgx.Tx, state 
 	_, err = tx.Exec(ctx,
 		`INSERT INTO morpho_vault_state (morpho_vault_id, block_number, block_version, total_assets, total_shares, fee_shares, new_total_assets, previous_total_assets, management_fee_shares)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		 ON CONFLICT (morpho_vault_id, block_number, block_version) DO UPDATE SET
-			total_assets = EXCLUDED.total_assets,
-			total_shares = EXCLUDED.total_shares,
-			fee_shares = EXCLUDED.fee_shares,
-			new_total_assets = EXCLUDED.new_total_assets,
-			previous_total_assets = EXCLUDED.previous_total_assets,
-			management_fee_shares = EXCLUDED.management_fee_shares`,
+		 ON CONFLICT (morpho_vault_id, block_number, block_version) DO NOTHING`,
 		state.MorphoVaultID, state.BlockNumber, state.BlockVersion,
 		totalAssets, totalShares, feeShares, newTotalAssets, previousTotalAssets, managementFeeShares,
 	)
@@ -343,11 +321,7 @@ func (r *MorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, pos
 	_, err = tx.Exec(ctx,
 		`INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, shares, assets, event_type, tx_hash)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 ON CONFLICT (user_id, morpho_vault_id, block_number, block_version) DO UPDATE SET
-			shares = EXCLUDED.shares,
-			assets = EXCLUDED.assets,
-			event_type = EXCLUDED.event_type,
-			tx_hash = EXCLUDED.tx_hash`,
+		 ON CONFLICT (user_id, morpho_vault_id, block_number, block_version) DO NOTHING`,
 		position.UserID, position.MorphoVaultID, position.BlockNumber, position.BlockVersion,
 		shares, assets, string(position.EventType), position.TxHash,
 	)
