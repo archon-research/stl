@@ -14,14 +14,14 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/sparklend"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"golang.org/x/sync/errgroup"
 )
 
 // ReceiptProcessor processes transaction receipts for a given block.
 // Satisfied by *sparklend_position_tracker.Service.
 type ReceiptProcessor interface {
-	ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []sparklend.TransactionReceipt) error
+	ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []shared.TransactionReceipt) error
 }
 
 // Config holds configuration for the backfill service.
@@ -251,7 +251,7 @@ func (s *Service) processBlockFromS3(ctx context.Context, blockNum int64, versio
 		return fmt.Errorf("reading S3 file %s: %w", key, err)
 	}
 
-	var receipts []sparklend.TransactionReceipt
+	var receipts []shared.TransactionReceipt
 	if err := json.Unmarshal(data, &receipts); err != nil {
 		return fmt.Errorf("unmarshalling receipts for block %d: %w", blockNum, err)
 	}

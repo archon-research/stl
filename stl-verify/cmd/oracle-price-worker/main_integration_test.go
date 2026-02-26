@@ -4,88 +4,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
-
-// ---------------------------------------------------------------------------
-// Mock SQS server (AWS JSON 1.0 protocol)
-// ---------------------------------------------------------------------------
-
-type mockSQSServer struct {
-	mu                sync.Mutex
-	messageDelivered  bool
-	receiveCallCount  int
-	deleteCallCount   int
-	firstCallReceived chan struct{}
-}
-
-func startMockSQS(t *testing.T) (*httptest.Server, *mockSQSServer) {
-	t.Helper()
-
-	state := &mockSQSServer{
-		firstCallReceived: make(chan struct{}, 1),
-	}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		target := r.Header.Get("X-Amz-Target")
-
-		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
-
-		switch {
-		case strings.Contains(target, "ReceiveMessage"):
-			state.mu.Lock()
-			state.receiveCallCount++
-			delivered := state.messageDelivered
-			state.messageDelivered = true
-			state.mu.Unlock()
-
-			// Signal first call received
-			select {
-			case state.firstCallReceived <- struct{}{}:
-			default:
-			}
-
-			if !delivered {
-				// First call: deliver one block event message
-				blockEvent := `{"chainId":1,"blockNumber":18000000,"version":1,"blockHash":"0xabc","blockTimestamp":1700000000}`
-				fmt.Fprintf(w, `{"Messages":[{"MessageId":"msg-1","ReceiptHandle":"handle-1","Body":%s}]}`,
-					mustMarshal(blockEvent))
-			} else {
-				// Subsequent calls: no messages
-				fmt.Fprint(w, `{"Messages":[]}`)
-			}
-
-		case strings.Contains(target, "DeleteMessage"):
-			state.mu.Lock()
-			state.deleteCallCount++
-			state.mu.Unlock()
-			fmt.Fprint(w, `{}`)
-
-		default:
-			// Handle any unexpected actions gracefully
-			_ = body
-			fmt.Fprint(w, `{}`)
-		}
-	}))
-
-	return server, state
-}
-
-func mustMarshal(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
-}
 
 // ---------------------------------------------------------------------------
 // Integration tests for run()
@@ -116,8 +42,11 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	rpcServer := testutil.StartMockEthRPC(t, tokenCount)
 	defer rpcServer.Close()
 
-	sqsServer, sqsState := startMockSQS(t)
+	sqsServer, sqsState := testutil.StartMockSQS(t)
 	defer sqsServer.Close()
+
+	// Enqueue one block event message for the service to process.
+	sqsState.AddMessage(`{"chainId":1,"blockNumber":18000000,"version":1,"blockHash":"0xabc","blockTimestamp":1700000000}`)
 
 	// Configure environment for run()
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
@@ -141,7 +70,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 
 	// Wait for the service to start (SQS ReceiveMessage call indicates it's polling)
 	select {
-	case <-sqsState.firstCallReceived:
+	case <-sqsState.FirstCallReceived:
 	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for service to start")
 	}
@@ -174,10 +103,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	}
 
 	// Verify DeleteMessage was called
-	sqsState.mu.Lock()
-	deletes := sqsState.deleteCallCount
-	sqsState.mu.Unlock()
-	if deletes < 1 {
+	if deletes := sqsState.Deletes(); deletes < 1 {
 		t.Errorf("expected at least 1 DeleteMessage call, got %d", deletes)
 	}
 }

@@ -19,7 +19,8 @@ import (
 // cleanup function. No pool connection or migrations are applied.
 func StartTimescaleDB(t *testing.T) (dsn string, cleanup func()) {
 	t.Helper()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
 
 	req := testcontainers.ContainerRequest{
 		Image:        ImageTimescaleDB,
