@@ -40,7 +40,7 @@ func run() error {
 	redisAddr := flag.String("redis", "", "Redis address")
 	maxMessages := flag.Int("max", 10, "Max messages per poll")
 	waitTime := flag.Int("wait", 20, "Wait time seconds")
-	sweepMinutes := flag.Int("sweep", 15, "Sweep interval minutes")
+	sweepBlocks := flag.Int("sweep-blocks", 75, "Sweep every N blocks")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -209,10 +209,10 @@ func run() error {
 
 	svc, err := at.NewService(
 		at.Config{
-			MaxMessages:   *maxMessages,
-			SweepInterval: time.Duration(*sweepMinutes) * time.Minute,
-			ChainID:       chainID,
-			Logger:        logger,
+			MaxMessages:       *maxMessages,
+			SweepEveryNBlocks: *sweepBlocks,
+			ChainID:           chainID,
+			Logger:            logger,
 		},
 		sqsConsumer,
 		redisClient,
@@ -227,7 +227,7 @@ func run() error {
 	}
 
 	// Start
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	sigChan := make(chan os.Signal, 1)
@@ -240,7 +240,7 @@ func run() error {
 	logger.Info("running",
 		"chainID", chainID,
 		"entries", len(entries),
-		"sweep", fmt.Sprintf("%dm", *sweepMinutes))
+		"sweepEveryNBlocks", *sweepBlocks)
 	sig := <-sigChan
 	logger.Info("shutting down", "signal", sig)
 	cancel()

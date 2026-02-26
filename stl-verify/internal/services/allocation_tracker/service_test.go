@@ -37,8 +37,8 @@ func TestNewService_FillsDefaults(t *testing.T) {
 	if svc.config.MaxMessages != ConfigDefaults().MaxMessages {
 		t.Errorf("MaxMessages not filled: got %d", svc.config.MaxMessages)
 	}
-	if svc.config.SweepInterval != ConfigDefaults().SweepInterval {
-		t.Errorf("SweepInterval not filled: got %v", svc.config.SweepInterval)
+	if svc.config.SweepEveryNBlocks != ConfigDefaults().SweepEveryNBlocks {
+		t.Errorf("SweepEveryNBlocks not filled: got %d", svc.config.SweepEveryNBlocks)
 	}
 	if len(svc.entries) == 0 {
 		t.Error("entries should default to DefaultTokenEntries for chain")

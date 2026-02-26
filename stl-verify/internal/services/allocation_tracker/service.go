@@ -27,18 +27,19 @@ type TransactionReceipt struct {
 }
 
 type Service struct {
-	config      Config
-	sqsConsumer outbound.SQSConsumer
-	redis       *redis.Client
-	ethClient   outbound.BlockQuerier
-	extractor   *TransferExtractor
-	registry    *SourceRegistry
-	entryLookup map[EntryKey]*TokenEntry
-	entries     []*TokenEntry
-	handler     AllocationHandler
-	ctx         context.Context
-	cancel      context.CancelFunc
-	logger      *slog.Logger
+	config           Config
+	sqsConsumer      outbound.SQSConsumer
+	redis            *redis.Client
+	ethClient        outbound.BlockQuerier
+	extractor        *TransferExtractor
+	registry         *SourceRegistry
+	entryLookup      map[EntryKey]*TokenEntry
+	entries          []*TokenEntry
+	handler          AllocationHandler
+	ctx              context.Context
+	cancel           context.CancelFunc
+	logger           *slog.Logger
+	blocksSinceSweep int
 }
 
 func NewService(
@@ -58,8 +59,8 @@ func NewService(
 	if config.PollInterval == 0 {
 		config.PollInterval = defaults.PollInterval
 	}
-	if config.SweepInterval == 0 {
-		config.SweepInterval = defaults.SweepInterval
+	if config.SweepEveryNBlocks == 0 {
+		config.SweepEveryNBlocks = defaults.SweepEveryNBlocks
 	}
 	if config.Logger == nil {
 		config.Logger = defaults.Logger
@@ -98,12 +99,10 @@ func (s *Service) Start(ctx context.Context) error {
 		Logger:       s.logger,
 	}, s.processBlock)
 
-	go s.sweepLoop()
-
 	s.logger.Info("started",
 		"chainID", s.config.ChainID,
 		"entries", len(s.entries),
-		"sweep", s.config.SweepInterval)
+		"sweepEveryNBlocks", s.config.SweepEveryNBlocks)
 	return nil
 }
 
@@ -144,39 +143,40 @@ func (s *Service) processBlock(
 	for _, receipt := range receipts {
 		transfers = append(transfers, s.extractor.Extract(receipt)...)
 	}
-	if len(transfers) == 0 {
-		return nil
+
+	// Process transfers if any matched
+	if len(transfers) > 0 {
+		affected := s.matchTransfers(transfers)
+		if len(affected) > 0 {
+			balances, err := s.registry.FetchAll(ctx, affected, event.BlockNumber)
+			if err != nil {
+				s.logger.Warn("partial balance fetch", "error", err)
+			}
+
+			snapshots := s.buildSnapshots(affected, balances, transfers, event)
+			if len(snapshots) > 0 {
+				if err := s.handler.HandleSnapshots(ctx, snapshots); err != nil {
+					return fmt.Errorf("handler: %w", err)
+				}
+			}
+
+			s.logger.Debug("block processed",
+				"block", event.BlockNumber,
+				"chain", event.ChainID,
+				"transfers", len(transfers),
+				"snapshots", len(snapshots),
+				"duration", time.Since(start))
+		}
 	}
 
-	affected := s.matchTransfers(transfers)
-	if len(affected) == 0 {
-		return nil
+	// Periodic sweep
+	s.blocksSinceSweep++
+	if s.blocksSinceSweep >= s.config.SweepEveryNBlocks {
+		s.blocksSinceSweep = 0
+		if err := s.sweep(ctx, event.BlockNumber); err != nil {
+			s.logger.Error("sweep failed", "error", err)
+		}
 	}
-
-	balances, err := s.registry.FetchAll(
-		ctx, affected, event.BlockNumber,
-	)
-	if err != nil {
-		s.logger.Warn("partial balance fetch", "error", err)
-	}
-
-	snapshots := s.buildSnapshots(
-		affected, balances, transfers, event,
-	)
-	if len(snapshots) == 0 {
-		return nil
-	}
-
-	if err := s.handler.HandleSnapshots(ctx, snapshots); err != nil {
-		return fmt.Errorf("handler: %w", err)
-	}
-
-	s.logger.Debug("block processed",
-		"block", event.BlockNumber,
-		"chain", event.ChainID,
-		"transfers", len(transfers),
-		"snapshots", len(snapshots),
-		"duration", time.Since(start))
 
 	return nil
 }
@@ -245,34 +245,14 @@ func (s *Service) buildSnapshots(
 	return snapshots
 }
 
-// sweepLoop runs periodic reconciliation to capture balance changes that don't
+// sweep runs periodic reconciliation to capture balance changes that don't
 // emit Transfer events — e.g. aToken interest accrual, ERC4626 yield compounding,
 // and BUIDL rebases. Without this, positions would drift between transfer-triggered
 // snapshots.
-func (s *Service) sweepLoop() {
-	ticker := time.NewTicker(s.config.SweepInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-ticker.C:
-			if err := s.sweep(s.ctx); err != nil {
-				s.logger.Error("sweep failed", "error", err)
-			}
-		}
-	}
-}
-
-func (s *Service) sweep(ctx context.Context) error {
+func (s *Service) sweep(ctx context.Context, blockNumber int64) error {
 	start := time.Now()
 
-	blockNum, err := s.ethClient.BlockNumber(ctx)
-	if err != nil {
-		return fmt.Errorf("get block number: %w", err)
-	}
-
-	balances, err := s.registry.FetchAll(ctx, s.entries, int64(blockNum))
+	balances, err := s.registry.FetchAll(ctx, s.entries, blockNumber)
 	if err != nil {
 		s.logger.Warn("sweep partial failure", "error", err)
 	}
@@ -288,7 +268,7 @@ func (s *Service) sweep(ctx context.Context) error {
 			Balance:       bal.Balance,
 			ScaledBalance: bal.ScaledBalance,
 			ChainID:       s.config.ChainID,
-			BlockNumber:   int64(blockNum),
+			BlockNumber:   blockNumber,
 			TxAmount:      big.NewInt(0),
 			Direction:     DirectionSweep,
 		})
@@ -303,6 +283,7 @@ func (s *Service) sweep(ctx context.Context) error {
 	}
 
 	s.logger.Info("sweep complete",
+		"block", blockNumber,
 		"snapshots", len(snapshots),
 		"duration", time.Since(start))
 	return nil

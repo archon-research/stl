@@ -196,14 +196,13 @@ func (r *AllocationRepository) resolveTokenIDs(
 	positions []*entity.AllocationPosition,
 ) (map[tokenCacheKey]int64, error) {
 	result := make(map[tokenCacheKey]int64)
-	toResolve := make(map[tokenCacheKey]*entity.AllocationPosition)
 
 	for _, pos := range positions {
 		key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
-		toResolve[key] = pos
-	}
+		if _, exists := result[key]; exists {
+			continue
+		}
 
-	for key, pos := range toResolve {
 		tokenID, err := r.tokenRepo.GetOrCreateToken(
 			ctx, tx,
 			pos.ChainID,

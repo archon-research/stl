@@ -14,19 +14,19 @@ type ProxyConfig struct {
 }
 
 type Config struct {
-	MaxMessages   int
-	PollInterval  time.Duration
-	SweepInterval time.Duration
-	ChainID       int64
-	Logger        *slog.Logger
+	MaxMessages       int
+	PollInterval      time.Duration
+	SweepEveryNBlocks int
+	ChainID           int64
+	Logger            *slog.Logger
 }
 
 func ConfigDefaults() Config {
 	return Config{
-		MaxMessages:   10,
-		PollInterval:  100 * time.Millisecond,
-		SweepInterval: 15 * time.Minute,
-		Logger:        slog.Default(),
+		MaxMessages:       10,
+		PollInterval:      100 * time.Millisecond,
+		SweepEveryNBlocks: 75,
+		Logger:            slog.Default(),
 	}
 }
 
