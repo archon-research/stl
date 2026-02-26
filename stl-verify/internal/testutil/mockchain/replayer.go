@@ -8,7 +8,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-const defaultInterval = 12 * time.Second
+const defaultInterval = 12 * time.Second // default Ethereum block time
 
 type Status struct {
 	Running       bool
@@ -81,7 +81,6 @@ func (r *Replayer) emit() {
 	r.blocksEmitted++
 	r.mu.Unlock()
 
-	// Call the callback outside the lock to avoid potential deadlocks
 	if r.onBlock != nil {
 		r.onBlock(header)
 	}

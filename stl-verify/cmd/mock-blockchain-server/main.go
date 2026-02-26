@@ -26,8 +26,6 @@ func main() {
 	}
 }
 
-// run starts the mock blockchain server on addr and blocks until ctx is cancelled.
-// If addrCh is non-nil, the bound address string is sent to it once the server is ready.
 func run(ctx context.Context, addr string, addrCh chan<- string) error {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,

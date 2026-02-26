@@ -1,4 +1,4 @@
-// server.go wires DataStore, wsHandler, httpHandler, and Replayer into a single TCP server.
+// Wires DataStore, wsHandler, httpHandler, and Replayer into a single TCP server.
 package mockchain
 
 import (

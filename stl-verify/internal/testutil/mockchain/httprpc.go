@@ -77,7 +77,7 @@ func (h *httpHandler) handleBatch(w http.ResponseWriter, raw json.RawMessage) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	w.Write(out) //nolint:errcheck
+	_, _ = w.Write(out)
 }
 
 func (h *httpHandler) dispatch(req jsonRPCRequest) (json.RawMessage, *jsonRPCErrorObj) {
@@ -105,7 +105,6 @@ func (h *httpHandler) respond(w http.ResponseWriter, id json.RawMessage, result 
 	testutil.WriteRPCResult(w, id, result)
 }
 
-// findIndexByHash returns the DataStore index for a block with the given hash, or -1 if not found.
 func (h *httpHandler) findIndexByHash(hash string) (int, bool) {
 	for i, hdr := range h.store.Headers() {
 		if hdr.Hash == hash {
@@ -115,7 +114,6 @@ func (h *httpHandler) findIndexByHash(hash string) (int, bool) {
 	return -1, false
 }
 
-// extractHashParam returns the first parameter as a string hash, or false if missing/invalid.
 func extractHashParam(req jsonRPCRequest) (string, bool) {
 	if len(req.Params) == 0 {
 		return "", false
@@ -127,7 +125,7 @@ func extractHashParam(req jsonRPCRequest) (string, bool) {
 func (h *httpHandler) getBlockByHash(req jsonRPCRequest) (json.RawMessage, *jsonRPCErrorObj) {
 	hash, ok := extractHashParam(req)
 	if !ok {
-		return nil, &jsonRPCErrorObj{Code: -32602, Message: "missing hash parameter"}
+		return nil, &jsonRPCErrorObj{Code: -32602, Message: "missing or invalid hash parameter"}
 	}
 
 	idx, found := h.findIndexByHash(hash)
