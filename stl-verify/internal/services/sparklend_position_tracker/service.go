@@ -104,7 +104,7 @@ type Service struct {
 	eventRepo    outbound.EventRepository
 
 	mu                 sync.RWMutex
-	blockchainServices map[common.Address]*blockchainService
+	blockchainServices map[blockchain.ProtocolKey]*blockchainService
 	multicallClient    outbound.Multicaller
 	erc20ABI           *abi.ABI
 	eventExtractor     *EventExtractor
@@ -167,7 +167,7 @@ func NewService(
 		tokenRepo:          tokenRepo,
 		positionRepo:       positionRepo,
 		eventRepo:          eventRepo,
-		blockchainServices: make(map[common.Address]*blockchainService),
+		blockchainServices: make(map[blockchain.ProtocolKey]*blockchainService),
 		multicallClient:    mc,
 		erc20ABI:           erc20ABI,
 		eventExtractor:     eventExtractor,
@@ -177,10 +177,12 @@ func NewService(
 	return processor, nil
 }
 
-func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (*blockchainService, error) {
+func (s *Service) getOrCreateBlockchainService(chainID int64, protocolAddress common.Address) (*blockchainService, error) {
+	key := blockchain.ProtocolKey{ChainID: chainID, PoolAddress: protocolAddress}
+
 	// First check: read map under read lock.
 	s.mu.RLock()
-	svc, exists := s.blockchainServices[protocolAddress]
+	svc, exists := s.blockchainServices[key]
 	s.mu.RUnlock()
 	if exists {
 		return svc, nil
@@ -193,6 +195,7 @@ func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (
 
 	// Construct outside the lock - this hits the network.
 	newSvc, err := newBlockchainService(
+		chainID,
 		s.ethClient,
 		s.multicallClient,
 		s.erc20ABI,
@@ -208,11 +211,12 @@ func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (
 
 	// Second check: re-acquire lock, another goroutine may have created it.
 	s.mu.Lock()
-	if svc, exists = s.blockchainServices[protocolAddress]; !exists {
-		s.blockchainServices[protocolAddress] = newSvc
+	if svc, exists = s.blockchainServices[key]; !exists {
+		s.blockchainServices[key] = newSvc
 		svc = newSvc
 		s.logger.Info("created blockchain service",
 			"protocol", protocolConfig.Name,
+			"chainID", chainID,
 			"address", protocolAddress.Hex())
 	}
 	s.mu.Unlock()
@@ -301,7 +305,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt sparklend.Transact
 
 		// Only process logs from known protocol addresses
 		protocolAddress := common.HexToAddress(log.Address)
-		if !blockchain.IsKnownProtocol(protocolAddress) {
+		if !blockchain.IsKnownProtocol(chainID, protocolAddress) {
 			continue
 		}
 
@@ -484,16 +488,17 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 		return fmt.Errorf("failed to get reserve data: %w", err)
 	}
 
-	// Get protocol ID
-	protocolID, err := s.protocolRepo.GetProtocolByAddress(ctx, chainID, protocolAddress)
-	if err != nil {
-		return fmt.Errorf("failed to get protocol: %w", err)
-	}
-	if protocolID == nil {
-		return fmt.Errorf("protocol not found for address %s on chain %d", protocolAddress.Hex(), chainID)
-	}
-
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
+		if !exists {
+			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
+		}
+
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
+		if err != nil {
+			return fmt.Errorf("failed to get protocol: %w", err)
+		}
+
 		// Get or create token
 		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reserve, normalizeTokenSymbol(tokenMetadata.Symbol), tokenMetadata.Decimals, blockNumber)
 		if err != nil {
@@ -501,7 +506,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 		}
 
 		// Build and persist the entity
-		sparkReserveData := s.buildReserveDataEntity(protocolID.ID, tokenID, blockNumber, blockVersion, reserveData, configData)
+		sparkReserveData := s.buildReserveDataEntity(protocolID, tokenID, blockNumber, blockVersion, reserveData, configData)
 		if err := s.protocolRepo.UpsertReserveData(ctx, tx, []*entity.SparkLendReserveData{sparkReserveData}); err != nil {
 			return fmt.Errorf("failed to upsert reserve data: %w", err)
 		}

@@ -928,31 +928,49 @@ func TestEventExtractor_ExtractReserveEventData(t *testing.T) {
 func TestService_IsKnownProtocol_FilterLogic(t *testing.T) {
 	tests := []struct {
 		name       string
+		chainID    int64
 		address    string
 		expectSkip bool
 	}{
 		{
 			name:       "Aave V3 - should process",
+			chainID:    1,
 			address:    "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
 			expectSkip: false,
 		},
 		{
 			name:       "Sparklend - should process",
+			chainID:    1,
 			address:    "0xC13e21B648A5Ee794902342038FF3aDAB66BE987",
 			expectSkip: false,
 		},
 		{
 			name:       "Aave V2 - should process",
+			chainID:    1,
 			address:    "0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9",
 			expectSkip: false,
 		},
 		{
+			name:       "Aave V3 Avalanche - should process",
+			chainID:    43114,
+			address:    "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expectSkip: false,
+		},
+		{
+			name:       "Aave V3 Avalanche on wrong chain - should skip",
+			chainID:    1,
+			address:    "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expectSkip: true,
+		},
+		{
 			name:       "RedemptionIdle - should skip",
+			chainID:    1,
 			address:    "0x4c21B7577C8FE8b0B0669165ee7C8f67fa1454Cf",
 			expectSkip: true,
 		},
 		{
 			name:       "Random unknown - should skip",
+			chainID:    1,
 			address:    "0x1234567890123456789012345678901234567890",
 			expectSkip: true,
 		},
@@ -961,10 +979,10 @@ func TestService_IsKnownProtocol_FilterLogic(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			addr := common.HexToAddress(tt.address)
-			skip := !blockchain.IsKnownProtocol(addr)
+			skip := !blockchain.IsKnownProtocol(tt.chainID, addr)
 
 			if skip != tt.expectSkip {
-				t.Errorf("IsKnownProtocol(%s) = %v, want skip=%v", tt.address, skip, tt.expectSkip)
+				t.Errorf("IsKnownProtocol(%d, %s) = %v, want skip=%v", tt.chainID, tt.address, !skip, tt.expectSkip)
 			}
 		})
 	}
