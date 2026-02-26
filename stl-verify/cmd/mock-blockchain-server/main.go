@@ -1,4 +1,4 @@
-// Command mock-blockchain-server starts an in-memory mock Ethereum JSON-RPC server for local development and stress testing.
+// Command mock-blockchain-server starts an in-memory mock Ethereum JSON-RPC server for stress testing.
 package main
 
 import (

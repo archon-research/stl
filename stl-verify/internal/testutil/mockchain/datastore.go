@@ -73,13 +73,13 @@ func NewTestDataStore() *DataStore {
 	ds := NewDataStore()
 
 	for i := 0; i < 3; i++ {
-		hash := fmt.Sprintf("0x%064x", i)
+		hash := fmt.Sprintf("0x%064x", i+1)
 		parentHash := "0x" + strings.Repeat("0", 64)
 		if i > 0 {
-			parentHash = fmt.Sprintf("0x%064x", i-1)
+			parentHash = fmt.Sprintf("0x%064x", i)
 		}
 		header := outbound.BlockHeader{
-			Number:     fmt.Sprintf("0x%x", i),
+			Number:     fmt.Sprintf("0x%x", i+1),
 			Hash:       hash,
 			ParentHash: parentHash,
 			Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),

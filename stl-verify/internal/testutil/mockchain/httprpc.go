@@ -1,4 +1,5 @@
-// httprpc.go implements the HTTP JSON-RPC handler for eth_getBlockByHash and eth_blockNumber.
+// httprpc.go implements the HTTP JSON-RPC handler for eth_getBlockByHash, eth_blockNumber,
+// eth_getBlockReceipts, trace_block, and eth_getBlobSidecars. Supports both single and batch requests.
 package mockchain
 
 import (
@@ -17,28 +18,82 @@ func newHTTPHandler(store *DataStore) *httpHandler {
 }
 
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var req jsonRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var raw json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+
+	if len(raw) > 0 && raw[0] == '[' {
+		h.handleBatch(w, raw)
+		return
+	}
+
+	var req jsonRPCRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
 	idJSON, err := json.Marshal(req.ID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
+	result, rpcErr := h.dispatch(req)
+	h.respond(w, idJSON, result, rpcErr)
+}
+
+func (h *httpHandler) handleBatch(w http.ResponseWriter, raw json.RawMessage) {
+	var reqs []jsonRPCRequest
+	if err := json.Unmarshal(raw, &reqs); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	type batchResponse struct {
+		JSONRPC string           `json:"jsonrpc"`
+		ID      any              `json:"id"`
+		Result  json.RawMessage  `json:"result,omitempty"`
+		Error   *jsonRPCErrorObj `json:"error,omitempty"`
+	}
+
+	responses := make([]batchResponse, len(reqs))
+	for i, req := range reqs {
+		result, rpcErr := h.dispatch(req)
+		responses[i] = batchResponse{JSONRPC: "2.0", ID: req.ID}
+		if rpcErr != nil {
+			responses[i].Error = rpcErr
+		} else {
+			responses[i].Result = result
+		}
+	}
+
+	out, err := json.Marshal(responses)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Write(out) //nolint:errcheck
+}
+
+func (h *httpHandler) dispatch(req jsonRPCRequest) (json.RawMessage, *jsonRPCErrorObj) {
 	switch req.Method {
 	case "eth_getBlockByHash":
-		result, rpcErr := h.getBlockByHash(req)
-		h.respond(w, idJSON, result, rpcErr)
+		return h.getBlockByHash(req)
 	case "eth_blockNumber":
-		result, rpcErr := h.blockNumber()
-		h.respond(w, idJSON, result, rpcErr)
+		return h.blockNumber()
+	case "eth_getBlockReceipts":
+		return h.getDataByHash(req, "receipts")
+	case "trace_block":
+		return h.getDataByHash(req, "traces")
+	case "eth_getBlobSidecars":
+		return h.getDataByHash(req, "blobs")
 	default:
-		testutil.WriteRPCError(w, idJSON, -32601, "method not found")
+		return nil, &jsonRPCErrorObj{Code: -32601, Message: "method not found"}
 	}
 }
 
@@ -50,25 +105,57 @@ func (h *httpHandler) respond(w http.ResponseWriter, id json.RawMessage, result 
 	testutil.WriteRPCResult(w, id, result)
 }
 
-func (h *httpHandler) getBlockByHash(req jsonRPCRequest) (json.RawMessage, *jsonRPCErrorObj) {
-	if len(req.Params) == 0 {
-		return nil, &jsonRPCErrorObj{Code: -32602, Message: "missing hash parameter"}
-	}
-	hash, ok := req.Params[0].(string)
-	if !ok {
-		return nil, &jsonRPCErrorObj{Code: -32602, Message: "invalid hash parameter"}
-	}
-
-	for i, header := range h.store.Headers() {
-		if header.Hash == hash {
-			raw, found := h.store.Get(i, "block")
-			if !found {
-				return json.RawMessage("null"), nil
-			}
-			return raw, nil
+// findIndexByHash returns the DataStore index for a block with the given hash, or -1 if not found.
+func (h *httpHandler) findIndexByHash(hash string) (int, bool) {
+	for i, hdr := range h.store.Headers() {
+		if hdr.Hash == hash {
+			return i, true
 		}
 	}
-	return json.RawMessage("null"), nil
+	return -1, false
+}
+
+// extractHashParam returns the first parameter as a string hash, or false if missing/invalid.
+func extractHashParam(req jsonRPCRequest) (string, bool) {
+	if len(req.Params) == 0 {
+		return "", false
+	}
+	s, ok := req.Params[0].(string)
+	return s, ok
+}
+
+func (h *httpHandler) getBlockByHash(req jsonRPCRequest) (json.RawMessage, *jsonRPCErrorObj) {
+	hash, ok := extractHashParam(req)
+	if !ok {
+		return nil, &jsonRPCErrorObj{Code: -32602, Message: "missing hash parameter"}
+	}
+
+	idx, found := h.findIndexByHash(hash)
+	if !found {
+		return json.RawMessage("null"), nil
+	}
+	raw, ok := h.store.Get(idx, "block")
+	if !ok {
+		return json.RawMessage("null"), nil
+	}
+	return raw, nil
+}
+
+func (h *httpHandler) getDataByHash(req jsonRPCRequest, dataType string) (json.RawMessage, *jsonRPCErrorObj) {
+	hash, ok := extractHashParam(req)
+	if !ok {
+		return nil, &jsonRPCErrorObj{Code: -32602, Message: "missing or invalid hash parameter"}
+	}
+
+	idx, found := h.findIndexByHash(hash)
+	if !found {
+		return json.RawMessage("null"), nil
+	}
+	raw, ok := h.store.Get(idx, dataType)
+	if !ok {
+		return json.RawMessage("null"), nil
+	}
+	return raw, nil
 }
 
 func (h *httpHandler) blockNumber() (json.RawMessage, *jsonRPCErrorObj) {
