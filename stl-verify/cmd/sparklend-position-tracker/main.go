@@ -18,9 +18,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/redis/go-redis/v9"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
@@ -101,7 +103,8 @@ func main() {
 		"redis", *redisAddr,
 		"chainID", chainID)
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Configure AWS SDK for LocalStack or production
 	// In production (ECS/Fargate), use the default credential chain which picks up IAM role credentials.
@@ -149,21 +152,28 @@ func main() {
 		}
 	}()
 
-	redisClient := redis.NewClient(&redis.Options{
+	blockCache, err := redis.NewBlockCache(redis.Config{
 		Addr:     *redisAddr,
 		Password: env.Get("REDIS_PASSWORD", ""),
 		DB:       0,
-	})
-	if err := redisClient.Ping(ctx).Err(); err != nil {
-		logger.Error("failed to connect to Redis", "error", err)
+	}, logger)
+	if err != nil {
+		logger.Error("failed to create BlockCache", "error", err)
 		os.Exit(1)
 	}
 	defer func() {
-		if err := redisClient.Close(); err != nil {
-			logger.Warn("failed to close Redis connection", "error", err)
+		if err := blockCache.Close(); err != nil {
+			logger.Warn("failed to close BlockCache", "error", err)
 		}
 	}()
-	logger.Info("Redis connected", "addr", *redisAddr)
+	logger.Info("BlockCache connected", "addr", *redisAddr)
+
+	s3Reader := s3adapter.NewReader(cfg, logger)
+	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, env.Get("S3_BUCKET", ""), logger)
+	if err != nil {
+		logger.Error("failed to create cache reader", "error", err)
+		os.Exit(1)
+	}
 
 	ethClient, err := ethclient.Dial(fullAlchemyURL)
 	if err != nil {
@@ -220,7 +230,7 @@ func main() {
 	processor, err := sparklend_position_tracker.NewService(
 		processorConfig,
 		sqsConsumer,
-		redisClient,
+		cacheReader,
 		ethClient,
 		txManager,
 		userRepo,
@@ -233,9 +243,6 @@ func main() {
 		logger.Error("failed to create processor", "error", err)
 		os.Exit(1)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
