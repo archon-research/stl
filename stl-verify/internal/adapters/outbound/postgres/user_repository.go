@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -50,25 +49,26 @@ func NewUserRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (
 func (r *UserRepository) GetOrCreateUser(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error) {
 	var userID int64
 
+	// Upsert: on conflict preserve the earliest first_seen_block via LEAST().
+	// This is safe for concurrent workers processing different blocks for the same user —
+	// whichever worker wins the INSERT race, the loser's LEAST() merge still produces
+	// the correct minimum first_seen_block.
 	err := tx.QueryRow(ctx,
-		`SELECT id FROM "user" WHERE chain_id = $1 AND address = $2`,
-		user.ChainID, user.Address.Bytes()).Scan(&userID)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		err = tx.QueryRow(ctx,
-			`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
-			 VALUES ($1, $2, $3, NOW(), NOW(), $4)
-			 RETURNING id`,
-			user.ChainID, user.Address.Bytes(), user.FirstSeenBlock, user.Metadata).Scan(&userID)
-		if err != nil {
-			return 0, fmt.Errorf("failed to create user: %w", err)
-		}
-
-		r.logger.Debug("user created", "address", user.Address.Hex(), "id", userID)
-	} else if err != nil {
-		return 0, fmt.Errorf("failed to get user: %w", err)
+		`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
+		 VALUES ($1, $2, $3, NOW(), NOW(), $4)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET
+		     first_seen_block = LEAST("user".first_seen_block, EXCLUDED.first_seen_block),
+		     updated_at = CASE
+		         WHEN EXCLUDED.first_seen_block < "user".first_seen_block THEN NOW()
+		         ELSE "user".updated_at
+		     END
+		 RETURNING id`,
+		user.ChainID, user.Address.Bytes(), user.FirstSeenBlock, user.Metadata).Scan(&userID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get or create user: %w", err)
 	}
 
+	r.logger.Debug("user upserted", "address", user.Address.Hex(), "id", userID)
 	return userID, nil
 }
 
@@ -133,7 +133,10 @@ func (r *UserRepository) upsertUserBatch(ctx context.Context, tx pgx.Tx, users [
 		ON CONFLICT (chain_id, address) DO UPDATE SET
 			first_seen_block = LEAST("user".first_seen_block, EXCLUDED.first_seen_block),
 			metadata = EXCLUDED.metadata,
-			updated_at = NOW()
+			updated_at = CASE
+			    WHEN EXCLUDED.first_seen_block < "user".first_seen_block THEN NOW()
+			    ELSE "user".updated_at
+			END
 	`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)

@@ -125,7 +125,7 @@ func (e *EventExtractor) ExtractEventData(log shared.Log) (*PositionEventData, e
 		return nil, fmt.Errorf("not a tracked position event")
 	}
 
-	eventData := make(map[string]interface{})
+	eventData := make(map[string]any)
 
 	// Parse indexed parameters from topics
 	var indexed abi.Arguments
@@ -181,7 +181,7 @@ func (e *EventExtractor) ExtractEventData(log shared.Log) (*PositionEventData, e
 	}
 }
 
-func (e *EventExtractor) extractBorrowData(eventData map[string]interface{}, txHash string) (*PositionEventData, error) {
+func (e *EventExtractor) extractBorrowData(eventData map[string]any, txHash string) (*PositionEventData, error) {
 	// Borrow: onBehalfOf is the borrower
 	user, ok := eventData["onBehalfOf"].(common.Address)
 	if !ok {
@@ -204,7 +204,7 @@ func (e *EventExtractor) extractBorrowData(eventData map[string]interface{}, txH
 	}, nil
 }
 
-func (e *EventExtractor) extractRepayData(eventData map[string]interface{}, txHash string) (*PositionEventData, error) {
+func (e *EventExtractor) extractRepayData(eventData map[string]any, txHash string) (*PositionEventData, error) {
 	// Repay: user is the debt holder (whose debt is being repaid)
 	user, ok := eventData["user"].(common.Address)
 	if !ok {
@@ -227,7 +227,7 @@ func (e *EventExtractor) extractRepayData(eventData map[string]interface{}, txHa
 	}, nil
 }
 
-func (e *EventExtractor) extractSupplyData(eventData map[string]interface{}, txHash string) (*PositionEventData, error) {
+func (e *EventExtractor) extractSupplyData(eventData map[string]any, txHash string) (*PositionEventData, error) {
 	// Supply: onBehalfOf is the supplier
 	user, ok := eventData["onBehalfOf"].(common.Address)
 	if !ok {
@@ -250,7 +250,7 @@ func (e *EventExtractor) extractSupplyData(eventData map[string]interface{}, txH
 	}, nil
 }
 
-func (e *EventExtractor) extractWithdrawData(eventData map[string]interface{}, txHash string) (*PositionEventData, error) {
+func (e *EventExtractor) extractWithdrawData(eventData map[string]any, txHash string) (*PositionEventData, error) {
 	// Withdraw: user is the one withdrawing
 	user, ok := eventData["user"].(common.Address)
 	if !ok {
@@ -273,7 +273,7 @@ func (e *EventExtractor) extractWithdrawData(eventData map[string]interface{}, t
 	}, nil
 }
 
-func (e *EventExtractor) extractLiquidationData(eventData map[string]interface{}, txHash string) (*PositionEventData, error) {
+func (e *EventExtractor) extractLiquidationData(eventData map[string]any, txHash string) (*PositionEventData, error) {
 	// LiquidationCall: both user (borrower being liquidated) and liquidator need snapshots
 	user, ok := eventData["user"].(common.Address)
 	if !ok {
@@ -311,7 +311,7 @@ func (e *EventExtractor) extractLiquidationData(eventData map[string]interface{}
 	}, nil
 }
 
-func (e *EventExtractor) extractCollateralEnabledData(eventData map[string]interface{}, txHash string) (*PositionEventData, error) {
+func (e *EventExtractor) extractCollateralEnabledData(eventData map[string]any, txHash string) (*PositionEventData, error) {
 	user, ok := eventData["user"].(common.Address)
 	if !ok {
 		return nil, fmt.Errorf("invalid user type in ReserveUsedAsCollateralEnabled event")
@@ -329,7 +329,7 @@ func (e *EventExtractor) extractCollateralEnabledData(eventData map[string]inter
 	}, nil
 }
 
-func (e *EventExtractor) extractCollateralDisabledData(eventData map[string]interface{}, txHash string) (*PositionEventData, error) {
+func (e *EventExtractor) extractCollateralDisabledData(eventData map[string]any, txHash string) (*PositionEventData, error) {
 	user, ok := eventData["user"].(common.Address)
 	if !ok {
 		return nil, fmt.Errorf("invalid user type in ReserveUsedAsCollateralDisabled event")
@@ -371,7 +371,7 @@ func (e *EventExtractor) ExtractReserveEventData(log shared.Log) (*ReserveEventD
 // ToJSON converts PositionEventData to a JSON-serializable map.
 // Addresses are hex strings, amounts are decimal strings.
 func (p *PositionEventData) ToJSON() (json.RawMessage, error) {
-	data := make(map[string]interface{})
+	data := make(map[string]any)
 	data["eventType"] = string(p.EventType)
 	data["user"] = p.User.Hex()
 

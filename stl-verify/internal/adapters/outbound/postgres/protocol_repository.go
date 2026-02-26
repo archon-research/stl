@@ -53,25 +53,22 @@ func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx,
 	var protocolID int64
 	addressBytes := address.Bytes()
 
+	// Upsert: on conflict preserve the earliest created_at_block via LEAST().
+	// This is safe for concurrent workers processing different blocks for the same protocol —
+	// whichever worker wins the INSERT race, subsequent LEAST() merges still produce
+	// the correct minimum created_at_block.
 	err := tx.QueryRow(ctx,
-		`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2`,
-		chainID, addressBytes).Scan(&protocolID)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		r.logger.Info("auto-creating protocol", "address", address.Hex(), "name", name)
-		err = tx.QueryRow(ctx,
-			`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING id`,
-			chainID, addressBytes, name, "lending", createdAtBlock).Scan(&protocolID)
-		if err != nil {
-			return 0, fmt.Errorf("failed to create protocol: %w", err)
-		}
-		return protocolID, nil
-	} else if err != nil {
-		return 0, fmt.Errorf("failed to get protocol: %w", err)
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET
+		     created_at_block = LEAST(protocol.created_at_block, EXCLUDED.created_at_block)
+		 RETURNING id`,
+		chainID, addressBytes, name, protocolType, createdAtBlock).Scan(&protocolID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get or create protocol: %w", err)
 	}
 
+	r.logger.Info("protocol upserted", "address", address.Hex(), "name", name, "id", protocolID)
 	return protocolID, nil
 }
 

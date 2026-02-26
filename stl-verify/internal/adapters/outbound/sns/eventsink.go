@@ -271,6 +271,8 @@ func (s *EventSink) publishWithRetry(ctx context.Context, input *sns.PublishInpu
 		"error", lastErr,
 		"eventType", event.EventType(),
 		"blockNumber", event.GetBlockNumber(),
+		"chainId", event.GetChainID(),
+		"topicArn", s.config.TopicARN,
 	)
 
 	return fmt.Errorf("failed to publish to SNS after %d retries: %w", s.config.MaxRetries, lastErr)
