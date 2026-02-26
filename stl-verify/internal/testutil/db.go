@@ -23,7 +23,7 @@ func StartTimescaleDB(t *testing.T) (dsn string, cleanup func()) {
 	defer cancel()
 
 	req := testcontainers.ContainerRequest{
-		Image:        "timescale/timescaledb:latest-pg17",
+		Image:        ImageTimescaleDB,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "test",

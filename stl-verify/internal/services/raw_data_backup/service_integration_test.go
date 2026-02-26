@@ -239,7 +239,7 @@ func startRedis(t *testing.T, ctx context.Context) (testcontainers.Container, Re
 	}
 
 	req := testcontainers.ContainerRequest{
-		Image:        "redis:8.0-M04-alpine",
+		Image:        testutil.ImageRedis,
 		ExposedPorts: []string{"6379/tcp"},
 		WaitingFor:   wait.ForLog("Ready to accept connections").WithStartupTimeout(60 * time.Second),
 	}
