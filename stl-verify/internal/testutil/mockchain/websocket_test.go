@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/gorilla/websocket"
 )
 
@@ -176,17 +177,11 @@ func TestWSHandler_DisconnectClearsConn(t *testing.T) {
 	conn.Close()
 
 	// ServeHTTP detects the disconnect asynchronously; poll with a timeout.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.WaitForCondition(t, 2*time.Second, func() bool {
 		h.mu.Lock()
-		c := h.conn
-		h.mu.Unlock()
-		if c == nil {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Error("expected h.conn to be nil after client disconnect")
+		defer h.mu.Unlock()
+		return h.conn == nil
+	}, "h.conn to be nil after client disconnect")
 }
 
 // TestWSHandler_ReplaceConn verifies that a second connection closes the first and takes over.

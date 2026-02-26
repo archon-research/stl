@@ -170,6 +170,21 @@ func TestReplayer_GetStatus(t *testing.T) {
 	}
 }
 
+// TestReplayer_EmptyTemplates verifies that Start is a no-op (no panic) when there are no templates.
+func TestReplayer_EmptyTemplates(t *testing.T) {
+	ds := NewDataStore() // empty — no headers
+	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {
+		t.Error("onBlock must not be called with empty templates")
+	})
+
+	r.Start()
+	emitted := r.Stop()
+
+	if emitted != 0 {
+		t.Errorf("expected 0 emissions with empty templates, got %d", emitted)
+	}
+}
+
 // TestReplayer_RestartResetsState verifies that starting after stopping resets the counters.
 func TestReplayer_RestartResetsState(t *testing.T) {
 	r, received := newTestReplayer(t)

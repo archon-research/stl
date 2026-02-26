@@ -5,38 +5,75 @@ import (
 	"testing"
 )
 
-// TestDataStore verifies Get, Headers, and Len on a pre-populated store.
-func TestDataStore(t *testing.T) {
+// TestDataStore_Get verifies Get across valid indexes, missing indexes, and all data types.
+func TestDataStore_Get(t *testing.T) {
 	ds := NewTestDataStore()
 
-	if ds.Len() != 3 {
-		t.Fatalf("expected 3 headers, got %d", ds.Len())
+	tests := []struct {
+		name     string
+		index    int
+		dataType string
+		wantOK   bool
+	}{
+		{"block at index 0", 0, "block", true},
+		{"receipts at index 0", 0, "receipts", true},
+		{"traces at index 0", 0, "traces", true},
+		{"blobs at index 0", 0, "blobs", true},
+		{"missing index", 99, "block", false},
+		{"missing data type", 0, "unknown", false},
 	}
-
-	_, ok := ds.Get(0, "block")
-	if !ok {
-		t.Fatal("expected block data for index 0")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, ok := ds.Get(tt.index, tt.dataType)
+			if ok != tt.wantOK {
+				t.Errorf("Get(%d, %q) ok = %v, want %v", tt.index, tt.dataType, ok, tt.wantOK)
+			}
+		})
 	}
+}
 
-	_, ok = ds.Get(99, "block")
-	if ok {
-		t.Fatal("expected no block data for index 99")
-	}
-
-	headers := ds.Headers()
-	if len(headers) != 3 {
-		t.Fatalf("expected 3 headers, got %d", len(headers))
-	}
-
-	_, ok = ds.Get(0, "receipts")
-	if !ok {
-		t.Fatal("expected receipts for index 0")
-	}
-
+// TestDataStore_Add verifies that Add overwrites an existing entry.
+func TestDataStore_Add(t *testing.T) {
+	ds := NewTestDataStore()
 	ds.Add(0, "block", json.RawMessage(`"overwritten"`))
-	raw, _ := ds.Get(0, "block")
+	raw, ok := ds.Get(0, "block")
+	if !ok {
+		t.Fatal("expected entry after overwrite")
+	}
 	if string(raw) != `"overwritten"` {
-		t.Fatal("expected overwrite")
+		t.Errorf("expected overwritten value, got %s", raw)
+	}
+}
+
+// TestDataStore_Len verifies the header count after population.
+func TestDataStore_Len(t *testing.T) {
+	tests := []struct {
+		name    string
+		store   *DataStore
+		wantLen int
+	}{
+		{"empty store", NewDataStore(), 0},
+		{"test store", NewTestDataStore(), 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.store.Len(); got != tt.wantLen {
+				t.Errorf("Len() = %d, want %d", got, tt.wantLen)
+			}
+		})
+	}
+}
+
+// TestHeaders_ReturnsCopy verifies that mutating the slice returned by Headers does not affect the store.
+func TestHeaders_ReturnsCopy(t *testing.T) {
+	ds := NewTestDataStore()
+	original := ds.Headers()[0].Hash
+
+	h := ds.Headers()
+	h[0].Hash = "0xmutated"
+
+	if ds.Headers()[0].Hash != original {
+		t.Fatal("mutating returned slice must not affect the DataStore")
 	}
 }
 

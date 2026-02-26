@@ -1,3 +1,4 @@
+// Implements the timed block emitter that cycles through stored block templates.
 package mockchain
 
 import (
@@ -42,7 +43,7 @@ func NewReplayer(headers []outbound.BlockHeader, store *DataStore, onBlock func(
 
 func (r *Replayer) Start() {
 	r.mu.Lock()
-	if r.running {
+	if r.running || len(r.templates) == 0 {
 		r.mu.Unlock()
 		return
 	}
@@ -81,7 +82,9 @@ func (r *Replayer) emit() {
 	r.mu.Unlock()
 
 	// Call the callback outside the lock to avoid potential deadlocks
-	r.onBlock(header)
+	if r.onBlock != nil {
+		r.onBlock(header)
+	}
 }
 
 func (r *Replayer) Stop() int64 {

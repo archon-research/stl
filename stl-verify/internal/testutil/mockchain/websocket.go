@@ -1,6 +1,8 @@
+// Implements the WebSocket JSON-RPC handler for eth_subscribe (newHeads) and block broadcast.
 package mockchain
 
 import (
+	"log/slog"
 	"net/http"
 	"sync"
 
@@ -65,6 +67,7 @@ func newWSHandler() *wsHandler {
 func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		slog.Error("mockchain: websocket upgrade failed", "error", err)
 		return
 	}
 

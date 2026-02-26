@@ -1,9 +1,10 @@
-// Package mockchain provides an in-memory mock blockchain server for stress testing.
+// Implements the thread-safe in-memory store for block headers and associated data (block, receipts, traces, blobs).
 package mockchain
 
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,7 +56,9 @@ func (ds *DataStore) Headers() []outbound.BlockHeader {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
 
-	return ds.headers
+	result := make([]outbound.BlockHeader, len(ds.headers))
+	copy(result, ds.headers)
+	return result
 }
 
 func (ds *DataStore) Len() int {
@@ -71,7 +74,10 @@ func NewTestDataStore() *DataStore {
 
 	for i := 0; i < 3; i++ {
 		hash := fmt.Sprintf("0x%064x", i)
-		parentHash := fmt.Sprintf("0x%064x", i-1)
+		parentHash := "0x" + strings.Repeat("0", 64)
+		if i > 0 {
+			parentHash = fmt.Sprintf("0x%064x", i-1)
+		}
 		header := outbound.BlockHeader{
 			Number:     fmt.Sprintf("0x%x", i),
 			Hash:       hash,
@@ -79,7 +85,10 @@ func NewTestDataStore() *DataStore {
 			Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
 		}
 
-		headerJSON, _ := json.Marshal(header)
+		headerJSON, err := json.Marshal(header)
+		if err != nil {
+			panic(fmt.Sprintf("mockchain: marshalling test header: %v", err))
+		}
 
 		ds.AddHeader(header)
 		ds.Add(i, "block", headerJSON)
