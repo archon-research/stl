@@ -2,6 +2,7 @@ package sparklend_position_tracker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -233,7 +234,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 	}
 
 	var receipts []shared.TransactionReceipt
-	if err := shared.ParseCompressedJSON(receiptsData, &receipts); err != nil {
+	if err := json.Unmarshal(receiptsData, &receipts); err != nil {
 		return fmt.Errorf("failed to unmarshal receipts: %w", err)
 	}
 

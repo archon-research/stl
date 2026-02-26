@@ -49,6 +49,9 @@ func (m *mockCacheReader) GetBlobs(_ context.Context, _ int64, _ int64, _ int) (
 	m.blobsCalled = true
 	return m.blobs, m.blobsErr
 }
+func (m *mockCacheReader) Close() error {
+	return nil
+}
 
 // mockS3Reader implements outbound.S3Reader with configurable behaviour.
 type mockS3Reader struct {

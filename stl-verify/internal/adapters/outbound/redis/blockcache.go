@@ -89,6 +89,14 @@ func NewBlockCache(cfg Config, logger *slog.Logger) (*BlockCache, error) {
 		DB:       cfg.DB,
 	})
 
+	// Verify connectivity
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pingCancel()
+	if err := client.Ping(pingCtx).Err(); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("connecting to Redis at %s: %w", cfg.Addr, err)
+	}
+
 	if logger == nil {
 		logger = slog.Default()
 	}

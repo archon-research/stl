@@ -14,6 +14,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
+var _ outbound.BlockCacheReader = (*ReaderWithFallback)(nil)
+
 // ReaderWithFallback implements BlockCacheReader by first checking Redis and
 // falling back to S3 on a cache miss. Chain isolation is achieved via the
 // bucket name — each chain has its own dedicated bucket, so S3 keys do not
@@ -30,7 +32,7 @@ type ReaderWithFallback struct {
 // wrong place in production.
 func NewReaderWithFallback(redis outbound.BlockCacheReader, s3 outbound.S3Reader, bucket string, logger *slog.Logger) (*ReaderWithFallback, error) {
 	if bucket == "" {
-		return nil, fmt.Errorf("S3 bucket name must not be empty")
+		return nil, fmt.Errorf("s3 bucket name must not be empty")
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -43,64 +45,53 @@ func NewReaderWithFallback(redis outbound.BlockCacheReader, s3 outbound.S3Reader
 	}, nil
 }
 
+// redisGetter defines the function signature for Redis get operations, allowing getWithFallback to be generic over different data types.
+type redisGetter func(ctx context.Context, chainID, blockNumber int64, version int) (json.RawMessage, error)
+
+
 // GetBlock retrieves the full block with transactions.
 // It checks Redis first; on a miss it falls back to S3.
 // Returns nil, nil if the data is not found in either store.
 func (c *ReaderWithFallback) GetBlock(ctx context.Context, chainID int64, blockNumber int64, version int) (json.RawMessage, error) {
-	data, err := c.redis.GetBlock(ctx, chainID, blockNumber, version)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get block from redis: %w", err)
-	}
-	if data != nil {
-		return data, nil
-	}
-
-	return c.getFromS3(ctx, blockNumber, version, s3key.Block)
+	return c.getWithFallback(ctx, chainID, blockNumber, version, c.redis.GetBlock, s3key.Block)
 }
 
 // GetReceipts retrieves transaction receipts for a block.
 // It checks Redis first; on a miss it falls back to S3.
 // Returns nil, nil if the data is not found in either store.
 func (c *ReaderWithFallback) GetReceipts(ctx context.Context, chainID int64, blockNumber int64, version int) (json.RawMessage, error) {
-	data, err := c.redis.GetReceipts(ctx, chainID, blockNumber, version)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get receipts from redis: %w", err)
-	}
-	if data != nil {
-		return data, nil
-	}
-
-	return c.getFromS3(ctx, blockNumber, version, s3key.Receipts)
+	return c.getWithFallback(ctx, chainID, blockNumber, version, c.redis.GetReceipts, s3key.Receipts)
 }
 
 // GetTraces retrieves execution traces for a block.
 // It checks Redis first; on a miss it falls back to S3.
 // Returns nil, nil if the data is not found in either store.
 func (c *ReaderWithFallback) GetTraces(ctx context.Context, chainID int64, blockNumber int64, version int) (json.RawMessage, error) {
-	data, err := c.redis.GetTraces(ctx, chainID, blockNumber, version)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get traces from redis: %w", err)
-	}
-	if data != nil {
-		return data, nil
-	}
-
-	return c.getFromS3(ctx, blockNumber, version, s3key.Traces)
+	return c.getWithFallback(ctx, chainID, blockNumber, version, c.redis.GetTraces, s3key.Traces)
 }
 
 // GetBlobs retrieves blob sidecars for a block.
 // It checks Redis first; on a miss it falls back to S3.
 // Returns nil, nil if the data is not found in either store.
 func (c *ReaderWithFallback) GetBlobs(ctx context.Context, chainID int64, blockNumber int64, version int) (json.RawMessage, error) {
-	data, err := c.redis.GetBlobs(ctx, chainID, blockNumber, version)
+	return c.getWithFallback(ctx, chainID, blockNumber, version, c.redis.GetBlobs, s3key.Blobs)
+}
+
+// Close closes the underlying Redis connection.
+func (c *ReaderWithFallback) Close() error {
+	return c.redis.Close()
+}
+
+
+func (c *ReaderWithFallback) getWithFallback(ctx context.Context, chainID, blockNumber int64, version int, fetch redisGetter, dataType s3key.DataType) (json.RawMessage, error) {
+	data, err := fetch(ctx, chainID, blockNumber, version)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get blobs from redis: %w", err)
+		return nil, fmt.Errorf("redis %s: %w", dataType, err)
 	}
 	if data != nil {
 		return data, nil
 	}
-
-	return c.getFromS3(ctx, blockNumber, version, s3key.Blobs)
+	return c.getFromS3(ctx, blockNumber, version, dataType)
 }
 
 func (c *ReaderWithFallback) getFromS3(ctx context.Context, blockNumber int64, version int, dataType s3key.DataType) (json.RawMessage, error) {

@@ -32,6 +32,9 @@ type BlockCacheReader interface {
 	// GetBlobs retrieves blob sidecars for a block.
 	// Returns nil, nil if the blobs are not in cache.
 	GetBlobs(ctx context.Context, chainID int64, blockNumber int64, version int) (json.RawMessage, error)
+
+	// Close closes the cache connection.
+	Close() error
 }
 
 // BlockCacheWriter defines the write interface for block cache.
@@ -47,8 +50,7 @@ type BlockCacheWriter interface {
 	Close() error
 }
 
-// BlockCache defines the interface for caching block data (read and write).
-// It embeds both BlockCacheReader and BlockCacheWriter for backward compatibility.
+// BlockCache combines read and write interfaces for block cache.
 type BlockCache interface {
 	BlockCacheReader
 	BlockCacheWriter

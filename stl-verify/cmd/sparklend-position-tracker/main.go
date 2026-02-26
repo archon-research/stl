@@ -1,5 +1,5 @@
 // Package main implements a SparkLend position tracker that monitors lending protocol
-// activity on Ethereum. It processes transaction receipts from Redis (triggered by SQS
+// activity on Ethereum. It processes transaction receipts from cache (triggered by SQS
 // messages), extracts position-changing events with collateral data, and stores the
 // results in PostgreSQL for downstream analysis.
 package main
@@ -136,9 +136,6 @@ func run(ctx context.Context, args []string) error {
 		"chainID", cfg.chainID,
 		"commit", GitCommit)
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	// AWS config
 	awsRegion := env.Get("AWS_REGION", "us-east-1")
 	awsOpts := []func(*awsconfig.LoadOptions) error{
@@ -182,8 +179,7 @@ func run(ctx context.Context, args []string) error {
 		DB:       0,
 	}, logger)
 	if err != nil {
-		logger.Error("failed to create BlockCache", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating block cache: %w", err)
 	}
 	defer func() {
 		if err := blockCache.Close(); err != nil {
@@ -195,8 +191,7 @@ func run(ctx context.Context, args []string) error {
 	s3Reader := s3adapter.NewReader(awsCfg, logger)
 	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, env.Get("S3_BUCKET", ""), logger)
 	if err != nil {
-		logger.Error("failed to create cache reader", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating cache reader: %w", err)
 	}
 
 	// Ethereum
