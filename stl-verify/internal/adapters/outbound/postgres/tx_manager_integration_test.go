@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // setupTxManagerTest creates a PostgreSQL container and returns a TxManager.
@@ -21,7 +23,7 @@ func setupTxManagerTest(t *testing.T) (*TxManager, *pgxpool.Pool, func()) {
 	ctx := context.Background()
 
 	req := testcontainers.ContainerRequest{
-		Image:        "postgres:17",
+		Image:        testutil.ImageTimescaleDB,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "test",

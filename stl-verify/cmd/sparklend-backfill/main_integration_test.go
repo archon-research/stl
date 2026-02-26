@@ -787,7 +787,7 @@ func startLocalStackS3(t *testing.T, ctx context.Context) (*s3.Client, string, f
 	t.Helper()
 
 	req := testcontainers.ContainerRequest{
-		Image:        "localstack/localstack:latest",
+		Image:        testutil.ImageLocalStack,
 		ExposedPorts: []string{"4566/tcp"},
 		Env: map[string]string{
 			"SERVICES": "s3",
