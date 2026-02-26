@@ -81,13 +81,16 @@ jobs:
       # stl-verify/internal/testutil/images.go.
       - name: Pull container images
         run: |
-          TIMESCALE=$(grep 'ImageTimescaleDB' internal/testutil/images.go | grep -oP '".*?"' | tr -d '"')
-          REDIS=$(grep 'ImageRedis' internal/testutil/images.go | grep -oP '".*?"' | tr -d '"')
-          
-          docker pull "$TIMESCALE"
-          docker pull "$REDIS"
+          IMAGES=$(grep -E 'Image[A-Za-z0-9_]+\s*=' internal/testutil/images.go | grep -oP '".*?"' | tr -d '"')
+          if [ -z "$IMAGES" ]; then
+            echo "::error::No image constants found in internal/testutil/images.go — check the grep pattern"
+            exit 1
+          fi
+          for IMAGE in $IMAGES; do
+            docker pull "$IMAGE"
+          done
 
-      # Integration tests require Docker services (PostgreSQL, Redis)
+      # Integration tests require Docker services (TimeScale, Redis, ...)
       # testcontainers will spin up these services automatically
       - name: Run integration tests
         run: make test-integration
