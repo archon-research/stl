@@ -632,11 +632,19 @@ func (s *blockchainService) probeVault(ctx context.Context, vaultAddress common.
 	}
 
 	// asset() — must succeed for any real vault.
-	if results[1].Success && len(results[1].ReturnData) > 0 {
-		assetUnpacked, err := s.metaMorphoABI.Unpack("asset", results[1].ReturnData)
-		if err == nil && len(assetUnpacked) > 0 {
-			asset, _ = assetUnpacked[0].(common.Address)
-		}
+	if !results[1].Success || len(results[1].ReturnData) == 0 {
+		return common.Address{}, common.Address{}, &errNotVault{err: fmt.Errorf("asset() call failed for %s", vaultAddress.Hex())}
+	}
+	assetUnpacked, err := s.metaMorphoABI.Unpack("asset", results[1].ReturnData)
+	if err != nil {
+		return common.Address{}, common.Address{}, &errNotVault{err: fmt.Errorf("unpacking asset() for %s: %w", vaultAddress.Hex(), err)}
+	}
+	if len(assetUnpacked) == 0 {
+		return common.Address{}, common.Address{}, &errNotVault{err: fmt.Errorf("asset() returned no values for %s", vaultAddress.Hex())}
+	}
+	asset, ok = assetUnpacked[0].(common.Address)
+	if !ok {
+		return common.Address{}, common.Address{}, &errNotVault{err: fmt.Errorf("asset() returned unexpected type %T for %s", assetUnpacked[0], vaultAddress.Hex())}
 	}
 
 	return morphoAddr, asset, nil

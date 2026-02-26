@@ -399,6 +399,54 @@ func TestGetVaultMetadata_AssetZero(t *testing.T) {
 	}
 }
 
+func TestGetVaultMetadata_AssetCallFailed(t *testing.T) {
+	h := newTestHarness(t)
+	vaultAddr := common.HexToAddress("0xABCD")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 2 {
+			return []outbound.Result{
+				{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)}, // MORPHO() succeeds
+				{Success: false, ReturnData: nil},                             // asset() reverts
+			}, nil
+		}
+		t.Fatal("detail multicall should not be called when asset() fails")
+		return nil, nil
+	}
+
+	_, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 20000000)
+	if err == nil {
+		t.Fatal("expected error when asset() call fails")
+	}
+	if !strings.Contains(err.Error(), "asset() call failed") {
+		t.Errorf("error should mention asset() failure, got: %s", err.Error())
+	}
+}
+
+func TestGetVaultMetadata_AssetUnpackError(t *testing.T) {
+	h := newTestHarness(t)
+	vaultAddr := common.HexToAddress("0xABCD")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 2 {
+			return []outbound.Result{
+				{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)},
+				{Success: true, ReturnData: []byte{0x01, 0x02}}, // garbage data that won't unpack
+			}, nil
+		}
+		t.Fatal("detail multicall should not be called when asset() unpack fails")
+		return nil, nil
+	}
+
+	_, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 20000000)
+	if err == nil {
+		t.Fatal("expected error when asset() returns garbage data")
+	}
+	if !strings.Contains(err.Error(), "unpacking asset()") {
+		t.Errorf("error should mention unpacking asset(), got: %s", err.Error())
+	}
+}
+
 func TestGetTokenMetadata_CacheMiss(t *testing.T) {
 	h := newTestHarness(t)
 	tokenAddr := common.HexToAddress("0xAAAA")

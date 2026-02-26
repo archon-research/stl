@@ -24,7 +24,7 @@ COPY . .
 # Build the binary for target architecture (ARM64 for Fargate)
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s -extldflags '-static' -X main.GitCommit=${GIT_COMMIT} -X main.GitBranch=${GIT_BRANCH} -X main.BuildTime=${BUILD_TIME}" \
-    -o /morpho_indexer \
+    -o /morpho-indexer \
     ./cmd/morpho-indexer
 
 # -----------------------------------------------------------------------------
@@ -41,11 +41,11 @@ RUN adduser -D -g '' appuser
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /morpho_indexer /app/morpho_indexer
+COPY --from=builder /morpho-indexer /app/morpho-indexer
 
 # Use non-root user
 USER appuser
 
 # Expose no ports - this is a background worker
 
-ENTRYPOINT ["/app/morpho_indexer"]
+ENTRYPOINT ["/app/morpho-indexer"]

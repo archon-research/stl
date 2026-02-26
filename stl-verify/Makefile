@@ -18,7 +18,6 @@
         docker-build-temporal-worker-staging docker-push-temporal-worker-staging docker-release-temporal-worker-staging \
         docker-build-morpho-indexer docker-push-morpho-indexer docker-release-morpho-indexer \
         docker-build-morpho-indexer-staging docker-push-morpho-indexer-staging docker-release-morpho-indexer-staging \
-        _docker-release-morpho-indexer-internal \
         run-temporal-worker build-temporal-worker \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         ecs-deploy-oracle-price-worker ecs-deploy-oracle-price-worker-staging \
