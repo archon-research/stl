@@ -8,24 +8,45 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
+const userSchemaName = "test_user"
+
+var userPool *pgxpool.Pool
+
+func init() {
+	registerTestFileSetup(userSchemaName, func() {
+		userPool = testutil.SetupSchemaForMain(sharedDSN, userSchemaName)
+	}, func() {
+		testutil.CleanupSchemaForMain(sharedDSN, userPool, userSchemaName)
+	})
+}
+
+// truncateUser clears the user table for test isolation.
+func truncateUser(t *testing.T, ctx context.Context) {
+	t.Helper()
+	_, err := userPool.Exec(ctx, `DELETE FROM "user"`)
+	if err != nil {
+		t.Fatalf("failed to truncate user: %v", err)
+	}
+}
+
 func TestGetOrCreateUser_CreatesNewUser(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
+	truncateUser(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewUserRepository(pool, nil, 0)
+	repo, err := NewUserRepository(userPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
 
 	user := entity.User{ChainID: 1, Address: common.HexToAddress("0x1111111111111111111111111111111111111111"), FirstSeenBlock: 100}
 
-	tx, err := pool.Begin(ctx)
+	tx, err := userPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
@@ -44,7 +65,7 @@ func TestGetOrCreateUser_CreatesNewUser(t *testing.T) {
 	}
 
 	var firstSeenBlock int64
-	err = pool.QueryRow(ctx,
+	err = userPool.QueryRow(ctx,
 		`SELECT first_seen_block FROM "user" WHERE chain_id = $1 AND address = $2`,
 		1, user.Address.Bytes(),
 	).Scan(&firstSeenBlock)
@@ -57,18 +78,17 @@ func TestGetOrCreateUser_CreatesNewUser(t *testing.T) {
 }
 
 func TestGetOrCreateUser_IdempotentReturnsSameID(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
+	truncateUser(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewUserRepository(pool, nil, 0)
+	repo, err := NewUserRepository(userPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
 
 	user := entity.User{ChainID: 1, Address: common.HexToAddress("0x2222222222222222222222222222222222222222"), FirstSeenBlock: 200}
 
-	tx1, err := pool.Begin(ctx)
+	tx1, err := userPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin tx1: %v", err)
 	}
@@ -81,7 +101,7 @@ func TestGetOrCreateUser_IdempotentReturnsSameID(t *testing.T) {
 		t.Fatalf("Commit tx1: %v", err)
 	}
 
-	tx2, err := pool.Begin(ctx)
+	tx2, err := userPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin tx2: %v", err)
 	}
@@ -103,11 +123,10 @@ func TestGetOrCreateUser_IdempotentReturnsSameID(t *testing.T) {
 // is upserted with a later block first and an earlier block second, the stored
 // first_seen_block is updated to the minimum.
 func TestGetOrCreateUser_FirstSeenBlockUsesLeast(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
+	truncateUser(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewUserRepository(pool, nil, 0)
+	repo, err := NewUserRepository(userPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
@@ -115,7 +134,7 @@ func TestGetOrCreateUser_FirstSeenBlockUsesLeast(t *testing.T) {
 	addr := common.HexToAddress("0x3333333333333333333333333333333333333333")
 
 	// First call: block 500 (a later block, as if a later block was processed first).
-	tx1, err := pool.Begin(ctx)
+	tx1, err := userPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin tx1: %v", err)
 	}
@@ -128,7 +147,7 @@ func TestGetOrCreateUser_FirstSeenBlockUsesLeast(t *testing.T) {
 	}
 
 	// Second call: block 100 (the true first seen block, processed out of order).
-	tx2, err := pool.Begin(ctx)
+	tx2, err := userPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin tx2: %v", err)
 	}
@@ -141,7 +160,7 @@ func TestGetOrCreateUser_FirstSeenBlockUsesLeast(t *testing.T) {
 	}
 
 	var firstSeenBlock int64
-	err = pool.QueryRow(ctx,
+	err = userPool.QueryRow(ctx,
 		`SELECT first_seen_block FROM "user" WHERE chain_id = $1 AND address = $2`,
 		1, addr.Bytes(),
 	).Scan(&firstSeenBlock)
@@ -157,11 +176,10 @@ func TestGetOrCreateUser_FirstSeenBlockUsesLeast(t *testing.T) {
 // processing different blocks that both encounter the same new user for the first
 // time. Both goroutines must succeed and return the same user id.
 func TestGetOrCreateUser_ConcurrentRaceReturnsSameID(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
+	truncateUser(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewUserRepository(pool, nil, 0)
+	repo, err := NewUserRepository(userPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
@@ -181,7 +199,7 @@ func TestGetOrCreateUser_ConcurrentRaceReturnsSameID(t *testing.T) {
 			defer wg.Done()
 			<-start
 
-			tx, err := pool.Begin(ctx)
+			tx, err := userPool.Begin(ctx)
 			if err != nil {
 				errs[idx] = err
 				return
@@ -222,7 +240,7 @@ func TestGetOrCreateUser_ConcurrentRaceReturnsSameID(t *testing.T) {
 
 	// first_seen_block should be the minimum across all workers (LEAST semantics).
 	var firstSeenBlock int64
-	err = pool.QueryRow(ctx,
+	err = userPool.QueryRow(ctx,
 		`SELECT first_seen_block FROM "user" WHERE chain_id = $1 AND address = $2`,
 		1, addr.Bytes(),
 	).Scan(&firstSeenBlock)

@@ -9,17 +9,51 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// setupPostgres creates a TimescaleDB container and returns a connected repository.
+const blockstateSchemaName = "test_blockstate"
+
+var blockstatePool *pgxpool.Pool
+
+func init() {
+	// Register setup function to be called after TestMain sets sharedDSN
+	registerTestFileSetup(blockstateSchemaName, func() {
+		blockstatePool = testutil.SetupSchemaForMain(sharedDSN, blockstateSchemaName)
+	}, func() {
+		testutil.CleanupSchemaForMain(sharedDSN, blockstatePool, blockstateSchemaName)
+	})
+}
+
+// truncateBlockState clears all block-related tables for test isolation within the schema.
+func truncateBlockState(t *testing.T, ctx context.Context) {
+	t.Helper()
+	_, err := blockstatePool.Exec(ctx, `DELETE FROM block_states`)
+	if err != nil {
+		t.Fatalf("failed to truncate block_states: %v", err)
+	}
+	_, err = blockstatePool.Exec(ctx, `DELETE FROM reorg_events`)
+	if err != nil {
+		t.Fatalf("failed to truncate reorg_events: %v", err)
+	}
+	// Reset backfill_watermark to default value instead of deleting
+	_, err = blockstatePool.Exec(ctx, `UPDATE backfill_watermark SET watermark = 0`)
+	if err != nil {
+		t.Fatalf("failed to reset backfill_watermark: %v", err)
+	}
+}
+
+// setupPostgres returns a connected repository using the schema-specific pool.
+// It truncates tables to ensure test isolation within the schema.
 func setupPostgres(t *testing.T) (*BlockStateRepository, func()) {
 	t.Helper()
-
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	repo := NewBlockStateRepository(pool, 1, nil)
-	return repo, cleanup
+	ctx := context.Background()
+	truncateBlockState(t, ctx)
+	repo := NewBlockStateRepository(blockstatePool, 1, nil)
+	return repo, func() {}
 }
 
 // TestSaveBlock_DuplicateHashIsIdempotent tests that saving the same block hash
