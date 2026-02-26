@@ -40,10 +40,10 @@ func TestHTTPHandler_GetBlockByHash(t *testing.T) {
 	knownHash := ds.Headers()[0].Hash
 
 	tests := []struct {
-		name      string
-		params    string
-		wantNull  bool
-		wantCode  int // 0 = success, non-zero = JSON-RPC error code
+		name     string
+		params   string
+		wantNull bool
+		wantCode int // 0 = success, non-zero = JSON-RPC error code
 	}{
 		{"known hash", `["` + knownHash + `",false]`, false, 0},
 		{"unknown hash", `["0xdeadbeef",false]`, true, 0},
@@ -120,6 +120,20 @@ func TestHTTPHandler_UnknownMethod(t *testing.T) {
 	}
 }
 
+// TestHTTPHandler_MethodNotAllowed verifies that non-POST requests return HTTP 405.
+func TestHTTPHandler_MethodNotAllowed(t *testing.T) {
+	ds := NewTestDataStore()
+	h := newHTTPHandler(ds)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
 // TestHTTPHandler_InvalidBody verifies malformed JSON returns HTTP 400.
 func TestHTTPHandler_InvalidBody(t *testing.T) {
 	ds := NewTestDataStore()
@@ -140,10 +154,10 @@ func TestHTTPHandler_DataByHash(t *testing.T) {
 	knownHash := ds.Headers()[0].Hash
 
 	tests := []struct {
-		method    string
-		params    string
-		wantNull  bool
-		wantCode  int // 0 = success, non-zero = JSON-RPC error code
+		method   string
+		params   string
+		wantNull bool
+		wantCode int // 0 = success, non-zero = JSON-RPC error code
 	}{
 		// eth_getBlockReceipts
 		{"eth_getBlockReceipts", `["` + knownHash + `"]`, false, 0},

@@ -165,3 +165,39 @@ func TestServer_HTTP_UnknownMethod(t *testing.T) {
 		t.Errorf("expected error code -32601, got %d", errResp.Error.Code)
 	}
 }
+
+// TestServer_HTTP_Batch verifies that a batch request returns a matching array of responses.
+func TestServer_HTTP_Batch(t *testing.T) {
+	store := NewTestDataStore()
+	s := startTestServer(t, store)
+	hash := store.Headers()[0].Hash
+
+	body := `[` +
+		`{"jsonrpc":"2.0","id":10,"method":"eth_blockNumber","params":[]}` +
+		`,{"jsonrpc":"2.0","id":11,"method":"eth_getBlockByHash","params":["` + hash + `",false]}` +
+		`]`
+	raw := serverPost(t, s, body)
+
+	var responses []struct {
+		ID     int             `json:"id"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &responses); err != nil {
+		t.Fatalf("unmarshal batch response: %v", err)
+	}
+	if len(responses) != 2 {
+		t.Fatalf("expected 2 responses, got %d", len(responses))
+	}
+	if responses[0].ID != 10 {
+		t.Errorf("expected id 10, got %d", responses[0].ID)
+	}
+	if responses[1].ID != 11 {
+		t.Errorf("expected id 11, got %d", responses[1].ID)
+	}
+	if len(responses[0].Result) == 0 {
+		t.Error("expected non-empty blockNumber result")
+	}
+	if string(responses[1].Result) == "null" || len(responses[1].Result) == 0 {
+		t.Error("expected non-null block result for known hash")
+	}
+}

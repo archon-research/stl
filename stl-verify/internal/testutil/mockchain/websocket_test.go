@@ -1,6 +1,7 @@
 package mockchain
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -36,7 +37,7 @@ func dialWS(t *testing.T, rawURL string) *websocket.Conn {
 // It also asserts that the response carries jsonrpc "2.0".
 func doSubscribe(t *testing.T, conn *websocket.Conn) string {
 	t.Helper()
-	req := jsonRPCRequest{ID: 1, Method: "eth_subscribe", Params: []interface{}{"newHeads"}}
+	req := jsonRPCRequest{ID: json.RawMessage("1"), Method: "eth_subscribe", Params: []interface{}{"newHeads"}}
 	if err := conn.WriteJSON(req); err != nil {
 		t.Fatalf("write subscribe: %v", err)
 	}
@@ -50,8 +51,8 @@ func doSubscribe(t *testing.T, conn *websocket.Conn) string {
 	if resp.JsonRPC != "2.0" {
 		t.Errorf("expected jsonrpc 2.0, got %q", resp.JsonRPC)
 	}
-	if resp.ID != req.ID {
-		t.Errorf("expected response id %d, got %d", req.ID, resp.ID)
+	if string(resp.ID) != string(req.ID) {
+		t.Errorf("expected response id %s, got %s", req.ID, resp.ID)
 	}
 	return resp.Result
 }
@@ -120,7 +121,7 @@ func TestWSHandler_InvalidParams(t *testing.T) {
 	srv, _ := newTestWSServer(t)
 	conn := dialWS(t, srv.URL)
 
-	req := jsonRPCRequest{ID: 2, Method: "eth_subscribe", Params: []interface{}{"logs"}}
+	req := jsonRPCRequest{ID: json.RawMessage("2"), Method: "eth_subscribe", Params: []interface{}{"logs"}}
 	if err := conn.WriteJSON(req); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -135,8 +136,8 @@ func TestWSHandler_InvalidParams(t *testing.T) {
 	if errResp.JsonRPC != "2.0" {
 		t.Errorf("expected jsonrpc 2.0, got %q", errResp.JsonRPC)
 	}
-	if errResp.ID != 2 {
-		t.Errorf("expected id 2, got %d", errResp.ID)
+	if string(errResp.ID) != "2" {
+		t.Errorf("expected id 2, got %s", errResp.ID)
 	}
 	if errResp.Error.Code != -32602 {
 		t.Errorf("expected error code -32602, got %d", errResp.Error.Code)
@@ -148,7 +149,7 @@ func TestWSHandler_UnknownMethod(t *testing.T) {
 	srv, _ := newTestWSServer(t)
 	conn := dialWS(t, srv.URL)
 
-	req := jsonRPCRequest{ID: 3, Method: "eth_chainId", Params: nil}
+	req := jsonRPCRequest{ID: json.RawMessage("3"), Method: "eth_chainId", Params: nil}
 	if err := conn.WriteJSON(req); err != nil {
 		t.Fatalf("write: %v", err)
 	}

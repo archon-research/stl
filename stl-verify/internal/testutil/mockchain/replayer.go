@@ -75,14 +75,14 @@ func (r *Replayer) emitLoop(stopCh <-chan struct{}, doneCh chan struct{}) {
 
 func (r *Replayer) emit() {
 	r.mu.Lock()
-
 	header := r.templates[r.templateIndex]
 	r.templateIndex = (r.templateIndex + 1) % len(r.templates)
 	r.blocksEmitted++
+	onBlock := r.onBlock
 	r.mu.Unlock()
 
-	if r.onBlock != nil {
-		r.onBlock(header)
+	if onBlock != nil {
+		onBlock(header)
 	}
 }
 

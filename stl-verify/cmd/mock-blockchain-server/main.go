@@ -30,6 +30,7 @@ func run(ctx context.Context, addr string, addrCh chan<- string) error {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
+	slog.SetDefault(logger)
 
 	store := mockchain.NewTestDataStore()
 	srv := mockchain.NewServer(store)

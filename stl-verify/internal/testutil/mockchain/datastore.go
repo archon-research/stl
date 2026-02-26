@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -82,7 +81,7 @@ func NewTestDataStore() *DataStore {
 			Number:     fmt.Sprintf("0x%x", i+1),
 			Hash:       hash,
 			ParentHash: parentHash,
-			Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
+			Timestamp:  "0x67c00000",
 		}
 
 		headerJSON, err := json.Marshal(header)

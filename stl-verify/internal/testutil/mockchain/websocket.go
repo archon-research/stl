@@ -2,6 +2,7 @@
 package mockchain
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -11,15 +12,15 @@ import (
 )
 
 type jsonRPCRequest struct {
-	ID     int           `json:"id"`
-	Method string        `json:"method"`
-	Params []interface{} `json:"params"`
+	ID     json.RawMessage `json:"id"`
+	Method string          `json:"method"`
+	Params []interface{}   `json:"params"`
 }
 
 type jsonRPCResponse struct {
-	JsonRPC string `json:"jsonrpc"`
-	ID      int    `json:"id"`
-	Result  string `json:"result"`
+	JsonRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Result  string          `json:"result"`
 }
 
 type jsonRPCErrorObj struct {
@@ -29,7 +30,7 @@ type jsonRPCErrorObj struct {
 
 type jsonRPCErrorResponse struct {
 	JsonRPC string          `json:"jsonrpc"`
-	ID      int             `json:"id"`
+	ID      json.RawMessage `json:"id"`
 	Error   jsonRPCErrorObj `json:"error"`
 }
 
@@ -123,7 +124,7 @@ func (h *wsHandler) handleSubscribe(conn *websocket.Conn, req jsonRPCRequest) er
 	return err
 }
 
-func (h *wsHandler) writeError(conn *websocket.Conn, id, code int, msg string) error {
+func (h *wsHandler) writeError(conn *websocket.Conn, id json.RawMessage, code int, msg string) error {
 	errResp := jsonRPCErrorResponse{
 		JsonRPC: "2.0",
 		ID:      id,

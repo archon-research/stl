@@ -101,8 +101,8 @@ func TestReplayer_IndexWraps(t *testing.T) {
 	r.Stop()
 
 	// After n+1 emissions from n templates, index should be at 1.
-	if r.templateIndex != 1 {
-		t.Errorf("expected templateIndex 1 after wrap, got %d", r.templateIndex)
+	if r.GetStatus().TemplateIndex != 1 {
+		t.Errorf("expected templateIndex 1 after wrap, got %d", r.GetStatus().TemplateIndex)
 	}
 }
 

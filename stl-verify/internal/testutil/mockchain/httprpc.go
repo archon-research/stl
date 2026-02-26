@@ -18,6 +18,11 @@ func newHTTPHandler(store *DataStore) *httpHandler {
 }
 
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	var raw json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -37,14 +42,8 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	idJSON, err := json.Marshal(req.ID)
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
 	result, rpcErr := h.dispatch(req)
-	h.respond(w, idJSON, result, rpcErr)
+	h.respond(w, req.ID, result, rpcErr)
 }
 
 func (h *httpHandler) handleBatch(w http.ResponseWriter, raw json.RawMessage) {
