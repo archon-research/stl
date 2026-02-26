@@ -249,6 +249,9 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 	defer span.End()
 
 	var errs []error
+	// Track transient vault discovery failures separately so we can discard
+	// them if a later log for the same address succeeds.
+	discoveryErrs := make(map[common.Address]error)
 	morphoBlueAddr := MorphoBlueAddress
 
 	for _, log := range receipt.Logs {
@@ -290,11 +293,18 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 					s.logger.Debug("not a MetaMorpho vault", "address", logAddress.Hex(), "reason", err)
 				} else {
 					s.logger.Warn("vault discovery failed (will retry)", "address", logAddress.Hex(), "error", err)
+					discoveryErrs[logAddress] = err
 				}
+			} else {
+				// Discovery succeeded — discard any earlier transient failure for this address.
+				delete(discoveryErrs, logAddress)
 			}
 		}
 	}
 
+	for _, err := range discoveryErrs {
+		errs = append(errs, err)
+	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
