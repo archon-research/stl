@@ -19,27 +19,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 // MulticallerFactory creates a new Multicaller for the given oracle type.
 // Returns the appropriate implementation (e.g. Multicall3 for Chainlink/Aave,
 // DirectCaller for Chronicle where msg.sender must be address(0)).
 type MulticallerFactory func(entity.OracleType) (outbound.Multicaller, error)
-
-// Config holds configuration for the oracle price worker.
-type Config struct {
-	MaxMessages  int
-	PollInterval time.Duration
-	Logger       *slog.Logger
-}
-
-func configDefaults() Config {
-	return Config{
-		MaxMessages:  10,
-		PollInterval: 100 * time.Millisecond,
-		Logger:       slog.Default(),
-	}
-}
 
 // oracleUnit wraps a shared OracleUnit with a per-oracle price cache
 // for persistent change detection across blocks.
@@ -51,7 +37,7 @@ type oracleUnit struct {
 
 // Service processes SQS block events and fetches oracle prices for each block.
 type Service struct {
-	config         Config
+	config         shared.SQSConsumerConfig
 	consumer       outbound.SQSConsumer
 	repo           outbound.OnchainPriceRepository
 	newMulticaller MulticallerFactory
@@ -69,7 +55,7 @@ type Service struct {
 
 // NewService creates a new oracle price worker service.
 func NewService(
-	config Config,
+	config shared.SQSConsumerConfig,
 	consumer outbound.SQSConsumer,
 	repo outbound.OnchainPriceRepository,
 	newMulticaller MulticallerFactory,
@@ -84,15 +70,9 @@ func NewService(
 		return nil, fmt.Errorf("newMulticaller cannot be nil")
 	}
 
-	defaults := configDefaults()
-	if config.MaxMessages == 0 {
-		config.MaxMessages = defaults.MaxMessages
-	}
-	if config.PollInterval == 0 {
-		config.PollInterval = defaults.PollInterval
-	}
-	if config.Logger == nil {
-		config.Logger = defaults.Logger
+	config.ApplyDefaults()
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("validating config: %w", err)
 	}
 
 	oracleABI, err := abis.GetAaveOracleABI()
@@ -129,6 +109,7 @@ func (s *Service) Start(ctx context.Context) error {
 		MaxMessages:  s.config.MaxMessages,
 		PollInterval: s.config.PollInterval,
 		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
 	}, s.processBlock)
 
 	s.logger.Info("oracle price worker started",

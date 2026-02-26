@@ -47,13 +47,12 @@ func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 }
 
 // SaveBorrower saves a single borrower (debt) position record within an external transaction.
-// Uses upsert semantics: ON CONFLICT updates the existing record.
+// Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
 func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, eventType string, txHash []byte) error {
 	_, err := tx.Exec(ctx,
 		`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
 		 VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8)
-		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version)
-		 DO UPDATE SET amount = EXCLUDED.amount, change = EXCLUDED.change, event_type = EXCLUDED.event_type, tx_hash = EXCLUDED.tx_hash`,
+		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
 		userID, protocolID, tokenID, blockNumber, blockVersion, amount, eventType, txHash)
 
 	if err != nil {
@@ -63,13 +62,12 @@ func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID
 }
 
 // SaveBorrowerCollateral saves a single collateral position record within an external transaction.
-// Uses upsert semantics: ON CONFLICT updates the existing record.
+// Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
 func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, eventType string, txHash []byte, collateralEnabled bool) error {
 	_, err := tx.Exec(ctx,
 		`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
 		 VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9)
-		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version)
-		 DO UPDATE SET amount = EXCLUDED.amount, change = EXCLUDED.change, event_type = EXCLUDED.event_type, tx_hash = EXCLUDED.tx_hash, collateral_enabled = EXCLUDED.collateral_enabled`,
+		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
 		userID, protocolID, tokenID, blockNumber, blockVersion, amount, eventType, txHash, collateralEnabled)
 
 	if err != nil {
@@ -78,25 +76,11 @@ func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.
 	return nil
 }
 
-// CollateralRecord represents a single collateral record for batch insertion.
-// This is a simplified struct that matches the service layer's data format.
-type CollateralRecord struct {
-	UserID            int64
-	ProtocolID        int64
-	TokenID           int64
-	BlockNumber       int64
-	BlockVersion      int
-	Amount            string // decimal-adjusted amount string
-	EventType         string
-	TxHash            []byte
-	CollateralEnabled bool
-}
-
 // SaveBorrowerCollaterals saves multiple borrower collateral position records using pgx.Batch.
 // Uses ON CONFLICT DO NOTHING to ensure immutability - existing records are never modified.
 // This is critical for reproducible calculations: data used in a calculation must not change.
 // Returns nil if records slice is empty.
-func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx.Tx, records []CollateralRecord) error {
+func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx.Tx, records []outbound.CollateralRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
@@ -186,11 +170,7 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, tx pgx.Tx,
 	}
 
 	sb.WriteString(`
-		ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO UPDATE SET
-			amount = EXCLUDED.amount,
-			change = EXCLUDED.change,
-			event_type = EXCLUDED.event_type,
-			tx_hash = EXCLUDED.tx_hash
+		ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING
 	`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)
@@ -263,12 +243,7 @@ func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, 
 	}
 
 	sb.WriteString(`
-		ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO UPDATE SET
-			amount = EXCLUDED.amount,
-			change = EXCLUDED.change,
-			event_type = EXCLUDED.event_type,
-			tx_hash = EXCLUDED.tx_hash,
-			collateral_enabled = EXCLUDED.collateral_enabled
+		ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING
 	`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)

@@ -192,29 +192,7 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 	}
 
 	sb.WriteString(`
-		ON CONFLICT (protocol_id, token_id, block_number, block_version) DO UPDATE SET
-			unbacked = EXCLUDED.unbacked,
-			accrued_to_treasury_scaled = EXCLUDED.accrued_to_treasury_scaled,
-			total_a_token = EXCLUDED.total_a_token,
-			total_stable_debt = EXCLUDED.total_stable_debt,
-			total_variable_debt = EXCLUDED.total_variable_debt,
-			liquidity_rate = EXCLUDED.liquidity_rate,
-			variable_borrow_rate = EXCLUDED.variable_borrow_rate,
-			stable_borrow_rate = EXCLUDED.stable_borrow_rate,
-			average_stable_borrow_rate = EXCLUDED.average_stable_borrow_rate,
-			liquidity_index = EXCLUDED.liquidity_index,
-			variable_borrow_index = EXCLUDED.variable_borrow_index,
-			last_update_timestamp = EXCLUDED.last_update_timestamp,
-			decimals = EXCLUDED.decimals,
-			ltv = EXCLUDED.ltv,
-			liquidation_threshold = EXCLUDED.liquidation_threshold,
-			liquidation_bonus = EXCLUDED.liquidation_bonus,
-			reserve_factor = EXCLUDED.reserve_factor,
-			usage_as_collateral_enabled = EXCLUDED.usage_as_collateral_enabled,
-			borrowing_enabled = EXCLUDED.borrowing_enabled,
-			stable_borrow_rate_enabled = EXCLUDED.stable_borrow_rate_enabled,
-			is_active = EXCLUDED.is_active,
-			is_frozen = EXCLUDED.is_frozen
+		ON CONFLICT (protocol_id, token_id, block_number, block_version) DO NOTHING
 	`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)

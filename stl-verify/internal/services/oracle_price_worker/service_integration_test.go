@@ -13,6 +13,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -139,9 +140,10 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	}
 	consumer := consumerWithMessages(messages)
 
-	cfg := Config{
+	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
 	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
@@ -246,9 +248,10 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 	}
 	consumer := consumerWithSequentialMessages(batches)
 
-	cfg := Config{
+	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
 	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
@@ -326,9 +329,10 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	}
 	consumer := consumerWithSequentialMessages(batches)
 
-	cfg := Config{
+	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
 	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
@@ -403,9 +407,10 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 	price1 := new(big.Int).Mul(big.NewInt(100), big.NewInt(1e8))
 	mc := integrationMulticaller(t, []*big.Int{price1})
 
-	cfg := Config{
+	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
 	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
@@ -483,9 +488,10 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 	}
 	consumer := consumerWithMessages(messages)
 
-	cfg := Config{
+	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
 	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
@@ -576,9 +582,10 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	}
 	consumer := consumerWithMessages(messages)
 
-	cfg := Config{
+	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
 	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
