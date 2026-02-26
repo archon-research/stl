@@ -23,6 +23,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const (
@@ -40,7 +41,7 @@ func setupLargePostgres(b *testing.B) (*pgxpool.Pool, *postgres.BlockStateReposi
 
 	// Use a more performant PostgreSQL configuration for benchmarking
 	req := testcontainers.ContainerRequest{
-		Image:        "timescale/timescaledb:latest-pg17",
+		Image:        testutil.ImageTimescaleDB,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "bench",

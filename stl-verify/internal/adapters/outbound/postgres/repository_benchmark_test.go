@@ -17,6 +17,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // Benchmark row counts
@@ -32,7 +33,7 @@ func setupBenchmarkPostgres(b *testing.B) (*pgxpool.Pool, func()) {
 	ctx := context.Background()
 
 	req := testcontainers.ContainerRequest{
-		Image:        "timescale/timescaledb:latest-pg17",
+		Image:        testutil.ImageTimescaleDB,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "bench",

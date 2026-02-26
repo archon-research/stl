@@ -18,6 +18,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 type eventTestFixture struct {
@@ -32,7 +33,7 @@ func setupEventTest(t *testing.T) *eventTestFixture {
 	ctx := context.Background()
 
 	container, err := postgres.Run(ctx,
-		"timescale/timescaledb:latest-pg17",
+		testutil.ImageTimescaleDB,
 		postgres.WithDatabase("testdb"),
 		postgres.WithUsername("test"),
 		postgres.WithPassword("test"),

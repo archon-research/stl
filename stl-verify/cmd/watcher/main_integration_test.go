@@ -804,7 +804,7 @@ func startPostgres(t *testing.T, ctx context.Context) (testcontainers.Container,
 	}
 
 	req := testcontainers.ContainerRequest{
-		Image:        "timescale/timescaledb:latest-pg17",
+		Image:        testutil.ImageTimescaleDB,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     config.User,
