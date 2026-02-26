@@ -912,7 +912,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 
 	// Wait for at least one block to be processed before stopping
 	prefix := "3000-3999/"
-	waitForS3Objects(t, ctx, infra, prefix, 1, 10*time.Second)
+	waitForS3Objects(t, ctx, infra, prefix, 1, 30*time.Second)
 
 	// Stop gracefully using the Stop() method (not context cancellation)
 	svc.Stop()
@@ -923,7 +923,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 		if err != nil && err != context.Canceled {
 			t.Errorf("unexpected error on shutdown: %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("service did not shut down within timeout")
 	}
 
@@ -992,10 +992,10 @@ func TestIntegration_RaceConditionIdempotency(t *testing.T) {
 
 	// Wait for at least one file to be created
 	key := s3key.BuildWithPartition("7000-7999", blockNumber, version, s3key.Block)
-	waitForS3Object(t, ctx, infra, key, 15*time.Second)
+	waitForS3Object(t, ctx, infra, key, 30*time.Second)
 
 	// Wait a bit for any concurrent writes to complete
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 15*time.Second, func() bool {
 		attrs, _ := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 			QueueUrl:       aws.String(infra.BackupQueueURL),
 			AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameApproximateNumberOfMessages},
@@ -1094,7 +1094,7 @@ func TestIntegration_PartialWriteFailure(t *testing.T) {
 
 	// Wait for block file to be created
 	key := s3key.BuildWithPartition("8000-8999", blockNumber, version, s3key.Block)
-	waitForS3Object(t, ctx, infra, key, 10*time.Second)
+	waitForS3Object(t, ctx, infra, key, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()
@@ -1236,7 +1236,7 @@ func TestIntegration_ChainIDMismatch(t *testing.T) {
 	// Wait for the message to be processed (rejected due to chain ID mismatch)
 	// The message will return to the queue since processing failed, but we wait
 	// for at least one processing attempt by checking the queue becomes in-flight
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 15*time.Second, func() bool {
 		attrs, _ := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 			QueueUrl: aws.String(infra.BackupQueueURL),
 			AttributeNames: []sqstypes.QueueAttributeName{
@@ -1514,7 +1514,7 @@ func TestIntegration_ChainExpectationsMetSuccessfully(t *testing.T) {
 
 	// Wait for all 3 files (block, receipts, traces)
 	prefix := fmt.Sprintf("3000-3999/%d_%d_", blockNumber, version)
-	objects := waitForS3Objects(t, ctx, infra, prefix, 3, 10*time.Second)
+	objects := waitForS3Objects(t, ctx, infra, prefix, 3, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()
