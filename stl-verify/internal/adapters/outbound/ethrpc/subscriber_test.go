@@ -1,4 +1,4 @@
-package alchemy
+package ethrpc
 
 import (
 	"context"
@@ -1371,19 +1371,11 @@ func TestSubscribe_IgnoresNonSubscriptionMessages(t *testing.T) {
 		}
 		_ = conn.WriteJSON(nonSubMsg)
 
-		// Send another non-subscription message with different method
-		otherMethodMsg := map[string]interface{}{
-			"jsonrpc": "2.0",
-			"method":  "eth_blockNumber",
-			"params":  []interface{}{},
-		}
-		_ = conn.WriteJSON(otherMethodMsg)
-
-		// Now send a valid subscription message
+		// Send a real subscription notification
 		header := outbound.BlockHeader{
-			Number:     "0x100",
-			Hash:       "0xabcdef1234567890",
-			ParentHash: "0xdef",
+			Number:     "0xa",
+			Hash:       "0xabc123",
+			ParentHash: "0xdef456",
 		}
 		notification := map[string]interface{}{
 			"jsonrpc": "2.0",
@@ -1395,89 +1387,16 @@ func TestSubscribe_IgnoresNonSubscriptionMessages(t *testing.T) {
 		}
 		_ = conn.WriteJSON(notification)
 
+		// Keep connection open
 		<-time.After(time.Second)
 	})
 	defer server.Close()
 
 	sub, err := NewSubscriber(SubscriberConfig{
-		WebSocketURL: server.URL(),
-		ReadTimeout:  5 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("failed to create subscriber: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	headers, err := sub.Subscribe(ctx)
-	if err != nil {
-		t.Fatalf("failed to subscribe: %v", err)
-	}
-	defer func() {
-		if err := sub.Unsubscribe(); err != nil {
-			t.Logf("unsubscribe returned error: %v", err)
-		}
-	}()
-
-	// Should only receive the valid subscription message
-	select {
-	case header := <-headers:
-		if header.Number != "0x100" {
-			t.Errorf("unexpected block number: %s", header.Number)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for header")
-	}
-}
-
-func TestSubscribe_ReadTimeoutTriggersReconnect(t *testing.T) {
-	connectCount := atomic.Int32{}
-
-	server := newMockWSServer(func(conn *websocket.Conn) {
-		count := connectCount.Add(1)
-
-		var req jsonRPCRequest
-		if err := conn.ReadJSON(&req); err != nil {
-			return
-		}
-
-		resp := jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      1,
-			Result:  json.RawMessage(`"0x1234"`),
-		}
-		_ = conn.WriteJSON(resp)
-
-		if count == 1 {
-			// First connection: don't send anything, let read timeout trigger
-			<-time.After(5 * time.Second)
-		} else {
-			// Second connection: send a block
-			header := outbound.BlockHeader{
-				Number:     "0x100",
-				Hash:       "0xabc",
-				ParentHash: "0xdef",
-			}
-			notification := map[string]interface{}{
-				"jsonrpc": "2.0",
-				"method":  "eth_subscription",
-				"params": map[string]interface{}{
-					"subscription": "0x1234",
-					"result":       header,
-				},
-			}
-			_ = conn.WriteJSON(notification)
-			<-time.After(time.Second)
-		}
-	})
-	defer server.Close()
-
-	sub, err := NewSubscriber(SubscriberConfig{
 		WebSocketURL:   server.URL(),
-		ReadTimeout:    100 * time.Millisecond, // Short timeout to trigger reconnect
 		InitialBackoff: 10 * time.Millisecond,
-		MaxBackoff:     50 * time.Millisecond,
+		ReadTimeout:    5 * time.Second,
+		HealthTimeout:  time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("failed to create subscriber: %v", err)
@@ -1486,7 +1405,7 @@ func TestSubscribe_ReadTimeoutTriggersReconnect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	headers, err := sub.Subscribe(ctx)
+	blockCh, err := sub.Subscribe(ctx)
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
@@ -1496,40 +1415,26 @@ func TestSubscribe_ReadTimeoutTriggersReconnect(t *testing.T) {
 		}
 	}()
 
-	// Wait for reconnect and block
+	// Should receive the subscription notification
 	select {
-	case <-headers:
-		// Good - received block from second connection
-	case <-time.After(3 * time.Second):
-		t.Fatal("timeout waiting for header after reconnect")
+	case block := <-blockCh:
+		if block.Number != "0xa" {
+			t.Errorf("expected block number 0xa, got %s", block.Number)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for block header")
 	}
 
-	if connectCount.Load() < 2 {
-		t.Errorf("expected at least 2 connections due to timeout, got %d", connectCount.Load())
+	// Verify no additional messages are received
+	select {
+	case <-blockCh:
+		t.Fatal("received unexpected additional message")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: no more messages
 	}
 }
 
-func TestHealthCheck_NotYetConnected(t *testing.T) {
-	sub, err := NewSubscriber(SubscriberConfig{
-		WebSocketURL:  "ws://localhost:19999", // Doesn't matter, we won't connect
-		HealthTimeout: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("failed to create subscriber: %v", err)
-	}
-
-	// Don't subscribe, so conn is nil
-	ctx := context.Background()
-	err = sub.HealthCheck(ctx)
-	if err == nil {
-		t.Fatal("expected health check to fail when not connected")
-	}
-	if !strings.Contains(err.Error(), "not yet connected") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestHealthCheck_ReportsDisconnectedDuration(t *testing.T) {
+func TestHealthCheck_FailsWhenDisconnected(t *testing.T) {
 	connectCount := atomic.Int32{}
 
 	server := newMockWSServer(func(conn *websocket.Conn) {

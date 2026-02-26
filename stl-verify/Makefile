@@ -188,9 +188,9 @@ dev-env:
 		{ echo "WARNING: Failed to fetch ALCHEMY_API_KEY from AWS Secrets Manager. Set it manually in cmd/watcher/.env"; ALCHEMY_API_KEY=''; }; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
-		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
-		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
-		"ALCHEMY_WS_URL=wss://eth-mainnet.g.alchemy.com/v2" \
+		"ETH_RPC_API_KEY=$$ALCHEMY_API_KEY" \
+		"ETH_RPC_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"ETH_RPC_WS_URL=wss://eth-mainnet.g.alchemy.com/v2" \
 		"CHAIN_ID=1" \
 		"AWS_SNS_ENDPOINT=http://127.0.0.1:4566" \
 		"AWS_ACCESS_KEY_ID=test" \
@@ -206,9 +206,9 @@ dev-env:
 		> cmd/watcher/.env && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
-		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
-		"ALCHEMY_HTTP_URL=https://avax-mainnet.g.alchemy.com/v2" \
-		"ALCHEMY_WS_URL=wss://avax-mainnet.g.alchemy.com/v2" \
+		"ETH_RPC_API_KEY=$$ALCHEMY_API_KEY" \
+		"ETH_RPC_HTTP_URL=https://avax-mainnet.g.alchemy.com/v2" \
+		"ETH_RPC_WS_URL=wss://avax-mainnet.g.alchemy.com/v2" \
 		"CHAIN_ID=43114" \
 		"AWS_SNS_ENDPOINT=http://127.0.0.1:4566" \
 		"AWS_ACCESS_KEY_ID=test" \
@@ -224,8 +224,8 @@ dev-env:
 		> cmd/watcher/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
-		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
-		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"ETH_RPC_API_KEY=$$ALCHEMY_API_KEY" \
+		"ETH_RPC_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-oracle-price.fifo" \
 		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
 		"AWS_ACCESS_KEY_ID=test" \
@@ -236,8 +236,8 @@ dev-env:
 		> cmd/oracle-price-worker/.env
 	@printf '%s\n' \
 		"ENVIRONMENT=development" \
-		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
-		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"ETH_RPC_API_KEY=$$ALCHEMY_API_KEY" \
+		"ETH_RPC_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-sparklend-position.fifo" \
 		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
 		"AWS_ACCESS_KEY_ID=test" \

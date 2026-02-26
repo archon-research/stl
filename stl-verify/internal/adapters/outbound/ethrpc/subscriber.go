@@ -1,4 +1,4 @@
-// subscriber.go implements a WebSocket client for Alchemy's newHeads subscription.
+// subscriber.go implements a WebSocket client for Ethereum newHeads WebSocket subscription.
 //
 // Key behaviors:
 //   - Automatic reconnection with exponential backoff (configurable via
@@ -12,7 +12,7 @@
 //   - Default ChannelBufferSize is 100 blocks
 //   - If your consumer processes blocks slower than ~12 seconds/block (Ethereum
 //     block time), increase the buffer or optimize consumption to avoid drops
-package alchemy
+package ethrpc
 
 import (
 	"context"
@@ -39,7 +39,7 @@ var _ outbound.BlockSubscriber = (*Subscriber)(nil)
 
 // SubscriberConfig holds configuration for the WebSocket subscriber.
 type SubscriberConfig struct {
-	// WebSocketURL is the Alchemy WebSocket endpoint URL.
+	// WebSocketURL is the WebSocket endpoint URL.
 	WebSocketURL string
 
 	// InitialBackoff is the initial delay before reconnecting after a disconnect.
@@ -94,7 +94,7 @@ func SubscriberConfigDefaults() SubscriberConfig {
 	}
 }
 
-// Subscriber implements BlockSubscriber using Alchemy's WebSocket API.
+// Subscriber implements BlockSubscriber using Ethereum WebSocket API.
 // It handles WebSocket connection, subscription, and emitting raw headers.
 type Subscriber struct {
 	config    SubscriberConfig
@@ -120,7 +120,7 @@ type Subscriber struct {
 	onReconnect func()
 }
 
-// NewSubscriber creates a new Alchemy WebSocket subscriber.
+// NewSubscriber creates a new Ethereum WebSocket subscriber.
 func NewSubscriber(config SubscriberConfig) (*Subscriber, error) {
 	if config.WebSocketURL == "" {
 		return nil, errors.New("WebSocketURL is required")
@@ -194,7 +194,7 @@ func (s *Subscriber) connectionManager() {
 	defer s.wg.Done()
 
 	backoff := s.config.InitialBackoff
-	logger := s.config.Logger.With("component", "alchemy-subscriber")
+	logger := s.config.Logger.With("component", "ethrpc-subscriber")
 	isFirstConnect := true
 
 	for {
@@ -226,7 +226,7 @@ func (s *Subscriber) connectionManager() {
 		}
 
 		backoff = s.config.InitialBackoff
-		logger.Info("connected to Alchemy WebSocket")
+		logger.Info("connected to WebSocket endpoint")
 
 		// Mark as connected
 		s.disconnectedSince.Store(0)
@@ -514,7 +514,7 @@ func (s *Subscriber) HealthCheck(ctx context.Context) error {
 //
 // This is needed for local development behind a TLS-intercepting proxy (e.g.
 // Zscaler, corporate firewall). Such proxies terminate the TLS connection to
-// Alchemy's WebSocket endpoint and re-sign it with their own CA. Without adding
+// the WebSocket endpoint and re-sign it with their own CA. Without adding
 // that CA to the trust pool, the dialer rejects the proxy's certificate.
 //
 // In production (ECS Fargate) SSL_CERT_FILE is not set, so this returns nil and

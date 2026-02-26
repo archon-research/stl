@@ -1,4 +1,4 @@
-package alchemy
+package ethrpc
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// TestProxyTLSConfig_WebSocketDial verifies that the WebSocket dial to Alchemy
+// TestProxyTLSConfig_WebSocketDial verifies that the WebSocket dial
 // fails without the proxy CA cert and succeeds with proxyTLSConfig().
 //
 // Go caches SystemCertPool() for the process lifetime, and in this sandbox the
@@ -24,15 +24,15 @@ import (
 // This test requires:
 //   - HTTPS_PROXY pointing to a TLS-intercepting proxy
 //   - SSL_CERT_FILE pointing to the proxy's CA cert
-//   - ALCHEMY_WS_URL and ALCHEMY_API_KEY set
+//   - ETH_RPC_WS_URL and ETH_RPC_API_KEY set
 //
-// Run with: go test -run TestProxyTLSConfig_WebSocketDial -v ./internal/adapters/outbound/alchemy/
+// Run with: go test -run TestProxyTLSConfig_WebSocketDial -v ./internal/adapters/outbound/ethrpc/
 func TestProxyTLSConfig_WebSocketDial(t *testing.T) {
-	wsURL := os.Getenv("ALCHEMY_WS_URL")
-	apiKey := os.Getenv("ALCHEMY_API_KEY")
+	wsURL := os.Getenv("ETH_RPC_WS_URL")
+	apiKey := os.Getenv("ETH_RPC_API_KEY")
 
 	if wsURL == "" || apiKey == "" {
-		t.Skip("ALCHEMY_WS_URL and ALCHEMY_API_KEY required")
+		t.Skip("ETH_RPC_WS_URL and ETH_RPC_API_KEY required")
 	}
 	if os.Getenv("SSL_CERT_FILE") == "" {
 		t.Skip("SSL_CERT_FILE required (not behind a TLS-intercepting proxy)")

@@ -266,7 +266,7 @@ func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, rece
 	prefetchCtx, cancelPrefetch := context.WithCancel(ctx)
 
 	// Start prefetching RPC data immediately with the traced context
-	// This ensures Alchemy RPC spans are linked to this parent span
+	// This ensures RPC spans are linked to this parent span
 	prefetchCh := s.startPrefetch(prefetchCtx, header, blockNum)
 
 	// Ensure we always clean up: cancel prefetch context and end span

@@ -23,7 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/ethrpc"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
@@ -164,11 +164,19 @@ func main() {
 	}
 
 	// Get configuration from environment
-	alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")
-	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
-	alchemyWSURL := env.Get("ALCHEMY_WS_URL", "wss://eth-mainnet.g.alchemy.com/v2")
-	if alchemyAPIKey == "" {
-		logger.Error("ALCHEMY_API_KEY environment variable is required")
+	rpcAPIKey := env.Get("ETH_RPC_API_KEY", "")
+	rpcHTTPURL := env.Get("ETH_RPC_HTTP_URL", "")
+	rpcWSURL := env.Get("ETH_RPC_WS_URL", "")
+	if rpcAPIKey == "" {
+		logger.Error("ETH_RPC_API_KEY environment variable is required")
+		os.Exit(1)
+	}
+	if rpcHTTPURL == "" {
+		logger.Error("ETH_RPC_HTTP_URL environment variable is required")
+		os.Exit(1)
+	}
+	if rpcWSURL == "" {
+		logger.Error("ETH_RPC_WS_URL environment variable is required")
 		os.Exit(1)
 	}
 	chainID, err := strconv.ParseInt(requireEnv("CHAIN_ID"), 10, 64)
@@ -191,9 +199,9 @@ func main() {
 
 	logger.Info("PostgreSQL connected, block state tracking enabled")
 
-	// Create Alchemy subscriber (WebSocket only)
-	subscriberConfig := alchemy.SubscriberConfig{
-		WebSocketURL:      fmt.Sprintf("%s/%s", alchemyWSURL, alchemyAPIKey),
+	// Create WebSocket subscriber
+	subscriberConfig := ethrpc.SubscriberConfig{
+		WebSocketURL:      fmt.Sprintf("%s/%s", rpcWSURL, rpcAPIKey),
 		InitialBackoff:    1 * time.Second,
 		MaxBackoff:        30 * time.Second,
 		PingInterval:      30 * time.Second,
@@ -203,33 +211,33 @@ func main() {
 		HealthTimeout:     30 * time.Second,
 		Logger:            logger,
 	}
-	subscriber, err := alchemy.NewSubscriber(subscriberConfig)
+	subscriber, err := ethrpc.NewSubscriber(subscriberConfig)
 	if err != nil {
 		logger.Error("failed to create subscriber", "error", err)
 		os.Exit(1)
 	}
 
-	// Create OpenTelemetry instrumentation for Alchemy client
-	alchemyTelemetry, err := alchemy.NewTelemetry()
+	// Create OpenTelemetry instrumentation for RPC client
+	rpcTelemetry, err := ethrpc.NewTelemetry()
 	if err != nil {
-		logger.Warn("failed to create alchemy telemetry, continuing without instrumentation", "error", err)
+		logger.Warn("failed to create RPC telemetry, continuing without instrumentation", "error", err)
 	}
 
-	// Create Alchemy HTTP client
-	client, err := alchemy.NewClient(alchemy.ClientConfig{
-		HTTPURL:      fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
+	// Create Ethereum HTTP RPC client
+	client, err := ethrpc.NewClient(ethrpc.ClientConfig{
+		HTTPURL:      fmt.Sprintf("%s/%s", rpcHTTPURL, rpcAPIKey),
 		EnableTraces: *enableTraces,
 		EnableBlobs:  *enableBlobs,
 		ParallelRPC:  *parallelRPC,
 		Logger:       logger,
-		Telemetry:    alchemyTelemetry,
+		Telemetry:    rpcTelemetry,
 	})
 	if err != nil {
 		logger.Error("failed to create client", "error", err)
 		os.Exit(1)
 	}
 
-	logger.Info("alchemy client configured",
+	logger.Info("RPC client configured",
 		"enableTraces", *enableTraces,
 		"enableBlobs", *enableBlobs,
 		"parallelRPC", *parallelRPC,

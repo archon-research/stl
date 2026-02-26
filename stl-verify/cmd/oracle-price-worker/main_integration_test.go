@@ -120,8 +120,8 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	defer sqsServer.Close()
 
 	// Configure environment for run()
-	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
-	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
+	t.Setenv("ETH_RPC_API_KEY", "test-api-key")
+	t.Setenv("ETH_RPC_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
@@ -186,8 +186,8 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer rpcServer.Close()
 
-	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
-	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
+	t.Setenv("ETH_RPC_API_KEY", "test-api-key")
+	t.Setenv("ETH_RPC_HTTP_URL", rpcServer.URL)
 
 	err := run(context.Background(), []string{
 		"-queue", "http://localhost/test-queue",

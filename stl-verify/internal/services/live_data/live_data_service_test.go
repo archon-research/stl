@@ -1068,11 +1068,11 @@ func (m *mockFailingClient) GetBlockTraces(ctx context.Context, blockNum int64) 
 	return m.MockBlockchainClient.GetBlockTraces(ctx, blockNum)
 }
 
-func (m *mockFailingClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+func (m *mockFailingClient) GetBlockTracesByHash(ctx context.Context, blockNum int64, hash string) (json.RawMessage, error) {
 	if m.failGetTraces {
 		return nil, fmt.Errorf("simulated traces fetch failure")
 	}
-	return m.MockBlockchainClient.GetBlockTracesByHash(ctx, hash)
+	return m.MockBlockchainClient.GetBlockTracesByHash(ctx, blockNum, hash)
 }
 
 func (m *mockFailingClient) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
@@ -2216,11 +2216,11 @@ func (m *mockClientWithHashTracking) GetBlockReceiptsByHash(ctx context.Context,
 	return m.MockBlockchainClient.GetBlockReceiptsByHash(ctx, hash)
 }
 
-func (m *mockClientWithHashTracking) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+func (m *mockClientWithHashTracking) GetBlockTracesByHash(ctx context.Context, blockNum int64, hash string) (json.RawMessage, error) {
 	m.mu.Lock()
 	m.fetchedByHash[hash] = append(m.fetchedByHash[hash], "GetBlockTracesByHash")
 	m.mu.Unlock()
-	return m.MockBlockchainClient.GetBlockTracesByHash(ctx, hash)
+	return m.MockBlockchainClient.GetBlockTracesByHash(ctx, blockNum, hash)
 }
 
 func (m *mockClientWithHashTracking) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
@@ -2441,7 +2441,7 @@ func (m *caseInsensitiveMockClient) GetBlockTraces(ctx context.Context, blockNum
 	return nil, fmt.Errorf("traces for block %d not found", blockNum)
 }
 
-func (m *caseInsensitiveMockClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+func (m *caseInsensitiveMockClient) GetBlockTracesByHash(ctx context.Context, blockNum int64, hash string) (json.RawMessage, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
