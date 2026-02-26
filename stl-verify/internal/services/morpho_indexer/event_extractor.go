@@ -1,192 +1,19 @@
 package morpho_indexer
 
 import (
-	"encoding/json"
 	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// MorphoBlueEventData holds parsed data from a Morpho Blue event.
-type MorphoBlueEventData struct {
-	EventType entity.MorphoEventType
-	TxHash    string
-	MarketID  [32]byte
-
-	// Common fields
-	Caller   common.Address
-	OnBehalf common.Address
-	Receiver common.Address
-	Assets   *big.Int
-	Shares   *big.Int
-
-	// CreateMarket fields
-	MarketParams *MarketParams
-
-	// Liquidate fields
-	Borrower      common.Address
-	RepaidAssets  *big.Int
-	RepaidShares  *big.Int
-	SeizedAssets  *big.Int
-	BadDebtAssets *big.Int
-	BadDebtShares *big.Int
-
-	// AccrueInterest fields
-	PrevBorrowRate *big.Int
-	Interest       *big.Int
-	FeeShares      *big.Int
-
-	// SetFee fields
-	NewFee *big.Int
-}
-
-// MarketParams holds the market parameters from a CreateMarket event.
-type MarketParams struct {
-	LoanToken       common.Address
-	CollateralToken common.Address
-	Oracle          common.Address
-	Irm             common.Address
-	LLTV            *big.Int
-}
-
-// abiMarketParams mirrors the ABI tuple field names for safe conversion via abi.ConvertType.
-// Field names must match the capitalized ABI parameter names exactly (e.g. "lltv" → "Lltv").
-type abiMarketParams struct {
-	LoanToken       common.Address
-	CollateralToken common.Address
-	Oracle          common.Address
-	Irm             common.Address
-	Lltv            *big.Int
-}
-
-// MetaMorphoEventData holds parsed data from a MetaMorpho vault event.
-type MetaMorphoEventData struct {
-	EventType entity.MorphoEventType
-	TxHash    string
-
-	// Deposit/Withdraw fields
-	Sender   common.Address
-	Owner    common.Address
-	Receiver common.Address
-	Assets   *big.Int
-	Shares   *big.Int
-
-	// Transfer fields
-	From  common.Address
-	To    common.Address
-	Value *big.Int
-
-	// AccrueInterest fields (V1 + V2)
-	NewTotalAssets *big.Int
-	FeeShares      *big.Int // V1: single fee, V2: performanceFeeShares
-	// V2-only AccrueInterest fields
-	PreviousTotalAssets *big.Int
-	ManagementFeeShares *big.Int
-}
-
-// ToJSON converts MorphoBlueEventData to JSON for protocol_event storage.
-func (e *MorphoBlueEventData) ToJSON() (json.RawMessage, error) {
-	data := map[string]any{
-		"eventType": string(e.EventType),
-		"marketId":  common.Bytes2Hex(e.MarketID[:]),
-	}
-
-	switch e.EventType {
-	case entity.MorphoEventCreateMarket:
-		if e.MarketParams != nil {
-			data["loanToken"] = e.MarketParams.LoanToken.Hex()
-			data["collateralToken"] = e.MarketParams.CollateralToken.Hex()
-			data["oracle"] = e.MarketParams.Oracle.Hex()
-			data["irm"] = e.MarketParams.Irm.Hex()
-			data["lltv"] = e.MarketParams.LLTV.String()
-		}
-	case entity.MorphoEventSupply, entity.MorphoEventRepay, entity.MorphoEventSupplyCollateral:
-		data["caller"] = e.Caller.Hex()
-		data["onBehalf"] = e.OnBehalf.Hex()
-		if e.Assets != nil {
-			data["assets"] = e.Assets.String()
-		}
-		if e.Shares != nil {
-			data["shares"] = e.Shares.String()
-		}
-	case entity.MorphoEventWithdraw, entity.MorphoEventBorrow, entity.MorphoEventWithdrawCollateral:
-		data["caller"] = e.Caller.Hex()
-		data["onBehalf"] = e.OnBehalf.Hex()
-		data["receiver"] = e.Receiver.Hex()
-		if e.Assets != nil {
-			data["assets"] = e.Assets.String()
-		}
-		if e.Shares != nil {
-			data["shares"] = e.Shares.String()
-		}
-	case entity.MorphoEventLiquidate:
-		data["caller"] = e.Caller.Hex()
-		data["borrower"] = e.Borrower.Hex()
-		data["repaidAssets"] = e.RepaidAssets.String()
-		data["repaidShares"] = e.RepaidShares.String()
-		data["seizedAssets"] = e.SeizedAssets.String()
-		data["badDebtAssets"] = e.BadDebtAssets.String()
-		data["badDebtShares"] = e.BadDebtShares.String()
-	case entity.MorphoEventAccrueInterest:
-		data["prevBorrowRate"] = e.PrevBorrowRate.String()
-		data["interest"] = e.Interest.String()
-		data["feeShares"] = e.FeeShares.String()
-	case entity.MorphoEventSetFee:
-		data["newFee"] = e.NewFee.String()
-	}
-
-	raw, err := json.Marshal(data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal morpho event data: %w", err)
-	}
-	return raw, nil
-}
-
-// ToJSON converts MetaMorphoEventData to JSON for protocol_event storage.
-func (e *MetaMorphoEventData) ToJSON() (json.RawMessage, error) {
-	data := map[string]any{
-		"eventType": string(e.EventType),
-	}
-
-	switch e.EventType {
-	case entity.MorphoEventVaultDeposit:
-		data["sender"] = e.Sender.Hex()
-		data["owner"] = e.Owner.Hex()
-		data["assets"] = e.Assets.String()
-		data["shares"] = e.Shares.String()
-	case entity.MorphoEventVaultWithdraw:
-		data["sender"] = e.Sender.Hex()
-		data["receiver"] = e.Receiver.Hex()
-		data["owner"] = e.Owner.Hex()
-		data["assets"] = e.Assets.String()
-		data["shares"] = e.Shares.String()
-	case entity.MorphoEventVaultTransfer:
-		data["from"] = e.From.Hex()
-		data["to"] = e.To.Hex()
-		data["value"] = e.Value.String()
-	case entity.MorphoEventVaultAccrueInterest:
-		data["newTotalAssets"] = e.NewTotalAssets.String()
-		data["feeShares"] = e.FeeShares.String()
-		if e.PreviousTotalAssets != nil {
-			data["previousTotalAssets"] = e.PreviousTotalAssets.String()
-		}
-		if e.ManagementFeeShares != nil {
-			data["managementFeeShares"] = e.ManagementFeeShares.String()
-		}
-	}
-
-	raw, err := json.Marshal(data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal metamorpho event data: %w", err)
-	}
-	return raw, nil
-}
+// ---------------------------------------------------------------------------
+// EventExtractor
+// ---------------------------------------------------------------------------
 
 // EventExtractor parses Morpho Blue and MetaMorpho events from transaction logs.
 type EventExtractor struct {
@@ -272,7 +99,7 @@ func (e *EventExtractor) IsMetaMorphoEvent(log shared.Log) bool {
 }
 
 // ExtractMorphoBlueEvent parses a Morpho Blue event from a log entry.
-func (e *EventExtractor) ExtractMorphoBlueEvent(log shared.Log) (*MorphoBlueEventData, error) {
+func (e *EventExtractor) ExtractMorphoBlueEvent(log shared.Log) (MorphoBlueEvent, error) {
 	if len(log.Topics) == 0 {
 		return nil, fmt.Errorf("no topics")
 	}
@@ -319,7 +146,7 @@ func (e *EventExtractor) ExtractMorphoBlueEvent(log shared.Log) (*MorphoBlueEven
 }
 
 // ExtractMetaMorphoEvent parses a MetaMorpho event from a log entry.
-func (e *EventExtractor) ExtractMetaMorphoEvent(log shared.Log) (*MetaMorphoEventData, error) {
+func (e *EventExtractor) ExtractMetaMorphoEvent(log shared.Log) (MetaMorphoEvent, error) {
 	if len(log.Topics) == 0 {
 		return nil, fmt.Errorf("no topics")
 	}
@@ -352,6 +179,10 @@ func (e *EventExtractor) ExtractMetaMorphoEvent(log shared.Log) (*MetaMorphoEven
 		return nil, fmt.Errorf("unknown MetaMorpho event: %s", event.Name)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 // parseTopics extracts indexed parameters from log topics into eventData.
 func parseTopics(event *abi.Event, topics []string, eventData map[string]any) error {
@@ -427,9 +258,11 @@ func getBigInt(eventData map[string]any, key string) (*big.Int, error) {
 	return b, nil
 }
 
+// ---------------------------------------------------------------------------
 // Morpho Blue event extractors
+// ---------------------------------------------------------------------------
 
-func extractCreateMarket(eventData map[string]any, txHash string) (*MorphoBlueEventData, error) {
+func extractCreateMarket(eventData map[string]any, txHash string) (*CreateMarketEvent, error) {
 	id, err := getBytes32(eventData, "id")
 	if err != nil {
 		return nil, err
@@ -448,11 +281,9 @@ func extractCreateMarket(eventData map[string]any, txHash string) (*MorphoBlueEv
 		return nil, fmt.Errorf("failed to convert marketParams: %T", mp)
 	}
 
-	return &MorphoBlueEventData{
-		EventType: entity.MorphoEventCreateMarket,
-		TxHash:    txHash,
-		MarketID:  id,
-		MarketParams: &MarketParams{
+	return &CreateMarketEvent{
+		morphoBlueBase: morphoBlueBase{marketID: id, txHash: txHash},
+		Params: &MarketParams{
 			LoanToken:       mps.LoanToken,
 			CollateralToken: mps.CollateralToken,
 			Oracle:          mps.Oracle,
@@ -462,7 +293,7 @@ func extractCreateMarket(eventData map[string]any, txHash string) (*MorphoBlueEv
 	}, nil
 }
 
-func extractSupply(eventData map[string]any, txHash string) (*MorphoBlueEventData, error) {
+func extractSupply(eventData map[string]any, txHash string) (*SupplyEvent, error) {
 	id, err := getBytes32(eventData, "id")
 	if err != nil {
 		return nil, err
@@ -484,18 +315,16 @@ func extractSupply(eventData map[string]any, txHash string) (*MorphoBlueEventDat
 		return nil, err
 	}
 
-	return &MorphoBlueEventData{
-		EventType: entity.MorphoEventSupply,
-		TxHash:    txHash,
-		MarketID:  id,
-		Caller:    caller,
-		OnBehalf:  onBehalf,
-		Assets:    assets,
-		Shares:    shares,
+	return &SupplyEvent{
+		morphoBlueBase: morphoBlueBase{marketID: id, txHash: txHash},
+		Caller:         caller,
+		OnBehalf:       onBehalf,
+		Assets:         assets,
+		Shares:         shares,
 	}, nil
 }
 
-func extractWithdrawBlue(eventData map[string]any, txHash string) (*MorphoBlueEventData, error) {
+func extractWithdrawBlue(eventData map[string]any, txHash string) (*WithdrawEvent, error) {
 	id, err := getBytes32(eventData, "id")
 	if err != nil {
 		return nil, err
@@ -521,19 +350,17 @@ func extractWithdrawBlue(eventData map[string]any, txHash string) (*MorphoBlueEv
 		return nil, err
 	}
 
-	return &MorphoBlueEventData{
-		EventType: entity.MorphoEventWithdraw,
-		TxHash:    txHash,
-		MarketID:  id,
-		Caller:    caller,
-		OnBehalf:  onBehalf,
-		Receiver:  receiver,
-		Assets:    assets,
-		Shares:    shares,
+	return &WithdrawEvent{
+		morphoBlueBase: morphoBlueBase{marketID: id, txHash: txHash},
+		Caller:         caller,
+		OnBehalf:       onBehalf,
+		Receiver:       receiver,
+		Assets:         assets,
+		Shares:         shares,
 	}, nil
 }
 
-func extractBorrow(eventData map[string]any, txHash string) (*MorphoBlueEventData, error) {
+func extractBorrow(eventData map[string]any, txHash string) (*BorrowEvent, error) {
 	id, err := getBytes32(eventData, "id")
 	if err != nil {
 		return nil, err
@@ -559,19 +386,17 @@ func extractBorrow(eventData map[string]any, txHash string) (*MorphoBlueEventDat
 		return nil, err
 	}
 
-	return &MorphoBlueEventData{
-		EventType: entity.MorphoEventBorrow,
-		TxHash:    txHash,
-		MarketID:  id,
-		Caller:    caller,
-		OnBehalf:  onBehalf,
-		Receiver:  receiver,
-		Assets:    assets,
-		Shares:    shares,
+	return &BorrowEvent{
+		morphoBlueBase: morphoBlueBase{marketID: id, txHash: txHash},
+		Caller:         caller,
+		OnBehalf:       onBehalf,
+		Receiver:       receiver,
+		Assets:         assets,
+		Shares:         shares,
 	}, nil
 }
 
-func extractRepay(eventData map[string]any, txHash string) (*MorphoBlueEventData, error) {
+func extractRepay(eventData map[string]any, txHash string) (*RepayEvent, error) {
 	id, err := getBytes32(eventData, "id")
 	if err != nil {
 		return nil, err
@@ -593,18 +418,16 @@ func extractRepay(eventData map[string]any, txHash string) (*MorphoBlueEventData
 		return nil, err
 	}
 
-	return &MorphoBlueEventData{
-		EventType: entity.MorphoEventRepay,
-		TxHash:    txHash,
-		MarketID:  id,
-		Caller:    caller,
-		OnBehalf:  onBehalf,
-		Assets:    assets,
-		Shares:    shares,
+	return &RepayEvent{
+		morphoBlueBase: morphoBlueBase{marketID: id, txHash: txHash},
+		Caller:         caller,
+		OnBehalf:       onBehalf,
+		Assets:         assets,
+		Shares:         shares,
 	}, nil
 }
 
-func extractSupplyCollateral(eventData map[string]any, txHash string) (*MorphoBlueEventData, error) {
+func extractSupplyCollateral(eventData map[string]any, txHash string) (*SupplyCollateralEvent, error) {
 	id, err := getBytes32(eventData, "id")
 	if err != nil {
 		return nil, err
@@ -622,17 +445,15 @@ func extractSupplyCollateral(eventData map[string]any, txHash string) (*MorphoBl
 		return nil, err
 	}
 
-	return &MorphoBlueEventData{
-		EventType: entity.MorphoEventSupplyCollateral,
-		TxHash:    txHash,
-		MarketID:  id,
-		Caller:    caller,
-		OnBehalf:  onBehalf,
-		Assets:    assets,
+	return &SupplyCollateralEvent{
+		morphoBlueBase: morphoBlueBase{marketID: id, txHash: txHash},
+		Caller:         caller,
+		OnBehalf:       onBehalf,
+		Assets:         assets,
 	}, nil
 }
 
-func extractWithdrawCollateral(eventData map[string]any, txHash string) (*MorphoBlueEventData, error) {
+func extractWithdrawCollateral(eventData map[string]any, txHash string) (*WithdrawCollateralEvent, error) {
 	id, err := getBytes32(eventData, "id")
 	if err != nil {
 		return nil, err
@@ -654,18 +475,16 @@ func extractWithdrawCollateral(eventData map[string]any, txHash string) (*Morpho
 		return nil, err
 	}
 
-	return &MorphoBlueEventData{
-		EventType: entity.MorphoEventWithdrawCollateral,
-		TxHash:    txHash,
-		MarketID:  id,
-		Caller:    caller,
-		OnBehalf:  onBehalf,
-		Receiver:  receiver,
-		Assets:    assets,
+	return &WithdrawCollateralEvent{
+		morphoBlueBase: morphoBlueBase{marketID: id, txHash: txHash},
+		Caller:         caller,
+		OnBehalf:       onBehalf,
+		Receiver:       receiver,
+		Assets:         assets,
 	}, nil
 }
 
-func extractLiquidate(eventData map[string]any, txHash string) (*MorphoBlueEventData, error) {
+func extractLiquidate(eventData map[string]any, txHash string) (*LiquidateEvent, error) {
 	id, err := getBytes32(eventData, "id")
 	if err != nil {
 		return nil, err
@@ -699,21 +518,19 @@ func extractLiquidate(eventData map[string]any, txHash string) (*MorphoBlueEvent
 		return nil, err
 	}
 
-	return &MorphoBlueEventData{
-		EventType:     entity.MorphoEventLiquidate,
-		TxHash:        txHash,
-		MarketID:      id,
-		Caller:        caller,
-		Borrower:      borrower,
-		RepaidAssets:  repaidAssets,
-		RepaidShares:  repaidShares,
-		SeizedAssets:  seizedAssets,
-		BadDebtAssets: badDebtAssets,
-		BadDebtShares: badDebtShares,
+	return &LiquidateEvent{
+		morphoBlueBase: morphoBlueBase{marketID: id, txHash: txHash},
+		Caller:         caller,
+		Borrower:       borrower,
+		RepaidAssets:   repaidAssets,
+		RepaidShares:   repaidShares,
+		SeizedAssets:   seizedAssets,
+		BadDebtAssets:  badDebtAssets,
+		BadDebtShares:  badDebtShares,
 	}, nil
 }
 
-func extractAccrueInterest(eventData map[string]any, txHash string) (*MorphoBlueEventData, error) {
+func extractAccrueInterest(eventData map[string]any, txHash string) (*AccrueInterestEvent, error) {
 	id, err := getBytes32(eventData, "id")
 	if err != nil {
 		return nil, err
@@ -731,17 +548,15 @@ func extractAccrueInterest(eventData map[string]any, txHash string) (*MorphoBlue
 		return nil, err
 	}
 
-	return &MorphoBlueEventData{
-		EventType:      entity.MorphoEventAccrueInterest,
-		TxHash:         txHash,
-		MarketID:       id,
+	return &AccrueInterestEvent{
+		morphoBlueBase: morphoBlueBase{marketID: id, txHash: txHash},
 		PrevBorrowRate: prevBorrowRate,
 		Interest:       interest,
 		FeeShares:      feeShares,
 	}, nil
 }
 
-func extractSetFee(eventData map[string]any, txHash string) (*MorphoBlueEventData, error) {
+func extractSetFee(eventData map[string]any, txHash string) (*SetFeeEvent, error) {
 	id, err := getBytes32(eventData, "id")
 	if err != nil {
 		return nil, err
@@ -751,17 +566,17 @@ func extractSetFee(eventData map[string]any, txHash string) (*MorphoBlueEventDat
 		return nil, err
 	}
 
-	return &MorphoBlueEventData{
-		EventType: entity.MorphoEventSetFee,
-		TxHash:    txHash,
-		MarketID:  id,
-		NewFee:    newFee,
+	return &SetFeeEvent{
+		morphoBlueBase: morphoBlueBase{marketID: id, txHash: txHash},
+		NewFee:         newFee,
 	}, nil
 }
 
+// ---------------------------------------------------------------------------
 // MetaMorpho event extractors
+// ---------------------------------------------------------------------------
 
-func extractVaultDeposit(eventData map[string]any, txHash string) (*MetaMorphoEventData, error) {
+func extractVaultDeposit(eventData map[string]any, txHash string) (*VaultDepositEvent, error) {
 	sender, err := getAddress(eventData, "sender")
 	if err != nil {
 		return nil, err
@@ -779,17 +594,16 @@ func extractVaultDeposit(eventData map[string]any, txHash string) (*MetaMorphoEv
 		return nil, err
 	}
 
-	return &MetaMorphoEventData{
-		EventType: entity.MorphoEventVaultDeposit,
-		TxHash:    txHash,
-		Sender:    sender,
-		Owner:     owner,
-		Assets:    assets,
-		Shares:    shares,
+	return &VaultDepositEvent{
+		metaMorphoBase: metaMorphoBase{txHash: txHash},
+		Sender:         sender,
+		Owner:          owner,
+		Assets:         assets,
+		Shares:         shares,
 	}, nil
 }
 
-func extractVaultWithdraw(eventData map[string]any, txHash string) (*MetaMorphoEventData, error) {
+func extractVaultWithdraw(eventData map[string]any, txHash string) (*VaultWithdrawEvent, error) {
 	sender, err := getAddress(eventData, "sender")
 	if err != nil {
 		return nil, err
@@ -811,18 +625,17 @@ func extractVaultWithdraw(eventData map[string]any, txHash string) (*MetaMorphoE
 		return nil, err
 	}
 
-	return &MetaMorphoEventData{
-		EventType: entity.MorphoEventVaultWithdraw,
-		TxHash:    txHash,
-		Sender:    sender,
-		Receiver:  receiver,
-		Owner:     owner,
-		Assets:    assets,
-		Shares:    shares,
+	return &VaultWithdrawEvent{
+		metaMorphoBase: metaMorphoBase{txHash: txHash},
+		Sender:         sender,
+		Receiver:       receiver,
+		Owner:          owner,
+		Assets:         assets,
+		Shares:         shares,
 	}, nil
 }
 
-func extractVaultTransfer(eventData map[string]any, txHash string) (*MetaMorphoEventData, error) {
+func extractVaultTransfer(eventData map[string]any, txHash string) (*VaultTransferEvent, error) {
 	from, err := getAddress(eventData, "from")
 	if err != nil {
 		return nil, err
@@ -836,16 +649,15 @@ func extractVaultTransfer(eventData map[string]any, txHash string) (*MetaMorphoE
 		return nil, err
 	}
 
-	return &MetaMorphoEventData{
-		EventType: entity.MorphoEventVaultTransfer,
-		TxHash:    txHash,
-		From:      from,
-		To:        to,
-		Value:     value,
+	return &VaultTransferEvent{
+		metaMorphoBase: metaMorphoBase{txHash: txHash},
+		From:           from,
+		To:             to,
+		Value:          value,
 	}, nil
 }
 
-func extractVaultAccrueInterest(eventData map[string]any, txHash string) (*MetaMorphoEventData, error) {
+func extractVaultAccrueInterest(eventData map[string]any, txHash string) (*VaultAccrueInterestEvent, error) {
 	newTotalAssets, err := getBigInt(eventData, "newTotalAssets")
 	if err != nil {
 		return nil, err
@@ -860,9 +672,8 @@ func extractVaultAccrueInterest(eventData map[string]any, txHash string) (*MetaM
 		}
 	}
 
-	result := &MetaMorphoEventData{
-		EventType:      entity.MorphoEventVaultAccrueInterest,
-		TxHash:         txHash,
+	result := &VaultAccrueInterestEvent{
+		metaMorphoBase: metaMorphoBase{txHash: txHash},
 		NewTotalAssets: newTotalAssets,
 		FeeShares:      feeShares,
 	}

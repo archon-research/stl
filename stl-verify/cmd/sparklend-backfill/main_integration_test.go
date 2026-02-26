@@ -28,7 +28,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
-	"github.com/archon-research/stl/stl-verify/internal/services/sparklend"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -58,7 +58,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 
 	// Upload gzipped empty receipt lists for each block in the range.
 	for blockNum := int64(fromBlock); blockNum <= toBlock; blockNum++ {
-		uploadReceipts(t, ctx, s3Client, bucket, blockNum, 1, []sparklend.TransactionReceipt{})
+		uploadReceipts(t, ctx, s3Client, bucket, blockNum, 1, []shared.TransactionReceipt{})
 	}
 
 	// A minimal mock RPC — the backfill processes empty receipts so no
@@ -161,9 +161,9 @@ func TestRunIntegration_BorrowEvent(t *testing.T) {
 		borrowAmount,
 	)
 
-	receipt := sparklend.TransactionReceipt{
+	receipt := shared.TransactionReceipt{
 		TransactionHash: "0xborrow" + strings.Repeat("0", 57),
-		Logs: []sparklend.Log{
+		Logs: []shared.Log{
 			{
 				Address:         sparkLendPool,
 				Topics:          []string{borrowTopic, reserveTopic, userTopic, referralTopic},
@@ -174,7 +174,7 @@ func TestRunIntegration_BorrowEvent(t *testing.T) {
 		},
 	}
 
-	uploadReceipts(t, ctx, s3Client, bucket, blockNum, 1, []sparklend.TransactionReceipt{receipt})
+	uploadReceipts(t, ctx, s3Client, bucket, blockNum, 1, []shared.TransactionReceipt{receipt})
 
 	// Build ABI-encoded mock RPC responses.
 	rpcServer := buildBorrowMockRPC(t, daiAddress)
@@ -213,7 +213,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
-	uploadReceipts(t, ctx, s3Client, bucket, 100, 1, []sparklend.TransactionReceipt{})
+	uploadReceipts(t, ctx, s3Client, bucket, 100, 1, []shared.TransactionReceipt{})
 
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer rpcServer.Close()
@@ -351,9 +351,9 @@ func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 		borrowAmount,
 	)
 
-	receipt := sparklend.TransactionReceipt{
+	receipt := shared.TransactionReceipt{
 		TransactionHash: "0xc0" + strings.Repeat("0", 62),
-		Logs: []sparklend.Log{
+		Logs: []shared.Log{
 			{
 				Address:         sparkLendPool,
 				Topics:          []string{borrowTopic, reserveTopic, userTopic, referralTopic},
@@ -364,7 +364,7 @@ func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 		},
 	}
 
-	uploadReceipts(t, ctx, s3Client, bucket, blockNum, 1, []sparklend.TransactionReceipt{receipt})
+	uploadReceipts(t, ctx, s3Client, bucket, blockNum, 1, []shared.TransactionReceipt{receipt})
 
 	rpcServer := buildBorrowWithCollateralMockRPC(t, daiAddress, wethAddress, borrowerAddress)
 	defer rpcServer.Close()
@@ -752,7 +752,7 @@ func buildBorrowWithCollateralMockRPC(t *testing.T, daiAddress, wethAddress, bor
 
 // uploadReceipts serializes receipts to JSON, gzips the result, and uploads
 // the object to S3 at the key computed for blockNum / version.
-func uploadReceipts(t *testing.T, ctx context.Context, client *s3.Client, bucket string, blockNum int64, version int, receipts []sparklend.TransactionReceipt) {
+func uploadReceipts(t *testing.T, ctx context.Context, client *s3.Client, bucket string, blockNum int64, version int, receipts []shared.TransactionReceipt) {
 	t.Helper()
 
 	key := s3key.Build(blockNum, version, s3key.Receipts)

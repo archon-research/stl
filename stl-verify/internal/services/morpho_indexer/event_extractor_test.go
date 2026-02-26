@@ -134,20 +134,24 @@ func TestExtractMorphoBlueEvent_AccrueInterest(t *testing.T) {
 		t.Fatalf("ExtractMorphoBlueEvent() error: %v", err)
 	}
 
-	if result.EventType != entity.MorphoEventAccrueInterest {
-		t.Errorf("EventType = %s, want AccrueInterest", result.EventType)
+	evt, ok := result.(*AccrueInterestEvent)
+	if !ok {
+		t.Fatalf("expected *AccrueInterestEvent, got %T", result)
 	}
-	if result.MarketID != marketID {
+	if evt.Type() != entity.MorphoEventAccrueInterest {
+		t.Errorf("Type() = %s, want AccrueInterest", evt.Type())
+	}
+	if evt.MarketID() != marketID {
 		t.Errorf("MarketID mismatch")
 	}
-	if result.PrevBorrowRate.Int64() != 1000 {
-		t.Errorf("PrevBorrowRate = %s, want 1000", result.PrevBorrowRate)
+	if evt.PrevBorrowRate.Int64() != 1000 {
+		t.Errorf("PrevBorrowRate = %s, want 1000", evt.PrevBorrowRate)
 	}
-	if result.Interest.Int64() != 500 {
-		t.Errorf("Interest = %s, want 500", result.Interest)
+	if evt.Interest.Int64() != 500 {
+		t.Errorf("Interest = %s, want 500", evt.Interest)
 	}
-	if result.FeeShares.Int64() != 10 {
-		t.Errorf("FeeShares = %s, want 10", result.FeeShares)
+	if evt.FeeShares.Int64() != 10 {
+		t.Errorf("FeeShares = %s, want 10", evt.FeeShares)
 	}
 }
 
@@ -176,11 +180,15 @@ func TestExtractMorphoBlueEvent_SetFee(t *testing.T) {
 		t.Fatalf("ExtractMorphoBlueEvent() error: %v", err)
 	}
 
-	if result.EventType != entity.MorphoEventSetFee {
-		t.Errorf("EventType = %s, want SetFee", result.EventType)
+	evt, ok := result.(*SetFeeEvent)
+	if !ok {
+		t.Fatalf("expected *SetFeeEvent, got %T", result)
 	}
-	if result.NewFee.String() != "100000000000000000" {
-		t.Errorf("NewFee = %s, want 100000000000000000", result.NewFee)
+	if evt.Type() != entity.MorphoEventSetFee {
+		t.Errorf("Type() = %s, want SetFee", evt.Type())
+	}
+	if evt.NewFee.String() != "100000000000000000" {
+		t.Errorf("NewFee = %s, want 100000000000000000", evt.NewFee)
 	}
 }
 
@@ -214,17 +222,21 @@ func TestExtractMetaMorphoEvent_Transfer(t *testing.T) {
 		t.Fatalf("ExtractMetaMorphoEvent() error: %v", err)
 	}
 
-	if result.EventType != entity.MorphoEventVaultTransfer {
-		t.Errorf("EventType = %s, want VaultTransfer", result.EventType)
+	evt, ok := result.(*VaultTransferEvent)
+	if !ok {
+		t.Fatalf("expected *VaultTransferEvent, got %T", result)
 	}
-	if result.From != from {
-		t.Errorf("From = %s, want %s", result.From.Hex(), from.Hex())
+	if evt.Type() != entity.MorphoEventVaultTransfer {
+		t.Errorf("Type() = %s, want VaultTransfer", evt.Type())
 	}
-	if result.To != to {
-		t.Errorf("To = %s, want %s", result.To.Hex(), to.Hex())
+	if evt.From != from {
+		t.Errorf("From = %s, want %s", evt.From.Hex(), from.Hex())
 	}
-	if result.Value.Int64() != 5000 {
-		t.Errorf("Value = %s, want 5000", result.Value)
+	if evt.To != to {
+		t.Errorf("To = %s, want %s", evt.To.Hex(), to.Hex())
+	}
+	if evt.Value.Int64() != 5000 {
+		t.Errorf("Value = %s, want 5000", evt.Value)
 	}
 }
 
@@ -252,28 +264,30 @@ func TestExtractMetaMorphoEvent_AccrueInterest(t *testing.T) {
 		t.Fatalf("ExtractMetaMorphoEvent() error: %v", err)
 	}
 
-	if result.EventType != entity.MorphoEventVaultAccrueInterest {
-		t.Errorf("EventType = %s, want VaultAccrueInterest", result.EventType)
+	evt, ok := result.(*VaultAccrueInterestEvent)
+	if !ok {
+		t.Fatalf("expected *VaultAccrueInterestEvent, got %T", result)
 	}
-	if result.NewTotalAssets.Int64() != 2000000 {
-		t.Errorf("NewTotalAssets = %s, want 2000000", result.NewTotalAssets)
+	if evt.Type() != entity.MorphoEventVaultAccrueInterest {
+		t.Errorf("Type() = %s, want VaultAccrueInterest", evt.Type())
 	}
-	if result.FeeShares.Int64() != 100 {
-		t.Errorf("FeeShares = %s, want 100", result.FeeShares)
+	if evt.NewTotalAssets.Int64() != 2000000 {
+		t.Errorf("NewTotalAssets = %s, want 2000000", evt.NewTotalAssets)
+	}
+	if evt.FeeShares.Int64() != 100 {
+		t.Errorf("FeeShares = %s, want 100", evt.FeeShares)
 	}
 }
 
-func TestMorphoBlueEventData_ToJSON(t *testing.T) {
-	data := &MorphoBlueEventData{
-		EventType:      entity.MorphoEventAccrueInterest,
-		TxHash:         "0xabc",
-		MarketID:       [32]byte{0x01},
+func TestAccrueInterestEvent_ToJSON(t *testing.T) {
+	evt := &AccrueInterestEvent{
+		morphoBlueBase: morphoBlueBase{marketID: [32]byte{0x01}, txHash: "0xabc"},
 		PrevBorrowRate: testutils.BigFromStr(t, "1000"),
 		Interest:       testutils.BigFromStr(t, "500"),
 		FeeShares:      testutils.BigFromStr(t, "10"),
 	}
 
-	jsonData, err := data.ToJSON()
+	jsonData, err := evt.ToJSON()
 	if err != nil {
 		t.Fatalf("ToJSON() error: %v", err)
 	}
@@ -282,17 +296,16 @@ func TestMorphoBlueEventData_ToJSON(t *testing.T) {
 	}
 }
 
-func TestMetaMorphoEventData_ToJSON(t *testing.T) {
-	data := &MetaMorphoEventData{
-		EventType: entity.MorphoEventVaultDeposit,
-		TxHash:    "0xdef",
-		Sender:    common.HexToAddress("0x1111111111111111111111111111111111111111"),
-		Owner:     common.HexToAddress("0x2222222222222222222222222222222222222222"),
-		Assets:    testutils.BigFromStr(t, "1000"),
-		Shares:    testutils.BigFromStr(t, "900"),
+func TestVaultDepositEvent_ToJSON(t *testing.T) {
+	evt := &VaultDepositEvent{
+		metaMorphoBase: metaMorphoBase{txHash: "0xdef"},
+		Sender:         common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		Owner:          common.HexToAddress("0x2222222222222222222222222222222222222222"),
+		Assets:         testutils.BigFromStr(t, "1000"),
+		Shares:         testutils.BigFromStr(t, "900"),
 	}
 
-	jsonData, err := data.ToJSON()
+	jsonData, err := evt.ToJSON()
 	if err != nil {
 		t.Fatalf("ToJSON() error: %v", err)
 	}
@@ -336,34 +349,37 @@ func TestExtractMetaMorphoEvent_AccrueInterestV2(t *testing.T) {
 		t.Fatalf("ExtractMetaMorphoEvent() error: %v", err)
 	}
 
-	if result.EventType != entity.MorphoEventVaultAccrueInterest {
-		t.Errorf("EventType = %s, want VaultAccrueInterest", result.EventType)
+	evt, ok := result.(*VaultAccrueInterestEvent)
+	if !ok {
+		t.Fatalf("expected *VaultAccrueInterestEvent, got %T", result)
 	}
-	if result.PreviousTotalAssets.Int64() != 2900000 {
-		t.Errorf("PreviousTotalAssets = %s, want 2900000", result.PreviousTotalAssets)
+	if evt.Type() != entity.MorphoEventVaultAccrueInterest {
+		t.Errorf("Type() = %s, want VaultAccrueInterest", evt.Type())
 	}
-	if result.NewTotalAssets.Int64() != 3000000 {
-		t.Errorf("NewTotalAssets = %s, want 3000000", result.NewTotalAssets)
+	if evt.PreviousTotalAssets.Int64() != 2900000 {
+		t.Errorf("PreviousTotalAssets = %s, want 2900000", evt.PreviousTotalAssets)
 	}
-	if result.FeeShares.Int64() != 200 {
-		t.Errorf("FeeShares (performanceFeeShares) = %s, want 200", result.FeeShares)
+	if evt.NewTotalAssets.Int64() != 3000000 {
+		t.Errorf("NewTotalAssets = %s, want 3000000", evt.NewTotalAssets)
 	}
-	if result.ManagementFeeShares.Int64() != 150 {
-		t.Errorf("ManagementFeeShares = %s, want 150", result.ManagementFeeShares)
+	if evt.FeeShares.Int64() != 200 {
+		t.Errorf("FeeShares (performanceFeeShares) = %s, want 200", evt.FeeShares)
+	}
+	if evt.ManagementFeeShares.Int64() != 150 {
+		t.Errorf("ManagementFeeShares = %s, want 150", evt.ManagementFeeShares)
 	}
 }
 
-func TestMetaMorphoEventData_ToJSON_AccrueInterestV2(t *testing.T) {
-	data := &MetaMorphoEventData{
-		EventType:           entity.MorphoEventVaultAccrueInterest,
-		TxHash:              "0xv2test",
+func TestVaultAccrueInterestEvent_ToJSON_V2(t *testing.T) {
+	evt := &VaultAccrueInterestEvent{
+		metaMorphoBase:      metaMorphoBase{txHash: "0xv2test"},
 		NewTotalAssets:      testutils.BigFromStr(t, "3000000"),
 		FeeShares:           testutils.BigFromStr(t, "200"),
 		PreviousTotalAssets: testutils.BigFromStr(t, "2900000"),
 		ManagementFeeShares: testutils.BigFromStr(t, "150"),
 	}
 
-	jsonData, err := data.ToJSON()
+	jsonData, err := evt.ToJSON()
 	if err != nil {
 		t.Fatalf("ToJSON() error: %v", err)
 	}
@@ -376,15 +392,14 @@ func TestMetaMorphoEventData_ToJSON_AccrueInterestV2(t *testing.T) {
 	}
 }
 
-func TestMetaMorphoEventData_ToJSON_AccrueInterestV1(t *testing.T) {
-	data := &MetaMorphoEventData{
-		EventType:      entity.MorphoEventVaultAccrueInterest,
-		TxHash:         "0xv1test",
+func TestVaultAccrueInterestEvent_ToJSON_V1(t *testing.T) {
+	evt := &VaultAccrueInterestEvent{
+		metaMorphoBase: metaMorphoBase{txHash: "0xv1test"},
 		NewTotalAssets: testutils.BigFromStr(t, "2000000"),
 		FeeShares:      testutils.BigFromStr(t, "100"),
 	}
 
-	jsonData, err := data.ToJSON()
+	jsonData, err := evt.ToJSON()
 	if err != nil {
 		t.Fatalf("ToJSON() error: %v", err)
 	}
