@@ -8,7 +8,6 @@ import (
 
 func TestNewMorphoMarketPosition(t *testing.T) {
 	zero := big.NewInt(0)
-	txHash := []byte{0x01, 0x02}
 
 	tests := []struct {
 		name        string
@@ -21,8 +20,6 @@ func TestNewMorphoMarketPosition(t *testing.T) {
 		collateral  *big.Int
 		supAssets   *big.Int
 		borAssets   *big.Int
-		eventType   MorphoEventType
-		txHash      []byte
 		wantErr     bool
 		errContains string
 	}{
@@ -30,76 +27,54 @@ func TestNewMorphoMarketPosition(t *testing.T) {
 			name: "valid position", userID: 1, marketID: 1, block: 100, version: 0,
 			supShares: big.NewInt(1000), borShares: zero, collateral: big.NewInt(500),
 			supAssets: big.NewInt(1050), borAssets: zero,
-			eventType: MorphoEventSupply, txHash: txHash,
 		},
 		{
 			name: "zero user ID", userID: 0, marketID: 1, block: 100, version: 0,
 			supShares: zero, borShares: zero, collateral: zero,
 			supAssets: zero, borAssets: zero,
-			eventType: MorphoEventSupply, txHash: txHash,
 			wantErr: true, errContains: "userID must be positive",
 		},
 		{
 			name: "zero market ID", userID: 1, marketID: 0, block: 100, version: 0,
 			supShares: zero, borShares: zero, collateral: zero,
 			supAssets: zero, borAssets: zero,
-			eventType: MorphoEventSupply, txHash: txHash,
 			wantErr: true, errContains: "morphoMarketID must be positive",
 		},
 		{
 			name: "nil supply shares", userID: 1, marketID: 1, block: 100, version: 0,
 			supShares: nil, borShares: zero, collateral: zero,
 			supAssets: zero, borAssets: zero,
-			eventType: MorphoEventSupply, txHash: txHash,
 			wantErr: true, errContains: "supplyShares must not be nil",
 		},
 		{
 			name: "nil borrow shares", userID: 1, marketID: 1, block: 100, version: 0,
 			supShares: zero, borShares: nil, collateral: zero,
 			supAssets: zero, borAssets: zero,
-			eventType: MorphoEventSupply, txHash: txHash,
 			wantErr: true, errContains: "borrowShares must not be nil",
 		},
 		{
 			name: "nil collateral", userID: 1, marketID: 1, block: 100, version: 0,
 			supShares: zero, borShares: zero, collateral: nil,
 			supAssets: zero, borAssets: zero,
-			eventType: MorphoEventSupply, txHash: txHash,
 			wantErr: true, errContains: "collateral must not be nil",
 		},
 		{
 			name: "nil supply assets", userID: 1, marketID: 1, block: 100, version: 0,
 			supShares: zero, borShares: zero, collateral: zero,
 			supAssets: nil, borAssets: zero,
-			eventType: MorphoEventSupply, txHash: txHash,
 			wantErr: true, errContains: "supplyAssets must not be nil",
 		},
 		{
 			name: "nil borrow assets", userID: 1, marketID: 1, block: 100, version: 0,
 			supShares: zero, borShares: zero, collateral: zero,
 			supAssets: zero, borAssets: nil,
-			eventType: MorphoEventSupply, txHash: txHash,
 			wantErr: true, errContains: "borrowAssets must not be nil",
-		},
-		{
-			name: "invalid event type", userID: 1, marketID: 1, block: 100, version: 0,
-			supShares: zero, borShares: zero, collateral: zero,
-			supAssets: zero, borAssets: zero,
-			eventType: MorphoEventType("Invalid"), txHash: txHash,
-			wantErr: true, errContains: "invalid eventType",
-		},
-		{
-			name: "empty tx hash", userID: 1, marketID: 1, block: 100, version: 0,
-			supShares: zero, borShares: zero, collateral: zero,
-			supAssets: zero, borAssets: zero,
-			eventType: MorphoEventSupply, txHash: nil,
-			wantErr: true, errContains: "txHash must not be empty",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewMorphoMarketPosition(tt.userID, tt.marketID, tt.block, tt.version, tt.supShares, tt.borShares, tt.collateral, tt.supAssets, tt.borAssets, tt.eventType, tt.txHash)
+			got, err := NewMorphoMarketPosition(tt.userID, tt.marketID, tt.block, tt.version, tt.supShares, tt.borShares, tt.collateral, tt.supAssets, tt.borAssets)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")

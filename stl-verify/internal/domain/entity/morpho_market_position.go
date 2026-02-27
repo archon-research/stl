@@ -17,12 +17,10 @@ type MorphoMarketPosition struct {
 	Collateral     *big.Int
 	SupplyAssets   *big.Int // computed: supplyShares * totalSupplyAssets / totalSupplyShares
 	BorrowAssets   *big.Int // computed: round-up division
-	EventType      MorphoEventType
-	TxHash         []byte
 }
 
 // NewMorphoMarketPosition creates a new MorphoMarketPosition entity with validation.
-func NewMorphoMarketPosition(userID, morphoMarketID, blockNumber int64, blockVersion int, supplyShares, borrowShares, collateral, supplyAssets, borrowAssets *big.Int, eventType MorphoEventType, txHash []byte) (*MorphoMarketPosition, error) {
+func NewMorphoMarketPosition(userID, morphoMarketID, blockNumber int64, blockVersion int, supplyShares, borrowShares, collateral, supplyAssets, borrowAssets *big.Int) (*MorphoMarketPosition, error) {
 	p := &MorphoMarketPosition{
 		UserID:         userID,
 		MorphoMarketID: morphoMarketID,
@@ -33,8 +31,6 @@ func NewMorphoMarketPosition(userID, morphoMarketID, blockNumber int64, blockVer
 		Collateral:     collateral,
 		SupplyAssets:   supplyAssets,
 		BorrowAssets:   borrowAssets,
-		EventType:      eventType,
-		TxHash:         txHash,
 	}
 	if err := p.validate(); err != nil {
 		return nil, err
@@ -69,12 +65,6 @@ func (p *MorphoMarketPosition) validate() error {
 	}
 	if p.BorrowAssets == nil {
 		return fmt.Errorf("borrowAssets must not be nil")
-	}
-	if !p.EventType.IsValid() {
-		return fmt.Errorf("invalid eventType: %s", p.EventType)
-	}
-	if len(p.TxHash) == 0 {
-		return fmt.Errorf("txHash must not be empty")
 	}
 	return nil
 }

@@ -69,8 +69,6 @@ CREATE TABLE IF NOT EXISTS morpho_market_position
     collateral       NUMERIC     NOT NULL,
     supply_assets    NUMERIC     NOT NULL,
     borrow_assets    NUMERIC     NOT NULL,
-    event_type       TEXT        NOT NULL,
-    tx_hash          BYTEA       NOT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (user_id, morpho_market_id, block_number, block_version)
 ) WITH (
@@ -144,8 +142,6 @@ CREATE TABLE IF NOT EXISTS morpho_vault_position
     block_version   INT         NOT NULL DEFAULT 0,
     shares          NUMERIC     NOT NULL,
     assets          NUMERIC     NOT NULL,
-    event_type      TEXT        NOT NULL,
-    tx_hash         BYTEA       NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (user_id, morpho_vault_id, block_number, block_version)
 ) WITH (

@@ -187,12 +187,11 @@ func (r *MorphoRepository) SaveMarketPosition(ctx context.Context, tx pgx.Tx, po
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets, event_type, tx_hash)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		`INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (user_id, morpho_market_id, block_number, block_version) DO NOTHING`,
 		position.UserID, position.MorphoMarketID, position.BlockNumber, position.BlockVersion,
 		supplyShares, borrowShares, collateral, supplyAssets, borrowAssets,
-		string(position.EventType), position.TxHash,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho market position: %w", err)
@@ -319,11 +318,11 @@ func (r *MorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, pos
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, shares, assets, event_type, tx_hash)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, shares, assets)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (user_id, morpho_vault_id, block_number, block_version) DO NOTHING`,
 		position.UserID, position.MorphoVaultID, position.BlockNumber, position.BlockVersion,
-		shares, assets, string(position.EventType), position.TxHash,
+		shares, assets,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho vault position: %w", err)
