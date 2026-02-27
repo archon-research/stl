@@ -690,26 +690,53 @@ func (s *blockchainService) fetchVaultDetails(ctx context.Context, vaultAddress 
 		md.Version = entity.MorphoVaultV2
 	}
 
-	if results[0].Success && len(results[0].ReturnData) > 0 {
-		nameUnpacked, err := s.metaMorphoABI.Unpack("name", results[0].ReturnData)
-		if err == nil && len(nameUnpacked) > 0 {
-			md.Name, _ = nameUnpacked[0].(string)
-		}
+	if !results[0].Success || len(results[0].ReturnData) == 0 {
+		return nil, fmt.Errorf("name call failed for vault %s", vaultAddress.Hex())
 	}
+	nameUnpacked, err := s.metaMorphoABI.Unpack("name", results[0].ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking name for vault %s: %w", vaultAddress.Hex(), err)
+	}
+	if len(nameUnpacked) == 0 {
+		return nil, fmt.Errorf("empty name result for vault %s", vaultAddress.Hex())
+	}
+	name, ok := nameUnpacked[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("name type assertion failed for vault %s: got %T", vaultAddress.Hex(), nameUnpacked[0])
+	}
+	md.Name = name
 
-	if results[1].Success && len(results[1].ReturnData) > 0 {
-		symbolUnpacked, err := s.metaMorphoABI.Unpack("symbol", results[1].ReturnData)
-		if err == nil && len(symbolUnpacked) > 0 {
-			md.Symbol, _ = symbolUnpacked[0].(string)
-		}
+	if !results[1].Success || len(results[1].ReturnData) == 0 {
+		return nil, fmt.Errorf("symbol call failed for vault %s", vaultAddress.Hex())
 	}
+	symbolUnpacked, err := s.metaMorphoABI.Unpack("symbol", results[1].ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking symbol for vault %s: %w", vaultAddress.Hex(), err)
+	}
+	if len(symbolUnpacked) == 0 {
+		return nil, fmt.Errorf("empty symbol result for vault %s", vaultAddress.Hex())
+	}
+	symbol, ok := symbolUnpacked[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("symbol type assertion failed for vault %s: got %T", vaultAddress.Hex(), symbolUnpacked[0])
+	}
+	md.Symbol = symbol
 
-	if results[2].Success && len(results[2].ReturnData) > 0 {
-		decimalsUnpacked, err := s.metaMorphoABI.Unpack("decimals", results[2].ReturnData)
-		if err == nil && len(decimalsUnpacked) > 0 {
-			md.Decimals, _ = decimalsUnpacked[0].(uint8)
-		}
+	if !results[2].Success || len(results[2].ReturnData) == 0 {
+		return nil, fmt.Errorf("decimals call failed for vault %s", vaultAddress.Hex())
 	}
+	decimalsUnpacked, err := s.metaMorphoABI.Unpack("decimals", results[2].ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking decimals for vault %s: %w", vaultAddress.Hex(), err)
+	}
+	if len(decimalsUnpacked) == 0 {
+		return nil, fmt.Errorf("empty decimals result for vault %s", vaultAddress.Hex())
+	}
+	decimals, ok := decimalsUnpacked[0].(uint8)
+	if !ok {
+		return nil, fmt.Errorf("decimals type assertion failed for vault %s: got %T", vaultAddress.Hex(), decimalsUnpacked[0])
+	}
+	md.Decimals = decimals
 
 	return md, nil
 }

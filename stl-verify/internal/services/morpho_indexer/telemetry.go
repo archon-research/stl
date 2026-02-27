@@ -114,7 +114,7 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 }
 
 // RecordBlockProcessed records metrics for a processed block.
-func (t *Telemetry) RecordBlockProcessed(ctx context.Context, blockNumber int64, duration time.Duration, err error) {
+func (t *Telemetry) RecordBlockProcessed(ctx context.Context, duration time.Duration, err error) {
 	if t == nil {
 		return
 	}

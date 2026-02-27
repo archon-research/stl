@@ -187,7 +187,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 	start := time.Now()
 	defer func() {
 		duration := time.Since(start)
-		s.telemetry.RecordBlockProcessed(ctx, event.BlockNumber, duration, retErr)
+		s.telemetry.RecordBlockProcessed(ctx, duration, retErr)
 		if retErr != nil {
 			SetSpanError(span, retErr, "block processing failed")
 			s.telemetry.RecordError(ctx, "fetchAndProcessReceipts", retErr)

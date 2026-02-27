@@ -358,7 +358,7 @@ func TestSaveMarketState_Basic(t *testing.T) {
 	// Verify by querying directly
 	var totalSupplyAssets, totalBorrowAssets, fee string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT total_supply_assets, total_borrow_assets, fee FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2`,
+		`SELECT total_supply_assets, total_borrow_assets, fee FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2 AND block_version = 0`,
 		marketDBID, int64(19000000),
 	).Scan(&totalSupplyAssets, &totalBorrowAssets, &fee)
 	if err != nil {
@@ -413,7 +413,7 @@ func TestSaveMarketState_WithAccrueInterest(t *testing.T) {
 	// Verify AccrueInterest fields
 	var prevBorrowRate, interestAccrued, feeShares *string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT prev_borrow_rate, interest_accrued, fee_shares FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2`,
+		`SELECT prev_borrow_rate, interest_accrued, fee_shares FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2 AND block_version = 0`,
 		marketDBID, int64(19000100),
 	).Scan(&prevBorrowRate, &interestAccrued, &feeShares)
 	if err != nil {
@@ -537,7 +537,7 @@ func TestSaveMarketPosition_Basic(t *testing.T) {
 	var supplyShares, borrowShares, collateral, supplyAssets, borrowAssets string
 	err = fixture.pool.QueryRow(ctx,
 		`SELECT supply_shares, borrow_shares, collateral, supply_assets, borrow_assets
-		 FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3`,
+		 FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3 AND block_version = 0`,
 		fixture.userID, marketDBID, int64(19000300),
 	).Scan(&supplyShares, &borrowShares, &collateral, &supplyAssets, &borrowAssets)
 	if err != nil {
@@ -608,7 +608,7 @@ func TestSaveMarketPosition_DuplicateIgnored(t *testing.T) {
 	// Verify first write preserved (DO NOTHING semantics)
 	var supplyShares string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT supply_shares FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3`,
+		`SELECT supply_shares FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3 AND block_version = 0`,
 		fixture.userID, marketDBID, int64(19000400),
 	).Scan(&supplyShares)
 	if err != nil {
@@ -705,7 +705,7 @@ func TestSaveMarketPosition_LargeBigIntPrecision(t *testing.T) {
 	// Verify precision preserved
 	var supplyShares string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT supply_shares FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3`,
+		`SELECT supply_shares FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3 AND block_version = 0`,
 		fixture.userID, marketDBID, int64(19000600),
 	).Scan(&supplyShares)
 	if err != nil {
@@ -916,7 +916,7 @@ func TestSaveVaultState_Basic(t *testing.T) {
 	var totalAssets, totalShares string
 	var feeShares, newTotalAssets *string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT total_assets, total_shares, fee_shares, new_total_assets FROM morpho_vault_state WHERE morpho_vault_id = $1 AND block_number = $2`,
+		`SELECT total_assets, total_shares, fee_shares, new_total_assets FROM morpho_vault_state WHERE morpho_vault_id = $1 AND block_number = $2 AND block_version = 0`,
 		vaultDBID, int64(19100000),
 	).Scan(&totalAssets, &totalShares, &feeShares, &newTotalAssets)
 	if err != nil {
@@ -968,7 +968,7 @@ func TestSaveVaultState_WithAccrueInterest(t *testing.T) {
 
 	var feeShares, newTotalAssets *string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT fee_shares, new_total_assets FROM morpho_vault_state WHERE morpho_vault_id = $1 AND block_number = $2`,
+		`SELECT fee_shares, new_total_assets FROM morpho_vault_state WHERE morpho_vault_id = $1 AND block_number = $2 AND block_version = 0`,
 		vaultDBID, int64(19100100),
 	).Scan(&feeShares, &newTotalAssets)
 	if err != nil {
@@ -1017,7 +1017,7 @@ func TestSaveVaultPosition_Basic(t *testing.T) {
 	// Verify
 	var shares, assets string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT shares, assets FROM morpho_vault_position WHERE user_id = $1 AND morpho_vault_id = $2 AND block_number = $3`,
+		`SELECT shares, assets FROM morpho_vault_position WHERE user_id = $1 AND morpho_vault_id = $2 AND block_number = $3 AND block_version = 0`,
 		fixture.userID, vaultDBID, int64(19200000),
 	).Scan(&shares, &assets)
 	if err != nil {
@@ -1082,7 +1082,7 @@ func TestSaveVaultPosition_DuplicateIgnored(t *testing.T) {
 	// Verify first write preserved (DO NOTHING semantics)
 	var shares string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT shares FROM morpho_vault_position WHERE user_id = $1 AND morpho_vault_id = $2 AND block_number = $3`,
+		`SELECT shares FROM morpho_vault_position WHERE user_id = $1 AND morpho_vault_id = $2 AND block_number = $3 AND block_version = 0`,
 		fixture.userID, vaultDBID, int64(19200100),
 	).Scan(&shares)
 	if err != nil {
@@ -1445,7 +1445,7 @@ func TestConcurrentWorkers_AllTablesAppendOnly(t *testing.T) {
 	// The surviving row's value must be one of the workers' values (1000..1009)
 	var totalSupplyAssets string
 	err := fixture.pool.QueryRow(ctx,
-		`SELECT total_supply_assets FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2`,
+		`SELECT total_supply_assets FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2 AND block_version = 0`,
 		marketDBID, blockNumber,
 	).Scan(&totalSupplyAssets)
 	if err != nil {
