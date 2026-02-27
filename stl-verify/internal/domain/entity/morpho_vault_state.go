@@ -58,7 +58,7 @@ func (s *MorphoVaultState) validate() error {
 		return fmt.Errorf("blockVersion must be non-negative, got %d", s.BlockVersion)
 	}
 	if s.BlockTimestamp.IsZero() {
-		return fmt.Errorf("timestamp must not be zero")
+		return fmt.Errorf("blockTimestamp must not be zero")
 	}
 	if s.TotalAssets == nil {
 		return fmt.Errorf("totalAssets must not be nil")

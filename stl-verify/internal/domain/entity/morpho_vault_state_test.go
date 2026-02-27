@@ -44,7 +44,7 @@ func TestNewMorphoVaultState(t *testing.T) {
 		{
 			name: "zero timestamp", vaultID: 1, block: 100, version: 0, timestamp: time.Time{},
 			assets: zero, supply: zero,
-			wantErr: true, errContains: "timestamp must not be zero",
+			wantErr: true, errContains: "blockTimestamp must not be zero",
 		},
 		{
 			name: "nil assets", vaultID: 1, block: 100, version: 0, timestamp: ts,
