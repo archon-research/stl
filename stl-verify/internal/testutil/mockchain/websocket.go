@@ -47,7 +47,6 @@ type jsonRPCNotification struct {
 
 type wsHandler struct {
 	mu       sync.Mutex
-	writeMu  sync.Mutex
 	conn     *websocket.Conn
 	upgrader websocket.Upgrader
 	subID    string
@@ -78,9 +77,9 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.Unlock()
 
 	if oldConn != nil {
-		h.writeMu.Lock()
+		h.mu.Lock()
 		_ = oldConn.Close()
-		h.writeMu.Unlock()
+		h.mu.Unlock()
 	}
 
 	for {
@@ -118,9 +117,9 @@ func (h *wsHandler) handleSubscribe(conn *websocket.Conn, req jsonRPCRequest) er
 		return h.writeError(conn, req.ID, -32602, "unsupported subscription type")
 	}
 	resp := jsonRPCResponse{JsonRPC: "2.0", ID: req.ID, Result: h.subID}
-	h.writeMu.Lock()
+	h.mu.Lock()
 	err := conn.WriteJSON(resp)
-	h.writeMu.Unlock()
+	h.mu.Unlock()
 	return err
 }
 
@@ -130,21 +129,13 @@ func (h *wsHandler) writeError(conn *websocket.Conn, id json.RawMessage, code in
 		ID:      id,
 		Error:   jsonRPCErrorObj{Code: code, Message: msg},
 	}
-	h.writeMu.Lock()
+	h.mu.Lock()
 	err := conn.WriteJSON(errResp)
-	h.writeMu.Unlock()
+	h.mu.Unlock()
 	return err
 }
 
 func (h *wsHandler) Broadcast(header outbound.BlockHeader) {
-	h.mu.Lock()
-	conn := h.conn
-	h.mu.Unlock()
-
-	if conn == nil {
-		return
-	}
-
 	notification := jsonRPCNotification{
 		JsonRPC: "2.0",
 		Method:  "eth_subscription",
@@ -154,15 +145,17 @@ func (h *wsHandler) Broadcast(header outbound.BlockHeader) {
 		},
 	}
 
-	h.writeMu.Lock()
-	err := conn.WriteJSON(notification)
-	h.writeMu.Unlock()
-
-	if err != nil {
-		h.mu.Lock()
-		if h.conn == conn {
-			h.conn = nil
-		}
+	h.mu.Lock()
+	if h.conn == nil {
 		h.mu.Unlock()
+		return
 	}
+	if err := h.conn.WriteJSON(notification); err != nil {
+		conn := h.conn
+		h.conn = nil
+		h.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	h.mu.Unlock()
 }
