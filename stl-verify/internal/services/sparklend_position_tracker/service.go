@@ -437,7 +437,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 		//   (e.g., contract was upgraded/redeployed)
 		// - The pool was deployed before its first PoolDataProvider became active
 		//   (e.g., SparkLend pool deployed at block 16568452, but first PoolDataProvider
-		//   only active from block 17007586)
+		//   only active from block 17007086)
 		if errors.Is(err, ErrReserveNotFound) || errors.Is(err, ErrNoPoolDataProvider) {
 			s.logger.Warn("Reserve data unavailable at block, skipping snapshot",
 				"reserve", reserve.Hex(),
@@ -456,7 +456,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
 		}
 
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
