@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/big"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -136,6 +137,14 @@ func NewService(
 	}
 
 	return processor, nil
+}
+
+func normalizeProtocolType(protocolType string) string {
+	if strings.TrimSpace(protocolType) == "" {
+		return "lending"
+	}
+
+	return protocolType
 }
 
 func (s *Service) getOrCreateBlockchainService(chainID int64, protocolAddress common.Address) (*blockchainService, error) {
@@ -456,7 +465,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
 		}
 
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
