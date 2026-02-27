@@ -1366,17 +1366,16 @@ The **Morpho API** (`api.morpho.org/graphql`) provides comprehensive pre-indexed
 **What's Efficient to Index from Events:**
 - ✅ User positions (vault shares, market positions)
 - ✅ Transaction history (deposits, withdrawals, borrows, repays)
-- ✅ Configuration changes (fees, caps, queues, roles)
-- ✅ V1/V1.1 vault allocations (complete market breakdown)
-- ✅ V2 adapter allocations (adapter-level totals)
-- ✅ V1/V1.1 vault native APY (from share price changes)
+- ✅ V1/V1.1 vault native APY (from share price changes via AccrueInterest)
 - ⚠️ V2 vault native APY (vault-level only, not per-adapter)
+- Configuration changes (fees, caps, queues, roles) — events exist and are straightforward to index *(not yet implemented)*
 
-**What Requires Archive Node Snapshots:**
-- Market state at specific blocks (supply, borrow, utilization)
-- User positions at specific blocks (for health factor calculations)
-- V2 adapter composition breakdown (per-market within adapters)
-- Historical rates at specific moments
+**What Requires Archive Node State Calls:**
+- V1 vault allocation breakdown (which markets, how much) — see [Vault Allocation Tracking](#vault-allocation-tracking)
+- V2 adapter enumeration and per-adapter allocation amounts — see [Vault Allocation Tracking](#vault-allocation-tracking)
+- Vault config params (curator, owner, fee, timelock) — readable via `curator()`, `owner()`, `fee()`
+- Market supply caps (per vault) — readable via V1 `config(marketId)`, V2 `absoluteCap(id)`
+- Current borrow rate without waiting for AccrueInterest — requires IRM `borrowRateView()`
 
 **What Morpho API Provides (Easier Than DIY):**
 - ✅ Current native APY for all vaults and markets
@@ -1389,26 +1388,7 @@ The **Morpho API** (`api.morpho.org/graphql`) provides comprehensive pre-indexed
 - ❌ **User claimable rewards** - Merkl API + Morpho Rewards API required
 - ❌ **Reward token distributions** - No onchain record
 
-**Recommended Indexing Approach:**
-
-**For V1/V1.1 Vaults:**
-- **Primary**: Event-based indexing (sufficient for native APY and positions)
-- **Required for rewards**: See [Rewards section](#rewards-understanding-availability-and-calculation) - all rewards via external APIs
-- **Optional**: Morpho API for USD values
-
-**For V2 Vaults:**
-- **Primary**: Event-based indexing for positions, transactions, adapter-level allocations
-- **Required for rewards**: See [Rewards section](#rewards-understanding-availability-and-calculation) - all rewards via external APIs
-- **Secondary**: Morpho API for current native APY and USD values
-- **Optional**: Archive node snapshots if you need per-market adapter composition history
-
-**For Morpho Blue Markets:**
-- **Primary**: Event-based indexing for positions and transactions
-- **Required for rewards**: See [Rewards section](#rewards-understanding-availability-and-calculation) - all rewards via external APIs
-- **Secondary**: Morpho API for historical APY and rates
-- **Optional**: Archive node + IRM calls for real-time rate calculations
-
-**Key Insight:** Almost everything CAN be indexed historically (via events or archive nodes), but the Morpho API provides pre-calculated metrics that save significant development effort for native APY, rates, and USD valuations. **For complete guidance on rewards (APRs, user claimables, historical data), see the dedicated [Rewards section](#rewards-understanding-availability-and-calculation)**.
+**Key Insight:** For user position tracking, the event-based approach captures all required data. Archive node state calls are only needed for allocation breakdown queries (which markets a vault allocates to) and vault config. These are read-on-demand rather than indexed, as the `adapters[]` array and `withdrawQueue` are enumerable directly from contract state at any historical block.
 
 ---
 
@@ -1594,6 +1574,100 @@ For each event, the indexer should:
 - Calculate derived metrics where appropriate
 
 **Important:** See [Data Availability & Indexing Constraints](#data-availability--indexing-constraints) for understanding what can be derived from events vs. what requires alternative approaches (API, snapshots).
+
+### Vault Discovery from Events
+
+**The core challenge:** MetaMorpho vaults are permissionlessly deployed contracts. There is no registry of all vaults — any address that passes a specific on-chain check is a vault.
+
+**Approach: Opportunistic discovery from event logs**
+
+Rather than maintaining a curated list or polling a factory, vaults are discovered by observing events in every block. The event topic signatures for MetaMorpho `Deposit`, `Withdraw`, `Transfer`, and `AccrueInterest` are known in advance. Any contract emitting a log that matches one of these topic signatures is a candidate vault.
+
+**Version Detection via `AccrueInterest` Topic:**
+
+V1 and V2 emit `AccrueInterest` with different signatures (different fields), so they produce different topic[0] hashes:
+
+| Version | Event Signature | Use |
+|---------|----------------|-----|
+| V1/V1.1 | `AccrueInterest(uint256 newTotalAssets, uint256 feeShares)` | Registered as V1 topic |
+| V2 | `AccrueInterest(uint256 previousTotalAssets, uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares)` | Registered as separate V2 topic |
+
+Both topic hashes are registered in the extractor's signature map, so both are matched.
+
+**`getVaultMetadata` — On-chain vault validation:**
+
+When an unknown address emits a MetaMorpho-shaped event, before registering it as a vault, a single Multicall3 batch confirms it is a genuine MetaMorpho vault and reads all needed metadata:
+
+```
+calls batched to candidate address:
+  1. name()              → vault name string
+  2. symbol()            → vault symbol string
+  3. asset()             → underlying ERC-20 asset address
+  4. decimals()          → vault decimals (uint8)
+  5. MORPHO()            → must return 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb
+  6. skimRecipient()     → AllowFailure: true (only exists on V2)
+```
+
+The `MORPHO()` check is the discriminator: only genuine MetaMorpho vaults return the Morpho Blue singleton address. This correctly rejects:
+- Other ERC-4626 vaults (Yearn, Aave) that share the same `Deposit`/`Withdraw`/`Transfer` topic hashes
+- Arbitrary contracts that happen to emit matching events
+
+**Version detection:** If call 6 (`skimRecipient()`) succeeds → **V2**. If it reverts → **V1/V1.1**.
+
+**Discovery flow per block:**
+
+```
+for each log in block:
+  if topic[0] matches a Morpho Blue event AND log.address == MorphoBlueAddress:
+    → process as market event
+
+  else if topic[0] matches a MetaMorpho event:
+    if log.address is a known vault:
+      → process as vault event
+    else if log.address is cached as not-vault:
+      → skip
+    else (unknown address):
+      a. attempt ABI decode of the event
+      b. call getVaultMetadata (Multicall3 batch, 6 calls)
+      c. if MORPHO() returns wrong address → cache as not-vault, skip forever
+      d. if MORPHO() returns MorphoBlue address → register vault, process event
+```
+
+**V1 vaults wrapped by V2 are auto-discovered:** When a V2 vault allocates to a V1 vault via an adapter, the V1 vault emits a `Deposit` event with `owner = V2_vault_address`. The V1 vault's address appears in `log.Address`. If not yet known, `tryDiscoverVault` is called for it — it passes the `MORPHO()` check and is registered as a V1 vault.
+
+**Important: `not-vault` caching:** Addresses that are definitively rejected (event decode failure, or `MORPHO()` returning the wrong address) are cached in-memory as "not a vault" so discovery is never attempted again for them within the process lifetime. Transient failures (network errors, DB errors) are intentionally not cached, so discovery will be retried on the next event from that address.
+
+**Alternative approach — factory event tracking:**
+
+Instead of opportunistic discovery from vault events, vaults can alternatively be discovered by tracking `CreateMetaMorpho` events emitted by the MetaMorpho factory contract(s):
+
+```
+event CreateMetaMorpho(
+    address indexed metaMorpho,   // the new vault address
+    address indexed caller,
+    address initialOwner,
+    uint256 initialTimelock,
+    address indexed asset,
+    string name,
+    string symbol,
+    bytes32 salt
+)
+```
+
+This event provides the vault address and all metadata in a single log — no `getVaultMetadata` call needed. However, **some chains have multiple factory contracts** (e.g. a V1 factory and a V1.1 factory deployed separately), so all factory addresses for a given chain must be tracked. Any vault deployed outside a known factory (e.g. direct deployment or a V2 factory) would also be missed. The opportunistic event-based discovery approach avoids this fragility.
+
+**ABIs required:**
+
+| ABI | Purpose |
+|-----|---------|
+| MetaMorpho events (V1 signature) | Deposit, Withdraw, Transfer, AccrueInterest |
+| MetaMorpho AccrueInterest (V2 signature) | V2 uses a different topic hash; registered separately |
+| MetaMorpho read functions | name, symbol, asset, decimals, MORPHO, skimRecipient — used in `getVaultMetadata` |
+| Morpho Blue events | All market events (CreateMarket, Supply, Borrow, Repay, Liquidate, etc.) |
+| Morpho Blue read functions | market(), position(), idToMarketParams() — used for market state snapshots |
+| ERC-20 read functions | symbol, decimals — used for token metadata on discovered tokens |
+
+---
 
 ### Vault Share Transfer Tracking
 
@@ -1878,90 +1952,143 @@ query {
 
 ### Vault Allocation Tracking
 
-**Purpose:** Track how vault assets are allocated across markets/adapters. This is **essential for position backing analysis** - understanding what underlying markets and collateral back a supplier's vault position.
+> **Note:** This section describes the planned implementation. The ABIs and query logic are not yet implemented.
+
+**Purpose:** Determine what markets a vault's assets are currently deployed to. This is **essential for position backing analysis** — understanding what underlying markets and collateral back a supplier's vault position.
 
 For MetaMorpho suppliers, vault allocation directly determines position backing:
 - If a vault allocates 60% to Market A and 40% to Market B
 - A supplier's position is backed by the same 60%/40% split of those markets' borrower collateral
 
-This is much simpler than pooled lending protocols (Aave/Sparklend) where backing analysis requires examining all individual borrower collateral compositions.
+**Approach: Archive node state calls, not events**
 
-**V1/V1.1 Allocation Discovery:**
+Allocation breakdown is implemented via on-demand archive node state calls rather than event tracking. This is possible because:
+- V1 vaults expose `withdrawQueueLength()` + `withdrawQueue(i)` — a fully enumerable list of allocated markets
+- V2 vaults expose `adaptersLength()` + `adapters(i)` — a fully enumerable list of adapters (storage is `address[] public adapters`)
+- Morpho Blue exposes `position(marketId, vaultAddress)` — vault's supply shares in any market
 
-Track `ReallocateSupply` and `ReallocateWithdraw` events:
+All of these are `view` functions that work with archive nodes at any historical block number. No events need to be indexed for allocation queries.
+
+**ABIs needed (not yet added, planned):**
 
 ```typescript
-VaultMarketAllocation {
-  id: `${vault}-${marketId}`,
-  vault: hex,
-  marketId: hex,
-  currentAssets: bigint,           // Current allocation
-  currentShares: bigint,
-  supplyCap: bigint,               // Maximum allowed
-  totalSupplied: bigint,           // Lifetime supplied
-  totalWithdrawn: bigint,          // Lifetime withdrawn
-  lastUpdateBlock: bigint,
-  lastUpdateTimestamp: bigint,
+// V1 vault read functions
+withdrawQueueLength()              // → uint256
+withdrawQueue(uint256 index)       // → bytes32 marketId
+config(bytes32 marketId)           // → (uint256 cap, bool enabled, uint64 removableAt)
+curator()                          // → address
+owner()                            // → address
+fee()                              // → uint256
+balanceOf(address)                 // → uint256 (shares; used when querying adapter's position in a V1 vault)
+convertToAssets(uint256 shares)    // → uint256 (used when querying adapter's position in a V1 vault)
+
+// V2 vault read functions
+adaptersLength()                   // → uint256
+adapters(uint256 index)            // → address
+curator()                          // → address
+owner()                            // → address
+performanceFee()                   // → uint96
+managementFee()                    // → uint96
+
+// Adapter interface (both adapter types)
+realAssets()                       // → uint256 (total assets held by this adapter)
+morpho()                           // → address (present on MorphoMarketV1AdapterV2; used for type detection)
+morphoVaultV1()                    // → address (present on MorphoVaultV1Adapter; returns the wrapped V1 vault address)
+marketParamsListLength()           // → uint256 (MorphoMarketV1AdapterV2 only; number of markets in adapter)
+marketParamsList(uint256 index)    // → MarketParams tuple (MorphoMarketV1AdapterV2 only; needed to compute marketId)
+
+// IRM contract
+borrowRateView(marketParams, market) // → uint256 (instantaneous borrow rate; used for interest accrual)
+```
+
+**V1 vault allocation query (archive node, any block):**
+
+```typescript
+async function getV1VaultAllocations(vaultAddress: Address, blockNumber: bigint) {
+  // 1. Get withdraw queue
+  const length = await vault.withdrawQueueLength({ blockNumber });
+  const marketIds = await multicall(
+    Array.from({ length }, (_, i) => vault.withdrawQueue(i)),
+    { blockNumber }
+  );
+
+  // 2. For each market, fetch vault's supply shares + market state (with interest accrual)
+  return Promise.all(marketIds.map(async (marketId) => {
+    const [staleMarket, marketParams, position] = await multicall([
+      morphoBlue.market(marketId),
+      morphoBlue.idToMarketParams(marketId),
+      morphoBlue.position(marketId, vaultAddress),
+    ], { blockNumber });
+
+    // Accrue interest: call IRM to get current borrow rate, then apply Taylor compounding
+    // This gives the real-time market state rather than the stale on-chain snapshot
+    const borrowRate = await irm(marketParams.irm).borrowRateView(marketParams, staleMarket, { blockNumber });
+    const elapsed = blockTimestamp - staleMarket.lastUpdate;
+    const interest = staleMarket.totalBorrowAssets * taylorCompound(borrowRate, elapsed) / WAD;
+    const market = { ...staleMarket, totalSupplyAssets: staleMarket.totalSupplyAssets + interest };
+
+    // shares → assets (virtual assets = 1, virtual shares = 1e6)
+    const allocatedAssets =
+      (position.supplyShares * (market.totalSupplyAssets + 1n)) /
+      (market.totalSupplyShares + 1_000_000n);
+
+    return { marketId, allocatedAssets };
+  }));
 }
 ```
 
-**Update Logic:**
+**V2 vault allocation query (archive node, any block):**
+
+Adapter type detection uses two probe calls:
+- `morphoVaultV1()` succeeds → `MorphoVaultV1Adapter` (wraps a V1 vault)
+- `morpho()` succeeds → `MorphoMarketV1AdapterV2` (holds Morpho Blue supply shares directly)
 
 ```typescript
-// On ReallocateSupply
-allocation.currentAssets += event.suppliedAssets
-allocation.currentShares += event.suppliedShares
-allocation.totalSupplied += event.suppliedAssets
+async function getV2VaultAllocations(vaultAddress: Address, blockNumber: bigint) {
+  // 1. Get all adapters
+  const length = await vault.adaptersLength({ blockNumber });
+  const adapterAddresses = await multicall(
+    Array.from({ length }, (_, i) => vault.adapters(i)),
+    { blockNumber }
+  );
 
-// On ReallocateWithdraw
-allocation.currentAssets -= event.withdrawnAssets
-allocation.currentShares -= event.withdrawnShares
-allocation.totalWithdrawn += event.withdrawnAssets
-```
+  // 2. Also get vault's idle balance (assets held directly, not in any adapter)
+  const idleAssets = await token.balanceOf(vaultAddress, { blockNumber });
 
-**V2 Adapter Allocation Discovery:**
+  // 3. For each adapter: detect type and resolve allocations
+  const adapterResults = await Promise.all(adapterAddresses.map(async (adapterAddress) => {
 
-Track `Allocate` and `Deallocate` events:
-
-```typescript
-VaultAdapterAllocation {
-  id: `${vault}-${adapter}`,
-  vault: hex,
-  adapter: hex,
-  adapterType: string,             // "MorphoMarketV1AdapterV2", "MorphoVaultV1Adapter", etc.
-  currentAssets: bigint,
-  // For adapter with multiple IDs (markets/sub-vaults)
-  allocations: {
-    [id: string]: {
-      assets: bigint,
-      cap: bigint,
+    // Probe for vault adapter first
+    const v1VaultAddress = await tryCall(adapter(adapterAddress).morphoVaultV1, { blockNumber });
+    if (v1VaultAddress) {
+      // MorphoVaultV1Adapter — resolve the adapter's position in the V1 vault
+      const shares = await metamorpho(v1VaultAddress).balanceOf(adapterAddress, { blockNumber });
+      const allocatedAssets = await metamorpho(v1VaultAddress).convertToAssets(shares, { blockNumber });
+      // Returns the V1 vault as the allocation destination.
+      // To get per-market breakdown of that V1 vault, call getV1VaultAllocations(v1VaultAddress, blockNumber).
+      return [{ type: "Vault", address: v1VaultAddress, allocatedAssets }];
     }
-  },
-  lastUpdateBlock: bigint,
+
+    // Otherwise assume MorphoMarketV1AdapterV2 — enumerate its market list
+    const marketCount = await adapter(adapterAddress).marketParamsListLength({ blockNumber });
+    return Promise.all(
+      Array.from({ length: Number(marketCount) }, async (_, i) => {
+        const params = await adapter(adapterAddress).marketParamsList(i, { blockNumber });
+        // Market ID is keccak256 of the ABI-encoded params tuple
+        const marketId = keccak256(encodeAbiParameters([...], [params]));
+        const position = await morphoBlue.position(marketId, adapterAddress, { blockNumber });
+        const market = await morphoBlue.market(marketId, { blockNumber }); // + interest accrual as above
+        const allocatedAssets = toAssetsDown(position.supplyShares, market.totalSupplyAssets, market.totalSupplyShares);
+        return { type: "Market", marketId, allocatedAssets };
+      })
+    );
+  }));
+
+  return { idle: idleAssets, adapters: adapterResults };
 }
 ```
 
-**Adapter Type Detection:**
-
-Read adapter contract to determine type:
-
-```typescript
-// Check if it implements specific interfaces
-const supportsV1Adapter = await checkInterface(adapter, "MORPHO_VAULT_V1_ADAPTER");
-const supportsMarketAdapter = await checkInterface(adapter, "MORPHO_MARKET_V1_ADAPTER_V2");
-```
-
-**Reading Adapter Allocations:**
-
-For detailed composition, call adapter contracts:
-
-```typescript
-// V2 adapters report current value
-const realAssets = await adapter.realAssets();
-
-// Market adapters expose underlying positions
-const positions = await adapter.positions(); // market IDs and amounts
-```
+**Double-counting note (TVL aggregation only):** This is not relevant when querying a specific user's deposits — each deposit they made directly is a separate, correct position record. It only matters if aggregating TVL across all vaults: when a V2 vault allocates to a V1 vault, the V2 vault's address appears as a "user" in the V1 vault's `morpho_vault_position` table. Naively summing all position values across all vaults would count the same assets twice. To compute total TVL, only include vaults that are not themselves wrapped by another vault (i.e. exclude V1 vaults that have a V2 vault as a depositor).
 
 ### Market Discovery and Metadata
 
