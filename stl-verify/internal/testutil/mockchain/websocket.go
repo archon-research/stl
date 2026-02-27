@@ -3,6 +3,7 @@ package mockchain
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -70,6 +71,7 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slog.Error("mockchain: websocket upgrade failed", "error", err)
 		return
 	}
+	defer conn.Close()
 
 	h.mu.Lock()
 	oldConn := h.conn
@@ -120,7 +122,10 @@ func (h *wsHandler) handleSubscribe(conn *websocket.Conn, req jsonRPCRequest) er
 	h.mu.Lock()
 	err := conn.WriteJSON(resp)
 	h.mu.Unlock()
-	return err
+	if err != nil {
+		return fmt.Errorf("writing subscribe response: %w", err)
+	}
+	return nil
 }
 
 func (h *wsHandler) writeError(conn *websocket.Conn, id json.RawMessage, code int, msg string) error {
@@ -132,7 +137,10 @@ func (h *wsHandler) writeError(conn *websocket.Conn, id json.RawMessage, code in
 	h.mu.Lock()
 	err := conn.WriteJSON(errResp)
 	h.mu.Unlock()
-	return err
+	if err != nil {
+		return fmt.Errorf("writing error response: %w", err)
+	}
+	return nil
 }
 
 func (h *wsHandler) Broadcast(header outbound.BlockHeader) {

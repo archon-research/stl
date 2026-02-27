@@ -78,6 +78,11 @@ func (r *Replayer) emitLoop(stopCh <-chan struct{}, doneCh chan struct{}) {
 		case <-stopCh:
 			return
 		case <-ticker.C:
+			select {
+			case <-stopCh:
+				return
+			default:
+			}
 			r.emit()
 		}
 	}

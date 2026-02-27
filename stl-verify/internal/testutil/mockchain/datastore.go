@@ -34,7 +34,9 @@ func (ds *DataStore) Add(index int, dataType string, raw json.RawMessage) {
 	if ds.data[index] == nil {
 		ds.data[index] = make(map[string]json.RawMessage)
 	}
-	ds.data[index][dataType] = raw
+	cp := make(json.RawMessage, len(raw))
+	copy(cp, raw)
+	ds.data[index][dataType] = cp
 }
 
 // AddHeader appends a block header to the ordered list of headers.
@@ -56,7 +58,12 @@ func (ds *DataStore) Get(index int, dataType string) (json.RawMessage, bool) {
 		return nil, false
 	}
 	raw, ok := inner[dataType]
-	return raw, ok
+	if !ok {
+		return nil, false
+	}
+	cp := make(json.RawMessage, len(raw))
+	copy(cp, raw)
+	return cp, true
 }
 
 // Headers returns a copy of all block headers in insertion order.
