@@ -54,7 +54,7 @@ func TestNewMorphoMarketState(t *testing.T) {
 			name: "zero timestamp", marketID: 1, block: 100, version: 0, timestamp: time.Time{},
 			supAssets: zero, supShares: zero, borAssets: zero, borShares: zero,
 			lastUpdate: 0, fee: zero,
-			wantErr: true, errContains: "timestamp must not be zero",
+			wantErr: true, errContains: "blockTimestamp must not be zero",
 		},
 		{
 			name: "nil supply assets", marketID: 1, block: 100, version: 0, timestamp: ts,

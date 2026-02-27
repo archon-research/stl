@@ -12,7 +12,7 @@ type MorphoMarketState struct {
 	MorphoMarketID    int64
 	BlockNumber       int64
 	BlockVersion      int
-	Timestamp         time.Time // block timestamp
+	BlockTimestamp    time.Time
 	TotalSupplyAssets *big.Int
 	TotalSupplyShares *big.Int
 	TotalBorrowAssets *big.Int
@@ -31,7 +31,7 @@ func NewMorphoMarketState(morphoMarketID, blockNumber int64, blockVersion int, t
 		MorphoMarketID:    morphoMarketID,
 		BlockNumber:       blockNumber,
 		BlockVersion:      blockVersion,
-		Timestamp:         timestamp,
+		BlockTimestamp:    timestamp,
 		TotalSupplyAssets: totalSupplyAssets,
 		TotalSupplyShares: totalSupplyShares,
 		TotalBorrowAssets: totalBorrowAssets,
@@ -62,8 +62,8 @@ func (s *MorphoMarketState) validate() error {
 	if s.BlockVersion < 0 {
 		return fmt.Errorf("blockVersion must be non-negative, got %d", s.BlockVersion)
 	}
-	if s.Timestamp.IsZero() {
-		return fmt.Errorf("timestamp must not be zero")
+	if s.BlockTimestamp.IsZero() {
+		return fmt.Errorf("blockTimestamp must not be zero")
 	}
 	if s.TotalSupplyAssets == nil {
 		return fmt.Errorf("totalSupplyAssets must not be nil")
