@@ -8,23 +8,44 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
+const tokenSchemaName = "test_token"
+
+var tokenPool *pgxpool.Pool
+
+func init() {
+	registerTestFileSetup(tokenSchemaName, func() {
+		tokenPool = testutil.SetupSchemaForMain(sharedDSN, tokenSchemaName)
+	}, func() {
+		testutil.CleanupSchemaForMain(sharedDSN, tokenPool, tokenSchemaName)
+	})
+}
+
+// truncateToken clears the token table for test isolation.
+func truncateToken(t *testing.T, ctx context.Context) {
+	t.Helper()
+	_, err := tokenPool.Exec(ctx, `TRUNCATE token CASCADE`)
+	if err != nil {
+		t.Fatalf("failed to truncate token: %v", err)
+	}
+}
+
 func TestGetOrCreateToken_CreatesNewToken(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
+	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(pool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
 
 	addr := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 
-	tx, err := pool.Begin(ctx)
+	tx, err := tokenPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
@@ -44,7 +65,7 @@ func TestGetOrCreateToken_CreatesNewToken(t *testing.T) {
 
 	var symbol string
 	var decimals int
-	err = pool.QueryRow(ctx,
+	err = tokenPool.QueryRow(ctx,
 		`SELECT symbol, decimals FROM token WHERE chain_id = $1 AND address = $2`,
 		1, addr.Bytes(),
 	).Scan(&symbol, &decimals)
@@ -60,18 +81,17 @@ func TestGetOrCreateToken_CreatesNewToken(t *testing.T) {
 }
 
 func TestGetOrCreateToken_IdempotentReturnsSameID(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
+	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(pool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
 
 	addr := common.HexToAddress("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
 
-	tx1, err := pool.Begin(ctx)
+	tx1, err := tokenPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin tx1: %v", err)
 	}
@@ -83,7 +103,7 @@ func TestGetOrCreateToken_IdempotentReturnsSameID(t *testing.T) {
 		t.Fatalf("Commit tx1: %v", err)
 	}
 
-	tx2, err := pool.Begin(ctx)
+	tx2, err := tokenPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin tx2: %v", err)
 	}
@@ -101,18 +121,17 @@ func TestGetOrCreateToken_IdempotentReturnsSameID(t *testing.T) {
 }
 
 func TestGetOrCreateToken_EmptySymbolIsPersistedAsProvided(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
+	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(pool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
 
 	addr := common.HexToAddress("0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")
 
-	tx, err := pool.Begin(ctx)
+	tx, err := tokenPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
@@ -126,7 +145,7 @@ func TestGetOrCreateToken_EmptySymbolIsPersistedAsProvided(t *testing.T) {
 	}
 
 	var symbol string
-	err = pool.QueryRow(ctx,
+	err = tokenPool.QueryRow(ctx,
 		`SELECT symbol FROM token WHERE chain_id = $1 AND address = $2`,
 		1, addr.Bytes(),
 	).Scan(&symbol)
@@ -142,11 +161,10 @@ func TestGetOrCreateToken_EmptySymbolIsPersistedAsProvided(t *testing.T) {
 // is upserted with a later block first and an earlier block second, the stored
 // created_at_block is updated to the minimum (matching GetOrCreateUser behavior).
 func TestGetOrCreateToken_CreatedAtBlockUsesLeast(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
+	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(pool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -154,7 +172,7 @@ func TestGetOrCreateToken_CreatedAtBlockUsesLeast(t *testing.T) {
 	addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
 
 	// First call: block 500 (a later block, as if processed first out of order).
-	tx1, err := pool.Begin(ctx)
+	tx1, err := tokenPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin tx1: %v", err)
 	}
@@ -167,7 +185,7 @@ func TestGetOrCreateToken_CreatedAtBlockUsesLeast(t *testing.T) {
 	}
 
 	// Second call: block 100 (the true first seen block, processed out of order).
-	tx2, err := pool.Begin(ctx)
+	tx2, err := tokenPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin tx2: %v", err)
 	}
@@ -180,7 +198,7 @@ func TestGetOrCreateToken_CreatedAtBlockUsesLeast(t *testing.T) {
 	}
 
 	var createdAtBlock int64
-	err = pool.QueryRow(ctx,
+	err = tokenPool.QueryRow(ctx,
 		`SELECT created_at_block FROM token WHERE chain_id = $1 AND address = $2`,
 		1, addr.Bytes(),
 	).Scan(&createdAtBlock)
@@ -196,11 +214,10 @@ func TestGetOrCreateToken_CreatedAtBlockUsesLeast(t *testing.T) {
 // both racing to insert the same new token. Both must succeed without error and
 // return the same token id.
 func TestGetOrCreateToken_ConcurrentRaceReturnsSameID(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
+	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(pool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -220,7 +237,7 @@ func TestGetOrCreateToken_ConcurrentRaceReturnsSameID(t *testing.T) {
 			defer wg.Done()
 			<-start
 
-			tx, err := pool.Begin(ctx)
+			tx, err := tokenPool.Begin(ctx)
 			if err != nil {
 				errs[idx] = err
 				return

@@ -16,11 +16,52 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
+const morphoSchemaName = "test_morpho"
+
+var morphoPool *pgxpool.Pool
+
+func init() {
+	registerTestFileSetup(morphoSchemaName, func() {
+		morphoPool = testutil.SetupSchemaForMain(sharedDSN, morphoSchemaName)
+	}, func() {
+		testutil.CleanupSchemaForMain(sharedDSN, morphoPool, morphoSchemaName)
+	})
+}
+
+// truncateMorpho clears morpho-related tables for test isolation.
+func truncateMorpho(t *testing.T, ctx context.Context) {
+	t.Helper()
+	tables := []string{
+		`morpho_market_state`,
+		`morpho_market_position`,
+		`morpho_vault_state`,
+		`morpho_vault_position`,
+		`morpho_market`,
+		`morpho_vault`,
+	}
+	for _, table := range tables {
+		if _, err := morphoPool.Exec(ctx, `DELETE FROM `+table); err != nil {
+			t.Fatalf("failed to truncate %s: %v", table, err)
+		}
+	}
+	// protocol is referenced by morpho_market; CASCADE handles any remaining refs.
+	if _, err := morphoPool.Exec(ctx, `TRUNCATE protocol CASCADE`); err != nil {
+		t.Fatalf("failed to truncate protocol: %v", err)
+	}
+	// "user" is referenced by morpho_market_position/morpho_vault_position; CASCADE handles them.
+	if _, err := morphoPool.Exec(ctx, `TRUNCATE "user" CASCADE`); err != nil {
+		t.Fatalf("failed to truncate user: %v", err)
+	}
+	// token has FK references from many tables; use CASCADE to clear dependents.
+	if _, err := morphoPool.Exec(ctx, `TRUNCATE token CASCADE`); err != nil {
+		t.Fatalf("failed to truncate token: %v", err)
+	}
+}
+
 // morphoTestFixture holds test dependencies for morpho repository tests.
 type morphoTestFixture struct {
-	repo    *MorphoRepository
-	pool    *pgxpool.Pool
-	cleanup func()
+	repo *MorphoRepository
+	pool *pgxpool.Pool
 	// Pre-created IDs for foreign key references
 	protocolID  int64
 	loanTokenID int64
@@ -28,22 +69,21 @@ type morphoTestFixture struct {
 	userID      int64
 }
 
-// setupMorphoTest creates a TimescaleDB container and returns a connected MorphoRepository.
+// setupMorphoTest returns a connected MorphoRepository using the schema-specific pool.
 func setupMorphoTest(t *testing.T) *morphoTestFixture {
 	t.Helper()
 	ctx := context.Background()
 
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	truncateMorpho(t, ctx)
 
-	repo, err := NewMorphoRepository(pool, nil)
+	repo, err := NewMorphoRepository(morphoPool, nil)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
 
 	fixture := &morphoTestFixture{
-		repo:    repo,
-		pool:    pool,
-		cleanup: cleanup,
+		repo: repo,
+		pool: morphoPool,
 	}
 
 	fixture.createTestFixtures(t, ctx)
@@ -162,7 +202,6 @@ func (f *morphoTestFixture) createTestVault(t *testing.T, ctx context.Context, a
 
 func TestGetOrCreateMarket_CreateNew(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	marketID := common.BytesToHash([]byte("test-market-id-1234567890abcdef"))
@@ -218,7 +257,6 @@ func TestGetOrCreateMarket_CreateNew(t *testing.T) {
 
 func TestGetOrCreateMarket_Idempotent(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	marketID := common.BytesToHash([]byte("idempotent-market-test-12345678"))
@@ -270,7 +308,6 @@ func TestGetOrCreateMarket_Idempotent(t *testing.T) {
 
 func TestGetMarketByMarketID_NotFound(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
@@ -287,7 +324,6 @@ func TestGetMarketByMarketID_NotFound(t *testing.T) {
 
 func TestSaveMarketState_Basic(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	marketDBID := fixture.createTestMarket(t, ctx, []byte("state-test-market-id-12345678ab"))
@@ -338,7 +374,6 @@ func TestSaveMarketState_Basic(t *testing.T) {
 
 func TestSaveMarketState_WithAccrueInterest(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	marketDBID := fixture.createTestMarket(t, ctx, []byte("accrue-interest-test-market-1234"))
@@ -397,7 +432,6 @@ func TestSaveMarketState_WithAccrueInterest(t *testing.T) {
 
 func TestSaveMarketState_DuplicateIgnored(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	marketDBID := fixture.createTestMarket(t, ctx, []byte("upsert-state-test-market-123456"))
@@ -468,7 +502,6 @@ func TestSaveMarketState_DuplicateIgnored(t *testing.T) {
 
 func TestSaveMarketPosition_Basic(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	marketDBID := fixture.createTestMarket(t, ctx, []byte("position-test-market-id-1234567"))
@@ -520,7 +553,6 @@ func TestSaveMarketPosition_Basic(t *testing.T) {
 
 func TestSaveMarketPosition_DuplicateIgnored(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	marketDBID := fixture.createTestMarket(t, ctx, []byte("pos-upsert-test-market-12345678"))
@@ -589,7 +621,6 @@ func TestSaveMarketPosition_DuplicateIgnored(t *testing.T) {
 
 func TestSaveMarketPosition_Rollback(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	marketDBID := fixture.createTestMarket(t, ctx, []byte("pos-rollback-test-market-1234567"))
@@ -637,7 +668,6 @@ func TestSaveMarketPosition_Rollback(t *testing.T) {
 
 func TestSaveMarketPosition_LargeBigIntPrecision(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	marketDBID := fixture.createTestMarket(t, ctx, []byte("large-int-test-market-1234567890"))
@@ -690,7 +720,6 @@ func TestSaveMarketPosition_LargeBigIntPrecision(t *testing.T) {
 
 func TestGetOrCreateVault_CreateNew(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	vaultAddr := []byte("vault-addr-123456789")
@@ -748,7 +777,6 @@ func TestGetOrCreateVault_CreateNew(t *testing.T) {
 
 func TestGetOrCreateVault_Idempotent(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	vaultAddr := []byte("vault-idemp-12345678")
@@ -795,7 +823,6 @@ func TestGetOrCreateVault_Idempotent(t *testing.T) {
 
 func TestGetVaultByAddress_NotFound(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	nonExistentAddr := common.HexToAddress("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
@@ -811,7 +838,6 @@ func TestGetVaultByAddress_NotFound(t *testing.T) {
 
 func TestGetAllVaults_Empty(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
@@ -826,7 +852,6 @@ func TestGetAllVaults_Empty(t *testing.T) {
 
 func TestGetAllVaults_MultipleVaults(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
@@ -860,7 +885,6 @@ func TestGetAllVaults_MultipleVaults(t *testing.T) {
 
 func TestSaveVaultState_Basic(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	vaultDBID := fixture.createTestVault(t, ctx, []byte("vstate-test-12345678"))
@@ -914,7 +938,6 @@ func TestSaveVaultState_Basic(t *testing.T) {
 
 func TestSaveVaultState_WithAccrueInterest(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	vaultDBID := fixture.createTestVault(t, ctx, []byte("vs-accrue-test-12345"))
@@ -963,7 +986,6 @@ func TestSaveVaultState_WithAccrueInterest(t *testing.T) {
 
 func TestSaveVaultPosition_Basic(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	vaultDBID := fixture.createTestVault(t, ctx, []byte("vpos-test-1234567890"))
@@ -1011,7 +1033,6 @@ func TestSaveVaultPosition_Basic(t *testing.T) {
 
 func TestSaveVaultPosition_DuplicateIgnored(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 	vaultDBID := fixture.createTestVault(t, ctx, []byte("vpos-upsert-12345678"))
@@ -1076,7 +1097,6 @@ func TestSaveVaultPosition_DuplicateIgnored(t *testing.T) {
 
 func TestTransactionAcrossMultipleTables(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
@@ -1183,7 +1203,6 @@ func TestTransactionAcrossMultipleTables(t *testing.T) {
 
 func TestTransactionRollbackAcrossMultipleTables(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
@@ -1253,7 +1272,6 @@ func TestTransactionRollbackAcrossMultipleTables(t *testing.T) {
 // all workers get the same ID back.
 func TestConcurrentWorkers_AllTablesAppendOnly(t *testing.T) {
 	fixture := setupMorphoTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 

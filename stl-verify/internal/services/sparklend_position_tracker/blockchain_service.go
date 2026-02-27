@@ -58,6 +58,7 @@ var ErrNoPoolDataProvider = errors.New("no PoolDataProvider available for block"
 
 type blockchainService struct {
 	mu                                         sync.RWMutex
+	chainID                                    int64
 	ethClient                                  *ethclient.Client
 	multicallClient                            outbound.Multicaller
 	erc20ABI                                   *abi.ABI
@@ -104,6 +105,7 @@ type reserveDataFromProvider struct {
 }
 
 func newBlockchainService(
+	chainID int64,
 	ethClient *ethclient.Client,
 	multicallClient outbound.Multicaller,
 	erc20ABI *abi.ABI,
@@ -114,6 +116,7 @@ func newBlockchainService(
 	logger *slog.Logger,
 ) (*blockchainService, error) {
 	service := &blockchainService{
+		chainID:               chainID,
 		ethClient:             ethClient,
 		multicallClient:       multicallClient,
 		erc20ABI:              erc20ABI,
@@ -135,9 +138,9 @@ func newBlockchainService(
 // getPoolDataProviderForBlock returns the correct PoolDataProvider address for the given block.
 // Returns an error if no PoolDataProvider was active at that block.
 func (s *blockchainService) getPoolDataProviderForBlock(blockNumber uint64) (common.Address, error) {
-	provider, ok := blockchain.GetPoolDataProviderForBlock(s.poolAddress, blockNumber)
+	provider, ok := blockchain.GetPoolDataProviderForBlock(s.chainID, s.poolAddress, blockNumber)
 	if !ok {
-		return common.Address{}, fmt.Errorf("%w: pool=%s block=%d", ErrNoPoolDataProvider, s.poolAddress.Hex(), blockNumber)
+		return common.Address{}, fmt.Errorf("%w: chain=%d pool=%s block=%d", ErrNoPoolDataProvider, s.chainID, s.poolAddress.Hex(), blockNumber)
 	}
 	return provider, nil
 }
@@ -216,7 +219,19 @@ func (s *blockchainService) getUserReservesData(
 
 	unpacked, err := s.getUserReservesABI.Unpack("getUserReservesData", result)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unpack getUserReservesData result: %w", err)
+		// Fallback: some chains (e.g. Avalanche C-Chain) encode booleans as uint256,
+		// which the strict Go ABI decoder rejects. Try raw decoding.
+		reserves, rawErr := decodeUserReservesRaw(result)
+		if rawErr != nil {
+			return nil, fmt.Errorf(
+				"failed to decode getUserReservesData: %w",
+				errors.Join(err, fmt.Errorf("raw fallback decode failed: %w", rawErr)),
+			)
+		}
+		s.logger.Debug("used raw decoder for getUserReservesData",
+			"user", user.Hex(),
+			"reserves", len(reserves))
+		return reserves, nil
 	}
 	if len(unpacked) == 0 {
 		return []UserReserveData{}, nil
@@ -539,7 +554,7 @@ func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvi
 	}
 }
 
-// parseReserveDataAaveV2 parses Aave V2 reserve data (10 fields)..
+// parseReserveDataAaveV2 parses Aave V2 reserve data (10 fields).
 func parseReserveDataAaveV2(unpacked []any, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
 	if len(unpacked) < 10 {
 		return nil, fmt.Errorf("expected 10 values from getReserveData (Aave V2), got %d", len(unpacked))
