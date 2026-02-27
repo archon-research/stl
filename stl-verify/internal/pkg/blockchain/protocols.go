@@ -30,7 +30,15 @@ const (
 	ProtocolVersionSparkLend ProtocolVersion = "sparklend"
 )
 
-// ContractWithBlock represents a contract address with its deployment block.
+// ProtocolKey uniquely identifies a protocol by chain and pool address.
+// Required because the same pool address can exist on multiple chains (e.g. Aave V3
+// uses CREATE2, so 0x794a... is the same on Avalanche, Arbitrum, Polygon, etc.).
+type ProtocolKey struct {
+	ChainID     int64
+	PoolAddress common.Address
+}
+
+// ContractWithBlock represents a contract address with its activation block.
 type ContractWithBlock struct {
 	Address       common.Address
 	ActiveAtBlock uint64
@@ -48,15 +56,19 @@ type ProtocolConfig struct {
 	PoolAddressesProvider ContractWithBlock
 	ProtocolVersion       ProtocolVersion
 	// PoolDataProviderHistory contains all historical PoolDataProvider addresses.
-	// Sorted by ActiveAtBlock ascending. Use GetPoolDataProviderForBlock to get the correct one.
+	// Sorted by ActiveAtBlock ascending. Use GetForBlock to get the correct one.
 	PoolDataProviderHistory PoolDataProviderHistory
 }
 
-var protocolRegistry = map[common.Address]ProtocolConfig{
+var protocolRegistry = map[ProtocolKey]ProtocolConfig{
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Ethereum (chainID 1)
+	// ═══════════════════════════════════════════════════════════════════════════
+
 	// Aave V2 - Pool created at block 11362579
 	// PoolDataProvider has been stable since deployment
 	// Source: https://github.com/aave-dao/aave-address-book/blob/main/src/AaveV2Ethereum.sol
-	common.HexToAddress("0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9"): {
+	{1, common.HexToAddress("0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9")}: {
 		Name:                  "Aave V2",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9"), ActiveAtBlock: 11362579},
 		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x00e50FAB64eBB37b87df06Aa46b8B35d5f1A4e1A"), ActiveAtBlock: 16384806},
@@ -70,7 +82,7 @@ var protocolRegistry = map[common.Address]ProtocolConfig{
 	// Aave V3 - Pool created at block 16291127
 	// PoolDataProvider has been updated multiple times via AddressSet events
 	// Source: https://github.com/aave-dao/aave-address-book/blob/main/src/AaveV3Ethereum.sol
-	common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"): {
+	{1, common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")}: {
 		Name:                  "Aave V3",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"), ActiveAtBlock: 16291127},
@@ -89,7 +101,7 @@ var protocolRegistry = map[common.Address]ProtocolConfig{
 	// SparkLend - Pool created at block 16776401
 	// PoolDataProvider has been stable since deployment
 	// Source: https://github.com/marsfoundation/spark-address-registry
-	common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987"): {
+	{1, common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")}: {
 		Name:                  "Sparklend",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987"), ActiveAtBlock: 16776401},
@@ -104,7 +116,7 @@ var protocolRegistry = map[common.Address]ProtocolConfig{
 	// Aave V3 Lido - Pool created at block 20262414
 	// PoolDataProvider has been updated multiple times via AddressSet events
 	// Source: https://github.com/aave-dao/aave-address-book/blob/main/src/AaveV3EthereumLido.sol
-	common.HexToAddress("0x4e033931ad43597d96d6bcc25c280717730b58b1"): {
+	{1, common.HexToAddress("0x4e033931ad43597d96d6bcc25c280717730b58b1")}: {
 		Name:                  "Aave V3 Lido",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x4e033931ad43597d96d6bcc25c280717730b58b1"), ActiveAtBlock: 20262414},
@@ -122,7 +134,7 @@ var protocolRegistry = map[common.Address]ProtocolConfig{
 	// Aave V3 RWA - Pool created at block 23125535
 	// PoolDataProvider has been stable since deployment
 	// Source: https://github.com/aave-dao/aave-address-book (check for RWA instance)
-	common.HexToAddress("0xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8"): {
+	{1, common.HexToAddress("0xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8")}: {
 		Name:                  "Aave V3 RWA",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8"), ActiveAtBlock: 23125535},
@@ -133,20 +145,39 @@ var protocolRegistry = map[common.Address]ProtocolConfig{
 			{Address: common.HexToAddress("0x53519c32f73fE1797d10210c4950fFeBa3b21504"), ActiveAtBlock: 23125535},
 		},
 	},
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Avalanche C-Chain (chainID 43114)
+	// ═══════════════════════════════════════════════════════════════════════════
+
+	// Aave V3 Avalanche - Pool deployed via CREATE2 (same address across chains)
+	// Source: https://github.com/bgd-labs/aave-address-book (AaveV3Avalanche)
+	{43114, common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD")}: {
+		Name:                  "Aave V3 Avalanche",
+		ProtocolType:          "lending",
+		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD"), ActiveAtBlock: 11970506},
+		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x3518E8927A7827CDdAf841872453003CA95906A3"), ActiveAtBlock: 11970506},
+		PoolAddressesProvider: ContractWithBlock{Address: common.HexToAddress("0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb"), ActiveAtBlock: 11970454},
+		ProtocolVersion:       ProtocolVersionAaveV3,
+		PoolDataProviderHistory: PoolDataProviderHistory{
+			{Address: common.HexToAddress("0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654"), ActiveAtBlock: 11970506},
+			{Address: common.HexToAddress("0x243Aa95cAC2a25651eda86e80bEe66114413c43b"), ActiveAtBlock: 40714595},
+		},
+	},
 }
 
 func init() {
 	// Sort all PoolDataProviderHistory slices by ActiveAtBlock ascending.
 	// This ensures GetForBlock works correctly regardless of declaration order.
-	for addr, config := range protocolRegistry {
+	for key, config := range protocolRegistry {
 		sort.Slice(config.PoolDataProviderHistory, func(i, j int) bool {
 			return config.PoolDataProviderHistory[i].ActiveAtBlock < config.PoolDataProviderHistory[j].ActiveAtBlock
 		})
-		protocolRegistry[addr] = config
+		protocolRegistry[key] = config
 	}
 }
 
-// GetPoolDataProviderForBlock returns the PoolDataProvider address that was active at the given block.
+// GetForBlock returns the PoolDataProvider address that was active at the given block.
 // Returns the zero address if no PoolDataProvider was active at that block.
 func (h PoolDataProviderHistory) GetForBlock(blockNumber uint64) common.Address {
 	if len(h) == 0 {
@@ -173,29 +204,40 @@ func (h PoolDataProviderHistory) GetLatest() common.Address {
 	return h[len(h)-1].Address
 }
 
-func GetProtocolConfig(protocolAddress common.Address) (ProtocolConfig, bool) {
-	config, exists := protocolRegistry[protocolAddress]
+func GetProtocolConfig(chainID int64, protocolAddress common.Address) (ProtocolConfig, bool) {
+	config, exists := protocolRegistry[ProtocolKey{chainID, protocolAddress}]
 	return config, exists
 }
 
-// GetProtocolRegistry returns a copy of all known protocol configs keyed by pool address.
-func GetProtocolRegistry() map[common.Address]ProtocolConfig {
-	registry := make(map[common.Address]ProtocolConfig, len(protocolRegistry))
-	for address, config := range protocolRegistry {
-		registry[address] = config
+// GetProtocolRegistry returns a copy of all known protocol configs.
+func GetProtocolRegistry() map[ProtocolKey]ProtocolConfig {
+	registry := make(map[ProtocolKey]ProtocolConfig, len(protocolRegistry))
+	for key, config := range protocolRegistry {
+		registry[key] = config
 	}
 	return registry
 }
 
-func IsKnownProtocol(protocolAddress common.Address) bool {
-	_, exists := protocolRegistry[protocolAddress]
+// GetProtocolsForChain returns all protocol configs for a given chain.
+func GetProtocolsForChain(chainID int64) map[common.Address]ProtocolConfig {
+	result := make(map[common.Address]ProtocolConfig)
+	for key, config := range protocolRegistry {
+		if key.ChainID == chainID {
+			result[key.PoolAddress] = config
+		}
+	}
+	return result
+}
+
+func IsKnownProtocol(chainID int64, protocolAddress common.Address) bool {
+	_, exists := protocolRegistry[ProtocolKey{chainID, protocolAddress}]
 	return exists
 }
 
-// GetPoolDataProviderForBlock is a convenience function that returns the correct
-// PoolDataProvider for a given protocol at a specific block.
-func GetPoolDataProviderForBlock(protocolAddress common.Address, blockNumber uint64) (common.Address, bool) {
-	config, exists := protocolRegistry[protocolAddress]
+// GetPoolDataProviderForBlock returns the correct PoolDataProvider for a given
+// protocol at a specific block.
+func GetPoolDataProviderForBlock(chainID int64, protocolAddress common.Address, blockNumber uint64) (common.Address, bool) {
+	config, exists := protocolRegistry[ProtocolKey{chainID, protocolAddress}]
 	if !exists {
 		return common.Address{}, false
 	}
