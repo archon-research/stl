@@ -214,6 +214,9 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating Redis cache: %w", err)
 	}
 	defer cache.Close()
+	if err := cache.Ping(ctx); err != nil {
+		return fmt.Errorf("connecting to Redis at %s: %w", cfg.redisAddr, err)
+	}
 	logger.Info("Redis connected", "addr", cfg.redisAddr)
 
 	// Ethereum

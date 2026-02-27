@@ -197,6 +197,9 @@ func run(ctx context.Context, args []string) error {
 			logger.Warn("failed to close BlockCache", "error", err)
 		}
 	}()
+	if err := blockCache.Ping(ctx); err != nil {
+		return fmt.Errorf("connecting to Redis at %s: %w", cfg.redisAddr, err)
+	}
 	logger.Info("BlockCache connected", "addr", cfg.redisAddr)
 
 	s3Reader := s3adapter.NewReader(awsCfg, logger)
