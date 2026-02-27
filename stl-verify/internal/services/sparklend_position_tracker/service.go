@@ -59,8 +59,8 @@ type CollateralData struct {
 }
 
 type Service struct {
-	config       shared.SQSConsumerConfig // may be nil in backfill mode (ProcessReceipts only)
-	consumer     outbound.SQSConsumer     // nil in backfill mode; Start() guards against use
+	config       shared.SQSConsumerConfig
+	consumer     outbound.SQSConsumer
 	cacheReader  outbound.BlockCacheReader
 	ethClient    *ethclient.Client
 	txManager    outbound.TxManager

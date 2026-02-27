@@ -57,6 +57,7 @@ type cliConfig struct {
 	redisAddr   string
 	dbURL       string
 	alchemyURL  string
+	s3Bucket    string
 	maxMessages int
 	waitTime    int
 	chainID     int64
@@ -115,6 +116,11 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
 	}
 	cfg.chainID = chainID
+
+	cfg.s3Bucket = env.Get("S3_BUCKET", "")
+	if cfg.s3Bucket == "" {
+		return cliConfig{}, fmt.Errorf("S3_BUCKET environment variable is required")
+	}
 
 	return cfg, nil
 }
@@ -189,7 +195,7 @@ func run(ctx context.Context, args []string) error {
 	logger.Info("BlockCache connected", "addr", cfg.redisAddr)
 
 	s3Reader := s3adapter.NewReader(awsCfg, logger)
-	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, env.Get("S3_BUCKET", ""), logger)
+	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.s3Bucket, logger)
 	if err != nil {
 		return fmt.Errorf("creating cache reader: %w", err)
 	}

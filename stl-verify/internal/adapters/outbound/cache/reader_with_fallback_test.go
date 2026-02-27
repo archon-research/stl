@@ -82,7 +82,7 @@ func (m *mockS3Reader) ListPrefix(_ context.Context, _, _ string) ([]string, err
 
 // --- helpers ---
 
-func newTestReader(t *testing.T, redis *mockCacheReader, s3 *mockS3Reader) *ReaderWithFallback {
+func newTestReader(t *testing.T, redis *mockCacheReader, s3 *mockS3Reader) *BlockCacheReaderWithFallback {
 	t.Helper()
 	r, err := NewReaderWithFallback(redis, s3, "test-bucket", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
@@ -135,7 +135,7 @@ type getCase struct {
 	wantS3Call bool
 }
 
-func runGetCases(t *testing.T, cases []getCase, invoke func(r *ReaderWithFallback, redis *mockCacheReader, s3 *mockS3Reader) (json.RawMessage, error)) {
+func runGetCases(t *testing.T, cases []getCase, invoke func(r *BlockCacheReaderWithFallback, redis *mockCacheReader, s3 *mockS3Reader) (json.RawMessage, error)) {
 	t.Helper()
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -214,25 +214,25 @@ func sharedCases() []getCase {
 }
 
 func TestGetBlock(t *testing.T) {
-	runGetCases(t, sharedCases(), func(r *ReaderWithFallback, _ *mockCacheReader, _ *mockS3Reader) (json.RawMessage, error) {
+	runGetCases(t, sharedCases(), func(r *BlockCacheReaderWithFallback, _ *mockCacheReader, _ *mockS3Reader) (json.RawMessage, error) {
 		return r.GetBlock(context.Background(), 1, 21000000, 0)
 	})
 }
 
 func TestGetReceipts(t *testing.T) {
-	runGetCases(t, sharedCases(), func(r *ReaderWithFallback, _ *mockCacheReader, _ *mockS3Reader) (json.RawMessage, error) {
+	runGetCases(t, sharedCases(), func(r *BlockCacheReaderWithFallback, _ *mockCacheReader, _ *mockS3Reader) (json.RawMessage, error) {
 		return r.GetReceipts(context.Background(), 1, 21000000, 0)
 	})
 }
 
 func TestGetTraces(t *testing.T) {
-	runGetCases(t, sharedCases(), func(r *ReaderWithFallback, _ *mockCacheReader, _ *mockS3Reader) (json.RawMessage, error) {
+	runGetCases(t, sharedCases(), func(r *BlockCacheReaderWithFallback, _ *mockCacheReader, _ *mockS3Reader) (json.RawMessage, error) {
 		return r.GetTraces(context.Background(), 1, 21000000, 0)
 	})
 }
 
 func TestGetBlobs(t *testing.T) {
-	runGetCases(t, sharedCases(), func(r *ReaderWithFallback, _ *mockCacheReader, _ *mockS3Reader) (json.RawMessage, error) {
+	runGetCases(t, sharedCases(), func(r *BlockCacheReaderWithFallback, _ *mockCacheReader, _ *mockS3Reader) (json.RawMessage, error) {
 		return r.GetBlobs(context.Background(), 1, 21000000, 0)
 	})
 }
