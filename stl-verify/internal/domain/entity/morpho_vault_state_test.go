@@ -4,47 +4,55 @@ import (
 	"math/big"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewMorphoVaultState(t *testing.T) {
 	zero := big.NewInt(0)
+	ts := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	tests := []struct {
 		name        string
 		vaultID     int64
 		block       int64
 		version     int
+		timestamp   time.Time
 		assets      *big.Int
 		supply      *big.Int
 		wantErr     bool
 		errContains string
 	}{
 		{
-			name: "valid state", vaultID: 1, block: 100, version: 0,
+			name: "valid state", vaultID: 1, block: 100, version: 0, timestamp: ts,
 			assets: big.NewInt(1000000), supply: big.NewInt(1000000),
 		},
 		{
-			name: "zero vault ID", vaultID: 0, block: 100, version: 0,
+			name: "zero vault ID", vaultID: 0, block: 100, version: 0, timestamp: ts,
 			assets: zero, supply: zero,
 			wantErr: true, errContains: "morphoVaultID must be positive",
 		},
 		{
-			name: "zero block", vaultID: 1, block: 0, version: 0,
+			name: "zero block", vaultID: 1, block: 0, version: 0, timestamp: ts,
 			assets: zero, supply: zero,
 			wantErr: true, errContains: "blockNumber must be positive",
 		},
 		{
-			name: "negative version", vaultID: 1, block: 100, version: -1,
+			name: "negative version", vaultID: 1, block: 100, version: -1, timestamp: ts,
 			assets: zero, supply: zero,
 			wantErr: true, errContains: "blockVersion must be non-negative",
 		},
 		{
-			name: "nil assets", vaultID: 1, block: 100, version: 0,
+			name: "zero timestamp", vaultID: 1, block: 100, version: 0, timestamp: time.Time{},
+			assets: zero, supply: zero,
+			wantErr: true, errContains: "timestamp must not be zero",
+		},
+		{
+			name: "nil assets", vaultID: 1, block: 100, version: 0, timestamp: ts,
 			assets: nil, supply: zero,
 			wantErr: true, errContains: "totalAssets must not be nil",
 		},
 		{
-			name: "nil supply", vaultID: 1, block: 100, version: 0,
+			name: "nil supply", vaultID: 1, block: 100, version: 0, timestamp: ts,
 			assets: zero, supply: nil,
 			wantErr: true, errContains: "totalShares must not be nil",
 		},
@@ -52,7 +60,7 @@ func TestNewMorphoVaultState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewMorphoVaultState(tt.vaultID, tt.block, tt.version, tt.assets, tt.supply)
+			got, err := NewMorphoVaultState(tt.vaultID, tt.block, tt.version, tt.timestamp, tt.assets, tt.supply)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -73,7 +81,8 @@ func TestNewMorphoVaultState(t *testing.T) {
 }
 
 func TestMorphoVaultState_WithAccrueInterest(t *testing.T) {
-	state, err := NewMorphoVaultState(1, 100, 0, big.NewInt(1000), big.NewInt(1000))
+	ts := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	state, err := NewMorphoVaultState(1, 100, 0, ts, big.NewInt(1000), big.NewInt(1000))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -3,6 +3,7 @@ package entity
 import (
 	"fmt"
 	"math/big"
+	"time"
 )
 
 // MorphoMarketState represents a snapshot of a Morpho Blue market's state at a specific block.
@@ -11,6 +12,7 @@ type MorphoMarketState struct {
 	MorphoMarketID    int64
 	BlockNumber       int64
 	BlockVersion      int
+	Timestamp         time.Time // block timestamp
 	TotalSupplyAssets *big.Int
 	TotalSupplyShares *big.Int
 	TotalBorrowAssets *big.Int
@@ -24,11 +26,12 @@ type MorphoMarketState struct {
 }
 
 // NewMorphoMarketState creates a new MorphoMarketState entity with validation.
-func NewMorphoMarketState(morphoMarketID, blockNumber int64, blockVersion int, totalSupplyAssets, totalSupplyShares, totalBorrowAssets, totalBorrowShares *big.Int, lastUpdate int64, fee *big.Int) (*MorphoMarketState, error) {
+func NewMorphoMarketState(morphoMarketID, blockNumber int64, blockVersion int, timestamp time.Time, totalSupplyAssets, totalSupplyShares, totalBorrowAssets, totalBorrowShares *big.Int, lastUpdate int64, fee *big.Int) (*MorphoMarketState, error) {
 	s := &MorphoMarketState{
 		MorphoMarketID:    morphoMarketID,
 		BlockNumber:       blockNumber,
 		BlockVersion:      blockVersion,
+		Timestamp:         timestamp,
 		TotalSupplyAssets: totalSupplyAssets,
 		TotalSupplyShares: totalSupplyShares,
 		TotalBorrowAssets: totalBorrowAssets,
@@ -58,6 +61,9 @@ func (s *MorphoMarketState) validate() error {
 	}
 	if s.BlockVersion < 0 {
 		return fmt.Errorf("blockVersion must be non-negative, got %d", s.BlockVersion)
+	}
+	if s.Timestamp.IsZero() {
+		return fmt.Errorf("timestamp must not be zero")
 	}
 	if s.TotalSupplyAssets == nil {
 		return fmt.Errorf("totalSupplyAssets must not be nil")

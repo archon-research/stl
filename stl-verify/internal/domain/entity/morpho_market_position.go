@@ -3,6 +3,7 @@ package entity
 import (
 	"fmt"
 	"math/big"
+	"time"
 )
 
 // MorphoMarketPosition represents a user's position snapshot in a Morpho Blue market at a specific block.
@@ -12,6 +13,7 @@ type MorphoMarketPosition struct {
 	MorphoMarketID int64
 	BlockNumber    int64
 	BlockVersion   int
+	Timestamp      time.Time // block timestamp
 	SupplyShares   *big.Int
 	BorrowShares   *big.Int
 	Collateral     *big.Int
@@ -20,12 +22,13 @@ type MorphoMarketPosition struct {
 }
 
 // NewMorphoMarketPosition creates a new MorphoMarketPosition entity with validation.
-func NewMorphoMarketPosition(userID, morphoMarketID, blockNumber int64, blockVersion int, supplyShares, borrowShares, collateral, supplyAssets, borrowAssets *big.Int) (*MorphoMarketPosition, error) {
+func NewMorphoMarketPosition(userID, morphoMarketID, blockNumber int64, blockVersion int, timestamp time.Time, supplyShares, borrowShares, collateral, supplyAssets, borrowAssets *big.Int) (*MorphoMarketPosition, error) {
 	p := &MorphoMarketPosition{
 		UserID:         userID,
 		MorphoMarketID: morphoMarketID,
 		BlockNumber:    blockNumber,
 		BlockVersion:   blockVersion,
+		Timestamp:      timestamp,
 		SupplyShares:   supplyShares,
 		BorrowShares:   borrowShares,
 		Collateral:     collateral,
@@ -50,6 +53,9 @@ func (p *MorphoMarketPosition) validate() error {
 	}
 	if p.BlockVersion < 0 {
 		return fmt.Errorf("blockVersion must be non-negative, got %d", p.BlockVersion)
+	}
+	if p.Timestamp.IsZero() {
+		return fmt.Errorf("timestamp must not be zero")
 	}
 	if p.SupplyShares == nil {
 		return fmt.Errorf("supplyShares must not be nil")

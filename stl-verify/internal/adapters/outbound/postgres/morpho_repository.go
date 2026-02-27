@@ -150,10 +150,10 @@ func (r *MorphoRepository) SaveMarketState(ctx context.Context, tx pgx.Tx, state
 	// snapshot (eth_call reads end-of-block state), so the first insert captures
 	// the correct state. Reorgs use a different block_version, so they insert cleanly.
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_market_state (morpho_market_id, block_number, block_version, total_supply_assets, total_supply_shares, total_borrow_assets, total_borrow_shares, last_update, fee, prev_borrow_rate, interest_accrued, fee_shares)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		 ON CONFLICT (morpho_market_id, block_number, block_version) DO NOTHING`,
-		state.MorphoMarketID, state.BlockNumber, state.BlockVersion,
+		`INSERT INTO morpho_market_state (morpho_market_id, block_number, block_version, timestamp, total_supply_assets, total_supply_shares, total_borrow_assets, total_borrow_shares, last_update, fee, prev_borrow_rate, interest_accrued, fee_shares)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		 ON CONFLICT (morpho_market_id, block_number, block_version, timestamp) DO NOTHING`,
+		state.MorphoMarketID, state.BlockNumber, state.BlockVersion, state.Timestamp,
 		totalSupplyAssets, totalSupplyShares, totalBorrowAssets, totalBorrowShares,
 		state.LastUpdate, fee, prevBorrowRate, interestAccrued, feeShares,
 	)
@@ -187,10 +187,10 @@ func (r *MorphoRepository) SaveMarketPosition(ctx context.Context, tx pgx.Tx, po
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		 ON CONFLICT (user_id, morpho_market_id, block_number, block_version) DO NOTHING`,
-		position.UserID, position.MorphoMarketID, position.BlockNumber, position.BlockVersion,
+		`INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		 ON CONFLICT (user_id, morpho_market_id, block_number, block_version, timestamp) DO NOTHING`,
+		position.UserID, position.MorphoMarketID, position.BlockNumber, position.BlockVersion, position.Timestamp,
 		supplyShares, borrowShares, collateral, supplyAssets, borrowAssets,
 	)
 	if err != nil {
@@ -294,10 +294,10 @@ func (r *MorphoRepository) SaveVaultState(ctx context.Context, tx pgx.Tx, state 
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_vault_state (morpho_vault_id, block_number, block_version, total_assets, total_shares, fee_shares, new_total_assets, previous_total_assets, management_fee_shares)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		 ON CONFLICT (morpho_vault_id, block_number, block_version) DO NOTHING`,
-		state.MorphoVaultID, state.BlockNumber, state.BlockVersion,
+		`INSERT INTO morpho_vault_state (morpho_vault_id, block_number, block_version, timestamp, total_assets, total_shares, fee_shares, new_total_assets, previous_total_assets, management_fee_shares)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		 ON CONFLICT (morpho_vault_id, block_number, block_version, timestamp) DO NOTHING`,
+		state.MorphoVaultID, state.BlockNumber, state.BlockVersion, state.Timestamp,
 		totalAssets, totalShares, feeShares, newTotalAssets, previousTotalAssets, managementFeeShares,
 	)
 	if err != nil {
@@ -318,10 +318,10 @@ func (r *MorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, pos
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, shares, assets)
-		 VALUES ($1, $2, $3, $4, $5, $6)
-		 ON CONFLICT (user_id, morpho_vault_id, block_number, block_version) DO NOTHING`,
-		position.UserID, position.MorphoVaultID, position.BlockNumber, position.BlockVersion,
+		`INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, timestamp, shares, assets)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 ON CONFLICT (user_id, morpho_vault_id, block_number, block_version, timestamp) DO NOTHING`,
+		position.UserID, position.MorphoVaultID, position.BlockNumber, position.BlockVersion, position.Timestamp,
 		shares, assets,
 	)
 	if err != nil {
