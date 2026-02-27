@@ -358,7 +358,7 @@ func TestSaveMarketState_Basic(t *testing.T) {
 	// Verify by querying directly
 	var totalSupplyAssets, totalBorrowAssets, fee string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT total_supply_assets, total_borrow_assets, fee FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2`,
+		`SELECT total_supply_assets, total_borrow_assets, fee FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2 AND block_version = 0`,
 		marketDBID, int64(19000000),
 	).Scan(&totalSupplyAssets, &totalBorrowAssets, &fee)
 	if err != nil {
@@ -413,7 +413,7 @@ func TestSaveMarketState_WithAccrueInterest(t *testing.T) {
 	// Verify AccrueInterest fields
 	var prevBorrowRate, interestAccrued, feeShares *string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT prev_borrow_rate, interest_accrued, fee_shares FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2`,
+		`SELECT prev_borrow_rate, interest_accrued, fee_shares FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2 AND block_version = 0`,
 		marketDBID, int64(19000100),
 	).Scan(&prevBorrowRate, &interestAccrued, &feeShares)
 	if err != nil {
@@ -516,8 +516,6 @@ func TestSaveMarketPosition_Basic(t *testing.T) {
 		Collateral:     big.NewInt(1000000000000000000),
 		SupplyAssets:   big.NewInt(500000),
 		BorrowAssets:   big.NewInt(0),
-		EventType:      entity.MorphoEventSupply,
-		TxHash:         []byte{0xab, 0xcd, 0xef},
 	}
 
 	tx, err := fixture.pool.Begin(ctx)
@@ -536,13 +534,12 @@ func TestSaveMarketPosition_Basic(t *testing.T) {
 	}
 
 	// Verify
-	var supplyShares, borrowShares, collateral, supplyAssets, borrowAssets, eventType string
-	var txHash []byte
+	var supplyShares, borrowShares, collateral, supplyAssets, borrowAssets string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT supply_shares, borrow_shares, collateral, supply_assets, borrow_assets, event_type, tx_hash
-		 FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3`,
+		`SELECT supply_shares, borrow_shares, collateral, supply_assets, borrow_assets
+		 FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3 AND block_version = 0`,
 		fixture.userID, marketDBID, int64(19000300),
-	).Scan(&supplyShares, &borrowShares, &collateral, &supplyAssets, &borrowAssets, &eventType, &txHash)
+	).Scan(&supplyShares, &borrowShares, &collateral, &supplyAssets, &borrowAssets)
 	if err != nil {
 		t.Fatalf("failed to query position: %v", err)
 	}
@@ -551,9 +548,6 @@ func TestSaveMarketPosition_Basic(t *testing.T) {
 	}
 	if borrowShares != "0" {
 		t.Errorf("borrowShares mismatch: got %s", borrowShares)
-	}
-	if eventType != "Supply" {
-		t.Errorf("eventType mismatch: got %s, want Supply", eventType)
 	}
 }
 
@@ -574,8 +568,6 @@ func TestSaveMarketPosition_DuplicateIgnored(t *testing.T) {
 		Collateral:     big.NewInt(0),
 		SupplyAssets:   big.NewInt(100),
 		BorrowAssets:   big.NewInt(0),
-		EventType:      entity.MorphoEventSupply,
-		TxHash:         []byte{0x01},
 	}
 
 	tx1, err := fixture.pool.Begin(ctx)
@@ -600,8 +592,6 @@ func TestSaveMarketPosition_DuplicateIgnored(t *testing.T) {
 		Collateral:     big.NewInt(200),
 		SupplyAssets:   big.NewInt(999),
 		BorrowAssets:   big.NewInt(50),
-		EventType:      entity.MorphoEventWithdraw,
-		TxHash:         []byte{0x02},
 	}
 
 	tx2, err := fixture.pool.Begin(ctx)
@@ -616,19 +606,16 @@ func TestSaveMarketPosition_DuplicateIgnored(t *testing.T) {
 	}
 
 	// Verify first write preserved (DO NOTHING semantics)
-	var supplyShares, eventType string
+	var supplyShares string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT supply_shares, event_type FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3`,
+		`SELECT supply_shares FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3 AND block_version = 0`,
 		fixture.userID, marketDBID, int64(19000400),
-	).Scan(&supplyShares, &eventType)
+	).Scan(&supplyShares)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
 	if supplyShares != "100" {
 		t.Errorf("expected first write preserved (supply_shares 100), got %s", supplyShares)
-	}
-	if eventType != "Supply" {
-		t.Errorf("expected first write preserved (event_type Supply), got %s", eventType)
 	}
 }
 
@@ -648,8 +635,6 @@ func TestSaveMarketPosition_Rollback(t *testing.T) {
 		Collateral:     big.NewInt(0),
 		SupplyAssets:   big.NewInt(100),
 		BorrowAssets:   big.NewInt(0),
-		EventType:      entity.MorphoEventSupply,
-		TxHash:         []byte{0xaa},
 	}
 
 	tx, err := fixture.pool.Begin(ctx)
@@ -700,8 +685,6 @@ func TestSaveMarketPosition_LargeBigIntPrecision(t *testing.T) {
 		Collateral:     big.NewInt(0),
 		SupplyAssets:   maxUint256,
 		BorrowAssets:   big.NewInt(0),
-		EventType:      entity.MorphoEventSupply,
-		TxHash:         []byte{0xff},
 	}
 
 	tx, err := fixture.pool.Begin(ctx)
@@ -722,7 +705,7 @@ func TestSaveMarketPosition_LargeBigIntPrecision(t *testing.T) {
 	// Verify precision preserved
 	var supplyShares string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT supply_shares FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3`,
+		`SELECT supply_shares FROM morpho_market_position WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3 AND block_version = 0`,
 		fixture.userID, marketDBID, int64(19000600),
 	).Scan(&supplyShares)
 	if err != nil {
@@ -933,7 +916,7 @@ func TestSaveVaultState_Basic(t *testing.T) {
 	var totalAssets, totalShares string
 	var feeShares, newTotalAssets *string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT total_assets, total_shares, fee_shares, new_total_assets FROM morpho_vault_state WHERE morpho_vault_id = $1 AND block_number = $2`,
+		`SELECT total_assets, total_shares, fee_shares, new_total_assets FROM morpho_vault_state WHERE morpho_vault_id = $1 AND block_number = $2 AND block_version = 0`,
 		vaultDBID, int64(19100000),
 	).Scan(&totalAssets, &totalShares, &feeShares, &newTotalAssets)
 	if err != nil {
@@ -985,7 +968,7 @@ func TestSaveVaultState_WithAccrueInterest(t *testing.T) {
 
 	var feeShares, newTotalAssets *string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT fee_shares, new_total_assets FROM morpho_vault_state WHERE morpho_vault_id = $1 AND block_number = $2`,
+		`SELECT fee_shares, new_total_assets FROM morpho_vault_state WHERE morpho_vault_id = $1 AND block_number = $2 AND block_version = 0`,
 		vaultDBID, int64(19100100),
 	).Scan(&feeShares, &newTotalAssets)
 	if err != nil {
@@ -1014,8 +997,6 @@ func TestSaveVaultPosition_Basic(t *testing.T) {
 		BlockVersion:  0,
 		Shares:        big.NewInt(1000000000000000000),
 		Assets:        big.NewInt(1000000),
-		EventType:     entity.MorphoEventVaultDeposit,
-		TxHash:        []byte{0xde, 0xad},
 	}
 
 	tx, err := fixture.pool.Begin(ctx)
@@ -1034,11 +1015,11 @@ func TestSaveVaultPosition_Basic(t *testing.T) {
 	}
 
 	// Verify
-	var shares, assets, eventType string
+	var shares, assets string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT shares, assets, event_type FROM morpho_vault_position WHERE user_id = $1 AND morpho_vault_id = $2 AND block_number = $3`,
+		`SELECT shares, assets FROM morpho_vault_position WHERE user_id = $1 AND morpho_vault_id = $2 AND block_number = $3 AND block_version = 0`,
 		fixture.userID, vaultDBID, int64(19200000),
-	).Scan(&shares, &assets, &eventType)
+	).Scan(&shares, &assets)
 	if err != nil {
 		t.Fatalf("failed to query vault position: %v", err)
 	}
@@ -1047,9 +1028,6 @@ func TestSaveVaultPosition_Basic(t *testing.T) {
 	}
 	if assets != "1000000" {
 		t.Errorf("assets mismatch: got %s", assets)
-	}
-	if eventType != "VaultDeposit" {
-		t.Errorf("eventType mismatch: got %s, want VaultDeposit", eventType)
 	}
 }
 
@@ -1067,8 +1045,6 @@ func TestSaveVaultPosition_DuplicateIgnored(t *testing.T) {
 		BlockVersion:  0,
 		Shares:        big.NewInt(100),
 		Assets:        big.NewInt(100),
-		EventType:     entity.MorphoEventVaultDeposit,
-		TxHash:        []byte{0x01},
 	}
 
 	tx1, err := fixture.pool.Begin(ctx)
@@ -1090,8 +1066,6 @@ func TestSaveVaultPosition_DuplicateIgnored(t *testing.T) {
 		BlockVersion:  0,
 		Shares:        big.NewInt(999),
 		Assets:        big.NewInt(999),
-		EventType:     entity.MorphoEventVaultWithdraw,
-		TxHash:        []byte{0x02},
 	}
 
 	tx2, err := fixture.pool.Begin(ctx)
@@ -1106,19 +1080,16 @@ func TestSaveVaultPosition_DuplicateIgnored(t *testing.T) {
 	}
 
 	// Verify first write preserved (DO NOTHING semantics)
-	var shares, eventType string
+	var shares string
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT shares, event_type FROM morpho_vault_position WHERE user_id = $1 AND morpho_vault_id = $2 AND block_number = $3`,
+		`SELECT shares FROM morpho_vault_position WHERE user_id = $1 AND morpho_vault_id = $2 AND block_number = $3 AND block_version = 0`,
 		fixture.userID, vaultDBID, int64(19200100),
-	).Scan(&shares, &eventType)
+	).Scan(&shares)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
 	if shares != "100" {
 		t.Errorf("expected first write preserved (shares 100), got %s", shares)
-	}
-	if eventType != "VaultDeposit" {
-		t.Errorf("expected first write preserved (event_type VaultDeposit), got %s", eventType)
 	}
 }
 
@@ -1166,8 +1137,6 @@ func TestTransactionAcrossMultipleTables(t *testing.T) {
 		Collateral:     big.NewInt(0),
 		SupplyAssets:   big.NewInt(100),
 		BorrowAssets:   big.NewInt(0),
-		EventType:      entity.MorphoEventSupply,
-		TxHash:         []byte{0xcc},
 	}
 	if err := fixture.repo.SaveMarketPosition(ctx, tx, position); err != nil {
 		t.Fatalf("SaveMarketPosition in tx failed: %v", err)
@@ -1193,8 +1162,6 @@ func TestTransactionAcrossMultipleTables(t *testing.T) {
 		BlockVersion:  0,
 		Shares:        big.NewInt(500),
 		Assets:        big.NewInt(500),
-		EventType:     entity.MorphoEventVaultDeposit,
-		TxHash:        []byte{0xdd},
 	}
 	if err := fixture.repo.SaveVaultPosition(ctx, tx, vaultPosition); err != nil {
 		t.Fatalf("SaveVaultPosition in tx failed: %v", err)
@@ -1272,8 +1239,6 @@ func TestTransactionRollbackAcrossMultipleTables(t *testing.T) {
 		Collateral:     big.NewInt(0),
 		SupplyAssets:   big.NewInt(100),
 		BorrowAssets:   big.NewInt(0),
-		EventType:      entity.MorphoEventSupply,
-		TxHash:         []byte{0xee},
 	}
 	if err := fixture.repo.SaveMarketPosition(ctx, tx, position); err != nil {
 		t.Fatalf("SaveMarketPosition failed: %v", err)
@@ -1404,8 +1369,6 @@ func TestConcurrentWorkers_AllTablesAppendOnly(t *testing.T) {
 				Collateral:     big.NewInt(0),
 				SupplyAssets:   val,
 				BorrowAssets:   big.NewInt(0),
-				EventType:      entity.MorphoEventSupply,
-				TxHash:         []byte{byte(idx)},
 			}); err != nil {
 				results[idx].err = fmt.Errorf("SaveMarketPosition: %w", err)
 				return
@@ -1431,8 +1394,6 @@ func TestConcurrentWorkers_AllTablesAppendOnly(t *testing.T) {
 				BlockVersion:  blockVersion,
 				Shares:        val,
 				Assets:        val,
-				EventType:     entity.MorphoEventVaultDeposit,
-				TxHash:        []byte{byte(idx)},
 			}); err != nil {
 				results[idx].err = fmt.Errorf("SaveVaultPosition: %w", err)
 				return
@@ -1484,7 +1445,7 @@ func TestConcurrentWorkers_AllTablesAppendOnly(t *testing.T) {
 	// The surviving row's value must be one of the workers' values (1000..1009)
 	var totalSupplyAssets string
 	err := fixture.pool.QueryRow(ctx,
-		`SELECT total_supply_assets FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2`,
+		`SELECT total_supply_assets FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2 AND block_version = 0`,
 		marketDBID, blockNumber,
 	).Scan(&totalSupplyAssets)
 	if err != nil {

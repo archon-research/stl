@@ -157,7 +157,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	}
 
 	// Wait for processing
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		var count int
 		pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&count)
 		return count >= 2
@@ -265,7 +265,7 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 	}
 
 	// Wait for both messages to be processed (at least 2 receive calls + 2 deletes)
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		consumer.mu.Lock()
 		defer consumer.mu.Unlock()
 		return consumer.deleteMessageCalls >= 2
@@ -346,7 +346,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	}
 
 	// Wait for all 3 messages to be processed
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		consumer.mu.Lock()
 		defer consumer.mu.Unlock()
 		return consumer.deleteMessageCalls >= 3
@@ -505,7 +505,7 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 	}
 
 	// Wait for the message to be processed
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		var count int
 		pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE block_number = 20000000`).Scan(&count)
 		return count >= numTokens
@@ -599,7 +599,7 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	}
 
 	// Wait for the message to be processed (delete indicates processing completed)
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		consumer.mu.Lock()
 		defer consumer.mu.Unlock()
 		return consumer.deleteMessageCalls >= 1

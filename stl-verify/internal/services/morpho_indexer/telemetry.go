@@ -114,23 +114,19 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 }
 
 // RecordBlockProcessed records metrics for a processed block.
-func (t *Telemetry) RecordBlockProcessed(ctx context.Context, blockNumber int64, duration time.Duration, err error) {
+func (t *Telemetry) RecordBlockProcessed(ctx context.Context, duration time.Duration, err error) {
 	if t == nil {
 		return
-	}
-
-	attrs := []attribute.KeyValue{
-		attribute.Int64("block.number", blockNumber),
 	}
 
 	status := "success"
 	if err != nil {
 		status = "error"
 	}
-	attrs = append(attrs, attribute.String("status", status))
+	attrs := metric.WithAttributes(attribute.String("status", status))
 
-	t.blocksProcessed.Add(ctx, 1, metric.WithAttributes(attrs...))
-	t.blockDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attrs...))
+	t.blocksProcessed.Add(ctx, 1, attrs)
+	t.blockDuration.Record(ctx, duration.Seconds(), attrs)
 }
 
 // RecordEventProcessed records that an event was processed.

@@ -590,18 +590,25 @@ func TestProcessBlockEvent_VaultDiscovery_Success(t *testing.T) {
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
-		case 6:
-			// getVaultMetadata
-			return h.vaultMetadataResults("Morpho Vault", "mVLT", testLoanToken, 18, false), nil
 		case 2:
-			// getTokenMetadata (symbol + decimals) OR vault state
+			if calls[0].Target == MorphoBlueAddress {
+				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+			}
 			if calls[0].Target == unknownVault {
+				// Could be vault probe or vault state
+				if calls[1].Target == unknownVault {
+					// vault probe (MORPHO + asset)
+					return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+				}
 				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
 			}
 			return h.tokenMetadataResults("WETH", 18), nil
 		case 3:
 			// vault state + balance (after discovery, process the event)
 			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+		case 4:
+			// vault details (name, symbol, decimals, skimRecipient)
+			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
 		}
@@ -635,15 +642,18 @@ func TestProcessBlockEvent_VaultDiscovery_V2(t *testing.T) {
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
-		case 6:
-			return h.vaultMetadataResults("Morpho V2 Vault", "mV2", testLoanToken, 18, true), nil
 		case 2:
 			if calls[0].Target == unknownVault {
+				if calls[1].Target == unknownVault {
+					return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+				}
 				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
 			}
 			return h.tokenMetadataResults("WETH", 18), nil
 		case 3:
 			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+		case 4:
+			return h.vaultDetailResults("Morpho V2 Vault", "mV2", 18, true), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
 		}
@@ -676,11 +686,9 @@ func TestProcessBlockEvent_VaultDiscovery_WrongMorphoAddress(t *testing.T) {
 
 	wrongMorpho := common.HexToAddress("0x0000000000000000000000000000000000000001")
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 6 {
-			results := h.vaultMetadataResults("Fake", "FAKE", testLoanToken, 18, false)
-			// Override MORPHO() to return wrong address.
-			results[4] = outbound.Result{Success: true, ReturnData: h.packAddress(wrongMorpho)}
-			return results, nil
+		if len(calls) == 2 {
+			// Probe returns wrong MORPHO address.
+			return h.vaultProbeResults(wrongMorpho, testLoanToken), nil
 		}
 		return nil, fmt.Errorf("unexpected %d calls", len(calls))
 	}
@@ -703,11 +711,12 @@ func TestProcessBlockEvent_VaultDiscovery_MorphoCallReverts(t *testing.T) {
 	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 6 {
-			results := h.vaultMetadataResults("Fake", "FAKE", testLoanToken, 18, false)
-			// MORPHO() call fails.
-			results[4] = outbound.Result{Success: false, ReturnData: nil}
-			return results, nil
+		if len(calls) == 2 {
+			// MORPHO() call fails in the probe.
+			return []outbound.Result{
+				{Success: false, ReturnData: nil},
+				{Success: true, ReturnData: h.packAddress(testLoanToken)},
+			}, nil
 		}
 		return nil, fmt.Errorf("unexpected %d calls", len(calls))
 	}
@@ -729,9 +738,9 @@ func TestProcessBlockEvent_VaultDiscovery_AssetZero(t *testing.T) {
 	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 6 {
-			// asset returns zero address.
-			return h.vaultMetadataResults("Fake", "FAKE", common.Address{}, 18, false), nil
+		if len(calls) == 2 {
+			// Probe: MORPHO succeeds but asset returns zero address.
+			return h.vaultProbeResults(MorphoBlueAddress, common.Address{}), nil
 		}
 		return nil, fmt.Errorf("unexpected %d calls", len(calls))
 	}
@@ -754,10 +763,13 @@ func TestProcessBlockEvent_VaultDiscovery_DBError(t *testing.T) {
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
-		case 6:
-			return h.vaultMetadataResults("Vault", "VLT", testLoanToken, 18, false), nil
 		case 2:
+			if calls[0].Target == unknownVault {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
 			return h.tokenMetadataResults("WETH", 18), nil
+		case 4:
+			return h.vaultDetailResults("Vault", "VLT", 18, false), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
 		}
@@ -771,9 +783,9 @@ func TestProcessBlockEvent_VaultDiscovery_DBError(t *testing.T) {
 	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
 	receipt := makeReceipt(testTxHash, log)
 
-	// DB errors are transient — processBlock should succeed (vault discovery logged as warning, not fatal).
-	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
-		t.Fatalf("processBlock: %v", err)
+	// DB errors are transient — processBlock should fail so the event can be reprocessed.
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err == nil {
+		t.Fatal("processBlock should fail on transient DB error so event can be reprocessed")
 	}
 
 	// Transient failure must NOT permanently mark the address as non-vault.
@@ -786,9 +798,9 @@ func TestProcessBlockEvent_VaultDiscovery_RPCTransientError(t *testing.T) {
 	h := newTestHarness(t)
 	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
 
-	// Simulate a transient RPC failure during vault metadata fetch.
+	// Simulate a transient RPC failure during vault probe.
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 6 {
+		if len(calls) == 2 {
 			return nil, fmt.Errorf("connection timeout")
 		}
 		return nil, fmt.Errorf("unexpected %d calls", len(calls))
@@ -797,13 +809,60 @@ func TestProcessBlockEvent_VaultDiscovery_RPCTransientError(t *testing.T) {
 	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
 	receipt := makeReceipt(testTxHash, log)
 
-	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
-		t.Fatalf("processBlock: %v", err)
+	// Transient RPC failure should fail processBlock so the event can be reprocessed.
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err == nil {
+		t.Fatal("processBlock should fail on transient RPC error so event can be reprocessed")
 	}
 
 	// Transient RPC failure must NOT permanently mark the address as non-vault.
 	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
 		t.Error("vault should NOT be marked as not-vault on transient RPC error")
+	}
+}
+
+func TestProcessBlockEvent_VaultDiscovery_TransientErrorThenSuccess(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	// First probe call fails (transient), second succeeds.
+	probeCallCount := 0
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			if calls[0].Target == unknownVault {
+				probeCallCount++
+				if probeCallCount == 1 {
+					return nil, fmt.Errorf("connection timeout")
+				}
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 3:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+		case 4:
+			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) {
+		return 99, nil
+	}
+
+	// Two Deposit logs from the same vault in one receipt.
+	// First triggers discovery (fails transiently), second retries (succeeds).
+	log1 := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log2 := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(3000), big.NewInt(2700))
+	receipt := makeReceipt(testTxHash, log1, log2)
+
+	// Should succeed because the second attempt discovers the vault.
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock should succeed after transient error followed by success: %v", err)
+	}
+
+	if !h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+		t.Error("vault should be registered after eventual success")
 	}
 }
 
@@ -1937,11 +1996,14 @@ func TestProcessBlockEvent_VaultDiscovery_GetTokenMetadataError(t *testing.T) {
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
-		case 6:
-			return h.vaultMetadataResults("Morpho Vault", "mVLT", testLoanToken, 18, false), nil
 		case 2:
+			if calls[0].Target == unknownVault {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
 			// getTokenMetadata call fails
 			return nil, errors.New("token metadata rpc error")
+		case 4:
+			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
 		}
@@ -1951,8 +2013,8 @@ func TestProcessBlockEvent_VaultDiscovery_GetTokenMetadataError(t *testing.T) {
 	receipt := makeReceipt(testTxHash, log)
 
 	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})
-	if err != nil {
-		t.Fatalf("processBlock should not error on vault discovery failure: %v", err)
+	if err == nil {
+		t.Fatal("processBlock should fail on transient token metadata RPC error so event can be reprocessed")
 	}
 	// Token metadata RPC error is transient — vault should NOT be permanently marked as non-vault
 	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
@@ -1966,10 +2028,13 @@ func TestProcessBlockEvent_VaultDiscovery_GetOrCreateTokenError(t *testing.T) {
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
-		case 6:
-			return h.vaultMetadataResults("Morpho Vault", "mVLT", testLoanToken, 18, false), nil
 		case 2:
+			if calls[0].Target == unknownVault {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
 			return h.tokenMetadataResults("WETH", 18), nil
+		case 4:
+			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
 		}
@@ -1983,8 +2048,8 @@ func TestProcessBlockEvent_VaultDiscovery_GetOrCreateTokenError(t *testing.T) {
 	receipt := makeReceipt(testTxHash, log)
 
 	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})
-	if err != nil {
-		t.Fatalf("processBlock should not error on vault discovery failure: %v", err)
+	if err == nil {
+		t.Fatal("processBlock should fail on transient token creation error so event can be reprocessed")
 	}
 	// Token creation DB error is transient — vault should NOT be permanently marked as non-vault
 	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {

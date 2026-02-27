@@ -233,9 +233,15 @@ func (h *serviceTestHarness) tokenMetadataResults(symbol string, decimals uint8)
 	}
 }
 
-// vaultMetadataResults returns 6 results for getVaultMetadata:
-// name, symbol, asset, decimals, MORPHO, skimRecipient.
-func (h *serviceTestHarness) vaultMetadataResults(name, symbol string, asset common.Address, decimals uint8, isV2 bool) []outbound.Result {
+// vaultProbeResults returns 2 results for the probe multicall: MORPHO, asset.
+func (h *serviceTestHarness) vaultProbeResults(morphoAddr, asset common.Address) []outbound.Result {
+	return []outbound.Result{
+		{Success: true, ReturnData: h.packAddress(morphoAddr)},
+		{Success: true, ReturnData: h.packAddress(asset)},
+	}
+}
+
+func (h *serviceTestHarness) vaultDetailResults(name, symbol string, decimals uint8, isV2 bool) []outbound.Result {
 	skimResult := outbound.Result{Success: false, ReturnData: nil}
 	if isV2 {
 		skimResult = outbound.Result{Success: true, ReturnData: h.packAddress(common.HexToAddress("0x1"))}
@@ -243,10 +249,23 @@ func (h *serviceTestHarness) vaultMetadataResults(name, symbol string, asset com
 	return []outbound.Result{
 		{Success: true, ReturnData: h.packString(name)},
 		{Success: true, ReturnData: h.packString(symbol)},
-		{Success: true, ReturnData: h.packAddress(asset)},
 		{Success: true, ReturnData: h.packUint8(decimals)},
-		{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)},
 		skimResult,
+	}
+}
+
+// vaultMetadataExecuteFn returns a mock ExecuteFn that handles both the probe (2 calls)
+// and detail (4 calls) multicalls for a valid vault.
+func (h *serviceTestHarness) vaultMetadataExecuteFn(name, symbol string, asset common.Address, decimals uint8, isV2 bool) func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error) {
+	return func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			return h.vaultProbeResults(MorphoBlueAddress, asset), nil
+		case 4:
+			return h.vaultDetailResults(name, symbol, decimals, isV2), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
 	}
 }
 
@@ -649,16 +668,19 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 				{Success: true, ReturnData: h.packMarketParams(testLoanToken, testCollToken, testOracle, testIrm, testutils.BigFromStr(h.t, "800000000000000000"))},
 			}, nil
 		case 2:
-			// Could be market+position or vault totalAssets+totalSupply or token metadata
-			// Check if first call targets MorphoBlue
+			// Could be market+position, vault probe, or token metadata.
 			if calls[0].Target == MorphoBlueAddress {
 				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
 			}
-			// Token metadata (symbol + decimals)
-			return []outbound.Result{
-				{Success: true, ReturnData: h.packString("TKN")},
-				{Success: true, ReturnData: h.packUint8(18)},
-			}, nil
+			if calls[0].Target == testLoanToken || calls[0].Target == testCollToken {
+				// Token metadata (symbol + decimals)
+				return []outbound.Result{
+					{Success: true, ReturnData: h.packString("TKN")},
+					{Success: true, ReturnData: h.packUint8(18)},
+				}, nil
+			}
+			// Vault probe (MORPHO + asset)
+			return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
 		case 3:
 			// market + 2 positions (Liquidate) OR vault state + balance
 			if calls[0].Target == MorphoBlueAddress {
@@ -668,8 +690,24 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
 		case 4:
 			// getTokenPairMetadata (4 calls: symbolA, decimalsA, symbolB, decimalsB)
+			// OR vault details (name, symbol, decimals, skimRecipient)
 			// OR vault state + 2 balances
-			if calls[0].Target != MorphoBlueAddress && calls[0].Target != testLoanToken && calls[0].Target != testCollToken {
+			if calls[0].Target == testLoanToken || calls[0].Target == testCollToken {
+				return []outbound.Result{
+					{Success: true, ReturnData: h.packString("LOAN")},
+					{Success: true, ReturnData: h.packUint8(18)},
+					{Success: true, ReturnData: h.packString("COLL")},
+					{Success: true, ReturnData: h.packUint8(18)},
+				}, nil
+			}
+			if calls[0].Target != MorphoBlueAddress {
+				// Could be vault details or vault state + 2 balances.
+				// Vault details targets the vault address for all 4 calls.
+				// Vault state + 2 balances mixes vault and token targets.
+				if calls[0].Target == calls[1].Target && calls[1].Target == calls[2].Target && calls[2].Target == calls[3].Target {
+					// All same target → vault details
+					return h.vaultDetailResults("Test Vault", "tVLT", 18, false), nil
+				}
 				// vault state + 2 balances
 				return []outbound.Result{
 					h.defaultVaultTotalAssetsResult(),
@@ -684,9 +722,6 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 				{Success: true, ReturnData: h.packString("COLL")},
 				{Success: true, ReturnData: h.packUint8(18)},
 			}, nil
-		case 6:
-			// getVaultMetadata
-			return h.vaultMetadataResults("Test Vault", "tVLT", testLoanToken, 18, false), nil
 		default:
 			if origFn != nil {
 				return origFn(ctx, calls, blockNumber)

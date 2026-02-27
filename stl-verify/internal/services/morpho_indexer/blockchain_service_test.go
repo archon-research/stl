@@ -223,12 +223,7 @@ func TestGetVaultMetadata_V1(t *testing.T) {
 	h := newTestHarness(t)
 	vaultAddr := common.HexToAddress("0xABCD")
 
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 6 {
-			return h.vaultMetadataResults("My Vault", "MV", testLoanToken, 18, false), nil
-		}
-		return nil, fmt.Errorf("unexpected %d calls", len(calls))
-	}
+	h.multicaller.ExecuteFn = h.vaultMetadataExecuteFn("My Vault", "MV", testLoanToken, 18, false)
 
 	md, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 20000000)
 	if err != nil {
@@ -256,12 +251,7 @@ func TestGetVaultMetadata_V2(t *testing.T) {
 	h := newTestHarness(t)
 	vaultAddr := common.HexToAddress("0xABCD")
 
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 6 {
-			return h.vaultMetadataResults("V2 Vault", "V2", testLoanToken, 6, true), nil
-		}
-		return nil, fmt.Errorf("unexpected %d calls", len(calls))
-	}
+	h.multicaller.ExecuteFn = h.vaultMetadataExecuteFn("V2 Vault", "V2", testLoanToken, 6, true)
 
 	md, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 20000000)
 	if err != nil {
@@ -273,15 +263,69 @@ func TestGetVaultMetadata_V2(t *testing.T) {
 	}
 }
 
+func TestGetVaultMetadata_AllCallsAllowFailure(t *testing.T) {
+	h := newTestHarness(t)
+	vaultAddr := common.HexToAddress("0xABCD")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		for i, c := range calls {
+			if !c.AllowFailure {
+				t.Errorf("call %d has AllowFailure=false; all calls must allow failure so Multicall3 does not revert on non-vault contracts", i)
+			}
+		}
+		switch len(calls) {
+		case 2:
+			return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+		case 4:
+			return h.vaultDetailResults("Vault", "V", 18, false), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	_, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 20000000)
+	if err != nil {
+		t.Fatalf("getVaultMetadata: %v", err)
+	}
+}
+
+func TestGetVaultMetadata_NonVaultContract(t *testing.T) {
+	h := newTestHarness(t)
+	// Simulate calling a plain ERC20 (e.g. USDC) — MORPHO() and asset() fail
+	// because they don't exist on ERC20 contracts. The probe multicall detects this.
+	erc20Addr := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 2 {
+			return []outbound.Result{
+				{Success: false, ReturnData: nil}, // MORPHO() reverts
+				{Success: false, ReturnData: nil}, // asset() reverts
+			}, nil
+		}
+		t.Fatal("detail multicall should not be called for non-vault contract")
+		return nil, nil
+	}
+
+	_, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), erc20Addr, 20000000)
+	if err == nil {
+		t.Fatal("expected error for non-vault contract")
+	}
+	if !strings.Contains(err.Error(), "not a MetaMorpho vault") {
+		t.Errorf("error should indicate not a vault, got: %s", err.Error())
+	}
+}
+
 func TestGetVaultMetadata_WrongMorphoAddress(t *testing.T) {
 	h := newTestHarness(t)
 	vaultAddr := common.HexToAddress("0xABCD")
 
 	wrongAddr := common.HexToAddress("0x0000000000000000000000000000000000000001")
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		results := h.vaultMetadataResults("Fake", "F", testLoanToken, 18, false)
-		results[4] = outbound.Result{Success: true, ReturnData: h.packAddress(wrongAddr)}
-		return results, nil
+		if len(calls) == 2 {
+			return h.vaultProbeResults(wrongAddr, testLoanToken), nil
+		}
+		t.Fatal("detail multicall should not be called for wrong MORPHO address")
+		return nil, nil
 	}
 
 	_, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 20000000)
@@ -298,9 +342,14 @@ func TestGetVaultMetadata_MorphoReverts(t *testing.T) {
 	vaultAddr := common.HexToAddress("0xABCD")
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		results := h.vaultMetadataResults("Fake", "F", testLoanToken, 18, false)
-		results[4] = outbound.Result{Success: false, ReturnData: nil}
-		return results, nil
+		if len(calls) == 2 {
+			return []outbound.Result{
+				{Success: false, ReturnData: nil}, // MORPHO() reverts
+				{Success: true, ReturnData: h.packAddress(testLoanToken)},
+			}, nil
+		}
+		t.Fatal("detail multicall should not be called when MORPHO() reverts")
+		return nil, nil
 	}
 
 	_, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 20000000)
@@ -309,12 +358,36 @@ func TestGetVaultMetadata_MorphoReverts(t *testing.T) {
 	}
 }
 
+func TestGetVaultMetadata_ProbeExecuteError_IsTransient(t *testing.T) {
+	h := newTestHarness(t)
+	vaultAddr := common.HexToAddress("0xABCD")
+
+	// Simulate a transient RPC-level failure on the probe multicall.
+	// This should NOT be wrapped as errNotVault — it must remain a retryable error.
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("connection timeout")
+	}
+
+	_, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 20000000)
+	if err == nil {
+		t.Fatal("expected error when probe multicall Execute fails")
+	}
+	var nv *errNotVault
+	if errors.As(err, &nv) {
+		t.Error("transient RPC error should NOT be classified as errNotVault")
+	}
+}
+
 func TestGetVaultMetadata_AssetZero(t *testing.T) {
 	h := newTestHarness(t)
 	vaultAddr := common.HexToAddress("0xABCD")
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		return h.vaultMetadataResults("Vault", "V", common.Address{}, 18, false), nil
+		if len(calls) == 2 {
+			return h.vaultProbeResults(MorphoBlueAddress, common.Address{}), nil
+		}
+		t.Fatal("detail multicall should not be called for zero asset")
+		return nil, nil
 	}
 
 	_, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 20000000)
@@ -323,6 +396,54 @@ func TestGetVaultMetadata_AssetZero(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to get vault asset address") {
 		t.Errorf("error should mention asset, got: %s", err.Error())
+	}
+}
+
+func TestGetVaultMetadata_AssetCallFailed(t *testing.T) {
+	h := newTestHarness(t)
+	vaultAddr := common.HexToAddress("0xABCD")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 2 {
+			return []outbound.Result{
+				{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)}, // MORPHO() succeeds
+				{Success: false, ReturnData: nil},                             // asset() reverts
+			}, nil
+		}
+		t.Fatal("detail multicall should not be called when asset() fails")
+		return nil, nil
+	}
+
+	_, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 20000000)
+	if err == nil {
+		t.Fatal("expected error when asset() call fails")
+	}
+	if !strings.Contains(err.Error(), "asset() call failed") {
+		t.Errorf("error should mention asset() failure, got: %s", err.Error())
+	}
+}
+
+func TestGetVaultMetadata_AssetUnpackError(t *testing.T) {
+	h := newTestHarness(t)
+	vaultAddr := common.HexToAddress("0xABCD")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 2 {
+			return []outbound.Result{
+				{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)},
+				{Success: true, ReturnData: []byte{0x01, 0x02}}, // garbage data that won't unpack
+			}, nil
+		}
+		t.Fatal("detail multicall should not be called when asset() unpack fails")
+		return nil, nil
+	}
+
+	_, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 20000000)
+	if err == nil {
+		t.Fatal("expected error when asset() returns garbage data")
+	}
+	if !strings.Contains(err.Error(), "unpacking asset()") {
+		t.Errorf("error should mention unpacking asset(), got: %s", err.Error())
 	}
 }
 

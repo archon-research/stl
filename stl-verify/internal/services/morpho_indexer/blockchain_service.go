@@ -551,7 +551,11 @@ func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vau
 	return vs, balA, balB, nil
 }
 
-// getVaultMetadata fetches vault name, symbol, and asset address in a single Multicall3 batch.
+// getVaultMetadata identifies whether a contract is a MetaMorpho vault, then fetches its metadata.
+//
+// Split into two multicalls to keep the probe cheap for non-vault contracts:
+//  1. Probe: MORPHO() + asset() — determines if this is a real MetaMorpho vault.
+//  2. Metadata: name, symbol, decimals, skimRecipient — only runs for confirmed vaults.
 func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress common.Address, blockNumber int64) (retMD *VaultMetadata, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultMetadata",
 		attribute.String("vault.address", vaultAddress.Hex()))
@@ -564,6 +568,90 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 		}
 	}()
 
+	block := big.NewInt(blockNumber)
+
+	morphoAddr, asset, err := s.probeVault(ctx, vaultAddress, block)
+	if err != nil {
+		return nil, fmt.Errorf("fetching vault probe: %w", err)
+	}
+	if morphoAddr != MorphoBlueAddress {
+		return nil, &errNotVault{err: fmt.Errorf("MORPHO() returned %s, expected %s — not a MetaMorpho vault", morphoAddr.Hex(), MorphoBlueAddress.Hex())}
+	}
+	if asset == (common.Address{}) {
+		return nil, &errNotVault{err: fmt.Errorf("failed to get vault asset address for %s", vaultAddress.Hex())}
+	}
+
+	md, err := s.fetchVaultDetails(ctx, vaultAddress, block)
+	if err != nil {
+		return nil, fmt.Errorf("fetching vault details: %w", err)
+	}
+	md.Asset = asset
+
+	return md, nil
+}
+
+// probeVault calls MORPHO() and asset() to determine if the contract is a MetaMorpho vault.
+// Returns errNotVault if the calls fail (e.g. non-vault contract), or the MORPHO address
+// and asset address on success.
+func (s *blockchainService) probeVault(ctx context.Context, vaultAddress common.Address, blockNumber *big.Int) (morphoAddr common.Address, asset common.Address, err error) {
+	morphoData, err := s.metaMorphoABI.Pack("MORPHO")
+	if err != nil {
+		return common.Address{}, common.Address{}, fmt.Errorf("packing MORPHO call: %w", err)
+	}
+	assetData, err := s.metaMorphoABI.Pack("asset")
+	if err != nil {
+		return common.Address{}, common.Address{}, fmt.Errorf("packing asset call: %w", err)
+	}
+
+	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
+		{Target: vaultAddress, AllowFailure: true, CallData: morphoData},
+		{Target: vaultAddress, AllowFailure: true, CallData: assetData},
+	}, blockNumber)
+	if err != nil {
+		return common.Address{}, common.Address{}, fmt.Errorf("multicall vault probe: %w", err)
+	}
+
+	if len(results) < 2 {
+		return common.Address{}, common.Address{}, fmt.Errorf("expected 2 probe results, got %d", len(results))
+	}
+
+	// MORPHO() — must succeed and return the Morpho Blue singleton address.
+	if !results[0].Success || len(results[0].ReturnData) == 0 {
+		return common.Address{}, common.Address{}, &errNotVault{err: fmt.Errorf("MORPHO() call failed — not a MetaMorpho vault: %s", vaultAddress.Hex())}
+	}
+	morphoUnpacked, err := s.metaMorphoABI.Unpack("MORPHO", results[0].ReturnData)
+	if err != nil {
+		return common.Address{}, common.Address{}, &errNotVault{err: fmt.Errorf("unpacking MORPHO(): %w", err)}
+	}
+	if len(morphoUnpacked) == 0 {
+		return common.Address{}, common.Address{}, &errNotVault{err: fmt.Errorf("MORPHO() returned no values for %s", vaultAddress.Hex())}
+	}
+	morphoAddr, ok := morphoUnpacked[0].(common.Address)
+	if !ok {
+		return common.Address{}, common.Address{}, &errNotVault{err: fmt.Errorf("MORPHO() returned unexpected type for %s", vaultAddress.Hex())}
+	}
+
+	// asset() — must succeed for any real vault.
+	if !results[1].Success || len(results[1].ReturnData) == 0 {
+		return common.Address{}, common.Address{}, &errNotVault{err: fmt.Errorf("asset() call failed for %s", vaultAddress.Hex())}
+	}
+	assetUnpacked, err := s.metaMorphoABI.Unpack("asset", results[1].ReturnData)
+	if err != nil {
+		return common.Address{}, common.Address{}, &errNotVault{err: fmt.Errorf("unpacking asset() for %s: %w", vaultAddress.Hex(), err)}
+	}
+	if len(assetUnpacked) == 0 {
+		return common.Address{}, common.Address{}, &errNotVault{err: fmt.Errorf("asset() returned no values for %s", vaultAddress.Hex())}
+	}
+	asset, ok = assetUnpacked[0].(common.Address)
+	if !ok {
+		return common.Address{}, common.Address{}, &errNotVault{err: fmt.Errorf("asset() returned unexpected type %T for %s", assetUnpacked[0], vaultAddress.Hex())}
+	}
+
+	return morphoAddr, asset, nil
+}
+
+// fetchVaultDetails fetches name, symbol, decimals, and version for a confirmed vault.
+func (s *blockchainService) fetchVaultDetails(ctx context.Context, vaultAddress common.Address, blockNumber *big.Int) (*VaultMetadata, error) {
 	nameData, err := s.metaMorphoABI.Pack("name")
 	if err != nil {
 		return nil, fmt.Errorf("packing name call: %w", err)
@@ -572,17 +660,9 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 	if err != nil {
 		return nil, fmt.Errorf("packing symbol call: %w", err)
 	}
-	assetData, err := s.metaMorphoABI.Pack("asset")
-	if err != nil {
-		return nil, fmt.Errorf("packing asset call: %w", err)
-	}
 	decimalsData, err := s.metaMorphoABI.Pack("decimals")
 	if err != nil {
 		return nil, fmt.Errorf("packing decimals call: %w", err)
-	}
-	morphoData, err := s.metaMorphoABI.Pack("MORPHO")
-	if err != nil {
-		return nil, fmt.Errorf("packing MORPHO call: %w", err)
 	}
 	// skimRecipient() only exists on MetaMorpho V2; reverts on V1.1.
 	skimRecipientData, err := s.metaMorphoABI.Pack("skimRecipient")
@@ -591,76 +671,74 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 	}
 
 	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
-		{Target: vaultAddress, AllowFailure: false, CallData: nameData},
-		{Target: vaultAddress, AllowFailure: false, CallData: symbolData},
-		{Target: vaultAddress, AllowFailure: false, CallData: assetData},
-		{Target: vaultAddress, AllowFailure: false, CallData: decimalsData},
-		{Target: vaultAddress, AllowFailure: false, CallData: morphoData},
+		{Target: vaultAddress, AllowFailure: true, CallData: nameData},
+		{Target: vaultAddress, AllowFailure: true, CallData: symbolData},
+		{Target: vaultAddress, AllowFailure: true, CallData: decimalsData},
 		{Target: vaultAddress, AllowFailure: true, CallData: skimRecipientData},
-	}, big.NewInt(blockNumber))
+	}, blockNumber)
 	if err != nil {
-		return nil, fmt.Errorf("multicall vault metadata: %w", err)
+		return nil, fmt.Errorf("multicall vault details: %w", err)
 	}
 
-	if len(results) < 6 {
-		return nil, fmt.Errorf("expected 6 results, got %d", len(results))
-	}
-
-	// Verify MORPHO() returns the Morpho Blue singleton address.
-	// This distinguishes real MetaMorpho vaults from other ERC4626 vaults
-	// (e.g. Yearn, Aave) that share the same Transfer/Deposit/Withdraw event topics.
-	if !results[4].Success || len(results[4].ReturnData) == 0 {
-		return nil, &errNotVault{err: fmt.Errorf("MORPHO() call failed — not a MetaMorpho vault: %s", vaultAddress.Hex())}
-	}
-	morphoUnpacked, err := s.metaMorphoABI.Unpack("MORPHO", results[4].ReturnData)
-	if err != nil {
-		return nil, &errNotVault{err: fmt.Errorf("unpacking MORPHO(): %w", err)}
-	}
-	if len(morphoUnpacked) == 0 {
-		return nil, &errNotVault{err: fmt.Errorf("MORPHO() returned no values for %s", vaultAddress.Hex())}
-	}
-	morphoAddr, ok := morphoUnpacked[0].(common.Address)
-	if !ok || morphoAddr != MorphoBlueAddress {
-		return nil, &errNotVault{err: fmt.Errorf("MORPHO() returned %s, expected %s — not a MetaMorpho vault", morphoAddr.Hex(), MorphoBlueAddress.Hex())}
+	if len(results) < 4 {
+		return nil, fmt.Errorf("expected 4 detail results, got %d", len(results))
 	}
 
 	md := &VaultMetadata{Version: entity.MorphoVaultV1}
-	// skimRecipient() only exists on V2 — success means V2.
-	if results[5].Success {
-		md.Version = entity.MorphoVaultV2
-	}
-
-	if results[0].Success && len(results[0].ReturnData) > 0 {
-		nameUnpacked, err := s.metaMorphoABI.Unpack("name", results[0].ReturnData)
-		if err == nil && len(nameUnpacked) > 0 {
-			md.Name, _ = nameUnpacked[0].(string)
-		}
-	}
-
-	if results[1].Success && len(results[1].ReturnData) > 0 {
-		symbolUnpacked, err := s.metaMorphoABI.Unpack("symbol", results[1].ReturnData)
-		if err == nil && len(symbolUnpacked) > 0 {
-			md.Symbol, _ = symbolUnpacked[0].(string)
-		}
-	}
-
-	if results[2].Success && len(results[2].ReturnData) > 0 {
-		assetUnpacked, err := s.metaMorphoABI.Unpack("asset", results[2].ReturnData)
-		if err == nil && len(assetUnpacked) > 0 {
-			md.Asset, _ = assetUnpacked[0].(common.Address)
-		}
-	}
-
+	// skimRecipient() only exists on V2 — success with valid return data means V2.
 	if results[3].Success && len(results[3].ReturnData) > 0 {
-		decimalsUnpacked, err := s.metaMorphoABI.Unpack("decimals", results[3].ReturnData)
-		if err == nil && len(decimalsUnpacked) > 0 {
-			md.Decimals, _ = decimalsUnpacked[0].(uint8)
+		if _, err := s.metaMorphoABI.Unpack("skimRecipient", results[3].ReturnData); err == nil {
+			md.Version = entity.MorphoVaultV2
 		}
 	}
 
-	if md.Asset == (common.Address{}) {
-		return nil, &errNotVault{err: fmt.Errorf("failed to get vault asset address for %s", vaultAddress.Hex())}
+	if !results[0].Success || len(results[0].ReturnData) == 0 {
+		return nil, fmt.Errorf("name call failed for vault %s", vaultAddress.Hex())
 	}
+	nameUnpacked, err := s.metaMorphoABI.Unpack("name", results[0].ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking name for vault %s: %w", vaultAddress.Hex(), err)
+	}
+	if len(nameUnpacked) == 0 {
+		return nil, fmt.Errorf("empty name result for vault %s", vaultAddress.Hex())
+	}
+	name, ok := nameUnpacked[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("name type assertion failed for vault %s: got %T", vaultAddress.Hex(), nameUnpacked[0])
+	}
+	md.Name = name
+
+	if !results[1].Success || len(results[1].ReturnData) == 0 {
+		return nil, fmt.Errorf("symbol call failed for vault %s", vaultAddress.Hex())
+	}
+	symbolUnpacked, err := s.metaMorphoABI.Unpack("symbol", results[1].ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking symbol for vault %s: %w", vaultAddress.Hex(), err)
+	}
+	if len(symbolUnpacked) == 0 {
+		return nil, fmt.Errorf("empty symbol result for vault %s", vaultAddress.Hex())
+	}
+	symbol, ok := symbolUnpacked[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("symbol type assertion failed for vault %s: got %T", vaultAddress.Hex(), symbolUnpacked[0])
+	}
+	md.Symbol = symbol
+
+	if !results[2].Success || len(results[2].ReturnData) == 0 {
+		return nil, fmt.Errorf("decimals call failed for vault %s", vaultAddress.Hex())
+	}
+	decimalsUnpacked, err := s.metaMorphoABI.Unpack("decimals", results[2].ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking decimals for vault %s: %w", vaultAddress.Hex(), err)
+	}
+	if len(decimalsUnpacked) == 0 {
+		return nil, fmt.Errorf("empty decimals result for vault %s", vaultAddress.Hex())
+	}
+	decimals, ok := decimalsUnpacked[0].(uint8)
+	if !ok {
+		return nil, fmt.Errorf("decimals type assertion failed for vault %s: got %T", vaultAddress.Hex(), decimalsUnpacked[0])
+	}
+	md.Decimals = decimals
 
 	return md, nil
 }
