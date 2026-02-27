@@ -77,9 +77,9 @@ ALTER TABLE offchain_token_price SET (
 SELECT add_compression_policy('offchain_token_price', INTERVAL '2 days', if_not_exists => TRUE);
 
 -- Tier data older than 1 year to S3-backed object storage (Tiger Cloud Scale Plan)
--- Only available on Timescale Cloud; skipped gracefully on self-hosted.
+-- Only available on Timescale Cloud; skipped gracefully on self-hosted/local dev.
 DO $$ BEGIN
-    PERFORM add_tiering_policy('offchain_token_price', INTERVAL '1 year');
+    PERFORM add_tiering_policy('offchain_token_price', INTERVAL '1 year', if_not_exists => TRUE);
 EXCEPTION WHEN undefined_function THEN
     RAISE NOTICE 'add_tiering_policy not available, skipping tiering for offchain_token_price';
 END $$;

@@ -130,9 +130,9 @@ SELECT add_compression_policy('onchain_token_price', INTERVAL '2 days', if_not_e
 -- Tier data older than 1 year to S3-backed object storage (Tiger Cloud Scale Plan)
 -- Data stays queryable via standard SQL, just stored cheaper and accessed slower
 -- $0.021/GB-month vs $0.212/GB-month (10x cheaper)
--- Only available on Timescale Cloud; skipped gracefully on self-hosted.
+-- Only available on Timescale Cloud; skipped gracefully on self-hosted/local dev.
 DO $$ BEGIN
-    PERFORM add_tiering_policy('onchain_token_price', INTERVAL '1 year');
+    PERFORM add_tiering_policy('onchain_token_price', INTERVAL '1 year', if_not_exists => TRUE);
 EXCEPTION WHEN undefined_function THEN
     RAISE NOTICE 'add_tiering_policy not available, skipping tiering for onchain_token_price';
 END $$;

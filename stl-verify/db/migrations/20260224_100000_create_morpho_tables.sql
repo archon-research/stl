@@ -69,7 +69,11 @@ ALTER TABLE morpho_market_state SET (
 
 SELECT add_compression_policy('morpho_market_state', INTERVAL '2 days', if_not_exists => TRUE);
 
-SELECT add_tiering_policy('morpho_market_state', INTERVAL '1 year');
+DO $$ BEGIN
+    PERFORM add_tiering_policy('morpho_market_state', INTERVAL '1 year', if_not_exists => TRUE);
+EXCEPTION WHEN undefined_function THEN
+    RAISE NOTICE 'add_tiering_policy not available, skipping tiering for morpho_market_state';
+END $$;
 
 -- ============================================================================
 -- morpho_market_position: User position snapshots in Morpho Blue markets (hypertable)
@@ -106,7 +110,11 @@ ALTER TABLE morpho_market_position SET (
 
 SELECT add_compression_policy('morpho_market_position', INTERVAL '2 days', if_not_exists => TRUE);
 
-SELECT add_tiering_policy('morpho_market_position', INTERVAL '1 year');
+DO $$ BEGIN
+    PERFORM add_tiering_policy('morpho_market_position', INTERVAL '1 year', if_not_exists => TRUE);
+EXCEPTION WHEN undefined_function THEN
+    RAISE NOTICE 'add_tiering_policy not available, skipping tiering for morpho_market_position';
+END $$;
 
 -- ============================================================================
 -- morpho_vault: MetaMorpho vault registry
@@ -165,7 +173,11 @@ ALTER TABLE morpho_vault_state SET (
 
 SELECT add_compression_policy('morpho_vault_state', INTERVAL '2 days', if_not_exists => TRUE);
 
-SELECT add_tiering_policy('morpho_vault_state', INTERVAL '1 year');
+DO $$ BEGIN
+    PERFORM add_tiering_policy('morpho_vault_state', INTERVAL '1 year', if_not_exists => TRUE);
+EXCEPTION WHEN undefined_function THEN
+    RAISE NOTICE 'add_tiering_policy not available, skipping tiering for morpho_vault_state';
+END $$;
 
 -- ============================================================================
 -- morpho_vault_position: User position snapshots in MetaMorpho vaults (hypertable)
@@ -199,7 +211,11 @@ ALTER TABLE morpho_vault_position SET (
 
 SELECT add_compression_policy('morpho_vault_position', INTERVAL '2 days', if_not_exists => TRUE);
 
-SELECT add_tiering_policy('morpho_vault_position', INTERVAL '1 year');
+DO $$ BEGIN
+    PERFORM add_tiering_policy('morpho_vault_position', INTERVAL '1 year', if_not_exists => TRUE);
+EXCEPTION WHEN undefined_function THEN
+    RAISE NOTICE 'add_tiering_policy not available, skipping tiering for morpho_vault_position';
+END $$;
 
 INSERT INTO migrations (filename)
 VALUES ('20260224_100000_create_morpho_tables.sql')
