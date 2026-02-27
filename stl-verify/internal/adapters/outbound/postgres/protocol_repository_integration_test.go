@@ -8,16 +8,37 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
+const protocolSchemaName = "test_protocol"
+
+var protocolPool *pgxpool.Pool
+
+func init() {
+	registerTestFileSetup(protocolSchemaName, func() {
+		protocolPool = testutil.SetupSchemaForMain(sharedDSN, protocolSchemaName)
+	}, func() {
+		testutil.CleanupSchemaForMain(sharedDSN, protocolPool, protocolSchemaName)
+	})
+}
+
+// truncateProtocol clears the protocol table for test isolation.
+func truncateProtocol(t *testing.T, ctx context.Context) {
+	t.Helper()
+	_, err := protocolPool.Exec(ctx, `TRUNCATE protocol CASCADE`)
+	if err != nil {
+		t.Fatalf("failed to truncate protocol: %v", err)
+	}
+}
+
 func TestGetOrCreateProtocol_CreatesNewProtocol(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
+	truncateProtocol(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewProtocolRepository(pool, nil, 0)
+	repo, err := NewProtocolRepository(protocolPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}
@@ -25,7 +46,7 @@ func TestGetOrCreateProtocol_CreatesNewProtocol(t *testing.T) {
 	// Use an address that is not seeded by migrations.
 	addr := common.HexToAddress("0xEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE")
 
-	tx, err := pool.Begin(ctx)
+	tx, err := protocolPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
@@ -44,7 +65,7 @@ func TestGetOrCreateProtocol_CreatesNewProtocol(t *testing.T) {
 	}
 
 	var name string
-	err = pool.QueryRow(ctx,
+	err = protocolPool.QueryRow(ctx,
 		`SELECT name FROM protocol WHERE chain_id = $1 AND address = $2`,
 		1, addr.Bytes(),
 	).Scan(&name)
@@ -57,18 +78,17 @@ func TestGetOrCreateProtocol_CreatesNewProtocol(t *testing.T) {
 }
 
 func TestGetOrCreateProtocol_IdempotentReturnsSameID(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
+	truncateProtocol(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewProtocolRepository(pool, nil, 0)
+	repo, err := NewProtocolRepository(protocolPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}
 
 	addr := common.HexToAddress("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
 
-	tx1, err := pool.Begin(ctx)
+	tx1, err := protocolPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin tx1: %v", err)
 	}
@@ -80,7 +100,7 @@ func TestGetOrCreateProtocol_IdempotentReturnsSameID(t *testing.T) {
 		t.Fatalf("Commit tx1: %v", err)
 	}
 
-	tx2, err := pool.Begin(ctx)
+	tx2, err := protocolPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin tx2: %v", err)
 	}
@@ -101,11 +121,10 @@ func TestGetOrCreateProtocol_IdempotentReturnsSameID(t *testing.T) {
 // is upserted with a later block first and an earlier block second, the stored
 // created_at_block is updated to the minimum (matching GetOrCreateUser behavior).
 func TestGetOrCreateProtocol_CreatedAtBlockUsesLeast(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
+	truncateProtocol(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewProtocolRepository(pool, nil, 0)
+	repo, err := NewProtocolRepository(protocolPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}
@@ -113,7 +132,7 @@ func TestGetOrCreateProtocol_CreatedAtBlockUsesLeast(t *testing.T) {
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
 
 	// First call: block 500 (a later block, as if processed first out of order).
-	tx1, err := pool.Begin(ctx)
+	tx1, err := protocolPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin tx1: %v", err)
 	}
@@ -126,7 +145,7 @@ func TestGetOrCreateProtocol_CreatedAtBlockUsesLeast(t *testing.T) {
 	}
 
 	// Second call: block 100 (the true first seen block, processed out of order).
-	tx2, err := pool.Begin(ctx)
+	tx2, err := protocolPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Begin tx2: %v", err)
 	}
@@ -139,7 +158,7 @@ func TestGetOrCreateProtocol_CreatedAtBlockUsesLeast(t *testing.T) {
 	}
 
 	var createdAtBlock int64
-	err = pool.QueryRow(ctx,
+	err = protocolPool.QueryRow(ctx,
 		`SELECT created_at_block FROM protocol WHERE chain_id = $1 AND address = $2`,
 		1, addr.Bytes(),
 	).Scan(&createdAtBlock)
@@ -155,11 +174,10 @@ func TestGetOrCreateProtocol_CreatedAtBlockUsesLeast(t *testing.T) {
 // both racing to insert the same new protocol. Both must succeed without error and
 // return the same protocol id.
 func TestGetOrCreateProtocol_ConcurrentRaceReturnsSameID(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(cleanup)
+	truncateProtocol(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewProtocolRepository(pool, nil, 0)
+	repo, err := NewProtocolRepository(protocolPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}
@@ -179,7 +197,7 @@ func TestGetOrCreateProtocol_ConcurrentRaceReturnsSameID(t *testing.T) {
 			defer wg.Done()
 			<-start
 
-			tx, err := pool.Begin(ctx)
+			tx, err := protocolPool.Begin(ctx)
 			if err != nil {
 				errs[idx] = err
 				return
