@@ -20,6 +20,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -120,6 +121,10 @@ func parseConfig(args []string) (cliConfig, error) {
 	cfg.s3Bucket = env.Get("S3_BUCKET", "")
 	if cfg.s3Bucket == "" {
 		return cliConfig{}, fmt.Errorf("S3_BUCKET environment variable is required")
+	}
+
+	if err := chainutil.ValidateS3BucketForChain(cfg.chainID, cfg.s3Bucket); err != nil {
+		return cliConfig{}, fmt.Errorf("S3 bucket validation failed: %w", err)
 	}
 
 	return cfg, nil

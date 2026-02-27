@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
@@ -101,6 +102,11 @@ func Main() {
 	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
 	if err != nil {
 		logger.Error("invalid CHAIN_ID", "value", chainIDStr, "error", err)
+		os.Exit(1)
+	}
+
+	if err := chainutil.ValidateS3BucketForChain(chainID, bucket); err != nil {
+		logger.Error("S3 bucket validation failed", "error", err)
 		os.Exit(1)
 	}
 

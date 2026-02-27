@@ -33,14 +33,9 @@ func (c *Chain) validate() error {
 	return nil
 }
 
-// ChainNameToID maps chain names to their chain IDs.
-var ChainNameToID = map[string]int{
-	"mainnet":     1,
-	"avalanche-c": 43114,
-}
-
-// ChainIDToName maps chain IDs to their names.
-var ChainIDToName = map[int]string{
-	1:     "mainnet",
-	43114: "avalanche-c",
+// ChainIDToName maps chain IDs to their canonical names.
+// Names match S3 bucket naming conventions (e.g., stl-sentinelstaging-ethereum-raw).
+var ChainIDToName = map[int64]string{
+	1:     "ethereum",
+	43114: "avalanche",
 }
