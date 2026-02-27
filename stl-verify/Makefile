@@ -300,8 +300,12 @@ dev-env:
 	@echo "Environment files generated."
 	@echo "Note: data-validator uses staging TigerData. Run 'make tigerdata-tunnel' first."
 
-# Stop all local services and delete volumes (including database data)
+# Stop all local services (preserves volumes and database data)
 dev-down:
+	@docker compose down
+
+# Stop all local services and delete volumes (destroys database data)
+dev-reset:
 	@docker compose down -v
 
 # Show service IPs (useful for devcontainer)

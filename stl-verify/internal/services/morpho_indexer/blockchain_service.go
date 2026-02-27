@@ -685,9 +685,11 @@ func (s *blockchainService) fetchVaultDetails(ctx context.Context, vaultAddress 
 	}
 
 	md := &VaultMetadata{Version: entity.MorphoVaultV1}
-	// skimRecipient() only exists on V2 — success means V2.
-	if results[3].Success {
-		md.Version = entity.MorphoVaultV2
+	// skimRecipient() only exists on V2 — success with valid return data means V2.
+	if results[3].Success && len(results[3].ReturnData) > 0 {
+		if _, err := s.metaMorphoABI.Unpack("skimRecipient", results[3].ReturnData); err == nil {
+			md.Version = entity.MorphoVaultV2
+		}
 	}
 
 	if !results[0].Success || len(results[0].ReturnData) == 0 {
