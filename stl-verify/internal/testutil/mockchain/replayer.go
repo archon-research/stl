@@ -10,12 +10,18 @@ import (
 
 const defaultInterval = 12 * time.Second // default Ethereum block time
 
+// Status holds a snapshot of the Replayer's current state.
 type Status struct {
-	Running       bool
+	// Running reports whether the Replayer is currently emitting blocks.
+	Running bool
+	// TemplateIndex is the index of the next block template to be emitted.
 	TemplateIndex int
+	// BlocksEmitted is the total number of blocks emitted since the last Start.
 	BlocksEmitted int64
 }
 
+// Replayer cycles through a fixed set of block header templates, calling onBlock
+// at a fixed interval (default: 12 s, matching Ethereum's block time).
 type Replayer struct {
 	mu sync.RWMutex
 
@@ -32,6 +38,8 @@ type Replayer struct {
 	doneCh chan struct{}
 }
 
+// NewReplayer creates a Replayer that emits blocks from headers at the default interval.
+// onBlock is called with each emitted header; store is used to look up associated block data.
 func NewReplayer(headers []outbound.BlockHeader, store *DataStore, onBlock func(outbound.BlockHeader)) *Replayer {
 	return &Replayer{
 		templates: headers,
@@ -41,6 +49,8 @@ func NewReplayer(headers []outbound.BlockHeader, store *DataStore, onBlock func(
 	}
 }
 
+// Start begins emitting blocks on the configured interval. It is a no-op if
+// already running or if no templates were provided.
 func (r *Replayer) Start() {
 	r.mu.Lock()
 	if r.running || len(r.templates) == 0 {
@@ -86,6 +96,8 @@ func (r *Replayer) emit() {
 	}
 }
 
+// Stop halts block emission and returns the total number of blocks emitted.
+// It is safe to call on a Replayer that was never started.
 func (r *Replayer) Stop() int64 {
 	r.mu.Lock()
 	if !r.running {
@@ -107,6 +119,7 @@ func (r *Replayer) Stop() int64 {
 	return r.blocksEmitted
 }
 
+// GetStatus returns a snapshot of the Replayer's current state.
 func (r *Replayer) GetStatus() Status {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

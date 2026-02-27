@@ -10,18 +10,23 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
+// DataStore is a thread-safe in-memory store for block headers and associated
+// per-block data (block body, receipts, traces, blobs), keyed by block index.
 type DataStore struct {
 	mu      sync.RWMutex
 	data    map[int]map[string]json.RawMessage
 	headers []outbound.BlockHeader
 }
 
+// NewDataStore returns an empty DataStore.
 func NewDataStore() *DataStore {
 	return &DataStore{
 		data: make(map[int]map[string]json.RawMessage),
 	}
 }
 
+// Add stores raw JSON data of the given dataType ("block", "receipts", "traces", "blobs")
+// for the block at index. Overwrites any existing entry for that index/dataType pair.
 func (ds *DataStore) Add(index int, dataType string, raw json.RawMessage) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
@@ -32,6 +37,7 @@ func (ds *DataStore) Add(index int, dataType string, raw json.RawMessage) {
 	ds.data[index][dataType] = raw
 }
 
+// AddHeader appends a block header to the ordered list of headers.
 func (ds *DataStore) AddHeader(header outbound.BlockHeader) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
@@ -39,6 +45,8 @@ func (ds *DataStore) AddHeader(header outbound.BlockHeader) {
 	ds.headers = append(ds.headers, header)
 }
 
+// Get retrieves the raw JSON data for the given dataType at block index.
+// Returns false if no data is stored for that index/dataType pair.
 func (ds *DataStore) Get(index int, dataType string) (json.RawMessage, bool) {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
@@ -51,6 +59,7 @@ func (ds *DataStore) Get(index int, dataType string) (json.RawMessage, bool) {
 	return raw, ok
 }
 
+// Headers returns a copy of all block headers in insertion order.
 func (ds *DataStore) Headers() []outbound.BlockHeader {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
@@ -60,6 +69,7 @@ func (ds *DataStore) Headers() []outbound.BlockHeader {
 	return result
 }
 
+// Len returns the number of block headers in the store.
 func (ds *DataStore) Len() int {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()

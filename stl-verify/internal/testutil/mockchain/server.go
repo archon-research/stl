@@ -13,6 +13,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Server is a mock Ethereum JSON-RPC server that combines a WebSocket handler,
+// an HTTP JSON-RPC handler, a DataStore, and a Replayer into a single TCP listener.
 type Server struct {
 	store    *DataStore
 	ws       *wsHandler
@@ -22,6 +24,7 @@ type Server struct {
 	listener net.Listener
 }
 
+// NewServer creates a Server backed by the given DataStore.
 func NewServer(store *DataStore) *Server {
 	ws := newWSHandler()
 	rpc := newHTTPHandler(store)
@@ -36,6 +39,8 @@ func NewServer(store *DataStore) *Server {
 	return s
 }
 
+// ServeHTTP routes incoming requests: WebSocket upgrades go to the WS handler;
+// all other requests go to the HTTP JSON-RPC handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if websocket.IsWebSocketUpgrade(r) {
 		s.ws.ServeHTTP(w, r)
@@ -44,6 +49,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.rpc.ServeHTTP(w, r)
 }
 
+// Start binds to addr, starts the Replayer, and begins serving requests.
 func (s *Server) Start(addr string) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -59,6 +65,7 @@ func (s *Server) Start(addr string) error {
 	return nil
 }
 
+// Stop halts the Replayer and shuts down the HTTP server gracefully.
 func (s *Server) Stop() {
 	s.replayer.Stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -68,6 +75,7 @@ func (s *Server) Stop() {
 	}
 }
 
+// Addr returns the server's listening address, or nil if not started.
 func (s *Server) Addr() net.Addr {
 	if s.listener == nil {
 		return nil
