@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: timescale/timescaledb:latest-pg17
+    image: timescale/timescaledb:2.25.1-pg17
     container_name: stl-verify-postgres
     environment:
       POSTGRES_USER: postgres

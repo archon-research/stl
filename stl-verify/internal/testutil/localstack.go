@@ -26,7 +26,7 @@ func StartLocalStack(t *testing.T, ctx context.Context, services string) (testco
 	}
 
 	req := testcontainers.ContainerRequest{
-		Image:        "localstack/localstack:4.3",
+		Image:        ImageLocalStack,
 		ExposedPorts: []string{"4566/tcp"},
 		Env: map[string]string{
 			"SERVICES":               services,

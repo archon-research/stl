@@ -59,7 +59,7 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     needs: check
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     defaults:
       run:
@@ -76,7 +76,21 @@ jobs:
           cache: true
           cache-dependency-path: "stl-verify/go.sum"
 
-      # Integration tests require Docker services (PostgreSQL, Redis, Jaeger)
+      # Derive image tags directly from the Go source so this step is always
+      # aligned with what the tests actually use. The single source of truth is
+      # stl-verify/internal/testutil/images.go.
+      - name: Pull container images
+        run: |
+          IMAGES=$(grep -E 'Image[A-Za-z0-9_]+\s*=' internal/testutil/images.go | grep -oP '".*?"' | tr -d '"')
+          if [ -z "$IMAGES" ]; then
+            echo "::error::No image constants found in internal/testutil/images.go — check the grep pattern"
+            exit 1
+          fi
+          for IMAGE in $IMAGES; do
+            docker pull "$IMAGE"
+          done
+
+      # Integration tests require Docker services (TimeScale, Redis, ...)
       # testcontainers will spin up these services automatically
       - name: Run integration tests
         run: make test-integration

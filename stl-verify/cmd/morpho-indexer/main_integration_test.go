@@ -110,7 +110,7 @@ func startRedisContainer(t *testing.T) (addr string, cleanup func()) {
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "redis:7-alpine",
+			Image:        testutil.ImageRedis,
 			ExposedPorts: []string{"6379/tcp"},
 			WaitingFor:   wait.ForListeningPort("6379/tcp").WithStartupTimeout(30 * time.Second),
 		},

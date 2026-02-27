@@ -402,12 +402,12 @@ func (s *Subscriber) readLoop(logger *slog.Logger) error {
 				s.lastBlockTime.Store(time.Now().Unix())
 				logger.Debug("block header received", "block", blockNum, "hash", truncateHash(header.Hash))
 				if s.telemetry != nil {
-					s.telemetry.RecordBlockReceived(s.ctx, blockNum)
+					s.telemetry.RecordBlockReceived(s.ctx)
 				}
 			default:
 				logger.Error("channel full, dropping block", "block", blockNum)
 				if s.telemetry != nil {
-					s.telemetry.RecordBlockDropped(s.ctx, blockNum)
+					s.telemetry.RecordBlockDropped(s.ctx)
 				}
 			}
 		case <-pingTicker.C:

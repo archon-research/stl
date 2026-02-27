@@ -6,93 +6,58 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// setupTxManagerTest creates a PostgreSQL container and returns a TxManager.
-func setupTxManagerTest(t *testing.T) (*TxManager, *pgxpool.Pool, func()) {
+const txmgrSchemaName = "test_txmgr"
+
+var txmgrPool *pgxpool.Pool
+
+func init() {
+	registerTestFileSetup(txmgrSchemaName, func() {
+		txmgrPool = testutil.SetupSchemaForMain(sharedDSN, txmgrSchemaName)
+		// Create the tx_test table used by transaction manager tests
+		ctx := context.Background()
+		_, err := txmgrPool.Exec(ctx, `CREATE TABLE IF NOT EXISTS tx_test (id SERIAL PRIMARY KEY, value TEXT)`)
+		if err != nil {
+			log.Fatalf("failed to create tx_test table: %v", err)
+		}
+	}, func() {
+		testutil.CleanupSchemaForMain(sharedDSN, txmgrPool, txmgrSchemaName)
+	})
+}
+
+// truncateTxTest clears the tx_test table for test isolation.
+func truncateTxTest(t *testing.T, ctx context.Context) {
+	t.Helper()
+	_, err := txmgrPool.Exec(ctx, `DELETE FROM tx_test`)
+	if err != nil {
+		t.Fatalf("failed to truncate tx_test: %v", err)
+	}
+}
+
+// setupTxManagerTest returns a TxManager backed by the schema-specific pool.
+func setupTxManagerTest(t *testing.T) *TxManager {
 	t.Helper()
 	ctx := context.Background()
+	truncateTxTest(t, ctx)
 
-	req := testcontainers.ContainerRequest{
-		Image:        "postgres:17",
-		ExposedPorts: []string{"5432/tcp"},
-		Env: map[string]string{
-			"POSTGRES_USER":     "test",
-			"POSTGRES_PASSWORD": "test",
-			"POSTGRES_DB":       "testdb",
-		},
-		WaitingFor: wait.ForLog("database system is ready to accept connections").
-			WithOccurrence(2).
-			WithStartupTimeout(60 * time.Second),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		t.Fatalf("failed to start container: %v", err)
-	}
-
-	host, err := container.Host(ctx)
-	if err != nil {
-		t.Fatalf("failed to get container host: %v", err)
-	}
-
-	port, err := container.MappedPort(ctx, "5432")
-	if err != nil {
-		t.Fatalf("failed to get container port: %v", err)
-	}
-
-	dsn := fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("failed to connect to database: %v", err)
-	}
-
-	// Wait for connection
-	for i := 0; i < 30; i++ {
-		if err := pool.Ping(ctx); err == nil {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// Create a simple test table
-	_, err = pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS tx_test (
-			id SERIAL PRIMARY KEY,
-			value TEXT NOT NULL
-		)
-	`)
-	if err != nil {
-		t.Fatalf("failed to create test table: %v", err)
-	}
-
-	txm, err := NewTxManager(pool, nil)
+	txm, err := NewTxManager(txmgrPool, nil)
 	if err != nil {
 		t.Fatalf("failed to create TxManager: %v", err)
 	}
 
-	cleanup := func() {
-		pool.Close()
-		container.Terminate(ctx)
-	}
-
-	return txm, pool, cleanup
+	return txm
 }
 
 func TestTxManager_WithTransaction_Commit(t *testing.T) {
-	txm, pool, cleanup := setupTxManagerTest(t)
-	t.Cleanup(cleanup)
+	txm := setupTxManagerTest(t)
 
 	ctx := context.Background()
 
@@ -107,7 +72,7 @@ func TestTxManager_WithTransaction_Commit(t *testing.T) {
 
 	// Verify data was committed
 	var value string
-	err = pool.QueryRow(ctx, "SELECT value FROM tx_test WHERE value = $1", "test_value").Scan(&value)
+	err = txmgrPool.QueryRow(ctx, "SELECT value FROM tx_test WHERE value = $1", "test_value").Scan(&value)
 	if err != nil {
 		t.Fatalf("failed to query inserted data: %v", err)
 	}
@@ -117,8 +82,7 @@ func TestTxManager_WithTransaction_Commit(t *testing.T) {
 }
 
 func TestTxManager_WithTransaction_Rollback(t *testing.T) {
-	txm, pool, cleanup := setupTxManagerTest(t)
-	t.Cleanup(cleanup)
+	txm := setupTxManagerTest(t)
 
 	ctx := context.Background()
 
@@ -138,7 +102,7 @@ func TestTxManager_WithTransaction_Rollback(t *testing.T) {
 
 	// Verify data was NOT committed (rolled back)
 	var count int
-	err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM tx_test WHERE value = $1", "should_not_exist").Scan(&count)
+	err = txmgrPool.QueryRow(ctx, "SELECT COUNT(*) FROM tx_test WHERE value = $1", "should_not_exist").Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
@@ -148,8 +112,7 @@ func TestTxManager_WithTransaction_Rollback(t *testing.T) {
 }
 
 func TestTxManager_WithTransaction_PanicRollback(t *testing.T) {
-	txm, pool, cleanup := setupTxManagerTest(t)
-	t.Cleanup(cleanup)
+	txm := setupTxManagerTest(t)
 
 	ctx := context.Background()
 
@@ -170,7 +133,7 @@ func TestTxManager_WithTransaction_PanicRollback(t *testing.T) {
 
 	// Verify data was NOT committed (rolled back due to panic)
 	var count int
-	err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM tx_test WHERE value = $1", "panic_value").Scan(&count)
+	err := txmgrPool.QueryRow(ctx, "SELECT COUNT(*) FROM tx_test WHERE value = $1", "panic_value").Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
@@ -180,8 +143,7 @@ func TestTxManager_WithTransaction_PanicRollback(t *testing.T) {
 }
 
 func TestTxManager_WithTransaction_MultipleOperations(t *testing.T) {
-	txm, pool, cleanup := setupTxManagerTest(t)
-	t.Cleanup(cleanup)
+	txm := setupTxManagerTest(t)
 
 	ctx := context.Background()
 
@@ -201,7 +163,7 @@ func TestTxManager_WithTransaction_MultipleOperations(t *testing.T) {
 
 	// Verify all data was committed
 	var count int
-	err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM tx_test WHERE value LIKE 'multi_%'").Scan(&count)
+	err = txmgrPool.QueryRow(ctx, "SELECT COUNT(*) FROM tx_test WHERE value LIKE 'multi_%'").Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
@@ -211,8 +173,7 @@ func TestTxManager_WithTransaction_MultipleOperations(t *testing.T) {
 }
 
 func TestTxManager_WithTransaction_PartialFailure(t *testing.T) {
-	txm, pool, cleanup := setupTxManagerTest(t)
-	t.Cleanup(cleanup)
+	txm := setupTxManagerTest(t)
 
 	ctx := context.Background()
 
@@ -236,7 +197,7 @@ func TestTxManager_WithTransaction_PartialFailure(t *testing.T) {
 
 	// Verify NO data was committed (atomic rollback)
 	var count int
-	err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM tx_test WHERE value LIKE 'partial_%'").Scan(&count)
+	err = txmgrPool.QueryRow(ctx, "SELECT COUNT(*) FROM tx_test WHERE value LIKE 'partial_%'").Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
@@ -246,13 +207,12 @@ func TestTxManager_WithTransaction_PartialFailure(t *testing.T) {
 }
 
 func TestTxManager_WithTransactionOptions_ReadOnly(t *testing.T) {
-	txm, pool, cleanup := setupTxManagerTest(t)
-	t.Cleanup(cleanup)
+	txm := setupTxManagerTest(t)
 
 	ctx := context.Background()
 
 	// Insert test data first
-	_, err := pool.Exec(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "readonly_test")
+	_, err := txmgrPool.Exec(ctx, "INSERT INTO tx_test (value) VALUES ($1)", "readonly_test")
 	if err != nil {
 		t.Fatalf("failed to insert test data: %v", err)
 	}
@@ -280,8 +240,7 @@ func TestTxManager_WithTransactionOptions_ReadOnly(t *testing.T) {
 }
 
 func TestTxManager_ContextCancellation(t *testing.T) {
-	txm, _, cleanup := setupTxManagerTest(t)
-	t.Cleanup(cleanup)
+	txm := setupTxManagerTest(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately

@@ -3,16 +3,18 @@ package entity
 import (
 	"fmt"
 	"math/big"
+	"time"
 )
 
 // MorphoVaultState represents a snapshot of a MetaMorpho vault's state at a specific block.
 type MorphoVaultState struct {
-	ID            int64
-	MorphoVaultID int64
-	BlockNumber   int64
-	BlockVersion  int
-	TotalAssets   *big.Int
-	TotalShares   *big.Int
+	ID             int64
+	MorphoVaultID  int64
+	BlockNumber    int64
+	BlockVersion   int
+	BlockTimestamp time.Time
+	TotalAssets    *big.Int
+	TotalShares    *big.Int
 	// AccrueInterest raw data (nil when not triggered by AccrueInterest)
 	FeeShares      *big.Int // V1: single fee, V2: performanceFeeShares
 	NewTotalAssets *big.Int
@@ -22,13 +24,14 @@ type MorphoVaultState struct {
 }
 
 // NewMorphoVaultState creates a new MorphoVaultState entity with validation.
-func NewMorphoVaultState(morphoVaultID, blockNumber int64, blockVersion int, totalAssets, totalShares *big.Int) (*MorphoVaultState, error) {
+func NewMorphoVaultState(morphoVaultID, blockNumber int64, blockVersion int, timestamp time.Time, totalAssets, totalShares *big.Int) (*MorphoVaultState, error) {
 	s := &MorphoVaultState{
-		MorphoVaultID: morphoVaultID,
-		BlockNumber:   blockNumber,
-		BlockVersion:  blockVersion,
-		TotalAssets:   totalAssets,
-		TotalShares:   totalShares,
+		MorphoVaultID:  morphoVaultID,
+		BlockNumber:    blockNumber,
+		BlockVersion:   blockVersion,
+		BlockTimestamp: timestamp,
+		TotalAssets:    totalAssets,
+		TotalShares:    totalShares,
 	}
 	if err := s.validate(); err != nil {
 		return nil, err
@@ -53,6 +56,9 @@ func (s *MorphoVaultState) validate() error {
 	}
 	if s.BlockVersion < 0 {
 		return fmt.Errorf("blockVersion must be non-negative, got %d", s.BlockVersion)
+	}
+	if s.BlockTimestamp.IsZero() {
+		return fmt.Errorf("blockTimestamp must not be zero")
 	}
 	if s.TotalAssets == nil {
 		return fmt.Errorf("totalAssets must not be nil")

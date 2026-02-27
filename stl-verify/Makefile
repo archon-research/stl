@@ -4,7 +4,7 @@
 .PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer help ci ci-checks \
         dev-up dev-env dev-down dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -16,6 +16,8 @@
         docker-release-all docker-release-all-staging \
         docker-build-temporal-worker docker-push-temporal-worker docker-release-temporal-worker \
         docker-build-temporal-worker-staging docker-push-temporal-worker-staging docker-release-temporal-worker-staging \
+        docker-build-morpho-indexer docker-push-morpho-indexer docker-release-morpho-indexer \
+        docker-build-morpho-indexer-staging docker-push-morpho-indexer-staging docker-release-morpho-indexer-staging \
         run-temporal-worker build-temporal-worker \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         ecs-deploy-oracle-price-worker ecs-deploy-oracle-price-worker-staging \
@@ -67,9 +69,11 @@ test:
 	go test -v ./...
 
 # Run integration tests (requires integration build tag)
+# -p 2: run at most 2 package test binaries in parallel to avoid spinning up
+# too many containers concurrently on CI (13 packages x containers = OOM).
 test-integration:
 	@echo "==> Running integration tests..."
-	go test -tags=integration -v -timeout=10m ./...
+	go test -tags=integration -v -timeout=10m -p 2 ./...
 
 # Run tests with coverage
 cover:
@@ -296,9 +300,13 @@ dev-env:
 	@echo "Environment files generated."
 	@echo "Note: data-validator uses staging TigerData. Run 'make tigerdata-tunnel' first."
 
-# Stop all local services
+# Stop all local services (preserves volumes and database data)
 dev-down:
 	@docker compose down
+
+# Stop all local services and delete volumes (destroys database data)
+dev-reset:
+	@docker compose down -v
 
 # Show service IPs (useful for devcontainer)
 dev-ips:
@@ -444,6 +452,8 @@ docker-release-all:
 	@$(MAKE) _docker-release-oracle-price-worker-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-sparklend-position-tracker-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-morpho-indexer-internal ENV=$(ENV)
 	@echo ""
 	@echo "==> All Docker images released for ENV=$(ENV)"
 
@@ -808,6 +818,74 @@ docker-push-temporal-worker-staging:
 
 docker-release-temporal-worker-staging:
 	@$(MAKE) docker-release-temporal-worker ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - Morpho Indexer
+# =============================================================================
+
+# ECR repository URL for morpho indexer
+ECR_REPO_MORPHO_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-morpho-indexer
+
+# Build Docker image for morpho indexer (ARM64 for Fargate Graviton)
+docker-build-morpho-indexer:
+	@echo "==> Building Morpho Indexer Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_MORPHO_INDEXER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.morpho-indexer \
+		-t $(ECR_REPO_MORPHO_INDEXER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_MORPHO_INDEXER):latest \
+		--load .
+
+# Push morpho indexer Docker image to ECR
+docker-push-morpho-indexer: ecr-login
+	@echo "==> Pushing Morpho Indexer Docker image to ECR..."
+	docker push $(ECR_REPO_MORPHO_INDEXER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_MORPHO_INDEXER):latest
+
+# Build and push morpho indexer in one step (captures tag at start to ensure consistency)
+docker-release-morpho-indexer: ecr-login _docker-release-morpho-indexer-internal
+
+_docker-release-morpho-indexer-internal:
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Morpho Indexer Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_MORPHO_INDEXER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.morpho-indexer \
+		-t $(ECR_REPO_MORPHO_INDEXER):$$TAG \
+		-t $(ECR_REPO_MORPHO_INDEXER):latest \
+		--load . && \
+	echo "==> Pushing Morpho Indexer Docker image to ECR..." && \
+	docker push $(ECR_REPO_MORPHO_INDEXER):$$TAG && \
+	docker push $(ECR_REPO_MORPHO_INDEXER):latest && \
+	echo "==> Morpho Indexer Docker image released: $(ECR_REPO_MORPHO_INDEXER):$$TAG"
+
+# =============================================================================
+# Sentinelstaging Morpho Indexer Docker Shortcuts
+# =============================================================================
+
+docker-build-morpho-indexer-staging:
+	@$(MAKE) docker-build-morpho-indexer ENV=sentinelstaging
+
+docker-push-morpho-indexer-staging:
+	@$(MAKE) docker-push-morpho-indexer ENV=sentinelstaging
+
+docker-release-morpho-indexer-staging:
+	@$(MAKE) docker-release-morpho-indexer ENV=sentinelstaging
 
 # =============================================================================
 # Erigon Node Management (via Tailscale)
