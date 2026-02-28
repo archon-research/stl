@@ -19,7 +19,7 @@ import (
 //   - The chain ID is not recognized
 //   - The bucket name does not contain the expected chain name
 func ValidateS3BucketForChain(chainID int64, bucket string) error {
-	chainName, ok := entity.ChainIDToName[chainID]
+	chainName, ok := entity.ChainIDToS3Bucket[chainID]
 	if !ok {
 		return fmt.Errorf("unknown chain ID %d: cannot validate bucket name", chainID)
 	}
