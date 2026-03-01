@@ -3,14 +3,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil/mockchain"
 )
 
@@ -21,7 +24,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *addr, nil); err != nil {
+	if err := run(ctx, *addr); err != nil {
 		slog.Error("mock-blockchain-server failed", "error", err)
 		os.Exit(1)
 	}
@@ -33,7 +36,6 @@ type serverAdapter struct {
 	store  *mockchain.DataStore
 	addr   string
 	logger *slog.Logger
-	addrCh chan<- string
 }
 
 func (a *serverAdapter) Start(_ context.Context) error {
@@ -48,28 +50,48 @@ func (a *serverAdapter) Start(_ context.Context) error {
 		"blocks", a.store.Len(),
 	)
 
-	if a.addrCh != nil {
-		select {
-		case a.addrCh <- a.srv.Addr().String():
-		default:
-		}
-	}
-
 	return nil
 }
 
 func (a *serverAdapter) Stop() error {
-	a.srv.Stop()
-	return nil
+	return a.srv.Stop()
 }
 
-func run(ctx context.Context, addr string, addrCh chan<- string) error {
+// newDataStore returns a DataStore pre-populated with 3 synthetic blocks for stress testing.
+func newDataStore() *mockchain.DataStore {
+	store := mockchain.NewDataStore()
+	for i := 0; i < 3; i++ {
+		hash := fmt.Sprintf("0x%064x", i+1)
+		parentHash := "0x" + strings.Repeat("0", 64)
+		if i > 0 {
+			parentHash = fmt.Sprintf("0x%064x", i)
+		}
+		header := outbound.BlockHeader{
+			Number:     fmt.Sprintf("0x%x", i+1),
+			Hash:       hash,
+			ParentHash: parentHash,
+			Timestamp:  "0x67c00000",
+		}
+		headerJSON, err := json.Marshal(header)
+		if err != nil {
+			panic(fmt.Sprintf("seeding data store: %v", err))
+		}
+		store.AddHeader(header)
+		store.Add(i, "block", headerJSON)
+		store.Add(i, "receipts", json.RawMessage(`[]`))
+		store.Add(i, "traces", json.RawMessage(`[]`))
+		store.Add(i, "blobs", json.RawMessage(`[]`))
+	}
+	return store
+}
+
+func run(ctx context.Context, addr string) error {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
 
-	store := mockchain.NewTestDataStore()
+	store := newDataStore()
 	srv := mockchain.NewServer(store)
 
 	return lifecycle.Run(ctx, logger, &serverAdapter{
@@ -77,6 +99,5 @@ func run(ctx context.Context, addr string, addrCh chan<- string) error {
 		store:  store,
 		addr:   addr,
 		logger: logger,
-		addrCh: addrCh,
 	})
 }

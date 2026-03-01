@@ -19,7 +19,7 @@ func startTestServer(t *testing.T, store *DataStore) *Server {
 	if err := s.Start(":0"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	t.Cleanup(s.Stop)
+	t.Cleanup(func() { _ = s.Stop() })
 	return s
 }
 

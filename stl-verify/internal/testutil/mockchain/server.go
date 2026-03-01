@@ -66,13 +66,11 @@ func (s *Server) Start(addr string) error {
 }
 
 // Stop halts the Replayer and shuts down the HTTP server gracefully.
-func (s *Server) Stop() {
+func (s *Server) Stop() error {
 	s.replayer.Stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := s.httpSrv.Shutdown(ctx); err != nil {
-		slog.Error("mockchain: shutdown error", "error", err)
-	}
+	return s.httpSrv.Shutdown(ctx)
 }
 
 // Addr returns the server's listening address, or nil if not started.

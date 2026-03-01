@@ -10,13 +10,10 @@ import (
 
 const defaultInterval = 12 * time.Second // default Ethereum block time
 
-// Status holds a snapshot of the Replayer's current state.
-type Status struct {
-	// Running reports whether the Replayer is currently emitting blocks.
-	Running bool
-	// TemplateIndex is the index of the next block template to be emitted.
+// status holds a snapshot of the Replayer's current state.
+type status struct {
+	Running       bool
 	TemplateIndex int
-	// BlocksEmitted is the total number of blocks emitted since the last Start.
 	BlocksEmitted int64
 }
 
@@ -124,12 +121,12 @@ func (r *Replayer) Stop() int64 {
 	return r.blocksEmitted
 }
 
-// GetStatus returns a snapshot of the Replayer's current state.
-func (r *Replayer) GetStatus() Status {
+// getStatus returns a snapshot of the Replayer's current state.
+func (r *Replayer) getStatus() status {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return Status{
+	return status{
 		Running:       r.running,
 		TemplateIndex: r.templateIndex,
 		BlocksEmitted: r.blocksEmitted,

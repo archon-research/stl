@@ -37,7 +37,7 @@ func dialWS(t *testing.T, rawURL string) *websocket.Conn {
 // It also asserts that the response carries jsonrpc "2.0".
 func doSubscribe(t *testing.T, conn *websocket.Conn) string {
 	t.Helper()
-	req := jsonRPCRequest{ID: json.RawMessage("1"), Method: "eth_subscribe", Params: []interface{}{"newHeads"}}
+	req := testutil.JSONRPCRequest{ID: json.RawMessage("1"), Method: "eth_subscribe", Params: json.RawMessage(`["newHeads"]`)}
 	if err := conn.WriteJSON(req); err != nil {
 		t.Fatalf("write subscribe: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestWSHandler_InvalidParams(t *testing.T) {
 	srv, _ := newTestWSServer(t)
 	conn := dialWS(t, srv.URL)
 
-	req := jsonRPCRequest{ID: json.RawMessage("2"), Method: "eth_subscribe", Params: []interface{}{"logs"}}
+	req := testutil.JSONRPCRequest{ID: json.RawMessage("2"), Method: "eth_subscribe", Params: json.RawMessage(`["logs"]`)}
 	if err := conn.WriteJSON(req); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestWSHandler_UnknownMethod(t *testing.T) {
 	srv, _ := newTestWSServer(t)
 	conn := dialWS(t, srv.URL)
 
-	req := jsonRPCRequest{ID: json.RawMessage("3"), Method: "eth_chainId", Params: nil}
+	req := testutil.JSONRPCRequest{ID: json.RawMessage("3"), Method: "eth_chainId", Params: nil}
 	if err := conn.WriteJSON(req); err != nil {
 		t.Fatalf("write: %v", err)
 	}

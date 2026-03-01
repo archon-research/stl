@@ -101,8 +101,8 @@ func TestReplayer_IndexWraps(t *testing.T) {
 	r.Stop()
 
 	// After n+1 emissions from n templates, index should be at 1.
-	if r.GetStatus().TemplateIndex != 1 {
-		t.Errorf("expected templateIndex 1 after wrap, got %d", r.GetStatus().TemplateIndex)
+	if r.getStatus().TemplateIndex != 1 {
+		t.Errorf("expected templateIndex 1 after wrap, got %d", r.getStatus().TemplateIndex)
 	}
 }
 
@@ -139,11 +139,11 @@ func TestReplayer_StopNotRunning(t *testing.T) {
 	}
 }
 
-// TestReplayer_GetStatus verifies status transitions: before start, while running, after stop.
-func TestReplayer_GetStatus(t *testing.T) {
+// TestReplayer_getStatus verifies status transitions: before start, while running, after stop.
+func TestReplayer_getStatus(t *testing.T) {
 	r, received := newTestReplayer(t)
 
-	s := r.GetStatus()
+	s := r.getStatus()
 	if s.Running {
 		t.Error("expected Running=false before Start")
 	}
@@ -154,7 +154,7 @@ func TestReplayer_GetStatus(t *testing.T) {
 	r.Start()
 	drain(t, received, 1)
 
-	s = r.GetStatus()
+	s = r.getStatus()
 	if !s.Running {
 		t.Error("expected Running=true while running")
 	}
@@ -164,7 +164,7 @@ func TestReplayer_GetStatus(t *testing.T) {
 
 	r.Stop()
 
-	s = r.GetStatus()
+	s = r.getStatus()
 	if s.Running {
 		t.Error("expected Running=false after Stop")
 	}
@@ -201,7 +201,7 @@ func TestReplayer_RestartResetsState(t *testing.T) {
 	r.Start()
 	drain(t, received, 1)
 
-	s := r.GetStatus()
+	s := r.getStatus()
 	if s.BlocksEmitted < 1 {
 		t.Errorf("expected BlocksEmitted >= 1 after restart, got %d", s.BlocksEmitted)
 	}

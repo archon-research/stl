@@ -9,14 +9,9 @@ import (
 	"sync"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/gorilla/websocket"
 )
-
-type jsonRPCRequest struct {
-	ID     json.RawMessage `json:"id"`
-	Method string          `json:"method"`
-	Params []interface{}   `json:"params"`
-}
 
 type jsonRPCResponse struct {
 	JsonRPC string          `json:"jsonrpc"`
@@ -79,13 +74,11 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.Unlock()
 
 	if oldConn != nil {
-		h.mu.Lock()
 		_ = oldConn.Close()
-		h.mu.Unlock()
 	}
 
 	for {
-		var req jsonRPCRequest
+		var req testutil.JSONRPCRequest
 		if err := conn.ReadJSON(&req); err != nil {
 			h.clearConn(conn)
 			return
@@ -105,7 +98,7 @@ func (h *wsHandler) clearConn(conn *websocket.Conn) {
 	h.mu.Unlock()
 }
 
-func (h *wsHandler) handleRequest(conn *websocket.Conn, req jsonRPCRequest) error {
+func (h *wsHandler) handleRequest(conn *websocket.Conn, req testutil.JSONRPCRequest) error {
 	switch req.Method {
 	case "eth_subscribe":
 		return h.handleSubscribe(conn, req)
@@ -114,8 +107,13 @@ func (h *wsHandler) handleRequest(conn *websocket.Conn, req jsonRPCRequest) erro
 	}
 }
 
-func (h *wsHandler) handleSubscribe(conn *websocket.Conn, req jsonRPCRequest) error {
-	if len(req.Params) == 0 || req.Params[0] != "newHeads" {
+func (h *wsHandler) handleSubscribe(conn *websocket.Conn, req testutil.JSONRPCRequest) error {
+	var params []json.RawMessage
+	if err := json.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
+		return h.writeError(conn, req.ID, -32602, "unsupported subscription type")
+	}
+	var sub string
+	if err := json.Unmarshal(params[0], &sub); err != nil || sub != "newHeads" {
 		return h.writeError(conn, req.ID, -32602, "unsupported subscription type")
 	}
 	resp := jsonRPCResponse{JsonRPC: "2.0", ID: req.ID, Result: h.subID}

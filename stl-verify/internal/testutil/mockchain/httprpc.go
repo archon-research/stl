@@ -36,7 +36,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req jsonRPCRequest
+	var req testutil.JSONRPCRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -47,7 +47,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *httpHandler) handleBatch(w http.ResponseWriter, raw json.RawMessage) {
-	var reqs []jsonRPCRequest
+	var reqs []testutil.JSONRPCRequest
 	if err := json.Unmarshal(raw, &reqs); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -79,7 +79,7 @@ func (h *httpHandler) handleBatch(w http.ResponseWriter, raw json.RawMessage) {
 	_, _ = w.Write(out)
 }
 
-func (h *httpHandler) dispatch(req jsonRPCRequest) (json.RawMessage, *jsonRPCErrorObj) {
+func (h *httpHandler) dispatch(req testutil.JSONRPCRequest) (json.RawMessage, *jsonRPCErrorObj) {
 	switch req.Method {
 	case "eth_getBlockByHash":
 		return h.getBlockByHash(req)
@@ -113,15 +113,19 @@ func (h *httpHandler) findIndexByHash(hash string) (int, bool) {
 	return -1, false
 }
 
-func extractHashParam(req jsonRPCRequest) (string, bool) {
-	if len(req.Params) == 0 {
+func extractHashParam(req testutil.JSONRPCRequest) (string, bool) {
+	var params []json.RawMessage
+	if err := json.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
 		return "", false
 	}
-	s, ok := req.Params[0].(string)
-	return s, ok
+	var s string
+	if err := json.Unmarshal(params[0], &s); err != nil {
+		return "", false
+	}
+	return s, true
 }
 
-func (h *httpHandler) getBlockByHash(req jsonRPCRequest) (json.RawMessage, *jsonRPCErrorObj) {
+func (h *httpHandler) getBlockByHash(req testutil.JSONRPCRequest) (json.RawMessage, *jsonRPCErrorObj) {
 	hash, ok := extractHashParam(req)
 	if !ok {
 		return nil, &jsonRPCErrorObj{Code: -32602, Message: "missing or invalid hash parameter"}
@@ -138,7 +142,7 @@ func (h *httpHandler) getBlockByHash(req jsonRPCRequest) (json.RawMessage, *json
 	return raw, nil
 }
 
-func (h *httpHandler) getDataByHash(req jsonRPCRequest, dataType string) (json.RawMessage, *jsonRPCErrorObj) {
+func (h *httpHandler) getDataByHash(req testutil.JSONRPCRequest, dataType string) (json.RawMessage, *jsonRPCErrorObj) {
 	hash, ok := extractHashParam(req)
 	if !ok {
 		return nil, &jsonRPCErrorObj{Code: -32602, Message: "missing or invalid hash parameter"}
