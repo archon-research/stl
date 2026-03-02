@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,10 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+func TestMain(m *testing.M) {
+	os.Exit(testutil.RunTestsWithLeakCheck(m))
+}
 
 // ---------------------------------------------------------------------------
 // Integration tests for run()

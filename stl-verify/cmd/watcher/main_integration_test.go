@@ -32,6 +32,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
+func TestMain(m *testing.M) {
+	os.Exit(testutil.RunTestsWithLeakCheck(m))
+}
+
 // newTestBlockchainClient returns a MockBlockchainClient configured for
 // watcher e2e tests. It sets UseBlockErrForMissing so that GetBlocksBatch
 // returns BlockErr on blocks not previously added.
