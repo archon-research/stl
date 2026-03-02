@@ -186,6 +186,58 @@ func TestWSHandler_DisconnectClearsConn(t *testing.T) {
 	}, "h.conn to be nil after client disconnect")
 }
 
+// TestWSHandler_Disconnect verifies that Disconnect closes the active connection and sets h.conn to nil.
+func TestWSHandler_Disconnect(t *testing.T) {
+	srv, h := newTestWSServer(t)
+	conn := dialWS(t, srv.URL)
+	doSubscribe(t, conn) // ensures h.conn is set
+
+	h.Disconnect()
+
+	// h.conn must be nil immediately — Disconnect clears it before closing.
+	h.mu.Lock()
+	isNil := h.conn == nil
+	h.mu.Unlock()
+	if !isNil {
+		t.Error("expected h.conn to be nil after Disconnect()")
+	}
+
+	// The client-side read must fail since the server closed the connection.
+	if err := conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var ignored any
+	if err := conn.ReadJSON(&ignored); err == nil {
+		t.Error("expected read to fail after server Disconnect()")
+	}
+}
+
+// TestWSHandler_BroadcastWriteFailure verifies that Broadcast clears h.conn when WriteJSON fails.
+func TestWSHandler_BroadcastWriteFailure(t *testing.T) {
+	// Obtain a real *websocket.Conn then close it to simulate a broken connection.
+	// Using a helper server just to get the conn; the actual handler under test is standalone.
+	helperSrv, _ := newTestWSServer(t)
+	deadConn := dialWS(t, helperSrv.URL)
+	deadConn.Close()
+
+	// Inject the dead connection into a standalone handler (no ServeHTTP goroutine
+	// is running, so there is no clearConn race).
+	h := newWSHandler()
+	h.mu.Lock()
+	h.conn = deadConn
+	h.mu.Unlock()
+
+	// Broadcast must detect the write failure and clear h.conn.
+	h.Broadcast(outbound.BlockHeader{Number: "0x1"})
+
+	h.mu.Lock()
+	isNil := h.conn == nil
+	h.mu.Unlock()
+	if !isNil {
+		t.Error("expected h.conn to be nil after broadcast write failure")
+	}
+}
+
 // TestWSHandler_ReplaceConn verifies that a second connection closes the first and takes over.
 func TestWSHandler_ReplaceConn(t *testing.T) {
 	srv, h := newTestWSServer(t)

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/gorilla/websocket"
 )
 
 // startTestServer starts a Server on a random port and registers cleanup.
@@ -131,13 +132,19 @@ func TestServer_HTTP_BlockNumber(t *testing.T) {
 	}
 }
 
-// TestServer_HTTP_GetBlockByHash verifies that eth_getBlockByHash returns block data for a known hash.
+// TestServer_HTTP_GetBlockByHash verifies that eth_getBlockByHash returns block data for a known derived hash.
 func TestServer_HTTP_GetBlockByHash(t *testing.T) {
 	store := NewTestDataStore()
 	s := startTestServer(t, store)
-	hash := store.Headers()[0].Hash
 
-	body := fmt.Sprintf(`{"id":2,"method":"eth_getBlockByHash","params":[%q,false]}`, hash)
+	// Emit one block to populate the derived-hash map, then retrieve its hash.
+	s.replayer.emit()
+	header, ok := s.replayer.HeaderForNumber(s.replayer.CurrentBlockNumber())
+	if !ok {
+		t.Fatal("expected emitted block to be retrievable")
+	}
+
+	body := fmt.Sprintf(`{"id":2,"method":"eth_getBlockByHash","params":[%q,false]}`, header.Hash)
 	raw := serverPost(t, s, body)
 
 	var resp httpRPCResponse
@@ -170,7 +177,14 @@ func TestServer_HTTP_UnknownMethod(t *testing.T) {
 func TestServer_HTTP_Batch(t *testing.T) {
 	store := NewTestDataStore()
 	s := startTestServer(t, store)
-	hash := store.Headers()[0].Hash
+
+	// Emit one block to populate the derived-hash map.
+	s.replayer.emit()
+	header, ok := s.replayer.HeaderForNumber(s.replayer.CurrentBlockNumber())
+	if !ok {
+		t.Fatal("expected emitted block to be retrievable")
+	}
+	hash := header.Hash
 
 	body := `[` +
 		`{"jsonrpc":"2.0","id":10,"method":"eth_blockNumber","params":[]}` +
@@ -199,5 +213,121 @@ func TestServer_HTTP_Batch(t *testing.T) {
 	}
 	if string(responses[1].Result) == "null" || len(responses[1].Result) == 0 {
 		t.Error("expected non-null block result for known hash")
+	}
+}
+
+// TestServer_Disconnect verifies that Server.Disconnect closes the active WebSocket
+// connection so the client detects it.
+func TestServer_Disconnect(t *testing.T) {
+	s := startTestServer(t, NewTestDataStore())
+	wsURL := fmt.Sprintf("ws://%s", s.Addr().String())
+	conn := dialWS(t, wsURL)
+	doSubscribe(t, conn)
+
+	s.Disconnect()
+
+	if err := conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var ignored any
+	if err := conn.ReadJSON(&ignored); err == nil {
+		t.Error("expected read to fail after Server.Disconnect()")
+	}
+}
+
+// TestServer_SetInterval verifies that SetInterval changes the block emission rate.
+// SetInterval must be called before Start.
+func TestServer_SetInterval(t *testing.T) {
+	s := NewServer(NewTestDataStore())
+	s.SetInterval(50 * time.Millisecond)
+	if err := s.Start(":0"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop() })
+
+	wsURL := fmt.Sprintf("ws://%s", s.Addr().String())
+	conn := dialWS(t, wsURL)
+	doSubscribe(t, conn)
+
+	// With a 50ms interval, 3 blocks must arrive well within 2 seconds.
+	for i := range 3 {
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		var n jsonRPCNotification
+		if err := conn.ReadJSON(&n); err != nil {
+			t.Fatalf("read notification %d: %v", i+1, err)
+		}
+	}
+}
+
+// TestServer_WSSubscriberLike replicates the exact connection pattern of the real
+// alchemy subscriber: sets a read deadline before every ReadJSON and a pong handler.
+// This catches any incompatibility between the mock server and the real watcher.
+func TestServer_WSSubscriberLike(t *testing.T) {
+	// Start server with a fast replayer so we don't wait 12s in CI.
+	store := NewTestDataStore()
+	s := NewServer(store)
+	s.replayer.SetInterval(100 * time.Millisecond)
+	if err := s.Start(":0"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop() })
+
+	wsURL := fmt.Sprintf("ws://%s", s.Addr().String())
+	dialer := websocket.Dialer{}
+	conn, _, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Mirror what alchemy.Subscriber.connectAndSubscribe does.
+	readTimeout := 5 * time.Second
+	if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(readTimeout))
+	})
+
+	// Send eth_subscribe.
+	subscribeReq := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "eth_subscribe",
+		"params":  []any{"newHeads"},
+	}
+	if err := conn.WriteJSON(subscribeReq); err != nil {
+		t.Fatalf("write subscribe: %v", err)
+	}
+
+	// Read the subscription acknowledgement.
+	var subResp jsonRPCResponse
+	if err := conn.ReadJSON(&subResp); err != nil {
+		t.Fatalf("read subscribe response: %v", err)
+	}
+	if subResp.Result != "0x1" {
+		t.Errorf("expected subscription id 0x1, got %q", subResp.Result)
+	}
+
+	// Mirror what alchemy.Subscriber.readLoop does: reset deadline before each read
+	// and wait for at least 3 block notifications.
+	received := 0
+	for received < 3 {
+		if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		var msg jsonRPCNotification
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatalf("read notification %d: %v", received+1, err)
+		}
+		if msg.Method != "eth_subscription" {
+			t.Errorf("expected method eth_subscription, got %q", msg.Method)
+		}
+		received++
+	}
+	if received < 3 {
+		t.Errorf("expected 3 notifications, got %d", received)
 	}
 }

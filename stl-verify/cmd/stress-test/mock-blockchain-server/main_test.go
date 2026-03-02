@@ -26,7 +26,7 @@ func TestRun_StartStop(t *testing.T) {
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- run(ctx, addr)
+		errCh <- run(ctx, addr, 12*time.Second)
 	}()
 
 	testutil.WaitForCondition(t, 2*time.Second, func() bool {
@@ -53,7 +53,7 @@ func TestRun_StartStop(t *testing.T) {
 // TestRun_BadAddr verifies that run returns an error when given an invalid address.
 func TestRun_BadAddr(t *testing.T) {
 	ctx := context.Background()
-	err := run(ctx, "invalid:addr:extra")
+	err := run(ctx, "invalid:addr:extra", 12*time.Second)
 	if err == nil {
 		t.Fatal("expected error for invalid address, got nil")
 	}
