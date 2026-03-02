@@ -341,7 +341,6 @@ func TestReplayer_SetInterval(t *testing.T) {
 // TestReplayer_SetInterval_NonPositive verifies that SetInterval panics for zero and negative values.
 func TestReplayer_SetInterval_NonPositive(t *testing.T) {
 	for _, d := range []time.Duration{0, -1 * time.Millisecond} {
-		d := d
 		t.Run(d.String(), func(t *testing.T) {
 			ds := NewFixtureDataStore()
 			r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {})
