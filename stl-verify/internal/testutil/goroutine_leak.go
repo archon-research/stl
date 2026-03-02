@@ -30,11 +30,18 @@ func CheckGoroutineLeaks(exitCode int) int {
 	// performs lazy detection, so Count returns 0 until the profile has
 	// been materialised at least once via WriteTo.
 	var buf bytes.Buffer
-	profile.WriteTo(&buf, 1)
+	err := profile.WriteTo(&buf, 1)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write goroutine leak profile: %v\n", err)
+		return 1
+	}
 
 	if count := profile.Count(); count > 0 {
 		fmt.Fprintf(os.Stderr, "\n=== GOROUTINE LEAK DETECTED: %d leaked goroutine(s) ===\n", count)
-		buf.WriteTo(os.Stderr)
+		_, err := buf.WriteTo(os.Stderr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to write goroutine leak report: %v\n", err)
+		}
 		fmt.Fprintln(os.Stderr, "=== END GOROUTINE LEAK REPORT ===")
 		return 1
 	}
