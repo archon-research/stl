@@ -102,7 +102,7 @@ func setupBenchmarkPostgres(b *testing.B) (*pgxpool.Pool, func()) {
 
 	cleanup := func() {
 		pool.Close()
-		container.Terminate(ctx)
+		container.Terminate(context.Background())
 	}
 
 	return pool, cleanup

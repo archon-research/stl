@@ -67,7 +67,7 @@ func setupRedis(t *testing.T, ttl time.Duration) (*BlockCache, func()) {
 
 	cleanup := func() {
 		cache.Close()
-		container.Terminate(ctx)
+		container.Terminate(context.Background())
 	}
 
 	return cache, cleanup
