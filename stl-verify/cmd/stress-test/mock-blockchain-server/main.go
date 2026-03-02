@@ -60,7 +60,7 @@ func (a *serverAdapter) Stop() error {
 // newDataStore returns a DataStore pre-populated with 3 synthetic blocks for stress testing.
 func newDataStore() *mockchain.DataStore {
 	store := mockchain.NewDataStore()
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		hash := fmt.Sprintf("0x%064x", i+1)
 		parentHash := "0x" + strings.Repeat("0", 64)
 		if i > 0 {

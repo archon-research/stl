@@ -25,7 +25,7 @@ func newTestReplayer(t *testing.T) (*Replayer, chan outbound.BlockHeader) {
 func drain(t *testing.T, ch chan outbound.BlockHeader, n int) []outbound.BlockHeader {
 	t.Helper()
 	out := make([]outbound.BlockHeader, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		select {
 		case h := <-ch:
 			out = append(out, h)

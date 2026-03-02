@@ -13,7 +13,7 @@ import (
 func NewTestDataStore() *DataStore {
 	ds := NewDataStore()
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		hash := fmt.Sprintf("0x%064x", i+1)
 		parentHash := "0x" + strings.Repeat("0", 64)
 		if i > 0 {

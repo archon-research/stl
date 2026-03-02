@@ -203,7 +203,7 @@ func TestWSHandler_ReplaceConn(t *testing.T) {
 	if err := conn1.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
 		t.Fatalf("set read deadline: %v", err)
 	}
-	var ignored interface{}
+	var ignored any
 	if err := conn1.ReadJSON(&ignored); err == nil {
 		t.Error("expected conn1 read to fail after server replaced it with conn2")
 	}

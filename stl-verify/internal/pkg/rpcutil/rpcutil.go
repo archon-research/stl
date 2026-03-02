@@ -25,7 +25,7 @@ func WriteResult(w http.ResponseWriter, id, result json.RawMessage) {
 
 // WriteError writes a JSON-RPC 2.0 error response.
 func WriteError(w http.ResponseWriter, id json.RawMessage, code int, message string) {
-	errJSON, _ := json.Marshal(map[string]interface{}{"code": code, "message": message})
+	errJSON, _ := json.Marshal(map[string]any{"code": code, "message": message})
 	_ = json.NewEncoder(w).Encode(map[string]json.RawMessage{
 		"jsonrpc": json.RawMessage(`"2.0"`),
 		"id":      id,
