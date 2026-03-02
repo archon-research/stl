@@ -86,10 +86,7 @@ func (r *UserRepository) UpsertUsers(ctx context.Context, users []*entity.User) 
 	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(users); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(users) {
-			end = len(users)
-		}
+		end := min(i+r.batchSize, len(users))
 		batch := users[i:end]
 
 		if err := r.upsertUserBatch(ctx, tx, batch); err != nil {
@@ -160,10 +157,7 @@ func (r *UserRepository) UpsertUserProtocolMetadata(ctx context.Context, metadat
 	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(metadata); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(metadata) {
-			end = len(metadata)
-		}
+		end := min(i+r.batchSize, len(metadata))
 		batch := metadata[i:end]
 
 		if err := r.upsertUserProtocolMetadataBatch(ctx, tx, batch); err != nil {

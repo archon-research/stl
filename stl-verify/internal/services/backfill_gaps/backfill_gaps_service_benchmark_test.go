@@ -344,7 +344,7 @@ func BenchmarkBackfillService_FindAndFillGaps(b *testing.B) {
 			for i := 0; i < tc.gapCount; i++ {
 				gapStart := int64((i + 1) * gapSize)
 				// Each gap is 5 blocks
-				for j := int64(0); j < 5; j++ {
+				for j := range int64(5) {
 					gapBlocks = append(gapBlocks, gapStart+j)
 				}
 			}
@@ -390,7 +390,7 @@ func BenchmarkBackfillService_BatchSizes(b *testing.B) {
 			blockCount := int64(200)
 			// Gap of 50 blocks
 			gapBlocks := make([]int64, 50)
-			for i := int64(0); i < 50; i++ {
+			for i := range int64(50) {
 				gapBlocks[i] = 75 + i
 			}
 

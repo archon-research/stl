@@ -340,10 +340,7 @@ func (s *BackfillService) fillGap(ctx context.Context, gap outbound.BlockRange) 
 		default:
 		}
 
-		batchEnd := batchStart + int64(batchSize) - 1
-		if batchEnd > gap.To {
-			batchEnd = gap.To
-		}
+		batchEnd := min(batchStart+int64(batchSize)-1, gap.To)
 
 		if err := s.processBatch(ctx, batchStart, batchEnd); err != nil {
 			s.logger.Warn("batch failed", "from", batchStart, "to", batchEnd, "error", err)
@@ -781,10 +778,7 @@ func (s *BackfillService) advanceWatermark(ctx context.Context) error {
 	}
 
 	// Start checking from the block after the current watermark
-	startBlock := currentWatermark + 1
-	if startBlock < minBlock {
-		startBlock = minBlock
-	}
+	startBlock := max(currentWatermark+1, minBlock)
 
 	// Find the first gap after the current watermark
 	// We temporarily bypass the watermark check by querying directly

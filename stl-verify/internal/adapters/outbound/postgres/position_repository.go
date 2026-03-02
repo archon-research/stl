@@ -121,10 +121,7 @@ func (r *PositionRepository) UpsertBorrowers(ctx context.Context, borrowers []*e
 	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(borrowers); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(borrowers) {
-			end = len(borrowers)
-		}
+		end := min(i+r.batchSize, len(borrowers))
 		batch := borrowers[i:end]
 
 		if err := r.upsertBorrowerBatch(ctx, tx, batch); err != nil {
@@ -194,10 +191,7 @@ func (r *PositionRepository) UpsertBorrowerCollateral(ctx context.Context, colla
 	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(collateral); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(collateral) {
-			end = len(collateral)
-		}
+		end := min(i+r.batchSize, len(collateral))
 		batch := collateral[i:end]
 
 		if err := r.upsertBorrowerCollateralBatch(ctx, tx, batch); err != nil {
