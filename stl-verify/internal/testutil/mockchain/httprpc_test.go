@@ -30,7 +30,7 @@ func rpcPost(t *testing.T, h *httpHandler, body string) *httptest.ResponseRecord
 // all three template blocks. The emitted (derived) headers are returned for use in tests.
 func newTestHTTPHandler(t *testing.T) (*httpHandler, []string) {
 	t.Helper()
-	ds := NewTestDataStore()
+	ds := NewFixtureDataStore()
 	var hashes []string
 	r := NewReplayer(ds.Headers(), ds, func(h outbound.BlockHeader) {
 		hashes = append(hashes, h.Hash)
@@ -43,7 +43,7 @@ func newTestHTTPHandler(t *testing.T) (*httpHandler, []string) {
 
 // TestNewHTTPHandler verifies the constructor sets the store and replayer.
 func TestNewHTTPHandler(t *testing.T) {
-	ds := NewTestDataStore()
+	ds := NewFixtureDataStore()
 	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {})
 	h := newHTTPHandler(ds, r)
 	if h.store != ds {
@@ -158,7 +158,7 @@ func TestHTTPHandler_GetBlockByNumber_HashMatches(t *testing.T) {
 
 // TestHTTPHandler_BlockNumber verifies eth_blockNumber reflects the replayer's emitted state.
 func TestHTTPHandler_BlockNumber(t *testing.T) {
-	ds := NewTestDataStore()
+	ds := NewFixtureDataStore()
 	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {})
 
 	// No emissions yet: expect "0x0".

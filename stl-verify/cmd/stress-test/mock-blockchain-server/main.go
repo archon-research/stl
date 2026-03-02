@@ -62,7 +62,7 @@ func run(ctx context.Context, addr string, interval time.Duration) error {
 	}))
 	slog.SetDefault(logger)
 
-	store := mockchain.NewTestDataStore()
+	store := mockchain.NewFixtureDataStore()
 	srv := mockchain.NewServer(store)
 	srv.SetInterval(interval)
 

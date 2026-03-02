@@ -42,7 +42,7 @@ func serverPost(t *testing.T, s *Server, body string) []byte {
 
 // TestNewServer verifies the constructor initialises all fields and Addr is nil before Start.
 func TestNewServer(t *testing.T) {
-	store := NewTestDataStore()
+	store := NewFixtureDataStore()
 	s := NewServer(store)
 
 	if s.store == nil {
@@ -64,7 +64,7 @@ func TestNewServer(t *testing.T) {
 
 // TestServer_StartStop verifies Start binds successfully and Stop does not panic.
 func TestServer_StartStop(t *testing.T) {
-	s := startTestServer(t, NewTestDataStore())
+	s := startTestServer(t, NewFixtureDataStore())
 	if s.Addr() == nil {
 		t.Fatal("expected non-nil Addr after Start")
 	}
@@ -72,7 +72,7 @@ func TestServer_StartStop(t *testing.T) {
 
 // TestServer_Start_BadAddr verifies that Start returns an error for an invalid address.
 func TestServer_Start_BadAddr(t *testing.T) {
-	s := NewServer(NewTestDataStore())
+	s := NewServer(NewFixtureDataStore())
 	if err := s.Start(":notaport"); err == nil {
 		t.Fatal("expected error for invalid address")
 	}
@@ -80,7 +80,7 @@ func TestServer_Start_BadAddr(t *testing.T) {
 
 // TestServer_WSSubscribe verifies that a WebSocket client can complete the eth_subscribe handshake.
 func TestServer_WSSubscribe(t *testing.T) {
-	s := startTestServer(t, NewTestDataStore())
+	s := startTestServer(t, NewFixtureDataStore())
 	wsURL := fmt.Sprintf("ws://%s", s.Addr().String())
 	conn := dialWS(t, wsURL)
 
@@ -92,7 +92,7 @@ func TestServer_WSSubscribe(t *testing.T) {
 
 // TestServer_WSBroadcast verifies that Broadcast pushes a notification to the subscribed client.
 func TestServer_WSBroadcast(t *testing.T) {
-	s := startTestServer(t, NewTestDataStore())
+	s := startTestServer(t, NewFixtureDataStore())
 	wsURL := fmt.Sprintf("ws://%s", s.Addr().String())
 	conn := dialWS(t, wsURL)
 	doSubscribe(t, conn)
@@ -117,7 +117,7 @@ func TestServer_WSBroadcast(t *testing.T) {
 
 // TestServer_HTTP_BlockNumber verifies that eth_blockNumber returns a hex block number.
 func TestServer_HTTP_BlockNumber(t *testing.T) {
-	s := startTestServer(t, NewTestDataStore())
+	s := startTestServer(t, NewFixtureDataStore())
 	raw := serverPost(t, s, `{"id":1,"method":"eth_blockNumber","params":[]}`)
 
 	var resp httpRPCResponse
@@ -134,7 +134,7 @@ func TestServer_HTTP_BlockNumber(t *testing.T) {
 
 // TestServer_HTTP_GetBlockByHash verifies that eth_getBlockByHash returns block data for a known derived hash.
 func TestServer_HTTP_GetBlockByHash(t *testing.T) {
-	store := NewTestDataStore()
+	store := NewFixtureDataStore()
 	s := startTestServer(t, store)
 
 	// Emit one block to populate the derived-hash map, then retrieve its hash.
@@ -161,7 +161,7 @@ func TestServer_HTTP_GetBlockByHash(t *testing.T) {
 
 // TestServer_HTTP_UnknownMethod verifies that an unsupported method returns a -32601 JSON-RPC error.
 func TestServer_HTTP_UnknownMethod(t *testing.T) {
-	s := startTestServer(t, NewTestDataStore())
+	s := startTestServer(t, NewFixtureDataStore())
 	raw := serverPost(t, s, `{"id":3,"method":"eth_chainId","params":[]}`)
 
 	var errResp jsonRPCErrorResponse
@@ -175,7 +175,7 @@ func TestServer_HTTP_UnknownMethod(t *testing.T) {
 
 // TestServer_HTTP_Batch verifies that a batch request returns a matching array of responses.
 func TestServer_HTTP_Batch(t *testing.T) {
-	store := NewTestDataStore()
+	store := NewFixtureDataStore()
 	s := startTestServer(t, store)
 
 	// Emit one block to populate the derived-hash map.
@@ -219,7 +219,7 @@ func TestServer_HTTP_Batch(t *testing.T) {
 // TestServer_Disconnect verifies that Server.Disconnect closes the active WebSocket
 // connection so the client detects it.
 func TestServer_Disconnect(t *testing.T) {
-	s := startTestServer(t, NewTestDataStore())
+	s := startTestServer(t, NewFixtureDataStore())
 	wsURL := fmt.Sprintf("ws://%s", s.Addr().String())
 	conn := dialWS(t, wsURL)
 	doSubscribe(t, conn)
@@ -238,7 +238,7 @@ func TestServer_Disconnect(t *testing.T) {
 // TestServer_SetInterval verifies that SetInterval changes the block emission rate.
 // SetInterval must be called before Start.
 func TestServer_SetInterval(t *testing.T) {
-	s := NewServer(NewTestDataStore())
+	s := NewServer(NewFixtureDataStore())
 	s.SetInterval(50 * time.Millisecond)
 	if err := s.Start(":0"); err != nil {
 		t.Fatalf("start: %v", err)
@@ -266,7 +266,7 @@ func TestServer_SetInterval(t *testing.T) {
 // This catches any incompatibility between the mock server and the real watcher.
 func TestServer_WSSubscriberLike(t *testing.T) {
 	// Start server with a fast replayer so we don't wait 12s in CI.
-	store := NewTestDataStore()
+	store := NewFixtureDataStore()
 	s := NewServer(store)
 	s.replayer.SetInterval(100 * time.Millisecond)
 	if err := s.Start(":0"); err != nil {

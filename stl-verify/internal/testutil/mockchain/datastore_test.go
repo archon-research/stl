@@ -7,7 +7,7 @@ import (
 
 // TestDataStore_Get verifies Get across valid indexes, missing indexes, and all data types.
 func TestDataStore_Get(t *testing.T) {
-	ds := NewTestDataStore()
+	ds := NewFixtureDataStore()
 
 	tests := []struct {
 		name     string
@@ -34,7 +34,7 @@ func TestDataStore_Get(t *testing.T) {
 
 // TestDataStore_Add verifies that Add overwrites an existing entry.
 func TestDataStore_Add(t *testing.T) {
-	ds := NewTestDataStore()
+	ds := NewFixtureDataStore()
 	ds.Add(0, "block", json.RawMessage(`"overwritten"`))
 	raw, ok := ds.Get(0, "block")
 	if !ok {
@@ -53,7 +53,7 @@ func TestDataStore_Len(t *testing.T) {
 		wantLen int
 	}{
 		{"empty store", NewDataStore(), 0},
-		{"test store", NewTestDataStore(), 3},
+		{"test store", NewFixtureDataStore(), 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -66,7 +66,7 @@ func TestDataStore_Len(t *testing.T) {
 
 // TestHeaders_ReturnsCopy verifies that mutating the slice returned by Headers does not affect the store.
 func TestHeaders_ReturnsCopy(t *testing.T) {
-	ds := NewTestDataStore()
+	ds := NewFixtureDataStore()
 	original := ds.Headers()[0].Hash
 
 	h := ds.Headers()

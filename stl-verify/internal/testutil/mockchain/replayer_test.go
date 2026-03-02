@@ -13,7 +13,7 @@ const testInterval = 250 * time.Millisecond // like Base chain
 // newTestReplayer creates a Replayer with a fast interval and a buffered channel collector.
 func newTestReplayer(t *testing.T) (*Replayer, chan outbound.BlockHeader) {
 	t.Helper()
-	ds := NewTestDataStore()
+	ds := NewFixtureDataStore()
 	received := make(chan outbound.BlockHeader, 32)
 	r := NewReplayer(ds.Headers(), ds, func(h outbound.BlockHeader) {
 		received <- h
@@ -39,7 +39,7 @@ func drain(t *testing.T, ch chan outbound.BlockHeader, n int) []outbound.BlockHe
 
 // TestNewReplayer verifies that the constructor sets fields correctly.
 func TestNewReplayer(t *testing.T) {
-	ds := NewTestDataStore()
+	ds := NewFixtureDataStore()
 	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {})
 
 	if r.interval != defaultInterval {
@@ -131,7 +131,7 @@ func TestReplayer_StartIdempotent(t *testing.T) {
 
 // TestReplayer_StopNotRunning verifies that Stop on a never-started replayer returns 0.
 func TestReplayer_StopNotRunning(t *testing.T) {
-	ds := NewTestDataStore()
+	ds := NewFixtureDataStore()
 	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {})
 
 	emitted := r.Stop()
@@ -219,7 +219,7 @@ func TestPatchHeader(t *testing.T) {
 // TestReplayer_LoopContinuity emits more blocks than the number of templates and verifies
 // that block numbers are sequential, no hash repeats, and parentHash[N] == hash[N-1].
 func TestReplayer_LoopContinuity(t *testing.T) {
-	ds := NewTestDataStore()
+	ds := NewFixtureDataStore()
 	var headers []outbound.BlockHeader
 	r := NewReplayer(ds.Headers(), ds, func(h outbound.BlockHeader) {
 		headers = append(headers, h)
@@ -253,7 +253,7 @@ func TestReplayer_LoopContinuity(t *testing.T) {
 // TestReplayer_HeaderForHash verifies that HeaderForHash returns the correct header
 // and that its ParentHash matches the previous block's Hash.
 func TestReplayer_HeaderForHash(t *testing.T) {
-	ds := NewTestDataStore()
+	ds := NewFixtureDataStore()
 	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {})
 
 	r.emit()
@@ -288,7 +288,7 @@ func TestReplayer_HeaderForHash(t *testing.T) {
 // TestReplayer_HeaderForNumber verifies that HeaderForNumber is deterministic and
 // consistent with what emit produced.
 func TestReplayer_HeaderForNumber(t *testing.T) {
-	ds := NewTestDataStore()
+	ds := NewFixtureDataStore()
 	var emitted []outbound.BlockHeader
 	r := NewReplayer(ds.Headers(), ds, func(h outbound.BlockHeader) {
 		emitted = append(emitted, h)
@@ -343,7 +343,7 @@ func TestReplayer_SetInterval_NonPositive(t *testing.T) {
 	for _, d := range []time.Duration{0, -1 * time.Millisecond} {
 		d := d
 		t.Run(d.String(), func(t *testing.T) {
-			ds := NewTestDataStore()
+			ds := NewFixtureDataStore()
 			r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {})
 			defer func() {
 				if recover() == nil {

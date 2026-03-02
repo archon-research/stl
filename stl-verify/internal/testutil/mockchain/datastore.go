@@ -84,9 +84,9 @@ func (ds *DataStore) Len() int {
 	return len(ds.headers)
 }
 
-// NewTestDataStore returns a DataStore pre-populated with 3 synthetic blocks.
-// It is intended for use in tests across packages that need a ready-made data source.
-func NewTestDataStore() *DataStore {
+// NewFixtureDataStore returns a DataStore pre-populated with 3 synthetic blocks.
+// It is intended for use in tests and stress-test binaries that need a ready-made data source.
+func NewFixtureDataStore() *DataStore {
 	ds := NewDataStore()
 
 	for i := range 3 {
