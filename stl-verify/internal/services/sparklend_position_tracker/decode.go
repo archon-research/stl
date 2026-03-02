@@ -82,7 +82,7 @@ func decodeUserReservesRaw(data []byte) ([]UserReserveData, error) {
 	}
 
 	reserves := make([]UserReserveData, 0, arrayLen)
-	for i := uint64(0); i < arrayLen; i++ {
+	for i := range arrayLen {
 		base := arrayStart + wordSize + i*fieldsPerStruct*wordSize
 
 		underlyingAsset := common.BytesToAddress(data[base : base+wordSize])

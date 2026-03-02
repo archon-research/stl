@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 )
 
 // SourceRegistry routes token entries to the appropriate PositionSource.
@@ -61,9 +62,7 @@ func (r *SourceRegistry) FetchAll(ctx context.Context, entries []*TokenEntry, bl
 			errs = append(errs, fmt.Errorf("%s: %w", source.Name(), err))
 			continue
 		}
-		for key, bal := range balances {
-			results[key] = bal
-		}
+		maps.Copy(results, balances)
 	}
 
 	if len(errs) > 0 {

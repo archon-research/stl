@@ -115,7 +115,7 @@ func (r *AllocationRepository) SavePositions(
 func (r *AllocationRepository) buildInsertArgs(
 	pos *entity.AllocationPosition,
 	tokenID int64,
-) (string, []interface{}, error) {
+) (string, []any, error) {
 	balanceDecimals := pos.TokenDecimals
 	if pos.AssetDecimals != nil {
 		balanceDecimals = *pos.AssetDecimals
@@ -153,7 +153,7 @@ func (r *AllocationRepository) buildInsertArgs(
 			tx_amount = EXCLUDED.tx_amount
 	`
 
-	args := []interface{}{
+	args := []any{
 		pos.ChainID,
 		tokenID,
 		pos.Star,

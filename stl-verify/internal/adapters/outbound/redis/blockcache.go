@@ -172,52 +172,44 @@ func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int6
 	}
 
 	if data.Block != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			compressed, err := compress(data.Block)
 			if err != nil {
 				setErr(fmt.Errorf("failed to compress block: %w", err))
 				return
 			}
 			blockCompressed = compressed
-		}()
+		})
 	}
 	if data.Receipts != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			compressed, err := compress(data.Receipts)
 			if err != nil {
 				setErr(fmt.Errorf("failed to compress receipts: %w", err))
 				return
 			}
 			receiptsCompressed = compressed
-		}()
+		})
 	}
 	if data.Traces != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			compressed, err := compress(data.Traces)
 			if err != nil {
 				setErr(fmt.Errorf("failed to compress traces: %w", err))
 				return
 			}
 			tracesCompressed = compressed
-		}()
+		})
 	}
 	if data.Blobs != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			compressed, err := compress(data.Blobs)
 			if err != nil {
 				setErr(fmt.Errorf("failed to compress blobs: %w", err))
 				return
 			}
 			blobsCompressed = compressed
-		}()
+		})
 	}
 
 	wg.Wait()

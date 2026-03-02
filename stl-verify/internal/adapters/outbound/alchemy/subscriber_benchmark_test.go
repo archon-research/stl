@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -101,10 +101,10 @@ func BenchmarkSubscriber_MessageLatency(b *testing.B) {
 			Hash:       fmt.Sprintf("0x%064x", i),
 			ParentHash: fmt.Sprintf("0x%064x", i-1),
 		}
-		notification := map[string]interface{}{
+		notification := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
-			"params": map[string]interface{}{
+			"params": map[string]any{
 				"subscription": "0x1234",
 				"result":       header,
 			},
@@ -129,7 +129,7 @@ func BenchmarkSubscriber_MessageLatency(b *testing.B) {
 
 	// Calculate and report statistics
 	if len(latencies) > 0 {
-		sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+		slices.Sort(latencies)
 
 		var total time.Duration
 		for _, l := range latencies {
@@ -213,17 +213,17 @@ func BenchmarkSubscriber_Throughput(b *testing.B) {
 	conn := <-connChan
 
 	// Pre-build all messages
-	messages := make([]map[string]interface{}, b.N)
+	messages := make([]map[string]any, b.N)
 	for i := 0; i < b.N; i++ {
 		header := outbound.BlockHeader{
 			Number:     fmt.Sprintf("0x%x", 1000+i),
 			Hash:       fmt.Sprintf("0x%064x", i),
 			ParentHash: fmt.Sprintf("0x%064x", i-1),
 		}
-		messages[i] = map[string]interface{}{
+		messages[i] = map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
-			"params": map[string]interface{}{
+			"params": map[string]any{
 				"subscription": "0x1234",
 				"result":       header,
 			},
@@ -235,15 +235,13 @@ func BenchmarkSubscriber_Throughput(b *testing.B) {
 
 	// Send all messages as fast as possible
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := 0; i < b.N; i++ {
 			if err := conn.WriteJSON(messages[i]); err != nil {
 				return
 			}
 		}
-	}()
+	})
 
 	// Receive all messages
 	received := 0
@@ -342,10 +340,10 @@ func BenchmarkSubscriber_LatencyPercentiles(b *testing.B) {
 			Hash:       fmt.Sprintf("0x%064x", i),
 			ParentHash: fmt.Sprintf("0x%064x", i-1),
 		}
-		notification := map[string]interface{}{
+		notification := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
-			"params": map[string]interface{}{
+			"params": map[string]any{
 				"subscription": "0x1234",
 				"result":       header,
 			},
@@ -368,7 +366,7 @@ func BenchmarkSubscriber_LatencyPercentiles(b *testing.B) {
 
 	// Calculate and report percentiles
 	if len(latencies) > 0 {
-		sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+		slices.Sort(latencies)
 
 		var total time.Duration
 		for _, l := range latencies {

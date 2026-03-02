@@ -1,7 +1,7 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer help ci ci-checks \
+.PHONY: all test test-race test-integration lint vet fmt fix fix-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer help ci ci-checks \
         dev-up dev-env dev-down dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal \
@@ -94,6 +94,21 @@ vet:
 	@echo "==> Running go vet..."
 	go vet ./...
 
+# Apply go fix modernizations
+fix:
+	@echo "==> Applying go fix..."
+	go fix ./...
+
+# Check if go fix has been applied (CI-friendly, fails if not)
+fix-check:
+	@echo "==> Checking go fix..."
+	@diff=$$(go fix -diff ./... 2>&1); \
+	if [ -n "$$diff" ]; then \
+		echo "Code needs modernizing. Run 'go fix ./...'"; \
+		echo "$$diff"; \
+		exit 1; \
+	fi
+
 # Format code
 fmt:
 	@echo "==> Formatting code..."
@@ -171,7 +186,7 @@ tools:
 	go install golang.org/x/tools/gopls@latest
 
 # CI target for lint/format/static/security checks
-ci-checks: fmt-check tidy-check vet staticcheck golangci-lint vulncheck
+ci-checks: fix-check fmt-check tidy-check vet staticcheck golangci-lint vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks

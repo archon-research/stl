@@ -26,7 +26,7 @@ func CacheKey(chainID, blockNumber int64, version int, dataType string) string {
 }
 
 // ParseCompressedJSON decompresses gzipped data (if needed) and unmarshals it
-func ParseCompressedJSON(data []byte, v interface{}) error {
+func ParseCompressedJSON(data []byte, v any) error {
 	// Check for gzip magic bytes (0x1f 0x8b)
 	if len(data) > 2 && data[0] == 0x1f && data[1] == 0x8b {
 		gr, err := gzip.NewReader(bytes.NewReader(data))

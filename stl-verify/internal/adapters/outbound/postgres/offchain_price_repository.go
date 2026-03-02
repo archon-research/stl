@@ -131,10 +131,7 @@ func (r *PriceRepository) UpsertPrices(ctx context.Context, prices []*entity.Tok
 	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(prices); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(prices) {
-			end = len(prices)
-		}
+		end := min(i+r.batchSize, len(prices))
 		batch := prices[i:end]
 
 		if err := r.upsertPriceBatch(ctx, tx, batch); err != nil {

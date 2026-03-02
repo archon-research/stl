@@ -18,8 +18,9 @@ import (
 // Test Helpers
 // =============================================================================
 
+//go:fix inline
 func ptr[T any](v T) *T {
-	return &v
+	return new(v)
 }
 
 // =============================================================================
@@ -194,7 +195,7 @@ func createPriceData(assetID string, price float64, ts time.Time) outbound.Price
 	return outbound.PriceData{
 		SourceAssetID: assetID,
 		PriceUSD:      price,
-		MarketCapUSD:  ptr(price * 1000000),
+		MarketCapUSD:  new(price * 1000000),
 		Timestamp:     ts,
 	}
 }

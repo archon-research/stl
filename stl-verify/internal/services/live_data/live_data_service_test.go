@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -141,15 +142,13 @@ func TestLateBlockAfterPruning(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Send live blocks 150-250 with delays to simulate real timing
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := int64(150); i <= 250; i++ {
 			header := client.GetHeader(i)
 			subscriber.SendHeader(header)
 			time.Sleep(2 * time.Millisecond)
 		}
-	}()
+	})
 
 	wg.Wait()
 	time.Sleep(100 * time.Millisecond)
@@ -2173,13 +2172,7 @@ func TestFetchReceiptsTracesBlobsByHash(t *testing.T) {
 
 	// Verify that GetBlockDataByHash was called with the expected hash
 	fetchedMethods := client.fetchedByHash[expectedHash]
-	found := false
-	for _, method := range fetchedMethods {
-		if method == "GetBlockDataByHash" {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(fetchedMethods, "GetBlockDataByHash")
 	if !found {
 		t.Errorf("expected GetBlockDataByHash to be called with hash %s, but it wasn't. Called methods: %v",
 			expectedHash, fetchedMethods)
@@ -3013,8 +3006,7 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 // This test verifies that the common ancestor is correctly identified as the
 // block in the DB, even if LiveService never had it in memory.
 func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
