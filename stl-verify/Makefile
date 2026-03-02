@@ -1,7 +1,7 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test test-race test-integration lint vet fmt fix fix-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer help ci ci-checks \
+.PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer help ci ci-checks \
         dev-up dev-env dev-down dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal \
@@ -120,6 +120,11 @@ fmt-check:
 	@echo "==> Checking format..."
 	@test -z "$$(gofmt -l .)" || (echo "Files not formatted:"; gofmt -l .; exit 1)
 
+# Check import formatting (CI-friendly, fails if imports not organized)
+goimports-check:
+	@echo "==> Checking imports..."
+	@test -z "$$($(GOBIN)/goimports -l .)" || (echo "Imports not formatted:"; $(GOBIN)/goimports -l .; exit 1)
+
 # Tidy and verify dependencies
 tidy:
 	@echo "==> Tidying modules..."
@@ -186,7 +191,7 @@ tools:
 	go install golang.org/x/tools/gopls@latest
 
 # CI target for lint/format/static/security checks
-ci-checks: fix-check fmt-check tidy-check vet staticcheck golangci-lint vulncheck
+ci-checks: fix-check fmt-check goimports-check tidy-check vet staticcheck golangci-lint vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
