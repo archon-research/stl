@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 )
 
 type httpHandler struct {
@@ -36,7 +36,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req testutil.JSONRPCRequest
+	var req rpcutil.Request
 	if err := json.Unmarshal(raw, &req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -47,7 +47,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *httpHandler) handleBatch(w http.ResponseWriter, raw json.RawMessage) {
-	var reqs []testutil.JSONRPCRequest
+	var reqs []rpcutil.Request
 	if err := json.Unmarshal(raw, &reqs); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -79,7 +79,7 @@ func (h *httpHandler) handleBatch(w http.ResponseWriter, raw json.RawMessage) {
 	_, _ = w.Write(out)
 }
 
-func (h *httpHandler) dispatch(req testutil.JSONRPCRequest) (json.RawMessage, *jsonRPCErrorObj) {
+func (h *httpHandler) dispatch(req rpcutil.Request) (json.RawMessage, *jsonRPCErrorObj) {
 	switch req.Method {
 	case "eth_getBlockByHash":
 		return h.getBlockByHash(req)
@@ -98,10 +98,10 @@ func (h *httpHandler) dispatch(req testutil.JSONRPCRequest) (json.RawMessage, *j
 
 func (h *httpHandler) respond(w http.ResponseWriter, id json.RawMessage, result json.RawMessage, rpcErr *jsonRPCErrorObj) {
 	if rpcErr != nil {
-		testutil.WriteRPCError(w, id, rpcErr.Code, rpcErr.Message)
+		rpcutil.WriteError(w, id, rpcErr.Code, rpcErr.Message)
 		return
 	}
-	testutil.WriteRPCResult(w, id, result)
+	rpcutil.WriteResult(w, id, result)
 }
 
 func (h *httpHandler) findIndexByHash(hash string) (int, bool) {
@@ -113,7 +113,7 @@ func (h *httpHandler) findIndexByHash(hash string) (int, bool) {
 	return -1, false
 }
 
-func extractHashParam(req testutil.JSONRPCRequest) (string, bool) {
+func extractHashParam(req rpcutil.Request) (string, bool) {
 	var params []json.RawMessage
 	if err := json.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
 		return "", false
@@ -125,7 +125,7 @@ func extractHashParam(req testutil.JSONRPCRequest) (string, bool) {
 	return s, true
 }
 
-func (h *httpHandler) getBlockByHash(req testutil.JSONRPCRequest) (json.RawMessage, *jsonRPCErrorObj) {
+func (h *httpHandler) getBlockByHash(req rpcutil.Request) (json.RawMessage, *jsonRPCErrorObj) {
 	hash, ok := extractHashParam(req)
 	if !ok {
 		return nil, &jsonRPCErrorObj{Code: -32602, Message: "missing or invalid hash parameter"}
@@ -142,7 +142,7 @@ func (h *httpHandler) getBlockByHash(req testutil.JSONRPCRequest) (json.RawMessa
 	return raw, nil
 }
 
-func (h *httpHandler) getDataByHash(req testutil.JSONRPCRequest, dataType string) (json.RawMessage, *jsonRPCErrorObj) {
+func (h *httpHandler) getDataByHash(req rpcutil.Request, dataType string) (json.RawMessage, *jsonRPCErrorObj) {
 	hash, ok := extractHashParam(req)
 	if !ok {
 		return nil, &jsonRPCErrorObj{Code: -32602, Message: "missing or invalid hash parameter"}

@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/gorilla/websocket"
 )
 
@@ -78,7 +78,7 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for {
-		var req testutil.JSONRPCRequest
+		var req rpcutil.Request
 		if err := conn.ReadJSON(&req); err != nil {
 			h.clearConn(conn)
 			return
@@ -98,7 +98,7 @@ func (h *wsHandler) clearConn(conn *websocket.Conn) {
 	h.mu.Unlock()
 }
 
-func (h *wsHandler) handleRequest(conn *websocket.Conn, req testutil.JSONRPCRequest) error {
+func (h *wsHandler) handleRequest(conn *websocket.Conn, req rpcutil.Request) error {
 	switch req.Method {
 	case "eth_subscribe":
 		return h.handleSubscribe(conn, req)
@@ -107,7 +107,7 @@ func (h *wsHandler) handleRequest(conn *websocket.Conn, req testutil.JSONRPCRequ
 	}
 }
 
-func (h *wsHandler) handleSubscribe(conn *websocket.Conn, req testutil.JSONRPCRequest) error {
+func (h *wsHandler) handleSubscribe(conn *websocket.Conn, req rpcutil.Request) error {
 	var params []json.RawMessage
 	if err := json.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
 		return h.writeError(conn, req.ID, -32602, "unsupported subscription type")
