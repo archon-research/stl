@@ -48,13 +48,13 @@ func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 
 // SaveBorrower saves a single borrower (debt) position record within an external transaction.
 // Uses upsert semantics: ON CONFLICT updates the existing record.
-func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, eventType string, txHash []byte) error {
+func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, protocolAssetID, blockNumber int64, blockVersion int, amount, eventType string, txHash []byte) error {
 	_, err := tx.Exec(ctx,
-		`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
+		`INSERT INTO borrower (user_id, protocol_id, protocol_asset_id, block_number, block_version, amount, change, event_type, tx_hash)
 		 VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8)
-		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version)
+		 ON CONFLICT (user_id, protocol_id, protocol_asset_id, block_number, block_version)
 		 DO UPDATE SET amount = EXCLUDED.amount, change = EXCLUDED.change, event_type = EXCLUDED.event_type, tx_hash = EXCLUDED.tx_hash`,
-		userID, protocolID, tokenID, blockNumber, blockVersion, amount, eventType, txHash)
+		userID, protocolID, protocolAssetID, blockNumber, blockVersion, amount, eventType, txHash)
 
 	if err != nil {
 		return fmt.Errorf("failed to save borrower: %w", err)
@@ -64,13 +64,13 @@ func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID
 
 // SaveBorrowerCollateral saves a single collateral position record within an external transaction.
 // Uses upsert semantics: ON CONFLICT updates the existing record.
-func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, eventType string, txHash []byte, collateralEnabled bool) error {
+func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, protocolAssetID, blockNumber int64, blockVersion int, amount, eventType string, txHash []byte, collateralEnabled bool) error {
 	_, err := tx.Exec(ctx,
-		`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
+		`INSERT INTO borrower_collateral (user_id, protocol_id, protocol_asset_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
 		 VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9)
-		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version)
+		 ON CONFLICT (user_id, protocol_id, protocol_asset_id, block_number, block_version)
 		 DO UPDATE SET amount = EXCLUDED.amount, change = EXCLUDED.change, event_type = EXCLUDED.event_type, tx_hash = EXCLUDED.tx_hash, collateral_enabled = EXCLUDED.collateral_enabled`,
-		userID, protocolID, tokenID, blockNumber, blockVersion, amount, eventType, txHash, collateralEnabled)
+		userID, protocolID, protocolAssetID, blockNumber, blockVersion, amount, eventType, txHash, collateralEnabled)
 
 	if err != nil {
 		return fmt.Errorf("failed to save collateral: %w", err)
@@ -83,7 +83,7 @@ func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.
 type CollateralRecord struct {
 	UserID            int64
 	ProtocolID        int64
-	TokenID           int64
+	ProtocolAssetID   int64
 	BlockNumber       int64
 	BlockVersion      int
 	Amount            string // decimal-adjusted amount string
@@ -104,10 +104,10 @@ func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx
 	batch := &pgx.Batch{}
 	for _, rec := range records {
 		batch.Queue(
-			`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
+			`INSERT INTO borrower_collateral (user_id, protocol_id, protocol_asset_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
 			 VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9)
-			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
-			rec.UserID, rec.ProtocolID, rec.TokenID, rec.BlockNumber, rec.BlockVersion, rec.Amount, rec.EventType, rec.TxHash, rec.CollateralEnabled,
+			 ON CONFLICT (user_id, protocol_id, protocol_asset_id, block_number, block_version) DO NOTHING`,
+			rec.UserID, rec.ProtocolID, rec.ProtocolAssetID, rec.BlockNumber, rec.BlockVersion, rec.Amount, rec.EventType, rec.TxHash, rec.CollateralEnabled,
 		)
 	}
 
@@ -176,7 +176,7 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, tx pgx.Tx,
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
+		INSERT INTO borrower (user_id, protocol_id, protocol_asset_id, block_number, block_version, amount, change, event_type, tx_hash)
 		VALUES `)
 
 	args := make([]any, 0, len(borrowers)*9)
@@ -197,11 +197,11 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, tx pgx.Tx,
 			return fmt.Errorf("borrower[%d] (UserID=%d): failed to convert Change to numeric: %w", i, b.UserID, err)
 		}
 
-		args = append(args, b.UserID, b.ProtocolID, b.TokenID, b.BlockNumber, b.BlockVersion, amount, change, b.EventType, b.TxHash)
+		args = append(args, b.UserID, b.ProtocolID, b.ProtocolAssetID, b.BlockNumber, b.BlockVersion, amount, change, b.EventType, b.TxHash)
 	}
 
 	sb.WriteString(`
-		ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO UPDATE SET
+		ON CONFLICT (user_id, protocol_id, protocol_asset_id, block_number, block_version) DO UPDATE SET
 			amount = EXCLUDED.amount,
 			change = EXCLUDED.change,
 			event_type = EXCLUDED.event_type,
@@ -268,7 +268,7 @@ func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, 
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
+		INSERT INTO borrower_collateral (user_id, protocol_id, protocol_asset_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
 		VALUES `)
 
 	args := make([]any, 0, len(collateral)*10)
@@ -289,11 +289,11 @@ func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, 
 			return fmt.Errorf("borrower_collateral[%d] (UserID=%d): failed to convert Change to numeric: %w", i, c.UserID, err)
 		}
 
-		args = append(args, c.UserID, c.ProtocolID, c.TokenID, c.BlockNumber, c.BlockVersion, amount, change, c.EventType, c.TxHash, c.CollateralEnabled)
+		args = append(args, c.UserID, c.ProtocolID, c.ProtocolAssetID, c.BlockNumber, c.BlockVersion, amount, change, c.EventType, c.TxHash, c.CollateralEnabled)
 	}
 
 	sb.WriteString(`
-		ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO UPDATE SET
+		ON CONFLICT (user_id, protocol_id, protocol_asset_id, block_number, block_version) DO UPDATE SET
 			amount = EXCLUDED.amount,
 			change = EXCLUDED.change,
 			event_type = EXCLUDED.event_type,

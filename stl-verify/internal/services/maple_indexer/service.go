@@ -22,10 +22,10 @@ import (
 // Track loan metadata for entity creation
 // only used internally while processing a block, not persisted as-is
 type loanData struct {
-	borrower          common.Address
-	loanTokenID       int64
-	collateralTokenID int64
-	loan              outbound.MapleActiveLoan
+	borrower                  common.Address
+	loanProtocolAssetID       int64
+	collateralProtocolAssetID int64
+	loan                      outbound.MapleActiveLoan
 }
 
 // Config holds configuration for the maple indexer service.
@@ -54,15 +54,15 @@ func configDefaults() Config {
 // Service processes SQS block events, fetches Maple positions and collateral
 // breakdowns via GraphQL, and persists the results.
 type Service struct {
-	config       Config
-	consumer     outbound.SQSConsumer
-	mapleAPI     outbound.MapleClient
-	positionRepo outbound.PositionRepository
-	userRepo     outbound.UserRepository
-	tokenRepo    outbound.TokenRepository
-	txManager    outbound.TxManager
-	protocolRepo outbound.ProtocolRepository
-	protocolID   int64
+	config            Config
+	consumer          outbound.SQSConsumer
+	mapleAPI          outbound.MapleClient
+	positionRepo      outbound.PositionRepository
+	userRepo          outbound.UserRepository
+	protocolAssetRepo outbound.ProtocolAssetRepository
+	txManager         outbound.TxManager
+	protocolRepo      outbound.ProtocolRepository
+	protocolID        int64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -76,7 +76,7 @@ func NewService(
 	mapleAPI outbound.MapleClient,
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,
-	tokenRepo outbound.TokenRepository,
+	protocolAssetRepo outbound.ProtocolAssetRepository,
 	positionRepo outbound.PositionRepository,
 	protocolRepo outbound.ProtocolRepository,
 ) (*Service, error) {
@@ -92,8 +92,8 @@ func NewService(
 	if userRepo == nil {
 		return nil, fmt.Errorf("userRepo cannot be nil")
 	}
-	if tokenRepo == nil {
-		return nil, fmt.Errorf("tokenRepo cannot be nil")
+	if protocolAssetRepo == nil {
+		return nil, fmt.Errorf("protocolAssetRepo cannot be nil")
 	}
 	if positionRepo == nil {
 		return nil, fmt.Errorf("positionRepo cannot be nil")
@@ -120,15 +120,15 @@ func NewService(
 	}
 
 	return &Service{
-		config:       config,
-		consumer:     consumer,
-		mapleAPI:     mapleAPI,
-		positionRepo: positionRepo,
-		userRepo:     userRepo,
-		tokenRepo:    tokenRepo,
-		txManager:    txManager,
-		protocolRepo: protocolRepo,
-		logger:       config.Logger.With("component", "maple-indexer"),
+		config:            config,
+		consumer:          consumer,
+		mapleAPI:          mapleAPI,
+		positionRepo:      positionRepo,
+		userRepo:          userRepo,
+		protocolAssetRepo: protocolAssetRepo,
+		txManager:         txManager,
+		protocolRepo:      protocolRepo,
+		logger:            config.Logger.With("component", "maple-indexer"),
 	}, nil
 }
 
@@ -201,26 +201,26 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) e
 	blockVersion := event.Version
 	tokenCache := make(map[string]int64)
 
-	// Pre-resolve tokens before transaction - fail fast on any error
+	// Pre-resolve protocol assets before transaction - fail fast on any error
 	loansWithTokens := make([]loanData, 0, len(loans))
 
 	for _, loan := range loans {
-		// Resolve both tokens - fail immediately if either fails
-		loanTokenID, err := s.getTokenID(ctx, loan.PoolAssetSymbol, tokenCache)
+		// Resolve both protocol assets - fail immediately if either fails
+		loanProtocolAssetID, err := s.getProtocolAssetID(ctx, loan.PoolAssetSymbol, tokenCache)
 		if err != nil {
 			return fmt.Errorf("resolving loan token %s for pool %s: %w", loan.PoolAssetSymbol, loan.PoolName, err)
 		}
 
-		collateralTokenID, err := s.getTokenID(ctx, loan.Collateral.Asset, tokenCache)
+		collateralProtocolAssetID, err := s.getProtocolAssetID(ctx, loan.Collateral.Asset, tokenCache)
 		if err != nil {
 			return fmt.Errorf("resolving collateral token %s for pool %s: %w", loan.Collateral.Asset, loan.PoolName, err)
 		}
 
 		loansWithTokens = append(loansWithTokens, loanData{
-			borrower:          loan.Borrower,
-			loanTokenID:       loanTokenID,
-			collateralTokenID: collateralTokenID,
-			loan:              loan,
+			borrower:                  loan.Borrower,
+			loanProtocolAssetID:       loanProtocolAssetID,
+			collateralProtocolAssetID: collateralProtocolAssetID,
+			loan:                      loan,
 		})
 	}
 
@@ -240,21 +240,21 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) e
 			userID := userCache[ld.borrower]
 
 			borrowers = append(borrowers, &entity.Borrower{
-				UserID:       userID,
-				ProtocolID:   s.protocolID,
-				TokenID:      ld.loanTokenID,
-				BlockNumber:  blockNumber,
-				BlockVersion: blockVersion,
-				Amount:       ld.loan.PrincipalOwed,
-				Change:       big.NewInt(0), // For maple we do not have incremental events, only snapshots, so change is always 0
-				EventType:    entity.EventMapleSnapshot,
-				TxHash:       nil,
+				UserID:          userID,
+				ProtocolID:      s.protocolID,
+				ProtocolAssetID: ld.loanProtocolAssetID,
+				BlockNumber:     blockNumber,
+				BlockVersion:    blockVersion,
+				Amount:          ld.loan.PrincipalOwed,
+				Change:          big.NewInt(0), // For maple we do not have incremental events, only snapshots, so change is always 0
+				EventType:       entity.EventMapleSnapshot,
+				TxHash:          nil,
 			})
 
 			collaterals = append(collaterals, &entity.BorrowerCollateral{
 				UserID:            userID,
 				ProtocolID:        s.protocolID,
-				TokenID:           ld.collateralTokenID,
+				ProtocolAssetID:   ld.collateralProtocolAssetID,
 				BlockNumber:       blockNumber,
 				BlockVersion:      blockVersion,
 				Amount:            ld.loan.Collateral.AssetAmount,
@@ -309,19 +309,19 @@ func (s *Service) resolveUsersInTx(ctx context.Context, tx pgx.Tx, addresses []c
 	return userCache, nil
 }
 
-func (s *Service) getTokenID(ctx context.Context, symbol string, cache map[string]int64) (int64, error) {
+func (s *Service) getProtocolAssetID(ctx context.Context, symbol string, cache map[string]int64) (int64, error) {
 	key := strings.ToUpper(symbol)
-	if tokenID, ok := cache[key]; ok {
-		return tokenID, nil
+	if id, ok := cache[key]; ok {
+		return id, nil
 	}
 
-	tokenID, err := s.tokenRepo.GetTokenIDBySymbol(ctx, s.config.ChainID, symbol)
+	asset, err := s.protocolAssetRepo.GetByKey(ctx, s.protocolID, key)
 	if err != nil {
 		return 0, err
 	}
 
-	cache[key] = tokenID
-	return tokenID, nil
+	cache[key] = asset.ID
+	return asset.ID, nil
 }
 
 func isCollateralEnabled(state string) bool {

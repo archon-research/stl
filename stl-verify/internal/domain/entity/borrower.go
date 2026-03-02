@@ -7,31 +7,31 @@ import (
 
 // Borrower represents a user's debt position at a specific block.
 type Borrower struct {
-	ID           int64
-	UserID       int64
-	ProtocolID   int64
-	TokenID      int64
-	BlockNumber  int64
-	BlockVersion int
-	Amount       *big.Int  // current total debt amount
-	Change       *big.Int  // change from previous snapshot
-	EventType    EventType // The type of event that triggered this position snapshot (e.g., "Borrow", "Repay", "LiquidationCall")
-	TxHash       []byte    // The transaction hash
+	ID              int64
+	UserID          int64
+	ProtocolID      int64
+	ProtocolAssetID int64
+	BlockNumber     int64
+	BlockVersion    int
+	Amount          *big.Int  // current total debt amount
+	Change          *big.Int  // change from previous snapshot
+	EventType       EventType // The type of event that triggered this position snapshot (e.g., "Borrow", "Repay", "LiquidationCall")
+	TxHash          []byte    // The transaction hash
 }
 
 // NewBorrower creates a new Borrower entity.
-func NewBorrower(id, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType EventType, txHash []byte) (*Borrower, error) {
+func NewBorrower(id, userID, protocolID, protocolAssetID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType EventType, txHash []byte) (*Borrower, error) {
 	b := &Borrower{
-		ID:           id,
-		UserID:       userID,
-		ProtocolID:   protocolID,
-		TokenID:      tokenID,
-		BlockNumber:  blockNumber,
-		BlockVersion: blockVersion,
-		Amount:       amount,
-		Change:       change,
-		EventType:    eventType,
-		TxHash:       txHash,
+		ID:              id,
+		UserID:          userID,
+		ProtocolID:      protocolID,
+		ProtocolAssetID: protocolAssetID,
+		BlockNumber:     blockNumber,
+		BlockVersion:    blockVersion,
+		Amount:          amount,
+		Change:          change,
+		EventType:       eventType,
+		TxHash:          txHash,
 	}
 	if err := b.validate(); err != nil {
 		return nil, err
@@ -50,8 +50,8 @@ func (b *Borrower) validate() error {
 	if b.ProtocolID <= 0 {
 		return fmt.Errorf("protocolID must be positive, got %d", b.ProtocolID)
 	}
-	if b.TokenID <= 0 {
-		return fmt.Errorf("tokenID must be positive, got %d", b.TokenID)
+	if b.ProtocolAssetID <= 0 {
+		return fmt.Errorf("protocolAssetID must be positive, got %d", b.ProtocolAssetID)
 	}
 	if b.BlockNumber <= 0 {
 		return fmt.Errorf("blockNumber must be positive, got %d", b.BlockNumber)

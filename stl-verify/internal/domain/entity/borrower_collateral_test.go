@@ -20,7 +20,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 		id                int64
 		userID            int64
 		protocolID        int64
-		tokenID           int64
+		protocolAssetID   int64
 		blockNumber       int64
 		blockVersion      int
 		amount            *big.Int
@@ -36,7 +36,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -51,7 +51,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -66,7 +66,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                0,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -82,7 +82,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                -1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -98,7 +98,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            0,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -114,7 +114,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        0,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -126,11 +126,11 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			errContains:       "protocolID must be positive",
 		},
 		{
-			name:              "zero tokenID",
+			name:              "zero protocolAssetID",
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           0,
+			protocolAssetID:   0,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -139,14 +139,14 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			txHash:            validTxHash,
 			collateralEnabled: true,
 			wantErr:           true,
-			errContains:       "tokenID must be positive",
+			errContains:       "protocolAssetID must be positive",
 		},
 		{
 			name:              "zero blockNumber",
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       0,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -162,7 +162,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      -1,
 			amount:            validAmount,
@@ -178,7 +178,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            nil,
@@ -194,7 +194,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            big.NewInt(-100),
@@ -210,7 +210,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -226,7 +226,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            big.NewInt(0),
@@ -241,7 +241,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -256,7 +256,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -272,7 +272,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -288,7 +288,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -303,7 +303,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -318,7 +318,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -334,7 +334,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -350,7 +350,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -365,7 +365,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -380,7 +380,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			id:                1,
 			userID:            10,
 			protocolID:        5,
-			tokenID:           3,
+			protocolAssetID:   3,
 			blockNumber:       1000,
 			blockVersion:      0,
 			amount:            validAmount,
@@ -394,7 +394,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bc, err := NewBorrowerCollateral(tt.id, tt.userID, tt.protocolID, tt.tokenID, tt.blockNumber, tt.blockVersion, tt.amount, tt.change, tt.eventType, tt.txHash, tt.collateralEnabled)
+			bc, err := NewBorrowerCollateral(tt.id, tt.userID, tt.protocolID, tt.protocolAssetID, tt.blockNumber, tt.blockVersion, tt.amount, tt.change, tt.eventType, tt.txHash, tt.collateralEnabled)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("NewBorrowerCollateral() expected error, got nil")
@@ -422,8 +422,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			if bc.ProtocolID != tt.protocolID {
 				t.Errorf("NewBorrowerCollateral() ProtocolID = %v, want %v", bc.ProtocolID, tt.protocolID)
 			}
-			if bc.TokenID != tt.tokenID {
-				t.Errorf("NewBorrowerCollateral() TokenID = %v, want %v", bc.TokenID, tt.tokenID)
+			if bc.ProtocolAssetID != tt.protocolAssetID {
+				t.Errorf("NewBorrowerCollateral() ProtocolAssetID = %v, want %v", bc.ProtocolAssetID, tt.protocolAssetID)
 			}
 			if bc.BlockNumber != tt.blockNumber {
 				t.Errorf("NewBorrowerCollateral() BlockNumber = %v, want %v", bc.BlockNumber, tt.blockNumber)
