@@ -5,6 +5,7 @@
 
 # Binary
 /blockwatcher
+**/mock-blockchain-server
 
 # Test artifacts
 *.test
