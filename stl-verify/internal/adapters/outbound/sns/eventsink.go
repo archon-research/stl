@@ -240,10 +240,7 @@ func (s *EventSink) publishWithRetry(ctx context.Context, input *sns.PublishInpu
 			}
 
 			// Increase backoff for next attempt
-			backoff = time.Duration(float64(backoff) * s.config.BackoffFactor)
-			if backoff > s.config.MaxBackoff {
-				backoff = s.config.MaxBackoff
-			}
+			backoff = min(time.Duration(float64(backoff)*s.config.BackoffFactor), s.config.MaxBackoff)
 		}
 
 		// Create a timeout context for this publish attempt to prevent indefinite blocking

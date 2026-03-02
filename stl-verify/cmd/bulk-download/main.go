@@ -524,12 +524,10 @@ func (p *pipeline) startUploadWorkers(ctx context.Context, writer outbound.S3Wri
 }
 
 func (p *pipeline) startTraceCollector(ctx context.Context, cfg Config, cache *PartitionCache, stats *Stats, logger *slog.Logger) {
-	p.traceWg.Add(1)
-	go func() {
-		defer p.traceWg.Done()
+	p.traceWg.Go(func() {
 		defer close(p.traceWorkCh)
 		traceCollector(ctx, cfg, p.traceCollectorCh, p.traceWorkCh, cache, stats, logger)
-	}()
+	})
 }
 
 func (p *pipeline) startBlockReceiptWorkers(ctx context.Context, client *alchemy.Client, cache *PartitionCache, cfg Config, stats *Stats, logger *slog.Logger) {
@@ -598,10 +596,7 @@ func blockReceiptWorker(
 		default:
 		}
 
-		batchEnd := batchStart + int64(cfg.BlockBatchSize) - 1
-		if batchEnd > cfg.EndBlock {
-			batchEnd = cfg.EndBlock
-		}
+		batchEnd := min(batchStart+int64(cfg.BlockBatchSize)-1, cfg.EndBlock)
 
 		// Check what exists and build fetch list
 		blocksToFetch := make([]int64, 0, batchEnd-batchStart+1)

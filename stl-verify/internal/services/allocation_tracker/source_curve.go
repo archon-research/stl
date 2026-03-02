@@ -256,7 +256,7 @@ func (s *CurveSource) discoverCoinIndices(
 
 	calls := make([]outbound.Call, 0, len(entries)*maxCoins)
 	for _, e := range entries {
-		for i := 0; i < maxCoins; i++ {
+		for i := range maxCoins {
 			data, err := s.poolABI.Pack("coins", big.NewInt(int64(i)))
 			if err != nil {
 				calls = append(calls, outbound.Call{
@@ -287,7 +287,7 @@ func (s *CurveSource) discoverCoinIndices(
 			continue
 		}
 		target := *e.AssetAddress
-		for j := 0; j < maxCoins; j++ {
+		for j := range maxCoins {
 			idx := i*maxCoins + j
 			if idx >= len(mc) {
 				break

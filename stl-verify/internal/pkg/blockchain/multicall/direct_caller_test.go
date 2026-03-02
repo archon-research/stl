@@ -46,7 +46,7 @@ func startBatchRPCServer(t *testing.T, handler func(req testutil.JSONRPCRequest)
 		for i, req := range batch {
 			result, rpcErr := handler(req)
 			if rpcErr != nil {
-				errJSON, _ := json.Marshal(map[string]interface{}{
+				errJSON, _ := json.Marshal(map[string]any{
 					"code":    rpcErr.Code,
 					"message": rpcErr.Message,
 				})

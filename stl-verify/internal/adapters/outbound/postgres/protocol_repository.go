@@ -108,10 +108,7 @@ func (r *ProtocolRepository) UpsertReserveData(ctx context.Context, tx pgx.Tx, d
 	}
 
 	for i := 0; i < len(data); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(data) {
-			end = len(data)
-		}
+		end := min(i+r.batchSize, len(data))
 		batch := data[i:end]
 
 		if err := r.upsertSparkLendReserveDataBatch(ctx, tx, batch); err != nil {

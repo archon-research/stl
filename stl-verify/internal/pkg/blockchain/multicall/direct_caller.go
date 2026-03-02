@@ -59,7 +59,7 @@ func (c *DirectCaller) Execute(ctx context.Context, calls []outbound.Call, block
 		hexResults[i] = nil
 		elems[i] = rpc.BatchElem{
 			Method: "eth_call",
-			Args: []interface{}{
+			Args: []any{
 				ethCallArg{
 					To:   call.Target.Hex(),
 					Data: "0x" + hex.EncodeToString(call.CallData),

@@ -17,6 +17,7 @@ package blockchain
 // the PoolAddressesProvider is updated.
 
 import (
+	"maps"
 	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -212,9 +213,7 @@ func GetProtocolConfig(chainID int64, protocolAddress common.Address) (ProtocolC
 // GetProtocolRegistry returns a copy of all known protocol configs.
 func GetProtocolRegistry() map[ProtocolKey]ProtocolConfig {
 	registry := make(map[ProtocolKey]ProtocolConfig, len(protocolRegistry))
-	for key, config := range protocolRegistry {
-		registry[key] = config
-	}
+	maps.Copy(registry, protocolRegistry)
 	return registry
 }
 

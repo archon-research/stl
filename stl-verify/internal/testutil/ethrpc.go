@@ -115,7 +115,7 @@ func WriteRPCResult(w http.ResponseWriter, id, result json.RawMessage) {
 
 // WriteRPCError writes a JSON-RPC error response.
 func WriteRPCError(w http.ResponseWriter, id json.RawMessage, code int, message string) {
-	errJSON, _ := json.Marshal(map[string]interface{}{"code": code, "message": message})
+	errJSON, _ := json.Marshal(map[string]any{"code": code, "message": message})
 	_ = json.NewEncoder(w).Encode(map[string]json.RawMessage{
 		"jsonrpc": json.RawMessage(`"2.0"`),
 		"id":      id,
@@ -154,7 +154,7 @@ func countMulticallInnerCalls(params json.RawMessage) int {
 	if err := json.Unmarshal(params, &p); err != nil || len(p) < 1 {
 		return 1
 	}
-	var callObj map[string]interface{}
+	var callObj map[string]any
 	if err := json.Unmarshal(p[0], &callObj); err != nil {
 		return 1
 	}
