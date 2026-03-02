@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/gorilla/websocket"
@@ -37,7 +38,7 @@ func dialWS(t *testing.T, rawURL string) *websocket.Conn {
 // It also asserts that the response carries jsonrpc "2.0".
 func doSubscribe(t *testing.T, conn *websocket.Conn) string {
 	t.Helper()
-	req := testutil.JSONRPCRequest{ID: json.RawMessage("1"), Method: "eth_subscribe", Params: json.RawMessage(`["newHeads"]`)}
+	req := rpcutil.Request{ID: json.RawMessage("1"), Method: "eth_subscribe", Params: json.RawMessage(`["newHeads"]`)}
 	if err := conn.WriteJSON(req); err != nil {
 		t.Fatalf("write subscribe: %v", err)
 	}
@@ -121,7 +122,7 @@ func TestWSHandler_InvalidParams(t *testing.T) {
 	srv, _ := newTestWSServer(t)
 	conn := dialWS(t, srv.URL)
 
-	req := testutil.JSONRPCRequest{ID: json.RawMessage("2"), Method: "eth_subscribe", Params: json.RawMessage(`["logs"]`)}
+	req := rpcutil.Request{ID: json.RawMessage("2"), Method: "eth_subscribe", Params: json.RawMessage(`["logs"]`)}
 	if err := conn.WriteJSON(req); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -149,7 +150,7 @@ func TestWSHandler_UnknownMethod(t *testing.T) {
 	srv, _ := newTestWSServer(t)
 	conn := dialWS(t, srv.URL)
 
-	req := testutil.JSONRPCRequest{ID: json.RawMessage("3"), Method: "eth_chainId", Params: nil}
+	req := rpcutil.Request{ID: json.RawMessage("3"), Method: "eth_chainId", Params: nil}
 	if err := conn.WriteJSON(req); err != nil {
 		t.Fatalf("write: %v", err)
 	}

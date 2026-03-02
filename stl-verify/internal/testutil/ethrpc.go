@@ -16,9 +16,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 )
 
-// JSONRPCRequest is an alias for rpcutil.Request for backwards compatibility.
-type JSONRPCRequest = rpcutil.Request
-
 // StartMockEthRPC creates a mock Ethereum node that handles multicall3 and
 // block header requests. Each block returns unique prices so change detection
 // doesn't filter them out.
@@ -42,7 +39,7 @@ func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 
-		var req JSONRPCRequest
+		var req rpcutil.Request
 		if err := json.Unmarshal(body, &req); err != nil {
 			WriteRPCError(w, json.RawMessage(`1`), -32700, "parse error")
 			return
