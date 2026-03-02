@@ -1,0 +1,1 @@
+../use-modern-go-src/claude/modern-go-guidelines/skills/use-modern-go/SKILL.md

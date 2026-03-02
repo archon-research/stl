@@ -1,0 +1,3 @@
+[submodule ".claude/skills/use-modern-go-src"]
+	path = .claude/skills/use-modern-go-src
+	url = https://github.com/JetBrains/go-modern-guidelines
