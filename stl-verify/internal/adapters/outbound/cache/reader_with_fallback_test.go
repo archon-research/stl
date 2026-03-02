@@ -15,8 +15,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// --- hand-written mocks ---
-
 type mockCacheReader struct {
 	block       json.RawMessage
 	blockErr    error
@@ -110,6 +108,9 @@ func TestNewReaderWithFallback_Success(t *testing.T) {
 	}
 	if r == nil {
 		t.Fatal("expected non-nil reader")
+	}
+	if r.chainID != 1 {
+		t.Errorf("chainID = %d, want 1", r.chainID)
 	}
 	if r.bucket != "stl-sentinelstaging-ethereum-raw" {
 		t.Errorf("bucket = %q, want %q", r.bucket, "stl-sentinelstaging-ethereum-raw")
@@ -278,5 +279,56 @@ func TestGetBlock_S3KeyFormat(t *testing.T) {
 	}
 	if strings.HasPrefix(s3mock.lastKey, "1/") {
 		t.Errorf("S3 key should NOT contain chain ID prefix, got %q", s3mock.lastKey)
+	}
+}
+
+// TestGetMethods_WrongChainID verifies that all Get* methods reject a chainID
+// that differs from the one the reader was constructed with.
+func TestGetMethods_WrongChainID(t *testing.T) {
+	redis := &mockCacheReader{}
+	s3mock := &mockS3Reader{}
+	// Reader is configured for chain 1 (Ethereum).
+	reader := newTestReader(t, redis, s3mock)
+
+	// Call each method with chain 43114 (Avalanche) — must be rejected.
+	wrongChain := int64(43114)
+
+	tests := []struct {
+		name   string
+		invoke func() (json.RawMessage, error)
+	}{
+		{"GetBlock", func() (json.RawMessage, error) {
+			return reader.GetBlock(context.Background(), wrongChain, 21000000, 0)
+		}},
+		{"GetReceipts", func() (json.RawMessage, error) {
+			return reader.GetReceipts(context.Background(), wrongChain, 21000000, 0)
+		}},
+		{"GetTraces", func() (json.RawMessage, error) {
+			return reader.GetTraces(context.Background(), wrongChain, 21000000, 0)
+		}},
+		{"GetBlobs", func() (json.RawMessage, error) {
+			return reader.GetBlobs(context.Background(), wrongChain, 21000000, 0)
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.invoke()
+			if err == nil {
+				t.Fatal("expected chainID mismatch error, got nil")
+			}
+			if !strings.Contains(err.Error(), "chainID mismatch") {
+				t.Errorf("expected 'chainID mismatch' in error, got: %v", err)
+			}
+			if got != nil {
+				t.Errorf("expected nil data on error, got %s", got)
+			}
+			if redis.blockCalled || redis.receiptsCalled || redis.tracesCalled || redis.blobsCalled {
+				t.Error("Redis must not be called when chainID does not match")
+			}
+			if s3mock.called {
+				t.Error("S3 must not be called when chainID does not match")
+			}
+		})
 	}
 }

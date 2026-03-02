@@ -1,9 +1,7 @@
-package gziputil_test
+package gziputil
 
 import (
 	"testing"
-
-	"github.com/archon-research/stl/stl-verify/internal/pkg/gziputil"
 )
 
 func TestIsGzipped(t *testing.T) {
@@ -21,7 +19,7 @@ func TestIsGzipped(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := gziputil.IsGzipped(tt.data)
+			got := IsGzipped(tt.data)
 			if got != tt.expected {
 				t.Errorf("IsGzipped(%v) = %v, want %v", tt.data, got, tt.expected)
 			}
@@ -31,7 +29,7 @@ func TestIsGzipped(t *testing.T) {
 
 func TestDecompress_UncompressedPassthrough(t *testing.T) {
 	data := []byte(`{"number":"0x1"}`)
-	got, err := gziputil.Decompress(data)
+	got, err := Decompress(data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -41,7 +39,7 @@ func TestDecompress_UncompressedPassthrough(t *testing.T) {
 }
 
 func TestDecompress_NilInput(t *testing.T) {
-	got, err := gziputil.Decompress(nil)
+	got, err := Decompress(nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -53,7 +51,7 @@ func TestDecompress_NilInput(t *testing.T) {
 func TestDecompress_InvalidGzip(t *testing.T) {
 	// Starts with gzip magic bytes but is not valid gzip.
 	data := []byte{0x1f, 0x8b, 0x00, 0x00}
-	_, err := gziputil.Decompress(data)
+	_, err := Decompress(data)
 	if err == nil {
 		t.Fatal("expected error for invalid gzip data, got nil")
 	}

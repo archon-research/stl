@@ -24,10 +24,11 @@ var _ outbound.BlockCacheReader = (*BlockCacheReaderWithFallback)(nil)
 // bucket name — each chain has its own dedicated bucket, so S3 keys do not
 // include the chain ID.
 type BlockCacheReaderWithFallback struct {
-	redis  outbound.BlockCacheReader
-	s3     outbound.S3Reader
-	bucket string
-	logger *slog.Logger
+	redis   outbound.BlockCacheReader
+	s3      outbound.S3Reader
+	chainID int64
+	bucket  string
+	logger  *slog.Logger
 }
 
 // NewReaderWithFallback creates a BlockCacheReaderWithFallback. It validates that all
@@ -51,10 +52,11 @@ func NewReaderWithFallback(redis outbound.BlockCacheReader, s3 outbound.S3Reader
 		logger = slog.Default()
 	}
 	return &BlockCacheReaderWithFallback{
-		redis:  redis,
-		s3:     s3,
-		bucket: bucket,
-		logger: logger,
+		redis:   redis,
+		s3:      s3,
+		chainID: chainID,
+		bucket:  bucket,
+		logger:  logger,
 	}, nil
 }
 
@@ -95,6 +97,9 @@ func (c *BlockCacheReaderWithFallback) Close() error {
 }
 
 func (c *BlockCacheReaderWithFallback) getWithFallback(ctx context.Context, chainID, blockNumber int64, version int, fetch redisGetter, dataType s3key.DataType) (json.RawMessage, error) {
+	if chainID != c.chainID {
+		return nil, fmt.Errorf("chainID mismatch: reader configured for chain %d, got %d", c.chainID, chainID)
+	}
 	data, err := fetch(ctx, chainID, blockNumber, version)
 	if err != nil {
 		return nil, fmt.Errorf("redis %s: %w", dataType, err)
