@@ -1,6 +1,7 @@
 package mockchain
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -240,6 +241,11 @@ func TestReplayer_LoopContinuity(t *testing.T) {
 			t.Errorf("duplicate hash %q at emission %d", h.Hash, i)
 		}
 		seen[h.Hash] = true
+
+		wantNumber := fmt.Sprintf("0x%x", r.baseBlockNumber+int64(i))
+		if h.Number != wantNumber {
+			t.Errorf("emission %d: Number %q, want %q", i, h.Number, wantNumber)
+		}
 
 		if i == 0 {
 			continue

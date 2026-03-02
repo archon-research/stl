@@ -50,6 +50,16 @@ func TestRun_StartStop(t *testing.T) {
 	}
 }
 
+// TestRun_NonPositiveInterval verifies that run returns an error for zero or negative intervals.
+func TestRun_NonPositiveInterval(t *testing.T) {
+	ctx := context.Background()
+	for _, d := range []time.Duration{0, -1 * time.Millisecond} {
+		if err := run(ctx, ":0", d); err == nil {
+			t.Errorf("expected error for interval %v, got nil", d)
+		}
+	}
+}
+
 // TestRun_BadAddr verifies that run returns an error when given an invalid address.
 func TestRun_BadAddr(t *testing.T) {
 	ctx := context.Background()

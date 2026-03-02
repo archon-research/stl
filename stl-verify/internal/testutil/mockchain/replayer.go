@@ -16,6 +16,11 @@ import (
 
 const defaultInterval = 12 * time.Second // default Ethereum block time
 
+// maxCachedHashes is the maximum number of emitted derived hashes retained in memory.
+// Older entries are evicted FIFO. The watcher's reorg walk-back never exceeds the
+// finality window (~32 blocks), so 128 is more than sufficient.
+const maxCachedHashes = 128
+
 // status holds a snapshot of the Replayer's current state.
 type status struct {
 	Running       bool
@@ -41,10 +46,11 @@ type Replayer struct {
 	lastBlockNumber int64  // block number of the most-recently emitted block
 	prevDerivedHash string // derived hash of the most-recently emitted block
 
-	// derivedHashToIndex maps a derived hash to its template index (populated by emit).
-	derivedHashToIndex map[string]int
 	// derivedHashToBlock maps a derived hash to its absolute block number (populated by emit).
+	// Template index is computed from block number on demand, so no separate index map is needed.
 	derivedHashToBlock map[string]int64
+	// hashOrder tracks insertion order for FIFO eviction of derivedHashToBlock.
+	hashOrder []string
 
 	templates []outbound.BlockHeader
 	store     *DataStore
@@ -59,10 +65,12 @@ type Replayer struct {
 // onBlock is called with each emitted header; store is used to look up associated block data.
 func NewReplayer(headers []outbound.BlockHeader, store *DataStore, onBlock func(outbound.BlockHeader)) *Replayer {
 	var base int64
-	if len(headers) > 0 {
-		if n, err := hexutil.ParseInt64(headers[0].Number); err == nil {
-			base = n
+	if len(headers) > 0 && headers[0].Number != "" {
+		n, err := hexutil.ParseInt64(headers[0].Number)
+		if err != nil {
+			panic(fmt.Sprintf("mockchain: NewReplayer: cannot parse base block number %q: %v", headers[0].Number, err))
 		}
+		base = n
 	}
 	return &Replayer{
 		templates:          headers,
@@ -70,7 +78,6 @@ func NewReplayer(headers []outbound.BlockHeader, store *DataStore, onBlock func(
 		onBlock:            onBlock,
 		interval:           defaultInterval,
 		baseBlockNumber:    base,
-		derivedHashToIndex: make(map[string]int),
 		derivedHashToBlock: make(map[string]int64),
 	}
 }
@@ -102,8 +109,8 @@ func (r *Replayer) Start() {
 	r.blocksEmitted = 0
 	r.lastBlockNumber = 0
 	r.prevDerivedHash = ""
-	r.derivedHashToIndex = make(map[string]int)
 	r.derivedHashToBlock = make(map[string]int64)
+	r.hashOrder = r.hashOrder[:0]
 	r.mu.Unlock()
 
 	go r.emitLoop(r.stopCh, r.doneCh)
@@ -150,8 +157,13 @@ func (r *Replayer) emit() {
 
 	header := patchHeader(template, blockNumber, r.loopIndex, parentHash)
 
-	r.derivedHashToIndex[header.Hash] = templateIndex
 	r.derivedHashToBlock[header.Hash] = blockNumber
+	r.hashOrder = append(r.hashOrder, header.Hash)
+	if len(r.hashOrder) > maxCachedHashes {
+		oldest := r.hashOrder[0]
+		r.hashOrder = r.hashOrder[1:]
+		delete(r.derivedHashToBlock, oldest)
+	}
 	r.lastBlockNumber = blockNumber
 	r.prevDerivedHash = header.Hash
 
@@ -209,8 +221,12 @@ func (r *Replayer) CurrentBlockNumber() int64 {
 func (r *Replayer) TemplateIndexForHash(hash string) (int, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	idx, ok := r.derivedHashToIndex[hash]
-	return idx, ok
+	blockNum, ok := r.derivedHashToBlock[hash]
+	if !ok {
+		return 0, false
+	}
+	offset := blockNum - r.baseBlockNumber
+	return int(offset % int64(len(r.templates))), true
 }
 
 // TemplateIndexForNumber returns the template index for a given absolute block number.

@@ -57,6 +57,10 @@ func (a *serverAdapter) Stop() error {
 }
 
 func run(ctx context.Context, addr string, interval time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("interval must be positive, got %v", interval)
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
