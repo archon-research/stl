@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/gziputil"
 )
 
 // --- Test: NewBlockCache ---
@@ -430,9 +432,9 @@ func TestIsGzipped_DetectsMagicBytes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isGzipped(tt.data)
+			result := gziputil.IsGzipped(tt.data)
 			if result != tt.expected {
-				t.Errorf("isGzipped(%v) = %v, want %v", tt.data, result, tt.expected)
+				t.Errorf("gziputil.IsGzipped(%v) = %v, want %v", tt.data, result, tt.expected)
 			}
 		})
 	}

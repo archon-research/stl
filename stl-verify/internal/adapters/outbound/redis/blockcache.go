@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -26,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/gziputil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -313,25 +313,9 @@ func compress(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// isGzipped checks if data is gzip-compressed by looking for the gzip magic bytes.
-// Gzip data always starts with 0x1f 0x8b.
-func isGzipped(data []byte) bool {
-	return len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b
-}
-
 // decompress decompresses gzip data if compressed, otherwise returns data as-is.
-// This provides backward compatibility with uncompressed data in the cache.
 func decompress(data []byte) ([]byte, error) {
-	if !isGzipped(data) {
-		// Data is not compressed, return as-is (backward compatibility)
-		return data, nil
-	}
-	r, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
-	}
-	defer r.Close()
-	return io.ReadAll(r)
+	return gziputil.Decompress(data)
 }
 
 // SetBlock caches block data (compressed).

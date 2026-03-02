@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/gziputil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -27,12 +30,22 @@ type BlockCacheReaderWithFallback struct {
 	logger *slog.Logger
 }
 
-// NewReaderWithFallback creates a BlockCacheReaderWithFallback. It returns an error if
-// bucket is empty, because an empty bucket name would silently read from the
-// wrong place in production.
-func NewReaderWithFallback(redis outbound.BlockCacheReader, s3 outbound.S3Reader, bucket string, logger *slog.Logger) (*BlockCacheReaderWithFallback, error) {
+// NewReaderWithFallback creates a BlockCacheReaderWithFallback. It validates that all
+// dependencies are non-nil, that the bucket is non-empty, and that the bucket
+// name has the correct prefix for the given chain ID and environment
+// (format: stl-sentinel{environment}-{chainName}-raw).
+func NewReaderWithFallback(redis outbound.BlockCacheReader, s3 outbound.S3Reader, chainID int64, environment string, bucket string, logger *slog.Logger) (*BlockCacheReaderWithFallback, error) {
+	if redis == nil {
+		return nil, fmt.Errorf("redis reader must not be nil")
+	}
+	if s3 == nil {
+		return nil, fmt.Errorf("s3 reader must not be nil")
+	}
 	if bucket == "" {
 		return nil, fmt.Errorf("s3 bucket name must not be empty")
+	}
+	if err := chainutil.ValidateS3BucketForChain(chainID, bucket, environment); err != nil {
+		return nil, fmt.Errorf("invalid s3 bucket: %w", err)
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -95,7 +108,10 @@ func (c *BlockCacheReaderWithFallback) getWithFallback(ctx context.Context, chai
 func (c *BlockCacheReaderWithFallback) getFromS3(ctx context.Context, blockNumber int64, version int, dataType s3key.DataType) (json.RawMessage, error) {
 	key := s3key.Build(blockNumber, version, dataType)
 
-	reader, err := c.s3.StreamFile(ctx, c.bucket, key)
+	s3Ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	reader, err := c.s3.StreamFile(s3Ctx, c.bucket, key)
 	if err != nil {
 		var noSuchKey *types.NoSuchKey
 		if errors.As(err, &noSuchKey) {
@@ -108,6 +124,11 @@ func (c *BlockCacheReaderWithFallback) getFromS3(ctx context.Context, blockNumbe
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read s3 data: %w", err)
+	}
+
+	data, err = gziputil.Decompress(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress s3 data (key=%s): %w", key, err)
 	}
 
 	c.logger.Debug("fallback: fetched from s3", "key", key, "size", len(data))
