@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/gorilla/websocket"
 )
 
