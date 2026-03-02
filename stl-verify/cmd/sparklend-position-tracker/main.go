@@ -20,7 +20,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -59,6 +58,7 @@ type cliConfig struct {
 	dbURL       string
 	alchemyURL  string
 	s3Bucket    string
+	deployEnv   string
 	maxMessages int
 	waitTime    int
 	chainID     int64
@@ -123,8 +123,9 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("S3_BUCKET environment variable is required")
 	}
 
-	if err := chainutil.ValidateS3BucketForChain(cfg.chainID, cfg.s3Bucket); err != nil {
-		return cliConfig{}, fmt.Errorf("S3 bucket validation failed: %w", err)
+	cfg.deployEnv = env.Get("DEPLOY_ENV", "")
+	if cfg.deployEnv == "" {
+		return cliConfig{}, fmt.Errorf("DEPLOY_ENV environment variable is required")
 	}
 
 	return cfg, nil
@@ -203,7 +204,7 @@ func run(ctx context.Context, args []string) error {
 	logger.Info("BlockCache connected", "addr", cfg.redisAddr)
 
 	s3Reader := s3adapter.NewReader(awsCfg, logger)
-	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.s3Bucket, logger)
+	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.chainID, cfg.deployEnv, cfg.s3Bucket, logger)
 	if err != nil {
 		return fmt.Errorf("creating cache reader: %w", err)
 	}

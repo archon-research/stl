@@ -105,7 +105,13 @@ func Main() {
 		os.Exit(1)
 	}
 
-	if err := chainutil.ValidateS3BucketForChain(chainID, bucket); err != nil {
+	deployEnv := os.Getenv("DEPLOY_ENV")
+	if deployEnv == "" {
+		logger.Error("DEPLOY_ENV environment variable is required")
+		os.Exit(1)
+	}
+
+	if err := chainutil.ValidateS3BucketForChain(chainID, bucket, deployEnv); err != nil {
 		logger.Error("S3 bucket validation failed", "error", err)
 		os.Exit(1)
 	}

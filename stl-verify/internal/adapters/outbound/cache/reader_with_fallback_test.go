@@ -84,7 +84,7 @@ func (m *mockS3Reader) ListPrefix(_ context.Context, _, _ string) ([]string, err
 
 func newTestReader(t *testing.T, redis *mockCacheReader, s3 *mockS3Reader) *BlockCacheReaderWithFallback {
 	t.Helper()
-	r, err := NewReaderWithFallback(redis, s3, "test-bucket", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r, err := NewReaderWithFallback(redis, s3, 1, "staging", "stl-sentinelstaging-ethereum-raw", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("NewReaderWithFallback unexpected error: %v", err)
 	}
@@ -94,7 +94,7 @@ func newTestReader(t *testing.T, redis *mockCacheReader, s3 *mockS3Reader) *Bloc
 // --- NewReaderWithFallback ---
 
 func TestNewReaderWithFallback_EmptyBucket(t *testing.T) {
-	_, err := NewReaderWithFallback(&mockCacheReader{}, &mockS3Reader{}, "", slog.Default())
+	_, err := NewReaderWithFallback(&mockCacheReader{}, &mockS3Reader{}, 1, "staging", "", slog.Default())
 	if err == nil {
 		t.Fatal("expected error for empty bucket, got nil")
 	}
@@ -104,18 +104,38 @@ func TestNewReaderWithFallback_EmptyBucket(t *testing.T) {
 }
 
 func TestNewReaderWithFallback_Success(t *testing.T) {
-	r, err := NewReaderWithFallback(&mockCacheReader{}, &mockS3Reader{}, "my-bucket", nil)
+	r, err := NewReaderWithFallback(&mockCacheReader{}, &mockS3Reader{}, 1, "staging", "stl-sentinelstaging-ethereum-raw", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if r == nil {
 		t.Fatal("expected non-nil reader")
 	}
-	if r.bucket != "my-bucket" {
-		t.Errorf("bucket = %q, want %q", r.bucket, "my-bucket")
+	if r.bucket != "stl-sentinelstaging-ethereum-raw" {
+		t.Errorf("bucket = %q, want %q", r.bucket, "stl-sentinelstaging-ethereum-raw")
 	}
 	if r.logger == nil {
 		t.Error("expected default logger to be set when nil is passed")
+	}
+}
+
+func TestNewReaderWithFallback_NilRedis(t *testing.T) {
+	_, err := NewReaderWithFallback(nil, &mockS3Reader{}, 1, "staging", "stl-sentinelstaging-ethereum-raw", slog.Default())
+	if err == nil {
+		t.Fatal("expected error for nil redis, got nil")
+	}
+	if !strings.Contains(err.Error(), "redis") {
+		t.Errorf("expected error to mention 'redis', got: %v", err)
+	}
+}
+
+func TestNewReaderWithFallback_NilS3(t *testing.T) {
+	_, err := NewReaderWithFallback(&mockCacheReader{}, nil, 1, "staging", "stl-sentinelstaging-ethereum-raw", slog.Default())
+	if err == nil {
+		t.Fatal("expected error for nil s3, got nil")
+	}
+	if !strings.Contains(err.Error(), "s3") {
+		t.Errorf("expected error to mention 's3', got: %v", err)
 	}
 }
 
@@ -256,7 +276,7 @@ func TestGetBlock_S3KeyFormat(t *testing.T) {
 	if s3mock.lastKey != expectedKey {
 		t.Errorf("S3 key = %q, want %q", s3mock.lastKey, expectedKey)
 	}
-	if strings.Contains(s3mock.lastKey, "1/") {
+	if strings.HasPrefix(s3mock.lastKey, "1/") {
 		t.Errorf("S3 key should NOT contain chain ID prefix, got %q", s3mock.lastKey)
 	}
 }
