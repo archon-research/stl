@@ -338,10 +338,30 @@ func TestReplayer_SetInterval(t *testing.T) {
 	r.Stop()
 	elapsed := time.Since(start)
 
-	// 3 blocks at 50ms each: expect < 500ms total (generous upper bound for CI).
+	// 3 blocks at 50ms each: first tick at ~50ms, third at ~150ms.
+	// Lower bound: at least 2 full intervals must elapse between first and third block.
+	// Upper bound: generous CI allowance.
+	if elapsed < 100*time.Millisecond {
+		t.Errorf("interval appears uncontrolled: 3 blocks arrived in %v (want ≥100ms with 50ms interval)", elapsed)
+	}
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("expected 3 blocks in <500ms with 50ms interval, took %v", elapsed)
 	}
+}
+
+// TestReplayer_SetInterval_WhileRunning verifies that SetInterval panics when called after Start.
+func TestReplayer_SetInterval_WhileRunning(t *testing.T) {
+	r, received := newTestReplayer(t)
+	r.Start()
+	drain(t, received, 1)
+	defer r.Stop()
+
+	defer func() {
+		if recover() == nil {
+			t.Error("expected panic when calling SetInterval while running")
+		}
+	}()
+	r.SetInterval(100 * time.Millisecond)
 }
 
 // TestReplayer_SetInterval_NonPositive verifies that SetInterval panics for zero and negative values.

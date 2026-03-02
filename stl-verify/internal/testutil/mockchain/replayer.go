@@ -83,14 +83,17 @@ func NewReplayer(headers []outbound.BlockHeader, store *DataStore, onBlock func(
 }
 
 // SetInterval sets the block emission interval. Must be called before Start.
-// Panics if d <= 0.
+// Panics if d <= 0 or if the replayer is already running.
 func (r *Replayer) SetInterval(d time.Duration) {
 	if d <= 0 {
 		panic("mockchain: SetInterval: duration must be positive")
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.running {
+		panic("mockchain: SetInterval: cannot change interval while running")
+	}
 	r.interval = d
-	r.mu.Unlock()
 }
 
 // Start begins emitting blocks on the configured interval. It is a no-op if
