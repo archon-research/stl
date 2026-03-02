@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"runtime"
@@ -25,9 +26,15 @@ func CheckGoroutineLeaks(exitCode int) int {
 		return exitCode
 	}
 
+	// WriteTo must be called before Count — the goroutineleak profile
+	// performs lazy detection, so Count returns 0 until the profile has
+	// been materialised at least once via WriteTo.
+	var buf bytes.Buffer
+	profile.WriteTo(&buf, 1)
+
 	if count := profile.Count(); count > 0 {
 		fmt.Fprintf(os.Stderr, "\n=== GOROUTINE LEAK DETECTED: %d leaked goroutine(s) ===\n", count)
-		profile.WriteTo(os.Stderr, 1)
+		buf.WriteTo(os.Stderr)
 		fmt.Fprintln(os.Stderr, "=== END GOROUTINE LEAK REPORT ===")
 		return 1
 	}
