@@ -210,12 +210,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	protocolAssetRepo, err := postgres.NewProtocolAssetRepository(pool)
-	if err != nil {
-		logger.Error("failed to create protocol asset repository", "error", err)
-		os.Exit(1)
-	}
-
 	eventRepo := postgres.NewEventRepository(logger)
 
 	processorConfig := sparklend_position_tracker.Config{
@@ -233,7 +227,6 @@ func main() {
 		protocolRepo,
 		tokenRepo,
 		positionRepo,
-		protocolAssetRepo,
 		eventRepo,
 	)
 	if err != nil {

@@ -104,20 +104,36 @@ func (m *mockUserRepo) UpsertUserProtocolMetadata(ctx context.Context, metadata 
 	return nil
 }
 
-type mockProtocolAssetRepo struct {
-	mu            sync.Mutex
-	getByKeyFn    func(ctx context.Context, protocolID int64, assetKey string) (*entity.ProtocolAsset, error)
-	getByKeyCalls int
+type mockTokenRepo struct {
+	mu                      sync.Mutex
+	getTokenIDBySymbolFn    func(ctx context.Context, chainID int64, symbol string) (int64, error)
+	getTokenIDBySymbolCalls int
 }
 
-func (m *mockProtocolAssetRepo) GetByKey(ctx context.Context, protocolID int64, assetKey string) (*entity.ProtocolAsset, error) {
+func (m *mockTokenRepo) UpsertTokens(ctx context.Context, tokens []*entity.Token) error {
+	return nil
+}
+
+func (m *mockTokenRepo) UpsertReceiptTokens(ctx context.Context, tokens []*entity.ReceiptToken) error {
+	return nil
+}
+
+func (m *mockTokenRepo) UpsertDebtTokens(ctx context.Context, tokens []*entity.DebtToken) error {
+	return nil
+}
+
+func (m *mockTokenRepo) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
+	return 1, nil
+}
+
+func (m *mockTokenRepo) GetTokenIDBySymbol(ctx context.Context, chainID int64, symbol string) (int64, error) {
 	m.mu.Lock()
-	m.getByKeyCalls++
+	m.getTokenIDBySymbolCalls++
 	m.mu.Unlock()
-	if m.getByKeyFn != nil {
-		return m.getByKeyFn(ctx, protocolID, assetKey)
+	if m.getTokenIDBySymbolFn != nil {
+		return m.getTokenIDBySymbolFn(ctx, chainID, symbol)
 	}
-	return &entity.ProtocolAsset{ID: 1}, nil
+	return 1, nil
 }
 
 type mockTxManager struct {
@@ -245,16 +261,16 @@ func defaultUserRepo() *mockUserRepo {
 	return &mockUserRepo{}
 }
 
-func defaultProtocolAssetRepo() *mockProtocolAssetRepo {
-	return &mockProtocolAssetRepo{
-		getByKeyFn: func(_ context.Context, _ int64, assetKey string) (*entity.ProtocolAsset, error) {
-			switch strings.ToUpper(assetKey) {
+func defaultTokenRepo() *mockTokenRepo {
+	return &mockTokenRepo{
+		getTokenIDBySymbolFn: func(_ context.Context, _ int64, symbol string) (int64, error) {
+			switch strings.ToUpper(symbol) {
 			case "USDC":
-				return &entity.ProtocolAsset{ID: 1, Symbol: "USDC"}, nil
+				return 1, nil
 			case "BTC":
-				return &entity.ProtocolAsset{ID: 2, Symbol: "BTC"}, nil
+				return 2, nil
 			default:
-				return nil, fmt.Errorf("protocol asset not found for key %s", assetKey)
+				return 0, fmt.Errorf("token not found for symbol %s", symbol)
 			}
 		},
 	}
@@ -273,7 +289,7 @@ func TestNewService(t *testing.T) {
 	mapleAPI := &mockMapleClient{}
 	positionRepo := &mockPositionRepo{}
 	userRepo := &mockUserRepo{}
-	protocolAssetRepo := &mockProtocolAssetRepo{}
+	tokenRepo := &mockTokenRepo{}
 	txManager := &mockTxManager{}
 	protocolRepo := &mockProtocolRepo{}
 	protocolRepo.getProtocolByAddrFn = func(_ context.Context, _ int64, _ common.Address) (*entity.Protocol, error) {
@@ -289,67 +305,67 @@ func TestNewService(t *testing.T) {
 	}
 
 	tests := []struct {
-		name              string
-		config            Config
-		consumer          outbound.SQSConsumer
-		mapleAPI          outbound.MapleClient
-		txManager         outbound.TxManager
-		userRepo          outbound.UserRepository
-		protocolAssetRepo outbound.ProtocolAssetRepository
-		positionRepo      outbound.PositionRepository
-		protocolRepo      outbound.ProtocolRepository
-		wantErr           bool
-		errContains       string
+		name         string
+		config       Config
+		consumer     outbound.SQSConsumer
+		mapleAPI     outbound.MapleClient
+		txManager    outbound.TxManager
+		userRepo     outbound.UserRepository
+		tokenRepo    outbound.TokenRepository
+		positionRepo outbound.PositionRepository
+		protocolRepo outbound.ProtocolRepository
+		wantErr      bool
+		errContains  string
 	}{
 		{
-			name:              "success with all valid params",
-			config:            validServiceConfig(),
-			consumer:          consumer,
-			mapleAPI:          mapleAPI,
-			txManager:         txManager,
-			userRepo:          userRepo,
-			protocolAssetRepo: protocolAssetRepo,
-			positionRepo:      positionRepo,
-			protocolRepo:      protocolRepo,
+			name:         "success with all valid params",
+			config:       validServiceConfig(),
+			consumer:     consumer,
+			mapleAPI:     mapleAPI,
+			txManager:    txManager,
+			userRepo:     userRepo,
+			tokenRepo:    tokenRepo,
+			positionRepo: positionRepo,
+			protocolRepo: protocolRepo,
 		},
 		{
-			name:              "error nil consumer",
-			config:            validServiceConfig(),
-			consumer:          nil,
-			mapleAPI:          mapleAPI,
-			txManager:         txManager,
-			userRepo:          userRepo,
-			protocolAssetRepo: protocolAssetRepo,
-			positionRepo:      positionRepo,
-			protocolRepo:      protocolRepo,
-			wantErr:           true,
-			errContains:       "consumer cannot be nil",
+			name:         "error nil consumer",
+			config:       validServiceConfig(),
+			consumer:     nil,
+			mapleAPI:     mapleAPI,
+			txManager:    txManager,
+			userRepo:     userRepo,
+			tokenRepo:    tokenRepo,
+			positionRepo: positionRepo,
+			protocolRepo: protocolRepo,
+			wantErr:      true,
+			errContains:  "consumer cannot be nil",
 		},
 		{
-			name:              "error nil mapleAPI",
-			config:            validServiceConfig(),
-			consumer:          consumer,
-			mapleAPI:          nil,
-			txManager:         txManager,
-			userRepo:          userRepo,
-			protocolAssetRepo: protocolAssetRepo,
-			positionRepo:      positionRepo,
-			protocolRepo:      protocolRepo,
-			wantErr:           true,
-			errContains:       "mapleAPI cannot be nil",
+			name:         "error nil mapleAPI",
+			config:       validServiceConfig(),
+			consumer:     consumer,
+			mapleAPI:     nil,
+			txManager:    txManager,
+			userRepo:     userRepo,
+			tokenRepo:    tokenRepo,
+			positionRepo: positionRepo,
+			protocolRepo: protocolRepo,
+			wantErr:      true,
+			errContains:  "mapleAPI cannot be nil",
 		},
 		{
-			name:              "error nil txManager",
-			config:            validServiceConfig(),
-			consumer:          consumer,
-			mapleAPI:          mapleAPI,
-			txManager:         nil,
-			userRepo:          userRepo,
-			protocolAssetRepo: protocolAssetRepo,
-			positionRepo:      positionRepo,
-			protocolRepo:      protocolRepo,
-			wantErr:           true,
-			errContains:       "txManager cannot be nil",
+			name:         "error nil txManager",
+			config:       validServiceConfig(),
+			consumer:     consumer,
+			mapleAPI:     mapleAPI,
+			txManager:    nil,
+			userRepo:     userRepo,
+			tokenRepo:    tokenRepo,
+			positionRepo: positionRepo,
+			protocolRepo: protocolRepo,
+			wantErr:      true,
+			errContains:  "txManager cannot be nil",
 		},
 		{
 			name: "error protocol address zero",
@@ -357,15 +373,15 @@ func TestNewService(t *testing.T) {
 				ProtocolAddress: common.Address{},
 				Logger:          testutil.DiscardLogger(),
 			},
-			consumer:          consumer,
-			mapleAPI:          mapleAPI,
-			txManager:         txManager,
-			userRepo:          userRepo,
-			protocolAssetRepo: protocolAssetRepo,
-			positionRepo:      positionRepo,
-			protocolRepo:      protocolRepo,
-			wantErr:           true,
-			errContains:       "protocolAddress must be set",
+			consumer:     consumer,
+			mapleAPI:     mapleAPI,
+			txManager:    txManager,
+			userRepo:     userRepo,
+			tokenRepo:    tokenRepo,
+			positionRepo: positionRepo,
+			protocolRepo: protocolRepo,
+			wantErr:      true,
+			errContains:  "protocolAddress must be set",
 		},
 		{
 			name: "error nil protocol repo",
@@ -373,44 +389,28 @@ func TestNewService(t *testing.T) {
 				ProtocolAddress: common.HexToAddress("0x804a6F5F667170F545Bf14e5DDB48C70B788390C"),
 				Logger:          testutil.DiscardLogger(),
 			},
-			consumer:          consumer,
-			mapleAPI:          mapleAPI,
-			txManager:         txManager,
-			userRepo:          userRepo,
-			protocolAssetRepo: protocolAssetRepo,
-			positionRepo:      positionRepo,
-			protocolRepo:      nil,
-			wantErr:           true,
-			errContains:       "protocolRepo cannot be nil",
-		},
-		{
-			name: "error nil protocolAssetRepo",
-			config: Config{
-				ProtocolAddress: common.HexToAddress("0x804a6F5F667170F545Bf14e5DDB48C70B788390C"),
-				Logger:          testutil.DiscardLogger(),
-			},
-			consumer:          consumer,
-			mapleAPI:          mapleAPI,
-			txManager:         txManager,
-			userRepo:          userRepo,
-			protocolAssetRepo: nil,
-			positionRepo:      positionRepo,
-			protocolRepo:      protocolRepo,
-			wantErr:           true,
-			errContains:       "protocolAssetRepo cannot be nil",
+			consumer:     consumer,
+			mapleAPI:     mapleAPI,
+			txManager:    txManager,
+			userRepo:     userRepo,
+			tokenRepo:    tokenRepo,
+			positionRepo: positionRepo,
+			protocolRepo: nil,
+			wantErr:      true,
+			errContains:  "protocolRepo cannot be nil",
 		},
 		{
 			name: "defaults are applied for zero config",
 			config: Config{
 				ProtocolAddress: common.HexToAddress("0x804a6F5F667170F545Bf14e5DDB48C70B788390C"),
 			},
-			consumer:          consumer,
-			mapleAPI:          mapleAPI,
-			txManager:         txManager,
-			userRepo:          userRepo,
-			protocolAssetRepo: protocolAssetRepo,
-			positionRepo:      positionRepo,
-			protocolRepo:      protocolRepo,
+			consumer:     consumer,
+			mapleAPI:     mapleAPI,
+			txManager:    txManager,
+			userRepo:     userRepo,
+			tokenRepo:    tokenRepo,
+			positionRepo: positionRepo,
+			protocolRepo: protocolRepo,
 		},
 	}
 
@@ -422,7 +422,7 @@ func TestNewService(t *testing.T) {
 				tc.mapleAPI,
 				tc.txManager,
 				tc.userRepo,
-				tc.protocolAssetRepo,
+				tc.tokenRepo,
 				tc.positionRepo,
 				tc.protocolRepo,
 			)
@@ -477,7 +477,7 @@ func TestStartStop(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			defaultPositionRepo(),
 			protocolRepo,
 		)
@@ -511,7 +511,7 @@ func TestStartStop(t *testing.T) {
 			&mockMapleClient{},
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			defaultPositionRepo(),
 			protocolRepo,
 		)
@@ -550,7 +550,7 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -624,7 +624,7 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -664,7 +664,7 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			defaultPositionRepo(),
 			protocolRepo,
 		)
@@ -701,7 +701,7 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -738,7 +738,7 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -772,7 +772,7 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			txMgr,
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			defaultPositionRepo(),
 			protocolRepo,
 		)
@@ -846,7 +846,7 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			userRepo,
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -896,7 +896,7 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			userRepo,
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			defaultPositionRepo(),
 			protocolRepo,
 		)
@@ -932,7 +932,7 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			defaultPositionRepo(),
 			protocolRepo,
 		)
@@ -995,7 +995,7 @@ func TestProcessMessages(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -1038,7 +1038,7 @@ func TestProcessMessages(t *testing.T) {
 			&mockMapleClient{},
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			defaultPositionRepo(),
 			protocolRepo,
 		)
@@ -1078,7 +1078,7 @@ func TestProcessMessages(t *testing.T) {
 			&mockMapleClient{},
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -1128,7 +1128,7 @@ func TestProcessMessages(t *testing.T) {
 			&mockMapleClient{},
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			defaultPositionRepo(),
 			protocolRepo,
 		)
@@ -1186,7 +1186,7 @@ func TestProcessMessages(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultProtocolAssetRepo(),
+			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)

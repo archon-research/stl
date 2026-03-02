@@ -146,9 +146,9 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating user repository: %w", err)
 	}
 
-	protocolAssetRepo, err := postgres.NewProtocolAssetRepository(pool)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0)
 	if err != nil {
-		return fmt.Errorf("creating protocol asset repository: %w", err)
+		return fmt.Errorf("creating token repository: %w", err)
 	}
 
 	txManager, err := postgres.NewTxManager(pool, logger)
@@ -167,7 +167,7 @@ func run(ctx context.Context, args []string) error {
 		mapleClient,
 		txManager,
 		userRepo,
-		protocolAssetRepo,
+		tokenRepo,
 		positionRepo,
 		protocolRepo,
 	)

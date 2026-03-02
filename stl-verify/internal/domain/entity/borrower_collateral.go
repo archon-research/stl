@@ -10,7 +10,7 @@ type BorrowerCollateral struct {
 	ID                int64
 	UserID            int64
 	ProtocolID        int64
-	ProtocolAssetID   int64
+	TokenID           int64
 	BlockNumber       int64
 	BlockVersion      int
 	Amount            *big.Int  // current total collateral amount
@@ -21,12 +21,12 @@ type BorrowerCollateral struct {
 }
 
 // NewBorrowerCollateral creates a new BorrowerCollateral entity.
-func NewBorrowerCollateral(id, userID, protocolID, protocolAssetID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType EventType, txHash []byte, collateralEnabled bool) (*BorrowerCollateral, error) {
+func NewBorrowerCollateral(id, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType EventType, txHash []byte, collateralEnabled bool) (*BorrowerCollateral, error) {
 	bc := &BorrowerCollateral{
 		ID:                id,
 		UserID:            userID,
 		ProtocolID:        protocolID,
-		ProtocolAssetID:   protocolAssetID,
+		TokenID:           tokenID,
 		BlockNumber:       blockNumber,
 		BlockVersion:      blockVersion,
 		Amount:            amount,
@@ -52,8 +52,8 @@ func (bc *BorrowerCollateral) validate() error {
 	if bc.ProtocolID <= 0 {
 		return fmt.Errorf("protocolID must be positive, got %d", bc.ProtocolID)
 	}
-	if bc.ProtocolAssetID <= 0 {
-		return fmt.Errorf("protocolAssetID must be positive, got %d", bc.ProtocolAssetID)
+	if bc.TokenID <= 0 {
+		return fmt.Errorf("tokenID must be positive, got %d", bc.TokenID)
 	}
 	if bc.BlockNumber <= 0 {
 		return fmt.Errorf("blockNumber must be positive, got %d", bc.BlockNumber)

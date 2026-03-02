@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math/big"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
@@ -104,17 +103,16 @@ func ConfigDefaults() Config {
 }
 
 type Service struct {
-	config            Config
-	consumer          outbound.SQSConsumer
-	redisClient       *redis.Client
-	ethClient         *ethclient.Client
-	txManager         *postgres.TxManager
-	userRepo          *postgres.UserRepository
-	protocolRepo      *postgres.ProtocolRepository
-	tokenRepo         *postgres.TokenRepository
-	positionRepo      *postgres.PositionRepository
-	protocolAssetRepo *postgres.ProtocolAssetRepository
-	eventRepo         outbound.EventRepository
+	config       Config
+	consumer     outbound.SQSConsumer
+	redisClient  *redis.Client
+	ethClient    *ethclient.Client
+	txManager    *postgres.TxManager
+	userRepo     *postgres.UserRepository
+	protocolRepo *postgres.ProtocolRepository
+	tokenRepo    *postgres.TokenRepository
+	positionRepo *postgres.PositionRepository
+	eventRepo    outbound.EventRepository
 
 	blockchainServices map[common.Address]*blockchainService
 	multicallClient    outbound.Multicaller
@@ -136,10 +134,9 @@ func NewService(
 	protocolRepo *postgres.ProtocolRepository,
 	tokenRepo *postgres.TokenRepository,
 	positionRepo *postgres.PositionRepository,
-	protocolAssetRepo *postgres.ProtocolAssetRepository,
 	eventRepo outbound.EventRepository,
 ) (*Service, error) {
-	if err := validateDependencies(consumer, redisClient, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, protocolAssetRepo, eventRepo); err != nil {
+	if err := validateDependencies(consumer, redisClient, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo); err != nil {
 		return nil, err
 	}
 
@@ -179,7 +176,6 @@ func NewService(
 		protocolRepo:       protocolRepo,
 		tokenRepo:          tokenRepo,
 		positionRepo:       positionRepo,
-		protocolAssetRepo:  protocolAssetRepo,
 		eventRepo:          eventRepo,
 		blockchainServices: make(map[common.Address]*blockchainService),
 		multicallClient:    mc,
@@ -592,16 +588,9 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 		if err != nil {
 			return fmt.Errorf("failed to get token: %w", err)
 		}
-		_ = tokenID // kept for reserve-data path; collateral uses protocol_asset
-
-		assetKey := strings.ToLower(strings.TrimPrefix(eventData.Reserve.Hex(), "0x"))
-		protocolAsset, err := s.protocolAssetRepo.GetByKey(ctx, protocolID, assetKey)
-		if err != nil {
-			return fmt.Errorf("failed to get protocol asset for %s: %w", eventData.Reserve.Hex(), err)
-		}
 
 		decimalAdjustedBalance := s.convertToDecimalAdjusted(balance, metadata.Decimals)
-		if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, protocolAsset.ID, blockNumber, blockVersion, decimalAdjustedBalance, string(eventData.EventType), common.FromHex(eventData.TxHash), eventData.CollateralEnabled); err != nil {
+		if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedBalance, string(eventData.EventType), common.FromHex(eventData.TxHash), eventData.CollateralEnabled); err != nil {
 			return fmt.Errorf("failed to save collateral toggle: %w", err)
 		}
 
@@ -680,15 +669,8 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			if err != nil {
 				return fmt.Errorf("failed to get token: %w", err)
 			}
-			_ = tokenID // kept for reserve-data path; borrower uses protocol_asset
-
-			assetKey := strings.ToLower(strings.TrimPrefix(eventData.Reserve.Hex(), "0x"))
-			protocolAsset, err := s.protocolAssetRepo.GetByKey(ctx, protocolID, assetKey)
-			if err != nil {
-				return fmt.Errorf("failed to get protocol asset for %s: %w", eventData.Reserve.Hex(), err)
-			}
 			decimalAdjustedAmount := s.convertToDecimalAdjusted(eventData.Amount, tokenMetadata.Decimals)
-			if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, protocolAsset.ID, blockNumber, blockVersion, decimalAdjustedAmount, string(eventData.EventType), common.FromHex(eventData.TxHash)); err != nil {
+			if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedAmount, string(eventData.EventType), common.FromHex(eventData.TxHash)); err != nil {
 				return fmt.Errorf("failed to insert borrower: %w", err)
 			}
 		}
@@ -700,19 +682,11 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 				s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err, "tx", eventData.TxHash)
 				continue
 			}
-			_ = tokenID // kept for reserve-data path; collateral record uses protocol_asset
-
-			colAssetKey := strings.ToLower(strings.TrimPrefix(col.Asset.Hex(), "0x"))
-			colProtocolAsset, err := s.protocolAssetRepo.GetByKey(ctx, protocolID, colAssetKey)
-			if err != nil {
-				s.logger.Warn("failed to get protocol asset for collateral", "token", col.Asset.Hex(), "error", err, "tx", eventData.TxHash)
-				continue
-			}
 
 			records = append(records, postgres.CollateralRecord{
 				UserID:            userID,
 				ProtocolID:        protocolID,
-				ProtocolAssetID:   colProtocolAsset.ID,
+				TokenID:           tokenID,
 				BlockNumber:       blockNumber,
 				BlockVersion:      blockVersion,
 				Amount:            s.convertToDecimalAdjusted(col.ActualBalance, col.Decimals),
@@ -764,19 +738,11 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 			s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err, "tx", txHashHex)
 			continue
 		}
-		_ = tokenID // kept for reserve-data path; collateral record uses protocol_asset
-
-		colAssetKey := strings.ToLower(strings.TrimPrefix(col.Asset.Hex(), "0x"))
-		colProtocolAsset, err := s.protocolAssetRepo.GetByKey(ctx, protocolID, colAssetKey)
-		if err != nil {
-			s.logger.Warn("failed to get protocol asset for collateral", "token", col.Asset.Hex(), "error", err, "tx", txHashHex)
-			continue
-		}
 
 		records = append(records, postgres.CollateralRecord{
 			UserID:            userID,
 			ProtocolID:        protocolID,
-			ProtocolAssetID:   colProtocolAsset.ID,
+			TokenID:           tokenID,
 			BlockNumber:       blockNumber,
 			BlockVersion:      blockVersion,
 			Amount:            s.convertToDecimalAdjusted(col.ActualBalance, col.Decimals),
@@ -901,7 +867,6 @@ func validateDependencies(
 	protocolRepo *postgres.ProtocolRepository,
 	tokenRepo *postgres.TokenRepository,
 	positionRepo *postgres.PositionRepository,
-	protocolAssetRepo *postgres.ProtocolAssetRepository,
 	eventRepo outbound.EventRepository,
 ) error {
 	if consumer == nil {
@@ -927,9 +892,6 @@ func validateDependencies(
 	}
 	if positionRepo == nil {
 		return fmt.Errorf("positionRepo is required")
-	}
-	if protocolAssetRepo == nil {
-		return fmt.Errorf("protocolAssetRepo is required")
 	}
 	if eventRepo == nil {
 		return fmt.Errorf("eventRepo is required")

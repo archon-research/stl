@@ -20,9 +20,9 @@ type positionTestFixture struct {
 	pool    *pgxpool.Pool
 	cleanup func()
 	// Pre-created IDs for foreign key references
-	userID          int64
-	protocolID      int64
-	protocolAssetID int64
+	userID     int64
+	protocolID int64
+	tokenID    int64
 }
 
 // setupPositionTest creates a TimescaleDB container and returns a connected PositionRepository.
@@ -49,7 +49,7 @@ func setupPositionTest(t *testing.T) *positionTestFixture {
 	return fixture
 }
 
-// createTestFixtures creates the required chain, user, protocol, and protocol_asset records.
+// createTestFixtures creates the required chain, user, protocol, and token records.
 func (f *positionTestFixture) createTestFixtures(t *testing.T, ctx context.Context) {
 	t.Helper()
 
@@ -72,23 +72,13 @@ func (f *positionTestFixture) createTestFixtures(t *testing.T, ctx context.Conte
 		t.Fatalf("failed to get protocol: %v", err)
 	}
 
-	// Create a test token and protocol_asset
-	var tokenID int64
+	// Create a test token
 	err = f.pool.QueryRow(ctx,
 		`INSERT INTO token (chain_id, address, symbol, decimals) VALUES ($1, $2, $3, $4) RETURNING id`,
 		1, []byte{0xaa, 0xbb, 0xcc}, "TEST", 18,
-	).Scan(&tokenID)
+	).Scan(&f.tokenID)
 	if err != nil {
 		t.Fatalf("failed to create test token: %v", err)
-	}
-
-	err = f.pool.QueryRow(ctx,
-		`INSERT INTO protocol_asset (protocol_id, asset_key, symbol, decimals, chain_id, address, token_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-		f.protocolID, "0xaabbcc", "TEST", 18, 1, []byte{0xaa, 0xbb, 0xcc}, tokenID,
-	).Scan(&f.protocolAssetID)
-	if err != nil {
-		t.Fatalf("failed to create test protocol_asset: %v", err)
 	}
 }
 
@@ -97,7 +87,7 @@ func (f *positionTestFixture) queryCollaterals(t *testing.T, ctx context.Context
 	t.Helper()
 
 	rows, err := f.pool.Query(ctx,
-		`SELECT user_id, protocol_id, protocol_asset_id, block_number, block_version, amount, event_type, tx_hash, collateral_enabled
+		`SELECT user_id, protocol_id, token_id, block_number, block_version, amount, event_type, tx_hash, collateral_enabled
 		 FROM borrower_collateral ORDER BY block_number, block_version`)
 	if err != nil {
 		t.Fatalf("failed to query collaterals: %v", err)
@@ -107,7 +97,7 @@ func (f *positionTestFixture) queryCollaterals(t *testing.T, ctx context.Context
 	var results []CollateralRecord
 	for rows.Next() {
 		var r CollateralRecord
-		if err := rows.Scan(&r.UserID, &r.ProtocolID, &r.ProtocolAssetID, &r.BlockNumber, &r.BlockVersion, &r.Amount, &r.EventType, &r.TxHash, &r.CollateralEnabled); err != nil {
+		if err := rows.Scan(&r.UserID, &r.ProtocolID, &r.TokenID, &r.BlockNumber, &r.BlockVersion, &r.Amount, &r.EventType, &r.TxHash, &r.CollateralEnabled); err != nil {
 			t.Fatalf("failed to scan collateral: %v", err)
 		}
 		results = append(results, r)
@@ -153,7 +143,7 @@ func TestSaveBorrowerCollaterals_SingleRecord(t *testing.T) {
 	input := CollateralRecord{
 		UserID:            fixture.userID,
 		ProtocolID:        fixture.protocolID,
-		ProtocolAssetID:   fixture.protocolAssetID,
+		TokenID:           fixture.tokenID,
 		BlockNumber:       1000,
 		BlockVersion:      0,
 		Amount:            "123456789012345678901234567890",
@@ -190,8 +180,8 @@ func TestSaveBorrowerCollaterals_SingleRecord(t *testing.T) {
 	if got.ProtocolID != input.ProtocolID {
 		t.Errorf("ProtocolID mismatch: got %d, want %d", got.ProtocolID, input.ProtocolID)
 	}
-	if got.ProtocolAssetID != input.ProtocolAssetID {
-		t.Errorf("ProtocolAssetID mismatch: got %d, want %d", got.ProtocolAssetID, input.ProtocolAssetID)
+	if got.TokenID != input.TokenID {
+		t.Errorf("TokenID mismatch: got %d, want %d", got.TokenID, input.TokenID)
 	}
 	if got.BlockNumber != input.BlockNumber {
 		t.Errorf("BlockNumber mismatch: got %d, want %d", got.BlockNumber, input.BlockNumber)
@@ -225,7 +215,7 @@ func TestSaveBorrowerCollaterals_TenRecords(t *testing.T) {
 		inputs[i] = CollateralRecord{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
-			ProtocolAssetID:   fixture.protocolAssetID,
+			TokenID:           fixture.tokenID,
 			BlockNumber:       2000,
 			BlockVersion:      i,
 			Amount:            fmt.Sprintf("%d000000000000000000", i+1),
@@ -285,7 +275,7 @@ func TestSaveBorrowerCollaterals_Rollback(t *testing.T) {
 		inputs[i] = CollateralRecord{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
-			ProtocolAssetID:   fixture.protocolAssetID,
+			TokenID:           fixture.tokenID,
 			BlockNumber:       3000,
 			BlockVersion:      i,
 			Amount:            "1000000000000000000",
@@ -329,7 +319,7 @@ func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 		inputs[i] = CollateralRecord{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
-			ProtocolAssetID:   fixture.protocolAssetID,
+			TokenID:           fixture.tokenID,
 			BlockNumber:       4000,
 			BlockVersion:      i,
 			Amount:            fmt.Sprintf("%d000000000000000000", i+1),
@@ -360,7 +350,7 @@ func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 		duplicateInputs[i] = CollateralRecord{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
-			ProtocolAssetID:   fixture.protocolAssetID,
+			TokenID:           fixture.tokenID,
 			BlockNumber:       4000,
 			BlockVersion:      i,                        // Same key as before
 			Amount:            "9999999999999999999",    // Different amount - should be ignored
@@ -416,7 +406,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 	initial := CollateralRecord{
 		UserID:            fixture.userID,
 		ProtocolID:        fixture.protocolID,
-		ProtocolAssetID:   fixture.protocolAssetID,
+		TokenID:           fixture.tokenID,
 		BlockNumber:       5000,
 		BlockVersion:      0,
 		Amount:            "1000000000000000000",
@@ -442,7 +432,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 		{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
-			ProtocolAssetID:   fixture.protocolAssetID,
+			TokenID:           fixture.tokenID,
 			BlockNumber:       5000,
 			BlockVersion:      0, // Duplicate - should be ignored
 			Amount:            "9999999999999999999",
@@ -453,7 +443,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 		{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
-			ProtocolAssetID:   fixture.protocolAssetID,
+			TokenID:           fixture.tokenID,
 			BlockNumber:       5000,
 			BlockVersion:      1, // New
 			Amount:            "2000000000000000000",
@@ -464,7 +454,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 		{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
-			ProtocolAssetID:   fixture.protocolAssetID,
+			TokenID:           fixture.tokenID,
 			BlockNumber:       5000,
 			BlockVersion:      2, // New
 			Amount:            "3000000000000000000",
@@ -522,7 +512,7 @@ func TestSaveBorrowerCollaterals_ForeignKeyViolation(t *testing.T) {
 	invalidRecord := CollateralRecord{
 		UserID:            999999, // Non-existent
 		ProtocolID:        fixture.protocolID,
-		ProtocolAssetID:   fixture.protocolAssetID,
+		TokenID:           fixture.tokenID,
 		BlockNumber:       6000,
 		BlockVersion:      0,
 		Amount:            "1000000000000000000",
@@ -555,7 +545,7 @@ func TestSaveBorrowerCollaterals_LargeAmountPrecision(t *testing.T) {
 	input := CollateralRecord{
 		UserID:            fixture.userID,
 		ProtocolID:        fixture.protocolID,
-		ProtocolAssetID:   fixture.protocolAssetID,
+		TokenID:           fixture.tokenID,
 		BlockNumber:       7000,
 		BlockVersion:      0,
 		Amount:            largeAmount,
@@ -623,7 +613,7 @@ func TestSaveBorrowerCollaterals_ConcurrentTransactions(t *testing.T) {
 	records1 := []CollateralRecord{{
 		UserID:            fixture.userID,
 		ProtocolID:        fixture.protocolID,
-		ProtocolAssetID:   fixture.protocolAssetID,
+		TokenID:           fixture.tokenID,
 		BlockNumber:       8000,
 		BlockVersion:      0,
 		Amount:            "1000000000000000000",
@@ -635,7 +625,7 @@ func TestSaveBorrowerCollaterals_ConcurrentTransactions(t *testing.T) {
 	records2 := []CollateralRecord{{
 		UserID:            userID2,
 		ProtocolID:        fixture.protocolID,
-		ProtocolAssetID:   fixture.protocolAssetID,
+		TokenID:           fixture.tokenID,
 		BlockNumber:       8000,
 		BlockVersion:      0,
 		Amount:            "2000000000000000000",
@@ -676,7 +666,7 @@ func TestSaveBorrowerCollaterals_TransactionIsolation(t *testing.T) {
 	record := CollateralRecord{
 		UserID:            fixture.userID,
 		ProtocolID:        fixture.protocolID,
-		ProtocolAssetID:   fixture.protocolAssetID,
+		TokenID:           fixture.tokenID,
 		BlockNumber:       9000,
 		BlockVersion:      0,
 		Amount:            "1000000000000000000",
