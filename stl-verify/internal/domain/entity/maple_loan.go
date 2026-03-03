@@ -31,11 +31,6 @@ type MapleLoan struct {
 	LoanWalletType    string // e.g., "EVM", "BASE" for blockchain type
 }
 
-// IsInternal returns true if this is an internal Maple loan (AMM or strategy position).
-func (l *MapleLoan) IsInternal() bool {
-	return l.LoanType == "amm" || l.LoanType == "strategy"
-}
-
 // NewMapleLoan creates a new MapleLoan entity with validation.
 func NewMapleLoan(
 	loanAddress common.Address,

@@ -115,69 +115,11 @@ func (c *Client) GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint6
 			return nil, fmt.Errorf("querying all active loans: %w", err)
 		}
 
-		for _, l := range resp.Data.OpenTermLoans {
-			principalOwed, ok := new(big.Int).SetString(l.PrincipalOwed, 10)
-			if !ok {
-				return nil, fmt.Errorf("parsing principal owed %q for loan %s", l.PrincipalOwed, l.ID)
-			}
-
-			acmRatio, ok := new(big.Int).SetString(l.AcmRatio, 10)
-			if !ok {
-				return nil, fmt.Errorf("parsing acm ratio %q for loan %s", l.AcmRatio, l.ID)
-			}
-
-			assetAmount, ok := new(big.Int).SetString(l.Collateral.AssetAmount, 10)
-			if !ok {
-				return nil, fmt.Errorf("parsing asset amount %q for loan %s", l.Collateral.AssetAmount, l.ID)
-			}
-
-			assetValueUSD, ok := new(big.Int).SetString(l.Collateral.AssetValueUSD, 10)
-			if !ok {
-				return nil, fmt.Errorf("parsing asset value usd %q for loan %s", l.Collateral.AssetValueUSD, l.ID)
-			}
-
-			var liquidationLevel *big.Int
-			if l.Collateral.LiquidationLevel != "" {
-				liquidationLevel, ok = new(big.Int).SetString(l.Collateral.LiquidationLevel, 10)
-				if !ok {
-					return nil, fmt.Errorf("parsing liquidation level %q for loan %s", l.Collateral.LiquidationLevel, l.ID)
-				}
-			}
-
-			var loanMeta *outbound.MapleLoanMeta
-			if l.LoanMeta != nil {
-				loanMeta = &outbound.MapleLoanMeta{
-					Type:          l.LoanMeta.Type,
-					AssetSymbol:   l.LoanMeta.AssetSymbol,
-					DexName:       l.LoanMeta.DexName,
-					Location:      l.LoanMeta.Location,
-					WalletAddress: l.LoanMeta.WalletAddress,
-					WalletType:    l.LoanMeta.WalletType,
-				}
-			}
-
-			allLoans = append(allLoans, outbound.MapleActiveLoan{
-				LoanID:        common.HexToAddress(l.ID),
-				Borrower:      common.HexToAddress(l.Borrower.ID),
-				State:         l.State,
-				PrincipalOwed: principalOwed,
-				AcmRatio:      acmRatio,
-				Collateral: outbound.MapleLoanCollateral{
-					Asset:            l.Collateral.Asset,
-					AssetAmount:      assetAmount,
-					AssetValueUSD:    assetValueUSD,
-					Decimals:         l.Collateral.Decimals,
-					State:            l.Collateral.State,
-					Custodian:        l.Collateral.Custodian,
-					LiquidationLevel: liquidationLevel,
-				},
-				LoanMeta:          loanMeta,
-				PoolAddress:       common.HexToAddress(l.FundingPool.ID),
-				PoolName:          l.FundingPool.Name,
-				PoolAssetSymbol:   l.FundingPool.Asset.Symbol,
-				PoolAssetDecimals: l.FundingPool.Asset.Decimals,
-			})
+		parsed, err := parseLoanData(resp.Data.OpenTermLoans)
+		if err != nil {
+			return nil, err
 		}
+		allLoans = append(allLoans, parsed...)
 
 		if len(resp.Data.OpenTermLoans) < batchSize {
 			break
@@ -185,6 +127,77 @@ func (c *Client) GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint6
 	}
 
 	return allLoans, nil
+}
+
+// parseLoanData converts raw GraphQL loan responses into typed MapleActiveLoan structs.
+func parseLoanData(loans []activeOpenTermLoan) ([]outbound.MapleActiveLoan, error) {
+	result := make([]outbound.MapleActiveLoan, 0, len(loans))
+
+	for _, l := range loans {
+		principalOwed, ok := new(big.Int).SetString(l.PrincipalOwed, 10)
+		if !ok {
+			return nil, fmt.Errorf("parsing principal owed %q for loan %s", l.PrincipalOwed, l.ID)
+		}
+
+		acmRatio, ok := new(big.Int).SetString(l.AcmRatio, 10)
+		if !ok {
+			return nil, fmt.Errorf("parsing acm ratio %q for loan %s", l.AcmRatio, l.ID)
+		}
+
+		assetAmount, ok := new(big.Int).SetString(l.Collateral.AssetAmount, 10)
+		if !ok {
+			return nil, fmt.Errorf("parsing asset amount %q for loan %s", l.Collateral.AssetAmount, l.ID)
+		}
+
+		assetValueUSD, ok := new(big.Int).SetString(l.Collateral.AssetValueUSD, 10)
+		if !ok {
+			return nil, fmt.Errorf("parsing asset value usd %q for loan %s", l.Collateral.AssetValueUSD, l.ID)
+		}
+
+		var liquidationLevel *big.Int
+		if l.Collateral.LiquidationLevel != "" {
+			liquidationLevel, ok = new(big.Int).SetString(l.Collateral.LiquidationLevel, 10)
+			if !ok {
+				return nil, fmt.Errorf("parsing liquidation level %q for loan %s", l.Collateral.LiquidationLevel, l.ID)
+			}
+		}
+
+		var loanMeta *outbound.MapleLoanMeta
+		if l.LoanMeta != nil {
+			loanMeta = &outbound.MapleLoanMeta{
+				Type:          l.LoanMeta.Type,
+				AssetSymbol:   l.LoanMeta.AssetSymbol,
+				DexName:       l.LoanMeta.DexName,
+				Location:      l.LoanMeta.Location,
+				WalletAddress: l.LoanMeta.WalletAddress,
+				WalletType:    l.LoanMeta.WalletType,
+			}
+		}
+
+		result = append(result, outbound.MapleActiveLoan{
+			LoanID:        common.HexToAddress(l.ID),
+			Borrower:      common.HexToAddress(l.Borrower.ID),
+			State:         l.State,
+			PrincipalOwed: principalOwed,
+			AcmRatio:      acmRatio,
+			Collateral: outbound.MapleLoanCollateral{
+				Asset:            l.Collateral.Asset,
+				AssetAmount:      assetAmount,
+				AssetValueUSD:    assetValueUSD,
+				Decimals:         l.Collateral.Decimals,
+				State:            l.Collateral.State,
+				Custodian:        l.Collateral.Custodian,
+				LiquidationLevel: liquidationLevel,
+			},
+			LoanMeta:          loanMeta,
+			PoolAddress:       common.HexToAddress(l.FundingPool.ID),
+			PoolName:          l.FundingPool.Name,
+			PoolAssetSymbol:   l.FundingPool.Asset.Symbol,
+			PoolAssetDecimals: l.FundingPool.Asset.Decimals,
+		})
+	}
+
+	return result, nil
 }
 
 // execute sends a GraphQL request and decodes the response.

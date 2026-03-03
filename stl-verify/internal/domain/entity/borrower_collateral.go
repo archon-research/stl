@@ -73,8 +73,8 @@ func (bc *BorrowerCollateral) validate() error {
 	if !bc.EventType.IsValid() {
 		return fmt.Errorf("invalid eventType: %s", bc.EventType)
 	}
-	if bc.EventType != EventMapleSnapshot && len(bc.TxHash) == 0 {
-		return fmt.Errorf("txHash must not be empty for event type %s", bc.EventType)
+	if len(bc.TxHash) == 0 {
+		return fmt.Errorf("txHash must not be empty")
 	}
 	return nil
 }

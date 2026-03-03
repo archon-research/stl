@@ -81,19 +81,6 @@ CREATE INDEX idx_maple_collateral_protocol ON maple_collateral(protocol_id);
 CREATE INDEX idx_maple_collateral_block ON maple_collateral(block_number);
 CREATE INDEX idx_maple_collateral_block_version ON maple_collateral(block_number, block_version);
 
--- Grant permissions
-GRANT SELECT ON maple_loan TO stl_readonly;
-GRANT SELECT, INSERT, UPDATE, DELETE ON maple_loan TO stl_readwrite;
-GRANT USAGE, SELECT ON SEQUENCE maple_loan_id_seq TO stl_readwrite;
-
-GRANT SELECT ON maple_borrower TO stl_readonly;
-GRANT SELECT, INSERT, UPDATE, DELETE ON maple_borrower TO stl_readwrite;
-GRANT USAGE, SELECT ON SEQUENCE maple_borrower_id_seq TO stl_readwrite;
-
-GRANT SELECT ON maple_collateral TO stl_readonly;
-GRANT SELECT, INSERT, UPDATE, DELETE ON maple_collateral TO stl_readwrite;
-GRANT USAGE, SELECT ON SEQUENCE maple_collateral_id_seq TO stl_readwrite;
-
 -- Seed Maple Finance protocol (MapleGlobals contract on mainnet)
 -- https://github.com/maple-labs/address-registry/blob/main/MapleAddressRegistryETH.md
 INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at)

@@ -27,7 +27,4 @@ type TokenRepository interface {
 	// GetOrCreateToken retrieves a token by address or creates it if it doesn't exist.
 	// This method participates in an external transaction.
 	GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error)
-
-	// GetTokenIDBySymbol retrieves a token ID by chain and symbol.
-	GetTokenIDBySymbol(ctx context.Context, chainID int64, symbol string) (int64, error)
 }

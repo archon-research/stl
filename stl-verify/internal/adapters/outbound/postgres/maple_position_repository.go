@@ -74,26 +74,31 @@ func (r *MaplePositionRepository) SaveLoanSnapshots(ctx context.Context, snapsho
 	return loanIDMap, nil
 }
 
-// saveLoanBatch inserts a batch of maple loan records with ON CONFLICT upsert.
+// saveLoanBatch inserts a batch of maple loan records.
+// Uses a no-op update on conflict to ensure RETURNING always yields the row ID.
 // Returns a map of loan_address (hex string) -> loan_id.
 func (r *MaplePositionRepository) saveLoanBatch(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleLoan) (map[string]int64, error) {
 	if len(snapshots) == 0 {
 		return make(map[string]int64), nil
 	}
 
-	var sb strings.Builder
-	sb.WriteString(`
-		INSERT INTO maple_loan (loan_address, protocol_id, block_number, block_version, pool_address, pool_name, pool_asset_symbol, pool_asset_decimals, loan_type, loan_asset_symbol, loan_dex_name, loan_location, loan_wallet_address, loan_wallet_type)
-		VALUES `)
+	loanColumns := []string{
+		"loan_address", "protocol_id", "block_number", "block_version",
+		"pool_address", "pool_name", "pool_asset_symbol", "pool_asset_decimals",
+		"loan_type", "loan_asset_symbol", "loan_dex_name",
+		"loan_location", "loan_wallet_address", "loan_wallet_type",
+	}
+	colCount := len(loanColumns)
 
-	args := make([]any, 0, len(snapshots)*14)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("INSERT INTO maple_loan (%s)\nVALUES ", strings.Join(loanColumns, ", ")))
+
+	args := make([]any, 0, len(snapshots)*colCount)
 	for i, s := range snapshots {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 14
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8, baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14))
+		sb.WriteString(buildPlaceholders(i, colCount))
 
 		args = append(args, s.LoanAddress.Bytes(), s.ProtocolID, s.BlockNumber, s.BlockVersion,
 			s.PoolAddress.Bytes(), s.PoolName, s.PoolAssetSymbol, s.PoolAssetDecimals,
@@ -103,16 +108,7 @@ func (r *MaplePositionRepository) saveLoanBatch(ctx context.Context, tx pgx.Tx, 
 
 	sb.WriteString(`
 		ON CONFLICT (loan_address, block_number, block_version) DO UPDATE SET
-			pool_address = EXCLUDED.pool_address,
-			pool_name = EXCLUDED.pool_name,
-			pool_asset_symbol = EXCLUDED.pool_asset_symbol,
-			pool_asset_decimals = EXCLUDED.pool_asset_decimals,
-			loan_type = EXCLUDED.loan_type,
-			loan_asset_symbol = EXCLUDED.loan_asset_symbol,
-			loan_dex_name = EXCLUDED.loan_dex_name,
-			loan_location = EXCLUDED.loan_location,
-			loan_wallet_address = EXCLUDED.loan_wallet_address,
-			loan_wallet_type = EXCLUDED.loan_wallet_type
+			id = maple_loan.id
 		RETURNING id, loan_address
 	`)
 
@@ -164,25 +160,27 @@ func (r *MaplePositionRepository) SaveBorrowerSnapshots(ctx context.Context, sna
 	return nil
 }
 
-// saveBorrowerBatch inserts a batch of maple borrower records with ON CONFLICT upsert.
+// saveBorrowerBatch inserts a batch of maple borrower records with ON CONFLICT DO NOTHING.
 func (r *MaplePositionRepository) saveBorrowerBatch(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleBorrower) error {
 	if len(snapshots) == 0 {
 		return nil
 	}
 
-	var sb strings.Builder
-	sb.WriteString(`
-		INSERT INTO maple_borrower (loan_id, user_id, protocol_id, pool_asset, pool_decimals, amount, block_number, block_version)
-		VALUES `)
+	borrowerColumns := []string{
+		"loan_id", "user_id", "protocol_id", "pool_asset",
+		"pool_decimals", "amount", "block_number", "block_version",
+	}
+	colCount := len(borrowerColumns)
 
-	args := make([]any, 0, len(snapshots)*8)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("\n\t\tINSERT INTO maple_borrower (%s)\n\t\tVALUES ", strings.Join(borrowerColumns, ", ")))
+
+	args := make([]any, 0, len(snapshots)*colCount)
 	for i, s := range snapshots {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 8
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8))
+		sb.WriteString(buildPlaceholders(i, colCount))
 
 		amount, err := bigIntToNumeric(s.Amount)
 		if err != nil {
@@ -193,12 +191,7 @@ func (r *MaplePositionRepository) saveBorrowerBatch(ctx context.Context, tx pgx.
 	}
 
 	sb.WriteString(`
-		ON CONFLICT (loan_id, block_number, block_version) DO UPDATE SET
-			user_id = EXCLUDED.user_id,
-			protocol_id = EXCLUDED.protocol_id,
-			pool_asset = EXCLUDED.pool_asset,
-			pool_decimals = EXCLUDED.pool_decimals,
-			amount = EXCLUDED.amount
+		ON CONFLICT (loan_id, block_number, block_version) DO NOTHING
 	`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)
@@ -233,25 +226,28 @@ func (r *MaplePositionRepository) SaveCollateralSnapshots(ctx context.Context, s
 	return nil
 }
 
-// saveCollateralBatch inserts a batch of maple collateral records with ON CONFLICT upsert.
+// saveCollateralBatch inserts a batch of maple collateral records with ON CONFLICT DO NOTHING.
 func (r *MaplePositionRepository) saveCollateralBatch(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleCollateral) error {
 	if len(snapshots) == 0 {
 		return nil
 	}
 
-	var sb strings.Builder
-	sb.WriteString(`
-		INSERT INTO maple_collateral (loan_id, user_id, protocol_id, collateral_asset, collateral_decimals, amount, custodian, state, liquidation_level, block_number, block_version)
-		VALUES `)
+	collateralColumns := []string{
+		"loan_id", "user_id", "protocol_id", "collateral_asset",
+		"collateral_decimals", "amount", "custodian", "state",
+		"liquidation_level", "block_number", "block_version",
+	}
+	colCount := len(collateralColumns)
 
-	args := make([]any, 0, len(snapshots)*11)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("\n\t\tINSERT INTO maple_collateral (%s)\n\t\tVALUES ", strings.Join(collateralColumns, ", ")))
+
+	args := make([]any, 0, len(snapshots)*colCount)
 	for i, s := range snapshots {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 11
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8, baseIdx+9, baseIdx+10, baseIdx+11))
+		sb.WriteString(buildPlaceholders(i, colCount))
 
 		amount, err := bigIntToNumeric(s.Amount)
 		if err != nil {
@@ -269,15 +265,7 @@ func (r *MaplePositionRepository) saveCollateralBatch(ctx context.Context, tx pg
 	}
 
 	sb.WriteString(`
-		ON CONFLICT (loan_id, block_number, block_version) DO UPDATE SET
-			user_id = EXCLUDED.user_id,
-			protocol_id = EXCLUDED.protocol_id,
-			collateral_asset = EXCLUDED.collateral_asset,
-			collateral_decimals = EXCLUDED.collateral_decimals,
-			amount = EXCLUDED.amount,
-			custodian = EXCLUDED.custodian,
-			state = EXCLUDED.state,
-			liquidation_level = EXCLUDED.liquidation_level
+		ON CONFLICT (loan_id, block_number, block_version) DO NOTHING
 	`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)
@@ -285,6 +273,17 @@ func (r *MaplePositionRepository) saveCollateralBatch(ctx context.Context, tx pg
 		return fmt.Errorf("upserting maple collateral batch: %w", err)
 	}
 	return nil
+}
+
+// buildPlaceholders generates a SQL placeholder tuple like "($1, $2, $3)" for the given
+// row index and column count. Row 0 produces ($1, $2, ...), row 1 produces ($N+1, $N+2, ...), etc.
+func buildPlaceholders(rowIdx, colCount int) string {
+	parts := make([]string, colCount)
+	base := rowIdx * colCount
+	for i := range colCount {
+		parts[i] = fmt.Sprintf("$%d", base+i+1)
+	}
+	return "(" + strings.Join(parts, ", ") + ")"
 }
 
 // nilIfEmpty returns nil if the string is empty, otherwise returns a pointer to the string.

@@ -183,14 +183,20 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) e
 		}
 
 		// Build and persist loan snapshots first to get loan IDs
-		loanSnapshots := s.buildLoanEntities(loans, blockNumber, blockVersion)
+		loanSnapshots, err := s.buildLoanEntities(loans, blockNumber, blockVersion)
+		if err != nil {
+			return fmt.Errorf("building loan entities: %w", err)
+		}
 		loanIDMap, err := s.maplePositionRepo.SaveLoanSnapshots(ctx, loanSnapshots)
 		if err != nil {
 			return fmt.Errorf("persisting loans: %w", err)
 		}
 
 		// Build borrower and collateral entities using the loan ID map
-		borrowers, collaterals := s.buildPositionEntities(loans, userCache, loanIDMap, blockNumber, blockVersion)
+		borrowers, collaterals, err := s.buildPositionEntities(loans, userCache, loanIDMap, blockNumber, blockVersion)
+		if err != nil {
+			return fmt.Errorf("building position entities: %w", err)
+		}
 
 		if err := s.maplePositionRepo.SaveBorrowerSnapshots(ctx, borrowers); err != nil {
 			return fmt.Errorf("persisting borrowers: %w", err)
@@ -219,19 +225,22 @@ func validateBlockEvent(event outbound.BlockEvent, expectedChainID int64) error 
 }
 
 // buildLoanEntities creates MapleLoan entities from API loan data.
-func (s *Service) buildLoanEntities(loans []outbound.MapleActiveLoan, blockNumber int64, blockVersion int) []*entity.MapleLoan {
+func (s *Service) buildLoanEntities(loans []outbound.MapleActiveLoan, blockNumber int64, blockVersion int) ([]*entity.MapleLoan, error) {
 	loanEntities := make([]*entity.MapleLoan, 0, len(loans))
 
 	for _, loan := range loans {
-		loanEntity := &entity.MapleLoan{
-			LoanAddress:       loan.LoanID,
-			ProtocolID:        s.protocolID,
-			BlockNumber:       blockNumber,
-			BlockVersion:      blockVersion,
-			PoolAddress:       loan.PoolAddress,
-			PoolName:          loan.PoolName,
-			PoolAssetSymbol:   loan.PoolAssetSymbol,
-			PoolAssetDecimals: loan.PoolAssetDecimals,
+		loanEntity, err := entity.NewMapleLoan(
+			loan.LoanID,
+			s.protocolID,
+			blockNumber,
+			blockVersion,
+			loan.PoolAddress,
+			loan.PoolName,
+			loan.PoolAssetSymbol,
+			loan.PoolAssetDecimals,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("loan %s: %w", loan.LoanID.Hex(), err)
 		}
 
 		// Populate loanMeta fields if present (internal loans)
@@ -247,12 +256,12 @@ func (s *Service) buildLoanEntities(loans []outbound.MapleActiveLoan, blockNumbe
 		loanEntities = append(loanEntities, loanEntity)
 	}
 
-	return loanEntities
+	return loanEntities, nil
 }
 
 // buildPositionEntities converts Maple API loan data into MapleBorrower and MapleCollateral entities.
 // Uses loanIDMap to associate positions with their loan records.
-func (s *Service) buildPositionEntities(loans []outbound.MapleActiveLoan, userCache map[common.Address]int64, loanIDMap map[string]int64, blockNumber int64, blockVersion int) ([]*entity.MapleBorrower, []*entity.MapleCollateral) {
+func (s *Service) buildPositionEntities(loans []outbound.MapleActiveLoan, userCache map[common.Address]int64, loanIDMap map[string]int64, blockNumber int64, blockVersion int) ([]*entity.MapleBorrower, []*entity.MapleCollateral, error) {
 	borrowers := make([]*entity.MapleBorrower, 0, len(loans))
 	collaterals := make([]*entity.MapleCollateral, 0, len(loans))
 
@@ -260,33 +269,41 @@ func (s *Service) buildPositionEntities(loans []outbound.MapleActiveLoan, userCa
 		userID := userCache[loan.Borrower]
 		loanID := loanIDMap[strings.ToLower(loan.LoanID.Hex())]
 
-		borrowers = append(borrowers, &entity.MapleBorrower{
-			LoanID:       loanID,
-			UserID:       userID,
-			ProtocolID:   s.protocolID,
-			PoolAsset:    loan.PoolAssetSymbol,
-			PoolDecimals: loan.PoolAssetDecimals,
-			Amount:       loan.PrincipalOwed,
-			BlockNumber:  blockNumber,
-			BlockVersion: blockVersion,
-		})
+		borrower, err := entity.NewMapleBorrower(
+			loanID,
+			userID,
+			s.protocolID,
+			loan.PoolAssetSymbol,
+			loan.PoolAssetDecimals,
+			loan.PrincipalOwed,
+			blockNumber,
+			blockVersion,
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("borrower for loan %s: %w", loan.LoanID.Hex(), err)
+		}
+		borrowers = append(borrowers, borrower)
 
-		collaterals = append(collaterals, &entity.MapleCollateral{
-			LoanID:             loanID,
-			UserID:             userID,
-			ProtocolID:         s.protocolID,
-			CollateralAsset:    loan.Collateral.Asset,
-			CollateralDecimals: loan.Collateral.Decimals,
-			Amount:             loan.Collateral.AssetAmount,
-			Custodian:          loan.Collateral.Custodian,
-			State:              loan.Collateral.State,
-			LiquidationLevel:   loan.Collateral.LiquidationLevel,
-			BlockNumber:        blockNumber,
-			BlockVersion:       blockVersion,
-		})
+		collateral, err := entity.NewMapleCollateral(
+			loanID,
+			userID,
+			s.protocolID,
+			loan.Collateral.Asset,
+			loan.Collateral.Decimals,
+			loan.Collateral.AssetAmount,
+			loan.Collateral.Custodian,
+			loan.Collateral.State,
+			loan.Collateral.LiquidationLevel,
+			blockNumber,
+			blockVersion,
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("collateral for loan %s: %w", loan.LoanID.Hex(), err)
+		}
+		collaterals = append(collaterals, collateral)
 	}
 
-	return borrowers, collaterals
+	return borrowers, collaterals, nil
 }
 
 // collectUniqueBorrowerAddresses deduplicates borrower addresses from all loans.

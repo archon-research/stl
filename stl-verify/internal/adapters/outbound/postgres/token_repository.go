@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -73,27 +72,6 @@ func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chain
 	}
 
 	r.logger.Debug("token upserted", "address", address.Hex(), "id", tokenID, "symbol", symbol, "decimals", decimals)
-	return tokenID, nil
-}
-
-// GetTokenIDBySymbol retrieves a token ID by chain ID and symbol.
-func (r *TokenRepository) GetTokenIDBySymbol(ctx context.Context, chainID int64, symbol string) (int64, error) {
-	var tokenID int64
-
-	if symbol == "" {
-		return 0, fmt.Errorf("token symbol must not be empty")
-	}
-
-	err := r.pool.QueryRow(ctx,
-		`SELECT id FROM token WHERE chain_id = $1 AND upper(symbol) = upper($2) ORDER BY id LIMIT 1`,
-		chainID, symbol).Scan(&tokenID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, fmt.Errorf("token not found for symbol %s on chain %d", symbol, chainID)
-		}
-		return 0, fmt.Errorf("failed to get token by symbol: %w", err)
-	}
-
 	return tokenID, nil
 }
 

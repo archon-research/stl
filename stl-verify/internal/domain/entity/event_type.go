@@ -11,7 +11,6 @@ const (
 	EventLiquidationCall                 EventType = "LiquidationCall"
 	EventReserveUsedAsCollateralEnabled  EventType = "ReserveUsedAsCollateralEnabled"
 	EventReserveUsedAsCollateralDisabled EventType = "ReserveUsedAsCollateralDisabled"
-	EventMapleSnapshot                   EventType = "MapleSnapshot"
 )
 
 // validEventTypes contains all valid event types for quick lookup
@@ -23,7 +22,6 @@ var validEventTypes = map[EventType]bool{
 	EventLiquidationCall:                 true,
 	EventReserveUsedAsCollateralEnabled:  true,
 	EventReserveUsedAsCollateralDisabled: true,
-	EventMapleSnapshot:                   true,
 }
 
 // IsValid returns true if the EventType is a known valid type
