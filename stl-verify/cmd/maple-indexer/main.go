@@ -34,6 +34,15 @@ func main() {
 	}
 }
 
+type serviceDependencies struct {
+	consumer          *sqsadapter.Consumer
+	mapleClient       *maple.Client
+	protocolRepo      *postgres.ProtocolRepository
+	userRepo          *postgres.UserRepository
+	maplePositionRepo *postgres.MaplePositionRepository
+	txManager         *postgres.TxManager
+}
+
 type cliConfig struct {
 	queueURL        string
 	dbURL           string
@@ -82,6 +91,68 @@ func parseConfig(args []string) (cliConfig, error) {
 	return cfg, nil
 }
 
+func setupDependencies(ctx context.Context, cfg cliConfig, logger *slog.Logger) (serviceDependencies, error) {
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion(env.Get("AWS_REGION", "eu-west-1")),
+	)
+	if err != nil {
+		return serviceDependencies{}, fmt.Errorf("loading AWS config: %w", err)
+	}
+
+	consumer, err := sqsadapter.NewConsumer(awsCfg, sqsadapter.Config{
+		QueueURL:     cfg.queueURL,
+		BaseEndpoint: env.Get("AWS_SQS_ENDPOINT", ""),
+	}, logger)
+	if err != nil {
+		return serviceDependencies{}, fmt.Errorf("creating SQS consumer: %w", err)
+	}
+
+	// Maple GraphQL client.
+	mapleClient, err := maple.NewClient(maple.Config{
+		Endpoint: cfg.mapleEndpoint,
+		Logger:   logger,
+	})
+	if err != nil {
+		return serviceDependencies{}, fmt.Errorf("creating Maple client: %w", err)
+	}
+
+	// PostgreSQL.
+	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
+	if err != nil {
+		return serviceDependencies{}, fmt.Errorf("connecting to database: %w", err)
+	}
+	defer pool.Close()
+	logger.Info("PostgreSQL connected")
+
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0)
+	if err != nil {
+		return serviceDependencies{}, fmt.Errorf("creating protocol repository: %w", err)
+	}
+
+	userRepo, err := postgres.NewUserRepository(pool, logger, 0)
+	if err != nil {
+		return serviceDependencies{}, fmt.Errorf("creating user repository: %w", err)
+	}
+
+	maplePositionRepo, err := postgres.NewMaplePositionRepository(pool, logger, 0)
+	if err != nil {
+		return serviceDependencies{}, fmt.Errorf("creating maple position repository: %w", err)
+	}
+
+	txManager, err := postgres.NewTxManager(pool, logger)
+	if err != nil {
+		return serviceDependencies{}, fmt.Errorf("creating tx manager: %w", err)
+	}
+	return serviceDependencies{
+		consumer:          consumer,
+		mapleClient:       mapleClient,
+		protocolRepo:      protocolRepo,
+		userRepo:          userRepo,
+		maplePositionRepo: maplePositionRepo,
+		txManager:         txManager,
+	}, nil
+}
+
 func run(ctx context.Context, args []string) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
@@ -98,72 +169,23 @@ func run(ctx context.Context, args []string) error {
 		"protocolAddress", cfg.protocolAddress,
 		"chainID", cfg.chainID)
 
-	// AWS + SQS consumer.
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithRegion(env.Get("AWS_REGION", "eu-west-1")),
-	)
+	deps, err := setupDependencies(ctx, cfg, logger)
 	if err != nil {
-		return fmt.Errorf("loading AWS config: %w", err)
+		return err
 	}
 
-	consumer, err := sqsadapter.NewConsumer(awsCfg, sqsadapter.Config{
-		QueueURL:     cfg.queueURL,
-		BaseEndpoint: env.Get("AWS_SQS_ENDPOINT", ""),
-	}, logger)
-	if err != nil {
-		return fmt.Errorf("creating SQS consumer: %w", err)
-	}
-
-	// Maple GraphQL client.
-	mapleClient, err := maple.NewClient(maple.Config{
-		Endpoint: cfg.mapleEndpoint,
-		Logger:   logger,
-	})
-	if err != nil {
-		return fmt.Errorf("creating Maple client: %w", err)
-	}
-
-	// PostgreSQL.
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
-	if err != nil {
-		return fmt.Errorf("connecting to database: %w", err)
-	}
-	defer pool.Close()
-	logger.Info("PostgreSQL connected")
-
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0)
-	if err != nil {
-		return fmt.Errorf("creating protocol repository: %w", err)
-	}
-
-	userRepo, err := postgres.NewUserRepository(pool, logger, 0)
-	if err != nil {
-		return fmt.Errorf("creating user repository: %w", err)
-	}
-
-	maplePositionRepo, err := postgres.NewMaplePositionRepository(pool, logger, 0)
-	if err != nil {
-		return fmt.Errorf("creating maple position repository: %w", err)
-	}
-
-	txManager, err := postgres.NewTxManager(pool, logger)
-	if err != nil {
-		return fmt.Errorf("creating tx manager: %w", err)
-	}
-
-	// Service.
 	service, err := maple_indexer.NewService(
 		maple_indexer.Config{
 			ChainID:         cfg.chainID,
 			ProtocolAddress: common.HexToAddress(cfg.protocolAddress),
 			Logger:          logger,
 		},
-		consumer,
-		mapleClient,
-		txManager,
-		userRepo,
-		maplePositionRepo,
-		protocolRepo,
+		deps.consumer,
+		deps.mapleClient,
+		deps.txManager,
+		deps.userRepo,
+		deps.maplePositionRepo,
+		deps.protocolRepo,
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)
