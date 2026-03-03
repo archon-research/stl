@@ -1,6 +1,6 @@
 // Package main implements an SQS consumer that fetches Maple Finance borrower
 // debt and collateral snapshots on each new Ethereum block, persisting results
-// to PostgreSQL.
+// to the db
 package main
 
 import (
