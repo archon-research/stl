@@ -67,8 +67,7 @@ func run(ctx context.Context, logger *slog.Logger, addr string, interval time.Du
 	}
 
 	store := mockchain.NewFixtureDataStore()
-	srv := mockchain.NewServer(store)
-	srv.SetInterval(interval)
+	srv := mockchain.NewServer(store, interval)
 
 	return lifecycle.Run(ctx, logger, &serverAdapter{
 		srv:    srv,

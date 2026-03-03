@@ -16,7 +16,7 @@ import (
 // startTestServer starts a Server on a random port and registers cleanup.
 func startTestServer(t *testing.T, store *DataStore) *Server {
 	t.Helper()
-	s := NewServer(store)
+	s := NewServer(store, defaultInterval)
 	if err := s.Start(":0"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -43,7 +43,7 @@ func serverPost(t *testing.T, s *Server, body string) []byte {
 // TestNewServer verifies the constructor initialises all fields and Addr is nil before Start.
 func TestNewServer(t *testing.T) {
 	store := NewFixtureDataStore()
-	s := NewServer(store)
+	s := NewServer(store, defaultInterval)
 
 	if s.store == nil {
 		t.Error("expected non-nil store")
@@ -72,7 +72,7 @@ func TestServer_StartStop(t *testing.T) {
 
 // TestServer_Start_BadAddr verifies that Start returns an error for an invalid address.
 func TestServer_Start_BadAddr(t *testing.T) {
-	s := NewServer(NewFixtureDataStore())
+	s := NewServer(NewFixtureDataStore(), defaultInterval)
 	if err := s.Start(":notaport"); err == nil {
 		t.Fatal("expected error for invalid address")
 	}
@@ -238,8 +238,7 @@ func TestServer_Disconnect(t *testing.T) {
 // TestServer_SetInterval verifies that SetInterval changes the block emission rate.
 // SetInterval must be called before Start.
 func TestServer_SetInterval(t *testing.T) {
-	s := NewServer(NewFixtureDataStore())
-	s.SetInterval(50 * time.Millisecond)
+	s := NewServer(NewFixtureDataStore(), 50*time.Millisecond)
 	if err := s.Start(":0"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -267,8 +266,7 @@ func TestServer_SetInterval(t *testing.T) {
 func TestServer_WSSubscriberLike(t *testing.T) {
 	// Start server with a fast replayer so we don't wait 12s in CI.
 	store := NewFixtureDataStore()
-	s := NewServer(store)
-	s.replayer.SetInterval(100 * time.Millisecond)
+	s := NewServer(store, 100*time.Millisecond)
 	if err := s.Start(":0"); err != nil {
 		t.Fatalf("start: %v", err)
 	}

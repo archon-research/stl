@@ -21,6 +21,9 @@ const defaultInterval = 12 * time.Second // default Ethereum block time
 // finality window (~32 blocks), so 128 is more than sufficient.
 const maxCachedHashes = 128
 
+// zeroParentHash is the parent hash used for the first block in a chain (all zeroes).
+var zeroParentHash = "0x" + strings.Repeat("0", 64)
+
 // status holds a snapshot of the Replayer's current state.
 type status struct {
 	Running       bool
@@ -42,7 +45,6 @@ type Replayer struct {
 	loopIndex     int
 	blocksEmitted int64
 
-	baseBlockNumber int64  // block number of templates[0] on loop 0
 	lastBlockNumber int64  // block number of the most-recently emitted block
 	prevDerivedHash string // derived hash of the most-recently emitted block
 
@@ -61,39 +63,51 @@ type Replayer struct {
 	doneCh chan struct{}
 }
 
-// NewReplayer creates a Replayer that emits blocks from headers at the default interval.
+// NewReplayer creates a Replayer that emits blocks from headers at the given interval.
+// Pass 0 for interval to use the default (12 s, matching Ethereum's block time).
 // onBlock is called with each emitted header; store is used to look up associated block data.
-func NewReplayer(headers []outbound.BlockHeader, store *DataStore, onBlock func(outbound.BlockHeader)) *Replayer {
-	var base int64
-	if len(headers) > 0 && headers[0].Number != "" {
-		n, err := hexutil.ParseInt64(headers[0].Number)
-		if err != nil {
-			panic(fmt.Sprintf("mockchain: NewReplayer: cannot parse base block number %q: %v", headers[0].Number, err))
-		}
-		base = n
+func NewReplayer(headers []outbound.BlockHeader, store *DataStore, onBlock func(outbound.BlockHeader), interval time.Duration) *Replayer {
+	if interval < 0 {
+		panic(fmt.Sprintf("mockchain: NewReplayer: interval must be non-negative, got %v", interval))
+	}
+	if interval == 0 {
+		interval = defaultInterval
 	}
 	return &Replayer{
 		templates:          headers,
 		store:              store,
 		onBlock:            onBlock,
-		interval:           defaultInterval,
-		baseBlockNumber:    base,
+		interval:           interval,
 		derivedHashToBlock: make(map[string]int64),
 	}
 }
 
+// baseBlockNumber returns the absolute block number of the first template.
+// Returns 0 if no templates are loaded or if the first template has no number set.
+func (r *Replayer) baseBlockNumber() int64 {
+	if len(r.templates) == 0 || r.templates[0].Number == "" {
+		return 0
+	}
+	n, err := hexutil.ParseInt64(r.templates[0].Number)
+	if err != nil {
+		panic(fmt.Sprintf("mockchain: baseBlockNumber: cannot parse %q: %v", r.templates[0].Number, err))
+	}
+	return n
+}
+
 // SetInterval sets the block emission interval. Must be called before Start.
-// Panics if d <= 0 or if the replayer is already running.
-func (r *Replayer) SetInterval(d time.Duration) {
+// Returns an error if d <= 0 or if the replayer is already running.
+func (r *Replayer) SetInterval(d time.Duration) error {
 	if d <= 0 {
-		panic("mockchain: SetInterval: duration must be positive")
+		return fmt.Errorf("mockchain: SetInterval: duration must be positive, got %v", d)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.running {
-		panic("mockchain: SetInterval: cannot change interval while running")
+		return fmt.Errorf("mockchain: SetInterval: cannot change interval while running")
 	}
 	r.interval = d
+	return nil
 }
 
 // Start begins emitting blocks on the configured interval. It is a no-op if
@@ -145,49 +159,45 @@ func (r *Replayer) emitLoop(stopCh <-chan struct{}, doneCh chan struct{}) {
 }
 
 func (r *Replayer) emit() {
-	var header outbound.BlockHeader
-	var onBlock func(outbound.BlockHeader)
-
-	func() {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-
-		templateIndex := r.templateIndex
-		template := r.templates[templateIndex]
-		blockNumber := r.baseBlockNumber + r.blocksEmitted
-
-		var parentHash string
-		if r.blocksEmitted == 0 {
-			parentHash = "0x" + strings.Repeat("0", 64)
-		} else {
-			parentHash = r.prevDerivedHash
-		}
-
-		header = patchHeader(template, blockNumber, r.loopIndex, parentHash)
-
-		r.derivedHashToBlock[header.Hash] = blockNumber
-		r.hashOrder = append(r.hashOrder, header.Hash)
-		if len(r.hashOrder) > maxCachedHashes {
-			oldest := r.hashOrder[0]
-			r.hashOrder = r.hashOrder[1:]
-			delete(r.derivedHashToBlock, oldest)
-		}
-		r.lastBlockNumber = blockNumber
-		r.prevDerivedHash = header.Hash
-
-		r.templateIndex++
-		if r.templateIndex >= len(r.templates) {
-			r.templateIndex = 0
-			r.loopIndex++
-		}
-		r.blocksEmitted++
-
-		onBlock = r.onBlock
-	}()
+	header, onBlock := r.prepareEmission()
 
 	if onBlock != nil {
 		onBlock(header)
 	}
+}
+
+// prepareEmission advances replay state under lock and returns the emitted header
+// along with the callback to execute after releasing the lock.
+func (r *Replayer) prepareEmission() (outbound.BlockHeader, func(outbound.BlockHeader)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	templateIndex := r.templateIndex
+	template := r.templates[templateIndex]
+	blockNumber := r.baseBlockNumber() + r.blocksEmitted
+
+	parentHash := r.parentHashForEmit()
+
+	header := patchHeader(template, blockNumber, r.loopIndex, parentHash)
+
+	r.derivedHashToBlock[header.Hash] = blockNumber
+	r.hashOrder = append(r.hashOrder, header.Hash)
+	if len(r.hashOrder) > maxCachedHashes {
+		oldest := r.hashOrder[0]
+		r.hashOrder = r.hashOrder[1:]
+		delete(r.derivedHashToBlock, oldest)
+	}
+	r.lastBlockNumber = blockNumber
+	r.prevDerivedHash = header.Hash
+
+	r.templateIndex++
+	if r.templateIndex >= len(r.templates) {
+		r.templateIndex = 0
+		r.loopIndex++
+	}
+	r.blocksEmitted++
+
+	return header, r.onBlock
 }
 
 // Stop halts block emission and returns the total number of blocks emitted.
@@ -218,9 +228,6 @@ func (r *Replayer) Stop() int64 {
 func (r *Replayer) CurrentBlockNumber() int64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.blocksEmitted == 0 {
-		return 0
-	}
 	return r.lastBlockNumber
 }
 
@@ -233,7 +240,7 @@ func (r *Replayer) TemplateIndexForHash(hash string) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	offset := blockNum - r.baseBlockNumber
+	offset := blockNum - r.baseBlockNumber()
 	return int(offset % int64(len(r.templates))), true
 }
 
@@ -242,10 +249,10 @@ func (r *Replayer) TemplateIndexForHash(hash string) (int, bool) {
 func (r *Replayer) TemplateIndexForNumber(blockNum int64) (int, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.blocksEmitted == 0 || blockNum > r.lastBlockNumber || blockNum < r.baseBlockNumber {
+	if r.blocksEmitted == 0 || blockNum > r.lastBlockNumber || blockNum < r.baseBlockNumber() {
 		return 0, false
 	}
-	offset := blockNum - r.baseBlockNumber
+	offset := blockNum - r.baseBlockNumber()
 	return int(offset % int64(len(r.templates))), true
 }
 
@@ -266,7 +273,7 @@ func (r *Replayer) HeaderForHash(hash string) (outbound.BlockHeader, bool) {
 func (r *Replayer) HeaderForNumber(blockNum int64) (outbound.BlockHeader, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.blocksEmitted == 0 || blockNum > r.lastBlockNumber || blockNum < r.baseBlockNumber {
+	if r.blocksEmitted == 0 || blockNum > r.lastBlockNumber || blockNum < r.baseBlockNumber() {
 		return outbound.BlockHeader{}, false
 	}
 	return r.headerForNumberLocked(blockNum), true
@@ -275,14 +282,14 @@ func (r *Replayer) HeaderForNumber(blockNum int64) (outbound.BlockHeader, bool) 
 // headerForNumberLocked reconstructs the patched header for blockNum deterministically.
 // Must be called with r.mu held (at least read-locked).
 func (r *Replayer) headerForNumberLocked(blockNum int64) outbound.BlockHeader {
-	offset := blockNum - r.baseBlockNumber
+	offset := blockNum - r.baseBlockNumber()
 	templateIndex := int(offset % int64(len(r.templates)))
 	loopIndex := int(offset / int64(len(r.templates)))
 	template := r.templates[templateIndex]
 
 	var parentHash string
 	if offset == 0 {
-		parentHash = "0x" + strings.Repeat("0", 64)
+		parentHash = zeroParentHash
 	} else {
 		prevOffset := offset - 1
 		prevTemplateIndex := int(prevOffset % int64(len(r.templates)))
@@ -310,6 +317,15 @@ func deriveHash(originalHash string, loopIndex int) string {
 	input := fmt.Sprintf("%s:%d", originalHash, loopIndex)
 	sum := sha256.Sum256([]byte(input))
 	return "0x" + hex.EncodeToString(sum[:])
+}
+
+// parentHashForEmit returns the parent hash for the next block emission.
+// Must be called with r.mu held.
+func (r *Replayer) parentHashForEmit() string {
+	if r.blocksEmitted == 0 {
+		return zeroParentHash
+	}
+	return r.prevDerivedHash
 }
 
 // patchHeader returns a copy of tmpl with Number, Hash, and ParentHash replaced.

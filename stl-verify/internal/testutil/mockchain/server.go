@@ -24,10 +24,10 @@ type Server struct {
 	listener net.Listener
 }
 
-// NewServer creates a Server backed by the given DataStore.
-func NewServer(store *DataStore) *Server {
+// NewServer creates a Server backed by the given DataStore with the given block emission interval.
+func NewServer(store *DataStore, interval time.Duration) *Server {
 	ws := newWSHandler()
-	replayer := NewReplayer(store.Headers(), store, ws.Broadcast)
+	replayer := NewReplayer(store.Headers(), store, ws.Broadcast, interval)
 	rpc := newHTTPHandler(store, replayer)
 	s := &Server{
 		store:    store,
@@ -79,11 +79,6 @@ func (s *Server) Addr() net.Addr {
 		return nil
 	}
 	return s.listener.Addr()
-}
-
-// SetInterval sets the block emission interval. Must be called before Start.
-func (s *Server) SetInterval(d time.Duration) {
-	s.replayer.SetInterval(d)
 }
 
 // Disconnect closes the active WebSocket connection without stopping the server.

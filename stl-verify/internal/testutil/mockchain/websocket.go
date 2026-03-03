@@ -74,10 +74,7 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.Unlock()
 
 	if oldConn != nil {
-		slog.Debug("mockchain: replacing existing websocket connection")
-		if err := oldConn.Close(); err != nil {
-			slog.Debug("mockchain: close replaced connection", "error", err)
-		}
+		_ = oldConn.Close()
 	}
 
 	for {
@@ -108,18 +105,18 @@ func (h *wsHandler) handleRequest(conn *websocket.Conn, req rpcutil.Request) err
 	case "eth_subscribe":
 		return h.handleSubscribe(conn, req)
 	default:
-		return h.writeError(conn, req.ID, -32601, "method not found")
+		return h.writeError(conn, req.ID, rpcErrMethodNotFound, "method not found")
 	}
 }
 
 func (h *wsHandler) handleSubscribe(conn *websocket.Conn, req rpcutil.Request) error {
 	var params []json.RawMessage
 	if err := json.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
-		return h.writeError(conn, req.ID, -32602, "unsupported subscription type")
+		return h.writeError(conn, req.ID, rpcErrInvalidParams, "unsupported subscription type")
 	}
 	var sub string
 	if err := json.Unmarshal(params[0], &sub); err != nil || sub != "newHeads" {
-		return h.writeError(conn, req.ID, -32602, "unsupported subscription type")
+		return h.writeError(conn, req.ID, rpcErrInvalidParams, "unsupported subscription type")
 	}
 	resp := jsonRPCResponse{JsonRPC: "2.0", ID: req.ID, Result: h.subID}
 	h.mu.Lock()

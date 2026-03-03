@@ -7,10 +7,18 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"strings"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
+)
+
+// Standard JSON-RPC 2.0 error codes.
+const (
+	rpcErrMethodNotFound = -32601
+	rpcErrInvalidParams  = -32602
+	rpcErrInternal       = -32603
 )
 
 type httpHandler struct {
@@ -99,7 +107,7 @@ func (h *httpHandler) dispatch(req rpcutil.Request) (json.RawMessage, *jsonRPCEr
 	case "eth_getBlobSidecars":
 		return h.getDataByHashOrNumber(req, "blobs")
 	default:
-		return nil, &jsonRPCErrorObj{Code: -32601, Message: "method not found"}
+		return nil, &jsonRPCErrorObj{Code: rpcErrMethodNotFound, Message: "method not found"}
 	}
 }
 
@@ -124,15 +132,15 @@ func extractStringParam(req rpcutil.Request) (string, bool) {
 	return s, true
 }
 
-// isHashParam returns true if the param is a 32-byte hex hash (0x + 64 chars).
+// isHashParam returns true if the param is a valid 32-byte hex hash.
 func isHashParam(s string) bool {
-	return len(s) == 66 && strings.HasPrefix(s, "0x")
+	return common.IsHexHash(s)
 }
 
 func (h *httpHandler) getBlockByHash(req rpcutil.Request) (json.RawMessage, *jsonRPCErrorObj) {
 	hash, ok := extractStringParam(req)
 	if !ok {
-		return nil, &jsonRPCErrorObj{Code: -32602, Message: "missing or invalid hash parameter"}
+		return nil, &jsonRPCErrorObj{Code: rpcErrInvalidParams, Message: "missing or invalid hash parameter"}
 	}
 
 	header, found := h.replayer.HeaderForHash(hash)
@@ -141,7 +149,7 @@ func (h *httpHandler) getBlockByHash(req rpcutil.Request) (json.RawMessage, *jso
 	}
 	raw, err := json.Marshal(header)
 	if err != nil {
-		return nil, &jsonRPCErrorObj{Code: -32603, Message: "internal error"}
+		return nil, &jsonRPCErrorObj{Code: rpcErrInternal, Message: "internal error"}
 	}
 	return raw, nil
 }
@@ -149,11 +157,11 @@ func (h *httpHandler) getBlockByHash(req rpcutil.Request) (json.RawMessage, *jso
 func (h *httpHandler) getBlockByNumber(req rpcutil.Request) (json.RawMessage, *jsonRPCErrorObj) {
 	numStr, ok := extractStringParam(req)
 	if !ok {
-		return nil, &jsonRPCErrorObj{Code: -32602, Message: "missing or invalid block number parameter"}
+		return nil, &jsonRPCErrorObj{Code: rpcErrInvalidParams, Message: "missing or invalid block number parameter"}
 	}
 	blockNum, err := hexutil.ParseInt64(numStr)
 	if err != nil {
-		return nil, &jsonRPCErrorObj{Code: -32602, Message: "invalid block number"}
+		return nil, &jsonRPCErrorObj{Code: rpcErrInvalidParams, Message: "invalid block number"}
 	}
 	header, found := h.replayer.HeaderForNumber(blockNum)
 	if !found {
@@ -161,7 +169,7 @@ func (h *httpHandler) getBlockByNumber(req rpcutil.Request) (json.RawMessage, *j
 	}
 	raw, err := json.Marshal(header)
 	if err != nil {
-		return nil, &jsonRPCErrorObj{Code: -32603, Message: "internal error"}
+		return nil, &jsonRPCErrorObj{Code: rpcErrInternal, Message: "internal error"}
 	}
 	return raw, nil
 }
@@ -171,7 +179,7 @@ func (h *httpHandler) getBlockByNumber(req rpcutil.Request) (json.RawMessage, *j
 func (h *httpHandler) getDataByHashOrNumber(req rpcutil.Request, dataType string) (json.RawMessage, *jsonRPCErrorObj) {
 	param, ok := extractStringParam(req)
 	if !ok {
-		return nil, &jsonRPCErrorObj{Code: -32602, Message: "missing or invalid parameter"}
+		return nil, &jsonRPCErrorObj{Code: rpcErrInvalidParams, Message: "missing or invalid parameter"}
 	}
 
 	var idx int
@@ -203,7 +211,7 @@ func (h *httpHandler) blockNumber() (json.RawMessage, *jsonRPCErrorObj) {
 	}
 	result, err := json.Marshal("0x" + strconv.FormatInt(num, 16))
 	if err != nil {
-		return nil, &jsonRPCErrorObj{Code: -32603, Message: "internal error"}
+		return nil, &jsonRPCErrorObj{Code: rpcErrInternal, Message: "internal error"}
 	}
 	return result, nil
 }

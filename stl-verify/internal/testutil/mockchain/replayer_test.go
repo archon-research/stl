@@ -18,8 +18,7 @@ func newTestReplayer(t *testing.T) (*Replayer, chan outbound.BlockHeader) {
 	received := make(chan outbound.BlockHeader, 32)
 	r := NewReplayer(ds.Headers(), ds, func(h outbound.BlockHeader) {
 		received <- h
-	})
-	r.interval = testInterval
+	}, testInterval)
 	return r, received
 }
 
@@ -41,7 +40,7 @@ func drain(t *testing.T, ch chan outbound.BlockHeader, n int) []outbound.BlockHe
 // TestNewReplayer verifies that the constructor sets fields correctly.
 func TestNewReplayer(t *testing.T) {
 	ds := NewFixtureDataStore()
-	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {})
+	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {}, 0)
 
 	if r.interval != defaultInterval {
 		t.Errorf("expected interval %v, got %v", defaultInterval, r.interval)
@@ -133,7 +132,7 @@ func TestReplayer_StartIdempotent(t *testing.T) {
 // TestReplayer_StopNotRunning verifies that Stop on a never-started replayer returns 0.
 func TestReplayer_StopNotRunning(t *testing.T) {
 	ds := NewFixtureDataStore()
-	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {})
+	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {}, 0)
 
 	emitted := r.Stop()
 	if emitted != 0 {
@@ -224,7 +223,7 @@ func TestReplayer_LoopContinuity(t *testing.T) {
 	var headers []outbound.BlockHeader
 	r := NewReplayer(ds.Headers(), ds, func(h outbound.BlockHeader) {
 		headers = append(headers, h)
-	})
+	}, 0)
 
 	n := len(r.templates)*2 + 1 // two full loops + one extra
 	for range n {
@@ -242,7 +241,7 @@ func TestReplayer_LoopContinuity(t *testing.T) {
 		}
 		seen[h.Hash] = true
 
-		wantNumber := fmt.Sprintf("0x%x", r.baseBlockNumber+int64(i))
+		wantNumber := fmt.Sprintf("0x%x", r.baseBlockNumber()+int64(i))
 		if h.Number != wantNumber {
 			t.Errorf("emission %d: Number %q, want %q", i, h.Number, wantNumber)
 		}
@@ -260,7 +259,7 @@ func TestReplayer_LoopContinuity(t *testing.T) {
 // and that its ParentHash matches the previous block's Hash.
 func TestReplayer_HeaderForHash(t *testing.T) {
 	ds := NewFixtureDataStore()
-	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {})
+	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {}, 0)
 
 	r.emit()
 	r.emit()
@@ -277,7 +276,7 @@ func TestReplayer_HeaderForHash(t *testing.T) {
 	}
 
 	// ParentHash of block 3 must equal hash of block 2.
-	h2, ok := r.HeaderForNumber(r.baseBlockNumber + 1)
+	h2, ok := r.HeaderForNumber(r.baseBlockNumber() + 1)
 	if !ok {
 		t.Fatal("expected HeaderForNumber to find block 2")
 	}
@@ -298,14 +297,14 @@ func TestReplayer_HeaderForNumber(t *testing.T) {
 	var emitted []outbound.BlockHeader
 	r := NewReplayer(ds.Headers(), ds, func(h outbound.BlockHeader) {
 		emitted = append(emitted, h)
-	})
+	}, 0)
 
 	r.emit()
 	r.emit()
 	r.emit()
 
 	for i, want := range emitted {
-		blockNum := r.baseBlockNumber + int64(i)
+		blockNum := r.baseBlockNumber() + int64(i)
 		got, ok := r.HeaderForNumber(blockNum)
 		if !ok {
 			t.Fatalf("HeaderForNumber(%d) returned false", blockNum)
@@ -319,10 +318,10 @@ func TestReplayer_HeaderForNumber(t *testing.T) {
 	}
 
 	// Block before base and block not yet emitted return false.
-	if _, ok := r.HeaderForNumber(r.baseBlockNumber - 1); ok {
+	if _, ok := r.HeaderForNumber(r.baseBlockNumber() - 1); ok {
 		t.Error("expected false for block before base")
 	}
-	if _, ok := r.HeaderForNumber(r.baseBlockNumber + 999); ok {
+	if _, ok := r.HeaderForNumber(r.baseBlockNumber() + 999); ok {
 		t.Error("expected false for block not yet emitted")
 	}
 }
@@ -330,7 +329,9 @@ func TestReplayer_HeaderForNumber(t *testing.T) {
 // TestReplayer_SetInterval verifies that SetInterval controls the emission cadence.
 func TestReplayer_SetInterval(t *testing.T) {
 	r, received := newTestReplayer(t)
-	r.SetInterval(50 * time.Millisecond)
+	if err := r.SetInterval(50 * time.Millisecond); err != nil {
+		t.Fatalf("SetInterval: %v", err)
+	}
 
 	start := time.Now()
 	r.Start()
@@ -349,33 +350,27 @@ func TestReplayer_SetInterval(t *testing.T) {
 	}
 }
 
-// TestReplayer_SetInterval_WhileRunning verifies that SetInterval panics when called after Start.
+// TestReplayer_SetInterval_WhileRunning verifies that SetInterval returns an error when called after Start.
 func TestReplayer_SetInterval_WhileRunning(t *testing.T) {
 	r, received := newTestReplayer(t)
 	r.Start()
 	drain(t, received, 1)
 	defer r.Stop()
 
-	defer func() {
-		if recover() == nil {
-			t.Error("expected panic when calling SetInterval while running")
-		}
-	}()
-	r.SetInterval(100 * time.Millisecond)
+	if err := r.SetInterval(100 * time.Millisecond); err == nil {
+		t.Error("expected error when calling SetInterval while running")
+	}
 }
 
-// TestReplayer_SetInterval_NonPositive verifies that SetInterval panics for zero and negative values.
+// TestReplayer_SetInterval_NonPositive verifies that SetInterval returns an error for zero and negative values.
 func TestReplayer_SetInterval_NonPositive(t *testing.T) {
 	for _, d := range []time.Duration{0, -1 * time.Millisecond} {
 		t.Run(d.String(), func(t *testing.T) {
 			ds := NewFixtureDataStore()
-			r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {})
-			defer func() {
-				if recover() == nil {
-					t.Errorf("expected panic for SetInterval(%v)", d)
-				}
-			}()
-			r.SetInterval(d)
+			r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {}, 0)
+			if err := r.SetInterval(d); err == nil {
+				t.Errorf("expected error for SetInterval(%v)", d)
+			}
 		})
 	}
 }
@@ -385,7 +380,7 @@ func TestReplayer_EmptyTemplates(t *testing.T) {
 	ds := NewDataStore() // empty — no headers
 	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {
 		t.Error("onBlock must not be called with empty templates")
-	})
+	}, 0)
 
 	r.Start()
 	emitted := r.Stop()

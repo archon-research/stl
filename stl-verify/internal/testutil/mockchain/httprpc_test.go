@@ -34,7 +34,7 @@ func newTestHTTPHandler(t *testing.T) (*httpHandler, []string) {
 	var hashes []string
 	r := NewReplayer(ds.Headers(), ds, func(h outbound.BlockHeader) {
 		hashes = append(hashes, h.Hash)
-	})
+	}, 0)
 	r.emit()
 	r.emit()
 	r.emit()
@@ -44,7 +44,7 @@ func newTestHTTPHandler(t *testing.T) (*httpHandler, []string) {
 // TestNewHTTPHandler verifies the constructor sets the store and replayer.
 func TestNewHTTPHandler(t *testing.T) {
 	ds := NewFixtureDataStore()
-	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {})
+	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {}, 0)
 	h := newHTTPHandler(ds, r)
 	if h.store != ds {
 		t.Error("expected store to be set")
@@ -159,7 +159,7 @@ func TestHTTPHandler_GetBlockByNumber_HashMatches(t *testing.T) {
 // TestHTTPHandler_BlockNumber verifies eth_blockNumber reflects the replayer's emitted state.
 func TestHTTPHandler_BlockNumber(t *testing.T) {
 	ds := NewFixtureDataStore()
-	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {})
+	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {}, 0)
 
 	// No emissions yet: expect "0x0".
 	h := newHTTPHandler(ds, r)
