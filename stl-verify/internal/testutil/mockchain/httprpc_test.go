@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 // httpRPCResponse is a test-only decode target for JSON-RPC success responses over HTTP.
@@ -24,20 +26,38 @@ func rpcPost(t *testing.T, h *httpHandler, body string) *httptest.ResponseRecord
 	return w
 }
 
-// TestNewHTTPHandler verifies the constructor sets the store.
+// newTestHTTPHandler returns a handler backed by a replayer that has already emitted
+// all three template blocks. The emitted (derived) headers are returned for use in tests.
+func newTestHTTPHandler(t *testing.T) (*httpHandler, []string) {
+	t.Helper()
+	ds := NewFixtureDataStore()
+	var hashes []string
+	r := NewReplayer(ds.Headers(), ds, func(h outbound.BlockHeader) {
+		hashes = append(hashes, h.Hash)
+	}, 0)
+	r.emit()
+	r.emit()
+	r.emit()
+	return newHTTPHandler(ds, r), hashes
+}
+
+// TestNewHTTPHandler verifies the constructor sets the store and replayer.
 func TestNewHTTPHandler(t *testing.T) {
-	ds := NewTestDataStore()
-	h := newHTTPHandler(ds)
+	ds := NewFixtureDataStore()
+	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {}, 0)
+	h := newHTTPHandler(ds, r)
 	if h.store != ds {
 		t.Error("expected store to be set")
 	}
+	if h.replayer != r {
+		t.Error("expected replayer to be set")
+	}
 }
 
-// TestHTTPHandler_GetBlockByHash verifies known hash, unknown hash, and missing params cases.
+// TestHTTPHandler_GetBlockByHash verifies known derived hash, unknown hash, and missing params cases.
 func TestHTTPHandler_GetBlockByHash(t *testing.T) {
-	ds := NewTestDataStore()
-	h := newHTTPHandler(ds)
-	knownHash := ds.Headers()[0].Hash
+	h, hashes := newTestHTTPHandler(t)
+	knownHash := hashes[0]
 
 	tests := []struct {
 		name     string
@@ -45,7 +65,7 @@ func TestHTTPHandler_GetBlockByHash(t *testing.T) {
 		wantNull bool
 		wantCode int // 0 = success, non-zero = JSON-RPC error code
 	}{
-		{"known hash", `["` + knownHash + `",false]`, false, 0},
+		{"known derived hash", `["` + knownHash + `",false]`, false, 0},
 		{"unknown hash", `["0xdeadbeef",false]`, true, 0},
 		{"missing params", `[]`, false, -32602},
 	}
@@ -76,38 +96,98 @@ func TestHTTPHandler_GetBlockByHash(t *testing.T) {
 	}
 }
 
-// TestHTTPHandler_BlockNumber verifies eth_blockNumber for both a populated and empty store.
-func TestHTTPHandler_BlockNumber(t *testing.T) {
-	populatedDS := NewTestDataStore()
-	wantNumber := `"` + populatedDS.Headers()[populatedDS.Len()-1].Number + `"`
+// TestHTTPHandler_GetBlockByNumber verifies eth_getBlockByNumber returns the correct patched header.
+func TestHTTPHandler_GetBlockByNumber(t *testing.T) {
+	h, _ := newTestHTTPHandler(t)
 
 	tests := []struct {
-		name       string
-		store      *DataStore
-		wantResult string
+		name     string
+		params   string
+		wantNull bool
+		wantCode int
 	}{
-		{"populated store", populatedDS, wantNumber},
-		{"empty store", NewDataStore(), `"0x0"`},
+		{"known block number", `["0x1",false]`, false, 0},
+		{"unknown block number", `["0xffff",false]`, true, 0},
+		{"missing params", `[]`, false, -32602},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newHTTPHandler(tt.store)
-			w := rpcPost(t, h, `{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`)
+			w := rpcPost(t, h, `{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":`+tt.params+`}`)
+			if tt.wantCode != 0 {
+				var resp jsonRPCErrorResponse
+				if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				if resp.Error.Code != tt.wantCode {
+					t.Errorf("expected error code %d, got %d", tt.wantCode, resp.Error.Code)
+				}
+				return
+			}
 			var resp httpRPCResponse
 			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 				t.Fatalf("decode: %v", err)
 			}
-			if string(resp.Result) != tt.wantResult {
-				t.Errorf("expected %s, got %s", tt.wantResult, resp.Result)
+			if tt.wantNull && string(resp.Result) != "null" {
+				t.Errorf("expected null result, got %s", resp.Result)
+			}
+			if !tt.wantNull && (string(resp.Result) == "null" || len(resp.Result) == 0) {
+				t.Error("expected non-null block result")
 			}
 		})
 	}
 }
 
+// TestHTTPHandler_GetBlockByNumber_HashMatches verifies that eth_getBlockByNumber returns a header
+// whose Hash matches what eth_blockNumber and WebSocket broadcasts would produce.
+func TestHTTPHandler_GetBlockByNumber_HashMatches(t *testing.T) {
+	h, hashes := newTestHTTPHandler(t)
+
+	w := rpcPost(t, h, `{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1",false]}`)
+	var resp httpRPCResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var header outbound.BlockHeader
+	if err := json.Unmarshal(resp.Result, &header); err != nil {
+		t.Fatalf("decode header: %v", err)
+	}
+	if header.Hash != hashes[0] {
+		t.Errorf("eth_getBlockByNumber returned hash %q, want %q", header.Hash, hashes[0])
+	}
+}
+
+// TestHTTPHandler_BlockNumber verifies eth_blockNumber reflects the replayer's emitted state.
+func TestHTTPHandler_BlockNumber(t *testing.T) {
+	ds := NewFixtureDataStore()
+	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {}, 0)
+
+	// No emissions yet: expect "0x0".
+	h := newHTTPHandler(ds, r)
+	w := rpcPost(t, h, `{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`)
+	var resp httpRPCResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if string(resp.Result) != `"0x0"` {
+		t.Errorf("expected \"0x0\" before any emission, got %s", resp.Result)
+	}
+
+	// After emitting all 3 templates (base=1), last block number = 3 = 0x3.
+	r.emit()
+	r.emit()
+	r.emit()
+	w = rpcPost(t, h, `{"jsonrpc":"2.0","id":2,"method":"eth_blockNumber","params":[]}`)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if string(resp.Result) != `"0x3"` {
+		t.Errorf("expected \"0x3\" after 3 emissions, got %s", resp.Result)
+	}
+}
+
 // TestHTTPHandler_UnknownMethod verifies an unsupported method returns -32601.
 func TestHTTPHandler_UnknownMethod(t *testing.T) {
-	ds := NewTestDataStore()
-	h := newHTTPHandler(ds)
+	h, _ := newTestHTTPHandler(t)
 
 	w := rpcPost(t, h, `{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}`)
 
@@ -122,8 +202,7 @@ func TestHTTPHandler_UnknownMethod(t *testing.T) {
 
 // TestHTTPHandler_MethodNotAllowed verifies that non-POST requests return HTTP 405.
 func TestHTTPHandler_MethodNotAllowed(t *testing.T) {
-	ds := NewTestDataStore()
-	h := newHTTPHandler(ds)
+	h, _ := newTestHTTPHandler(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -136,8 +215,7 @@ func TestHTTPHandler_MethodNotAllowed(t *testing.T) {
 
 // TestHTTPHandler_InvalidBody verifies malformed JSON returns HTTP 400.
 func TestHTTPHandler_InvalidBody(t *testing.T) {
-	ds := NewTestDataStore()
-	h := newHTTPHandler(ds)
+	h, _ := newTestHTTPHandler(t)
 
 	w := rpcPost(t, h, "this is not json")
 
@@ -147,11 +225,10 @@ func TestHTTPHandler_InvalidBody(t *testing.T) {
 }
 
 // TestHTTPHandler_DataByHash verifies eth_getBlockReceipts, trace_block, and eth_getBlobSidecars
-// all return stored data for a known hash and null for an unknown hash.
+// return stored data for a known derived hash and null for an unknown hash.
 func TestHTTPHandler_DataByHash(t *testing.T) {
-	ds := NewTestDataStore()
-	h := newHTTPHandler(ds)
-	knownHash := ds.Headers()[0].Hash
+	h, hashes := newTestHTTPHandler(t)
+	knownHash := hashes[0]
 
 	tests := []struct {
 		method   string
@@ -199,11 +276,30 @@ func TestHTTPHandler_DataByHash(t *testing.T) {
 	}
 }
 
+// TestHTTPHandler_DataByNumber verifies that eth_getBlockReceipts, trace_block, and
+// eth_getBlobSidecars return data when given a block number instead of a hash.
+func TestHTTPHandler_DataByNumber(t *testing.T) {
+	h, _ := newTestHTTPHandler(t)
+
+	methods := []string{"eth_getBlockReceipts", "trace_block", "eth_getBlobSidecars"}
+	for _, method := range methods {
+		t.Run(method, func(t *testing.T) {
+			w := rpcPost(t, h, `{"jsonrpc":"2.0","id":1,"method":"`+method+`","params":["0x1"]}`)
+			var resp httpRPCResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if string(resp.Result) == "null" || len(resp.Result) == 0 {
+				t.Errorf("%s by number returned null, expected data", method)
+			}
+		})
+	}
+}
+
 // TestHTTPHandler_Batch verifies that a batch request returns a matching array of responses.
 func TestHTTPHandler_Batch(t *testing.T) {
-	ds := NewTestDataStore()
-	h := newHTTPHandler(ds)
-	knownHash := ds.Headers()[0].Hash
+	h, hashes := newTestHTTPHandler(t)
+	knownHash := hashes[0]
 
 	body := `[` +
 		`{"jsonrpc":"2.0","id":10,"method":"eth_blockNumber","params":[]}` +

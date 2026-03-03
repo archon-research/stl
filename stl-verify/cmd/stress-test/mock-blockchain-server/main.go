@@ -3,29 +3,33 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil/mockchain"
 )
 
 func main() {
 	addr := flag.String("addr", ":8546", "listen address (e.g. :8546)")
+	interval := flag.Duration("interval", 12*time.Second, "block emission interval (e.g. 1s, 500ms)")
 	flag.Parse()
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *addr); err != nil {
-		slog.Error("mock-blockchain-server failed", "error", err)
+	if err := run(ctx, logger, *addr, *interval); err != nil {
+		logger.Error("mock-blockchain-server failed", "error", err)
 		os.Exit(1)
 	}
 }
@@ -57,42 +61,13 @@ func (a *serverAdapter) Stop() error {
 	return a.srv.Stop()
 }
 
-// newDataStore returns a DataStore pre-populated with 3 synthetic blocks for stress testing.
-func newDataStore() *mockchain.DataStore {
-	store := mockchain.NewDataStore()
-	for i := range 3 {
-		hash := fmt.Sprintf("0x%064x", i+1)
-		parentHash := "0x" + strings.Repeat("0", 64)
-		if i > 0 {
-			parentHash = fmt.Sprintf("0x%064x", i)
-		}
-		header := outbound.BlockHeader{
-			Number:     fmt.Sprintf("0x%x", i+1),
-			Hash:       hash,
-			ParentHash: parentHash,
-			Timestamp:  "0x67c00000",
-		}
-		headerJSON, err := json.Marshal(header)
-		if err != nil {
-			panic(fmt.Sprintf("seeding data store: %v", err))
-		}
-		store.AddHeader(header)
-		store.Add(i, "block", headerJSON)
-		store.Add(i, "receipts", json.RawMessage(`[]`))
-		store.Add(i, "traces", json.RawMessage(`[]`))
-		store.Add(i, "blobs", json.RawMessage(`[]`))
+func run(ctx context.Context, logger *slog.Logger, addr string, interval time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("interval must be positive, got %v", interval)
 	}
-	return store
-}
 
-func run(ctx context.Context, addr string) error {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-	slog.SetDefault(logger)
-
-	store := newDataStore()
-	srv := mockchain.NewServer(store)
+	store := mockchain.NewFixtureDataStore()
+	srv := mockchain.NewServer(store, interval)
 
 	return lifecycle.Run(ctx, logger, &serverAdapter{
 		srv:    srv,

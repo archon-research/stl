@@ -80,10 +80,12 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for {
 		var req rpcutil.Request
 		if err := conn.ReadJSON(&req); err != nil {
+			slog.Debug("mockchain: websocket read error", "error", err)
 			h.clearConn(conn)
 			return
 		}
 		if err := h.handleRequest(conn, req); err != nil {
+			slog.Debug("mockchain: websocket handle error", "error", err)
 			h.clearConn(conn)
 			return
 		}
@@ -103,18 +105,18 @@ func (h *wsHandler) handleRequest(conn *websocket.Conn, req rpcutil.Request) err
 	case "eth_subscribe":
 		return h.handleSubscribe(conn, req)
 	default:
-		return h.writeError(conn, req.ID, -32601, "method not found")
+		return h.writeError(conn, req.ID, rpcErrMethodNotFound, "method not found")
 	}
 }
 
 func (h *wsHandler) handleSubscribe(conn *websocket.Conn, req rpcutil.Request) error {
 	var params []json.RawMessage
 	if err := json.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
-		return h.writeError(conn, req.ID, -32602, "unsupported subscription type")
+		return h.writeError(conn, req.ID, rpcErrInvalidParams, "unsupported subscription type")
 	}
 	var sub string
 	if err := json.Unmarshal(params[0], &sub); err != nil || sub != "newHeads" {
-		return h.writeError(conn, req.ID, -32602, "unsupported subscription type")
+		return h.writeError(conn, req.ID, rpcErrInvalidParams, "unsupported subscription type")
 	}
 	resp := jsonRPCResponse{JsonRPC: "2.0", ID: req.ID, Result: h.subID}
 	h.mu.Lock()
@@ -141,6 +143,20 @@ func (h *wsHandler) writeError(conn *websocket.Conn, id json.RawMessage, code in
 	return nil
 }
 
+// Disconnect closes the active WebSocket connection without stopping the handler.
+// The read loop in ServeHTTP will receive an error and clear the connection.
+func (h *wsHandler) Disconnect() {
+	h.mu.Lock()
+	conn := h.conn
+	h.conn = nil
+	h.mu.Unlock()
+	if conn != nil {
+		if err := conn.Close(); err != nil {
+			slog.Debug("mockchain: close disconnected connection", "error", err)
+		}
+	}
+}
+
 func (h *wsHandler) Broadcast(header outbound.BlockHeader) {
 	notification := jsonRPCNotification{
 		JsonRPC: "2.0",
@@ -157,10 +173,13 @@ func (h *wsHandler) Broadcast(header outbound.BlockHeader) {
 		return
 	}
 	if err := h.conn.WriteJSON(notification); err != nil {
+		slog.Warn("mockchain: broadcast write failed, closing connection", "error", err)
 		conn := h.conn
 		h.conn = nil
 		h.mu.Unlock()
-		_ = conn.Close()
+		if err := conn.Close(); err != nil {
+			slog.Debug("mockchain: close failed-broadcast connection", "error", err)
+		}
 		return
 	}
 	h.mu.Unlock()

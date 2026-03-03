@@ -3,6 +3,8 @@ package mockchain
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -80,4 +82,38 @@ func (ds *DataStore) Len() int {
 	defer ds.mu.RUnlock()
 
 	return len(ds.headers)
+}
+
+// NewFixtureDataStore returns a DataStore pre-populated with 3 synthetic blocks.
+// It is intended for use in tests and stress-test binaries that need a ready-made data source.
+func NewFixtureDataStore() *DataStore {
+	ds := NewDataStore()
+
+	for i := range 3 {
+		hash := fmt.Sprintf("0x%064x", i+1)
+		parentHash := "0x" + strings.Repeat("0", 64)
+		if i > 0 {
+			parentHash = fmt.Sprintf("0x%064x", i)
+		}
+		header := outbound.BlockHeader{
+			Number:     fmt.Sprintf("0x%x", i+1),
+			Hash:       hash,
+			ParentHash: parentHash,
+			Timestamp:  "0x67c00000",
+		}
+
+		headerJSON, err := json.Marshal(header)
+		if err != nil {
+			// Unreachable: json.Marshal cannot fail on a struct with only string fields.
+			panic(fmt.Sprintf("mockchain: marshalling test header: %v", err))
+		}
+
+		ds.AddHeader(header)
+		ds.Add(i, "block", headerJSON)
+		ds.Add(i, "receipts", json.RawMessage(`[]`))
+		ds.Add(i, "traces", json.RawMessage(`[]`))
+		ds.Add(i, "blobs", json.RawMessage(`[]`))
+	}
+
+	return ds
 }

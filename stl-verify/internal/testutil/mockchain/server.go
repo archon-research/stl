@@ -24,11 +24,11 @@ type Server struct {
 	listener net.Listener
 }
 
-// NewServer creates a Server backed by the given DataStore.
-func NewServer(store *DataStore) *Server {
+// NewServer creates a Server backed by the given DataStore with the given block emission interval.
+func NewServer(store *DataStore, interval time.Duration) *Server {
 	ws := newWSHandler()
-	rpc := newHTTPHandler(store)
-	replayer := NewReplayer(store.Headers(), store, ws.Broadcast)
+	replayer := NewReplayer(store.Headers(), store, ws.Broadcast, interval)
+	rpc := newHTTPHandler(store, replayer)
 	s := &Server{
 		store:    store,
 		ws:       ws,
@@ -79,4 +79,10 @@ func (s *Server) Addr() net.Addr {
 		return nil
 	}
 	return s.listener.Addr()
+}
+
+// Disconnect closes the active WebSocket connection without stopping the server.
+// The connected client will receive a close error and is expected to reconnect.
+func (s *Server) Disconnect() {
+	s.ws.Disconnect()
 }
