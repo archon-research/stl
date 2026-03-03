@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
-	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/ethereum/go-ethereum/common"
@@ -21,6 +20,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/services/maple_indexer"
 )
 
@@ -169,34 +169,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating service: %w", err)
 	}
 
-	logger.Info("starting service...")
-	if err := service.Start(ctx); err != nil {
-		return fmt.Errorf("starting service: %w", err)
-	}
+	logger.Info("maple indexer started, waiting for messages...")
 
-	logger.Info("service started, waiting for messages...")
-
-	// Block until context is cancelled (signal or test cancellation).
-	<-ctx.Done()
-	logger.Info("shutting down...")
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer shutdownCancel()
-
-	shutdownDone := make(chan struct{})
-	go func() {
-		defer close(shutdownDone)
-		if err := service.Stop(); err != nil {
-			logger.Error("error stopping service", "error", err)
-		}
-	}()
-
-	select {
-	case <-shutdownDone:
-		logger.Info("shutdown complete")
-	case <-shutdownCtx.Done():
-		return fmt.Errorf("shutdown timed out")
-	}
-
-	return nil
+	return lifecycle.Run(ctx, logger, service)
 }
