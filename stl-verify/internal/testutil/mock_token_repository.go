@@ -12,6 +12,7 @@ import (
 // MockTokenRepository implements outbound.TokenRepository for testing.
 type MockTokenRepository struct {
 	GetOrCreateTokenFn    func(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error)
+	GetTokenIDBySymbolFn  func(ctx context.Context, chainID int64, symbol string) (int64, error)
 	UpsertTokensFn        func(ctx context.Context, tokens []*entity.Token) error
 	UpsertReceiptTokensFn func(ctx context.Context, tokens []*entity.ReceiptToken) error
 	UpsertDebtTokensFn    func(ctx context.Context, tokens []*entity.DebtToken) error
@@ -20,6 +21,13 @@ type MockTokenRepository struct {
 func (m *MockTokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
 	if m.GetOrCreateTokenFn != nil {
 		return m.GetOrCreateTokenFn(ctx, tx, chainID, address, symbol, decimals, createdAtBlock)
+	}
+	return 1, nil
+}
+
+func (m *MockTokenRepository) GetTokenIDBySymbol(ctx context.Context, chainID int64, symbol string) (int64, error) {
+	if m.GetTokenIDBySymbolFn != nil {
+		return m.GetTokenIDBySymbolFn(ctx, chainID, symbol)
 	}
 	return 1, nil
 }

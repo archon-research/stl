@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -64,9 +65,7 @@ func (r *MaplePositionRepository) SaveLoanSnapshots(ctx context.Context, snapsho
 		if err != nil {
 			return nil, err
 		}
-		for k, v := range batchMap {
-			loanIDMap[k] = v
-		}
+		maps.Copy(loanIDMap, batchMap)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

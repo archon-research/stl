@@ -1231,7 +1231,7 @@ func TestStart_FeedOracle(t *testing.T) {
 	feedOracleSetup(repo)
 
 	consumer := &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -1300,7 +1300,7 @@ func TestStart_ChronicleOracle(t *testing.T) {
 	}
 
 	consumer := &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -1358,7 +1358,7 @@ func TestProcessBlock_FeedOracle(t *testing.T) {
 	feedOracleSetup(repo)
 
 	consumer := &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -1429,7 +1429,7 @@ func TestProcessBlock_FeedOracle_ChangeDetection(t *testing.T) {
 	feedOracleSetup(repo)
 
 	consumer := &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -1535,7 +1535,7 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 	}
 
 	consumer := &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -1626,7 +1626,7 @@ func TestProcessBlock_FeedOracle_AllFeedsFail(t *testing.T) {
 	feedOracleSetup(repo)
 
 	consumer := &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -1691,7 +1691,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 		feedOracleSetup(repo)
 
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
@@ -1744,7 +1744,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 		feedOracleSetup(repo)
 
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
@@ -1807,7 +1807,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 		feedOracleSetup(repo)
 
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
@@ -1880,7 +1880,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 		defaultRepoSetup(repo) // aave oracle
 
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},

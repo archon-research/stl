@@ -285,7 +285,7 @@ type loanMetaResponse struct {
 	WalletType    string `json:"walletType"`
 }
 
-// All active loans response (top-level openTermLoans query).	
+// All active loans response (top-level openTermLoans query).
 type allActiveLoansResponse struct {
 	Data struct {
 		OpenTermLoans []activeOpenTermLoan `json:"openTermLoans"`
