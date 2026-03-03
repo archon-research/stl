@@ -16,10 +16,14 @@ package alchemy
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -214,10 +218,7 @@ func (s *Subscriber) connectionManager() {
 			case <-time.After(backoff):
 			}
 
-			backoff = time.Duration(float64(backoff) * s.config.BackoffFactor)
-			if backoff > s.config.MaxBackoff {
-				backoff = s.config.MaxBackoff
-			}
+			backoff = min(time.Duration(float64(backoff)*s.config.BackoffFactor), s.config.MaxBackoff)
 			continue
 		}
 
@@ -256,6 +257,8 @@ func (s *Subscriber) connectAndSubscribe() error {
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: s.config.HandshakeTimeout,
+		Proxy:            http.ProxyFromEnvironment,
+		TLSClientConfig:  proxyTLSConfig(),
 	}
 	conn, _, err := dialer.DialContext(s.ctx, s.config.WebSocketURL, nil)
 	if err != nil {
@@ -278,7 +281,7 @@ func (s *Subscriber) connectAndSubscribe() error {
 		JSONRPC: "2.0",
 		ID:      1,
 		Method:  "eth_subscribe",
-		Params:  []interface{}{"newHeads"},
+		Params:  []any{"newHeads"},
 	}
 
 	if err := conn.WriteJSON(subscribeReq); err != nil {
@@ -396,12 +399,12 @@ func (s *Subscriber) readLoop(logger *slog.Logger) error {
 				s.lastBlockTime.Store(time.Now().Unix())
 				logger.Debug("block header received", "block", blockNum, "hash", truncateHash(header.Hash))
 				if s.telemetry != nil {
-					s.telemetry.RecordBlockReceived(s.ctx, blockNum)
+					s.telemetry.RecordBlockReceived(s.ctx)
 				}
 			default:
 				logger.Error("channel full, dropping block", "block", blockNum)
 				if s.telemetry != nil {
-					s.telemetry.RecordBlockDropped(s.ctx, blockNum)
+					s.telemetry.RecordBlockDropped(s.ctx)
 				}
 			}
 		case <-pingTicker.C:
@@ -501,4 +504,31 @@ func (s *Subscriber) HealthCheck(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// proxyTLSConfig returns a TLS config that trusts an additional CA certificate
+// specified by the SSL_CERT_FILE environment variable.
+//
+// This is needed for local development behind a TLS-intercepting proxy (e.g.
+// Zscaler, corporate firewall). Such proxies terminate the TLS connection to
+// Alchemy's WebSocket endpoint and re-sign it with their own CA. Without adding
+// that CA to the trust pool, the dialer rejects the proxy's certificate.
+//
+// In production (ECS Fargate) SSL_CERT_FILE is not set, so this returns nil and
+// the dialer uses Go's default system cert pool — no behaviour change.
+func proxyTLSConfig() *tls.Config {
+	certFile := os.Getenv("SSL_CERT_FILE")
+	if certFile == "" {
+		return nil
+	}
+	pem, err := os.ReadFile(certFile)
+	if err != nil {
+		return nil
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		pool = x509.NewCertPool()
+	}
+	pool.AppendCertsFromPEM(pem)
+	return &tls.Config{RootCAs: pool} //nolint:gosec // only adds extra CA
 }

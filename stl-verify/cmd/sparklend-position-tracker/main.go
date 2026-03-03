@@ -11,18 +11,21 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"runtime/debug"
+	"strconv"
 	"syscall"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
 )
 
@@ -34,191 +37,203 @@ var (
 )
 
 func init() {
-	// Use Go's built-in build info (Go 1.18+) if ldflags weren't provided
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, setting := range info.Settings {
-			switch setting.Key {
-			case "vcs.revision":
-				if GitCommit == "" {
-					GitCommit = setting.Value
-				}
-			case "vcs.time":
-				if BuildTime == "" {
-					BuildTime = setting.Value
-				}
-			}
-		}
-	}
+	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
 }
 
 func main() {
-	queueURL := flag.String("queue", "", "SQS Queue URL")
-	redisAddr := flag.String("redis", "", "Redis address")
-	dbURL := flag.String("db", "", "PostgreSQL connection URL")
-	maxMessages := flag.Int("max", 10, "Max messages per poll")
-	waitTime := flag.Int("wait", 20, "Wait time in seconds (long polling)")
-	flag.Parse()
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if err := run(ctx, os.Args[1:]); err != nil {
+		slog.Error("fatal error", "error", err)
+		os.Exit(1)
+	}
+}
+
+type cliConfig struct {
+	queueURL    string
+	redisAddr   string
+	dbURL       string
+	alchemyURL  string
+	maxMessages int
+	waitTime    int
+	chainID     int64
+}
+
+func parseConfig(args []string) (cliConfig, error) {
+	fs := flag.NewFlagSet("sparklend-position-tracker", flag.ContinueOnError)
+	queueURL := fs.String("queue", "", "SQS Queue URL")
+	redisAddr := fs.String("redis", "", "Redis address")
+	dbURL := fs.String("db", "", "PostgreSQL connection URL")
+	maxMessages := fs.Int("max", 10, "Max messages per poll")
+	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
+	if err := fs.Parse(args); err != nil {
+		return cliConfig{}, fmt.Errorf("parsing CLI flags: %w", err)
+	}
+
+	cfg := cliConfig{
+		queueURL:    *queueURL,
+		redisAddr:   *redisAddr,
+		dbURL:       *dbURL,
+		maxMessages: *maxMessages,
+		waitTime:    *waitTime,
+	}
+
+	if cfg.queueURL == "" {
+		cfg.queueURL = env.Get("AWS_SQS_QUEUE_URL", "")
+	}
+	if cfg.queueURL == "" {
+		return cliConfig{}, fmt.Errorf("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_URL env var)")
+	}
+
+	if cfg.dbURL == "" {
+		cfg.dbURL = env.Get("DATABASE_URL", "")
+	}
+	if cfg.dbURL == "" {
+		return cliConfig{}, fmt.Errorf("database URL not provided (use -db flag or DATABASE_URL env var)")
+	}
+
+	alchemyAPIKey := os.Getenv("ALCHEMY_API_KEY")
+	if alchemyAPIKey == "" {
+		return cliConfig{}, fmt.Errorf("ALCHEMY_API_KEY environment variable is required")
+	}
+	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
+	cfg.alchemyURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
+
+	if cfg.redisAddr == "" {
+		cfg.redisAddr = env.Get("REDIS_ADDR", "")
+	}
+	if cfg.redisAddr == "" {
+		return cliConfig{}, fmt.Errorf("redis address not provided (use -redis flag or REDIS_ADDR env var)")
+	}
+
+	chainIDStr := env.Get("CHAIN_ID", "1")
+	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	if err != nil {
+		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
+	}
+	cfg.chainID = chainID
+
+	return cfg, nil
+}
+
+func run(ctx context.Context, args []string) error {
+	cfg, err := parseConfig(args)
+	if err != nil {
+		return err
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
 	slog.SetDefault(logger)
 
-	if *queueURL == "" {
-		*queueURL = env.Get("AWS_SQS_QUEUE_URL", "")
-	}
-	if *queueURL == "" {
-		logger.Error("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_URL env var)")
-		os.Exit(1)
-	}
-
-	if *dbURL == "" {
-		*dbURL = env.Get("DATABASE_URL", "")
-	}
-	if *dbURL == "" {
-		logger.Error("database URL not provided (use -db flag or DATABASE_URL env var)")
-		os.Exit(1)
-	}
-
-	alchemyAPIKey := requireEnv("ALCHEMY_API_KEY", logger)
-	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
-	fullAlchemyURL := fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
-
-	if *redisAddr == "" {
-		*redisAddr = env.Get("REDIS_ADDR", "")
-	}
-	if *redisAddr == "" {
-		logger.Error("Redis address not provided (use -redis flag or REDIS_ADDR env var)")
-		os.Exit(1)
-	}
-
-	chainIDStr := env.Get("CHAIN_ID", "1")
-	var chainID int64 = 1
-	_, _ = fmt.Sscanf(chainIDStr, "%d", &chainID)
-
 	logger.Info("starting sparklend position tracker",
-		"queue", *queueURL,
-		"redis", *redisAddr,
-		"chainID", chainID)
+		"queue", cfg.queueURL,
+		"redis", cfg.redisAddr,
+		"chainID", cfg.chainID,
+		"commit", GitCommit)
 
-	ctx := context.Background()
-
-	// Configure AWS SDK for LocalStack or production
-	// In production (ECS/Fargate), use the default credential chain which picks up IAM role credentials.
-	// For local development with LocalStack, use static credentials from environment variables.
+	// AWS config
 	awsRegion := env.Get("AWS_REGION", "us-east-1")
-	opts := []func(*config.LoadOptions) error{
-		config.WithRegion(awsRegion),
+	awsOpts := []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(awsRegion),
 	}
 
-	// Only use static credentials if explicitly set (for LocalStack)
-	// In ECS/Fargate, these won't be set and the SDK will use the IAM role
 	if accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID"); accessKeyID != "" {
 		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-		opts = append(opts, config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
+		if secretKey == "" {
+			return fmt.Errorf("AWS_ACCESS_KEY_ID is set but AWS_SECRET_ACCESS_KEY is missing")
+		}
+		awsOpts = append(awsOpts, awsconfig.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
 			return aws.Credentials{
 				AccessKeyID:     accessKeyID,
 				SecretAccessKey: secretKey,
 				Source:          "StaticCredentials",
 			}, nil
 		})))
-		logger.Debug("using static AWS credentials from environment")
-	} else {
-		logger.Debug("using default AWS credential chain (IAM role)")
 	}
 
-	cfg, err := config.LoadDefaultConfig(ctx, opts...)
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsOpts...)
 	if err != nil {
-		logger.Error("failed to load AWS config", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("loading AWS config: %w", err)
 	}
 
-	sqsConsumer, err := sqsAdapter.NewConsumer(cfg, sqsAdapter.Config{
-		QueueURL:          *queueURL,
-		WaitTimeSeconds:   int32(*waitTime),
-		VisibilityTimeout: 300, // 5 minutes — processing involves multiple RPC calls per message
+	// SQS
+	sqsConsumer, err := sqsAdapter.NewConsumer(awsCfg, sqsAdapter.Config{
+		QueueURL:          cfg.queueURL,
+		WaitTimeSeconds:   int32(cfg.waitTime),
+		VisibilityTimeout: 300,
 		BaseEndpoint:      env.Get("AWS_SQS_ENDPOINT", ""),
 	}, logger)
 	if err != nil {
-		logger.Error("failed to create SQS consumer", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating SQS consumer: %w", err)
 	}
-	defer func() {
-		if err := sqsConsumer.Close(); err != nil {
-			logger.Warn("failed to close SQS consumer", "error", err)
-		}
-	}()
+	defer sqsConsumer.Close()
 
+	// Redis
 	redisClient := redis.NewClient(&redis.Options{
-		Addr:     *redisAddr,
+		Addr:     cfg.redisAddr,
 		Password: env.Get("REDIS_PASSWORD", ""),
 		DB:       0,
 	})
 	if err := redisClient.Ping(ctx).Err(); err != nil {
-		logger.Error("failed to connect to Redis", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("connecting to Redis: %w", err)
 	}
-	defer func() {
-		if err := redisClient.Close(); err != nil {
-			logger.Warn("failed to close Redis connection", "error", err)
-		}
-	}()
-	logger.Info("Redis connected", "addr", *redisAddr)
+	defer redisClient.Close()
+	logger.Info("Redis connected", "addr", cfg.redisAddr)
 
-	ethClient, err := ethclient.Dial(fullAlchemyURL)
+	// Ethereum
+	ethClient, err := ethclient.Dial(cfg.alchemyURL)
 	if err != nil {
-		logger.Error("failed to connect to Ethereum node", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("connecting to Ethereum node: %w", err)
 	}
+	defer ethClient.Close()
 	logger.Info("Ethereum node connected")
 
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(*dbURL))
+	// PostgreSQL
+	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
 	if err != nil {
-		logger.Error("failed to open database", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("opening database: %w", err)
 	}
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
+	// Repositories
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
-		logger.Error("failed to create transaction manager", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating transaction manager: %w", err)
 	}
 
 	userRepo, err := postgres.NewUserRepository(pool, logger, 0)
 	if err != nil {
-		logger.Error("failed to create user repository", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating user repository: %w", err)
 	}
 
 	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0)
 	if err != nil {
-		logger.Error("failed to create protocol repository", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating protocol repository: %w", err)
 	}
 
 	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0)
 	if err != nil {
-		logger.Error("failed to create token repository", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating token repository: %w", err)
 	}
 
 	positionRepo, err := postgres.NewPositionRepository(pool, logger, 0)
 	if err != nil {
-		logger.Error("failed to create position repository", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating position repository: %w", err)
 	}
 
 	eventRepo := postgres.NewEventRepository(logger)
 
-	processorConfig := sparklend_position_tracker.Config{
-		MaxMessages: *maxMessages,
-		Logger:      logger,
-	}
-
-	processor, err := sparklend_position_tracker.NewService(
-		processorConfig,
+	// Service
+	service, err := sparklend_position_tracker.NewService(
+		shared.SQSConsumerConfig{
+			MaxMessages: cfg.maxMessages,
+			Logger:      logger,
+			ChainID:     cfg.chainID,
+		},
 		sqsConsumer,
 		redisClient,
 		ethClient,
@@ -230,54 +245,10 @@ func main() {
 		eventRepo,
 	)
 	if err != nil {
-		logger.Error("failed to create processor", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating service: %w", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	logger.Info("sparklend position tracker started, waiting for messages...")
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	logger.Info("starting processor...")
-	if err := processor.Start(ctx); err != nil {
-		logger.Error("failed to start processor", "error", err)
-		os.Exit(1)
-	}
-
-	logger.Info("processor started, waiting for messages...")
-
-	sig := <-sigChan
-	logger.Info("received signal, shutting down...", "signal", sig)
-
-	cancel()
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer shutdownCancel()
-
-	shutdownDone := make(chan struct{})
-	go func() {
-		defer close(shutdownDone)
-		if err := processor.Stop(); err != nil {
-			logger.Error("error stopping processor", "error", err)
-		}
-	}()
-
-	select {
-	case <-shutdownDone:
-		logger.Info("shutdown complete")
-	case <-shutdownCtx.Done():
-		logger.Error("shutdown timed out, forcing exit")
-		os.Exit(1)
-	}
-}
-
-func requireEnv(key string, logger *slog.Logger) string {
-	value := os.Getenv(key)
-	if value == "" {
-		logger.Error("required environment variable not set", "key", key)
-		os.Exit(1)
-	}
-	return value
+	return lifecycle.Run(ctx, logger, service)
 }

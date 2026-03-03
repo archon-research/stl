@@ -254,50 +254,64 @@ func (s *BackfillService) findAndFillGaps() error {
 	}
 
 	if len(gaps) == 0 {
-		s.logger.Debug("no gaps to backfill", "minBlock", minBlock, "maxBlock", maxBlock)
+		// Check for unpublished blocks even when there are no gaps, so operators
+		// can see that blocks exist but need retry (saved but cache/publish failed).
+		hasUnpublishedBlocks := false
+		incomplete, err := s.stateRepo.GetBlocksWithIncompletePublish(ctx, 1)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to check incomplete publishes")
+			return fmt.Errorf("failed to check incomplete publishes: %w", err)
+		}
+		hasUnpublishedBlocks = len(incomplete) > 0
+		s.logger.Debug("no gaps to backfill",
+			"minBlock", minBlock,
+			"maxBlock", maxBlock,
+			"hasUnpublishedBlocks", hasUnpublishedBlocks)
 		span.SetAttributes(
 			attribute.Int("backfill.gaps_count", 0),
 			attribute.Int64("backfill.min_block", minBlock),
 			attribute.Int64("backfill.max_block", maxBlock),
+			attribute.Bool("backfill.has_unpublished_blocks", hasUnpublishedBlocks),
 		)
-		return nil
-	}
-
-	// Calculate total missing blocks
-	totalMissing := int64(0)
-	for _, gap := range gaps {
-		totalMissing += gap.To - gap.From + 1
-	}
-
-	span.SetAttributes(
-		attribute.Int("backfill.gaps_count", len(gaps)),
-		attribute.Int64("backfill.total_missing", totalMissing),
-		attribute.Int64("backfill.min_block", minBlock),
-		attribute.Int64("backfill.max_block", maxBlock),
-	)
-
-	s.logger.Info("found gaps to backfill",
-		"gaps", len(gaps),
-		"totalMissing", totalMissing,
-		"minBlock", minBlock,
-		"maxBlock", maxBlock)
-
-	// Process each gap
-	for _, gap := range gaps {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+	} else {
+		// Calculate total missing blocks
+		totalMissing := int64(0)
+		for _, gap := range gaps {
+			totalMissing += gap.To - gap.From + 1
 		}
 
-		if err := s.fillGapWithTracing(ctx, gap); err != nil {
-			s.logger.Warn("failed to fill gap", "from", gap.From, "to", gap.To, "error", err)
-			// Continue with other gaps
+		span.SetAttributes(
+			attribute.Int("backfill.gaps_count", len(gaps)),
+			attribute.Int64("backfill.total_missing", totalMissing),
+			attribute.Int64("backfill.min_block", minBlock),
+			attribute.Int64("backfill.max_block", maxBlock),
+		)
+
+		s.logger.Info("found gaps to backfill",
+			"gaps", len(gaps),
+			"totalMissing", totalMissing,
+			"minBlock", minBlock,
+			"maxBlock", maxBlock)
+
+		// Process each gap
+		for _, gap := range gaps {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			if err := s.fillGapWithTracing(ctx, gap); err != nil {
+				s.logger.Warn("failed to fill gap", "from", gap.From, "to", gap.To, "error", err)
+				// Continue with other gaps
+			}
 		}
 	}
 
 	// Retry blocks that were saved but not fully published (cache/publish failed).
-	// This ensures eventual consistency for blocks that had transient failures.
+	// This runs on EVERY pass, not just when gaps exist, because blocks can be
+	// present in the DB (no gap) but have failed cache/publish (block_published=false).
 	if err := s.retryIncompletePublishes(ctx); err != nil {
 		s.logger.Warn("failed to retry incomplete publishes", "error", err)
 		// Continue - this will be retried on the next pass
@@ -326,10 +340,7 @@ func (s *BackfillService) fillGap(ctx context.Context, gap outbound.BlockRange) 
 		default:
 		}
 
-		batchEnd := batchStart + int64(batchSize) - 1
-		if batchEnd > gap.To {
-			batchEnd = gap.To
-		}
+		batchEnd := min(batchStart+int64(batchSize)-1, gap.To)
 
 		if err := s.processBatch(ctx, batchStart, batchEnd); err != nil {
 			s.logger.Warn("batch failed", "from", batchStart, "to", batchEnd, "error", err)
@@ -767,10 +778,7 @@ func (s *BackfillService) advanceWatermark(ctx context.Context) error {
 	}
 
 	// Start checking from the block after the current watermark
-	startBlock := currentWatermark + 1
-	if startBlock < minBlock {
-		startBlock = minBlock
-	}
+	startBlock := max(currentWatermark+1, minBlock)
 
 	// Find the first gap after the current watermark
 	// We temporarily bypass the watermark check by querying directly
@@ -922,6 +930,17 @@ func (s *BackfillService) retryBlockPublish(ctx context.Context, block outbound.
 		),
 	)
 	defer span.End()
+
+	// Re-check if the block has been published since GetBlocksWithIncompletePublish.
+	// The live service may have completed publishing between the query and now.
+	current, err := s.stateRepo.GetBlockByHash(ctx, block.Hash)
+	if err != nil {
+		s.logger.Warn("failed to re-check block publish status", "block", block.Number, "error", err)
+		// Continue with retry on error — worst case is a harmless duplicate publish
+	} else if current != nil && current.BlockPublished {
+		s.logger.Debug("block already published, skipping retry", "block", block.Number)
+		return nil
+	}
 
 	// Fetch block data by hash to ensure we get the exact block we have in DB
 	bd, err := s.client.GetBlockDataByHash(ctx, block.Number, block.Hash, true)

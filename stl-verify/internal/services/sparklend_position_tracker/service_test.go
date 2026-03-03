@@ -10,6 +10,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 func TestEventExtractor_NewEventExtractor(t *testing.T) {
@@ -82,12 +84,12 @@ func TestEventExtractor_IsPositionEvent(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		log      Log
+		log      shared.Log
 		expected bool
 	}{
 		{
 			name: "valid borrow event",
-			log: Log{
+			log: shared.Log{
 				Address: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
 				Topics: []string{
 					"0xb3d084820fb1a9decffb176436bd02558d15fac9b0ddfed8c465bc7359d7dce0",
@@ -97,7 +99,7 @@ func TestEventExtractor_IsPositionEvent(t *testing.T) {
 		},
 		{
 			name: "valid supply event",
-			log: Log{
+			log: shared.Log{
 				Address: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
 				Topics: []string{
 					"0x2b627736bca15cd5381dcf80b0bf11fd197d01a037c52b927a881a10fb73ba61",
@@ -107,7 +109,7 @@ func TestEventExtractor_IsPositionEvent(t *testing.T) {
 		},
 		{
 			name: "non-tracked event",
-			log: Log{
+			log: shared.Log{
 				Address: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
 				Topics: []string{
 					"0x1111111111111111111111111111111111111111111111111111111111111111",
@@ -117,7 +119,7 @@ func TestEventExtractor_IsPositionEvent(t *testing.T) {
 		},
 		{
 			name: "empty topics",
-			log: Log{
+			log: shared.Log{
 				Address: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
 				Topics:  []string{},
 			},
@@ -141,7 +143,7 @@ func TestEventExtractor_ExtractEventData_Borrow(t *testing.T) {
 		t.Fatalf("failed to create extractor: %v", err)
 	}
 
-	log := Log{
+	log := shared.Log{
 		Address: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
 		Topics: []string{
 			"0xb3d084820fb1a9decffb176436bd02558d15fac9b0ddfed8c465bc7359d7dce0",
@@ -281,7 +283,7 @@ func TestEventExtractor_ProcessReceipt_MultipleEventTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logs := make([]Log, tt.logsPerReceipt)
+			logs := make([]shared.Log, tt.logsPerReceipt)
 
 			for i := 0; i < tt.logsPerReceipt; i++ {
 				var topics []string
@@ -298,7 +300,7 @@ func TestEventExtractor_ProcessReceipt_MultipleEventTypes(t *testing.T) {
 					}
 				}
 
-				logs[i] = Log{
+				logs[i] = shared.Log{
 					Address:          "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
 					Topics:           topics,
 					Data:             "0x000000000000000000000000742d35Cc6634C0532925a3b844Bc9e7595f0bEb00000000000000000000000000000000000000000000000056bc75e2d63100000000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000002b5e3af16b18800000000000000000000000000000000000000000000000000000000000000000000",
@@ -309,7 +311,7 @@ func TestEventExtractor_ProcessReceipt_MultipleEventTypes(t *testing.T) {
 				}
 			}
 
-			receipt := TransactionReceipt{
+			receipt := shared.TransactionReceipt{
 				Type:              "0x2",
 				Status:            "0x1",
 				TransactionHash:   "0xabc123",
@@ -402,7 +404,7 @@ func TestEventExtractor_ExtractEventData_Repay(t *testing.T) {
 
 	// Repay event: reserve (indexed), user (indexed), repayer (indexed), amount, useATokens
 	// Data contains: amount (uint256), useATokens (bool)
-	log := Log{
+	log := shared.Log{
 		Address: testPool,
 		Topics: []string{
 			sigRepay,
@@ -456,7 +458,7 @@ func TestEventExtractor_ExtractEventData_Supply(t *testing.T) {
 
 	// Supply event: reserve (indexed), user, onBehalfOf (indexed), amount, referralCode (indexed)
 	// Data contains: user (address), amount (uint256)
-	log := Log{
+	log := shared.Log{
 		Address: testPool,
 		Topics: []string{
 			sigSupply,
@@ -510,7 +512,7 @@ func TestEventExtractor_ExtractEventData_Withdraw(t *testing.T) {
 
 	// Withdraw event: reserve (indexed), user (indexed), to (indexed), amount
 	// Data contains: amount (uint256)
-	log := Log{
+	log := shared.Log{
 		Address: testPool,
 		Topics: []string{
 			sigWithdraw,
@@ -565,7 +567,7 @@ func TestEventExtractor_ExtractEventData_LiquidationCall(t *testing.T) {
 	// LiquidationCall event: collateralAsset (indexed), debtAsset (indexed), user (indexed),
 	//                       debtToCover, liquidatedCollateralAmount, liquidator, receiveAToken
 	// Data contains: debtToCover (uint256), liquidatedCollateralAmount (uint256), liquidator (address), receiveAToken (bool)
-	log := Log{
+	log := shared.Log{
 		Address: testPool,
 		Topics: []string{
 			sigLiquidationCall,
@@ -639,7 +641,7 @@ func TestEventExtractor_ExtractEventData_ReserveUsedAsCollateralEnabled(t *testi
 
 	// ReserveUsedAsCollateralEnabled event: reserve (indexed), user (indexed)
 	// No data - all fields are indexed
-	log := Log{
+	log := shared.Log{
 		Address: testPool,
 		Topics: []string{
 			sigReserveUsedAsCollateralEnabled,
@@ -689,7 +691,7 @@ func TestEventExtractor_ExtractEventData_ReserveUsedAsCollateralDisabled(t *test
 
 	// ReserveUsedAsCollateralDisabled event: reserve (indexed), user (indexed)
 	// No data - all fields are indexed
-	log := Log{
+	log := shared.Log{
 		Address: testPool,
 		Topics: []string{
 			sigReserveUsedAsCollateralDisabled,
@@ -756,7 +758,7 @@ func TestEventExtractor_IsPositionEvent_AllEventTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			log := Log{
+			log := shared.Log{
 				Address: testPool,
 				Topics:  []string{tt.signature},
 			}
@@ -777,13 +779,13 @@ func TestEventExtractor_ExtractEventData_ErrorCases(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		log         Log
+		log         shared.Log
 		expectError bool
 		errorMsg    string
 	}{
 		{
 			name: "empty topics",
-			log: Log{
+			log: shared.Log{
 				Address: testPool,
 				Topics:  []string{},
 				Data:    "0x",
@@ -793,7 +795,7 @@ func TestEventExtractor_ExtractEventData_ErrorCases(t *testing.T) {
 		},
 		{
 			name: "unknown event signature",
-			log: Log{
+			log: shared.Log{
 				Address: testPool,
 				Topics:  []string{"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"},
 				Data:    "0x",
@@ -836,7 +838,7 @@ func TestEventExtractor_ExtractReserveEventData(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		log         Log
+		log         shared.Log
 		expectError bool
 		errorMsg    string
 		wantReserve string
@@ -844,7 +846,7 @@ func TestEventExtractor_ExtractReserveEventData(t *testing.T) {
 	}{
 		{
 			name: "valid ReserveDataUpdated event",
-			log: Log{
+			log: shared.Log{
 				Address:         testPool,
 				Topics:          []string{reserveDataUpdatedSig, testReserve},
 				Data:            "0x",
@@ -856,7 +858,7 @@ func TestEventExtractor_ExtractReserveEventData(t *testing.T) {
 		},
 		{
 			name: "missing reserve topic",
-			log: Log{
+			log: shared.Log{
 				Address:         testPool,
 				Topics:          []string{reserveDataUpdatedSig}, // Only 1 topic
 				Data:            "0x",
@@ -867,7 +869,7 @@ func TestEventExtractor_ExtractReserveEventData(t *testing.T) {
 		},
 		{
 			name: "wrong event signature",
-			log: Log{
+			log: shared.Log{
 				Address:         testPool,
 				Topics:          []string{"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", testReserve},
 				Data:            "0x",
@@ -878,7 +880,7 @@ func TestEventExtractor_ExtractReserveEventData(t *testing.T) {
 		},
 		{
 			name: "empty topics",
-			log: Log{
+			log: shared.Log{
 				Address:         testPool,
 				Topics:          []string{},
 				Data:            "0x",
@@ -918,6 +920,69 @@ func TestEventExtractor_ExtractReserveEventData(t *testing.T) {
 
 			if result.TxHash != tt.wantTxHash {
 				t.Errorf("TxHash = %s, want %s", result.TxHash, tt.wantTxHash)
+			}
+		})
+	}
+}
+
+func TestService_IsKnownProtocol_FilterLogic(t *testing.T) {
+	tests := []struct {
+		name       string
+		chainID    int64
+		address    string
+		expectSkip bool
+	}{
+		{
+			name:       "Aave V3 - should process",
+			chainID:    1,
+			address:    "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+			expectSkip: false,
+		},
+		{
+			name:       "Sparklend - should process",
+			chainID:    1,
+			address:    "0xC13e21B648A5Ee794902342038FF3aDAB66BE987",
+			expectSkip: false,
+		},
+		{
+			name:       "Aave V2 - should process",
+			chainID:    1,
+			address:    "0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9",
+			expectSkip: false,
+		},
+		{
+			name:       "Aave V3 Avalanche - should process",
+			chainID:    43114,
+			address:    "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expectSkip: false,
+		},
+		{
+			name:       "Aave V3 Avalanche on wrong chain - should skip",
+			chainID:    1,
+			address:    "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expectSkip: true,
+		},
+		{
+			name:       "RedemptionIdle - should skip",
+			chainID:    1,
+			address:    "0x4c21B7577C8FE8b0B0669165ee7C8f67fa1454Cf",
+			expectSkip: true,
+		},
+		{
+			name:       "Random unknown - should skip",
+			chainID:    1,
+			address:    "0x1234567890123456789012345678901234567890",
+			expectSkip: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr := common.HexToAddress(tt.address)
+			skip := !blockchain.IsKnownProtocol(tt.chainID, addr)
+
+			if skip != tt.expectSkip {
+				t.Errorf("IsKnownProtocol(%d, %s) = %v, want skip=%v", tt.chainID, tt.address, !skip, tt.expectSkip)
 			}
 		})
 	}

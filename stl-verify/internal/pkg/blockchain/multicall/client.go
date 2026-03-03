@@ -48,6 +48,12 @@ func (c *Client) Address() common.Address {
 }
 
 func (c *Client) Execute(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	if blockNumber == nil {
+		return nil, fmt.Errorf("block number is required")
+	}
+	if blockNumber.Sign() < 0 {
+		return nil, fmt.Errorf("negative block number: %s", blockNumber)
+	}
 	if len(calls) == 0 {
 		return []outbound.Result{}, nil
 	}

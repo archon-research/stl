@@ -405,16 +405,22 @@ func TestMultiChain_BackfillWithGaps(t *testing.T) {
 
 	t.Run("gaps_are_chain_scoped", func(t *testing.T) {
 		// Reset watermarks for this subtest
-		ethRepo.SetBackfillWatermark(ctx, 0)
-		avaxRepo.SetBackfillWatermark(ctx, 0)
+		if err := ethRepo.SetBackfillWatermark(ctx, 0); err != nil {
+			t.Fatalf("failed to reset eth watermark: %v", err)
+		}
+		if err := avaxRepo.SetBackfillWatermark(ctx, 0); err != nil {
+			t.Fatalf("failed to reset avalanche watermark: %v", err)
+		}
 
 		// Save eth blocks 1, 2, 5 (gap at 3-4)
+		now := time.Now().Unix()
 		for _, num := range []int64{1, 2, 5} {
 			_, err := ethRepo.SaveBlock(ctx, outbound.BlockState{
-				Number:     num,
-				Hash:       fmt.Sprintf("0x1_gap_%d", num),
-				ParentHash: fmt.Sprintf("0x1_gap_%d", num-1),
-				ReceivedAt: time.Now().Unix(),
+				Number:         num,
+				Hash:           fmt.Sprintf("0x1_gap_%d", num),
+				ParentHash:     fmt.Sprintf("0x1_gap_%d", num-1),
+				ReceivedAt:     now,
+				BlockTimestamp: now,
 			})
 			if err != nil {
 				t.Fatalf("failed to save eth block %d: %v", num, err)
@@ -424,10 +430,11 @@ func TestMultiChain_BackfillWithGaps(t *testing.T) {
 		// Save avalanche blocks 1-5 (no gap)
 		for i := int64(1); i <= 5; i++ {
 			_, err := avaxRepo.SaveBlock(ctx, outbound.BlockState{
-				Number:     i,
-				Hash:       fmt.Sprintf("0x2_gap_%d", i),
-				ParentHash: fmt.Sprintf("0x2_gap_%d", i-1),
-				ReceivedAt: time.Now().Unix(),
+				Number:         i,
+				Hash:           fmt.Sprintf("0x2_gap_%d", i),
+				ParentHash:     fmt.Sprintf("0x2_gap_%d", i-1),
+				ReceivedAt:     now,
+				BlockTimestamp: now,
 			})
 			if err != nil {
 				t.Fatalf("failed to save avalanche block %d: %v", i, err)
@@ -478,20 +485,22 @@ func TestMultiChain_ReorgIsolation(t *testing.T) {
 	// Save blocks 100-102 on both chains
 	for i := int64(100); i <= 102; i++ {
 		_, err := ethRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x1_reorg_%d", i),
-			ParentHash: fmt.Sprintf("0x1_reorg_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x1_reorg_%d", i),
+			ParentHash:     fmt.Sprintf("0x1_reorg_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save eth block %d: %v", i, err)
 		}
 
 		_, err = avaxRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x2_reorg_%d", i),
-			ParentHash: fmt.Sprintf("0x2_reorg_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x2_reorg_%d", i),
+			ParentHash:     fmt.Sprintf("0x2_reorg_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save avalanche block %d: %v", i, err)
@@ -507,10 +516,11 @@ func TestMultiChain_ReorgIsolation(t *testing.T) {
 		Depth:       1,
 	}
 	newBlock := outbound.BlockState{
-		Number:     101,
-		Hash:       "0x1_reorg_101_new",
-		ParentHash: "0x1_reorg_100",
-		ReceivedAt: time.Now().Unix(),
+		Number:         101,
+		Hash:           "0x1_reorg_101_new",
+		ParentHash:     "0x1_reorg_100",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}
 
 	_, err := ethRepo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock)
@@ -617,7 +627,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	postgresContainer, postgresCfg := startPostgres(t, ctx)
 	infra.containers = append(infra.containers, postgresContainer)
 	cleanupFuncs = append(cleanupFuncs, func() {
-		if err := postgresContainer.Terminate(ctx); err != nil {
+		if err := postgresContainer.Terminate(context.Background()); err != nil {
 			logger.Error("failed to terminate postgres container", "error", err)
 		}
 	})
@@ -646,7 +656,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	redisContainer, redisCfg := startRedis(t, ctx)
 	infra.containers = append(infra.containers, redisContainer)
 	cleanupFuncs = append(cleanupFuncs, func() {
-		if err := redisContainer.Terminate(ctx); err != nil {
+		if err := redisContainer.Terminate(context.Background()); err != nil {
 			logger.Error("failed to terminate redis container", "error", err)
 		}
 	})
@@ -669,10 +679,10 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	infra.Cache = cache
 
 	// Start LocalStack
-	localstackContainer, localstackCfg := startLocalStack(t, ctx)
+	localstackContainer, localstackCfg := testutil.StartLocalStack(t, ctx, "sns,sqs")
 	infra.containers = append(infra.containers, localstackContainer)
 	cleanupFuncs = append(cleanupFuncs, func() {
-		if err := localstackContainer.Terminate(ctx); err != nil {
+		if err := localstackContainer.Terminate(context.Background()); err != nil {
 			logger.Error("failed to terminate localstack container", "error", err)
 		}
 	})
@@ -794,7 +804,7 @@ func startPostgres(t *testing.T, ctx context.Context) (testcontainers.Container,
 	}
 
 	req := testcontainers.ContainerRequest{
-		Image:        "timescale/timescaledb:latest-pg17",
+		Image:        testutil.ImageTimescaleDB,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     config.User,
@@ -838,7 +848,7 @@ func startRedis(t *testing.T, ctx context.Context) (testcontainers.Container, Re
 	}
 
 	req := testcontainers.ContainerRequest{
-		Image:        "redis:8.0-M04-alpine",
+		Image:        testutil.ImageRedis,
 		ExposedPorts: []string{"6379/tcp"},
 		WaitingFor:   wait.ForLog("Ready to accept connections").WithStartupTimeout(60 * time.Second),
 	}
@@ -854,46 +864,6 @@ func startRedis(t *testing.T, ctx context.Context) (testcontainers.Container, Re
 	host, _ := container.Host(ctx)
 	port, _ := container.MappedPort(ctx, "6379")
 	config.Addr = fmt.Sprintf("%s:%s", host, port.Port())
-
-	return container, config
-}
-
-// LocalStackTestConfig contains all configuration needed to connect to test LocalStack.
-type LocalStackTestConfig struct {
-	Endpoint string
-	Region   string
-}
-
-func startLocalStack(t *testing.T, ctx context.Context) (testcontainers.Container, LocalStackTestConfig) {
-	t.Helper()
-
-	config := LocalStackTestConfig{
-		Region: "us-east-1",
-	}
-
-	req := testcontainers.ContainerRequest{
-		Image:        "localstack/localstack:latest",
-		ExposedPorts: []string{"4566/tcp"},
-		Env: map[string]string{
-			"SERVICES": "sns,sqs",
-			"DEBUG":    "0",
-		},
-		WaitingFor: wait.ForHTTP("/_localstack/health").
-			WithPort("4566/tcp").
-			WithStartupTimeout(120 * time.Second),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		t.Fatalf("failed to start localstack: %v", err)
-	}
-
-	host, _ := container.Host(ctx)
-	port, _ := container.MappedPort(ctx, "4566")
-	config.Endpoint = fmt.Sprintf("http://%s:%s", host, port.Port())
 
 	return container, config
 }

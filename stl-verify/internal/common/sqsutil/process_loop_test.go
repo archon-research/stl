@@ -45,6 +45,15 @@ func makeMsg(id, handle string, event outbound.BlockEvent) outbound.SQSMessage {
 	return outbound.SQSMessage{MessageID: id, ReceiptHandle: handle, Body: string(body)}
 }
 
+func testConfig(consumer *mockConsumer) Config {
+	return Config{
+		Consumer:    consumer,
+		MaxMessages: 10,
+		Logger:      slog.Default(),
+		ChainID:     1,
+	}
+}
+
 func TestProcessMessages_Success(t *testing.T) {
 	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
 	consumer := &mockConsumer{
@@ -57,7 +66,7 @@ func TestProcessMessages_Success(t *testing.T) {
 		return nil
 	}
 
-	err := ProcessMessages(context.Background(), consumer, 10, slog.Default(), handler)
+	err := ProcessMessages(context.Background(), testConfig(consumer), handler)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -82,7 +91,7 @@ func TestProcessMessages_HandlerError_SkipsDelete(t *testing.T) {
 		return errors.New("handler failed")
 	}
 
-	err := ProcessMessages(context.Background(), consumer, 10, slog.Default(), handler)
+	err := ProcessMessages(context.Background(), testConfig(consumer), handler)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -100,7 +109,7 @@ func TestProcessMessages_EmptyBatch(t *testing.T) {
 		return nil
 	}
 
-	err := ProcessMessages(context.Background(), consumer, 10, slog.Default(), handler)
+	err := ProcessMessages(context.Background(), testConfig(consumer), handler)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -121,7 +130,7 @@ func TestProcessMessages_InvalidJSON(t *testing.T) {
 		return nil
 	}
 
-	err := ProcessMessages(context.Background(), consumer, 10, slog.Default(), handler)
+	err := ProcessMessages(context.Background(), testConfig(consumer), handler)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -144,7 +153,7 @@ func TestProcessMessages_PartialFailure(t *testing.T) {
 		return nil
 	}
 
-	err := ProcessMessages(context.Background(), consumer, 10, slog.Default(), handler)
+	err := ProcessMessages(context.Background(), testConfig(consumer), handler)
 	if err == nil {
 		t.Fatal("expected error for partial failure")
 	}
@@ -152,6 +161,76 @@ func TestProcessMessages_PartialFailure(t *testing.T) {
 	if len(consumer.deletedHandles) != 1 || consumer.deletedHandles[0] != "h2" {
 		t.Errorf("expected h2 deleted, got %v", consumer.deletedHandles)
 	}
+}
+
+func TestProcessMessages_ChainIDMismatch_SkipsHandler(t *testing.T) {
+	event := outbound.BlockEvent{ChainID: 42, BlockNumber: 200, Version: 0, BlockHash: "0xfoo"}
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", event)}},
+	}
+
+	called := false
+	handler := func(_ context.Context, e outbound.BlockEvent) error {
+		called = true
+		return nil
+	}
+
+	cfg := testConfig(consumer)
+	cfg.ChainID = 1 // expect chain 1, event has chain 42
+
+	err := ProcessMessages(context.Background(), cfg, handler)
+	// Chain ID mismatch is deterministic — message is deleted, no error returned
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if called {
+		t.Error("handler should not be called when chain ID mismatches")
+	}
+	if len(consumer.deletedHandles) != 1 || consumer.deletedHandles[0] != "h1" {
+		t.Errorf("expected mismatched message to be deleted, got deletes: %v", consumer.deletedHandles)
+	}
+}
+
+func TestProcessMessages_ChainIDMatch_Proceeds(t *testing.T) {
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 200, Version: 0, BlockHash: "0xfoo"}
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", event)}},
+	}
+
+	var processed []outbound.BlockEvent
+	handler := func(_ context.Context, e outbound.BlockEvent) error {
+		processed = append(processed, e)
+		return nil
+	}
+
+	cfg := testConfig(consumer)
+	cfg.ChainID = 1 // matches event
+
+	err := ProcessMessages(context.Background(), cfg, handler)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(processed) != 1 {
+		t.Fatalf("expected 1 processed event, got %d", len(processed))
+	}
+	if len(consumer.deletedHandles) != 1 || consumer.deletedHandles[0] != "h1" {
+		t.Errorf("expected handle h1 deleted, got %v", consumer.deletedHandles)
+	}
+}
+
+func TestConfig_Validate(t *testing.T) {
+	t.Run("zero chain ID returns error", func(t *testing.T) {
+		cfg := Config{ChainID: 0}
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for zero ChainID")
+		}
+	})
+	t.Run("non-zero chain ID succeeds", func(t *testing.T) {
+		cfg := Config{ChainID: 1}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
 }
 
 func TestRunLoop_StopsOnCancel(t *testing.T) {

@@ -11,36 +11,61 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
+const positionSchemaName = "test_position"
+
+var positionPool *pgxpool.Pool
+
+func init() {
+	registerTestFileSetup(positionSchemaName, func() {
+		positionPool = testutil.SetupSchemaForMain(sharedDSN, positionSchemaName)
+	}, func() {
+		testutil.CleanupSchemaForMain(sharedDSN, positionPool, positionSchemaName)
+	})
+}
+
+// truncateCollaterals clears collateral-related tables for test isolation.
+func truncateCollaterals(t *testing.T, ctx context.Context) {
+	t.Helper()
+	if _, err := positionPool.Exec(ctx, `DELETE FROM borrower_collateral`); err != nil {
+		t.Fatalf("failed to truncate borrower_collateral: %v", err)
+	}
+	if _, err := positionPool.Exec(ctx, `TRUNCATE "user" CASCADE`); err != nil {
+		t.Fatalf("failed to truncate user: %v", err)
+	}
+	if _, err := positionPool.Exec(ctx, `TRUNCATE token CASCADE`); err != nil {
+		t.Fatalf("failed to truncate token: %v", err)
+	}
+}
+
 // positionTestFixture holds test dependencies for position repository tests.
 type positionTestFixture struct {
-	repo    *PositionRepository
-	pool    *pgxpool.Pool
-	cleanup func()
+	repo *PositionRepository
+	pool *pgxpool.Pool
 	// Pre-created IDs for foreign key references
 	userID     int64
 	protocolID int64
 	tokenID    int64
 }
 
-// setupPositionTest creates a TimescaleDB container and returns a connected PositionRepository.
+// setupPositionTest returns a connected PositionRepository using the schema-specific pool.
 func setupPositionTest(t *testing.T) *positionTestFixture {
 	t.Helper()
 	ctx := context.Background()
 
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	truncateCollaterals(t, ctx)
 
-	repo, err := NewPositionRepository(pool, nil, 100)
+	repo, err := NewPositionRepository(positionPool, nil, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
 
 	fixture := &positionTestFixture{
-		repo:    repo,
-		pool:    pool,
-		cleanup: cleanup,
+		repo: repo,
+		pool: positionPool,
 	}
 
 	// Create required foreign key references
@@ -64,12 +89,15 @@ func (f *positionTestFixture) createTestFixtures(t *testing.T, ctx context.Conte
 		t.Fatalf("failed to create test user: %v", err)
 	}
 
-	// Get the protocol ID (seeded by migration)
+	// Create a test protocol (don't rely on seeded data since we truncate)
 	err = f.pool.QueryRow(ctx,
-		`SELECT id FROM protocol WHERE name = 'SparkLend' LIMIT 1`,
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+		 VALUES (1, '\x1234567890123456789012345678901234567890'::bytea, 'TestProtocol', 'lending', 100, NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id`,
 	).Scan(&f.protocolID)
 	if err != nil {
-		t.Fatalf("failed to get protocol: %v", err)
+		t.Fatalf("failed to create test protocol: %v", err)
 	}
 
 	// Create a test token
@@ -83,7 +111,7 @@ func (f *positionTestFixture) createTestFixtures(t *testing.T, ctx context.Conte
 }
 
 // queryCollaterals returns all collateral records for verification.
-func (f *positionTestFixture) queryCollaterals(t *testing.T, ctx context.Context) []CollateralRecord {
+func (f *positionTestFixture) queryCollaterals(t *testing.T, ctx context.Context) []outbound.CollateralRecord {
 	t.Helper()
 
 	rows, err := f.pool.Query(ctx,
@@ -94,9 +122,9 @@ func (f *positionTestFixture) queryCollaterals(t *testing.T, ctx context.Context
 	}
 	defer rows.Close()
 
-	var results []CollateralRecord
+	var results []outbound.CollateralRecord
 	for rows.Next() {
-		var r CollateralRecord
+		var r outbound.CollateralRecord
 		if err := rows.Scan(&r.UserID, &r.ProtocolID, &r.TokenID, &r.BlockNumber, &r.BlockVersion, &r.Amount, &r.EventType, &r.TxHash, &r.CollateralEnabled); err != nil {
 			t.Fatalf("failed to scan collateral: %v", err)
 		}
@@ -107,7 +135,6 @@ func (f *positionTestFixture) queryCollaterals(t *testing.T, ctx context.Context
 
 func TestSaveBorrowerCollaterals_EmptyRecords(t *testing.T) {
 	fixture := setupPositionTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
@@ -118,7 +145,7 @@ func TestSaveBorrowerCollaterals_EmptyRecords(t *testing.T) {
 	defer tx.Rollback(ctx)
 
 	// Empty slice should return nil without error
-	err = fixture.repo.SaveBorrowerCollaterals(ctx, tx, []CollateralRecord{})
+	err = fixture.repo.SaveBorrowerCollaterals(ctx, tx, []outbound.CollateralRecord{})
 	if err != nil {
 		t.Errorf("expected nil error for empty records, got: %v", err)
 	}
@@ -136,11 +163,10 @@ func TestSaveBorrowerCollaterals_EmptyRecords(t *testing.T) {
 
 func TestSaveBorrowerCollaterals_SingleRecord(t *testing.T) {
 	fixture := setupPositionTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
-	input := CollateralRecord{
+	input := outbound.CollateralRecord{
 		UserID:            fixture.userID,
 		ProtocolID:        fixture.protocolID,
 		TokenID:           fixture.tokenID,
@@ -158,7 +184,7 @@ func TestSaveBorrowerCollaterals_SingleRecord(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	err = fixture.repo.SaveBorrowerCollaterals(ctx, tx, []CollateralRecord{input})
+	err = fixture.repo.SaveBorrowerCollaterals(ctx, tx, []outbound.CollateralRecord{input})
 	if err != nil {
 		t.Fatalf("SaveBorrowerCollaterals failed: %v", err)
 	}
@@ -205,14 +231,13 @@ func TestSaveBorrowerCollaterals_SingleRecord(t *testing.T) {
 
 func TestSaveBorrowerCollaterals_TenRecords(t *testing.T) {
 	fixture := setupPositionTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
 	// Create 10 unique records (different block_version for same block)
-	inputs := make([]CollateralRecord, 10)
+	inputs := make([]outbound.CollateralRecord, 10)
 	for i := 0; i < 10; i++ {
-		inputs[i] = CollateralRecord{
+		inputs[i] = outbound.CollateralRecord{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
 			TokenID:           fixture.tokenID,
@@ -266,13 +291,12 @@ func TestSaveBorrowerCollaterals_TenRecords(t *testing.T) {
 
 func TestSaveBorrowerCollaterals_Rollback(t *testing.T) {
 	fixture := setupPositionTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
-	inputs := make([]CollateralRecord, 10)
+	inputs := make([]outbound.CollateralRecord, 10)
 	for i := 0; i < 10; i++ {
-		inputs[i] = CollateralRecord{
+		inputs[i] = outbound.CollateralRecord{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
 			TokenID:           fixture.tokenID,
@@ -309,14 +333,13 @@ func TestSaveBorrowerCollaterals_Rollback(t *testing.T) {
 
 func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 	fixture := setupPositionTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
 	// Create 10 records where record 5 is a duplicate of record 0
-	inputs := make([]CollateralRecord, 10)
+	inputs := make([]outbound.CollateralRecord, 10)
 	for i := 0; i < 10; i++ {
-		inputs[i] = CollateralRecord{
+		inputs[i] = outbound.CollateralRecord{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
 			TokenID:           fixture.tokenID,
@@ -345,9 +368,9 @@ func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 	}
 
 	// Now try to insert again with some records having same key but different data
-	duplicateInputs := make([]CollateralRecord, 10)
+	duplicateInputs := make([]outbound.CollateralRecord, 10)
 	for i := 0; i < 10; i++ {
-		duplicateInputs[i] = CollateralRecord{
+		duplicateInputs[i] = outbound.CollateralRecord{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
 			TokenID:           fixture.tokenID,
@@ -398,12 +421,11 @@ func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 
 func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 	fixture := setupPositionTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
 	// Insert initial record
-	initial := CollateralRecord{
+	initial := outbound.CollateralRecord{
 		UserID:            fixture.userID,
 		ProtocolID:        fixture.protocolID,
 		TokenID:           fixture.tokenID,
@@ -419,7 +441,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to begin transaction: %v", err)
 	}
-	err = fixture.repo.SaveBorrowerCollaterals(ctx, tx1, []CollateralRecord{initial})
+	err = fixture.repo.SaveBorrowerCollaterals(ctx, tx1, []outbound.CollateralRecord{initial})
 	if err != nil {
 		t.Fatalf("initial insert failed: %v", err)
 	}
@@ -428,7 +450,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 	}
 
 	// Now insert a batch where some are new and some are duplicates
-	mixedBatch := []CollateralRecord{
+	mixedBatch := []outbound.CollateralRecord{
 		{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
@@ -504,12 +526,11 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 
 func TestSaveBorrowerCollaterals_ForeignKeyViolation(t *testing.T) {
 	fixture := setupPositionTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
 	// Try to insert with non-existent user_id
-	invalidRecord := CollateralRecord{
+	invalidRecord := outbound.CollateralRecord{
 		UserID:            999999, // Non-existent
 		ProtocolID:        fixture.protocolID,
 		TokenID:           fixture.tokenID,
@@ -527,7 +548,7 @@ func TestSaveBorrowerCollaterals_ForeignKeyViolation(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	err = fixture.repo.SaveBorrowerCollaterals(ctx, tx, []CollateralRecord{invalidRecord})
+	err = fixture.repo.SaveBorrowerCollaterals(ctx, tx, []outbound.CollateralRecord{invalidRecord})
 	if err == nil {
 		t.Error("expected foreign key violation error, got nil")
 	}
@@ -535,14 +556,13 @@ func TestSaveBorrowerCollaterals_ForeignKeyViolation(t *testing.T) {
 
 func TestSaveBorrowerCollaterals_LargeAmountPrecision(t *testing.T) {
 	fixture := setupPositionTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
 	// Test with very large numbers (typical for wei values)
 	largeAmount := "115792089237316195423570985008687907853269984665640564039457584007913129639935" // max uint256
 
-	input := CollateralRecord{
+	input := outbound.CollateralRecord{
 		UserID:            fixture.userID,
 		ProtocolID:        fixture.protocolID,
 		TokenID:           fixture.tokenID,
@@ -560,7 +580,7 @@ func TestSaveBorrowerCollaterals_LargeAmountPrecision(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	err = fixture.repo.SaveBorrowerCollaterals(ctx, tx, []CollateralRecord{input})
+	err = fixture.repo.SaveBorrowerCollaterals(ctx, tx, []outbound.CollateralRecord{input})
 	if err != nil {
 		t.Fatalf("SaveBorrowerCollaterals with large amount failed: %v", err)
 	}
@@ -582,7 +602,6 @@ func TestSaveBorrowerCollaterals_LargeAmountPrecision(t *testing.T) {
 
 func TestSaveBorrowerCollaterals_ConcurrentTransactions(t *testing.T) {
 	fixture := setupPositionTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
@@ -610,7 +629,7 @@ func TestSaveBorrowerCollaterals_ConcurrentTransactions(t *testing.T) {
 	defer tx2.Rollback(ctx)
 
 	// Insert different records in each transaction
-	records1 := []CollateralRecord{{
+	records1 := []outbound.CollateralRecord{{
 		UserID:            fixture.userID,
 		ProtocolID:        fixture.protocolID,
 		TokenID:           fixture.tokenID,
@@ -622,7 +641,7 @@ func TestSaveBorrowerCollaterals_ConcurrentTransactions(t *testing.T) {
 		CollateralEnabled: true,
 	}}
 
-	records2 := []CollateralRecord{{
+	records2 := []outbound.CollateralRecord{{
 		UserID:            userID2,
 		ProtocolID:        fixture.protocolID,
 		TokenID:           fixture.tokenID,
@@ -659,11 +678,10 @@ func TestSaveBorrowerCollaterals_ConcurrentTransactions(t *testing.T) {
 
 func TestSaveBorrowerCollaterals_TransactionIsolation(t *testing.T) {
 	fixture := setupPositionTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
-	record := CollateralRecord{
+	record := outbound.CollateralRecord{
 		UserID:            fixture.userID,
 		ProtocolID:        fixture.protocolID,
 		TokenID:           fixture.tokenID,
@@ -681,7 +699,7 @@ func TestSaveBorrowerCollaterals_TransactionIsolation(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	err = fixture.repo.SaveBorrowerCollaterals(ctx, tx, []CollateralRecord{record})
+	err = fixture.repo.SaveBorrowerCollaterals(ctx, tx, []outbound.CollateralRecord{record})
 	if err != nil {
 		t.Fatalf("save failed: %v", err)
 	}

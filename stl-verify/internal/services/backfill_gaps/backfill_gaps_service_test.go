@@ -38,10 +38,11 @@ func TestBackfillService_FillsGaps(t *testing.T) {
 	// Seed the state repo with blocks 1, 50, and 100 (leaving gaps 2-49 and 51-99)
 	for _, num := range []int64{1, 50, 100} {
 		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     num,
-			Hash:       client.GetHeader(num).Hash,
-			ParentHash: client.GetHeader(num).ParentHash,
-			ReceivedAt: time.Now().Unix(),
+			Number:         num,
+			Hash:           client.GetHeader(num).Hash,
+			ParentHash:     client.GetHeader(num).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		}); err != nil {
 			t.Fatalf("failed to save block %d: %v", num, err)
 		}
@@ -123,11 +124,12 @@ func TestBackfillService_VersionIsSavedToDatabase(t *testing.T) {
 	// Seed blocks 1 and 10 to create a gap at 2-9
 	for _, num := range []int64{1, 10} {
 		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     num,
-			Hash:       client.GetHeader(num).Hash,
-			ParentHash: client.GetHeader(num).ParentHash,
-			ReceivedAt: time.Now().Unix(),
-			Version:    0,
+			Number:         num,
+			Hash:           client.GetHeader(num).Hash,
+			ParentHash:     client.GetHeader(num).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+			Version:        0,
 		}); err != nil {
 			t.Fatalf("failed to save block %d: %v", num, err)
 		}
@@ -190,9 +192,10 @@ func TestVerifyChainIntegrity_MemoryAdapter_ValidChain(t *testing.T) {
 	// Save a contiguous chain with correct parent_hash links
 	for i := int64(1); i <= 10; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -213,9 +216,10 @@ func TestVerifyChainIntegrity_MemoryAdapter_BrokenChain(t *testing.T) {
 	// Save blocks 1-5 with correct links
 	for i := int64(1); i <= 5; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -224,9 +228,10 @@ func TestVerifyChainIntegrity_MemoryAdapter_BrokenChain(t *testing.T) {
 
 	// Save block 6 with WRONG parent_hash (points to block 3 instead of 5)
 	_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     6,
-		Hash:       fmt.Sprintf("0x%064x", 6),
-		ParentHash: fmt.Sprintf("0x%064x", 3), // Wrong! Should be 5
+		Number:         6,
+		Hash:           fmt.Sprintf("0x%064x", 6),
+		ParentHash:     fmt.Sprintf("0x%064x", 3), // Wrong! Should be 5
+		BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save block 6: %v", err)
@@ -259,9 +264,10 @@ func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
 	// Blocks 1-5 correct, block 6 has wrong parent
 	for i := int64(1); i <= 5; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -270,9 +276,10 @@ func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
 
 	// Block 6 with wrong parent_hash
 	_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     6,
-		Hash:       fmt.Sprintf("0x%064x", 6),
-		ParentHash: fmt.Sprintf("0x%064x", 3), // Wrong! Points to block 3
+		Number:         6,
+		Hash:           fmt.Sprintf("0x%064x", 6),
+		ParentHash:     fmt.Sprintf("0x%064x", 3), // Wrong! Points to block 3
+		BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save block 6: %v", err)
@@ -281,9 +288,10 @@ func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
 	// Blocks 7-10 continue (even though 6 is broken)
 	for i := int64(7); i <= 10; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -522,10 +530,11 @@ func TestBackfillService_RejectsNonCanonicalBlock(t *testing.T) {
 	// Pre-populate state repo with blocks 1-8 and 10 (leaving gap at 9)
 	for i := int64(1); i <= 8; i++ {
 		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       client.GetHeader(i).Hash,
-			ParentHash: client.GetHeader(i).ParentHash,
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           client.GetHeader(i).Hash,
+			ParentHash:     client.GetHeader(i).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		}); err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
 		}
@@ -533,10 +542,11 @@ func TestBackfillService_RejectsNonCanonicalBlock(t *testing.T) {
 
 	// Save block 10 with parent_hash pointing to ORIGINAL block 9 hash
 	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     10,
-		Hash:       client.GetHeader(10).Hash,
-		ParentHash: originalBlock9Hash, // This is A9, but client returns B9
-		ReceivedAt: time.Now().Unix(),
+		Number:         10,
+		Hash:           client.GetHeader(10).Hash,
+		ParentHash:     originalBlock9Hash, // This is A9, but client returns B9
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}); err != nil {
 		t.Fatalf("failed to save block 10: %v", err)
 	}
@@ -609,10 +619,11 @@ func saveBlockState(t *testing.T, ctx context.Context, repo outbound.BlockStateR
 	t.Helper()
 
 	if _, err := repo.SaveBlock(ctx, outbound.BlockState{
-		Number:     num,
-		Hash:       hash,
-		ParentHash: parentHash,
-		ReceivedAt: time.Now().Unix(),
+		Number:         num,
+		Hash:           hash,
+		ParentHash:     parentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}); err != nil {
 		t.Fatalf("failed to save block %d: %v", num, err)
 	}
@@ -776,7 +787,7 @@ func TestBackfillService_SkipsStaleBlockWhenLiveAlreadyProcessed(t *testing.T) {
 	// but processes it after live service has already saved the canonical block.
 	staleBlockData := outbound.BlockData{
 		BlockNumber: 100,
-		Block:       []byte(fmt.Sprintf(`{"number":"0x64","hash":"%s","parentHash":"0x%064x","timestamp":"0x0"}`, staleHash, 99)),
+		Block:       fmt.Appendf(nil, `{"number":"0x64","hash":"%s","parentHash":"0x%064x","timestamp":"0x0"}`, staleHash, 99),
 	}
 
 	// This should skip the block, not save it
@@ -959,10 +970,11 @@ func TestVerifyBoundaryBlocks_DetectsUncleReorg(t *testing.T) {
 
 	// 2. Initial State: Repo has Block 100 (Hash A)
 	block100 := outbound.BlockState{
-		Number:     100,
-		Hash:       "0xHASH_A",
-		ParentHash: "0xHASH_99",
-		Version:    0,
+		Number:         100,
+		Hash:           "0xHASH_A",
+		ParentHash:     "0xHASH_99",
+		Version:        0,
+		BlockTimestamp: time.Now().Unix(),
 	}
 	if _, err := repo.SaveBlock(ctx, block100); err != nil {
 		t.Fatalf("failed to save block: %v", err)
@@ -1027,11 +1039,11 @@ func TestVerifyBoundaryBlocks_RecoverFromDeepReorgCorrected(t *testing.T) {
 	// Canonical: 100A, 101A
 	block100A := outbound.BlockState{
 		Number: 100, Hash: "0xHASH_100A", ParentHash: "0xHASH_99",
-		IsOrphaned: false, ReceivedAt: time.Now().Unix(),
+		IsOrphaned: false, ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix(),
 	}
 	block101A := outbound.BlockState{
 		Number: 101, Hash: "0xHASH_101A", ParentHash: "0xHASH_100A",
-		IsOrphaned: false, ReceivedAt: time.Now().Unix(),
+		IsOrphaned: false, ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix(),
 	}
 
 	if _, err := stateRepo.SaveBlock(ctx, block100A); err != nil {
@@ -1049,10 +1061,11 @@ func TestVerifyBoundaryBlocks_RecoverFromDeepReorgCorrected(t *testing.T) {
 
 	// Pre-populate ancestor 99 in DB so 100B binds correctly
 	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     99,
-		Hash:       "0xHASH_99",
-		ParentHash: "0xHASH_98",
-		IsOrphaned: false,
+		Number:         99,
+		Hash:           "0xHASH_99",
+		ParentHash:     "0xHASH_98",
+		IsOrphaned:     false,
+		BlockTimestamp: time.Now().Unix(),
 	}); err != nil {
 		t.Fatalf("failed to save block: %v", err)
 	}
@@ -1160,10 +1173,11 @@ func TestRetry_CacheFailureIsRetried(t *testing.T) {
 	// Save blocks 1 and 5 to create a gap (blocks 2-4 missing)
 	for _, num := range []int64{1, 5} {
 		block := outbound.BlockState{
-			Number:     num,
-			Hash:       client.GetHeader(num).Hash,
-			ParentHash: client.GetHeader(num).ParentHash,
-			ReceivedAt: time.Now().Unix(),
+			Number:         num,
+			Hash:           client.GetHeader(num).Hash,
+			ParentHash:     client.GetHeader(num).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		}
 		_, _ = stateRepo.SaveBlock(ctx, block)
 		_ = stateRepo.MarkPublishComplete(ctx, block.Hash)
@@ -1235,10 +1249,11 @@ func TestRetry_PublishFailureIsRetried(t *testing.T) {
 	// Create gap: save blocks 1 and 5
 	for _, num := range []int64{1, 5} {
 		block := outbound.BlockState{
-			Number:     num,
-			Hash:       client.GetHeader(num).Hash,
-			ParentHash: client.GetHeader(num).ParentHash,
-			ReceivedAt: time.Now().Unix(),
+			Number:         num,
+			Hash:           client.GetHeader(num).Hash,
+			ParentHash:     client.GetHeader(num).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		}
 		_, _ = stateRepo.SaveBlock(ctx, block)
 		_ = stateRepo.MarkPublishComplete(ctx, block.Hash)
@@ -1319,10 +1334,11 @@ func TestAdvanceWatermark_StopsAtUnpublishedBlock(t *testing.T) {
 	// Save all 10 blocks to the state repo
 	for i := int64(1); i <= 10; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -1376,10 +1392,11 @@ func TestAdvanceWatermark_AdvancesWhenAllPublished(t *testing.T) {
 	// Save all 10 blocks
 	for i := int64(1); i <= 10; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -1442,10 +1459,11 @@ func TestWatermarkAlreadyPastUnpublished_RetryFixesThem(t *testing.T) {
 	// Save blocks 1-10 to the state repo (simulating live service having processed them)
 	for i := int64(1); i <= 10; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       client.GetHeader(i).Hash,
-			ParentHash: client.GetHeader(i).ParentHash,
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           client.GetHeader(i).Hash,
+			ParentHash:     client.GetHeader(i).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -1455,10 +1473,11 @@ func TestWatermarkAlreadyPastUnpublished_RetryFixesThem(t *testing.T) {
 	// Save block 12 (live service jumped ahead), leaving a gap at 11.
 	// This gap ensures retryIncompletePublishes is reached during findAndFillGaps.
 	_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     12,
-		Hash:       client.GetHeader(12).Hash,
-		ParentHash: client.GetHeader(12).ParentHash,
-		ReceivedAt: time.Now().Unix(),
+		Number:         12,
+		Hash:           client.GetHeader(12).Hash,
+		ParentHash:     client.GetHeader(12).ParentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save block 12: %v", err)
@@ -1612,5 +1631,105 @@ func TestPublishNeverHappensWithoutCache(t *testing.T) {
 				t.Logf("correctly rejected: %v", err)
 			}
 		})
+	}
+}
+
+// TestBackfillService_RetriesIncompletePublishes_WhenNoGaps reproduces the bug where
+// blocks saved to DB but not published (block_published=false) are never retried
+// when there are no missing block numbers (no gaps).
+//
+// Scenario:
+// 1. LiveService saves blocks 1-10 to DB
+// 2. Cache/SNS publish fails for blocks 3,5,7 → block_published=false
+// 3. Backfill runs, FindGaps() returns 0 gaps (all block numbers exist)
+// 4. BUG: retryIncompletePublishes() is never called due to early return
+// 5. Blocks 3,5,7 remain unpublished forever
+func TestBackfillService_RetriesIncompletePublishes_WhenNoGaps(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Pre-populate client with blocks 1-10
+	for i := int64(1); i <= 10; i++ {
+		client.AddBlock(i, "")
+	}
+
+	// Save ALL blocks 1-10 to DB (simulating LiveService saved them)
+	for i := int64(1); i <= 10; i++ {
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:         i,
+			Hash:           client.GetHeader(i).Hash,
+			ParentHash:     client.GetHeader(i).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Mark most blocks as published (simulating successful cache+SNS)
+	for i := int64(1); i <= 10; i++ {
+		if i == 3 || i == 5 || i == 7 {
+			continue // Leave these UNpublished (simulating cache/SNS failure)
+		}
+		if err := stateRepo.MarkPublishComplete(ctx, client.GetHeader(i).Hash); err != nil {
+			t.Fatalf("failed to mark block %d published: %v", i, err)
+		}
+	}
+
+	// Verify precondition: blocks 3,5,7 are unpublished
+	incomplete, err := stateRepo.GetBlocksWithIncompletePublish(ctx, 100)
+	if err != nil {
+		t.Fatalf("failed to get incomplete publishes: %v", err)
+	}
+	if len(incomplete) != 3 {
+		t.Fatalf("expected 3 incomplete publishes, got %d", len(incomplete))
+	}
+
+	config := BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		BoundaryCheckDepth: -1, // Disable boundary check (not relevant to this test)
+		Logger:             slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Run a single backfill pass
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatalf("backfill failed: %v", err)
+	}
+
+	// After backfill, ALL blocks should be published (blocks 3,5,7 should have been retried)
+	stillIncomplete, err := stateRepo.GetBlocksWithIncompletePublish(ctx, 100)
+	if err != nil {
+		t.Fatalf("failed to get incomplete publishes after backfill: %v", err)
+	}
+	if len(stillIncomplete) != 0 {
+		unpublishedNums := make([]int64, len(stillIncomplete))
+		for i, b := range stillIncomplete {
+			unpublishedNums[i] = b.Number
+		}
+		t.Errorf("expected 0 incomplete publishes after backfill, got %d (blocks: %v)",
+			len(stillIncomplete), unpublishedNums)
+	}
+
+	// Verify events were published for the retried blocks
+	blockEvents := eventSink.GetBlockEvents()
+	retriedBlocks := map[int64]bool{}
+	for _, e := range blockEvents {
+		retriedBlocks[e.BlockNumber] = true
+	}
+	for _, num := range []int64{3, 5, 7} {
+		if !retriedBlocks[num] {
+			t.Errorf("block %d was not retried/published", num)
+		}
 	}
 }

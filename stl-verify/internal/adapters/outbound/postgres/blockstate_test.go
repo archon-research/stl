@@ -8,8 +8,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// TestIsSerializationFailure tests the isSerializationFailure helper function.
-func TestIsSerializationFailure(t *testing.T) {
+// TestIsRetryableTxError tests the isRetryableTxError helper function.
+func TestIsRetryableTxError(t *testing.T) {
 	tests := []struct {
 		name     string
 		err      error
@@ -58,7 +58,7 @@ func TestIsSerializationFailure(t *testing.T) {
 				Code:    "40P01",
 				Message: "deadlock detected",
 			},
-			expected: false,
+			expected: true,
 		},
 		{
 			name:     "generic error without pgconn.PgError",
@@ -74,9 +74,9 @@ func TestIsSerializationFailure(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isSerializationFailure(tt.err)
+			result := isRetryableTxError(tt.err)
 			if result != tt.expected {
-				t.Errorf("isSerializationFailure(%v) = %v, want %v", tt.err, result, tt.expected)
+				t.Errorf("isRetryableTxError(%v) = %v, want %v", tt.err, result, tt.expected)
 			}
 		})
 	}

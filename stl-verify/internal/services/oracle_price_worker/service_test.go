@@ -15,8 +15,24 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+// dummyMulticallerFactory returns a MulticallerFactory that creates a mock multicaller
+// for any oracle type. It satisfies the non-nil factory requirement for NewService.
+func dummyMulticallerFactory() MulticallerFactory {
+	return func(_ entity.OracleType) (outbound.Multicaller, error) {
+		return &testutil.MockMulticaller{}, nil
+	}
+}
+
+// multicallFactoryFor returns a MulticallerFactory that always returns the given multicaller.
+func multicallFactoryFor(mc outbound.Multicaller) MulticallerFactory {
+	return func(_ entity.OracleType) (outbound.Multicaller, error) {
+		return mc, nil
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -145,9 +161,10 @@ func (m *mockRepo) GetAllProtocolOracleBindings(ctx context.Context) ([]*entity.
 // Helpers
 // ---------------------------------------------------------------------------
 
-func validConfig() Config {
-	return Config{
-		Logger: testutil.DiscardLogger(),
+func validConfig() shared.SQSConsumerConfig {
+	return shared.SQSConsumerConfig{
+		Logger:  testutil.DiscardLogger(),
+		ChainID: 1,
 	}
 }
 
@@ -158,6 +175,7 @@ func defaultOracle() *entity.Oracle {
 		DisplayName:     "Spark: aave Oracle",
 		ChainID:         1,
 		Address:         common.HexToAddress("0x8105f69D9C41644c6A0803fDA7D03Aa70996cFD9"),
+		OracleType:      entity.OracleTypeAave,
 		DeploymentBlock: 17000000,
 		Enabled:         true,
 	}
@@ -227,14 +245,12 @@ func makeBlockEventJSON(blockNumber int64, version int, blockTimestamp int64) st
 
 func TestNewService(t *testing.T) {
 	consumer := &mockConsumer{}
-	multicaller := &testutil.MockMulticaller{}
 	repo := &mockRepo{}
 
 	tests := []struct {
 		name        string
-		config      Config
+		config      shared.SQSConsumerConfig
 		consumer    outbound.SQSConsumer
-		multicaller outbound.Multicaller
 		repo        outbound.OnchainPriceRepository
 		wantErr     bool
 		errContains string
@@ -242,18 +258,16 @@ func TestNewService(t *testing.T) {
 		checkDefaults bool
 	}{
 		{
-			name:        "success with all valid params",
-			config:      validConfig(),
-			consumer:    consumer,
-			multicaller: multicaller,
-			repo:        repo,
-			wantErr:     false,
+			name:     "success with all valid params",
+			config:   validConfig(),
+			consumer: consumer,
+			repo:     repo,
+			wantErr:  false,
 		},
 		{
 			name:          "success with default config values",
-			config:        Config{},
+			config:        shared.SQSConsumerConfig{ChainID: 1},
 			consumer:      consumer,
-			multicaller:   multicaller,
 			repo:          repo,
 			wantErr:       false,
 			checkDefaults: true,
@@ -262,34 +276,34 @@ func TestNewService(t *testing.T) {
 			name:        "error nil consumer",
 			config:      validConfig(),
 			consumer:    nil,
-			multicaller: multicaller,
 			repo:        repo,
 			wantErr:     true,
 			errContains: "consumer cannot be nil",
 		},
 		{
-			name:        "error nil multicaller",
-			config:      validConfig(),
-			consumer:    consumer,
-			multicaller: nil,
-			repo:        repo,
-			wantErr:     true,
-			errContains: "multicaller cannot be nil",
-		},
-		{
 			name:        "error nil repo",
 			config:      validConfig(),
 			consumer:    consumer,
-			multicaller: multicaller,
 			repo:        nil,
 			wantErr:     true,
 			errContains: "repo cannot be nil",
 		},
 	}
 
+	// Separate test for nil newMulticaller since the table always passes dummyMulticallerFactory().
+	t.Run("error nil newMulticaller", func(t *testing.T) {
+		_, err := NewService(validConfig(), consumer, repo, nil)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "newMulticaller cannot be nil") {
+			t.Errorf("error %q does not contain %q", err.Error(), "newMulticaller cannot be nil")
+		}
+	})
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, err := NewService(tc.config, tc.consumer, tc.multicaller, tc.repo)
+			svc, err := NewService(tc.config, tc.consumer, tc.repo, dummyMulticallerFactory())
 
 			if tc.wantErr {
 				if err == nil {
@@ -315,8 +329,8 @@ func TestNewService(t *testing.T) {
 			if svc.consumer == nil {
 				t.Error("consumer should not be nil")
 			}
-			if svc.multicaller == nil {
-				t.Error("multicaller should not be nil")
+			if svc.newMulticaller == nil {
+				t.Error("newMulticaller should not be nil")
 			}
 			if svc.repo == nil {
 				t.Error("repo should not be nil")
@@ -329,7 +343,7 @@ func TestNewService(t *testing.T) {
 			}
 
 			if tc.checkDefaults {
-				defaults := configDefaults()
+				defaults := shared.SQSConsumerConfigDefaults()
 				if svc.config.MaxMessages != defaults.MaxMessages {
 					t.Errorf("MaxMessages = %d, want %d", svc.config.MaxMessages, defaults.MaxMessages)
 				}
@@ -371,7 +385,7 @@ func TestStart(t *testing.T) {
 			errContains: "getting enabled oracles",
 		},
 		{
-			name: "error GetEnabledAssets fails is warned and skipped",
+			name: "error GetEnabledAssets fails returns error",
 			setupRepo: func(r *mockRepo) {
 				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{defaultOracle()}, nil
@@ -381,10 +395,10 @@ func TestStart(t *testing.T) {
 				}
 			},
 			wantErr:     true,
-			errContains: "no oracles with enabled assets found",
+			errContains: "building oracle unit",
 		},
 		{
-			name: "error no enabled assets returns no oracles error",
+			name: "error no enabled assets returns error",
 			setupRepo: func(r *mockRepo) {
 				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{defaultOracle()}, nil
@@ -394,10 +408,10 @@ func TestStart(t *testing.T) {
 				}
 			},
 			wantErr:     true,
-			errContains: "no oracles with enabled assets found",
+			errContains: "no enabled assets",
 		},
 		{
-			name: "error token address not found is warned and skipped",
+			name: "error token address not found returns error",
 			setupRepo: func(r *mockRepo) {
 				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{defaultOracle()}, nil
@@ -412,7 +426,7 @@ func TestStart(t *testing.T) {
 				}
 			},
 			wantErr:     true,
-			errContains: "no oracles with enabled assets found",
+			errContains: "token address not found",
 		},
 		{
 			name: "error GetLatestPrices fails is warned and skipped",
@@ -462,6 +476,7 @@ func TestStart(t *testing.T) {
 					DisplayName:     "Aave V3 Oracle",
 					ChainID:         1,
 					Address:         common.HexToAddress("0x54586bE62E3c3580375aE3723C145253060Ca0C2"),
+					OracleType:      entity.OracleTypeAave,
 					DeploymentBlock: 18000000,
 					Enabled:         true,
 				}
@@ -512,7 +527,7 @@ func TestStart(t *testing.T) {
 				new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8)),
 			})
 
-			svc, err := NewService(validConfig(), consumer, mc, repo)
+			svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
 			if err != nil {
 				t.Fatalf("NewService failed: %v", err)
 			}
@@ -594,7 +609,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -674,7 +689,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -715,7 +730,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -766,7 +781,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -824,7 +839,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -881,7 +896,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -946,7 +961,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1006,7 +1021,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1072,7 +1087,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1121,7 +1136,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1139,17 +1154,763 @@ func TestStartAndProcessMessages(t *testing.T) {
 			BlockTimestamp: blockTimestamp,
 		}
 		err = svc.processBlock(context.Background(), event)
-		// processBlock should succeed (no price changes after all entities fail validation)
-		if err != nil {
-			t.Errorf("processBlock with blockNumber=0 returned unexpected error: %v", err)
+		// processBlock should return an error because entity validation fails hard
+		if err == nil {
+			t.Error("processBlock with blockNumber=0 should have returned an error")
 		}
 
-		// No prices should have been upserted (all failed validation)
+		// No prices should have been upserted (validation failed before upsert)
 		repo.mu.Lock()
 		if repo.upsertPricesCalls != 0 {
 			t.Errorf("UpsertPrices call count = %d, want 0", repo.upsertPricesCalls)
 		}
 		repo.mu.Unlock()
+
+		if stopErr := svc.Stop(); stopErr != nil {
+			t.Errorf("Stop: %v", stopErr)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Feed oracle helpers
+// ---------------------------------------------------------------------------
+
+// feedOracleSetup configures the mock repo for a chainlink_feed oracle with one USD feed.
+func feedOracleSetup(r *mockRepo) {
+	feedAddr := common.HexToAddress("0x0000000000000000000000000000000000000F01")
+	wethAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+		return []*entity.Oracle{{
+			ID: 1, Name: "chainlink", Enabled: true,
+			OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
+		}}, nil
+	}
+	r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+		return []*entity.OracleAsset{{
+			ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
+			FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
+		}}, nil
+	}
+	r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
+		return map[int64][]byte{1: wethAddr.Bytes()}, nil
+	}
+	r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		return map[int64]float64{}, nil
+	}
+}
+
+// newFeedMulticaller creates a mock multicaller that returns latestRoundData for each feed.
+func newFeedMulticaller(t *testing.T, answers []*big.Int) *testutil.MockMulticaller {
+	t.Helper()
+	return &testutil.MockMulticaller{
+		ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			results := make([]outbound.Result, len(calls))
+			for i := range calls {
+				if i < len(answers) {
+					results[i] = outbound.Result{
+						Success: true,
+						ReturnData: testutil.PackLatestRoundData(t,
+							big.NewInt(1), answers[i], big.NewInt(1000), big.NewInt(1000), big.NewInt(1)),
+					}
+				} else {
+					results[i] = outbound.Result{Success: false}
+				}
+			}
+			return results, nil
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestStart_FeedOracle — chainlink_feed oracle initialization
+// ---------------------------------------------------------------------------
+
+func TestStart_FeedOracle(t *testing.T) {
+	repo := &mockRepo{}
+	feedOracleSetup(repo)
+
+	consumer := &mockConsumer{
+		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	mc := newFeedMulticaller(t, []*big.Int{big.NewInt(200_000_000_000)})
+
+	svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if len(svc.units) != 1 {
+		t.Fatalf("units count = %d, want 1", len(svc.units))
+	}
+
+	unit := svc.units[0]
+	if unit.Oracle.OracleType != entity.OracleTypeChainlinkFeed {
+		t.Errorf("OracleType = %q, want %q", unit.Oracle.OracleType, entity.OracleTypeChainlinkFeed)
+	}
+	if len(unit.Feeds) != 1 {
+		t.Errorf("Feeds count = %d, want 1", len(unit.Feeds))
+	}
+	if unit.Feeds[0].QuoteCurrency != "USD" {
+		t.Errorf("Feeds[0].QuoteCurrency = %q, want %q", unit.Feeds[0].QuoteCurrency, "USD")
+	}
+	if unit.Feeds[0].FeedDecimals != 8 {
+		t.Errorf("Feeds[0].FeedDecimals = %d, want 8", unit.Feeds[0].FeedDecimals)
+	}
+
+	if stopErr := svc.Stop(); stopErr != nil {
+		t.Errorf("Stop: %v", stopErr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestStart_ChronicleOracle — chronicle oracle gets its own eth_call multicaller
+// ---------------------------------------------------------------------------
+
+func TestStart_ChronicleOracle(t *testing.T) {
+	feedAddr := common.HexToAddress("0x0000000000000000000000000000000000000C01")
+	wethAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+
+	repo := &mockRepo{}
+	repo.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+		return []*entity.Oracle{{
+			ID: 2, Name: "chronicle", Enabled: true,
+			OracleType: entity.OracleTypeChronicle, PriceDecimals: 18,
+		}}, nil
+	}
+	repo.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+		return []*entity.OracleAsset{{
+			ID: 1, OracleID: 2, TokenID: 1, Enabled: true,
+			FeedAddress: feedAddr, FeedDecimals: 18, QuoteCurrency: "USD",
+		}}, nil
+	}
+	repo.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
+		return map[int64][]byte{1: wethAddr.Bytes()}, nil
+	}
+	repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		return map[int64]float64{}, nil
+	}
+
+	consumer := &mockConsumer{
+		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	// Track which oracle type the factory was called with.
+	var factoryCalledWith entity.OracleType
+	chronicleMC := &testutil.MockMulticaller{}
+	factory := func(ot entity.OracleType) (outbound.Multicaller, error) {
+		factoryCalledWith = ot
+		return chronicleMC, nil
+	}
+
+	svc, err := NewService(validConfig(), consumer, repo, factory)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if len(svc.units) != 1 {
+		t.Fatalf("units count = %d, want 1", len(svc.units))
+	}
+
+	unit := svc.units[0]
+	if unit.Oracle.OracleType != entity.OracleTypeChronicle {
+		t.Errorf("OracleType = %q, want %q", unit.Oracle.OracleType, entity.OracleTypeChronicle)
+	}
+
+	// Verify the factory was called with the chronicle oracle type.
+	if factoryCalledWith != entity.OracleTypeChronicle {
+		t.Errorf("factory called with %q, want %q", factoryCalledWith, entity.OracleTypeChronicle)
+	}
+
+	// The unit's multicaller should be the one returned by the factory.
+	if unit.multicaller != chronicleMC {
+		t.Error("chronicle unit should use the multicaller returned by the factory")
+	}
+
+	if stopErr := svc.Stop(); stopErr != nil {
+		t.Errorf("Stop: %v", stopErr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestProcessBlock_FeedOracle — end-to-end feed price processing
+// ---------------------------------------------------------------------------
+
+func TestProcessBlock_FeedOracle(t *testing.T) {
+	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+
+	repo := &mockRepo{}
+	feedOracleSetup(repo)
+
+	consumer := &mockConsumer{
+		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	answer := big.NewInt(200_000_000_000) // $2000 with 8 decimals
+	mc := newFeedMulticaller(t, []*big.Int{answer})
+
+	cfg := validConfig()
+	cfg.PollInterval = 1 * time.Millisecond
+
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	svc.decimalsValidated = true // skip decimals validation for this test
+
+	// Directly call processBlock
+	event := outbound.BlockEvent{
+		ChainID:        1,
+		BlockNumber:    18000000,
+		Version:        1,
+		BlockHash:      "0xfeedblock1",
+		BlockTimestamp: blockTimestamp,
+	}
+	if err := svc.processBlock(context.Background(), event); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	// Verify UpsertPrices was called with the correct price
+	repo.mu.Lock()
+	if repo.upsertPricesCalls != 1 {
+		t.Errorf("UpsertPrices call count = %d, want 1", repo.upsertPricesCalls)
+	}
+	if len(repo.lastUpserted) != 1 {
+		t.Errorf("lastUpserted length = %d, want 1", len(repo.lastUpserted))
+	} else {
+		p := repo.lastUpserted[0]
+		if p.TokenID != 1 {
+			t.Errorf("TokenID = %d, want 1", p.TokenID)
+		}
+		if p.PriceUSD != 2000.0 {
+			t.Errorf("PriceUSD = %f, want 2000.0", p.PriceUSD)
+		}
+		if p.BlockNumber != 18000000 {
+			t.Errorf("BlockNumber = %d, want 18000000", p.BlockNumber)
+		}
+	}
+	repo.mu.Unlock()
+
+	if stopErr := svc.Stop(); stopErr != nil {
+		t.Errorf("Stop: %v", stopErr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestProcessBlock_FeedOracle_ChangeDetection — same prices are skipped
+// ---------------------------------------------------------------------------
+
+func TestProcessBlock_FeedOracle_ChangeDetection(t *testing.T) {
+	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+
+	repo := &mockRepo{}
+	feedOracleSetup(repo)
+
+	consumer := &mockConsumer{
+		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	answer := big.NewInt(200_000_000_000) // $2000
+	mc := newFeedMulticaller(t, []*big.Int{answer})
+
+	cfg := validConfig()
+	cfg.PollInterval = 1 * time.Millisecond
+
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	svc.decimalsValidated = true // skip decimals validation for this test
+
+	// First block: prices are new, should be upserted
+	event1 := outbound.BlockEvent{
+		ChainID:        1,
+		BlockNumber:    18000000,
+		Version:        1,
+		BlockHash:      "0xfeed1",
+		BlockTimestamp: blockTimestamp,
+	}
+	if err := svc.processBlock(context.Background(), event1); err != nil {
+		t.Fatalf("processBlock (block 1): %v", err)
+	}
+
+	repo.mu.Lock()
+	if repo.upsertPricesCalls != 1 {
+		t.Errorf("after block 1: UpsertPrices call count = %d, want 1", repo.upsertPricesCalls)
+	}
+	repo.mu.Unlock()
+
+	// Second block: same price, should NOT be upserted
+	event2 := outbound.BlockEvent{
+		ChainID:        1,
+		BlockNumber:    18000001,
+		Version:        1,
+		BlockHash:      "0xfeed2",
+		BlockTimestamp: blockTimestamp + 12,
+	}
+	if err := svc.processBlock(context.Background(), event2); err != nil {
+		t.Fatalf("processBlock (block 2): %v", err)
+	}
+
+	repo.mu.Lock()
+	if repo.upsertPricesCalls != 1 {
+		t.Errorf("after block 2 (same price): UpsertPrices call count = %d, want 1 (unchanged)", repo.upsertPricesCalls)
+	}
+	repo.mu.Unlock()
+
+	if stopErr := svc.Stop(); stopErr != nil {
+		t.Errorf("Stop: %v", stopErr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestProcessBlock_FeedOracle_NonUSDConversion — ETH-denominated feed conversion
+// ---------------------------------------------------------------------------
+
+func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
+	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+
+	wethAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	weethAddr := common.HexToAddress("0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee")
+
+	feedAddr1 := common.HexToAddress("0x0000000000000000000000000000000000000F01") // WETH/USD
+	feedAddr2 := common.HexToAddress("0x0000000000000000000000000000000000000F02") // weETH/ETH
+
+	repo := &mockRepo{}
+	repo.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+		return []*entity.Oracle{{
+			ID: 1, Name: "chainlink-feeds", Enabled: true,
+			OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
+		}}, nil
+	}
+	repo.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+		return []*entity.OracleAsset{
+			{
+				ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
+				FeedAddress: feedAddr1, FeedDecimals: 8, QuoteCurrency: "USD",
+			},
+			{
+				ID: 2, OracleID: 1, TokenID: 2, Enabled: true,
+				FeedAddress: feedAddr2, FeedDecimals: 8, QuoteCurrency: "ETH",
+			},
+		}, nil
+	}
+	repo.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
+		return map[int64][]byte{
+			1: wethAddr.Bytes(),  // Token 1 = WETH → matches quoteCurrencyTokenAddr["ETH"]
+			2: weethAddr.Bytes(), // Token 2 = weETH
+		}, nil
+	}
+	repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		return map[int64]float64{}, nil
+	}
+
+	consumer := &mockConsumer{
+		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	// WETH/USD = $2000, weETH/ETH = 1.05 ETH
+	wethAnswer := big.NewInt(200_000_000_000) // 2000 * 1e8
+	weethAnswer := big.NewInt(105_000_000)    // 1.05 * 1e8
+
+	mc := newFeedMulticaller(t, []*big.Int{wethAnswer, weethAnswer})
+
+	cfg := validConfig()
+	cfg.PollInterval = 1 * time.Millisecond
+
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	svc.decimalsValidated = true // skip decimals validation for this test
+
+	event := outbound.BlockEvent{
+		ChainID:        1,
+		BlockNumber:    18000000,
+		Version:        1,
+		BlockHash:      "0xnonusd",
+		BlockTimestamp: blockTimestamp,
+	}
+	if err := svc.processBlock(context.Background(), event); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+
+	if repo.upsertPricesCalls != 1 {
+		t.Fatalf("UpsertPrices call count = %d, want 1", repo.upsertPricesCalls)
+	}
+	if len(repo.lastUpserted) != 2 {
+		t.Fatalf("lastUpserted length = %d, want 2", len(repo.lastUpserted))
+	}
+
+	// Find the weETH price (token 2) — should be 1.05 * 2000 = 2100.0
+	var weethPrice *entity.OnchainTokenPrice
+	for _, p := range repo.lastUpserted {
+		if p.TokenID == 2 {
+			weethPrice = p
+		}
+	}
+	if weethPrice == nil {
+		t.Fatal("weETH price (token 2) not found in upserted prices")
+	}
+	// ConvertNonUSDPrices multiplies: 1.05 * 2000.0 = 2100.0
+	if weethPrice.PriceUSD != 2100.0 {
+		t.Errorf("weETH PriceUSD = %f, want 2100.0", weethPrice.PriceUSD)
+	}
+
+	// Verify WETH/USD price is correct
+	var wethPrice *entity.OnchainTokenPrice
+	for _, p := range repo.lastUpserted {
+		if p.TokenID == 1 {
+			wethPrice = p
+		}
+	}
+	if wethPrice == nil {
+		t.Fatal("WETH price (token 1) not found in upserted prices")
+	}
+	if wethPrice.PriceUSD != 2000.0 {
+		t.Errorf("WETH PriceUSD = %f, want 2000.0", wethPrice.PriceUSD)
+	}
+
+	if stopErr := svc.Stop(); stopErr != nil {
+		t.Errorf("Stop: %v", stopErr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestProcessBlock_FeedOracle_AllFeedsFail — all feeds fail, no upserts
+// ---------------------------------------------------------------------------
+
+func TestProcessBlock_FeedOracle_AllFeedsFail(t *testing.T) {
+	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+
+	repo := &mockRepo{}
+	feedOracleSetup(repo)
+
+	consumer := &mockConsumer{
+		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	// All feeds return failure
+	mc := &testutil.MockMulticaller{
+		ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			results := make([]outbound.Result, len(calls))
+			for i := range calls {
+				results[i] = outbound.Result{Success: false}
+			}
+			return results, nil
+		},
+	}
+
+	cfg := validConfig()
+	cfg.PollInterval = 1 * time.Millisecond
+
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	svc.decimalsValidated = true // skip decimals validation for this test
+
+	event := outbound.BlockEvent{
+		ChainID:        1,
+		BlockNumber:    18000000,
+		Version:        1,
+		BlockHash:      "0xallfail",
+		BlockTimestamp: blockTimestamp,
+	}
+	if err := svc.processBlock(context.Background(), event); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	// No prices should have been upserted since all feeds failed
+	repo.mu.Lock()
+	if repo.upsertPricesCalls != 0 {
+		t.Errorf("UpsertPrices call count = %d, want 0 (all feeds failed)", repo.upsertPricesCalls)
+	}
+	repo.mu.Unlock()
+
+	if stopErr := svc.Stop(); stopErr != nil {
+		t.Errorf("Stop: %v", stopErr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestProcessBlock_FeedDecimalsValidation — lazy validation tests
+// ---------------------------------------------------------------------------
+
+func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
+	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+
+	t.Run("decimals mismatch blocks processing", func(t *testing.T) {
+		repo := &mockRepo{}
+		feedOracleSetup(repo)
+
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+
+		// Return decimals=18 but config says 8 → mismatch
+		callCount := 0
+		mc := &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				callCount++
+				if callCount == 1 {
+					// decimals() call
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 18)},
+					}, nil
+				}
+				// Should not be called because decimals validation fails
+				t.Fatal("unexpected Execute call after decimals validation failure")
+				return nil, nil
+			},
+		}
+
+		svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		event := outbound.BlockEvent{
+			ChainID: 1, BlockNumber: 18000000, Version: 1,
+			BlockHash: "0xdecfail", BlockTimestamp: blockTimestamp,
+		}
+		err = svc.processBlock(context.Background(), event)
+		if err == nil {
+			t.Fatal("expected decimals mismatch error, got nil")
+		}
+		if !strings.Contains(err.Error(), "feed decimals") {
+			t.Errorf("error = %q, expected it to contain 'feed decimals'", err)
+		}
+
+		if stopErr := svc.Stop(); stopErr != nil {
+			t.Errorf("Stop: %v", stopErr)
+		}
+	})
+
+	t.Run("matching decimals allows processing", func(t *testing.T) {
+		repo := &mockRepo{}
+		feedOracleSetup(repo)
+
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+
+		callCount := 0
+		mc := &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				callCount++
+				if callCount == 1 {
+					// decimals() returns 8, matching config
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 8)},
+					}, nil
+				}
+				// latestRoundData call
+				results := make([]outbound.Result, len(calls))
+				for i := range calls {
+					results[i] = outbound.Result{
+						Success: true,
+						ReturnData: testutil.PackLatestRoundData(t,
+							big.NewInt(1), big.NewInt(200_000_000_000),
+							big.NewInt(1000), big.NewInt(1000), big.NewInt(1)),
+					}
+				}
+				return results, nil
+			},
+		}
+
+		svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		event := outbound.BlockEvent{
+			ChainID: 1, BlockNumber: 18000000, Version: 1,
+			BlockHash: "0xdecok", BlockTimestamp: blockTimestamp,
+		}
+		if err := svc.processBlock(context.Background(), event); err != nil {
+			t.Fatalf("processBlock: %v", err)
+		}
+
+		// Verify prices were stored
+		repo.mu.Lock()
+		if repo.upsertPricesCalls < 1 {
+			t.Error("expected UpsertPrices to be called after successful decimals validation")
+		}
+		repo.mu.Unlock()
+
+		if stopErr := svc.Stop(); stopErr != nil {
+			t.Errorf("Stop: %v", stopErr)
+		}
+	})
+
+	t.Run("validation runs only once", func(t *testing.T) {
+		repo := &mockRepo{}
+		feedOracleSetup(repo)
+
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+
+		decimalsCallCount := 0
+		mc := &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				// Peek at call data to detect decimals() vs latestRoundData()
+				// decimals() calldata is 4 bytes, latestRoundData() is 4 bytes too, but
+				// we can use callCount to distinguish: first call is decimals(), rest are latestRoundData().
+				if decimalsCallCount == 0 {
+					decimalsCallCount++
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 8)},
+					}, nil
+				}
+				// latestRoundData
+				results := make([]outbound.Result, len(calls))
+				for i := range calls {
+					results[i] = outbound.Result{
+						Success: true,
+						ReturnData: testutil.PackLatestRoundData(t,
+							big.NewInt(1), big.NewInt(200_000_000_000),
+							big.NewInt(1000), big.NewInt(1000), big.NewInt(1)),
+					}
+				}
+				return results, nil
+			},
+		}
+
+		svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		event1 := outbound.BlockEvent{
+			ChainID: 1, BlockNumber: 18000000, Version: 1,
+			BlockHash: "0xonce1", BlockTimestamp: blockTimestamp,
+		}
+		if err := svc.processBlock(context.Background(), event1); err != nil {
+			t.Fatalf("processBlock 1: %v", err)
+		}
+
+		prevDecimalsCount := decimalsCallCount
+
+		event2 := outbound.BlockEvent{
+			ChainID: 1, BlockNumber: 18000001, Version: 1,
+			BlockHash: "0xonce2", BlockTimestamp: blockTimestamp + 12,
+		}
+		if err := svc.processBlock(context.Background(), event2); err != nil {
+			t.Fatalf("processBlock 2: %v", err)
+		}
+
+		if decimalsCallCount != prevDecimalsCount {
+			t.Errorf("decimals validated again on second block: count went from %d to %d",
+				prevDecimalsCount, decimalsCallCount)
+		}
+
+		if stopErr := svc.Stop(); stopErr != nil {
+			t.Errorf("Stop: %v", stopErr)
+		}
+	})
+
+	t.Run("aave oracle skips decimals validation", func(t *testing.T) {
+		repo := &mockRepo{}
+		defaultRepoSetup(repo) // aave oracle
+
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+
+		mc := newOracleMulticallerWithT(t, []*big.Int{
+			new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8)),
+			new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8)),
+		})
+
+		svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		event := outbound.BlockEvent{
+			ChainID: 1, BlockNumber: 18000000, Version: 1,
+			BlockHash: "0xaave", BlockTimestamp: blockTimestamp,
+		}
+		// Should succeed because aave oracles skip decimals validation
+		if err := svc.processBlock(context.Background(), event); err != nil {
+			t.Fatalf("processBlock: %v", err)
+		}
+
+		if !svc.decimalsValidated {
+			t.Error("decimalsValidated should be true after first processBlock")
+		}
 
 		if stopErr := svc.Stop(); stopErr != nil {
 			t.Errorf("Stop: %v", stopErr)
@@ -1167,7 +1928,7 @@ func TestStop(t *testing.T) {
 		consumer := &mockConsumer{}
 		mc := &testutil.MockMulticaller{}
 
-		svc, err := NewService(validConfig(), consumer, mc, repo)
+		svc, err := NewService(validConfig(), consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1197,7 +1958,7 @@ func TestStop(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, mc, repo)
+		svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}

@@ -9,17 +9,51 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// setupPostgres creates a TimescaleDB container and returns a connected repository.
+const blockstateSchemaName = "test_blockstate"
+
+var blockstatePool *pgxpool.Pool
+
+func init() {
+	// Register setup function to be called after TestMain sets sharedDSN
+	registerTestFileSetup(blockstateSchemaName, func() {
+		blockstatePool = testutil.SetupSchemaForMain(sharedDSN, blockstateSchemaName)
+	}, func() {
+		testutil.CleanupSchemaForMain(sharedDSN, blockstatePool, blockstateSchemaName)
+	})
+}
+
+// truncateBlockState clears all block-related tables for test isolation within the schema.
+func truncateBlockState(t *testing.T, ctx context.Context) {
+	t.Helper()
+	_, err := blockstatePool.Exec(ctx, `DELETE FROM block_states`)
+	if err != nil {
+		t.Fatalf("failed to truncate block_states: %v", err)
+	}
+	_, err = blockstatePool.Exec(ctx, `DELETE FROM reorg_events`)
+	if err != nil {
+		t.Fatalf("failed to truncate reorg_events: %v", err)
+	}
+	// Reset backfill_watermark to default value instead of deleting
+	_, err = blockstatePool.Exec(ctx, `UPDATE backfill_watermark SET watermark = 0`)
+	if err != nil {
+		t.Fatalf("failed to reset backfill_watermark: %v", err)
+	}
+}
+
+// setupPostgres returns a connected repository using the schema-specific pool.
+// It truncates tables to ensure test isolation within the schema.
 func setupPostgres(t *testing.T) (*BlockStateRepository, func()) {
 	t.Helper()
-
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	repo := NewBlockStateRepository(pool, 1, nil)
-	return repo, cleanup
+	ctx := context.Background()
+	truncateBlockState(t, ctx)
+	repo := NewBlockStateRepository(blockstatePool, 1, nil)
+	return repo, func() {}
 }
 
 // TestSaveBlock_DuplicateHashIsIdempotent tests that saving the same block hash
@@ -36,11 +70,12 @@ func TestSaveBlock_DuplicateHashIsIdempotent(t *testing.T) {
 	// First save: block data
 	originalReceivedAt := time.Now().Unix()
 	firstState := outbound.BlockState{
-		Number:     100,
-		Hash:       "0xabc123",
-		ParentHash: "0xparent1",
-		ReceivedAt: originalReceivedAt,
-		IsOrphaned: false,
+		Number:         100,
+		Hash:           "0xabc123",
+		ParentHash:     "0xparent1",
+		ReceivedAt:     originalReceivedAt,
+		BlockTimestamp: originalReceivedAt,
+		IsOrphaned:     false,
 	}
 
 	version1, err := repo.SaveBlock(ctx, firstState)
@@ -52,11 +87,12 @@ func TestSaveBlock_DuplicateHashIsIdempotent(t *testing.T) {
 	// Even though we're passing different values, a real duplicate would have
 	// identical content. The test verifies we ignore the second save entirely.
 	duplicateState := outbound.BlockState{
-		Number:     100,
-		Hash:       "0xabc123", // Same hash = same block
-		ParentHash: "0xparent1",
-		ReceivedAt: originalReceivedAt + 500, // Different received_at (we saw it again later)
-		IsOrphaned: false,
+		Number:         100,
+		Hash:           "0xabc123", // Same hash = same block
+		ParentHash:     "0xparent1",
+		ReceivedAt:     originalReceivedAt + 500, // Different received_at (we saw it again later)
+		BlockTimestamp: originalReceivedAt,
+		IsOrphaned:     false,
 	}
 
 	version2, err := repo.SaveBlock(ctx, duplicateState)
@@ -99,11 +135,12 @@ func TestHandleReorgAtomic_AllOrNothingSemantics(t *testing.T) {
 	// Setup: Create a chain of blocks 100, 101, 102
 	for i := int64(100); i <= 102; i++ {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0xoriginal_%d", i),
-			ParentHash: fmt.Sprintf("0xoriginal_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
-			IsOrphaned: false,
+			Number:         i,
+			Hash:           fmt.Sprintf("0xoriginal_%d", i),
+			ParentHash:     fmt.Sprintf("0xoriginal_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+			IsOrphaned:     false,
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -120,11 +157,12 @@ func TestHandleReorgAtomic_AllOrNothingSemantics(t *testing.T) {
 	}
 
 	newBlock := outbound.BlockState{
-		Number:     101,
-		Hash:       "0xnew_101",
-		ParentHash: "0xoriginal_100",
-		ReceivedAt: time.Now().Unix(),
-		IsOrphaned: false,
+		Number:         101,
+		Hash:           "0xnew_101",
+		ParentHash:     "0xoriginal_100",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+		IsOrphaned:     false,
 	}
 
 	// Execute atomic reorg
@@ -224,10 +262,11 @@ func TestGetLastBlock(t *testing.T) {
 	// Save some blocks
 	for i := int64(100); i <= 105; i++ {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0xblock_%d", i),
-			ParentHash: fmt.Sprintf("0xblock_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0xblock_%d", i),
+			ParentHash:     fmt.Sprintf("0xblock_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -275,10 +314,11 @@ func TestGetBlockByNumber(t *testing.T) {
 
 	// Save a block
 	_, err := repo.SaveBlock(ctx, outbound.BlockState{
-		Number:     100,
-		Hash:       "0xcanonical",
-		ParentHash: "0xparent",
-		ReceivedAt: time.Now().Unix(),
+		Number:         100,
+		Hash:           "0xcanonical",
+		ParentHash:     "0xparent",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save block: %v", err)
@@ -312,10 +352,11 @@ func TestGetBlockByNumber(t *testing.T) {
 		t.Fatalf("failed to mark orphaned: %v", err)
 	}
 	_, err = repo.SaveBlock(ctx, outbound.BlockState{
-		Number:     100,
-		Hash:       "0xnew_canonical",
-		ParentHash: "0xparent",
-		ReceivedAt: time.Now().Unix(),
+		Number:         100,
+		Hash:           "0xnew_canonical",
+		ParentHash:     "0xparent",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save new block: %v", err)
@@ -344,10 +385,11 @@ func TestGetBlockByHash(t *testing.T) {
 
 	// Save and then orphan a block
 	_, err := repo.SaveBlock(ctx, outbound.BlockState{
-		Number:     100,
-		Hash:       "0xorphaned_hash",
-		ParentHash: "0xparent",
-		ReceivedAt: time.Now().Unix(),
+		Number:         100,
+		Hash:           "0xorphaned_hash",
+		ParentHash:     "0xparent",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save block: %v", err)
@@ -399,7 +441,7 @@ func TestGetBlockVersionCount(t *testing.T) {
 
 	// Save first version
 	_, err := repo.SaveBlock(ctx, outbound.BlockState{
-		Number: 100, Hash: "0xv0", ParentHash: "0xparent", ReceivedAt: time.Now().Unix(),
+		Number: 100, Hash: "0xv0", ParentHash: "0xparent", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save: %v", err)
@@ -418,7 +460,7 @@ func TestGetBlockVersionCount(t *testing.T) {
 	// Mark as orphaned and save v1
 	repo.MarkBlockOrphaned(ctx, "0xv0")
 	_, err = repo.SaveBlock(ctx, outbound.BlockState{
-		Number: 100, Hash: "0xv1", ParentHash: "0xparent", ReceivedAt: time.Now().Unix(),
+		Number: 100, Hash: "0xv1", ParentHash: "0xparent", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save: %v", err)
@@ -445,10 +487,11 @@ func TestGetRecentBlocks(t *testing.T) {
 	// Save 10 blocks
 	for i := int64(1); i <= 10; i++ {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0xblock_%d", i),
-			ParentHash: fmt.Sprintf("0xblock_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0xblock_%d", i),
+			ParentHash:     fmt.Sprintf("0xblock_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -520,10 +563,11 @@ func TestMinMaxBlockNumber(t *testing.T) {
 	// Save blocks 100-110
 	for i := int64(100); i <= 110; i++ {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0xblock_%d", i),
-			ParentHash: fmt.Sprintf("0xblock_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0xblock_%d", i),
+			ParentHash:     fmt.Sprintf("0xblock_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -580,10 +624,11 @@ func TestMarkPublishComplete(t *testing.T) {
 
 	// Save a block
 	_, err := repo.SaveBlock(ctx, outbound.BlockState{
-		Number:     100,
-		Hash:       "0xtest_block",
-		ParentHash: "0xparent",
-		ReceivedAt: time.Now().Unix(),
+		Number:         100,
+		Hash:           "0xtest_block",
+		ParentHash:     "0xparent",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save block: %v", err)
@@ -617,10 +662,11 @@ func TestGetBlocksWithIncompletePublish(t *testing.T) {
 	// Save blocks with different publish states
 	for i := int64(1); i <= 3; i++ {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0xblock_%d", i),
-			ParentHash: fmt.Sprintf("0xblock_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0xblock_%d", i),
+			ParentHash:     fmt.Sprintf("0xblock_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -668,10 +714,11 @@ func TestHandleReorgAtomic_Idempotency(t *testing.T) {
 
 	// Save initial block
 	_, err := repo.SaveBlock(ctx, outbound.BlockState{
-		Number:     100,
-		Hash:       "0xoriginal",
-		ParentHash: "0xparent",
-		ReceivedAt: time.Now().Unix(),
+		Number:         100,
+		Hash:           "0xoriginal",
+		ParentHash:     "0xparent",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save block: %v", err)
@@ -686,10 +733,11 @@ func TestHandleReorgAtomic_Idempotency(t *testing.T) {
 	}
 
 	newBlock := outbound.BlockState{
-		Number:     100,
-		Hash:       "0xnew",
-		ParentHash: "0xparent",
-		ReceivedAt: time.Now().Unix(),
+		Number:         100,
+		Hash:           "0xnew",
+		ParentHash:     "0xparent",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}
 
 	// First call
@@ -766,10 +814,11 @@ func TestFindGaps(t *testing.T) {
 		// Save blocks 1-10
 		for i := int64(1); i <= 10; i++ {
 			_, err := repo.SaveBlock(ctx, outbound.BlockState{
-				Number:     i,
-				Hash:       fmt.Sprintf("0xblock_%d", i),
-				ParentHash: fmt.Sprintf("0xblock_%d", i-1),
-				ReceivedAt: time.Now().Unix(),
+				Number:         i,
+				Hash:           fmt.Sprintf("0xblock_%d", i),
+				ParentHash:     fmt.Sprintf("0xblock_%d", i-1),
+				ReceivedAt:     time.Now().Unix(),
+				BlockTimestamp: time.Now().Unix(),
 			})
 			if err != nil {
 				t.Fatalf("failed to save block %d: %v", i, err)
@@ -796,10 +845,11 @@ func TestFindGaps_WithGap(t *testing.T) {
 	// Save blocks 1, 2, 5, 6, 10 (missing 3-4 and 7-9)
 	for _, num := range []int64{1, 2, 5, 6, 10} {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     num,
-			Hash:       fmt.Sprintf("0xblock_%d", num),
-			ParentHash: fmt.Sprintf("0xblock_%d", num-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         num,
+			Hash:           fmt.Sprintf("0xblock_%d", num),
+			ParentHash:     fmt.Sprintf("0xblock_%d", num-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", num, err)
@@ -834,10 +884,11 @@ func TestFindGaps_WatermarkSkipsVerifiedBlocks(t *testing.T) {
 	// Save blocks 1-5 and 8-10 (missing 6-7)
 	for _, num := range []int64{1, 2, 3, 4, 5, 8, 9, 10} {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     num,
-			Hash:       fmt.Sprintf("0xblock_%d", num),
-			ParentHash: fmt.Sprintf("0xblock_%d", num-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         num,
+			Hash:           fmt.Sprintf("0xblock_%d", num),
+			ParentHash:     fmt.Sprintf("0xblock_%d", num-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", num, err)
@@ -913,10 +964,11 @@ func TestFindGaps_GapAtBeginning(t *testing.T) {
 	// Save blocks 5-10 (missing 1-4)
 	for i := int64(5); i <= 10; i++ {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0xblock_%d", i),
-			ParentHash: fmt.Sprintf("0xblock_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0xblock_%d", i),
+			ParentHash:     fmt.Sprintf("0xblock_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -946,10 +998,11 @@ func TestFindGaps_IgnoresOrphanedBlocks(t *testing.T) {
 	// Save blocks 1-5
 	for i := int64(1); i <= 5; i++ {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0xblock_%d", i),
-			ParentHash: fmt.Sprintf("0xblock_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0xblock_%d", i),
+			ParentHash:     fmt.Sprintf("0xblock_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -986,10 +1039,11 @@ func TestVerifyChainIntegrity(t *testing.T) {
 		// Save a properly linked chain
 		for i := int64(1); i <= 5; i++ {
 			_, err := repo.SaveBlock(ctx, outbound.BlockState{
-				Number:     i,
-				Hash:       fmt.Sprintf("0x%064d", i),
-				ParentHash: fmt.Sprintf("0x%064d", i-1),
-				ReceivedAt: time.Now().Unix(),
+				Number:         i,
+				Hash:           fmt.Sprintf("0x%064d", i),
+				ParentHash:     fmt.Sprintf("0x%064d", i-1),
+				ReceivedAt:     time.Now().Unix(),
+				BlockTimestamp: time.Now().Unix(),
 			})
 			if err != nil {
 				t.Fatalf("failed to save block %d: %v", i, err)
@@ -1017,10 +1071,11 @@ func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
 			parentHash = "0xwrong_parent" // This doesn't match block 2's hash
 		}
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064d", i),
-			ParentHash: parentHash,
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064d", i),
+			ParentHash:     parentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -1069,10 +1124,11 @@ func TestVerifyChainIntegrity_IgnoresOrphanedBlocks(t *testing.T) {
 	// Save a valid chain
 	for i := int64(1); i <= 5; i++ {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064d", i),
-			ParentHash: fmt.Sprintf("0x%064d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064d", i),
+			ParentHash:     fmt.Sprintf("0x%064d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -1085,10 +1141,11 @@ func TestVerifyChainIntegrity_IgnoresOrphanedBlocks(t *testing.T) {
 	}
 
 	_, err := repo.SaveBlock(ctx, outbound.BlockState{
-		Number:     2,
-		Hash:       "0xnew_block_2",
-		ParentHash: fmt.Sprintf("0x%064d", 1), // Correct parent
-		ReceivedAt: time.Now().Unix(),
+		Number:         2,
+		Hash:           "0xnew_block_2",
+		ParentHash:     fmt.Sprintf("0x%064d", 1), // Correct parent
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save replacement block: %v", err)
@@ -1126,11 +1183,12 @@ func TestSaveBlock_ConcurrentRaceConditionWithRetry(t *testing.T) {
 
 			// Each goroutine tries to save a block with a unique hash
 			version, err := repo.SaveBlock(ctx, outbound.BlockState{
-				Number:     blockNum,
-				Hash:       fmt.Sprintf("0x%064d_%d", blockNum, id),
-				ParentHash: fmt.Sprintf("0x%064d", blockNum-1),
-				ReceivedAt: time.Now().Unix(),
-				IsOrphaned: false,
+				Number:         blockNum,
+				Hash:           fmt.Sprintf("0x%064d_%d", blockNum, id),
+				ParentHash:     fmt.Sprintf("0x%064d", blockNum-1),
+				ReceivedAt:     time.Now().Unix(),
+				BlockTimestamp: time.Now().Unix(),
+				IsOrphaned:     false,
 			})
 			resultCh <- struct {
 				version int
@@ -1194,10 +1252,11 @@ func TestHandleReorgAtomic_MultipleBlocksOrphaned(t *testing.T) {
 	// Create a chain of 10 blocks (100-109)
 	for i := int64(100); i <= 109; i++ {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0xoriginal_%d", i),
-			ParentHash: fmt.Sprintf("0xoriginal_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0xoriginal_%d", i),
+			ParentHash:     fmt.Sprintf("0xoriginal_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -1214,10 +1273,11 @@ func TestHandleReorgAtomic_MultipleBlocksOrphaned(t *testing.T) {
 	}
 
 	newBlock := outbound.BlockState{
-		Number:     105,
-		Hash:       "0xnew_105",
-		ParentHash: "0xoriginal_100",
-		ReceivedAt: time.Now().Unix(),
+		Number:         105,
+		Hash:           "0xnew_105",
+		ParentHash:     "0xoriginal_100",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}
 
 	_, err := repo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock)
@@ -1256,9 +1316,9 @@ func TestHandleReorgAtomic_ShortNewChainPreservesCommonAncestor(t *testing.T) {
 
 	// 1. Setup initial chain: 100 -> 101 -> 102
 	blocks := []outbound.BlockState{
-		{Number: 100, Hash: "0xhash100", ParentHash: "0xhash99", ReceivedAt: time.Now().Unix()},
-		{Number: 101, Hash: "0xhash101", ParentHash: "0xhash100", ReceivedAt: time.Now().Unix()},
-		{Number: 102, Hash: "0xhash102", ParentHash: "0xhash101", ReceivedAt: time.Now().Unix()},
+		{Number: 100, Hash: "0xhash100", ParentHash: "0xhash99", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix()},
+		{Number: 101, Hash: "0xhash101", ParentHash: "0xhash100", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix()},
+		{Number: 102, Hash: "0xhash102", ParentHash: "0xhash101", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix()},
 	}
 
 	for _, b := range blocks {
@@ -1273,10 +1333,11 @@ func TestHandleReorgAtomic_ShortNewChainPreservesCommonAncestor(t *testing.T) {
 	// Common Ancestor: 100.
 
 	newBlock := outbound.BlockState{
-		Number:     101,
-		Hash:       "0xhash101_prime",
-		ParentHash: "0xhash100",
-		ReceivedAt: time.Now().Unix(),
+		Number:         101,
+		Hash:           "0xhash101_prime",
+		ParentHash:     "0xhash100",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}
 
 	event := outbound.ReorgEvent{
@@ -1317,9 +1378,9 @@ func TestHandleReorgAtomic_MultiBlockReorgGap(t *testing.T) {
 
 	// 1. Setup initial chain: ... -> 100 -> 101 -> 102
 	blocks := []outbound.BlockState{
-		{Number: 100, Hash: "0xhash100", ParentHash: "0xhash99", ReceivedAt: time.Now().Unix()},
-		{Number: 101, Hash: "0xhash101", ParentHash: "0xhash100", ReceivedAt: time.Now().Unix()},
-		{Number: 102, Hash: "0xhash102", ParentHash: "0xhash101", ReceivedAt: time.Now().Unix()},
+		{Number: 100, Hash: "0xhash100", ParentHash: "0xhash99", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix()},
+		{Number: 101, Hash: "0xhash101", ParentHash: "0xhash100", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix()},
+		{Number: 102, Hash: "0xhash102", ParentHash: "0xhash101", ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix()},
 	}
 
 	for _, b := range blocks {
@@ -1334,10 +1395,11 @@ func TestHandleReorgAtomic_MultiBlockReorgGap(t *testing.T) {
 	// We receive 102' as the new head. Intermediate 101' is implicitly part of the chain but not sent in the call.
 
 	newBlock := outbound.BlockState{
-		Number:     102,
-		Hash:       "0xhash102_prime",
-		ParentHash: "0xhash101_prime", // Parent is MISSING from DB
-		ReceivedAt: time.Now().Unix(),
+		Number:         102,
+		Hash:           "0xhash102_prime",
+		ParentHash:     "0xhash101_prime", // Parent is MISSING from DB
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}
 
 	event := outbound.ReorgEvent{
@@ -1397,10 +1459,11 @@ func TestHandleReorgAtomic_ConcurrentCallsWithSerializableMustAllSucceed(t *test
 	// Setup: Create a chain of blocks (100-115)
 	for i := int64(100); i <= 115; i++ {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0xoriginal_%d", i),
-			ParentHash: fmt.Sprintf("0xoriginal_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0xoriginal_%d", i),
+			ParentHash:     fmt.Sprintf("0xoriginal_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -1432,10 +1495,11 @@ func TestHandleReorgAtomic_ConcurrentCallsWithSerializableMustAllSucceed(t *test
 			}
 
 			newBlock := outbound.BlockState{
-				Number:     blockNum,
-				Hash:       fmt.Sprintf("0xnew_%d", id),
-				ParentHash: "0xoriginal_105",
-				ReceivedAt: time.Now().Unix(),
+				Number:         blockNum,
+				Hash:           fmt.Sprintf("0xnew_%d", id),
+				ParentHash:     "0xoriginal_105",
+				ReceivedAt:     time.Now().Unix(),
+				BlockTimestamp: time.Now().Unix(),
 			}
 
 			// Call the actual HandleReorgAtomic which now has SERIALIZABLE + retry logic
@@ -1485,10 +1549,11 @@ func TestFindGaps_DetectsReorgGap(t *testing.T) {
 	// Initial: 100, 101, 102
 	for i := int64(100); i <= 102; i++ {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0xhash%d", i),
-			ParentHash: fmt.Sprintf("0xhash%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0xhash%d", i),
+			ParentHash:     fmt.Sprintf("0xhash%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save setup block %d: %v", i, err)
@@ -1498,10 +1563,11 @@ func TestFindGaps_DetectsReorgGap(t *testing.T) {
 	// Reorg: 100 -> [GAP 101'] -> 102'
 	// HandleReorgAtomic only saves 102', leaving 101' missing.
 	newBlock := outbound.BlockState{
-		Number:     102,
-		Hash:       "0xhash102_prime",
-		ParentHash: "0xhash101_prime",
-		ReceivedAt: time.Now().Unix(),
+		Number:         102,
+		Hash:           "0xhash102_prime",
+		ParentHash:     "0xhash101_prime",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}
 	event := outbound.ReorgEvent{
 		DetectedAt:  time.Now(),
@@ -1554,10 +1620,11 @@ func TestGetMinUnpublishedBlock(t *testing.T) {
 	// Save blocks 1-5, mark all as published
 	for i := int64(1); i <= 5; i++ {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0xpub_%d", i),
-			ParentHash: fmt.Sprintf("0xpub_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0xpub_%d", i),
+			ParentHash:     fmt.Sprintf("0xpub_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -1580,10 +1647,11 @@ func TestGetMinUnpublishedBlock(t *testing.T) {
 	// Save blocks 6-10, leave them unpublished
 	for i := int64(6); i <= 10; i++ {
 		_, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0xpub_%d", i),
-			ParentHash: fmt.Sprintf("0xpub_%d", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0xpub_%d", i),
+			ParentHash:     fmt.Sprintf("0xpub_%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)

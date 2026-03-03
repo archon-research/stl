@@ -53,25 +53,22 @@ func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx,
 	var protocolID int64
 	addressBytes := address.Bytes()
 
+	// Upsert: on conflict preserve the earliest created_at_block via LEAST().
+	// This is safe for concurrent workers processing different blocks for the same protocol —
+	// whichever worker wins the INSERT race, subsequent LEAST() merges still produce
+	// the correct minimum created_at_block.
 	err := tx.QueryRow(ctx,
-		`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2`,
-		chainID, addressBytes).Scan(&protocolID)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		r.logger.Info("auto-creating protocol", "address", address.Hex(), "name", name)
-		err = tx.QueryRow(ctx,
-			`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING id`,
-			chainID, addressBytes, name, "lending", createdAtBlock).Scan(&protocolID)
-		if err != nil {
-			return 0, fmt.Errorf("failed to create protocol: %w", err)
-		}
-		return protocolID, nil
-	} else if err != nil {
-		return 0, fmt.Errorf("failed to get protocol: %w", err)
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET
+		     created_at_block = LEAST(protocol.created_at_block, EXCLUDED.created_at_block)
+		 RETURNING id`,
+		chainID, addressBytes, name, protocolType, createdAtBlock).Scan(&protocolID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get or create protocol: %w", err)
 	}
 
+	r.logger.Info("protocol upserted", "address", address.Hex(), "name", name, "id", protocolID)
 	return protocolID, nil
 }
 
@@ -111,10 +108,7 @@ func (r *ProtocolRepository) UpsertReserveData(ctx context.Context, tx pgx.Tx, d
 	}
 
 	for i := 0; i < len(data); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(data) {
-			end = len(data)
-		}
+		end := min(i+r.batchSize, len(data))
 		batch := data[i:end]
 
 		if err := r.upsertSparkLendReserveDataBatch(ctx, tx, batch); err != nil {
@@ -195,29 +189,7 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 	}
 
 	sb.WriteString(`
-		ON CONFLICT (protocol_id, token_id, block_number, block_version) DO UPDATE SET
-			unbacked = EXCLUDED.unbacked,
-			accrued_to_treasury_scaled = EXCLUDED.accrued_to_treasury_scaled,
-			total_a_token = EXCLUDED.total_a_token,
-			total_stable_debt = EXCLUDED.total_stable_debt,
-			total_variable_debt = EXCLUDED.total_variable_debt,
-			liquidity_rate = EXCLUDED.liquidity_rate,
-			variable_borrow_rate = EXCLUDED.variable_borrow_rate,
-			stable_borrow_rate = EXCLUDED.stable_borrow_rate,
-			average_stable_borrow_rate = EXCLUDED.average_stable_borrow_rate,
-			liquidity_index = EXCLUDED.liquidity_index,
-			variable_borrow_index = EXCLUDED.variable_borrow_index,
-			last_update_timestamp = EXCLUDED.last_update_timestamp,
-			decimals = EXCLUDED.decimals,
-			ltv = EXCLUDED.ltv,
-			liquidation_threshold = EXCLUDED.liquidation_threshold,
-			liquidation_bonus = EXCLUDED.liquidation_bonus,
-			reserve_factor = EXCLUDED.reserve_factor,
-			usage_as_collateral_enabled = EXCLUDED.usage_as_collateral_enabled,
-			borrowing_enabled = EXCLUDED.borrowing_enabled,
-			stable_borrow_rate_enabled = EXCLUDED.stable_borrow_rate_enabled,
-			is_active = EXCLUDED.is_active,
-			is_frozen = EXCLUDED.is_frozen
+		ON CONFLICT (protocol_id, token_id, block_number, block_version) DO NOTHING
 	`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)

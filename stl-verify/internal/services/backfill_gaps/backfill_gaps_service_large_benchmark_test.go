@@ -23,6 +23,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const (
@@ -40,7 +41,7 @@ func setupLargePostgres(b *testing.B) (*pgxpool.Pool, *postgres.BlockStateReposi
 
 	// Use a more performant PostgreSQL configuration for benchmarking
 	req := testcontainers.ContainerRequest{
-		Image:        "timescale/timescaledb:latest-pg17",
+		Image:        testutil.ImageTimescaleDB,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "bench",
@@ -112,7 +113,7 @@ func setupLargePostgres(b *testing.B) (*pgxpool.Pool, *postgres.BlockStateReposi
 
 	cleanup := func() {
 		pool.Close()
-		container.Terminate(ctx)
+		container.Terminate(context.Background())
 	}
 
 	return pool, repo, cleanup
@@ -185,11 +186,12 @@ func seedLargeDataset(b *testing.B, pool *pgxpool.Pool, rowCount int64, gapRange
 		}
 
 		batch = append(batch, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
-			ReceivedAt: receivedAt,
-			IsOrphaned: false,
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			ReceivedAt:     receivedAt,
+			BlockTimestamp: receivedAt,
+			IsOrphaned:     false,
 		})
 
 		// Flush when batch is full

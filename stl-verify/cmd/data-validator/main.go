@@ -8,9 +8,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"strconv"
 	"syscall"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/etherscan"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -26,20 +27,7 @@ var (
 )
 
 func init() {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, setting := range info.Settings {
-			switch setting.Key {
-			case "vcs.revision":
-				if GitCommit == "" {
-					GitCommit = setting.Value
-				}
-			case "vcs.time":
-				if BuildTime == "" {
-					BuildTime = setting.Value
-				}
-			}
-		}
-	}
+	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
 }
 
 func main() {

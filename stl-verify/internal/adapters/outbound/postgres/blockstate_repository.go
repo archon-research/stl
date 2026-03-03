@@ -58,6 +58,10 @@ func (r *BlockStateRepository) Pool() *pgxpool.Pool {
 // If it's a new block, the database trigger assigns the version atomically.
 // The provided state.Version is ignored; the actual assigned version is returned.
 func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
+	if state.BlockTimestamp == 0 {
+		return 0, fmt.Errorf("BlockTimestamp is required (used as created_at for hypertable partitioning)")
+	}
+
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "postgres.SaveBlock",
 		trace.WithSpanKind(trace.SpanKindClient),
@@ -80,7 +84,7 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 	}
 
 	onRetry := func(attempt int, err error, backoff time.Duration) {
-		r.logger.Debug("serialization failure, retrying",
+		r.logger.Debug("retryable tx error, retrying",
 			"attempt", attempt,
 			"block", state.Number,
 			"hash", state.Hash,
@@ -91,7 +95,7 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 		))
 	}
 
-	version, err := retry.Do(ctx, cfg, isSerializationFailure, onRetry, func() (int, error) {
+	version, err := retry.Do(ctx, cfg, isRetryableTxError, onRetry, func() (int, error) {
 		return r.saveBlockOnce(ctx, state)
 	})
 
@@ -158,8 +162,9 @@ func (r *BlockStateRepository) saveBlockOnce(ctx context.Context, state outbound
 	return version, nil
 }
 
-// isSerializationFailure checks if the error is a PostgreSQL serialization failure (SQLSTATE 40001).
-func isSerializationFailure(err error) bool {
+// isRetryableTxError checks if the error is a PostgreSQL serialization failure (SQLSTATE 40001)
+// or deadlock (SQLSTATE 40P01). Both are transient and safe to retry.
+func isRetryableTxError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -167,7 +172,8 @@ func isSerializationFailure(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		// SQLSTATE 40001 = serialization_failure
-		return pgErr.Code == "40001"
+		// SQLSTATE 40P01 = deadlock_detected
+		return pgErr.Code == "40001" || pgErr.Code == "40P01"
 	}
 	return false
 }
@@ -321,8 +327,12 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 // The commonAncestor is derived from the ReorgEvent (BlockNumber - Depth).
 //
 // Uses SERIALIZABLE isolation (consistent with SaveBlock) and includes retry logic
-// for transient serialization failures (SQLSTATE 40001).
+// for transient tx errors (SQLSTATE 40001 serialization failure, 40P01 deadlock).
 func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+	if newBlock.BlockTimestamp == 0 {
+		return 0, fmt.Errorf("BlockTimestamp is required (used as created_at for hypertable partitioning)")
+	}
+
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "postgres.HandleReorgAtomic",
 		trace.WithSpanKind(trace.SpanKindClient),
@@ -347,7 +357,7 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 	}
 
 	onRetry := func(attempt int, err error, backoff time.Duration) {
-		r.logger.Debug("serialization failure in HandleReorgAtomic, retrying",
+		r.logger.Debug("retryable tx error in HandleReorgAtomic, retrying",
 			"attempt", attempt,
 			"block", newBlock.Number,
 			"hash", newBlock.Hash,
@@ -358,7 +368,7 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 		))
 	}
 
-	version, err := retry.Do(ctx, cfg, isSerializationFailure, onRetry, func() (int, error) {
+	version, err := retry.Do(ctx, cfg, isRetryableTxError, onRetry, func() (int, error) {
 		return r.handleReorgAtomicOnce(ctx, commonAncestor, event, newBlock)
 	})
 
