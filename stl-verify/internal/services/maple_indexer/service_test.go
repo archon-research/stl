@@ -40,42 +40,34 @@ func (m *mockMapleClient) GetAllActiveLoansAtBlock(ctx context.Context, blockNum
 	return nil, nil
 }
 
-type mockPositionRepo struct {
-	mu                              sync.Mutex
-	upsertBorrowersTxFn             func(ctx context.Context, tx pgx.Tx, borrowers []*entity.Borrower) error
-	upsertBorrowerCollateralTxFn    func(ctx context.Context, tx pgx.Tx, collateral []*entity.BorrowerCollateral) error
-	upsertBorrowersTxCalls          int
-	upsertBorrowerCollateralTxCalls int
-	lastUpsertedBorrowers           []*entity.Borrower
-	lastUpsertedCollateral          []*entity.BorrowerCollateral
+type mockMaplePositionRepo struct {
+	mu                           sync.Mutex
+	saveBorrowerSnapshotsFn      func(ctx context.Context, snapshots []*entity.MapleBorrower) error
+	saveCollateralSnapshotsFn    func(ctx context.Context, snapshots []*entity.MapleCollateral) error
+	saveBorrowerSnapshotsCalls   int
+	saveCollateralSnapshotsCalls int
+	lastSavedBorrowers           []*entity.MapleBorrower
+	lastSavedCollateral          []*entity.MapleCollateral
 }
 
-func (m *mockPositionRepo) UpsertBorrowers(ctx context.Context, borrowers []*entity.Borrower) error {
-	return nil
-}
-
-func (m *mockPositionRepo) UpsertBorrowersTx(ctx context.Context, tx pgx.Tx, borrowers []*entity.Borrower) error {
+func (m *mockMaplePositionRepo) SaveBorrowerSnapshots(ctx context.Context, snapshots []*entity.MapleBorrower) error {
 	m.mu.Lock()
-	m.upsertBorrowersTxCalls++
-	m.lastUpsertedBorrowers = borrowers
+	m.saveBorrowerSnapshotsCalls++
+	m.lastSavedBorrowers = snapshots
 	m.mu.Unlock()
-	if m.upsertBorrowersTxFn != nil {
-		return m.upsertBorrowersTxFn(ctx, tx, borrowers)
+	if m.saveBorrowerSnapshotsFn != nil {
+		return m.saveBorrowerSnapshotsFn(ctx, snapshots)
 	}
 	return nil
 }
 
-func (m *mockPositionRepo) UpsertBorrowerCollateral(ctx context.Context, collateral []*entity.BorrowerCollateral) error {
-	return nil
-}
-
-func (m *mockPositionRepo) UpsertBorrowerCollateralTx(ctx context.Context, tx pgx.Tx, collateral []*entity.BorrowerCollateral) error {
+func (m *mockMaplePositionRepo) SaveCollateralSnapshots(ctx context.Context, snapshots []*entity.MapleCollateral) error {
 	m.mu.Lock()
-	m.upsertBorrowerCollateralTxCalls++
-	m.lastUpsertedCollateral = collateral
+	m.saveCollateralSnapshotsCalls++
+	m.lastSavedCollateral = snapshots
 	m.mu.Unlock()
-	if m.upsertBorrowerCollateralTxFn != nil {
-		return m.upsertBorrowerCollateralTxFn(ctx, tx, collateral)
+	if m.saveCollateralSnapshotsFn != nil {
+		return m.saveCollateralSnapshotsFn(ctx, snapshots)
 	}
 	return nil
 }
@@ -102,38 +94,6 @@ func (m *mockUserRepo) GetOrCreateUser(ctx context.Context, tx pgx.Tx, user enti
 
 func (m *mockUserRepo) UpsertUserProtocolMetadata(ctx context.Context, metadata []*entity.UserProtocolMetadata) error {
 	return nil
-}
-
-type mockTokenRepo struct {
-	mu                      sync.Mutex
-	getTokenIDBySymbolFn    func(ctx context.Context, chainID int64, symbol string) (int64, error)
-	getTokenIDBySymbolCalls int
-}
-
-func (m *mockTokenRepo) UpsertTokens(ctx context.Context, tokens []*entity.Token) error {
-	return nil
-}
-
-func (m *mockTokenRepo) UpsertReceiptTokens(ctx context.Context, tokens []*entity.ReceiptToken) error {
-	return nil
-}
-
-func (m *mockTokenRepo) UpsertDebtTokens(ctx context.Context, tokens []*entity.DebtToken) error {
-	return nil
-}
-
-func (m *mockTokenRepo) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
-	return 1, nil
-}
-
-func (m *mockTokenRepo) GetTokenIDBySymbol(ctx context.Context, chainID int64, symbol string) (int64, error) {
-	m.mu.Lock()
-	m.getTokenIDBySymbolCalls++
-	m.mu.Unlock()
-	if m.getTokenIDBySymbolFn != nil {
-		return m.getTokenIDBySymbolFn(ctx, chainID, symbol)
-	}
-	return 1, nil
 }
 
 type mockTxManager struct {
@@ -223,12 +183,13 @@ func defaultLoans() []outbound.MapleActiveLoan {
 			PrincipalOwed: big.NewInt(200_000_000),
 			AcmRatio:      big.NewInt(1_650_000),
 			Collateral: outbound.MapleLoanCollateral{
-				Asset:         "BTC",
-				AssetAmount:   big.NewInt(1_000_000_000),
-				AssetValueUSD: big.NewInt(60_000_000),
-				Decimals:      8,
-				State:         "Deposited",
-				Custodian:     "ANCHORAGE",
+				Asset:            "BTC",
+				AssetAmount:      big.NewInt(1_000_000_000),
+				AssetValueUSD:    big.NewInt(60_000_000),
+				Decimals:         8,
+				State:            "Deposited",
+				Custodian:        "ANCHORAGE",
+				LiquidationLevel: big.NewInt(1_500_000),
 			},
 			PoolAddress:       testPoolAddress(),
 			PoolName:          "Syrup USDC",
@@ -261,23 +222,8 @@ func defaultUserRepo() *mockUserRepo {
 	return &mockUserRepo{}
 }
 
-func defaultTokenRepo() *mockTokenRepo {
-	return &mockTokenRepo{
-		getTokenIDBySymbolFn: func(_ context.Context, _ int64, symbol string) (int64, error) {
-			switch strings.ToUpper(symbol) {
-			case "USDC":
-				return 1, nil
-			case "BTC":
-				return 2, nil
-			default:
-				return 0, fmt.Errorf("token not found for symbol %s", symbol)
-			}
-		},
-	}
-}
-
-func defaultPositionRepo() *mockPositionRepo {
-	return &mockPositionRepo{}
+func defaultMaplePositionRepo() *mockMaplePositionRepo {
+	return &mockMaplePositionRepo{}
 }
 
 // ---------------------------------------------------------------------------
@@ -287,9 +233,8 @@ func defaultPositionRepo() *mockPositionRepo {
 func TestNewService(t *testing.T) {
 	consumer := &mockConsumer{}
 	mapleAPI := &mockMapleClient{}
-	positionRepo := &mockPositionRepo{}
+	maplePositionRepo := &mockMaplePositionRepo{}
 	userRepo := &mockUserRepo{}
-	tokenRepo := &mockTokenRepo{}
 	txManager := &mockTxManager{}
 	protocolRepo := &mockProtocolRepo{}
 	protocolRepo.getProtocolByAddrFn = func(_ context.Context, _ int64, _ common.Address) (*entity.Protocol, error) {
@@ -305,67 +250,86 @@ func TestNewService(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		config       Config
-		consumer     outbound.SQSConsumer
-		mapleAPI     outbound.MapleClient
-		txManager    outbound.TxManager
-		userRepo     outbound.UserRepository
-		tokenRepo    outbound.TokenRepository
-		positionRepo outbound.PositionRepository
-		protocolRepo outbound.ProtocolRepository
-		wantErr      bool
-		errContains  string
+		name              string
+		config            Config
+		consumer          outbound.SQSConsumer
+		mapleAPI          outbound.MapleClient
+		txManager         outbound.TxManager
+		userRepo          outbound.UserRepository
+		maplePositionRepo outbound.MaplePositionRepository
+		protocolRepo      outbound.ProtocolRepository
+		wantErr           bool
+		errContains       string
 	}{
 		{
-			name:         "success with all valid params",
-			config:       validServiceConfig(),
-			consumer:     consumer,
-			mapleAPI:     mapleAPI,
-			txManager:    txManager,
-			userRepo:     userRepo,
-			tokenRepo:    tokenRepo,
-			positionRepo: positionRepo,
-			protocolRepo: protocolRepo,
+			name:              "success with all valid params",
+			config:            validServiceConfig(),
+			consumer:          consumer,
+			mapleAPI:          mapleAPI,
+			txManager:         txManager,
+			userRepo:          userRepo,
+			maplePositionRepo: maplePositionRepo,
+			protocolRepo:      protocolRepo,
 		},
 		{
-			name:         "error nil consumer",
-			config:       validServiceConfig(),
-			consumer:     nil,
-			mapleAPI:     mapleAPI,
-			txManager:    txManager,
-			userRepo:     userRepo,
-			tokenRepo:    tokenRepo,
-			positionRepo: positionRepo,
-			protocolRepo: protocolRepo,
-			wantErr:      true,
-			errContains:  "consumer cannot be nil",
+			name:              "error nil consumer",
+			config:            validServiceConfig(),
+			consumer:          nil,
+			mapleAPI:          mapleAPI,
+			txManager:         txManager,
+			userRepo:          userRepo,
+			maplePositionRepo: maplePositionRepo,
+			protocolRepo:      protocolRepo,
+			wantErr:           true,
+			errContains:       "consumer cannot be nil",
 		},
 		{
-			name:         "error nil mapleAPI",
-			config:       validServiceConfig(),
-			consumer:     consumer,
-			mapleAPI:     nil,
-			txManager:    txManager,
-			userRepo:     userRepo,
-			tokenRepo:    tokenRepo,
-			positionRepo: positionRepo,
-			protocolRepo: protocolRepo,
-			wantErr:      true,
-			errContains:  "mapleAPI cannot be nil",
+			name:              "error nil mapleAPI",
+			config:            validServiceConfig(),
+			consumer:          consumer,
+			mapleAPI:          nil,
+			txManager:         txManager,
+			userRepo:          userRepo,
+			maplePositionRepo: maplePositionRepo,
+			protocolRepo:      protocolRepo,
+			wantErr:           true,
+			errContains:       "mapleAPI cannot be nil",
 		},
 		{
-			name:         "error nil txManager",
-			config:       validServiceConfig(),
-			consumer:     consumer,
-			mapleAPI:     mapleAPI,
-			txManager:    nil,
-			userRepo:     userRepo,
-			tokenRepo:    tokenRepo,
-			positionRepo: positionRepo,
-			protocolRepo: protocolRepo,
-			wantErr:      true,
-			errContains:  "txManager cannot be nil",
+			name:              "error nil txManager",
+			config:            validServiceConfig(),
+			consumer:          consumer,
+			mapleAPI:          mapleAPI,
+			txManager:         nil,
+			userRepo:          userRepo,
+			maplePositionRepo: maplePositionRepo,
+			protocolRepo:      protocolRepo,
+			wantErr:           true,
+			errContains:       "txManager cannot be nil",
+		},
+		{
+			name:              "error nil userRepo",
+			config:            validServiceConfig(),
+			consumer:          consumer,
+			mapleAPI:          mapleAPI,
+			txManager:         txManager,
+			userRepo:          nil,
+			maplePositionRepo: maplePositionRepo,
+			protocolRepo:      protocolRepo,
+			wantErr:           true,
+			errContains:       "userRepo cannot be nil",
+		},
+		{
+			name:              "error nil maplePositionRepo",
+			config:            validServiceConfig(),
+			consumer:          consumer,
+			mapleAPI:          mapleAPI,
+			txManager:         txManager,
+			userRepo:          userRepo,
+			maplePositionRepo: nil,
+			protocolRepo:      protocolRepo,
+			wantErr:           true,
+			errContains:       "maplePositionRepo cannot be nil",
 		},
 		{
 			name: "error protocol address zero",
@@ -373,15 +337,14 @@ func TestNewService(t *testing.T) {
 				ProtocolAddress: common.Address{},
 				Logger:          testutil.DiscardLogger(),
 			},
-			consumer:     consumer,
-			mapleAPI:     mapleAPI,
-			txManager:    txManager,
-			userRepo:     userRepo,
-			tokenRepo:    tokenRepo,
-			positionRepo: positionRepo,
-			protocolRepo: protocolRepo,
-			wantErr:      true,
-			errContains:  "protocolAddress must be set",
+			consumer:          consumer,
+			mapleAPI:          mapleAPI,
+			txManager:         txManager,
+			userRepo:          userRepo,
+			maplePositionRepo: maplePositionRepo,
+			protocolRepo:      protocolRepo,
+			wantErr:           true,
+			errContains:       "protocolAddress must be set",
 		},
 		{
 			name: "error nil protocol repo",
@@ -389,28 +352,26 @@ func TestNewService(t *testing.T) {
 				ProtocolAddress: common.HexToAddress("0x804a6F5F667170F545Bf14e5DDB48C70B788390C"),
 				Logger:          testutil.DiscardLogger(),
 			},
-			consumer:     consumer,
-			mapleAPI:     mapleAPI,
-			txManager:    txManager,
-			userRepo:     userRepo,
-			tokenRepo:    tokenRepo,
-			positionRepo: positionRepo,
-			protocolRepo: nil,
-			wantErr:      true,
-			errContains:  "protocolRepo cannot be nil",
+			consumer:          consumer,
+			mapleAPI:          mapleAPI,
+			txManager:         txManager,
+			userRepo:          userRepo,
+			maplePositionRepo: maplePositionRepo,
+			protocolRepo:      nil,
+			wantErr:           true,
+			errContains:       "protocolRepo cannot be nil",
 		},
 		{
 			name: "defaults are applied for zero config",
 			config: Config{
 				ProtocolAddress: common.HexToAddress("0x804a6F5F667170F545Bf14e5DDB48C70B788390C"),
 			},
-			consumer:     consumer,
-			mapleAPI:     mapleAPI,
-			txManager:    txManager,
-			userRepo:     userRepo,
-			tokenRepo:    tokenRepo,
-			positionRepo: positionRepo,
-			protocolRepo: protocolRepo,
+			consumer:          consumer,
+			mapleAPI:          mapleAPI,
+			txManager:         txManager,
+			userRepo:          userRepo,
+			maplePositionRepo: maplePositionRepo,
+			protocolRepo:      protocolRepo,
 		},
 	}
 
@@ -422,8 +383,7 @@ func TestNewService(t *testing.T) {
 				tc.mapleAPI,
 				tc.txManager,
 				tc.userRepo,
-				tc.tokenRepo,
-				tc.positionRepo,
+				tc.maplePositionRepo,
 				tc.protocolRepo,
 			)
 			if tc.wantErr {
@@ -451,8 +411,8 @@ func TestNewService(t *testing.T) {
 			if svc.mapleAPI == nil {
 				t.Error("mapleAPI should not be nil")
 			}
-			if svc.positionRepo == nil {
-				t.Error("positionRepo should not be nil")
+			if svc.maplePositionRepo == nil {
+				t.Error("maplePositionRepo should not be nil")
 			}
 			if svc.logger == nil {
 				t.Error("logger should not be nil")
@@ -477,8 +437,7 @@ func TestStartStop(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultTokenRepo(),
-			defaultPositionRepo(),
+			defaultMaplePositionRepo(),
 			protocolRepo,
 		)
 		if err != nil {
@@ -511,8 +470,7 @@ func TestStartStop(t *testing.T) {
 			&mockMapleClient{},
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultTokenRepo(),
-			defaultPositionRepo(),
+			defaultMaplePositionRepo(),
 			protocolRepo,
 		)
 		if err != nil {
@@ -541,7 +499,7 @@ func TestProcessBlock(t *testing.T) {
 	t.Run("success: borrowers and collateral persisted", func(t *testing.T) {
 		client := &mockMapleClient{}
 		defaultClientSetup(client)
-		positionRepo := defaultPositionRepo()
+		positionRepo := defaultMaplePositionRepo()
 
 		protocolRepo := defaultProtocolRepo()
 		svc, err := NewService(
@@ -550,7 +508,6 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -576,46 +533,58 @@ func TestProcessBlock(t *testing.T) {
 
 		positionRepo.mu.Lock()
 		defer positionRepo.mu.Unlock()
-		if positionRepo.upsertBorrowersTxCalls != 1 {
-			t.Errorf("UpsertBorrowersTx calls = %d, want 1", positionRepo.upsertBorrowersTxCalls)
+		if positionRepo.saveBorrowerSnapshotsCalls != 1 {
+			t.Errorf("SaveBorrowerSnapshots calls = %d, want 1", positionRepo.saveBorrowerSnapshotsCalls)
 		}
-		if len(positionRepo.lastUpsertedBorrowers) != 1 {
-			t.Errorf("borrowers count = %d, want 1", len(positionRepo.lastUpsertedBorrowers))
+		if len(positionRepo.lastSavedBorrowers) != 1 {
+			t.Fatalf("borrowers count = %d, want 1", len(positionRepo.lastSavedBorrowers))
 		}
-		borrower := positionRepo.lastUpsertedBorrowers[0]
-		if borrower.ID != 0 {
-			t.Errorf("borrower ID = %d, want 0", borrower.ID)
+		borrower := positionRepo.lastSavedBorrowers[0]
+		if borrower.PoolAsset != "USDC" {
+			t.Errorf("borrower PoolAsset = %q, want %q", borrower.PoolAsset, "USDC")
 		}
-		if borrower.EventType != entity.EventMapleSnapshot {
-			t.Errorf("borrower EventType = %v, want %v", borrower.EventType, entity.EventMapleSnapshot)
+		if borrower.PoolDecimals != 6 {
+			t.Errorf("borrower PoolDecimals = %d, want 6", borrower.PoolDecimals)
+		}
+		if borrower.Amount.Cmp(big.NewInt(200_000_000)) != 0 {
+			t.Errorf("borrower Amount = %v, want 200000000", borrower.Amount)
 		}
 		if borrower.BlockVersion != event.Version {
 			t.Errorf("borrower BlockVersion = %d, want %d", borrower.BlockVersion, event.Version)
 		}
-		if positionRepo.upsertBorrowerCollateralTxCalls != 1 {
-			t.Errorf("UpsertBorrowerCollateralTx calls = %d, want 1", positionRepo.upsertBorrowerCollateralTxCalls)
+		if positionRepo.saveCollateralSnapshotsCalls != 1 {
+			t.Errorf("SaveCollateralSnapshots calls = %d, want 1", positionRepo.saveCollateralSnapshotsCalls)
 		}
-		if len(positionRepo.lastUpsertedCollateral) != 1 {
-			t.Errorf("collateral count = %d, want 1", len(positionRepo.lastUpsertedCollateral))
+		if len(positionRepo.lastSavedCollateral) != 1 {
+			t.Fatalf("collateral count = %d, want 1", len(positionRepo.lastSavedCollateral))
 		}
-		collateral := positionRepo.lastUpsertedCollateral[0]
-		if collateral.ID != 0 {
-			t.Errorf("collateral ID = %d, want 0", collateral.ID)
+		collateral := positionRepo.lastSavedCollateral[0]
+		if collateral.CollateralAsset != "BTC" {
+			t.Errorf("collateral CollateralAsset = %q, want %q", collateral.CollateralAsset, "BTC")
 		}
-		if collateral.EventType != entity.EventMapleSnapshot {
-			t.Errorf("collateral EventType = %v, want %v", collateral.EventType, entity.EventMapleSnapshot)
+		if collateral.CollateralDecimals != 8 {
+			t.Errorf("collateral CollateralDecimals = %d, want 8", collateral.CollateralDecimals)
+		}
+		if collateral.Amount.Cmp(big.NewInt(1_000_000_000)) != 0 {
+			t.Errorf("collateral Amount = %v, want 1000000000", collateral.Amount)
+		}
+		if collateral.Custodian != "ANCHORAGE" {
+			t.Errorf("collateral Custodian = %q, want %q", collateral.Custodian, "ANCHORAGE")
+		}
+		if collateral.State != "Deposited" {
+			t.Errorf("collateral State = %q, want %q", collateral.State, "Deposited")
 		}
 		if collateral.BlockVersion != event.Version {
 			t.Errorf("collateral BlockVersion = %d, want %d", collateral.BlockVersion, event.Version)
 		}
 	})
 
-	t.Run("no loans found: no upserts", func(t *testing.T) {
+	t.Run("no loans found: no saves", func(t *testing.T) {
 		client := &mockMapleClient{}
 		client.getAllActiveLoansAtBlockFn = func(_ context.Context, _ uint64) ([]outbound.MapleActiveLoan, error) {
 			return nil, nil
 		}
-		positionRepo := defaultPositionRepo()
+		positionRepo := defaultMaplePositionRepo()
 
 		protocolRepo := defaultProtocolRepo()
 		svc, err := NewService(
@@ -624,7 +593,6 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -642,11 +610,11 @@ func TestProcessBlock(t *testing.T) {
 		}
 
 		positionRepo.mu.Lock()
-		if positionRepo.upsertBorrowersTxCalls != 0 {
-			t.Errorf("UpsertBorrowersTx calls = %d, want 0", positionRepo.upsertBorrowersTxCalls)
+		if positionRepo.saveBorrowerSnapshotsCalls != 0 {
+			t.Errorf("SaveBorrowerSnapshots calls = %d, want 0", positionRepo.saveBorrowerSnapshotsCalls)
 		}
-		if positionRepo.upsertBorrowerCollateralTxCalls != 0 {
-			t.Errorf("UpsertBorrowerCollateralTx calls = %d, want 0", positionRepo.upsertBorrowerCollateralTxCalls)
+		if positionRepo.saveCollateralSnapshotsCalls != 0 {
+			t.Errorf("SaveCollateralSnapshots calls = %d, want 0", positionRepo.saveCollateralSnapshotsCalls)
 		}
 		positionRepo.mu.Unlock()
 	})
@@ -664,8 +632,7 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultTokenRepo(),
-			defaultPositionRepo(),
+			defaultMaplePositionRepo(),
 			protocolRepo,
 		)
 		if err != nil {
@@ -686,11 +653,11 @@ func TestProcessBlock(t *testing.T) {
 		}
 	})
 
-	t.Run("upsert borrowers error propagates", func(t *testing.T) {
+	t.Run("save borrowers error propagates", func(t *testing.T) {
 		client := &mockMapleClient{}
 		defaultClientSetup(client)
-		positionRepo := defaultPositionRepo()
-		positionRepo.upsertBorrowersTxFn = func(_ context.Context, _ pgx.Tx, _ []*entity.Borrower) error {
+		positionRepo := defaultMaplePositionRepo()
+		positionRepo.saveBorrowerSnapshotsFn = func(_ context.Context, _ []*entity.MapleBorrower) error {
 			return fmt.Errorf("database write failure")
 		}
 
@@ -701,7 +668,6 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -723,11 +689,11 @@ func TestProcessBlock(t *testing.T) {
 		}
 	})
 
-	t.Run("upsert borrower collateral error propagates", func(t *testing.T) {
+	t.Run("save collateral error propagates", func(t *testing.T) {
 		client := &mockMapleClient{}
 		defaultClientSetup(client)
-		positionRepo := defaultPositionRepo()
-		positionRepo.upsertBorrowerCollateralTxFn = func(_ context.Context, _ pgx.Tx, _ []*entity.BorrowerCollateral) error {
+		positionRepo := defaultMaplePositionRepo()
+		positionRepo.saveCollateralSnapshotsFn = func(_ context.Context, _ []*entity.MapleCollateral) error {
 			return fmt.Errorf("collateral write failure")
 		}
 
@@ -738,7 +704,6 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -760,7 +725,7 @@ func TestProcessBlock(t *testing.T) {
 		}
 	})
 
-	t.Run("success: single transaction for users and positions", func(t *testing.T) {
+	t.Run("success: single transaction for users", func(t *testing.T) {
 		client := &mockMapleClient{}
 		defaultClientSetup(client)
 		txMgr := defaultTxManager()
@@ -772,8 +737,7 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			txMgr,
 			defaultUserRepo(),
-			defaultTokenRepo(),
-			defaultPositionRepo(),
+			defaultMaplePositionRepo(),
 			protocolRepo,
 		)
 		if err != nil {
@@ -789,7 +753,7 @@ func TestProcessBlock(t *testing.T) {
 			t.Fatalf("processBlock: %v", err)
 		}
 
-		// User resolution and position persistence now happen in a single transaction
+		// User resolution and position persistence happen in a single transaction
 		if txMgr.withTransactionCalls != 1 {
 			t.Errorf("WithTransaction calls = %d, want 1", txMgr.withTransactionCalls)
 		}
@@ -837,7 +801,7 @@ func TestProcessBlock(t *testing.T) {
 			}, nil
 		}
 		userRepo := defaultUserRepo()
-		positionRepo := defaultPositionRepo()
+		positionRepo := defaultMaplePositionRepo()
 
 		protocolRepo := defaultProtocolRepo()
 		svc, err := NewService(
@@ -846,7 +810,6 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			userRepo,
-			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -872,11 +835,11 @@ func TestProcessBlock(t *testing.T) {
 
 		positionRepo.mu.Lock()
 		defer positionRepo.mu.Unlock()
-		if len(positionRepo.lastUpsertedBorrowers) != 2 {
-			t.Errorf("borrowers count = %d, want 2", len(positionRepo.lastUpsertedBorrowers))
+		if len(positionRepo.lastSavedBorrowers) != 2 {
+			t.Errorf("borrowers count = %d, want 2", len(positionRepo.lastSavedBorrowers))
 		}
-		if len(positionRepo.lastUpsertedCollateral) != 2 {
-			t.Errorf("collateral count = %d, want 2", len(positionRepo.lastUpsertedCollateral))
+		if len(positionRepo.lastSavedCollateral) != 2 {
+			t.Errorf("collateral count = %d, want 2", len(positionRepo.lastSavedCollateral))
 		}
 	})
 
@@ -896,8 +859,7 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			userRepo,
-			defaultTokenRepo(),
-			defaultPositionRepo(),
+			defaultMaplePositionRepo(),
 			protocolRepo,
 		)
 		if err != nil {
@@ -932,8 +894,7 @@ func TestProcessBlock(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultTokenRepo(),
-			defaultPositionRepo(),
+			defaultMaplePositionRepo(),
 			protocolRepo,
 		)
 		if err != nil {
@@ -953,6 +914,70 @@ func TestProcessBlock(t *testing.T) {
 			t.Errorf("error %q should contain 'unexpected chain ID'", err.Error())
 		}
 	})
+
+	t.Run("invalid block number returns error", func(t *testing.T) {
+		client := &mockMapleClient{}
+		defaultClientSetup(client)
+
+		protocolRepo := defaultProtocolRepo()
+		svc, err := NewService(
+			validServiceConfig(),
+			blockingConsumer(),
+			client,
+			defaultTxManager(),
+			defaultUserRepo(),
+			defaultMaplePositionRepo(),
+			protocolRepo,
+		)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = svc.Stop() }()
+
+		event := outbound.BlockEvent{ChainID: 1, BlockNumber: 0, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp}
+		err = svc.processBlock(context.Background(), event)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "invalid block number") {
+			t.Errorf("error %q should contain 'invalid block number'", err.Error())
+		}
+	})
+
+	t.Run("missing block hash returns error", func(t *testing.T) {
+		client := &mockMapleClient{}
+		defaultClientSetup(client)
+
+		protocolRepo := defaultProtocolRepo()
+		svc, err := NewService(
+			validServiceConfig(),
+			blockingConsumer(),
+			client,
+			defaultTxManager(),
+			defaultUserRepo(),
+			defaultMaplePositionRepo(),
+			protocolRepo,
+		)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = svc.Stop() }()
+
+		event := outbound.BlockEvent{ChainID: 1, BlockNumber: 21000000, Version: 1, BlockHash: "", BlockTimestamp: blockTimestamp}
+		err = svc.processBlock(context.Background(), event)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "block hash missing") {
+			t.Errorf("error %q should contain 'block hash missing'", err.Error())
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -965,7 +990,7 @@ func TestProcessMessages(t *testing.T) {
 	t.Run("end-to-end: message processed and deleted", func(t *testing.T) {
 		client := &mockMapleClient{}
 		defaultClientSetup(client)
-		positionRepo := defaultPositionRepo()
+		positionRepo := defaultMaplePositionRepo()
 
 		messageDelivered := false
 		body := makeMapleBlockEventJSON(21000000, blockTimestamp)
@@ -995,7 +1020,6 @@ func TestProcessMessages(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -1009,8 +1033,8 @@ func TestProcessMessages(t *testing.T) {
 		testutil.WaitForCondition(t, 2*time.Second, func() bool {
 			positionRepo.mu.Lock()
 			defer positionRepo.mu.Unlock()
-			return positionRepo.upsertBorrowersTxCalls >= 1
-		}, "UpsertBorrowers to be called")
+			return positionRepo.saveBorrowerSnapshotsCalls >= 1
+		}, "SaveBorrowerSnapshots to be called")
 
 		consumer.Mu.Lock()
 		if consumer.DeleteMessageCalls < 1 {
@@ -1038,8 +1062,7 @@ func TestProcessMessages(t *testing.T) {
 			&mockMapleClient{},
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultTokenRepo(),
-			defaultPositionRepo(),
+			defaultMaplePositionRepo(),
 			protocolRepo,
 		)
 		if err != nil {
@@ -1061,7 +1084,7 @@ func TestProcessMessages(t *testing.T) {
 	})
 
 	t.Run("empty messages: no processing", func(t *testing.T) {
-		positionRepo := defaultPositionRepo()
+		positionRepo := defaultMaplePositionRepo()
 		consumer := &mockConsumer{
 			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				return nil, nil
@@ -1078,7 +1101,6 @@ func TestProcessMessages(t *testing.T) {
 			&mockMapleClient{},
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -1092,8 +1114,8 @@ func TestProcessMessages(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		positionRepo.mu.Lock()
-		if positionRepo.upsertBorrowersTxCalls != 0 {
-			t.Errorf("UpsertBorrowersTx calls = %d, want 0", positionRepo.upsertBorrowersTxCalls)
+		if positionRepo.saveBorrowerSnapshotsCalls != 0 {
+			t.Errorf("SaveBorrowerSnapshots calls = %d, want 0", positionRepo.saveBorrowerSnapshotsCalls)
 		}
 		positionRepo.mu.Unlock()
 
@@ -1128,8 +1150,7 @@ func TestProcessMessages(t *testing.T) {
 			&mockMapleClient{},
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultTokenRepo(),
-			defaultPositionRepo(),
+			defaultMaplePositionRepo(),
 			protocolRepo,
 		)
 		if err != nil {
@@ -1153,7 +1174,7 @@ func TestProcessMessages(t *testing.T) {
 	t.Run("delete message error: logged but processing continues", func(t *testing.T) {
 		client := &mockMapleClient{}
 		defaultClientSetup(client)
-		positionRepo := defaultPositionRepo()
+		positionRepo := defaultMaplePositionRepo()
 
 		delivered := false
 		body := makeMapleBlockEventJSON(21000000, blockTimestamp)
@@ -1186,7 +1207,6 @@ func TestProcessMessages(t *testing.T) {
 			client,
 			defaultTxManager(),
 			defaultUserRepo(),
-			defaultTokenRepo(),
 			positionRepo,
 			protocolRepo,
 		)
@@ -1200,8 +1220,8 @@ func TestProcessMessages(t *testing.T) {
 		testutil.WaitForCondition(t, 2*time.Second, func() bool {
 			positionRepo.mu.Lock()
 			defer positionRepo.mu.Unlock()
-			return positionRepo.upsertBorrowersTxCalls >= 1
-		}, "UpsertBorrowers to be called")
+			return positionRepo.saveBorrowerSnapshotsCalls >= 1
+		}, "SaveBorrowerSnapshots to be called")
 
 		consumer.Mu.Lock()
 		if consumer.DeleteMessageCalls < 1 {
