@@ -266,9 +266,9 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 
 	// Wait for both messages to be processed (at least 2 receive calls + 2 deletes)
 	testutil.WaitForCondition(t, 30*time.Second, func() bool {
-		consumer.mu.Lock()
-		defer consumer.mu.Unlock()
-		return consumer.deleteMessageCalls >= 2
+		consumer.Mu.Lock()
+		defer consumer.Mu.Unlock()
+		return consumer.DeleteMessageCalls >= 2
 	}, "both messages to be processed")
 
 	// Only the first block should have prices (change detection skips second)
@@ -347,9 +347,9 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 
 	// Wait for all 3 messages to be processed
 	testutil.WaitForCondition(t, 30*time.Second, func() bool {
-		consumer.mu.Lock()
-		defer consumer.mu.Unlock()
-		return consumer.deleteMessageCalls >= 3
+		consumer.Mu.Lock()
+		defer consumer.Mu.Unlock()
+		return consumer.DeleteMessageCalls >= 3
 	}, "all 3 messages to be processed")
 
 	// All 3 blocks should have prices (each has unique prices)
@@ -600,9 +600,9 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 
 	// Wait for the message to be processed (delete indicates processing completed)
 	testutil.WaitForCondition(t, 30*time.Second, func() bool {
-		consumer.mu.Lock()
-		defer consumer.mu.Unlock()
-		return consumer.deleteMessageCalls >= 1
+		consumer.Mu.Lock()
+		defer consumer.Mu.Unlock()
+		return consumer.DeleteMessageCalls >= 1
 	}, "message to be processed")
 
 	// Should still have only 2 prices (the pre-seeded ones)
