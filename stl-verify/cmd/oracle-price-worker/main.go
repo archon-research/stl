@@ -129,7 +129,7 @@ func run(ctx context.Context, args []string) error {
 	// Service telemetry
 	oracleTelemetry, err := oracle_price_worker.NewTelemetry()
 	if err != nil {
-		logger.Warn("failed to create oracle telemetry", "error", err)
+		return fmt.Errorf("creating oracle telemetry: %w", err)
 	}
 
 	logger.Info("starting oracle price worker", "queue", cfg.queueURL, "chainID", cfg.chainID)

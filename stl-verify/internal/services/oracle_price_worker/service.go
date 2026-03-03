@@ -297,12 +297,11 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 	changed, err := s.detectChanges(prices, event, unit)
 	if err != nil {
 		SetSpanError(detectSpan, err, "detect changes failed")
+		detectSpan.End()
+		return fmt.Errorf("detecting changes at block %d: %w", event.BlockNumber, err)
 	}
 	detectSpan.SetAttributes(attribute.Int("prices.changed", len(changed)))
 	detectSpan.End()
-	if err != nil {
-		return fmt.Errorf("detecting changes at block %d: %w", event.BlockNumber, err)
-	}
 
 	if len(changed) == 0 {
 		s.logger.Debug("no price changes", "oracle", unit.Oracle.Name, "block", event.BlockNumber)
@@ -356,12 +355,11 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 	changed, err := s.detectFeedChanges(results, event, unit)
 	if err != nil {
 		SetSpanError(detectSpan, err, "detect feed changes failed")
+		detectSpan.End()
+		return fmt.Errorf("detecting feed changes at block %d: %w", event.BlockNumber, err)
 	}
 	detectSpan.SetAttributes(attribute.Int("prices.changed", len(changed)))
 	detectSpan.End()
-	if err != nil {
-		return fmt.Errorf("detecting feed changes at block %d: %w", event.BlockNumber, err)
-	}
 
 	if len(changed) == 0 {
 		s.logger.Debug("no price changes", "oracle", unit.Oracle.Name, "block", event.BlockNumber)

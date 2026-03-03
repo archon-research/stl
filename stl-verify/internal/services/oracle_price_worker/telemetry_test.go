@@ -8,6 +8,8 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
@@ -19,30 +21,18 @@ func TestNewTelemetry(t *testing.T) {
 	if tel == nil {
 		t.Fatal("NewTelemetry() returned nil")
 	}
-	if tel.tracer == nil {
-		t.Error("tracer is nil")
-	}
-	if tel.meter == nil {
-		t.Error("meter is nil")
-	}
-	if tel.blocksProcessed == nil {
-		t.Error("blocksProcessed counter is nil")
-	}
-	if tel.pricesChanged == nil {
-		t.Error("pricesChanged counter is nil")
-	}
-	if tel.rpcCallsTotal == nil {
-		t.Error("rpcCallsTotal counter is nil")
-	}
-	if tel.errorsTotal == nil {
-		t.Error("errorsTotal counter is nil")
-	}
-	if tel.blockDuration == nil {
-		t.Error("blockDuration histogram is nil")
-	}
-	if tel.rpcDuration == nil {
-		t.Error("rpcDuration histogram is nil")
-	}
+
+	// Verify the instance works by calling all public methods without panic.
+	ctx := context.Background()
+	tel.RecordBlockProcessed(ctx, time.Second, nil)
+	tel.RecordPricesChanged(ctx, "test", 1)
+	tel.RecordRPCCall(ctx, "eth_call", time.Millisecond, nil)
+	tel.RecordError(ctx, "op", errors.New("e"))
+
+	_, span := tel.StartBlockSpan(ctx, 1)
+	span.End()
+	_, span = tel.StartSpan(ctx, "test.span")
+	span.End()
 }
 
 func TestNewTelemetryWithProviders(t *testing.T) {
@@ -56,29 +46,55 @@ func TestNewTelemetryWithProviders(t *testing.T) {
 	if tel == nil {
 		t.Fatal("NewTelemetryWithProviders() returned nil")
 	}
-	if tel.tracer == nil {
-		t.Error("tracer is nil")
+
+	// Verify the instance works by calling all public methods without panic.
+	ctx := context.Background()
+	tel.RecordBlockProcessed(ctx, time.Second, nil)
+	tel.RecordPricesChanged(ctx, "test", 1)
+	tel.RecordRPCCall(ctx, "eth_call", time.Millisecond, nil)
+	tel.RecordError(ctx, "op", errors.New("e"))
+
+	_, span := tel.StartBlockSpan(ctx, 1)
+	span.End()
+	_, span = tel.StartSpan(ctx, "test.span")
+	span.End()
+}
+
+func TestNewTelemetryWithProviders_CreatesSpans(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	mp := metricnoop.NewMeterProvider()
+
+	tel, err := NewTelemetryWithProviders(tp, mp)
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProviders() error: %v", err)
 	}
-	if tel.meter == nil {
-		t.Error("meter is nil")
+
+	ctx := context.Background()
+	ctx, blockSpan := tel.StartBlockSpan(ctx, 42)
+	_, childSpan := tel.StartSpan(ctx, "oracle.fetchPrices", attribute.String("rpc.method", "getAssetsPrices"))
+	childSpan.End()
+	blockSpan.End()
+
+	_ = tp.ForceFlush(context.Background())
+
+	spans := exporter.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("expected 2 spans, got %d", len(spans))
 	}
-	if tel.blocksProcessed == nil {
-		t.Error("blocksProcessed counter is nil")
+
+	// Child span is exported first (ended first).
+	if spans[0].Name != "oracle.fetchPrices" {
+		t.Errorf("span[0].Name = %q, want %q", spans[0].Name, "oracle.fetchPrices")
 	}
-	if tel.pricesChanged == nil {
-		t.Error("pricesChanged counter is nil")
+	if spans[1].Name != "oracle.processBlock" {
+		t.Errorf("span[1].Name = %q, want %q", spans[1].Name, "oracle.processBlock")
 	}
-	if tel.rpcCallsTotal == nil {
-		t.Error("rpcCallsTotal counter is nil")
-	}
-	if tel.errorsTotal == nil {
-		t.Error("errorsTotal counter is nil")
-	}
-	if tel.blockDuration == nil {
-		t.Error("blockDuration histogram is nil")
-	}
-	if tel.rpcDuration == nil {
-		t.Error("rpcDuration histogram is nil")
+
+	// Verify parent-child relationship.
+	if spans[0].Parent.SpanID() != spans[1].SpanContext.SpanID() {
+		t.Error("fetchPrices span should be a child of processBlock span")
 	}
 }
 
