@@ -40,6 +40,9 @@ type expectedActiveLoan struct {
 func assertBigInt(t *testing.T, label string, got, want *big.Int) {
 	t.Helper()
 	if want == nil {
+		if got != nil {
+			t.Errorf("%s = %s, want <nil>", label, got)
+		}
 		return
 	}
 	if got == nil {

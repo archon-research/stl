@@ -1,7 +1,7 @@
-// Package maple_indexer provides an SQS consumer that fetches Maple Finance
+// Package mapleindexer provides an SQS consumer that fetches Maple Finance
 // borrower debt and collateral snapshots on each new block, then persists the
 // results to the database.
-package maple_indexer
+package mapleindexer
 
 import (
 	"context"
@@ -17,6 +17,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
+
+// protocolReader is a narrow interface for the only protocol operation the
+// Maple indexer requires. It avoids coupling this service to SparkLend-specific
+// methods on the full outbound.ProtocolRepository interface.
+type protocolReader interface {
+	GetProtocolByAddress(ctx context.Context, chainID int64, address common.Address) (*entity.Protocol, error)
+}
 
 // Config holds configuration for the maple indexer service.
 type Config struct {
@@ -50,10 +57,12 @@ type Service struct {
 	maplePositionRepo outbound.MaplePositionRepository
 	userRepo          outbound.UserRepository
 	txManager         outbound.TxManager
-	protocolRepo      outbound.ProtocolRepository
+	protocolRepo      protocolReader
 	protocolID        int64
 
-	ctx    context.Context
+	// runCtx and cancel govern the lifecycle of the background processing loop.
+	// Set by Start; cancelled by Stop.
+	runCtx context.Context //nolint:containedctx
 	cancel context.CancelFunc
 	logger *slog.Logger
 }
@@ -66,7 +75,7 @@ func NewService(
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,
 	maplePositionRepo outbound.MaplePositionRepository,
-	protocolRepo outbound.ProtocolRepository,
+	protocolRepo protocolReader,
 ) (*Service, error) {
 	if consumer == nil {
 		return nil, fmt.Errorf("consumer cannot be nil")
@@ -118,9 +127,9 @@ func NewService(
 
 // Start begins processing SQS messages.
 func (s *Service) Start(ctx context.Context) error {
-	s.ctx, s.cancel = context.WithCancel(ctx)
+	s.runCtx, s.cancel = context.WithCancel(ctx)
 
-	protocol, err := s.protocolRepo.GetProtocolByAddress(s.ctx, s.config.ChainID, s.config.ProtocolAddress)
+	protocol, err := s.protocolRepo.GetProtocolByAddress(s.runCtx, s.config.ChainID, s.config.ProtocolAddress)
 	if err != nil {
 		return fmt.Errorf("looking up protocol by address %s: %w", s.config.ProtocolAddress.Hex(), err)
 	}
@@ -129,7 +138,7 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 	s.protocolID = protocol.ID
 
-	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
+	go sqsutil.RunLoop(s.runCtx, sqsutil.Config{
 		Consumer:     s.consumer,
 		MaxMessages:  s.config.MaxMessages,
 		PollInterval: s.config.PollInterval,
@@ -187,7 +196,7 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) e
 		if err != nil {
 			return fmt.Errorf("building loan entities: %w", err)
 		}
-		loanIDMap, err := s.maplePositionRepo.SaveLoanSnapshots(ctx, loanSnapshots)
+		loanIDMap, err := s.maplePositionRepo.SaveLoanSnapshots(ctx, tx, loanSnapshots)
 		if err != nil {
 			return fmt.Errorf("persisting loans: %w", err)
 		}
@@ -198,11 +207,11 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) e
 			return fmt.Errorf("building position entities: %w", err)
 		}
 
-		if err := s.maplePositionRepo.SaveBorrowerSnapshots(ctx, borrowers); err != nil {
+		if err := s.maplePositionRepo.SaveBorrowerSnapshots(ctx, tx, borrowers); err != nil {
 			return fmt.Errorf("persisting borrowers: %w", err)
 		}
 
-		if err := s.maplePositionRepo.SaveCollateralSnapshots(ctx, collaterals); err != nil {
+		if err := s.maplePositionRepo.SaveCollateralSnapshots(ctx, tx, collaterals); err != nil {
 			return fmt.Errorf("persisting collateral: %w", err)
 		}
 
@@ -229,16 +238,16 @@ func (s *Service) buildLoanEntities(loans []outbound.MapleActiveLoan, blockNumbe
 	loanEntities := make([]*entity.MapleLoan, 0, len(loans))
 
 	for _, loan := range loans {
-		loanEntity, err := entity.NewMapleLoan(
-			loan.LoanID,
-			s.protocolID,
-			blockNumber,
-			blockVersion,
-			loan.PoolAddress,
-			loan.PoolName,
-			loan.PoolAssetSymbol,
-			loan.PoolAssetDecimals,
-		)
+		loanEntity, err := entity.NewMapleLoan(entity.MapleLoanParams{
+			LoanAddress:       loan.LoanID,
+			ProtocolID:        s.protocolID,
+			BlockNumber:       blockNumber,
+			BlockVersion:      blockVersion,
+			PoolAddress:       loan.PoolAddress,
+			PoolName:          loan.PoolName,
+			PoolAssetSymbol:   loan.PoolAssetSymbol,
+			PoolAssetDecimals: loan.PoolAssetDecimals,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("loan %s: %w", loan.LoanID.Hex(), err)
 		}

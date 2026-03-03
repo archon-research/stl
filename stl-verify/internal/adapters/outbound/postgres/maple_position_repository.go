@@ -7,6 +7,7 @@ import (
 	"maps"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -44,18 +45,12 @@ func NewMaplePositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSi
 	}, nil
 }
 
-// SaveLoanSnapshots persists Maple loan metadata snapshots atomically.
+// SaveLoanSnapshots persists Maple loan metadata snapshots within the provided transaction.
 // Returns a map of loan_address (hex string) -> loan_id for use when persisting borrowers and collateral.
-func (r *MaplePositionRepository) SaveLoanSnapshots(ctx context.Context, snapshots []*entity.MapleLoan) (map[string]int64, error) {
+func (r *MaplePositionRepository) SaveLoanSnapshots(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleLoan) (map[string]int64, error) {
 	if len(snapshots) == 0 {
 		return make(map[string]int64), nil
 	}
-
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer rollback(ctx, tx, r.logger)
 
 	loanIDMap := make(map[string]int64, len(snapshots))
 
@@ -68,9 +63,6 @@ func (r *MaplePositionRepository) SaveLoanSnapshots(ctx context.Context, snapsho
 		maps.Copy(loanIDMap, batchMap)
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("committing transaction: %w", err)
-	}
 	return loanIDMap, nil
 }
 
@@ -125,8 +117,7 @@ func (r *MaplePositionRepository) saveLoanBatch(ctx context.Context, tx pgx.Tx, 
 		if err := rows.Scan(&id, &loanAddr); err != nil {
 			return nil, fmt.Errorf("scanning loan ID: %w", err)
 		}
-		// Convert bytes to hex string for map key
-		loanIDMap[fmt.Sprintf("0x%x", loanAddr)] = id
+		loanIDMap[strings.ToLower(common.BytesToAddress(loanAddr).Hex())] = id
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating loan rows: %w", err)
@@ -135,27 +126,13 @@ func (r *MaplePositionRepository) saveLoanBatch(ctx context.Context, tx pgx.Tx, 
 	return loanIDMap, nil
 }
 
-// SaveBorrowerSnapshots persists Maple borrower (debt) position snapshots atomically.
-func (r *MaplePositionRepository) SaveBorrowerSnapshots(ctx context.Context, snapshots []*entity.MapleBorrower) error {
-	if len(snapshots) == 0 {
-		return nil
-	}
-
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer rollback(ctx, tx, r.logger)
-
+// SaveBorrowerSnapshots persists Maple borrower (debt) position snapshots within the provided transaction.
+func (r *MaplePositionRepository) SaveBorrowerSnapshots(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleBorrower) error {
 	for i := 0; i < len(snapshots); i += r.batchSize {
 		end := min(i+r.batchSize, len(snapshots))
 		if err := r.saveBorrowerBatch(ctx, tx, snapshots[i:end]); err != nil {
 			return err
 		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
 }
@@ -173,7 +150,7 @@ func (r *MaplePositionRepository) saveBorrowerBatch(ctx context.Context, tx pgx.
 	colCount := len(borrowerColumns)
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("\n\t\tINSERT INTO maple_borrower (%s)\n\t\tVALUES ", strings.Join(borrowerColumns, ", ")))
+	sb.WriteString(fmt.Sprintf("INSERT INTO maple_borrower (%s)\nVALUES ", strings.Join(borrowerColumns, ", ")))
 
 	args := make([]any, 0, len(snapshots)*colCount)
 	for i, s := range snapshots {
@@ -201,27 +178,13 @@ func (r *MaplePositionRepository) saveBorrowerBatch(ctx context.Context, tx pgx.
 	return nil
 }
 
-// SaveCollateralSnapshots persists Maple collateral position snapshots atomically.
-func (r *MaplePositionRepository) SaveCollateralSnapshots(ctx context.Context, snapshots []*entity.MapleCollateral) error {
-	if len(snapshots) == 0 {
-		return nil
-	}
-
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer rollback(ctx, tx, r.logger)
-
+// SaveCollateralSnapshots persists Maple collateral position snapshots within the provided transaction.
+func (r *MaplePositionRepository) SaveCollateralSnapshots(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleCollateral) error {
 	for i := 0; i < len(snapshots); i += r.batchSize {
 		end := min(i+r.batchSize, len(snapshots))
 		if err := r.saveCollateralBatch(ctx, tx, snapshots[i:end]); err != nil {
 			return err
 		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
 }
@@ -240,7 +203,7 @@ func (r *MaplePositionRepository) saveCollateralBatch(ctx context.Context, tx pg
 	colCount := len(collateralColumns)
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("\n\t\tINSERT INTO maple_collateral (%s)\n\t\tVALUES ", strings.Join(collateralColumns, ", ")))
+	sb.WriteString(fmt.Sprintf("INSERT INTO maple_collateral (%s)\nVALUES ", strings.Join(collateralColumns, ", ")))
 
 	args := make([]any, 0, len(snapshots)*colCount)
 	for i, s := range snapshots {
@@ -273,23 +236,4 @@ func (r *MaplePositionRepository) saveCollateralBatch(ctx context.Context, tx pg
 		return fmt.Errorf("upserting maple collateral batch: %w", err)
 	}
 	return nil
-}
-
-// buildPlaceholders generates a SQL placeholder tuple like "($1, $2, $3)" for the given
-// row index and column count. Row 0 produces ($1, $2, ...), row 1 produces ($N+1, $N+2, ...), etc.
-func buildPlaceholders(rowIdx, colCount int) string {
-	parts := make([]string, colCount)
-	base := rowIdx * colCount
-	for i := range colCount {
-		parts[i] = fmt.Sprintf("$%d", base+i+1)
-	}
-	return "(" + strings.Join(parts, ", ") + ")"
-}
-
-// nilIfEmpty returns nil if the string is empty, otherwise returns a pointer to the string.
-func nilIfEmpty(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
 }

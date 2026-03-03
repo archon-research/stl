@@ -28,8 +28,8 @@ type Config struct {
 	Timeout    time.Duration
 }
 
-// ConfigDefaults returns a Config with sensible defaults.
-func ConfigDefaults() Config {
+// configDefaults returns a Config with sensible defaults.
+func configDefaults() Config {
 	return Config{
 		Endpoint: "https://api.maple.finance/v2/graphql",
 		Timeout:  15 * time.Second,
@@ -45,7 +45,7 @@ type Client struct {
 
 // NewClient creates a new Maple GraphQL client.
 func NewClient(cfg Config) (*Client, error) {
-	defaults := ConfigDefaults()
+	defaults := configDefaults()
 	if cfg.Endpoint == "" {
 		cfg.Endpoint = defaults.Endpoint
 	}
@@ -233,20 +233,22 @@ func (c *Client) execute(ctx context.Context, query string, variables map[string
 		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	// Check for GraphQL-level errors.
-	var errResp graphqlErrorResponse
-	err = json.Unmarshal(respBody, &errResp)
-	if err != nil {
-		// If we can't decode the error response, log it and return a generic error.
-		c.logger.Warn("decoding GraphQL error response", "error", err, "response", string(respBody))
-		return fmt.Errorf("decoding GraphQL error response. request failed with status %d", resp.StatusCode)
+	// Decode into a unified envelope that captures both errors and the typed data.
+	// This avoids parsing the body twice.
+	var envelope struct {
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
 	}
-	if len(errResp.Errors) > 0 {
-		messages := make([]string, 0, len(errResp.Errors))
-		for _, entry := range errResp.Errors {
+	if err := json.Unmarshal(respBody, &envelope); err != nil {
+		c.logger.Warn("decoding GraphQL response", "error", err, "response", string(respBody))
+		return fmt.Errorf("decoding GraphQL response: %w", err)
+	}
+	if len(envelope.Errors) > 0 {
+		messages := make([]string, 0, len(envelope.Errors))
+		for _, entry := range envelope.Errors {
 			messages = append(messages, entry.Message)
 		}
-
 		return fmt.Errorf("graphql error: %s", strings.Join(messages, "; "))
 	}
 
@@ -262,12 +264,6 @@ func (c *Client) execute(ctx context.Context, query string, variables map[string
 type graphqlRequest struct {
 	Query     string         `json:"query"`
 	Variables map[string]any `json:"variables,omitempty"`
-}
-
-type graphqlErrorResponse struct {
-	Errors []struct {
-		Message string `json:"message"`
-	} `json:"errors"`
 }
 
 type assetInfo struct {

@@ -31,26 +31,29 @@ type MapleLoan struct {
 	LoanWalletType    string // e.g., "EVM", "BASE" for blockchain type
 }
 
+// MapleLoanParams holds the constructor parameters for NewMapleLoan.
+type MapleLoanParams struct {
+	LoanAddress       common.Address
+	ProtocolID        int64
+	BlockNumber       int64
+	BlockVersion      int
+	PoolAddress       common.Address
+	PoolName          string
+	PoolAssetSymbol   string
+	PoolAssetDecimals int
+}
+
 // NewMapleLoan creates a new MapleLoan entity with validation.
-func NewMapleLoan(
-	loanAddress common.Address,
-	protocolID int64,
-	blockNumber int64,
-	blockVersion int,
-	poolAddress common.Address,
-	poolName string,
-	poolAssetSymbol string,
-	poolAssetDecimals int,
-) (*MapleLoan, error) {
+func NewMapleLoan(p MapleLoanParams) (*MapleLoan, error) {
 	loan := &MapleLoan{
-		LoanAddress:       loanAddress,
-		ProtocolID:        protocolID,
-		BlockNumber:       blockNumber,
-		BlockVersion:      blockVersion,
-		PoolAddress:       poolAddress,
-		PoolName:          poolName,
-		PoolAssetSymbol:   poolAssetSymbol,
-		PoolAssetDecimals: poolAssetDecimals,
+		LoanAddress:       p.LoanAddress,
+		ProtocolID:        p.ProtocolID,
+		BlockNumber:       p.BlockNumber,
+		BlockVersion:      p.BlockVersion,
+		PoolAddress:       p.PoolAddress,
+		PoolName:          p.PoolName,
+		PoolAssetSymbol:   p.PoolAssetSymbol,
+		PoolAssetDecimals: p.PoolAssetDecimals,
 	}
 	if err := loan.validate(); err != nil {
 		return nil, err

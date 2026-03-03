@@ -3,6 +3,8 @@ package outbound
 import (
 	"context"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
@@ -12,22 +14,22 @@ import (
 //
 // The schema is normalized: loan metadata is stored in maple_loan, and both
 // maple_borrower and maple_collateral reference it via loan_id.
+//
+// All methods accept a pgx.Tx so they can participate in a caller-owned transaction.
+// The caller is responsible for beginning, committing, and rolling back the transaction.
 type MaplePositionRepository interface {
-	// SaveLoanSnapshots persists Maple loan metadata snapshots atomically.
+	// SaveLoanSnapshots persists Maple loan metadata snapshots within the provided transaction.
 	// Returns a map of loan_address (hex string) -> loan_id for use when persisting borrowers and collateral.
-	// All records are inserted in a single transaction - if any record fails, all changes are rolled back.
 	// Conflict resolution: ON CONFLICT (loan_address, block_number, block_version) DO UPDATE
-	SaveLoanSnapshots(ctx context.Context, snapshots []*entity.MapleLoan) (map[string]int64, error)
+	SaveLoanSnapshots(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleLoan) (map[string]int64, error)
 
-	// SaveBorrowerSnapshots persists Maple borrower (debt) position snapshots atomically.
+	// SaveBorrowerSnapshots persists Maple borrower (debt) position snapshots within the provided transaction.
 	// Requires loan_id to be set on each snapshot (obtained from SaveLoanSnapshots).
-	// All records are inserted in a single transaction - if any record fails, all changes are rolled back.
-	// Conflict resolution: ON CONFLICT (loan_id, block_number, block_version) DO UPDATE
-	SaveBorrowerSnapshots(ctx context.Context, snapshots []*entity.MapleBorrower) error
+	// Conflict resolution: ON CONFLICT (loan_id, block_number, block_version) DO NOTHING
+	SaveBorrowerSnapshots(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleBorrower) error
 
-	// SaveCollateralSnapshots persists Maple collateral position snapshots atomically.
+	// SaveCollateralSnapshots persists Maple collateral position snapshots within the provided transaction.
 	// Requires loan_id to be set on each snapshot (obtained from SaveLoanSnapshots).
-	// All records are inserted in a single transaction - if any record fails, all changes are rolled back.
-	// Conflict resolution: ON CONFLICT (loan_id, block_number, block_version) DO UPDATE
-	SaveCollateralSnapshots(ctx context.Context, snapshots []*entity.MapleCollateral) error
+	// Conflict resolution: ON CONFLICT (loan_id, block_number, block_version) DO NOTHING
+	SaveCollateralSnapshots(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleCollateral) error
 }

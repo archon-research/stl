@@ -1,4 +1,4 @@
-package maple_indexer
+package mapleindexer
 
 import (
 	"context"
@@ -42,9 +42,9 @@ func (m *mockMapleClient) GetAllActiveLoansAtBlock(ctx context.Context, blockNum
 
 type mockMaplePositionRepo struct {
 	mu                           sync.Mutex
-	saveLoanSnapshotsFn          func(ctx context.Context, snapshots []*entity.MapleLoan) (map[string]int64, error)
-	saveBorrowerSnapshotsFn      func(ctx context.Context, snapshots []*entity.MapleBorrower) error
-	saveCollateralSnapshotsFn    func(ctx context.Context, snapshots []*entity.MapleCollateral) error
+	saveLoanSnapshotsFn          func(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleLoan) (map[string]int64, error)
+	saveBorrowerSnapshotsFn      func(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleBorrower) error
+	saveCollateralSnapshotsFn    func(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleCollateral) error
 	saveLoanSnapshotsCalls       int
 	saveBorrowerSnapshotsCalls   int
 	saveCollateralSnapshotsCalls int
@@ -53,13 +53,13 @@ type mockMaplePositionRepo struct {
 	lastSavedCollateral          []*entity.MapleCollateral
 }
 
-func (m *mockMaplePositionRepo) SaveLoanSnapshots(ctx context.Context, snapshots []*entity.MapleLoan) (map[string]int64, error) {
+func (m *mockMaplePositionRepo) SaveLoanSnapshots(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleLoan) (map[string]int64, error) {
 	m.mu.Lock()
 	m.saveLoanSnapshotsCalls++
 	m.lastSavedLoans = snapshots
 	m.mu.Unlock()
 	if m.saveLoanSnapshotsFn != nil {
-		return m.saveLoanSnapshotsFn(ctx, snapshots)
+		return m.saveLoanSnapshotsFn(ctx, tx, snapshots)
 	}
 	// Default: return a map with sequential IDs keyed by loan address
 	result := make(map[string]int64, len(snapshots))
@@ -69,24 +69,24 @@ func (m *mockMaplePositionRepo) SaveLoanSnapshots(ctx context.Context, snapshots
 	return result, nil
 }
 
-func (m *mockMaplePositionRepo) SaveBorrowerSnapshots(ctx context.Context, snapshots []*entity.MapleBorrower) error {
+func (m *mockMaplePositionRepo) SaveBorrowerSnapshots(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleBorrower) error {
 	m.mu.Lock()
 	m.saveBorrowerSnapshotsCalls++
 	m.lastSavedBorrowers = snapshots
 	m.mu.Unlock()
 	if m.saveBorrowerSnapshotsFn != nil {
-		return m.saveBorrowerSnapshotsFn(ctx, snapshots)
+		return m.saveBorrowerSnapshotsFn(ctx, tx, snapshots)
 	}
 	return nil
 }
 
-func (m *mockMaplePositionRepo) SaveCollateralSnapshots(ctx context.Context, snapshots []*entity.MapleCollateral) error {
+func (m *mockMaplePositionRepo) SaveCollateralSnapshots(ctx context.Context, tx pgx.Tx, snapshots []*entity.MapleCollateral) error {
 	m.mu.Lock()
 	m.saveCollateralSnapshotsCalls++
 	m.lastSavedCollateral = snapshots
 	m.mu.Unlock()
 	if m.saveCollateralSnapshotsFn != nil {
-		return m.saveCollateralSnapshotsFn(ctx, snapshots)
+		return m.saveCollateralSnapshotsFn(ctx, tx, snapshots)
 	}
 	return nil
 }
@@ -134,10 +134,6 @@ type mockProtocolRepo struct {
 	getProtocolByAddrCalls int
 }
 
-func (m *mockProtocolRepo) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, name string, protocolType string, createdAtBlock int64) (int64, error) {
-	return 1, nil
-}
-
 func (m *mockProtocolRepo) GetProtocolByAddress(ctx context.Context, chainID int64, address common.Address) (*entity.Protocol, error) {
 	m.mu.Lock()
 	m.getProtocolByAddrCalls++
@@ -146,10 +142,6 @@ func (m *mockProtocolRepo) GetProtocolByAddress(ctx context.Context, chainID int
 		return m.getProtocolByAddrFn(ctx, chainID, address)
 	}
 	return nil, nil
-}
-
-func (m *mockProtocolRepo) UpsertReserveData(ctx context.Context, tx pgx.Tx, data []*entity.SparkLendReserveData) error {
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +273,7 @@ func TestNewService(t *testing.T) {
 		txManager         outbound.TxManager
 		userRepo          outbound.UserRepository
 		maplePositionRepo outbound.MaplePositionRepository
-		protocolRepo      outbound.ProtocolRepository
+		protocolRepo      protocolReader
 		wantErr           bool
 		errContains       string
 	}{
@@ -472,7 +464,7 @@ func TestStartStop(t *testing.T) {
 			t.Fatalf("Start: %v", err)
 		}
 
-		if svc.ctx.Err() != nil {
+		if svc.runCtx.Err() != nil {
 			t.Error("context should not be cancelled before Stop")
 		}
 
@@ -480,7 +472,7 @@ func TestStartStop(t *testing.T) {
 			t.Errorf("Stop: %v", err)
 		}
 
-		if svc.ctx.Err() == nil {
+		if svc.runCtx.Err() == nil {
 			t.Error("context should be cancelled after Stop")
 		}
 	})
@@ -875,7 +867,7 @@ func TestProcessBlock(t *testing.T) {
 		client := &mockMapleClient{}
 		defaultClientSetup(client)
 		positionRepo := defaultMaplePositionRepo()
-		positionRepo.saveBorrowerSnapshotsFn = func(_ context.Context, _ []*entity.MapleBorrower) error {
+		positionRepo.saveBorrowerSnapshotsFn = func(_ context.Context, _ pgx.Tx, _ []*entity.MapleBorrower) error {
 			return fmt.Errorf("database write failure")
 		}
 
@@ -911,7 +903,7 @@ func TestProcessBlock(t *testing.T) {
 		client := &mockMapleClient{}
 		defaultClientSetup(client)
 		positionRepo := defaultMaplePositionRepo()
-		positionRepo.saveCollateralSnapshotsFn = func(_ context.Context, _ []*entity.MapleCollateral) error {
+		positionRepo.saveCollateralSnapshotsFn = func(_ context.Context, _ pgx.Tx, _ []*entity.MapleCollateral) error {
 			return fmt.Errorf("collateral write failure")
 		}
 
@@ -1290,22 +1282,26 @@ func TestProcessMessages(t *testing.T) {
 			t.Fatalf("Start: %v", err)
 		}
 
-		time.Sleep(50 * time.Millisecond)
-
-		consumer.Mu.Lock()
-		if consumer.ReceiveMessageCalls == 0 {
-			t.Error("expected at least one ReceiveMessage call")
-		}
-		consumer.Mu.Unlock()
+		testutil.WaitForCondition(t, 2*time.Second, func() bool {
+			consumer.Mu.Lock()
+			defer consumer.Mu.Unlock()
+			return consumer.ReceiveMessageCalls >= 1
+		}, "at least one ReceiveMessage call")
 
 		_ = svc.Stop()
 	})
 
 	t.Run("empty messages: no processing", func(t *testing.T) {
 		positionRepo := defaultMaplePositionRepo()
+		polled := make(chan struct{}, 1)
 		consumer := &mockConsumer{
 			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
-				return nil, nil
+				select {
+				case polled <- struct{}{}:
+				default:
+				}
+				<-ctx.Done()
+				return nil, ctx.Err()
 			},
 		}
 
@@ -1329,15 +1325,19 @@ func TestProcessMessages(t *testing.T) {
 			t.Fatalf("Start: %v", err)
 		}
 
-		time.Sleep(50 * time.Millisecond)
+		// Wait until the loop has polled at least once, then stop.
+		select {
+		case <-polled:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for first poll")
+		}
+		_ = svc.Stop()
 
 		positionRepo.mu.Lock()
 		if positionRepo.saveBorrowerSnapshotsCalls != 0 {
 			t.Errorf("SaveBorrowerSnapshots calls = %d, want 0", positionRepo.saveBorrowerSnapshotsCalls)
 		}
 		positionRepo.mu.Unlock()
-
-		_ = svc.Stop()
 	})
 
 	t.Run("invalid JSON: message not deleted", func(t *testing.T) {
@@ -1378,7 +1378,12 @@ func TestProcessMessages(t *testing.T) {
 			t.Fatalf("Start: %v", err)
 		}
 
-		time.Sleep(50 * time.Millisecond)
+		// Wait until the loop has processed the bad message and looped back (second poll call blocks).
+		testutil.WaitForCondition(t, 2*time.Second, func() bool {
+			consumer.Mu.Lock()
+			defer consumer.Mu.Unlock()
+			return consumer.ReceiveMessageCalls >= 2
+		}, "loop to process invalid message and loop back")
 
 		consumer.Mu.Lock()
 		if consumer.DeleteMessageCalls != 0 {

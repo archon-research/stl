@@ -150,9 +150,7 @@ func (r *PositionRepository) upsertBorrowerBatch(ctx context.Context, tx pgx.Tx,
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 9
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8, baseIdx+9))
+		sb.WriteString(buildPlaceholders(i, 9))
 
 		amount, err := bigIntToNumeric(b.Amount)
 		if err != nil {
@@ -220,9 +218,7 @@ func (r *PositionRepository) upsertBorrowerCollateralBatch(ctx context.Context, 
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 10
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8, baseIdx+9, baseIdx+10))
+		sb.WriteString(buildPlaceholders(i, 10))
 
 		amount, err := bigIntToNumeric(c.Amount)
 		if err != nil {

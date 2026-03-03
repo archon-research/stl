@@ -21,7 +21,7 @@ import (
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
-	"github.com/archon-research/stl/stl-verify/internal/services/maple_indexer"
+	mapleindexer "github.com/archon-research/stl/stl-verify/internal/services/maple_indexer"
 )
 
 func main() {
@@ -41,6 +41,7 @@ type serviceDependencies struct {
 	userRepo          *postgres.UserRepository
 	maplePositionRepo *postgres.MaplePositionRepository
 	txManager         *postgres.TxManager
+	closePool         func()
 }
 
 type cliConfig struct {
@@ -119,25 +120,28 @@ func setupDependencies(ctx context.Context, cfg cliConfig, logger *slog.Logger) 
 	if err != nil {
 		return serviceDependencies{}, fmt.Errorf("connecting to database: %w", err)
 	}
-	defer pool.Close()
 
 	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0)
 	if err != nil {
+		pool.Close()
 		return serviceDependencies{}, fmt.Errorf("creating protocol repository: %w", err)
 	}
 
 	userRepo, err := postgres.NewUserRepository(pool, logger, 0)
 	if err != nil {
+		pool.Close()
 		return serviceDependencies{}, fmt.Errorf("creating user repository: %w", err)
 	}
 
 	maplePositionRepo, err := postgres.NewMaplePositionRepository(pool, logger, 0)
 	if err != nil {
+		pool.Close()
 		return serviceDependencies{}, fmt.Errorf("creating maple position repository: %w", err)
 	}
 
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
+		pool.Close()
 		return serviceDependencies{}, fmt.Errorf("creating tx manager: %w", err)
 	}
 
@@ -148,6 +152,7 @@ func setupDependencies(ctx context.Context, cfg cliConfig, logger *slog.Logger) 
 		userRepo:          userRepo,
 		maplePositionRepo: maplePositionRepo,
 		txManager:         txManager,
+		closePool:         pool.Close,
 	}, nil
 }
 
@@ -172,9 +177,10 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer deps.closePool()
 
-	service, err := maple_indexer.NewService(
-		maple_indexer.Config{
+	service, err := mapleindexer.NewService(
+		mapleindexer.Config{
 			ChainID:         cfg.chainID,
 			ProtocolAddress: common.HexToAddress(cfg.protocolAddress),
 			Logger:          logger,
