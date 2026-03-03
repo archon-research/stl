@@ -20,11 +20,16 @@ func main() {
 	interval := flag.Duration("interval", 12*time.Second, "block emission interval (e.g. 1s, 500ms)")
 	flag.Parse()
 
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	slog.SetDefault(logger)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *addr, *interval); err != nil {
-		slog.Error("mock-blockchain-server failed", "error", err)
+	if err := run(ctx, logger, *addr, *interval); err != nil {
+		logger.Error("mock-blockchain-server failed", "error", err)
 		os.Exit(1)
 	}
 }
@@ -56,15 +61,10 @@ func (a *serverAdapter) Stop() error {
 	return a.srv.Stop()
 }
 
-func run(ctx context.Context, addr string, interval time.Duration) error {
+func run(ctx context.Context, logger *slog.Logger, addr string, interval time.Duration) error {
 	if interval <= 0 {
 		return fmt.Errorf("interval must be positive, got %v", interval)
 	}
-
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-	slog.SetDefault(logger)
 
 	store := mockchain.NewFixtureDataStore()
 	srv := mockchain.NewServer(store)
