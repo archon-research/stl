@@ -24,11 +24,22 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_price_worker"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
+
+var (
+	GitCommit string
+	BuildTime string
+)
+
+func init() {
+	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
+}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -103,6 +114,24 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
+	// Initialize OpenTelemetry tracing and metrics
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "oracle-price-worker",
+		ServiceVersion: GitCommit,
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
+	// Service telemetry
+	oracleTelemetry, err := oracle_price_worker.NewTelemetry()
+	if err != nil {
+		logger.Warn("failed to create oracle telemetry", "error", err)
+	}
+
 	logger.Info("starting oracle price worker", "queue", cfg.queueURL, "chainID", cfg.chainID)
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
@@ -155,6 +184,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)
 	}
+	service.WithTelemetry(oracleTelemetry)
 
 	logger.Info("oracle price worker started, waiting for messages...")
 

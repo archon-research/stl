@@ -8,9 +8,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/metric/noop"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -1012,6 +1016,55 @@ func TestProcessBlockEvent_IrrelevantLogs(t *testing.T) {
 	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})
 	if err != nil {
 		t.Fatalf("expected nil for irrelevant logs, got: %v", err)
+	}
+}
+
+func TestProcessReceipt_NoRelevantEvents_SkipsSpan(t *testing.T) {
+	h := newTestHarness(t)
+
+	// Wire a real tracer so we can verify no processReceipt span is created.
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	telemetry, err := NewTelemetryWithProviders(tp, noop.NewMeterProvider())
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProviders: %v", err)
+	}
+	h.svc.telemetry = telemetry
+
+	// Ensure no downstream work happens.
+	var multicallCalled int32
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		atomic.AddInt32(&multicallCalled, 1)
+		return nil, errors.New("should not be called")
+	}
+
+	// Receipt with only irrelevant logs — no Morpho Blue or MetaMorpho events.
+	irrelevantLog := shared.Log{
+		Address: "0x0000000000000000000000000000000000000001",
+		Topics:  []string{"0x0000000000000000000000000000000000000000000000000000000000000001"},
+		Data:    "",
+	}
+	receipt := makeReceipt(testTxHash, irrelevantLog)
+
+	if err := h.svc.processReceipt(context.Background(), receipt, 1, 20000000, 0, time.Now()); err != nil {
+		t.Fatalf("processReceipt: %v", err)
+	}
+
+	// Force flush spans.
+	_ = tp.ForceFlush(context.Background())
+
+	// Verify no morpho.processReceipt span was created.
+	spans := exporter.GetSpans()
+	for _, s := range spans {
+		if s.Name == "morpho.processReceipt" {
+			t.Error("morpho.processReceipt span should not be created for receipts with no relevant events")
+		}
+	}
+
+	if atomic.LoadInt32(&multicallCalled) != 0 {
+		t.Error("multicall should not be called when receipt has no relevant events")
 	}
 }
 

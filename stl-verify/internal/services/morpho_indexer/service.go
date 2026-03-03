@@ -239,6 +239,17 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 	return nil
 }
 
+// hasRelevantEvents returns true if the receipt contains at least one
+// Morpho Blue or MetaMorpho event worth processing.
+func (s *Service) hasRelevantEvents(receipt shared.TransactionReceipt) bool {
+	for _, log := range receipt.Logs {
+		if s.eventExtractor.IsMorphoBlueEvent(log) || s.eventExtractor.IsMetaMorphoEvent(log) {
+			return true
+		}
+	}
+	return false
+}
+
 // processReceipt processes all Morpho-related logs in a single transaction receipt.
 //
 // Note: eth_call reads return end-of-block state. Multiple events for the same
@@ -246,6 +257,10 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 // clause means only the last-written event_type/tx_hash is retained, but the
 // on-chain state (shares, assets, collateral) is always correct.
 func (s *Service) processReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+	if !s.hasRelevantEvents(receipt) {
+		return nil
+	}
+
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.processReceipt",
 		attribute.String("tx.hash", receipt.TransactionHash))
 	defer span.End()
