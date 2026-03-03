@@ -250,11 +250,16 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) (
 	return nil
 }
 
-func (s *Service) processBlockForOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
+func (s *Service) processBlockForOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) (retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "oracle.processBlockForOracle",
 		attribute.String("oracle.name", unit.Oracle.Name),
 		attribute.String("oracle.type", string(unit.Oracle.OracleType)))
-	defer span.End()
+	defer func() {
+		if retErr != nil {
+			SetSpanError(span, retErr, "oracle processing failed")
+		}
+		span.End()
+	}()
 
 	switch unit.Oracle.OracleType {
 	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
@@ -268,7 +273,7 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 
 func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
 	// Fetch prices (RPC span)
-	_, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
+	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "getAssetsPrices"))
 	rpcStart := time.Now()
 	prices, err := blockchain.FetchOraclePrices(ctx, unit.multicaller, s.oracleABI, unit.OracleAddr, unit.TokenAddrs, event.BlockNumber)
@@ -287,7 +292,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 	}
 
 	// Detect changes
-	_, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
+	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
 		attribute.Int("prices.total", len(prices)))
 	changed, err := s.detectChanges(prices, event, unit)
 	if err != nil {
@@ -305,7 +310,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 	}
 
 	// Upsert prices (DB span)
-	_, upsertSpan := s.telemetry.StartSpan(ctx, "oracle.upsertPrices",
+	ctx, upsertSpan := s.telemetry.StartSpan(ctx, "oracle.upsertPrices",
 		attribute.Int("prices.changed", len(changed)))
 	err = s.repo.UpsertPrices(ctx, changed)
 	if err != nil {
@@ -329,7 +334,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 
 func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
 	// Fetch prices (RPC span)
-	_, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
+	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "latestRoundData"))
 	rpcStart := time.Now()
 	results, err := blockchain.FetchFeedPrices(ctx, unit.multicaller, s.feedABI, unit.Feeds, event.BlockNumber, s.logger)
@@ -346,7 +351,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 	results = oracle_pricing.ConvertNonUSDPrices(results, unit.OracleUnit, s.logger, event.BlockNumber)
 
 	// Detect changes
-	_, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
+	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
 		attribute.Int("prices.total", len(results)))
 	changed, err := s.detectFeedChanges(results, event, unit)
 	if err != nil {
@@ -364,7 +369,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 	}
 
 	// Upsert prices (DB span)
-	_, upsertSpan := s.telemetry.StartSpan(ctx, "oracle.upsertPrices",
+	ctx, upsertSpan := s.telemetry.StartSpan(ctx, "oracle.upsertPrices",
 		attribute.Int("prices.changed", len(changed)))
 	err = s.repo.UpsertPrices(ctx, changed)
 	if err != nil {

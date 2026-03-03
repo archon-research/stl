@@ -1025,7 +1025,11 @@ func TestProcessReceipt_NoRelevantEvents_SkipsSpan(t *testing.T) {
 	// Wire a real tracer so we can verify no processReceipt span is created.
 	exporter := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
-	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		if err := tp.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown tracer provider: %v", err)
+		}
+	})
 
 	telemetry, err := NewTelemetryWithProviders(tp, noop.NewMeterProvider())
 	if err != nil {
@@ -1053,7 +1057,9 @@ func TestProcessReceipt_NoRelevantEvents_SkipsSpan(t *testing.T) {
 	}
 
 	// Force flush spans.
-	_ = tp.ForceFlush(context.Background())
+	if err := tp.ForceFlush(context.Background()); err != nil {
+		t.Errorf("force flush spans: %v", err)
+	}
 
 	// Verify no morpho.processReceipt span was created.
 	spans := exporter.GetSpans()
