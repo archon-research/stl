@@ -216,14 +216,31 @@ func (s *Service) buildEntities(loans []outbound.MapleActiveLoan, userCache map[
 	for _, loan := range loans {
 		userID := userCache[loan.Borrower]
 
+		// Extract loanMeta fields (empty strings if loanMeta is nil for external loans)
+		var loanType, loanAssetSymbol, loanDexName, loanLocation, loanWalletAddress, loanWalletType string
+		if loan.LoanMeta != nil {
+			loanType = loan.LoanMeta.Type
+			loanAssetSymbol = loan.LoanMeta.AssetSymbol
+			loanDexName = loan.LoanMeta.DexName
+			loanLocation = loan.LoanMeta.Location
+			loanWalletAddress = loan.LoanMeta.WalletAddress
+			loanWalletType = loan.LoanMeta.WalletType
+		}
+
 		borrowers = append(borrowers, &entity.MapleBorrower{
-			UserID:       userID,
-			ProtocolID:   s.protocolID,
-			PoolAsset:    loan.PoolAssetSymbol,
-			PoolDecimals: loan.PoolAssetDecimals,
-			Amount:       loan.PrincipalOwed,
-			BlockNumber:  blockNumber,
-			BlockVersion: blockVersion,
+			UserID:            userID,
+			ProtocolID:        s.protocolID,
+			PoolAsset:         loan.PoolAssetSymbol,
+			PoolDecimals:      loan.PoolAssetDecimals,
+			Amount:            loan.PrincipalOwed,
+			BlockNumber:       blockNumber,
+			BlockVersion:      blockVersion,
+			LoanType:          loanType,
+			LoanAssetSymbol:   loanAssetSymbol,
+			LoanDexName:       loanDexName,
+			LoanLocation:      loanLocation,
+			LoanWalletAddress: loanWalletAddress,
+			LoanWalletType:    loanWalletType,
 		})
 
 		collaterals = append(collaterals, &entity.MapleCollateral{
@@ -237,6 +254,12 @@ func (s *Service) buildEntities(loans []outbound.MapleActiveLoan, userCache map[
 			LiquidationLevel:   loan.Collateral.LiquidationLevel,
 			BlockNumber:        blockNumber,
 			BlockVersion:       blockVersion,
+			LoanType:           loanType,
+			LoanAssetSymbol:    loanAssetSymbol,
+			LoanDexName:        loanDexName,
+			LoanLocation:       loanLocation,
+			LoanWalletAddress:  loanWalletAddress,
+			LoanWalletType:     loanWalletType,
 		})
 	}
 

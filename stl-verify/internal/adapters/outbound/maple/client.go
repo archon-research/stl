@@ -87,6 +87,14 @@ func (c *Client) GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint6
 				custodian
 				liquidationLevel
 			}
+			loanMeta {
+				type
+				assetSymbol
+				dexName
+				location
+				walletAddress
+				walletType
+			}
 			fundingPool {
 				id
 				name
@@ -136,6 +144,18 @@ func (c *Client) GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint6
 				}
 			}
 
+			var loanMeta *outbound.MapleLoanMeta
+			if l.LoanMeta != nil {
+				loanMeta = &outbound.MapleLoanMeta{
+					Type:          l.LoanMeta.Type,
+					AssetSymbol:   l.LoanMeta.AssetSymbol,
+					DexName:       l.LoanMeta.DexName,
+					Location:      l.LoanMeta.Location,
+					WalletAddress: l.LoanMeta.WalletAddress,
+					WalletType:    l.LoanMeta.WalletType,
+				}
+			}
+
 			allLoans = append(allLoans, outbound.MapleActiveLoan{
 				LoanID:        common.HexToAddress(l.ID),
 				Borrower:      common.HexToAddress(l.Borrower.ID),
@@ -151,6 +171,7 @@ func (c *Client) GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint6
 					Custodian:        l.Collateral.Custodian,
 					LiquidationLevel: liquidationLevel,
 				},
+				LoanMeta:          loanMeta,
 				PoolAddress:       common.HexToAddress(l.FundingPool.ID),
 				PoolName:          l.FundingPool.Name,
 				PoolAssetSymbol:   l.FundingPool.Asset.Symbol,
@@ -255,6 +276,15 @@ type loanCollateral struct {
 	LiquidationLevel string `json:"liquidationLevel"`
 }
 
+type loanMetaResponse struct {
+	Type          string `json:"type"`
+	AssetSymbol   string `json:"assetSymbol"`
+	DexName       string `json:"dexName"`
+	Location      string `json:"location"`
+	WalletAddress string `json:"walletAddress"`
+	WalletType    string `json:"walletType"`
+}
+
 // All active loans response (top-level openTermLoans query).
 type allActiveLoansResponse struct {
 	Data struct {
@@ -263,13 +293,14 @@ type allActiveLoansResponse struct {
 }
 
 type activeOpenTermLoan struct {
-	ID            string         `json:"id"`
-	Borrower      borrowerInfo   `json:"borrower"`
-	State         string         `json:"state"`
-	PrincipalOwed string         `json:"principalOwed"`
-	AcmRatio      string         `json:"acmRatio"`
-	Collateral    loanCollateral `json:"collateral"`
-	FundingPool   fundingPool    `json:"fundingPool"`
+	ID            string            `json:"id"`
+	Borrower      borrowerInfo      `json:"borrower"`
+	State         string            `json:"state"`
+	PrincipalOwed string            `json:"principalOwed"`
+	AcmRatio      string            `json:"acmRatio"`
+	Collateral    loanCollateral    `json:"collateral"`
+	LoanMeta      *loanMetaResponse `json:"loanMeta"`
+	FundingPool   fundingPool       `json:"fundingPool"`
 }
 
 type fundingPool struct {

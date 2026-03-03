@@ -115,6 +115,10 @@ type mockProtocolRepo struct {
 	getProtocolByAddrCalls int
 }
 
+func (m *mockProtocolRepo) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, name string, protocolType string, createdAtBlock int64) (int64, error) {
+	return 1, nil
+}
+
 func (m *mockProtocolRepo) GetProtocolByAddress(ctx context.Context, chainID int64, address common.Address) (*entity.Protocol, error) {
 	m.mu.Lock()
 	m.getProtocolByAddrCalls++
@@ -191,6 +195,7 @@ func defaultLoans() []outbound.MapleActiveLoan {
 				Custodian:        "ANCHORAGE",
 				LiquidationLevel: big.NewInt(1_500_000),
 			},
+			LoanMeta:          nil, // External loan
 			PoolAddress:       testPoolAddress(),
 			PoolName:          "Syrup USDC",
 			PoolAssetSymbol:   "USDC",
@@ -576,6 +581,195 @@ func TestProcessBlock(t *testing.T) {
 		}
 		if collateral.BlockVersion != event.Version {
 			t.Errorf("collateral BlockVersion = %d, want %d", collateral.BlockVersion, event.Version)
+		}
+	})
+
+	t.Run("success: internal loan with loanMeta.type propagates LoanType", func(t *testing.T) {
+		client := &mockMapleClient{}
+		client.getAllActiveLoansAtBlockFn = func(_ context.Context, _ uint64) ([]outbound.MapleActiveLoan, error) {
+			return []outbound.MapleActiveLoan{
+				{
+					LoanID:        common.HexToAddress("0xaa"),
+					Borrower:      common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e"),
+					State:         "Active",
+					PrincipalOwed: big.NewInt(100_000_000),
+					AcmRatio:      big.NewInt(1_500_000),
+					Collateral: outbound.MapleLoanCollateral{
+						Asset:       "BTC",
+						AssetAmount: big.NewInt(500_000_000),
+						Decimals:    8,
+						State:       "Deposited",
+					},
+					LoanMeta: &outbound.MapleLoanMeta{
+						Type:          "amm",
+						AssetSymbol:   "USDC",
+						DexName:       "Uniswap",
+						Location:      "ethereum",
+						WalletAddress: "0x1234567890123456789012345678901234567890",
+						WalletType:    "safe",
+					},
+					PoolAddress:       testPoolAddress(),
+					PoolName:          "Pool A",
+					PoolAssetSymbol:   "USDC",
+					PoolAssetDecimals: 6,
+				},
+			}, nil
+		}
+		positionRepo := defaultMaplePositionRepo()
+
+		protocolRepo := defaultProtocolRepo()
+		svc, err := NewService(
+			validServiceConfig(),
+			blockingConsumer(),
+			client,
+			defaultTxManager(),
+			defaultUserRepo(),
+			positionRepo,
+			protocolRepo,
+		)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = svc.Stop() }()
+
+		event := outbound.BlockEvent{
+			ChainID:        1,
+			BlockNumber:    21000000,
+			Version:        1,
+			BlockHash:      "0xabc",
+			BlockTimestamp: blockTimestamp,
+		}
+
+		if err := svc.processBlock(context.Background(), event); err != nil {
+			t.Fatalf("processBlock: %v", err)
+		}
+
+		positionRepo.mu.Lock()
+		defer positionRepo.mu.Unlock()
+
+		if len(positionRepo.lastSavedBorrowers) != 1 {
+			t.Fatalf("borrowers count = %d, want 1", len(positionRepo.lastSavedBorrowers))
+		}
+		borrower := positionRepo.lastSavedBorrowers[0]
+		if borrower.LoanType != "amm" {
+			t.Errorf("borrower LoanType = %q, want %q", borrower.LoanType, "amm")
+		}
+		if borrower.LoanAssetSymbol != "USDC" {
+			t.Errorf("borrower LoanAssetSymbol = %q, want %q", borrower.LoanAssetSymbol, "USDC")
+		}
+		if borrower.LoanDexName != "Uniswap" {
+			t.Errorf("borrower LoanDexName = %q, want %q", borrower.LoanDexName, "Uniswap")
+		}
+		if borrower.LoanLocation != "ethereum" {
+			t.Errorf("borrower LoanLocation = %q, want %q", borrower.LoanLocation, "ethereum")
+		}
+		if borrower.LoanWalletAddress != "0x1234567890123456789012345678901234567890" {
+			t.Errorf("borrower LoanWalletAddress = %q, want %q", borrower.LoanWalletAddress, "0x1234567890123456789012345678901234567890")
+		}
+		if borrower.LoanWalletType != "safe" {
+			t.Errorf("borrower LoanWalletType = %q, want %q", borrower.LoanWalletType, "safe")
+		}
+
+		if len(positionRepo.lastSavedCollateral) != 1 {
+			t.Fatalf("collateral count = %d, want 1", len(positionRepo.lastSavedCollateral))
+		}
+		collateral := positionRepo.lastSavedCollateral[0]
+		if collateral.LoanType != "amm" {
+			t.Errorf("collateral LoanType = %q, want %q", collateral.LoanType, "amm")
+		}
+		if collateral.LoanAssetSymbol != "USDC" {
+			t.Errorf("collateral LoanAssetSymbol = %q, want %q", collateral.LoanAssetSymbol, "USDC")
+		}
+		if collateral.LoanDexName != "Uniswap" {
+			t.Errorf("collateral LoanDexName = %q, want %q", collateral.LoanDexName, "Uniswap")
+		}
+		if collateral.LoanLocation != "ethereum" {
+			t.Errorf("collateral LoanLocation = %q, want %q", collateral.LoanLocation, "ethereum")
+		}
+		if collateral.LoanWalletAddress != "0x1234567890123456789012345678901234567890" {
+			t.Errorf("collateral LoanWalletAddress = %q, want %q", collateral.LoanWalletAddress, "0x1234567890123456789012345678901234567890")
+		}
+		if collateral.LoanWalletType != "safe" {
+			t.Errorf("collateral LoanWalletType = %q, want %q", collateral.LoanWalletType, "safe")
+		}
+	})
+
+	t.Run("success: external loan with null loanMeta has empty LoanType", func(t *testing.T) {
+		client := &mockMapleClient{}
+		client.getAllActiveLoansAtBlockFn = func(_ context.Context, _ uint64) ([]outbound.MapleActiveLoan, error) {
+			return []outbound.MapleActiveLoan{
+				{
+					LoanID:        common.HexToAddress("0xbb"),
+					Borrower:      common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e"),
+					State:         "Active",
+					PrincipalOwed: big.NewInt(100_000_000),
+					AcmRatio:      big.NewInt(1_500_000),
+					Collateral: outbound.MapleLoanCollateral{
+						Asset:       "BTC",
+						AssetAmount: big.NewInt(500_000_000),
+						Decimals:    8,
+						State:       "Deposited",
+					},
+					LoanMeta:          nil, // External loan
+					PoolAddress:       testPoolAddress(),
+					PoolName:          "Pool A",
+					PoolAssetSymbol:   "USDC",
+					PoolAssetDecimals: 6,
+				},
+			}, nil
+		}
+		positionRepo := defaultMaplePositionRepo()
+
+		protocolRepo := defaultProtocolRepo()
+		svc, err := NewService(
+			validServiceConfig(),
+			blockingConsumer(),
+			client,
+			defaultTxManager(),
+			defaultUserRepo(),
+			positionRepo,
+			protocolRepo,
+		)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = svc.Stop() }()
+
+		event := outbound.BlockEvent{
+			ChainID:        1,
+			BlockNumber:    21000000,
+			Version:        1,
+			BlockHash:      "0xabc",
+			BlockTimestamp: blockTimestamp,
+		}
+
+		if err := svc.processBlock(context.Background(), event); err != nil {
+			t.Fatalf("processBlock: %v", err)
+		}
+
+		positionRepo.mu.Lock()
+		defer positionRepo.mu.Unlock()
+
+		if len(positionRepo.lastSavedBorrowers) != 1 {
+			t.Fatalf("borrowers count = %d, want 1", len(positionRepo.lastSavedBorrowers))
+		}
+		borrower := positionRepo.lastSavedBorrowers[0]
+		if borrower.LoanType != "" {
+			t.Errorf("borrower LoanType = %q, want empty string for external loan", borrower.LoanType)
+		}
+
+		if len(positionRepo.lastSavedCollateral) != 1 {
+			t.Fatalf("collateral count = %d, want 1", len(positionRepo.lastSavedCollateral))
+		}
+		collateral := positionRepo.lastSavedCollateral[0]
+		if collateral.LoanType != "" {
+			t.Errorf("collateral LoanType = %q, want empty string for external loan", collateral.LoanType)
 		}
 	})
 

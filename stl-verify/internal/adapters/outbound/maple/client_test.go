@@ -30,6 +30,7 @@ type expectedActiveLoan struct {
 	collateralState    string
 	collateralCustody  string
 	liquidationLevel   *big.Int
+	loanMeta           *outbound.MapleLoanMeta
 	poolAddress        common.Address
 	poolName           string
 	poolAssetSymbol    string
@@ -80,6 +81,36 @@ func assertLoan(t *testing.T, idx int, want expectedActiveLoan, got outbound.Map
 		t.Errorf("loans[%d].Collateral.Custodian = %q, want %q", idx, got.Collateral.Custodian, want.collateralCustody)
 	}
 	assertBigInt(t, fmt.Sprintf("loans[%d].Collateral.LiquidationLevel", idx), got.Collateral.LiquidationLevel, want.liquidationLevel)
+
+	// Check loanMeta
+	if want.loanMeta == nil {
+		if got.LoanMeta != nil {
+			t.Errorf("loans[%d].LoanMeta = %+v, want nil", idx, got.LoanMeta)
+		}
+	} else {
+		if got.LoanMeta == nil {
+			t.Errorf("loans[%d].LoanMeta = nil, want %+v", idx, want.loanMeta)
+		} else {
+			if got.LoanMeta.Type != want.loanMeta.Type {
+				t.Errorf("loans[%d].LoanMeta.Type = %q, want %q", idx, got.LoanMeta.Type, want.loanMeta.Type)
+			}
+			if got.LoanMeta.AssetSymbol != want.loanMeta.AssetSymbol {
+				t.Errorf("loans[%d].LoanMeta.AssetSymbol = %q, want %q", idx, got.LoanMeta.AssetSymbol, want.loanMeta.AssetSymbol)
+			}
+			if got.LoanMeta.DexName != want.loanMeta.DexName {
+				t.Errorf("loans[%d].LoanMeta.DexName = %q, want %q", idx, got.LoanMeta.DexName, want.loanMeta.DexName)
+			}
+			if got.LoanMeta.Location != want.loanMeta.Location {
+				t.Errorf("loans[%d].LoanMeta.Location = %q, want %q", idx, got.LoanMeta.Location, want.loanMeta.Location)
+			}
+			if got.LoanMeta.WalletAddress != want.loanMeta.WalletAddress {
+				t.Errorf("loans[%d].LoanMeta.WalletAddress = %q, want %q", idx, got.LoanMeta.WalletAddress, want.loanMeta.WalletAddress)
+			}
+			if got.LoanMeta.WalletType != want.loanMeta.WalletType {
+				t.Errorf("loans[%d].LoanMeta.WalletType = %q, want %q", idx, got.LoanMeta.WalletType, want.loanMeta.WalletType)
+			}
+		}
+	}
 
 	if got.PoolAddress != want.poolAddress {
 		t.Errorf("loans[%d].PoolAddress = %s, want %s", idx, got.PoolAddress.Hex(), want.poolAddress.Hex())
@@ -350,6 +381,198 @@ func TestGetAllActiveLoansAtBlock_Pagination(t *testing.T) {
 
 	if callCount != 3 {
 		t.Errorf("expected 3 API calls (1000 + 1000 + 500), got %d", callCount)
+	}
+}
+
+func TestGetAllActiveLoansAtBlock_LoanMeta(t *testing.T) {
+	tests := []struct {
+		name           string
+		serverResponse any
+		wantLoanMeta   *outbound.MapleLoanMeta
+	}{
+		{
+			name: "external loan: null loanMeta",
+			serverResponse: graphqlResponse{
+				Data: json.RawMessage(`{
+					"openTermLoans": [
+						{
+							"id": "0x0430665a6e0ce5141b1cc42607d79632125cbbac",
+							"borrower": {"id": "0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5"},
+							"state": "Active",
+							"principalOwed": "2000000000000",
+							"acmRatio": "1698389",
+							"collateral": {
+								"asset": "BTC",
+								"assetAmount": "5000000000",
+								"assetValueUsd": "6793556500000",
+								"decimals": 8,
+								"state": "Deposited",
+								"custodian": "FORDEFI",
+								"liquidationLevel": "1176471"
+							},
+							"loanMeta": null,
+							"fundingPool": {
+								"id": "0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b",
+								"name": "Syrup USDC",
+								"asset": {"symbol": "USDC", "decimals": 6}
+							}
+						}
+					]
+				}`),
+			},
+			wantLoanMeta: nil,
+		},
+		{
+			name: "internal loan: amm type",
+			serverResponse: graphqlResponse{
+				Data: json.RawMessage(`{
+					"openTermLoans": [
+						{
+							"id": "0x0430665a6e0ce5141b1cc42607d79632125cbbac",
+							"borrower": {"id": "0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5"},
+							"state": "Active",
+							"principalOwed": "2000000000000",
+							"acmRatio": "1698389",
+							"collateral": {
+								"asset": "BTC",
+								"assetAmount": "5000000000",
+								"assetValueUsd": "6793556500000",
+								"decimals": 8,
+								"state": "Deposited",
+								"custodian": "FORDEFI",
+								"liquidationLevel": "1176471"
+							},
+							"loanMeta": {
+								"type": "amm",
+								"assetSymbol": "USDC",
+								"dexName": "Uniswap",
+								"location": "ethereum",
+								"walletAddress": "0x1234567890123456789012345678901234567890",
+								"walletType": "safe"
+							},
+							"fundingPool": {
+								"id": "0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b",
+								"name": "Syrup USDC",
+								"asset": {"symbol": "USDC", "decimals": 6}
+							}
+						}
+					]
+				}`),
+			},
+			wantLoanMeta: &outbound.MapleLoanMeta{
+				Type:          "amm",
+				AssetSymbol:   "USDC",
+				DexName:       "Uniswap",
+				Location:      "ethereum",
+				WalletAddress: "0x1234567890123456789012345678901234567890",
+				WalletType:    "safe",
+			},
+		},
+		{
+			name: "internal loan: strategy type",
+			serverResponse: graphqlResponse{
+				Data: json.RawMessage(`{
+					"openTermLoans": [
+						{
+							"id": "0x0430665a6e0ce5141b1cc42607d79632125cbbac",
+							"borrower": {"id": "0xc24b928b8f28ec560200bd46bfb84c1b7ae8f4a5"},
+							"state": "Active",
+							"principalOwed": "2000000000000",
+							"acmRatio": "1698389",
+							"collateral": {
+								"asset": "BTC",
+								"assetAmount": "5000000000",
+								"assetValueUsd": "6793556500000",
+								"decimals": 8,
+								"state": "Deposited",
+								"custodian": "FORDEFI",
+								"liquidationLevel": "1176471"
+							},
+							"loanMeta": {
+								"type": "strategy",
+								"assetSymbol": "ETH",
+								"dexName": "",
+								"location": "base",
+								"walletAddress": "0xabcdef1234567890abcdef1234567890abcdef12",
+								"walletType": "eoa"
+							},
+							"fundingPool": {
+								"id": "0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b",
+								"name": "Syrup USDC",
+								"asset": {"symbol": "USDC", "decimals": 6}
+							}
+						}
+					]
+				}`),
+			},
+			wantLoanMeta: &outbound.MapleLoanMeta{
+				Type:          "strategy",
+				AssetSymbol:   "ETH",
+				DexName:       "",
+				Location:      "base",
+				WalletAddress: "0xabcdef1234567890abcdef1234567890abcdef12",
+				WalletType:    "eoa",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(tc.serverResponse)
+			}))
+			defer server.Close()
+
+			client, err := NewClient(Config{
+				Endpoint: server.URL,
+				Logger:   testutil.DiscardLogger(),
+			})
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			loans, err := client.GetAllActiveLoansAtBlock(ctx, 21500000)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if len(loans) != 1 {
+				t.Fatalf("expected 1 loan, got %d", len(loans))
+			}
+
+			got := loans[0].LoanMeta
+			if tc.wantLoanMeta == nil {
+				if got != nil {
+					t.Errorf("LoanMeta = %+v, want nil", got)
+				}
+			} else {
+				if got == nil {
+					t.Fatalf("LoanMeta = nil, want %+v", tc.wantLoanMeta)
+				}
+				if got.Type != tc.wantLoanMeta.Type {
+					t.Errorf("LoanMeta.Type = %q, want %q", got.Type, tc.wantLoanMeta.Type)
+				}
+				if got.AssetSymbol != tc.wantLoanMeta.AssetSymbol {
+					t.Errorf("LoanMeta.AssetSymbol = %q, want %q", got.AssetSymbol, tc.wantLoanMeta.AssetSymbol)
+				}
+				if got.DexName != tc.wantLoanMeta.DexName {
+					t.Errorf("LoanMeta.DexName = %q, want %q", got.DexName, tc.wantLoanMeta.DexName)
+				}
+				if got.Location != tc.wantLoanMeta.Location {
+					t.Errorf("LoanMeta.Location = %q, want %q", got.Location, tc.wantLoanMeta.Location)
+				}
+				if got.WalletAddress != tc.wantLoanMeta.WalletAddress {
+					t.Errorf("LoanMeta.WalletAddress = %q, want %q", got.WalletAddress, tc.wantLoanMeta.WalletAddress)
+				}
+				if got.WalletType != tc.wantLoanMeta.WalletType {
+					t.Errorf("LoanMeta.WalletType = %q, want %q", got.WalletType, tc.wantLoanMeta.WalletType)
+				}
+			}
+		})
 	}
 }
 

@@ -21,6 +21,15 @@ type MapleCollateral struct {
 	LiquidationLevel   *big.Int // liquidation trigger ratio (may be nil)
 	BlockNumber        int64
 	BlockVersion       int
+
+	// LoanMeta fields - populated for internal Maple positions (loanMeta.type = "amm" or "strategy")
+	// All fields are empty strings for external loans (where loanMeta is null in the API)
+	LoanType          string // "amm", "strategy" for internal loans, empty for external loans
+	LoanAssetSymbol   string // e.g., underlying asset symbol for internal positions
+	LoanDexName       string // e.g., "Aerodrome" for AMM positions
+	LoanLocation      string // location metadata
+	LoanWalletAddress string // wallet address holding the position
+	LoanWalletType    string // e.g., "BASE" for Base blockchain
 }
 
 // NewMapleCollateral creates a new MapleCollateral entity with validation.

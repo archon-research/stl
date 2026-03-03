@@ -13,6 +13,17 @@ type MapleClient interface {
 	GetAllActiveLoansAtBlock(ctx context.Context, blockNumber uint64) ([]MapleActiveLoan, error)
 }
 
+// MapleLoanMeta represents metadata for a loan that distinguishes internal vs external loans.
+// Internal loans have Type = "amm" or "strategy", while external loans have nil LoanMeta.
+type MapleLoanMeta struct {
+	Type          string // "amm", "strategy", or empty for external loans
+	AssetSymbol   string
+	DexName       string
+	Location      string
+	WalletAddress string
+	WalletType    string
+}
+
 // MapleLoanCollateral represents the collateral for a single loan.
 type MapleLoanCollateral struct {
 	Asset            string   // symbol, e.g. "BTC", "USDC"
@@ -32,6 +43,7 @@ type MapleActiveLoan struct {
 	PrincipalOwed     *big.Int
 	AcmRatio          *big.Int
 	Collateral        MapleLoanCollateral
+	LoanMeta          *MapleLoanMeta // nil for external loans, non-nil for internal loans
 	PoolAddress       common.Address
 	PoolName          string
 	PoolAssetSymbol   string

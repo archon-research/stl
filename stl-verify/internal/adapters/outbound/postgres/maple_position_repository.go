@@ -76,30 +76,38 @@ func (r *MaplePositionRepository) saveBorrowerBatch(ctx context.Context, tx pgx.
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO maple_borrower (user_id, protocol_id, pool_asset, pool_decimals, amount, block_number, block_version)
+		INSERT INTO maple_borrower (user_id, protocol_id, pool_asset, pool_decimals, amount, block_number, block_version, loan_type, loan_asset_symbol, loan_dex_name, loan_location, loan_wallet_address, loan_wallet_type)
 		VALUES `)
 
-	args := make([]any, 0, len(snapshots)*7)
+	args := make([]any, 0, len(snapshots)*13)
 	for i, s := range snapshots {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 7
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
+		baseIdx := i * 13
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8, baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13))
 
 		amount, err := bigIntToNumeric(s.Amount)
 		if err != nil {
 			return fmt.Errorf("maple_borrower[%d] (UserID=%d): converting amount to numeric: %w", i, s.UserID, err)
 		}
 
-		args = append(args, s.UserID, s.ProtocolID, s.PoolAsset, s.PoolDecimals, amount, s.BlockNumber, s.BlockVersion)
+		args = append(args, s.UserID, s.ProtocolID, s.PoolAsset, s.PoolDecimals, amount, s.BlockNumber, s.BlockVersion,
+			nilIfEmpty(s.LoanType), nilIfEmpty(s.LoanAssetSymbol), nilIfEmpty(s.LoanDexName),
+			nilIfEmpty(s.LoanLocation), nilIfEmpty(s.LoanWalletAddress), nilIfEmpty(s.LoanWalletType))
 	}
 
 	sb.WriteString(`
 		ON CONFLICT (user_id, protocol_id, pool_asset, block_number, block_version) DO UPDATE SET
 			pool_decimals = EXCLUDED.pool_decimals,
-			amount = EXCLUDED.amount
+			amount = EXCLUDED.amount,
+			loan_type = EXCLUDED.loan_type,
+			loan_asset_symbol = EXCLUDED.loan_asset_symbol,
+			loan_dex_name = EXCLUDED.loan_dex_name,
+			loan_location = EXCLUDED.loan_location,
+			loan_wallet_address = EXCLUDED.loan_wallet_address,
+			loan_wallet_type = EXCLUDED.loan_wallet_type
 	`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)
@@ -142,17 +150,17 @@ func (r *MaplePositionRepository) saveCollateralBatch(ctx context.Context, tx pg
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO maple_collateral (user_id, protocol_id, collateral_asset, collateral_decimals, amount, custodian, state, liquidation_level, block_number, block_version)
+		INSERT INTO maple_collateral (user_id, protocol_id, collateral_asset, collateral_decimals, amount, custodian, state, liquidation_level, block_number, block_version, loan_type, loan_asset_symbol, loan_dex_name, loan_location, loan_wallet_address, loan_wallet_type)
 		VALUES `)
 
-	args := make([]any, 0, len(snapshots)*10)
+	args := make([]any, 0, len(snapshots)*16)
 	for i, s := range snapshots {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 10
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8, baseIdx+9, baseIdx+10))
+		baseIdx := i * 16
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8, baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14, baseIdx+15, baseIdx+16))
 
 		amount, err := bigIntToNumeric(s.Amount)
 		if err != nil {
@@ -165,7 +173,10 @@ func (r *MaplePositionRepository) saveCollateralBatch(ctx context.Context, tx pg
 			liqLevel = &v
 		}
 
-		args = append(args, s.UserID, s.ProtocolID, s.CollateralAsset, s.CollateralDecimals, amount, nilIfEmpty(s.Custodian), nilIfEmpty(s.State), liqLevel, s.BlockNumber, s.BlockVersion)
+		args = append(args, s.UserID, s.ProtocolID, s.CollateralAsset, s.CollateralDecimals, amount,
+			nilIfEmpty(s.Custodian), nilIfEmpty(s.State), liqLevel, s.BlockNumber, s.BlockVersion,
+			nilIfEmpty(s.LoanType), nilIfEmpty(s.LoanAssetSymbol), nilIfEmpty(s.LoanDexName),
+			nilIfEmpty(s.LoanLocation), nilIfEmpty(s.LoanWalletAddress), nilIfEmpty(s.LoanWalletType))
 	}
 
 	sb.WriteString(`
@@ -174,7 +185,13 @@ func (r *MaplePositionRepository) saveCollateralBatch(ctx context.Context, tx pg
 			amount = EXCLUDED.amount,
 			custodian = EXCLUDED.custodian,
 			state = EXCLUDED.state,
-			liquidation_level = EXCLUDED.liquidation_level
+			liquidation_level = EXCLUDED.liquidation_level,
+			loan_type = EXCLUDED.loan_type,
+			loan_asset_symbol = EXCLUDED.loan_asset_symbol,
+			loan_dex_name = EXCLUDED.loan_dex_name,
+			loan_location = EXCLUDED.loan_location,
+			loan_wallet_address = EXCLUDED.loan_wallet_address,
+			loan_wallet_type = EXCLUDED.loan_wallet_type
 	`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)
