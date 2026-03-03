@@ -107,7 +107,6 @@ func setupDependencies(ctx context.Context, cfg cliConfig, logger *slog.Logger) 
 		return serviceDependencies{}, fmt.Errorf("creating SQS consumer: %w", err)
 	}
 
-	// Maple GraphQL client.
 	mapleClient, err := maple.NewClient(maple.Config{
 		Endpoint: cfg.mapleEndpoint,
 		Logger:   logger,
@@ -116,13 +115,11 @@ func setupDependencies(ctx context.Context, cfg cliConfig, logger *slog.Logger) 
 		return serviceDependencies{}, fmt.Errorf("creating Maple client: %w", err)
 	}
 
-	// PostgreSQL.
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
 	if err != nil {
 		return serviceDependencies{}, fmt.Errorf("connecting to database: %w", err)
 	}
 	defer pool.Close()
-	logger.Info("PostgreSQL connected")
 
 	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0)
 	if err != nil {
@@ -143,6 +140,7 @@ func setupDependencies(ctx context.Context, cfg cliConfig, logger *slog.Logger) 
 	if err != nil {
 		return serviceDependencies{}, fmt.Errorf("creating tx manager: %w", err)
 	}
+
 	return serviceDependencies{
 		consumer:          consumer,
 		mapleClient:       mapleClient,
@@ -153,6 +151,7 @@ func setupDependencies(ctx context.Context, cfg cliConfig, logger *slog.Logger) 
 	}, nil
 }
 
+// run executes the main application logic
 func run(ctx context.Context, args []string) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
