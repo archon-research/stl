@@ -392,7 +392,7 @@ func TestDecompress_DecompressesGzipData(t *testing.T) {
 		t.Fatalf("compress failed: %v", err)
 	}
 
-	decompressed, err := decompress(compressed)
+	decompressed, err := gziputil.Decompress(compressed)
 	if err != nil {
 		t.Fatalf("decompress failed: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestDecompress_BackwardCompatibility_UncompressedData(t *testing.T) {
 	uncompressedJSON := []byte(`{"block": {"number": "0x12345"}, "receipts": []}`)
 
 	// decompress should detect it's not gzipped and return as-is
-	result, err := decompress(uncompressedJSON)
+	result, err := gziputil.Decompress(uncompressedJSON)
 	if err != nil {
 		t.Fatalf("decompress should not fail on uncompressed data: %v", err)
 	}
@@ -465,7 +465,7 @@ func TestCompressDecompress_LargeData(t *testing.T) {
 	}
 
 	// Verify round-trip
-	decompressed, err := decompress(compressed)
+	decompressed, err := gziputil.Decompress(compressed)
 	if err != nil {
 		t.Fatalf("decompress failed: %v", err)
 	}

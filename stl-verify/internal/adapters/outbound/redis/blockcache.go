@@ -313,11 +313,6 @@ func compress(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// decompress decompresses gzip data if compressed, otherwise returns data as-is.
-func decompress(data []byte) ([]byte, error) {
-	return gziputil.Decompress(data)
-}
-
 // SetBlock caches block data (compressed).
 // Transient failures are automatically retried.
 func (c *BlockCache) SetBlock(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
@@ -409,7 +404,7 @@ func (c *BlockCache) GetBlock(ctx context.Context, chainID, blockNumber int64, v
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block: %w", err)
 	}
-	decompressed, err := decompress(data)
+	decompressed, err := gziputil.Decompress(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress block: %w", err)
 	}
@@ -426,7 +421,7 @@ func (c *BlockCache) GetReceipts(ctx context.Context, chainID, blockNumber int64
 	if err != nil {
 		return nil, fmt.Errorf("failed to get receipts: %w", err)
 	}
-	decompressed, err := decompress(data)
+	decompressed, err := gziputil.Decompress(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress receipts: %w", err)
 	}
@@ -443,7 +438,7 @@ func (c *BlockCache) GetTraces(ctx context.Context, chainID, blockNumber int64, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get traces: %w", err)
 	}
-	decompressed, err := decompress(data)
+	decompressed, err := gziputil.Decompress(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress traces: %w", err)
 	}
@@ -460,7 +455,7 @@ func (c *BlockCache) GetBlobs(ctx context.Context, chainID, blockNumber int64, v
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blobs: %w", err)
 	}
-	decompressed, err := decompress(data)
+	decompressed, err := gziputil.Decompress(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress blobs: %w", err)
 	}
