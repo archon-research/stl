@@ -9,8 +9,11 @@ import (
 // Unlike the generic BorrowerCollateral entity, MapleCollateral uses a collateral asset symbol
 // (e.g., "BTC", "SOL") instead of a token ID, because Maple collateral assets may not have
 // on-chain contract addresses.
+//
+// Each MapleCollateral references a MapleLoan via LoanID, which contains the loan metadata.
 type MapleCollateral struct {
 	ID                 int64
+	LoanID             int64 // FK to maple_loan.id
 	UserID             int64
 	ProtocolID         int64
 	CollateralAsset    string   // e.g., "BTC", "XRP", "SOL"
@@ -21,20 +24,12 @@ type MapleCollateral struct {
 	LiquidationLevel   *big.Int // liquidation trigger ratio (may be nil)
 	BlockNumber        int64
 	BlockVersion       int
-
-	// LoanMeta fields - populated for internal Maple positions (loanMeta.type = "amm" or "strategy")
-	// All fields are empty strings for external loans (where loanMeta is null in the API)
-	LoanType          string // "amm", "strategy" for internal loans, empty for external loans
-	LoanAssetSymbol   string // e.g., underlying asset symbol for internal positions
-	LoanDexName       string // e.g., "Aerodrome" for AMM positions
-	LoanLocation      string // location metadata
-	LoanWalletAddress string // wallet address holding the position
-	LoanWalletType    string // e.g., "BASE" for Base blockchain
 }
 
 // NewMapleCollateral creates a new MapleCollateral entity with validation.
-func NewMapleCollateral(userID, protocolID int64, collateralAsset string, collateralDecimals int, amount *big.Int, custodian, state string, liquidationLevel *big.Int, blockNumber int64, blockVersion int) (*MapleCollateral, error) {
+func NewMapleCollateral(loanID, userID, protocolID int64, collateralAsset string, collateralDecimals int, amount *big.Int, custodian, state string, liquidationLevel *big.Int, blockNumber int64, blockVersion int) (*MapleCollateral, error) {
 	c := &MapleCollateral{
+		LoanID:             loanID,
 		UserID:             userID,
 		ProtocolID:         protocolID,
 		CollateralAsset:    collateralAsset,
@@ -54,6 +49,9 @@ func NewMapleCollateral(userID, protocolID int64, collateralAsset string, collat
 
 // validate checks that all fields have valid values.
 func (c *MapleCollateral) validate() error {
+	if c.LoanID <= 0 {
+		return fmt.Errorf("loanID must be positive, got %d", c.LoanID)
+	}
 	if c.UserID <= 0 {
 		return fmt.Errorf("userID must be positive, got %d", c.UserID)
 	}

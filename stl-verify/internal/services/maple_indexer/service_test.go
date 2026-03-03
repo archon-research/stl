@@ -42,12 +42,31 @@ func (m *mockMapleClient) GetAllActiveLoansAtBlock(ctx context.Context, blockNum
 
 type mockMaplePositionRepo struct {
 	mu                           sync.Mutex
+	saveLoanSnapshotsFn          func(ctx context.Context, snapshots []*entity.MapleLoan) (map[string]int64, error)
 	saveBorrowerSnapshotsFn      func(ctx context.Context, snapshots []*entity.MapleBorrower) error
 	saveCollateralSnapshotsFn    func(ctx context.Context, snapshots []*entity.MapleCollateral) error
+	saveLoanSnapshotsCalls       int
 	saveBorrowerSnapshotsCalls   int
 	saveCollateralSnapshotsCalls int
+	lastSavedLoans               []*entity.MapleLoan
 	lastSavedBorrowers           []*entity.MapleBorrower
 	lastSavedCollateral          []*entity.MapleCollateral
+}
+
+func (m *mockMaplePositionRepo) SaveLoanSnapshots(ctx context.Context, snapshots []*entity.MapleLoan) (map[string]int64, error) {
+	m.mu.Lock()
+	m.saveLoanSnapshotsCalls++
+	m.lastSavedLoans = snapshots
+	m.mu.Unlock()
+	if m.saveLoanSnapshotsFn != nil {
+		return m.saveLoanSnapshotsFn(ctx, snapshots)
+	}
+	// Default: return a map with sequential IDs keyed by loan address
+	result := make(map[string]int64, len(snapshots))
+	for i, s := range snapshots {
+		result[strings.ToLower(s.LoanAddress.Hex())] = int64(i + 1)
+	}
+	return result, nil
 }
 
 func (m *mockMaplePositionRepo) SaveBorrowerSnapshots(ctx context.Context, snapshots []*entity.MapleBorrower) error {
@@ -650,50 +669,45 @@ func TestProcessBlock(t *testing.T) {
 		positionRepo.mu.Lock()
 		defer positionRepo.mu.Unlock()
 
+		// Check loan entity has the loanMeta fields
+		if len(positionRepo.lastSavedLoans) != 1 {
+			t.Fatalf("loans count = %d, want 1", len(positionRepo.lastSavedLoans))
+		}
+		loan := positionRepo.lastSavedLoans[0]
+		if loan.LoanType != "amm" {
+			t.Errorf("loan LoanType = %q, want %q", loan.LoanType, "amm")
+		}
+		if loan.LoanAssetSymbol != "USDC" {
+			t.Errorf("loan LoanAssetSymbol = %q, want %q", loan.LoanAssetSymbol, "USDC")
+		}
+		if loan.LoanDexName != "Uniswap" {
+			t.Errorf("loan LoanDexName = %q, want %q", loan.LoanDexName, "Uniswap")
+		}
+		if loan.LoanLocation != "ethereum" {
+			t.Errorf("loan LoanLocation = %q, want %q", loan.LoanLocation, "ethereum")
+		}
+		if loan.LoanWalletAddress != "0x1234567890123456789012345678901234567890" {
+			t.Errorf("loan LoanWalletAddress = %q, want %q", loan.LoanWalletAddress, "0x1234567890123456789012345678901234567890")
+		}
+		if loan.LoanWalletType != "safe" {
+			t.Errorf("loan LoanWalletType = %q, want %q", loan.LoanWalletType, "safe")
+		}
+
+		// Verify borrower and collateral reference the loan via LoanID
 		if len(positionRepo.lastSavedBorrowers) != 1 {
 			t.Fatalf("borrowers count = %d, want 1", len(positionRepo.lastSavedBorrowers))
 		}
 		borrower := positionRepo.lastSavedBorrowers[0]
-		if borrower.LoanType != "amm" {
-			t.Errorf("borrower LoanType = %q, want %q", borrower.LoanType, "amm")
-		}
-		if borrower.LoanAssetSymbol != "USDC" {
-			t.Errorf("borrower LoanAssetSymbol = %q, want %q", borrower.LoanAssetSymbol, "USDC")
-		}
-		if borrower.LoanDexName != "Uniswap" {
-			t.Errorf("borrower LoanDexName = %q, want %q", borrower.LoanDexName, "Uniswap")
-		}
-		if borrower.LoanLocation != "ethereum" {
-			t.Errorf("borrower LoanLocation = %q, want %q", borrower.LoanLocation, "ethereum")
-		}
-		if borrower.LoanWalletAddress != "0x1234567890123456789012345678901234567890" {
-			t.Errorf("borrower LoanWalletAddress = %q, want %q", borrower.LoanWalletAddress, "0x1234567890123456789012345678901234567890")
-		}
-		if borrower.LoanWalletType != "safe" {
-			t.Errorf("borrower LoanWalletType = %q, want %q", borrower.LoanWalletType, "safe")
+		if borrower.LoanID == 0 {
+			t.Errorf("borrower LoanID = 0, want non-zero (FK to loan)")
 		}
 
 		if len(positionRepo.lastSavedCollateral) != 1 {
 			t.Fatalf("collateral count = %d, want 1", len(positionRepo.lastSavedCollateral))
 		}
 		collateral := positionRepo.lastSavedCollateral[0]
-		if collateral.LoanType != "amm" {
-			t.Errorf("collateral LoanType = %q, want %q", collateral.LoanType, "amm")
-		}
-		if collateral.LoanAssetSymbol != "USDC" {
-			t.Errorf("collateral LoanAssetSymbol = %q, want %q", collateral.LoanAssetSymbol, "USDC")
-		}
-		if collateral.LoanDexName != "Uniswap" {
-			t.Errorf("collateral LoanDexName = %q, want %q", collateral.LoanDexName, "Uniswap")
-		}
-		if collateral.LoanLocation != "ethereum" {
-			t.Errorf("collateral LoanLocation = %q, want %q", collateral.LoanLocation, "ethereum")
-		}
-		if collateral.LoanWalletAddress != "0x1234567890123456789012345678901234567890" {
-			t.Errorf("collateral LoanWalletAddress = %q, want %q", collateral.LoanWalletAddress, "0x1234567890123456789012345678901234567890")
-		}
-		if collateral.LoanWalletType != "safe" {
-			t.Errorf("collateral LoanWalletType = %q, want %q", collateral.LoanWalletType, "safe")
+		if collateral.LoanID == 0 {
+			t.Errorf("collateral LoanID = 0, want non-zero (FK to loan)")
 		}
 	})
 
@@ -756,20 +770,30 @@ func TestProcessBlock(t *testing.T) {
 		positionRepo.mu.Lock()
 		defer positionRepo.mu.Unlock()
 
+		// For external loans, loan entity should have empty loanMeta fields
+		if len(positionRepo.lastSavedLoans) != 1 {
+			t.Fatalf("loans count = %d, want 1", len(positionRepo.lastSavedLoans))
+		}
+		loan := positionRepo.lastSavedLoans[0]
+		if loan.LoanType != "" {
+			t.Errorf("loan LoanType = %q, want empty string for external loan", loan.LoanType)
+		}
+
+		// Verify borrower and collateral reference the loan via LoanID
 		if len(positionRepo.lastSavedBorrowers) != 1 {
 			t.Fatalf("borrowers count = %d, want 1", len(positionRepo.lastSavedBorrowers))
 		}
 		borrower := positionRepo.lastSavedBorrowers[0]
-		if borrower.LoanType != "" {
-			t.Errorf("borrower LoanType = %q, want empty string for external loan", borrower.LoanType)
+		if borrower.LoanID == 0 {
+			t.Errorf("borrower LoanID = 0, want non-zero (FK to loan)")
 		}
 
 		if len(positionRepo.lastSavedCollateral) != 1 {
 			t.Fatalf("collateral count = %d, want 1", len(positionRepo.lastSavedCollateral))
 		}
 		collateral := positionRepo.lastSavedCollateral[0]
-		if collateral.LoanType != "" {
-			t.Errorf("collateral LoanType = %q, want empty string for external loan", collateral.LoanType)
+		if collateral.LoanID == 0 {
+			t.Errorf("collateral LoanID = 0, want non-zero (FK to loan)")
 		}
 	})
 

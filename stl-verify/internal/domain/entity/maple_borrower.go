@@ -9,8 +9,11 @@ import (
 // Unlike the generic Borrower entity, MapleBorrower uses a pool asset symbol (e.g., "USDC")
 // instead of a token ID, because Maple data comes from off-chain snapshots without
 // on-chain contract addresses.
+//
+// Each MapleBorrower references a MapleLoan via LoanID, which contains the loan metadata.
 type MapleBorrower struct {
 	ID           int64
+	LoanID       int64 // FK to maple_loan.id
 	UserID       int64
 	ProtocolID   int64
 	PoolAsset    string   // e.g., "USDC", "WBTC"
@@ -18,20 +21,12 @@ type MapleBorrower struct {
 	Amount       *big.Int // current debt amount in native decimals
 	BlockNumber  int64
 	BlockVersion int
-
-	// LoanMeta fields - populated for internal Maple positions (loanMeta.type = "amm" or "strategy")
-	// All fields are empty strings for external loans (where loanMeta is null in the API)
-	LoanType          string // "amm", "strategy" for internal loans, empty for external loans
-	LoanAssetSymbol   string // e.g., underlying asset symbol for internal positions
-	LoanDexName       string // e.g., "Aerodrome" for AMM positions
-	LoanLocation      string // location metadata
-	LoanWalletAddress string // wallet address holding the position
-	LoanWalletType    string // e.g., "BASE" for Base blockchain
 }
 
 // NewMapleBorrower creates a new MapleBorrower entity with validation.
-func NewMapleBorrower(userID, protocolID int64, poolAsset string, poolDecimals int, amount *big.Int, blockNumber int64, blockVersion int) (*MapleBorrower, error) {
+func NewMapleBorrower(loanID, userID, protocolID int64, poolAsset string, poolDecimals int, amount *big.Int, blockNumber int64, blockVersion int) (*MapleBorrower, error) {
 	b := &MapleBorrower{
+		LoanID:       loanID,
 		UserID:       userID,
 		ProtocolID:   protocolID,
 		PoolAsset:    poolAsset,
@@ -48,6 +43,9 @@ func NewMapleBorrower(userID, protocolID int64, poolAsset string, poolDecimals i
 
 // validate checks that all fields have valid values.
 func (b *MapleBorrower) validate() error {
+	if b.LoanID <= 0 {
+		return fmt.Errorf("loanID must be positive, got %d", b.LoanID)
+	}
 	if b.UserID <= 0 {
 		return fmt.Errorf("userID must be positive, got %d", b.UserID)
 	}

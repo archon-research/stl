@@ -11,6 +11,7 @@ func TestNewMapleBorrower(t *testing.T) {
 
 	tests := []struct {
 		name         string
+		loanID       int64
 		userID       int64
 		protocolID   int64
 		poolAsset    string
@@ -23,6 +24,7 @@ func TestNewMapleBorrower(t *testing.T) {
 	}{
 		{
 			name:         "valid maple borrower",
+			loanID:       1,
 			userID:       10,
 			protocolID:   5,
 			poolAsset:    "USDC",
@@ -33,6 +35,7 @@ func TestNewMapleBorrower(t *testing.T) {
 		},
 		{
 			name:         "valid with zero amount",
+			loanID:       1,
 			userID:       10,
 			protocolID:   5,
 			poolAsset:    "WBTC",
@@ -43,6 +46,7 @@ func TestNewMapleBorrower(t *testing.T) {
 		},
 		{
 			name:         "valid with large amount",
+			loanID:       1,
 			userID:       1,
 			protocolID:   1,
 			poolAsset:    "USDC",
@@ -53,6 +57,7 @@ func TestNewMapleBorrower(t *testing.T) {
 		},
 		{
 			name:         "valid with zero decimals",
+			loanID:       1,
 			userID:       10,
 			protocolID:   5,
 			poolAsset:    "WETH",
@@ -62,7 +67,34 @@ func TestNewMapleBorrower(t *testing.T) {
 			blockVersion: 0,
 		},
 		{
+			name:         "zero loanID",
+			loanID:       0,
+			userID:       10,
+			protocolID:   5,
+			poolAsset:    "USDC",
+			poolDecimals: 6,
+			amount:       validAmount,
+			blockNumber:  21000000,
+			blockVersion: 0,
+			wantErr:      true,
+			errContains:  "loanID must be positive",
+		},
+		{
+			name:         "negative loanID",
+			loanID:       -1,
+			userID:       10,
+			protocolID:   5,
+			poolAsset:    "USDC",
+			poolDecimals: 6,
+			amount:       validAmount,
+			blockNumber:  21000000,
+			blockVersion: 0,
+			wantErr:      true,
+			errContains:  "loanID must be positive",
+		},
+		{
 			name:         "zero userID",
+			loanID:       1,
 			userID:       0,
 			protocolID:   5,
 			poolAsset:    "USDC",
@@ -75,6 +107,7 @@ func TestNewMapleBorrower(t *testing.T) {
 		},
 		{
 			name:         "negative userID",
+			loanID:       1,
 			userID:       -1,
 			protocolID:   5,
 			poolAsset:    "USDC",
@@ -87,6 +120,7 @@ func TestNewMapleBorrower(t *testing.T) {
 		},
 		{
 			name:         "zero protocolID",
+			loanID:       1,
 			userID:       10,
 			protocolID:   0,
 			poolAsset:    "USDC",
@@ -99,6 +133,7 @@ func TestNewMapleBorrower(t *testing.T) {
 		},
 		{
 			name:         "negative protocolID",
+			loanID:       1,
 			userID:       10,
 			protocolID:   -5,
 			poolAsset:    "USDC",
@@ -111,6 +146,7 @@ func TestNewMapleBorrower(t *testing.T) {
 		},
 		{
 			name:         "empty poolAsset",
+			loanID:       1,
 			userID:       10,
 			protocolID:   5,
 			poolAsset:    "",
@@ -123,6 +159,7 @@ func TestNewMapleBorrower(t *testing.T) {
 		},
 		{
 			name:         "negative poolDecimals",
+			loanID:       1,
 			userID:       10,
 			protocolID:   5,
 			poolAsset:    "USDC",
@@ -135,6 +172,7 @@ func TestNewMapleBorrower(t *testing.T) {
 		},
 		{
 			name:         "nil amount",
+			loanID:       1,
 			userID:       10,
 			protocolID:   5,
 			poolAsset:    "USDC",
@@ -147,6 +185,7 @@ func TestNewMapleBorrower(t *testing.T) {
 		},
 		{
 			name:         "negative amount",
+			loanID:       1,
 			userID:       10,
 			protocolID:   5,
 			poolAsset:    "USDC",
@@ -159,6 +198,7 @@ func TestNewMapleBorrower(t *testing.T) {
 		},
 		{
 			name:         "zero blockNumber",
+			loanID:       1,
 			userID:       10,
 			protocolID:   5,
 			poolAsset:    "USDC",
@@ -171,6 +211,7 @@ func TestNewMapleBorrower(t *testing.T) {
 		},
 		{
 			name:         "negative blockNumber",
+			loanID:       1,
 			userID:       10,
 			protocolID:   5,
 			poolAsset:    "USDC",
@@ -183,6 +224,7 @@ func TestNewMapleBorrower(t *testing.T) {
 		},
 		{
 			name:         "negative blockVersion",
+			loanID:       1,
 			userID:       10,
 			protocolID:   5,
 			poolAsset:    "USDC",
@@ -197,7 +239,7 @@ func TestNewMapleBorrower(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mb, err := NewMapleBorrower(tt.userID, tt.protocolID, tt.poolAsset, tt.poolDecimals, tt.amount, tt.blockNumber, tt.blockVersion)
+			mb, err := NewMapleBorrower(tt.loanID, tt.userID, tt.protocolID, tt.poolAsset, tt.poolDecimals, tt.amount, tt.blockNumber, tt.blockVersion)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("NewMapleBorrower() expected error, got nil")
@@ -221,6 +263,9 @@ func TestNewMapleBorrower(t *testing.T) {
 			}
 			if mb.ID != 0 {
 				t.Errorf("NewMapleBorrower() ID = %d, want 0 (set by DB)", mb.ID)
+			}
+			if mb.LoanID != tt.loanID {
+				t.Errorf("NewMapleBorrower() LoanID = %d, want %d", mb.LoanID, tt.loanID)
 			}
 			if mb.UserID != tt.userID {
 				t.Errorf("NewMapleBorrower() UserID = %d, want %d", mb.UserID, tt.userID)

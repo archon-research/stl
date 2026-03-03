@@ -12,6 +12,7 @@ func TestNewMapleCollateral(t *testing.T) {
 
 	tests := []struct {
 		name               string
+		loanID             int64
 		userID             int64
 		protocolID         int64
 		collateralAsset    string
@@ -27,6 +28,7 @@ func TestNewMapleCollateral(t *testing.T) {
 	}{
 		{
 			name:               "valid maple collateral",
+			loanID:             100,
 			userID:             10,
 			protocolID:         5,
 			collateralAsset:    "BTC",
@@ -40,6 +42,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "valid with nil liquidation level",
+			loanID:             101,
 			userID:             10,
 			protocolID:         5,
 			collateralAsset:    "SOL",
@@ -53,6 +56,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "valid with empty custodian",
+			loanID:             102,
 			userID:             10,
 			protocolID:         5,
 			collateralAsset:    "XRP",
@@ -66,6 +70,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "valid with empty state",
+			loanID:             103,
 			userID:             10,
 			protocolID:         5,
 			collateralAsset:    "BTC",
@@ -79,6 +84,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "valid with zero amount",
+			loanID:             104,
 			userID:             10,
 			protocolID:         5,
 			collateralAsset:    "BTC",
@@ -92,6 +98,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "valid with zero decimals",
+			loanID:             105,
 			userID:             10,
 			protocolID:         5,
 			collateralAsset:    "BTC",
@@ -105,6 +112,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "valid with large amount",
+			loanID:             106,
 			userID:             1,
 			protocolID:         1,
 			collateralAsset:    "BTC",
@@ -117,7 +125,40 @@ func TestNewMapleCollateral(t *testing.T) {
 			blockVersion:       0,
 		},
 		{
+			name:               "zero loanID",
+			loanID:             0,
+			userID:             10,
+			protocolID:         5,
+			collateralAsset:    "BTC",
+			collateralDecimals: 8,
+			amount:             validAmount,
+			custodian:          "ANCHORAGE",
+			state:              "Deposited",
+			liquidationLevel:   validLiqLevel,
+			blockNumber:        21000000,
+			blockVersion:       0,
+			wantErr:            true,
+			errContains:        "loanID must be positive",
+		},
+		{
+			name:               "negative loanID",
+			loanID:             -1,
+			userID:             10,
+			protocolID:         5,
+			collateralAsset:    "BTC",
+			collateralDecimals: 8,
+			amount:             validAmount,
+			custodian:          "ANCHORAGE",
+			state:              "Deposited",
+			liquidationLevel:   validLiqLevel,
+			blockNumber:        21000000,
+			blockVersion:       0,
+			wantErr:            true,
+			errContains:        "loanID must be positive",
+		},
+		{
 			name:               "zero userID",
+			loanID:             100,
 			userID:             0,
 			protocolID:         5,
 			collateralAsset:    "BTC",
@@ -133,6 +174,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "negative userID",
+			loanID:             100,
 			userID:             -1,
 			protocolID:         5,
 			collateralAsset:    "BTC",
@@ -148,6 +190,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "zero protocolID",
+			loanID:             100,
 			userID:             10,
 			protocolID:         0,
 			collateralAsset:    "BTC",
@@ -163,6 +206,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "negative protocolID",
+			loanID:             100,
 			userID:             10,
 			protocolID:         -5,
 			collateralAsset:    "BTC",
@@ -178,6 +222,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "empty collateralAsset",
+			loanID:             100,
 			userID:             10,
 			protocolID:         5,
 			collateralAsset:    "",
@@ -193,6 +238,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "negative collateralDecimals",
+			loanID:             100,
 			userID:             10,
 			protocolID:         5,
 			collateralAsset:    "BTC",
@@ -208,6 +254,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "nil amount",
+			loanID:             100,
 			userID:             10,
 			protocolID:         5,
 			collateralAsset:    "BTC",
@@ -223,6 +270,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "negative amount",
+			loanID:             100,
 			userID:             10,
 			protocolID:         5,
 			collateralAsset:    "BTC",
@@ -238,6 +286,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "zero blockNumber",
+			loanID:             100,
 			userID:             10,
 			protocolID:         5,
 			collateralAsset:    "BTC",
@@ -253,6 +302,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "negative blockNumber",
+			loanID:             100,
 			userID:             10,
 			protocolID:         5,
 			collateralAsset:    "BTC",
@@ -268,6 +318,7 @@ func TestNewMapleCollateral(t *testing.T) {
 		},
 		{
 			name:               "negative blockVersion",
+			loanID:             100,
 			userID:             10,
 			protocolID:         5,
 			collateralAsset:    "BTC",
@@ -285,7 +336,7 @@ func TestNewMapleCollateral(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mc, err := NewMapleCollateral(tt.userID, tt.protocolID, tt.collateralAsset, tt.collateralDecimals, tt.amount, tt.custodian, tt.state, tt.liquidationLevel, tt.blockNumber, tt.blockVersion)
+			mc, err := NewMapleCollateral(tt.loanID, tt.userID, tt.protocolID, tt.collateralAsset, tt.collateralDecimals, tt.amount, tt.custodian, tt.state, tt.liquidationLevel, tt.blockNumber, tt.blockVersion)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("NewMapleCollateral() expected error, got nil")
@@ -309,6 +360,9 @@ func TestNewMapleCollateral(t *testing.T) {
 			}
 			if mc.ID != 0 {
 				t.Errorf("NewMapleCollateral() ID = %d, want 0 (set by DB)", mc.ID)
+			}
+			if mc.LoanID != tt.loanID {
+				t.Errorf("NewMapleCollateral() LoanID = %d, want %d", mc.LoanID, tt.loanID)
 			}
 			if mc.UserID != tt.userID {
 				t.Errorf("NewMapleCollateral() UserID = %d, want %d", mc.UserID, tt.userID)
