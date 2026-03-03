@@ -104,10 +104,7 @@ func Do[T any](
 			}
 
 			// Calculate next backoff (exponential)
-			backoff = time.Duration(float64(backoff) * cfg.BackoffFactor)
-			if backoff > cfg.MaxBackoff {
-				backoff = cfg.MaxBackoff
-			}
+			backoff = min(time.Duration(float64(backoff)*cfg.BackoffFactor), cfg.MaxBackoff)
 		}
 
 		// Execute the function

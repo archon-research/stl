@@ -218,10 +218,7 @@ func (s *Subscriber) connectionManager() {
 			case <-time.After(backoff):
 			}
 
-			backoff = time.Duration(float64(backoff) * s.config.BackoffFactor)
-			if backoff > s.config.MaxBackoff {
-				backoff = s.config.MaxBackoff
-			}
+			backoff = min(time.Duration(float64(backoff)*s.config.BackoffFactor), s.config.MaxBackoff)
 			continue
 		}
 
@@ -284,7 +281,7 @@ func (s *Subscriber) connectAndSubscribe() error {
 		JSONRPC: "2.0",
 		ID:      1,
 		Method:  "eth_subscribe",
-		Params:  []interface{}{"newHeads"},
+		Params:  []any{"newHeads"},
 	}
 
 	if err := conn.WriteJSON(subscribeReq); err != nil {
