@@ -94,5 +94,11 @@ GRANT SELECT ON maple_collateral TO stl_readonly;
 GRANT SELECT, INSERT, UPDATE, DELETE ON maple_collateral TO stl_readwrite;
 GRANT USAGE, SELECT ON SEQUENCE maple_collateral_id_seq TO stl_readwrite;
 
-INSERT INTO migrations (filename) VALUES ('20260303_100000_create_maple_tables.sql')
+-- Seed Maple Finance protocol (MapleGlobals contract on mainnet)
+-- https://github.com/maple-labs/address-registry/blob/main/MapleAddressRegistryETH.md
+INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at)
+VALUES (1, '\x804a6F5F667170F545Bf14e5DDB48C70B788390C'::bytea, 'Maple Finance', 'rwa', 11964925, NOW())
+ON CONFLICT (chain_id, address) DO NOTHING;
+
+INSERT INTO migrations (filename) VALUES ('20260303_100000_add_maple.sql')
 ON CONFLICT (filename) DO NOTHING;
