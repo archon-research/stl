@@ -145,40 +145,45 @@ func (r *Replayer) emitLoop(stopCh <-chan struct{}, doneCh chan struct{}) {
 }
 
 func (r *Replayer) emit() {
-	r.mu.Lock()
+	var header outbound.BlockHeader
+	var onBlock func(outbound.BlockHeader)
 
-	templateIndex := r.templateIndex
-	template := r.templates[templateIndex]
-	blockNumber := r.baseBlockNumber + r.blocksEmitted
+	func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
 
-	var parentHash string
-	if r.blocksEmitted == 0 {
-		parentHash = "0x" + strings.Repeat("0", 64)
-	} else {
-		parentHash = r.prevDerivedHash
-	}
+		templateIndex := r.templateIndex
+		template := r.templates[templateIndex]
+		blockNumber := r.baseBlockNumber + r.blocksEmitted
 
-	header := patchHeader(template, blockNumber, r.loopIndex, parentHash)
+		var parentHash string
+		if r.blocksEmitted == 0 {
+			parentHash = "0x" + strings.Repeat("0", 64)
+		} else {
+			parentHash = r.prevDerivedHash
+		}
 
-	r.derivedHashToBlock[header.Hash] = blockNumber
-	r.hashOrder = append(r.hashOrder, header.Hash)
-	if len(r.hashOrder) > maxCachedHashes {
-		oldest := r.hashOrder[0]
-		r.hashOrder = r.hashOrder[1:]
-		delete(r.derivedHashToBlock, oldest)
-	}
-	r.lastBlockNumber = blockNumber
-	r.prevDerivedHash = header.Hash
+		header = patchHeader(template, blockNumber, r.loopIndex, parentHash)
 
-	r.templateIndex++
-	if r.templateIndex >= len(r.templates) {
-		r.templateIndex = 0
-		r.loopIndex++
-	}
-	r.blocksEmitted++
+		r.derivedHashToBlock[header.Hash] = blockNumber
+		r.hashOrder = append(r.hashOrder, header.Hash)
+		if len(r.hashOrder) > maxCachedHashes {
+			oldest := r.hashOrder[0]
+			r.hashOrder = r.hashOrder[1:]
+			delete(r.derivedHashToBlock, oldest)
+		}
+		r.lastBlockNumber = blockNumber
+		r.prevDerivedHash = header.Hash
 
-	onBlock := r.onBlock
-	r.mu.Unlock()
+		r.templateIndex++
+		if r.templateIndex >= len(r.templates) {
+			r.templateIndex = 0
+			r.loopIndex++
+		}
+		r.blocksEmitted++
+
+		onBlock = r.onBlock
+	}()
 
 	if onBlock != nil {
 		onBlock(header)
