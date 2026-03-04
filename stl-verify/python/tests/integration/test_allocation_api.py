@@ -20,7 +20,7 @@ from app.api.v1 import allocations
 from app.main import app
 from app.services.allocation_service import AllocationService
 
-MIGRATIONS_DIR = pathlib.Path(__file__).parents[4] / "db" / "migrations"
+MIGRATIONS_DIR = pathlib.Path(__file__).parents[3] / "db" / "migrations"
 
 # Hex bytes used in assertions (20-byte proxy, 20-byte token addr, 32-byte tx hash).
 _PROXY_HEX = "1234567890abcdef1234567890abcdef12345678"
@@ -33,11 +33,18 @@ _TX2_HEX = "bb" * 32
 
 async def _run_migrations(dsn: str) -> None:
     """Execute every migration file in filename order using a native asyncpg
-    connection, which supports multi-statement SQL strings."""
+    connection, which supports multi-statement SQL strings.
+
+    Migration files must follow the lexicographically-sortable naming convention
+    already used in this repo (e.g. 20260122_140000_create_migrations.sql).
+    """
     conn = await asyncpg.connect(dsn)
     try:
         for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
-            await conn.execute(sql_file.read_text())
+            try:
+                await conn.execute(sql_file.read_text())
+            except Exception as exc:
+                raise RuntimeError(f"Migration failed: {sql_file.name}") from exc
     finally:
         await conn.close()
 
