@@ -54,6 +54,10 @@ async def list_stars(service: AllocationService = Depends(_get_service)):
 
 
 @router.get("/stars/{star}/allocations", response_model=list[AllocationPositionResponse])
-async def list_allocations(star: str, service: AllocationService = Depends(_get_service)):
-    positions = await service.list_allocations_by_star(star)
+async def list_allocations(
+    star: str,
+    block_number: int | None = None,
+    service: AllocationService = Depends(_get_service),
+):
+    positions = await service.list_allocations_by_star(star, block_number)
     return [AllocationPositionResponse(**dataclasses.asdict(p)) for p in positions]

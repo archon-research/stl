@@ -64,6 +64,24 @@ def test_list_allocations_returns_200_with_positions():
     assert data[0]["star"] == "spark"
     assert data[0]["token_symbol"] == "USDC"
     assert data[0]["direction"] == "in"
+    service.list_allocations_by_star.assert_awaited_once_with("spark", None)
+
+
+def test_list_allocations_with_block_number_passes_param_to_service():
+    from app.api.v1 import allocations
+
+    position = make_allocation_position(block_number=5000)
+    service = _make_service(positions=[position])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/stars/spark/allocations?block_number=5000")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["block_number"] == 5000
+    service.list_allocations_by_star.assert_awaited_once_with("spark", 5000)
 
 
 def test_list_allocations_returns_empty_for_unknown_star():

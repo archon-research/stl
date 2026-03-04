@@ -15,10 +15,17 @@ class PostgresAllocationRepository(AllocationRepository):
         )
         return [Star(name=row.star) for row in result]
 
-    async def list_allocations_by_star(self, star: str) -> list[AllocationPosition]:
+    async def list_allocations_by_star(self, star: str, block_number: int | None = None) -> list[AllocationPosition]:
+        if block_number is None:
+            block_filter = "ap.block_number = (SELECT MAX(block_number) FROM allocation_position WHERE star = :star)"
+            params: dict = {"star": star}
+        else:
+            block_filter = "ap.block_number = :block_number"
+            params = {"star": star, "block_number": block_number}
+
         result = await self._conn.execute(
             text(
-                """
+                f"""
                 SELECT
                     ap.id,
                     ap.chain_id,
@@ -39,10 +46,11 @@ class PostgresAllocationRepository(AllocationRepository):
                 FROM allocation_position ap
                 JOIN token t ON t.id = ap.token_id
                 WHERE ap.star = :star
+                  AND {block_filter}
                 ORDER BY ap.block_number DESC
                 """
             ),
-            {"star": star},
+            params,
         )
         return [
             AllocationPosition(

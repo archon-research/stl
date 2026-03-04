@@ -29,7 +29,20 @@ async def test_list_allocations_by_star_delegates_to_repository():
     result = await service.list_allocations_by_star("spark")
 
     assert result == [position]
-    repo.list_allocations_by_star.assert_awaited_once_with("spark")
+    repo.list_allocations_by_star.assert_awaited_once_with("spark", None)
+
+
+@pytest.mark.asyncio
+async def test_list_allocations_by_star_with_block_number_passes_it_to_repository():
+    repo = AsyncMock()
+    position = make_allocation_position(block_number=1000)
+    repo.list_allocations_by_star.return_value = [position]
+    service = AllocationService(repo)
+
+    result = await service.list_allocations_by_star("spark", block_number=1000)
+
+    assert result == [position]
+    repo.list_allocations_by_star.assert_awaited_once_with("spark", 1000)
 
 
 @pytest.mark.asyncio

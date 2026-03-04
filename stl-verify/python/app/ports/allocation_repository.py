@@ -9,5 +9,9 @@ class AllocationRepository(ABC):
         """Return all distinct stars."""
 
     @abstractmethod
-    async def list_allocations_by_star(self, star: str) -> list[AllocationPosition]:
-        """Return all allocation positions for the given star name."""
+    async def list_allocations_by_star(self, star: str, block_number: int | None = None) -> list[AllocationPosition]:
+        """Return allocation positions for the given star.
+
+        When block_number is provided, only positions at that exact block are returned.
+        When omitted, positions at the latest block_number for the star are returned.
+        """
