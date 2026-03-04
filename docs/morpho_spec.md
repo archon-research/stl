@@ -340,69 +340,97 @@ Unlike Aave where rates are stored in events, Morpho Blue calculates rates on-de
 
 ### Liquidation Mechanics (Morpho Blue)
 
-**When Liquidations Occur:**
+**LTV and Liquidation Threshold:**
 
-Liquidations trigger when a borrower's collateral value falls below the LLTV threshold:
-
-```
-liquidatable if: (collateralValue × LLTV) < debtValue
-
-LLTV (Liquidation Loan-to-Value) is the maximum allowed:
-- 86% LLTV = Can borrow up to 86% of collateral value
-- If debt reaches 86% of collateral, position is liquidatable
-```
-
-**Liquidation Process:**
-
-1. **Liquidator calls** `liquidate(marketParams, borrower, seizedAssets, repaidShares, data)`
-
-2. **Protocol validates:**
-   - Position is liquidatable (debt ≥ collateral × LLTV)
-   - Liquidator has assets to repay
-   - Market has sufficient collateral to seize
-
-3. **Protocol executes:**
-   - Repays specified debt shares
-   - Transfers collateral to liquidator (with bonus)
-   - Calculates bad debt if collateral insufficient
-   - Emits `Liquidate` event
-
-**Liquidation Incentive:**
-
-The liquidation bonus is built into the LLTV:
+The Loan-to-Value (LTV) ratio measures debt relative to collateral value:
 
 ```
-LLTV = 86% means:
-- Liquidation Threshold: 86%
-- Liquidation Bonus: ~14% buffer
+LTV = borrowedAmount / collateralValueInLoanToken
 
-If collateralValue = $1000, debtValue = $860:
-- Position is liquidatable
-- Liquidator repays $860
-- Liquidator receives: collateral worth more than $860
+Where:
+  collateralValueInLoanToken = (collateralAmount × oraclePrice) / ORACLE_PRICE_SCALE
+  ORACLE_PRICE_SCALE = 10^36  (constant in Morpho Blue)
+  oraclePrice       = value returned by the market's oracle.price() function
 ```
 
-**Bad Debt:**
+A position becomes liquidatable when its LTV exceeds the market's LLTV:
 
-Unlike Aave, Morpho Blue explicitly tracks bad debt:
+```
+liquidatable if: LTV > LLTV
+equivalently:   borrowedAmount × WAD > collateralValueInLoanToken × LLTV
+```
+
+**Health Factor:**
+
+The health factor is a WAD-scaled metric indicating how close a position is to liquidation:
+
+```
+healthFactor = (collateralValueInLoanToken × LLTV) / borrowedAmount
+```
+
+Where LLTV is WAD-scaled (e.g., 86% is stored as `860000000000000000`). The result is also WAD-scaled:
+- `healthFactor ≥ WAD (1e18)`: position is healthy
+- `healthFactor < WAD (1e18)`: position is liquidatable
+
+**Liquidation Incentive Factor (LIF):**
+
+The LIF determines the collateral bonus received by the liquidator. The **entire LIF goes to the liquidator** — Morpho takes no protocol fee:
+
+```
+LIF = min(M, 1 / (β × LLTV + (1 − β)))
+
+Where:
+  β    = 0.3
+  M    = 1.15  (cap — maximum possible LIF)
+  LLTV = market LLTV as a decimal (e.g., 0.86 for 86% LLTV)
+```
+
+Example LIF values by LLTV:
+
+| LLTV   | LIF   | Liquidator Bonus |
+|--------|-------|-----------------|
+| 77.0%  | ~1.15 | ~15% (capped at M) |
+| 86.0%  | ~1.05 | ~5%  |
+| 91.5%  | ~1.02 | ~2%  |
+| 98.0%  | ~1.01 | ~1%  |
+
+Higher LLTV markets have a lower LIF — positions are closer to the liquidation threshold, so less incentive is needed for liquidators to act.
+
+**Seized Collateral:**
+
+The value of collateral seized equals the debt repaid scaled by the LIF:
+
+```
+seizedCollateralValue (in loan token terms) = repaidAssets × LIF
+```
+
+This is reflected in the `seizedAssets` field of the `Liquidate` event, denominated in collateral token base units.
+
+**Liquidate Event:**
 
 ```solidity
 event Liquidate(
     bytes32 indexed id,
-    address indexed caller,
-    address indexed borrower,
-    uint256 repaidAssets,
-    uint256 repaidShares,
-    uint256 seizedAssets,
-    uint256 badDebtAssets,   // Non-zero if collateral insufficient
+    address indexed caller,       // Liquidator address
+    address indexed borrower,     // Borrower being liquidated
+    uint256 repaidAssets,         // Debt repaid (loan token base units)
+    uint256 repaidShares,         // Borrow shares burned
+    uint256 seizedAssets,         // Collateral transferred to liquidator (collateral token base units)
+    uint256 badDebtAssets,        // Non-zero if collateral was insufficient to cover remaining debt
     uint256 badDebtShares
 );
 ```
 
-When collateral is insufficient to cover debt:
-- `badDebtAssets` and `badDebtShares` are non-zero
-- Suppliers absorb the loss proportionally
-- Market continues operating normally
+Liquidators can repay any amount up to 100% of the borrower's debt in a single transaction — partial liquidations are permitted.
+
+**Bad Debt:**
+
+When collateral is exhausted before the debt is fully covered, `badDebtAssets` and `badDebtShares` will be non-zero. How bad debt is handled depends on the vault version supplying to the market:
+
+- **Morpho Blue direct suppliers**: Bad debt is socialized proportionally across all suppliers in that market at the time of liquidation.
+- **MetaMorpho V1.0 vaults** (`FactoryV1.0`): Bad debt is realized and socialized immediately across vault depositors — markets can continue operating in perpetuity.
+- **MetaMorpho V1.1 vaults** (`FactoryV1.1`): Bad debt is **not** realized — it accumulates in the market indefinitely until manual intervention, similar to other pooled lending protocols.
+- **MetaMorpho V2 vaults**: Automatic loss socialization — each adapter reports its current value via `realAssets()`; when that value drops (e.g., due to bad debt in an underlying market), the loss is distributed proportionally to all vault shareholders through share price depreciation. Note: because V1.1 vaults do not realize bad debt, a V2 vault supplying to a V1.1 vault via `MorphoVaultV1Adapter` will **not** reflect those losses.
 
 ### MetaMorpho Vault Mechanics
 
@@ -1973,15 +2001,17 @@ borrowAssets = (borrowShares * market.totalBorrowAssets) / market.totalBorrowSha
 **Health Factor Calculation:**
 
 ```typescript
-// Get price from oracle (36 - loan decimals - collateral decimals precision)
+// ORACLE_PRICE_SCALE is always 1e36 in Morpho Blue (protocol constant)
+const ORACLE_PRICE_SCALE = 10n ** 36n;
 const price = await oracle.price();
 
-// Calculate collateral value in loan token terms
-const collateralValue = (collateral * price) / (10 ** pricePrecision);
+// Collateral value in loan token base units
+const collateralValueInLoan = (collateral * price) / ORACLE_PRICE_SCALE;
 
-// Health factor = collateral value / (borrow value / LLTV)
-// Or equivalently: (collateral value * LLTV) / borrow value
-const healthFactor = (collateralValue * lltv * 1e18) / (borrowAssets * 10000);
+// Health factor = (collateralValueInLoan × LLTV) / borrowAssets
+// LLTV is WAD-scaled (e.g., 860000000000000000n for 86%)
+// Result is WAD-scaled: < WAD (1e18) means liquidatable
+const healthFactor = (collateralValueInLoan * lltv) / borrowAssets;
 
 // healthFactor < 1e18 means liquidatable
 ```
@@ -2540,7 +2570,7 @@ MarketMetadata {
   collateralTokenDecimals: integer,
   oracle: hex,
   irm: hex,
-  lltv: bigint,                     // Basis points
+  lltv: bigint,                     // WAD (1e18 = 100%, e.g. 860000000000000000 for 86%)
   marketName: string,               // "WETH/USDC 86%"
   createdAt: bigint,
   createdAtBlock: bigint,
@@ -2555,7 +2585,7 @@ function generateMarketName(
   loanSymbol: string,
   lltv: bigint
 ): string {
-  const lltvPercent = Number(lltv) / 100; // Convert from basis points
+  const lltvPercent = Number(lltv) / 1e16; // Convert from WAD to percentage (e.g. 860000000000000000 → 86)
   return `${collateralSymbol} / ${loanSymbol} ${lltvPercent}%`;
 }
 
@@ -2817,18 +2847,21 @@ More precisely: the price of `10^(collateralDecimals)` collateral token units qu
 #### Converting Oracle Price to Collateral USD Value
 
 ```typescript
-// oracle.price() precision = 36 + loanDecimals - collateralDecimals
-const ORACLE_PRICE_SCALE = 10n ** BigInt(36 + loanDecimals - collateralDecimals);
+// ORACLE_PRICE_SCALE is always 1e36 in Morpho Blue (protocol constant).
+// The oracle price value itself has (36 + loanDecimals - collateralDecimals) digits of precision,
+// but the divisor in every collateral-value calculation is always 1e36.
+const ORACLE_PRICE_SCALE = 10n ** 36n;
 
-// Collateral value in loan token units (token-denominated)
+// Collateral value in loan token base units
 const collateralValueInLoan = (collateralAmount * oraclePrice) / ORACLE_PRICE_SCALE;
 
-// Health factor = (collateralValueInLoan * LLTV) / borrowAssets
-// (liquidatable when healthFactor < WAD)
-const healthFactor = (collateralValueInLoan * lltv) / (borrowAssets * 10000n);
+// Health factor = (collateralValueInLoan × LLTV) / borrowAssets
+// LLTV is WAD-scaled (e.g., 860000000000000000n for 86%)
+// Result is WAD-scaled: < WAD (1e18) means liquidatable
+const healthFactor = (collateralValueInLoan * lltv) / borrowAssets;
 
 // USD value requires a separate loan token USD price (from API or another oracle)
-const collateralValueUSD = collateralValueInLoan * loanTokenPriceUSD / 10n**loanDecimals;
+const collateralValueUSD = collateralValueInLoan * loanTokenPriceUSD / 10n**BigInt(loanDecimals);
 ```
 
 #### MorphoChainlinkOracleV2
