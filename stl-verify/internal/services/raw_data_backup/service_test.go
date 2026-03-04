@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -77,10 +78,7 @@ func (m *mockSQSConsumer) ReceiveMessages(ctx context.Context, maxMessages int) 
 	}
 
 	// Return up to maxMessages
-	count := maxMessages
-	if count > len(m.messages) {
-		count = len(m.messages)
-	}
+	count := min(maxMessages, len(m.messages))
 
 	result := m.messages[:count]
 	m.messages = m.messages[count:]
@@ -355,7 +353,7 @@ func (m *mockS3Writer) PresetFileExists(bucket, key string) {
 func blockOnlyExpectations() map[int64]ChainExpectation {
 	return map[int64]ChainExpectation{
 		1:     {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
-		42161: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+		43114: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 	}
 }
 
@@ -501,6 +499,7 @@ func TestProcessMessage_Success(t *testing.T) {
 	cache := newMockBlockCache()
 	writer := newMockS3Writer()
 
+	// Use default Ethereum expectations: receipts + traces expected, blobs not expected
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
@@ -512,13 +511,11 @@ func TestProcessMessage_Success(t *testing.T) {
 	blockData := json.RawMessage(`{"number": 100}`)
 	receiptsData := json.RawMessage(`[{"transactionHash": "0x123"}]`)
 	tracesData := json.RawMessage(`[{"type": "call"}]`)
-	blobsData := json.RawMessage(`[{"commitment": "0xabc"}]`)
 
 	ctx := context.Background()
 	_ = cache.SetBlock(ctx, 1, 100, 0, blockData)
 	_ = cache.SetReceipts(ctx, 1, 100, 0, receiptsData)
 	_ = cache.SetTraces(ctx, 1, 100, 0, tracesData)
-	_ = cache.SetBlobs(ctx, 1, 100, 0, blobsData)
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)
@@ -527,10 +524,10 @@ func TestProcessMessage_Success(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify all files were written
+	// Verify expected files were written (block + receipts + traces, no blobs for Ethereum)
 	keys := writer.GetAllKeys()
-	if len(keys) != 4 {
-		t.Errorf("expected 4 files, got %d: %v", len(keys), keys)
+	if len(keys) != 3 {
+		t.Errorf("expected 3 files, got %d: %v", len(keys), keys)
 	}
 
 	// Check specific keys
@@ -538,20 +535,48 @@ func TestProcessMessage_Success(t *testing.T) {
 		"test-bucket/0-999/100_0_block.json.gz",
 		"test-bucket/0-999/100_0_receipts.json.gz",
 		"test-bucket/0-999/100_0_traces.json.gz",
-		"test-bucket/0-999/100_0_blobs.json.gz",
 	}
 
 	for _, expectedKey := range expectedKeys {
-		found := false
-		for _, key := range keys {
-			if key == expectedKey {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(keys, expectedKey)
 		if !found {
 			t.Errorf("expected key %s not found in %v", expectedKey, keys)
 		}
+	}
+}
+
+func TestProcessMessage_AllDataTypesWithExplicitExpectations(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+
+	// Explicitly expect all data types including blobs
+	svc, _ := NewService(Config{
+		ChainID: 1,
+		Bucket:  "test-bucket",
+		ChainExpectations: map[int64]ChainExpectation{
+			1: {ExpectReceipts: true, ExpectTraces: true, ExpectBlobs: true},
+		},
+		Logger: testutil.DiscardLogger(),
+	}, consumer, cache, writer)
+
+	event := createBlockEvent(1, 100, 0)
+	ctx := context.Background()
+	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{"number": 100}`))
+	_ = cache.SetReceipts(ctx, 1, 100, 0, json.RawMessage(`[{"transactionHash": "0x123"}]`))
+	_ = cache.SetTraces(ctx, 1, 100, 0, json.RawMessage(`[{"type": "call"}]`))
+	_ = cache.SetBlobs(ctx, 1, 100, 0, json.RawMessage(`[{"commitment": "0xabc"}]`))
+
+	msg := createSQSMessage("msg1", event)
+	err := svc.processMessage(ctx, msg)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	keys := writer.GetAllKeys()
+	if len(keys) != 4 {
+		t.Errorf("expected 4 files, got %d: %v", len(keys), keys)
 	}
 }
 
@@ -735,10 +760,14 @@ func TestProcessMessage_CacheGetTracesError(t *testing.T) {
 	cache := newMockBlockCache()
 	writer := newMockS3Writer()
 
+	// Explicitly expect traces so the cache fetch is triggered
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testutil.DiscardLogger(),
+		ChainExpectations: map[int64]ChainExpectation{
+			1: {ExpectReceipts: false, ExpectTraces: true, ExpectBlobs: false},
+		},
+		Logger: testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -762,10 +791,14 @@ func TestProcessMessage_CacheGetBlobsError(t *testing.T) {
 	cache := newMockBlockCache()
 	writer := newMockS3Writer()
 
+	// Explicitly expect blobs so the cache fetch is triggered
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
-		Logger:  testutil.DiscardLogger(),
+		ChainExpectations: map[int64]ChainExpectation{
+			1: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: true},
+		},
+		Logger: testutil.DiscardLogger(),
 	}, consumer, cache, writer)
 
 	event := createBlockEvent(1, 100, 0)
@@ -1322,7 +1355,7 @@ func TestRun_MultipleWorkersProcessConcurrently(t *testing.T) {
 	ctx := context.Background()
 
 	// Add multiple messages
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		event := createBlockEvent(1, int64(100+i), 0)
 		_ = cache.SetBlock(ctx, 1, int64(100+i), 0, json.RawMessage(fmt.Sprintf(`{"block": %d}`, 100+i)))
 		consumer.AddMessage(createSQSMessage(fmt.Sprintf("msg%d", i), event))
@@ -1345,10 +1378,7 @@ func TestRun_MultipleWorkersProcessConcurrently(t *testing.T) {
 			return nil, ctx.Err()
 		}
 
-		count := maxMessages
-		if count > len(consumer.messages) {
-			count = len(consumer.messages)
-		}
+		count := min(maxMessages, len(consumer.messages))
 		msgs := consumer.messages[:count]
 		consumer.messages = consumer.messages[count:]
 		consumer.mu.Unlock()
@@ -1572,6 +1602,127 @@ func TestConfigDefaults(t *testing.T) {
 }
 
 // =============================================================================
+// Tests: Avalanche C-Chain
+// =============================================================================
+
+func TestDefaultChainExpectations_IncludesAvalanche(t *testing.T) {
+	expectations := DefaultChainExpectations()
+
+	avax, ok := expectations[43114]
+	if !ok {
+		t.Fatal("expected Avalanche C-Chain (43114) in default expectations")
+	}
+	if !avax.ExpectReceipts {
+		t.Error("expected Avalanche to expect receipts")
+	}
+	if avax.ExpectTraces {
+		t.Error("expected Avalanche to NOT expect traces")
+	}
+	if avax.ExpectBlobs {
+		t.Error("expected Avalanche to NOT expect blobs")
+	}
+}
+
+func TestProcessMessage_AvalancheSkipsTracesAndBlobs(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+
+	svc, _ := NewService(Config{
+		ChainID: 43114,
+		Bucket:  "avax-bucket",
+		Logger:  testutil.DiscardLogger(),
+	}, consumer, cache, writer)
+
+	event := createBlockEvent(43114, 500, 0)
+	ctx := context.Background()
+
+	// Set block and receipts (expected for Avalanche), but NOT traces or blobs
+	_ = cache.SetBlock(ctx, 43114, 500, 0, json.RawMessage(`{"number": 500}`))
+	_ = cache.SetReceipts(ctx, 43114, 500, 0, json.RawMessage(`[{"status": "0x1"}]`))
+
+	msg := createSQSMessage("avax-msg1", event)
+	err := svc.processMessage(ctx, msg)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should write block + receipts (2 files), NOT traces or blobs
+	keys := writer.GetAllKeys()
+	if len(keys) != 2 {
+		t.Errorf("expected 2 files (block + receipts), got %d: %v", len(keys), keys)
+	}
+
+	expectedKeys := []string{
+		"avax-bucket/0-999/500_0_block.json.gz",
+		"avax-bucket/0-999/500_0_receipts.json.gz",
+	}
+	for _, expectedKey := range expectedKeys {
+		found := slices.Contains(keys, expectedKey)
+		if !found {
+			t.Errorf("expected key %s not found in %v", expectedKey, keys)
+		}
+	}
+}
+
+func TestProcessMessage_AvalancheDoesNotFetchTraces(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+
+	svc, _ := NewService(Config{
+		ChainID: 43114,
+		Bucket:  "avax-bucket",
+		Logger:  testutil.DiscardLogger(),
+	}, consumer, cache, writer)
+
+	event := createBlockEvent(43114, 500, 0)
+	ctx := context.Background()
+
+	_ = cache.SetBlock(ctx, 43114, 500, 0, json.RawMessage(`{"number": 500}`))
+	_ = cache.SetReceipts(ctx, 43114, 500, 0, json.RawMessage(`[]`))
+
+	// Set a traces error - should NOT be triggered since Avalanche doesn't expect traces
+	cache.SetGetError("traces", 43114, 500, 0, errors.New("should not be called"))
+
+	msg := createSQSMessage("avax-msg1", event)
+	err := svc.processMessage(ctx, msg)
+
+	if err != nil {
+		t.Fatalf("unexpected error (traces fetch should be skipped): %v", err)
+	}
+}
+
+func TestProcessMessage_AvalancheMissingReceipts(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+
+	svc, _ := NewService(Config{
+		ChainID: 43114,
+		Bucket:  "avax-bucket",
+		Logger:  testutil.DiscardLogger(),
+	}, consumer, cache, writer)
+
+	event := createBlockEvent(43114, 500, 0)
+	ctx := context.Background()
+
+	// Set block but NOT receipts (which Avalanche expects)
+	_ = cache.SetBlock(ctx, 43114, 500, 0, json.RawMessage(`{"number": 500}`))
+
+	msg := createSQSMessage("avax-msg1", event)
+	err := svc.processMessage(ctx, msg)
+
+	if err == nil {
+		t.Fatal("expected error for missing receipts on Avalanche")
+	}
+	if !strings.Contains(err.Error(), "receipts data expected but not found") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// =============================================================================
 // Benchmark Tests
 // =============================================================================
 
@@ -1718,7 +1869,7 @@ func TestRun_ContextCancelledDuringMessageSend(t *testing.T) {
 	}, consumer, cache, writer)
 
 	// Create many messages
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		event := createBlockEvent(1, int64(i), 0)
 		consumer.AddMessage(createSQSMessage(fmt.Sprintf("msg%d", i), event))
 	}
@@ -1792,6 +1943,7 @@ func TestProcessMessage_AllDataTypesWithContent(t *testing.T) {
 	cache := newMockBlockCache()
 	writer := newMockS3Writer()
 
+	// Default Ethereum expectations: receipts + traces, no blobs
 	svc, _ := NewService(Config{
 		ChainID: 1,
 		Bucket:  "test-bucket",
@@ -1801,11 +1953,10 @@ func TestProcessMessage_AllDataTypesWithContent(t *testing.T) {
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
 
-	// Set all data types with actual content
+	// Set expected data types with actual content (block + receipts + traces)
 	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{"number": "0x64", "hash": "0x123"}`))
 	_ = cache.SetReceipts(ctx, 1, 100, 0, json.RawMessage(`[{"transactionIndex": "0x0"}]`))
 	_ = cache.SetTraces(ctx, 1, 100, 0, json.RawMessage(`[{"action": {"callType": "call"}}]`))
-	_ = cache.SetBlobs(ctx, 1, 100, 0, json.RawMessage(`[{"commitment": "0xabc"}]`))
 
 	msg := createSQSMessage("msg1", event)
 	err := svc.processMessage(ctx, msg)
@@ -1814,10 +1965,10 @@ func TestProcessMessage_AllDataTypesWithContent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify all 4 files written
+	// Verify 3 files written (block + receipts + traces, blobs not expected for Ethereum)
 	keys := writer.GetAllKeys()
-	if len(keys) != 4 {
-		t.Errorf("expected 4 files, got %d: %v", len(keys), keys)
+	if len(keys) != 3 {
+		t.Errorf("expected 3 files, got %d: %v", len(keys), keys)
 	}
 
 	// Check content was written

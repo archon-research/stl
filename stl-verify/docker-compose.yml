@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: timescale/timescaledb:latest-pg17
+    image: timescale/timescaledb:2.25.1-pg17
     container_name: stl-verify-postgres
     environment:
       POSTGRES_USER: postgres
@@ -62,7 +62,59 @@ services:
       timeout: 5s
       retries: 5
 
+  # Dedicated PostgreSQL for Temporal state (mirrors production's separate RDS)
+  temporal-db:
+    image: postgres:16-alpine
+    container_name: stl-verify-temporal-db
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+    ports:
+      - "5433:5432"
+    volumes:
+      - temporal_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    container_name: stl-verify-temporal
+    depends_on:
+      temporal-db:
+        condition: service_healthy
+    ports:
+      - "7233:7233"     # Temporal gRPC
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: temporal-db
+      BIND_ON_IP: 0.0.0.0
+      DEFAULT_NAMESPACE: sentinel
+    healthcheck:
+      test: ["CMD", "temporal", "workflow", "list", "--namespace", "sentinel"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  temporal-ui:
+    image: temporalio/ui:2.45.3
+    container_name: stl-verify-temporal-ui
+    depends_on:
+      temporal:
+        condition: service_healthy
+    ports:
+      - "8233:8080"
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+
 volumes:
   postgres_data:
   localstack_data:
   redis_data:
+  temporal_db_data:

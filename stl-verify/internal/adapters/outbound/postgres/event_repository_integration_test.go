@@ -6,24 +6,37 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
-	"runtime"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+const eventSchemaName = "test_event"
+
+var eventPool *pgxpool.Pool
+
+func init() {
+	registerTestFileSetup(eventSchemaName, func() {
+		eventPool = testutil.SetupSchemaForMain(sharedDSN, eventSchemaName)
+	}, func() {
+		testutil.CleanupSchemaForMain(sharedDSN, eventPool, eventSchemaName)
+	})
+}
+
+// truncateEvents clears the protocol_event table for test isolation.
+func truncateEvents(t *testing.T, ctx context.Context) {
+	t.Helper()
+	_, err := eventPool.Exec(ctx, `DELETE FROM protocol_event`)
+	if err != nil {
+		t.Fatalf("failed to truncate protocol_event: %v", err)
+	}
+}
 
 type eventTestFixture struct {
 	repo       *EventRepository
-	pool       *pgxpool.Pool
-	cleanup    func()
 	protocolID int64
 }
 
@@ -31,58 +44,16 @@ func setupEventTest(t *testing.T) *eventTestFixture {
 	t.Helper()
 	ctx := context.Background()
 
-	container, err := postgres.Run(ctx,
-		"timescale/timescaledb:latest-pg17",
-		postgres.WithDatabase("testdb"),
-		postgres.WithUsername("test"),
-		postgres.WithPassword("test"),
-		postgres.WithSQLDriver("pgx"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(60*time.Second)),
-	)
-	if err != nil {
-		t.Fatalf("failed to start container: %v", err)
-	}
-
-	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("failed to get connection string: %v", err)
-	}
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("failed to create pgxpool: %v", err)
-	}
-
-	for i := 0; i < 30; i++ {
-		if err := pool.Ping(ctx); err == nil {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	_, currentFile, _, _ := runtime.Caller(0)
-	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../../db/migrations")
-	m := migrator.New(pool, migrationsDir)
-	if err := m.ApplyAll(ctx); err != nil {
-		t.Fatalf("failed to apply migrations: %v", err)
-	}
+	truncateEvents(t, ctx)
 
 	repo := NewEventRepository(nil)
 
 	fixture := &eventTestFixture{
 		repo: repo,
-		pool: pool,
-		cleanup: func() {
-			pool.Close()
-			container.Terminate(ctx)
-		},
 	}
 
 	// Get seeded protocol ID
-	err = pool.QueryRow(ctx, `SELECT id FROM protocol WHERE name = 'SparkLend' LIMIT 1`).Scan(&fixture.protocolID)
+	err := eventPool.QueryRow(ctx, `SELECT id FROM protocol WHERE name = 'SparkLend' LIMIT 1`).Scan(&fixture.protocolID)
 	if err != nil {
 		t.Fatalf("failed to get protocol: %v", err)
 	}
@@ -92,7 +63,6 @@ func setupEventTest(t *testing.T) *eventTestFixture {
 
 func TestSaveEvent_SingleEvent(t *testing.T) {
 	fixture := setupEventTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
@@ -102,7 +72,7 @@ func TestSaveEvent_SingleEvent(t *testing.T) {
 		t.Fatalf("failed to create event: %v", err)
 	}
 
-	tx, err := fixture.pool.Begin(ctx)
+	tx, err := eventPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("failed to begin transaction: %v", err)
 	}
@@ -119,7 +89,7 @@ func TestSaveEvent_SingleEvent(t *testing.T) {
 
 	// Verify record was inserted
 	var count int
-	err = fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM protocol_event WHERE event_name = 'Borrow'`).Scan(&count)
+	err = eventPool.QueryRow(ctx, `SELECT COUNT(*) FROM protocol_event WHERE event_name = 'Borrow'`).Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
@@ -131,7 +101,7 @@ func TestSaveEvent_SingleEvent(t *testing.T) {
 	var storedEventName string
 	var storedEventData json.RawMessage
 	var storedBlockNumber int64
-	err = fixture.pool.QueryRow(ctx,
+	err = eventPool.QueryRow(ctx,
 		`SELECT event_name, event_data, block_number FROM protocol_event WHERE event_name = 'Borrow'`).
 		Scan(&storedEventName, &storedEventData, &storedBlockNumber)
 	if err != nil {
@@ -163,7 +133,6 @@ func TestSaveEvent_SingleEvent(t *testing.T) {
 
 func TestSaveEvent_DuplicateIgnored(t *testing.T) {
 	fixture := setupEventTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
@@ -174,7 +143,7 @@ func TestSaveEvent_DuplicateIgnored(t *testing.T) {
 	}
 
 	// Insert first time
-	tx1, err := fixture.pool.Begin(ctx)
+	tx1, err := eventPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("failed to begin tx1: %v", err)
 	}
@@ -186,7 +155,7 @@ func TestSaveEvent_DuplicateIgnored(t *testing.T) {
 	}
 
 	// Insert same event again — should be silently ignored
-	tx2, err := fixture.pool.Begin(ctx)
+	tx2, err := eventPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("failed to begin tx2: %v", err)
 	}
@@ -199,7 +168,7 @@ func TestSaveEvent_DuplicateIgnored(t *testing.T) {
 
 	// Still only 1 record
 	var count int
-	err = fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM protocol_event WHERE block_number = 2000`).Scan(&count)
+	err = eventPool.QueryRow(ctx, `SELECT COUNT(*) FROM protocol_event WHERE block_number = 2000`).Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
@@ -210,7 +179,6 @@ func TestSaveEvent_DuplicateIgnored(t *testing.T) {
 
 func TestSaveEvent_DifferentBlockVersionsAllowed(t *testing.T) {
 	fixture := setupEventTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
@@ -227,7 +195,7 @@ func TestSaveEvent_DifferentBlockVersionsAllowed(t *testing.T) {
 	}
 
 	// Insert version 0
-	tx1, err := fixture.pool.Begin(ctx)
+	tx1, err := eventPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("failed to begin tx1: %v", err)
 	}
@@ -239,7 +207,7 @@ func TestSaveEvent_DifferentBlockVersionsAllowed(t *testing.T) {
 	}
 
 	// Insert version 1 — should succeed (different block_version)
-	tx2, err := fixture.pool.Begin(ctx)
+	tx2, err := eventPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("failed to begin tx2: %v", err)
 	}
@@ -252,7 +220,7 @@ func TestSaveEvent_DifferentBlockVersionsAllowed(t *testing.T) {
 
 	// Should have 2 records
 	var count int
-	err = fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM protocol_event WHERE block_number = 3000`).Scan(&count)
+	err = eventPool.QueryRow(ctx, `SELECT COUNT(*) FROM protocol_event WHERE block_number = 3000`).Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
@@ -263,7 +231,6 @@ func TestSaveEvent_DifferentBlockVersionsAllowed(t *testing.T) {
 
 func TestSaveEvent_Rollback(t *testing.T) {
 	fixture := setupEventTest(t)
-	t.Cleanup(fixture.cleanup)
 
 	ctx := context.Background()
 
@@ -273,7 +240,7 @@ func TestSaveEvent_Rollback(t *testing.T) {
 		t.Fatalf("failed to create event: %v", err)
 	}
 
-	tx, err := fixture.pool.Begin(ctx)
+	tx, err := eventPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("failed to begin transaction: %v", err)
 	}
@@ -289,7 +256,7 @@ func TestSaveEvent_Rollback(t *testing.T) {
 
 	// Verify no records exist after rollback
 	var count int
-	err = fixture.pool.QueryRow(ctx, `SELECT COUNT(*) FROM protocol_event WHERE block_number = 4000`).Scan(&count)
+	err = eventPool.QueryRow(ctx, `SELECT COUNT(*) FROM protocol_event WHERE block_number = 4000`).Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}

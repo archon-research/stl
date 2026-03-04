@@ -46,4 +46,8 @@ type OnchainPriceRepository interface {
 
 	// CopyOracleAssets copies all oracle_asset rows from one oracle to another.
 	CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error
+
+	// GetAllProtocolOracleBindings retrieves ALL protocol-oracle bindings (not just active).
+	// Used by backfill to compute when each oracle was superseded.
+	GetAllProtocolOracleBindings(ctx context.Context) ([]*entity.ProtocolOracle, error)
 }

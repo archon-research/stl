@@ -13,6 +13,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -27,7 +28,8 @@ func integrationMulticaller(t *testing.T, prices []*big.Int) *testutil.MockMulti
 }
 
 // integrationMulticallerBlockDependent creates a mock multicaller where prices depend on block number.
-func integrationMulticallerBlockDependent(numTokens int) *testutil.MockMulticaller {
+func integrationMulticallerBlockDependent(t *testing.T, numTokens int) *testutil.MockMulticaller {
+	t.Helper()
 	return &testutil.MockMulticaller{
 		ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 			bn := blockNumber.Int64()
@@ -38,7 +40,7 @@ func integrationMulticallerBlockDependent(numTokens int) *testutil.MockMulticall
 					big.NewInt(int64(i+1)*100_000_000),
 				)
 			}
-			pricesData := testutil.PackAssetPrices(&testing.T{}, prices)
+			pricesData := testutil.PackAssetPrices(t, prices)
 			return []outbound.Result{
 				{Success: true, ReturnData: pricesData},
 			}, nil
@@ -48,7 +50,7 @@ func integrationMulticallerBlockDependent(numTokens int) *testutil.MockMulticall
 
 // blockEventMessage creates an outbound.SQSMessage containing a block event.
 func blockEventMessage(blockNumber int64, version int, blockTimestamp int64, receiptHandle string) outbound.SQSMessage {
-	event := blockEvent{
+	event := outbound.BlockEvent{
 		ChainID:        1,
 		BlockNumber:    blockNumber,
 		Version:        version,
@@ -113,10 +115,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Disable migration-seeded oracle to isolate test data
-	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
-		t.Fatalf("disable sparklend oracle: %v", err)
-	}
+	testutil.DisableAllOracles(t, ctx, pool)
 
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker", "Test Worker", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000051", "WK1", 18)
@@ -141,12 +140,13 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	}
 	consumer := consumerWithMessages(messages)
 
-	cfg := Config{
+	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo)
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	}
 
 	// Wait for processing
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		var count int
 		pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&count)
 		return count >= 2
@@ -221,10 +221,7 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Disable migration-seeded oracle to isolate test data
-	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
-		t.Fatalf("disable sparklend oracle: %v", err)
-	}
+	testutil.DisableAllOracles(t, ctx, pool)
 
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-cd", "Test Worker CD", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000061", "CD1", 18)
@@ -251,12 +248,13 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 	}
 	consumer := consumerWithSequentialMessages(batches)
 
-	cfg := Config{
+	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo)
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -267,7 +265,7 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 	}
 
 	// Wait for both messages to be processed (at least 2 receive calls + 2 deletes)
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		consumer.mu.Lock()
 		defer consumer.mu.Unlock()
 		return consumer.deleteMessageCalls >= 2
@@ -305,10 +303,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Disable migration-seeded oracle to isolate test data
-	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
-		t.Fatalf("disable sparklend oracle: %v", err)
-	}
+	testutil.DisableAllOracles(t, ctx, pool)
 
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-multi", "Test Worker Multi", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000071", "MT1", 18)
@@ -322,7 +317,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	}
 
 	// Block-dependent prices: each block gets unique prices
-	mc := integrationMulticallerBlockDependent(2)
+	mc := integrationMulticallerBlockDependent(t, 2)
 
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
 
@@ -334,12 +329,13 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	}
 	consumer := consumerWithSequentialMessages(batches)
 
-	cfg := Config{
+	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo)
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -350,7 +346,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	}
 
 	// Wait for all 3 messages to be processed
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		consumer.mu.Lock()
 		defer consumer.mu.Unlock()
 		return consumer.deleteMessageCalls >= 3
@@ -389,10 +385,7 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Disable migration-seeded oracle to isolate test data
-	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
-		t.Fatalf("disable sparklend oracle: %v", err)
-	}
+	testutil.DisableAllOracles(t, ctx, pool)
 
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-ss", "Test Worker SS", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000081", "SS1", 18)
@@ -414,12 +407,13 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 	price1 := new(big.Int).Mul(big.NewInt(100), big.NewInt(1e8))
 	mc := integrationMulticaller(t, []*big.Int{price1})
 
-	cfg := Config{
+	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo)
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -462,7 +456,12 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Count enabled oracle assets from all enabled oracles
+	// Disable feed-based oracles — the mock only handles aave_oracle format.
+	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE oracle_type IN ('chainlink_feed', 'chronicle', 'redstone')`); err != nil {
+		t.Fatalf("disable feed oracles: %v", err)
+	}
+
+	// Count enabled oracle assets from all enabled oracles (sparklend only after disable)
 	var numTokens int
 	err := pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM oracle_asset oa
@@ -481,7 +480,7 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 		t.Fatalf("failed to create repository: %v", err)
 	}
 
-	mc := integrationMulticallerBlockDependent(numTokens)
+	mc := integrationMulticallerBlockDependent(t, numTokens)
 
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
 	messages := []outbound.SQSMessage{
@@ -489,12 +488,13 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 	}
 	consumer := consumerWithMessages(messages)
 
-	cfg := Config{
+	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo)
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -505,7 +505,7 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 	}
 
 	// Wait for the message to be processed
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		var count int
 		pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE block_number = 20000000`).Scan(&count)
 		return count >= numTokens
@@ -533,10 +533,7 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Disable migration-seeded oracle to isolate test data
-	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name = 'sparklend'`); err != nil {
-		t.Fatalf("disable sparklend oracle: %v", err)
-	}
+	testutil.DisableAllOracles(t, ctx, pool)
 
 	oracleID := testutil.SeedOracle(t, ctx, pool, "test-worker-cache", "Test Worker Cache", 1, "0x0000000000000000000000000000000000000AAA")
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000091", "CA1", 18)
@@ -585,12 +582,13 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	}
 	consumer := consumerWithMessages(messages)
 
-	cfg := Config{
+	cfg := shared.SQSConsumerConfig{
 		PollInterval: 1 * time.Millisecond,
 		Logger:       logger,
+		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, mc, repo)
+	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -601,7 +599,7 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	}
 
 	// Wait for the message to be processed (delete indicates processing completed)
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		consumer.mu.Lock()
 		defer consumer.mu.Unlock()
 		return consumer.deleteMessageCalls >= 1

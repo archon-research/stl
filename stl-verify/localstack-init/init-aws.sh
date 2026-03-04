@@ -94,6 +94,44 @@ $AWS sns subscribe \
   --attributes RawMessageDelivery=true \
   --region $REGION
 
+# SparkLend position tracker is Ethereum-only
+echo "Creating Ethereum sparklend position queues..."
+$AWS sqs create-queue \
+  --queue-name stl-ethereum-sparklend-position-dlq.fifo \
+  --attributes FifoQueue=true,ContentBasedDeduplication=true \
+  --region $REGION
+
+$AWS sqs create-queue \
+  --queue-name stl-ethereum-sparklend-position.fifo \
+  --attributes FifoQueue=true,ContentBasedDeduplication=true \
+  --region $REGION
+
+$AWS sns subscribe \
+  --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
+  --protocol sqs \
+  --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-sparklend-position.fifo" \
+  --attributes RawMessageDelivery=true \
+  --region $REGION
+
+# Morpho indexer is Ethereum-only
+echo "Creating Ethereum morpho indexing queues..."
+$AWS sqs create-queue \
+  --queue-name stl-ethereum-morpho-indexing-dlq.fifo \
+  --attributes FifoQueue=true,ContentBasedDeduplication=true \
+  --region $REGION
+
+$AWS sqs create-queue \
+  --queue-name stl-ethereum-morpho-indexing.fifo \
+  --attributes FifoQueue=true,ContentBasedDeduplication=true \
+  --region $REGION
+
+$AWS sns subscribe \
+  --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
+  --protocol sqs \
+  --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-morpho-indexing.fifo" \
+  --attributes RawMessageDelivery=true \
+  --region $REGION
+
 echo "=== LocalStack initialization complete ==="
 echo ""
 echo "SNS Topics:"

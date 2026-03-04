@@ -11,6 +11,8 @@ import (
 
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // setupRedis creates a Redis container and returns a connected BlockCache.
@@ -19,7 +21,7 @@ func setupRedis(t *testing.T, ttl time.Duration) (*BlockCache, func()) {
 	ctx := context.Background()
 
 	req := testcontainers.ContainerRequest{
-		Image:        "redis:7-alpine",
+		Image:        testutil.ImageRedis,
 		ExposedPorts: []string{"6379/tcp"},
 		WaitingFor:   wait.ForLog("Ready to accept connections").WithStartupTimeout(60 * time.Second),
 	}
@@ -65,7 +67,7 @@ func setupRedis(t *testing.T, ttl time.Duration) (*BlockCache, func()) {
 
 	cleanup := func() {
 		cache.Close()
-		container.Terminate(ctx)
+		container.Terminate(context.Background())
 	}
 
 	return cache, cleanup

@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -26,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/gziputil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -172,52 +172,44 @@ func (c *BlockCache) SetBlockData(ctx context.Context, chainID, blockNumber int6
 	}
 
 	if data.Block != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			compressed, err := compress(data.Block)
 			if err != nil {
 				setErr(fmt.Errorf("failed to compress block: %w", err))
 				return
 			}
 			blockCompressed = compressed
-		}()
+		})
 	}
 	if data.Receipts != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			compressed, err := compress(data.Receipts)
 			if err != nil {
 				setErr(fmt.Errorf("failed to compress receipts: %w", err))
 				return
 			}
 			receiptsCompressed = compressed
-		}()
+		})
 	}
 	if data.Traces != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			compressed, err := compress(data.Traces)
 			if err != nil {
 				setErr(fmt.Errorf("failed to compress traces: %w", err))
 				return
 			}
 			tracesCompressed = compressed
-		}()
+		})
 	}
 	if data.Blobs != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			compressed, err := compress(data.Blobs)
 			if err != nil {
 				setErr(fmt.Errorf("failed to compress blobs: %w", err))
 				return
 			}
 			blobsCompressed = compressed
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -313,27 +305,6 @@ func compress(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// isGzipped checks if data is gzip-compressed by looking for the gzip magic bytes.
-// Gzip data always starts with 0x1f 0x8b.
-func isGzipped(data []byte) bool {
-	return len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b
-}
-
-// decompress decompresses gzip data if compressed, otherwise returns data as-is.
-// This provides backward compatibility with uncompressed data in the cache.
-func decompress(data []byte) ([]byte, error) {
-	if !isGzipped(data) {
-		// Data is not compressed, return as-is (backward compatibility)
-		return data, nil
-	}
-	r, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
-	}
-	defer r.Close()
-	return io.ReadAll(r)
-}
-
 // SetBlock caches block data (compressed).
 // Transient failures are automatically retried.
 func (c *BlockCache) SetBlock(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
@@ -425,7 +396,7 @@ func (c *BlockCache) GetBlock(ctx context.Context, chainID, blockNumber int64, v
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block: %w", err)
 	}
-	decompressed, err := decompress(data)
+	decompressed, err := gziputil.Decompress(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress block: %w", err)
 	}
@@ -442,7 +413,7 @@ func (c *BlockCache) GetReceipts(ctx context.Context, chainID, blockNumber int64
 	if err != nil {
 		return nil, fmt.Errorf("failed to get receipts: %w", err)
 	}
-	decompressed, err := decompress(data)
+	decompressed, err := gziputil.Decompress(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress receipts: %w", err)
 	}
@@ -459,7 +430,7 @@ func (c *BlockCache) GetTraces(ctx context.Context, chainID, blockNumber int64, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get traces: %w", err)
 	}
-	decompressed, err := decompress(data)
+	decompressed, err := gziputil.Decompress(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress traces: %w", err)
 	}
@@ -476,7 +447,7 @@ func (c *BlockCache) GetBlobs(ctx context.Context, chainID, blockNumber int64, v
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blobs: %w", err)
 	}
-	decompressed, err := decompress(data)
+	decompressed, err := gziputil.Decompress(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress blobs: %w", err)
 	}

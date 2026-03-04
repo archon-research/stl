@@ -49,13 +49,67 @@ func SeedOracle(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, dis
 	return id
 }
 
+// SeedOracleWithDeploymentBlock inserts an oracle with a specific deployment block and returns its ID.
+func SeedOracleWithDeploymentBlock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, displayName string, chainID int, address string, deploymentBlock int64) int64 {
+	t.Helper()
+	addrBytes, err := HexToBytes(address)
+	if err != nil {
+		t.Fatalf("failed to parse oracle address %s: %v", address, err)
+	}
+
+	var id int64
+	err = pool.QueryRow(ctx, `
+		INSERT INTO oracle (name, display_name, chain_id, address, deployment_block, enabled)
+		VALUES ($1, $2, $3, $4, $5, true)
+		ON CONFLICT (name) DO UPDATE SET display_name = EXCLUDED.display_name, deployment_block = EXCLUDED.deployment_block
+		RETURNING id
+	`, name, displayName, chainID, addrBytes, deploymentBlock).Scan(&id)
+	if err != nil {
+		t.Fatalf("failed to insert oracle %s: %v", name, err)
+	}
+	return id
+}
+
+// SeedFeedOracle inserts a feed-based oracle (no contract address) and returns its ID.
+func SeedFeedOracle(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, displayName, oracleType string, chainID int, priceDecimals int) int64 {
+	t.Helper()
+	var id int64
+	err := pool.QueryRow(ctx, `
+		INSERT INTO oracle (name, display_name, chain_id, oracle_type, deployment_block, enabled, price_decimals)
+		VALUES ($1, $2, $3, $4, 100, true, $5)
+		ON CONFLICT (name) DO UPDATE SET display_name = EXCLUDED.display_name
+		RETURNING id
+	`, name, displayName, chainID, oracleType, priceDecimals).Scan(&id)
+	if err != nil {
+		t.Fatalf("failed to insert feed oracle %s: %v", name, err)
+	}
+	return id
+}
+
+// SeedFeedOracleAsset inserts a feed-based oracle asset with feed address, decimals, and quote currency.
+func SeedFeedOracleAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64, feedAddress string, feedDecimals int, quoteCurrency string) {
+	t.Helper()
+	feedAddrBytes, err := HexToBytes(feedAddress)
+	if err != nil {
+		t.Fatalf("failed to parse feed address %s: %v", feedAddress, err)
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+		VALUES ($1, $2, true, $3, $4, $5)
+		ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL DO NOTHING
+	`, oracleID, tokenID, feedAddrBytes, feedDecimals, quoteCurrency)
+	if err != nil {
+		t.Fatalf("failed to insert feed oracle asset (oracle=%d, token=%d): %v", oracleID, tokenID, err)
+	}
+}
+
 // SeedOracleAsset inserts an oracle asset link.
 func SeedOracleAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64) {
 	t.Helper()
 	_, err := pool.Exec(ctx, `
 		INSERT INTO oracle_asset (oracle_id, token_id, enabled)
 		VALUES ($1, $2, true)
-		ON CONFLICT (oracle_id, token_id) DO NOTHING
+		ON CONFLICT (oracle_id, token_id) WHERE feed_address IS NULL DO NOTHING
 	`, oracleID, tokenID)
 	if err != nil {
 		t.Fatalf("failed to insert oracle asset (oracle=%d, token=%d): %v", oracleID, tokenID, err)

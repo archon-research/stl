@@ -10,16 +10,19 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"strconv"
 	"syscall"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
+
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	rawdatabackup "github.com/archon-research/stl/stl-verify/internal/services/raw_data_backup"
 )
 
@@ -31,20 +34,7 @@ var (
 )
 
 func init() {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, setting := range info.Settings {
-			switch setting.Key {
-			case "vcs.revision":
-				if GitCommit == "" {
-					GitCommit = setting.Value
-				}
-			case "vcs.time":
-				if BuildTime == "" {
-					BuildTime = setting.Value
-				}
-			}
-		}
-	}
+	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
 }
 
 func main() {
@@ -115,6 +105,17 @@ func Main() {
 		os.Exit(1)
 	}
 
+	deployEnv := os.Getenv("DEPLOY_ENV")
+	if deployEnv == "" {
+		logger.Error("DEPLOY_ENV environment variable is required")
+		os.Exit(1)
+	}
+
+	if err := chainutil.ValidateS3BucketForChain(chainID, bucket, deployEnv); err != nil {
+		logger.Error("S3 bucket validation failed", "error", err)
+		os.Exit(1)
+	}
+
 	awsRegion := os.Getenv("AWS_REGION")
 	if awsRegion == "" {
 		awsRegion = "eu-west-1"
@@ -160,7 +161,8 @@ func Main() {
 
 	// Create SQS consumer
 	consumer, err := sqs.NewConsumer(awsCfg, sqs.Config{
-		QueueURL: queueURL,
+		QueueURL:     queueURL,
+		BaseEndpoint: env.Get("AWS_SQS_ENDPOINT", ""),
 	}, logger)
 	if err != nil {
 		logger.Error("failed to create SQS consumer", "error", err)
@@ -173,22 +175,18 @@ func Main() {
 	writer := s3.NewWriter(awsCfg, logger)
 	logger.Info("S3 writer created", "bucket", bucket)
 
-	// Initialize OpenTelemetry Metrics
-	shutdownMetrics, err := telemetry.InitMetrics(ctx, telemetry.MetricConfig{
-		ServiceName:    "raw_data_backup",
+	// Initialize OpenTelemetry tracing and metrics
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "raw-data-backup",
 		ServiceVersion: GitCommit,
-		Environment:    "production", // Or invoke from env var
-		OTLPEndpoint:   os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		BuildTime:      BuildTime,
+		Logger:         logger,
 	})
 	if err != nil {
-		logger.Error("failed to initialize metrics", "error", err)
-	} else {
-		defer func() {
-			if err := shutdownMetrics(context.Background()); err != nil {
-				logger.Error("failed to shutdown metrics", "error", err)
-			}
-		}()
+		logger.Error("failed to initialize telemetry", "error", err)
+		os.Exit(1)
 	}
+	defer shutdownOTEL(context.Background())
 
 	metricsRec, err := telemetry.NewMetrics("stl-verify/raw_data_backup")
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // Benchmark row counts
@@ -32,7 +33,7 @@ func setupBenchmarkPostgres(b *testing.B) (*pgxpool.Pool, func()) {
 	ctx := context.Background()
 
 	req := testcontainers.ContainerRequest{
-		Image:        "timescale/timescaledb:latest-pg17",
+		Image:        testutil.ImageTimescaleDB,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "bench",
@@ -101,7 +102,7 @@ func setupBenchmarkPostgres(b *testing.B) (*pgxpool.Pool, func()) {
 
 	cleanup := func() {
 		pool.Close()
-		container.Terminate(ctx)
+		container.Terminate(context.Background())
 	}
 
 	return pool, cleanup
@@ -373,8 +374,16 @@ func BenchmarkProtocolRepository_UpsertSparkLendReserveData(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if err := repo.UpsertReserveData(ctx, data); err != nil {
+				tx, err := pool.Begin(ctx)
+				if err != nil {
+					b.Fatalf("begin tx: %v", err)
+				}
+				if err := repo.UpsertReserveData(ctx, tx, data); err != nil {
+					_ = tx.Rollback(ctx)
 					b.Fatalf("upsert failed: %v", err)
+				}
+				if err := tx.Commit(ctx); err != nil {
+					b.Fatalf("commit tx: %v", err)
 				}
 			}
 			b.StopTimer()

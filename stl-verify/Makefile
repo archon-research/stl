@@ -1,23 +1,33 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax help \
+.PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer help ci ci-checks \
         dev-up dev-env dev-down dev-ips generate-er \
-        tf-init tf-validate tf-plan tf-apply tf-apply-auto tf-destroy tf-state tf-check \
-        ecr-login docker-build docker-push docker-release \
+		ecr-login docker-build docker-push docker-release \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal \
+        docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
         docker-build-backup-staging docker-push-backup-staging docker-release-backup-staging \
         docker-build-oracle-price-worker docker-push-oracle-price-worker docker-release-oracle-price-worker \
         docker-build-oracle-price-worker-staging docker-push-oracle-price-worker-staging docker-release-oracle-price-worker-staging \
+        docker-build-sparklend-position-tracker docker-push-sparklend-position-tracker docker-release-sparklend-position-tracker \
+        docker-build-sparklend-position-tracker-staging docker-push-sparklend-position-tracker-staging docker-release-sparklend-position-tracker-staging \
+        docker-release-all docker-release-all-staging \
+        docker-build-temporal-worker docker-push-temporal-worker docker-release-temporal-worker \
+        docker-build-temporal-worker-staging docker-push-temporal-worker-staging docker-release-temporal-worker-staging \
+        docker-build-morpho-indexer docker-push-morpho-indexer docker-release-morpho-indexer \
+        docker-build-morpho-indexer-staging docker-push-morpho-indexer-staging docker-release-morpho-indexer-staging \
+        run-temporal-worker build-temporal-worker \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
+        ecs-deploy-oracle-price-worker ecs-deploy-oracle-price-worker-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
         bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel \
         db-migrate db-set-passwords db-test-app-user \
-        erigon-init erigon-validate erigon-plan erigon-apply erigon-apply-auto erigon-destroy erigon-check \
         erigon-status erigon-logs erigon-logs-follow erigon-deploy-readonly erigon-switch-readonly erigon-switch-sync erigon-mode \
         erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download \
-        build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill
+		build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill deploy-oracle-pricing-backfill-worker \
+		build-sparklend-backfill-arm64 deploy-sparklend-backfill erigon-sparklend-backfill
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -38,6 +48,16 @@ run-watcher-avax:
 	@echo "==> Running Avalanche watcher (chain_id=43114)..."
 	@set -a && . cmd/watcher/.env.avax && [ -f cmd/watcher/.env.avax.local ] && . cmd/watcher/.env.avax.local; set +a && go run ./cmd/watcher --enable-traces=false
 
+# Run the oracle price worker (requires dev-up first)
+run-oracle-price-worker:
+	@echo "==> Running oracle price worker..."
+	@set -a && . cmd/oracle-price-worker/.env && [ -f cmd/oracle-price-worker/.env.local ] && . cmd/oracle-price-worker/.env.local; set +a && go run ./cmd/oracle-price-worker
+
+# Run the Morpho indexer (requires dev-up first)
+run-morpho-indexer:
+	@echo "==> Running Morpho indexer..."
+	@set -a && . cmd/morpho-indexer/.env && [ -f cmd/morpho-indexer/.env.local ] && . cmd/morpho-indexer/.env.local; set +a && go run ./cmd/morpho-indexer
+
 # Run tests with race detector
 test-race:
 	@echo "==> Running tests with race detector..."
@@ -49,9 +69,11 @@ test:
 	go test -v ./...
 
 # Run integration tests (requires integration build tag)
+# -p 2: run at most 2 package test binaries in parallel to avoid spinning up
+# too many containers concurrently on CI (13 packages x containers = OOM).
 test-integration:
 	@echo "==> Running integration tests..."
-	go test -tags=integration -v -timeout=5m ./...
+	go test -tags=integration -v -timeout=10m -p 2 ./...
 
 # Run tests with coverage
 cover:
@@ -72,6 +94,21 @@ vet:
 	@echo "==> Running go vet..."
 	go vet ./...
 
+# Apply go fix modernizations
+fix:
+	@echo "==> Applying go fix..."
+	go fix ./...
+
+# Check if go fix has been applied (CI-friendly, fails if not)
+fix-check:
+	@echo "==> Checking go fix..."
+	@diff=$$(go fix -diff ./... 2>&1); \
+	if [ -n "$$diff" ]; then \
+		echo "Code needs modernizing. Run 'go fix ./...'"; \
+		echo "$$diff"; \
+		exit 1; \
+	fi
+
 # Format code
 fmt:
 	@echo "==> Formatting code..."
@@ -82,6 +119,11 @@ fmt:
 fmt-check:
 	@echo "==> Checking format..."
 	@test -z "$$(gofmt -l .)" || (echo "Files not formatted:"; gofmt -l .; exit 1)
+
+# Check import formatting (CI-friendly, fails if imports not organized)
+goimports-check:
+	@echo "==> Checking imports..."
+	@test -z "$$($(GOBIN)/goimports -l .)" || (echo "Imports not formatted:"; $(GOBIN)/goimports -l .; exit 1)
 
 # Tidy and verify dependencies
 tidy:
@@ -148,8 +190,12 @@ tools:
 	go install github.com/go-delve/delve/cmd/dlv@latest
 	go install golang.org/x/tools/gopls@latest
 
+# CI target for lint/format/static/security checks
+ci-checks: fix-check fmt-check goimports-check tidy-check vet staticcheck golangci-lint vulncheck
+
 # CI target: everything with strict checks
-ci: test-race vet fmt-check tidy-check vulncheck golangci-lint staticcheck
+# Order: fast checks first (fail fast), then expensive checks
+ci: ci-checks test-race
 
 # =============================================================================
 # Local Development
@@ -215,8 +261,44 @@ dev-env:
 		"AWS_SECRET_ACCESS_KEY=test" \
 		"AWS_REGION=us-east-1" \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"JAEGER_ENDPOINT=127.0.0.1:4317" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"LOG_LEVEL=debug" \
-		> cmd/oracle-price-worker/.env
+		> cmd/oracle-price-worker/.env && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-sparklend-position.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:6379" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=1" \
+		"LOG_LEVEL=debug" \
+		> cmd/sparklend-position-tracker/.env && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-morpho-indexing.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:6379" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=1" \
+		"JAEGER_ENDPOINT=127.0.0.1:4317" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"SQS_WAIT_TIME=1" \
+		"SQS_VISIBILITY_TIMEOUT=30" \
+		"LOG_LEVEL=debug" \
+		> cmd/morpho-indexer/.env
 	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
 		{ echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
 	printf '%s\n' \
@@ -227,7 +309,7 @@ dev-env:
 	@printf '%s\n' \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
-		> cmd/oracle-backfill/.env
+		> cmd/oracle-pricing-backfill/.env
 	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text) || \
 		{ echo "WARNING: Failed to fetch ETHERSCAN_API_KEY from AWS Secrets Manager."; ETHERSCAN_API_KEY=''; }; \
 	TIGERDATA_URL=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-tigerdata-readonly --query SecretString --output text | jq -r '.connection_url // empty' | sed 's|@[^:]*:|@localhost:|') || \
@@ -240,9 +322,13 @@ dev-env:
 	@echo "Environment files generated."
 	@echo "Note: data-validator uses staging TigerData. Run 'make tigerdata-tunnel' first."
 
-# Stop all local services
+# Stop all local services (preserves volumes and database data)
 dev-down:
 	@docker compose down
+
+# Stop all local services and delete volumes (destroys database data)
+dev-reset:
+	@docker compose down -v
 
 # Show service IPs (useful for devcontainer)
 dev-ips:
@@ -257,56 +343,6 @@ generate-er:
 	@echo "==> Generating ER diagram..."
 	@DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" go run ./cmd/generate-er --output ../docs/entity_relation.md
 	@echo "==> Generated: docs/entity_relation.md"
-
-# =============================================================================
-# Terraform Commands
-# =============================================================================
-
-INFRA_DIR := ../infra
-
-# Helper script to load TigerData credentials and run tofu
-# This exports credentials directly in the shell to ensure they're passed to tofu
-define run_tofu_with_creds
-	@SECRET_JSON=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata --query SecretString --output text 2>/dev/null || echo '{}') && \
-	export TF_VAR_tigerdata_project_id=$$(echo "$$SECRET_JSON" | jq -r '.project_id // empty') && \
-	export TF_VAR_tigerdata_access_key=$$(echo "$$SECRET_JSON" | jq -r '.access_key // empty') && \
-	export TF_VAR_tigerdata_secret_key=$$(echo "$$SECRET_JSON" | jq -r '.secret_key // empty') && \
-	cd $(INFRA_DIR) && $(1)
-endef
-
-# Initialize Terraform for an environment
-# Usage: make tf-init ENV=sentinelstaging
-tf-init:
-	@echo "==> Initializing Terraform for $(ENV)..."
-	cd $(INFRA_DIR) && tofu init -backend-config=environments/$(ENV).backend.hcl -reconfigure
-
-# Validate Terraform configuration
-# Usage: make tf-validate ENV=sentinelstaging
-tf-validate:
-	@echo "==> Validating Terraform for $(ENV)..."
-	$(call run_tofu_with_creds,tofu validate)
-
-# Plan Terraform changes
-# Usage: make tf-plan ENV=sentinelstaging
-tf-plan:
-	@echo "==> Planning Terraform for $(ENV)..."
-	$(call run_tofu_with_creds,tofu plan -var-file=environments/$(ENV).tfvars)
-
-# Apply Terraform changes
-# Usage: make tf-apply ENV=sentinelstaging
-tf-apply:
-	@echo "==> Applying Terraform for $(ENV)..."
-	$(call run_tofu_with_creds,tofu apply -var-file=environments/$(ENV).tfvars)
-
-# Apply Terraform changes (auto-approve)
-# Usage: make tf-apply-auto ENV=sentinelstaging
-tf-apply-auto:
-	@echo "==> Applying Terraform for $(ENV) (auto-approve)..."
-	$(call run_tofu_with_creds,tofu apply -auto-approve -var-file=environments/$(ENV).tfvars)
-
-# Full Terraform workflow: init, validate, plan
-# Usage: make tf-check ENV=sentinelstaging
-tf-check: tf-init tf-validate tf-plan
 
 # =============================================================================
 # Docker Build & Push
@@ -355,7 +391,9 @@ docker-push: ecr-login
 	docker push $(ECR_REPO):latest
 
 # Build and push in one step (single recipe to ensure consistent IMAGE_TAG)
-docker-release: ecr-login
+docker-release: ecr-login _docker-release-internal
+
+_docker-release-internal:
 	@IMAGE_TAG=$$(git rev-parse --short HEAD) && \
 	GIT_COMMIT_FULL=$$(git rev-parse HEAD) && \
 	GIT_BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
@@ -382,46 +420,84 @@ docker-clean:
 	-docker builder prune -f
 	@echo "==> Docker cleanup complete"
 
-# =============================================================================
-# Sentinelstaging Docker Shortcuts
-# =============================================================================
-
-docker-build-watcher-staging:
-	@$(MAKE) docker-build ENV=sentinelstaging
-
-docker-push-watcher-staging:
-	@$(MAKE) docker-push ENV=sentinelstaging
-
-docker-release-watcher-staging:
-	@$(MAKE) docker-release ENV=sentinelstaging
-
 # Force new deployment of watcher service (pulls latest image)
+# Usage: make ecs-deploy-watcher ENV=sentineldev|sentinelstaging|sentinelprod
 ecs-deploy-watcher:
 	@echo "==> Forcing new deployment of watcher service..."
 	aws ecs update-service --cluster stl-$(ENV)-cluster --service stl-$(ENV)-watcher --force-new-deployment --region $(AWS_REGION)
 	@echo "==> Deployment initiated. Monitor with: aws ecs describe-services --cluster stl-$(ENV)-cluster --services stl-$(ENV)-watcher --region $(AWS_REGION)"
 
+# Named aliases for consistency with other service targets
+docker-build-watcher:
+	@$(MAKE) docker-build
+
+docker-push-watcher:
+	@$(MAKE) docker-push
+
+docker-release-watcher:
+	@$(MAKE) docker-release
+
+# =============================================================================
+# Sentinelstaging Watcher Docker Shortcuts
+# =============================================================================
+
+docker-build-watcher-staging:
+	@$(MAKE) docker-build-watcher ENV=sentinelstaging
+
+docker-push-watcher-staging:
+	@$(MAKE) docker-push-watcher ENV=sentinelstaging
+
+docker-release-watcher-staging:
+	@$(MAKE) docker-release-watcher ENV=sentinelstaging
+
 ecs-deploy-watcher-staging:
 	@$(MAKE) ecs-deploy-watcher ENV=sentinelstaging
+
+# =============================================================================
+# Combined Docker Release (All Services)
+# =============================================================================
+
+# Release all services for a given environment
+# Usage: make docker-release-all ENV=sentineldev|sentinelstaging|sentinelprod
+docker-release-all:
+	@if [ -z "$(ENV)" ]; then \
+		echo "Error: ENV is required. Usage: make docker-release-all ENV=sentineldev|sentinelstaging|sentinelprod"; \
+		exit 1; \
+	fi
+	@$(MAKE) ecr-login ENV=$(ENV)
+	@echo "==> Releasing all Docker images for ENV=$(ENV)..."
+	@echo ""
+	@$(MAKE) _docker-release-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-backup-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-oracle-price-worker-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-sparklend-position-tracker-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-morpho-indexer-internal ENV=$(ENV)
+	@echo ""
+	@echo "==> All Docker images released for ENV=$(ENV)"
+
+# Shortcut: Release all services for sentinelstaging
+docker-release-all-staging:
+	@$(MAKE) docker-release-all ENV=sentinelstaging
 
 # =============================================================================
 # Bastion Host Management
 # =============================================================================
 
 # SSH tunnel to TigerData via bastion (after Tailscale is connected)
-# Usage: make tigerdata-tunnel BASTION_IP=<tailscale-ip>
+# Auto-discovers bastion and TigerData details from AWS
+# Usage: make tigerdata-tunnel ENV=sentineldev
+# Or manual: make tigerdata-tunnel BASTION_IP=<tailscale-ip> TIGERDATA_HOST=<tigerdata-host>
 # Then connect locally: psql "postgres://user:pass@localhost:5432/dbname"
 tigerdata-tunnel:
 	@if [ -z "$(BASTION_IP)" ] || [ -z "$(TIGERDATA_HOST)" ]; then \
 		echo "Error: BASTION_IP and TIGERDATA_HOST are required"; \
-		echo "Usage: make $@ BASTION_IP=<tailscale-ip> TIGERDATA_HOST=<tigerdata-host>"; \
-		echo "Get TIGERDATA_HOST from: aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-connection --query SecretString --output text | jq -r .host"; \
+		echo "Usage: make $@ BASTION_IP=<ip> TIGERDATA_HOST=<tigerdata-host>"; \
 		exit 1; \
 	fi
-	@echo "==> Starting SSH tunnel to TigerData via Tailscale..."
-	@echo "    Local:  localhost:5432"
-	@echo "    Remote: $(TIGERDATA_HOST):5432"
-	@echo "    Press Ctrl+C to stop"
 	ssh -N -L 5432:$(TIGERDATA_HOST):5432 ec2-user@$(BASTION_IP)
 
 # =============================================================================
@@ -445,15 +521,15 @@ db-migrate:
 	@echo "==> Migrations complete"
 
 # Set database user passwords from Secrets Manager
-# Usage: make db-set-passwords DATABASE_URL="postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require" ENV=sentinelstaging
+# Usage: make db-set-passwords DATABASE_URL="postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require" ENV=sentineldev|sentinelstaging|sentinelprod
 # Requires:
 #   1. Tunnel running: make tigerdata-tunnel BASTION_IP=... TIGERDATA_HOST=...
-#   2. Terraform applied: make tf-apply ENV=sentinelstaging (creates secrets with passwords)
+#   2. Terraform applied (from infrastructure repo): make tf-apply ENV=sentineldev|sentinelstaging|sentinelprod (creates secrets with passwords)
 #   3. Migrations run: make db-migrate DATABASE_URL=... (creates users with placeholder passwords)
 db-set-passwords:
 	@if [ -z "$(DATABASE_URL)" ] || [ -z "$(ENV)" ]; then \
 		echo "Error: DATABASE_URL and ENV are required"; \
-		echo "Usage: make $@ DATABASE_URL=\"postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require\" ENV=sentinelstaging"; \
+		echo "Usage: make $@ DATABASE_URL=\"postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require\" ENV=sentineldev|sentinelstaging|sentinelprod"; \
 		exit 1; \
 	fi
 	@echo "==> Setting database user passwords from Secrets Manager..."
@@ -466,12 +542,12 @@ db-set-passwords:
 	echo "==> Database user passwords configured successfully"
 
 # Test database connection with application user
-# Usage: make db-test-app-user ENV=sentinelstaging
+# Usage: make db-test-app-user ENV=sentineldev|sentinelstaging|sentinelprod
 # Requires tunnel to be running first: make tigerdata-tunnel BASTION_IP=... TIGERDATA_HOST=...
 db-test-app-user:
 	@if [ -z "$(ENV)" ]; then \
 		echo "Error: ENV is required"; \
-		echo "Usage: make $@ ENV=sentinelstaging"; \
+		echo "Usage: make $@ ENV=sentineldev|sentinelstaging|sentinelprod"; \
 		exit 1; \
 	fi
 	@echo "==> Testing stl_read_write connection..."
@@ -515,7 +591,9 @@ docker-push-backup: ecr-login
 	docker push $(ECR_REPO_BACKUP):latest
 
 # Build and push backup worker in one step (captures tag at start to ensure consistency)
-docker-release-backup: ecr-login
+docker-release-backup: ecr-login _docker-release-backup-internal
+
+_docker-release-backup-internal:
 	@TAG=$$(git rev-parse --short HEAD) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
@@ -581,7 +659,9 @@ docker-push-oracle-price-worker: ecr-login
 	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):latest
 
 # Build and push oracle price worker in one step (captures tag at start to ensure consistency)
-docker-release-oracle-price-worker: ecr-login
+docker-release-oracle-price-worker: ecr-login _docker-release-oracle-price-worker-internal
+
+_docker-release-oracle-price-worker-internal:
 	@TAG=$$(git rev-parse --short HEAD) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
@@ -617,63 +697,231 @@ docker-push-oracle-price-worker-staging:
 docker-release-oracle-price-worker-staging:
 	@$(MAKE) docker-release-oracle-price-worker ENV=sentinelstaging
 
+# Force new deployment of oracle price worker service (pulls latest image)
+# Usage: make ecs-deploy-oracle-price-worker ENV=sentineldev|sentinelstaging|sentinelprod
+ecs-deploy-oracle-price-worker:
+	@echo "==> Forcing new deployment of oracle price worker service..."
+	aws ecs update-service --cluster stl-$(ENV)-cluster --service stl-$(ENV)-oracle-price-worker --force-new-deployment --region $(AWS_REGION)
+	@echo "==> Deployment initiated. Monitor with: aws ecs describe-services --cluster stl-$(ENV)-cluster --services stl-$(ENV)-oracle-price-worker --region $(AWS_REGION)"
+
+ecs-deploy-oracle-price-worker-staging:
+	@$(MAKE) ecs-deploy-oracle-price-worker ENV=sentinelstaging
+
 # =============================================================================
-# Erigon Node Terraform Commands
+# Docker Build & Push - SparkLend Position Tracker
 # =============================================================================
 
-ERIGON_DIR := ephemeral-infra/erigon-node
+# ECR repository URL for sparklend position tracker
+ECR_REPO_SPARKLEND_POSITION_TRACKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-sparklend-position-tracker
 
-# Helper to check AWS_PROFILE_ERIGON is set
-define require_aws_profile_erigon
-	@if [ -z "$(AWS_PROFILE_ERIGON)" ]; then \
-		echo "Error: AWS_PROFILE_ERIGON is required"; \
-		echo "Usage: make $@ AWS_PROFILE_ERIGON=<profile-name>"; \
-		exit 1; \
-	fi
-endef
+# Build Docker image for sparklend position tracker (ARM64 for Fargate Graviton)
+docker-build-sparklend-position-tracker:
+	@echo "==> Building SparkLend Position Tracker Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.sparklend-position-tracker \
+		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest \
+		--load .
 
-# Initialize Erigon Terraform
-erigon-init:
-	$(call require_aws_profile_erigon)
-	@echo "==> Initializing Erigon Terraform..."
-	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu init -backend-config=environments/sentinelstaging.backend.hcl
+# Push sparklend position tracker Docker image to ECR
+docker-push-sparklend-position-tracker: ecr-login
+	@echo "==> Pushing SparkLend Position Tracker Docker image to ECR..."
+	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest
 
-# Validate Erigon Terraform configuration
-erigon-validate:
-	$(call require_aws_profile_erigon)
-	@echo "==> Validating Erigon Terraform..."
-	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu validate
+# Build and push sparklend position tracker in one step (captures tag at start to ensure consistency)
+docker-release-sparklend-position-tracker: ecr-login _docker-release-sparklend-position-tracker-internal
 
-# Plan Erigon Terraform changes
-erigon-plan:
-	$(call require_aws_profile_erigon)
-	@echo "==> Planning Erigon Terraform..."
-	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu plan
+_docker-release-sparklend-position-tracker-internal:
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building SparkLend Position Tracker Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.sparklend-position-tracker \
+		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$$TAG \
+		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest \
+		--load . && \
+	echo "==> Pushing SparkLend Position Tracker Docker image to ECR..." && \
+	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$$TAG && \
+	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest && \
+	echo "==> SparkLend Position Tracker Docker image released: $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$$TAG"
 
-# Apply Erigon Terraform changes
-erigon-apply:
-	$(call require_aws_profile_erigon)
-	@echo "==> Applying Erigon Terraform..."
-	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu apply
+# =============================================================================
+# Sentinelstaging SparkLend Position Tracker Docker Shortcuts
+# =============================================================================
 
-# Apply Erigon Terraform changes (auto-approve)
-erigon-apply-auto:
-	$(call require_aws_profile_erigon)
-	@echo "==> Applying Erigon Terraform (auto-approve)..."
-	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu apply -auto-approve
+docker-build-sparklend-position-tracker-staging:
+	@$(MAKE) docker-build-sparklend-position-tracker ENV=sentinelstaging
 
-# Destroy Erigon infrastructure
-erigon-destroy:
-	$(call require_aws_profile_erigon)
-	@echo "==> Destroying Erigon infrastructure..."
-	cd $(ERIGON_DIR) && AWS_PROFILE=$(AWS_PROFILE_ERIGON) tofu destroy
+docker-push-sparklend-position-tracker-staging:
+	@$(MAKE) docker-push-sparklend-position-tracker ENV=sentinelstaging
 
-# Full Erigon workflow: init, validate, plan
-erigon-check: erigon-init erigon-validate erigon-plan
+docker-release-sparklend-position-tracker-staging:
+	@$(MAKE) docker-release-sparklend-position-tracker ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - Temporal Worker
+# =============================================================================
+
+# ECR repository URL for temporal worker
+ECR_REPO_TEMPORAL_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-temporal-worker
+
+# Build Docker image for temporal worker (ARM64 for Fargate Graviton)
+docker-build-temporal-worker:
+	@echo "==> Building Temporal Worker Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_TEMPORAL_WORKER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.temporal-worker \
+		-t $(ECR_REPO_TEMPORAL_WORKER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_TEMPORAL_WORKER):latest \
+		--load .
+
+# Push temporal worker Docker image to ECR
+docker-push-temporal-worker: ecr-login
+	@echo "==> Pushing Temporal Worker Docker image to ECR..."
+	docker push $(ECR_REPO_TEMPORAL_WORKER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_TEMPORAL_WORKER):latest
+
+# Build and push temporal worker in one step (captures tag at start to ensure consistency)
+docker-release-temporal-worker: ecr-login
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Temporal Worker Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_TEMPORAL_WORKER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.temporal-worker \
+		-t $(ECR_REPO_TEMPORAL_WORKER):$$TAG \
+		-t $(ECR_REPO_TEMPORAL_WORKER):latest \
+		--load . && \
+	echo "==> Pushing Temporal Worker Docker image to ECR..." && \
+	docker push $(ECR_REPO_TEMPORAL_WORKER):$$TAG && \
+	docker push $(ECR_REPO_TEMPORAL_WORKER):latest && \
+	echo "==> Temporal Worker Docker image released: $(ECR_REPO_TEMPORAL_WORKER):$$TAG"
+
+# =============================================================================
+# Sentinelstaging Temporal Worker Docker Shortcuts
+# =============================================================================
+
+docker-build-temporal-worker-staging:
+	@$(MAKE) docker-build-temporal-worker ENV=sentinelstaging
+
+docker-push-temporal-worker-staging:
+	@$(MAKE) docker-push-temporal-worker ENV=sentinelstaging
+
+docker-release-temporal-worker-staging:
+	@$(MAKE) docker-release-temporal-worker ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - Morpho Indexer
+# =============================================================================
+
+# ECR repository URL for morpho indexer
+ECR_REPO_MORPHO_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-morpho-indexer
+
+# Build Docker image for morpho indexer (ARM64 for Fargate Graviton)
+docker-build-morpho-indexer:
+	@echo "==> Building Morpho Indexer Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_MORPHO_INDEXER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.morpho-indexer \
+		-t $(ECR_REPO_MORPHO_INDEXER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_MORPHO_INDEXER):latest \
+		--load .
+
+# Push morpho indexer Docker image to ECR
+docker-push-morpho-indexer: ecr-login
+	@echo "==> Pushing Morpho Indexer Docker image to ECR..."
+	docker push $(ECR_REPO_MORPHO_INDEXER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_MORPHO_INDEXER):latest
+
+# Build and push morpho indexer in one step (captures tag at start to ensure consistency)
+docker-release-morpho-indexer: ecr-login _docker-release-morpho-indexer-internal
+
+_docker-release-morpho-indexer-internal:
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Morpho Indexer Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_MORPHO_INDEXER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.morpho-indexer \
+		-t $(ECR_REPO_MORPHO_INDEXER):$$TAG \
+		-t $(ECR_REPO_MORPHO_INDEXER):latest \
+		--load . && \
+	echo "==> Pushing Morpho Indexer Docker image to ECR..." && \
+	docker push $(ECR_REPO_MORPHO_INDEXER):$$TAG && \
+	docker push $(ECR_REPO_MORPHO_INDEXER):latest && \
+	echo "==> Morpho Indexer Docker image released: $(ECR_REPO_MORPHO_INDEXER):$$TAG"
+
+# =============================================================================
+# Sentinelstaging Morpho Indexer Docker Shortcuts
+# =============================================================================
+
+docker-build-morpho-indexer-staging:
+	@$(MAKE) docker-build-morpho-indexer ENV=sentinelstaging
+
+docker-push-morpho-indexer-staging:
+	@$(MAKE) docker-push-morpho-indexer ENV=sentinelstaging
+
+docker-release-morpho-indexer-staging:
+	@$(MAKE) docker-release-morpho-indexer ENV=sentinelstaging
 
 # =============================================================================
 # Erigon Node Management (via Tailscale)
 # =============================================================================
+
+# WORKER_USER and WORKER_IP are required for worker deploy targets
+# Usage: make deploy-oracle-pricing-backfill-worker WORKER_USER=root WORKER_IP=<tailscale-ip>
+define require_worker_vars
+	@if [ -z "$(WORKER_USER)" ] || [ -z "$(WORKER_IP)" ]; then \
+		echo "Error: WORKER_USER and WORKER_IP are required"; \
+		echo "Usage: make $@ WORKER_USER=<user> WORKER_IP=<tailscale-ip>"; \
+		exit 1; \
+	fi
+endef
 
 # ERIGON_USER and ERIGON_IP are required for all erigon-* targets
 # Usage: make erigon-status ERIGON_USER=<user> ERIGON_IP=<tailscale-ip>
@@ -709,7 +957,7 @@ erigon-logs-follow:
 erigon-deploy-readonly:
 	$(call require_erigon_vars)
 	@echo "==> Deploying erigon-readonly.service to Erigon node..."
-	cat $(ERIGON_DIR)/erigon-readonly.service | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > /etc/systemd/system/erigon-readonly.service && systemctl daemon-reload'
+	cat erigon/erigon-readonly.service | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > /etc/systemd/system/erigon-readonly.service && systemctl daemon-reload'
 	@echo "==> Service deployed. Use 'make erigon-switch-readonly' to switch modes."
 
 # Switch to read-only mode (for bulk downloading)
@@ -753,6 +1001,25 @@ build-oracle-worker:
 	go build -o dist/oracle-price-worker ./cmd/oracle-price-worker
 	@echo "==> Built: dist/oracle-price-worker"
 
+# Build sparklend-position-tracker binary
+build-sparklend-position-tracker:
+	@echo "==> Building sparklend-position-tracker..."
+	mkdir -p dist
+	go build -o dist/sparklend-position-tracker ./cmd/sparklend-position-tracker
+	@echo "==> Built: dist/sparklend-position-tracker"
+
+# Build temporal-worker binary
+build-temporal-worker:
+	@echo "==> Building temporal-worker..."
+	mkdir -p dist
+	go build -o dist/temporal-worker ./cmd/temporal-worker
+	@echo "==> Built: dist/temporal-worker"
+
+# Run temporal-worker locally (requires dev-up first for Temporal server)
+run-temporal-worker:
+	@echo "==> Running Temporal Worker..."
+	COINGECKO_API_KEY=$${COINGECKO_API_KEY} go run ./cmd/temporal-worker
+
 # Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
 build-oracle-pricing-backfill-arm64:
 	@echo "==> Building oracle-pricing-backfill for ARM64 Linux..."
@@ -767,6 +1034,14 @@ deploy-oracle-pricing-backfill: build-oracle-pricing-backfill-arm64
 	@echo "==> Deploying oracle-pricing-backfill to Erigon node..."
 	cat dist/oracle-pricing-backfill-linux-arm64 | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > ~/oracle-pricing-backfill && chmod +x ~/oracle-pricing-backfill'
 	@echo "==> Deployed to ~/oracle-pricing-backfill on Erigon node."
+
+# Deploy oracle-pricing-backfill to worker instance
+# Usage: make deploy-oracle-pricing-backfill-worker WORKER_USER=root WORKER_IP=<tailscale-ip>
+deploy-oracle-pricing-backfill-worker: build-oracle-pricing-backfill-arm64
+	$(call require_worker_vars)
+	@echo "==> Deploying oracle-pricing-backfill to worker..."
+	cat dist/oracle-pricing-backfill-linux-arm64 | tailscale ssh $(WORKER_USER)@$(WORKER_IP) 'cat > ~/oracle-pricing-backfill && chmod +x ~/oracle-pricing-backfill'
+	@echo "==> Deployed to ~/oracle-pricing-backfill on worker."
 
 # Build bulk-download binary for ARM64 Linux (to run on Erigon node)
 build-bulk-download-arm64:
@@ -800,3 +1075,41 @@ erigon-bulk-download:
 		--bucket=$(BUCKET) \
 		$(if $(filter true,$(DRY_RUN)),--dry-run,)'
 
+# Build sparklend-backfill binary for ARM64 Linux (to run on Erigon node)
+build-sparklend-backfill-arm64:
+	@echo "==> Building sparklend-backfill for ARM64 Linux..."
+	mkdir -p dist
+	GOOS=linux GOARCH=arm64 go build -o dist/sparklend-backfill-linux-arm64 ./cmd/sparklend-backfill
+	@echo "==> Built: dist/sparklend-backfill-linux-arm64"
+
+# Deploy sparklend-backfill to Erigon node
+# Usage: make deploy-sparklend-backfill ERIGON_USER=<user> ERIGON_IP=<ip>
+deploy-sparklend-backfill: build-sparklend-backfill-arm64
+	$(call require_erigon_vars)
+	@echo "==> Deploying sparklend-backfill to Erigon node..."
+	cat dist/sparklend-backfill-linux-arm64 | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > ~/sparklend-backfill && chmod +x ~/sparklend-backfill'
+	@echo "==> Deployed to ~/sparklend-backfill on Erigon node."
+
+# Run sparklend-backfill on Erigon node
+# Usage: make erigon-sparklend-backfill ERIGON_USER=<user> ERIGON_IP=<ip> BUCKET=<bucket> START=<start> END=<end> DB_URL=<postgres-url> [RPC_URL=http://127.0.0.1:8545] [CONCURRENCY=10] [CHAIN_ID=1] [BACKFILL_AWS_REGION=us-east-1]
+RPC_URL ?= http://127.0.0.1:8545
+CONCURRENCY ?= 10
+CHAIN_ID ?= 1
+BACKFILL_AWS_REGION ?= us-east-1
+erigon-sparklend-backfill:
+	$(call require_erigon_vars)
+	@if [ -z "$(BUCKET)" ] || [ -z "$(START)" ] || [ -z "$(END)" ] || [ -z "$(DB_URL)" ]; then \
+		echo "Error: BUCKET, START, END, and DB_URL are required"; \
+		echo "Usage: make $@ ERIGON_USER=<user> ERIGON_IP=<ip> BUCKET=<bucket> START=<start> END=<end> DB_URL=<postgres-url>"; \
+		exit 1; \
+	fi
+	@echo "==> Running sparklend-backfill on Erigon node..."
+	tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) '~/sparklend-backfill \
+		--rpc-url=$(RPC_URL) \
+		--from=$(START) \
+		--to=$(END) \
+		--bucket=$(BUCKET) \
+		--db=$(DB_URL) \
+		--concurrency=$(CONCURRENCY) \
+		--chain-id=$(CHAIN_ID) \
+		--aws-region=$(BACKFILL_AWS_REGION)'

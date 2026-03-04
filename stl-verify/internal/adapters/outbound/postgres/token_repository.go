@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -53,29 +52,26 @@ func NewTokenRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) 
 func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
 	var tokenID int64
 
+	// Upsert: on conflict preserve the earliest created_at_block via LEAST().
+	// This is safe for concurrent workers processing different blocks for the same token —
+	// whichever worker wins the INSERT race, subsequent LEAST() merges still produce
+	// the correct minimum created_at_block.
 	err := tx.QueryRow(ctx,
-		`SELECT id FROM token WHERE chain_id = $1 AND address = $2`,
-		chainID, address.Bytes()).Scan(&tokenID)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		if symbol == "" {
-			symbol = "UNKNOWN"
-		}
-		r.logger.Info("auto-creating token", "address", address.Hex(), "symbol", symbol, "decimals", decimals)
-		err = tx.QueryRow(ctx,
-			`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, '{}', NOW())
-			 RETURNING id`,
-			chainID, address.Bytes(), symbol, decimals, createdAtBlock).Scan(&tokenID)
-		if err != nil {
-			return 0, fmt.Errorf("failed to create token: %w", err)
-		}
-		r.logger.Debug("token created", "address", address.Hex(), "id", tokenID, "symbol", symbol, "decimals", decimals)
-		return tokenID, nil
-	} else if err != nil {
-		return 0, fmt.Errorf("failed to get token: %w", err)
+		`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, '{}', NOW())
+		 ON CONFLICT (chain_id, address) DO UPDATE SET
+		     created_at_block = LEAST(token.created_at_block, EXCLUDED.created_at_block),
+		     updated_at = CASE
+		         WHEN EXCLUDED.created_at_block < token.created_at_block THEN NOW()
+		         ELSE token.updated_at
+		     END
+		 RETURNING id`,
+		chainID, address.Bytes(), symbol, decimals, createdAtBlock).Scan(&tokenID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get or create token: %w", err)
 	}
 
+	r.logger.Debug("token upserted", "address", address.Hex(), "id", tokenID, "symbol", symbol, "decimals", decimals)
 	return tokenID, nil
 }
 
@@ -93,10 +89,7 @@ func (r *TokenRepository) UpsertTokens(ctx context.Context, tokens []*entity.Tok
 	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(tokens); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
+		end := min(i+r.batchSize, len(tokens))
 		batch := tokens[i:end]
 
 		if err := r.upsertTokenBatch(ctx, tx, batch); err != nil {
@@ -165,10 +158,7 @@ func (r *TokenRepository) UpsertReceiptTokens(ctx context.Context, tokens []*ent
 	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(tokens); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
+		end := min(i+r.batchSize, len(tokens))
 		batch := tokens[i:end]
 
 		if err := r.upsertReceiptTokenBatch(ctx, tx, batch); err != nil {
@@ -237,10 +227,7 @@ func (r *TokenRepository) UpsertDebtTokens(ctx context.Context, tokens []*entity
 	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(tokens); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
+		end := min(i+r.batchSize, len(tokens))
 		batch := tokens[i:end]
 
 		if err := r.upsertDebtTokenBatch(ctx, tx, batch); err != nil {

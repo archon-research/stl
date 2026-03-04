@@ -82,6 +82,10 @@ func (m *mockBlockStateRepository) MarkPublishComplete(ctx context.Context, hash
 	return nil
 }
 
+func (m *mockBlockStateRepository) GetMinUnpublishedBlock(ctx context.Context) (int64, bool, error) {
+	return 0, false, nil
+}
+
 func (m *mockBlockStateRepository) GetBlocksWithIncompletePublish(ctx context.Context, limit int) ([]outbound.BlockState, error) {
 	return nil, nil
 }
@@ -314,9 +318,9 @@ func TestService_ValidateReorgs(t *testing.T) {
 
 func TestService_SpotChecks(t *testing.T) {
 	localBlocks := map[int64]*outbound.BlockState{
-		100: {Number: 100, Hash: "0xabc123"},
-		101: {Number: 101, Hash: "0xdef456"},
-		102: {Number: 102, Hash: "0xghi789"},
+		100: {Number: 100, Hash: "0xabc123", BlockTimestamp: time.Now().Unix()},
+		101: {Number: 101, Hash: "0xdef456", BlockTimestamp: time.Now().Unix()},
+		102: {Number: 102, Hash: "0xghi789", BlockTimestamp: time.Now().Unix()},
 	}
 
 	canonicalBlocks := map[int64]*outbound.CanonicalBlock{
@@ -360,7 +364,7 @@ func TestService_SpotChecks(t *testing.T) {
 
 func TestService_SpotChecks_Mismatch(t *testing.T) {
 	localBlocks := map[int64]*outbound.BlockState{
-		100: {Number: 100, Hash: "0xlocal"},
+		100: {Number: 100, Hash: "0xlocal", BlockTimestamp: time.Now().Unix()},
 	}
 
 	canonicalBlocks := map[int64]*outbound.CanonicalBlock{

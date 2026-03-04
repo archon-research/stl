@@ -2,9 +2,11 @@ package sparklend_position_tracker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"sync"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -15,6 +17,11 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 )
+
+// ErrReserveNotFound is returned when reserve data cannot be fetched at the queried block.
+// This typically happens when the configured PoolDataProvider contract didn't exist at
+// the historical block (e.g., the contract was upgraded/redeployed after that block).
+var ErrReserveNotFound = errors.New("reserve not found at block")
 
 type TokenMetadata struct {
 	Symbol   string
@@ -46,7 +53,12 @@ type ActualUserReserveData struct {
 	StableRateLastUpdated    uint64
 }
 
+// ErrNoPoolDataProvider is returned when no PoolDataProvider exists for the queried block.
+var ErrNoPoolDataProvider = errors.New("no PoolDataProvider available for block")
+
 type blockchainService struct {
+	mu                                         sync.RWMutex
+	chainID                                    int64
 	ethClient                                  *ethclient.Client
 	multicallClient                            outbound.Multicaller
 	erc20ABI                                   *abi.ABI
@@ -55,7 +67,7 @@ type blockchainService struct {
 	getPoolDataProviderReserveConfigurationABI *abi.ABI
 	getPoolDataProviderReserveDataABI          *abi.ABI
 	uiPoolDataProvider                         common.Address
-	poolDataProvider                           common.Address
+	poolAddress                                common.Address
 	poolAddressesProvider                      common.Address
 	protocolVersion                            blockchain.ProtocolVersion
 	metadataCache                              map[common.Address]TokenMetadata
@@ -93,21 +105,23 @@ type reserveDataFromProvider struct {
 }
 
 func newBlockchainService(
+	chainID int64,
 	ethClient *ethclient.Client,
 	multicallClient outbound.Multicaller,
 	erc20ABI *abi.ABI,
 	uiPoolDataProvider common.Address,
-	poolDataProvider common.Address,
+	poolAddress common.Address,
 	poolAddressesProvider common.Address,
 	protocolVersion blockchain.ProtocolVersion,
 	logger *slog.Logger,
 ) (*blockchainService, error) {
 	service := &blockchainService{
+		chainID:               chainID,
 		ethClient:             ethClient,
 		multicallClient:       multicallClient,
 		erc20ABI:              erc20ABI,
 		uiPoolDataProvider:    uiPoolDataProvider,
-		poolDataProvider:      poolDataProvider,
+		poolAddress:           poolAddress,
 		poolAddressesProvider: poolAddressesProvider,
 		protocolVersion:       protocolVersion,
 		metadataCache:         make(map[common.Address]TokenMetadata),
@@ -119,6 +133,16 @@ func newBlockchainService(
 	}
 
 	return service, nil
+}
+
+// getPoolDataProviderForBlock returns the correct PoolDataProvider address for the given block.
+// Returns an error if no PoolDataProvider was active at that block.
+func (s *blockchainService) getPoolDataProviderForBlock(blockNumber uint64) (common.Address, error) {
+	provider, ok := blockchain.GetPoolDataProviderForBlock(s.chainID, s.poolAddress, blockNumber)
+	if !ok {
+		return common.Address{}, fmt.Errorf("%w: chain=%d pool=%s block=%d", ErrNoPoolDataProvider, s.chainID, s.poolAddress.Hex(), blockNumber)
+	}
+	return provider, nil
 }
 
 func (s *blockchainService) loadABIs(protocolVersion blockchain.ProtocolVersion) error {
@@ -195,7 +219,19 @@ func (s *blockchainService) getUserReservesData(
 
 	unpacked, err := s.getUserReservesABI.Unpack("getUserReservesData", result)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unpack getUserReservesData result: %w", err)
+		// Fallback: some chains (e.g. Avalanche C-Chain) encode booleans as uint256,
+		// which the strict Go ABI decoder rejects. Try raw decoding.
+		reserves, rawErr := decodeUserReservesRaw(result)
+		if rawErr != nil {
+			return nil, fmt.Errorf(
+				"failed to decode getUserReservesData: %w",
+				errors.Join(err, fmt.Errorf("raw fallback decode failed: %w", rawErr)),
+			)
+		}
+		s.logger.Debug("used raw decoder for getUserReservesData",
+			"user", user.Hex(),
+			"reserves", len(reserves))
+		return reserves, nil
 	}
 	if len(unpacked) == 0 {
 		return []UserReserveData{}, nil
@@ -265,6 +301,12 @@ func (s *blockchainService) batchGetUserReserveData(ctx context.Context, assets 
 		return make(map[common.Address]ActualUserReserveData), nil
 	}
 
+	// Get the correct PoolDataProvider for this block
+	poolDataProvider, err := s.getPoolDataProviderForBlock(uint64(blockNumber))
+	if err != nil {
+		return nil, err
+	}
+
 	calls := make([]outbound.Call, 0, len(assets))
 	for _, asset := range assets {
 		callData, err := s.getUserReserveDataABI.Pack("getUserReserveData", asset, user)
@@ -274,7 +316,7 @@ func (s *blockchainService) batchGetUserReserveData(ctx context.Context, assets 
 		}
 
 		calls = append(calls, outbound.Call{
-			Target:       s.poolDataProvider,
+			Target:       poolDataProvider,
 			AllowFailure: true,
 			CallData:     callData,
 		})
@@ -333,10 +375,11 @@ func (s *blockchainService) batchGetUserReserveData(ctx context.Context, assets 
 	return dataMap, nil
 }
 
-func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens map[common.Address]bool) (map[common.Address]TokenMetadata, error) {
+func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens map[common.Address]bool, blockNumber *big.Int) (map[common.Address]TokenMetadata, error) {
 	tokensToFetch := make([]common.Address, 0)
 	result := make(map[common.Address]TokenMetadata)
 
+	s.mu.RLock()
 	for token := range tokens {
 		if cached, ok := s.metadataCache[token]; ok {
 			result[token] = cached
@@ -344,6 +387,7 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 			tokensToFetch = append(tokensToFetch, token)
 		}
 	}
+	s.mu.RUnlock()
 
 	if len(tokensToFetch) == 0 {
 		return result, nil
@@ -362,7 +406,7 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 		)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, calls, nil)
+	results, err := s.multicallClient.Execute(ctx, calls, blockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("multicall failed: %w", err)
 	}
@@ -409,7 +453,12 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 			Name:     name,
 		}
 
+		// Token metadata (symbol, decimals, name) is immutable, so a concurrent
+		// cache miss producing duplicate fetches is safe — both writes produce
+		// the same value.
+		s.mu.Lock()
 		s.metadataCache[token] = metadata
+		s.mu.Unlock()
 		result[token] = metadata
 	}
 
@@ -418,6 +467,12 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 
 // getFullReserveData fetches both reserve data and configuration data from ProtocolDataProvider.
 func (s *blockchainService) getFullReserveData(ctx context.Context, asset common.Address, blockNumber int64) (*reserveDataFromProvider, *reserveConfigData, error) {
+	// Get the correct PoolDataProvider for this block
+	poolDataProvider, err := s.getPoolDataProviderForBlock(uint64(blockNumber))
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// Build multicall requests for both getReserveData and getReserveConfigurationData
 	getReserveDataCallData, err := s.getPoolDataProviderReserveDataABI.Pack("getReserveData", asset)
 	if err != nil {
@@ -431,12 +486,12 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, asset common
 
 	calls := []outbound.Call{
 		{
-			Target:       s.poolDataProvider,
+			Target:       poolDataProvider,
 			AllowFailure: true,
 			CallData:     getReserveDataCallData,
 		},
 		{
-			Target:       s.poolDataProvider,
+			Target:       poolDataProvider,
 			AllowFailure: true,
 			CallData:     getConfigCallData,
 		},
@@ -455,6 +510,9 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, asset common
 	if !results[0].Success {
 		return nil, nil, fmt.Errorf("getReserveData call failed for asset %s at block %d", asset.Hex(), blockNumber)
 	}
+	if len(results[0].ReturnData) == 0 {
+		return nil, nil, fmt.Errorf("%w: getReserveData returned empty data for asset %s at block %d", ErrReserveNotFound, asset.Hex(), blockNumber)
+	}
 	reserveData, err := s.parseReserveData(results[0].ReturnData)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse reserve data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
@@ -463,6 +521,9 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, asset common
 	// Parse getReserveConfigurationData result
 	if !results[1].Success {
 		return nil, nil, fmt.Errorf("getReserveConfigurationData call failed for asset %s at block %d", asset.Hex(), blockNumber)
+	}
+	if len(results[1].ReturnData) == 0 {
+		return nil, nil, fmt.Errorf("%w: getReserveConfigurationData returned empty data for asset %s at block %d", ErrReserveNotFound, asset.Hex(), blockNumber)
 	}
 	configData, err := s.parseReserveConfigurationData(results[1].ReturnData)
 	if err != nil {
@@ -494,7 +555,7 @@ func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvi
 }
 
 // parseReserveDataAaveV2 parses Aave V2 reserve data (10 fields).
-func parseReserveDataAaveV2(unpacked []interface{}, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+func parseReserveDataAaveV2(unpacked []any, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
 	if len(unpacked) < 10 {
 		return nil, fmt.Errorf("expected 10 values from getReserveData (Aave V2), got %d", len(unpacked))
 	}
@@ -562,7 +623,7 @@ func parseReserveDataAaveV2(unpacked []interface{}, fieldIndex map[string]int) (
 }
 
 // parseReserveDataAaveV3 parses Aave V3 reserve data (12 fields).
-func parseReserveDataAaveV3(unpacked []interface{}, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+func parseReserveDataAaveV3(unpacked []any, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
 	if len(unpacked) < 12 {
 		return nil, fmt.Errorf("expected 12 values from getReserveData (Aave V3), got %d", len(unpacked))
 	}
@@ -635,7 +696,7 @@ func parseReserveDataAaveV3(unpacked []interface{}, fieldIndex map[string]int) (
 }
 
 // parseReserveDataSparklend parses Sparklend reserve data (11 fields, no averageStableBorrowRate).
-func parseReserveDataSparklend(unpacked []interface{}, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+func parseReserveDataSparklend(unpacked []any, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
 	result := &reserveDataFromProvider{}
 	var err error
 
@@ -768,6 +829,8 @@ func (s *blockchainService) parseReserveConfigurationData(data []byte) (*reserve
 	return result, nil
 }
 
+// buildFieldIndexMap returns a map from each ABI output name to its index in the provided Arguments slice.
+// If an output has an empty name the map will contain an entry with the empty string key.
 func buildFieldIndexMap(outputs abi.Arguments) map[string]int {
 	fieldIndex := make(map[string]int, len(outputs))
 	for i, arg := range outputs {
@@ -776,7 +839,10 @@ func buildFieldIndexMap(outputs abi.Arguments) map[string]int {
 	return fieldIndex
 }
 
-func getBigIntByName(unpacked []interface{}, fieldIndex map[string]int, fieldName string) (*big.Int, error) {
+// getBigIntByName retrieves a *big.Int value from an ABI unpacked output slice by field name.
+// It uses fieldIndex to resolve the field's index and returns the corresponding *big.Int.
+// Returns an error if the field name is not present, the index is out of range, or the value is not a *big.Int.
+func getBigIntByName(unpacked []any, fieldIndex map[string]int, fieldName string) (*big.Int, error) {
 	idx, ok := fieldIndex[fieldName]
 	if !ok {
 		return nil, fmt.Errorf("field %s not found in ABI", fieldName)
@@ -794,7 +860,9 @@ func getBigIntByName(unpacked []interface{}, fieldIndex map[string]int, fieldNam
 	return v, nil
 }
 
-func getBoolByName(unpacked []interface{}, fieldIndex map[string]int, fieldName string) (bool, error) {
+// getBoolByName extracts a boolean value identified by fieldName from an unpacked ABI output using fieldIndex.
+// It returns the boolean or an error if the field is not present, the index is out of range, or the value is not a bool.
+func getBoolByName(unpacked []any, fieldIndex map[string]int, fieldName string) (bool, error) {
 	idx, ok := fieldIndex[fieldName]
 	if !ok {
 		return false, fmt.Errorf("field %s not found in ABI", fieldName)

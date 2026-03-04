@@ -237,8 +237,8 @@ func splitStatements(content string) []string {
 	var statements []string
 	var current strings.Builder
 
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(content, "\n")
+	for line := range lines {
 		trimmed := strings.TrimSpace(line)
 
 		// Skip pure comment lines

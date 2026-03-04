@@ -38,10 +38,18 @@ func NewBlockStateRepository() *BlockStateRepository {
 }
 
 // SaveBlock persists a block's state with atomic version assignment.
+// If a block with the same hash already exists, returns its existing version (idempotent).
 // Returns the assigned version number.
+// If a block with the same hash already exists, returns its existing version
+// without modification (idempotent), matching the Postgres adapter behavior.
 func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// Check if block with this hash already exists (matches postgres behavior)
+	if existing, ok := r.blocks[state.Hash]; ok {
+		return existing.Version, nil
+	}
 
 	// Calculate the next version atomically while holding the lock
 	maxVersion := -1
@@ -408,6 +416,26 @@ func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, f
 	})
 
 	return filtered, nil
+}
+
+// GetMinUnpublishedBlock returns the lowest canonical block number that has not been published.
+// Returns (blockNum, true, nil) if found, (0, false, nil) if all blocks are published.
+func (r *BlockStateRepository) GetMinUnpublishedBlock(ctx context.Context) (int64, bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var minNum int64
+	found := false
+	for _, b := range r.blocks {
+		if b.IsOrphaned || b.BlockPublished {
+			continue
+		}
+		if !found || b.Number < minNum {
+			minNum = b.Number
+			found = true
+		}
+	}
+	return minNum, found, nil
 }
 
 // GetBlocksWithIncompletePublish returns canonical blocks that have not been published.

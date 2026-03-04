@@ -95,10 +95,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 	// Calculate rate limiter: requests per second from requests per minute
 	// Burst size allows short bursts of concurrent requests while maintaining average rate
 	rps := float64(config.RateLimitPerMin) / 60.0
-	burstSize := config.RateLimitPerMin / 60
-	if burstSize < 1 {
-		burstSize = 1
-	}
+	burstSize := max(config.RateLimitPerMin/60, 1)
 
 	httpCfg := httpclient.Config{
 		Timeout:        config.Timeout,

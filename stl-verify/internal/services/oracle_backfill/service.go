@@ -20,6 +20,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 )
 
 // BlockHeaderFetcher retrieves block headers from an Ethereum node.
@@ -28,9 +29,11 @@ type BlockHeaderFetcher interface {
 	HeaderByNumber(ctx context.Context, number *big.Int) (*ethtypes.Header, error)
 }
 
-// MulticallFactory creates a new Multicaller instance.
+// MulticallFactory creates a new Multicaller for the given oracle type.
 // Each backfill worker needs its own multicall client for concurrent use.
-type MulticallFactory func() (outbound.Multicaller, error)
+// The factory returns the appropriate implementation (e.g. Multicall3 for
+// Chainlink/Aave, DirectCaller for Chronicle).
+type MulticallFactory func(entity.OracleType) (outbound.Multicaller, error)
 
 // Config holds configuration for the backfill service.
 type Config struct {
@@ -47,12 +50,18 @@ func configDefaults() Config {
 	}
 }
 
-// oracleWorkUnit holds everything needed to fetch prices for one oracle.
+// oracleWorkUnit wraps a shared OracleUnit with backfill-specific
+// block range information.
 type oracleWorkUnit struct {
-	oracle     *entity.Oracle
-	oracleAddr common.Address
-	tokenAddrs []common.Address
-	tokenIDs   []int64
+	*oracle_pricing.OracleUnit
+	validFrom int64 // earliest block to query (0 = no lower bound)
+	validTo   int64 // latest block to query (0 = no upper bound)
+}
+
+// oracleBlockRange represents the valid block range for an oracle across all protocols.
+type oracleBlockRange struct {
+	validFrom int64
+	validTo   int64 // 0 = no upper bound (still active)
 }
 
 // Service orchestrates parallel oracle price backfilling.
@@ -63,6 +72,7 @@ type Service struct {
 	repo           outbound.OnchainPriceRepository
 
 	oracleABI *abi.ABI
+	feedABI   *abi.ABI
 
 	logger *slog.Logger
 }
@@ -100,12 +110,18 @@ func NewService(
 		return nil, fmt.Errorf("loading Oracle ABI: %w", err)
 	}
 
+	feedABI, err := abis.GetAggregatorV3ABI()
+	if err != nil {
+		return nil, fmt.Errorf("loading AggregatorV3 ABI: %w", err)
+	}
+
 	return &Service{
 		config:         config,
 		headerFetcher:  headerFetcher,
 		newMulticaller: newMulticaller,
 		repo:           repo,
 		oracleABI:      oracleABI,
+		feedABI:        feedABI,
 		logger:         config.Logger.With("component", "oracle-backfill"),
 	}, nil
 }
@@ -121,114 +137,104 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 		return nil
 	}
 
+	if err := s.validateFeedDecimals(ctx, workUnits, toBlock); err != nil {
+		return fmt.Errorf("feed decimals validation: %w", err)
+	}
+
 	s.logger.Info("loaded oracles for backfill", "count", len(workUnits))
 
 	for _, wu := range workUnits {
 		if err := s.runForOracle(ctx, wu, fromBlock, toBlock); err != nil {
-			return fmt.Errorf("backfilling oracle %s: %w", wu.oracle.Name, err)
+			return fmt.Errorf("backfilling oracle %s: %w", wu.Oracle.Name, err)
 		}
 	}
 
 	return nil
 }
 
+func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleWorkUnit, blockNum int64) error {
+	for _, wu := range workUnits {
+		if !wu.Oracle.OracleType.IsFeedOracle() {
+			continue
+		}
+		mc, err := s.newMulticaller(wu.Oracle.OracleType)
+		if err != nil {
+			return fmt.Errorf("oracle %s: creating multicaller for decimals validation: %w", wu.Oracle.Name, err)
+		}
+		if err := blockchain.ValidateFeedDecimals(
+			ctx, mc, s.feedABI,
+			wu.Feeds, blockNum, s.logger,
+		); err != nil {
+			return fmt.Errorf("oracle %s: %w", wu.Oracle.Name, err)
+		}
+	}
+	return nil
+}
+
 // buildOracleWorkUnits loads all enabled oracles from DB, deduplicates by oracle_id,
 // and builds the per-oracle data structures needed for price fetching.
 func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, error) {
-	// Load all enabled oracles (generic + protocol-bound)
-	allOracles, err := s.repo.GetAllEnabledOracles(ctx)
+	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.logger)
 	if err != nil {
-		return nil, fmt.Errorf("getting enabled oracles: %w", err)
+		return nil, err
 	}
 
-	// Deduplicate by oracle ID (a protocol oracle may also exist as a generic oracle)
-	seen := make(map[int64]bool)
+	// Load all protocol-oracle bindings to compute valid block ranges.
+	bindings, err := s.repo.GetAllProtocolOracleBindings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting protocol oracle bindings: %w", err)
+	}
+	blockRanges := computeOracleBlockRanges(bindings)
+
 	var workUnits []*oracleWorkUnit
+	for _, su := range shared {
+		wu := &oracleWorkUnit{
+			OracleUnit: su,
+			validFrom:  su.Oracle.DeploymentBlock,
+		}
 
-	for _, oracle := range allOracles {
-		if seen[oracle.ID] {
-			continue
+		if br, ok := blockRanges[su.Oracle.ID]; ok {
+			if br.validFrom > wu.validFrom {
+				wu.validFrom = br.validFrom
+			}
+			wu.validTo = br.validTo
 		}
-		seen[oracle.ID] = true
 
-		wu, err := s.buildWorkUnit(ctx, oracle)
-		if err != nil {
-			s.logger.Warn("skipping oracle", "name", oracle.Name, "error", err)
-			continue
-		}
-		if wu != nil {
-			workUnits = append(workUnits, wu)
-		}
+		workUnits = append(workUnits, wu)
 	}
 
 	return workUnits, nil
 }
 
-func (s *Service) buildWorkUnit(ctx context.Context, oracle *entity.Oracle) (*oracleWorkUnit, error) {
-	assets, err := s.repo.GetEnabledAssets(ctx, oracle.ID)
-	if err != nil {
-		return nil, fmt.Errorf("getting enabled assets: %w", err)
-	}
-	if len(assets) == 0 {
-		return nil, nil
-	}
-
-	tokenAddrBytes, err := s.repo.GetTokenAddresses(ctx, oracle.ID)
-	if err != nil {
-		return nil, fmt.Errorf("getting token addresses: %w", err)
-	}
-
-	tokenAddrs := make([]common.Address, len(assets))
-	tokenIDs := make([]int64, len(assets))
-	for i, asset := range assets {
-		addrBytes, ok := tokenAddrBytes[asset.TokenID]
-		if !ok {
-			return nil, fmt.Errorf("token address not found for token_id %d", asset.TokenID)
-		}
-		tokenAddrs[i] = common.BytesToAddress(addrBytes)
-		tokenIDs[i] = asset.TokenID
-	}
-
-	return &oracleWorkUnit{
-		oracle:     oracle,
-		oracleAddr: common.Address(oracle.Address),
-		tokenAddrs: tokenAddrs,
-		tokenIDs:   tokenIDs,
-	}, nil
-}
-
 func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBlock, toBlock int64) error {
-	// Resume support: skip already-processed blocks
-	latestBlock, err := s.repo.GetLatestBlock(ctx, wu.oracle.ID)
-	if err != nil {
-		return fmt.Errorf("getting latest block: %w", err)
-	}
-	if latestBlock > 0 && latestBlock >= fromBlock {
-		s.logger.Info("resuming from latest stored block",
-			"oracle", wu.oracle.Name,
-			"latestStored", latestBlock,
-			"requestedFrom", fromBlock)
-		fromBlock = latestBlock + 1
+	var ok bool
+	fromBlock, toBlock, ok = clampBlockRange(fromBlock, toBlock, wu.validFrom, wu.validTo)
+	if !ok {
+		s.logger.Info("no blocks to process after clamping to oracle valid range",
+			"oracle", wu.Oracle.Name,
+			"validFrom", wu.validFrom,
+			"validTo", wu.validTo)
+		return nil
 	}
 
 	totalBlocks := toBlock - fromBlock + 1
 	if totalBlocks <= 0 {
-		s.logger.Info("no blocks to process", "oracle", wu.oracle.Name, "from", fromBlock, "to", toBlock)
+		s.logger.Info("no blocks to process", "oracle", wu.Oracle.Name, "from", fromBlock, "to", toBlock)
 		return nil
 	}
 
 	s.logger.Info("starting backfill",
-		"oracle", wu.oracle.Name,
+		"oracle", wu.Oracle.Name,
 		"from", fromBlock,
 		"to", toBlock,
 		"blocks", totalBlocks,
 		"concurrency", s.config.Concurrency,
-		"assets", len(wu.tokenIDs))
+		"assets", len(wu.TokenIDs))
 
 	// Progress tracking
 	var stats backfillStats
 	stats.startTime = time.Now()
-	stopProgress := s.startProgressReporter(ctx, &stats, totalBlocks, wu.oracle.Name)
+	stopProgress := s.startProgressReporter(ctx, &stats, totalBlocks, wu.Oracle.Name)
 	defer stopProgress()
 
 	// Child context: cancelled if batchWriter fails so workers stop promptly.
@@ -282,13 +288,77 @@ func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBloc
 	}
 
 	s.logger.Info("backfill complete",
-		"oracle", wu.oracle.Name,
+		"oracle", wu.Oracle.Name,
 		"blocks", stats.blocksProcessed.Load(),
 		"pricesStored", stats.pricesStored.Load(),
 		"errors", stats.blocksFailed.Load(),
 		"duration", time.Since(stats.startTime))
 
 	return nil
+}
+
+// computeOracleBlockRanges groups protocol-oracle bindings by protocol, then
+// determines each oracle's valid block range as the union across all protocols.
+// Assumes bindings are ordered by (protocol_id, from_block) as returned by
+// GetAllProtocolOracleBindings.
+func computeOracleBlockRanges(bindings []*entity.ProtocolOracle) map[int64]*oracleBlockRange {
+	byProtocol := make(map[int64][]*entity.ProtocolOracle)
+	for _, b := range bindings {
+		byProtocol[b.ProtocolID] = append(byProtocol[b.ProtocolID], b)
+	}
+
+	type rangeAccum struct {
+		minFrom     int64
+		maxTo       int64
+		stillActive bool
+	}
+	accum := make(map[int64]*rangeAccum)
+
+	for _, protocolBindings := range byProtocol {
+		for i, b := range protocolBindings {
+			a, ok := accum[b.OracleID]
+			if !ok {
+				a = &rangeAccum{minFrom: b.FromBlock}
+				accum[b.OracleID] = a
+			}
+			if b.FromBlock < a.minFrom {
+				a.minFrom = b.FromBlock
+			}
+
+			isLast := i == len(protocolBindings)-1
+			if isLast {
+				a.stillActive = true
+			} else {
+				supersededAt := protocolBindings[i+1].FromBlock - 1
+				if supersededAt > a.maxTo {
+					a.maxTo = supersededAt
+				}
+			}
+		}
+	}
+
+	result := make(map[int64]*oracleBlockRange, len(accum))
+	for oracleID, a := range accum {
+		r := &oracleBlockRange{validFrom: a.minFrom}
+		if !a.stillActive {
+			r.validTo = a.maxTo
+		}
+		result[oracleID] = r
+	}
+	return result
+}
+
+// clampBlockRange restricts the requested [from, to] range to the oracle's valid
+// [validFrom, validTo] range. Returns the clamped from/to and whether any blocks
+// remain (ok=true means from <= to after clamping).
+func clampBlockRange(from, to, validFrom, validTo int64) (int64, int64, bool) {
+	if validFrom > 0 {
+		from = max(from, validFrom)
+	}
+	if validTo > 0 {
+		to = min(to, validTo)
+	}
+	return from, to, from <= to
 }
 
 type backfillStats struct {
@@ -305,14 +375,20 @@ func (s *Service) worker(
 	priceCh chan<- []*entity.OnchainTokenPrice,
 	stats *backfillStats,
 ) {
-	mc, err := s.newMulticaller()
+	mc, err := s.newMulticaller(wu.Oracle.OracleType)
 	if err != nil {
-		s.logger.Error("failed to create multicall client", "error", err)
+		rangeSize := toBlock - fromBlock + 1
+		stats.blocksFailed.Add(rangeSize)
+		s.logger.Error("failed to create multicall client",
+			"error", err,
+			"fromBlock", fromBlock,
+			"toBlock", toBlock,
+			"blocksDropped", rangeSize)
 		return
 	}
 
-	oracleID := int16(wu.oracle.ID)
-	priceDecimals := wu.oracle.PriceDecimals
+	oracleID := wu.OracleID
+	priceDecimals := wu.Oracle.PriceDecimals
 	if priceDecimals == 0 {
 		priceDecimals = 8
 	}
@@ -325,18 +401,29 @@ func (s *Service) worker(
 			return
 		}
 
-		prices, err := s.processBlock(ctx, mc, wu.oracleAddr, wu.tokenAddrs, wu.tokenIDs, oracleID, priceDecimals, blockNum)
-		if err != nil {
+		var prices []*entity.OnchainTokenPrice
+		var blockErr error
+
+		switch wu.Oracle.OracleType {
+		case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
+			prices, blockErr = s.processBlockFeed(ctx, mc, wu, oracleID, blockNum)
+		case entity.OracleTypeAave:
+			prices, blockErr = s.processBlockAave(ctx, mc, wu.OracleAddr, wu.TokenAddrs, wu.TokenIDs, oracleID, priceDecimals, blockNum)
+		default:
+			blockErr = fmt.Errorf("unsupported oracle type: %s", wu.Oracle.OracleType)
+		}
+
+		if blockErr != nil {
 			s.logger.Error("failed to process block",
 				"block", blockNum,
-				"error", err)
+				"error", blockErr)
 			stats.blocksFailed.Add(1)
 			continue
 		}
 
-		// Change detection: only keep prices that differ from previous block
+		// Change detection: only keep prices that differ from previous block.
 		// If there is a duplicate price on the worker block boundary,
-		// it will be sent in both batches but that's acceptable for simplicity
+		// it will be sent in both batches but that's acceptable for simplicity.
 		var changed []*entity.OnchainTokenPrice
 		for _, p := range prices {
 			if prev, ok := prevPrices[p.TokenID]; ok && prev == p.PriceUSD {
@@ -358,7 +445,7 @@ func (s *Service) worker(
 	}
 }
 
-func (s *Service) processBlock(
+func (s *Service) processBlockAave(
 	ctx context.Context,
 	mc outbound.Multicaller,
 	oracleAddr common.Address,
@@ -369,7 +456,7 @@ func (s *Service) processBlock(
 	blockNum int64,
 ) ([]*entity.OnchainTokenPrice, error) {
 	// Fetch oracle prices via multicall
-	rawPrices, err := blockchain.FetchOraclePrices(
+	results, err := blockchain.FetchOraclePricesIndividual(
 		ctx, mc, s.oracleABI,
 		oracleAddr,
 		tokenAddrs, blockNum,
@@ -378,8 +465,17 @@ func (s *Service) processBlock(
 		return nil, fmt.Errorf("fetching oracle prices: %w", err)
 	}
 
-	if len(rawPrices) != len(tokenIDs) {
-		return nil, fmt.Errorf("price count mismatch: expected %d, got %d", len(tokenIDs), len(rawPrices))
+	// Collect successful token indices in a single pass.
+	// Fast path: if no token succeeded, skip the header fetch entirely.
+	// This avoids a wasted RPC call for blocks where the oracle is deployed but not yet configured.
+	var successIdx []int
+	for i, r := range results {
+		if r.Success {
+			successIdx = append(successIdx, i)
+		}
+	}
+	if len(successIdx) == 0 {
+		return nil, nil
 	}
 
 	// Get block timestamp
@@ -389,9 +485,9 @@ func (s *Service) processBlock(
 	}
 	blockTimestamp := time.Unix(int64(header.Time), 0).UTC()
 
-	prices := make([]*entity.OnchainTokenPrice, 0, len(tokenIDs))
-	for i, rawPrice := range rawPrices {
-		priceUSD := blockchain.ConvertOraclePriceToUSD(rawPrice, priceDecimals)
+	prices := make([]*entity.OnchainTokenPrice, 0, len(successIdx))
+	for _, i := range successIdx {
+		priceUSD := blockchain.ScaleByDecimals(results[i].Price, priceDecimals)
 
 		p, err := entity.NewOnchainTokenPrice(
 			tokenIDs[i],
@@ -402,8 +498,60 @@ func (s *Service) processBlock(
 			priceUSD,
 		)
 		if err != nil {
-			s.logger.Error("invalid price entity", "tokenID", tokenIDs[i], "error", err)
-			continue
+			return nil, fmt.Errorf("invalid price entity for tokenID %d: %w", tokenIDs[i], err)
+		}
+		prices = append(prices, p)
+	}
+
+	return prices, nil
+}
+
+func (s *Service) processBlockFeed(
+	ctx context.Context,
+	mc outbound.Multicaller,
+	wu *oracleWorkUnit,
+	oracleID int16,
+	blockNum int64,
+) ([]*entity.OnchainTokenPrice, error) {
+	results, err := blockchain.FetchFeedPrices(
+		ctx, mc, s.feedABI,
+		wu.Feeds, blockNum,
+		s.logger,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("fetching feed prices: %w", err)
+	}
+
+	results = oracle_pricing.ConvertNonUSDPrices(results, wu.OracleUnit, s.logger, blockNum)
+
+	var successResults []blockchain.FeedPriceResult
+	for _, r := range results {
+		if r.Success {
+			successResults = append(successResults, r)
+		}
+	}
+	if len(successResults) == 0 {
+		return nil, nil
+	}
+
+	header, err := s.headerFetcher.HeaderByNumber(ctx, new(big.Int).SetInt64(blockNum))
+	if err != nil {
+		return nil, fmt.Errorf("getting block header: %w", err)
+	}
+	blockTimestamp := time.Unix(int64(header.Time), 0).UTC()
+
+	prices := make([]*entity.OnchainTokenPrice, 0, len(successResults))
+	for _, result := range successResults {
+		p, err := entity.NewOnchainTokenPrice(
+			result.TokenID,
+			oracleID,
+			blockNum,
+			0, // block_version = 0 for historical backfill
+			blockTimestamp,
+			result.Price,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("invalid price entity for tokenID %d: %w", result.TokenID, err)
 		}
 		prices = append(prices, p)
 	}
@@ -459,9 +607,11 @@ func (s *Service) startProgressReporter(ctx context.Context, stats *backfillStat
 				if blocksPerSec > 0 {
 					eta = time.Duration(float64(remaining)/blocksPerSec) * time.Second
 				}
+				pct := float64(processed+failed) / float64(totalBlocks) * 100
 
 				s.logger.Info("progress",
 					"oracle", oracleName,
+					"pct", fmt.Sprintf("%.1f%%", pct),
 					"processed", processed,
 					"failed", failed,
 					"stored", stored,

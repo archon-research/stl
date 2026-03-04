@@ -20,6 +20,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // Default row count for benchmarks. Can be overridden via BENCH_ROW_COUNT env var.
@@ -218,10 +219,11 @@ func TestLargeDataset_QueryPerformance(t *testing.T) {
 		nextBlock := int64(totalRows + 1)
 		runQueryBenchmark(t, "SaveBlock(append)", 100, func() error {
 			_, err := repo.SaveBlock(ctx, outbound.BlockState{
-				Number:     nextBlock,
-				Hash:       fmt.Sprintf("0xnew_%d_%d", nextBlock, time.Now().UnixNano()),
-				ParentHash: fmt.Sprintf("0x%064d", nextBlock-1),
-				ReceivedAt: time.Now().Unix(),
+				Number:         nextBlock,
+				Hash:           fmt.Sprintf("0xnew_%d_%d", nextBlock, time.Now().UnixNano()),
+				ParentHash:     fmt.Sprintf("0x%064d", nextBlock-1),
+				ReceivedAt:     time.Now().Unix(),
+				BlockTimestamp: time.Now().Unix(),
 			})
 			nextBlock++
 			return err
@@ -234,10 +236,11 @@ func TestLargeDataset_QueryPerformance(t *testing.T) {
 		for i := 0; i < 100; i++ {
 			blockNum := totalRows + 1000 + int64(i)
 			repo.SaveBlock(ctx, outbound.BlockState{
-				Number:     blockNum,
-				Hash:       fmt.Sprintf("0xorphan_%d", blockNum),
-				ParentHash: fmt.Sprintf("0x%064d", blockNum-1),
-				ReceivedAt: time.Now().Unix(),
+				Number:         blockNum,
+				Hash:           fmt.Sprintf("0xorphan_%d", blockNum),
+				ParentHash:     fmt.Sprintf("0x%064d", blockNum-1),
+				ReceivedAt:     time.Now().Unix(),
+				BlockTimestamp: time.Now().Unix(),
 			})
 		}
 
@@ -400,7 +403,7 @@ func setupLargePostgres(tb testing.TB) (*BlockStateRepository, func()) {
 	ctx := context.Background()
 
 	req := testcontainers.ContainerRequest{
-		Image:        "timescale/timescaledb:latest-pg17",
+		Image:        testutil.ImageTimescaleDB,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "test",
@@ -475,7 +478,7 @@ func setupLargePostgres(tb testing.TB) (*BlockStateRepository, func()) {
 
 	cleanup := func() {
 		pool.Close()
-		container.Terminate(ctx)
+		container.Terminate(context.Background())
 	}
 
 	return repo, cleanup

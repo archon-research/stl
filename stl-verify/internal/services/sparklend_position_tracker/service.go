@@ -8,20 +8,18 @@ import (
 	"log/slog"
 	"math/big"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5"
-	"github.com/redis/go-redis/v9"
 
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -37,36 +35,6 @@ const (
 	EventReserveUsedAsCollateralEnabled  = entity.EventReserveUsedAsCollateralEnabled
 	EventReserveUsedAsCollateralDisabled = entity.EventReserveUsedAsCollateralDisabled
 )
-
-type TransactionReceipt struct {
-	Type              string  `json:"type"`
-	Status            string  `json:"status"`
-	CumulativeGasUsed string  `json:"cumulativeGasUsed"`
-	Logs              []Log   `json:"logs"`
-	LogsBloom         string  `json:"logsBloom"`
-	TransactionHash   string  `json:"transactionHash"`
-	TransactionIndex  string  `json:"transactionIndex"`
-	BlockHash         string  `json:"blockHash"`
-	BlockNumber       string  `json:"blockNumber"`
-	GasUsed           string  `json:"gasUsed"`
-	EffectiveGasPrice string  `json:"effectiveGasPrice"`
-	From              string  `json:"from"`
-	To                string  `json:"to"`
-	ContractAddress   *string `json:"contractAddress"`
-}
-
-type Log struct {
-	Address          string   `json:"address"`
-	Topics           []string `json:"topics"`
-	Data             string   `json:"data"`
-	BlockHash        string   `json:"blockHash"`
-	BlockNumber      string   `json:"blockNumber"`
-	BlockTimestamp   string   `json:"blockTimestamp"`
-	TransactionHash  string   `json:"transactionHash"`
-	TransactionIndex string   `json:"transactionIndex"`
-	LogIndex         string   `json:"logIndex"`
-	Removed          bool     `json:"removed"`
-}
 
 type PositionEventData struct {
 	EventType                  entity.EventType
@@ -91,52 +59,20 @@ type CollateralData struct {
 	CollateralEnabled bool
 }
 
-type BlockEvent struct {
-	ChainID        int64  `json:"chainId"`
-	BlockNumber    int64  `json:"blockNumber"`
-	Version        int    `json:"version"`
-	BlockHash      string `json:"blockHash"`
-	ParentHash     string `json:"parentHash"`
-	BlockTimestamp int64  `json:"blockTimestamp"`
-	ReceivedAt     string `json:"receivedAt"`
-	IsBackfill     bool   `json:"isBackfill"`
-	IsReorg        bool   `json:"isReorg"`
-}
-
-func (e BlockEvent) CacheKey() string {
-	return fmt.Sprintf("stl:%d:%d:%d:receipts", e.ChainID, e.BlockNumber, e.Version)
-}
-
-type Config struct {
-	QueueURL        string
-	MaxMessages     int32
-	WaitTimeSeconds int32
-	PollInterval    time.Duration
-	Logger          *slog.Logger
-}
-
-func ConfigDefaults() Config {
-	return Config{
-		MaxMessages:     10,
-		WaitTimeSeconds: 20,
-		PollInterval:    100 * time.Millisecond,
-		Logger:          slog.Default(),
-	}
-}
-
 type Service struct {
-	config       Config
-	sqsClient    *sqs.Client
-	redisClient  *redis.Client
+	config       shared.SQSConsumerConfig
+	consumer     outbound.SQSConsumer
+	cacheReader  outbound.BlockCacheReader
 	ethClient    *ethclient.Client
-	txManager    *postgres.TxManager
-	userRepo     *postgres.UserRepository
-	protocolRepo *postgres.ProtocolRepository
-	tokenRepo    *postgres.TokenRepository
-	positionRepo *postgres.PositionRepository
+	txManager    outbound.TxManager
+	userRepo     outbound.UserRepository
+	protocolRepo outbound.ProtocolRepository
+	tokenRepo    outbound.TokenRepository
+	positionRepo outbound.PositionRepository
 	eventRepo    outbound.EventRepository
 
-	blockchainServices map[common.Address]*blockchainService
+	mu                 sync.RWMutex
+	blockchainServices map[blockchain.ProtocolKey]*blockchainService
 	multicallClient    outbound.Multicaller
 	erc20ABI           *abi.ABI
 	eventExtractor     *EventExtractor
@@ -147,36 +83,24 @@ type Service struct {
 }
 
 func NewService(
-	config Config,
-	sqsClient *sqs.Client,
-	redisClient *redis.Client,
+	config shared.SQSConsumerConfig,
+	consumer outbound.SQSConsumer,
+	cacheReader outbound.BlockCacheReader,
 	ethClient *ethclient.Client,
-	txManager *postgres.TxManager,
-	userRepo *postgres.UserRepository,
-	protocolRepo *postgres.ProtocolRepository,
-	tokenRepo *postgres.TokenRepository,
-	positionRepo *postgres.PositionRepository,
+	txManager outbound.TxManager,
+	userRepo outbound.UserRepository,
+	protocolRepo outbound.ProtocolRepository,
+	tokenRepo outbound.TokenRepository,
+	positionRepo outbound.PositionRepository,
 	eventRepo outbound.EventRepository,
 ) (*Service, error) {
-	if err := validateDependencies(sqsClient, redisClient, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo); err != nil {
+	if err := validateDependencies(consumer, cacheReader, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo); err != nil {
 		return nil, err
 	}
 
-	defaults := ConfigDefaults()
-	if config.QueueURL == "" {
-		return nil, fmt.Errorf("queueURL is required")
-	}
-	if config.MaxMessages == 0 {
-		config.MaxMessages = defaults.MaxMessages
-	}
-	if config.WaitTimeSeconds == 0 {
-		config.WaitTimeSeconds = defaults.WaitTimeSeconds
-	}
-	if config.PollInterval == 0 {
-		config.PollInterval = defaults.PollInterval
-	}
-	if config.Logger == nil {
-		config.Logger = defaults.Logger
+	config.ApplyDefaults()
+	if err := config.Validate(); err != nil {
+		return nil, err
 	}
 
 	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
@@ -196,8 +120,8 @@ func NewService(
 
 	processor := &Service{
 		config:             config,
-		sqsClient:          sqsClient,
-		redisClient:        redisClient,
+		consumer:           consumer,
+		cacheReader:        cacheReader,
 		ethClient:          ethClient,
 		txManager:          txManager,
 		userRepo:           userRepo,
@@ -205,7 +129,7 @@ func NewService(
 		tokenRepo:          tokenRepo,
 		positionRepo:       positionRepo,
 		eventRepo:          eventRepo,
-		blockchainServices: make(map[common.Address]*blockchainService),
+		blockchainServices: make(map[blockchain.ProtocolKey]*blockchainService),
 		multicallClient:    mc,
 		erc20ABI:           erc20ABI,
 		eventExtractor:     eventExtractor,
@@ -215,23 +139,47 @@ func NewService(
 	return processor, nil
 }
 
-func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (*blockchainService, error) {
-	if svc, exists := s.blockchainServices[protocolAddress]; exists {
+func normalizeProtocolType(protocolType string) string {
+	if strings.TrimSpace(protocolType) == "" {
+		return "lending"
+	}
+
+	return protocolType
+}
+
+func normalizeTokenSymbol(symbol string) string {
+	if strings.TrimSpace(symbol) == "" {
+		return "UNKNOWN"
+	}
+
+	return symbol
+}
+
+func (s *Service) getOrCreateBlockchainService(chainID int64, protocolAddress common.Address) (*blockchainService, error) {
+	key := blockchain.ProtocolKey{ChainID: chainID, PoolAddress: protocolAddress}
+
+	// First check: read map under read lock.
+	s.mu.RLock()
+	svc, exists := s.blockchainServices[key]
+	s.mu.RUnlock()
+	if exists {
 		return svc, nil
 	}
 
-	protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
+	protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
 	if !exists {
-		return nil, fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
+		return nil, fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
 	}
 
-	svc, err := newBlockchainService(
+	// Construct outside the lock - this hits the network.
+	newSvc, err := newBlockchainService(
+		chainID,
 		s.ethClient,
 		s.multicallClient,
 		s.erc20ABI,
-		protocolConfig.UIPoolDataProvider,
-		protocolConfig.PoolDataProvider,
-		protocolConfig.PoolAddressesProvider,
+		protocolConfig.UIPoolDataProvider.Address,
+		protocolConfig.PoolAddress.Address,
+		protocolConfig.PoolAddressesProvider.Address,
 		protocolConfig.ProtocolVersion,
 		s.logger,
 	)
@@ -239,21 +187,40 @@ func (s *Service) getOrCreateBlockchainService(protocolAddress common.Address) (
 		return nil, fmt.Errorf("failed to create blockchain service for %s: %w", protocolConfig.Name, err)
 	}
 
-	s.blockchainServices[protocolAddress] = svc
-	s.logger.Info("created blockchain service",
-		"protocol", protocolConfig.Name,
-		"address", protocolAddress.Hex())
+	// Second check: re-acquire lock, another goroutine may have created it.
+	s.mu.Lock()
+	if svc, exists = s.blockchainServices[key]; !exists {
+		s.blockchainServices[key] = newSvc
+		svc = newSvc
+		s.logger.Info("created blockchain service",
+			"protocol", protocolConfig.Name,
+			"chainID", chainID,
+			"address", protocolAddress.Hex())
+	}
+	s.mu.Unlock()
 
 	return svc, nil
 }
 
 func (s *Service) Start(ctx context.Context) error {
+	if s.consumer == nil {
+		return fmt.Errorf("Start() called on service without SQS consumer")
+	}
+	if s.cacheReader == nil {
+		return fmt.Errorf("Start() called on service without cache reader")
+	}
+
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	go s.processLoop()
+	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
+		Consumer:     s.consumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
+	}, s.processBlockEvent)
 
 	s.logger.Info("sparklend position tracker started",
-		"queue", s.config.QueueURL,
 		"maxMessages", s.config.MaxMessages)
 	return nil
 }
@@ -266,81 +233,11 @@ func (s *Service) Stop() error {
 	return nil
 }
 
-func (s *Service) processLoop() {
-	ticker := time.NewTicker(s.config.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-ticker.C:
-			if err := s.processMessages(s.ctx); err != nil {
-				s.logger.Error("error processing messages", "error", err)
-			}
-		}
-	}
-}
-
-func (s *Service) processMessages(ctx context.Context) error {
-	start := time.Now()
-	defer func() {
-		s.logger.Debug("processMessages completed", "duration", time.Since(start))
-	}()
-
-	result, err := s.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-		QueueUrl:            aws.String(s.config.QueueURL),
-		MaxNumberOfMessages: s.config.MaxMessages,
-		WaitTimeSeconds:     s.config.WaitTimeSeconds,
-		VisibilityTimeout:   30,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to receive messages: %w", err)
-	}
-
-	if len(result.Messages) == 0 {
-		return nil
-	}
-
-	s.logger.Info("received messages", "count", len(result.Messages))
-
-	var errs []error
-	for _, msg := range result.Messages {
-		if err := s.processMessage(ctx, msg); err != nil {
-			s.logger.Error("failed to process message", "error", err)
-			errs = append(errs, err)
-			continue
-		}
-
-		_, deleteErr := s.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-			QueueUrl:      aws.String(s.config.QueueURL),
-			ReceiptHandle: msg.ReceiptHandle,
-		})
-		if deleteErr != nil {
-			s.logger.Error("failed to delete message", "error", deleteErr)
-		}
-	}
-
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	return nil
-}
-
-func (s *Service) processMessage(ctx context.Context, msg types.Message) error {
-	if msg.Body == nil {
-		return fmt.Errorf("message body is nil")
-	}
-
-	var event BlockEvent
-	if err := json.Unmarshal([]byte(*msg.Body), &event); err != nil {
-		return fmt.Errorf("failed to parse block event: %w", err)
-	}
-
+func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) error {
 	return s.fetchAndProcessReceipts(ctx, event)
 }
 
-func (s *Service) fetchAndProcessReceipts(ctx context.Context, event BlockEvent) error {
+func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.BlockEvent) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("fetchAndProcessReceipts completed",
@@ -348,37 +245,47 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event BlockEvent)
 			"duration", time.Since(start))
 	}()
 
-	cacheKey := event.CacheKey()
-	receiptsJSON, err := s.redisClient.Get(ctx, cacheKey).Result()
-	if errors.Is(err, redis.Nil) {
-		s.logger.Warn("cache key expired or not found", "key", cacheKey, "block", event.BlockNumber)
-		return nil
-	}
+	receiptsData, err := s.cacheReader.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
 	if err != nil {
-		return fmt.Errorf("failed to fetch from Redis: %w", err)
+		return fmt.Errorf("failed to fetch receipts from cache: %w", err)
+	}
+	if receiptsData == nil {
+		return fmt.Errorf("receipts not found in cache: chainID=%d block=%d version=%d", event.ChainID, event.BlockNumber, event.Version)
 	}
 
-	var receipts []TransactionReceipt
-	if err := shared.ParseCompressedJSON([]byte(receiptsJSON), &receipts); err != nil {
+	var receipts []shared.TransactionReceipt
+	if err := json.Unmarshal(receiptsData, &receipts); err != nil {
 		return fmt.Errorf("failed to unmarshal receipts: %w", err)
 	}
 
+	return s.ProcessReceipts(ctx, event.ChainID, event.BlockNumber, event.Version, receipts)
+}
+
+// ProcessReceipts processes a slice of transaction receipts for a given block.
+// It is safe to call from the backfill service without Redis or SQS.
+func (s *Service) ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []shared.TransactionReceipt) error {
 	var errs []error
 	for _, receipt := range receipts {
-		if err := s.processReceipt(ctx, receipt, event.ChainID, event.BlockNumber, event.Version); err != nil {
+		if err := s.processReceipt(ctx, receipt, chainID, blockNumber, version); err != nil {
 			errs = append(errs, err)
 		}
 	}
-
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
 	return nil
 }
 
-func (s *Service) processReceipt(ctx context.Context, receipt TransactionReceipt, chainID, blockNumber int64, blockVersion int) error {
+func (s *Service) processReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, blockVersion int) error {
 	var errs []error
 	for _, log := range receipt.Logs {
+
+		// Only process logs from known protocol addresses
+		protocolAddress := common.HexToAddress(log.Address)
+		if !blockchain.IsKnownProtocol(chainID, protocolAddress) {
+			continue
+		}
+
 		if s.isPositionEvent(log) {
 			if err := s.processPositionEventLog(ctx, log, receipt.TransactionHash, chainID, blockNumber, blockVersion); err != nil {
 				s.logger.Error("failed to process position event", "error", err, "tx", receipt.TransactionHash)
@@ -402,15 +309,15 @@ func (s *Service) processReceipt(ctx context.Context, receipt TransactionReceipt
 	return nil
 }
 
-func (s *Service) isPositionEvent(log Log) bool {
+func (s *Service) isPositionEvent(log shared.Log) bool {
 	return s.eventExtractor.IsPositionEvent(log)
 }
 
-func (s *Service) isReserveEvent(log Log) bool {
+func (s *Service) isReserveEvent(log shared.Log) bool {
 	return s.eventExtractor.IsReserveEvent(log)
 }
 
-func (s *Service) processPositionEventLog(ctx context.Context, log Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
+func (s *Service) processPositionEventLog(ctx context.Context, log shared.Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("processEventLog completed",
@@ -419,12 +326,12 @@ func (s *Service) processPositionEventLog(ctx context.Context, log Log, txHash s
 			"duration", time.Since(start))
 	}()
 
+	protocolAddress := common.HexToAddress(log.Address)
+
 	eventData, err := s.eventExtractor.ExtractEventData(log)
 	if err != nil {
 		return fmt.Errorf("failed to extract event data: %w", err)
 	}
-
-	protocolAddress := common.HexToAddress(log.Address)
 
 	s.logger.Info("Position event detected",
 		"event_type", eventData.EventType,
@@ -462,12 +369,12 @@ func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEven
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
+		protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
 		if !exists {
-			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
+			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
 		}
 
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
@@ -492,7 +399,7 @@ func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEven
 }
 
 // processReserveEventLog handles ReserveDataUpdated events by fetching and storing reserve data.
-func (s *Service) processReserveEventLog(ctx context.Context, log Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
+func (s *Service) processReserveEventLog(ctx context.Context, log shared.Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
 	start := time.Now()
 	defer func() {
 		s.logger.Debug("processReserveEventLog completed",
@@ -501,12 +408,12 @@ func (s *Service) processReserveEventLog(ctx context.Context, log Log, txHash st
 			"duration", time.Since(start))
 	}()
 
+	protocolAddress := common.HexToAddress(log.Address)
+
 	reserveEventData, err := s.eventExtractor.ExtractReserveEventData(log)
 	if err != nil {
 		return fmt.Errorf("failed to extract reserve event data: %w", err)
 	}
-
-	protocolAddress := common.HexToAddress(log.Address)
 
 	s.logger.Info("ReserveDataUpdated event detected",
 		"reserve", reserveEventData.Reserve.Hex(),
@@ -519,14 +426,14 @@ func (s *Service) processReserveEventLog(ctx context.Context, log Log, txHash st
 
 // saveReserveDataSnapshot fetches reserve data from chain and persists it.
 func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Address, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int, txHash string) error {
-	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
+	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
 		return fmt.Errorf("failed to get blockchain service: %w", err)
 	}
 
 	// Get token metadata for the reserve
 	tokensToFetch := map[common.Address]bool{reserve: true}
-	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {
 		return fmt.Errorf("failed to get token metadata: %w", err)
 	}
@@ -539,27 +446,44 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 	// Fetch reserve data and configuration from chain
 	reserveData, configData, err := blockchainSvc.getFullReserveData(ctx, reserve, blockNumber)
 	if err != nil {
+		// If reserve doesn't exist at this block or no PoolDataProvider was active,
+		// log and skip (non-fatal). This can happen when:
+		// - The configured PoolDataProvider address didn't exist at the historical block
+		//   (e.g., contract was upgraded/redeployed)
+		// - The pool was deployed before its first PoolDataProvider became active
+		//   (e.g., SparkLend pool deployed at block 16568452, but first PoolDataProvider
+		//   only active from block 17007086)
+		if errors.Is(err, ErrReserveNotFound) || errors.Is(err, ErrNoPoolDataProvider) {
+			s.logger.Warn("Reserve data unavailable at block, skipping snapshot",
+				"reserve", reserve.Hex(),
+				"protocol", protocolAddress.Hex(),
+				"block", blockNumber,
+				"tx", txHash,
+				"error", err)
+			return nil
+		}
 		return fmt.Errorf("failed to get reserve data: %w", err)
 	}
 
-	// Get protocol ID
-	protocolID, err := s.protocolRepo.GetProtocolByAddress(ctx, chainID, protocolAddress)
-	if err != nil {
-		return fmt.Errorf("failed to get protocol: %w", err)
-	}
-	if protocolID == nil {
-		return fmt.Errorf("protocol not found for address %s on chain %d", protocolAddress.Hex(), chainID)
-	}
-
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
+		if !exists {
+			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
+		}
+
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
+		if err != nil {
+			return fmt.Errorf("failed to get protocol: %w", err)
+		}
+
 		// Get or create token
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reserve, tokenMetadata.Symbol, tokenMetadata.Decimals, blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reserve, normalizeTokenSymbol(tokenMetadata.Symbol), tokenMetadata.Decimals, blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get token: %w", err)
 		}
 
 		// Build and persist the entity
-		sparkReserveData := s.buildReserveDataEntity(protocolID.ID, tokenID, blockNumber, blockVersion, reserveData, configData)
+		sparkReserveData := s.buildReserveDataEntity(protocolID, tokenID, blockNumber, blockVersion, reserveData, configData)
 		if err := s.protocolRepo.UpsertReserveData(ctx, tx, []*entity.SparkLendReserveData{sparkReserveData}); err != nil {
 			return fmt.Errorf("failed to upsert reserve data: %w", err)
 		}
@@ -625,13 +549,13 @@ func (s *Service) buildReserveDataEntity(
 
 // saveCollateralToggleEvent handles ReserveUsedAsCollateralEnabled/Disabled events
 func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
-	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
+	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
 		return fmt.Errorf("failed to get blockchain service: %w", err)
 	}
 
 	tokensToFetch := map[common.Address]bool{eventData.Reserve: true}
-	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {
 		return fmt.Errorf("failed to get token metadata: %w", err)
 	}
@@ -641,7 +565,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 		return fmt.Errorf("token metadata not found for %s", eventData.Reserve.Hex())
 	}
 
-	collaterals, err := s.extractCollateralData(ctx, eventData.User, protocolAddress, blockNumber, eventData.TxHash)
+	collaterals, err := s.extractCollateralData(ctx, eventData.User, protocolAddress, chainID, blockNumber, eventData.TxHash)
 	if err != nil {
 		s.logger.Warn("failed to extract collateral data", "error", err, "tx", eventData.TxHash)
 		collaterals = []CollateralData{}
@@ -668,17 +592,17 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 			return fmt.Errorf("failed to ensure user: %w", err)
 		}
 
-		protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
+		protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
 		if !exists {
-			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
+			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
 		}
 
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
 
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, metadata.Symbol, metadata.Decimals, blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, normalizeTokenSymbol(metadata.Symbol), metadata.Decimals, blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get token: %w", err)
 		}
@@ -707,13 +631,13 @@ func (s *Service) saveLiquidationEvent(ctx context.Context, eventData *PositionE
 }
 
 func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
-	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
+	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
 		return fmt.Errorf("failed to get blockchain service: %w", err)
 	}
 
 	tokensToFetch := map[common.Address]bool{eventData.Reserve: true}
-	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {
 		s.logger.Warn("failed to batch get token metadata", "error", err, "tx", eventData.TxHash, "block", blockNumber)
 		metadataMap = make(map[common.Address]TokenMetadata)
@@ -732,7 +656,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 		return fmt.Errorf("token decimals not found for %s", eventData.Reserve.Hex())
 	}
 
-	collaterals, err := s.extractCollateralData(ctx, eventData.User, protocolAddress, blockNumber, eventData.TxHash)
+	collaterals, err := s.extractCollateralData(ctx, eventData.User, protocolAddress, chainID, blockNumber, eventData.TxHash)
 	if err != nil {
 		s.logger.Warn("failed to extract collateral data", "error", err, "tx", eventData.TxHash, "block", blockNumber)
 		collaterals = []CollateralData{}
@@ -748,18 +672,18 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			return fmt.Errorf("failed to ensure user: %w", err)
 		}
 
-		protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
+		protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
 		if !exists {
-			return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
+			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
 		}
 
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
 
 		if eventData.EventType == EventBorrow || eventData.EventType == EventRepay {
-			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, tokenMetadata.Symbol, tokenMetadata.Decimals, blockNumber)
+			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, normalizeTokenSymbol(tokenMetadata.Symbol), tokenMetadata.Decimals, blockNumber)
 			if err != nil {
 				return fmt.Errorf("failed to get token: %w", err)
 			}
@@ -769,15 +693,15 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			}
 		}
 
-		records := make([]postgres.CollateralRecord, 0, len(collaterals))
+		records := make([]outbound.CollateralRecord, 0, len(collaterals))
 		for _, col := range collaterals {
-			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, col.Symbol, col.Decimals, blockNumber)
+			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, normalizeTokenSymbol(col.Symbol), col.Decimals, blockNumber)
 			if err != nil {
 				s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err, "tx", eventData.TxHash)
 				continue
 			}
 
-			records = append(records, postgres.CollateralRecord{
+			records = append(records, outbound.CollateralRecord{
 				UserID:            userID,
 				ProtocolID:        protocolID,
 				TokenID:           tokenID,
@@ -808,32 +732,32 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 		return fmt.Errorf("failed to ensure user: %w", err)
 	}
 
-	protocolConfig, exists := blockchain.GetProtocolConfig(protocolAddress)
+	protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
 	if !exists {
-		return fmt.Errorf("unknown protocol: %s", protocolAddress.Hex())
+		return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
 	}
 
-	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, protocolConfig.ProtocolType, blockNumber)
+	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
 	if err != nil {
 		return fmt.Errorf("failed to get protocol: %w", err)
 	}
 
 	txHashHex := common.BytesToHash(txHash).Hex()
-	collaterals, err := s.extractCollateralData(ctx, user, protocolAddress, blockNumber, txHashHex)
+	collaterals, err := s.extractCollateralData(ctx, user, protocolAddress, chainID, blockNumber, txHashHex)
 	if err != nil {
 		s.logger.Warn("failed to extract collateral data for user", "user", user.Hex(), "error", err)
 		collaterals = []CollateralData{}
 	}
 
-	records := make([]postgres.CollateralRecord, 0, len(collaterals))
+	records := make([]outbound.CollateralRecord, 0, len(collaterals))
 	for _, col := range collaterals {
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, col.Symbol, col.Decimals, blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, normalizeTokenSymbol(col.Symbol), col.Decimals, blockNumber)
 		if err != nil {
 			s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err, "tx", txHashHex)
 			continue
 		}
 
-		records = append(records, postgres.CollateralRecord{
+		records = append(records, outbound.CollateralRecord{
 			UserID:            userID,
 			ProtocolID:        protocolID,
 			TokenID:           tokenID,
@@ -854,8 +778,8 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	return nil
 }
 
-func (s *Service) extractCollateralData(ctx context.Context, user common.Address, protocolAddress common.Address, blockNumber int64, txHash string) ([]CollateralData, error) {
-	blockchainSvc, err := s.getOrCreateBlockchainService(protocolAddress)
+func (s *Service) extractCollateralData(ctx context.Context, user common.Address, protocolAddress common.Address, chainID, blockNumber int64, txHash string) ([]CollateralData, error) {
+	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blockchain service: %w", err)
 	}
@@ -884,7 +808,7 @@ func (s *Service) extractCollateralData(ctx context.Context, user common.Address
 		tokensToFetch[asset] = true
 	}
 
-	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch)
+	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {
 		s.logger.Warn("failed to batch get token metadata", "error", err, "tx", txHash, "block", blockNumber)
 		return []CollateralData{}, fmt.Errorf("failed to get token metadata: %w", err)
@@ -952,23 +876,22 @@ func (s *Service) convertToDecimalAdjusted(rawAmount *big.Int, decimals int) str
 	return fmt.Sprintf("%s.%s", integerPart.String(), fractionalStr)
 }
 
+// validateDependencies verifies that all required service dependencies are present.
+// Consumer and cacheReader may be nil in backfill mode (when only ProcessReceipts is used).
+// Returns an error if any of the following required dependencies is nil: ethClient,
+// txManager, userRepo, protocolRepo, tokenRepo, positionRepo, or eventRepo.
 func validateDependencies(
-	sqsClient *sqs.Client,
-	redisClient *redis.Client,
+	consumer outbound.SQSConsumer,
+	cacheReader outbound.BlockCacheReader,
 	ethClient *ethclient.Client,
-	txManager *postgres.TxManager,
-	userRepo *postgres.UserRepository,
-	protocolRepo *postgres.ProtocolRepository,
-	tokenRepo *postgres.TokenRepository,
-	positionRepo *postgres.PositionRepository,
+	txManager outbound.TxManager,
+	userRepo outbound.UserRepository,
+	protocolRepo outbound.ProtocolRepository,
+	tokenRepo outbound.TokenRepository,
+	positionRepo outbound.PositionRepository,
 	eventRepo outbound.EventRepository,
 ) error {
-	if sqsClient == nil {
-		return fmt.Errorf("sqsClient is required")
-	}
-	if redisClient == nil {
-		return fmt.Errorf("redisClient is required")
-	}
+	// consumer and cacheReader may be nil in backfill mode (ProcessReceipts only).
 	if ethClient == nil {
 		return fmt.Errorf("ethClient is required")
 	}

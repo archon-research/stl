@@ -4,11 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Structure
 
-This is a monorepo containing:
+This repository contains the application code:
 - **stl-verify/** - Main Go service (block watcher, backfill, backup worker)
-- **infra/** - Terraform/OpenTofu infrastructure (AWS: ECS, RDS, SNS, SQS, S3, Redis)
 - **experiments/** - Exploration projects
 - **docs/** - Architecture diagrams and entity relations
+
+Infrastructure code (Terraform/OpenTofu) lives in a separate repository for security reasons.
 
 ## Common Commands
 
@@ -37,10 +38,6 @@ make tools              # Install dev tools (staticcheck, golangci-lint, govulnc
 # Docker (ARM64 for Fargate Graviton)
 make docker-release ENV=sentinelstaging    # Build and push watcher image
 make docker-release-backup ENV=sentinelstaging  # Build and push backup worker image
-
-# Terraform
-make tf-check-staging   # Init, validate, plan for sentinelstaging
-make tf-apply-staging   # Apply infrastructure changes
 
 # Erigon node management (requires ERIGON_USER, ERIGON_IP)
 make erigon-status ERIGON_USER=<user> ERIGON_IP=<ip>
@@ -93,7 +90,10 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 - **Interfaces**: Use `-er` suffix (Reader, Publisher)
 - **Constructors**: Use `New` prefix
 - **Files**: snake_case
-- **Errors**: Wrap with context: `fmt.Errorf("doing X: %w", err)`
+- **Errors**: 
+Wrap with context: `fmt.Errorf("doing X: %w", err)`.
+Never ignore errors.
+Lean towards returning errors instead of continuing, unless there is an extremely good reason to continue instead.
 - **Testing**: 
     Table-driven tests, mock outbound ports for unit tests.
     Services and main.go files should have 100% coverage. Think very hard about edge cases, it is mission critical that code is correct and robust.
@@ -102,11 +102,18 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
     For main.go files, only create integration tests.
     For services, create both unit and integration tests.
     Integration tests are only allowed to mock our data sources that we cannot control, e.g. Alchemy
-- **Binaries/Building**: Output to `stl/dist`
+- **Binaries/Building**: When building binaries using `go build`, output to `stl/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.
-- **Function composition**: Compose large functions from smaller functions. Large functions should read like prose, with each step delegated to a well-named helper function.
-- **Testing**: Table-driven tests, mock outbound ports for unit tests
-- **Libraries**: Use the standard library as much as possible
+- **Function composition**: 
+    Compose large functions from smaller functions.
+    Large functions should read like prose, with each step delegated to a well-named helper function.
+- **Libraries**: 
+    Use the standard library as much as possible.
+    Instead of duplicating code, create a function containing the shared functionality, and re-use it.
+- **Database**:
+    Always think hard and carefully about how the wrong data could be written to the database.
+    Always think hard and carefully about schema design.
+    For timeseries tables, use Tigerdata primitives, and make sure they support distributed tables.
 
 ## Do NOT
 
@@ -118,7 +125,7 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 
 ## Environment
 
-- Go 1.25+
+- Go 1.26+
 - Docker for local development (PostgreSQL, Redis, Jaeger, LocalStack)
 - AWS for production (ECS Fargate ARM64, RDS Aurora, ElastiCache, SNS/SQS, S3)
 - Alchemy API key required for Ethereum mainnet access
