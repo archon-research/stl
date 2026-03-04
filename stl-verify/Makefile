@@ -1,10 +1,10 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer help ci ci-checks \
+.PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
         dev-up dev-env dev-down dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -13,6 +13,8 @@
         docker-build-oracle-price-worker-staging docker-push-oracle-price-worker-staging docker-release-oracle-price-worker-staging \
         docker-build-sparklend-position-tracker docker-push-sparklend-position-tracker docker-release-sparklend-position-tracker \
         docker-build-sparklend-position-tracker-staging docker-push-sparklend-position-tracker-staging docker-release-sparklend-position-tracker-staging \
+        docker-build-allocation-tracker docker-push-allocation-tracker docker-release-allocation-tracker \
+        docker-build-allocation-tracker-staging docker-push-allocation-tracker-staging docker-release-allocation-tracker-staging \
         docker-release-all docker-release-all-staging \
         docker-build-temporal-worker docker-push-temporal-worker docker-release-temporal-worker \
         docker-build-temporal-worker-staging docker-push-temporal-worker-staging docker-release-temporal-worker-staging \
@@ -57,6 +59,26 @@ run-oracle-price-worker:
 run-morpho-indexer:
 	@echo "==> Running Morpho indexer..."
 	@set -a && . cmd/morpho-indexer/.env && [ -f cmd/morpho-indexer/.env.local ] && . cmd/morpho-indexer/.env.local; set +a && go run ./cmd/morpho-indexer
+
+# Run the allocation tracker (requires dev-up first)
+run-allocation-tracker:
+	@echo "==> Running allocation tracker..."
+	@set -a && . cmd/allocation_tracker/.env && [ -f cmd/allocation_tracker/.env.local ] && . cmd/allocation_tracker/.env.local; set +a && go run ./cmd/allocation_tracker
+
+# Run the Avalanche allocation tracker (requires dev-up first)
+run-allocation-tracker-avax:
+	@echo "==> Running Avalanche allocation tracker (chain_id=43114)..."
+	@set -a && . cmd/allocation_tracker/.env.avax && [ -f cmd/allocation_tracker/.env.avax.local ] && . cmd/allocation_tracker/.env.avax.local; set +a && go run ./cmd/allocation_tracker
+
+# Run the SparkLend position tracker (requires dev-up first)
+run-sparklend-position-tracker:
+	@echo "==> Running SparkLend position tracker..."
+	@set -a && . cmd/sparklend-position-tracker/.env && [ -f cmd/sparklend-position-tracker/.env.local ] && . cmd/sparklend-position-tracker/.env.local; set +a && go run ./cmd/sparklend-position-tracker
+
+# Run the Avalanche SparkLend position tracker (requires dev-up first)
+run-sparklend-position-tracker-avax:
+	@echo "==> Running Avalanche SparkLend position tracker (chain_id=43114)..."
+	@set -a && . cmd/sparklend-position-tracker/.env.avax && [ -f cmd/sparklend-position-tracker/.env.avax.local ] && . cmd/sparklend-position-tracker/.env.avax.local; set +a && go run ./cmd/sparklend-position-tracker
 
 # Run tests with race detector
 test-race:
@@ -271,6 +293,7 @@ dev-env:
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-sparklend-position.fifo" \
 		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:4566" \
 		"AWS_ACCESS_KEY_ID=test" \
 		"AWS_SECRET_ACCESS_KEY=test" \
 		"AWS_REGION=us-east-1" \
@@ -278,8 +301,64 @@ dev-env:
 		"REDIS_ADDR=127.0.0.1:6379" \
 		"REDIS_PASSWORD=" \
 		"CHAIN_ID=1" \
+		"S3_BUCKET=stl-sentineldevelopment-ethereum-raw" \
+		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
 		> cmd/sparklend-position-tracker/.env && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://avax-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-avalanche-sparklend-position.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:6379" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=43114" \
+		"S3_BUCKET=stl-sentineldevelopment-avalanche-raw" \
+		"DEPLOY_ENV=development" \
+		"LOG_LEVEL=debug" \
+		> cmd/sparklend-position-tracker/.env.avax && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-allocation-tracker.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:6379" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=1" \
+		"S3_BUCKET=stl-sentineldevelopment-ethereum-raw" \
+		"DEPLOY_ENV=development" \
+		"LOG_LEVEL=debug" \
+		> cmd/allocation_tracker/.env && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://avax-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-avalanche-allocation-tracker.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:6379" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=43114" \
+		"S3_BUCKET=stl-sentineldevelopment-avalanche-raw" \
+		"DEPLOY_ENV=development" \
+		"LOG_LEVEL=debug" \
+		> cmd/allocation_tracker/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -476,6 +555,8 @@ docker-release-all:
 	@$(MAKE) _docker-release-sparklend-position-tracker-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-morpho-indexer-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-allocation-tracker-internal ENV=$(ENV)
 	@echo ""
 	@echo "==> All Docker images released for ENV=$(ENV)"
 
@@ -910,6 +991,74 @@ docker-release-morpho-indexer-staging:
 	@$(MAKE) docker-release-morpho-indexer ENV=sentinelstaging
 
 # =============================================================================
+# Docker Build & Push - Allocation Tracker
+# =============================================================================
+
+# ECR repository URL for allocation tracker
+ECR_REPO_ALLOCATION_TRACKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-allocation-tracker
+
+# Build Docker image for allocation tracker (ARM64 for Fargate Graviton)
+docker-build-allocation-tracker:
+	@echo "==> Building Allocation Tracker Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_ALLOCATION_TRACKER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.allocation-tracker \
+		-t $(ECR_REPO_ALLOCATION_TRACKER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_ALLOCATION_TRACKER):latest \
+		--load .
+
+# Push allocation tracker Docker image to ECR
+docker-push-allocation-tracker: ecr-login
+	@echo "==> Pushing Allocation Tracker Docker image to ECR..."
+	docker push $(ECR_REPO_ALLOCATION_TRACKER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_ALLOCATION_TRACKER):latest
+
+# Build and push allocation tracker in one step (captures tag at start to ensure consistency)
+docker-release-allocation-tracker: ecr-login _docker-release-allocation-tracker-internal
+
+_docker-release-allocation-tracker-internal:
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Allocation Tracker Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_ALLOCATION_TRACKER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.allocation-tracker \
+		-t $(ECR_REPO_ALLOCATION_TRACKER):$$TAG \
+		-t $(ECR_REPO_ALLOCATION_TRACKER):latest \
+		--load . && \
+	echo "==> Pushing Allocation Tracker Docker image to ECR..." && \
+	docker push $(ECR_REPO_ALLOCATION_TRACKER):$$TAG && \
+	docker push $(ECR_REPO_ALLOCATION_TRACKER):latest && \
+	echo "==> Allocation Tracker Docker image released: $(ECR_REPO_ALLOCATION_TRACKER):$$TAG"
+
+# =============================================================================
+# Sentinelstaging Allocation Tracker Docker Shortcuts
+# =============================================================================
+
+docker-build-allocation-tracker-staging:
+	@$(MAKE) docker-build-allocation-tracker ENV=sentinelstaging
+
+docker-push-allocation-tracker-staging:
+	@$(MAKE) docker-push-allocation-tracker ENV=sentinelstaging
+
+docker-release-allocation-tracker-staging:
+	@$(MAKE) docker-release-allocation-tracker ENV=sentinelstaging
+
+# =============================================================================
 # Erigon Node Management (via Tailscale)
 # =============================================================================
 
@@ -1007,6 +1156,13 @@ build-sparklend-position-tracker:
 	mkdir -p dist
 	go build -o dist/sparklend-position-tracker ./cmd/sparklend-position-tracker
 	@echo "==> Built: dist/sparklend-position-tracker"
+
+# Build allocation-tracker binary
+build-allocation-tracker:
+	@echo "==> Building allocation-tracker..."
+	mkdir -p dist
+	go build -o dist/allocation-tracker ./cmd/allocation_tracker
+	@echo "==> Built: dist/allocation-tracker"
 
 # Build temporal-worker binary
 build-temporal-worker:
