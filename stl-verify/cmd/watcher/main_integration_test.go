@@ -631,7 +631,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	postgresContainer, postgresCfg := startPostgres(t, ctx)
 	infra.containers = append(infra.containers, postgresContainer)
 	cleanupFuncs = append(cleanupFuncs, func() {
-		if err := postgresContainer.Terminate(ctx); err != nil {
+		if err := postgresContainer.Terminate(context.Background()); err != nil {
 			logger.Error("failed to terminate postgres container", "error", err)
 		}
 	})
@@ -660,7 +660,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	redisContainer, redisCfg := startRedis(t, ctx)
 	infra.containers = append(infra.containers, redisContainer)
 	cleanupFuncs = append(cleanupFuncs, func() {
-		if err := redisContainer.Terminate(ctx); err != nil {
+		if err := redisContainer.Terminate(context.Background()); err != nil {
 			logger.Error("failed to terminate redis container", "error", err)
 		}
 	})
@@ -686,7 +686,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	localstackContainer, localstackCfg := testutil.StartLocalStack(t, ctx, "sns,sqs")
 	infra.containers = append(infra.containers, localstackContainer)
 	cleanupFuncs = append(cleanupFuncs, func() {
-		if err := localstackContainer.Terminate(ctx); err != nil {
+		if err := localstackContainer.Terminate(context.Background()); err != nil {
 			logger.Error("failed to terminate localstack container", "error", err)
 		}
 	})

@@ -478,7 +478,7 @@ func setupLargePostgres(tb testing.TB) (*BlockStateRepository, func()) {
 
 	cleanup := func() {
 		pool.Close()
-		container.Terminate(ctx)
+		container.Terminate(context.Background())
 	}
 
 	return repo, cleanup

@@ -135,6 +135,6 @@ func startRedisContainer(t *testing.T) (addr string, cleanup func()) {
 	}
 
 	addr = fmt.Sprintf("%s:%s", host, port.Port())
-	cleanup = func() { _ = container.Terminate(ctx) }
+	cleanup = func() { _ = container.Terminate(context.Background()) }
 	return addr, cleanup
 }

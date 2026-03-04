@@ -17,12 +17,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -171,16 +171,18 @@ func run(ctx context.Context, args []string) error {
 	}
 	defer sqsConsumer.Close()
 
-	// Redis
-	redisClient := redis.NewClient(&redis.Options{
-		Addr:     cfg.redisAddr,
-		Password: env.Get("REDIS_PASSWORD", ""),
-		DB:       0,
-	})
-	if err := redisClient.Ping(ctx).Err(); err != nil {
+	// Redis (block cache)
+	cacheCfg := redisAdapter.ConfigDefaults()
+	cacheCfg.Addr = cfg.redisAddr
+	cacheCfg.Password = env.Get("REDIS_PASSWORD", "")
+	blockCache, err := redisAdapter.NewBlockCache(cacheCfg, logger)
+	if err != nil {
+		return fmt.Errorf("creating block cache: %w", err)
+	}
+	if err := blockCache.Ping(ctx); err != nil {
 		return fmt.Errorf("connecting to Redis: %w", err)
 	}
-	defer redisClient.Close()
+	defer blockCache.Close()
 	logger.Info("Redis connected", "addr", cfg.redisAddr)
 
 	// Ethereum
@@ -235,7 +237,7 @@ func run(ctx context.Context, args []string) error {
 			ChainID:     cfg.chainID,
 		},
 		sqsConsumer,
-		redisClient,
+		blockCache,
 		ethClient,
 		txManager,
 		userRepo,
