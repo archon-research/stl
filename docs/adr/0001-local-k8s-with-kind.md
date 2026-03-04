@@ -27,6 +27,39 @@ A `make kind-up` target will bring up a full kind cluster containing:
 All infra services are accessible at `localhost` via NodePort + kind `extraPortMappings`
 (no background port-forward processes needed).
 
+## Application Config and Secrets
+
+Non-sensitive configuration (log level, chain IDs, service URLs, feature flags) is stored in
+**ConfigMaps** and mounted as environment variables or volume files into each pod.
+
+Sensitive values (Alchemy API key, database credentials, AWS credentials) are **not** stored in
+the cluster. Instead, the local kind cluster is configured with AWS credentials (via the
+developer's `~/.aws` credentials or environment variables) and pods fetch secrets at startup
+directly from **AWS Secrets Manager**, matching the production pattern used on EKS with IAM roles.
+
+This means:
+- No plaintext secrets in k8s manifests or the repository
+- The local and production secret-fetching path are identical, catching misconfiguration early
+- Rotating a secret requires no manifest change — pods pick it up on next restart
+
+## Startup Targets
+
+Two `make` targets cover different developer workflows:
+
+**`make kind-cold`** — Cold start, no local image cache assumed:
+- Pulls all third-party images from registries (TimescaleDB, Redis, LocalStack, Jaeger)
+- Builds application images from source (`docker build`)
+- Loads all images into the kind cluster
+- Applies manifests and waits for all pods to be Ready
+
+**`make kind-warm`** — Warm start, images already present in the kind cluster:
+- Skips image pulls and builds for unchanged images
+- Re-applies manifests (picks up config/manifest changes)
+- Waits for rollout to complete
+
+`make kind-up` is an alias for `make kind-cold`. Developers iterating on application code will
+typically run `make kind-warm` after the initial cold start to avoid redundant image builds.
+
 ## Alternatives Considered
 
 **minikube** — Requires a VM driver (VirtualBox, HyperKit, etc.), heavier resource footprint,
