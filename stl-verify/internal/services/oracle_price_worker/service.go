@@ -13,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -301,6 +302,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 		return fmt.Errorf("detecting changes at block %d: %w", event.BlockNumber, err)
 	}
 	detectSpan.SetAttributes(attribute.Int("prices.changed", len(changed)))
+	recordPriceChangeEvents(detectSpan, unit, changed)
 	detectSpan.End()
 
 	if len(changed) == 0 {
@@ -359,6 +361,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 		return fmt.Errorf("detecting feed changes at block %d: %w", event.BlockNumber, err)
 	}
 	detectSpan.SetAttributes(attribute.Int("prices.changed", len(changed)))
+	recordPriceChangeEvents(detectSpan, unit, changed)
 	detectSpan.End()
 
 	if len(changed) == 0 {
@@ -454,4 +457,26 @@ func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event 
 	}
 
 	return changed, nil
+}
+
+// recordPriceChangeEvents adds a span event for each changed price so Jaeger
+// shows which tokens changed, from which oracle/feed, and to what value.
+func recordPriceChangeEvents(span trace.Span, unit *oracleUnit, changed []*entity.OnchainTokenPrice) {
+	// Build tokenID → feed address lookup for feed oracles.
+	feedAddr := make(map[int64]string, len(unit.Feeds))
+	for _, f := range unit.Feeds {
+		feedAddr[f.TokenID] = f.FeedAddress.Hex()
+	}
+
+	for _, p := range changed {
+		attrs := []attribute.KeyValue{
+			attribute.String("oracle.name", unit.Oracle.Name),
+			attribute.Int64("token.id", p.TokenID),
+			attribute.Float64("price.usd", p.PriceUSD),
+		}
+		if addr, ok := feedAddr[p.TokenID]; ok {
+			attrs = append(attrs, attribute.String("feed.address", addr))
+		}
+		span.AddEvent("price.changed", trace.WithAttributes(attrs...))
+	}
 }

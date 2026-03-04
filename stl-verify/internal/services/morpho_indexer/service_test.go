@@ -1074,6 +1074,57 @@ func TestProcessReceipt_NoRelevantEvents_SkipsSpan(t *testing.T) {
 	}
 }
 
+func TestProcessReceipt_KnownNotVault_SkipsSpan(t *testing.T) {
+	h := newTestHarness(t)
+
+	// Wire a real tracer so we can verify no processReceipt span is created.
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() {
+		if err := tp.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown tracer provider: %v", err)
+		}
+	})
+
+	telemetry, err := NewTelemetryWithProviders(tp, noop.NewMeterProvider())
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProviders: %v", err)
+	}
+	h.svc.telemetry = telemetry
+
+	// Mark the address as a known non-vault.
+	knownNotVault := common.HexToAddress("0x0000000000000000000000000000000000000099")
+	h.svc.vaultRegistry.MarkNotVault(knownNotVault)
+
+	// Build a receipt with a Transfer event (matches MetaMorpho ABI) from a
+	// known-not-vault address. This used to create an empty span.
+	transferTopic := h.svc.eventExtractor.metaMorphoABI.Events["Transfer"].ID.Hex()
+	receipt := makeReceipt(testTxHash, shared.Log{
+		Address: knownNotVault.Hex(),
+		Topics: []string{
+			transferTopic,
+			"0x0000000000000000000000000000000000000000000000000000000000000001",
+			"0x0000000000000000000000000000000000000000000000000000000000000002",
+		},
+		Data: "0x0000000000000000000000000000000000000000000000000000000000000064",
+	})
+
+	if err := h.svc.processReceipt(context.Background(), receipt, 1, 20000000, 0, time.Now()); err != nil {
+		t.Fatalf("processReceipt: %v", err)
+	}
+
+	if err := tp.ForceFlush(context.Background()); err != nil {
+		t.Errorf("force flush spans: %v", err)
+	}
+
+	spans := exporter.GetSpans()
+	for _, s := range spans {
+		if s.Name == "morpho.processReceipt" {
+			t.Error("morpho.processReceipt span should not be created for receipts from known-not-vault addresses")
+		}
+	}
+}
+
 func TestProcessBlockEvent_MultipleReceipts_OneError(t *testing.T) {
 	h := newTestHarness(t)
 	h.setupMarketExistsInDB(testMarketID, 42)

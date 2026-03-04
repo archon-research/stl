@@ -261,6 +261,8 @@ dev-env:
 		"AWS_SECRET_ACCESS_KEY=test" \
 		"AWS_REGION=us-east-1" \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"JAEGER_ENDPOINT=127.0.0.1:4317" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"LOG_LEVEL=debug" \
 		> cmd/oracle-price-worker/.env && \
 	printf '%s\n' \
