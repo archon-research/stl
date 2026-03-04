@@ -34,10 +34,8 @@ func bigIntToNumeric(b *big.Int) (string, error) {
 // toNumeric converts a raw *big.Int token amount to a pgtype.Numeric with the
 // given decimal shift applied. For example, 1500000 with 6 decimals becomes
 // the numeric value 1.5. This avoids a *big.Int → string → numeric round-trip.
+// raw must not be nil; callers must validate before calling.
 func toNumeric(raw *big.Int, decimals int) pgtype.Numeric {
-	if raw == nil {
-		return pgtype.Numeric{Int: big.NewInt(0), Valid: true}
-	}
 	return pgtype.Numeric{Int: new(big.Int).Set(raw), Exp: int32(-decimals), Valid: true}
 }
 

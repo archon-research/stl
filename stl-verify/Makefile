@@ -1,7 +1,7 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax help ci ci-checks \
+.PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
         dev-up dev-env dev-down dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal \
@@ -64,6 +64,11 @@ run-morpho-indexer:
 run-allocation-tracker:
 	@echo "==> Running allocation tracker..."
 	@set -a && . cmd/allocation_tracker/.env && [ -f cmd/allocation_tracker/.env.local ] && . cmd/allocation_tracker/.env.local; set +a && go run ./cmd/allocation_tracker
+
+# Run the Avalanche allocation tracker (requires dev-up first)
+run-allocation-tracker-avax:
+	@echo "==> Running Avalanche allocation tracker (chain_id=43114)..."
+	@set -a && . cmd/allocation_tracker/.env.avax && [ -f cmd/allocation_tracker/.env.avax.local ] && . cmd/allocation_tracker/.env.avax.local; set +a && go run ./cmd/allocation_tracker
 
 # Run the SparkLend position tracker (requires dev-up first)
 run-sparklend-position-tracker:
@@ -336,6 +341,24 @@ dev-env:
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
 		> cmd/allocation_tracker/.env && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://avax-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-avalanche-allocation-tracker.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:6379" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=43114" \
+		"S3_BUCKET=stl-sentineldevelopment-avalanche-raw" \
+		"DEPLOY_ENV=development" \
+		"LOG_LEVEL=debug" \
+		> cmd/allocation_tracker/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \

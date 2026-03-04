@@ -105,7 +105,8 @@ func TestBuildInsertArgs_TxAmountPlainERC20(t *testing.T) {
 	assertNumeric(t, "txAmount", txAmount, big.NewInt(32361621161), -6)
 }
 
-func TestBuildInsertArgs_NilBalanceDefaultsToZero(t *testing.T) {
+func TestBuildInsertArgs_NilScaledBalanceIsNull(t *testing.T) {
+	// ScaledBalance is optional — nil should produce a NULL numeric.
 	r := &AllocationRepository{}
 
 	pos := &entity.AllocationPosition{
@@ -115,11 +116,11 @@ func TestBuildInsertArgs_NilBalanceDefaultsToZero(t *testing.T) {
 		TokenDecimals: 6,
 		Star:          "spark",
 		ProxyAddress:  common.HexToAddress("0x1111111111111111111111111111111111111111"),
-		Balance:       nil,
+		Balance:       big.NewInt(1000000),
 		BlockNumber:   24584100,
 		TxHash:        "0xabc",
 		LogIndex:      1,
-		TxAmount:      nil,
+		TxAmount:      big.NewInt(1000000),
 		Direction:     "in",
 	}
 
@@ -128,27 +129,9 @@ func TestBuildInsertArgs_NilBalanceDefaultsToZero(t *testing.T) {
 		t.Fatalf("buildInsertArgs: %v", err)
 	}
 
-	// nil balance → valid zero
-	balance := args[4].(pgtype.Numeric)
-	if !balance.Valid {
-		t.Fatal("expected balance to be valid")
-	}
-	if balance.Int.Sign() != 0 {
-		t.Errorf("expected balance Int=0, got %s", balance.Int)
-	}
-
 	// nil scaled_balance → invalid (NULL)
 	scaled := args[5].(pgtype.Numeric)
 	if scaled.Valid {
 		t.Fatal("expected scaled_balance to be NULL (invalid)")
-	}
-
-	// nil txAmount → valid zero
-	txAmount := args[10].(pgtype.Numeric)
-	if !txAmount.Valid {
-		t.Fatal("expected txAmount to be valid")
-	}
-	if txAmount.Int.Sign() != 0 {
-		t.Errorf("expected txAmount Int=0, got %s", txAmount.Int)
 	}
 }
