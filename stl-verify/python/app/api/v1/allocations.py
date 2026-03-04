@@ -15,7 +15,9 @@ router = APIRouter()
 
 
 class StarResponse(BaseModel):
+    id: str
     name: str
+    address: str
 
 
 class AllocationPositionResponse(BaseModel):
@@ -50,14 +52,14 @@ async def _get_service(engine: AsyncEngine = Depends(_get_engine)) -> Allocation
 @router.get("/stars", response_model=list[StarResponse])
 async def list_stars(service: AllocationService = Depends(_get_service)):
     stars = await service.list_stars()
-    return [StarResponse(name=s.name) for s in stars]
+    return [StarResponse(id=s.id, name=s.name, address=s.address) for s in stars]
 
 
-@router.get("/stars/{star}/allocations", response_model=list[AllocationPositionResponse])
+@router.get("/stars/{star_id}/allocations", response_model=list[AllocationPositionResponse])
 async def list_allocations(
-    star: str,
+    star_id: str,
     block_number: int | None = None,
     service: AllocationService = Depends(_get_service),
 ):
-    positions = await service.list_allocations_by_star(star, block_number)
+    positions = await service.list_allocations_by_star(star_id, block_number)
     return [AllocationPositionResponse(**dataclasses.asdict(p)) for p in positions]

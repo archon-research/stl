@@ -9,5 +9,5 @@ class AllocationService:
     async def list_stars(self) -> list[Star]:
         return await self._repository.list_stars()
 
-    async def list_allocations_by_star(self, star: str, block_number: int | None = None) -> list[AllocationPosition]:
-        return await self._repository.list_allocations_by_star(star, block_number)
+    async def list_allocations_by_star(self, star_id: str, block_number: int | None = None) -> list[AllocationPosition]:
+        return await self._repository.list_allocations_by_star(star_id, block_number)

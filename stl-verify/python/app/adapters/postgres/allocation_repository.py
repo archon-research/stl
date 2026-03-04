@@ -11,17 +11,26 @@ class PostgresAllocationRepository(AllocationRepository):
 
     async def list_stars(self) -> list[Star]:
         result = await self._conn.execute(
-            text("SELECT DISTINCT star FROM allocation_position ORDER BY star")
+            text(
+                """
+                SELECT DISTINCT ON (star)
+                    star,
+                    encode(proxy_address, 'hex') AS address
+                FROM allocation_position
+                ORDER BY star
+                """
+            )
         )
-        return [Star(name=row.star) for row in result]
+        return [Star(id="0x" + row.address, name=row.star, address="0x" + row.address) for row in result]
 
-    async def list_allocations_by_star(self, star: str, block_number: int | None = None) -> list[AllocationPosition]:
+    async def list_allocations_by_star(self, star_id: str, block_number: int | None = None) -> list[AllocationPosition]:
+        proxy_hex = star_id.removeprefix("0x")
         if block_number is None:
-            block_filter = "ap.block_number = (SELECT MAX(block_number) FROM allocation_position WHERE star = :star)"
-            params: dict = {"star": star}
+            block_filter = "ap.block_number = (SELECT MAX(block_number) FROM allocation_position WHERE proxy_address = decode(:proxy_hex, 'hex'))"
+            params: dict = {"proxy_hex": proxy_hex}
         else:
             block_filter = "ap.block_number = :block_number"
-            params = {"star": star, "block_number": block_number}
+            params = {"proxy_hex": proxy_hex, "block_number": block_number}
 
         result = await self._conn.execute(
             text(
@@ -45,7 +54,7 @@ class PostgresAllocationRepository(AllocationRepository):
                     ap.created_at
                 FROM allocation_position ap
                 JOIN token t ON t.id = ap.token_id
-                WHERE ap.star = :star
+                WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
                   AND {block_filter}
                 ORDER BY ap.block_number DESC
                 """

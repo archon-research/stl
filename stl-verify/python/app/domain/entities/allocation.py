@@ -5,7 +5,9 @@ from decimal import Decimal
 
 @dataclass
 class Star:
+    id: str
     name: str
+    address: str
 
 
 @dataclass

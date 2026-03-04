@@ -55,6 +55,7 @@ _DDL_STATEMENTS = [
 
 # Hex bytes used in assertions (20-byte proxy, 20-byte token addr, 32-byte tx hash).
 _PROXY_HEX = "1234567890abcdef1234567890abcdef12345678"
+_GROVE_PROXY_HEX = "abcdef1234567890abcdef1234567890abcdef12"
 _TOKEN_HEX = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
 _TX1_HEX = "aa" * 32
 _TX2_HEX = "bb" * 32
@@ -77,7 +78,7 @@ async def _setup(async_url: str) -> None:
             )
             token_id = result.scalar_one()
 
-            # Two rows for 'spark' at different block numbers.
+            # Two rows for 'spark' at different block numbers (proxy = _PROXY_HEX).
             for block, tx_hex in [(1000, _TX1_HEX), (2000, _TX2_HEX)]:
                 await conn.execute(
                     text(
@@ -89,7 +90,7 @@ async def _setup(async_url: str) -> None:
                     {"tid": token_id, "proxy": _PROXY_HEX, "bn": block, "tx": tx_hex},
                 )
 
-            # One row for a second star ('grove') at block 1000.
+            # One row for a second star ('grove') at block 1000 with its own proxy address.
             await conn.execute(
                 text(
                     "INSERT INTO allocation_position "
@@ -97,7 +98,7 @@ async def _setup(async_url: str) -> None:
                     "block_number, tx_hash, log_index, tx_amount, direction) "
                     "VALUES (1, :tid, 'grove', decode(:proxy, 'hex'), 100, 1000, decode(:tx, 'hex'), 0, 100, 'in')"
                 ),
-                {"tid": token_id, "proxy": _PROXY_HEX, "tx": "cc" * 32},
+                {"tid": token_id, "proxy": _GROVE_PROXY_HEX, "tx": "cc" * 32},
             )
     finally:
         await engine.dispose()
@@ -133,12 +134,18 @@ def test_list_stars_returns_both_stars(client: TestClient) -> None:
     response = client.get("/v1/stars")
 
     assert response.status_code == 200
-    names = {item["name"] for item in response.json()}
-    assert names == {"spark", "grove"}
+    data = response.json()
+    by_name = {item["name"]: item for item in data}
+    assert set(by_name.keys()) == {"spark", "grove"}
+    # Each star exposes id and address as its proxy address.
+    assert by_name["spark"]["id"] == f"0x{_PROXY_HEX}"
+    assert by_name["spark"]["address"] == f"0x{_PROXY_HEX}"
+    assert by_name["grove"]["id"] == f"0x{_GROVE_PROXY_HEX}"
+    assert by_name["grove"]["address"] == f"0x{_GROVE_PROXY_HEX}"
 
 
 def test_list_allocations_without_block_number_returns_latest(client: TestClient) -> None:
-    response = client.get("/v1/stars/spark/allocations")
+    response = client.get(f"/v1/stars/0x{_PROXY_HEX}/allocations")
 
     assert response.status_code == 200
     data = response.json()
@@ -152,7 +159,7 @@ def test_list_allocations_without_block_number_returns_latest(client: TestClient
 
 
 def test_list_allocations_with_block_number_returns_that_block(client: TestClient) -> None:
-    response = client.get("/v1/stars/spark/allocations?block_number=1000")
+    response = client.get(f"/v1/stars/0x{_PROXY_HEX}/allocations?block_number=1000")
 
     assert response.status_code == 200
     data = response.json()
@@ -161,14 +168,14 @@ def test_list_allocations_with_block_number_returns_that_block(client: TestClien
 
 
 def test_list_allocations_with_unknown_block_number_returns_empty(client: TestClient) -> None:
-    response = client.get("/v1/stars/spark/allocations?block_number=9999")
+    response = client.get(f"/v1/stars/0x{_PROXY_HEX}/allocations?block_number=9999")
 
     assert response.status_code == 200
     assert response.json() == []
 
 
 def test_list_allocations_for_unknown_star_returns_empty(client: TestClient) -> None:
-    response = client.get("/v1/stars/unknown/allocations")
+    response = client.get("/v1/stars/0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/allocations")
 
     assert response.status_code == 200
     assert response.json() == []
