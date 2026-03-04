@@ -202,8 +202,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		return fmt.Errorf("fetching receipts from cache: %w", err)
 	}
 	if receiptsJSON == nil {
-		s.logger.Warn("cache miss for receipts", "block", event.BlockNumber)
-		return nil
+		return fmt.Errorf("receipts not found in cache for block %d (chain=%d, version=%d)", event.BlockNumber, event.ChainID, event.Version)
 	}
 
 	var receipts []shared.TransactionReceipt
@@ -239,16 +238,59 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 	return nil
 }
 
+// hasRelevantEvents returns true if the receipt contains at least one
+// Morpho Blue or MetaMorpho event that will actually be processed.
+// This checks both topic signatures and addresses to avoid creating
+// empty spans for common events (e.g. Transfer) from non-vault contracts.
+func (s *Service) hasRelevantEvents(receipt shared.TransactionReceipt) bool {
+	morphoBlueAddr := MorphoBlueAddress
+	for _, log := range receipt.Logs {
+		logAddress := common.HexToAddress(log.Address)
+		isMorphoBlue := s.eventExtractor.IsMorphoBlueEvent(log)
+		isMetaMorpho := s.eventExtractor.IsMetaMorphoEvent(log)
+
+		if !isMorphoBlue && !isMetaMorpho {
+			continue
+		}
+		// MorphoBlue events from the MorphoBlue contract are always relevant.
+		if logAddress == morphoBlueAddr && isMorphoBlue {
+			return true
+		}
+		// Skip known non-vaults (except MorphoBlue address, handled above).
+		if logAddress != morphoBlueAddr && s.vaultRegistry.IsKnownNotVault(logAddress) {
+			continue
+		}
+		// MetaMorpho event from an address that isn't the MorphoBlue contract and
+		// isn't a known non-vault. This covers two cases:
+		//  1. Known vault emitting a MetaMorpho event (Deposit, Withdraw, Transfer, AccrueInterest).
+		//  2. Unknown address that needs vault discovery — processReceipt will call
+		//     tryDiscoverVault, which is real work worth tracing.
+		if isMetaMorpho && logAddress != morphoBlueAddr {
+			return true
+		}
+	}
+	return false
+}
+
 // processReceipt processes all Morpho-related logs in a single transaction receipt.
 //
 // Note: eth_call reads return end-of-block state. Multiple events for the same
 // entity within one block produce identical on-chain snapshots. The ON CONFLICT
 // clause means only the last-written event_type/tx_hash is retained, but the
 // on-chain state (shares, assets, collateral) is always correct.
-func (s *Service) processReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+func (s *Service) processReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) (retErr error) {
+	if !s.hasRelevantEvents(receipt) {
+		return nil
+	}
+
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.processReceipt",
 		attribute.String("tx.hash", receipt.TransactionHash))
-	defer span.End()
+	defer func() {
+		if retErr != nil {
+			SetSpanError(span, retErr, "receipt processing failed")
+		}
+		span.End()
+	}()
 
 	var errs []error
 	// Track transient vault discovery failures separately so we can discard

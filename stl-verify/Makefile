@@ -1,7 +1,7 @@
 # stl-verify Makefile
 # Go 1.25+ best practices
 
-.PHONY: all test test-race test-integration lint vet fmt tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer help ci ci-checks \
+.PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer help ci ci-checks \
         dev-up dev-env dev-down dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal \
@@ -94,6 +94,21 @@ vet:
 	@echo "==> Running go vet..."
 	go vet ./...
 
+# Apply go fix modernizations
+fix:
+	@echo "==> Applying go fix..."
+	go fix ./...
+
+# Check if go fix has been applied (CI-friendly, fails if not)
+fix-check:
+	@echo "==> Checking go fix..."
+	@diff=$$(go fix -diff ./... 2>&1); \
+	if [ -n "$$diff" ]; then \
+		echo "Code needs modernizing. Run 'go fix ./...'"; \
+		echo "$$diff"; \
+		exit 1; \
+	fi
+
 # Format code
 fmt:
 	@echo "==> Formatting code..."
@@ -104,6 +119,11 @@ fmt:
 fmt-check:
 	@echo "==> Checking format..."
 	@test -z "$$(gofmt -l .)" || (echo "Files not formatted:"; gofmt -l .; exit 1)
+
+# Check import formatting (CI-friendly, fails if imports not organized)
+goimports-check:
+	@echo "==> Checking imports..."
+	@test -z "$$($(GOBIN)/goimports -l .)" || (echo "Imports not formatted:"; $(GOBIN)/goimports -l .; exit 1)
 
 # Tidy and verify dependencies
 tidy:
@@ -171,7 +191,7 @@ tools:
 	go install golang.org/x/tools/gopls@latest
 
 # CI target for lint/format/static/security checks
-ci-checks: fmt-check tidy-check vet staticcheck golangci-lint vulncheck
+ci-checks: fix-check fmt-check goimports-check tidy-check vet staticcheck golangci-lint vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
@@ -241,6 +261,8 @@ dev-env:
 		"AWS_SECRET_ACCESS_KEY=test" \
 		"AWS_REGION=us-east-1" \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"JAEGER_ENDPOINT=127.0.0.1:4317" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"LOG_LEVEL=debug" \
 		> cmd/oracle-price-worker/.env && \
 	printf '%s\n' \

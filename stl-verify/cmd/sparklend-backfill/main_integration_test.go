@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -63,7 +64,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Return an empty JSON-RPC result for any method.
-		var req testutil.JSONRPCRequest
+		var req rpcutil.Request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":null}`))
 			return
@@ -461,7 +462,7 @@ func buildBorrowMockRPC(t *testing.T, reserveAddress string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		var req testutil.JSONRPCRequest
+		var req rpcutil.Request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			testutil.WriteRPCError(w, json.RawMessage(`1`), -32700, "parse error")
 			return
@@ -702,7 +703,7 @@ func buildBorrowWithCollateralMockRPC(t *testing.T, daiAddress, wethAddress, bor
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		var req testutil.JSONRPCRequest
+		var req rpcutil.Request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			testutil.WriteRPCError(w, json.RawMessage(`1`), -32700, "parse error")
 			return

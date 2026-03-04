@@ -25,6 +25,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
+	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -185,30 +186,24 @@ func run(ctx context.Context, args []string) error {
 	}
 	defer sqsConsumer.Close()
 
-	blockCache, err := redis.NewBlockCache(redis.Config{
-		Addr:     cfg.redisAddr,
-		Password: env.Get("REDIS_PASSWORD", ""),
-		DB:       0,
-	}, logger)
+	// Redis (block cache)
+	cacheCfg := redisAdapter.ConfigDefaults()
+	cacheCfg.Addr = cfg.redisAddr
+	cacheCfg.Password = env.Get("REDIS_PASSWORD", "")
+	blockCache, err := redisAdapter.NewBlockCache(cacheCfg, logger)
 	if err != nil {
 		return fmt.Errorf("creating block cache: %w", err)
 	}
-	defer func() {
-		if err := blockCache.Close(); err != nil {
-			logger.Warn("failed to close BlockCache", "error", err)
-		}
-	}()
 	if err := blockCache.Ping(ctx); err != nil {
-		return fmt.Errorf("connecting to Redis at %s: %w", cfg.redisAddr, err)
+		return fmt.Errorf("connecting to Redis: %w", err)
 	}
-	logger.Info("BlockCache connected", "addr", cfg.redisAddr)
-
+	defer blockCache.Close()
+	logger.Info("Redis connected", "addr", cfg.redisAddr)
 	s3Reader := s3adapter.NewReader(awsCfg, logger)
 	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.chainID, cfg.deployEnv, cfg.s3Bucket, logger)
 	if err != nil {
 		return fmt.Errorf("creating cache reader: %w", err)
 	}
-
 	// Ethereum
 	ethClient, err := ethclient.Dial(cfg.alchemyURL)
 	if err != nil {

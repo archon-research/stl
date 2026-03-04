@@ -60,7 +60,7 @@ func StartTimescaleDB(t *testing.T) (dsn string, cleanup func()) {
 	}
 
 	dsn = fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
-	cleanup = func() { _ = container.Terminate(ctx) }
+	cleanup = func() { _ = container.Terminate(context.Background()) }
 	return dsn, cleanup
 }
 
@@ -74,7 +74,7 @@ func ConnectPool(t *testing.T, dsn string) *pgxpool.Pool {
 		t.Fatalf("connect: %v", err)
 	}
 
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		if pool.Ping(ctx) == nil {
 			return pool
 		}
@@ -170,7 +170,7 @@ func ConnectPoolForMain(dsn string) *pgxpool.Pool {
 		log.Fatalf("connect: %v", err)
 	}
 
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		if pool.Ping(ctx) == nil {
 			return pool
 		}
@@ -260,7 +260,7 @@ func ConnectPoolWithSchemaForMain(dsn, schemaName string) *pgxpool.Pool {
 		log.Fatalf("connect with schema %s: %v", schemaName, err)
 	}
 
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		if pool.Ping(ctx) == nil {
 			return pool
 		}

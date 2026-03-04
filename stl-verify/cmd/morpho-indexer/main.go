@@ -180,7 +180,7 @@ func run(ctx context.Context, args []string) error {
 	// Service telemetry
 	morphoTelemetry, err := morpho_indexer.NewTelemetry()
 	if err != nil {
-		logger.Warn("failed to create morpho telemetry", "error", err)
+		return fmt.Errorf("creating morpho telemetry: %w", err)
 	}
 
 	// AWS config

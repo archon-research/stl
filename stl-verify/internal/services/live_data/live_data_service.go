@@ -508,10 +508,7 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 	// Calculate finality boundary based on latest known block
 	var finalityBoundary int64 = 0
 	if latestBlock != nil {
-		finalityBoundary = latestBlock.Number - int64(s.config.FinalityBlockCount)
-		if finalityBoundary < 0 {
-			finalityBoundary = 0
-		}
+		finalityBoundary = max(latestBlock.Number-int64(s.config.FinalityBlockCount), 0)
 	}
 
 	// Walk back to find common ancestor

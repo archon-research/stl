@@ -146,7 +146,7 @@ func (c *Client) GetBlockByNumber(ctx context.Context, blockNum int64, fullTx bo
 		JSONRPC: "2.0",
 		ID:      1,
 		Method:  "eth_getBlockByNumber",
-		Params:  []interface{}{hexNum, fullTx},
+		Params:  []any{hexNum, fullTx},
 	}
 
 	resp, err := c.call(ctx, req)
@@ -163,7 +163,7 @@ func (c *Client) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (
 		JSONRPC: "2.0",
 		ID:      1,
 		Method:  "eth_getBlockByHash",
-		Params:  []interface{}{hash, fullTx},
+		Params:  []any{hash, fullTx},
 	}
 
 	resp, err := c.call(ctx, req)
@@ -189,7 +189,7 @@ func (c *Client) GetFullBlockByHash(ctx context.Context, hash string, fullTx boo
 		JSONRPC: "2.0",
 		ID:      1,
 		Method:  "eth_getBlockByHash",
-		Params:  []interface{}{hash, fullTx},
+		Params:  []any{hash, fullTx},
 	}
 
 	resp, err := c.call(ctx, req)
@@ -211,7 +211,7 @@ func (c *Client) GetBlockReceipts(ctx context.Context, blockNum int64) (json.Raw
 		JSONRPC: "2.0",
 		ID:      1,
 		Method:  "eth_getBlockReceipts",
-		Params:  []interface{}{hexNum},
+		Params:  []any{hexNum},
 	}
 
 	resp, err := c.call(ctx, req)
@@ -229,7 +229,7 @@ func (c *Client) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.
 		JSONRPC: "2.0",
 		ID:      1,
 		Method:  "eth_getBlockReceipts",
-		Params:  []interface{}{hash},
+		Params:  []any{hash},
 	}
 
 	resp, err := c.call(ctx, req)
@@ -247,7 +247,7 @@ func (c *Client) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMe
 		JSONRPC: "2.0",
 		ID:      1,
 		Method:  "trace_block",
-		Params:  []interface{}{hexNum},
+		Params:  []any{hexNum},
 	}
 
 	resp, err := c.call(ctx, req)
@@ -265,7 +265,7 @@ func (c *Client) GetBlockTracesByHash(ctx context.Context, hash string) (json.Ra
 		JSONRPC: "2.0",
 		ID:      1,
 		Method:  "trace_block",
-		Params:  []interface{}{hash},
+		Params:  []any{hash},
 	}
 
 	resp, err := c.call(ctx, req)
@@ -283,7 +283,7 @@ func (c *Client) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawM
 		JSONRPC: "2.0",
 		ID:      1,
 		Method:  "eth_getBlobSidecars",
-		Params:  []interface{}{hexNum},
+		Params:  []any{hexNum},
 	}
 
 	resp, err := c.call(ctx, req)
@@ -301,7 +301,7 @@ func (c *Client) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.R
 		JSONRPC: "2.0",
 		ID:      1,
 		Method:  "eth_getBlobSidecars",
-		Params:  []interface{}{hash},
+		Params:  []any{hash},
 	}
 
 	resp, err := c.call(ctx, req)
@@ -340,10 +340,8 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 	var mu sync.Mutex
 
 	// Fetch block
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		req := jsonRPCRequest{JSONRPC: "2.0", ID: 0, Method: "eth_getBlockByHash", Params: []interface{}{hash, fullTx}}
+	wg.Go(func() {
+		req := jsonRPCRequest{JSONRPC: "2.0", ID: 0, Method: "eth_getBlockByHash", Params: []any{hash, fullTx}}
 		resp, err := c.call(ctx, req)
 		mu.Lock()
 		defer mu.Unlock()
@@ -354,13 +352,11 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 		} else {
 			result.Block = resp.Result
 		}
-	}()
+	})
 
 	// Fetch receipts
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		req := jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "eth_getBlockReceipts", Params: []interface{}{hash}}
+	wg.Go(func() {
+		req := jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "eth_getBlockReceipts", Params: []any{hash}}
 		resp, err := c.call(ctx, req)
 		mu.Lock()
 		defer mu.Unlock()
@@ -371,14 +367,12 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 		} else {
 			result.Receipts = resp.Result
 		}
-	}()
+	})
 
 	// Fetch traces (only if enabled)
 	if c.config.EnableTraces {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			req := jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []interface{}{hash}}
+		wg.Go(func() {
+			req := jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []any{hash}}
 			resp, err := c.call(ctx, req)
 			mu.Lock()
 			defer mu.Unlock()
@@ -389,15 +383,13 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 			} else {
 				result.Traces = resp.Result
 			}
-		}()
+		})
 	}
 
 	// Fetch blobs (only if enabled)
 	if c.config.EnableBlobs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			req := jsonRPCRequest{JSONRPC: "2.0", ID: 3, Method: "eth_getBlobSidecars", Params: []interface{}{hash}}
+		wg.Go(func() {
+			req := jsonRPCRequest{JSONRPC: "2.0", ID: 3, Method: "eth_getBlobSidecars", Params: []any{hash}}
 			resp, err := c.call(ctx, req)
 			mu.Lock()
 			defer mu.Unlock()
@@ -408,7 +400,7 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 			} else {
 				result.Blobs = resp.Result
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -429,17 +421,17 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 	requests := make([]jsonRPCRequest, 0, callsCount)
 
 	requests = append(requests,
-		jsonRPCRequest{JSONRPC: "2.0", ID: 0, Method: "eth_getBlockByHash", Params: []interface{}{hash, fullTx}},
-		jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "eth_getBlockReceipts", Params: []interface{}{hash}},
+		jsonRPCRequest{JSONRPC: "2.0", ID: 0, Method: "eth_getBlockByHash", Params: []any{hash, fullTx}},
+		jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "eth_getBlockReceipts", Params: []any{hash}},
 	)
 	if c.config.EnableTraces {
 		requests = append(requests,
-			jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []interface{}{hash}},
+			jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []any{hash}},
 		)
 	}
 	if c.config.EnableBlobs {
 		requests = append(requests,
-			jsonRPCRequest{JSONRPC: "2.0", ID: 3, Method: "eth_getBlobSidecars", Params: []interface{}{hash}},
+			jsonRPCRequest{JSONRPC: "2.0", ID: 3, Method: "eth_getBlobSidecars", Params: []any{hash}},
 		)
 	}
 
@@ -514,7 +506,7 @@ func (c *Client) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
 		JSONRPC: "2.0",
 		ID:      1,
 		Method:  "eth_blockNumber",
-		Params:  []interface{}{},
+		Params:  []any{},
 	}
 
 	resp, err := c.call(ctx, req)
@@ -550,17 +542,17 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		baseID := i * 4 // Keep consistent IDs for response mapping
 
 		requests = append(requests,
-			jsonRPCRequest{JSONRPC: "2.0", ID: baseID, Method: "eth_getBlockByNumber", Params: []interface{}{hexNum, fullTx}},
-			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 1, Method: "eth_getBlockReceipts", Params: []interface{}{hexNum}},
+			jsonRPCRequest{JSONRPC: "2.0", ID: baseID, Method: "eth_getBlockByNumber", Params: []any{hexNum, fullTx}},
+			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 1, Method: "eth_getBlockReceipts", Params: []any{hexNum}},
 		)
 		if c.config.EnableTraces {
 			requests = append(requests,
-				jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 2, Method: "trace_block", Params: []interface{}{hexNum}},
+				jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 2, Method: "trace_block", Params: []any{hexNum}},
 			)
 		}
 		if c.config.EnableBlobs {
 			requests = append(requests,
-				jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 3, Method: "eth_getBlobSidecars", Params: []interface{}{hexNum}},
+				jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 3, Method: "eth_getBlobSidecars", Params: []any{hexNum}},
 			)
 		}
 	}
@@ -649,8 +641,8 @@ func (c *Client) GetBlocksAndReceiptsBatch(ctx context.Context, blockNums []int6
 		baseID := i * 2
 
 		requests = append(requests,
-			jsonRPCRequest{JSONRPC: "2.0", ID: baseID, Method: "eth_getBlockByNumber", Params: []interface{}{hexNum, fullTx}},
-			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 1, Method: "eth_getBlockReceipts", Params: []interface{}{hexNum}},
+			jsonRPCRequest{JSONRPC: "2.0", ID: baseID, Method: "eth_getBlockByNumber", Params: []any{hexNum, fullTx}},
+			jsonRPCRequest{JSONRPC: "2.0", ID: baseID + 1, Method: "eth_getBlockReceipts", Params: []any{hexNum}},
 		)
 	}
 
@@ -708,7 +700,7 @@ func (c *Client) GetTracesBatch(ctx context.Context, blockNums []int64) (map[int
 	requests := make([]jsonRPCRequest, len(blockNums))
 	for i, blockNum := range blockNums {
 		hexNum := fmt.Sprintf("0x%x", blockNum)
-		requests[i] = jsonRPCRequest{JSONRPC: "2.0", ID: i, Method: "trace_block", Params: []interface{}{hexNum}}
+		requests[i] = jsonRPCRequest{JSONRPC: "2.0", ID: i, Method: "trace_block", Params: []any{hexNum}}
 	}
 
 	responses, err := c.callBatch(ctx, requests)
@@ -936,10 +928,7 @@ func (c *Client) doWithRetry(ctx context.Context, method string, fn func() error
 		}
 
 		// Increase backoff for next attempt
-		backoff = time.Duration(float64(backoff) * c.config.BackoffFactor)
-		if backoff > c.config.MaxBackoff {
-			backoff = c.config.MaxBackoff
-		}
+		backoff = min(time.Duration(float64(backoff)*c.config.BackoffFactor), c.config.MaxBackoff)
 	}
 
 	c.logger.Error("request failed after all retries",

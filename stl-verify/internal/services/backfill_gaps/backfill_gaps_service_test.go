@@ -787,7 +787,7 @@ func TestBackfillService_SkipsStaleBlockWhenLiveAlreadyProcessed(t *testing.T) {
 	// but processes it after live service has already saved the canonical block.
 	staleBlockData := outbound.BlockData{
 		BlockNumber: 100,
-		Block:       []byte(fmt.Sprintf(`{"number":"0x64","hash":"%s","parentHash":"0x%064x","timestamp":"0x0"}`, staleHash, 99)),
+		Block:       fmt.Appendf(nil, `{"number":"0x64","hash":"%s","parentHash":"0x%064x","timestamp":"0x0"}`, staleHash, 99),
 	}
 
 	// This should skip the block, not save it

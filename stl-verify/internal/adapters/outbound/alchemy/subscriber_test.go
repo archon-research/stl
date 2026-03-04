@@ -177,16 +177,16 @@ func TestSubscribe_ReceivesBlockHeaders(t *testing.T) {
 		}
 
 		// Send block headers
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			header := outbound.BlockHeader{
 				Number:     "0x" + string(rune('1'+i)),
 				Hash:       "0xabc" + string(rune('0'+i)),
 				ParentHash: "0xdef" + string(rune('0'+i)),
 			}
-			notification := map[string]interface{}{
+			notification := map[string]any{
 				"jsonrpc": "2.0",
 				"method":  "eth_subscription",
-				"params": map[string]interface{}{
+				"params": map[string]any{
 					"subscription": "0x1234",
 					"result":       header,
 				},
@@ -338,7 +338,7 @@ func TestUnsubscribe_Idempotent(t *testing.T) {
 	}
 
 	// Unsubscribe multiple times should not panic
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		err := sub.Unsubscribe()
 		if err != nil {
 			t.Fatalf("unsubscribe %d failed: %v", i, err)
@@ -456,10 +456,10 @@ func TestUnsubscribe_GracefulWithActiveBlocks(t *testing.T) {
 				Hash:       fmt.Sprintf("0xhash%d", i),
 				ParentHash: fmt.Sprintf("0xparent%d", i),
 			}
-			notification := map[string]interface{}{
+			notification := map[string]any{
 				"jsonrpc": "2.0",
 				"method":  "eth_subscription",
-				"params": map[string]interface{}{
+				"params": map[string]any{
 					"subscription": "0x1234",
 					"result":       header,
 				},
@@ -558,10 +558,10 @@ func TestSubscribe_ReconnectsOnConnectionLoss(t *testing.T) {
 			Hash:       "0xabc",
 			ParentHash: "0xdef",
 		}
-		notification := map[string]interface{}{
+		notification := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
-			"params": map[string]interface{}{
+			"params": map[string]any{
 				"subscription": "0x1234",
 				"result":       header,
 			},
@@ -883,16 +883,16 @@ func TestSubscribe_ChannelBufferFull(t *testing.T) {
 		}
 
 		// Flood with blocks (more than buffer size)
-		for i := 0; i < totalBlocks; i++ {
+		for i := range totalBlocks {
 			header := outbound.BlockHeader{
 				Number:     fmt.Sprintf("0x%x", 1000+i), // Valid hex block numbers
 				Hash:       "0xabc",
 				ParentHash: "0xdef",
 			}
-			notification := map[string]interface{}{
+			notification := map[string]any{
 				"jsonrpc": "2.0",
 				"method":  "eth_subscription",
-				"params": map[string]interface{}{
+				"params": map[string]any{
 					"subscription": "0x1234",
 					"result":       header,
 				},
@@ -992,16 +992,16 @@ func TestSubscribe_ContextCancellation(t *testing.T) {
 
 		// Wait for cancellation signal, then try to send more blocks
 		<-cancelledChan
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			header := outbound.BlockHeader{
 				Number:     fmt.Sprintf("0x%x", 100+i),
 				Hash:       "0xabc",
 				ParentHash: "0xdef",
 			}
-			notification := map[string]interface{}{
+			notification := map[string]any{
 				"jsonrpc": "2.0",
 				"method":  "eth_subscription",
-				"params": map[string]interface{}{
+				"params": map[string]any{
 					"subscription": "0x1234",
 					"result":       header,
 				},
@@ -1087,7 +1087,7 @@ func TestSubscribe_MalformedJSON(t *testing.T) {
 		}
 
 		// Send malformed params (should be handled gracefully)
-		badNotification := map[string]interface{}{
+		badNotification := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
 			"params":  "not an object",
@@ -1102,10 +1102,10 @@ func TestSubscribe_MalformedJSON(t *testing.T) {
 			Hash:       "0xabc",
 			ParentHash: "0xdef",
 		}
-		notification := map[string]interface{}{
+		notification := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
-			"params": map[string]interface{}{
+			"params": map[string]any{
 				"subscription": "0x1234",
 				"result":       header,
 			},
@@ -1188,13 +1188,11 @@ func TestSubscribe_ConcurrentUnsubscribe(t *testing.T) {
 
 	// Concurrent unsubscribe calls should not panic
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 10 {
+		wg.Go(func() {
 			// Ignore error - expected on subsequent calls after first unsubscribe
 			_ = sub.Unsubscribe()
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -1364,7 +1362,7 @@ func TestSubscribe_IgnoresNonSubscriptionMessages(t *testing.T) {
 		_ = conn.WriteJSON(resp)
 
 		// Send a non-subscription message (should be ignored)
-		nonSubMsg := map[string]interface{}{
+		nonSubMsg := map[string]any{
 			"jsonrpc": "2.0",
 			"id":      2,
 			"result":  "0x123",
@@ -1372,10 +1370,10 @@ func TestSubscribe_IgnoresNonSubscriptionMessages(t *testing.T) {
 		_ = conn.WriteJSON(nonSubMsg)
 
 		// Send another non-subscription message with different method
-		otherMethodMsg := map[string]interface{}{
+		otherMethodMsg := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_blockNumber",
-			"params":  []interface{}{},
+			"params":  []any{},
 		}
 		_ = conn.WriteJSON(otherMethodMsg)
 
@@ -1385,10 +1383,10 @@ func TestSubscribe_IgnoresNonSubscriptionMessages(t *testing.T) {
 			Hash:       "0xabcdef1234567890",
 			ParentHash: "0xdef",
 		}
-		notification := map[string]interface{}{
+		notification := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
-			"params": map[string]interface{}{
+			"params": map[string]any{
 				"subscription": "0x1234",
 				"result":       header,
 			},
@@ -1459,10 +1457,10 @@ func TestSubscribe_ReadTimeoutTriggersReconnect(t *testing.T) {
 				Hash:       "0xabc",
 				ParentHash: "0xdef",
 			}
-			notification := map[string]interface{}{
+			notification := map[string]any{
 				"jsonrpc": "2.0",
 				"method":  "eth_subscription",
-				"params": map[string]interface{}{
+				"params": map[string]any{
 					"subscription": "0x1234",
 					"result":       header,
 				},
@@ -1665,7 +1663,7 @@ func TestSubscribe_SubscriptionWithNilParams(t *testing.T) {
 		_ = conn.WriteJSON(resp)
 
 		// Send subscription message with nil params (should be handled gracefully)
-		nilParamsMsg := map[string]interface{}{
+		nilParamsMsg := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
 			// params is missing/nil
@@ -1678,10 +1676,10 @@ func TestSubscribe_SubscriptionWithNilParams(t *testing.T) {
 			Hash:       "0xabc",
 			ParentHash: "0xdef",
 		}
-		notification := map[string]interface{}{
+		notification := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
-			"params": map[string]interface{}{
+			"params": map[string]any{
 				"subscription": "0x1234",
 				"result":       header,
 			},
@@ -1802,7 +1800,7 @@ func TestSubscribe_InvalidParamsJSON(t *testing.T) {
 		_ = conn.WriteJSON(resp)
 
 		// Send subscription message with invalid params JSON structure
-		invalidParamsMsg := map[string]interface{}{
+		invalidParamsMsg := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
 			"params":  "not an object", // Invalid: should be object with result field
@@ -1815,10 +1813,10 @@ func TestSubscribe_InvalidParamsJSON(t *testing.T) {
 			Hash:       "0xabcdef1234567890",
 			ParentHash: "0xdef",
 		}
-		notification := map[string]interface{}{
+		notification := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
-			"params": map[string]interface{}{
+			"params": map[string]any{
 				"subscription": "0x1234",
 				"result":       header,
 			},
@@ -1875,16 +1873,16 @@ func TestSubscribe_DoneChannelClosedDuringBlockSend(t *testing.T) {
 		_ = conn.WriteJSON(resp)
 
 		// Send blocks continuously
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			header := outbound.BlockHeader{
 				Number:     fmt.Sprintf("0x%x", 1000+i),
 				Hash:       fmt.Sprintf("0xabc%d1234567890", i),
 				ParentHash: "0xdef",
 			}
-			notification := map[string]interface{}{
+			notification := map[string]any{
 				"jsonrpc": "2.0",
 				"method":  "eth_subscription",
-				"params": map[string]interface{}{
+				"params": map[string]any{
 					"subscription": "0x1234",
 					"result":       header,
 				},
@@ -1957,16 +1955,16 @@ func TestSubscribe_ContextCancelledDuringBlockSend(t *testing.T) {
 		_ = conn.WriteJSON(resp)
 
 		// Send blocks continuously
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			header := outbound.BlockHeader{
 				Number:     fmt.Sprintf("0x%x", 1000+i),
 				Hash:       fmt.Sprintf("0xabc%d1234567890", i),
 				ParentHash: "0xdef",
 			}
-			notification := map[string]interface{}{
+			notification := map[string]any{
 				"jsonrpc": "2.0",
 				"method":  "eth_subscription",
-				"params": map[string]interface{}{
+				"params": map[string]any{
 					"subscription": "0x1234",
 					"result":       header,
 				},
@@ -2051,10 +2049,10 @@ func TestSubscribe_PingFailureTriggersReconnect(t *testing.T) {
 			Hash:       "0xabc1234567890",
 			ParentHash: "0xdef",
 		}
-		notification := map[string]interface{}{
+		notification := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
-			"params": map[string]interface{}{
+			"params": map[string]any{
 				"subscription": "0x1234",
 				"result":       header,
 			},
