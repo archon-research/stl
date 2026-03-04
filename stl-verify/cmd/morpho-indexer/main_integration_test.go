@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -27,6 +29,8 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
+	t.Setenv("S3_BUCKET", "stl-sentineltest-ethereum-raw")
+	t.Setenv("DEPLOY_ENV", "test")
 
 	err := run(context.Background(), []string{
 		"-queue", "http://localhost/test-queue",
@@ -43,6 +47,8 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 }
 
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
+	ctx := context.Background()
+
 	_, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
 	defer dbCleanup()
 
@@ -58,19 +64,36 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	redisAddr, redisCleanup := startRedisContainer(t)
 	defer redisCleanup()
 
+	s3Container, s3Cfg := testutil.StartLocalStack(t, ctx, "s3")
+	defer s3Container.Terminate(context.Background())
+	s3Client := testutil.NewS3Client(t, ctx, s3Cfg)
+
+	// Bucket name must satisfy the stl-sentinel{env}-{chain}-raw prefix convention.
+	const (
+		bucket    = "stl-sentineltest-ethereum-raw"
+		deployEnv = "test"
+	)
+
+	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
+		t.Fatalf("create S3 bucket: %v", err)
+	}
+
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
+	t.Setenv("AWS_S3_ENDPOINT", s3Cfg.Endpoint)
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("S3_BUCKET", bucket)
+	t.Setenv("DEPLOY_ENV", deployEnv)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- run(ctx, []string{
+		errCh <- run(runCtx, []string{
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
 			"-redis", redisAddr,

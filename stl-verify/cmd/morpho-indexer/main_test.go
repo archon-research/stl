@@ -23,12 +23,16 @@ func TestParseConfig(t *testing.T) {
 			envVars: map[string]string{
 				"ALCHEMY_API_KEY":  "test-key",
 				"ALCHEMY_HTTP_URL": "https://eth.example.com",
+				"S3_BUCKET":        "my-bucket",
+				"DEPLOY_ENV":       "sentinelstaging",
 			},
 			wantCfg: cliConfig{
 				queueURL:          "https://sqs.us-east-1.amazonaws.com/123/my-queue",
 				dbURL:             "postgres://localhost:5432/testdb",
 				redisAddr:         "localhost:6379",
 				alchemyURL:        "https://eth.example.com/test-key",
+				s3Bucket:          "my-bucket",
+				deployEnv:         "sentinelstaging",
 				maxMessages:       10,
 				waitTime:          20,
 				visibilityTimeout: 300,
@@ -41,12 +45,16 @@ func TestParseConfig(t *testing.T) {
 			envVars: map[string]string{
 				"AWS_SQS_QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/123/env-queue",
 				"ALCHEMY_API_KEY":   "test-key",
+				"S3_BUCKET":         "my-bucket",
+				"DEPLOY_ENV":        "sentinelstaging",
 			},
 			wantCfg: cliConfig{
 				queueURL:          "https://sqs.us-east-1.amazonaws.com/123/env-queue",
 				dbURL:             "postgres://localhost/testdb",
 				redisAddr:         "localhost:6379",
 				alchemyURL:        "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				s3Bucket:          "my-bucket",
+				deployEnv:         "sentinelstaging",
 				maxMessages:       10,
 				waitTime:          20,
 				visibilityTimeout: 300,
@@ -59,12 +67,16 @@ func TestParseConfig(t *testing.T) {
 			envVars: map[string]string{
 				"DATABASE_URL":    "postgres://localhost:5432/envdb",
 				"ALCHEMY_API_KEY": "test-key",
+				"S3_BUCKET":       "my-bucket",
+				"DEPLOY_ENV":      "sentinelstaging",
 			},
 			wantCfg: cliConfig{
 				queueURL:          "https://sqs.us-east-1.amazonaws.com/123/q",
 				dbURL:             "postgres://localhost:5432/envdb",
 				redisAddr:         "localhost:6379",
 				alchemyURL:        "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				s3Bucket:          "my-bucket",
+				deployEnv:         "sentinelstaging",
 				maxMessages:       10,
 				waitTime:          20,
 				visibilityTimeout: 300,
@@ -77,12 +89,16 @@ func TestParseConfig(t *testing.T) {
 			envVars: map[string]string{
 				"REDIS_ADDR":      "redis.example.com:6379",
 				"ALCHEMY_API_KEY": "test-key",
+				"S3_BUCKET":       "my-bucket",
+				"DEPLOY_ENV":      "sentinelstaging",
 			},
 			wantCfg: cliConfig{
 				queueURL:          "https://sqs.us-east-1.amazonaws.com/123/q",
 				dbURL:             "postgres://localhost/db",
 				redisAddr:         "redis.example.com:6379",
 				alchemyURL:        "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				s3Bucket:          "my-bucket",
+				deployEnv:         "sentinelstaging",
 				maxMessages:       10,
 				waitTime:          20,
 				visibilityTimeout: 300,
@@ -113,6 +129,21 @@ func TestParseConfig(t *testing.T) {
 			wantError: "redis address not provided",
 		},
 		{
+			name:      "missing S3_BUCKET",
+			args:      []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/q", "-db", "postgres://localhost/db", "-redis", "localhost:6379"},
+			envVars:   map[string]string{"ALCHEMY_API_KEY": "test-key"},
+			wantError: "S3_BUCKET environment variable is required",
+		},
+		{
+			name: "missing DEPLOY_ENV",
+			args: []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/q", "-db", "postgres://localhost/db", "-redis", "localhost:6379"},
+			envVars: map[string]string{
+				"ALCHEMY_API_KEY": "test-key",
+				"S3_BUCKET":       "my-bucket",
+			},
+			wantError: "DEPLOY_ENV environment variable is required",
+		},
+		{
 			name:      "invalid flag",
 			args:      []string{"--nonexistent"},
 			wantError: "flag provided but not defined",
@@ -129,12 +160,16 @@ func TestParseConfig(t *testing.T) {
 				"DATABASE_URL":      "postgres://localhost/env-db",
 				"REDIS_ADDR":        "env-redis:6379",
 				"ALCHEMY_API_KEY":   "test-key",
+				"S3_BUCKET":         "my-bucket",
+				"DEPLOY_ENV":        "sentinelstaging",
 			},
 			wantCfg: cliConfig{
 				queueURL:          "https://sqs.us-east-1.amazonaws.com/123/cli-queue",
 				dbURL:             "postgres://localhost/cli-db",
 				redisAddr:         "cli-redis:6379",
 				alchemyURL:        "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				s3Bucket:          "my-bucket",
+				deployEnv:         "sentinelstaging",
 				maxMessages:       10,
 				waitTime:          20,
 				visibilityTimeout: 300,
@@ -147,12 +182,16 @@ func TestParseConfig(t *testing.T) {
 			envVars: map[string]string{
 				"ALCHEMY_API_KEY": "test-key",
 				"CHAIN_ID":        "8453",
+				"S3_BUCKET":       "my-bucket",
+				"DEPLOY_ENV":      "sentinelstaging",
 			},
 			wantCfg: cliConfig{
 				queueURL:          "https://sqs.us-east-1.amazonaws.com/123/q",
 				dbURL:             "postgres://localhost/db",
 				redisAddr:         "localhost:6379",
 				alchemyURL:        "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				s3Bucket:          "my-bucket",
+				deployEnv:         "sentinelstaging",
 				maxMessages:       10,
 				waitTime:          20,
 				visibilityTimeout: 300,
@@ -174,12 +213,16 @@ func TestParseConfig(t *testing.T) {
 			envVars: map[string]string{
 				"ALCHEMY_API_KEY": "test-key",
 				"SQS_WAIT_TIME":   "5",
+				"S3_BUCKET":       "my-bucket",
+				"DEPLOY_ENV":      "sentinelstaging",
 			},
 			wantCfg: cliConfig{
 				queueURL:          "https://sqs.us-east-1.amazonaws.com/123/q",
 				dbURL:             "postgres://localhost/db",
 				redisAddr:         "localhost:6379",
 				alchemyURL:        "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				s3Bucket:          "my-bucket",
+				deployEnv:         "sentinelstaging",
 				maxMessages:       10,
 				waitTime:          5,
 				visibilityTimeout: 300,
@@ -201,12 +244,16 @@ func TestParseConfig(t *testing.T) {
 			envVars: map[string]string{
 				"ALCHEMY_API_KEY":        "test-key",
 				"SQS_VISIBILITY_TIMEOUT": "60",
+				"S3_BUCKET":              "my-bucket",
+				"DEPLOY_ENV":             "sentinelstaging",
 			},
 			wantCfg: cliConfig{
 				queueURL:          "https://sqs.us-east-1.amazonaws.com/123/q",
 				dbURL:             "postgres://localhost/db",
 				redisAddr:         "localhost:6379",
 				alchemyURL:        "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				s3Bucket:          "my-bucket",
+				deployEnv:         "sentinelstaging",
 				maxMessages:       10,
 				waitTime:          20,
 				visibilityTimeout: 60,
@@ -230,12 +277,18 @@ func TestParseConfig(t *testing.T) {
 				"-redis", "localhost:6379",
 				"-max", "5",
 			},
-			envVars: map[string]string{"ALCHEMY_API_KEY": "test-key"},
+			envVars: map[string]string{
+				"ALCHEMY_API_KEY": "test-key",
+				"S3_BUCKET":       "my-bucket",
+				"DEPLOY_ENV":      "sentinelstaging",
+			},
 			wantCfg: cliConfig{
 				queueURL:          "https://sqs.us-east-1.amazonaws.com/123/q",
 				dbURL:             "postgres://localhost/db",
 				redisAddr:         "localhost:6379",
 				alchemyURL:        "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				s3Bucket:          "my-bucket",
+				deployEnv:         "sentinelstaging",
 				maxMessages:       5,
 				waitTime:          20,
 				visibilityTimeout: 300,
@@ -251,6 +304,7 @@ func TestParseConfig(t *testing.T) {
 				"ALCHEMY_API_KEY", "ALCHEMY_HTTP_URL", "AWS_SQS_QUEUE_URL",
 				"DATABASE_URL", "REDIS_ADDR", "CHAIN_ID",
 				"SQS_WAIT_TIME", "SQS_VISIBILITY_TIMEOUT",
+				"S3_BUCKET", "DEPLOY_ENV",
 			} {
 				if _, has := tt.envVars[key]; !has {
 					t.Setenv(key, "")
@@ -288,6 +342,12 @@ func TestParseConfig(t *testing.T) {
 			}
 			if cfg.alchemyURL != tt.wantCfg.alchemyURL {
 				t.Errorf("alchemyURL: expected %q, got %q", tt.wantCfg.alchemyURL, cfg.alchemyURL)
+			}
+			if cfg.s3Bucket != tt.wantCfg.s3Bucket {
+				t.Errorf("s3Bucket: expected %q, got %q", tt.wantCfg.s3Bucket, cfg.s3Bucket)
+			}
+			if cfg.deployEnv != tt.wantCfg.deployEnv {
+				t.Errorf("deployEnv: expected %q, got %q", tt.wantCfg.deployEnv, cfg.deployEnv)
 			}
 			if cfg.maxMessages != tt.wantCfg.maxMessages {
 				t.Errorf("maxMessages: expected %d, got %d", tt.wantCfg.maxMessages, cfg.maxMessages)
