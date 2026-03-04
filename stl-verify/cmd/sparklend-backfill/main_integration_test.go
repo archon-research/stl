@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -27,6 +28,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+func TestMain(m *testing.M) {
+	os.Exit(testutil.RunTestsWithLeakCheck(m))
+}
 
 // ---------------------------------------------------------------------------
 // Integration tests for run()

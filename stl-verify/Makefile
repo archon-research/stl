@@ -73,7 +73,7 @@ test:
 # too many containers concurrently on CI (13 packages x containers = OOM).
 test-integration:
 	@echo "==> Running integration tests..."
-	go test -tags=integration -v -timeout=10m -p 2 ./...
+	GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=10m -p 2 ./...
 
 # Run tests with coverage
 cover:

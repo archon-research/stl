@@ -50,5 +50,7 @@ func TestMain(m *testing.M) {
 
 	cleanup()
 
+	code = testutil.CheckGoroutineLeaks(code)
+
 	os.Exit(code)
 }
