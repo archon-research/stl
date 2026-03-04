@@ -27,7 +27,7 @@ type TransactionReceipt struct {
 type Service struct {
 	config           Config
 	sqsConsumer      outbound.SQSConsumer
-	cache            outbound.BlockCache
+	cache            outbound.BlockCacheReader
 	extractor        *TransferExtractor
 	registry         *SourceRegistry
 	entryLookup      map[EntryKey]*TokenEntry
@@ -42,7 +42,7 @@ type Service struct {
 func NewService(
 	config Config,
 	sqsConsumer outbound.SQSConsumer,
-	cache outbound.BlockCache,
+	cache outbound.BlockCacheReader,
 	registry *SourceRegistry,
 	entries []*TokenEntry,
 	handler AllocationHandler,
@@ -92,6 +92,7 @@ func (s *Service) Start(ctx context.Context) error {
 		MaxMessages:  s.config.MaxMessages,
 		PollInterval: s.config.PollInterval,
 		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
 	}, s.processBlock)
 
 	s.logger.Info("started",

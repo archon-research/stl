@@ -65,7 +65,7 @@ type Service struct {
 	config       Config
 	deployBlock  int64 // resolved Morpho Blue deploy block for the configured chain
 	consumer     outbound.SQSConsumer
-	cache        outbound.BlockCache
+	cache        outbound.BlockCacheReader
 	txManager    outbound.TxManager
 	userRepo     outbound.UserRepository
 	protocolRepo outbound.ProtocolRepository
@@ -87,7 +87,7 @@ type Service struct {
 func NewService(
 	config Config,
 	consumer outbound.SQSConsumer,
-	cache outbound.BlockCache,
+	cache outbound.BlockCacheReader,
 	multicallClient outbound.Multicaller,
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,
@@ -883,7 +883,7 @@ func (s *Service) saveProtocolEvent(ctx context.Context, event MorphoBlueEvent, 
 
 func validateDependencies(
 	consumer outbound.SQSConsumer,
-	cache outbound.BlockCache,
+	cache outbound.BlockCacheReader,
 	multicallClient outbound.Multicaller,
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,

@@ -12,16 +12,11 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -51,8 +46,9 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
 	defer dbCleanup()
 
-	s3Client, s3Endpoint, s3Cleanup := startLocalStackS3(t, ctx)
-	defer s3Cleanup()
+	s3Container, s3Cfg := testutil.StartLocalStack(t, ctx, "s3")
+	defer s3Container.Terminate(context.Background())
+	s3Client := testutil.NewS3Client(t, ctx, s3Cfg)
 
 	const bucket = "test-sparklend-backfill"
 	const fromBlock = 100
@@ -82,7 +78,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	}))
 	defer rpcServer.Close()
 
-	t.Setenv("AWS_ENDPOINT_URL", s3Endpoint)
+	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 
@@ -123,8 +119,9 @@ func TestRunIntegration_BorrowEvent(t *testing.T) {
 	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
 	defer dbCleanup()
 
-	s3Client, s3Endpoint, s3Cleanup := startLocalStackS3(t, ctx)
-	defer s3Cleanup()
+	s3Container, s3Cfg := testutil.StartLocalStack(t, ctx, "s3")
+	defer s3Container.Terminate(context.Background())
+	s3Client := testutil.NewS3Client(t, ctx, s3Cfg)
 
 	// SparkLend's PoolDataProvider is only active from block 16776400 onwards.
 	// Use a block well above that so GetPoolDataProviderForBlock succeeds.
@@ -185,7 +182,7 @@ func TestRunIntegration_BorrowEvent(t *testing.T) {
 	rpcServer := buildBorrowMockRPC(t, daiAddress)
 	defer rpcServer.Close()
 
-	t.Setenv("AWS_ENDPOINT_URL", s3Endpoint)
+	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 
@@ -211,8 +208,9 @@ func TestRunIntegration_BorrowEvent(t *testing.T) {
 func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	ctx := context.Background()
 
-	s3Client, s3Endpoint, s3Cleanup := startLocalStackS3(t, ctx)
-	defer s3Cleanup()
+	s3Container, s3Cfg := testutil.StartLocalStack(t, ctx, "s3")
+	defer s3Container.Terminate(context.Background())
+	s3Client := testutil.NewS3Client(t, ctx, s3Cfg)
 
 	const bucket = "test-sparklend-backfill-baddb"
 	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
@@ -223,7 +221,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer rpcServer.Close()
 
-	t.Setenv("AWS_ENDPOINT_URL", s3Endpoint)
+	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 
@@ -327,8 +325,9 @@ func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
 	defer dbCleanup()
 
-	s3Client, s3Endpoint, s3Cleanup := startLocalStackS3(t, ctx)
-	defer s3Cleanup()
+	s3Container, s3Cfg := testutil.StartLocalStack(t, ctx, "s3")
+	defer s3Container.Terminate(context.Background())
+	s3Client := testutil.NewS3Client(t, ctx, s3Cfg)
 
 	const blockNum = int64(16800000)
 	const bucket = "test-sparklend-borrow-collateral"
@@ -374,7 +373,7 @@ func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 	rpcServer := buildBorrowWithCollateralMockRPC(t, daiAddress, wethAddress, borrowerAddress)
 	defer rpcServer.Close()
 
-	t.Setenv("AWS_ENDPOINT_URL", s3Endpoint)
+	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 
@@ -784,62 +783,4 @@ func uploadReceipts(t *testing.T, ctx context.Context, client *s3.Client, bucket
 	if err != nil {
 		t.Fatalf("put object %s: %v", key, err)
 	}
-}
-
-// startLocalStackS3 starts a LocalStack container configured for S3 only and
-// returns an S3 client, the endpoint URL, and a cleanup function.
-func startLocalStackS3(t *testing.T, ctx context.Context) (*s3.Client, string, func()) {
-	t.Helper()
-
-	req := testcontainers.ContainerRequest{
-		Image:        testutil.ImageLocalStack,
-		ExposedPorts: []string{"4566/tcp"},
-		Env: map[string]string{
-			"SERVICES":               "s3",
-			"DEBUG":                  "0",
-			"DISABLE_EVENTS":         "1",
-			"SKIP_SSL_CERT_DOWNLOAD": "1",
-		},
-		WaitingFor: wait.ForLog("Ready."),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		t.Fatalf("start localstack: %v", err)
-	}
-
-	host, _ := container.Host(ctx)
-	port, _ := container.MappedPort(ctx, "4566")
-	endpoint := fmt.Sprintf("http://%s:%s", host, port.Port())
-
-	// Ensure the container host bypasses the HTTP proxy. In containerised CI
-	// environments testcontainers resolves the Docker bridge gateway IP (e.g.
-	// 172.17.0.1) which is typically NOT in NO_PROXY.
-	if noProxy := os.Getenv("NO_PROXY"); !strings.Contains(noProxy, host) {
-		t.Setenv("NO_PROXY", noProxy+","+host)
-	}
-	if noProxy := os.Getenv("no_proxy"); !strings.Contains(noProxy, host) {
-		t.Setenv("no_proxy", noProxy+","+host)
-	}
-
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithRegion("us-east-1"),
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
-	)
-	if err != nil {
-		t.Fatalf("load aws config: %v", err)
-	}
-
-	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(endpoint)
-		o.UsePathStyle = true // Required for LocalStack
-	})
-
-	cleanup := func() {
-		_ = container.Terminate(context.Background())
-	}
-	return client, endpoint, cleanup
 }

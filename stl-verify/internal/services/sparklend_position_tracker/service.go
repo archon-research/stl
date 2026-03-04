@@ -62,7 +62,7 @@ type CollateralData struct {
 type Service struct {
 	config       shared.SQSConsumerConfig
 	consumer     outbound.SQSConsumer
-	cache        outbound.BlockCache
+	cacheReader  outbound.BlockCacheReader
 	ethClient    *ethclient.Client
 	txManager    outbound.TxManager
 	userRepo     outbound.UserRepository
@@ -85,7 +85,7 @@ type Service struct {
 func NewService(
 	config shared.SQSConsumerConfig,
 	consumer outbound.SQSConsumer,
-	cache outbound.BlockCache,
+	cacheReader outbound.BlockCacheReader,
 	ethClient *ethclient.Client,
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,
@@ -94,7 +94,7 @@ func NewService(
 	positionRepo outbound.PositionRepository,
 	eventRepo outbound.EventRepository,
 ) (*Service, error) {
-	if err := validateDependencies(consumer, cache, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo); err != nil {
+	if err := validateDependencies(consumer, cacheReader, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo); err != nil {
 		return nil, err
 	}
 
@@ -121,7 +121,7 @@ func NewService(
 	processor := &Service{
 		config:             config,
 		consumer:           consumer,
-		cache:              cache,
+		cacheReader:        cacheReader,
 		ethClient:          ethClient,
 		txManager:          txManager,
 		userRepo:           userRepo,
@@ -206,8 +206,8 @@ func (s *Service) Start(ctx context.Context) error {
 	if s.consumer == nil {
 		return fmt.Errorf("Start() called on service without SQS consumer")
 	}
-	if s.cache == nil {
-		return fmt.Errorf("Start() called on service without block cache")
+	if s.cacheReader == nil {
+		return fmt.Errorf("Start() called on service without cache reader")
 	}
 
 	s.ctx, s.cancel = context.WithCancel(ctx)
@@ -245,16 +245,16 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 			"duration", time.Since(start))
 	}()
 
-	receiptsJSON, err := s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
+	receiptsData, err := s.cacheReader.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
 	if err != nil {
-		return fmt.Errorf("fetching receipts from cache: %w", err)
+		return fmt.Errorf("failed to fetch receipts from cache: %w", err)
 	}
-	if receiptsJSON == nil {
-		return fmt.Errorf("receipts not found in cache for block %d (chain=%d, version=%d)", event.BlockNumber, event.ChainID, event.Version)
+	if receiptsData == nil {
+		return fmt.Errorf("receipts not found in cache: chainID=%d block=%d version=%d", event.ChainID, event.BlockNumber, event.Version)
 	}
 
 	var receipts []shared.TransactionReceipt
-	if err := json.Unmarshal(receiptsJSON, &receipts); err != nil {
+	if err := json.Unmarshal(receiptsData, &receipts); err != nil {
 		return fmt.Errorf("failed to unmarshal receipts: %w", err)
 	}
 
@@ -877,12 +877,12 @@ func (s *Service) convertToDecimalAdjusted(rawAmount *big.Int, decimals int) str
 }
 
 // validateDependencies verifies that all required service dependencies are present.
-// Consumer and redisClient may be nil in backfill mode (when only ProcessReceipts is used).
+// Consumer and cacheReader may be nil in backfill mode (when only ProcessReceipts is used).
 // Returns an error if any of the following required dependencies is nil: ethClient,
 // txManager, userRepo, protocolRepo, tokenRepo, positionRepo, or eventRepo.
 func validateDependencies(
 	consumer outbound.SQSConsumer,
-	cache outbound.BlockCache,
+	cacheReader outbound.BlockCacheReader,
 	ethClient *ethclient.Client,
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,
@@ -891,7 +891,7 @@ func validateDependencies(
 	positionRepo outbound.PositionRepository,
 	eventRepo outbound.EventRepository,
 ) error {
-	// consumer and cache may be nil in backfill mode (ProcessReceipts only).
+	// consumer and cacheReader may be nil in backfill mode (ProcessReceipts only).
 	if ethClient == nil {
 		return fmt.Errorf("ethClient is required")
 	}
