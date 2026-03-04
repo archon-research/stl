@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # Database
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/stl"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/stl_verify"
 
 
 def get_settings() -> Settings:

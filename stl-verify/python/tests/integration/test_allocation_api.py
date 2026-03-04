@@ -92,7 +92,7 @@ async def _seed(async_url: str) -> None:
 @pytest.fixture(scope="module")
 def async_db_url():
     """Start a TimescaleDB container, run all migrations, seed data, yield the asyncpg URL."""
-    with PostgresContainer("timescale/timescaledb:latest-pg16") as container:
+    with PostgresContainer("timescale/timescaledb:2.25.1-pg17") as container:
         async_url = container.get_connection_url(driver="asyncpg")
         dsn = container.get_connection_url()
         asyncio.run(_run_migrations(dsn))

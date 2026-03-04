@@ -13,11 +13,11 @@ class PostgresAllocationRepository(AllocationRepository):
         result = await self._conn.execute(
             text(
                 """
-                SELECT DISTINCT ON (star)
+                SELECT DISTINCT ON (proxy_address)
                     star,
                     encode(proxy_address, 'hex') AS address
                 FROM allocation_position
-                ORDER BY star, proxy_address
+                ORDER BY proxy_address, block_number DESC
                 """
             )
         )
