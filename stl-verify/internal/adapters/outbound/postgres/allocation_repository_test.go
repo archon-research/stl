@@ -10,8 +10,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
-func intPtr(v int) *int { return &v }
-
 func assertNumeric(t *testing.T, name string, got pgtype.Numeric, wantInt *big.Int, wantExp int32) {
 	t.Helper()
 	if !got.Valid {
@@ -37,11 +35,11 @@ func TestBuildInsertArgs_TxAmountUsesTokenDecimals(t *testing.T) {
 		TokenAddress:  common.HexToAddress("0x00836Fe54625BE242BcFA286207795405ca4fD10"),
 		TokenSymbol:   "sUSDSUSDT",
 		TokenDecimals: 18,
-		AssetDecimals: intPtr(6), // underlying USDT
+		AssetDecimals: new(6), // underlying USDT
 		Star:          "spark",
 		ProxyAddress:  common.HexToAddress("0x1111111111111111111111111111111111111111"),
-		Balance:       big.NewInt(27758109970696),           // underlying USDT amount (6 dec)
-		ScaledBalance: lpTokenRaw,                           // LP shares (18 dec)
+		Balance:       big.NewInt(27758109970696), // underlying USDT amount (6 dec)
+		ScaledBalance: lpTokenRaw,                 // LP shares (18 dec)
 		BlockNumber:   24584100,
 		TxHash:        "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c",
 		LogIndex:      42,
