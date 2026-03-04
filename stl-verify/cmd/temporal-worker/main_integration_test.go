@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,10 @@ import (
 	temporaladapter "github.com/archon-research/stl/stl-verify/internal/adapters/inbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+func TestMain(m *testing.M) {
+	os.Exit(testutil.RunTestsWithLeakCheck(m))
+}
 
 // ---------------------------------------------------------------------------
 // Mock CoinGecko server
