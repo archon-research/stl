@@ -44,7 +44,7 @@ func EntriesForChain(entries []*TokenEntry, chain string) []*TokenEntry {
 }
 
 func EntriesForChainID(entries []*TokenEntry, chainID int64) []*TokenEntry {
-	chain, ok := entity.ChainIDToName[int(chainID)]
+	chain, ok := entity.ChainIDToName[chainID]
 	if !ok {
 		return nil
 	}
@@ -52,7 +52,7 @@ func EntriesForChainID(entries []*TokenEntry, chainID int64) []*TokenEntry {
 }
 
 func ProxiesForChainID(proxies []ProxyConfig, chainID int64) []ProxyConfig {
-	chain, ok := entity.ChainIDToName[int(chainID)]
+	chain, ok := entity.ChainIDToName[chainID]
 	if !ok {
 		return nil
 	}

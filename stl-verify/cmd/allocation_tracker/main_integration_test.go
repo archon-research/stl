@@ -29,6 +29,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("S3_BUCKET", "stl-sentineltest-ethereum-raw")
 	t.Setenv("DEPLOY_ENV", "test")
+	t.Setenv("CHAIN_ID", "1")
 
 	err := run(context.Background(), []string{
 		"-queue", "http://localhost/test-queue",
@@ -36,7 +37,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
 	})
 	if err == nil {
-		t.Fatal("expected error for bad database URL")
+		t.Fatal("expected error for bad connection config")
 	}
 	// Could fail at Redis connection or database connection
 	if !strings.Contains(err.Error(), "database") && !strings.Contains(err.Error(), "connect") && !strings.Contains(err.Error(), "Redis") {
@@ -85,6 +86,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	t.Setenv("S3_BUCKET", bucket)
 	t.Setenv("DEPLOY_ENV", deployEnv)
+	t.Setenv("CHAIN_ID", "1")
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -931,8 +931,8 @@ func TestEventExtractor_ExtractReserveEventData(t *testing.T) {
 func TestFetchAndProcessReceipts_CacheMiss_ReturnsError(t *testing.T) {
 	cache := testutil.NewMockBlockCache()
 	svc := &Service{
-		cache:  cache,
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		cacheReader: cache,
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	// Don't store anything in cache — GetReceipts returns nil, nil.
