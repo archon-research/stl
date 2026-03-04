@@ -250,8 +250,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		return fmt.Errorf("failed to fetch receipts from cache: %w", err)
 	}
 	if receiptsData == nil {
-		s.logger.Warn("receipts not found in cache", "chainID", event.ChainID, "block", event.BlockNumber, "version", event.Version)
-		return nil
+		return fmt.Errorf("receipts not found in cache: chainID=%d block=%d version=%d", event.ChainID, event.BlockNumber, event.Version)
 	}
 
 	var receipts []shared.TransactionReceipt
