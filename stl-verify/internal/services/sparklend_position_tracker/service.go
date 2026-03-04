@@ -913,11 +913,5 @@ func validateDependencies(
 	if eventRepo == nil {
 		return fmt.Errorf("eventRepo is required")
 	}
-	if consumer == nil {
-		return fmt.Errorf("consumer is required")
-	}
-	if cache == nil {
-		return fmt.Errorf("cache is required")
-	}
 	return nil
 }

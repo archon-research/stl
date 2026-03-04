@@ -115,10 +115,10 @@ func run() error {
 	defer sqsConsumer.Close()
 
 	// Redis (block cache)
-	blockCache, err := redisAdapter.NewBlockCache(redisAdapter.Config{
-		Addr:     *redisAddr,
-		Password: env.Get("REDIS_PASSWORD", ""),
-	}, logger)
+	cacheCfg := redisAdapter.ConfigDefaults()
+	cacheCfg.Addr = *redisAddr
+	cacheCfg.Password = env.Get("REDIS_PASSWORD", "")
+	blockCache, err := redisAdapter.NewBlockCache(cacheCfg, logger)
 	if err != nil {
 		return fmt.Errorf("creating block cache: %w", err)
 	}
