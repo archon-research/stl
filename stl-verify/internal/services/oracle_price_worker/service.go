@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -48,9 +50,16 @@ type Service struct {
 
 	decimalsValidated bool // set after first successful feed decimals check
 
+	telemetry *Telemetry
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	logger *slog.Logger
+}
+
+// WithTelemetry sets the telemetry instance for the service. Call before Start.
+func (s *Service) WithTelemetry(t *Telemetry) {
+	s.telemetry = t
 }
 
 // NewService creates a new oracle price worker service.
@@ -205,7 +214,20 @@ func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) erro
 	return nil
 }
 
-func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) error {
+func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) (retErr error) {
+	ctx, span := s.telemetry.StartBlockSpan(ctx, event.BlockNumber)
+	defer span.End()
+
+	start := time.Now()
+	defer func() {
+		duration := time.Since(start)
+		s.telemetry.RecordBlockProcessed(ctx, duration, retErr)
+		if retErr != nil {
+			SetSpanError(span, retErr, "block processing failed")
+			s.telemetry.RecordError(ctx, "processBlock", retErr)
+		}
+	}()
+
 	if !s.decimalsValidated {
 		if err := s.validateFeedDecimals(ctx, event.BlockNumber); err != nil {
 			return fmt.Errorf("feed decimals validation: %w", err)
@@ -229,7 +251,17 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) e
 	return nil
 }
 
-func (s *Service) processBlockForOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
+func (s *Service) processBlockForOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) (retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "oracle.processBlockForOracle",
+		attribute.String("oracle.name", unit.Oracle.Name),
+		attribute.String("oracle.type", string(unit.Oracle.OracleType)))
+	defer func() {
+		if retErr != nil {
+			SetSpanError(span, retErr, "oracle processing failed")
+		}
+		span.End()
+	}()
+
 	switch unit.Oracle.OracleType {
 	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
 		return s.processBlockForFeedOracle(ctx, event, unit)
@@ -241,14 +273,17 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 }
 
 func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
-	prices, err := blockchain.FetchOraclePrices(
-		ctx,
-		unit.multicaller,
-		s.oracleABI,
-		unit.OracleAddr,
-		unit.TokenAddrs,
-		event.BlockNumber,
-	)
+	// Fetch prices (RPC span)
+	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
+		attribute.String("rpc.method", "getAssetsPrices"))
+	rpcStart := time.Now()
+	prices, err := blockchain.FetchOraclePrices(ctx, unit.multicaller, s.oracleABI, unit.OracleAddr, unit.TokenAddrs, event.BlockNumber)
+	rpcDuration := time.Since(rpcStart)
+	s.telemetry.RecordRPCCall(ctx, "getAssetsPrices", rpcDuration, err)
+	if err != nil {
+		SetSpanError(fetchSpan, err, "fetch oracle prices failed")
+	}
+	fetchSpan.End()
 	if err != nil {
 		return fmt.Errorf("fetching oracle prices at block %d: %w", event.BlockNumber, err)
 	}
@@ -257,19 +292,37 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 		return fmt.Errorf("price count mismatch: expected %d, got %d", len(unit.TokenIDs), len(prices))
 	}
 
+	// Detect changes
+	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
+		attribute.Int("prices.total", len(prices)))
 	changed, err := s.detectChanges(prices, event, unit)
 	if err != nil {
+		SetSpanError(detectSpan, err, "detect changes failed")
+		detectSpan.End()
 		return fmt.Errorf("detecting changes at block %d: %w", event.BlockNumber, err)
 	}
+	detectSpan.SetAttributes(attribute.Int("prices.changed", len(changed)))
+	recordPriceChangeEvents(detectSpan, unit, changed)
+	detectSpan.End()
 
 	if len(changed) == 0 {
 		s.logger.Debug("no price changes", "oracle", unit.Oracle.Name, "block", event.BlockNumber)
 		return nil
 	}
 
-	if err := s.repo.UpsertPrices(ctx, changed); err != nil {
+	// Upsert prices (DB span)
+	ctx, upsertSpan := s.telemetry.StartSpan(ctx, "oracle.upsertPrices",
+		attribute.Int("prices.changed", len(changed)))
+	err = s.repo.UpsertPrices(ctx, changed)
+	if err != nil {
+		SetSpanError(upsertSpan, err, "upsert prices failed")
+	}
+	upsertSpan.End()
+	if err != nil {
 		return fmt.Errorf("storing prices at block %d: %w", event.BlockNumber, err)
 	}
+
+	s.telemetry.RecordPricesChanged(ctx, unit.Oracle.Name, len(changed))
 
 	s.logger.Info("stored oracle prices",
 		"oracle", unit.Oracle.Name,
@@ -281,33 +334,54 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 }
 
 func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
-	results, err := blockchain.FetchFeedPrices(
-		ctx,
-		unit.multicaller,
-		s.feedABI,
-		unit.Feeds,
-		event.BlockNumber,
-		s.logger,
-	)
+	// Fetch prices (RPC span)
+	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
+		attribute.String("rpc.method", "latestRoundData"))
+	rpcStart := time.Now()
+	results, err := blockchain.FetchFeedPrices(ctx, unit.multicaller, s.feedABI, unit.Feeds, event.BlockNumber, s.logger)
+	rpcDuration := time.Since(rpcStart)
+	s.telemetry.RecordRPCCall(ctx, "latestRoundData", rpcDuration, err)
+	if err != nil {
+		SetSpanError(fetchSpan, err, "fetch feed prices failed")
+	}
+	fetchSpan.End()
 	if err != nil {
 		return fmt.Errorf("fetching feed prices at block %d: %w", event.BlockNumber, err)
 	}
 
 	results = oracle_pricing.ConvertNonUSDPrices(results, unit.OracleUnit, s.logger, event.BlockNumber)
 
+	// Detect changes
+	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
+		attribute.Int("prices.total", len(results)))
 	changed, err := s.detectFeedChanges(results, event, unit)
 	if err != nil {
+		SetSpanError(detectSpan, err, "detect feed changes failed")
+		detectSpan.End()
 		return fmt.Errorf("detecting feed changes at block %d: %w", event.BlockNumber, err)
 	}
+	detectSpan.SetAttributes(attribute.Int("prices.changed", len(changed)))
+	recordPriceChangeEvents(detectSpan, unit, changed)
+	detectSpan.End()
 
 	if len(changed) == 0 {
 		s.logger.Debug("no price changes", "oracle", unit.Oracle.Name, "block", event.BlockNumber)
 		return nil
 	}
 
-	if err := s.repo.UpsertPrices(ctx, changed); err != nil {
+	// Upsert prices (DB span)
+	ctx, upsertSpan := s.telemetry.StartSpan(ctx, "oracle.upsertPrices",
+		attribute.Int("prices.changed", len(changed)))
+	err = s.repo.UpsertPrices(ctx, changed)
+	if err != nil {
+		SetSpanError(upsertSpan, err, "upsert prices failed")
+	}
+	upsertSpan.End()
+	if err != nil {
 		return fmt.Errorf("storing prices at block %d: %w", event.BlockNumber, err)
 	}
+
+	s.telemetry.RecordPricesChanged(ctx, unit.Oracle.Name, len(changed))
 
 	s.logger.Info("stored feed prices",
 		"oracle", unit.Oracle.Name,
@@ -383,4 +457,26 @@ func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event 
 	}
 
 	return changed, nil
+}
+
+// recordPriceChangeEvents adds a span event for each changed price so Jaeger
+// shows which tokens changed, from which oracle/feed, and to what value.
+func recordPriceChangeEvents(span trace.Span, unit *oracleUnit, changed []*entity.OnchainTokenPrice) {
+	// Build tokenID → feed address lookup for feed oracles.
+	feedAddr := make(map[int64]string, len(unit.Feeds))
+	for _, f := range unit.Feeds {
+		feedAddr[f.TokenID] = f.FeedAddress.Hex()
+	}
+
+	for _, p := range changed {
+		attrs := []attribute.KeyValue{
+			attribute.String("oracle.name", unit.Oracle.Name),
+			attribute.Int64("token.id", p.TokenID),
+			attribute.Float64("price.usd", p.PriceUSD),
+		}
+		if addr, ok := feedAddr[p.TokenID]; ok {
+			attrs = append(attrs, attribute.String("feed.address", addr))
+		}
+		span.AddEvent("price.changed", trace.WithAttributes(attrs...))
+	}
 }
