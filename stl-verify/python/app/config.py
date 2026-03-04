@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # Database
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/stl"
+
 
 def get_settings() -> Settings:
     """Get cached settings instance."""
