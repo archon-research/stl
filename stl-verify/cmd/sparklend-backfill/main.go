@@ -116,9 +116,12 @@ func run(args []string) error {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigChan)
 	go func() {
-		sig := <-sigChan
-		logger.Info("received signal, shutting down...", "signal", sig)
-		cancel()
+		select {
+		case sig := <-sigChan:
+			logger.Info("received signal, shutting down...", "signal", sig)
+			cancel()
+		case <-ctx.Done():
+		}
 	}()
 
 	// Create Ethereum client with connection pooling scaled to concurrency

@@ -5,6 +5,7 @@ package leaktest_test
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -24,14 +25,13 @@ func TestMain(m *testing.M) {
 // The contrast between the two exit codes proves the detector is responsible
 // for the failure, without coupling to any particular output format.
 func TestLeakDetection_CatchesLeakyGoroutine(t *testing.T) {
-	goBin := goWithExperimentSupport(t)
 	root := moduleRoot(t)
 
 	runLeakyTest := func(t *testing.T, enableExperiment bool) (exitCode int, output string) {
 		t.Helper()
 
 		cmd := exec.Command(
-			goBin, "test",
+			"go", "test",
 			"-tags=leaktest",
 			"-run=TestLeakGoroutine",
 			"-count=1",
@@ -69,53 +69,19 @@ func TestLeakDetection_CatchesLeakyGoroutine(t *testing.T) {
 	})
 }
 
-// goWithExperimentSupport returns the path to a Go binary that supports
-// GOEXPERIMENT=goroutineleakprofile. It skips the test if no suitable binary
-// is found.
-func goWithExperimentSupport(t *testing.T) string {
-	t.Helper()
-
-	env := appendOrReplaceEnv(os.Environ(), "GOEXPERIMENT", "goroutineleakprofile")
-
-	// Try the default go binary first, then the official SDK binary.
-	for _, bin := range []string{"go", "go1.26.0"} {
-		path, err := exec.LookPath(bin)
-		if err != nil {
-			continue
-		}
-		cmd := exec.Command(path, "version")
-		cmd.Env = env
-		if err := cmd.Run(); err == nil {
-			return path
-		}
-	}
-
-	t.Skip("no Go binary with GOEXPERIMENT=goroutineleakprofile support found")
-	return ""
-}
-
-// moduleRoot returns the module root directory by looking for go.mod relative
-// to the test binary's working directory.
+// moduleRoot returns the module root directory via "go env GOMOD".
 func moduleRoot(t *testing.T) string {
 	t.Helper()
 
-	// go test sets the working directory to the package directory. Walk up
-	// to find the module root (where go.mod lives).
-	dir, err := os.Getwd()
+	out, err := exec.Command("go", "env", "GOMOD").Output()
 	if err != nil {
-		t.Fatalf("getting working directory: %v", err)
+		t.Fatalf("go env GOMOD: %v", err)
 	}
-
-	for {
-		if _, err := os.Stat(dir + "/go.mod"); err == nil {
-			return dir
-		}
-		parent := dir[:strings.LastIndex(dir, "/")]
-		if parent == dir {
-			t.Fatal("could not find module root (go.mod)")
-		}
-		dir = parent
+	gomod := strings.TrimSpace(string(out))
+	if gomod == "" {
+		t.Fatal("go env GOMOD returned empty string (not in a module?)")
 	}
+	return filepath.Dir(gomod)
 }
 
 // removeEnv returns a copy of env with the given key removed.

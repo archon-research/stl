@@ -15,16 +15,16 @@ import (
 // exitCode is returned unchanged. When leaked goroutines are detected, their
 // stacks are printed to stderr and exit code 1 is returned.
 func CheckGoroutineLeaks(exitCode int) int {
-	// Two GC cycles ensure finalizers have run and unreachable goroutines
-	// blocked on concurrency primitives are marked as leaked.
-	runtime.GC()
-	runtime.GC()
-
 	profile := pprof.Lookup("goroutineleak")
 	if profile == nil {
 		// Experiment not enabled — nothing to check.
 		return exitCode
 	}
+
+	// Two GC cycles ensure finalizers have run and unreachable goroutines
+	// blocked on concurrency primitives are marked as leaked.
+	runtime.GC()
+	runtime.GC()
 
 	// WriteTo must be called before Count — the goroutineleak profile
 	// performs lazy detection, so Count returns 0 until the profile has
