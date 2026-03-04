@@ -1,11 +1,14 @@
 """Integration tests for the allocation API endpoints.
 
-Spins up a real Postgres container, seeds the minimal schema and fixture data,
-then hits the FastAPI app via TestClient to verify end-to-end behaviour.
+Spins up a real TimescaleDB container, applies all shared migration files to get
+the real production schema, seeds fixture data, then hits the FastAPI app via
+TestClient to verify end-to-end behaviour.
 """
 
 import asyncio
+import pathlib
 
+import asyncpg
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -17,41 +20,7 @@ from app.api.v1 import allocations
 from app.main import app
 from app.services.allocation_service import AllocationService
 
-# Minimal DDL executed one statement at a time (asyncpg rejects multi-statement strings).
-_DDL_STATEMENTS = [
-    """CREATE TABLE chain (
-        chain_id INT PRIMARY KEY,
-        name     VARCHAR(255) NOT NULL UNIQUE
-    )""",
-    """CREATE TABLE token (
-        id               BIGSERIAL PRIMARY KEY,
-        chain_id         INT         NOT NULL REFERENCES chain (chain_id),
-        address          BYTEA       NOT NULL,
-        symbol           VARCHAR(50),
-        decimals         SMALLINT,
-        created_at_block BIGINT,
-        updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        metadata         JSONB,
-        UNIQUE (chain_id, address)
-    )""",
-    """CREATE TABLE allocation_position (
-        id             BIGSERIAL PRIMARY KEY,
-        chain_id       INT         NOT NULL REFERENCES chain (chain_id),
-        token_id       BIGINT      NOT NULL REFERENCES token (id),
-        star           TEXT        NOT NULL,
-        proxy_address  BYTEA       NOT NULL,
-        balance        NUMERIC     NOT NULL,
-        scaled_balance NUMERIC,
-        block_number   BIGINT      NOT NULL,
-        block_version  INT         NOT NULL DEFAULT 0,
-        tx_hash        BYTEA       NOT NULL,
-        log_index      INT         NOT NULL,
-        tx_amount      NUMERIC     NOT NULL,
-        direction      TEXT        NOT NULL CHECK (direction IN ('in', 'out', 'sweep')),
-        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE (chain_id, token_id, proxy_address, block_number, block_version, tx_hash, log_index, direction)
-    )""",
-]
+MIGRATIONS_DIR = pathlib.Path(__file__).parents[4] / "db" / "migrations"
 
 # Hex bytes used in assertions (20-byte proxy, 20-byte token addr, 32-byte tx hash).
 _PROXY_HEX = "1234567890abcdef1234567890abcdef12345678"
@@ -62,14 +31,22 @@ _TX1_HEX = "aa" * 32
 _TX2_HEX = "bb" * 32
 
 
-async def _setup(async_url: str) -> None:
-    """Create schema and seed fixture rows."""
+async def _run_migrations(dsn: str) -> None:
+    """Execute every migration file in filename order using a native asyncpg
+    connection, which supports multi-statement SQL strings."""
+    conn = await asyncpg.connect(dsn)
+    try:
+        for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+            await conn.execute(sql_file.read_text())
+    finally:
+        await conn.close()
+
+
+async def _seed(async_url: str) -> None:
+    """Insert fixture rows. Chain data is already present from the migrations."""
     engine = create_async_engine(async_url)
     try:
         async with engine.begin() as conn:
-            for ddl in _DDL_STATEMENTS:
-                await conn.execute(text(ddl))
-            await conn.execute(text("INSERT INTO chain (chain_id, name) VALUES (1, 'Ethereum Mainnet')"))
             result = await conn.execute(
                 text(
                     "INSERT INTO token (chain_id, address, symbol, decimals) "
@@ -107,11 +84,13 @@ async def _setup(async_url: str) -> None:
 
 @pytest.fixture(scope="module")
 def async_db_url():
-    """Start a Postgres container, build the schema, seed data, yield the asyncpg URL."""
-    with PostgresContainer("postgres:16") as container:
-        url = container.get_connection_url(driver="asyncpg")
-        asyncio.run(_setup(url))
-        yield url
+    """Start a TimescaleDB container, run all migrations, seed data, yield the asyncpg URL."""
+    with PostgresContainer("timescale/timescaledb:latest-pg16") as container:
+        async_url = container.get_connection_url(driver="asyncpg")
+        dsn = container.get_connection_url()
+        asyncio.run(_run_migrations(dsn))
+        asyncio.run(_seed(async_url))
+        yield async_url
 
 
 @pytest.fixture()
