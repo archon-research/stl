@@ -1,0 +1,174 @@
+"""Integration tests for the allocation API endpoints.
+
+Spins up a real Postgres container, seeds the minimal schema and fixture data,
+then hits the FastAPI app via TestClient to verify end-to-end behaviour.
+"""
+
+import asyncio
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+from testcontainers.postgres import PostgresContainer
+
+from app.adapters.postgres.allocation_repository import PostgresAllocationRepository
+from app.api.v1 import allocations
+from app.main import app
+from app.services.allocation_service import AllocationService
+
+# Minimal DDL executed one statement at a time (asyncpg rejects multi-statement strings).
+_DDL_STATEMENTS = [
+    """CREATE TABLE chain (
+        chain_id INT PRIMARY KEY,
+        name     VARCHAR(255) NOT NULL UNIQUE
+    )""",
+    """CREATE TABLE token (
+        id               BIGSERIAL PRIMARY KEY,
+        chain_id         INT         NOT NULL REFERENCES chain (chain_id),
+        address          BYTEA       NOT NULL,
+        symbol           VARCHAR(50),
+        decimals         SMALLINT,
+        created_at_block BIGINT,
+        updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        metadata         JSONB,
+        UNIQUE (chain_id, address)
+    )""",
+    """CREATE TABLE allocation_position (
+        id             BIGSERIAL PRIMARY KEY,
+        chain_id       INT         NOT NULL REFERENCES chain (chain_id),
+        token_id       BIGINT      NOT NULL REFERENCES token (id),
+        star           TEXT        NOT NULL,
+        proxy_address  BYTEA       NOT NULL,
+        balance        NUMERIC     NOT NULL,
+        scaled_balance NUMERIC,
+        block_number   BIGINT      NOT NULL,
+        block_version  INT         NOT NULL DEFAULT 0,
+        tx_hash        BYTEA       NOT NULL,
+        log_index      INT         NOT NULL,
+        tx_amount      NUMERIC     NOT NULL,
+        direction      TEXT        NOT NULL CHECK (direction IN ('in', 'out', 'sweep')),
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (chain_id, token_id, proxy_address, block_number, block_version, tx_hash, log_index, direction)
+    )""",
+]
+
+# Hex bytes used in assertions (20-byte proxy, 20-byte token addr, 32-byte tx hash).
+_PROXY_HEX = "1234567890abcdef1234567890abcdef12345678"
+_TOKEN_HEX = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+_TX1_HEX = "aa" * 32
+_TX2_HEX = "bb" * 32
+
+
+async def _setup(async_url: str) -> None:
+    """Create schema and seed fixture rows."""
+    engine = create_async_engine(async_url)
+    try:
+        async with engine.begin() as conn:
+            for ddl in _DDL_STATEMENTS:
+                await conn.execute(text(ddl))
+            await conn.execute(text("INSERT INTO chain (chain_id, name) VALUES (1, 'Ethereum Mainnet')"))
+            result = await conn.execute(
+                text(
+                    "INSERT INTO token (chain_id, address, symbol, decimals) "
+                    "VALUES (1, decode(:addr, 'hex'), 'USDC', 6) RETURNING id"
+                ),
+                {"addr": _TOKEN_HEX},
+            )
+            token_id = result.scalar_one()
+
+            # Two rows for 'spark' at different block numbers.
+            for block, tx_hex in [(1000, _TX1_HEX), (2000, _TX2_HEX)]:
+                await conn.execute(
+                    text(
+                        "INSERT INTO allocation_position "
+                        "(chain_id, token_id, star, proxy_address, balance, "
+                        "block_number, tx_hash, log_index, tx_amount, direction) "
+                        "VALUES (1, :tid, 'spark', decode(:proxy, 'hex'), 500, :bn, decode(:tx, 'hex'), 0, 500, 'in')"
+                    ),
+                    {"tid": token_id, "proxy": _PROXY_HEX, "bn": block, "tx": tx_hex},
+                )
+
+            # One row for a second star ('grove') at block 1000.
+            await conn.execute(
+                text(
+                    "INSERT INTO allocation_position "
+                    "(chain_id, token_id, star, proxy_address, balance, "
+                    "block_number, tx_hash, log_index, tx_amount, direction) "
+                    "VALUES (1, :tid, 'grove', decode(:proxy, 'hex'), 100, 1000, decode(:tx, 'hex'), 0, 100, 'in')"
+                ),
+                {"tid": token_id, "proxy": _PROXY_HEX, "tx": "cc" * 32},
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture(scope="module")
+def async_db_url():
+    """Start a Postgres container, build the schema, seed data, yield the asyncpg URL."""
+    with PostgresContainer("postgres:16") as container:
+        url = container.get_connection_url(driver="asyncpg")
+        asyncio.run(_setup(url))
+        yield url
+
+
+@pytest.fixture()
+def client(async_db_url: str):
+    """Return a TestClient wired to the test database via a dependency override."""
+
+    async def _service_override():
+        engine = create_async_engine(async_db_url)
+        async with engine.connect() as conn:
+            repo = PostgresAllocationRepository(conn)
+            yield AllocationService(repo)
+        await engine.dispose()
+
+    app.dependency_overrides[allocations._get_service] = _service_override
+    with TestClient(app) as c:
+        yield c
+    # clear_dependency_overrides (autouse in tests/conftest.py) clears overrides after each test
+
+
+def test_list_stars_returns_both_stars(client: TestClient) -> None:
+    response = client.get("/v1/stars")
+
+    assert response.status_code == 200
+    names = {item["name"] for item in response.json()}
+    assert names == {"spark", "grove"}
+
+
+def test_list_allocations_without_block_number_returns_latest(client: TestClient) -> None:
+    response = client.get("/v1/stars/spark/allocations")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["block_number"] == 2000
+    assert data[0]["star"] == "spark"
+    assert data[0]["token_symbol"] == "USDC"
+    assert data[0]["token_decimals"] == 6
+    assert data[0]["proxy_address"] == f"0x{_PROXY_HEX}"
+    assert data[0]["token_address"] == f"0x{_TOKEN_HEX}"
+
+
+def test_list_allocations_with_block_number_returns_that_block(client: TestClient) -> None:
+    response = client.get("/v1/stars/spark/allocations?block_number=1000")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["block_number"] == 1000
+
+
+def test_list_allocations_with_unknown_block_number_returns_empty(client: TestClient) -> None:
+    response = client.get("/v1/stars/spark/allocations?block_number=9999")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_list_allocations_for_unknown_star_returns_empty(client: TestClient) -> None:
+    response = client.get("/v1/stars/unknown/allocations")
+
+    assert response.status_code == 200
+    assert response.json() == []
