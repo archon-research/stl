@@ -12,7 +12,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 var _ outbound.AllocationRepository = (*AllocationRepository)(nil)
@@ -121,18 +120,9 @@ func (r *AllocationRepository) buildInsertArgs(
 		balanceDecimals = *pos.AssetDecimals
 	}
 
-	balanceStr := shared.FormatAmount(pos.Balance, balanceDecimals)
-
-	var scaledStr *string
-	if pos.ScaledBalance != nil {
-		s := shared.FormatAmount(pos.ScaledBalance, pos.TokenDecimals)
-		scaledStr = &s
-	}
-
-	txAmountStr := "0"
-	if pos.TxAmount != nil {
-		txAmountStr = shared.FormatAmount(pos.TxAmount, balanceDecimals)
-	}
+	balance := toNumeric(pos.Balance, balanceDecimals)
+	scaled := toNullableNumeric(pos.ScaledBalance, pos.TokenDecimals)
+	txAmount := toNumeric(pos.TxAmount, pos.TokenDecimals)
 
 	txHashBytes, err := encodeTxHash(pos)
 	if err != nil {
@@ -158,13 +148,13 @@ func (r *AllocationRepository) buildInsertArgs(
 		tokenID,
 		pos.Star,
 		pos.ProxyAddress.Bytes(),
-		balanceStr,
-		scaledStr,
+		balance,
+		scaled,
 		pos.BlockNumber,
 		pos.BlockVersion,
 		txHashBytes,
 		pos.LogIndex,
-		txAmountStr,
+		txAmount,
 		pos.Direction,
 	}
 

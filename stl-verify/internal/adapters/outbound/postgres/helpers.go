@@ -9,6 +9,7 @@ import (
 	"math/big"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // rollback rolls back the transaction and logs the error if it fails.
@@ -28,6 +29,24 @@ func bigIntToNumeric(b *big.Int) (string, error) {
 	}
 
 	return b.String(), nil
+}
+
+// toNumeric converts a raw *big.Int token amount to a pgtype.Numeric with the
+// given decimal shift applied. For example, 1500000 with 6 decimals becomes
+// the numeric value 1.5. This avoids a *big.Int → string → numeric round-trip.
+func toNumeric(raw *big.Int, decimals int) pgtype.Numeric {
+	if raw == nil {
+		return pgtype.Numeric{Int: big.NewInt(0), Valid: true}
+	}
+	return pgtype.Numeric{Int: new(big.Int).Set(raw), Exp: int32(-decimals), Valid: true}
+}
+
+// toNullableNumeric is like toNumeric but returns a NULL numeric when raw is nil.
+func toNullableNumeric(raw *big.Int, decimals int) pgtype.Numeric {
+	if raw == nil {
+		return pgtype.Numeric{}
+	}
+	return pgtype.Numeric{Int: new(big.Int).Set(raw), Exp: int32(-decimals), Valid: true}
 }
 
 // marshalMetadata safely marshals metadata to JSON, returning "{}" for nil/empty maps.
