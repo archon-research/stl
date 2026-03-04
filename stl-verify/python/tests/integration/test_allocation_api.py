@@ -56,6 +56,7 @@ _DDL_STATEMENTS = [
 # Hex bytes used in assertions (20-byte proxy, 20-byte token addr, 32-byte tx hash).
 _PROXY_HEX = "1234567890abcdef1234567890abcdef12345678"
 _GROVE_PROXY_HEX = "abcdef1234567890abcdef1234567890abcdef12"
+_UNKNOWN_PROXY_HEX = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 _TOKEN_HEX = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
 _TX1_HEX = "aa" * 32
 _TX2_HEX = "bb" * 32
@@ -175,7 +176,7 @@ def test_list_allocations_with_unknown_block_number_returns_empty(client: TestCl
 
 
 def test_list_allocations_for_unknown_star_returns_empty(client: TestClient) -> None:
-    response = client.get("/v1/stars/0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/allocations")
+    response = client.get(f"/v1/stars/0x{_UNKNOWN_PROXY_HEX}/allocations")
 
     assert response.status_code == 200
     assert response.json() == []

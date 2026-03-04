@@ -17,7 +17,7 @@ class PostgresAllocationRepository(AllocationRepository):
                     star,
                     encode(proxy_address, 'hex') AS address
                 FROM allocation_position
-                ORDER BY star
+                ORDER BY star, proxy_address
                 """
             )
         )
@@ -25,6 +25,8 @@ class PostgresAllocationRepository(AllocationRepository):
 
     async def list_allocations_by_star(self, star_id: str, block_number: int | None = None) -> list[AllocationPosition]:
         proxy_hex = star_id.removeprefix("0x")
+        if len(proxy_hex) != 40 or not all(c in "0123456789abcdefABCDEF" for c in proxy_hex):
+            return []
         if block_number is None:
             block_filter = "ap.block_number = (SELECT MAX(block_number) FROM allocation_position WHERE proxy_address = decode(:proxy_hex, 'hex'))"
             params: dict = {"proxy_hex": proxy_hex}
