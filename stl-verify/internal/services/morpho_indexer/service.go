@@ -202,8 +202,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		return fmt.Errorf("fetching receipts from cache: %w", err)
 	}
 	if receiptsJSON == nil {
-		s.logger.Warn("cache miss for receipts", "block", event.BlockNumber)
-		return nil
+		return fmt.Errorf("receipts not found in cache for block %d (chain=%d, version=%d)", event.BlockNumber, event.ChainID, event.Version)
 	}
 
 	var receipts []shared.TransactionReceipt

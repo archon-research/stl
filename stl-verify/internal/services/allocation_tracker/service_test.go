@@ -2,10 +2,13 @@ package allocation_tracker
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"math/big"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -55,6 +58,24 @@ func TestNewService_RequiresChainID(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("expected error when ChainID is 0")
+	}
+}
+
+// ── processBlock ──
+
+func TestProcessBlock_CacheMiss_ReturnsError(t *testing.T) {
+	cache := testutil.NewMockBlockCache()
+	svc := &Service{
+		cache:  cache,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// Don't store anything in cache — GetReceipts returns nil, nil.
+	err := svc.processBlock(context.Background(), outbound.BlockEvent{
+		ChainID: 1, BlockNumber: 99999, Version: 0,
+	})
+	if err == nil {
+		t.Fatal("expected error for cache miss, got nil")
 	}
 }
 

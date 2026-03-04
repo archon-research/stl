@@ -968,14 +968,14 @@ func TestProcessBlockEvent_EnsureMarket_LookupError(t *testing.T) {
 
 // --- Error handling & edge cases ---
 
-func TestProcessBlockEvent_RedisCacheMiss(t *testing.T) {
+func TestProcessBlockEvent_CacheMiss_ReturnsError(t *testing.T) {
 	h := newTestHarness(t)
-	// Don't store anything in Redis — should get redis.Nil.
+	// Don't store anything in cache — GetReceipts returns nil, nil.
 	err := h.svc.processBlockEvent(context.Background(), outbound.BlockEvent{
 		ChainID: 1, BlockNumber: 99999, Version: 0,
 	})
-	if err != nil {
-		t.Fatalf("expected nil for cache miss, got: %v", err)
+	if err == nil {
+		t.Fatal("expected error for cache miss, got nil")
 	}
 }
 

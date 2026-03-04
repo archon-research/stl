@@ -2,18 +2,16 @@ package allocation_tracker
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math/big"
 	"time"
 
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 type TransactionReceipt struct {
@@ -29,7 +27,7 @@ type TransactionReceipt struct {
 type Service struct {
 	config           Config
 	sqsConsumer      outbound.SQSConsumer
-	redis            *redis.Client
+	cache            outbound.BlockCache
 	extractor        *TransferExtractor
 	registry         *SourceRegistry
 	entryLookup      map[EntryKey]*TokenEntry
@@ -44,7 +42,7 @@ type Service struct {
 func NewService(
 	config Config,
 	sqsConsumer outbound.SQSConsumer,
-	redisClient *redis.Client,
+	cache outbound.BlockCache,
 	registry *SourceRegistry,
 	entries []*TokenEntry,
 	handler AllocationHandler,
@@ -76,7 +74,7 @@ func NewService(
 	return &Service{
 		config:      config,
 		sqsConsumer: sqsConsumer,
-		redis:       redisClient,
+		cache:       cache,
 		extractor:   NewTransferExtractor(proxies),
 		registry:    registry,
 		entryLookup: BuildEntryLookup(entries),
@@ -117,22 +115,16 @@ func (s *Service) processBlock(
 ) error {
 	start := time.Now()
 
-	cacheKey := shared.CacheKey(event.ChainID, event.BlockNumber, event.Version, "receipts")
-	receiptsJSON, err := s.redis.Get(ctx, cacheKey).Result()
-	if errors.Is(err, redis.Nil) {
-		s.logger.Warn("cache miss",
-			"block", event.BlockNumber,
-			"chain", event.ChainID)
-		return nil
-	}
+	receiptsJSON, err := s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
 	if err != nil {
-		return fmt.Errorf("redis get: %w", err)
+		return fmt.Errorf("fetching receipts from cache: %w", err)
+	}
+	if receiptsJSON == nil {
+		return fmt.Errorf("receipts not found in cache for block %d (chain=%d, version=%d)", event.BlockNumber, event.ChainID, event.Version)
 	}
 
 	var receipts []TransactionReceipt
-	if err := shared.ParseCompressedJSON(
-		[]byte(receiptsJSON), &receipts,
-	); err != nil {
+	if err := json.Unmarshal(receiptsJSON, &receipts); err != nil {
 		return fmt.Errorf("parse receipts: %w", err)
 	}
 
