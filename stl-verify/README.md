@@ -12,26 +12,33 @@ The watcher consists of two main services:
 ## Prerequisites
 
 - Go 1.25+
-- Docker and Docker Compose
-- Alchemy API key (for Ethereum mainnet access)
+- Docker
+- [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation) — Kubernetes IN Docker
+- [kubectl](https://kubernetes.io/docs/tasks/tools/) — Kubernetes CLI
+- AWS CLI configured with credentials that have access to staging
 
 ## Quick Start
 
-### 1. Start Infrastructure
-
-Start the required infrastructure services (PostgreSQL, Redis, Jaeger, LocalStack):
+### 1. Start the local cluster
 
 ```bash
-docker compose up -d
+make dev-up
 ```
 
-This starts:
-- **PostgreSQL** (port 5432) - Block state persistence
-- **Redis** (port 6379) - Block data cache
-- **Jaeger** (port 16686) - Distributed tracing UI
-- **LocalStack** (port 4566) - Local AWS SNS/SQS for development
+This creates a local `kind` Kubernetes cluster (`stl-local`) and deploys the full pipeline:
+- **TimescaleDB** (port 5432) — Block state persistence
+- **Redis** (port 6379) — Block data cache
+- **LocalStack** (port 4566) — Local AWS SNS/SQS
+- **Jaeger** (port 16686) — Distributed tracing UI
+- **Temporal** (port 7233, UI 8233) — Workflow orchestration
+- **Watcher** — Core live-data pipeline
+- **oracle-price-worker**, **morpho-indexer**, **sparklend-position-tracker** — Downstream workers
 
-### 2. Configure Environment
+All services are accessible at `localhost` — no port-forwarding needed.
+
+To stop: `make dev-down` | To wipe and restart: `make dev-reset`
+
+### 3. Configure Environment
 
 ```bash
 # Required
