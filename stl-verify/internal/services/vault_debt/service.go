@@ -34,7 +34,7 @@ type resolvedPrime struct {
 // Config holds configuration for VaultDebtService.
 type Config struct {
 	// PollInterval controls how often debt is read from the chain.
-	// Defaults to 15 minutes.
+	// Must be positive. Defaults to 15 minutes.
 	PollInterval time.Duration
 
 	// Logger is the structured logger.
@@ -52,7 +52,7 @@ func configDefaults() Config {
 // and writes append-only snapshots to Postgres.
 type VaultDebtService struct {
 	config Config
-	caller *ethereum.VatCaller
+	caller outbound.VatCaller
 	repo   outbound.PrimeDebtRepository
 	primes []resolvedPrime
 	ctx    context.Context
@@ -64,7 +64,7 @@ type VaultDebtService struct {
 // NewVaultDebtService creates a new VaultDebtService.
 func NewVaultDebtService(
 	config Config,
-	caller *ethereum.VatCaller,
+	caller outbound.VatCaller,
 	repo outbound.PrimeDebtRepository,
 ) (*VaultDebtService, error) {
 	if caller == nil {
@@ -77,6 +77,9 @@ func NewVaultDebtService(
 	defaults := configDefaults()
 	if config.PollInterval == 0 {
 		config.PollInterval = defaults.PollInterval
+	}
+	if config.PollInterval < 0 {
+		return nil, fmt.Errorf("poll interval must be positive, got %s", config.PollInterval)
 	}
 	if config.Logger == nil {
 		config.Logger = defaults.Logger
@@ -132,6 +135,10 @@ func (s *VaultDebtService) resolveIlks(ctx context.Context, primes []entity.Prim
 	resolved := make([]resolvedPrime, 0, len(primes))
 
 	for _, prime := range primes {
+		if !common.IsHexAddress(prime.VaultAddress) {
+			return fmt.Errorf("prime %q has invalid vault address: %q", prime.Name, prime.VaultAddress)
+		}
+
 		addr := common.HexToAddress(prime.VaultAddress)
 		ilk, err := s.caller.GetIlk(ctx, addr)
 		if err != nil {
@@ -224,6 +231,10 @@ func (s *VaultDebtService) syncAll() error {
 
 // readDebt fetches rate and art from the Vat and computes exact debt for one prime.
 func (s *VaultDebtService) readDebt(ctx context.Context, prime resolvedPrime, syncedAt time.Time) (*entity.PrimeDebt, error) {
+	if !common.IsHexAddress(prime.VaultAddress) {
+		return nil, fmt.Errorf("invalid vault address: %q", prime.VaultAddress)
+	}
+
 	addr := common.HexToAddress(prime.VaultAddress)
 
 	rate, err := s.caller.GetRate(ctx, prime.ilk)

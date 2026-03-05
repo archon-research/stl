@@ -8,7 +8,12 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
+
+// Compile-time check that VatCaller implements the port interface.
+var _ outbound.VatCaller = (*VatCaller)(nil)
 
 const (
 	vatABI = `[
@@ -31,9 +36,7 @@ const (
 	vaultABI = `[
 		{"name":"ilk","type":"function","inputs":[],"outputs":[{"name":"","type":"bytes32"}]}
 	]`
-)
 
-const (
 	// wadDecimals is the number of decimal places in a wad (1e18).
 	// USDS and DAI both use 18 decimals — this is fixed by the MakerDAO spec.
 	wadDecimals = 18
@@ -69,6 +72,9 @@ func NewVatCaller(client ContractCaller, vatAddress common.Address) (*VatCaller,
 	if client == nil {
 		return nil, fmt.Errorf("contract caller is required")
 	}
+	if vatAddress == (common.Address{}) {
+		return nil, fmt.Errorf("vat address must not be zero")
+	}
 
 	parsedVatABI, err := abi.JSON(strings.NewReader(vatABI))
 	if err != nil {
@@ -90,6 +96,10 @@ func NewVatCaller(client ContractCaller, vatAddress common.Address) (*VatCaller,
 
 // GetIlk reads the ilk identifier from a vault contract.
 func (c *VatCaller) GetIlk(ctx context.Context, vaultAddress common.Address) ([32]byte, error) {
+	if vaultAddress == (common.Address{}) {
+		return [32]byte{}, fmt.Errorf("vault address must not be zero")
+	}
+
 	data, err := c.vaultABI.Pack("ilk")
 	if err != nil {
 		return [32]byte{}, fmt.Errorf("pack ilk call: %w", err)
@@ -141,6 +151,10 @@ func (c *VatCaller) GetRate(ctx context.Context, ilk [32]byte) (*big.Int, error)
 
 // GetNormalizedDebt reads the normalized debt (art) for a specific urn from the Vat.
 func (c *VatCaller) GetNormalizedDebt(ctx context.Context, ilk [32]byte, urnAddress common.Address) (*big.Int, error) {
+	if urnAddress == (common.Address{}) {
+		return nil, fmt.Errorf("urn address must not be zero")
+	}
+
 	data, err := c.vatABI.Pack("urns", ilk, urnAddress)
 	if err != nil {
 		return nil, fmt.Errorf("pack urns call: %w", err)

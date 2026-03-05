@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // ethCallMsg is the parameter object for eth_call.
@@ -17,6 +19,10 @@ type ethCallMsg struct {
 // CallContract executes a read-only contract call via eth_call at the latest block.
 // Returns the raw ABI-encoded response bytes.
 func (c *Client) CallContract(ctx context.Context, to string, data []byte) ([]byte, error) {
+	if !common.IsHexAddress(to) {
+		return nil, fmt.Errorf("invalid contract address: %q", to)
+	}
+
 	req := jsonRPCRequest{
 		JSONRPC: "2.0",
 		ID:      1,
