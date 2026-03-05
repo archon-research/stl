@@ -14,9 +14,8 @@ INSERT INTO primes (name, vault_address) VALUES
 ON CONFLICT DO NOTHING;
 
 -- prime_debts stores append-only debt snapshots.
--- debt_wad is NUMERIC with no precision cap — Postgres stores the exact decimal
--- value produced by big.Rat division (art * rate / 1e27), preserving all 18
--- sub-USDS decimal digits without rounding.
+-- debt_wad is NUMERIC — stores the exact wad-scaled big.Int (art * rate / 1e27).
+-- block_number records which Ethereum block the debt was read at.
 CREATE TABLE IF NOT EXISTS prime_debts (
                                            id            BIGSERIAL    PRIMARY KEY,
                                            prime_id      BIGINT       NOT NULL REFERENCES primes(id),
@@ -24,6 +23,7 @@ CREATE TABLE IF NOT EXISTS prime_debts (
                                            vault_address BYTEA        NOT NULL,
                                            ilk_name      TEXT         NOT NULL,
                                            debt_wad      NUMERIC      NOT NULL,
+                                           block_number  BIGINT       NOT NULL,
                                            synced_at     TIMESTAMPTZ  NOT NULL
 );
 
@@ -32,6 +32,9 @@ CREATE INDEX IF NOT EXISTS idx_prime_debts_prime_synced
 
 CREATE INDEX IF NOT EXISTS idx_prime_debts_synced_at
     ON prime_debts (synced_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_prime_debts_block
+    ON prime_debts (prime_id, block_number DESC);
 
 INSERT INTO migrations (filename)
 VALUES ('20260305_120000_create_prime_debts.sql')

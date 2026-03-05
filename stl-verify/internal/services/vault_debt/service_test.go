@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/vault_debt"
 )
 
@@ -18,27 +19,50 @@ import (
 // Fakes
 // ---------------------------------------------------------------------------
 
+// fakeBlockQuerier returns a fixed block number.
+type fakeBlockQuerier struct {
+	mu       sync.Mutex
+	blockNum uint64
+	err      error
+}
+
+func newFakeBlockQuerier(blockNum uint64) *fakeBlockQuerier {
+	return &fakeBlockQuerier{blockNum: blockNum}
+}
+
+func (f *fakeBlockQuerier) BlockNumber(_ context.Context) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.blockNum, f.err
+}
+
 // fakeVatCaller is a controllable in-memory VatCaller for unit tests.
 type fakeVatCaller struct {
 	mu sync.Mutex
 
-	// ilkByVault returns the ilk for a given vault address, or an error.
+	// ilkByVault maps vault address → ilk bytes32 for ResolveIlks.
 	ilkByVault map[common.Address][32]byte
-	ilkErr     map[common.Address]error
+	resolveErr error // if set, ResolveIlks returns this error
 
-	// rate / art are returned for all ilks.
-	rate    *big.Int
-	art     *big.Int
-	rateErr error
-	artErr  error
+	// rate / art are returned for all vaults in ReadDebts.
+	rate *big.Int
+	art  *big.Int
+
+	// Per-vault error injection for ReadDebts.
+	debtErrByVault map[common.Address]error
+	readDebtsErr   error // if set, ReadDebts returns this error (whole batch fails)
 }
 
 func newFakeVatCaller() *fakeVatCaller {
+	rayVal := new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
+	wadVal := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	art1000 := new(big.Int).Mul(big.NewInt(1000), wadVal)
+
 	return &fakeVatCaller{
-		ilkByVault: make(map[common.Address][32]byte),
-		ilkErr:     make(map[common.Address]error),
-		rate:       big.NewInt(1e9), // non-zero so debt is non-zero
-		art:        big.NewInt(1e9),
+		ilkByVault:     make(map[common.Address][32]byte),
+		debtErrByVault: make(map[common.Address]error),
+		rate:           rayVal,
+		art:            art1000,
 	}
 }
 
@@ -48,37 +72,52 @@ func (f *fakeVatCaller) setIlk(vault common.Address, ilk [32]byte) {
 	f.ilkByVault[vault] = ilk
 }
 
-func (f *fakeVatCaller) setIlkError(vault common.Address, err error) {
+func (f *fakeVatCaller) setDebtError(vault common.Address, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.ilkErr[vault] = err
+	f.debtErrByVault[vault] = err
 }
 
-func (f *fakeVatCaller) GetIlk(_ context.Context, vaultAddress common.Address) ([32]byte, error) {
+func (f *fakeVatCaller) ResolveIlks(_ context.Context, vaults []common.Address, _ *big.Int) (map[common.Address][32]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err, ok := f.ilkErr[vaultAddress]; ok {
-		return [32]byte{}, err
+
+	if f.resolveErr != nil {
+		return nil, f.resolveErr
 	}
-	return f.ilkByVault[vaultAddress], nil
+
+	result := make(map[common.Address][32]byte, len(vaults))
+	for _, v := range vaults {
+		ilk, ok := f.ilkByVault[v]
+		if !ok {
+			return nil, errors.New("ilk not found for " + v.Hex())
+		}
+		result[v] = ilk
+	}
+	return result, nil
 }
 
-func (f *fakeVatCaller) GetRate(_ context.Context, _ [32]byte) (*big.Int, error) {
+func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []outbound.DebtQuery, _ *big.Int) ([]outbound.DebtResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.rateErr != nil {
-		return nil, f.rateErr
-	}
-	return new(big.Int).Set(f.rate), nil
-}
 
-func (f *fakeVatCaller) GetNormalizedDebt(_ context.Context, _ [32]byte, _ common.Address) (*big.Int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.artErr != nil {
-		return nil, f.artErr
+	if f.readDebtsErr != nil {
+		return nil, f.readDebtsErr
 	}
-	return new(big.Int).Set(f.art), nil
+
+	results := make([]outbound.DebtResult, len(queries))
+	for i, q := range queries {
+		results[i].VaultAddress = q.VaultAddress
+
+		if err, ok := f.debtErrByVault[q.VaultAddress]; ok {
+			results[i].Err = err
+			continue
+		}
+
+		results[i].Rate = new(big.Int).Set(f.rate)
+		results[i].Art = new(big.Int).Set(f.art)
+	}
+	return results, nil
 }
 
 // fakePrimeDebtRepository is a controllable in-memory repository.
@@ -144,25 +183,34 @@ func sparkPrime() entity.Prime {
 	return entity.Prime{
 		ID:           1,
 		Name:         "spark",
-		VaultAddress: "0x691A6c29e9e96Dd897718305427Ad5D534db16BA",
+		VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA"),
 	}
 }
+
+const testBlockNum = 21000000
 
 // ---------------------------------------------------------------------------
 // Constructor tests
 // ---------------------------------------------------------------------------
 
 func TestNewVaultDebtService_NilCaller(t *testing.T) {
-	_, err := vault_debt.NewVaultDebtService(vault_debt.Config{}, nil, &fakePrimeDebtRepository{})
+	_, err := vault_debt.NewVaultDebtService(vault_debt.Config{}, nil, &fakePrimeDebtRepository{}, newFakeBlockQuerier(testBlockNum))
 	if err == nil {
 		t.Fatal("expected error for nil caller")
 	}
 }
 
 func TestNewVaultDebtService_NilRepository(t *testing.T) {
-	_, err := vault_debt.NewVaultDebtService(vault_debt.Config{}, newFakeVatCaller(), nil)
+	_, err := vault_debt.NewVaultDebtService(vault_debt.Config{}, newFakeVatCaller(), nil, newFakeBlockQuerier(testBlockNum))
 	if err == nil {
 		t.Fatal("expected error for nil repository")
+	}
+}
+
+func TestNewVaultDebtService_NilBlockQuerier(t *testing.T) {
+	_, err := vault_debt.NewVaultDebtService(vault_debt.Config{}, newFakeVatCaller(), &fakePrimeDebtRepository{}, nil)
+	if err == nil {
+		t.Fatal("expected error for nil block querier")
 	}
 }
 
@@ -171,6 +219,7 @@ func TestNewVaultDebtService_NegativePollInterval(t *testing.T) {
 		vault_debt.Config{PollInterval: -1 * time.Second},
 		newFakeVatCaller(),
 		&fakePrimeDebtRepository{},
+		newFakeBlockQuerier(testBlockNum),
 	)
 	if err == nil {
 		t.Fatal("expected error for negative poll interval")
@@ -179,9 +228,10 @@ func TestNewVaultDebtService_NegativePollInterval(t *testing.T) {
 
 func TestNewVaultDebtService_DefaultPollInterval(t *testing.T) {
 	svc, err := vault_debt.NewVaultDebtService(
-		vault_debt.Config{}, // zero PollInterval → should default
+		vault_debt.Config{},
 		newFakeVatCaller(),
 		&fakePrimeDebtRepository{},
+		newFakeBlockQuerier(testBlockNum),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -196,8 +246,8 @@ func TestNewVaultDebtService_DefaultPollInterval(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStart_NoPrimes(t *testing.T) {
-	repo := &fakePrimeDebtRepository{} // empty primes
-	svc, err := vault_debt.NewVaultDebtService(vault_debt.Config{}, newFakeVatCaller(), repo)
+	repo := &fakePrimeDebtRepository{}
+	svc, err := vault_debt.NewVaultDebtService(vault_debt.Config{}, newFakeVatCaller(), repo, newFakeBlockQuerier(testBlockNum))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -212,53 +262,56 @@ func TestStart_NoPrimes(t *testing.T) {
 }
 
 func TestStart_IlkResolutionError(t *testing.T) {
-	vaultAddr := common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")
 	caller := newFakeVatCaller()
-	caller.setIlkError(vaultAddr, errors.New("RPC unavailable"))
+	caller.resolveErr = errors.New("RPC unavailable")
 
 	repo := &fakePrimeDebtRepository{primes: []entity.Prime{sparkPrime()}}
-	svc, _ := vault_debt.NewVaultDebtService(vault_debt.Config{}, caller, repo)
+	svc, err := vault_debt.NewVaultDebtService(vault_debt.Config{}, caller, repo, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
 
-	err := svc.Start(context.Background())
+	err = svc.Start(context.Background())
 	if err == nil {
 		t.Fatal("expected error when ilk resolution fails")
 	}
 }
 
 func TestStart_Stop_Clean(t *testing.T) {
-	vaultAddr := common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")
 	caller := newFakeVatCaller()
-	caller.setIlk(vaultAddr, ilkFrom("ALLOCATOR-SPARK-A"))
+	caller.setIlk(
+		common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA"),
+		ilkFrom("ALLOCATOR-SPARK-A"),
+	)
 
 	repo := &fakePrimeDebtRepository{primes: []entity.Prime{sparkPrime()}}
 	svc, err := vault_debt.NewVaultDebtService(
-		vault_debt.Config{PollInterval: 10 * time.Minute}, // long interval — only initial sync fires
+		vault_debt.Config{PollInterval: 10 * time.Minute},
 		caller,
 		repo,
+		newFakeBlockQuerier(testBlockNum),
 	)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	if err := svc.Start(ctx); err != nil {
-		t.Fatalf("start: %v", err)
-	}
 
-	// Give the initial sync goroutine a moment to fire.
-	time.Sleep(50 * time.Millisecond)
-
-	cancel()
-	done := make(chan struct{})
+	errCh := make(chan error, 1)
 	go func() {
-		defer close(done)
-		_ = svc.Stop()
+		errCh <- svc.Start(ctx)
 	}()
 
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
 	select {
-	case <-done:
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Start returned error: %v", err)
+		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Stop() did not return within 5 seconds")
+		t.Fatal("Start did not return within 5 seconds after context cancellation")
 	}
 }
 
@@ -268,13 +321,13 @@ func TestStart_Stop_Clean(t *testing.T) {
 
 func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 	primes := []entity.Prime{
-		{ID: 1, Name: "spark", VaultAddress: "0x691A6c29e9e96Dd897718305427Ad5D534db16BA"},
-		{ID: 2, Name: "grove", VaultAddress: "0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0"},
+		{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")},
+		{ID: 2, Name: "grove", VaultAddress: common.HexToAddress("0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0")},
 	}
 
 	caller := newFakeVatCaller()
 	for _, p := range primes {
-		caller.setIlk(common.HexToAddress(p.VaultAddress), ilkFrom("ALLOCATOR-"+p.Name+"-A"))
+		caller.setIlk(p.VaultAddress, ilkFrom("ALLOCATOR-"+p.Name+"-A"))
 	}
 
 	repo := &fakePrimeDebtRepository{primes: primes}
@@ -282,6 +335,7 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 		vault_debt.Config{PollInterval: 10 * time.Minute},
 		caller,
 		repo,
+		newFakeBlockQuerier(testBlockNum),
 	)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
@@ -290,11 +344,11 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := svc.Start(ctx); err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- svc.Start(ctx)
+	}()
 
-	// Wait for the initial sync batch.
 	deadline := time.After(5 * time.Second)
 	for {
 		if repo.savedCount() >= len(primes) {
@@ -311,47 +365,33 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 		if snap.IlkName == "" {
 			t.Errorf("prime %q: empty ilk_name", snap.PrimeName)
 		}
-		if snap.DebtWad == "" {
-			t.Errorf("prime %q: empty debt_wad", snap.PrimeName)
+		if snap.DebtWad == nil || snap.DebtWad.Sign() == 0 {
+			t.Errorf("prime %q: nil or zero debt_wad", snap.PrimeName)
+		}
+		if snap.BlockNumber != testBlockNum {
+			t.Errorf("prime %q: block_number = %d, want %d", snap.PrimeName, snap.BlockNumber, testBlockNum)
 		}
 	}
+
+	cancel()
+	<-errCh
 }
 
 func TestSync_PartialFailure_OtherPrimesStillSaved(t *testing.T) {
-	// spark → ilk resolution succeeds; grove → GetIlk fails at startup.
-	// Since ilk resolution is per-prime and grove fails, Start itself should
-	// fail. To test partial poll failure instead, we make grove's GetRate fail.
-	spark := entity.Prime{ID: 1, Name: "spark", VaultAddress: "0x691A6c29e9e96Dd897718305427Ad5D534db16BA"}
-	grove := entity.Prime{ID: 2, Name: "grove", VaultAddress: "0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0"}
-
-	sparkAddr := common.HexToAddress(spark.VaultAddress)
-	groveAddr := common.HexToAddress(grove.VaultAddress)
+	spark := entity.Prime{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")}
+	grove := entity.Prime{ID: 2, Name: "grove", VaultAddress: common.HexToAddress("0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0")}
 
 	caller := newFakeVatCaller()
-	caller.setIlk(sparkAddr, ilkFrom("ALLOCATOR-SPARK-A"))
-	caller.setIlk(groveAddr, ilkFrom("ALLOCATOR-GROVE-A"))
-
-	// Make GetRate fail for grove's ilk by making it fail globally after ilk
-	// resolution. We simulate this by making artErr fire — grove's art read fails,
-	// spark's succeeds because we only fail on second call.
-	callN := 0
-	var callMu sync.Mutex
-	fakeCaller := &partialFailCaller{
-		inner: caller,
-		artFailOn: func(ilk [32]byte) bool {
-			callMu.Lock()
-			defer callMu.Unlock()
-			callN++
-			// fail every other GetNormalizedDebt call — grove is second prime
-			return callN%2 == 0
-		},
-	}
+	caller.setIlk(spark.VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+	caller.setIlk(grove.VaultAddress, ilkFrom("ALLOCATOR-GROVE-A"))
+	caller.setDebtError(grove.VaultAddress, errors.New("simulated RPC failure"))
 
 	repo := &fakePrimeDebtRepository{primes: []entity.Prime{spark, grove}}
 	svc, err := vault_debt.NewVaultDebtService(
 		vault_debt.Config{PollInterval: 10 * time.Minute},
-		fakeCaller,
+		caller,
 		repo,
+		newFakeBlockQuerier(testBlockNum),
 	)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
@@ -360,11 +400,11 @@ func TestSync_PartialFailure_OtherPrimesStillSaved(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := svc.Start(ctx); err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- svc.Start(ctx)
+	}()
 
-	// At least spark's snapshot should be saved (grove fails its art call).
 	deadline := time.After(5 * time.Second)
 	for {
 		snaps := repo.allSaved()
@@ -380,30 +420,8 @@ func TestSync_PartialFailure_OtherPrimesStillSaved(t *testing.T) {
 		}
 	}
 found:
-}
-
-// ---------------------------------------------------------------------------
-// partialFailCaller wraps fakeVatCaller to inject per-call art failures.
-// ---------------------------------------------------------------------------
-
-type partialFailCaller struct {
-	inner     *fakeVatCaller
-	artFailOn func(ilk [32]byte) bool
-}
-
-func (p *partialFailCaller) GetIlk(ctx context.Context, vaultAddress common.Address) ([32]byte, error) {
-	return p.inner.GetIlk(ctx, vaultAddress)
-}
-
-func (p *partialFailCaller) GetRate(ctx context.Context, ilk [32]byte) (*big.Int, error) {
-	return p.inner.GetRate(ctx, ilk)
-}
-
-func (p *partialFailCaller) GetNormalizedDebt(ctx context.Context, ilk [32]byte, urnAddress common.Address) (*big.Int, error) {
-	if p.artFailOn(ilk) {
-		return nil, errors.New("simulated RPC failure")
-	}
-	return p.inner.GetNormalizedDebt(ctx, ilk, urnAddress)
+	cancel()
+	<-errCh
 }
 
 // ---------------------------------------------------------------------------

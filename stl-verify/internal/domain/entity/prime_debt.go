@@ -2,6 +2,7 @@ package entity
 
 import (
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -11,7 +12,7 @@ import (
 type Prime struct {
 	ID           int64
 	Name         string
-	VaultAddress string
+	VaultAddress common.Address
 	CreatedAt    time.Time
 }
 
@@ -19,13 +20,13 @@ type Prime struct {
 type PrimeDebt struct {
 	PrimeID      int64
 	PrimeName    string
-	VaultAddress string
+	VaultAddress common.Address
 	IlkName      string
-	// DebtWad is the exact debt in wad units (18 decimal places) as a decimal string.
-	// Computed as art * rate / 1e27 using exact rational arithmetic.
-	// Example: "2948696280.290761728641811098"
-	DebtWad  string
-	SyncedAt time.Time
+	// DebtWad is the exact debt in wad units (art * rate / 1e27).
+	// The value is an integer scaled by 1e18 (wad precision).
+	DebtWad     *big.Int
+	BlockNumber int64
+	SyncedAt    time.Time
 }
 
 // Validate checks that the snapshot is well-formed before persistence.
@@ -33,17 +34,17 @@ func (d *PrimeDebt) Validate() error {
 	if d.PrimeName == "" {
 		return fmt.Errorf("prime name is required")
 	}
-	if d.VaultAddress == "" {
+	if d.VaultAddress == (common.Address{}) {
 		return fmt.Errorf("vault address is required")
-	}
-	if !common.IsHexAddress(d.VaultAddress) {
-		return fmt.Errorf("vault address %q is not a valid hex address", d.VaultAddress)
 	}
 	if d.IlkName == "" {
 		return fmt.Errorf("ilk name is required")
 	}
-	if d.DebtWad == "" {
+	if d.DebtWad == nil {
 		return fmt.Errorf("debt wad is required")
+	}
+	if d.BlockNumber <= 0 {
+		return fmt.Errorf("block number must be positive")
 	}
 	if d.SyncedAt.IsZero() {
 		return fmt.Errorf("synced_at is required")

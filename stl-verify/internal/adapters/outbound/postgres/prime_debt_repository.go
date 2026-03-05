@@ -40,7 +40,7 @@ func NewPrimeDebtRepository(
 }
 
 // GetPrimes returns all rows from the primes table.
-// vault_address is stored as BYTEA and converted to a checksummed hex string.
+// vault_address is stored as BYTEA and scanned directly into common.Address.
 func (r *PrimeDebtRepository) GetPrimes(ctx context.Context) ([]entity.Prime, error) {
 	const q = `
 		SELECT id, name, vault_address, created_at
@@ -61,7 +61,7 @@ func (r *PrimeDebtRepository) GetPrimes(ctx context.Context) ([]entity.Prime, er
 		if err := rows.Scan(&p.ID, &p.Name, &addrBytes, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan prime row: %w", err)
 		}
-		p.VaultAddress = common.BytesToAddress(addrBytes).Hex()
+		p.VaultAddress = common.BytesToAddress(addrBytes)
 		primes = append(primes, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -72,8 +72,7 @@ func (r *PrimeDebtRepository) GetPrimes(ctx context.Context) ([]entity.Prime, er
 }
 
 // SaveDebtSnapshots writes all debt snapshots in a single batched transaction.
-// vault_address is converted from hex string to BYTEA before insert.
-// debt_wad is stored as NUMERIC preserving full 18-decimal wad precision.
+// vault_address is written as raw BYTEA; debt_wad is stored as NUMERIC via big.Int.
 func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*entity.PrimeDebt) error {
 	if len(debts) == 0 {
 		return nil
@@ -87,8 +86,8 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		const q = `
-			INSERT INTO prime_debts (prime_id, prime_name, vault_address, ilk_name, debt_wad, synced_at)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			INSERT INTO prime_debts (prime_id, prime_name, vault_address, ilk_name, debt_wad, block_number, synced_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
 		`
 
 		batch := &pgx.Batch{}
@@ -96,9 +95,10 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 			batch.Queue(q,
 				d.PrimeID,
 				d.PrimeName,
-				common.HexToAddress(d.VaultAddress).Bytes(),
+				d.VaultAddress.Bytes(),
 				d.IlkName,
-				d.DebtWad, // decimal string e.g. "2959325731667100.074096521437"
+				d.DebtWad.String(), // NUMERIC from decimal string representation of big.Int
+				d.BlockNumber,
 				d.SyncedAt,
 			)
 		}
