@@ -1227,16 +1227,16 @@ kind-config:
 kind-secrets:
 	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value \
 	  --secret-id stl-sentinelstaging-alchemy-api-key \
-	  --query SecretString --output text | jq -r '.alchemy_api_key // empty' 2>/dev/null || true) || \
+	  --query SecretString --output text) || \
 	  { echo "ERROR: Failed to fetch ALCHEMY_API_KEY from AWS Secrets Manager. Make sure your AWS profile is set to the staging account (e.g. export AWS_PROFILE=<your-staging-profile>)."; exit 1; }; \
-	test -n "$$ALCHEMY_API_KEY" || { echo "ERROR: ALCHEMY_API_KEY is empty — check the secret format in AWS Secrets Manager."; exit 1; }; \
+	test -n "$$ALCHEMY_API_KEY" || { echo "ERROR: ALCHEMY_API_KEY is empty — check the secret in AWS Secrets Manager."; exit 1; }; \
 	COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value \
 	  --secret-id coingecko_api_key \
 	  --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
 	  { echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
 	ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value \
 	  --secret-id etherscan_api_key \
-	  --query SecretString --output text | jq -r '.etherscan_api_key // empty' 2>/dev/null || true) || \
+	  --query SecretString --output text) || \
 	  { echo "WARNING: Failed to fetch ETHERSCAN_API_KEY from AWS Secrets Manager."; ETHERSCAN_API_KEY=''; }; \
 	kubectl create secret generic stl-secrets \
 	  --from-literal=ALCHEMY_API_KEY=$$ALCHEMY_API_KEY \
