@@ -67,13 +67,23 @@ type VatCaller struct {
 	vaultABI   abi.ABI
 }
 
+// validateAddress returns an error if addr is the zero address.
+// common.Address is always a valid hex value by construction (it is a [20]byte),
+// so the only invalid state is the zero address which indicates an unset field.
+func validateAddress(name string, addr common.Address) error {
+	if addr == (common.Address{}) {
+		return fmt.Errorf("%s must not be the zero address", name)
+	}
+	return nil
+}
+
 // NewVatCaller creates a new VatCaller backed by the provided ContractCaller.
 func NewVatCaller(client ContractCaller, vatAddress common.Address) (*VatCaller, error) {
 	if client == nil {
 		return nil, fmt.Errorf("contract caller is required")
 	}
-	if vatAddress == (common.Address{}) {
-		return nil, fmt.Errorf("vat address must not be zero")
+	if err := validateAddress("vatAddress", vatAddress); err != nil {
+		return nil, err
 	}
 
 	parsedVatABI, err := abi.JSON(strings.NewReader(vatABI))
@@ -96,8 +106,8 @@ func NewVatCaller(client ContractCaller, vatAddress common.Address) (*VatCaller,
 
 // GetIlk reads the ilk identifier from a vault contract.
 func (c *VatCaller) GetIlk(ctx context.Context, vaultAddress common.Address) ([32]byte, error) {
-	if vaultAddress == (common.Address{}) {
-		return [32]byte{}, fmt.Errorf("vault address must not be zero")
+	if err := validateAddress("vaultAddress", vaultAddress); err != nil {
+		return [32]byte{}, err
 	}
 
 	data, err := c.vaultABI.Pack("ilk")
@@ -151,8 +161,8 @@ func (c *VatCaller) GetRate(ctx context.Context, ilk [32]byte) (*big.Int, error)
 
 // GetNormalizedDebt reads the normalized debt (art) for a specific urn from the Vat.
 func (c *VatCaller) GetNormalizedDebt(ctx context.Context, ilk [32]byte, urnAddress common.Address) (*big.Int, error) {
-	if urnAddress == (common.Address{}) {
-		return nil, fmt.Errorf("urn address must not be zero")
+	if err := validateAddress("urnAddress", urnAddress); err != nil {
+		return nil, err
 	}
 
 	data, err := c.vatABI.Pack("urns", ilk, urnAddress)
