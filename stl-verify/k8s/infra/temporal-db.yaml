@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: temporal-db
+spec:
+  serviceName: temporal-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal-db
+  template:
+    metadata:
+      labels:
+        app: temporal-db
+    spec:
+      containers:
+        - name: temporal-db
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_USER
+              value: temporal
+            - name: POSTGRES_PASSWORD
+              value: temporal
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          hostPath:
+            path: /data/temporal-db
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-db
+spec:
+  type: NodePort
+  selector:
+    app: temporal-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+      nodePort: 30433

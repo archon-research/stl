@@ -1,0 +1,23 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-db
+          image: postgres:alpine
+          command:
+            - sh
+            - -c
+            - until pg_isready -h timescaledb -U postgres; do echo "waiting for timescaledb..."; sleep 2; done
+      containers:
+        - name: migrate
+          image: stl-migrate:local
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: stl-config

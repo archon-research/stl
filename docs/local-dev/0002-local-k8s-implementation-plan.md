@@ -8,9 +8,9 @@
 
 ## Context
 
-Implement the local Kubernetes environment described in ADR-0001 (SEN-205). Replaces flat
-`docker-compose` with a `kind` cluster that mirrors production EKS. `make dev-up` now creates
-the kind cluster and deploys the full pipeline; the old docker-compose workflow is retired.
+Implement the local Kubernetes environment. Replaces flat `docker-compose` with a `kind` 
+cluster that mirrors production EKS. `make dev-up` now creates the kind cluster and 
+deploys the full pipeline; the old docker-compose workflow is retired.
 
 ---
 
@@ -29,7 +29,7 @@ the kind cluster and deploys the full pipeline; the old docker-compose workflow 
 
 ---
 
-## Files to Create / Modify
+## Files Created / Modified
 
 **New files:**
 ```
@@ -51,6 +51,7 @@ stl-verify/
     │   └── configmap.yaml
     ├── apps/
     │   ├── watcher.yaml
+    │   ├── temporal-worker.yaml
     │   └── workers/
     │       ├── oracle-price-worker.yaml
     │       ├── morpho-indexer.yaml
@@ -59,67 +60,52 @@ stl-verify/
 ```
 
 **Modified files:**
-- `stl-verify/Makefile` — replace `dev-up`/`dev-down`/`dev-reset` bodies with kind equivalents; extend existing `docker-build-*` targets with `LOCAL=1`; add new `kind-*` sub-targets; update `.PHONY`
-- `stl-verify/README.md` — update Prerequisites (add `kind`, `kubectl`); update Quick Start to reflect `make dev-up` kind workflow
+- `stl-verify/Makefile` — updated `dev-up`/`dev-down`/`dev-reset`; added `dev-up-rebuild`, `dev-wipe`, `dev-wipe-data`; extended `docker-build-*` targets with `LOCAL=1`; added all `kind-*` sub-targets; updated `.PHONY`
+- `stl-verify/Dockerfile.temporal-worker` — bumped Go base image from `1.25` to `1.26` to match `go.mod`
+- `stl-verify/README.md` — updated Prerequisites (kind, kubectl, AWS profile)
 
 ---
 
-## Phase 1 — Cluster Config
+## Step 1 — Cluster Config
 
 ### k8s/kind.yaml
-Single control-plane node. All 8 services exposed via `extraPortMappings` so no `kubectl port-forward` is needed:
+
+Single control-plane node. All 8 services exposed via `extraPortMappings` (no `kubectl port-forward` needed).
+
+Also mounts two host directories into the node for persistent storage (see Step 8):
 
 ```yaml
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-name: stl-local
-nodes:
-  - role: control-plane
-    extraPortMappings:
-      - containerPort: 30432   # timescaledb
-        hostPort: 5432
-      - containerPort: 30433   # temporal-db
-        hostPort: 5433
-      - containerPort: 30379   # redis
-        hostPort: 6379
-      - containerPort: 30566   # localstack
-        hostPort: 4566
-      - containerPort: 30686   # jaeger UI
-        hostPort: 16686
-      - containerPort: 30317   # OTLP gRPC
-        hostPort: 4317
-      - containerPort: 30233   # temporal gRPC
-        hostPort: 7233
-      - containerPort: 30823   # temporal UI
-        hostPort: 8233
+extraMounts:
+  - hostPath: STL_DATA_DIR/timescaledb
+    containerPath: /data/timescaledb
+  - hostPath: STL_DATA_DIR/temporal-db
+    containerPath: /data/temporal-db
 ```
+
+`STL_DATA_DIR` is a placeholder substituted at cluster creation time with `$HOME/.stl-local`.
 
 ### k8s/namespace.yaml
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: stl
-```
+Namespace `stl`.
 
-**Makefile targets (new):**
+**Makefile target:**
 ```makefile
 kind-create:
-	kind create cluster --config k8s/kind.yaml
-
-kind-delete:
-	kind delete cluster --name stl-local
+	@mkdir -p $$HOME/.stl-local/timescaledb $$HOME/.stl-local/temporal-db
+	kind get clusters | grep -q stl-local || \
+	  sed "s|STL_DATA_DIR|$$HOME/.stl-local|g" k8s/kind.yaml | kind create cluster --config -
 ```
+
+`kind-create` is idempotent: if the cluster already exists it is a no-op.
 
 ---
 
-## Phase 2 — Infra Manifests
+## Step 2 — Infra Manifests
 
 All applied with: `kubectl apply -f k8s/namespace.yaml && kubectl apply -f k8s/infra/ -n stl`
 
 ### timescaledb.yaml
-- `StatefulSet`, 1 replica, image `timescale/timescaledb:2.25.1-pg17`
-- PVC 5Gi at `/var/lib/postgresql/data`
+- `StatefulSet`, image `timescale/timescaledb:2.25.1-pg17`
+- **hostPath** volume at `/data/timescaledb` (mapped from host via `extraMounts`) — data persists across cluster restarts
 - Env: `POSTGRES_USER=postgres`, `POSTGRES_PASSWORD=postgres`, `POSTGRES_DB=stl_verify`
 - `NodePort` service on 30432
 
@@ -130,16 +116,17 @@ All applied with: `kubectl apply -f k8s/namespace.yaml && kubectl apply -f k8s/i
 
 ### localstack.yaml
 - `Deployment`, image `localstack/localstack:4.3`, env `SERVICES=sns,sqs`
-- `ConfigMap` (`localstack-init`) containing the content of the existing `localstack-init/init-aws.sh`
-- Mount at `/etc/localstack/init/ready.d/init-aws.sh` (LocalStack auto-init — runs after healthy)
+- `ConfigMap` (`localstack-init`) containing `localstack-init/init-aws.sh` with `defaultMode: 0755`
+- Mounted at `/etc/localstack/init/ready.d/init-aws.sh` (LocalStack auto-init)
 - `NodePort` service on 30566
 
 ### jaeger.yaml
-- `Deployment`, image `jaegertracing/all-in-one:latest`, env `COLLECTOR_OTLP_ENABLED=true`
+- `Deployment`, image `jaegertracing/all-in-one:1.76.0`, env `COLLECTOR_OTLP_ENABLED=true`
 - Two `NodePort` services: 30686 (UI), 30317 (OTLP gRPC)
 
 ### temporal-db.yaml
 - `StatefulSet`, image `postgres:16-alpine`
+- **hostPath** volume at `/data/temporal-db` — Temporal workflow history persists across cluster restarts
 - Env: `POSTGRES_USER=temporal`, `POSTGRES_PASSWORD=temporal`
 - `NodePort` service on 30433
 
@@ -147,43 +134,46 @@ All applied with: `kubectl apply -f k8s/namespace.yaml && kubectl apply -f k8s/i
 - `Deployment` for `temporalio/auto-setup:1.25.2`
   - Env: `DB=postgres12`, `DB_PORT=5432`, `POSTGRES_USER=temporal`, `POSTGRES_PWD=temporal`, `POSTGRES_SEEDS=temporal-db`, `BIND_ON_IP=0.0.0.0`, `DEFAULT_NAMESPACE=sentinel`
   - `NodePort` service on 30233
-- `Deployment` for temporal-ui: `temporalio/ui:2.45.3`, env `TEMPORAL_ADDRESS=temporal:7233`
+- `Deployment` for `temporalio/ui:2.45.3`
+  - Env: `TEMPORAL_ADDRESS=temporal:7233`
+  - `enableServiceLinks: false` — prevents Kubernetes from injecting `TEMPORAL_PORT=tcp://...` which corrupts the UI's config file
   - `NodePort` service on 30823
 
-**Makefile target (new):**
+**Makefile target:**
 ```makefile
 kind-infra:
 	kubectl apply -f k8s/namespace.yaml
 	kubectl apply -f k8s/infra/ -n stl
-	kubectl wait --for=condition=ready pod -l app=timescaledb -n stl --timeout=120s
-	kubectl wait --for=condition=ready pod -l app=localstack   -n stl --timeout=120s
+	@echo "==> Waiting for timescaledb to be ready (may take a moment on first run — image pull)..."
+	kubectl rollout status statefulset/timescaledb -n stl --timeout=120s
+	@echo "==> Waiting for localstack to be ready..."
+	kubectl rollout status deployment/localstack -n stl --timeout=120s
 ```
+
+Note: `kubectl rollout status` is used instead of `kubectl wait --for=condition=ready` because the
+latter races with pod scheduling and returns "no matching resources" if called too early.
 
 ---
 
-## Phase 3 — Dockerfile.migrate + migrate Job
+## Step 3 — Dockerfile.migrate + migrate Job
 
 ### Dockerfile.migrate
-Follows the same multi-stage pattern as all other Dockerfiles in the repo:
-- Builder stage: compiles `cmd/migrate` binary
-- Runtime stage (`alpine:3.21`):
-  - `WORKDIR /app`
-  - `COPY --from=builder /migrate /app/migrate`
-  - `COPY db/migrations/ /app/db/migrations/`  ← binary looks for `./db/migrations` at runtime
-  - Non-root user (`appuser`), same as other images
-  - `ENTRYPOINT ["/app/migrate"]`
+Multi-stage build following the same pattern as other Dockerfiles in the repo:
+- Builder: compiles `cmd/migrate`
+- Runtime (`alpine:3.21`): non-root user, `WORKDIR /app`, copies binary + `db/migrations/`
+- `ENTRYPOINT ["/app/migrate"]`
 
 ### k8s/jobs/migrate.yaml
 ```
 Job:
-  initContainer: postgres:alpine — loops on `pg_isready -h timescaledb -U postgres`
+  initContainer: postgres:alpine — loops on pg_isready -h timescaledb -U postgres
   container:     stl-migrate:local, imagePullPolicy: Never
-                 env DATABASE_URL from stl-config ConfigMap
+                 envFrom: stl-config ConfigMap
   backoffLimit:  5
   restartPolicy: Never
 ```
 
-**Makefile targets (new):**
+**Makefile targets:**
 ```makefile
 docker-build-migrate:
 	docker build -t stl-migrate:local -f Dockerfile.migrate .
@@ -194,20 +184,25 @@ kind-load-migrate:
 kind-migrate:
 	kubectl delete job/migrate --ignore-not-found -n stl
 	kubectl apply -f k8s/jobs/migrate.yaml -n stl
+	@echo "==> Waiting for migration to complete..."
 	kubectl wait --for=condition=complete job/migrate -n stl --timeout=120s
+	@echo "==> Migration logs:"
+	kubectl logs -l job-name=migrate -n stl || true
 ```
+
+Note: logs are shown after completion (not streamed) to avoid the race between the init container
+finishing and the main container starting.
 
 ---
 
-## Phase 4 — ConfigMap + Secrets
+## Step 4 — ConfigMap + Secrets
 
 ### k8s/config/configmap.yaml (ConfigMap name: `stl-config`)
-Non-sensitive values shared across all pods:
 
 | Key | Value |
 |-----|-------|
 | `CHAIN_ID` | `1` |
-| `AWS_REGION` | `us-east-1` *(see note below)* |
+| `AWS_REGION` | `us-east-1` *(see note)* |
 | `AWS_ACCESS_KEY_ID` | `test` |
 | `AWS_SECRET_ACCESS_KEY` | `test` |
 | `AWS_SNS_TOPIC_ARN` | `arn:aws:sns:us-east-1:000000000000:stl-ethereum-blocks.fifo` |
@@ -220,166 +215,183 @@ Non-sensitive values shared across all pods:
 | `ALCHEMY_HTTP_URL` | `https://eth-mainnet.g.alchemy.com/v2` |
 | `ALCHEMY_WS_URL` | `wss://eth-mainnet.g.alchemy.com/v2` |
 | `ENABLE_BACKFILL` | `false` |
+| `TEMPORAL_HOST_PORT` | `temporal:7233` |
+| `TEMPORAL_NAMESPACE` | `sentinel` |
 
 > **Note on `AWS_REGION`**: Production EKS runs in `eu-west-1`, but LocalStack does not route to
 > real AWS — the region is just a label used to construct consistent ARNs. The existing
-> `localstack-init/init-aws.sh` already uses `us-east-1` for all topic/queue ARNs, so we keep it
-> here to stay in sync and avoid divergence with that script.
+> `localstack-init/init-aws.sh` already uses `us-east-1` for all topic/queue ARNs, so we keep
+> `us-east-1` here to stay in sync with that script.
+
+**Makefile target:**
+```makefile
+kind-config:
+	kubectl apply -f k8s/config/configmap.yaml -n stl
+```
+
+`kind-config` must run before `kind-migrate` because the migrate Job references `stl-config`.
 
 ### Secret: `stl-secrets`
-- `ALCHEMY_API_KEY` — fetched directly from AWS Secrets Manager using the developer's local AWS
-  credentials. No `.env.kind` file needed; secrets never touch the filesystem.
+
+Contains `ALCHEMY_API_KEY`, `COINGECKO_API_KEY`, and `ETHERSCAN_API_KEY` — all fetched from AWS
+Secrets Manager using the developer's local AWS credentials. No `.env` file needed; secrets never
+touch the filesystem.
+
 - **In EKS**: secrets will be injected via External Secrets Operator pulling from AWS Secrets
   Manager. The `stl-secrets` k8s Secret will be managed by the operator automatically.
-- Both environments end up with the same `stl-secrets` k8s Secret referenced by pods via
-  `envFrom` — app manifests are identical between local and EKS.
+- Both environments reference the same `stl-secrets` Secret via `envFrom` — app manifests are
+  identical between local and EKS.
 
-**Makefile target (new):**
+**Makefile target:**
 ```makefile
 kind-secrets:
+	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value \
+	  --secret-id stl-sentinelstaging-alchemy-api-key \
+	  --query SecretString --output text) || \
+	  { echo "ERROR: Failed to fetch ALCHEMY_API_KEY. Set AWS_PROFILE to your staging account profile."; exit 1; }; \
+	COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value \
+	  --secret-id coingecko_api_key \
+	  --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
+	  { echo "WARNING: Failed to fetch COINGECKO_API_KEY."; COINGECKO_API_KEY=''; }; \
+	ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value \
+	  --secret-id etherscan_api_key \
+	  --query SecretString --output text) || \
+	  { echo "WARNING: Failed to fetch ETHERSCAN_API_KEY."; ETHERSCAN_API_KEY=''; }; \
 	kubectl create secret generic stl-secrets \
-	  --from-literal=ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value \
-	    --secret-id stl/alchemy-api-key --query SecretString --output text) \
+	  --from-literal=ALCHEMY_API_KEY=$$ALCHEMY_API_KEY \
+	  --from-literal=COINGECKO_API_KEY=$$COINGECKO_API_KEY \
+	  --from-literal=ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY \
 	  --namespace=stl \
 	  --dry-run=client -o yaml | kubectl apply -f -
 ```
-(`--dry-run=client -o yaml | kubectl apply -f -` makes this idempotent on reruns.
-Requires AWS CLI credentials configured locally — same requirement as the existing `make dev-env`.)
+
+Requires `AWS_PROFILE` set to a profile with access to the staging account (e.g.
+`export AWS_PROFILE=sentinelstaging`). The `--dry-run=client -o yaml | kubectl apply -f -` pattern
+makes this idempotent on reruns.
 
 ---
 
-## Phase 5 — App Deployments
+## Step 5 — App Deployments
 
-All deployments: `imagePullPolicy: Never`, `envFrom: [stl-config ConfigMap, stl-secrets Secret]`.
-No liveness/readiness probes (watcher has no HTTP server; local dev only).
+All deployments: `imagePullPolicy: Never`, `envFrom: [stl-config, stl-secrets]`.
 
 ### k8s/apps/watcher.yaml
-- `Deployment`, 1 replica, image `stl-watcher:local`
-- `terminationGracePeriodSeconds: 30`
+- `Deployment`, image `stl-watcher:local`, `terminationGracePeriodSeconds: 30`
 
 ### k8s/apps/workers/oracle-price-worker.yaml
-- `Deployment`, 1 replica, image `stl-oracle-price-worker:local`
 - Additional env: `AWS_SQS_QUEUE_URL=http://localstack:4566/000000000000/stl-ethereum-oracle-price.fifo`
 
 ### k8s/apps/workers/morpho-indexer.yaml
-- `Deployment`, 1 replica, image `stl-morpho-indexer:local`
 - Additional env: `AWS_SQS_QUEUE_URL=http://localstack:4566/000000000000/stl-ethereum-morpho-indexing.fifo`
 
 ### k8s/apps/workers/sparklend-position-tracker.yaml
-- `Deployment`, 1 replica, image `stl-sparklend-tracker:local`
 - Additional env: `AWS_SQS_QUEUE_URL=http://localstack:4566/000000000000/stl-ethereum-sparklend-position.fifo`
 
-### Makefile — modify existing `docker-build-*` targets
+### k8s/apps/temporal-worker.yaml
+- `Deployment`, image `stl-temporal-worker:local`
+- Creates Temporal schedules (`coingecko-price-fetch` every 5m, `data-validation` every 1h) on startup
+- Requires `COINGECKO_API_KEY` (from `stl-secrets`); `ETHERSCAN_API_KEY` optional
+- `TEMPORAL_HOST_PORT` and `TEMPORAL_NAMESPACE` from `stl-config`
 
-The 4 existing build targets are **modified** (not replaced) to support `LOCAL=1`. When passed,
-they build a native-arch `:local` tagged image instead of the ECR ARM64 production build:
+### Makefile — `docker-build-*` targets with `LOCAL=1`
+
+All 5 existing build targets (`watcher`, `oracle-price-worker`, `morpho-indexer`,
+`sparklend-position-tracker`, `temporal-worker`) are wrapped with `ifdef LOCAL` to build
+a native-arch `:local` image instead of the ECR ARM64 production build.
+
+---
+
+## Step 6 — Master Makefile Targets
+
+### Warm/cold start
+
+`dev-up` supports two modes via the `build-if-needed` helper:
 
 ```makefile
-# Pattern applied to all 4 existing targets:
-docker-build-watcher:
-ifdef LOCAL
-	docker build -t stl-watcher:local -f Dockerfile .
-else
-	@$(MAKE) docker-build
-endif
-
-docker-build-oracle-price-worker:
-ifdef LOCAL
-	docker build -t stl-oracle-price-worker:local -f Dockerfile.oracle-price-worker .
-else
-	@$(MAKE) _docker-release-oracle-price-worker-internal  # existing behaviour
-endif
-
-# same pattern for morpho-indexer and sparklend-position-tracker
+define build-if-needed
+@if [ "$(COLD)" = "1" ] || ! docker image inspect $(1) >/dev/null 2>&1; then \
+  $(MAKE) $(2); \
+else \
+  echo "  $(1) already present — skipping build (use COLD=1 to force rebuild)"; \
+fi
+endef
 ```
 
-**New kind-specific targets:**
+- **Warm start (default)**: skips `docker build` for any image that already exists locally.
+  Useful for day-to-day `dev-down` / `dev-up` cycles.
+- **Cold start**: `make dev-up-rebuild` forces a full rebuild of all images.
+- **Auto cold**: if an image is missing (e.g. first run, or after `dev-wipe`), it is built
+  automatically regardless of the `COLD` flag.
+
+### `dev-up` structure (6 sections)
+
+```
+[1/6] Cluster        kind-create
+[2/6] Infrastructure kind-infra, kind-config, kind-secrets
+[3/6] Migrations     docker-build-migrate (if needed), kind-load-migrate, kind-migrate
+[4/6] Watcher        docker-build-watcher (if needed), kind-load-watcher, kind-deploy-watcher
+[5/6] Workers        docker-build-* (if needed), kind-load-workers, kind-deploy-workers,
+                     docker-build-temporal-worker (if needed), kind-load/deploy-temporal-worker
+[6/6] Ready          wait for all pods ready, kind-status
+```
+
+### Full target reference
+
 ```makefile
-kind-load-watcher:
-	kind load docker-image stl-watcher:local --name stl-local
-kind-load-workers:
-	kind load docker-image stl-oracle-price-worker:local --name stl-local
-	kind load docker-image stl-morpho-indexer:local       --name stl-local
-	kind load docker-image stl-sparklend-tracker:local    --name stl-local
-
-kind-deploy-watcher:
-	kubectl apply -f k8s/apps/watcher.yaml -n stl
-kind-deploy-workers:
-	kubectl apply -f k8s/apps/workers/ -n stl
-
-kind-logs:
-	kubectl logs -f deployment/watcher -n stl
-
-kind-redeploy-watcher:
-	$(MAKE) docker-build-watcher LOCAL=1
-	kind load docker-image stl-watcher:local --name stl-local
-	kubectl rollout restart deployment/watcher -n stl
+make dev-up          # warm start — reuses existing images if present
+make dev-up-rebuild     # cold start — rebuilds all images from scratch
+make dev-down        # delete cluster; data at ~/.stl-local persists
+make dev-reset       # dev-down + dev-up (warm)
+make dev-wipe        # prompts, then tears down cluster + deletes ~/.stl-local
+make kind-secrets             # re-fetch secrets from AWS and reapply (then rollout restart if needed)
+make kind-redeploy-watcher    # rebuild watcher image + reload + rollout restart
+make kind-redeploy-worker NAME=<name>  # rebuild any worker + reload + rollout restart
 ```
 
 ---
 
-## Phase 6 — Master Makefile Targets
+## Step 7 — README
 
-`dev-up`, `dev-down`, and `dev-reset` are **modified** to drive the kind cluster instead of
-docker-compose. The `kind-*` targets remain as implementation building blocks.
-
-```makefile
-dev-up: kind-create kind-infra \
-        docker-build-migrate kind-load-migrate kind-migrate \
-        kind-secrets
-	$(MAKE) docker-build-watcher LOCAL=1
-	$(MAKE) kind-load-watcher kind-deploy-watcher
-	$(MAKE) docker-build-oracle-price-worker LOCAL=1
-	$(MAKE) docker-build-morpho-indexer LOCAL=1
-	$(MAKE) docker-build-sparklend-position-tracker LOCAL=1
-	$(MAKE) kind-load-workers kind-deploy-workers
-	@echo "=== STL kind cluster ready ==="
-	@$(MAKE) kind-status
-
-dev-down: kind-delete
-
-dev-reset: dev-down dev-up
-
-kind-status:
-	kubectl get pods -n stl
-```
+`k8s/README.md` covers prerequisites, quick start, service access, fast iteration, logs, secrets
+update, teardown, and lifecycle commands.
 
 ---
 
-## Phase 7 — README
+## Step 8 — Persistent Storage
 
-**`k8s/README.md`** — developer guide covering:
-1. Prerequisites: `kind`, `kubectl`, `docker`, `aws` CLI with credentials configured
-2. Quick start: `make dev-up` — what it does, expected output
-3. Accessing services at localhost (no extra commands needed):
-   - DB: `psql postgres://postgres:postgres@localhost:5432/stl_verify`
-   - Redis: `redis-cli -h localhost -p 6379`
-   - LocalStack: `aws --endpoint-url=http://localhost:4566 sns list-topics`
-   - Jaeger UI: http://localhost:16686
-   - Temporal UI: http://localhost:8233
-4. Fast iteration: `make kind-redeploy-watcher`
-5. Viewing logs: `make kind-logs`
-6. Updating secrets: `make kind-secrets` (re-fetches from AWS Secrets Manager) + rollout restart
-7. Tear down: `make dev-down`
-8. `dev-up` now starts the kind cluster — the old docker-compose workflow is replaced
+Database data survives `dev-down` / `dev-up` cycles via host-mounted directories:
+
+| Data | Host path | In-cluster path |
+|------|-----------|-----------------|
+| TimescaleDB | `~/.stl-local/timescaledb` | `/data/timescaledb` |
+| Temporal DB | `~/.stl-local/temporal-db` | `/data/temporal-db` |
+
+The kind node mounts these via `extraMounts`; the StatefulSets use `hostPath` volumes pointing
+to the in-cluster paths. Both directories are created automatically by `kind-create`.
+
+To wipe all data and start fresh:
+```bash
+make dev-wipe        # prompts for confirmation, tears down cluster, deletes ~/.stl-local
+make dev-up          # fresh cluster with empty databases
+```
 
 ---
 
 ## Manual Steps Required (one-time, per developer)
 
-1. Install `kind` and `kubectl` (documented in `stl-verify/README.md` Prerequisites)
-2. Ensure AWS CLI is configured with credentials that have access to `stl/alchemy-api-key` in Secrets Manager
+1. Install `kind` and `kubectl`
+2. Set `AWS_PROFILE` to your staging account profile (e.g. `export AWS_PROFILE=sentinelstaging`)
 
 ---
 
 ## Verification Checklist
 
-1. `make dev-up` completes without errors
-2. `kubectl get pods -n stl` — all pods `Running` or `Completed`
-3. `psql postgres://postgres:postgres@localhost:5432/stl_verify -c '\dt'` — tables visible
-4. `aws --endpoint-url=http://localhost:4566 sns list-topics` — shows `stl-ethereum-blocks.fifo`
-5. `aws --endpoint-url=http://localhost:4566 sqs list-queues` — shows all FIFO queues
-6. `make kind-logs` — shows watcher block ingestion log lines
-7. http://localhost:16686 — Jaeger UI shows `watcher` service traces
-8. http://localhost:8233 — Temporal UI accessible
-9. `make dev-down && make dev-up` — full reset works (migrate Job reruns without error)
+1. `make dev-up` completes without errors, all pods `Running` or `Completed`
+2. `psql postgres://postgres:postgres@localhost:5432/stl_verify -c '\dt'` — tables visible
+3. `AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url=http://localhost:4566 --region us-east-1 sns list-topics` — shows `stl-ethereum-blocks.fifo`
+4. `AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url=http://localhost:4566 --region us-east-1 sqs list-queues` — shows all FIFO queues
+5. `make kind-logs` — shows watcher block ingestion lines
+6. http://localhost:16686 — Jaeger UI reachable
+7. http://localhost:8233/namespaces/sentinel/schedules — shows `coingecko-price-fetch` and `data-validation` schedules
+8. `make dev-down && make dev-up` — warm restart, Temporal schedules and DB data preserved
+9. `make dev-wipe && make dev-up` — fresh start, empty databases
