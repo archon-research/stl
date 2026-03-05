@@ -41,6 +41,10 @@ async def _run_migrations(db_url: str, pg_container) -> None:
     try:
         for migration_file in migration_files:
             sql = migration_file.read_text()
+            # CONCURRENTLY cannot run inside a transaction block.
+            # In tests there is no concurrent traffic, so it's safe
+            # to run the plain (non-concurrent) variant instead.
+            sql = sql.replace(" CONCURRENTLY", "")
             await conn.execute(sql)
     finally:
         await conn.close()
@@ -306,7 +310,7 @@ async def repository(async_db_url: str, _seed_data: None) -> AsyncIterator[Backe
         await engine.dispose()
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_single_borrower_full_attribution(
     repository: BackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
@@ -345,7 +349,7 @@ async def test_single_borrower_full_attribution(
     assert by_symbol["cbBTC"].backing_pct == Decimal("49.0196")
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_no_borrowers_returns_empty(repository: BackedBreakdownRepository, test_ids: dict[str, int]) -> None:
     """A token nobody has borrowed returns an empty breakdown."""
     result = await repository.get_backed_breakdown(
@@ -356,7 +360,7 @@ async def test_no_borrowers_returns_empty(repository: BackedBreakdownRepository,
     assert result.items == ()
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_nonexistent_protocol_returns_empty(
     repository: BackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
