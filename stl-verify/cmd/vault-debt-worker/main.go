@@ -8,16 +8,17 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -52,6 +53,16 @@ func main() {
 		slog.Error("vault-debt-worker exited with error", "error", err)
 		os.Exit(1)
 	}
+}
+
+// maskRPCURL redacts the path (which typically contains API keys) from an RPC URL.
+// Example: "https://eth-mainnet.g.alchemy.com/v2/abc123" → "https://eth-mainnet.g.alchemy.com/v2/***"
+func maskRPCURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "***"
+	}
+	return fmt.Sprintf("%s://%s/***", u.Scheme, u.Host)
 }
 
 // run is the entry point for the vault-debt-worker service.
@@ -115,7 +126,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("eth rpc dial: %w", err)
 	}
 	defer ethClient.Close()
-	logger.Info("eth rpc client connected", "rpc", *rpcURL)
+	logger.Info("eth rpc client connected", "rpc", maskRPCURL(*rpcURL))
 
 	// Multicaller
 	mc, err := multicall.NewClient(ethClient, common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11"))

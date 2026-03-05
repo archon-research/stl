@@ -124,16 +124,25 @@ func mockVatRPCMulti(t *testing.T, _ string, primes []primeFixture, rate, art *b
 	ilkResultBytes := make([][]byte, len(primes))
 	for i, p := range primes {
 		padded := make([]byte, 32)
-		raw, _ := hex.DecodeString(p.ilkHex)
+		raw, err := hex.DecodeString(p.ilkHex)
+		if err != nil {
+			t.Fatalf("decode ilk hex for prime %q: %v", p.name, err)
+		}
 		copy(padded, raw)
 		ilkResultBytes[i] = padded
 	}
 
 	ilksReturnHex := strings.Repeat("0", 64) + bigIntHex64(rate) + strings.Repeat("0", 192)
-	ilksReturnBytes, _ := hex.DecodeString(ilksReturnHex)
+	ilksReturnBytes, err := hex.DecodeString(ilksReturnHex)
+	if err != nil {
+		t.Fatalf("decode ilks return hex: %v", err)
+	}
 
 	urnsReturnHex := strings.Repeat("0", 64) + bigIntHex64(art)
-	urnsReturnBytes, _ := hex.DecodeString(urnsReturnHex)
+	urnsReturnBytes, err := hex.DecodeString(urnsReturnHex)
+	if err != nil {
+		t.Fatalf("decode urns return hex: %v", err)
+	}
 
 	var ilkCallIdx atomic.Int64
 
@@ -385,7 +394,10 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 	}
 	for _, p := range primes {
 		addrHex := strings.TrimPrefix(strings.ToLower(p.vaultAddress), "0x")
-		addrBytes, _ := hex.DecodeString(addrHex)
+		addrBytes, err := hex.DecodeString(addrHex)
+		if err != nil {
+			t.Fatalf("decode vault address for prime %q: %v", p.name, err)
+		}
 		if _, err := pool.Exec(ctx, `INSERT INTO primes (name, vault_address) VALUES ($1, $2) ON CONFLICT DO NOTHING`, p.name, addrBytes); err != nil {
 			t.Fatalf("seed prime %s: %v", p.name, err)
 		}
@@ -423,7 +435,10 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 		}
 	}
 
-	rows, _ := pool.Query(ctx, `SELECT prime_name, ilk_name, debt_wad::text, block_number FROM prime_debts ORDER BY prime_name, id`)
+	rows, err := pool.Query(ctx, `SELECT prime_name, ilk_name, debt_wad::text, block_number FROM prime_debts ORDER BY prime_name, id`)
+	if err != nil {
+		t.Fatalf("query snapshots: %v", err)
+	}
 	defer rows.Close()
 
 	seen := make(map[string]struct{})
@@ -443,6 +458,9 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 			t.Errorf("prime %q: non-positive block_number", primeName)
 		}
 		seen[primeName] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate snapshot rows: %v", err)
 	}
 	for _, p := range primes {
 		if _, ok := seen[p.name]; !ok {
@@ -507,7 +525,9 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	}
 
 	var distinctTimes int
-	_ = pool.QueryRow(ctx, `SELECT COUNT(DISTINCT synced_at) FROM prime_debts`).Scan(&distinctTimes)
+	if err := pool.QueryRow(ctx, `SELECT COUNT(DISTINCT synced_at) FROM prime_debts`).Scan(&distinctTimes); err != nil {
+		t.Fatalf("query distinct synced_at: %v", err)
+	}
 	if distinctTimes < wantRows {
 		t.Errorf("expected %d distinct synced_at values, got %d", wantRows, distinctTimes)
 	}
