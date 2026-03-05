@@ -4,16 +4,106 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+// primeFixture holds test data for a single prime vault.
+type primeFixture struct {
+	name         string
+	vaultAddress string // checksummed hex
+	ilkName      string // human-readable, e.g. "ALLOCATOR-SPARK-A"
+	ilkHex       string // right-padded bytes32 as 64 hex chars (no 0x prefix)
+}
+
+// ilkBytes32Hex encodes an ASCII ilk name as a zero-padded 64-char hex string.
+func ilkBytes32Hex(name string) string {
+	b := make([]byte, 32)
+	copy(b, name)
+	return fmt.Sprintf("%x", b)
+}
+
+// mockVatRPCMulti serves eth_call responses for N prime vaults using a
+// deterministic call sequence. The service always calls in this order:
+//
+// Startup (once):
+//
+//	call 1..N : vault[i].ilk() → bytes32 ilk identifier for prime i
+//
+// Per poll tick (repeating):
+//
+//	call N+1, N+3, ... : vat.ilks(ilk[i])       → (Art, rate, spot, line, dust)
+//	call N+2, N+4, ... : vat.urns(ilk[i], vault) → (ink, art)
+func mockVatRPCMulti(t *testing.T, _ string, primes []primeFixture, rate, art int64) *httptest.Server {
+	t.Helper()
+
+	n := len(primes)
+
+	// Pre-build all ilk responses (one per prime).
+	ilkResults := make([]string, n)
+	for i, p := range primes {
+		ilkResults[i] = "0x" + p.ilkHex
+	}
+
+	// ilks() response: Art=0, rate=<rate>, spot=0, line=0, dust=0
+	ilksResult := "0x" +
+		strings.Repeat("0", 64) + // Art
+		fmt.Sprintf("%064x", rate) + // rate
+		strings.Repeat("0", 192) // spot, line, dust
+
+	// urns() response: ink=0, art=<art>
+	urnsResult := "0x" +
+		strings.Repeat("0", 64) + // ink
+		fmt.Sprintf("%064x", art) // art
+
+	var callCount atomic.Int64
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string          `json:"method"`
+			ID     json.RawMessage `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		if req.Method != "eth_call" {
+			testutil.WriteRPCResult(w, req.ID, json.RawMessage(`"0x1"`))
+			return
+		}
+
+		c := int(callCount.Add(1)) // 1-based
+
+		var result string
+		if c <= n {
+			// Startup phase: vault[c-1].ilk()
+			result = ilkResults[c-1]
+		} else {
+			// Poll phase: calls arrive in pairs (ilks, urns) per prime.
+			// offset within poll calls (0-based)
+			offset := (c - n - 1) % (2 * n)
+			if offset%2 == 0 {
+				result = ilksResult
+			} else {
+				result = urnsResult
+			}
+		}
+
+		testutil.WriteRPCResult(w, req.ID, json.RawMessage(`"`+result+`"`))
+	}))
+}
 
 // mockVatRPC serves sequential eth_call responses matching the call order:
 //  1. vault.ilk()       → bytes32 ilk identifier
@@ -39,7 +129,7 @@ func mockVatRPC(t *testing.T) *httptest.Server {
 		strings.Repeat("0", 64) + // ink
 		fmt.Sprintf("%064x", int64(1000e9)) // art
 
-	callCount := 0
+	var callCount atomic.Int64
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Method string          `json:"method"`
@@ -57,14 +147,14 @@ func mockVatRPC(t *testing.T) *httptest.Server {
 			return
 		}
 
-		callCount++
+		n := callCount.Add(1)
 		var result string
-		switch callCount {
+		switch n {
 		case 1: // vault.ilk()
 			result = ilkResult
 		default:
 			// Alternate between ilks() and urns() for each poll tick
-			if callCount%2 == 0 {
+			if n%2 == 0 {
 				result = ilksResult
 			} else {
 				result = urnsResult
@@ -84,6 +174,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000") // 1s in ms — fail fast so defer shutdownOTEL doesn't block tests
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 
 	err := run(context.Background(), []string{
@@ -103,11 +194,15 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
 	defer dbCleanup()
 
-	// Seed a prime so the service has something to resolve.
+	// Clear any primes left by previous runs, then seed exactly one.
+	// mockVatRPC only handles a single-prime call sequence, so extra primes
+	// would receive wrong ABI data and produce empty ilk names.
+	if _, err := pool.Exec(ctx, `TRUNCATE primes CASCADE`); err != nil {
+		t.Fatalf("truncate primes: %v", err)
+	}
 	_, err := pool.Exec(ctx, `
 		INSERT INTO primes (name, vault_address)
 		VALUES ('spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')
-		ON CONFLICT DO NOTHING
 	`)
 	if err != nil {
 		t.Fatalf("seed prime: %v", err)
@@ -117,6 +212,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000") // 1s in ms — fail fast so defer shutdownOTEL doesn't block tests
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -172,7 +268,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		if err != nil {
 			t.Fatalf("run() returned error: %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("run() did not return after context cancellation")
 	}
 }
@@ -184,8 +280,8 @@ func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 	defer dbCleanup()
 
 	// Ensure primes table is empty.
-	if _, err := pool.Exec(ctx, `DELETE FROM primes`); err != nil {
-		t.Fatalf("clear primes: %v", err)
+	if _, err := pool.Exec(ctx, `TRUNCATE primes CASCADE`); err != nil {
+		t.Fatalf("truncate primes: %v", err)
 	}
 
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -195,6 +291,7 @@ func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000") // 1s in ms — fail fast so defer shutdownOTEL doesn't block tests
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 
 	err := run(context.Background(), []string{
@@ -206,5 +303,275 @@ func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no primes") {
 		t.Errorf("expected 'no primes' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional integration tests
+// ---------------------------------------------------------------------------
+
+// TestRunIntegration_MultipleVaults verifies that the service correctly resolves
+// and polls three distinct prime vaults, writing one snapshot per prime per tick.
+func TestRunIntegration_MultipleVaults(t *testing.T) {
+	ctx := context.Background()
+
+	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
+	defer dbCleanup()
+
+	const vatAddr = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
+
+	primes := []primeFixture{
+		{
+			name:         "spark",
+			vaultAddress: "0x691A6c29e9e96Dd897718305427Ad5D534db16BA",
+			ilkName:      "ALLOCATOR-SPARK-A",
+			ilkHex:       ilkBytes32Hex("ALLOCATOR-SPARK-A"),
+		},
+		{
+			name:         "grove",
+			vaultAddress: "0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0",
+			ilkName:      "ALLOCATOR-GROVE-A",
+			ilkHex:       ilkBytes32Hex("ALLOCATOR-GROVE-A"),
+		},
+		{
+			name:         "obex",
+			vaultAddress: "0xC1A83e7C92E4b09fD95B0FB8e5E25E6A6543db4E",
+			ilkName:      "ALLOCATOR-OBEX-A",
+			ilkHex:       ilkBytes32Hex("ALLOCATOR-OBEX-A"),
+		},
+	}
+
+	// Truncate first so primes from other tests don't corrupt the mock's call sequence.
+	if _, err := pool.Exec(ctx, `TRUNCATE primes CASCADE`); err != nil {
+		t.Fatalf("truncate primes: %v", err)
+	}
+
+	// Seed all three primes. Pass vault_address as raw 20-byte slice (BYTEA).
+	for _, p := range primes {
+		addrHex := strings.TrimPrefix(strings.ToLower(p.vaultAddress), "0x")
+		addrBytes, err := hex.DecodeString(addrHex)
+		if err != nil {
+			t.Fatalf("decode vault address for %s: %v", p.name, err)
+		}
+		_, err = pool.Exec(ctx, `
+			INSERT INTO primes (name, vault_address)
+			VALUES ($1, $2)
+			ON CONFLICT DO NOTHING
+		`, p.name, addrBytes)
+		if err != nil {
+			t.Fatalf("seed prime %s: %v", p.name, err)
+		}
+	}
+
+	// rate = 1e9 (non-zero), art = 500e9 (non-zero debt)
+	rpcServer := mockVatRPCMulti(t, vatAddr, primes, int64(1e9), int64(500e9))
+	defer rpcServer.Close()
+
+	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000") // 1s in ms — fail fast so defer shutdownOTEL doesn't block tests
+	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(runCtx, []string{
+			"-db", dbURL,
+			"-vat", vatAddr,
+			"-poll-interval", "200ms",
+		})
+	}()
+
+	// Wait until we have at least one snapshot per prime (3 total).
+	deadline := time.After(15 * time.Second)
+	for {
+		var count int
+		err := pool.QueryRow(ctx, `SELECT COUNT(DISTINCT prime_name) FROM prime_debts`).Scan(&count)
+		if err == nil && count >= len(primes) {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for snapshots from all primes")
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	// Verify each prime has an ilk_name and non-zero debt_wad.
+	rows, err := pool.Query(ctx, `
+		SELECT prime_name, ilk_name, debt_wad FROM prime_debts
+		ORDER BY prime_name, id
+	`)
+	if err != nil {
+		t.Fatalf("query snapshots: %v", err)
+	}
+	defer rows.Close()
+
+	seen := make(map[string]struct{})
+	for rows.Next() {
+		var primeName, ilkName, debtWad string
+		if err := rows.Scan(&primeName, &ilkName, &debtWad); err != nil {
+			t.Fatalf("scan row: %v", err)
+		}
+		if ilkName == "" {
+			t.Errorf("prime %q: ilk_name is empty", primeName)
+		}
+		if debtWad == "" || debtWad == "0.000000000000000000" {
+			t.Errorf("prime %q: debt_wad = %q, expected non-zero", primeName, debtWad)
+		}
+		seen[primeName] = struct{}{}
+	}
+	for _, p := range primes {
+		if _, ok := seen[p.name]; !ok {
+			t.Errorf("no snapshot written for prime %q", p.name)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("run() did not return after context cancellation")
+	}
+}
+
+// TestRunIntegration_SnapshotAccumulation verifies that each poll tick appends a
+// new row — the table is append-only and rows are never overwritten.
+func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
+	ctx := context.Background()
+
+	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
+	defer dbCleanup()
+
+	const vatAddr = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
+
+	if _, err := pool.Exec(ctx, `TRUNCATE primes CASCADE`); err != nil {
+		t.Fatalf("truncate primes: %v", err)
+	}
+	_, err := pool.Exec(ctx, `
+		INSERT INTO primes (name, vault_address)
+		VALUES ('spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')
+	`)
+	if err != nil {
+		t.Fatalf("seed prime: %v", err)
+	}
+
+	primes := []primeFixture{{
+		name:         "spark",
+		vaultAddress: "0x691A6c29e9e96Dd897718305427Ad5D534db16BA",
+		ilkHex:       ilkBytes32Hex("ALLOCATOR-SPARK-A"),
+	}}
+
+	rpcServer := mockVatRPCMulti(t, vatAddr, primes, int64(1e9), int64(1000e9))
+	defer rpcServer.Close()
+
+	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000") // 1s in ms — fail fast so defer shutdownOTEL doesn't block tests
+	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(runCtx, []string{
+			"-db", dbURL,
+			"-vat", vatAddr,
+			"-poll-interval", "150ms",
+		})
+	}()
+
+	// Wait for at least 3 rows — meaning the initial sync plus two ticker ticks fired.
+	const wantRows = 3
+	deadline := time.After(15 * time.Second)
+	for {
+		var count int
+		err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debts`).Scan(&count)
+		if err == nil && count >= wantRows {
+			break
+		}
+		select {
+		case <-deadline:
+			var got int
+			_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debts`).Scan(&got)
+			t.Fatalf("timed out: want %d rows, have %d", wantRows, got)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	// All rows should have distinct synced_at timestamps (append-only).
+	var distinctTimes int
+	err = pool.QueryRow(ctx, `SELECT COUNT(DISTINCT synced_at) FROM prime_debts`).Scan(&distinctTimes)
+	if err != nil {
+		t.Fatalf("query distinct synced_at: %v", err)
+	}
+	if distinctTimes < wantRows {
+		t.Errorf("expected %d distinct synced_at values, got %d — rows may have been overwritten", wantRows, distinctTimes)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("run() did not return after context cancellation")
+	}
+}
+
+// TestRunIntegration_InvalidVatFlag verifies that run() returns an error immediately
+// when the -vat flag is not a valid Ethereum address.
+func TestRunIntegration_InvalidVatFlag(t *testing.T) {
+	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
+	defer dbCleanup()
+	_ = pool
+
+	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":"0x1"}`)
+	}))
+	defer rpcServer.Close()
+
+	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000") // 1s in ms — fail fast so defer shutdownOTEL doesn't block tests
+	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
+
+	err := run(context.Background(), []string{
+		"-db", dbURL,
+		"-vat", "not-a-valid-address",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid vat address")
+	}
+	if !strings.Contains(err.Error(), "vat") && !strings.Contains(err.Error(), "address") {
+		t.Errorf("expected vat/address error, got: %v", err)
+	}
+}
+
+// TestRunIntegration_InvalidPollInterval verifies that run() returns an error
+// immediately when -poll-interval cannot be parsed as a duration.
+func TestRunIntegration_InvalidPollInterval(t *testing.T) {
+	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer rpcServer.Close()
+
+	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000") // 1s in ms — fail fast so defer shutdownOTEL doesn't block tests
+	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
+
+	err := run(context.Background(), []string{
+		"-db", "postgres://localhost/test",
+		"-vat", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b",
+		"-poll-interval", "not-a-duration",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid poll interval")
+	}
+	if !strings.Contains(err.Error(), "poll") && !strings.Contains(err.Error(), "interval") && !strings.Contains(err.Error(), "duration") {
+		t.Errorf("expected poll interval parse error, got: %v", err)
 	}
 }

@@ -119,6 +119,9 @@ func run(ctx context.Context, args []string) error {
 	logger.Info("alchemy client configured")
 
 	// Vat caller
+	if !common.IsHexAddress(*vatAddr) {
+		return fmt.Errorf("invalid vat address: %q", *vatAddr)
+	}
 	vatCaller, err := ethereum.NewVatCaller(client, common.HexToAddress(*vatAddr))
 	if err != nil {
 		return fmt.Errorf("vat caller: %w", err)
@@ -158,13 +161,17 @@ func run(ctx context.Context, args []string) error {
 	defer shutdownCancel()
 
 	shutdownDone := make(chan struct{})
+	var stopErr error
 	go func() {
 		defer close(shutdownDone)
-		_ = svc.Stop()
+		stopErr = svc.Stop()
 	}()
 
 	select {
 	case <-shutdownDone:
+		if stopErr != nil {
+			return fmt.Errorf("stop vault debt service: %w", stopErr)
+		}
 		logger.Info("shutdown complete")
 	case <-shutdownCtx.Done():
 		return fmt.Errorf("shutdown timed out")
