@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,45 +33,43 @@ func ilkBytes32Hex(name string) string {
 	return fmt.Sprintf("%x", b)
 }
 
-// mockVatRPCMulti serves eth_call responses for N prime vaults using a
-// deterministic call sequence. The service always calls in this order:
+// mockVatRPCMulti serves eth_call responses for N prime vaults by inspecting
+// calldata length to distinguish the three call types — no address parsing,
+// no call-order assumptions:
 //
-// Startup (once):
+//   - ilk()                  → 4-byte calldata  (just the selector)
+//   - ilks(bytes32)          → 36-byte calldata  (selector + 1 arg)
+//   - urns(bytes32,address)  → 68-byte calldata  (selector + 2 args)
 //
-//	call 1..N : vault[i].ilk() → bytes32 ilk identifier for prime i
-//
-// Per poll tick (repeating):
-//
-//	call N+1, N+3, ... : vat.ilks(ilk[i])       → (Art, rate, spot, line, dust)
-//	call N+2, N+4, ... : vat.urns(ilk[i], vault) → (ink, art)
+// ilk() calls are answered in the order they arrive (startup resolves primes
+// in DB ORDER BY id ASC, which matches the primes slice order in the fixture).
 func mockVatRPCMulti(t *testing.T, _ string, primes []primeFixture, rate, art int64) *httptest.Server {
 	t.Helper()
 
-	n := len(primes)
-
-	// Pre-build all ilk responses (one per prime).
-	ilkResults := make([]string, n)
+	// Pre-build ilk responses in fixture order.
+	ilkResults := make([]string, len(primes))
 	for i, p := range primes {
 		ilkResults[i] = "0x" + p.ilkHex
 	}
 
-	// ilks() response: Art=0, rate=<rate>, spot=0, line=0, dust=0
+	// ilks(bytes32) response: Art=0, rate=<rate>, spot=0, line=0, dust=0
 	ilksResult := "0x" +
 		strings.Repeat("0", 64) + // Art
 		fmt.Sprintf("%064x", rate) + // rate
 		strings.Repeat("0", 192) // spot, line, dust
 
-	// urns() response: ink=0, art=<art>
+	// urns(bytes32,address) response: ink=0, art=<art>
 	urnsResult := "0x" +
 		strings.Repeat("0", 64) + // ink
 		fmt.Sprintf("%064x", art) // art
 
-	var callCount atomic.Int64
+	var ilkCallIdx atomic.Int64 // tracks which prime's ilk() we're serving next
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Method string          `json:"method"`
-			ID     json.RawMessage `json:"id"`
+			Method string            `json:"method"`
+			ID     json.RawMessage   `json:"id"`
+			Params []json.RawMessage `json:"params"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -84,56 +83,66 @@ func mockVatRPCMulti(t *testing.T, _ string, primes []primeFixture, rate, art in
 			return
 		}
 
-		c := int(callCount.Add(1)) // 1-based
+		// Extract calldata to determine call type.
+		var msg struct {
+			Data string `json:"data"`
+		}
+		if len(req.Params) > 0 {
+			_ = json.Unmarshal(req.Params[0], &msg)
+		}
+		dataHexLen := len(strings.TrimPrefix(msg.Data, "0x"))
 
 		var result string
-		if c <= n {
-			// Startup phase: vault[c-1].ilk()
-			result = ilkResults[c-1]
-		} else {
-			// Poll phase: calls arrive in pairs (ilks, urns) per prime.
-			// offset within poll calls (0-based)
-			offset := (c - n - 1) % (2 * n)
-			if offset%2 == 0 {
-				result = ilksResult
+		switch dataHexLen {
+		case 8: // ilk() — 4-byte selector only
+			idx := int(ilkCallIdx.Add(1)) - 1
+			if idx < len(ilkResults) {
+				result = ilkResults[idx]
 			} else {
-				result = urnsResult
+				result = "0x" + strings.Repeat("0", 64)
 			}
+		case 72: // ilks(bytes32) — selector + 32-byte ilk arg
+			result = ilksResult
+		case 136: // urns(bytes32,address) — selector + 32-byte ilk + 32-byte address
+			result = urnsResult
+		default:
+			result = "0x" + strings.Repeat("0", 64)
 		}
 
 		testutil.WriteRPCResult(w, req.ID, json.RawMessage(`"`+result+`"`))
 	}))
 }
 
-// mockVatRPC serves sequential eth_call responses matching the call order:
-//  1. vault.ilk()       → bytes32 ilk identifier
-//  2. vat.ilks(ilk)     → (Art, rate, spot, line, dust) tuple
-//  3. vat.urns(ilk,usr) → (ink, art) tuple
+// mockVatRPC serves eth_call responses for a single-prime (spark) setup,
+// dispatching by calldata length rather than call order:
 //
-// Subsequent calls repeat responses 2 and 3 for each poll tick.
+//   - 4-byte data  → ilk() call  → returns ALLOCATOR-SPARK-A bytes32
+//   - 36-byte data → ilks() call → returns (Art=0, rate, spot=0, line=0, dust=0)
+//   - 68-byte data → urns() call → returns (ink=0, art)
 func mockVatRPC(t *testing.T) *httptest.Server {
 	t.Helper()
 
 	// ALLOCATOR-SPARK-A right-padded to 32 bytes
-	ilkResult := "0x414c4c4f4341544f522d535041524b2d41000000000000000000000000000000"
+	ilkResult := "0x" + ilkBytes32Hex("ALLOCATOR-SPARK-A")
 
-	// ilks() tuple: Art=0, rate=1e27 (RAY), spot=0, line=0, dust=0
-	// rate is the second 32-byte word
+	// ilks() tuple: Art=0, rate=1e27 (1 RAY — no accumulated fees), spot=0, line=0, dust=0
+	ray := new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
 	ilksResult := "0x" +
-		strings.Repeat("0", 64) + // Art
-		fmt.Sprintf("%064x", int64(1e9)) + // rate (truncated 1e27 for test simplicity)
+		strings.Repeat("0", 64) + // Art = 0
+		fmt.Sprintf("%064x", ray) + // rate = 1 RAY
 		strings.Repeat("0", 192) // spot, line, dust
 
-	// urns() tuple: ink=0, art=1000e9
+	// urns() tuple: ink=0, art=1000 * 1e18 (1000 USDS of normalized debt)
+	art1000 := new(big.Int).Mul(big.NewInt(1000), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 	urnsResult := "0x" +
-		strings.Repeat("0", 64) + // ink
-		fmt.Sprintf("%064x", int64(1000e9)) // art
+		strings.Repeat("0", 64) + // ink = 0
+		fmt.Sprintf("%064x", art1000) // art = 1000 USDS
 
-	var callCount atomic.Int64
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Method string          `json:"method"`
-			ID     json.RawMessage `json:"id"`
+			Method string            `json:"method"`
+			ID     json.RawMessage   `json:"id"`
+			Params []json.RawMessage `json:"params"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -147,18 +156,24 @@ func mockVatRPC(t *testing.T) *httptest.Server {
 			return
 		}
 
-		n := callCount.Add(1)
+		var msg struct {
+			Data string `json:"data"`
+		}
+		if len(req.Params) > 0 {
+			_ = json.Unmarshal(req.Params[0], &msg)
+		}
+		dataHexLen := len(strings.TrimPrefix(msg.Data, "0x"))
+
 		var result string
-		switch n {
-		case 1: // vault.ilk()
+		switch dataHexLen {
+		case 8: // ilk() — 4-byte selector only
 			result = ilkResult
+		case 72: // ilks(bytes32)
+			result = ilksResult
+		case 136: // urns(bytes32,address)
+			result = urnsResult
 		default:
-			// Alternate between ilks() and urns() for each poll tick
-			if n%2 == 0 {
-				result = ilksResult
-			} else {
-				result = urnsResult
-			}
+			result = "0x" + strings.Repeat("0", 64)
 		}
 
 		testutil.WriteRPCResult(w, req.ID, json.RawMessage(`"`+result+`"`))
@@ -421,6 +436,9 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 			t.Errorf("prime %q: debt_wad = %q, expected non-zero", primeName, debtWad)
 		}
 		seen[primeName] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate snapshot rows: %v", err)
 	}
 	for _, p := range primes {
 		if _, ok := seen[p.name]; !ok {
