@@ -18,11 +18,16 @@ VALUES (
 )
 ON CONFLICT (name) DO NOTHING;
 
--- 2. Bind Aave V3 oracle to Aave V3 protocol
+-- 2. Add unique constraint to protocol_oracle (prevents duplicate bindings)
+ALTER TABLE protocol_oracle
+  ADD CONSTRAINT protocol_oracle_unique UNIQUE (protocol_id, oracle_id, from_block);
+
+-- 3. Bind Aave V3 oracle to Aave V3 protocol
 INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block)
 SELECT p.id, o.id, 16291127
 FROM protocol p, oracle o
-WHERE p.name = 'Aave V3' AND o.name = 'aave_v3';
+WHERE p.name = 'Aave V3' AND o.name = 'aave_v3'
+ON CONFLICT (protocol_id, oracle_id, from_block) DO NOTHING;
 
 -- 3. Add 12 oracle_asset entries for Aave V3 oracle
 -- These tokens are priced via getAssetsPrices() on the Aave V3 oracle contract.
