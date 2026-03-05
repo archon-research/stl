@@ -273,6 +273,7 @@ dev-up:
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  [2/6] Infrastructure"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	kubectl apply -f k8s/namespace.yaml
 	$(MAKE) kind-config kind-secrets kind-infra
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1454,7 +1455,9 @@ kind-redeploy-watcher:
 
 # CI targets — infra only, no apps, no secrets needed
 # Migrations run via go run (no Docker build required)
-kind-infra-ci: kind-create kind-config kind-infra
+kind-infra-ci: kind-create
+	kubectl apply -f k8s/namespace.yaml
+	$(MAKE) kind-config kind-infra
 	@echo "==> Running migrations..."
 	DATABASE_URL=postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable \
 	  go run ./cmd/migrate/...
