@@ -221,9 +221,21 @@ endef
 dev-preflight:
 	@command -v kind    >/dev/null 2>&1 || { echo "ERROR: kind not found. Install from https://kind.sigs.k8s.io/docs/user/quick-start/#installation"; exit 1; }
 	@command -v kubectl >/dev/null 2>&1 || { echo "ERROR: kubectl not found. Install from https://kubernetes.io/docs/tasks/tools/"; exit 1; }
-	@command -v aws     >/dev/null 2>&1 || { echo "ERROR: aws CLI not found. Install from https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"; exit 1; }
-	@command -v jq      >/dev/null 2>&1 || { echo "ERROR: jq not found. Install via: brew install jq"; exit 1; }
 	@docker info        >/dev/null 2>&1 || { echo "ERROR: Docker is not running. Start Docker and try again."; exit 1; }
+	@if [ ! -f ../.env.secrets ]; then \
+	  printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\n' > ../.env.secrets; \
+	  echo ""; \
+	  echo "⚠️  .env.secrets created at the repo root (.env.secrets)"; \
+	  echo "   Fill in ALCHEMY_API_KEY (ask a team member), then run:"; \
+	  echo "   make kind-secrets && kubectl rollout restart deployment -n stl"; \
+	  echo ""; \
+	elif ! grep -q 'ALCHEMY_API_KEY=.\+' ../.env.secrets; then \
+	  echo ""; \
+	  echo "⚠️  ALCHEMY_API_KEY is not set in .env.secrets — the watcher will not function."; \
+	  echo "   Fill in the value, then run:"; \
+	  echo "   make kind-secrets && kubectl rollout restart deployment -n stl"; \
+	  echo ""; \
+	fi
 
 # Start the local kind cluster and deploy the full pipeline.
 # Warm start (default): reuses existing Docker images if present.
@@ -1225,23 +1237,12 @@ kind-config:
 	kubectl apply -f k8s/config/configmap.yaml -n stl
 
 kind-secrets:
-	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value \
-	  --secret-id stl-sentinelstaging-alchemy-api-key \
-	  --query SecretString --output text) || \
-	  { echo "ERROR: Failed to fetch ALCHEMY_API_KEY from AWS Secrets Manager. Make sure your AWS profile is set to the staging account (e.g. export AWS_PROFILE=<your-staging-profile>)."; exit 1; }; \
-	test -n "$$ALCHEMY_API_KEY" || { echo "ERROR: ALCHEMY_API_KEY is empty — check the secret in AWS Secrets Manager."; exit 1; }; \
-	COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value \
-	  --secret-id coingecko_api_key \
-	  --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
-	  { echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
-	ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value \
-	  --secret-id etherscan_api_key \
-	  --query SecretString --output text) || \
-	  { echo "WARNING: Failed to fetch ETHERSCAN_API_KEY from AWS Secrets Manager."; ETHERSCAN_API_KEY=''; }; \
+	@test -f ../.env.secrets || printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\n' > ../.env.secrets
+	@set -a; . ../.env.secrets; set +a; \
 	kubectl create secret generic stl-secrets \
 	  --from-literal=ALCHEMY_API_KEY=$$ALCHEMY_API_KEY \
-	  --from-literal=COINGECKO_API_KEY=$$COINGECKO_API_KEY \
-	  --from-literal=ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY \
+	  --from-literal=COINGECKO_API_KEY=$${COINGECKO_API_KEY:-} \
+	  --from-literal=ETHERSCAN_API_KEY=$${ETHERSCAN_API_KEY:-} \
 	  --from-literal=AWS_ACCESS_KEY_ID=test \
 	  --from-literal=AWS_SECRET_ACCESS_KEY=test \
 	  --namespace=stl \

@@ -7,7 +7,7 @@ Local Kubernetes environment for the STL live data pipeline using [kind](https:/
 - [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 - Docker
-- AWS CLI configured with a profile that has access to the staging account Secrets Manager (e.g. `export AWS_PROFILE=<your-staging-profile>`)
+- `.env.secrets` at the repo root — created automatically on first run with empty values; ask a team member for the API keys, then run `make kind-secrets`
 - [k9s](https://k9scli.io/topics/install/) (optional but recommended — terminal UI for browsing pods, logs, and events)
 
 ## Quick Start
@@ -66,9 +66,9 @@ open http://localhost:8233/namespaces/sentinel/schedules
 
 ## Configuration
 
-Non-sensitive environment variables are defined in `k8s/config/configmap.yaml` (`stl-config`) and applied automatically during `dev-up`. This includes database URLs, AWS endpoints, Temporal host, chain ID, and blockckain provider URLs.
+Non-sensitive environment variables are defined in `k8s/config/configmap.yaml` (`stl-config`) and applied automatically during `dev-up`. This includes database URLs, AWS endpoints, Temporal host, chain ID, and blockchain provider URLs.
 
-Secrets (`ALCHEMY_API_KEY`, `COINGECKO_API_KEY`, `ETHERSCAN_API_KEY`) are fetched from AWS Secrets Manager and stored in the `stl-secrets` Kubernetes secret. Run `make kind-secrets` to re-fetch and reapply them (requires `AWS_PROFILE` to be set to your staging profile).
+Secrets (`ALCHEMY_API_KEY`, `COINGECKO_API_KEY`, `ETHERSCAN_API_KEY`) are loaded from `.env.secrets` at the repo root and stored in the `stl-secrets` Kubernetes secret. Run `make kind-secrets` to reapply them (e.g. after rotating keys or on a fresh cluster).
 
 To override a config value locally, edit `k8s/config/configmap.yaml` and reapply:
 
@@ -97,9 +97,9 @@ kubectl rollout restart deployment -n stl
 
 ## Updating Secrets
 
-Re-fetch from AWS Secrets Manager and apply:
+Update `.env.secrets` at the repo root then reapply:
 
 ```bash
 make kind-secrets
-kubectl rollout restart deployment/watcher -n stl
+kubectl rollout restart deployment -n stl
 ```
