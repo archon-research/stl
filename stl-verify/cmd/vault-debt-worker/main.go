@@ -13,13 +13,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/ethereum"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/services/vault_debt"
 )
@@ -58,9 +60,17 @@ func run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("vault-debt-worker", flag.ContinueOnError)
 	dbURL := fs.String("db", env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"), "PostgreSQL connection string")
 	vatAddr := fs.String("vat", env.Get("VAT_ADDRESS", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"), "MCD Vat contract address")
+	rpcURL := fs.String("rpc", env.Get("ETH_RPC_URL", ""), "Ethereum JSON-RPC endpoint (e.g. https://eth-mainnet.g.alchemy.com/v2/<key>)")
 	pollIntervalStr := fs.String("poll-interval", env.Get("POLL_INTERVAL", "15m"), "Debt polling interval (e.g. 15m, 1h)")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	if *rpcURL == "" {
+		// Fallback: compose from legacy ALCHEMY_HTTP_URL + ALCHEMY_API_KEY env vars.
+		alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
+		alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")
+		*rpcURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
 	}
 
 	pollInterval, err := time.ParseDuration(*pollIntervalStr)
@@ -99,30 +109,25 @@ func run(ctx context.Context, args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	// Alchemy HTTP client
-	alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")
-	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
-
-	alchemyTelemetry, err := alchemy.NewTelemetry()
+	// Ethereum JSON-RPC client
+	ethClient, err := ethclient.DialContext(ctx, *rpcURL)
 	if err != nil {
-		logger.Warn("failed to create alchemy telemetry, continuing without instrumentation", "error", err)
+		return fmt.Errorf("eth rpc dial: %w", err)
+	}
+	defer ethClient.Close()
+	logger.Info("eth rpc client connected", "rpc", *rpcURL)
+
+	// Multicaller
+	mc, err := multicall.NewClient(ethClient, common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11"))
+	if err != nil {
+		return fmt.Errorf("multicall client: %w", err)
 	}
 
-	client, err := alchemy.NewClient(alchemy.ClientConfig{
-		HTTPURL:   fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
-		Logger:    logger,
-		Telemetry: alchemyTelemetry,
-	})
-	if err != nil {
-		return fmt.Errorf("alchemy client: %w", err)
-	}
-	logger.Info("alchemy client configured")
-
-	// Vat caller
+	// Vat caller (backed by multicall)
 	if !common.IsHexAddress(*vatAddr) {
 		return fmt.Errorf("invalid vat address: %q", *vatAddr)
 	}
-	vatCaller, err := ethereum.NewVatCaller(client, common.HexToAddress(*vatAddr))
+	vatCaller, err := blockchain.NewVatCaller(mc, common.HexToAddress(*vatAddr))
 	if err != nil {
 		return fmt.Errorf("vat caller: %w", err)
 	}
@@ -136,6 +141,7 @@ func run(ctx context.Context, args []string) error {
 	primeDebtRepo := postgres.NewPrimeDebtRepository(pool, txm, logger)
 
 	// Vault debt service
+	// ethClient satisfies outbound.BlockQuerier (has BlockNumber(ctx) method).
 	svc, err := vault_debt.NewVaultDebtService(
 		vault_debt.Config{
 			PollInterval: pollInterval,
@@ -143,39 +149,12 @@ func run(ctx context.Context, args []string) error {
 		},
 		vatCaller,
 		primeDebtRepo,
+		ethClient,
 	)
 	if err != nil {
 		return fmt.Errorf("vault debt service: %w", err)
 	}
 
 	logger.Info("starting vault debt service...", "pollInterval", pollInterval)
-	if err := svc.Start(ctx); err != nil {
-		return fmt.Errorf("start vault debt service: %w", err)
-	}
-
-	// Wait for shutdown
-	<-ctx.Done()
-	logger.Info("shutting down...")
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer shutdownCancel()
-
-	shutdownDone := make(chan struct{})
-	var stopErr error
-	go func() {
-		defer close(shutdownDone)
-		stopErr = svc.Stop()
-	}()
-
-	select {
-	case <-shutdownDone:
-		if stopErr != nil {
-			return fmt.Errorf("stop vault debt service: %w", stopErr)
-		}
-		logger.Info("shutdown complete")
-	case <-shutdownCtx.Done():
-		return fmt.Errorf("shutdown timed out")
-	}
-
-	return nil
+	return lifecycle.Run(ctx, logger, svc)
 }
