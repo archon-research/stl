@@ -11,126 +11,231 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/redis/go-redis/v9"
-
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
 )
 
+var (
+	GitCommit string
+	GitBranch string
+	BuildTime string
+)
+
+func init() {
+	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
+}
+
 func main() {
-	if err := run(); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if err := run(ctx, os.Args[1:]); err != nil {
+		slog.Error("fatal error", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	queueURL := flag.String("queue", "", "SQS Queue URL")
-	redisAddr := flag.String("redis", "", "Redis address")
-	maxMessages := flag.Int("max", 10, "Max messages per poll")
-	waitTime := flag.Int("wait", 20, "Wait time seconds")
-	sweepBlocks := flag.Int("sweep-blocks", 75, "Sweep every N blocks")
-	flag.Parse()
+type cliConfig struct {
+	queueURL          string
+	redisAddr         string
+	dbURL             string
+	alchemyURL        string
+	s3Bucket          string
+	deployEnv         string
+	maxMessages       int
+	waitTime          int
+	visibilityTimeout int
+	sweepBlocks       int
+	chainID           int64
+}
+
+func parseConfig(args []string) (cliConfig, error) {
+	fs := flag.NewFlagSet("allocation-tracker", flag.ContinueOnError)
+	queueURL := fs.String("queue", "", "SQS Queue URL")
+	redisAddr := fs.String("redis", "", "Redis address")
+	dbURL := fs.String("db", "", "PostgreSQL connection URL")
+	maxMessages := fs.Int("max", 10, "Max messages per poll")
+	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
+	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
+	sweepBlocks := fs.Int("sweep-blocks", 75, "Sweep every N blocks")
+	if err := fs.Parse(args); err != nil {
+		return cliConfig{}, err
+	}
+
+	cfg := cliConfig{
+		queueURL:          *queueURL,
+		redisAddr:         *redisAddr,
+		dbURL:             *dbURL,
+		maxMessages:       *maxMessages,
+		waitTime:          *waitTime,
+		visibilityTimeout: *visibilityTimeout,
+		sweepBlocks:       *sweepBlocks,
+	}
+
+	if cfg.queueURL == "" {
+		cfg.queueURL = env.Get("AWS_SQS_QUEUE_URL", "")
+	}
+	if cfg.queueURL == "" {
+		return cliConfig{}, fmt.Errorf("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_URL env var)")
+	}
+
+	if cfg.dbURL == "" {
+		cfg.dbURL = env.Get("DATABASE_URL", "")
+	}
+	if cfg.dbURL == "" {
+		return cliConfig{}, fmt.Errorf("database URL not provided (use -db flag or DATABASE_URL env var)")
+	}
+
+	alchemyAPIKey := os.Getenv("ALCHEMY_API_KEY")
+	if alchemyAPIKey == "" {
+		return cliConfig{}, fmt.Errorf("ALCHEMY_API_KEY environment variable is required")
+	}
+	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
+	cfg.alchemyURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
+
+	if cfg.redisAddr == "" {
+		cfg.redisAddr = env.Get("REDIS_ADDR", "")
+	}
+	if cfg.redisAddr == "" {
+		return cliConfig{}, fmt.Errorf("redis address not provided (use -redis flag or REDIS_ADDR env var)")
+	}
+
+	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
+		v, err := strconv.Atoi(waitTimeStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
+		}
+		cfg.waitTime = v
+	}
+	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
+		v, err := strconv.Atoi(visTimeStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
+		}
+		cfg.visibilityTimeout = v
+	}
+
+	chainIDStr := env.Get("CHAIN_ID", "1")
+	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	if err != nil {
+		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
+	}
+	cfg.chainID = chainID
+
+	cfg.s3Bucket = env.Get("S3_BUCKET", "")
+	if cfg.s3Bucket == "" {
+		return cliConfig{}, fmt.Errorf("S3_BUCKET environment variable is required")
+	}
+
+	cfg.deployEnv = env.Get("DEPLOY_ENV", "")
+	if cfg.deployEnv == "" {
+		return cliConfig{}, fmt.Errorf("DEPLOY_ENV environment variable is required")
+	}
+
+	return cfg, nil
+}
+
+func run(ctx context.Context, args []string) error {
+	cfg, err := parseConfig(args)
+	if err != nil {
+		return err
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
+	slog.SetDefault(logger)
 
-	if *queueURL == "" {
-		*queueURL = env.Get("AWS_SQS_QUEUE_URL", "")
-	}
-	if *redisAddr == "" {
-		*redisAddr = env.Get("REDIS_ADDR", "")
+	logger.Info("starting allocation tracker",
+		"queue", cfg.queueURL,
+		"redis", cfg.redisAddr,
+		"chainID", cfg.chainID,
+		"commit", GitCommit)
+
+	// AWS config
+	awsRegion := env.Get("AWS_REGION", "eu-west-1")
+	awsOpts := []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(awsRegion),
 	}
 
-	if *queueURL == "" {
-		return fmt.Errorf("queue URL required (-queue or AWS_SQS_QUEUE_URL)")
-	}
-	if *redisAddr == "" {
-		return fmt.Errorf("redis address required (-redis or REDIS_ADDR)")
+	if accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID"); accessKeyID != "" {
+		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+		awsOpts = append(awsOpts, awsconfig.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
+			return aws.Credentials{
+				AccessKeyID:     accessKeyID,
+				SecretAccessKey: secretKey,
+				Source:          "StaticCredentials",
+			}, nil
+		})))
 	}
 
-	chainIDStr, err := env.Require("CHAIN_ID")
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsOpts...)
 	if err != nil {
-		return err
-	}
-	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid CHAIN_ID %q: %w", chainIDStr, err)
+		return fmt.Errorf("loading AWS config: %w", err)
 	}
 
-	alchemyKey, err := env.Require("ALCHEMY_API_KEY")
-	if err != nil {
-		return err
-	}
-	rpcURL := fmt.Sprintf(
-		"%s/%s",
-		env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2"),
-		alchemyKey,
-	)
-
-	ctx := context.Background()
-
-	// AWS
-	var awsOpts []func(*config.LoadOptions) error
-	awsOpts = append(awsOpts,
-		config.WithRegion(env.Get("AWS_REGION", "us-east-1")),
-	)
-
-	accessKey := env.Get("AWS_ACCESS_KEY_ID", "")
-	secretKey := env.Get("AWS_SECRET_ACCESS_KEY", "")
-	if accessKey != "" && secretKey != "" {
-		awsOpts = append(awsOpts,
-			config.WithCredentialsProvider(
-				credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
-			),
-		)
-	}
-
-	awsCfg, err := config.LoadDefaultConfig(ctx, awsOpts...)
-	if err != nil {
-		return fmt.Errorf("aws config: %w", err)
-	}
-
-	// SQS consumer
+	// SQS
 	sqsConsumer, err := sqsAdapter.NewConsumer(awsCfg, sqsAdapter.Config{
-		QueueURL:          *queueURL,
-		WaitTimeSeconds:   int32(*waitTime),
-		VisibilityTimeout: 30,
+		QueueURL:          cfg.queueURL,
+		WaitTimeSeconds:   int32(cfg.waitTime),
+		VisibilityTimeout: int32(cfg.visibilityTimeout),
 		BaseEndpoint:      env.Get("AWS_SQS_ENDPOINT", ""),
 	}, logger)
 	if err != nil {
-		return fmt.Errorf("sqs consumer: %w", err)
+		return fmt.Errorf("creating SQS consumer: %w", err)
 	}
 	defer sqsConsumer.Close()
 
-	// Redis
-	redisClient := redis.NewClient(&redis.Options{
-		Addr:     *redisAddr,
-		Password: env.Get("REDIS_PASSWORD", ""),
-	})
-	if err := redisClient.Ping(ctx).Err(); err != nil {
-		return fmt.Errorf("redis ping: %w", err)
+	// Redis (block cache)
+	cacheCfg := redisAdapter.ConfigDefaults()
+	cacheCfg.Addr = cfg.redisAddr
+	cacheCfg.Password = env.Get("REDIS_PASSWORD", "")
+	blockCache, err := redisAdapter.NewBlockCache(cacheCfg, logger)
+	if err != nil {
+		return fmt.Errorf("creating block cache: %w", err)
 	}
-	defer redisClient.Close()
-	logger.Info("redis connected", "addr", *redisAddr)
+	if err := blockCache.Ping(ctx); err != nil {
+		return fmt.Errorf("connecting to Redis at %s: %w", cfg.redisAddr, err)
+	}
+	defer blockCache.Close()
+	logger.Info("Redis connected", "addr", cfg.redisAddr)
+
+	// S3 + cache reader with fallback
+	s3Opts := []func(*awss3.Options){}
+	if s3Endpoint := env.Get("AWS_S3_ENDPOINT", ""); s3Endpoint != "" {
+		s3Opts = append(s3Opts, func(o *awss3.Options) {
+			o.BaseEndpoint = aws.String(s3Endpoint)
+			o.UsePathStyle = true
+		})
+	}
+	s3Reader := s3adapter.NewReaderWithOptions(awsCfg, logger, s3Opts...)
+	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.chainID, cfg.deployEnv, cfg.s3Bucket, logger)
+	if err != nil {
+		return fmt.Errorf("creating cache reader: %w", err)
+	}
 
 	// Ethereum
-	rawClient, err := ethclient.Dial(rpcURL)
+	rawClient, err := ethclient.DialContext(ctx, cfg.alchemyURL)
 	if err != nil {
 		return fmt.Errorf("eth dial: %w", err)
 	}
 	defer rawClient.Close()
+	logger.Info("Ethereum node connected")
 
 	mc, err := multicall.NewClient(rawClient, blockchain.Multicall3)
 	if err != nil {
@@ -168,28 +273,23 @@ func run() error {
 	}
 
 	// Token entries filtered by chain
-	entries := at.EntriesForChainID(at.DefaultTokenEntries(), chainID)
+	entries := at.EntriesForChainID(at.DefaultTokenEntries(), cfg.chainID)
 	if len(entries) == 0 {
-		return fmt.Errorf("no token entries for chain ID %d", chainID)
+		return fmt.Errorf("no token entries for chain ID %d", cfg.chainID)
 	}
 
-	proxies := at.ProxiesForChainID(at.DefaultProxies(), chainID)
+	proxies := at.ProxiesForChainID(at.DefaultProxies(), cfg.chainID)
 
 	// Database
-	dbURL, err := env.Require("DATABASE_URL")
+	dbPool, err := pgxpool.New(ctx, cfg.dbURL)
 	if err != nil {
-		return err
-	}
-
-	dbPool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		return fmt.Errorf("db connect: %w", err)
+		return fmt.Errorf("opening database: %w", err)
 	}
 	defer dbPool.Close()
 	if err := dbPool.Ping(ctx); err != nil {
-		return fmt.Errorf("db ping: %w", err)
+		return fmt.Errorf("connecting to database: %w", err)
 	}
-	logger.Info("postgres connected")
+	logger.Info("PostgreSQL connected")
 
 	txm, err := postgres.NewTxManager(dbPool, logger)
 	if err != nil {
@@ -207,13 +307,13 @@ func run() error {
 
 	svc, err := at.NewService(
 		at.Config{
-			MaxMessages:       *maxMessages,
-			SweepEveryNBlocks: *sweepBlocks,
-			ChainID:           chainID,
+			MaxMessages:       cfg.maxMessages,
+			SweepEveryNBlocks: cfg.sweepBlocks,
+			ChainID:           cfg.chainID,
 			Logger:            logger,
 		},
 		sqsConsumer,
-		redisClient,
+		cacheReader,
 		registry,
 		entries,
 		handler,
@@ -224,22 +324,27 @@ func run() error {
 	}
 
 	// Start
-	ctx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	if err := svc.Start(ctx); err != nil {
+	if err := svc.Start(runCtx); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
 
 	logger.Info("running",
-		"chainID", chainID,
+		"chainID", cfg.chainID,
 		"entries", len(entries),
-		"sweepEveryNBlocks", *sweepBlocks)
-	sig := <-sigChan
-	logger.Info("shutting down", "signal", sig)
+		"sweepEveryNBlocks", cfg.sweepBlocks)
+
+	select {
+	case sig := <-sigChan:
+		logger.Info("shutting down", "signal", sig)
+	case <-ctx.Done():
+		logger.Info("shutting down", "reason", "context cancelled")
+	}
 	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)

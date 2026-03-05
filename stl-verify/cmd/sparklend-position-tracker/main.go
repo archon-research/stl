@@ -1,5 +1,5 @@
 // Package main implements a SparkLend position tracker that monitors lending protocol
-// activity on Ethereum. It processes transaction receipts from Redis (triggered by SQS
+// activity on Ethereum. It processes transaction receipts from cache (triggered by SQS
 // messages), extracts position-changing events with collateral data, and stores the
 // results in PostgreSQL for downstream analysis.
 package main
@@ -17,12 +17,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/redis/go-redis/v9"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -55,6 +57,8 @@ type cliConfig struct {
 	redisAddr   string
 	dbURL       string
 	alchemyURL  string
+	s3Bucket    string
+	deployEnv   string
 	maxMessages int
 	waitTime    int
 	chainID     int64
@@ -114,6 +118,16 @@ func parseConfig(args []string) (cliConfig, error) {
 	}
 	cfg.chainID = chainID
 
+	cfg.s3Bucket = env.Get("S3_BUCKET", "")
+	if cfg.s3Bucket == "" {
+		return cliConfig{}, fmt.Errorf("S3_BUCKET environment variable is required")
+	}
+
+	cfg.deployEnv = env.Get("DEPLOY_ENV", "")
+	if cfg.deployEnv == "" {
+		return cliConfig{}, fmt.Errorf("DEPLOY_ENV environment variable is required")
+	}
+
 	return cfg, nil
 }
 
@@ -171,18 +185,24 @@ func run(ctx context.Context, args []string) error {
 	}
 	defer sqsConsumer.Close()
 
-	// Redis
-	redisClient := redis.NewClient(&redis.Options{
-		Addr:     cfg.redisAddr,
-		Password: env.Get("REDIS_PASSWORD", ""),
-		DB:       0,
-	})
-	if err := redisClient.Ping(ctx).Err(); err != nil {
+	// Redis (block cache)
+	cacheCfg := redisAdapter.ConfigDefaults()
+	cacheCfg.Addr = cfg.redisAddr
+	cacheCfg.Password = env.Get("REDIS_PASSWORD", "")
+	blockCache, err := redisAdapter.NewBlockCache(cacheCfg, logger)
+	if err != nil {
+		return fmt.Errorf("creating block cache: %w", err)
+	}
+	if err := blockCache.Ping(ctx); err != nil {
 		return fmt.Errorf("connecting to Redis: %w", err)
 	}
-	defer redisClient.Close()
+	defer blockCache.Close()
 	logger.Info("Redis connected", "addr", cfg.redisAddr)
-
+	s3Reader := s3adapter.NewReader(awsCfg, logger)
+	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.chainID, cfg.deployEnv, cfg.s3Bucket, logger)
+	if err != nil {
+		return fmt.Errorf("creating cache reader: %w", err)
+	}
 	// Ethereum
 	ethClient, err := ethclient.Dial(cfg.alchemyURL)
 	if err != nil {
@@ -235,7 +255,7 @@ func run(ctx context.Context, args []string) error {
 			ChainID:     cfg.chainID,
 		},
 		sqsConsumer,
-		redisClient,
+		cacheReader,
 		ethClient,
 		txManager,
 		userRepo,

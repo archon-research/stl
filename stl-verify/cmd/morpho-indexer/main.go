@@ -13,10 +13,13 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/ethclient"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
@@ -53,6 +56,8 @@ type cliConfig struct {
 	redisAddr         string
 	dbURL             string
 	alchemyURL        string
+	s3Bucket          string
+	deployEnv         string
 	maxMessages       int
 	waitTime          int
 	visibilityTimeout int
@@ -130,6 +135,16 @@ func parseConfig(args []string) (cliConfig, error) {
 	}
 	cfg.chainID = chainID
 
+	cfg.s3Bucket = env.Get("S3_BUCKET", "")
+	if cfg.s3Bucket == "" {
+		return cliConfig{}, fmt.Errorf("S3_BUCKET environment variable is required")
+	}
+
+	cfg.deployEnv = env.Get("DEPLOY_ENV", "")
+	if cfg.deployEnv == "" {
+		return cliConfig{}, fmt.Errorf("DEPLOY_ENV environment variable is required")
+	}
+
 	return cfg, nil
 }
 
@@ -165,7 +180,7 @@ func run(ctx context.Context, args []string) error {
 	// Service telemetry
 	morphoTelemetry, err := morpho_indexer.NewTelemetry()
 	if err != nil {
-		logger.Warn("failed to create morpho telemetry", "error", err)
+		return fmt.Errorf("creating morpho telemetry: %w", err)
 	}
 
 	// AWS config
@@ -203,7 +218,7 @@ func run(ctx context.Context, args []string) error {
 	defer sqsConsumer.Close()
 
 	// Redis
-	cache, err := redisAdapter.NewBlockCache(redisAdapter.Config{
+	blockCache, err := redisAdapter.NewBlockCache(redisAdapter.Config{
 		Addr:      cfg.redisAddr,
 		Password:  env.Get("REDIS_PASSWORD", ""),
 		DB:        0,
@@ -213,8 +228,24 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating Redis cache: %w", err)
 	}
-	defer cache.Close()
+	defer blockCache.Close()
+	if err := blockCache.Ping(ctx); err != nil {
+		return fmt.Errorf("connecting to Redis at %s: %w", cfg.redisAddr, err)
+	}
 	logger.Info("Redis connected", "addr", cfg.redisAddr)
+
+	s3Opts := []func(*awss3.Options){}
+	if s3Endpoint := env.Get("AWS_S3_ENDPOINT", ""); s3Endpoint != "" {
+		s3Opts = append(s3Opts, func(o *awss3.Options) {
+			o.BaseEndpoint = aws.String(s3Endpoint)
+			o.UsePathStyle = true
+		})
+	}
+	s3Reader := s3adapter.NewReaderWithOptions(awsCfg, logger, s3Opts...)
+	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.chainID, cfg.deployEnv, cfg.s3Bucket, logger)
+	if err != nil {
+		return fmt.Errorf("creating cache reader: %w", err)
+	}
 
 	// Ethereum
 	ethClient, err := ethclient.DialContext(ctx, cfg.alchemyURL)
@@ -279,7 +310,7 @@ func run(ctx context.Context, args []string) error {
 	service, err := morpho_indexer.NewService(
 		svcConfig,
 		sqsConsumer,
-		cache,
+		cacheReader,
 		mc,
 		txManager,
 		userRepo,

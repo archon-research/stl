@@ -2,6 +2,7 @@ package sparklend_position_tracker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,7 +19,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
@@ -62,7 +62,7 @@ type CollateralData struct {
 type Service struct {
 	config       shared.SQSConsumerConfig
 	consumer     outbound.SQSConsumer
-	redisClient  *redis.Client
+	cacheReader  outbound.BlockCacheReader
 	ethClient    *ethclient.Client
 	txManager    outbound.TxManager
 	userRepo     outbound.UserRepository
@@ -85,7 +85,7 @@ type Service struct {
 func NewService(
 	config shared.SQSConsumerConfig,
 	consumer outbound.SQSConsumer,
-	redisClient *redis.Client,
+	cacheReader outbound.BlockCacheReader,
 	ethClient *ethclient.Client,
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,
@@ -94,7 +94,7 @@ func NewService(
 	positionRepo outbound.PositionRepository,
 	eventRepo outbound.EventRepository,
 ) (*Service, error) {
-	if err := validateDependencies(consumer, redisClient, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo); err != nil {
+	if err := validateDependencies(consumer, cacheReader, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo); err != nil {
 		return nil, err
 	}
 
@@ -121,7 +121,7 @@ func NewService(
 	processor := &Service{
 		config:             config,
 		consumer:           consumer,
-		redisClient:        redisClient,
+		cacheReader:        cacheReader,
 		ethClient:          ethClient,
 		txManager:          txManager,
 		userRepo:           userRepo,
@@ -206,8 +206,8 @@ func (s *Service) Start(ctx context.Context) error {
 	if s.consumer == nil {
 		return fmt.Errorf("Start() called on service without SQS consumer")
 	}
-	if s.redisClient == nil {
-		return fmt.Errorf("Start() called on service without Redis client")
+	if s.cacheReader == nil {
+		return fmt.Errorf("Start() called on service without cache reader")
 	}
 
 	s.ctx, s.cancel = context.WithCancel(ctx)
@@ -245,18 +245,16 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 			"duration", time.Since(start))
 	}()
 
-	cacheKey := shared.CacheKey(event.ChainID, event.BlockNumber, event.Version, "receipts")
-	receiptsJSON, err := s.redisClient.Get(ctx, cacheKey).Result()
-	if errors.Is(err, redis.Nil) {
-		s.logger.Warn("cache key expired or not found", "key", cacheKey, "block", event.BlockNumber)
-		return nil
-	}
+	receiptsData, err := s.cacheReader.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
 	if err != nil {
-		return fmt.Errorf("failed to fetch from Redis: %w", err)
+		return fmt.Errorf("failed to fetch receipts from cache: %w", err)
+	}
+	if receiptsData == nil {
+		return fmt.Errorf("receipts not found in cache: chainID=%d block=%d version=%d", event.ChainID, event.BlockNumber, event.Version)
 	}
 
 	var receipts []shared.TransactionReceipt
-	if err := shared.ParseCompressedJSON([]byte(receiptsJSON), &receipts); err != nil {
+	if err := json.Unmarshal(receiptsData, &receipts); err != nil {
 		return fmt.Errorf("failed to unmarshal receipts: %w", err)
 	}
 
@@ -879,12 +877,12 @@ func (s *Service) convertToDecimalAdjusted(rawAmount *big.Int, decimals int) str
 }
 
 // validateDependencies verifies that all required service dependencies are present.
-// Consumer and redisClient may be nil in backfill mode (when only ProcessReceipts is used).
+// Consumer and cacheReader may be nil in backfill mode (when only ProcessReceipts is used).
 // Returns an error if any of the following required dependencies is nil: ethClient,
 // txManager, userRepo, protocolRepo, tokenRepo, positionRepo, or eventRepo.
 func validateDependencies(
 	consumer outbound.SQSConsumer,
-	redisClient *redis.Client,
+	cacheReader outbound.BlockCacheReader,
 	ethClient *ethclient.Client,
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,
@@ -893,7 +891,7 @@ func validateDependencies(
 	positionRepo outbound.PositionRepository,
 	eventRepo outbound.EventRepository,
 ) error {
-	// consumer and redisClient may be nil in backfill mode (ProcessReceipts only).
+	// consumer and cacheReader may be nil in backfill mode (ProcessReceipts only).
 	if ethClient == nil {
 		return fmt.Errorf("ethClient is required")
 	}

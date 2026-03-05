@@ -71,66 +71,45 @@ create_chain_resources() {
     --region $REGION
 }
 
+# Helper: create a consumer queue (with DLQ) subscribed to a chain's SNS topic
+create_consumer_queue() {
+  local CHAIN_NAME=$1
+  local QUEUE_NAME=$2
+
+  echo "Creating ${CHAIN_NAME} ${QUEUE_NAME} queues..."
+  $AWS sqs create-queue \
+    --queue-name "stl-${CHAIN_NAME}-${QUEUE_NAME}-dlq.fifo" \
+    --attributes FifoQueue=true,ContentBasedDeduplication=true \
+    --region $REGION
+
+  $AWS sqs create-queue \
+    --queue-name "stl-${CHAIN_NAME}-${QUEUE_NAME}.fifo" \
+    --attributes FifoQueue=true,ContentBasedDeduplication=true \
+    --region $REGION
+
+  $AWS sns subscribe \
+    --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-${CHAIN_NAME}-blocks.fifo" \
+    --protocol sqs \
+    --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-${CHAIN_NAME}-${QUEUE_NAME}.fifo" \
+    --attributes RawMessageDelivery=true \
+    --region $REGION
+}
+
 # Create resources for each supported chain
 create_chain_resources "ethereum"
 create_chain_resources "avalanche"
 
-# Oracle price worker is Ethereum-only
-echo "Creating Ethereum oracle price queues..."
-$AWS sqs create-queue \
-  --queue-name stl-ethereum-oracle-price-dlq.fifo \
-  --attributes FifoQueue=true,ContentBasedDeduplication=true \
-  --region $REGION
+# Ethereum-only consumers
+for queue in oracle-price morpho-indexing; do
+  create_consumer_queue "ethereum" "$queue"
+done
 
-$AWS sqs create-queue \
-  --queue-name stl-ethereum-oracle-price.fifo \
-  --attributes FifoQueue=true,ContentBasedDeduplication=true \
-  --region $REGION
-
-$AWS sns subscribe \
-  --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
-  --protocol sqs \
-  --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-oracle-price.fifo" \
-  --attributes RawMessageDelivery=true \
-  --region $REGION
-
-# SparkLend position tracker is Ethereum-only
-echo "Creating Ethereum sparklend position queues..."
-$AWS sqs create-queue \
-  --queue-name stl-ethereum-sparklend-position-dlq.fifo \
-  --attributes FifoQueue=true,ContentBasedDeduplication=true \
-  --region $REGION
-
-$AWS sqs create-queue \
-  --queue-name stl-ethereum-sparklend-position.fifo \
-  --attributes FifoQueue=true,ContentBasedDeduplication=true \
-  --region $REGION
-
-$AWS sns subscribe \
-  --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
-  --protocol sqs \
-  --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-sparklend-position.fifo" \
-  --attributes RawMessageDelivery=true \
-  --region $REGION
-
-# Morpho indexer is Ethereum-only
-echo "Creating Ethereum morpho indexing queues..."
-$AWS sqs create-queue \
-  --queue-name stl-ethereum-morpho-indexing-dlq.fifo \
-  --attributes FifoQueue=true,ContentBasedDeduplication=true \
-  --region $REGION
-
-$AWS sqs create-queue \
-  --queue-name stl-ethereum-morpho-indexing.fifo \
-  --attributes FifoQueue=true,ContentBasedDeduplication=true \
-  --region $REGION
-
-$AWS sns subscribe \
-  --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
-  --protocol sqs \
-  --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-morpho-indexing.fifo" \
-  --attributes RawMessageDelivery=true \
-  --region $REGION
+# Multi-chain consumers (Ethereum + Avalanche)
+for queue in sparklend-position allocation-tracker; do
+  for chain in ethereum avalanche; do
+    create_consumer_queue "$chain" "$queue"
+  done
+done
 
 echo "=== LocalStack initialization complete ==="
 echo ""

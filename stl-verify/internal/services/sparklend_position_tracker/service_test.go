@@ -1,6 +1,7 @@
 package sparklend_position_tracker
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"math/big"
@@ -11,7 +12,9 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 func TestEventExtractor_NewEventExtractor(t *testing.T) {
@@ -922,6 +925,22 @@ func TestEventExtractor_ExtractReserveEventData(t *testing.T) {
 				t.Errorf("TxHash = %s, want %s", result.TxHash, tt.wantTxHash)
 			}
 		})
+	}
+}
+
+func TestFetchAndProcessReceipts_CacheMiss_ReturnsError(t *testing.T) {
+	cache := testutil.NewMockBlockCache()
+	svc := &Service{
+		cacheReader: cache,
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// Don't store anything in cache — GetReceipts returns nil, nil.
+	err := svc.fetchAndProcessReceipts(context.Background(), outbound.BlockEvent{
+		ChainID: 1, BlockNumber: 99999, Version: 0,
+	})
+	if err == nil {
+		t.Fatal("expected error for cache miss, got nil")
 	}
 }
 
