@@ -1,3 +1,6 @@
+import functools
+
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,9 +13,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # Database
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/stl_verify"
+    database_url: SecretStr = SecretStr("postgresql+asyncpg://postgres:postgres@localhost:5432/stl_verify")
 
 
+@functools.lru_cache
 def get_settings() -> Settings:
     """Get cached settings instance."""
     return Settings()
