@@ -1,5 +1,21 @@
 -- Add Aave V3 oracle and Chainlink feeds for high/medium-impact Aave V3 tokens.
--- See docs/plans/2026-03-05-aave-v3-oracle-feeds-design.md for context.
+
+-- 0. Seed tokens referenced by this migration (idempotent — ON CONFLICT DO NOTHING)
+INSERT INTO token (chain_id, address, symbol, decimals)
+VALUES
+    (1, '\x4c9EDD5852cd905f086C759E8383e09bff1E68B3'::bytea, 'USDe', 18),
+    (1, '\x9D39A5DE30e57443BfF2A8307A4256c8797A3497'::bytea, 'sUSDe', 18),
+    (1, '\x3De0fF76e8b528C092d47b9DAc775931CEf80f49'::bytea, 'PT-sUSDE-7MAY2026', 18),
+    (1, '\x356b8d89C1E1239cbBb9DE4815c39a1474d5Ba7D'::bytea, 'syrupUSDT', 6),
+    (1, '\x9bF45Ab47747F4b4dd09b3c2c73953484b4eB375'::bytea, 'PT-srUSDe-2APR2026', 18),
+    (1, '\x1aBaEA1f7C830bD89Acc67eC4af516284b1bC33c'::bytea, 'EURC', 6),
+    (1, '\x514910771AF9Ca656af840dff83E8264EcF986CA'::bytea, 'LINK', 18),
+    (1, '\xaEBF0Bb9F57E89260D57f31AF34eB58657D96ce0'::bytea, 'PT-USDe-7MAY2026', 18),
+    (1, '\xE8483517077aFA11A9b07f849CeE2552f040D7B2'::bytea, 'PT-sUSDE-5FEB2026', 18),
+    (1, '\xD533a949740bb3306d119CC777fa900bA034cd52'::bytea, 'CRV', 18),
+    (1, '\x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9'::bytea, 'AAVE', 18),
+    (1, '\x5A98FcBEA516Cf06857215779Fd812CA3beF1B32'::bytea, 'LDO', 18)
+ON CONFLICT (chain_id, address) DO NOTHING;
 
 -- 1. Insert Aave V3 oracle
 -- Oracle address: 0x54586be62e3c3580375ae3723c145253060ca0c2
