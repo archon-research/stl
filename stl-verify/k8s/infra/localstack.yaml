@@ -138,6 +138,9 @@ data:
       --attributes RawMessageDelivery=true \
       --region $REGION
 
+    echo "Creating S3 bucket..."
+    $AWS s3 mb s3://${S3_BUCKET} --region $REGION
+
     echo "=== LocalStack initialization complete ==="
     echo ""
     echo "SNS Topics:"
@@ -145,6 +148,9 @@ data:
     echo ""
     echo "SQS Queues:"
     $AWS sqs list-queues --region $REGION --query 'QueueUrls' --output table
+    echo ""
+    echo "S3 Buckets:"
+    $AWS s3 ls
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -165,7 +171,12 @@ spec:
           image: localstack/localstack:4.3
           env:
             - name: SERVICES
-              value: sns,sqs
+              value: sns,sqs,s3
+            - name: S3_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-config
+                  key: S3_BUCKET
           ports:
             - containerPort: 4566
           volumeMounts:

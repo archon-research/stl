@@ -8,10 +8,13 @@ data:
   AWS_SNS_TOPIC_ARN: arn:aws:sns:us-east-1:000000000000:stl-ethereum-blocks.fifo
   AWS_SNS_ENDPOINT: http://localstack:4566
   AWS_SQS_ENDPOINT: http://localstack:4566
+  AWS_S3_ENDPOINT: http://localstack:4566
+  S3_BUCKET: stl-sentineldev-bucket
   DATABASE_URL: postgres://postgres:postgres@timescaledb:5432/stl_verify?sslmode=disable
   REDIS_ADDR: redis:6379
   JAEGER_ENDPOINT: jaeger:4317
   ENVIRONMENT: development
+  DEPLOY_ENV: development
   ALCHEMY_HTTP_URL: https://eth-mainnet.g.alchemy.com/v2
   ALCHEMY_WS_URL: wss://eth-mainnet.g.alchemy.com/v2
   ENABLE_BACKFILL: "false"

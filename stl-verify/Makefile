@@ -223,7 +223,7 @@ dev-preflight:
 	@command -v kubectl >/dev/null 2>&1 || { echo "ERROR: kubectl not found. Install from https://kubernetes.io/docs/tasks/tools/"; exit 1; }
 	@docker info        >/dev/null 2>&1 || { echo "ERROR: Docker is not running. Start Docker and try again."; exit 1; }
 	@if [ ! -f ../.env.secrets ]; then \
-	  printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\n' > ../.env.secrets; \
+	  printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\n' | install -m 600 /dev/stdin ../.env.secrets; \
 	  echo ""; \
 	  echo "⚠️  .env.secrets created at the repo root (.env.secrets)"; \
 	  echo "   Fill in ALCHEMY_API_KEY (ask a team member), then run:"; \
@@ -1219,11 +1219,11 @@ erigon-sparklend-backfill:
 
 kind-create:
 	@mkdir -p $$HOME/.stl-local/timescaledb $$HOME/.stl-local/temporal-db
-	kind get clusters | grep -q stl-local || \
+	kind get clusters | grep -qx stl-local || \
 	  sed "s|STL_DATA_DIR|$$HOME/.stl-local|g" k8s/kind.yaml | kind create cluster --config -
 
 kind-delete:
-	kind get clusters | grep -q stl-local && kind delete cluster --name stl-local || true
+	kind get clusters | grep -qx stl-local && kind delete cluster --name stl-local || true
 
 kind-infra:
 	kubectl apply -f k8s/namespace.yaml
@@ -1237,7 +1237,7 @@ kind-config:
 	kubectl apply -f k8s/config/configmap.yaml -n stl
 
 kind-secrets:
-	@test -f ../.env.secrets || printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\n' > ../.env.secrets
+	@test -f ../.env.secrets || printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\n' | install -m 600 /dev/stdin ../.env.secrets
 	@set -a; . ../.env.secrets; set +a; \
 	kubectl create secret generic stl-secrets \
 	  --from-literal=ALCHEMY_API_KEY=$$ALCHEMY_API_KEY \

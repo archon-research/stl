@@ -8,6 +8,9 @@ Local Kubernetes environment for the STL live data pipeline using [kind](https:/
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 - Docker
 - `.env.secrets` at the repo root — created automatically on first run with empty values; ask a team member for the API keys, then run `make kind-secrets`
+- `psql` — for direct PostgreSQL access (`brew install libpq`)
+- `redis-cli` — for direct Redis access (`brew install redis`)
+- `aws` CLI — for LocalStack inspection (`brew install awscli`)
 - [k9s](https://k9scli.io/topics/install/) (optional but recommended — terminal UI for browsing pods, logs, and events)
 
 ## Quick Start
