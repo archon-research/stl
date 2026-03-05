@@ -273,7 +273,7 @@ dev-up:
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  [2/6] Infrastructure"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	$(MAKE) kind-infra kind-config kind-secrets
+	$(MAKE) kind-config kind-secrets kind-infra
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  [3/6] Database migrations"
@@ -1454,7 +1454,7 @@ kind-redeploy-watcher:
 
 # CI targets — infra only, no apps, no secrets needed
 # Migrations run via go run (no Docker build required)
-kind-infra-ci: kind-create kind-infra kind-config
+kind-infra-ci: kind-create kind-config kind-infra
 	@echo "==> Running migrations..."
 	DATABASE_URL=postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable \
 	  go run ./cmd/migrate/...
