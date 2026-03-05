@@ -390,7 +390,7 @@ dev-down: kind-delete
 # Wipe cluster and all persisted data. Cannot be undone.
 dev-wipe:
 	@echo "WARNING: This will tear down the cluster and permanently delete all local database data."
-	@read -p "Are you sure? [y/N] " confirm && [ "$$confirm" = "y" ] || exit 1
+	@read -rp "Are you sure? [y/N] " confirm && [ "$$confirm" = "y" ] || exit 1
 	$(MAKE) kind-delete
 	rm -rf $$HOME/.stl-local
 
@@ -1242,6 +1242,8 @@ kind-secrets:
 	  --from-literal=ALCHEMY_API_KEY=$$ALCHEMY_API_KEY \
 	  --from-literal=COINGECKO_API_KEY=$$COINGECKO_API_KEY \
 	  --from-literal=ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY \
+	  --from-literal=AWS_ACCESS_KEY_ID=test \
+	  --from-literal=AWS_SECRET_ACCESS_KEY=test \
 	  --namespace=stl \
 	  --dry-run=client -o yaml | kubectl apply -f -
 
