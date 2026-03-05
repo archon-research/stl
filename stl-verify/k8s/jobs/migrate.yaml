@@ -9,7 +9,7 @@ spec:
       restartPolicy: Never
       initContainers:
         - name: wait-for-db
-          image: postgres:alpine
+          image: postgres:16-alpine
           command:
             - sh
             - -c

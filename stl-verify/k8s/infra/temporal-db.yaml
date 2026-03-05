@@ -21,6 +21,8 @@ spec:
               value: temporal
             - name: POSTGRES_PASSWORD
               value: temporal
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           ports:
             - containerPort: 5432
           volumeMounts:

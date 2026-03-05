@@ -221,6 +221,8 @@ endef
 dev-preflight:
 	@command -v kind    >/dev/null 2>&1 || { echo "ERROR: kind not found. Install from https://kind.sigs.k8s.io/docs/user/quick-start/#installation"; exit 1; }
 	@command -v kubectl >/dev/null 2>&1 || { echo "ERROR: kubectl not found. Install from https://kubernetes.io/docs/tasks/tools/"; exit 1; }
+	@command -v aws     >/dev/null 2>&1 || { echo "ERROR: aws CLI not found. Install from https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"; exit 1; }
+	@command -v jq      >/dev/null 2>&1 || { echo "ERROR: jq not found. Install via: brew install jq"; exit 1; }
 	@docker info        >/dev/null 2>&1 || { echo "ERROR: Docker is not running. Start Docker and try again."; exit 1; }
 
 # Start the local kind cluster and deploy the full pipeline.
@@ -256,7 +258,7 @@ dev-up:
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-oracle-price-worker:local,docker-build-oracle-price-worker LOCAL=1)
 	$(call build-if-needed,stl-morpho-indexer:local,docker-build-morpho-indexer LOCAL=1)
-	$(call build-if-needed,stl-sparklend-tracker:local,docker-build-sparklend-position-tracker LOCAL=1)
+	$(call build-if-needed,stl-sparklend-position-tracker:local,docker-build-sparklend-position-tracker LOCAL=1)
 	$(MAKE) kind-load-workers kind-deploy-workers
 	$(call build-if-needed,stl-temporal-worker:local,docker-build-temporal-worker LOCAL=1)
 	$(MAKE) kind-load-temporal-worker kind-deploy-temporal-worker
@@ -265,7 +267,8 @@ dev-up:
 	@echo "  [6/6] Ready"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "==> Waiting for all pods to be ready..."
-	@kubectl wait --for=condition=ready pod --all -n stl --timeout=120s --field-selector=status.phase!=Succeeded 2>/dev/null || true
+	@kubectl wait --for=condition=ready pod --all -n stl --timeout=120s --field-selector=status.phase!=Succeeded \
+	  || { echo "ERROR: pods not ready after 120s"; kubectl get pods -n stl; exit 1; }
 	@kubectl get pods -n stl
 
 # Generate .env files for all services (fetches secrets from AWS)
@@ -789,7 +792,7 @@ ECR_REPO_SPARKLEND_POSITION_TRACKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).am
 # Build Docker image for sparklend position tracker (ARM64 for Fargate Graviton)
 docker-build-sparklend-position-tracker:
 ifdef LOCAL
-	docker build -t stl-sparklend-tracker:local -f Dockerfile.sparklend-position-tracker .
+	docker build -t stl-sparklend-position-tracker:local -f Dockerfile.sparklend-position-tracker .
 else
 	@echo "==> Building SparkLend Position Tracker Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)"
@@ -1208,7 +1211,7 @@ kind-create:
 	  sed "s|STL_DATA_DIR|$$HOME/.stl-local|g" k8s/kind.yaml | kind create cluster --config -
 
 kind-delete:
-	kind delete cluster --name stl-local
+	kind get clusters | grep -q stl-local && kind delete cluster --name stl-local || true
 
 kind-infra:
 	kubectl apply -f k8s/namespace.yaml
@@ -1224,15 +1227,16 @@ kind-config:
 kind-secrets:
 	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value \
 	  --secret-id stl-sentinelstaging-alchemy-api-key \
-	  --query SecretString --output text) || \
+	  --query SecretString --output text | jq -r '.alchemy_api_key // empty' 2>/dev/null || true) || \
 	  { echo "ERROR: Failed to fetch ALCHEMY_API_KEY from AWS Secrets Manager. Make sure your AWS profile is set to the staging account (e.g. export AWS_PROFILE=<your-staging-profile>)."; exit 1; }; \
+	test -n "$$ALCHEMY_API_KEY" || { echo "ERROR: ALCHEMY_API_KEY is empty — check the secret format in AWS Secrets Manager."; exit 1; }; \
 	COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value \
 	  --secret-id coingecko_api_key \
 	  --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
 	  { echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
 	ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value \
 	  --secret-id etherscan_api_key \
-	  --query SecretString --output text) || \
+	  --query SecretString --output text | jq -r '.etherscan_api_key // empty' 2>/dev/null || true) || \
 	  { echo "WARNING: Failed to fetch ETHERSCAN_API_KEY from AWS Secrets Manager."; ETHERSCAN_API_KEY=''; }; \
 	kubectl create secret generic stl-secrets \
 	  --from-literal=ALCHEMY_API_KEY=$$ALCHEMY_API_KEY \
@@ -1261,7 +1265,7 @@ kind-load-watcher:
 kind-load-workers:
 	kind load docker-image stl-oracle-price-worker:local --name stl-local
 	kind load docker-image stl-morpho-indexer:local       --name stl-local
-	kind load docker-image stl-sparklend-tracker:local    --name stl-local
+	kind load docker-image stl-sparklend-position-tracker:local    --name stl-local
 
 kind-deploy-watcher:
 	kubectl apply -f k8s/apps/watcher.yaml -n stl

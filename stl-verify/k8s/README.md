@@ -66,7 +66,7 @@ open http://localhost:8233/namespaces/sentinel/schedules
 
 ## Configuration
 
-Non-sensitive environment variables are defined in `k8s/config/configmap.yaml` (`stl-config`) and applied automatically during `dev-up`. This includes database URLs, AWS endpoints, Temporal host, chain ID, and blochckain provider URLs.
+Non-sensitive environment variables are defined in `k8s/config/configmap.yaml` (`stl-config`) and applied automatically during `dev-up`. This includes database URLs, AWS endpoints, Temporal host, chain ID, and blockckain provider URLs.
 
 Secrets (`ALCHEMY_API_KEY`, `COINGECKO_API_KEY`, `ETHERSCAN_API_KEY`) are fetched from AWS Secrets Manager and stored in the `stl-secrets` Kubernetes secret. Run `make kind-secrets` to re-fetch and reapply them (requires `AWS_PROFILE` to be set to your staging profile).
 

@@ -5,8 +5,6 @@ metadata:
 data:
   CHAIN_ID: "1"
   AWS_REGION: us-east-1
-  AWS_ACCESS_KEY_ID: test
-  AWS_SECRET_ACCESS_KEY: test
   AWS_SNS_TOPIC_ARN: arn:aws:sns:us-east-1:000000000000:stl-ethereum-blocks.fifo
   AWS_SNS_ENDPOINT: http://localstack:4566
   AWS_SQS_ENDPOINT: http://localstack:4566

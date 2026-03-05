@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: sparklend-position-tracker
-          image: stl-sparklend-tracker:local
+          image: stl-sparklend-position-tracker:local
           imagePullPolicy: Never
           envFrom:
             - configMapRef:

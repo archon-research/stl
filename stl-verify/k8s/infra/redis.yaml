@@ -17,8 +17,6 @@ spec:
           image: redis:8.0-M04-alpine
           command:
             - redis-server
-            - --appendonly
-            - "yes"
             - --maxmemory
             - 4gb
             - --maxmemory-policy

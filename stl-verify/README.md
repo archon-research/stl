@@ -11,7 +11,7 @@ The watcher consists of two main services:
 
 ## Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - Docker
 - [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation) — Kubernetes IN Docker
 - [kubectl](https://kubernetes.io/docs/tasks/tools/) — Kubernetes CLI
@@ -37,48 +37,6 @@ This creates a local `kind` Kubernetes cluster (`stl-local`) and deploys the ful
 All services are accessible at `localhost` — no port-forwarding needed.
 
 To stop: `make dev-down` | To wipe and restart: `make dev-reset`
-
-### 3. Configure Environment
-
-```bash
-# Required
-ALCHEMY_API_KEY=your_alchemy_api_key_here
-
-# Optional (defaults shown)
-ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable
-REDIS_ADDR=localhost:6379
-REDIS_PASSWORD=
-
-# AWS/LocalStack
-AWS_SNS_ENDPOINT=http://localhost:4566
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=test
-AWS_SECRET_ACCESS_KEY=test
-
-# SNS FIFO Topic (single topic for all event types)
-AWS_SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:stl-ethereum-blocks.fifo
-
-# Tracing
-JAEGER_ENDPOINT=localhost:4317
-ENVIRONMENT=development
-
-# Features
-ENABLE_BACKFILL=false
-```
-
-### 3. Run the Watcher
-
-```bash
-go run ./cmd/watcher -disable-blobs
-```
-
-Or with flags:
-
-```bash
-# Enable pprof profiling server
-go run ./cmd/watcher -disable-blobs -pprof :6060
-```
 
 ## Command-Line Flags
 
