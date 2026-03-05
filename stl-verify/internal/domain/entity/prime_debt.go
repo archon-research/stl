@@ -8,6 +8,9 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+// ray = 1e27 — the MakerDAO RAY unit used for cumulative rate.
+var ray = new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
+
 // Prime represents a registered prime agent vault tracked for debt.
 type Prime struct {
 	ID           int64
@@ -50,4 +53,14 @@ func (d *PrimeDebt) Validate() error {
 		return fmt.Errorf("synced_at is required")
 	}
 	return nil
+}
+
+// ComputeDebtWad computes vault debt as a wad-scaled *big.Int (18 decimals).
+//
+// Formula: art (wad, 1e18) × rate (ray, 1e27) = rad (1e45) → ÷ 1e27 → wad (1e18).
+//
+// To recover a human-readable USDS amount, divide the result by 1e18.
+func ComputeDebtWad(art, rate *big.Int) *big.Int {
+	rad := new(big.Int).Mul(art, rate)
+	return new(big.Int).Div(rad, ray)
 }

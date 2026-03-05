@@ -17,7 +17,6 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -170,7 +169,7 @@ func (s *VaultDebtService) resolveIlks(ctx context.Context, primes []entity.Prim
 
 	ilkMap, err := s.caller.ResolveIlks(ctx, vaults, big.NewInt(blockNum))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve ilks at block %d: %w", blockNum, err)
 	}
 
 	resolved := make([]resolvedPrime, 0, len(primes))
@@ -218,7 +217,7 @@ func (s *VaultDebtService) syncAll(ctx context.Context, primes []resolvedPrime) 
 	// Single multicall for all rate + art reads.
 	results, err := s.caller.ReadDebts(ctx, queries, big.NewInt(blockNum))
 	if err != nil {
-		return fmt.Errorf("read debts: %w", err)
+		return fmt.Errorf("read debts at block %d: %w", blockNum, err)
 	}
 
 	// Build snapshots from results.
@@ -239,7 +238,7 @@ func (s *VaultDebtService) syncAll(ctx context.Context, primes []resolvedPrime) 
 			continue
 		}
 
-		debtWad := blockchain.ComputeDebtWad(r.Art, r.Rate)
+		debtWad := entity.ComputeDebtWad(r.Art, r.Rate)
 
 		s.logger.Debug("read vault debt",
 			"prime", prime.Name,
