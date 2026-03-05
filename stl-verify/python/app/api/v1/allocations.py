@@ -1,17 +1,30 @@
 import dataclasses
 from datetime import datetime
 from decimal import Decimal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import AfterValidator, BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_repository import PostgresAllocationRepository
 from app.adapters.postgres.engine import get_engine
 from app.config import Settings, get_settings
+from app.domain.entities.allocation import EthAddress
 from app.services.allocation_service import AllocationService
 
 router = APIRouter()
+
+
+def _validate_eth_address(value: str) -> EthAddress:
+    """Convert a raw path string to an EthAddress.
+
+    Raises ValueError on malformed input, which FastAPI surfaces as HTTP 422.
+    """
+    return EthAddress(value)
+
+
+EthAddressPath = Annotated[str, AfterValidator(_validate_eth_address)]
 
 
 class StarResponse(BaseModel):
@@ -57,7 +70,7 @@ async def list_stars(service: AllocationService = Depends(_get_service)):
 
 @router.get("/stars/{star_id}/allocations", response_model=list[AllocationPositionResponse])
 async def list_allocations(
-    star_id: str,
+    star_id: EthAddressPath,
     block_number: int | None = None,
     service: AllocationService = Depends(_get_service),
 ):

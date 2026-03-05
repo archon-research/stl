@@ -2,9 +2,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.domain.entities.allocation import Star
+from app.domain.entities.allocation import EthAddress, Star
 from app.services.allocation_service import AllocationService
 from tests.conftest import make_allocation_position
+
+_VALID_ADDR = EthAddress("0x" + "ab" * 20)
 
 
 @pytest.mark.asyncio
@@ -32,10 +34,10 @@ async def test_list_allocations_by_star_delegates_to_repository():
     repo.list_allocations_by_star.return_value = [position]
     service = AllocationService(repo)
 
-    result = await service.list_allocations_by_star("0xabc")
+    result = await service.list_allocations_by_star(_VALID_ADDR)
 
     assert result == [position]
-    repo.list_allocations_by_star.assert_awaited_once_with("0xabc", None)
+    repo.list_allocations_by_star.assert_awaited_once_with(_VALID_ADDR, None)
 
 
 @pytest.mark.asyncio
@@ -45,10 +47,10 @@ async def test_list_allocations_by_star_with_block_number_passes_it_to_repositor
     repo.list_allocations_by_star.return_value = [position]
     service = AllocationService(repo)
 
-    result = await service.list_allocations_by_star("0xabc", block_number=1000)
+    result = await service.list_allocations_by_star(_VALID_ADDR, block_number=1000)
 
     assert result == [position]
-    repo.list_allocations_by_star.assert_awaited_once_with("0xabc", 1000)
+    repo.list_allocations_by_star.assert_awaited_once_with(_VALID_ADDR, 1000)
 
 
 @pytest.mark.asyncio
@@ -57,6 +59,7 @@ async def test_list_allocations_by_star_returns_empty_for_unknown_star():
     repo.list_allocations_by_star.return_value = []
     service = AllocationService(repo)
 
-    result = await service.list_allocations_by_star("0xdeadbeef")
+    unknown_addr = EthAddress("0x" + "de" * 20)
+    result = await service.list_allocations_by_star(unknown_addr)
 
     assert result == []

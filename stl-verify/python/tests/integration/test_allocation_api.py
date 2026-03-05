@@ -190,3 +190,10 @@ def test_list_allocations_returns_latest_block_version_after_reorg(client: TestC
     assert len(data) == 1
     assert data[0]["block_version"] == 1
     assert data[0]["balance"] == "999.00"
+
+
+def test_list_allocations_returns_422_for_malformed_star_id(client: TestClient) -> None:
+    """A star_id that is not a valid Ethereum address should be rejected at the API boundary."""
+    response = client.get("/v1/stars/0xdeadbeef/allocations")
+
+    assert response.status_code == 422

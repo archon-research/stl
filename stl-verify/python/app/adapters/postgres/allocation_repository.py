@@ -1,7 +1,7 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.domain.entities.allocation import AllocationPosition, Star
+from app.domain.entities.allocation import AllocationPosition, EthAddress, Star
 from app.ports.allocation_repository import AllocationRepository
 
 
@@ -23,10 +23,10 @@ class PostgresAllocationRepository(AllocationRepository):
         )
         return [Star(id="0x" + row.address, name=row.star, address="0x" + row.address) for row in result]
 
-    async def list_allocations_by_star(self, star_id: str, block_number: int | None = None) -> list[AllocationPosition]:
-        proxy_hex = star_id.removeprefix("0x")
-        if len(proxy_hex) != 40 or not all(c in "0123456789abcdefABCDEF" for c in proxy_hex):
-            return []
+    async def list_allocations_by_star(
+        self, star_id: EthAddress, block_number: int | None = None
+    ) -> list[AllocationPosition]:
+        proxy_hex = star_id.hex
         if block_number is None:
             block_filter = "ap.block_number = (SELECT MAX(block_number) FROM allocation_position WHERE proxy_address = decode(:proxy_hex, 'hex'))"
             params: dict = {"proxy_hex": proxy_hex}
