@@ -75,6 +75,18 @@ async def _seed(async_url: str) -> None:
                     {"tid": token_id, "proxy": _PROXY_HEX, "bn": block, "tx": tx_hex},
                 )
 
+            # Reorg simulation: a second block_version (1) for the block-1000 event with
+            # corrected balance. The query must return only this version, not version 0.
+            await conn.execute(
+                text(
+                    "INSERT INTO allocation_position "
+                    "(chain_id, token_id, star, proxy_address, balance, "
+                    "block_number, block_version, tx_hash, log_index, tx_amount, direction) "
+                    "VALUES (1, :tid, 'spark', decode(:proxy, 'hex'), 999, 1000, 1, decode(:tx, 'hex'), 0, 999, 'in')"
+                ),
+                {"tid": token_id, "proxy": _PROXY_HEX, "tx": _TX1_HEX},
+            )
+
             # One row for a second star ('grove') at block 1000 with its own proxy address.
             await conn.execute(
                 text(
@@ -166,3 +178,15 @@ def test_list_allocations_for_unknown_star_returns_empty(client: TestClient) -> 
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_list_allocations_returns_latest_block_version_after_reorg(client: TestClient) -> None:
+    """When two block_version rows exist for the same event the latest version wins."""
+    response = client.get(f"/v1/stars/0x{_PROXY_HEX}/allocations?block_number=1000")
+
+    assert response.status_code == 200
+    data = response.json()
+    # The reorg fixture inserted block_version=0 and block_version=1; only version 1 is canon.
+    assert len(data) == 1
+    assert data[0]["block_version"] == 1
+    assert data[0]["balance"] == "999.00"

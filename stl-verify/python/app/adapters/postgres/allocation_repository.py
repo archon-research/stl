@@ -37,7 +37,7 @@ class PostgresAllocationRepository(AllocationRepository):
         result = await self._conn.execute(
             text(
                 f"""
-                SELECT
+                SELECT DISTINCT ON (ap.chain_id, ap.token_id, ap.proxy_address, ap.block_number, ap.tx_hash, ap.log_index, ap.direction)
                     ap.id,
                     ap.chain_id,
                     ap.star,
@@ -58,7 +58,7 @@ class PostgresAllocationRepository(AllocationRepository):
                 JOIN token t ON t.id = ap.token_id
                 WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
                   AND {block_filter}
-                ORDER BY ap.block_number DESC
+                ORDER BY ap.chain_id, ap.token_id, ap.proxy_address, ap.block_number, ap.tx_hash, ap.log_index, ap.direction, ap.block_version DESC
                 """
             ),
             params,
