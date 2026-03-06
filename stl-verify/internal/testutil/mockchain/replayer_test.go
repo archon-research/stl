@@ -350,15 +350,24 @@ func TestReplayer_SetInterval(t *testing.T) {
 	}
 }
 
-// TestReplayer_SetInterval_WhileRunning verifies that SetInterval returns an error when called after Start.
+// TestReplayer_SetInterval_WhileRunning verifies that SetInterval succeeds while running
+// and that the new interval takes effect for subsequent emissions.
 func TestReplayer_SetInterval_WhileRunning(t *testing.T) {
 	r, received := newTestReplayer(t)
 	r.Start()
 	drain(t, received, 1)
 	defer r.Stop()
 
-	if err := r.SetInterval(100 * time.Millisecond); err == nil {
-		t.Error("expected error when calling SetInterval while running")
+	if err := r.SetInterval(100 * time.Millisecond); err != nil {
+		t.Errorf("unexpected error calling SetInterval while running: %v", err)
+	}
+
+	// Verify next block arrives within the new interval's window.
+	start := time.Now()
+	drain(t, received, 1)
+	elapsed := time.Since(start)
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("block took too long after interval change: %v (want <500ms)", elapsed)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -21,16 +22,45 @@ const (
 	rpcErrInternal       = -32603
 )
 
+// ErrorMode controls how the HTTP RPC handler behaves for error injection.
+type ErrorMode int32
+
+const (
+	// ErrorModeNone is normal operation.
+	ErrorModeNone ErrorMode = 0
+	// ErrorMode429 always returns HTTP 429 Too Many Requests.
+	ErrorMode429 ErrorMode = 1
+	// ErrorMode500 always returns HTTP 500 Internal Server Error.
+	ErrorMode500 ErrorMode = 2
+	// ErrorModeTimeout blocks indefinitely, simulating a client-side timeout.
+	ErrorModeTimeout ErrorMode = 3
+	// ErrorModeOnce429 returns HTTP 429 once, then resets to ErrorModeNone.
+	ErrorModeOnce429 ErrorMode = 4
+	// ErrorModeOnce500 returns HTTP 500 once, then resets to ErrorModeNone.
+	ErrorModeOnce500 ErrorMode = 5
+)
+
 type httpHandler struct {
-	store    *DataStore
-	replayer *Replayer
+	store     *DataStore
+	replayer  *Replayer
+	errorMode atomic.Int32
 }
 
 func newHTTPHandler(store *DataStore, replayer *Replayer) *httpHandler {
 	return &httpHandler{store: store, replayer: replayer}
 }
 
+// SetErrorMode sets the error injection mode for subsequent requests.
+func (h *httpHandler) SetErrorMode(mode ErrorMode) {
+	h.errorMode.Store(int32(mode))
+}
+
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Error injection: check mode before processing the request.
+	if injected := h.handleErrorInjection(w, r); injected {
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -57,6 +87,47 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	result, rpcErr := h.dispatch(req)
 	h.respond(w, req.ID, result, rpcErr)
+}
+
+// handleErrorInjection checks the current error mode and writes the appropriate
+// HTTP error response. Returns true if the request was handled by injection.
+func (h *httpHandler) handleErrorInjection(w http.ResponseWriter, r *http.Request) bool {
+	mode := ErrorMode(h.errorMode.Load())
+
+	switch mode {
+	case ErrorModeNone:
+		return false
+
+	case ErrorMode429:
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return true
+
+	case ErrorMode500:
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return true
+
+	case ErrorModeTimeout:
+		// Block until the client disconnects or context is cancelled.
+		<-r.Context().Done()
+		return true
+
+	case ErrorModeOnce429:
+		// Reset to None on success; only one request gets the error.
+		if h.errorMode.CompareAndSwap(int32(ErrorModeOnce429), int32(ErrorModeNone)) {
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return true
+		}
+		return false
+
+	case ErrorModeOnce500:
+		if h.errorMode.CompareAndSwap(int32(ErrorModeOnce500), int32(ErrorModeNone)) {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return true
+		}
+		return false
+	}
+
+	return false
 }
 
 func (h *httpHandler) handleBatch(w http.ResponseWriter, raw json.RawMessage) {
@@ -143,6 +214,15 @@ func (h *httpHandler) getBlockByHash(req rpcutil.Request) (json.RawMessage, *jso
 		return nil, &jsonRPCErrorObj{Code: rpcErrInvalidParams, Message: "missing or invalid hash parameter"}
 	}
 
+	// Check reorg blocks first (reorg walk-back uses these hashes).
+	if reorgHeader, found := h.store.GetReorgHeader(hash); found {
+		raw, err := json.Marshal(reorgHeader)
+		if err != nil {
+			return nil, &jsonRPCErrorObj{Code: rpcErrInternal, Message: "internal error"}
+		}
+		return raw, nil
+	}
+
 	header, found := h.replayer.HeaderForHash(hash)
 	if !found {
 		return json.RawMessage("null"), nil
@@ -176,24 +256,34 @@ func (h *httpHandler) getBlockByNumber(req rpcutil.Request) (json.RawMessage, *j
 
 // getDataByHashOrNumber serves eth_getBlockReceipts, trace_block, and eth_getBlobSidecars.
 // The first param may be a 32-byte hash (66 chars) or a hex block number (shorter).
+// Reorg blocks are checked first so that reorg walk-back requests are served correctly.
 func (h *httpHandler) getDataByHashOrNumber(req rpcutil.Request, dataType string) (json.RawMessage, *jsonRPCErrorObj) {
 	param, ok := extractStringParam(req)
 	if !ok {
 		return nil, &jsonRPCErrorObj{Code: rpcErrInvalidParams, Message: "missing or invalid parameter"}
 	}
 
-	var idx int
-	var found bool
 	if isHashParam(param) {
-		idx, found = h.replayer.TemplateIndexForHash(param)
-	} else {
-		blockNum, err := hexutil.ParseInt64(param)
-		if err != nil {
+		// Check reorg blocks first.
+		if raw, found := h.store.GetReorgBlock(param, dataType); found {
+			return raw, nil
+		}
+		idx, found := h.replayer.TemplateIndexForHash(param)
+		if !found {
 			return json.RawMessage("null"), nil
 		}
-		idx, found = h.replayer.TemplateIndexForNumber(blockNum)
+		raw, ok := h.store.Get(idx, dataType)
+		if !ok {
+			return json.RawMessage("null"), nil
+		}
+		return raw, nil
 	}
 
+	blockNum, err := hexutil.ParseInt64(param)
+	if err != nil {
+		return json.RawMessage("null"), nil
+	}
+	idx, found := h.replayer.TemplateIndexForNumber(blockNum)
 	if !found {
 		return json.RawMessage("null"), nil
 	}

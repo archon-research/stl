@@ -95,17 +95,14 @@ func (r *Replayer) baseBlockNumber() int64 {
 	return n
 }
 
-// SetInterval sets the block emission interval. Must be called before Start.
-// Returns an error if d <= 0 or if the replayer is already running.
+// SetInterval sets the block emission interval. Can be called before or during replay.
+// Returns an error if d <= 0. Takes effect on the next tick after the current interval fires.
 func (r *Replayer) SetInterval(d time.Duration) error {
 	if d <= 0 {
 		return fmt.Errorf("mockchain: SetInterval: duration must be positive, got %v", d)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.running {
-		return fmt.Errorf("mockchain: SetInterval: cannot change interval while running")
-	}
 	r.interval = d
 	return nil
 }
@@ -136,11 +133,11 @@ func (r *Replayer) Start() {
 func (r *Replayer) emitLoop(stopCh <-chan struct{}, doneCh chan struct{}) {
 	defer close(doneCh)
 
-	r.mu.Lock()
-	interval := r.interval
-	r.mu.Unlock()
+	r.mu.RLock()
+	currentInterval := r.interval
+	r.mu.RUnlock()
 
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(currentInterval)
 	defer ticker.Stop()
 
 	for {
@@ -154,6 +151,14 @@ func (r *Replayer) emitLoop(stopCh <-chan struct{}, doneCh chan struct{}) {
 			default:
 			}
 			r.emit()
+			// Re-read interval and reset ticker if it changed.
+			r.mu.RLock()
+			newInterval := r.interval
+			r.mu.RUnlock()
+			if newInterval != currentInterval {
+				currentInterval = newInterval
+				ticker.Reset(currentInterval)
+			}
 		}
 	}
 }
@@ -298,6 +303,13 @@ func (r *Replayer) headerForNumberLocked(blockNum int64) outbound.BlockHeader {
 	}
 
 	return patchHeader(template, blockNum, loopIndex, parentHash)
+}
+
+// setReorgTip updates prevDerivedHash so the next emission uses the reorg tip as its parent.
+// It does NOT change blocksEmitted or lastBlockNumber — the block number sequence continues normally.
+// Must be called while holding r.mu (write lock).
+func (r *Replayer) setReorgTip(hash string) {
+	r.prevDerivedHash = hash
 }
 
 // getStatus returns a snapshot of the Replayer's current state.
