@@ -4,9 +4,15 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "stl-verify/python/**"
+      - ".github/workflows/python-ci.yml"
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - "stl-verify/python/**"
+      - ".github/workflows/python-ci.yml"
 
 # Cancel in-progress runs for the same branch/PR
 concurrency:
