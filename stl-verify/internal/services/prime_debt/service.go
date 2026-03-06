@@ -8,7 +8,7 @@
 //  4. Every SweepEveryNBlocks, batch-read all debts via VatCaller.ReadDebts.
 //  5. Compute exact debt: art * rate / 1e27 (wad-scaled big.Int).
 //  6. Write all snapshots (including block number) via PrimeDebtRepository.SaveDebtSnapshots.
-package vault_debt
+package prime_debt
 
 import (
 	"context"
@@ -64,10 +64,10 @@ func configDefaults() Config {
 // each prime agent's vault debt from the Vat contract.
 type VaultDebtService struct {
 	config           Config
-	caller           outbound.VatCaller
+	caller           VatCaller
 	repo             outbound.PrimeDebtRepository
 	sqsConsumer      outbound.SQSConsumer
-	blockQuerier     outbound.BlockQuerier
+	blockQuerier     BlockQuerier
 	logger           *slog.Logger
 	resolved         []resolvedPrime
 	blocksSinceSweep int
@@ -78,10 +78,10 @@ type VaultDebtService struct {
 // NewVaultDebtService creates a new VaultDebtService.
 func NewVaultDebtService(
 	config Config,
-	caller outbound.VatCaller,
+	caller VatCaller,
 	repo outbound.PrimeDebtRepository,
 	sqsConsumer outbound.SQSConsumer,
-	blockQuerier outbound.BlockQuerier,
+	blockQuerier BlockQuerier,
 ) (*VaultDebtService, error) {
 	if caller == nil {
 		return nil, fmt.Errorf("vat caller is required")
@@ -187,7 +187,7 @@ func (s *VaultDebtService) processBlock(
 	}
 	s.blocksSinceSweep = 0
 
-	return s.syncAll(ctx, event.BlockNumber)
+	return s.syncAll(ctx, event.BlockNumber, event.Version)
 }
 
 // latestBlock fetches the latest block number from the node.
@@ -235,14 +235,14 @@ func (s *VaultDebtService) resolveIlks(ctx context.Context, primes []entity.Prim
 
 // syncAll batch-reads on-chain debt for all primes at the given block
 // and writes snapshots to Postgres.
-func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64) error {
+func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, blockVersion int) error {
 	start := time.Now()
 	syncedAt := start.UTC()
 
 	// Build queries.
-	queries := make([]outbound.DebtQuery, len(s.resolved))
+	queries := make([]DebtQuery, len(s.resolved))
 	for i, p := range s.resolved {
-		queries[i] = outbound.DebtQuery{
+		queries[i] = DebtQuery{
 			Ilk:          p.ilk,
 			VaultAddress: p.VaultAddress,
 		}
@@ -282,11 +282,12 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64) error
 		)
 
 		snapshots = append(snapshots, &entity.PrimeDebt{
-			PrimeID:     prime.ID,
-			IlkName:     ilkToString(prime.ilk),
-			DebtWad:     debtWad,
-			BlockNumber: blockNumber,
-			SyncedAt:    syncedAt,
+			PrimeID:      prime.ID,
+			IlkName:      ilkToString(prime.ilk),
+			DebtWad:      debtWad,
+			BlockNumber:  blockNumber,
+			BlockVersion: blockVersion,
+			SyncedAt:     syncedAt,
 		})
 	}
 

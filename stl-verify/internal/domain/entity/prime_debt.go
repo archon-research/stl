@@ -25,9 +25,10 @@ type PrimeDebt struct {
 	IlkName string
 	// DebtWad is the exact debt in wad units (art * rate / 1e27).
 	// The value is an integer scaled by 1e18 (wad precision).
-	DebtWad     *big.Int
-	BlockNumber int64
-	SyncedAt    time.Time
+	DebtWad      *big.Int
+	BlockNumber  int64
+	BlockVersion int
+	SyncedAt     time.Time
 }
 
 // Validate checks that the snapshot is well-formed before persistence.
