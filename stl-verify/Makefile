@@ -35,7 +35,11 @@
 		kind-deploy-watcher kind-deploy-workers kind-deploy-temporal-worker \
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate docker-build-temporal-worker \
-		kind-infra-ci kind-ci-up kind-ci-down
+		kind-infra-ci kind-ci-up kind-ci-down \
+		docker-build-mock-blockchain-server docker-push-mock-blockchain-server docker-release-mock-blockchain-server \
+		docker-release-mock-blockchain-server-staging \
+		kind-build-mock-blockchain-server kind-load-mock-blockchain-server kind-deploy-mock-blockchain-server kind-redeploy-mock-blockchain-server \
+		kind-use-mock kind-use-alchemy k6-stress-test stress-test-data stress-test
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -1466,3 +1470,189 @@ kind-infra-ci: kind-create
 kind-ci-up: kind-infra-ci
 
 kind-ci-down: kind-delete
+
+# =============================================================================
+# Docker Build & Push - Mock Blockchain Server
+# =============================================================================
+
+ECR_REPO_MOCK_BLOCKCHAIN_SERVER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-mock-blockchain-server
+
+# Build Docker image for mock-blockchain-server (ARM64 for Fargate Graviton)
+docker-build-mock-blockchain-server:
+	@echo "==> Building Mock Blockchain Server Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.mock-blockchain-server \
+		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):latest \
+		--load .
+
+# Push mock-blockchain-server Docker image to ECR
+docker-push-mock-blockchain-server: ecr-login
+	@echo "==> Pushing Mock Blockchain Server Docker image to ECR..."
+	docker push $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):latest
+
+# Build and push mock-blockchain-server in one step (captures tag at start for consistency)
+docker-release-mock-blockchain-server: ecr-login _docker-release-mock-blockchain-server-internal
+
+_docker-release-mock-blockchain-server-internal:
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Mock Blockchain Server Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.mock-blockchain-server \
+		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$$TAG \
+		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):latest \
+		--load . && \
+	echo "==> Pushing Mock Blockchain Server Docker image to ECR..." && \
+	docker push $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$$TAG && \
+	docker push $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):latest && \
+	echo "==> Mock Blockchain Server Docker image released: $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$$TAG"
+
+docker-release-mock-blockchain-server-staging:
+	@$(MAKE) docker-release-mock-blockchain-server ENV=sentinelstaging
+
+# =============================================================================
+# Kind (local k8s) - Mock Blockchain Server
+# =============================================================================
+
+# Build local Docker image for kind
+kind-build-mock-blockchain-server:
+	docker build -f Dockerfile.mock-blockchain-server -t stl-mock-blockchain-server:local .
+
+# Build and load image into kind cluster
+kind-load-mock-blockchain-server: kind-build-mock-blockchain-server
+	kind load docker-image stl-mock-blockchain-server:local --name stl-local
+
+# Deploy mock-blockchain-server to kind cluster (populates LocalStack data first)
+kind-deploy-mock-blockchain-server: stress-test-data
+	kubectl apply -f k8s/apps/mock-blockchain-server.yaml -n stl
+
+# Rebuild, reload, and restart mock-blockchain-server in kind
+kind-redeploy-mock-blockchain-server: kind-load-mock-blockchain-server
+	kubectl rollout restart deployment/mock-blockchain-server -n stl
+
+# Point watcher at mock-blockchain-server instead of Alchemy
+kind-use-mock:
+	kubectl set env deployment/watcher \
+		ALCHEMY_WS_URL=ws://mock-blockchain-server:8546 \
+		ALCHEMY_HTTP_URL=http://mock-blockchain-server:8546 \
+		-n stl
+
+# Restore watcher to real Alchemy (ConfigMap values take effect)
+kind-use-alchemy:
+	kubectl set env deployment/watcher ALCHEMY_WS_URL- ALCHEMY_HTTP_URL- -n stl
+
+# =============================================================================
+# Stress Tests
+# =============================================================================
+
+# Block data export configuration (override via environment or make flags)
+STRESS_TEST_SRC_BUCKET     ?= stl-sentinelstaging-ethereum-raw-89d540d0
+STRESS_TEST_PREFIX         ?= blocks/chain-1
+STRESS_TEST_START_BLOCK    ?= 16000000
+STRESS_TEST_BLOCK_COUNT    ?= 500
+STRESS_TEST_VERSION        ?= 1
+STRESS_TEST_LOCAL_BUCKET   ?= stress-test-data
+STRESS_TEST_LOCAL_ENDPOINT ?= http://localhost:4566
+STRESS_TEST_STAGING_BUCKET ?= stl-sentinelstaging-stress-test-data-89d540d0
+
+# Populate S3 with stress test block data.
+# Local (default):       creates bucket in LocalStack and exports blocks from staging.
+# Staging (ENV=sentinelstaging): creates real S3 bucket and exports blocks (one-time operator step).
+# Idempotent: skips export if block data already exists in the destination bucket.
+stress-test-data:
+ifeq ($(ENV),sentinelstaging)
+	@echo "==> Creating stress-test bucket in staging S3..."
+	aws s3 mb s3://$(STRESS_TEST_STAGING_BUCKET) --region $(AWS_REGION) 2>/dev/null || true
+	@COUNT=$$(aws s3 ls s3://$(STRESS_TEST_STAGING_BUCKET)/$(STRESS_TEST_PREFIX)/ --recursive 2>/dev/null | wc -l | tr -d ' '); \
+	if [ "$$COUNT" -gt "0" ]; then \
+	  echo "==> Block data already exists ($$COUNT files), skipping export"; \
+	else \
+	  echo "==> Exporting $(STRESS_TEST_BLOCK_COUNT) blocks to staging S3 (requires staging creds)..."; \
+	  go run ./cmd/stress-test/data-export \
+	    --env staging \
+	    --src-bucket $(STRESS_TEST_SRC_BUCKET) \
+	    --dest-bucket $(STRESS_TEST_STAGING_BUCKET) \
+	    --dest-prefix $(STRESS_TEST_PREFIX) \
+	    --start-block $(STRESS_TEST_START_BLOCK) \
+	    --block-count $(STRESS_TEST_BLOCK_COUNT) \
+	    --version $(STRESS_TEST_VERSION); \
+	fi
+else
+	@echo "==> Creating stress-test-data bucket in LocalStack..."
+	aws --endpoint-url $(STRESS_TEST_LOCAL_ENDPOINT) s3 mb s3://$(STRESS_TEST_LOCAL_BUCKET) --region us-east-1 2>/dev/null || true
+	@COUNT=$$(aws --endpoint-url $(STRESS_TEST_LOCAL_ENDPOINT) s3 ls s3://$(STRESS_TEST_LOCAL_BUCKET)/$(STRESS_TEST_PREFIX)/ --recursive 2>/dev/null | wc -l | tr -d ' '); \
+	if [ "$$COUNT" -gt "0" ]; then \
+	  echo "==> Block data already exists ($$COUNT files), skipping export"; \
+	else \
+	  echo "==> Exporting $(STRESS_TEST_BLOCK_COUNT) blocks to LocalStack (requires staging AWS credentials)..."; \
+	  go run ./cmd/stress-test/data-export \
+	    --env staging \
+	    --src-bucket $(STRESS_TEST_SRC_BUCKET) \
+	    --dest-bucket $(STRESS_TEST_LOCAL_BUCKET) \
+	    --dest-prefix $(STRESS_TEST_PREFIX) \
+	    --dest-endpoint $(STRESS_TEST_LOCAL_ENDPOINT) \
+	    --start-block $(STRESS_TEST_START_BLOCK) \
+	    --block-count $(STRESS_TEST_BLOCK_COUNT) \
+	    --version $(STRESS_TEST_VERSION); \
+	fi
+endif
+
+# Run k6 stress test locally against the kind cluster.
+# Truncates block_states first so finality boundary is clean.
+# SCENARIO: watcher-sustained (default), watcher-burst, watcher-reorg
+# INTERVAL_MS: block emission interval (default: 12000ms ~Ethereum, e.g. 250 for Base)
+stress-test:
+	kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify -c "TRUNCATE block_states CASCADE;" -q
+	kubectl exec -n stl deployment/redis -- redis-cli FLUSHDB
+	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
+	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo
+	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
+	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-backup.fifo
+	ADMIN_URL=http://localhost:8547 INTERVAL_MS=$(or $(INTERVAL_MS),12000) k6 run stress-test/k6/$(or $(SCENARIO),watcher-sustained).js
+
+# Run k6 stress test as a Job inside the cluster (kind or EKS).
+# SCENARIO: sustained (default), burst, reorg
+# INTERVAL_MS: block interval ms (default: 12000)
+# DURATION: test duration (default: 2m)
+k6-stress-test:
+	kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify -c "TRUNCATE block_states CASCADE;" -q
+	kubectl exec -n stl deployment/redis -- redis-cli FLUSHDB
+	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
+	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo
+	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
+	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-backup.fifo
+	kubectl create configmap k6-scripts --from-file=stress-test/k6/ -n stl --dry-run=client -o yaml | kubectl apply -f -
+	kubectl delete job k6-stress-test -n stl --ignore-not-found
+	sed -e 's|$${SCENARIO}|$(or $(SCENARIO),sustained)|g' \
+	    -e 's|$${INTERVAL_MS}|$(or $(INTERVAL_MS),12000)|g' \
+	    -e 's|$${DURATION}|$(or $(DURATION),2m)|g' \
+	    -e 's|$${REORG}|$(or $(REORG),)|g' \
+	    -e 's|$${REORG_DEPTH}|$(or $(REORG_DEPTH),5)|g' \
+	    -e 's|$${REORG_INTERVAL_S}|$(or $(REORG_INTERVAL_S),30)|g' \
+	    k8s/jobs/k6-stress-test.yaml | kubectl apply -f - -n stl
+	kubectl wait --for=condition=ready pod -l job-name=k6-stress-test -n stl --timeout=60s
+	kubectl logs job/k6-stress-test -n stl -f
+	kubectl wait --for=condition=complete job/k6-stress-test -n stl --timeout=10s
+	@echo "==> Verifying chain correctness..."
+	kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify -v chain_id=1 \
+	  -c "SELECT count(*) AS gaps FROM generate_series((SELECT min(number) FROM block_states WHERE chain_id = 1 AND NOT is_orphaned),(SELECT max(number) FROM block_states WHERE chain_id = 1 AND NOT is_orphaned)) AS s(n) LEFT JOIN block_states b ON b.number = s.n AND b.chain_id = 1 AND NOT b.is_orphaned WHERE b.number IS NULL;" \
+	  -c "SELECT count(*) AS unexpected_orphans FROM block_states WHERE chain_id = 1 AND is_orphaned AND number > (SELECT max(number) - 64 FROM block_states WHERE chain_id = 1);" \
+	  -c "SELECT count(*) AS broken_parent_links FROM block_states b JOIN block_states p ON p.number = b.number - 1 AND p.chain_id = b.chain_id AND NOT p.is_orphaned WHERE NOT b.is_orphaned AND b.chain_id = 1 AND b.parent_hash != p.hash;"
