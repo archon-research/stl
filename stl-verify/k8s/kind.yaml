@@ -1,0 +1,35 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: stl-local
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30432   # timescaledb
+        hostPort: 5432
+        listenAddress: "127.0.0.1"
+      - containerPort: 30433   # temporal-db
+        hostPort: 5433
+        listenAddress: "127.0.0.1"
+      - containerPort: 30379   # redis
+        hostPort: 6379
+        listenAddress: "127.0.0.1"
+      - containerPort: 30566   # localstack
+        hostPort: 4566
+        listenAddress: "127.0.0.1"
+      - containerPort: 30686   # jaeger UI
+        hostPort: 16686
+        listenAddress: "127.0.0.1"
+      - containerPort: 30317   # OTLP gRPC
+        hostPort: 4317
+        listenAddress: "127.0.0.1"
+      - containerPort: 30233   # temporal gRPC
+        hostPort: 7233
+        listenAddress: "127.0.0.1"
+      - containerPort: 30823   # temporal UI
+        hostPort: 8233
+        listenAddress: "127.0.0.1"
+    extraMounts:
+      - hostPath: STL_DATA_DIR/timescaledb
+        containerPath: /data/timescaledb
+      - hostPath: STL_DATA_DIR/temporal-db
+        containerPath: /data/temporal-db

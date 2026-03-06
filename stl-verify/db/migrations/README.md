@@ -5,7 +5,7 @@
 1. **Naming:** `YYYYMMDD_HHMMSS_description.sql` (use `date +"%Y%m%d_%H%M%S"`)
 2. **Plain SQL only** with self-tracking INSERT at end
 3. **Production:** Manual execution only
-4. **Local/Tests:** Auto-applied via docker-compose and migrator
+4. **Local/Tests:** Auto-applied via the kind cluster (`make dev-up`) and migrator
 
 ## Template
 ```sql
@@ -22,17 +22,17 @@ ON CONFLICT (filename) DO NOTHING;
 
 ## Local Development
 ```bash
-# Apply new migrations (recommended - keeps existing data)
-go run cmd/migrate/main.go
+# Apply new migrations (runs automatically on make dev-up)
+make kind-migrate
 
-# Alternative: Apply specific migration manually
-docker exec -i stl-verify-postgres psql -U postgres -d stl_verify < db/migrations/YOUR_FILE.sql
+# Apply specific migration manually
+psql postgres://postgres:postgres@localhost:5432/stl_verify < db/migrations/YOUR_FILE.sql
 
 # Verify applied
-docker exec -i stl-verify-postgres psql -U postgres -d stl_verify -c "SELECT filename, applied_at FROM migrations ORDER BY applied_at DESC LIMIT 5;"
+psql postgres://postgres:postgres@localhost:5432/stl_verify -c "SELECT filename, applied_at FROM migrations ORDER BY applied_at DESC LIMIT 5;"
 
 # Fresh start (⚠️ deletes all data)
-docker-compose down -v && docker-compose up
+make dev-wipe && make dev-up
 ```
 
 ## Production

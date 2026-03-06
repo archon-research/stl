@@ -2,7 +2,7 @@
 # Go 1.25+ best practices
 
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
-        dev-up dev-env dev-down dev-ips generate-er \
+        dev-up dev-up-rebuild dev-preflight dev-env dev-down dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
@@ -29,7 +29,13 @@
         erigon-status erigon-logs erigon-logs-follow erigon-deploy-readonly erigon-switch-readonly erigon-switch-sync erigon-mode \
         erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download \
 		build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill deploy-oracle-pricing-backfill-worker \
-		build-sparklend-backfill-arm64 deploy-sparklend-backfill erigon-sparklend-backfill
+		build-sparklend-backfill-arm64 deploy-sparklend-backfill erigon-sparklend-backfill \
+		kind-create kind-delete kind-infra kind-config kind-secrets kind-migrate \
+		kind-load-migrate kind-load-watcher kind-load-workers kind-load-temporal-worker \
+		kind-deploy-watcher kind-deploy-workers kind-deploy-temporal-worker \
+		kind-redeploy-watcher kind-redeploy-worker \
+		docker-build-migrate docker-build-temporal-worker \
+		kind-infra-ci kind-ci-up kind-ci-down
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -223,14 +229,82 @@ ci: ci-checks test-race
 # Local Development
 # =============================================================================
 
-# Start all local services (Postgres, Redis, LocalStack, Jaeger)
+# Build a Docker image only if COLD=1 or the image does not exist locally.
+# Usage: $(call build-if-needed,<image:tag>,<make-target> [ARGS])
+define build-if-needed
+@if [ "$(COLD)" = "1" ] || ! docker image inspect $(1) >/dev/null 2>&1; then \
+  $(MAKE) $(2); \
+else \
+  echo "  $(1) already present — skipping build (use COLD=1 to force rebuild)"; \
+fi
+endef
+
+# Verify required tools are installed before starting the cluster.
+dev-preflight:
+	@command -v kind    >/dev/null 2>&1 || { echo "ERROR: kind not found. Install from https://kind.sigs.k8s.io/docs/user/quick-start/#installation"; exit 1; }
+	@command -v kubectl >/dev/null 2>&1 || { echo "ERROR: kubectl not found. Install from https://kubernetes.io/docs/tasks/tools/"; exit 1; }
+	@docker info        >/dev/null 2>&1 || { echo "ERROR: Docker is not running. Start Docker and try again."; exit 1; }
+	@if [ ! -f ../.env.secrets ]; then \
+	  printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\n' | install -m 600 /dev/stdin ../.env.secrets; \
+	  echo ""; \
+	  echo "⚠️  .env.secrets created at the repo root (.env.secrets)"; \
+	  echo "   Fill in ALCHEMY_API_KEY (ask a team member), then run:"; \
+	  echo "   make kind-secrets && kubectl rollout restart deployment -n stl"; \
+	  echo ""; \
+	elif ! grep -q 'ALCHEMY_API_KEY=.\+' ../.env.secrets; then \
+	  echo ""; \
+	  echo "⚠️  ALCHEMY_API_KEY is not set in .env.secrets — the watcher will not function."; \
+	  echo "   Fill in the value, then run:"; \
+	  echo "   make kind-secrets && kubectl rollout restart deployment -n stl"; \
+	  echo ""; \
+	fi
+
+# Start the local kind cluster and deploy the full pipeline.
+# Warm start (default): reuses existing Docker images if present.
+# Cold start: COLD=1 make dev-up — rebuilds all images from scratch.
 dev-up:
-	@docker compose up -d
-	@until docker inspect stl-verify-localstack --format '{{.State.Health.Status}}' 2>/dev/null | grep -q healthy; do sleep 1; done
-	@./localstack-init/init-aws.sh > /dev/null 2>&1
-	@echo "Running database migrations..."
-	@DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" go run ./cmd/migrate
-	@$(MAKE) dev-env
+	@$(MAKE) dev-preflight
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "  [1/6] Cluster"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	$(MAKE) kind-create
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "  [2/6] Infrastructure"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	kubectl apply -f k8s/namespace.yaml
+	$(MAKE) kind-config kind-secrets kind-infra
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "  [3/6] Database migrations"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	$(call build-if-needed,stl-migrate:local,docker-build-migrate)
+	$(MAKE) kind-load-migrate kind-migrate
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "  [4/6] Watcher"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	$(call build-if-needed,stl-watcher:local,docker-build-watcher LOCAL=1)
+	$(MAKE) kind-load-watcher kind-deploy-watcher
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "  [5/6] Workers"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	$(call build-if-needed,stl-oracle-price-worker:local,docker-build-oracle-price-worker LOCAL=1)
+	$(call build-if-needed,stl-morpho-indexer:local,docker-build-morpho-indexer LOCAL=1)
+	$(call build-if-needed,stl-sparklend-position-tracker:local,docker-build-sparklend-position-tracker LOCAL=1)
+	$(MAKE) kind-load-workers kind-deploy-workers
+	$(call build-if-needed,stl-temporal-worker:local,docker-build-temporal-worker LOCAL=1)
+	$(MAKE) kind-load-temporal-worker kind-deploy-temporal-worker
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "  [6/6] Ready"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "==> Waiting for all pods to be ready..."
+	@kubectl wait --for=condition=ready pod --all -n stl --timeout=120s --field-selector=status.phase!=Succeeded \
+	  || { echo "ERROR: pods not ready after 120s"; kubectl get pods -n stl; exit 1; }
+	@kubectl get pods -n stl
 
 # Generate .env files for all services (fetches secrets from AWS)
 # Can be re-run independently to refresh secrets without restarting services.
@@ -401,13 +475,21 @@ dev-env:
 	@echo "Environment files generated."
 	@echo "Note: data-validator uses staging TigerData. Run 'make tigerdata-tunnel' first."
 
-# Stop all local services (preserves volumes and database data)
-dev-down:
-	@docker compose down
+# Cold start — rebuilds all images from scratch
+dev-up-rebuild:
+	$(MAKE) dev-up COLD=1
 
-# Stop all local services and delete volumes (destroys database data)
-dev-reset:
-	@docker compose down -v
+dev-down: kind-delete
+
+# Wipe cluster and all persisted data. Cannot be undone.
+dev-wipe:
+	@echo "WARNING: This will tear down the cluster and permanently delete all local database data."
+	@read -rp "Are you sure? [y/N] " confirm && [ "$$confirm" = "y" ] || exit 1
+	$(MAKE) kind-delete
+	rm -rf $$HOME/.stl-local
+
+# Wipe and recreate the local kind cluster
+dev-reset: dev-down dev-up
 
 # Show service IPs (useful for devcontainer)
 dev-ips:
@@ -508,7 +590,11 @@ ecs-deploy-watcher:
 
 # Named aliases for consistency with other service targets
 docker-build-watcher:
+ifdef LOCAL
+	docker build -t stl-watcher:local -f Dockerfile .
+else
 	@$(MAKE) docker-build
+endif
 
 docker-push-watcher:
 	@$(MAKE) docker-push
@@ -719,6 +805,9 @@ ECR_REPO_ORACLE_PRICE_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws
 
 # Build Docker image for oracle price worker (ARM64 for Fargate Graviton)
 docker-build-oracle-price-worker:
+ifdef LOCAL
+	docker build -t stl-oracle-price-worker:local -f Dockerfile.oracle-price-worker .
+else
 	@echo "==> Building Oracle Price Worker Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_ORACLE_PRICE_WORKER)"
 	@echo "    Tag: $(IMAGE_TAG)"
@@ -732,6 +821,7 @@ docker-build-oracle-price-worker:
 		-t $(ECR_REPO_ORACLE_PRICE_WORKER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_ORACLE_PRICE_WORKER):latest \
 		--load .
+endif
 
 # Push oracle price worker Docker image to ECR
 docker-push-oracle-price-worker: ecr-login
@@ -797,6 +887,9 @@ ECR_REPO_SPARKLEND_POSITION_TRACKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).am
 
 # Build Docker image for sparklend position tracker (ARM64 for Fargate Graviton)
 docker-build-sparklend-position-tracker:
+ifdef LOCAL
+	docker build -t stl-sparklend-position-tracker:local -f Dockerfile.sparklend-position-tracker .
+else
 	@echo "==> Building SparkLend Position Tracker Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)"
 	@echo "    Tag: $(IMAGE_TAG)"
@@ -810,6 +903,7 @@ docker-build-sparklend-position-tracker:
 		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest \
 		--load .
+endif
 
 # Push sparklend position tracker Docker image to ECR
 docker-push-sparklend-position-tracker: ecr-login
@@ -865,6 +959,9 @@ ECR_REPO_TEMPORAL_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
 
 # Build Docker image for temporal worker (ARM64 for Fargate Graviton)
 docker-build-temporal-worker:
+ifdef LOCAL
+	docker build -t stl-temporal-worker:local -f Dockerfile.temporal-worker .
+else
 	@echo "==> Building Temporal Worker Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_TEMPORAL_WORKER)"
 	@echo "    Tag: $(IMAGE_TAG)"
@@ -878,6 +975,7 @@ docker-build-temporal-worker:
 		-t $(ECR_REPO_TEMPORAL_WORKER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_TEMPORAL_WORKER):latest \
 		--load .
+endif
 
 # Push temporal worker Docker image to ECR
 docker-push-temporal-worker: ecr-login
@@ -931,6 +1029,9 @@ ECR_REPO_MORPHO_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/
 
 # Build Docker image for morpho indexer (ARM64 for Fargate Graviton)
 docker-build-morpho-indexer:
+ifdef LOCAL
+	docker build -t stl-morpho-indexer:local -f Dockerfile.morpho-indexer .
+else
 	@echo "==> Building Morpho Indexer Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_MORPHO_INDEXER)"
 	@echo "    Tag: $(IMAGE_TAG)"
@@ -944,6 +1045,7 @@ docker-build-morpho-indexer:
 		-t $(ECR_REPO_MORPHO_INDEXER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_MORPHO_INDEXER):latest \
 		--load .
+endif
 
 # Push morpho indexer Docker image to ECR
 docker-push-morpho-indexer: ecr-login
@@ -1269,3 +1371,98 @@ erigon-sparklend-backfill:
 		--concurrency=$(CONCURRENCY) \
 		--chain-id=$(CHAIN_ID) \
 		--aws-region=$(BACKFILL_AWS_REGION)'
+
+# =============================================================================
+# Local kind Cluster
+# =============================================================================
+
+kind-create:
+	@mkdir -p $$HOME/.stl-local/timescaledb $$HOME/.stl-local/temporal-db
+	kind get clusters | grep -qx stl-local || \
+	  sed "s|STL_DATA_DIR|$$HOME/.stl-local|g" k8s/kind.yaml | kind create cluster --config -
+
+kind-delete:
+	kind get clusters | grep -qx stl-local && kind delete cluster --name stl-local || true
+
+kind-infra:
+	kubectl apply -f k8s/namespace.yaml
+	kubectl apply -f k8s/infra/ -n stl
+	@echo "==> Waiting for timescaledb to be ready (may take a moment on first run — image pull)..."
+	kubectl rollout status statefulset/timescaledb -n stl --timeout=120s
+	@echo "==> Waiting for localstack to be ready..."
+	kubectl rollout status deployment/localstack   -n stl --timeout=120s
+
+kind-config:
+	kubectl apply -f k8s/config/configmap.yaml -n stl
+
+kind-secrets:
+	@test -f ../.env.secrets || printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\n' | install -m 600 /dev/stdin ../.env.secrets
+	@set -a; . ../.env.secrets; set +a; \
+	kubectl create secret generic stl-secrets \
+	  --from-literal=ALCHEMY_API_KEY=$$ALCHEMY_API_KEY \
+	  --from-literal=COINGECKO_API_KEY=$${COINGECKO_API_KEY:-} \
+	  --from-literal=ETHERSCAN_API_KEY=$${ETHERSCAN_API_KEY:-} \
+	  --from-literal=AWS_ACCESS_KEY_ID=test \
+	  --from-literal=AWS_SECRET_ACCESS_KEY=test \
+	  --namespace=stl \
+	  --dry-run=client -o yaml | kubectl apply -f -
+
+docker-build-migrate:
+	docker build -t stl-migrate:local -f Dockerfile.migrate .
+
+kind-load-migrate:
+	kind load docker-image stl-migrate:local --name stl-local
+
+kind-migrate:
+	kubectl delete job/migrate --ignore-not-found -n stl
+	kubectl apply -f k8s/jobs/migrate.yaml -n stl
+	@echo "==> Waiting for migration to complete..."
+	kubectl wait --for=condition=complete job/migrate -n stl --timeout=120s
+	@echo "==> Migration logs:"
+	kubectl logs -l job-name=migrate -n stl || true
+
+kind-load-watcher:
+	kind load docker-image stl-watcher:local --name stl-local
+
+kind-load-workers:
+	kind load docker-image stl-oracle-price-worker:local --name stl-local
+	kind load docker-image stl-morpho-indexer:local       --name stl-local
+	kind load docker-image stl-sparklend-position-tracker:local    --name stl-local
+
+kind-deploy-watcher:
+	kubectl apply -f k8s/apps/watcher.yaml -n stl
+
+kind-deploy-workers:
+	kubectl apply -f k8s/apps/workers/ -n stl
+
+kind-load-temporal-worker:
+	kind load docker-image stl-temporal-worker:local --name stl-local
+
+kind-deploy-temporal-worker:
+	kubectl apply -f k8s/apps/temporal-worker.yaml -n stl
+
+# Rebuild and redeploy a specific worker. Usage: make kind-redeploy-worker NAME=morpho-indexer
+kind-redeploy-worker:
+	@test -n "$(NAME)" || { echo "ERROR: NAME is required. Example: make kind-redeploy-worker NAME=morpho-indexer"; exit 1; }
+	$(MAKE) docker-build-$(NAME) LOCAL=1
+	kind load docker-image stl-$(NAME):local --name stl-local
+	kubectl rollout restart deployment/$(NAME) -n stl
+
+kind-redeploy-watcher:
+	$(MAKE) docker-build-watcher LOCAL=1
+	kind load docker-image stl-watcher:local --name stl-local
+	kubectl rollout restart deployment/watcher -n stl
+
+# CI targets — infra only, no apps, no secrets needed
+# Migrations run via go run (no Docker build required)
+kind-infra-ci: kind-create
+	kubectl apply -f k8s/namespace.yaml
+	$(MAKE) kind-config kind-infra
+	@echo "==> Running migrations..."
+	DATABASE_URL=postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable \
+	  go run ./cmd/migrate/...
+	@echo "==> CI infra ready"
+
+kind-ci-up: kind-infra-ci
+
+kind-ci-down: kind-delete
