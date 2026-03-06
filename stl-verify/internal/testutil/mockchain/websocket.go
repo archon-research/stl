@@ -143,6 +143,16 @@ func (h *wsHandler) writeError(conn *websocket.Conn, id json.RawMessage, code in
 	return nil
 }
 
+// ConnectedCount returns 1 if a WebSocket client is currently connected, 0 otherwise.
+func (h *wsHandler) ConnectedCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.conn != nil {
+		return 1
+	}
+	return 0
+}
+
 // Disconnect closes the active WebSocket connection without stopping the handler.
 // The read loop in ServeHTTP will receive an error and clear the connection.
 func (h *wsHandler) Disconnect() {
