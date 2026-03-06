@@ -456,12 +456,12 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 	ctx := context.Background()
 	logger := testutil.DiscardLogger()
 
-	// Disable feed-based oracles — the mock only handles aave_oracle format.
-	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE oracle_type IN ('chainlink_feed', 'chronicle', 'redstone')`); err != nil {
-		t.Fatalf("disable feed oracles: %v", err)
+	// Disable all oracles except sparklend — the mock is parameterized for a single oracle.
+	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name != 'sparklend'`); err != nil {
+		t.Fatalf("disable non-sparklend oracles: %v", err)
 	}
 
-	// Count enabled oracle assets from all enabled oracles (sparklend only after disable)
+	// Count enabled oracle assets from sparklend (the only enabled oracle)
 	var numTokens int
 	err := pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM oracle_asset oa
