@@ -36,7 +36,7 @@ func TestBuildInsertArgs_TxAmountUsesTokenDecimals(t *testing.T) {
 		TokenSymbol:   "sUSDSUSDT",
 		TokenDecimals: 18,
 		AssetDecimals: new(6), // underlying USDT
-		Star:          "spark",
+		PrimeID:       1,
 		ProxyAddress:  common.HexToAddress("0x1111111111111111111111111111111111111111"),
 		Balance:       big.NewInt(27758109970696), // underlying USDT amount (6 dec)
 		ScaledBalance: lpTokenRaw,                 // LP shares (18 dec)
@@ -83,7 +83,7 @@ func TestBuildInsertArgs_TxAmountPlainERC20(t *testing.T) {
 		TokenAddress:  common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
 		TokenSymbol:   "USDC",
 		TokenDecimals: 6,
-		Star:          "spark",
+		PrimeID:       1,
 		ProxyAddress:  common.HexToAddress("0x1111111111111111111111111111111111111111"),
 		Balance:       big.NewInt(0),
 		BlockNumber:   24584100,
@@ -114,7 +114,7 @@ func TestBuildInsertArgs_NilScaledBalanceIsNull(t *testing.T) {
 		TokenAddress:  common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
 		TokenSymbol:   "USDC",
 		TokenDecimals: 6,
-		Star:          "spark",
+		PrimeID:       1,
 		ProxyAddress:  common.HexToAddress("0x1111111111111111111111111111111111111111"),
 		Balance:       big.NewInt(1000000),
 		BlockNumber:   24584100,

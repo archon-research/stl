@@ -39,12 +39,12 @@ func NewPrimeDebtRepository(
 	}
 }
 
-// GetPrimes returns all rows from the primes table.
+// GetPrimes returns all rows from the prime table.
 // vault_address is stored as BYTEA and scanned directly into common.Address.
 func (r *PrimeDebtRepository) GetPrimes(ctx context.Context) ([]entity.Prime, error) {
 	const q = `
 		SELECT id, name, vault_address, created_at
-		FROM primes
+		FROM prime
 		ORDER BY id ASC
 	`
 
@@ -86,16 +86,14 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		const q = `
-			INSERT INTO prime_debts (prime_id, prime_name, vault_address, ilk_name, debt_wad, block_number, synced_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, synced_at)
+			VALUES ($1, $2, $3, $4, $5)
 		`
 
 		batch := &pgx.Batch{}
 		for _, d := range debts {
 			batch.Queue(q,
 				d.PrimeID,
-				d.PrimeName,
-				d.VaultAddress.Bytes(),
 				d.IlkName,
 				d.DebtWad.String(), // NUMERIC from decimal string representation of big.Int
 				d.BlockNumber,

@@ -15,21 +15,24 @@ import (
 )
 
 type PrimePositionHandler struct {
-	repo     outbound.AllocationRepository
-	metadata *metadataCache
-	logger   *slog.Logger
+	repo        outbound.AllocationRepository
+	metadata    *metadataCache
+	primeLookup map[string]int64 // star name → prime.id
+	logger      *slog.Logger
 }
 
 func NewPrimePositionHandler(
 	repo outbound.AllocationRepository,
 	multicaller outbound.Multicaller,
 	erc20ABI *abi.ABI,
+	primeLookup map[string]int64,
 	logger *slog.Logger,
 ) *PrimePositionHandler {
 	return &PrimePositionHandler{
-		repo:     repo,
-		metadata: newMetadataCache(multicaller, erc20ABI, logger),
-		logger:   logger.With("component", "postgres-handler"),
+		repo:        repo,
+		metadata:    newMetadataCache(multicaller, erc20ABI, logger),
+		primeLookup: primeLookup,
+		logger:      logger.With("component", "postgres-handler"),
 	}
 }
 
@@ -77,6 +80,11 @@ func (h *PrimePositionHandler) HandleSnapshots(
 			assetDecimals = &assetMeta.decimals
 		}
 
+		primeID, ok := h.primeLookup[s.Entry.Star]
+		if !ok {
+			return fmt.Errorf("unknown star %q: no matching prime_id", s.Entry.Star)
+		}
+
 		var createdAtBlock int64
 		if s.Entry.CreatedAtBlock != nil {
 			createdAtBlock = *s.Entry.CreatedAtBlock
@@ -88,7 +96,7 @@ func (h *PrimePositionHandler) HandleSnapshots(
 			TokenSymbol:    meta.symbol,
 			TokenDecimals:  meta.decimals,
 			AssetDecimals:  assetDecimals,
-			Star:           s.Entry.Star,
+			PrimeID:        primeID,
 			ProxyAddress:   s.Entry.WalletAddress,
 			Balance:        s.Balance,
 			ScaledBalance:  s.ScaledBalance,
