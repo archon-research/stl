@@ -6,6 +6,9 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    # Database
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/stl_verify"
+
     # Logging
     log_level: str = "INFO"
 
