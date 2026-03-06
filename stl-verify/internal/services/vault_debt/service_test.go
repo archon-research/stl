@@ -66,10 +66,7 @@ func (f *fakeSQSConsumer) ReceiveMessages(_ context.Context, maxMessages int) ([
 		return nil, nil
 	}
 
-	end := f.served + maxMessages
-	if end > len(f.messages) {
-		end = len(f.messages)
-	}
+	end := min(f.served+maxMessages, len(f.messages))
 
 	batch := f.messages[f.served:end]
 	f.served = end
