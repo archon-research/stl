@@ -1,11 +1,11 @@
-// Package vault_debt provides a polling service that reads each prime agent's
+// Package vault_debt provides a service that reads each prime agent's
 // vault debt from the Sky/MakerDAO Vat contract and writes snapshots to Postgres.
 //
 // Flow:
 //  1. At Start, load prime agents from the database via PrimeDebtRepository.GetPrimes.
-//  2. Fetch the latest block number via BlockQuerier.
-//  3. Batch-resolve all vault ilks in a single multicall via VatCaller.ResolveIlks.
-//  4. On every tick, fetch latest block, batch-read all debts via VatCaller.ReadDebts.
+//  2. Resolve all vault ilks in a single multicall via VatCaller.ResolveIlks.
+//  3. Consume block events from SQS via sqsutil.RunLoop.
+//  4. Every SweepEveryNBlocks, batch-read all debts via VatCaller.ReadDebts.
 //  5. Compute exact debt: art * rate / 1e27 (wad-scaled big.Int).
 //  6. Write all snapshots (including block number) via PrimeDebtRepository.SaveDebtSnapshots.
 package vault_debt
@@ -19,11 +19,12 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-const defaultPollInterval = 15 * time.Minute
+const defaultSweepEveryNBlocks = 75
 
 // resolvedPrime is a Prime with its ilk resolved at startup.
 type resolvedPrime struct {
@@ -33,8 +34,17 @@ type resolvedPrime struct {
 
 // Config holds configuration for VaultDebtService.
 type Config struct {
-	// PollInterval controls how often debt is read from the chain.
-	// Must be positive. Defaults to 15 minutes.
+	// SweepEveryNBlocks controls how often debt is read from the chain.
+	// Defaults to 75.
+	SweepEveryNBlocks int
+
+	// ChainID is the expected chain ID for incoming block events.
+	ChainID int64
+
+	// MaxMessages is the max number of SQS messages per poll.
+	MaxMessages int
+
+	// PollInterval controls how often SQS is polled for new messages.
 	PollInterval time.Duration
 
 	// Logger is the structured logger.
@@ -43,22 +53,26 @@ type Config struct {
 
 func configDefaults() Config {
 	return Config{
-		PollInterval: defaultPollInterval,
-		Logger:       slog.Default(),
+		SweepEveryNBlocks: defaultSweepEveryNBlocks,
+		MaxMessages:       10,
+		PollInterval:      100 * time.Millisecond,
+		Logger:            slog.Default(),
 	}
 }
 
-// VaultDebtService polls each prime agent's vault debt on a fixed interval
-// and writes append-only snapshots to Postgres.
-//
-// Start blocks until the context is cancelled. lifecycle.Run handles signal
-// trapping and context cancellation.
+// VaultDebtService consumes block events from SQS and periodically reads
+// each prime agent's vault debt from the Vat contract.
 type VaultDebtService struct {
-	config       Config
-	caller       outbound.VatCaller
-	repo         outbound.PrimeDebtRepository
-	blockQuerier outbound.BlockQuerier
-	logger       *slog.Logger
+	config           Config
+	caller           outbound.VatCaller
+	repo             outbound.PrimeDebtRepository
+	sqsConsumer      outbound.SQSConsumer
+	blockQuerier     outbound.BlockQuerier
+	logger           *slog.Logger
+	resolved         []resolvedPrime
+	blocksSinceSweep int
+	ctx              context.Context
+	cancel           context.CancelFunc
 }
 
 // NewVaultDebtService creates a new VaultDebtService.
@@ -66,6 +80,7 @@ func NewVaultDebtService(
 	config Config,
 	caller outbound.VatCaller,
 	repo outbound.PrimeDebtRepository,
+	sqsConsumer outbound.SQSConsumer,
 	blockQuerier outbound.BlockQuerier,
 ) (*VaultDebtService, error) {
 	if caller == nil {
@@ -74,16 +89,25 @@ func NewVaultDebtService(
 	if repo == nil {
 		return nil, fmt.Errorf("prime debt repository is required")
 	}
+	if sqsConsumer == nil {
+		return nil, fmt.Errorf("sqs consumer is required")
+	}
 	if blockQuerier == nil {
 		return nil, fmt.Errorf("block querier is required")
 	}
 
 	defaults := configDefaults()
+	if config.SweepEveryNBlocks == 0 {
+		config.SweepEveryNBlocks = defaults.SweepEveryNBlocks
+	}
+	if config.MaxMessages == 0 {
+		config.MaxMessages = defaults.MaxMessages
+	}
 	if config.PollInterval == 0 {
 		config.PollInterval = defaults.PollInterval
 	}
-	if config.PollInterval < 0 {
-		return nil, fmt.Errorf("poll interval must be positive, got %s", config.PollInterval)
+	if config.ChainID == 0 {
+		return nil, fmt.Errorf("chain ID is required")
 	}
 	if config.Logger == nil {
 		config.Logger = defaults.Logger
@@ -93,12 +117,13 @@ func NewVaultDebtService(
 		config:       config,
 		caller:       caller,
 		repo:         repo,
+		sqsConsumer:  sqsConsumer,
 		blockQuerier: blockQuerier,
 		logger:       config.Logger.With("component", "vault-debt-service"),
 	}, nil
 }
 
-// Start loads primes, resolves ilks, then runs the blocking poll loop.
+// Start loads primes, resolves ilks, then starts the SQS processing loop.
 // It returns when ctx is cancelled (clean shutdown) or if initial setup fails.
 func (s *VaultDebtService) Start(ctx context.Context) error {
 	primes, err := s.repo.GetPrimes(ctx)
@@ -119,36 +144,50 @@ func (s *VaultDebtService) Start(ctx context.Context) error {
 		return fmt.Errorf("resolve vault ilks: %w", err)
 	}
 
+	s.resolved = resolved
+	s.blocksSinceSweep = s.config.SweepEveryNBlocks - 1 // first block triggers immediate read
+	s.ctx, s.cancel = context.WithCancel(ctx)
+
+	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
+		Consumer:     s.sqsConsumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
+	}, s.processBlock)
+
 	s.logger.Info("vault debt service started",
 		"primes", len(resolved),
-		"pollInterval", s.config.PollInterval,
+		"sweepEveryNBlocks", s.config.SweepEveryNBlocks,
+		"chainID", s.config.ChainID,
 		"block", blockNum,
 	)
 
-	// Sync immediately on start before waiting for the first tick.
-	if err := s.syncAll(ctx, resolved); err != nil {
-		s.logger.Warn("initial debt sync failed", "error", err)
-	}
-
-	ticker := time.NewTicker(s.config.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			s.logger.Info("vault debt service stopped")
-			return nil
-		case <-ticker.C:
-			if err := s.syncAll(ctx, resolved); err != nil {
-				s.logger.Warn("debt sync failed", "error", err)
-			}
-		}
-	}
+	return nil
 }
 
-// Stop is a no-op — shutdown is driven by context cancellation via lifecycle.Run.
+// Stop cancels the SQS processing loop.
 func (s *VaultDebtService) Stop() error {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.logger.Info("vault debt service stopped")
 	return nil
+}
+
+// processBlock is called for every block event from SQS.
+// It only reads debt every SweepEveryNBlocks.
+func (s *VaultDebtService) processBlock(
+	ctx context.Context,
+	event outbound.BlockEvent,
+) error {
+	s.blocksSinceSweep++
+	if s.blocksSinceSweep < s.config.SweepEveryNBlocks {
+		return nil
+	}
+	s.blocksSinceSweep = 0
+
+	return s.syncAll(ctx, event.BlockNumber)
 }
 
 // latestBlock fetches the latest block number from the node.
@@ -194,20 +233,15 @@ func (s *VaultDebtService) resolveIlks(ctx context.Context, primes []entity.Prim
 	return resolved, nil
 }
 
-// syncAll fetches the latest block, batch-reads on-chain debt for all primes,
+// syncAll batch-reads on-chain debt for all primes at the given block
 // and writes snapshots to Postgres.
-func (s *VaultDebtService) syncAll(ctx context.Context, primes []resolvedPrime) error {
+func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64) error {
 	start := time.Now()
 	syncedAt := start.UTC()
 
-	blockNum, err := s.latestBlock(ctx)
-	if err != nil {
-		return fmt.Errorf("get latest block: %w", err)
-	}
-
 	// Build queries.
-	queries := make([]outbound.DebtQuery, len(primes))
-	for i, p := range primes {
+	queries := make([]outbound.DebtQuery, len(s.resolved))
+	for i, p := range s.resolved {
 		queries[i] = outbound.DebtQuery{
 			Ilk:          p.ilk,
 			VaultAddress: p.VaultAddress,
@@ -215,14 +249,14 @@ func (s *VaultDebtService) syncAll(ctx context.Context, primes []resolvedPrime) 
 	}
 
 	// Single multicall for all rate + art reads.
-	results, err := s.caller.ReadDebts(ctx, queries, big.NewInt(blockNum))
+	results, err := s.caller.ReadDebts(ctx, queries, big.NewInt(blockNumber))
 	if err != nil {
-		return fmt.Errorf("read debts at block %d: %w", blockNum, err)
+		return fmt.Errorf("read debts at block %d: %w", blockNumber, err)
 	}
 
 	// Build snapshots from results.
-	snapshots := make([]*entity.PrimeDebt, 0, len(primes))
-	for i, prime := range primes {
+	snapshots := make([]*entity.PrimeDebt, 0, len(s.resolved))
+	for i, prime := range s.resolved {
 		if i >= len(results) {
 			s.logger.Warn("missing result for prime", "prime", prime.Name)
 			continue
@@ -244,17 +278,15 @@ func (s *VaultDebtService) syncAll(ctx context.Context, primes []resolvedPrime) 
 			"prime", prime.Name,
 			"ilk", ilkToString(prime.ilk),
 			"debtWad", debtWad,
-			"block", blockNum,
+			"block", blockNumber,
 		)
 
 		snapshots = append(snapshots, &entity.PrimeDebt{
-			PrimeID:      prime.ID,
-			PrimeName:    prime.Name,
-			VaultAddress: prime.VaultAddress,
-			IlkName:      ilkToString(prime.ilk),
-			DebtWad:      debtWad,
-			BlockNumber:  blockNum,
-			SyncedAt:     syncedAt,
+			PrimeID:     prime.ID,
+			IlkName:     ilkToString(prime.ilk),
+			DebtWad:     debtWad,
+			BlockNumber: blockNumber,
+			SyncedAt:    syncedAt,
 		})
 	}
 
@@ -268,7 +300,7 @@ func (s *VaultDebtService) syncAll(ctx context.Context, primes []resolvedPrime) 
 
 	s.logger.Info("debt sync complete",
 		"primes", len(snapshots),
-		"block", blockNum,
+		"block", blockNumber,
 		"duration", time.Since(start),
 	)
 

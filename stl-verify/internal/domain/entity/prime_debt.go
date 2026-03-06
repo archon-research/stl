@@ -21,10 +21,8 @@ type Prime struct {
 
 // PrimeDebt is a single on-chain debt snapshot for a prime agent.
 type PrimeDebt struct {
-	PrimeID      int64
-	PrimeName    string
-	VaultAddress common.Address
-	IlkName      string
+	PrimeID int64
+	IlkName string
 	// DebtWad is the exact debt in wad units (art * rate / 1e27).
 	// The value is an integer scaled by 1e18 (wad precision).
 	DebtWad     *big.Int
@@ -34,11 +32,8 @@ type PrimeDebt struct {
 
 // Validate checks that the snapshot is well-formed before persistence.
 func (d *PrimeDebt) Validate() error {
-	if d.PrimeName == "" {
-		return fmt.Errorf("prime name is required")
-	}
-	if d.VaultAddress == (common.Address{}) {
-		return fmt.Errorf("vault address is required")
+	if d.PrimeID <= 0 {
+		return fmt.Errorf("prime_id must be positive")
 	}
 	if d.IlkName == "" {
 		return fmt.Errorf("ilk name is required")

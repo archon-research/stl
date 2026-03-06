@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -242,6 +243,31 @@ func mockVatRPC(t *testing.T) *httptest.Server {
 }
 
 // ---------------------------------------------------------------------------
+// SQS helpers
+// ---------------------------------------------------------------------------
+
+// enqueueBlockEvents sends block events to the mock SQS server.
+func enqueueBlockEvents(t *testing.T, sqsState *testutil.MockSQSServer, startBlock int64, count int, chainID int64) {
+	t.Helper()
+	for i := 0; i < count; i++ {
+		event := outbound.BlockEvent{
+			ChainID:        chainID,
+			BlockNumber:    startBlock + int64(i),
+			Version:        0,
+			BlockHash:      fmt.Sprintf("0x%064x", startBlock+int64(i)),
+			ParentHash:     fmt.Sprintf("0x%064x", startBlock+int64(i)-1),
+			BlockTimestamp: time.Now().Unix(),
+			ReceivedAt:     time.Now(),
+		}
+		body, err := json.Marshal(event)
+		if err != nil {
+			t.Fatalf("marshal block event: %v", err)
+		}
+		sqsState.AddMessage(string(body))
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Integration tests
 // ---------------------------------------------------------------------------
 
@@ -249,11 +275,20 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer rpcServer.Close()
 
+	sqsServer, _ := testutil.StartMockSQS(t)
+	defer sqsServer.Close()
+
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
+	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000")
 
 	err := run(context.Background(), []string{
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
+		"-queue", "http://localhost/test-queue",
 	})
 	if err == nil {
 		t.Fatal("expected error for bad connection config")
@@ -269,11 +304,11 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
 	defer dbCleanup()
 
-	if _, err := pool.Exec(ctx, `TRUNCATE primes CASCADE`); err != nil {
-		t.Fatalf("truncate primes: %v", err)
+	if _, err := pool.Exec(ctx, `TRUNCATE prime CASCADE`); err != nil {
+		t.Fatalf("truncate prime: %v", err)
 	}
 	_, err := pool.Exec(ctx, `
-		INSERT INTO primes (name, vault_address)
+		INSERT INTO prime (name, vault_address)
 		VALUES ('spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')
 	`)
 	if err != nil {
@@ -283,7 +318,18 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	rpcServer := mockVatRPC(t)
 	defer rpcServer.Close()
 
+	sqsServer, sqsState := testutil.StartMockSQS(t)
+	defer sqsServer.Close()
+
+	// Enqueue enough block events to trigger at least one sweep
+	enqueueBlockEvents(t, sqsState, 20971520, 5, 1)
+
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
+	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000")
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -294,14 +340,15 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		errCh <- run(runCtx, []string{
 			"-db", dbURL,
 			"-vat", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b",
-			"-poll-interval", "200ms",
+			"-queue", sqsServer.URL + "/queue/test",
+			"-sweep-blocks", "1",
 		})
 	}()
 
 	deadline := time.After(15 * time.Second)
 	for {
 		var count int
-		err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debts`).Scan(&count)
+		err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&count)
 		if err == nil && count >= 1 {
 			break
 		}
@@ -312,16 +359,16 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		}
 	}
 
-	var primeName, ilkName, debtWad string
-	var blockNumber int64
+	var ilkName, debtWad string
+	var primeID, blockNumber int64
 	err = pool.QueryRow(ctx, `
-		SELECT prime_name, ilk_name, debt_wad::text, block_number FROM prime_debts ORDER BY id LIMIT 1
-	`).Scan(&primeName, &ilkName, &debtWad, &blockNumber)
+		SELECT prime_id, ilk_name, debt_wad::text, block_number FROM prime_debt ORDER BY id LIMIT 1
+	`).Scan(&primeID, &ilkName, &debtWad, &blockNumber)
 	if err != nil {
 		t.Fatalf("query snapshot: %v", err)
 	}
-	if primeName != "spark" {
-		t.Errorf("prime_name = %q, want %q", primeName, "spark")
+	if primeID <= 0 {
+		t.Errorf("prime_id = %d, expected positive", primeID)
 	}
 	if !strings.HasPrefix(ilkName, "ALLOCATOR-SPARK") {
 		t.Errorf("ilk_name = %q, expected ALLOCATOR-SPARK prefix", ilkName)
@@ -350,8 +397,8 @@ func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
 	defer dbCleanup()
 
-	if _, err := pool.Exec(ctx, `TRUNCATE primes CASCADE`); err != nil {
-		t.Fatalf("truncate primes: %v", err)
+	if _, err := pool.Exec(ctx, `TRUNCATE prime CASCADE`); err != nil {
+		t.Fatalf("truncate prime: %v", err)
 	}
 
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -360,12 +407,21 @@ func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 	}))
 	defer rpcServer.Close()
 
+	sqsServer, _ := testutil.StartMockSQS(t)
+	defer sqsServer.Close()
+
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
+	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000")
 
 	err := run(context.Background(), []string{
 		"-db", dbURL,
 		"-vat", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b",
+		"-queue", sqsServer.URL + "/queue/test",
 	})
 	if err == nil {
 		t.Fatal("expected error when no primes are registered")
@@ -389,8 +445,8 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 		{name: "obex", vaultAddress: "0xC1A83e7C92E4b09fD95B0FB8e5E25E6A6543db4E", ilkHex: ilkBytes32Hex("ALLOCATOR-OBEX-A")},
 	}
 
-	if _, err := pool.Exec(ctx, `TRUNCATE primes CASCADE`); err != nil {
-		t.Fatalf("truncate primes: %v", err)
+	if _, err := pool.Exec(ctx, `TRUNCATE prime CASCADE`); err != nil {
+		t.Fatalf("truncate prime: %v", err)
 	}
 	for _, p := range primes {
 		addrHex := strings.TrimPrefix(strings.ToLower(p.vaultAddress), "0x")
@@ -398,7 +454,7 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode vault address for prime %q: %v", p.name, err)
 		}
-		if _, err := pool.Exec(ctx, `INSERT INTO primes (name, vault_address) VALUES ($1, $2) ON CONFLICT DO NOTHING`, p.name, addrBytes); err != nil {
+		if _, err := pool.Exec(ctx, `INSERT INTO prime (name, vault_address) VALUES ($1, $2) ON CONFLICT DO NOTHING`, p.name, addrBytes); err != nil {
 			t.Fatalf("seed prime %s: %v", p.name, err)
 		}
 	}
@@ -410,7 +466,17 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 	rpcServer := mockVatRPCMulti(t, vatAddr, primes, rayVal, art500)
 	defer rpcServer.Close()
 
+	sqsServer, sqsState := testutil.StartMockSQS(t)
+	defer sqsServer.Close()
+
+	enqueueBlockEvents(t, sqsState, 20971520, 5, 1)
+
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
+	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000")
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -418,13 +484,18 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- run(runCtx, []string{"-db", dbURL, "-vat", vatAddr, "-poll-interval", "200ms"})
+		errCh <- run(runCtx, []string{
+			"-db", dbURL,
+			"-vat", vatAddr,
+			"-queue", sqsServer.URL + "/queue/test",
+			"-sweep-blocks", "1",
+		})
 	}()
 
 	deadline := time.After(15 * time.Second)
 	for {
 		var count int
-		_ = pool.QueryRow(ctx, `SELECT COUNT(DISTINCT prime_name) FROM prime_debts`).Scan(&count)
+		_ = pool.QueryRow(ctx, `SELECT COUNT(DISTINCT prime_id) FROM prime_debt`).Scan(&count)
 		if count >= len(primes) {
 			break
 		}
@@ -435,7 +506,12 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 		}
 	}
 
-	rows, err := pool.Query(ctx, `SELECT prime_name, ilk_name, debt_wad::text, block_number FROM prime_debts ORDER BY prime_name, id`)
+	rows, err := pool.Query(ctx, `
+		SELECT p.name, pd.ilk_name, pd.debt_wad::text, pd.block_number
+		FROM prime_debt pd
+		JOIN prime p ON p.id = pd.prime_id
+		ORDER BY p.name, pd.id
+	`)
 	if err != nil {
 		t.Fatalf("query snapshots: %v", err)
 	}
@@ -480,10 +556,10 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 
 	const vatAddr = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
 
-	if _, err := pool.Exec(ctx, `TRUNCATE primes CASCADE`); err != nil {
-		t.Fatalf("truncate primes: %v", err)
+	if _, err := pool.Exec(ctx, `TRUNCATE prime CASCADE`); err != nil {
+		t.Fatalf("truncate prime: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO primes (name, vault_address) VALUES ('spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')`); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO prime (name, vault_address) VALUES ('spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')`); err != nil {
 		t.Fatalf("seed prime: %v", err)
 	}
 
@@ -496,7 +572,18 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	rpcServer := mockVatRPCMulti(t, vatAddr, primes, rayVal, art1000)
 	defer rpcServer.Close()
 
+	sqsServer, sqsState := testutil.StartMockSQS(t)
+	defer sqsServer.Close()
+
+	const wantRows = 3
+	enqueueBlockEvents(t, sqsState, 20971520, wantRows+2, 1)
+
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
+	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000")
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -504,28 +591,32 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- run(runCtx, []string{"-db", dbURL, "-vat", vatAddr, "-poll-interval", "150ms"})
+		errCh <- run(runCtx, []string{
+			"-db", dbURL,
+			"-vat", vatAddr,
+			"-queue", sqsServer.URL + "/queue/test",
+			"-sweep-blocks", "1",
+		})
 	}()
 
-	const wantRows = 3
 	deadline := time.After(15 * time.Second)
 	for {
 		var count int
-		_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debts`).Scan(&count)
+		_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&count)
 		if count >= wantRows {
 			break
 		}
 		select {
 		case <-deadline:
 			var got int
-			_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debts`).Scan(&got)
+			_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&got)
 			t.Fatalf("timed out: want %d rows, have %d", wantRows, got)
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
 
 	var distinctTimes int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(DISTINCT synced_at) FROM prime_debts`).Scan(&distinctTimes); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT COUNT(DISTINCT synced_at) FROM prime_debt`).Scan(&distinctTimes); err != nil {
 		t.Fatalf("query distinct synced_at: %v", err)
 	}
 	if distinctTimes < wantRows {
@@ -546,27 +637,23 @@ func TestRunIntegration_InvalidVatFlag(t *testing.T) {
 	}))
 	defer rpcServer.Close()
 
+	sqsServer, _ := testutil.StartMockSQS(t)
+	defer sqsServer.Close()
+
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
+	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000")
 
-	err := run(context.Background(), []string{"-db", dbURL, "-vat", "not-a-valid-address"})
+	err := run(context.Background(), []string{
+		"-db", dbURL,
+		"-vat", "not-a-valid-address",
+		"-queue", sqsServer.URL + "/queue/test",
+	})
 	if err == nil {
 		t.Fatal("expected error for invalid vat address")
-	}
-}
-
-func TestRunIntegration_InvalidPollInterval(t *testing.T) {
-	_, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
-	defer dbCleanup()
-
-	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defer rpcServer.Close()
-
-	t.Setenv("ETH_RPC_URL", rpcServer.URL)
-	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000")
-
-	err := run(context.Background(), []string{"-db", dbURL, "-vat", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b", "-poll-interval", "not-a-duration"})
-	if err == nil {
-		t.Fatal("expected error for invalid poll interval")
 	}
 }

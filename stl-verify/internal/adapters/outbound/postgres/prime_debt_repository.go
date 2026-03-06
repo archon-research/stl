@@ -105,7 +105,7 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 		for i, d := range debts {
 			if _, err := results.Exec(); err != nil {
 				_ = results.Close()
-				return fmt.Errorf("insert debt snapshot %d (prime=%s): %w", i, d.PrimeName, err)
+				return fmt.Errorf("insert debt snapshot %d (prime_id=%d): %w", i, d.PrimeID, err)
 			}
 		}
 		if err := results.Close(); err != nil {
