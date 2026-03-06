@@ -270,11 +270,11 @@ func TestSavePositionSnapshot_BorrowAmountIsProviderDebt(t *testing.T) {
 	srv := startMockEthServer(t, ethHex)
 	svc, posRepo := newPositionTestService(t, srv.URL, mc)
 
-	// Also mock token metadata for the initial call in savePositionSnapshot
-	// (batchGetTokenMetadata is called once more for the event reserve before
-	// extractUserPositionSnapshots is invoked)
+	// savePositionSnapshot calls batchGetTokenMetadata once for the event
+	// reserve, then extractUserPositionSnapshots calls it again for all active
+	// assets. Use len(calls) to distinguish the two multicall batches so the
+	// mock remains independent of call order.
 	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		// The function is called multiple times. Key: return metadata for all.
 		switch len(calls) {
 		case 3: // token metadata (decimals, symbol, name for 1 token)
 			return []outbound.Result{

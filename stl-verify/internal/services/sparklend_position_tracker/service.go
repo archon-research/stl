@@ -701,10 +701,12 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			var debtBalance *big.Int
 			for _, snap := range snapshots {
 				if snap.Asset == eventData.Reserve {
-					debtBalance = snap.DebtBalance
+					debtBalance = snap.DebtBalance // always non-nil when found
 					break
 				}
 			}
+			// debtBalance is nil when the reserve was not in the snapshot (e.g. fully
+			// repaid so getUserReservesData returned it with zero scaled balances).
 			if debtBalance != nil && debtBalance.Cmp(big.NewInt(0)) > 0 {
 				tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, normalizeTokenSymbol(tokenMetadata.Symbol), tokenMetadata.Decimals, blockNumber)
 				if err != nil {
