@@ -1,4 +1,4 @@
-package vault_debt_test
+package prime_debt_test
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/vault_debt"
+	"github.com/archon-research/stl/stl-verify/internal/services/prime_debt"
 )
 
 // ---------------------------------------------------------------------------
@@ -142,7 +142,7 @@ func (f *fakeVatCaller) ResolveIlks(_ context.Context, vaults []common.Address, 
 	return result, nil
 }
 
-func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []outbound.DebtQuery, _ *big.Int) ([]outbound.DebtResult, error) {
+func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []prime_debt.DebtQuery, _ *big.Int) ([]prime_debt.DebtResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -150,7 +150,7 @@ func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []outbound.DebtQuer
 		return nil, f.readDebtsErr
 	}
 
-	results := make([]outbound.DebtResult, len(queries))
+	results := make([]prime_debt.DebtResult, len(queries))
 	for i, q := range queries {
 		results[i].VaultAddress = q.VaultAddress
 
@@ -251,8 +251,8 @@ func makeBlockEvents(startBlock int64, count int) []outbound.BlockEvent {
 	return events
 }
 
-func defaultConfig(sweepEveryN int) vault_debt.Config {
-	return vault_debt.Config{
+func defaultConfig(sweepEveryN int) prime_debt.Config {
+	return prime_debt.Config{
 		SweepEveryNBlocks: sweepEveryN,
 		ChainID:           testChainID,
 		MaxMessages:       10,
@@ -266,7 +266,7 @@ func defaultConfig(sweepEveryN int) vault_debt.Config {
 
 func TestNewVaultDebtService_NilCaller(t *testing.T) {
 	consumer := newFakeSQSConsumer(nil)
-	_, err := vault_debt.NewVaultDebtService(defaultConfig(75), nil, &fakePrimeDebtRepository{}, consumer, newFakeBlockQuerier(testBlockNum))
+	_, err := prime_debt.NewVaultDebtService(defaultConfig(75), nil, &fakePrimeDebtRepository{}, consumer, newFakeBlockQuerier(testBlockNum))
 	if err == nil {
 		t.Fatal("expected error for nil caller")
 	}
@@ -274,14 +274,14 @@ func TestNewVaultDebtService_NilCaller(t *testing.T) {
 
 func TestNewVaultDebtService_NilRepository(t *testing.T) {
 	consumer := newFakeSQSConsumer(nil)
-	_, err := vault_debt.NewVaultDebtService(defaultConfig(75), newFakeVatCaller(), nil, consumer, newFakeBlockQuerier(testBlockNum))
+	_, err := prime_debt.NewVaultDebtService(defaultConfig(75), newFakeVatCaller(), nil, consumer, newFakeBlockQuerier(testBlockNum))
 	if err == nil {
 		t.Fatal("expected error for nil repository")
 	}
 }
 
 func TestNewVaultDebtService_NilSQSConsumer(t *testing.T) {
-	_, err := vault_debt.NewVaultDebtService(defaultConfig(75), newFakeVatCaller(), &fakePrimeDebtRepository{}, nil, newFakeBlockQuerier(testBlockNum))
+	_, err := prime_debt.NewVaultDebtService(defaultConfig(75), newFakeVatCaller(), &fakePrimeDebtRepository{}, nil, newFakeBlockQuerier(testBlockNum))
 	if err == nil {
 		t.Fatal("expected error for nil sqs consumer")
 	}
@@ -289,7 +289,7 @@ func TestNewVaultDebtService_NilSQSConsumer(t *testing.T) {
 
 func TestNewVaultDebtService_NilBlockQuerier(t *testing.T) {
 	consumer := newFakeSQSConsumer(nil)
-	_, err := vault_debt.NewVaultDebtService(defaultConfig(75), newFakeVatCaller(), &fakePrimeDebtRepository{}, consumer, nil)
+	_, err := prime_debt.NewVaultDebtService(defaultConfig(75), newFakeVatCaller(), &fakePrimeDebtRepository{}, consumer, nil)
 	if err == nil {
 		t.Fatal("expected error for nil block querier")
 	}
@@ -299,7 +299,7 @@ func TestNewVaultDebtService_ZeroChainID(t *testing.T) {
 	consumer := newFakeSQSConsumer(nil)
 	cfg := defaultConfig(75)
 	cfg.ChainID = 0
-	_, err := vault_debt.NewVaultDebtService(cfg, newFakeVatCaller(), &fakePrimeDebtRepository{}, consumer, newFakeBlockQuerier(testBlockNum))
+	_, err := prime_debt.NewVaultDebtService(cfg, newFakeVatCaller(), &fakePrimeDebtRepository{}, consumer, newFakeBlockQuerier(testBlockNum))
 	if err == nil {
 		t.Fatal("expected error for zero chain ID")
 	}
@@ -307,7 +307,7 @@ func TestNewVaultDebtService_ZeroChainID(t *testing.T) {
 
 func TestNewVaultDebtService_Defaults(t *testing.T) {
 	consumer := newFakeSQSConsumer(nil)
-	svc, err := vault_debt.NewVaultDebtService(defaultConfig(75), newFakeVatCaller(), &fakePrimeDebtRepository{}, consumer, newFakeBlockQuerier(testBlockNum))
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(75), newFakeVatCaller(), &fakePrimeDebtRepository{}, consumer, newFakeBlockQuerier(testBlockNum))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestNewVaultDebtService_Defaults(t *testing.T) {
 func TestStart_NoPrimes(t *testing.T) {
 	consumer := newFakeSQSConsumer(nil)
 	repo := &fakePrimeDebtRepository{}
-	svc, err := vault_debt.NewVaultDebtService(defaultConfig(75), newFakeVatCaller(), repo, consumer, newFakeBlockQuerier(testBlockNum))
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(75), newFakeVatCaller(), repo, consumer, newFakeBlockQuerier(testBlockNum))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestStart_IlkResolutionError(t *testing.T) {
 
 	consumer := newFakeSQSConsumer(nil)
 	repo := &fakePrimeDebtRepository{primes: []entity.Prime{sparkPrime()}}
-	svc, err := vault_debt.NewVaultDebtService(defaultConfig(75), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(75), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestStart_Stop_Clean(t *testing.T) {
 
 	consumer := newFakeSQSConsumer(nil)
 	repo := &fakePrimeDebtRepository{primes: []entity.Prime{sparkPrime()}}
-	svc, err := vault_debt.NewVaultDebtService(defaultConfig(75), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(75), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -406,7 +406,7 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 	consumer := newFakeSQSConsumer(events)
 
 	repo := &fakePrimeDebtRepository{primes: primes}
-	svc, err := vault_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -459,7 +459,7 @@ func TestSync_PartialFailure_OtherPrimesStillSaved(t *testing.T) {
 	consumer := newFakeSQSConsumer(events)
 
 	repo := &fakePrimeDebtRepository{primes: []entity.Prime{spark, grove}}
-	svc, err := vault_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}

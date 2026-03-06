@@ -136,11 +136,7 @@ func (r *AllocationRepository) buildInsertArgs(
 			block_number, block_version,
 			tx_hash, log_index, tx_amount, direction
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		ON CONFLICT (chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction)
-		DO UPDATE SET
-			balance = EXCLUDED.balance,
-			scaled_balance = EXCLUDED.scaled_balance,
-			tx_amount = EXCLUDED.tx_amount
+		ON CONFLICT DO NOTHING
 	`
 
 	args := []any{

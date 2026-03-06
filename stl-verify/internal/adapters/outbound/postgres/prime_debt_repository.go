@@ -86,8 +86,8 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		const q = `
-			INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, synced_at)
-			VALUES ($1, $2, $3, $4, $5)
+			INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at)
+			VALUES ($1, $2, $3, $4, $5, $6)
 		`
 
 		batch := &pgx.Batch{}
@@ -97,6 +97,7 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 				d.IlkName,
 				d.DebtWad.String(), // NUMERIC from decimal string representation of big.Int
 				d.BlockNumber,
+				d.BlockVersion,
 				d.SyncedAt,
 			)
 		}

@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/archon-research/stl/stl-verify/internal/services/prime_debt"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
@@ -13,7 +14,7 @@ import (
 )
 
 // Compile-time check that VatCaller implements the port interface.
-var _ outbound.VatCaller = (*VatCaller)(nil)
+var _ prime_debt.VatCaller = (*VatCaller)(nil)
 
 const (
 	vatABIJSON = `[
@@ -135,7 +136,7 @@ func (c *VatCaller) ResolveIlks(ctx context.Context, vaults []common.Address, bl
 // via DebtResult.Err rather than failing the entire batch.
 //
 // Call layout per query: [ilks(ilk), urns(ilk, vault)] — 2 calls per query.
-func (c *VatCaller) ReadDebts(ctx context.Context, queries []outbound.DebtQuery, blockNumber *big.Int) ([]outbound.DebtResult, error) {
+func (c *VatCaller) ReadDebts(ctx context.Context, queries []prime_debt.DebtQuery, blockNumber *big.Int) ([]prime_debt.DebtResult, error) {
 	if len(queries) == 0 {
 		return nil, nil
 	}
@@ -165,7 +166,7 @@ func (c *VatCaller) ReadDebts(ctx context.Context, queries []outbound.DebtQuery,
 	}
 
 	// Parse 2 results per query.
-	results := make([]outbound.DebtResult, len(queries))
+	results := make([]prime_debt.DebtResult, len(queries))
 	for i, q := range queries {
 		ilksIdx := i * 2
 		urnsIdx := i*2 + 1

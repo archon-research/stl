@@ -1,6 +1,6 @@
-// Package main provides the vault-debt-worker service.
-// It consumes block events from SQS and reads on-chain debt for each
-// prime agent vault every N blocks, writing append-only snapshots to Postgres.
+// Package main consumes Ethereum block events from SQS, reads on-chain debt
+// for each prime agent vault every N blocks, and writes append-only snapshots
+// to Postgres.
 package main
 
 import (
@@ -26,8 +26,9 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
-	"github.com/archon-research/stl/stl-verify/internal/services/vault_debt"
+	"github.com/archon-research/stl/stl-verify/internal/services/prime_debt"
 )
 
 // Build-time variables - can be set via ldflags, otherwise populated from Go's build info.
@@ -53,7 +54,7 @@ func main() {
 	}()
 
 	if err := run(ctx, os.Args[1:]); err != nil {
-		slog.Error("vault-debt-worker exited with error", "error", err)
+		slog.Error("prime-debt-indexer exited with error", "error", err)
 		os.Exit(1)
 	}
 }
@@ -68,10 +69,10 @@ func maskRPCURL(rawURL string) string {
 	return fmt.Sprintf("%s://%s/***", u.Scheme, u.Host)
 }
 
-// run is the entry point for the vault-debt-worker service.
+// run is the entry point for the prime-debt-indexer.
 // It is extracted from main() to allow integration testing.
 func run(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("vault-debt-worker", flag.ContinueOnError)
+	fs := flag.NewFlagSet("prime-debt-indexer", flag.ContinueOnError)
 	dbURL := fs.String("db", env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"), "PostgreSQL connection string")
 	vatAddr := fs.String("vat", env.Get("VAT_ADDRESS", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"), "MCD Vat contract address")
 	rpcURL := fs.String("rpc", env.Get("ETH_RPC_URL", ""), "Ethereum JSON-RPC endpoint (e.g. https://eth-mainnet.g.alchemy.com/v2/<key>)")
@@ -120,7 +121,7 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
-	logger.Info("starting vault-debt-worker",
+	logger.Info("starting prime-debt-indexer",
 		"commit", GitCommit,
 		"branch", GitBranch,
 		"buildTime", BuildTime,
@@ -129,7 +130,7 @@ func run(ctx context.Context, args []string) error {
 
 	// OpenTelemetry
 	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "vault-debt-worker",
+		ServiceName:    "prime-debt-indexer",
 		ServiceVersion: GitCommit,
 		BuildTime:      BuildTime,
 		Logger:         logger,
@@ -211,8 +212,8 @@ func run(ctx context.Context, args []string) error {
 	primeDebtRepo := postgres.NewPrimeDebtRepository(pool, txm, logger)
 
 	// Vault debt service
-	svc, err := vault_debt.NewVaultDebtService(
-		vault_debt.Config{
+	svc, err := prime_debt.NewVaultDebtService(
+		prime_debt.Config{
 			SweepEveryNBlocks: *sweepBlocks,
 			ChainID:           chainID,
 			MaxMessages:       10,
@@ -225,41 +226,13 @@ func run(ctx context.Context, args []string) error {
 		ethClient,
 	)
 	if err != nil {
-		return fmt.Errorf("vault debt service: %w", err)
+		return fmt.Errorf("prime debt indexer: %w", err)
 	}
 
-	logger.Info("starting vault debt service...",
+	logger.Info("starting prime debt indexer...",
 		"sweepEveryNBlocks", *sweepBlocks,
 		"chainID", chainID,
 	)
 
-	if err := svc.Start(ctx); err != nil {
-		return fmt.Errorf("starting service: %w", err)
-	}
-
-	// Block until context is cancelled
-	<-ctx.Done()
-	logger.Info("shutting down")
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer shutdownCancel()
-
-	done := make(chan struct{})
-	var stopErr error
-	go func() {
-		defer close(done)
-		stopErr = svc.Stop()
-	}()
-
-	select {
-	case <-done:
-		if stopErr != nil {
-			return fmt.Errorf("stop: %w", stopErr)
-		}
-		logger.Info("shutdown complete")
-	case <-shutdownCtx.Done():
-		return fmt.Errorf("shutdown timeout")
-	}
-
-	return nil
+	return lifecycle.Run(ctx, logger, svc)
 }

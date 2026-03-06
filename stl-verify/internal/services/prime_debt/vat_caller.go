@@ -1,4 +1,4 @@
-package outbound
+package prime_debt
 
 import (
 	"context"
@@ -26,7 +26,7 @@ type DebtResult struct {
 	Err          error    // per-vault error (nil on success)
 }
 
-// VatCaller is the port for reading debt data from the MakerDAO/Sky Vat contract.
+// VatCaller reads debt data from the MakerDAO/Sky Vat contract.
 // All methods batch their RPC calls via Multicall3.
 type VatCaller interface {
 	// ResolveIlks reads the ilk identifier from each vault contract in a single
