@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -57,4 +58,23 @@ func marshalMetadata(m map[string]any) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
+}
+
+// buildPlaceholders generates a SQL placeholder tuple like "($1, $2, $3)" for the given
+// row index and column count. Row 0 produces ($1, $2, ...), row 1 produces ($N+1, $N+2, ...), etc.
+func buildPlaceholders(rowIdx, colCount int) string {
+	parts := make([]string, colCount)
+	base := rowIdx * colCount
+	for i := range colCount {
+		parts[i] = fmt.Sprintf("$%d", base+i+1)
+	}
+	return "(" + strings.Join(parts, ", ") + ")"
+}
+
+// nilIfEmpty returns nil if the string is empty, otherwise returns a pointer to the string.
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
