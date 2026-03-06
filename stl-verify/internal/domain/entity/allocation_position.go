@@ -13,7 +13,7 @@ type AllocationPosition struct {
 	TokenAddress   common.Address
 	TokenSymbol    string
 	TokenDecimals  int
-	Star           string
+	PrimeID        int64
 	ProxyAddress   common.Address
 	AssetDecimals  *int
 	Balance        *big.Int
@@ -46,8 +46,8 @@ func (p *AllocationPosition) Validate() error {
 	if p.Direction != "in" && p.Direction != "out" && p.Direction != "sweep" {
 		return fmt.Errorf("direction must be 'in', 'out', or 'sweep', got %q", p.Direction)
 	}
-	if p.Star == "" {
-		return fmt.Errorf("star is required")
+	if p.PrimeID == 0 {
+		return fmt.Errorf("prime_id is required")
 	}
 	if p.BlockNumber == 0 {
 		return fmt.Errorf("block_number is required")
