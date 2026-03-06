@@ -443,7 +443,7 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 	}
 
 	cancel()
-	svc.Stop()
+	_ = svc.Stop()
 }
 
 func TestSync_PartialFailure_OtherPrimesStillSaved(t *testing.T) {
@@ -487,7 +487,7 @@ func TestSync_PartialFailure_OtherPrimesStillSaved(t *testing.T) {
 	}
 found:
 	cancel()
-	svc.Stop()
+	_ = svc.Stop()
 }
 
 // ---------------------------------------------------------------------------
