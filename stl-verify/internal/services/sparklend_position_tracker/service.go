@@ -50,15 +50,6 @@ type PositionEventData struct {
 	CollateralEnabled          bool
 }
 
-type CollateralData struct {
-	Asset             common.Address
-	Decimals          int
-	Symbol            string
-	Name              string
-	ActualBalance     *big.Int
-	CollateralEnabled bool
-}
-
 // UserPositionSnapshot represents a user's full position on a single reserve at a specific block,
 // derived from provider calls. Both supply and debt are snapshotted from on-chain state.
 type UserPositionSnapshot struct {
@@ -580,8 +571,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 	// Use unified extraction so we capture the supplied balance even when collateral is disabled.
 	snapshots, err := s.extractUserPositionSnapshots(ctx, eventData.User, protocolAddress, chainID, blockNumber, eventData.TxHash)
 	if err != nil {
-		s.logger.Warn("failed to extract position snapshots for collateral toggle", "error", err, "tx", eventData.TxHash)
-		snapshots = []UserPositionSnapshot{}
+		return fmt.Errorf("failed to extract user position snapshots: %w", err)
 	}
 
 	var balance *big.Int
@@ -672,8 +662,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 	// Unified extraction: fetches both supply and debt snapshots for all active reserves.
 	snapshots, err := s.extractUserPositionSnapshots(ctx, eventData.User, protocolAddress, chainID, blockNumber, eventData.TxHash)
 	if err != nil {
-		s.logger.Warn("failed to extract user position snapshots", "error", err, "tx", eventData.TxHash, "block", blockNumber)
-		snapshots = []UserPositionSnapshot{}
+		return fmt.Errorf("failed to extract user position snapshots: %w", err)
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
@@ -777,8 +766,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	txHashHex := common.BytesToHash(txHash).Hex()
 	snapshots, err := s.extractUserPositionSnapshots(ctx, user, protocolAddress, chainID, blockNumber, txHashHex)
 	if err != nil {
-		s.logger.Warn("failed to extract user position snapshots", "user", user.Hex(), "error", err)
-		snapshots = []UserPositionSnapshot{}
+		return fmt.Errorf("failed to extract user position snapshots: %w", err)
 	}
 
 	// Persist both debt and supplied-position snapshots for all active reserves.
@@ -786,14 +774,13 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	for _, snap := range snapshots {
 		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, snap.Asset, normalizeTokenSymbol(snap.Symbol), snap.Decimals, blockNumber)
 		if err != nil {
-			s.logger.Warn("failed to get token for liquidation snapshot", "token", snap.Asset.Hex(), "error", err, "tx", txHashHex)
-			continue
+			return fmt.Errorf("failed to get token for liquidation snapshot: %w", err)
 		}
 
 		if snap.DebtBalance.Cmp(big.NewInt(0)) > 0 {
 			decimalAdjustedDebt := s.convertToDecimalAdjusted(snap.DebtBalance, snap.Decimals)
 			if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedDebt, "0", eventType, txHash); err != nil {
-				s.logger.Warn("failed to save borrower debt snapshot", "token", snap.Asset.Hex(), "error", err, "tx", txHashHex)
+				return fmt.Errorf("failed to save borrower debt snapshot for token %s: %w", snap.Asset.Hex(), err)
 			}
 		}
 

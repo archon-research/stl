@@ -19,6 +19,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/jackc/pgx/v5"
 )
 
 // ----- helpers -----
@@ -147,6 +148,51 @@ func buildUserReservesDataResponse(t *testing.T, reserves []UserReserveData) str
 		if r.ScaledVariableDebt != nil {
 			copy(data[base+96:base+128], common.LeftPadBytes(r.ScaledVariableDebt.Bytes(), 32))
 		}
+	}
+
+	return "0x" + hex.EncodeToString(data)
+}
+
+// buildUserReservesDataResponse7Field encodes a getUserReservesData response
+// using the 7-field legacy AaveV3 layout which includes stable debt fields:
+//
+//	[0] address  underlyingAsset
+//	[1] uint256  scaledATokenBalance
+//	[2] bool     usageAsCollateralEnabledOnUser
+//	[3] uint256  scaledVariableDebt
+//	[4] uint256  stableBorrowRate
+//	[5] uint256  principalStableDebt
+//	[6] uint256  stableBorrowLastUpdateTimestamp
+func buildUserReservesDataResponse7Field(t *testing.T, reserves []UserReserveData) string {
+	t.Helper()
+
+	n := len(reserves)
+	// Layout: [offset (32)] [eMode uint8 (32)] [length (32)] [n * 7 * 32]
+	data := make([]byte, 32*2+32+n*7*32)
+
+	// word 0: offset to array = 64 (0x40)
+	data[31] = 64
+
+	// word 2 (at offset 64): array length
+	copy(data[64:96], common.LeftPadBytes(big.NewInt(int64(n)).Bytes(), 32))
+
+	for i, r := range reserves {
+		base := 96 + i*7*32
+		copy(data[base:base+32], common.LeftPadBytes(r.UnderlyingAsset.Bytes(), 32))
+		if r.ScaledATokenBalance != nil {
+			copy(data[base+32:base+64], common.LeftPadBytes(r.ScaledATokenBalance.Bytes(), 32))
+		}
+		if r.UsageAsCollateralEnabledOnUser {
+			data[base+95] = 1
+		}
+		if r.ScaledVariableDebt != nil {
+			copy(data[base+96:base+128], common.LeftPadBytes(r.ScaledVariableDebt.Bytes(), 32))
+		}
+		// stableBorrowRate (word 4) — zero
+		if r.PrincipalStableDebt != nil {
+			copy(data[base+5*32:base+6*32], common.LeftPadBytes(r.PrincipalStableDebt.Bytes(), 32))
+		}
+		// stableBorrowLastUpdateTimestamp (word 6) — zero
 	}
 
 	return "0x" + hex.EncodeToString(data)
@@ -988,5 +1034,275 @@ func TestExtractUserPositionSnapshots_ProviderUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "provider unavailable") {
 		t.Errorf("error = %q, want to contain 'provider unavailable'", err.Error())
+	}
+}
+
+
+// TestSavePositionSnapshot_SnapshotExtractionFailureReturnsError verifies that
+// savePositionSnapshot propagates extractUserPositionSnapshots errors rather
+// than silently continuing with empty snapshots.
+func TestSavePositionSnapshot_SnapshotExtractionFailureReturnsError(t *testing.T) {
+	weth := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	user := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+
+	// The mock eth server returns a valid getUserReservesData response with a
+	// single active asset so extractUserPositionSnapshots proceeds past
+	// getUserReservesData and into batchGetUserReserveData.
+	reserves := []UserReserveData{
+		{UnderlyingAsset: weth, ScaledATokenBalance: big.NewInt(1e18)},
+	}
+
+	decPacked, symPacked, namePacked := buildERC20MetadataResult(t, 18, "WETH", "Wrapped Ether")
+
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		// 3 calls = batchGetTokenMetadata (succeeds for both the initial event-reserve
+		// lookup in savePositionSnapshot and the per-asset lookup inside
+		// extractUserPositionSnapshots).
+		// 1 call  = batchGetUserReserveData (fails to simulate provider unavailable).
+		switch len(calls) {
+		case 3:
+			return []outbound.Result{
+				{Success: true, ReturnData: decPacked},
+				{Success: true, ReturnData: symPacked},
+				{Success: true, ReturnData: namePacked},
+			}, nil
+		case 1:
+			return nil, fmt.Errorf("provider contract unavailable")
+		default:
+			return nil, fmt.Errorf("unexpected call with %d calls", len(calls))
+		}
+	}
+
+	srv := startMockEthServer(t, buildUserReservesDataResponse(t, reserves))
+	svc, posRepo := newPositionTestService(t, srv.URL, mc)
+
+	err := svc.savePositionSnapshot(context.Background(), &PositionEventData{
+		EventType: EventBorrow,
+		TxHash:    "0xfail",
+		User:      user,
+		Reserve:   weth,
+		Amount:    big.NewInt(1e18),
+	}, common.HexToAddress(aaveV3EthPool), testChainID, testBlockNumber, 0)
+
+	// Must return an error — must not silently drop the borrower row.
+	if err == nil {
+		t.Fatal("expected error when snapshot extraction fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "provider contract unavailable") {
+		t.Errorf("error = %q, want to contain provider contract unavailable", err.Error())
+	}
+
+	// No partial data must have been written.
+	if len(posRepo.SavedBorrowers) != 0 {
+		t.Errorf("expected 0 borrower rows on failure, got %d", len(posRepo.SavedBorrowers))
+	}
+	if len(posRepo.SavedCollaterals) != 0 {
+		t.Errorf("expected 0 collateral rows on failure, got %d", len(posRepo.SavedCollaterals))
+	}
+}
+
+// TestSaveCollateralToggleEvent_SnapshotExtractionFailureReturnsError verifies
+// that saveCollateralToggleEvent propagates extractUserPositionSnapshots errors
+// rather than persisting a fabricated zero balance.
+func TestSaveCollateralToggleEvent_SnapshotExtractionFailureReturnsError(t *testing.T) {
+	weth := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	user := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+
+	reserves := []UserReserveData{
+		{UnderlyingAsset: weth, ScaledATokenBalance: big.NewInt(1e18)},
+	}
+
+	decPacked, symPacked, namePacked := buildERC20MetadataResult(t, 18, "WETH", "Wrapped Ether")
+
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		// 3 calls = batchGetTokenMetadata (succeeds).
+		// 1 call  = batchGetUserReserveData (fails to simulate provider unavailable).
+		switch len(calls) {
+		case 3:
+			return []outbound.Result{
+				{Success: true, ReturnData: decPacked},
+				{Success: true, ReturnData: symPacked},
+				{Success: true, ReturnData: namePacked},
+			}, nil
+		case 1:
+			return nil, fmt.Errorf("provider contract unavailable")
+		default:
+			return nil, fmt.Errorf("unexpected call with %d calls", len(calls))
+		}
+	}
+
+	srv := startMockEthServer(t, buildUserReservesDataResponse(t, reserves))
+	svc, posRepo := newPositionTestService(t, srv.URL, mc)
+
+	err := svc.saveCollateralToggleEvent(context.Background(), &PositionEventData{
+		EventType:         EventReserveUsedAsCollateralDisabled,
+		TxHash:            "0xfail2",
+		User:              user,
+		Reserve:           weth,
+		CollateralEnabled: false,
+	}, common.HexToAddress(aaveV3EthPool), testChainID, testBlockNumber, 0)
+
+	// Must return an error — must not persist a fabricated zero balance.
+	if err == nil {
+		t.Fatal("expected error when snapshot extraction fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "provider contract unavailable") {
+		t.Errorf("error = %q, want to contain provider contract unavailable", err.Error())
+	}
+
+	if len(posRepo.SavedCollaterals) != 0 {
+		t.Errorf("expected 0 collateral rows on failure, got %d", len(posRepo.SavedCollaterals))
+	}
+}
+
+// TestSnapshotUserPosition_SaveBorrowerFailureRollsBack verifies that a
+// SaveBorrower failure causes snapshotUserPosition to return an error, so the
+// enclosing transaction rolls back and collateral rows are not committed.
+func TestSnapshotUserPosition_SaveBorrowerFailureRollsBack(t *testing.T) {
+	weth := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	user := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+
+	wethSupply := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	usdcDebt := big.NewInt(500000000) // 500 USDC
+
+	reserves := []UserReserveData{
+		{UnderlyingAsset: weth, ScaledATokenBalance: wethSupply, UsageAsCollateralEnabledOnUser: true},
+		{UnderlyingAsset: usdc, ScaledVariableDebt: usdcDebt},
+	}
+
+	wethDecPacked, wethSymPacked, wethNamePacked := buildERC20MetadataResult(t, 18, "WETH", "Wrapped Ether")
+	usdcDecPacked, usdcSymPacked, usdcNamePacked := buildERC20MetadataResult(t, 6, "USDC", "USD Coin")
+	wethReserveData := buildGetUserReserveDataResult(t, wethSupply, big.NewInt(0), big.NewInt(0), true)
+	usdcReserveData := buildGetUserReserveDataResult(t, big.NewInt(0), big.NewInt(0), usdcDebt, false)
+
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 6:
+			return []outbound.Result{
+				{Success: true, ReturnData: wethDecPacked},
+				{Success: true, ReturnData: wethSymPacked},
+				{Success: true, ReturnData: wethNamePacked},
+				{Success: true, ReturnData: usdcDecPacked},
+				{Success: true, ReturnData: usdcSymPacked},
+				{Success: true, ReturnData: usdcNamePacked},
+			}, nil
+		case 2:
+			return []outbound.Result{
+				{Success: true, ReturnData: wethReserveData},
+				{Success: true, ReturnData: usdcReserveData},
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected call with %d calls", len(calls))
+		}
+	}
+
+	srv := startMockEthServer(t, buildUserReservesDataResponse(t, reserves))
+	svc, posRepo := newPositionTestService(t, srv.URL, mc)
+
+	// Inject a SaveBorrower failure.
+	posRepo.SaveBorrowerFn = func(_ context.Context, _ pgx.Tx, _, _, _ int64, _ int64, _ int, _, _, _ string, _ []byte) error {
+		return fmt.Errorf("db write failure")
+	}
+
+	err := svc.snapshotUserPosition(
+		context.Background(),
+		nil,
+		user,
+		"LiquidationCall",
+		common.FromHex("0xdeadbeef"),
+		common.HexToAddress(aaveV3EthPool),
+		testChainID, testBlockNumber, 0,
+	)
+
+	// snapshotUserPosition must surface the SaveBorrower error so the caller's
+	// transaction can roll back, leaving no partial snapshot.
+	if err == nil {
+		t.Fatal("expected error from SaveBorrower failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "db write failure") {
+		t.Errorf("error = %q, want to contain db write failure", err.Error())
+	}
+
+	// No collateral rows must have been committed (transaction would be rolled back).
+	if len(posRepo.SavedCollaterals) != 0 {
+		t.Errorf("expected 0 collateral rows when borrower write fails, got %d", len(posRepo.SavedCollaterals))
+	}
+}
+
+// TestExtractUserPositionSnapshots_StableDebtOnlyAsset verifies that an asset
+// with only stable debt (and no variable debt or supply) is discovered and
+// included in the snapshot, with DebtBalance equal to the stable debt amount.
+// This test uses the 7-field getUserReservesData layout (legacy AaveV3) which
+// carries PrincipalStableDebt in the discovery response.
+func TestExtractUserPositionSnapshots_StableDebtOnlyAsset(t *testing.T) {
+	dai := common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F")
+	user := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+
+	stableDebt := big.NewInt(1000000000000000000) // 1 DAI
+
+	// getUserReservesData returns the asset with PrincipalStableDebt > 0 only
+	// (7-field layout so the decoder picks up the stable debt field).
+	reserves := []UserReserveData{
+		{
+			UnderlyingAsset:     dai,
+			ScaledATokenBalance: big.NewInt(0),
+			ScaledVariableDebt:  big.NewInt(0),
+			PrincipalStableDebt: stableDebt,
+		},
+	}
+
+	decPacked, symPacked, namePacked := buildERC20MetadataResult(t, 18, "DAI", "Dai Stablecoin")
+	// Provider reports: no supply, no variable debt, currentStableDebt = 1 DAI.
+	reserveDataPacked := buildGetUserReserveDataResult(t,
+		big.NewInt(0), // currentATokenBalance
+		stableDebt,    // currentStableDebt
+		big.NewInt(0), // currentVariableDebt
+		false,
+	)
+
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 3:
+			return []outbound.Result{
+				{Success: true, ReturnData: decPacked},
+				{Success: true, ReturnData: symPacked},
+				{Success: true, ReturnData: namePacked},
+			}, nil
+		case 1:
+			return []outbound.Result{
+				{Success: true, ReturnData: reserveDataPacked},
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected call len=%d", len(calls))
+		}
+	}
+
+	srv := startMockEthServer(t, buildUserReservesDataResponse7Field(t, reserves))
+	svc, _ := newPositionTestService(t, srv.URL, mc)
+
+	snapshots, err := svc.extractUserPositionSnapshots(
+		context.Background(),
+		user,
+		common.HexToAddress(aaveV3EthPool),
+		testChainID, testBlockNumber, "0xtest",
+	)
+	if err != nil {
+		t.Fatalf("extractUserPositionSnapshots: %v", err)
+	}
+
+	if len(snapshots) != 1 {
+		t.Fatalf("expected 1 snapshot for stable-debt-only asset, got %d", len(snapshots))
+	}
+	snap := snapshots[0]
+	if snap.DebtBalance.Cmp(stableDebt) != 0 {
+		t.Errorf("DebtBalance = %v, want %v (stableDebt)", snap.DebtBalance, stableDebt)
+	}
+	if snap.SuppliedBalance.Cmp(big.NewInt(0)) != 0 {
+		t.Errorf("SuppliedBalance = %v, want 0", snap.SuppliedBalance)
 	}
 }
