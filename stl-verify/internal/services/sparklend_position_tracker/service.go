@@ -34,6 +34,11 @@ const (
 	EventLiquidationCall                 = entity.EventLiquidationCall
 	EventReserveUsedAsCollateralEnabled  = entity.EventReserveUsedAsCollateralEnabled
 	EventReserveUsedAsCollateralDisabled = entity.EventReserveUsedAsCollateralDisabled
+
+	// snapshotChange is the change column value for all snapshot rows.
+	// Snapshots record the full on-chain balance at a given block; delta
+	// tracking (non-zero change) is reserved for future use.
+	snapshotChange = "0"
 )
 
 type PositionEventData struct {
@@ -50,9 +55,9 @@ type PositionEventData struct {
 	CollateralEnabled          bool
 }
 
-// UserPositionSnapshot represents a user's full position on a single reserve at a specific block,
+// userPositionSnapshot represents a user's full position on a single reserve at a specific block,
 // derived from provider calls. Both supply and debt are snapshotted from on-chain state.
-type UserPositionSnapshot struct {
+type userPositionSnapshot struct {
 	Asset             common.Address
 	Decimals          int
 	Symbol            string
@@ -574,6 +579,10 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 		return fmt.Errorf("failed to extract user position snapshots: %w", err)
 	}
 
+	// A collateral toggle only changes the collateral status of the event reserve;
+	// debt positions are unaffected. Only the toggled reserve's supply balance is
+	// recorded here. Debt rows are written by savePositionSnapshot / snapshotUserPosition
+	// when borrow/repay/liquidation events fire.
 	var balance *big.Int
 	for _, snap := range snapshots {
 		if snap.Asset == eventData.Reserve {
@@ -611,7 +620,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 		}
 
 		decimalAdjustedBalance := s.convertToDecimalAdjusted(balance, metadata.Decimals)
-		if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedBalance, "0", string(eventData.EventType), common.FromHex(eventData.TxHash), eventData.CollateralEnabled); err != nil {
+		if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedBalance, snapshotChange, string(eventData.EventType), common.FromHex(eventData.TxHash), eventData.CollateralEnabled); err != nil {
 			return fmt.Errorf("failed to save collateral toggle: %w", err)
 		}
 
@@ -702,7 +711,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 					return fmt.Errorf("failed to get token: %w", err)
 				}
 				decimalAdjustedDebt := s.convertToDecimalAdjusted(debtBalance, tokenMetadata.Decimals)
-				if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedDebt, "0", string(eventData.EventType), common.FromHex(eventData.TxHash)); err != nil {
+				if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedDebt, snapshotChange, string(eventData.EventType), common.FromHex(eventData.TxHash)); err != nil {
 					return fmt.Errorf("failed to insert borrower: %w", err)
 				}
 			}
@@ -717,8 +726,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			}
 			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, snap.Asset, normalizeTokenSymbol(snap.Symbol), snap.Decimals, blockNumber)
 			if err != nil {
-				s.logger.Warn("failed to get collateral token", "token", snap.Asset.Hex(), "error", err, "tx", eventData.TxHash)
-				continue
+				return fmt.Errorf("failed to get token for position snapshot: %w", err)
 			}
 
 			records = append(records, outbound.CollateralRecord{
@@ -728,7 +736,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 				BlockNumber:       blockNumber,
 				BlockVersion:      blockVersion,
 				Amount:            s.convertToDecimalAdjusted(snap.SuppliedBalance, snap.Decimals),
-				Change:            "0",
+				Change:            snapshotChange,
 				EventType:         string(eventData.EventType),
 				TxHash:            common.FromHex(eventData.TxHash),
 				CollateralEnabled: snap.CollateralEnabled,
@@ -779,7 +787,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 
 		if snap.DebtBalance.Cmp(big.NewInt(0)) > 0 {
 			decimalAdjustedDebt := s.convertToDecimalAdjusted(snap.DebtBalance, snap.Decimals)
-			if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedDebt, "0", eventType, txHash); err != nil {
+			if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedDebt, snapshotChange, eventType, txHash); err != nil {
 				return fmt.Errorf("failed to save borrower debt snapshot for token %s: %w", snap.Asset.Hex(), err)
 			}
 		}
@@ -792,7 +800,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 				BlockNumber:       blockNumber,
 				BlockVersion:      blockVersion,
 				Amount:            s.convertToDecimalAdjusted(snap.SuppliedBalance, snap.Decimals),
-				Change:            "0",
+				Change:            snapshotChange,
 				EventType:         eventType,
 				TxHash:            txHash,
 				CollateralEnabled: snap.CollateralEnabled,
@@ -816,7 +824,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 // balances (CurrentATokenBalance, CurrentVariableDebt, CurrentStableDebt) are then fetched via
 // getUserReserveData through multicall. Only assets with a non-zero actual balance on either side
 // are returned.
-func (s *Service) extractUserPositionSnapshots(ctx context.Context, user common.Address, protocolAddress common.Address, chainID, blockNumber int64, txHash string) ([]UserPositionSnapshot, error) {
+func (s *Service) extractUserPositionSnapshots(ctx context.Context, user common.Address, protocolAddress common.Address, chainID, blockNumber int64, txHash string) ([]userPositionSnapshot, error) {
 	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blockchain service: %w", err)
@@ -824,22 +832,21 @@ func (s *Service) extractUserPositionSnapshots(ctx context.Context, user common.
 
 	reserves, err := blockchainSvc.getUserReservesData(ctx, user, blockNumber)
 	if err != nil {
-		s.logger.Warn("failed to get user reserves", "error", err, "tx", txHash, "block", blockNumber)
-		return []UserPositionSnapshot{}, nil
+		return nil, fmt.Errorf("failed to get user reserves data: %w", err)
 	}
 
 	// Collect all assets where the user has any scaled balance (supply or debt).
 	activeAssets := make([]common.Address, 0, len(reserves))
 	for _, r := range reserves {
 		hasSupply := r.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0
-		hasDebt := r.ScaledVariableDebt.Cmp(big.NewInt(0)) > 0 || r.PrincipalStableDebt.Cmp(big.NewInt(0)) > 0
+		hasDebt := r.ScaledVariableDebt.Cmp(big.NewInt(0)) > 0 || (r.PrincipalStableDebt != nil && r.PrincipalStableDebt.Cmp(big.NewInt(0)) > 0)
 		if (hasSupply || hasDebt) && r.UnderlyingAsset != (common.Address{}) {
 			activeAssets = append(activeAssets, r.UnderlyingAsset)
 		}
 	}
 
 	if len(activeAssets) == 0 {
-		return []UserPositionSnapshot{}, nil
+		return nil, nil
 	}
 
 	tokensToFetch := make(map[common.Address]bool, len(activeAssets))
@@ -850,16 +857,16 @@ func (s *Service) extractUserPositionSnapshots(ctx context.Context, user common.
 	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {
 		s.logger.Warn("failed to batch get token metadata", "error", err, "tx", txHash, "block", blockNumber)
-		return []UserPositionSnapshot{}, fmt.Errorf("failed to get token metadata: %w", err)
+		return nil, fmt.Errorf("failed to get token metadata: %w", err)
 	}
 
 	actualDataMap, err := blockchainSvc.batchGetUserReserveData(ctx, activeAssets, user, blockNumber)
 	if err != nil {
 		s.logger.Warn("failed to batch get user reserve data", "error", err, "tx", txHash, "block", blockNumber)
-		return []UserPositionSnapshot{}, fmt.Errorf("failed to get user reserve data: %w", err)
+		return nil, fmt.Errorf("failed to get user reserve data: %w", err)
 	}
 
-	snapshots := make([]UserPositionSnapshot, 0, len(activeAssets))
+	snapshots := make([]userPositionSnapshot, 0, len(activeAssets))
 	for _, asset := range activeAssets {
 		metadata, ok := metadataMap[asset]
 		if !ok || metadata.Decimals == 0 {
@@ -886,7 +893,7 @@ func (s *Service) extractUserPositionSnapshots(ctx context.Context, user common.
 		debtBalance := new(big.Int).Add(actualData.CurrentVariableDebt, actualData.CurrentStableDebt)
 		// Only include assets where the user actually has a position at this block.
 		if actualData.CurrentATokenBalance.Cmp(big.NewInt(0)) > 0 || debtBalance.Cmp(big.NewInt(0)) > 0 {
-			snapshots = append(snapshots, UserPositionSnapshot{
+			snapshots = append(snapshots, userPositionSnapshot{
 				Asset:             asset,
 				Decimals:          metadata.Decimals,
 				Symbol:            metadata.Symbol,

@@ -380,8 +380,8 @@ func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 			TokenID:           fixture.tokenID,
 			BlockNumber:       4000,
 			BlockVersion:      i,                        // Same key as before
-			Amount:            "9999999999999999999",
-			Change:            "0",    // Different amount - should be ignored
+			Amount:            "9999999999999999999",    // Different amount - should be ignored
+			Change:            "0",
 			EventType:         "Modified",               // Different event type - should be ignored
 			TxHash:            []byte{0xff, 0xff, 0xff}, // Different tx hash - should be ignored
 			CollateralEnabled: false,                    // Different enabled - should be ignored

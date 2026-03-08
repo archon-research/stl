@@ -1306,3 +1306,113 @@ func TestExtractUserPositionSnapshots_StableDebtOnlyAsset(t *testing.T) {
 		t.Errorf("SuppliedBalance = %v, want 0", snap.SuppliedBalance)
 	}
 }
+
+// TestExtractUserPositionSnapshots_UserReservesDataFails verifies that
+// extractUserPositionSnapshots propagates a getUserReservesData failure as an
+// error rather than silently returning an empty snapshot (which would cause
+// callers to write no rows without knowing why).
+func TestExtractUserPositionSnapshots_UserReservesDataFails(t *testing.T) {
+	user := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+
+	// Start a server that returns an RPC execution error for every eth_call,
+	// simulating a reverted getUserReservesData call.
+	revertingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"error": map[string]any{
+				"code":    -32000,
+				"message": "execution reverted: contract not deployed at block",
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("mock eth server encode: %v", err)
+		}
+	}))
+	t.Cleanup(revertingSrv.Close)
+
+	mc := testutil.NewMockMulticaller()
+	svc, _ := newPositionTestService(t, revertingSrv.URL, mc)
+
+	_, err := svc.extractUserPositionSnapshots(
+		context.Background(),
+		user,
+		common.HexToAddress(aaveV3EthPool),
+		testChainID, testBlockNumber, "0xtest",
+	)
+	// Must surface the error — must not silently return an empty snapshot.
+	if err == nil {
+		t.Fatal("expected error when getUserReservesData fails, got nil")
+	}
+}
+
+// TestSavePositionSnapshot_CollateralTokenFailureReturnsError verifies that a
+// GetOrCreateToken failure while building collateral rows in savePositionSnapshot
+// returns an error rather than silently dropping the row.
+func TestSavePositionSnapshot_CollateralTokenFailureReturnsError(t *testing.T) {
+	weth := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	user := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+
+	supply := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil) // 1 ETH
+
+	reserves := []UserReserveData{
+		{
+			UnderlyingAsset:                weth,
+			ScaledATokenBalance:            supply,
+			UsageAsCollateralEnabledOnUser: true,
+		},
+	}
+
+	decPacked, symPacked, namePacked := buildERC20MetadataResult(t, 18, "WETH", "Wrapped Ether")
+	reserveDataPacked := buildGetUserReserveDataResult(t, supply, big.NewInt(0), big.NewInt(0), true)
+
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 3:
+			return []outbound.Result{
+				{Success: true, ReturnData: decPacked},
+				{Success: true, ReturnData: symPacked},
+				{Success: true, ReturnData: namePacked},
+			}, nil
+		case 1:
+			return []outbound.Result{
+				{Success: true, ReturnData: reserveDataPacked},
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected call len=%d", len(calls))
+		}
+	}
+
+	srv := startMockEthServer(t, buildUserReservesDataResponse(t, reserves))
+	svc, posRepo := newPositionTestService(t, srv.URL, mc)
+
+	// Inject a GetOrCreateToken failure for the collateral token lookup.
+	svc.tokenRepo = &testutil.MockTokenRepository{
+		GetOrCreateTokenFn: func(_ context.Context, _ pgx.Tx, _ int64, _ common.Address, _ string, _ int, _ int64) (int64, error) {
+			return 0, fmt.Errorf("token registry unavailable")
+		},
+	}
+
+	err := svc.savePositionSnapshot(context.Background(), &PositionEventData{
+		EventType: EventSupply,
+		TxHash:    "0xtok",
+		User:      user,
+		Reserve:   weth,
+		Amount:    supply,
+	}, common.HexToAddress(aaveV3EthPool), testChainID, testBlockNumber, 0)
+
+	// Must return an error — must not silently drop the collateral row.
+	if err == nil {
+		t.Fatal("expected error when GetOrCreateToken fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "token registry unavailable") {
+		t.Errorf("error = %q, want to contain 'token registry unavailable'", err.Error())
+	}
+
+	// No partial data must have been written.
+	if len(posRepo.SavedCollaterals) != 0 {
+		t.Errorf("expected 0 collateral rows on failure, got %d", len(posRepo.SavedCollaterals))
+	}
+}
