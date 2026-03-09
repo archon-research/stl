@@ -301,9 +301,11 @@ dev-up:
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  [6/6] Ready"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "==> Waiting for all pods to be ready..."
-	@kubectl wait --for=condition=ready pod --all -n stl --timeout=120s --field-selector=status.phase!=Succeeded \
-	  || { echo "ERROR: pods not ready after 120s"; kubectl get pods -n stl; exit 1; }
+	@echo "==> Waiting for all deployments to roll out..."
+	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker temporal-worker; do \
+	  kubectl rollout status deployment/$$dep -n stl --timeout=120s || \
+	    { echo "ERROR: deployment $$dep not ready after 120s"; kubectl get pods -n stl; exit 1; }; \
+	done
 	@kubectl get pods -n stl
 
 # Generate .env files for all services (fetches secrets from AWS)
