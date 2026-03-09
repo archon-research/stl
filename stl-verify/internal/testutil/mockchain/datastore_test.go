@@ -217,7 +217,7 @@ func TestLoadFromS3_Success(t *testing.T) {
 
 // TestLoadFromS3_Errors verifies the exact error wrapping for each failure mode.
 func TestLoadFromS3_Errors(t *testing.T) {
-	errList   := errors.New("list error")
+	errList := errors.New("list error")
 	errStream := errors.New("stream error")
 
 	tests := []struct {
