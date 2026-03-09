@@ -213,13 +213,13 @@ func buildGetUserReserveDataResult(
 
 	var lastUpdated uint64 = 0
 	packed, err := userReserveDataABI.Methods["getUserReserveData"].Outputs.Pack(
-		aTokenBalance, // currentATokenBalance
-		stableDebt,    // currentStableDebt
-		variableDebt,  // currentVariableDebt
-		big.NewInt(0), // principalStableDebt
-		big.NewInt(0), // scaledVariableDebt
-		big.NewInt(0), // stableBorrowRate
-		big.NewInt(0), // liquidityRate
+		aTokenBalance,                       // currentATokenBalance
+		stableDebt,                          // currentStableDebt
+		variableDebt,                        // currentVariableDebt
+		big.NewInt(0),                       // principalStableDebt
+		big.NewInt(0),                       // scaledVariableDebt
+		big.NewInt(0),                       // stableBorrowRate
+		big.NewInt(0),                       // liquidityRate
 		new(big.Int).SetUint64(lastUpdated), // stableRateLastUpdated (uint40 → *big.Int)
 		collateralEnabled,                   // usageAsCollateralEnabled
 	)
@@ -286,10 +286,10 @@ func TestSavePositionSnapshot_BorrowAmountIsProviderDebt(t *testing.T) {
 
 	decPacked, symPacked, namePacked := buildERC20MetadataResult(t, 18, "WETH", "Wrapped Ether")
 	reserveDataPacked := buildGetUserReserveDataResult(t,
-		big.NewInt(0),  // aTokenBalance = 0 (no supply)
-		big.NewInt(0),  // stableDebt
-		providerDebt,   // variableDebt = 1 ETH
-		false,          // collateralEnabled
+		big.NewInt(0), // aTokenBalance = 0 (no supply)
+		big.NewInt(0), // stableDebt
+		providerDebt,  // variableDebt = 1 ETH
+		false,         // collateralEnabled
 	)
 
 	callCount := 0
@@ -378,9 +378,9 @@ func TestSavePositionSnapshot_BorrowChangeIsZero(t *testing.T) {
 
 	reserves := []UserReserveData{
 		{
-			UnderlyingAsset:    weth,
+			UnderlyingAsset:     weth,
 			ScaledATokenBalance: big.NewInt(0),
-			ScaledVariableDebt: providerDebt,
+			ScaledVariableDebt:  providerDebt,
 		},
 	}
 
@@ -560,17 +560,18 @@ func TestSavePositionSnapshot_NonCollateralEnabledAssetPersisted(t *testing.T) {
 	}
 }
 
-// TestSavePositionSnapshot_ZeroDebtNotPersisted verifies that when the provider
-// reports zero debt (e.g. after a full repayment) no borrower row is written.
-func TestSavePositionSnapshot_ZeroDebtNotPersisted(t *testing.T) {
+// TestSavePositionSnapshot_ZeroDebtRepayPersistsZeroRow verifies that when the
+// provider reports zero debt after a full repayment, a borrower row with
+// Amount="0" is still written so downstream consumers know the debt is closed.
+func TestSavePositionSnapshot_ZeroDebtRepayPersistsZeroRow(t *testing.T) {
 	weth := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
 	user := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
 
 	reserves := []UserReserveData{
 		{
-			UnderlyingAsset:    weth,
+			UnderlyingAsset:     weth,
 			ScaledATokenBalance: big.NewInt(0),
-			ScaledVariableDebt: big.NewInt(0),
+			ScaledVariableDebt:  big.NewInt(0),
 		},
 	}
 
@@ -601,9 +602,6 @@ func TestSavePositionSnapshot_ZeroDebtNotPersisted(t *testing.T) {
 	srv := startMockEthServer(t, buildUserReservesDataResponse(t, reserves))
 	svc, posRepo := newPositionTestService(t, srv.URL, mc)
 
-	// Even though event says 1 ETH was repaid, there's no token metadata in
-	// the service's batchGetTokenMetadata so it will fail unless we provide it.
-	// The test verifies zero-balance assets produce no repo writes.
 	err := svc.savePositionSnapshot(context.Background(), &PositionEventData{
 		EventType: EventRepay,
 		TxHash:    "0xeee",
@@ -611,13 +609,27 @@ func TestSavePositionSnapshot_ZeroDebtNotPersisted(t *testing.T) {
 		Reserve:   weth,
 		Amount:    new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil),
 	}, common.HexToAddress(aaveV3EthPool), testChainID, testBlockNumber, 0)
-	// No error expected even though there are no rows to write.
 	if err != nil {
 		t.Fatalf("savePositionSnapshot: %v", err)
 	}
 
-	if len(posRepo.SavedBorrowers) != 0 {
-		t.Errorf("expected 0 borrower rows for zero debt, got %d", len(posRepo.SavedBorrowers))
+	// For Repay events, a zero-debt row must be written so downstream knows debt is closed.
+	if len(posRepo.SavedBorrowers) != 1 {
+		t.Fatalf("expected 1 borrower row for zero-debt Repay, got %d", len(posRepo.SavedBorrowers))
+	}
+	got := posRepo.SavedBorrowers[0]
+	if got.Amount != "0" {
+		t.Errorf("borrower.Amount = %q, want %q", got.Amount, "0")
+	}
+	if got.Change != "0" {
+		t.Errorf("borrower.Change = %q, want %q", got.Change, "0")
+	}
+	if got.EventType != string(EventRepay) {
+		t.Errorf("borrower.EventType = %q, want %q", got.EventType, string(EventRepay))
+	}
+	// Zero supply + zero debt should produce no collateral rows.
+	if len(posRepo.SavedCollaterals) != 0 {
+		t.Errorf("expected 0 collateral rows for zero supply, got %d", len(posRepo.SavedCollaterals))
 	}
 }
 
@@ -631,9 +643,9 @@ func TestSavePositionSnapshot_ZeroSupplyNotPersisted(t *testing.T) {
 
 	reserves := []UserReserveData{
 		{
-			UnderlyingAsset:    weth,
+			UnderlyingAsset:     weth,
 			ScaledATokenBalance: big.NewInt(0), // no supply
-			ScaledVariableDebt: providerDebt,
+			ScaledVariableDebt:  providerDebt,
 		},
 	}
 
@@ -689,7 +701,7 @@ func TestSavePositionSnapshot_MultipleTokensPersistIndependently(t *testing.T) {
 	user := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
 
 	wethSupply := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil) // 1 ETH
-	usdcDebt := big.NewInt(1000000000)                                   // 1000 USDC (6 decimals)
+	usdcDebt := big.NewInt(1000000000)                                  // 1000 USDC (6 decimals)
 
 	reserves := []UserReserveData{
 		{UnderlyingAsset: weth, ScaledATokenBalance: wethSupply, UsageAsCollateralEnabledOnUser: true},
@@ -899,7 +911,169 @@ func TestSaveCollateralToggleEvent_NonEnabledBalancePersisted(t *testing.T) {
 	}
 }
 
-// TestExtractUserPositionSnapshots_IncludesDebtOnlyAssets verifies that assets
+// TestSaveCollateralToggleEvent_FullSnapshot_MultipleReserves verifies that a
+// collateral toggle event produces a full snapshot: collateral rows for all
+// reserves with supply AND debt rows for reserves with non-zero debt.
+func TestSaveCollateralToggleEvent_FullSnapshot_MultipleReserves(t *testing.T) {
+	weth := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	user := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+
+	wethSupply := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil) // 1 ETH
+	usdcDebt := big.NewInt(1000000000)                                  // 1000 USDC (6 decimals)
+
+	reserves := []UserReserveData{
+		{UnderlyingAsset: weth, ScaledATokenBalance: wethSupply, UsageAsCollateralEnabledOnUser: true},
+		{UnderlyingAsset: usdc, ScaledVariableDebt: usdcDebt},
+	}
+
+	wethDecPacked, wethSymPacked, wethNamePacked := buildERC20MetadataResult(t, 18, "WETH", "Wrapped Ether")
+	usdcDecPacked, usdcSymPacked, usdcNamePacked := buildERC20MetadataResult(t, 6, "USDC", "USD Coin")
+	wethReserveData := buildGetUserReserveDataResult(t, wethSupply, big.NewInt(0), big.NewInt(0), true)
+	usdcReserveData := buildGetUserReserveDataResult(t, big.NewInt(0), big.NewInt(0), usdcDebt, false)
+
+	// Metadata results keyed by token address for order-independent lookup.
+	// batchGetTokenMetadata targets individual token contracts, so we match on call target.
+	metadataByToken := map[common.Address]struct{ dec, sym, name []byte }{
+		weth: {wethDecPacked, wethSymPacked, wethNamePacked},
+		usdc: {usdcDecPacked, usdcSymPacked, usdcNamePacked},
+	}
+
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 6: // metadata for 2 tokens — 3 calls each (decimals, symbol, name)
+			results := make([]outbound.Result, 6)
+			for i := 0; i < len(calls); i += 3 {
+				token := calls[i].Target
+				md, ok := metadataByToken[token]
+				if !ok {
+					return nil, fmt.Errorf("unexpected token %s", token.Hex())
+				}
+				results[i] = outbound.Result{Success: true, ReturnData: md.dec}
+				results[i+1] = outbound.Result{Success: true, ReturnData: md.sym}
+				results[i+2] = outbound.Result{Success: true, ReturnData: md.name}
+			}
+			return results, nil
+		case 2: // getUserReserveData for 2 assets (targets PoolDataProvider, order matches reserves)
+			return []outbound.Result{
+				{Success: true, ReturnData: wethReserveData},
+				{Success: true, ReturnData: usdcReserveData},
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected Execute call with %d calls", len(calls))
+		}
+	}
+
+	srv := startMockEthServer(t, buildUserReservesDataResponse(t, reserves))
+	svc, posRepo := newPositionTestService(t, srv.URL, mc)
+
+	err := svc.saveCollateralToggleEvent(context.Background(), &PositionEventData{
+		EventType:         EventReserveUsedAsCollateralEnabled,
+		TxHash:            "0xtoggle1",
+		User:              user,
+		Reserve:           weth,
+		CollateralEnabled: true,
+	}, common.HexToAddress(aaveV3EthPool), testChainID, testBlockNumber, 0)
+	if err != nil {
+		t.Fatalf("saveCollateralToggleEvent: %v", err)
+	}
+
+	// 1 collateral row (WETH with supply) and 1 debt row (USDC with debt).
+	if len(posRepo.SavedCollaterals) != 1 {
+		t.Fatalf("expected 1 collateral row, got %d", len(posRepo.SavedCollaterals))
+	}
+	if posRepo.SavedCollaterals[0].Amount != "1" {
+		t.Errorf("collateral.Amount = %q, want %q", posRepo.SavedCollaterals[0].Amount, "1")
+	}
+	if !posRepo.SavedCollaterals[0].CollateralEnabled {
+		t.Error("collateral.CollateralEnabled = false, want true for enabled event")
+	}
+
+	if len(posRepo.SavedBorrowers) != 1 {
+		t.Fatalf("expected 1 borrower (debt) row, got %d", len(posRepo.SavedBorrowers))
+	}
+	if posRepo.SavedBorrowers[0].Amount != "1000" {
+		t.Errorf("borrower.Amount = %q, want %q", posRepo.SavedBorrowers[0].Amount, "1000")
+	}
+	if posRepo.SavedBorrowers[0].EventType != string(EventReserveUsedAsCollateralEnabled) {
+		t.Errorf("borrower.EventType = %q, want %q", posRepo.SavedBorrowers[0].EventType, string(EventReserveUsedAsCollateralEnabled))
+	}
+}
+
+// TestSaveCollateralToggleEvent_DebtOnEventReserve verifies that when the event
+// reserve itself has debt, both a collateral row and a debt row are written for it.
+func TestSaveCollateralToggleEvent_DebtOnEventReserve(t *testing.T) {
+	weth := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	user := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+
+	supply := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil) // 1 ETH
+	debt := new(big.Int).Mul(big.NewInt(5), big.NewInt(1e17))       // 0.5 ETH
+
+	reserves := []UserReserveData{
+		{
+			UnderlyingAsset:                weth,
+			ScaledATokenBalance:            supply,
+			UsageAsCollateralEnabledOnUser: false,
+			ScaledVariableDebt:             debt,
+		},
+	}
+
+	decPacked, symPacked, namePacked := buildERC20MetadataResult(t, 18, "WETH", "Wrapped Ether")
+	reserveDataPacked := buildGetUserReserveDataResult(t, supply, big.NewInt(0), debt, false)
+
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 3:
+			return []outbound.Result{
+				{Success: true, ReturnData: decPacked},
+				{Success: true, ReturnData: symPacked},
+				{Success: true, ReturnData: namePacked},
+			}, nil
+		case 1:
+			return []outbound.Result{
+				{Success: true, ReturnData: reserveDataPacked},
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected call len=%d", len(calls))
+		}
+	}
+
+	srv := startMockEthServer(t, buildUserReservesDataResponse(t, reserves))
+	svc, posRepo := newPositionTestService(t, srv.URL, mc)
+
+	err := svc.saveCollateralToggleEvent(context.Background(), &PositionEventData{
+		EventType:         EventReserveUsedAsCollateralDisabled,
+		TxHash:            "0xtoggle2",
+		User:              user,
+		Reserve:           weth,
+		CollateralEnabled: false,
+	}, common.HexToAddress(aaveV3EthPool), testChainID, testBlockNumber, 0)
+	if err != nil {
+		t.Fatalf("saveCollateralToggleEvent: %v", err)
+	}
+
+	// Both a collateral row (supply) and a debt row should be written for WETH.
+	if len(posRepo.SavedCollaterals) != 1 {
+		t.Fatalf("expected 1 collateral row, got %d", len(posRepo.SavedCollaterals))
+	}
+	if posRepo.SavedCollaterals[0].Amount != "1" {
+		t.Errorf("collateral.Amount = %q, want %q", posRepo.SavedCollaterals[0].Amount, "1")
+	}
+	if posRepo.SavedCollaterals[0].CollateralEnabled {
+		t.Error("collateral.CollateralEnabled = true, want false")
+	}
+
+	if len(posRepo.SavedBorrowers) != 1 {
+		t.Fatalf("expected 1 borrower row, got %d", len(posRepo.SavedBorrowers))
+	}
+	// 0.5 ETH = 500000000000000000 / 10^18 = 0.5
+	if posRepo.SavedBorrowers[0].Amount != "0.500000000000000000" {
+		t.Errorf("borrower.Amount = %q, want %q", posRepo.SavedBorrowers[0].Amount, "0.500000000000000000")
+	}
+}
+
 // with debt but no supply are also included in the snapshot.
 func TestExtractUserPositionSnapshots_IncludesDebtOnlyAssets(t *testing.T) {
 	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
@@ -910,9 +1084,9 @@ func TestExtractUserPositionSnapshots_IncludesDebtOnlyAssets(t *testing.T) {
 	// Only debt, no supply
 	reserves := []UserReserveData{
 		{
-			UnderlyingAsset:    usdc,
+			UnderlyingAsset:     usdc,
 			ScaledATokenBalance: big.NewInt(0),
-			ScaledVariableDebt: usdcDebt,
+			ScaledVariableDebt:  usdcDebt,
 		},
 	}
 
@@ -1036,7 +1210,6 @@ func TestExtractUserPositionSnapshots_ProviderUnavailable(t *testing.T) {
 		t.Errorf("error = %q, want to contain 'provider unavailable'", err.Error())
 	}
 }
-
 
 // TestSavePositionSnapshot_SnapshotExtractionFailureReturnsError verifies that
 // savePositionSnapshot propagates extractUserPositionSnapshots errors rather

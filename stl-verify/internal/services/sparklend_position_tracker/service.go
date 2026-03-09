@@ -556,42 +556,13 @@ func (s *Service) buildReserveDataEntity(
 }
 
 // saveCollateralToggleEvent handles ReserveUsedAsCollateralEnabled/Disabled events
+// by performing a full position snapshot: all collateral rows for reserves with
+// non-zero supply, and all debt rows for reserves with non-zero debt.
 func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
-	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
-	if err != nil {
-		return fmt.Errorf("failed to get blockchain service: %w", err)
-	}
-
-	tokensToFetch := map[common.Address]bool{eventData.Reserve: true}
-	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
-	if err != nil {
-		return fmt.Errorf("failed to get token metadata: %w", err)
-	}
-
-	metadata, ok := metadataMap[eventData.Reserve]
-	if !ok || metadata.Decimals == 0 {
-		return fmt.Errorf("token metadata not found for %s", eventData.Reserve.Hex())
-	}
-
-	// Use unified extraction so we capture the supplied balance even when collateral is disabled.
+	// Unified extraction: fetches both supply and debt snapshots for all active reserves.
 	snapshots, err := s.extractUserPositionSnapshots(ctx, eventData.User, protocolAddress, chainID, blockNumber, eventData.TxHash)
 	if err != nil {
 		return fmt.Errorf("failed to extract user position snapshots: %w", err)
-	}
-
-	// A collateral toggle only changes the collateral status of the event reserve;
-	// debt positions are unaffected. Only the toggled reserve's supply balance is
-	// recorded here. Debt rows are written by savePositionSnapshot / snapshotUserPosition
-	// when borrow/repay/liquidation events fire.
-	var balance *big.Int
-	for _, snap := range snapshots {
-		if snap.Asset == eventData.Reserve {
-			balance = snap.SuppliedBalance
-			break
-		}
-	}
-	if balance == nil {
-		balance = big.NewInt(0)
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
@@ -614,14 +585,47 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
 
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, normalizeTokenSymbol(metadata.Symbol), metadata.Decimals, blockNumber)
-		if err != nil {
-			return fmt.Errorf("failed to get token: %w", err)
+		// Persist debt rows for all reserves with non-zero debt.
+		for _, snap := range snapshots {
+			if snap.DebtBalance.Cmp(big.NewInt(0)) > 0 {
+				tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, snap.Asset, normalizeTokenSymbol(snap.Symbol), snap.Decimals, blockNumber)
+				if err != nil {
+					return fmt.Errorf("failed to get token for debt snapshot: %w", err)
+				}
+				decimalAdjustedDebt := s.convertToDecimalAdjusted(snap.DebtBalance, snap.Decimals)
+				if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedDebt, snapshotChange, string(eventData.EventType), common.FromHex(eventData.TxHash)); err != nil {
+					return fmt.Errorf("failed to save borrower debt snapshot for token %s: %w", snap.Asset.Hex(), err)
+				}
+			}
 		}
 
-		decimalAdjustedBalance := s.convertToDecimalAdjusted(balance, metadata.Decimals)
-		if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedBalance, snapshotChange, string(eventData.EventType), common.FromHex(eventData.TxHash), eventData.CollateralEnabled); err != nil {
-			return fmt.Errorf("failed to save collateral toggle: %w", err)
+		// Persist collateral rows for all reserves with non-zero supply.
+		collateralRecords := make([]outbound.CollateralRecord, 0, len(snapshots))
+		for _, snap := range snapshots {
+			if snap.SuppliedBalance.Cmp(big.NewInt(0)) <= 0 {
+				continue
+			}
+			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, snap.Asset, normalizeTokenSymbol(snap.Symbol), snap.Decimals, blockNumber)
+			if err != nil {
+				return fmt.Errorf("failed to get token for collateral snapshot: %w", err)
+			}
+
+			collateralRecords = append(collateralRecords, outbound.CollateralRecord{
+				UserID:            userID,
+				ProtocolID:        protocolID,
+				TokenID:           tokenID,
+				BlockNumber:       blockNumber,
+				BlockVersion:      blockVersion,
+				Amount:            s.convertToDecimalAdjusted(snap.SuppliedBalance, snap.Decimals),
+				Change:            snapshotChange,
+				EventType:         string(eventData.EventType),
+				TxHash:            common.FromHex(eventData.TxHash),
+				CollateralEnabled: snap.CollateralEnabled,
+			})
+		}
+
+		if err := s.positionRepo.SaveBorrowerCollaterals(ctx, tx, collateralRecords); err != nil {
+			return fmt.Errorf("failed to save collaterals: %w", err)
 		}
 
 		return nil
@@ -713,6 +717,16 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 				decimalAdjustedDebt := s.convertToDecimalAdjusted(debtBalance, tokenMetadata.Decimals)
 				if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedDebt, snapshotChange, string(eventData.EventType), common.FromHex(eventData.TxHash)); err != nil {
 					return fmt.Errorf("failed to insert borrower: %w", err)
+				}
+			} else if eventData.EventType == EventRepay {
+				// Debt went to zero after full repayment — write a zero-debt row so
+				// downstream consumers know the position is closed.
+				tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, normalizeTokenSymbol(tokenMetadata.Symbol), tokenMetadata.Decimals, blockNumber)
+				if err != nil {
+					return fmt.Errorf("failed to get token for zero-debt borrower: %w", err)
+				}
+				if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, "0", snapshotChange, string(eventData.EventType), common.FromHex(eventData.TxHash)); err != nil {
+					return fmt.Errorf("failed to insert zero-debt borrower: %w", err)
 				}
 			}
 		}
