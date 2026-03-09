@@ -1,4 +1,4 @@
-package blockchain
+package morpho_indexer
 
 import (
 	"context"

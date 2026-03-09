@@ -12,7 +12,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -73,7 +72,7 @@ type blockchainService struct {
 	morphoBlueABI   *abi.ABI
 	metaMorphoABI   *abi.ABI
 	erc20ABI        *abi.ABI
-	vaultProber     *blockchain.VaultProber
+	vaultProber     *VaultProber
 	metadataCache   map[common.Address]TokenMetadata
 	telemetry       *Telemetry
 	logger          *slog.Logger
@@ -95,7 +94,7 @@ func newBlockchainService(
 		return nil, fmt.Errorf("failed to load MetaMorpho read ABI: %w", err)
 	}
 
-	vaultProber, err := blockchain.NewVaultProber()
+	vaultProber, err := NewVaultProber()
 	if err != nil {
 		return nil, fmt.Errorf("creating vault prober: %w", err)
 	}
@@ -582,10 +581,10 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 		return nil, fmt.Errorf("fetching vault probe: %w", err)
 	}
 	if morphoAddr != MorphoBlueAddress {
-		return nil, &blockchain.ErrNotVault{Err: fmt.Errorf("MORPHO() returned %s, expected %s — not a MetaMorpho vault", morphoAddr.Hex(), MorphoBlueAddress.Hex())}
+		return nil, &ErrNotVault{Err: fmt.Errorf("MORPHO() returned %s, expected %s — not a MetaMorpho vault", morphoAddr.Hex(), MorphoBlueAddress.Hex())}
 	}
 	if asset == (common.Address{}) {
-		return nil, &blockchain.ErrNotVault{Err: fmt.Errorf("failed to get vault asset address for %s", vaultAddress.Hex())}
+		return nil, &ErrNotVault{Err: fmt.Errorf("failed to get vault asset address for %s", vaultAddress.Hex())}
 	}
 
 	md, err := s.fetchVaultDetails(ctx, vaultAddress, block)

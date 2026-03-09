@@ -16,7 +16,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -324,7 +323,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 		default:
 			s.logger.Debug("attempting vault discovery", "address", logAddress.Hex(), "tx", receipt.TransactionHash)
 			if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
-				var nv *blockchain.ErrNotVault
+				var nv *ErrNotVault
 				if errors.As(err, &nv) {
 					s.vaultRegistry.MarkNotVault(logAddress)
 					s.logger.Debug("not a MetaMorpho vault", "address", logAddress.Hex(), "reason", err)
@@ -445,7 +444,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 
 	// Validate this is a decodable MetaMorpho event before making on-chain calls.
 	if _, err := s.eventExtractor.ExtractMetaMorphoEvent(log); err != nil {
-		return &blockchain.ErrNotVault{Err: fmt.Errorf("event decode failed: %w", err)}
+		return &ErrNotVault{Err: fmt.Errorf("event decode failed: %w", err)}
 	}
 
 	// Fetch vault metadata (including version) from on-chain.

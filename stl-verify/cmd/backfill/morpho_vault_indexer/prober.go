@@ -11,7 +11,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 )
@@ -31,7 +30,7 @@ type confirmedVault struct {
 // vaultProber probes candidate addresses on-chain to determine if they are MetaMorpho vaults.
 type vaultProber struct {
 	multicaller  outbound.Multicaller
-	sharedProber *blockchain.VaultProber
+	sharedProber *morpho_indexer.VaultProber
 	erc20ABI     *abi.ABI
 	logger       *slog.Logger
 }
@@ -102,7 +101,7 @@ func (p *vaultProber) probeBatch(
 	for i, addr := range batch {
 		probeResult, err := p.sharedProber.ParseProbeResults(results[i*2], results[i*2+1], addr)
 		if err != nil {
-			var nv *blockchain.ErrNotVault
+			var nv *morpho_indexer.ErrNotVault
 			if errors.As(err, &nv) {
 				continue
 			}

@@ -10,7 +10,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -373,7 +372,7 @@ func TestGetVaultMetadata_ProbeExecuteError_IsTransient(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when probe multicall Execute fails")
 	}
-	var nv *blockchain.ErrNotVault
+	var nv *ErrNotVault
 	if errors.As(err, &nv) {
 		t.Error("transient RPC error should NOT be classified as ErrNotVault")
 	}

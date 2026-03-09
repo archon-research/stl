@@ -141,7 +141,7 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// Shared vault prober (handles MetaMorpho ABI internally)
-	sharedProber, err := blockchain.NewVaultProber()
+	sharedProber, err := morpho_indexer.NewVaultProber()
 	if err != nil {
 		return fmt.Errorf("creating vault prober: %w", err)
 	}
