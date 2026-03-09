@@ -1569,9 +1569,11 @@ STRESS_TEST_PREFIX         ?= blocks/chain-1
 STRESS_TEST_START_BLOCK    ?= 16000000
 STRESS_TEST_BLOCK_COUNT    ?= 500
 STRESS_TEST_VERSION        ?= 1
-STRESS_TEST_LOCAL_BUCKET   ?= stress-test-data
-STRESS_TEST_LOCAL_ENDPOINT ?= http://localhost:4566
-STRESS_TEST_STAGING_BUCKET ?= stl-sentinelstaging-stress-test-data-89d540d0
+STRESS_TEST_LOCAL_BUCKET        ?= stress-test-data
+STRESS_TEST_LOCAL_ENDPOINT      ?= http://localhost:4566
+STRESS_TEST_STAGING_BUCKET      ?= stl-sentinelstaging-stress-test-data-89d540d0
+STRESS_TEST_TRANSFORMER_QUEUE   ?= stl-ethereum-transformer.fifo
+STRESS_TEST_BACKUP_QUEUE        ?= stl-ethereum-backup.fifo
 
 # Populate S3 with stress test block data.
 # Local (default):       creates bucket in LocalStack and exports blocks from staging.
@@ -1595,7 +1597,7 @@ ifeq ($(ENV),sentinelstaging)
 	    --dest-prefix $(STRESS_TEST_PREFIX) \
 	    --start-block $(STRESS_TEST_START_BLOCK) \
 	    --block-count $(STRESS_TEST_BLOCK_COUNT) \
-	    --version $(STRESS_TEST_VERSION); \
+	    --version $(STRESS_TEST_VERSION) && \
 	  echo "$$WANT" | aws s3 cp - s3://$(STRESS_TEST_STAGING_BUCKET)/$(STRESS_TEST_PREFIX)/.manifest; \
 	fi
 else
@@ -1616,7 +1618,7 @@ else
 	    --dest-endpoint $(STRESS_TEST_LOCAL_ENDPOINT) \
 	    --start-block $(STRESS_TEST_START_BLOCK) \
 	    --block-count $(STRESS_TEST_BLOCK_COUNT) \
-	    --version $(STRESS_TEST_VERSION); \
+	    --version $(STRESS_TEST_VERSION) && \
 	  echo "$$WANT" | aws --endpoint-url $(STRESS_TEST_LOCAL_ENDPOINT) s3 cp \
 	    - s3://$(STRESS_TEST_LOCAL_BUCKET)/$(STRESS_TEST_PREFIX)/.manifest; \
 	fi
@@ -1642,10 +1644,17 @@ stress-test:
 k6-stress-test:
 	kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify -c "TRUNCATE block_states CASCADE;" -q
 	kubectl exec -n stl deployment/redis -- redis-cli FLUSHDB
+ifeq ($(ENV),sentinelstaging)
+	aws --region $(AWS_REGION) sqs purge-queue \
+	  --queue-url https://sqs.$(AWS_REGION).amazonaws.com/$(AWS_ACCOUNT_ID)/$(STRESS_TEST_TRANSFORMER_QUEUE) || true
+	aws --region $(AWS_REGION) sqs purge-queue \
+	  --queue-url https://sqs.$(AWS_REGION).amazonaws.com/$(AWS_ACCOUNT_ID)/$(STRESS_TEST_BACKUP_QUEUE) || true
+else
 	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
-	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo || true
+	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/$(STRESS_TEST_TRANSFORMER_QUEUE) || true
 	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
-	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-backup.fifo || true
+	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/$(STRESS_TEST_BACKUP_QUEUE) || true
+endif
 	kubectl create configmap k6-scripts --from-file=stress-test/k6/ -n stl --dry-run=client -o yaml | kubectl apply -f -
 	kubectl delete job k6-stress-test -n stl --ignore-not-found
 	sed -e 's|$${SCENARIO}|$(or $(SCENARIO),sustained)|g' \

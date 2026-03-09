@@ -142,7 +142,7 @@ func buildDestConfig(ctx context.Context, c cfg) (aws.Config, []func(*awss3.Opti
 			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
 		)
 		if err != nil {
-			return aws.Config{}, nil, err
+			return aws.Config{}, nil, fmt.Errorf("loading localstack dest config: %w", err)
 		}
 		optFns := []func(*awss3.Options){
 			func(o *awss3.Options) { o.UsePathStyle = true },
@@ -153,7 +153,7 @@ func buildDestConfig(ctx context.Context, c cfg) (aws.Config, []func(*awss3.Opti
 	// Real AWS: use default credential chain.
 	destCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(c.region))
 	if err != nil {
-		return aws.Config{}, nil, err
+		return aws.Config{}, nil, fmt.Errorf("loading dest config: %w", err)
 	}
 	return destCfg, nil, nil
 }

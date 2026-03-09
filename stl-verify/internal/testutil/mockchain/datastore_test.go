@@ -179,8 +179,14 @@ func TestStreamAll_StreamError(t *testing.T) {
 func TestLoadFromS3_Success(t *testing.T) {
 	header1 := outbound.BlockHeader{Number: "0x3e8", Hash: "0xaaa"}
 	header2 := outbound.BlockHeader{Number: "0x3e9", Hash: "0xbbb"}
-	raw1, _ := json.Marshal(header1)
-	raw2, _ := json.Marshal(header2)
+	raw1, err := json.Marshal(header1)
+	if err != nil {
+		t.Fatalf("marshal header1: %v", err)
+	}
+	raw2, err := json.Marshal(header2)
+	if err != nil {
+		t.Fatalf("marshal header2: %v", err)
+	}
 
 	files := map[string]string{
 		"blocks/1001/block.json":    string(raw2), // out of order — should load 1000 first
@@ -335,7 +341,10 @@ func newStaticS3Lister(wantBucket string, files map[string]string) *mockS3Lister
 			}
 			return out, nil
 		},
-		streamFile: func(_ context.Context, _, key string) (io.ReadCloser, error) {
+		streamFile: func(_ context.Context, bucket, key string) (io.ReadCloser, error) {
+			if bucket != wantBucket {
+				return nil, fmt.Errorf("StreamFile: unexpected bucket %q (want %q)", bucket, wantBucket)
+			}
 			body, ok := files[key]
 			if !ok {
 				return nil, errors.New("key not found: " + key)

@@ -359,15 +359,17 @@ func TestReplayer_SetInterval_WhileRunning(t *testing.T) {
 	defer r.Stop()
 
 	if err := r.SetInterval(100 * time.Millisecond); err != nil {
-		t.Errorf("unexpected error calling SetInterval while running: %v", err)
+		t.Fatalf("SetInterval while running: %v", err)
 	}
 
-	// Verify next block arrives within the new interval's window.
-	start := time.Now()
+	// The first emission after the change may still arrive on the old cadence.
+	// Measure the gap between the next two emissions to confirm the new interval took effect.
+	drain(t, received, 1) // first post-change emission (may be on old cadence)
+	t1 := time.Now()
 	drain(t, received, 1)
-	elapsed := time.Since(start)
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("block took too long after interval change: %v (want <500ms)", elapsed)
+	gap := time.Since(t1)
+	if gap > 300*time.Millisecond {
+		t.Errorf("inter-block gap after SetInterval: %v (want ≤300ms with 100ms interval)", gap)
 	}
 }
 
