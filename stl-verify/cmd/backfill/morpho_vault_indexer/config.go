@@ -73,6 +73,9 @@ func parseConfig(args []string) (config, error) {
 	if cfg.from > cfg.to {
 		return config{}, fmt.Errorf("-from (%d) must be <= -to (%d)", cfg.from, cfg.to)
 	}
+	if cfg.chainID <= 0 {
+		return config{}, fmt.Errorf("-chain-id must be positive")
+	}
 	if cfg.goroutines <= 0 {
 		return config{}, fmt.Errorf("-goroutines must be positive")
 	}

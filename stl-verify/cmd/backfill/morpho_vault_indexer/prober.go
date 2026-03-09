@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
 
-	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 )
 
 // confirmedVault holds metadata for a confirmed MetaMorpho vault.
@@ -27,10 +30,10 @@ type confirmedVault struct {
 
 // vaultProber probes candidate addresses on-chain to determine if they are MetaMorpho vaults.
 type vaultProber struct {
-	multicaller   outbound.Multicaller
-	metaMorphoABI *abi.ABI
-	erc20ABI      *abi.ABI
-	logger        *slog.Logger
+	multicaller  outbound.Multicaller
+	sharedProber *blockchain.VaultProber
+	erc20ABI     *abi.ABI
+	logger       *slog.Logger
 }
 
 // probeAllCandidates checks each candidate address by calling MORPHO() and asset()
@@ -81,22 +84,10 @@ func (p *vaultProber) probeBatch(
 	firstBlocks map[common.Address]int64,
 	blockNum *big.Int,
 ) ([]confirmedVault, error) {
-	morphoData, err := p.metaMorphoABI.Pack("MORPHO")
-	if err != nil {
-		return nil, fmt.Errorf("packing MORPHO call: %w", err)
-	}
-	assetData, err := p.metaMorphoABI.Pack("asset")
-	if err != nil {
-		return nil, fmt.Errorf("packing asset call: %w", err)
-	}
-
 	// Build multicall: 2 calls per candidate (MORPHO, asset)
 	calls := make([]outbound.Call, 0, len(batch)*2)
 	for _, addr := range batch {
-		calls = append(calls,
-			outbound.Call{Target: addr, AllowFailure: true, CallData: morphoData},
-			outbound.Call{Target: addr, AllowFailure: true, CallData: assetData},
-		)
+		calls = append(calls, p.sharedProber.ProbeCalls(addr)...)
 	}
 
 	results, err := p.multicaller.Execute(ctx, calls, blockNum)
@@ -109,35 +100,23 @@ func (p *vaultProber) probeBatch(
 	vaultAssets := make(map[common.Address]common.Address)
 
 	for i, addr := range batch {
-		morphoResult := results[i*2]
-		assetResult := results[i*2+1]
-
-		if !morphoResult.Success || len(morphoResult.ReturnData) == 0 {
+		probeResult, err := p.sharedProber.ParseProbeResults(results[i*2], results[i*2+1], addr)
+		if err != nil {
+			var nv *blockchain.ErrNotVault
+			if errors.As(err, &nv) {
+				continue
+			}
+			return nil, fmt.Errorf("parsing probe for %s: %w", addr.Hex(), err)
+		}
+		if probeResult.MorphoAddr != morpho_indexer.MorphoBlueAddress {
 			continue
 		}
-		morphoUnpacked, err := p.metaMorphoABI.Unpack("MORPHO", morphoResult.ReturnData)
-		if err != nil || len(morphoUnpacked) == 0 {
-			continue
-		}
-		morphoAddr, ok := morphoUnpacked[0].(common.Address)
-		if !ok || morphoAddr != morpho_indexer.MorphoBlueAddress {
-			continue
-		}
-
-		if !assetResult.Success || len(assetResult.ReturnData) == 0 {
-			continue
-		}
-		assetUnpacked, err := p.metaMorphoABI.Unpack("asset", assetResult.ReturnData)
-		if err != nil || len(assetUnpacked) == 0 {
-			continue
-		}
-		asset, ok := assetUnpacked[0].(common.Address)
-		if !ok || asset == (common.Address{}) {
+		if probeResult.AssetAddr == (common.Address{}) {
 			continue
 		}
 
 		vaultAddrs = append(vaultAddrs, addr)
-		vaultAssets[addr] = asset
+		vaultAssets[addr] = probeResult.AssetAddr
 	}
 
 	if len(vaultAddrs) == 0 {
@@ -148,7 +127,7 @@ func (p *vaultProber) probeBatch(
 	return p.fetchVaultMetadata(ctx, vaultAddrs, vaultAssets, firstBlocks, blockNum)
 }
 
-// fetchVaultMetadata fetches name, symbol, decimals, and version for confirmed vaults.
+// fetchVaultMetadata fetches name, symbol, decimals, version, and asset symbol for confirmed vaults.
 func (p *vaultProber) fetchVaultMetadata(
 	ctx context.Context,
 	vaultAddrs []common.Address,
@@ -156,37 +135,16 @@ func (p *vaultProber) fetchVaultMetadata(
 	firstBlocks map[common.Address]int64,
 	blockNum *big.Int,
 ) ([]confirmedVault, error) {
-	nameData, err := p.metaMorphoABI.Pack("name")
-	if err != nil {
-		return nil, fmt.Errorf("packing name: %w", err)
-	}
-	symbolData, err := p.metaMorphoABI.Pack("symbol")
-	if err != nil {
-		return nil, fmt.Errorf("packing symbol: %w", err)
-	}
-	skimData, err := p.metaMorphoABI.Pack("skimRecipient")
-	if err != nil {
-		return nil, fmt.Errorf("packing skimRecipient: %w", err)
-	}
-	decimalsData, err := p.erc20ABI.Pack("decimals")
-	if err != nil {
-		return nil, fmt.Errorf("packing decimals: %w", err)
-	}
 	assetSymbolData, err := p.erc20ABI.Pack("symbol")
 	if err != nil {
 		return nil, fmt.Errorf("packing asset symbol: %w", err)
 	}
 
-	// 5 calls per vault: name, symbol, skimRecipient (version detect), asset decimals, asset symbol
+	// 5 calls per vault: 4 details (name, symbol, decimals, skimRecipient) + 1 asset symbol
 	calls := make([]outbound.Call, 0, len(vaultAddrs)*5)
 	for _, addr := range vaultAddrs {
-		calls = append(calls,
-			outbound.Call{Target: addr, AllowFailure: true, CallData: nameData},
-			outbound.Call{Target: addr, AllowFailure: true, CallData: symbolData},
-			outbound.Call{Target: addr, AllowFailure: true, CallData: skimData},
-			outbound.Call{Target: vaultAssets[addr], AllowFailure: true, CallData: decimalsData},
-			outbound.Call{Target: vaultAssets[addr], AllowFailure: true, CallData: assetSymbolData},
-		)
+		calls = append(calls, p.sharedProber.DetailsCalls(addr)...)
+		calls = append(calls, outbound.Call{Target: vaultAssets[addr], AllowFailure: true, CallData: assetSymbolData})
 	}
 
 	results, err := p.multicaller.Execute(ctx, calls, blockNum)
@@ -196,50 +154,30 @@ func (p *vaultProber) fetchVaultMetadata(
 
 	var vaults []confirmedVault
 	for i, addr := range vaultAddrs {
-		nameResult := results[i*5]
-		symbolResult := results[i*5+1]
-		skimResult := results[i*5+2]
-		decimalsResult := results[i*5+3]
-		assetSymbolResult := results[i*5+4]
+		base := i * 5
+
+		// Parse vault details (name, symbol, decimals, skimRecipient) via shared prober
+		details, err := p.sharedProber.ParseDetailsResults(
+			results[base], results[base+1], results[base+2], results[base+3], addr)
+		if err != nil {
+			p.logger.Warn("skipping vault with failed metadata",
+				"address", addr.Hex(),
+				"error", err)
+			continue
+		}
 
 		v := confirmedVault{
 			Address:    addr,
+			Name:       details.Name,
+			Symbol:     details.Symbol,
+			Decimals:   details.Decimals,
+			Version:    details.Version,
 			Asset:      vaultAssets[addr],
 			FirstBlock: firstBlocks[addr],
-			Version:    entity.MorphoVaultV1,
 		}
 
-		// Version detection: skimRecipient() only exists on V2
-		if skimResult.Success && len(skimResult.ReturnData) > 0 {
-			if _, err := p.metaMorphoABI.Unpack("skimRecipient", skimResult.ReturnData); err == nil {
-				v.Version = entity.MorphoVaultV2
-			}
-		}
-
-		if nameResult.Success && len(nameResult.ReturnData) > 0 {
-			if unpacked, err := p.metaMorphoABI.Unpack("name", nameResult.ReturnData); err == nil && len(unpacked) > 0 {
-				if name, ok := unpacked[0].(string); ok {
-					v.Name = name
-				}
-			}
-		}
-
-		if symbolResult.Success && len(symbolResult.ReturnData) > 0 {
-			if unpacked, err := p.metaMorphoABI.Unpack("symbol", symbolResult.ReturnData); err == nil && len(unpacked) > 0 {
-				if sym, ok := unpacked[0].(string); ok {
-					v.Symbol = sym
-				}
-			}
-		}
-
-		if decimalsResult.Success && len(decimalsResult.ReturnData) > 0 {
-			if unpacked, err := p.erc20ABI.Unpack("decimals", decimalsResult.ReturnData); err == nil && len(unpacked) > 0 {
-				if dec, ok := unpacked[0].(uint8); ok {
-					v.Decimals = dec
-				}
-			}
-		}
-
+		// Parse asset symbol (ERC20 call on asset token)
+		assetSymbolResult := results[base+4]
 		if assetSymbolResult.Success && len(assetSymbolResult.ReturnData) > 0 {
 			if unpacked, err := p.erc20ABI.Unpack("symbol", assetSymbolResult.ReturnData); err == nil && len(unpacked) > 0 {
 				if sym, ok := unpacked[0].(string); ok {
@@ -248,11 +186,11 @@ func (p *vaultProber) fetchVaultMetadata(
 			}
 		}
 
-		if v.Name == "" || v.Symbol == "" {
-			p.logger.Warn("skipping vault with missing metadata",
+		if v.AssetSymbol == "" {
+			p.logger.Warn("skipping vault with empty asset symbol",
 				"address", addr.Hex(),
 				"name", v.Name,
-				"symbol", v.Symbol)
+				"asset", v.Asset.Hex())
 			continue
 		}
 
@@ -261,6 +199,7 @@ func (p *vaultProber) fetchVaultMetadata(
 			"name", v.Name,
 			"symbol", v.Symbol,
 			"asset", v.Asset.Hex(),
+			"assetSymbol", v.AssetSymbol,
 			"version", v.Version,
 			"firstBlock", v.FirstBlock)
 

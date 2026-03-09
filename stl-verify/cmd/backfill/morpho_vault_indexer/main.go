@@ -116,18 +116,19 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("connecting to RPC: %w", err)
 	}
+	defer rpcClient.Close()
 	ethClient := ethclient.NewClient(rpcClient)
-	logger.Info("Ethereum RPC connected", "url", cfg.rpcURL)
+	logger.Info("Ethereum RPC connected")
 
 	multicaller, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
 		return fmt.Errorf("creating multicall client: %w", err)
 	}
 
-	// ABIs for vault probing
-	metaMorphoABI, err := abis.GetMetaMorphoReadABI()
+	// Shared vault prober (handles MetaMorpho ABI internally)
+	sharedProber, err := blockchain.NewVaultProber()
 	if err != nil {
-		return fmt.Errorf("loading MetaMorpho ABI: %w", err)
+		return fmt.Errorf("creating vault prober: %w", err)
 	}
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
@@ -154,10 +155,10 @@ func run(ctx context.Context, args []string) error {
 
 	// Phase 2: Probe candidates on-chain to confirm vaults
 	prober := &vaultProber{
-		multicaller:   multicaller,
-		metaMorphoABI: metaMorphoABI,
-		erc20ABI:      erc20ABI,
-		logger:        logger,
+		multicaller:  multicaller,
+		sharedProber: sharedProber,
+		erc20ABI:     erc20ABI,
+		logger:       logger,
 	}
 
 	vaults, err := prober.probeAllCandidates(ctx, candidates, cfg.to, cfg.probeBatch)
@@ -210,6 +211,9 @@ func scanBlockRange(
 	from, to int64,
 	numWorkers int,
 ) (map[common.Address]int64, error) {
+	ctx, cancelScan := context.WithCancel(ctx)
+	defer cancelScan()
+
 	partitions := partitionsForRange(from, to)
 	prog := &progress{totalPartitions: int64(len(partitions))}
 	logger.Info("partitions to process", "count", prog.totalPartitions)
@@ -229,7 +233,7 @@ func scanBlockRange(
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Add(1)
-		go scanPartitions(ctx, logger, s3Reader, extractor, bucket, from, to, partCh, candidateCh, prog, &firstErr, &wg)
+		go scanPartitions(ctx, logger, s3Reader, extractor, bucket, from, to, partCh, candidateCh, prog, &firstErr, cancelScan, &wg)
 	}
 
 	feedPartitions(ctx, partitions, partCh, &firstErr)
@@ -308,6 +312,7 @@ func scanPartitions(
 	candidateCh chan<- candidateEntry,
 	prog *progress,
 	firstErr *atomic.Value,
+	cancelScan context.CancelFunc,
 	wg *sync.WaitGroup,
 ) {
 	defer wg.Done()
@@ -319,6 +324,7 @@ func scanPartitions(
 		if err != nil {
 			firstErr.CompareAndSwap(nil, err)
 			logger.Error("partition failed", "partition", part, "error", err)
+			cancelScan()
 			return
 		}
 		prog.blocksProcessed.Add(int64(blocks))

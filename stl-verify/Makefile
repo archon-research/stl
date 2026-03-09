@@ -2,7 +2,7 @@
 # Go 1.25+ best practices
 
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
-        dev-up dev-up-rebuild dev-preflight dev-env dev-down dev-wipe dev-ips generate-er \
+        dev-up dev-up-rebuild dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
@@ -307,6 +307,20 @@ dev-up:
 	    { echo "ERROR: deployment $$dep not ready after 120s"; kubectl get pods -n stl; exit 1; }; \
 	done
 	@kubectl get pods -n stl
+
+# Start only the database and run migrations (no app services).
+dev-db:
+	@$(MAKE) dev-preflight
+	$(MAKE) kind-create
+	kubectl apply -f k8s/namespace.yaml
+	$(MAKE) kind-config kind-secrets
+	kubectl apply -f k8s/infra/timescaledb.yaml -n stl
+	@echo "==> Waiting for timescaledb to be ready..."
+	kubectl rollout status statefulset/timescaledb -n stl --timeout=120s
+	$(call build-if-needed,stl-migrate:local,docker-build-migrate)
+	$(MAKE) kind-load-migrate kind-migrate
+	@echo "==> Database ready."
+	@echo "    Connection: postgres://postgres:postgres@127.0.0.1:30432/stl_verify?sslmode=disable"
 
 # Generate .env files for all services (fetches secrets from AWS)
 # Can be re-run independently to refresh secrets without restarting services.
