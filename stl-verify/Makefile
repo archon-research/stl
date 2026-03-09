@@ -1434,15 +1434,18 @@ kind-load-workers:
 
 kind-deploy-watcher:
 	kubectl apply -f k8s/apps/watcher.yaml -n stl
+	kubectl rollout restart deployment/watcher -n stl
 
 kind-deploy-workers:
 	kubectl apply -f k8s/apps/workers/ -n stl
+	kubectl rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/sparklend-position-tracker -n stl
 
 kind-load-temporal-worker:
 	kind load docker-image stl-temporal-worker:local --name stl-local
 
 kind-deploy-temporal-worker:
 	kubectl apply -f k8s/apps/temporal-worker.yaml -n stl
+	kubectl rollout restart deployment/temporal-worker -n stl
 
 # Rebuild and redeploy a specific worker. Usage: make kind-redeploy-worker NAME=morpho-indexer
 kind-redeploy-worker:
