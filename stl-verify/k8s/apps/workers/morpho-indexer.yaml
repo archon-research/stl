@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: morpho-indexer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: morpho-indexer
+  template:
+    metadata:
+      labels:
+        app: morpho-indexer
+    spec:
+      containers:
+        - name: morpho-indexer
+          image: stl-morpho-indexer:local
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: stl-config
+            - secretRef:
+                name: stl-secrets
+          env:
+            - name: AWS_SQS_QUEUE_URL
+              value: http://localstack:4566/000000000000/stl-ethereum-morpho-indexing.fifo
