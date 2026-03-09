@@ -150,9 +150,7 @@ func (s *VaultDebtService) Start(ctx context.Context) error {
 	s.blocksSinceSweep = s.config.SweepEveryNBlocks - 1 // first block triggers immediate read
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
+	s.wg.Go(func() {
 		sqsutil.RunLoop(s.ctx, sqsutil.Config{
 			Consumer:     s.sqsConsumer,
 			MaxMessages:  s.config.MaxMessages,
@@ -160,7 +158,7 @@ func (s *VaultDebtService) Start(ctx context.Context) error {
 			Logger:       s.logger,
 			ChainID:      s.config.ChainID,
 		}, s.processBlock)
-	}()
+	})
 
 	s.logger.Info("vault debt service started",
 		"primes", len(resolved),
