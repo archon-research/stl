@@ -16,6 +16,9 @@
 #       --reorg-interval Seconds between reorgs (default: 30)
 #       --no-clean       Skip truncating block_states before the run
 #   -h, --help           Show this help
+#
+# Environment:
+#   CHAIN_ID             Chain ID for verification queries (default: 1)
 
 set -euo pipefail
 
@@ -31,6 +34,7 @@ ADMIN_URL="http://localhost:8547"
 REORG=""
 REORG_DEPTH="5"
 REORG_INTERVAL_S="30"
+CHAIN_ID="${CHAIN_ID:-1}"
 CLEAN=true
 
 usage() {
@@ -75,12 +79,15 @@ if $CLEAN; then
   echo "==> Flushing Redis..."
   kubectl exec -n stl deployment/redis -- redis-cli FLUSHDB
   echo "==> Purging SQS queues..."
+  # purge-queue fails if called within 60 s of the previous purge; treat that as a warning.
   AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
     aws --endpoint-url http://localhost:4566 --region us-east-1 \
-    sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo
+    sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo \
+    || echo "  warning: transformer queue purge skipped (within 60 s cooldown)"
   AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
     aws --endpoint-url http://localhost:4566 --region us-east-1 \
-    sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-backup.fifo
+    sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-backup.fifo \
+    || echo "  warning: backup queue purge skipped (within 60 s cooldown)"
 fi
 
 echo "==> Running k6..."
@@ -93,7 +100,6 @@ REORG_INTERVAL_S="$REORG_INTERVAL_S" \
   k6 run "$SCRIPT"
 
 echo "==> Verifying chain correctness..."
-kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify \
-  -c "SELECT count(*) AS gaps FROM generate_series((SELECT min(number) FROM block_states WHERE chain_id = 1 AND NOT is_orphaned),(SELECT max(number) FROM block_states WHERE chain_id = 1 AND NOT is_orphaned)) AS s(n) LEFT JOIN block_states b ON b.number = s.n AND b.chain_id = 1 AND NOT b.is_orphaned WHERE b.number IS NULL;" \
-  -c "SELECT count(*) AS unexpected_orphans FROM block_states WHERE chain_id = 1 AND is_orphaned AND number > (SELECT max(number) - 64 FROM block_states WHERE chain_id = 1);" \
-  -c "SELECT count(*) AS broken_parent_links FROM block_states b JOIN block_states p ON p.number = b.number - 1 AND p.chain_id = b.chain_id AND NOT p.is_orphaned WHERE NOT b.is_orphaned AND b.chain_id = 1 AND b.parent_hash != p.hash;"
+kubectl exec -i -n stl timescaledb-0 -- psql -U postgres -d stl_verify \
+  -v chain_id="$CHAIN_ID" \
+  < stress-test/verify/checks.sql

@@ -9,7 +9,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: k6
-          image: grafana/k6:latest
+          image: grafana/k6:1.6.1
           env:
             - name: ADMIN_URL
               value: "http://mock-blockchain-server:8547"

@@ -1617,15 +1617,15 @@ endif
 
 # Run k6 stress test locally against the kind cluster.
 # Truncates block_states first so finality boundary is clean.
-# SCENARIO: watcher-sustained (default), watcher-burst, watcher-reorg
+# SCENARIO: watcher-sustained (default), watcher-burst  (watcher-reorg.js is a shared module, not a runnable scenario)
 # INTERVAL_MS: block emission interval (default: 12000ms ~Ethereum, e.g. 250 for Base)
 stress-test:
 	kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify -c "TRUNCATE block_states CASCADE;" -q
 	kubectl exec -n stl deployment/redis -- redis-cli FLUSHDB
 	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
-	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo
+	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo || true
 	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
-	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-backup.fifo
+	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-backup.fifo || true
 	ADMIN_URL=http://localhost:8547 INTERVAL_MS=$(or $(INTERVAL_MS),12000) k6 run stress-test/k6/$(or $(SCENARIO),watcher-sustained).js
 
 # Run k6 stress test as a Job inside the cluster (kind or EKS).
@@ -1636,9 +1636,9 @@ k6-stress-test:
 	kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify -c "TRUNCATE block_states CASCADE;" -q
 	kubectl exec -n stl deployment/redis -- redis-cli FLUSHDB
 	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
-	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo
+	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo || true
 	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
-	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-backup.fifo
+	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-backup.fifo || true
 	kubectl create configmap k6-scripts --from-file=stress-test/k6/ -n stl --dry-run=client -o yaml | kubectl apply -f -
 	kubectl delete job k6-stress-test -n stl --ignore-not-found
 	sed -e 's|$${SCENARIO}|$(or $(SCENARIO),sustained)|g' \

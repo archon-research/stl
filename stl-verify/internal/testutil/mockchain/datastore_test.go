@@ -1,8 +1,14 @@
 package mockchain
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"strings"
 	"testing"
+
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 // TestDataStore_Get verifies Get across valid indexes, missing indexes, and all data types.
@@ -87,4 +93,246 @@ func TestNewDataStore(t *testing.T) {
 	if ok {
 		t.Fatal("expected empty store to return not found")
 	}
+}
+
+// --- parseS3Key ---
+
+// TestParseS3Key covers the valid path and all failure modes.
+func TestParseS3Key(t *testing.T) {
+	tests := []struct {
+		name         string
+		key, prefix  string
+		wantBlockNum int64
+		wantDataType string
+		wantOK       bool
+	}{
+		{"valid block", "blocks/1000/block.json", "blocks", 1000, "block", true},
+		{"valid receipts", "blocks/999/receipts.json", "blocks", 999, "receipts", true},
+		{"valid traces", "pfx/42/traces.json", "pfx", 42, "traces", true},
+		{"valid blobs", "pfx/0/blobs.json", "pfx", 0, "blobs", true},
+		{"wrong prefix", "other/1/block.json", "blocks", 0, "", false},
+		{"missing data type segment", "blocks/1000", "blocks", 0, "", false},
+		{"non-numeric block number", "blocks/abc/block.json", "blocks", 0, "", false},
+		{"no .json suffix", "blocks/1/block.txt", "blocks", 0, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			blockNum, dataType, ok := parseS3Key(tt.key, tt.prefix)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if blockNum != tt.wantBlockNum {
+				t.Errorf("blockNum = %d, want %d", blockNum, tt.wantBlockNum)
+			}
+			if dataType != tt.wantDataType {
+				t.Errorf("dataType = %q, want %q", dataType, tt.wantDataType)
+			}
+		})
+	}
+}
+
+// --- streamAll ---
+
+// TestStreamAll_Success verifies that bytes are returned and the reader is closed.
+func TestStreamAll_Success(t *testing.T) {
+	payload := `{"number":"0x1"}`
+	closed := false
+	getter := &mockS3Lister{
+		streamFile: func(_ context.Context, _, _ string) (io.ReadCloser, error) {
+			return &closeTracker{Reader: strings.NewReader(payload), closed: &closed}, nil
+		},
+	}
+	raw, err := streamAll(context.Background(), getter, "bucket", "key")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(raw) != payload {
+		t.Errorf("got %q, want %q", raw, payload)
+	}
+	if !closed {
+		t.Error("reader was not closed")
+	}
+}
+
+// TestStreamAll_StreamError verifies that a StreamFile error is propagated.
+func TestStreamAll_StreamError(t *testing.T) {
+	getter := &mockS3Lister{
+		streamFile: func(_ context.Context, _, _ string) (io.ReadCloser, error) {
+			return nil, errors.New("stream error")
+		},
+	}
+	_, err := streamAll(context.Background(), getter, "bucket", "key")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+// --- LoadFromS3 ---
+
+// TestLoadFromS3_Success verifies that blocks are loaded in ascending order,
+// headers are populated, and data is accessible by index.
+func TestLoadFromS3_Success(t *testing.T) {
+	header1 := outbound.BlockHeader{Number: "0x3e8", Hash: "0xaaa"}
+	header2 := outbound.BlockHeader{Number: "0x3e9", Hash: "0xbbb"}
+	raw1, _ := json.Marshal(header1)
+	raw2, _ := json.Marshal(header2)
+
+	files := map[string]string{
+		"blocks/1001/block.json":    string(raw2), // out of order — should load 1000 first
+		"blocks/1000/block.json":    string(raw1),
+		"blocks/1000/receipts.json": `[]`,
+	}
+	getter := newStaticS3Lister("blocks", files)
+
+	ds := NewDataStore()
+	if err := ds.LoadFromS3(context.Background(), getter, "bucket", "blocks"); err != nil {
+		t.Fatalf("LoadFromS3: %v", err)
+	}
+
+	if ds.Len() != 2 {
+		t.Errorf("expected 2 headers, got %d", ds.Len())
+	}
+	// Index 0 → block 1000 (ascending order)
+	if ds.Headers()[0].Hash != "0xaaa" {
+		t.Errorf("expected first header hash 0xaaa, got %s", ds.Headers()[0].Hash)
+	}
+	if ds.Headers()[1].Hash != "0xbbb" {
+		t.Errorf("expected second header hash 0xbbb, got %s", ds.Headers()[1].Hash)
+	}
+	// Receipts at index 0 should be present.
+	if _, ok := ds.Get(0, "receipts"); !ok {
+		t.Error("expected receipts at index 0")
+	}
+	// Block 1001 has no receipts.
+	if _, ok := ds.Get(1, "receipts"); ok {
+		t.Error("expected no receipts at index 1")
+	}
+}
+
+// TestLoadFromS3_ListError verifies that a ListFiles error is wrapped and returned.
+func TestLoadFromS3_ListError(t *testing.T) {
+	getter := &mockS3Lister{
+		listFiles: func(_ context.Context, _, _ string) ([]outbound.S3File, error) {
+			return nil, errors.New("list error")
+		},
+	}
+	ds := NewDataStore()
+	err := ds.LoadFromS3(context.Background(), getter, "bucket", "blocks")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "listing files") {
+		t.Errorf("error should mention listing files, got: %v", err)
+	}
+}
+
+// TestLoadFromS3_StreamError verifies that a StreamFile error is wrapped and returned.
+func TestLoadFromS3_StreamError(t *testing.T) {
+	files := map[string]string{
+		"blocks/1000/block.json": `{"number":"0x3e8","hash":"0xaaa"}`,
+	}
+	getter := newStaticS3Lister("blocks", files)
+	getter.streamFile = func(_ context.Context, _, _ string) (io.ReadCloser, error) {
+		return nil, errors.New("stream error")
+	}
+
+	ds := NewDataStore()
+	err := ds.LoadFromS3(context.Background(), getter, "bucket", "blocks")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "block 1000") {
+		t.Errorf("error should mention block number, got: %v", err)
+	}
+}
+
+// TestLoadFromS3_InvalidBlockJSON verifies that invalid block JSON returns a parse error.
+func TestLoadFromS3_InvalidBlockJSON(t *testing.T) {
+	files := map[string]string{
+		"blocks/1000/block.json": `not-json`,
+	}
+	getter := newStaticS3Lister("blocks", files)
+
+	ds := NewDataStore()
+	err := ds.LoadFromS3(context.Background(), getter, "bucket", "blocks")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unmarshalling header") {
+		t.Errorf("error should mention unmarshalling header, got: %v", err)
+	}
+}
+
+// TestLoadFromS3_SkipsUnparsableKeys verifies that keys not matching the expected
+// format are silently skipped and do not cause errors.
+func TestLoadFromS3_SkipsUnparsableKeys(t *testing.T) {
+	header := outbound.BlockHeader{Number: "0x1", Hash: "0xaaa"}
+	raw, _ := json.Marshal(header)
+	files := map[string]string{
+		"blocks/1000/block.json": string(raw),
+		"blocks/README.md":       "docs",
+		"blocks/bad/path":        "ignored",
+	}
+	getter := newStaticS3Lister("blocks", files)
+
+	ds := NewDataStore()
+	if err := ds.LoadFromS3(context.Background(), getter, "bucket", "blocks"); err != nil {
+		t.Fatalf("LoadFromS3: %v", err)
+	}
+	if ds.Len() != 1 {
+		t.Errorf("expected 1 header (unparsable keys skipped), got %d", ds.Len())
+	}
+}
+
+// --- test helpers ---
+
+// mockS3Lister is a configurable s3Lister for testing.
+type mockS3Lister struct {
+	listFiles  func(ctx context.Context, bucket, prefix string) ([]outbound.S3File, error)
+	streamFile func(ctx context.Context, bucket, key string) (io.ReadCloser, error)
+}
+
+func (m *mockS3Lister) ListFiles(ctx context.Context, bucket, prefix string) ([]outbound.S3File, error) {
+	return m.listFiles(ctx, bucket, prefix)
+}
+
+func (m *mockS3Lister) StreamFile(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+	return m.streamFile(ctx, bucket, key)
+}
+
+// newStaticS3Lister builds a mockS3Lister backed by an in-memory map of key→body.
+// Only keys whose prefix matches listPrefix are returned by ListFiles.
+func newStaticS3Lister(listPrefix string, files map[string]string) *mockS3Lister {
+	return &mockS3Lister{
+		listFiles: func(_ context.Context, _, _ string) ([]outbound.S3File, error) {
+			out := make([]outbound.S3File, 0, len(files))
+			for k := range files {
+				if strings.HasPrefix(k, listPrefix+"/") {
+					out = append(out, outbound.S3File{Key: k})
+				}
+			}
+			return out, nil
+		},
+		streamFile: func(_ context.Context, _, key string) (io.ReadCloser, error) {
+			body, ok := files[key]
+			if !ok {
+				return nil, errors.New("key not found: " + key)
+			}
+			return io.NopCloser(strings.NewReader(body)), nil
+		},
+	}
+}
+
+// closeTracker wraps an io.Reader and records whether Close was called.
+type closeTracker struct {
+	io.Reader
+	closed *bool
+}
+
+func (c *closeTracker) Close() error {
+	*c.closed = true
+	return nil
 }

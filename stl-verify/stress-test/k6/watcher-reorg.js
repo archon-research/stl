@@ -29,11 +29,19 @@ export const reorgErrors = new Counter('reorg_errors');
 export function createReorgRunner(adminURL) {
   const enabled = !!__ENV.REORG;
   const depth = parseInt(__ENV.REORG_DEPTH || '5', 10);
+  if (isNaN(depth) || depth <= 0) {
+    throw new Error(`REORG_DEPTH must be a positive integer, got: ${__ENV.REORG_DEPTH}`);
+  }
   const intervalSeconds = parseInt(__ENV.REORG_INTERVAL_S || '30', 10);
+  if (isNaN(intervalSeconds) || intervalSeconds <= 0) {
+    throw new Error(`REORG_INTERVAL_S must be a positive integer, got: ${__ENV.REORG_INTERVAL_S}`);
+  }
   let lastReorgAt = Date.now() / 1000; // start clock from test start, not epoch
+  let count = 0;
 
   return {
     enabled,
+    get count() { return count; },
     tick() {
       if (!enabled) return;
       const now = Date.now() / 1000;
@@ -44,6 +52,7 @@ export function createReorgRunner(adminURL) {
       const ok = check(res, { 'reorg triggered': (r) => r.status === 200 });
       if (ok) {
         reorgsTriggered.add(1);
+        count++;
         console.log(`Reorg triggered (depth=${depth})`);
       } else {
         reorgErrors.add(1);

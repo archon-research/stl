@@ -18,7 +18,10 @@ import { Counter } from 'k6/metrics';
 import { createReorgRunner, reorgErrors } from './watcher-reorg.js';
 
 const adminURL = __ENV.ADMIN_URL || 'http://mock-blockchain-server:8547';
-const intervalMs = parseInt(__ENV.INTERVAL_MS || '50');
+const intervalMs = parseInt(__ENV.INTERVAL_MS || '50', 10);
+if (isNaN(intervalMs) || intervalMs <= 0) {
+  throw new Error(`INTERVAL_MS must be a positive integer, got: ${__ENV.INTERVAL_MS}`);
+}
 const reorg = createReorgRunner(adminURL);
 
 const adminErrors = new Counter('admin_errors');

@@ -134,8 +134,9 @@ func (s *Server) SetErrorMode(mode ErrorMode) {
 }
 
 // Reorg triggers a chain reorganisation of the given depth.
-// It emits reorg blocks with alternative hashes for the last `depth` blocks
-// and broadcasts the new tip via WebSocket.
+// It generates alternative hashes for the last `depth` blocks and broadcasts
+// all reorg branch headers in order via WebSocket, so the watcher receives
+// each as a normal newHead and inserts the full branch into the canonical chain.
 func (s *Server) Reorg(depth int) error {
 	return s.reorgCtrl.trigger(depth)
 }
@@ -180,6 +181,11 @@ func (rc *reorgController) trigger(depth int) error {
 	if commonAncestorNum < base {
 		return fmt.Errorf("reorg depth %d exceeds available blocks (%d)", depth, tip-base)
 	}
+
+	// Evict the previous reorg's data before building the new branch.
+	// The watcher had the full inter-reorg interval to fetch those hashes via HTTP RPC,
+	// so it is safe to drop them now.
+	rc.store.ClearReorgData()
 
 	// Get the common ancestor hash (the branch point).
 	rc.replayer.mu.RLock()

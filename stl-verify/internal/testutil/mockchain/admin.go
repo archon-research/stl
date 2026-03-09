@@ -100,7 +100,7 @@ func (h *adminHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"running":           st.Running,
 		"blocks_emitted":    st.BlocksEmitted,
-		"loop_index":        st.TemplateIndex,
+		"template_index":    st.TemplateIndex,
 		"connected_clients": h.ws.ConnectedCount(),
 		"reorg_count":       h.reorgCtrl.reorgCount.Load(),
 	})

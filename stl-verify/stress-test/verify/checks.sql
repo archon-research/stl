@@ -19,7 +19,7 @@ SELECT count(*) AS unexpected_orphans
 FROM block_states
 WHERE chain_id = :chain_id
   AND is_orphaned
-  AND number > (SELECT max(number) - 64 FROM block_states WHERE chain_id = :chain_id);
+  AND number > (SELECT max(number) - 64 FROM block_states WHERE chain_id = :chain_id AND NOT is_orphaned);
 
 -- 3. ParentHash continuity on the canonical chain
 -- Returns: number of canonical blocks whose parent_hash does not match the previous block's hash.

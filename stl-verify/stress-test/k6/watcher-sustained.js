@@ -17,10 +17,13 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Counter, Rate } from 'k6/metrics';
-import { createReorgRunner, reorgsTriggered, reorgErrors } from './watcher-reorg.js';
+import { createReorgRunner, reorgErrors } from './watcher-reorg.js';
 
 const adminURL = __ENV.ADMIN_URL || 'http://mock-blockchain-server:8547';
-const intervalMs = parseInt(__ENV.INTERVAL_MS || '12000');
+const intervalMs = parseInt(__ENV.INTERVAL_MS || '12000', 10);
+if (isNaN(intervalMs) || intervalMs <= 0) {
+  throw new Error(`INTERVAL_MS must be a positive integer, got: ${__ENV.INTERVAL_MS}`);
+}
 const reorg = createReorgRunner(adminURL);
 
 const adminErrors = new Counter('admin_errors');
@@ -69,6 +72,6 @@ export function teardown() {
   const body = JSON.parse(res.body || '{}');
   console.log(`Blocks emitted: ${body.last_block || 'unknown'}`);
   if (reorg.enabled) {
-    console.log(`Reorgs triggered: ${reorgsTriggered.name}`);
+    console.log(`Reorgs triggered: ${reorg.count}`);
   }
 }
