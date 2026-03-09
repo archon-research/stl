@@ -1,6 +1,5 @@
 from collections.abc import AsyncIterator
 from decimal import Decimal
-from pathlib import Path
 
 import asyncpg
 import pytest
@@ -10,44 +9,26 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.adapters.postgres.backed_breakdown_repository import BackedBreakdownRepository
 
 
-@pytest.fixture(scope="module")
-def pg_container():
-    """Spin up a TimescaleDB container for the test module."""
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer(
-        image="timescale/timescaledb:latest-pg17",
-        username="postgres",
-        password="postgres",
-        dbname="stl_test",
-    ) as container:
-        yield container
+# ---------------------------------------------------------------------------
+# Database URL fixtures (derived from the shared module_db)
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
-def db_url(pg_container) -> str:
-    host = pg_container.get_container_host_ip()
-    port = pg_container.get_exposed_port(5432)
-    return f"postgresql://postgres:postgres@{host}:{port}/stl_test"
+def db_url(module_db) -> str:
+    """Plain ``postgresql://`` URL for the module's isolated database."""
+    return module_db["db_url"]
 
 
-@pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def _run_migrations(db_url: str, pg_container) -> None:
-    """Run all SQL migrations in order against the test database."""
-    migrations_dir = Path(__file__).resolve().parents[3] / "db" / "migrations"
-    migration_files = sorted(migrations_dir.glob("*.sql"))
+@pytest.fixture(scope="module")
+def async_db_url(module_db) -> str:
+    """SQLAlchemy async URL for the module's isolated database."""
+    return module_db["async_url"]
 
-    conn = await asyncpg.connect(db_url)
-    try:
-        for migration_file in migration_files:
-            sql = migration_file.read_text()
-            # CONCURRENTLY cannot run inside a transaction block.
-            # In tests there is no concurrent traffic, so it's safe
-            # to run the plain (non-concurrent) variant instead.
-            sql = sql.replace(" CONCURRENTLY", "")
-            await conn.execute(sql)
-    finally:
-        await conn.close()
+
+# ---------------------------------------------------------------------------
+# Seed helpers
+# ---------------------------------------------------------------------------
 
 
 async def _insert_token(conn: asyncpg.Connection, symbol: str, decimals: int, address: bytes) -> int:
@@ -255,8 +236,13 @@ async def _seed_user2(
 _SEED_BLOCK_NUMBER = 20_000_000
 
 
+# ---------------------------------------------------------------------------
+# Seed and repository fixtures
+# ---------------------------------------------------------------------------
+
+
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def _seed_data(db_url: str, _run_migrations: None) -> None:
+async def _seed_data(db_url: str) -> None:
     """Seed test data for backed breakdown tests."""
     conn = await asyncpg.connect(db_url)
     try:
@@ -294,12 +280,6 @@ async def test_ids(db_url: str, _seed_data: None) -> dict[str, int]:
         await conn.close()
 
 
-@pytest.fixture(scope="module")
-def async_db_url(db_url: str) -> str:
-    """SQLAlchemy async URL derived from the base database URL."""
-    return db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-
-
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def repository(async_db_url: str, _seed_data: None) -> AsyncIterator[BackedBreakdownRepository]:
     """Create a repository backed by the test database."""
@@ -308,6 +288,11 @@ async def repository(async_db_url: str, _seed_data: None) -> AsyncIterator[Backe
         yield BackedBreakdownRepository(engine)
     finally:
         await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio(loop_scope="module")

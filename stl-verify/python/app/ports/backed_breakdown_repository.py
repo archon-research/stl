@@ -16,4 +16,3 @@ class BackedBreakdownRepository(Protocol):
         Returns:
             BackedBreakdown with attributed collateral contributions.
         """
-        ...
