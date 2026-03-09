@@ -107,13 +107,17 @@ func (r *Replayer) SetInterval(d time.Duration) error {
 	return nil
 }
 
-// Start begins emitting blocks on the configured interval. It is a no-op if
-// already running or if no templates were provided.
-func (r *Replayer) Start() {
+// Start begins emitting blocks on the configured interval.
+// Returns an error if no templates are loaded or if already running.
+func (r *Replayer) Start() error {
 	r.mu.Lock()
-	if r.running || len(r.templates) == 0 {
+	if r.running {
 		r.mu.Unlock()
-		return
+		return fmt.Errorf("mockchain: replayer is already running")
+	}
+	if len(r.templates) == 0 {
+		r.mu.Unlock()
+		return fmt.Errorf("mockchain: replayer has no block templates loaded")
 	}
 	r.running = true
 	r.stopCh = make(chan struct{})
@@ -128,6 +132,7 @@ func (r *Replayer) Start() {
 	r.mu.Unlock()
 
 	go r.emitLoop(r.stopCh, r.doneCh)
+	return nil
 }
 
 func (r *Replayer) emitLoop(stopCh <-chan struct{}, doneCh chan struct{}) {

@@ -61,7 +61,10 @@ func (h *adminHandler) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	h.replayer.Start()
+	if err := h.replayer.Start(); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	if err := writeJSON(w, map[string]bool{"ok": true}); err != nil {
 		slog.Error("mockchain: admin writeJSON", "error", err)
 	}

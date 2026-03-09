@@ -75,7 +75,9 @@ func (s *Server) Start(addr string) error {
 		return fmt.Errorf("listening on %s: %w", addr, err)
 	}
 	s.listener = ln
-	s.replayer.Start()
+	if err := s.replayer.Start(); err != nil {
+		return fmt.Errorf("starting replayer: %w", err)
+	}
 	go func() {
 		if err := s.httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("mockchain: server error", "error", err)

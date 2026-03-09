@@ -63,7 +63,9 @@ func TestNewReplayer(t *testing.T) {
 func TestReplayer_BasicEmit(t *testing.T) {
 	r, received := newTestReplayer(t)
 
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	drain(t, received, 3)
 	emitted := r.Stop()
 
@@ -76,7 +78,9 @@ func TestReplayer_BasicEmit(t *testing.T) {
 func TestReplayer_StopReturnsCount(t *testing.T) {
 	r, received := newTestReplayer(t)
 
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	drain(t, received, 3)
 	emitted := r.Stop()
 
@@ -97,7 +101,9 @@ func TestReplayer_IndexWraps(t *testing.T) {
 	r, received := newTestReplayer(t)
 	n := len(r.templates) // 3
 
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	drain(t, received, n+1) // one full loop plus one more
 	r.Stop()
 
@@ -107,12 +113,17 @@ func TestReplayer_IndexWraps(t *testing.T) {
 	}
 }
 
-// TestReplayer_StartIdempotent verifies that calling Start twice does not launch two goroutines.
+// TestReplayer_StartIdempotent verifies that a second Start while running returns an error
+// and does not launch a second goroutine.
 func TestReplayer_StartIdempotent(t *testing.T) {
 	r, received := newTestReplayer(t)
 
-	r.Start()
-	r.Start() // second call must be a no-op
+	if err := r.Start(); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	if err := r.Start(); err == nil {
+		t.Error("second Start: expected error while already running, got nil")
+	}
 
 	drain(t, received, 2)
 	emitted := r.Stop()
@@ -152,7 +163,9 @@ func TestReplayer_getStatus(t *testing.T) {
 		t.Errorf("expected BlocksEmitted=0 before Start, got %d", s.BlocksEmitted)
 	}
 
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	drain(t, received, 1)
 
 	s = r.getStatus()
@@ -334,7 +347,9 @@ func TestReplayer_SetInterval(t *testing.T) {
 	}
 
 	start := time.Now()
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	drain(t, received, 3)
 	r.Stop()
 	elapsed := time.Since(start)
@@ -354,7 +369,9 @@ func TestReplayer_SetInterval(t *testing.T) {
 // and that the new interval takes effect for subsequent emissions.
 func TestReplayer_SetInterval_WhileRunning(t *testing.T) {
 	r, received := newTestReplayer(t)
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	drain(t, received, 1)
 	defer r.Stop()
 
@@ -386,14 +403,16 @@ func TestReplayer_SetInterval_NonPositive(t *testing.T) {
 	}
 }
 
-// TestReplayer_EmptyTemplates verifies that Start is a no-op (no panic) when there are no templates.
+// TestReplayer_EmptyTemplates verifies that Start returns an error when there are no templates.
 func TestReplayer_EmptyTemplates(t *testing.T) {
 	ds := NewDataStore() // empty — no headers
 	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {
 		t.Error("onBlock must not be called with empty templates")
 	}, 0)
 
-	r.Start()
+	if err := r.Start(); err == nil {
+		t.Error("Start with empty templates: expected error, got nil")
+	}
 	emitted := r.Stop()
 
 	if emitted != 0 {
@@ -405,7 +424,9 @@ func TestReplayer_EmptyTemplates(t *testing.T) {
 func TestReplayer_RestartResetsState(t *testing.T) {
 	r, received := newTestReplayer(t)
 
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
 	drain(t, received, 2)
 	r.Stop()
 
@@ -414,7 +435,9 @@ func TestReplayer_RestartResetsState(t *testing.T) {
 		<-received
 	}
 
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("second Start: %v", err)
+	}
 	drain(t, received, 1)
 
 	s := r.getStatus()
