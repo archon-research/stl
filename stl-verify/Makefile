@@ -130,7 +130,7 @@ fix:
 # Check if go fix has been applied (CI-friendly, fails if not)
 fix-check:
 	@echo "==> Checking go fix..."
-	@diff=$$(go fix -diff ./... 2>&1); \
+	@diff=$$(go fix -diff ./... 2>/dev/null); \
 	if [ -n "$$diff" ]; then \
 		echo "Code needs modernizing. Run 'go fix ./...'"; \
 		echo "$$diff"; \
