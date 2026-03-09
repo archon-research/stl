@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sparklend-position-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sparklend-position-tracker
+  template:
+    metadata:
+      labels:
+        app: sparklend-position-tracker
+    spec:
+      containers:
+        - name: sparklend-position-tracker
+          image: stl-sparklend-position-tracker:local
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: stl-config
+            - secretRef:
+                name: stl-secrets
+          env:
+            - name: AWS_SQS_QUEUE_URL
+              value: http://localstack:4566/000000000000/stl-ethereum-sparklend-position.fifo
