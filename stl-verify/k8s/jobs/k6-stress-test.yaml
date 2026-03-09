@@ -7,6 +7,11 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: k6
           image: grafana/k6:1.6.1
@@ -25,10 +30,20 @@ spec:
               value: "${REORG_DEPTH}"
             - name: REORG_INTERVAL_S
               value: "${REORG_INTERVAL_S}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           command:
             - sh
             - -c
-            - k6 run /scripts/watcher-${SCENARIO}.js
+            - |
+              case "${SCENARIO}" in
+                sustained|burst) ;;
+                *) echo "unknown SCENARIO: ${SCENARIO}" >&2; exit 1 ;;
+              esac
+              exec k6 run "/scripts/watcher-${SCENARIO}.js"
           volumeMounts:
             - name: k6-scripts
               mountPath: /scripts

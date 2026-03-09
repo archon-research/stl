@@ -107,11 +107,19 @@ func (s *Server) Stop() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	var adminErr error
 	if s.adminSrv != nil {
-		_ = s.adminSrv.Shutdown(ctx)
+		if err := s.adminSrv.Shutdown(ctx); err != nil {
+			adminErr = fmt.Errorf("shutting down admin server: %w", err)
+		}
 	}
 
-	return s.httpSrv.Shutdown(ctx)
+	httpErr := s.httpSrv.Shutdown(ctx)
+	if httpErr != nil {
+		httpErr = fmt.Errorf("shutting down http server: %w", httpErr)
+	}
+
+	return errors.Join(adminErr, httpErr)
 }
 
 // Addr returns the server's listening address, or nil if not started.
@@ -187,22 +195,23 @@ func (rc *reorgController) trigger(depth int) error {
 	// so it is safe to drop them now.
 	rc.store.ClearReorgData()
 
-	// Get the common ancestor hash (the branch point).
+	// Get the common ancestor hash and snapshot templates under one read lock.
 	rc.replayer.mu.RLock()
 	ancestorHeader := rc.replayer.headerForNumberLocked(commonAncestorNum)
+	templates := rc.replayer.templates
 	rc.replayer.mu.RUnlock()
 	prevHash := ancestorHeader.Hash
 
 	// Generate the reorg branch.
 	reorgHeaders := make([]outbound.BlockHeader, 0, depth)
-	nTemplates := int64(len(rc.replayer.templates))
+	nTemplates := int64(len(templates))
 
 	for i := range depth {
 		blockNum := commonAncestorNum + 1 + int64(i)
 		offset := blockNum - base
 		templateIndex := int(offset % nTemplates)
 		loopIndex := int(offset / nTemplates)
-		template := rc.replayer.templates[templateIndex]
+		template := templates[templateIndex]
 
 		reorgHash := deriveReorgHash(template.Hash, loopIndex, i)
 

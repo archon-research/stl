@@ -27,7 +27,7 @@ if (isNaN(intervalMs) || intervalMs <= 0) {
 const reorg = createReorgRunner(adminURL);
 
 const adminErrors = new Counter('admin_errors');
-const blockEmissionRate = Rate('block_emission_ok');
+const blockEmissionRate = new Rate('block_emission_ok');
 
 export const options = {
   duration: __ENV.DURATION || '2m',
@@ -42,10 +42,14 @@ export function setup() {
   let res = http.post(`${adminURL}/speed`, JSON.stringify({ interval_ms: intervalMs }), {
     headers: { 'Content-Type': 'application/json' },
   });
-  check(res, { 'speed set': (r) => r.status === 200 });
+  if (res.status !== 200) {
+    throw new Error(`setup: /speed failed (${res.status}): ${res.body}`);
+  }
 
   res = http.post(`${adminURL}/start`);
-  check(res, { 'replayer started': (r) => r.status === 200 });
+  if (res.status !== 200) {
+    throw new Error(`setup: /start failed (${res.status}): ${res.body}`);
+  }
 }
 
 export default function () {

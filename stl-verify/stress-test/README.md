@@ -100,9 +100,9 @@ Reorgs are an option, not a scenario — inject them into any scenario:
 # Local
 psql $DATABASE_URL -v chain_id=1 -f stress-test/verify/checks.sql
 
-# EKS
-kubectl exec -n stl-stress-test timescaledb-0 -- psql -U postgres -d stl_verify \
-  -f stress-test/verify/checks.sql
+# EKS (stream the local file into the pod; -f cannot reference a path inside the container)
+kubectl exec -i -n stl-stress-test timescaledb-0 -- psql -U postgres -d stl_verify \
+  -v chain_id=1 < stress-test/verify/checks.sql
 ```
 
 All three queries must return 0:

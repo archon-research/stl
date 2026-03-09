@@ -13,6 +13,11 @@ spec:
         app: mock-blockchain-server
     spec:
       terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: mock-blockchain-server
           image: stl-mock-blockchain-server:local
@@ -23,11 +28,23 @@ spec:
             - --s3-bucket=stress-test-data
             - --s3-prefix=blocks/chain-1
             - --s3-endpoint=http://localstack:4566
+            - --region=$(AWS_REGION)
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - name: rpc
               containerPort: 8546
             - name: admin
               containerPort: 8547
+          env:
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-config
+                  key: AWS_REGION
           envFrom:
             - configMapRef:
                 name: stl-config

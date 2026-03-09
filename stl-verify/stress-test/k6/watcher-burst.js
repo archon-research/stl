@@ -39,10 +39,14 @@ export function setup() {
   let res = http.post(`${adminURL}/speed`, JSON.stringify({ interval_ms: intervalMs }), {
     headers: { 'Content-Type': 'application/json' },
   });
-  check(res, { [`speed set to ${intervalMs}ms`]: (r) => r.status === 200 });
+  if (res.status !== 200) {
+    throw new Error(`setup: /speed failed (${res.status}): ${res.body}`);
+  }
 
   res = http.post(`${adminURL}/start`);
-  check(res, { 'replayer started': (r) => r.status === 200 });
+  if (res.status !== 200) {
+    throw new Error(`setup: /start failed (${res.status}): ${res.body}`);
+  }
 }
 
 export default function () {

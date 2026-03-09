@@ -12,6 +12,8 @@ package mockchain
 
 import (
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -60,7 +62,9 @@ func (h *adminHandler) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.replayer.Start()
-	writeJSON(w, map[string]bool{"ok": true})
+	if err := writeJSON(w, map[string]bool{"ok": true}); err != nil {
+		slog.Error("mockchain: admin writeJSON", "error", err)
+	}
 }
 
 func (h *adminHandler) handleStop(w http.ResponseWriter, r *http.Request) {
@@ -69,7 +73,9 @@ func (h *adminHandler) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	last := h.replayer.Stop()
-	writeJSON(w, map[string]any{"last_block": last})
+	if err := writeJSON(w, map[string]any{"last_block": last}); err != nil {
+		slog.Error("mockchain: admin writeJSON", "error", err)
+	}
 }
 
 func (h *adminHandler) handleSpeed(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +94,9 @@ func (h *adminHandler) handleSpeed(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	writeJSON(w, map[string]bool{"ok": true})
+	if err := writeJSON(w, map[string]bool{"ok": true}); err != nil {
+		slog.Error("mockchain: admin writeJSON", "error", err)
+	}
 }
 
 func (h *adminHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -97,13 +105,15 @@ func (h *adminHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st := h.replayer.getStatus()
-	writeJSON(w, map[string]any{
+	if err := writeJSON(w, map[string]any{
 		"running":           st.Running,
 		"blocks_emitted":    st.BlocksEmitted,
 		"template_index":    st.TemplateIndex,
 		"connected_clients": h.ws.ConnectedCount(),
 		"reorg_count":       h.reorgCtrl.reorgCount.Load(),
-	})
+	}); err != nil {
+		slog.Error("mockchain: admin writeJSON", "error", err)
+	}
 }
 
 func (h *adminHandler) handleReorg(w http.ResponseWriter, r *http.Request) {
@@ -125,7 +135,9 @@ func (h *adminHandler) handleReorg(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]bool{"ok": true})
+	if err := writeJSON(w, map[string]bool{"ok": true}); err != nil {
+		slog.Error("mockchain: admin writeJSON", "error", err)
+	}
 }
 
 func (h *adminHandler) handleDisconnect(w http.ResponseWriter, r *http.Request) {
@@ -134,7 +146,9 @@ func (h *adminHandler) handleDisconnect(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	h.ws.Disconnect()
-	writeJSON(w, map[string]bool{"ok": true})
+	if err := writeJSON(w, map[string]bool{"ok": true}); err != nil {
+		slog.Error("mockchain: admin writeJSON", "error", err)
+	}
 }
 
 func (h *adminHandler) handleError(w http.ResponseWriter, r *http.Request) {
@@ -155,7 +169,9 @@ func (h *adminHandler) handleError(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.rpc.SetErrorMode(mode)
-	writeJSON(w, map[string]bool{"ok": true})
+	if err := writeJSON(w, map[string]bool{"ok": true}); err != nil {
+		slog.Error("mockchain: admin writeJSON", "error", err)
+	}
 }
 
 // parseErrorMode maps a string name to an ErrorMode constant.
@@ -178,7 +194,10 @@ func parseErrorMode(s string) (ErrorMode, bool) {
 }
 
 // writeJSON encodes v as JSON and writes it to w with Content-Type application/json.
-func writeJSON(w http.ResponseWriter, v any) {
+func writeJSON(w http.ResponseWriter, v any) error {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		return fmt.Errorf("encoding JSON response: %w", err)
+	}
+	return nil
 }

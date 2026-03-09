@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -157,16 +158,17 @@ func TestStreamAll_Success(t *testing.T) {
 	}
 }
 
-// TestStreamAll_StreamError verifies that a StreamFile error is propagated.
+// TestStreamAll_StreamError verifies that a StreamFile error is propagated unchanged.
 func TestStreamAll_StreamError(t *testing.T) {
+	sentinel := errors.New("stream error")
 	getter := &mockS3Lister{
 		streamFile: func(_ context.Context, _, _ string) (io.ReadCloser, error) {
-			return nil, errors.New("stream error")
+			return nil, sentinel
 		},
 	}
 	_, err := streamAll(context.Background(), getter, "bucket", "key")
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error %q, got: %v", sentinel, err)
 	}
 }
 
@@ -185,22 +187,23 @@ func TestLoadFromS3_Success(t *testing.T) {
 		"blocks/1000/block.json":    string(raw1),
 		"blocks/1000/receipts.json": `[]`,
 	}
-	getter := newStaticS3Lister("blocks", files)
+	getter := newStaticS3Lister("bucket", files)
 
 	ds := NewDataStore()
 	if err := ds.LoadFromS3(context.Background(), getter, "bucket", "blocks"); err != nil {
 		t.Fatalf("LoadFromS3: %v", err)
 	}
 
-	if ds.Len() != 2 {
-		t.Errorf("expected 2 headers, got %d", ds.Len())
+	headers := ds.Headers()
+	if len(headers) != 2 {
+		t.Fatalf("expected 2 headers, got %d", len(headers))
 	}
 	// Index 0 → block 1000 (ascending order)
-	if ds.Headers()[0].Hash != "0xaaa" {
-		t.Errorf("expected first header hash 0xaaa, got %s", ds.Headers()[0].Hash)
+	if headers[0].Hash != "0xaaa" {
+		t.Errorf("expected first header hash 0xaaa, got %s", headers[0].Hash)
 	}
-	if ds.Headers()[1].Hash != "0xbbb" {
-		t.Errorf("expected second header hash 0xbbb, got %s", ds.Headers()[1].Hash)
+	if headers[1].Hash != "0xbbb" {
+		t.Errorf("expected second header hash 0xbbb, got %s", headers[1].Hash)
 	}
 	// Receipts at index 0 should be present.
 	if _, ok := ds.Get(0, "receipts"); !ok {
@@ -212,57 +215,69 @@ func TestLoadFromS3_Success(t *testing.T) {
 	}
 }
 
-// TestLoadFromS3_ListError verifies that a ListFiles error is wrapped and returned.
-func TestLoadFromS3_ListError(t *testing.T) {
-	getter := &mockS3Lister{
-		listFiles: func(_ context.Context, _, _ string) ([]outbound.S3File, error) {
-			return nil, errors.New("list error")
+// TestLoadFromS3_Errors verifies the exact error wrapping for each failure mode.
+func TestLoadFromS3_Errors(t *testing.T) {
+	errList   := errors.New("list error")
+	errStream := errors.New("stream error")
+
+	tests := []struct {
+		name        string
+		makeGetter  func() *mockS3Lister
+		wantWraps   error  // sentinel that must be reachable via errors.Is
+		wantMessage string // full wrapping prefix that must appear in err.Error()
+	}{
+		{
+			name: "list error",
+			makeGetter: func() *mockS3Lister {
+				return &mockS3Lister{
+					listFiles: func(_ context.Context, _, _ string) ([]outbound.S3File, error) {
+						return nil, errList
+					},
+				}
+			},
+			wantWraps:   errList,
+			wantMessage: "loading from S3: listing files: list error",
+		},
+		{
+			name: "stream error",
+			makeGetter: func() *mockS3Lister {
+				g := newStaticS3Lister("bucket", map[string]string{
+					"blocks/1000/block.json": `{"number":"0x3e8","hash":"0xaaa"}`,
+				})
+				g.streamFile = func(_ context.Context, _, _ string) (io.ReadCloser, error) {
+					return nil, errStream
+				}
+				return g
+			},
+			wantWraps:   errStream,
+			wantMessage: "loading from S3: block 1000 block: stream error",
+		},
+		{
+			name: "invalid block JSON",
+			makeGetter: func() *mockS3Lister {
+				return newStaticS3Lister("bucket", map[string]string{
+					"blocks/1000/block.json": `not-json`,
+				})
+			},
+			wantWraps:   nil, // json errors are not sentinels; check message only
+			wantMessage: "loading from S3: block 1000: unmarshalling header:",
 		},
 	}
-	ds := NewDataStore()
-	err := ds.LoadFromS3(context.Background(), getter, "bucket", "blocks")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "listing files") {
-		t.Errorf("error should mention listing files, got: %v", err)
-	}
-}
 
-// TestLoadFromS3_StreamError verifies that a StreamFile error is wrapped and returned.
-func TestLoadFromS3_StreamError(t *testing.T) {
-	files := map[string]string{
-		"blocks/1000/block.json": `{"number":"0x3e8","hash":"0xaaa"}`,
-	}
-	getter := newStaticS3Lister("blocks", files)
-	getter.streamFile = func(_ context.Context, _, _ string) (io.ReadCloser, error) {
-		return nil, errors.New("stream error")
-	}
-
-	ds := NewDataStore()
-	err := ds.LoadFromS3(context.Background(), getter, "bucket", "blocks")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "block 1000") {
-		t.Errorf("error should mention block number, got: %v", err)
-	}
-}
-
-// TestLoadFromS3_InvalidBlockJSON verifies that invalid block JSON returns a parse error.
-func TestLoadFromS3_InvalidBlockJSON(t *testing.T) {
-	files := map[string]string{
-		"blocks/1000/block.json": `not-json`,
-	}
-	getter := newStaticS3Lister("blocks", files)
-
-	ds := NewDataStore()
-	err := ds.LoadFromS3(context.Background(), getter, "bucket", "blocks")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "unmarshalling header") {
-		t.Errorf("error should mention unmarshalling header, got: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ds := NewDataStore()
+			err := ds.LoadFromS3(context.Background(), tt.makeGetter(), "bucket", "blocks")
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantMessage) {
+				t.Errorf("error = %q; want it to contain %q", err.Error(), tt.wantMessage)
+			}
+			if tt.wantWraps != nil && !errors.Is(err, tt.wantWraps) {
+				t.Errorf("errors.Is(%v) = false; sentinel not in chain", tt.wantWraps)
+			}
+		})
 	}
 }
 
@@ -276,7 +291,7 @@ func TestLoadFromS3_SkipsUnparsableKeys(t *testing.T) {
 		"blocks/README.md":       "docs",
 		"blocks/bad/path":        "ignored",
 	}
-	getter := newStaticS3Lister("blocks", files)
+	getter := newStaticS3Lister("bucket", files)
 
 	ds := NewDataStore()
 	if err := ds.LoadFromS3(context.Background(), getter, "bucket", "blocks"); err != nil {
@@ -304,13 +319,17 @@ func (m *mockS3Lister) StreamFile(ctx context.Context, bucket, key string) (io.R
 }
 
 // newStaticS3Lister builds a mockS3Lister backed by an in-memory map of key→body.
-// Only keys whose prefix matches listPrefix are returned by ListFiles.
-func newStaticS3Lister(listPrefix string, files map[string]string) *mockS3Lister {
+// ListFiles filters by the prefix argument passed at call time, so the test catches
+// production code that wires the wrong prefix.
+func newStaticS3Lister(wantBucket string, files map[string]string) *mockS3Lister {
 	return &mockS3Lister{
-		listFiles: func(_ context.Context, _, _ string) ([]outbound.S3File, error) {
+		listFiles: func(_ context.Context, bucket, prefix string) ([]outbound.S3File, error) {
+			if bucket != wantBucket {
+				return nil, fmt.Errorf("ListFiles: unexpected bucket %q (want %q)", bucket, wantBucket)
+			}
 			out := make([]outbound.S3File, 0, len(files))
 			for k := range files {
-				if strings.HasPrefix(k, listPrefix+"/") {
+				if strings.HasPrefix(k, prefix+"/") {
 					out = append(out, outbound.S3File{Key: k})
 				}
 			}

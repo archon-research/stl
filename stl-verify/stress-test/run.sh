@@ -79,15 +79,25 @@ if $CLEAN; then
   echo "==> Flushing Redis..."
   kubectl exec -n stl deployment/redis -- redis-cli FLUSHDB
   echo "==> Purging SQS queues..."
-  # purge-queue fails if called within 60 s of the previous purge; treat that as a warning.
-  AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
-    aws --endpoint-url http://localhost:4566 --region us-east-1 \
-    sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo \
-    || echo "  warning: transformer queue purge skipped (within 60 s cooldown)"
-  AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
-    aws --endpoint-url http://localhost:4566 --region us-east-1 \
-    sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-backup.fifo \
-    || echo "  warning: backup queue purge skipped (within 60 s cooldown)"
+  # purge_sqs_queue suppresses only the 60 s cooldown error (PurgeQueueInProgress);
+  # all other failures (LocalStack unavailable, bad URL, auth error) are fatal.
+  purge_sqs_queue() {
+    local queue_name="$1" queue_url="$2"
+    local out
+    out=$(AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
+      aws --endpoint-url http://localhost:4566 --region us-east-1 \
+      sqs purge-queue --queue-url "$queue_url" 2>&1) && return 0
+    if echo "$out" | grep -q "PurgeQueueInProgress"; then
+      echo "  warning: ${queue_name} purge skipped (within 60 s cooldown)"
+      return 0
+    fi
+    echo "  error: ${queue_name} purge failed: ${out}" >&2
+    return 1
+  }
+  purge_sqs_queue "transformer" \
+    "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo"
+  purge_sqs_queue "backup" \
+    "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-backup.fifo"
 fi
 
 echo "==> Running k6..."
@@ -100,6 +110,15 @@ REORG_INTERVAL_S="$REORG_INTERVAL_S" \
   k6 run "$SCRIPT"
 
 echo "==> Verifying chain correctness..."
-kubectl exec -i -n stl timescaledb-0 -- psql -U postgres -d stl_verify \
-  -v chain_id="$CHAIN_ID" \
-  < stress-test/verify/checks.sql
+# Run checks.sql with -t (tuples-only) and -A (unaligned) so each query prints a bare number.
+# xargs strips whitespace; read assigns the three values in order.
+results=$(kubectl exec -i -n stl timescaledb-0 -- psql -U postgres -d stl_verify \
+  -v chain_id="$CHAIN_ID" -tA \
+  < stress-test/verify/checks.sql)
+read -r gaps unexpected_orphans broken_parent_links <<< "$(echo "$results" | xargs)"
+echo "  gaps=${gaps}  unexpected_orphans=${unexpected_orphans}  broken_parent_links=${broken_parent_links}"
+if [[ "$gaps" -ne 0 || "$unexpected_orphans" -ne 0 || "$broken_parent_links" -ne 0 ]]; then
+  echo "error: chain invariants violated — see counts above" >&2
+  exit 1
+fi
+echo "==> Chain OK"

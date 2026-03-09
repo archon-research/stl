@@ -1576,14 +1576,16 @@ STRESS_TEST_STAGING_BUCKET ?= stl-sentinelstaging-stress-test-data-89d540d0
 # Populate S3 with stress test block data.
 # Local (default):       creates bucket in LocalStack and exports blocks from staging.
 # Staging (ENV=sentinelstaging): creates real S3 bucket and exports blocks (one-time operator step).
-# Idempotent: skips export if block data already exists in the destination bucket.
+# Idempotent: skips export only when a manifest written by a previous run matches the requested
+#             start_block, block_count, and version. Any parameter change triggers a fresh export.
 stress-test-data:
 ifeq ($(ENV),sentinelstaging)
 	@echo "==> Creating stress-test bucket in staging S3..."
 	aws s3 mb s3://$(STRESS_TEST_STAGING_BUCKET) --region $(AWS_REGION) 2>/dev/null || true
-	@COUNT=$$(aws s3 ls s3://$(STRESS_TEST_STAGING_BUCKET)/$(STRESS_TEST_PREFIX)/ --recursive 2>/dev/null | wc -l | tr -d ' '); \
-	if [ "$$COUNT" -gt "0" ]; then \
-	  echo "==> Block data already exists ($$COUNT files), skipping export"; \
+	@WANT="start_block=$(STRESS_TEST_START_BLOCK) block_count=$(STRESS_TEST_BLOCK_COUNT) version=$(STRESS_TEST_VERSION)"; \
+	GOT=$$(aws s3 cp s3://$(STRESS_TEST_STAGING_BUCKET)/$(STRESS_TEST_PREFIX)/.manifest - 2>/dev/null || true); \
+	if [ "$$GOT" = "$$WANT" ]; then \
+	  echo "==> Block data up-to-date ($$WANT), skipping export"; \
 	else \
 	  echo "==> Exporting $(STRESS_TEST_BLOCK_COUNT) blocks to staging S3 (requires staging creds)..."; \
 	  go run ./cmd/stress-test/data-export \
@@ -1594,13 +1596,16 @@ ifeq ($(ENV),sentinelstaging)
 	    --start-block $(STRESS_TEST_START_BLOCK) \
 	    --block-count $(STRESS_TEST_BLOCK_COUNT) \
 	    --version $(STRESS_TEST_VERSION); \
+	  echo "$$WANT" | aws s3 cp - s3://$(STRESS_TEST_STAGING_BUCKET)/$(STRESS_TEST_PREFIX)/.manifest; \
 	fi
 else
 	@echo "==> Creating stress-test-data bucket in LocalStack..."
 	aws --endpoint-url $(STRESS_TEST_LOCAL_ENDPOINT) s3 mb s3://$(STRESS_TEST_LOCAL_BUCKET) --region us-east-1 2>/dev/null || true
-	@COUNT=$$(aws --endpoint-url $(STRESS_TEST_LOCAL_ENDPOINT) s3 ls s3://$(STRESS_TEST_LOCAL_BUCKET)/$(STRESS_TEST_PREFIX)/ --recursive 2>/dev/null | wc -l | tr -d ' '); \
-	if [ "$$COUNT" -gt "0" ]; then \
-	  echo "==> Block data already exists ($$COUNT files), skipping export"; \
+	@WANT="start_block=$(STRESS_TEST_START_BLOCK) block_count=$(STRESS_TEST_BLOCK_COUNT) version=$(STRESS_TEST_VERSION)"; \
+	GOT=$$(aws --endpoint-url $(STRESS_TEST_LOCAL_ENDPOINT) s3 cp \
+	  s3://$(STRESS_TEST_LOCAL_BUCKET)/$(STRESS_TEST_PREFIX)/.manifest - 2>/dev/null || true); \
+	if [ "$$GOT" = "$$WANT" ]; then \
+	  echo "==> Block data up-to-date ($$WANT), skipping export"; \
 	else \
 	  echo "==> Exporting $(STRESS_TEST_BLOCK_COUNT) blocks to LocalStack (requires staging AWS credentials)..."; \
 	  go run ./cmd/stress-test/data-export \
@@ -1612,6 +1617,8 @@ else
 	    --start-block $(STRESS_TEST_START_BLOCK) \
 	    --block-count $(STRESS_TEST_BLOCK_COUNT) \
 	    --version $(STRESS_TEST_VERSION); \
+	  echo "$$WANT" | aws --endpoint-url $(STRESS_TEST_LOCAL_ENDPOINT) s3 cp \
+	    - s3://$(STRESS_TEST_LOCAL_BUCKET)/$(STRESS_TEST_PREFIX)/.manifest; \
 	fi
 endif
 
@@ -1629,7 +1636,7 @@ stress-test:
 	ADMIN_URL=http://localhost:8547 INTERVAL_MS=$(or $(INTERVAL_MS),12000) k6 run stress-test/k6/$(or $(SCENARIO),watcher-sustained).js
 
 # Run k6 stress test as a Job inside the cluster (kind or EKS).
-# SCENARIO: sustained (default), burst, reorg
+# SCENARIO: sustained (default), burst  (watcher-reorg.js is a shared module, not a runnable scenario)
 # INTERVAL_MS: block interval ms (default: 12000)
 # DURATION: test duration (default: 2m)
 k6-stress-test:

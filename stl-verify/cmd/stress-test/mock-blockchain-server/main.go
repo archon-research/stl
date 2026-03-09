@@ -22,7 +22,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":8546", "listen address (e.g. :8546)")
-	adminPort := flag.String("admin-port", ":8547", "admin API listen address (empty to disable)")
+	adminPort := flag.String("admin-port", "localhost:8547", "admin API listen address (empty to disable; use :8547 to bind all interfaces in k8s)")
 	interval := flag.Duration("interval", 12*time.Second, "block emission interval (e.g. 1s, 500ms)")
 	s3Bucket := flag.String("s3-bucket", "", "S3 bucket containing block data (empty = use fixture data)")
 	s3Prefix := flag.String("s3-prefix", "blocks/chain-1", "S3 key prefix for block data")
@@ -156,7 +156,7 @@ func loadStore(ctx context.Context, logger *slog.Logger, c serverConfig) (*mockc
 
 	store := mockchain.NewDataStore()
 	if err := store.LoadFromS3(ctx, reader, c.s3Bucket, c.s3Prefix); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("bucket %q prefix %q: %w", c.s3Bucket, c.s3Prefix, err)
 	}
 
 	logger.Info("block data loaded from S3", "blocks", store.Len())
