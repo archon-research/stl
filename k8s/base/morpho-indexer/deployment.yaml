@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: morpho-indexer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: morpho-indexer
+  template:
+    metadata:
+      labels:
+        app: morpho-indexer
+    spec:
+      serviceAccountName: morpho-indexer
+      containers:
+        - name: morpho-indexer
+          image: morpho-indexer
+          envFrom:
+            - secretRef:
+                name: morpho-indexer
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2048Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2048Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f morpho"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

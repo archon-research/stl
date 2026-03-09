@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backup-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backup-worker
+  template:
+    metadata:
+      labels:
+        app: backup-worker
+    spec:
+      serviceAccountName: backup-worker
+      containers:
+        - name: backup-worker
+          image: backup-worker
+          envFrom:
+            - secretRef:
+                name: backup-worker
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1024Mi"
+            limits:
+              cpu: "500m"
+              memory: "1024Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f backup-worker"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60
