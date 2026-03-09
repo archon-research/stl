@@ -13,7 +13,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     yield
     # Dispose the database engine on shutdown
     settings = get_settings()
-    engine = get_engine(settings.database_url.get_secret_value())
+    engine = get_engine(settings)
     await engine.dispose()
 
 
