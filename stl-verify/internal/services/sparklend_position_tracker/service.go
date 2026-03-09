@@ -245,13 +245,13 @@ func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEve
 	return s.fetchAndProcessReceipts(ctx, event)
 }
 
+func (s *Service) reportCompletion(funcName string, start time.Time, attrs ...any) {
+	s.logger.Debug(funcName+" completed", append(attrs, "duration", time.Since(start))...)
+}
+
 func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.BlockEvent) error {
 	start := time.Now()
-	defer func() {
-		s.logger.Debug("fetchAndProcessReceipts completed",
-			"block", event.BlockNumber,
-			"duration", time.Since(start))
-	}()
+	defer s.reportCompletion("fetchAndProcessReceipts", start, "block", event.BlockNumber)
 
 	receiptsData, err := s.cacheReader.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
 	if err != nil {
@@ -275,7 +275,7 @@ func (s *Service) ProcessReceipts(ctx context.Context, chainID, blockNumber int6
 	var errs []error
 	for _, receipt := range receipts {
 		if err := s.processReceipt(ctx, receipt, chainID, blockNumber, version); err != nil {
-			errs = append(errs, err)
+			errs = append(errs, err) // This allows for partial success?
 		}
 	}
 	if len(errs) > 0 {
@@ -285,57 +285,30 @@ func (s *Service) ProcessReceipts(ctx context.Context, chainID, blockNumber int6
 }
 
 func (s *Service) processReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, blockVersion int) error {
-	var errs []error
 	for _, log := range receipt.Logs {
-
 		// Only process logs from known protocol addresses
 		protocolAddress := common.HexToAddress(log.Address)
 		if !blockchain.IsKnownProtocol(chainID, protocolAddress) {
 			continue
 		}
 
-		if s.isPositionEvent(log) {
-			if err := s.processPositionEventLog(ctx, log, receipt.TransactionHash, chainID, blockNumber, blockVersion); err != nil {
-				s.logger.Error("failed to process position event", "error", err, "tx", receipt.TransactionHash)
-				errs = append(errs, err)
-			}
-			continue
-		}
+		switch {
+		case s.eventExtractor.IsPositionEvent(log):
+			return s.processPositionEventLog(ctx, log, receipt.TransactionHash, chainID, blockNumber, blockVersion)
 
-		if s.isReserveEvent(log) {
-			if err := s.processReserveEventLog(ctx, log, receipt.TransactionHash, chainID, blockNumber, blockVersion); err != nil {
-				s.logger.Error("failed to process reserve event", "error", err, "tx", receipt.TransactionHash)
-				errs = append(errs, err)
-			}
-			continue
+		case s.eventExtractor.IsReserveEvent(log):
+			return s.processReserveEventLog(ctx, log, receipt.TransactionHash, chainID, blockNumber, blockVersion)
 		}
 	}
 
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
 	return nil
-}
-
-func (s *Service) isPositionEvent(log shared.Log) bool {
-	return s.eventExtractor.IsPositionEvent(log)
-}
-
-func (s *Service) isReserveEvent(log shared.Log) bool {
-	return s.eventExtractor.IsReserveEvent(log)
 }
 
 func (s *Service) processPositionEventLog(ctx context.Context, log shared.Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
 	start := time.Now()
-	defer func() {
-		s.logger.Debug("processEventLog completed",
-			"tx", txHash,
-			"block", blockNumber,
-			"duration", time.Since(start))
-	}()
+	defer s.reportCompletion("processEventLog", start, "tx", txHash, "block", blockNumber)
 
 	protocolAddress := common.HexToAddress(log.Address)
-
 	eventData, err := s.eventExtractor.ExtractEventData(log)
 	if err != nil {
 		return fmt.Errorf("failed to extract event data: %w", err)
@@ -358,16 +331,16 @@ func (s *Service) processPositionEventLog(ctx context.Context, log shared.Log, t
 		return fmt.Errorf("failed to save protocol event: %w", err)
 	}
 
-	if eventData.EventType == EventReserveUsedAsCollateralEnabled ||
-		eventData.EventType == EventReserveUsedAsCollateralDisabled {
+	switch eventData.EventType {
+	case EventReserveUsedAsCollateralEnabled, EventReserveUsedAsCollateralDisabled:
 		return s.saveCollateralToggleEvent(ctx, eventData, protocolAddress, chainID, blockNumber, blockVersion)
-	}
-
-	if eventData.EventType == EventLiquidationCall {
+	case EventLiquidationCall:
 		return s.saveLiquidationEvent(ctx, eventData, protocolAddress, chainID, blockNumber, blockVersion)
+	case EventBorrow, EventRepay, EventSupply, EventWithdraw:
+		return s.savePositionSnapshot(ctx, eventData, protocolAddress, chainID, blockNumber, blockVersion)
+	default:
+		return fmt.Errorf("unknown position event type processed: %s", eventData.EventType)
 	}
-
-	return s.savePositionSnapshot(ctx, eventData, protocolAddress, chainID, blockNumber, blockVersion)
 }
 
 func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int, logIndex int) error {
@@ -409,12 +382,7 @@ func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEven
 // processReserveEventLog handles ReserveDataUpdated events by fetching and storing reserve data.
 func (s *Service) processReserveEventLog(ctx context.Context, log shared.Log, txHash string, chainID, blockNumber int64, blockVersion int) error {
 	start := time.Now()
-	defer func() {
-		s.logger.Debug("processReserveEventLog completed",
-			"tx", txHash,
-			"block", blockNumber,
-			"duration", time.Since(start))
-	}()
+	defer s.reportCompletion("processReserveEventLog", start, "tx", txHash, "block", blockNumber)
 
 	protocolAddress := common.HexToAddress(log.Address)
 
@@ -632,6 +600,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 	})
 }
 
+// saveLiquidationEvent simply snapshots the borrower and liquidator
 func (s *Service) saveLiquidationEvent(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if err := s.snapshotUserPosition(ctx, tx, eventData.User, string(eventData.EventType), common.FromHex(eventData.TxHash), protocolAddress, chainID, blockNumber, blockVersion); err != nil {
