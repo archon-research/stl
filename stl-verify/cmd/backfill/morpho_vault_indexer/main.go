@@ -5,7 +5,7 @@
 //
 // Usage:
 //
-//	go run ./cmd/backfill/morpho_user_indexer \
+//	go run ./cmd/backfill/morpho_vault_indexer \
 //	  -from 18883124 -to 24600000 \
 //	  -bucket stl-sentinelstaging-ethereum-raw-89d540d0 \
 //	  -db "$DATABASE_URL" \
@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -33,7 +32,6 @@ import (
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -174,7 +172,11 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// Phase 3: Persist confirmed vaults
-	err = persistVaults(ctx, pool, logger, vaults, cfg.chainID, cfg.from)
+	deployBlock, err := morpho_indexer.MorphoBlueDeployBlock(cfg.chainID)
+	if err != nil {
+		return fmt.Errorf("getting deploy block: %w", err)
+	}
+	err = persistVaults(ctx, pool, logger, vaults, cfg.chainID, deployBlock)
 	if err != nil {
 		return fmt.Errorf("persisting vaults: %w", err)
 	}
@@ -191,9 +193,10 @@ type candidateEntry struct {
 
 // progress holds atomic counters shared between workers and the progress reporter.
 type progress struct {
-	partitionsDone  atomic.Int64
-	blocksProcessed atomic.Int64
-	totalPartitions int64
+	partitionsDone   atomic.Int64
+	blocksProcessed  atomic.Int64
+	uniqueCandidates atomic.Int64
+	totalPartitions  int64
 }
 
 // scanBlockRange fans out partition processing across goroutines and merges results.
@@ -218,10 +221,10 @@ func scanBlockRange(
 	candidates := make(map[common.Address]int64)
 	var collectorDone sync.WaitGroup
 	collectorDone.Add(1)
-	go collectCandidates(candidateCh, candidates, &collectorDone)
+	go collectCandidates(candidateCh, candidates, prog, &collectorDone)
 
 	stopProgress := make(chan struct{})
-	go reportProgress(ctx, logger, prog, candidates, stopProgress)
+	go reportProgress(ctx, logger, prog, stopProgress)
 
 	var wg sync.WaitGroup
 	for range numWorkers {
@@ -247,17 +250,20 @@ func scanBlockRange(
 
 // collectCandidates reads candidate entries from candidateCh and merges them,
 // keeping the earliest first-seen block for each address.
-func collectCandidates(candidateCh <-chan candidateEntry, candidates map[common.Address]int64, done *sync.WaitGroup) {
+func collectCandidates(candidateCh <-chan candidateEntry, candidates map[common.Address]int64, prog *progress, done *sync.WaitGroup) {
 	defer done.Done()
 	for entry := range candidateCh {
 		if existing, ok := candidates[entry.address]; !ok || entry.firstBlock < existing {
+			if !ok {
+				prog.uniqueCandidates.Add(1)
+			}
 			candidates[entry.address] = entry.firstBlock
 		}
 	}
 }
 
 // reportProgress logs scan stats every 10 seconds until stopCh is closed.
-func reportProgress(ctx context.Context, logger *slog.Logger, prog *progress, candidates map[common.Address]int64, stopCh <-chan struct{}) {
+func reportProgress(ctx context.Context, logger *slog.Logger, prog *progress, stopCh <-chan struct{}) {
 	startTime := time.Now()
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -281,7 +287,7 @@ func reportProgress(ctx context.Context, logger *slog.Logger, prog *progress, ca
 			logger.Info("progress",
 				"partitions", fmt.Sprintf("%d/%d", done, prog.totalPartitions),
 				"blocksProcessed", blocks,
-				"uniqueCandidates", len(candidates),
+				"uniqueCandidates", prog.uniqueCandidates.Load(),
 				"blocksPerSec", fmt.Sprintf("%.0f", blocksPerSec),
 				"elapsed", elapsed.Round(time.Second),
 				"eta", eta.Round(time.Second))
@@ -323,16 +329,17 @@ func scanPartitions(
 // feedPartitions sends partition prefixes into partCh, stopping early on
 // context cancellation or if a worker has recorded an error.
 func feedPartitions(ctx context.Context, partitions []string, partCh chan<- string, firstErr *atomic.Value) {
+	defer close(partCh)
 	for _, part := range partitions {
-		if ctx.Err() != nil {
-			break
-		}
 		if v := firstErr.Load(); v != nil {
-			break
+			return
 		}
-		partCh <- part
+		select {
+		case partCh <- part:
+		case <-ctx.Done():
+			return
+		}
 	}
-	close(partCh)
 }
 
 // processPartition lists receipts for a single partition, downloads them,
@@ -386,7 +393,7 @@ func processPartition(
 			return blocks, fmt.Errorf("downloading %s: %w", key, err)
 		}
 
-		extractCandidatesFromReceipts(receipts, extractor, morphoBlueAddr, parsed.BlockNumber, candidateCh)
+		extractCandidatesFromReceipts(logger, receipts, extractor, morphoBlueAddr, parsed.BlockNumber, candidateCh)
 		blocks++
 	}
 
@@ -529,6 +536,7 @@ func downloadReceipts(
 // extractCandidatesFromReceipts scans receipts for Morpho Blue events and sends
 // candidate vault addresses (caller/onBehalf) to candidateCh.
 func extractCandidatesFromReceipts(
+	logger *slog.Logger,
 	receipts []shared.TransactionReceipt,
 	extractor *morpho_indexer.EventExtractor,
 	morphoBlueAddr common.Address,
@@ -546,6 +554,10 @@ func extractCandidatesFromReceipts(
 
 			event, err := extractor.ExtractMorphoBlueEvent(log)
 			if err != nil {
+				logger.Warn("failed to extract Morpho Blue event",
+					"block", blockNumber,
+					"txHash", log.TransactionHash,
+					"error", err)
 				continue
 			}
 
@@ -581,248 +593,6 @@ func candidateAddresses(event morpho_indexer.MorphoBlueEvent) []common.Address {
 		return nil
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Phase 2: On-chain vault probing
-// ---------------------------------------------------------------------------
-
-// confirmedVault holds metadata for a confirmed MetaMorpho vault.
-type confirmedVault struct {
-	Address    common.Address
-	Name       string
-	Symbol     string
-	Asset      common.Address
-	Decimals   uint8
-	Version    entity.MorphoVaultVersion
-	FirstBlock int64
-}
-
-// vaultProber probes candidate addresses on-chain to determine if they are MetaMorpho vaults.
-type vaultProber struct {
-	multicaller   outbound.Multicaller
-	metaMorphoABI *abi.ABI
-	erc20ABI      *abi.ABI
-	logger        *slog.Logger
-}
-
-// probeAllCandidates checks each candidate address by calling MORPHO() and asset()
-// via multicall. Returns confirmed vaults with their metadata.
-func (p *vaultProber) probeAllCandidates(
-	ctx context.Context,
-	candidates map[common.Address]int64,
-	probeBlock int64,
-	batchSize int,
-) ([]confirmedVault, error) {
-	addrs := make([]common.Address, 0, len(candidates))
-	for addr := range candidates {
-		addrs = append(addrs, addr)
-	}
-
-	blockNum := new(big.Int).SetInt64(probeBlock)
-	var confirmed []confirmedVault
-
-	for i := 0; i < len(addrs); i += batchSize {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-
-		end := min(i+batchSize, len(addrs))
-		batch := addrs[i:end]
-
-		vaults, err := p.probeBatch(ctx, batch, candidates, blockNum)
-		if err != nil {
-			return nil, fmt.Errorf("probing batch %d-%d: %w", i, end, err)
-		}
-		confirmed = append(confirmed, vaults...)
-
-		p.logger.Info("probe progress",
-			"probed", end,
-			"total", len(addrs),
-			"confirmedSoFar", len(confirmed))
-	}
-
-	return confirmed, nil
-}
-
-// probeBatch probes a batch of candidate addresses. For each address, it calls
-// MORPHO() and asset() in a single multicall. Confirmed vaults get their metadata
-// fetched in a follow-up multicall.
-func (p *vaultProber) probeBatch(
-	ctx context.Context,
-	batch []common.Address,
-	firstBlocks map[common.Address]int64,
-	blockNum *big.Int,
-) ([]confirmedVault, error) {
-	morphoData, err := p.metaMorphoABI.Pack("MORPHO")
-	if err != nil {
-		return nil, fmt.Errorf("packing MORPHO call: %w", err)
-	}
-	assetData, err := p.metaMorphoABI.Pack("asset")
-	if err != nil {
-		return nil, fmt.Errorf("packing asset call: %w", err)
-	}
-
-	// Build multicall: 2 calls per candidate (MORPHO, asset)
-	calls := make([]outbound.Call, 0, len(batch)*2)
-	for _, addr := range batch {
-		calls = append(calls,
-			outbound.Call{Target: addr, AllowFailure: true, CallData: morphoData},
-			outbound.Call{Target: addr, AllowFailure: true, CallData: assetData},
-		)
-	}
-
-	results, err := p.multicaller.Execute(ctx, calls, blockNum)
-	if err != nil {
-		return nil, fmt.Errorf("multicall probe: %w", err)
-	}
-
-	// Identify confirmed vaults from results
-	var vaultAddrs []common.Address
-	vaultAssets := make(map[common.Address]common.Address)
-
-	for i, addr := range batch {
-		morphoResult := results[i*2]
-		assetResult := results[i*2+1]
-
-		if !morphoResult.Success || len(morphoResult.ReturnData) == 0 {
-			continue
-		}
-		morphoUnpacked, err := p.metaMorphoABI.Unpack("MORPHO", morphoResult.ReturnData)
-		if err != nil || len(morphoUnpacked) == 0 {
-			continue
-		}
-		morphoAddr, ok := morphoUnpacked[0].(common.Address)
-		if !ok || morphoAddr != morpho_indexer.MorphoBlueAddress {
-			continue
-		}
-
-		if !assetResult.Success || len(assetResult.ReturnData) == 0 {
-			continue
-		}
-		assetUnpacked, err := p.metaMorphoABI.Unpack("asset", assetResult.ReturnData)
-		if err != nil || len(assetUnpacked) == 0 {
-			continue
-		}
-		asset, ok := assetUnpacked[0].(common.Address)
-		if !ok || asset == (common.Address{}) {
-			continue
-		}
-
-		vaultAddrs = append(vaultAddrs, addr)
-		vaultAssets[addr] = asset
-	}
-
-	if len(vaultAddrs) == 0 {
-		return nil, nil
-	}
-
-	// Fetch metadata for confirmed vaults
-	return p.fetchVaultMetadata(ctx, vaultAddrs, vaultAssets, firstBlocks, blockNum)
-}
-
-// fetchVaultMetadata fetches name, symbol, decimals, and version for confirmed vaults.
-func (p *vaultProber) fetchVaultMetadata(
-	ctx context.Context,
-	vaultAddrs []common.Address,
-	vaultAssets map[common.Address]common.Address,
-	firstBlocks map[common.Address]int64,
-	blockNum *big.Int,
-) ([]confirmedVault, error) {
-	nameData, err := p.metaMorphoABI.Pack("name")
-	if err != nil {
-		return nil, fmt.Errorf("packing name: %w", err)
-	}
-	symbolData, err := p.metaMorphoABI.Pack("symbol")
-	if err != nil {
-		return nil, fmt.Errorf("packing symbol: %w", err)
-	}
-	skimData, err := p.metaMorphoABI.Pack("skimRecipient")
-	if err != nil {
-		return nil, fmt.Errorf("packing skimRecipient: %w", err)
-	}
-	decimalsData, err := p.erc20ABI.Pack("decimals")
-	if err != nil {
-		return nil, fmt.Errorf("packing decimals: %w", err)
-	}
-
-	// 4 calls per vault: name, symbol, skimRecipient (version detect), asset decimals
-	calls := make([]outbound.Call, 0, len(vaultAddrs)*4)
-	for _, addr := range vaultAddrs {
-		calls = append(calls,
-			outbound.Call{Target: addr, AllowFailure: true, CallData: nameData},
-			outbound.Call{Target: addr, AllowFailure: true, CallData: symbolData},
-			outbound.Call{Target: addr, AllowFailure: true, CallData: skimData},
-			outbound.Call{Target: vaultAssets[addr], AllowFailure: true, CallData: decimalsData},
-		)
-	}
-
-	results, err := p.multicaller.Execute(ctx, calls, blockNum)
-	if err != nil {
-		return nil, fmt.Errorf("multicall metadata: %w", err)
-	}
-
-	var vaults []confirmedVault
-	for i, addr := range vaultAddrs {
-		nameResult := results[i*4]
-		symbolResult := results[i*4+1]
-		skimResult := results[i*4+2]
-		decimalsResult := results[i*4+3]
-
-		v := confirmedVault{
-			Address:    addr,
-			Asset:      vaultAssets[addr],
-			FirstBlock: firstBlocks[addr],
-			Version:    entity.MorphoVaultV1,
-		}
-
-		// Version detection: skimRecipient() only exists on V2
-		if skimResult.Success && len(skimResult.ReturnData) > 0 {
-			if _, err := p.metaMorphoABI.Unpack("skimRecipient", skimResult.ReturnData); err == nil {
-				v.Version = entity.MorphoVaultV2
-			}
-		}
-
-		if nameResult.Success && len(nameResult.ReturnData) > 0 {
-			if unpacked, err := p.metaMorphoABI.Unpack("name", nameResult.ReturnData); err == nil && len(unpacked) > 0 {
-				if name, ok := unpacked[0].(string); ok {
-					v.Name = name
-				}
-			}
-		}
-
-		if symbolResult.Success && len(symbolResult.ReturnData) > 0 {
-			if unpacked, err := p.metaMorphoABI.Unpack("symbol", symbolResult.ReturnData); err == nil && len(unpacked) > 0 {
-				if sym, ok := unpacked[0].(string); ok {
-					v.Symbol = sym
-				}
-			}
-		}
-
-		if decimalsResult.Success && len(decimalsResult.ReturnData) > 0 {
-			if unpacked, err := p.erc20ABI.Unpack("decimals", decimalsResult.ReturnData); err == nil && len(unpacked) > 0 {
-				if dec, ok := unpacked[0].(uint8); ok {
-					v.Decimals = dec
-				}
-			}
-		}
-
-		p.logger.Info("confirmed vault",
-			"address", addr.Hex(),
-			"name", v.Name,
-			"symbol", v.Symbol,
-			"asset", v.Asset.Hex(),
-			"version", v.Version,
-			"firstBlock", v.FirstBlock)
-
-		vaults = append(vaults, v)
-	}
-
-	return vaults, nil
-}
-
-// ---------------------------------------------------------------------------
-// Phase 3: Persist confirmed vaults
-// ---------------------------------------------------------------------------
 
 // persistVaults stores confirmed vaults in the database, creating the protocol
 // and asset token entries as needed.
@@ -861,7 +631,7 @@ func persistVaults(
 				return fmt.Errorf("getting protocol: %w", err)
 			}
 
-			tokenID, err := tokenRepo.GetOrCreateToken(ctx, tx, chainID, v.Asset, "", int(v.Decimals), v.FirstBlock)
+			tokenID, err := tokenRepo.GetOrCreateToken(ctx, tx, chainID, v.Asset, v.AssetSymbol, int(v.Decimals), v.FirstBlock)
 			if err != nil {
 				return fmt.Errorf("getting asset token: %w", err)
 			}
