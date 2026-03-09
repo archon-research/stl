@@ -28,7 +28,7 @@ class PostgresAllocationRepository(AllocationRepository):
     ) -> list[AllocationPosition]:
         proxy_hex = star_id.hex
         if block_number is None:
-            block_filter = "ap.block_number = (SELECT MAX(block_number) FROM allocation_position WHERE proxy_address = decode(:proxy_hex, 'hex'))"
+            block_filter = "ap.block_number = (SELECT MAX(block_number) FROM allocation_position WHERE proxy_address = decode(:proxy_hex, 'hex'))"  # noqa: E501
             params: dict = {"proxy_hex": proxy_hex}
         else:
             block_filter = "ap.block_number = :block_number"
@@ -37,7 +37,8 @@ class PostgresAllocationRepository(AllocationRepository):
         result = await self._conn.execute(
             text(
                 f"""
-                SELECT DISTINCT ON (ap.chain_id, ap.token_id, ap.proxy_address, ap.block_number, ap.tx_hash, ap.log_index, ap.direction)
+                SELECT DISTINCT ON
+                (ap.chain_id, ap.token_id, ap.proxy_address, ap.block_number, ap.tx_hash, ap.log_index, ap.direction)
                     ap.id,
                     ap.chain_id,
                     ap.star,
@@ -58,7 +59,14 @@ class PostgresAllocationRepository(AllocationRepository):
                 JOIN token t ON t.id = ap.token_id
                 WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
                   AND {block_filter}
-                ORDER BY ap.chain_id, ap.token_id, ap.proxy_address, ap.block_number, ap.tx_hash, ap.log_index, ap.direction, ap.block_version DESC
+                ORDER BY ap.chain_id,
+                         ap.token_id,
+                         ap.proxy_address,
+                         ap.block_number,
+                         ap.tx_hash,
+                         ap.log_index,
+                         ap.direction,
+                         ap.block_version DESC
                 """
             ),
             params,

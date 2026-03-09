@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.backed_breakdown_repository import BackedBreakdownRepository
 
-
 # ---------------------------------------------------------------------------
 # Database URL fixtures (derived from the shared module_db)
 # ---------------------------------------------------------------------------
