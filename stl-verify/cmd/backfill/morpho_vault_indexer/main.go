@@ -135,6 +135,14 @@ func run(ctx context.Context, args []string) error {
 	ethClient := ethclient.NewClient(rpcClient)
 	logger.Info("Ethereum RPC connected")
 
+	rpcChainID, err := ethClient.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("fetching RPC chain ID: %w", err)
+	}
+	if rpcChainID.Int64() != cfg.chainID {
+		return fmt.Errorf("RPC chain ID mismatch: RPC reports %d, config says %d", rpcChainID.Int64(), cfg.chainID)
+	}
+
 	multicaller, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
 		return fmt.Errorf("creating multicall client: %w", err)

@@ -159,10 +159,7 @@ func (p *vaultProber) fetchVaultMetadata(
 		details, err := p.sharedProber.ParseDetailsResults(
 			results[base], results[base+1], results[base+2], results[base+3], addr)
 		if err != nil {
-			p.logger.Warn("skipping vault with failed metadata",
-				"address", addr.Hex(),
-				"error", err)
-			continue
+			return nil, fmt.Errorf("parsing metadata for confirmed vault %s: %w", addr.Hex(), err)
 		}
 
 		v := confirmedVault{
