@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS prime_debt
     debt_wad      NUMERIC     NOT NULL,
     block_number  BIGINT      NOT NULL,
     block_version INT         NOT NULL DEFAULT 0,
-    synced_at     TIMESTAMPTZ NOT NULL
+    synced_at     TIMESTAMPTZ NOT NULL,
+    UNIQUE (prime_id, block_number, block_version)
 );
 
 CREATE INDEX IF NOT EXISTS idx_prime_debt_prime_synced

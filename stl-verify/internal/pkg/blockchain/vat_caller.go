@@ -6,15 +6,14 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/archon-research/stl/stl-verify/internal/services/prime_debt"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
-
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 // Compile-time check that VatCaller implements the port interface.
-var _ prime_debt.VatCaller = (*VatCaller)(nil)
+var _ outbound.VatCaller = (*VatCaller)(nil)
 
 const (
 	vatABIJSON = `[
@@ -38,9 +37,6 @@ const (
 		{"name":"ilk","type":"function","inputs":[],"outputs":[{"name":"","type":"bytes32"}]}
 	]`
 )
-
-// ray = 1e27 — the MakerDAO RAY unit used for cumulative rate.
-var ray = new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
 
 // VatCaller reads debt data from the MakerDAO/Sky Vat contract using batched
 // multicall3 reads. All on-chain calls for a given operation (ilk resolution
@@ -136,7 +132,7 @@ func (c *VatCaller) ResolveIlks(ctx context.Context, vaults []common.Address, bl
 // via DebtResult.Err rather than failing the entire batch.
 //
 // Call layout per query: [ilks(ilk), urns(ilk, vault)] — 2 calls per query.
-func (c *VatCaller) ReadDebts(ctx context.Context, queries []prime_debt.DebtQuery, blockNumber *big.Int) ([]prime_debt.DebtResult, error) {
+func (c *VatCaller) ReadDebts(ctx context.Context, queries []entity.DebtQuery, blockNumber *big.Int) ([]entity.DebtResult, error) {
 	if len(queries) == 0 {
 		return nil, nil
 	}
@@ -166,7 +162,7 @@ func (c *VatCaller) ReadDebts(ctx context.Context, queries []prime_debt.DebtQuer
 	}
 
 	// Parse 2 results per query.
-	results := make([]prime_debt.DebtResult, len(queries))
+	results := make([]entity.DebtResult, len(queries))
 	for i, q := range queries {
 		ilksIdx := i * 2
 		urnsIdx := i*2 + 1
@@ -215,12 +211,4 @@ func (c *VatCaller) ReadDebts(ctx context.Context, queries []prime_debt.DebtQuer
 	}
 
 	return results, nil
-}
-
-// ComputeDebtWad returns the vault debt as a wad-scaled *big.Int (18 decimals).
-//
-// Formula: art (wad, 1e18) × rate (ray, 1e27) = rad (1e45) → ÷ 1e27 → wad (1e18).
-func ComputeDebtWad(art, rate *big.Int) *big.Int {
-	rad := new(big.Int).Mul(art, rate)
-	return new(big.Int).Div(rad, ray)
 }

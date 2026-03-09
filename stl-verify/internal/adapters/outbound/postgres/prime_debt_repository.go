@@ -72,7 +72,10 @@ func (r *PrimeDebtRepository) GetPrimes(ctx context.Context) ([]entity.Prime, er
 }
 
 // SaveDebtSnapshots writes all debt snapshots in a single batched transaction.
-// vault_address is written as raw BYTEA; debt_wad is stored as NUMERIC via big.Int.
+// SaveDebtSnapshots writes all debt snapshots in a single batched transaction.
+// debt_wad is stored as NUMERIC via big.Int's decimal string representation.
+// Duplicate snapshots (same prime_id + block_number + block_version) are
+// silently skipped via ON CONFLICT DO NOTHING.
 func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*entity.PrimeDebt) error {
 	if len(debts) == 0 {
 		return nil
@@ -88,6 +91,7 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 		const q = `
 			INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at)
 			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT DO NOTHING
 		`
 
 		batch := &pgx.Batch{}

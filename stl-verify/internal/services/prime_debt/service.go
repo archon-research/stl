@@ -1,5 +1,5 @@
-// Package vault_debt provides a service that reads each prime agent's
-// vault debt from the Sky/MakerDAO Vat contract and writes snapshots to Postgres.
+// Package prime_debt reads each prime agent's vault debt from the Sky/MakerDAO
+// Vat contract and writes append-only snapshots to Postgres.
 //
 // Flow:
 //  1. At Start, load prime agents from the database via PrimeDebtRepository.GetPrimes.
@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -64,13 +65,14 @@ func configDefaults() Config {
 // each prime agent's vault debt from the Vat contract.
 type VaultDebtService struct {
 	config           Config
-	caller           VatCaller
+	caller           outbound.VatCaller
 	repo             outbound.PrimeDebtRepository
 	sqsConsumer      outbound.SQSConsumer
-	blockQuerier     BlockQuerier
+	blockQuerier     entity.BlockQuerier
 	logger           *slog.Logger
 	resolved         []resolvedPrime
 	blocksSinceSweep int
+	wg               sync.WaitGroup
 	ctx              context.Context
 	cancel           context.CancelFunc
 }
@@ -78,10 +80,10 @@ type VaultDebtService struct {
 // NewVaultDebtService creates a new VaultDebtService.
 func NewVaultDebtService(
 	config Config,
-	caller VatCaller,
+	caller outbound.VatCaller,
 	repo outbound.PrimeDebtRepository,
 	sqsConsumer outbound.SQSConsumer,
-	blockQuerier BlockQuerier,
+	blockQuerier entity.BlockQuerier,
 ) (*VaultDebtService, error) {
 	if caller == nil {
 		return nil, fmt.Errorf("vat caller is required")
@@ -148,13 +150,17 @@ func (s *VaultDebtService) Start(ctx context.Context) error {
 	s.blocksSinceSweep = s.config.SweepEveryNBlocks - 1 // first block triggers immediate read
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
-		Consumer:     s.sqsConsumer,
-		MaxMessages:  s.config.MaxMessages,
-		PollInterval: s.config.PollInterval,
-		Logger:       s.logger,
-		ChainID:      s.config.ChainID,
-	}, s.processBlock)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		sqsutil.RunLoop(s.ctx, sqsutil.Config{
+			Consumer:     s.sqsConsumer,
+			MaxMessages:  s.config.MaxMessages,
+			PollInterval: s.config.PollInterval,
+			Logger:       s.logger,
+			ChainID:      s.config.ChainID,
+		}, s.processBlock)
+	}()
 
 	s.logger.Info("vault debt service started",
 		"primes", len(resolved),
@@ -166,11 +172,12 @@ func (s *VaultDebtService) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop cancels the SQS processing loop.
+// Stop cancels the SQS processing loop and waits for the goroutine to exit.
 func (s *VaultDebtService) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.wg.Wait()
 	s.logger.Info("vault debt service stopped")
 	return nil
 }
@@ -240,9 +247,9 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 	syncedAt := start.UTC()
 
 	// Build queries.
-	queries := make([]DebtQuery, len(s.resolved))
+	queries := make([]entity.DebtQuery, len(s.resolved))
 	for i, p := range s.resolved {
-		queries[i] = DebtQuery{
+		queries[i] = entity.DebtQuery{
 			Ilk:          p.ilk,
 			VaultAddress: p.VaultAddress,
 		}

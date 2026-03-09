@@ -142,7 +142,7 @@ func (f *fakeVatCaller) ResolveIlks(_ context.Context, vaults []common.Address, 
 	return result, nil
 }
 
-func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []prime_debt.DebtQuery, _ *big.Int) ([]prime_debt.DebtResult, error) {
+func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []entity.DebtQuery, _ *big.Int) ([]entity.DebtResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -150,7 +150,7 @@ func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []prime_debt.DebtQu
 		return nil, f.readDebtsErr
 	}
 
-	results := make([]prime_debt.DebtResult, len(queries))
+	results := make([]entity.DebtResult, len(queries))
 	for i, q := range queries {
 		results[i].VaultAddress = q.VaultAddress
 

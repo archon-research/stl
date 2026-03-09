@@ -60,7 +60,7 @@ func main() {
 }
 
 // maskRPCURL redacts the path (which typically contains API keys) from an RPC URL.
-// Example: "https://eth-mainnet.g.alchemy.com/v2/abc123" → "https://eth-mainnet.g.alchemy.com/v2/***"
+// Example: "https://eth-mainnet.g.alchemy.com/v2/abc123" → "https://eth-mainnet.g.alchemy.com/***"
 func maskRPCURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
