@@ -144,6 +144,10 @@ func buildAaveUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		tokenIDs[i] = asset.TokenID
 	}
 
+	if oracle.Address == (common.Address{}) {
+		return nil, fmt.Errorf("aave oracle %q: oracle address is required for aave_oracle type", oracle.Name)
+	}
+
 	return &OracleUnit{
 		Oracle:     oracle,
 		OracleAddr: oracle.Address,

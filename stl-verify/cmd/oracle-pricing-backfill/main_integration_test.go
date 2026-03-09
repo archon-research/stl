@@ -27,9 +27,9 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Disable feed-based oracles — the mock RPC only handles aave_oracle format.
-	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE oracle_type IN ('chainlink_feed', 'chronicle')`); err != nil {
-		t.Fatalf("disable feed oracles: %v", err)
+	// Disable all oracles except sparklend — the mock RPC is parameterized for a single oracle.
+	if _, err := pool.Exec(ctx, `UPDATE oracle SET enabled = false WHERE name != 'sparklend'`); err != nil {
+		t.Fatalf("disable non-sparklend oracles: %v", err)
 	}
 
 	// Set deployment_block and protocol binding below the test range so clamping doesn't skip blocks

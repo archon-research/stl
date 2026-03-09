@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oracle-price-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oracle-price-worker
+  template:
+    metadata:
+      labels:
+        app: oracle-price-worker
+    spec:
+      containers:
+        - name: oracle-price-worker
+          image: stl-oracle-price-worker:local
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: stl-config
+            - secretRef:
+                name: stl-secrets
+          env:
+            - name: AWS_SQS_QUEUE_URL
+              value: http://localstack:4566/000000000000/stl-ethereum-oracle-price.fifo

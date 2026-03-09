@@ -237,7 +237,7 @@ func TestLoadOracleUnits(t *testing.T) {
 		{
 			name: "deduplicates by oracle ID",
 			setupRepo: func() *mockRepo {
-				oracle := &entity.Oracle{ID: 1, Name: "test", Enabled: true}
+				oracle := &entity.Oracle{ID: 1, Name: "test", Address: [20]byte{0xBB}, Enabled: true}
 				return &mockRepo{
 					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{oracle, oracle}, nil
@@ -293,6 +293,31 @@ func TestLoadOracleUnits(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: "building oracle unit",
+		},
+		{
+			name: "aave oracle with zero address returns error",
+			setupRepo: func() *mockRepo {
+				return &mockRepo{
+					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{{
+							ID: 1, Name: "sparklend", Address: common.Address{},
+							Enabled: true, OracleType: entity.OracleTypeAave,
+						}}, nil
+					},
+					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+						return []*entity.OracleAsset{
+							{ID: 1, OracleID: 1, TokenID: 1, Enabled: true},
+						}, nil
+					},
+					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+						return map[int64][]byte{
+							1: wethAddr.Bytes(),
+						}, nil
+					},
+				}
+			},
+			wantErr:     true,
+			errContains: "oracle address is required",
 		},
 		{
 			name: "feed oracle missing feed address returns error",
