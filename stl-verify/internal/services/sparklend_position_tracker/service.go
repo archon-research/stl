@@ -163,6 +163,20 @@ func normalizeTokenSymbol(symbol string) string {
 	return symbol
 }
 
+func (s *Service) getOrCreateProtocolID(ctx context.Context, tx pgx.Tx, chainID int64, protocolAddress common.Address, blockNumber int64) (int64, error) {
+	protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
+	if !exists {
+		return 0, fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
+	}
+
+	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get protocol: %w", err)
+	}
+
+	return protocolID, nil
+}
+
 func (s *Service) getOrCreateBlockchainService(chainID int64, protocolAddress common.Address) (*blockchainService, error) {
 	key := blockchain.ProtocolKey{ChainID: chainID, PoolAddress: protocolAddress}
 
@@ -331,6 +345,7 @@ func (s *Service) processPositionEventLog(ctx context.Context, log shared.Log, t
 		return fmt.Errorf("failed to save protocol event: %w", err)
 	}
 
+
 	switch eventData.EventType {
 	case EventReserveUsedAsCollateralEnabled, EventReserveUsedAsCollateralDisabled:
 		return s.saveCollateralToggleEvent(ctx, eventData, protocolAddress, chainID, blockNumber, blockVersion)
@@ -350,14 +365,9 @@ func (s *Service) saveProtocolEvent(ctx context.Context, eventData *PositionEven
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
-		if !exists {
-			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
-		}
-
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
+		protocolID, err := s.getOrCreateProtocolID(ctx, tx, chainID, protocolAddress, blockNumber)
 		if err != nil {
-			return fmt.Errorf("failed to get protocol: %w", err)
+			return fmt.Errorf("failed to get or create protocol ID: %w", err)
 		}
 
 		event, err := entity.NewProtocolEvent(
@@ -442,14 +452,9 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
-		if !exists {
-			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
-		}
-
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
+		protocolID, err := s.getOrCreateProtocolID(ctx, tx, chainID, protocolAddress, blockNumber)
 		if err != nil {
-			return fmt.Errorf("failed to get protocol: %w", err)
+			return fmt.Errorf("failed to get or create protocol ID: %w", err)
 		}
 
 		// Get or create token
@@ -543,14 +548,9 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 			return fmt.Errorf("failed to ensure user: %w", err)
 		}
 
-		protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
-		if !exists {
-			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
-		}
-
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
+		protocolID, err := s.getOrCreateProtocolID(ctx, tx, chainID, protocolAddress, blockNumber)
 		if err != nil {
-			return fmt.Errorf("failed to get protocol: %w", err)
+			return fmt.Errorf("failed to get or create protocol ID: %w", err)
 		}
 
 		// Persist debt rows for all reserves with non-zero debt.
@@ -657,14 +657,9 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			return fmt.Errorf("failed to ensure user: %w", err)
 		}
 
-		protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
-		if !exists {
-			return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
-		}
-
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
+		protocolID, err := s.getOrCreateProtocolID(ctx, tx, chainID, protocolAddress, blockNumber)
 		if err != nil {
-			return fmt.Errorf("failed to get protocol: %w", err)
+			return fmt.Errorf("failed to get or create protocol ID: %w", err)
 		}
 
 		if eventData.EventType == EventBorrow || eventData.EventType == EventRepay {
@@ -744,14 +739,9 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 		return fmt.Errorf("failed to ensure user: %w", err)
 	}
 
-	protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
-	if !exists {
-		return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
-	}
-
-	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
+	protocolID, err := s.getOrCreateProtocolID(ctx, tx, chainID, protocolAddress, blockNumber)
 	if err != nil {
-		return fmt.Errorf("failed to get protocol: %w", err)
+		return fmt.Errorf("failed to get or create protocol ID: %w", err)
 	}
 
 	txHashHex := common.BytesToHash(txHash).Hex()
