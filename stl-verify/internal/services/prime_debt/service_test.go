@@ -86,8 +86,9 @@ type fakeVatCaller struct {
 	mu sync.Mutex
 
 	// ilkByVault maps vault address → ilk bytes32 for ResolveIlks.
-	ilkByVault map[common.Address][32]byte
-	resolveErr error // if set, ResolveIlks returns this error
+	ilkByVault     map[common.Address][32]byte
+	resolveErr     error // if set, ResolveIlks returns this error
+	partialResolve bool  // if true, skip missing vaults instead of erroring
 
 	// rate / art are returned for all vaults in ReadDebts.
 	rate *big.Int
@@ -136,6 +137,9 @@ func (f *fakeVatCaller) ResolveIlks(_ context.Context, vaults []common.Address, 
 	for _, v := range vaults {
 		ilk, ok := f.ilkByVault[v]
 		if !ok {
+			if f.partialResolve {
+				continue // skip missing — return partial map
+			}
 			return nil, errors.New("ilk not found for " + v.Hex())
 		}
 		result[v] = ilk
@@ -357,6 +361,31 @@ func TestStart_IlkResolutionError(t *testing.T) {
 	err = svc.Start(context.Background())
 	if err == nil {
 		t.Fatal("expected error when ilk resolution fails")
+	}
+}
+
+func TestStart_PartialIlkResolution(t *testing.T) {
+	spark := entity.Prime{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")}
+	grove := entity.Prime{ID: 2, Name: "grove", VaultAddress: common.HexToAddress("0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0")}
+
+	caller := newFakeVatCaller()
+	// Only register ilk for spark, not grove
+	caller.setIlk(spark.VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+	caller.partialResolve = true // return partial map instead of error
+
+	consumer := newFakeSQSConsumer(nil)
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{spark, grove}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(75), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	err = svc.Start(context.Background())
+	if err == nil {
+		t.Fatal("expected error when ilk is missing for some primes")
+	}
+	if !containsAny(err.Error(), "ilk not resolved", "grove") {
+		t.Errorf("expected 'ilk not resolved' error mentioning grove, got: %v", err)
 	}
 }
 
