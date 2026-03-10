@@ -2,21 +2,29 @@ package sparklend_position_tracker
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// mockPositionRepository is a local test double for outbound.PositionRepository that
-// captures SaveBorrower calls for assertion.
 type mockPositionRepository struct {
 	saveBorrowerCalls []saveBorrowerCall
 
@@ -65,155 +73,123 @@ func (m *mockPositionRepository) UpsertBorrowerCollateral(ctx context.Context, c
 	return nil
 }
 
-// mockBlockchainServiceForDebt overrides extractUserPositionData to return controlled data.
-// Since blockchainService is an internal struct, we test via the Service method
-// extractUserPositionData by injecting the blockchainService via the map.
+type sparkLendUserReserve struct {
+	UnderlyingAsset                common.Address
+	ScaledATokenBalance            *big.Int
+	UsageAsCollateralEnabledOnUser bool
+	ScaledVariableDebt             *big.Int
+}
 
-// TestExtractUserPositionData_ReturnsDebtAndCollateral verifies that
-// extractUserPositionData returns both collateral and debt data from getUserReservesData.
-// This test documents the expected post-fix behavior.
 func TestExtractUserPositionData_ReturnsDebtAndCollateral(t *testing.T) {
-	// We need a blockchainService that returns controlled getUserReservesData responses.
-	// The blockchainService calls ethclient.CallContract and multicall.Execute,
-	// so we use the mockchain RPC server pattern already used in other tests.
-	//
-	// For a unit test, we test the logic of extractUserPositionData through the
-	// service's internal logic by verifying the filtering:
-	// - collateral: ScaledATokenBalance > 0 && UsageAsCollateralEnabledOnUser
-	// - debt:       ScaledVariableDebt > 0
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
 
-	// Build the service struct directly (no constructor needed for pure logic tests).
-	svc := &Service{
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	userAddress := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+	wethAddress := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	usdcAddress := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 
-	// Test the field-level filtering logic for the new DebtData struct.
-	// A reserve with only debt (no collateral) must produce a DebtData entry.
-	reserves := []UserReserveData{
+	oneETH := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	debtUSDC := new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil))
+	zero := big.NewInt(0)
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{
 		{
-			// Debt-only position (no collateral enabled)
-			UnderlyingAsset:                common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"), // USDC
-			ScaledATokenBalance:            big.NewInt(0),
-			UsageAsCollateralEnabledOnUser: false,
-			ScaledVariableDebt:             big.NewInt(1000),
-		},
-		{
-			// Collateral-only position
-			UnderlyingAsset:                common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
-			ScaledATokenBalance:            big.NewInt(5000),
+			UnderlyingAsset:                wethAddress,
+			ScaledATokenBalance:            oneETH,
 			UsageAsCollateralEnabledOnUser: true,
-			ScaledVariableDebt:             big.NewInt(0),
+			ScaledVariableDebt:             zero,
 		},
 		{
-			// Both collateral and debt
-			UnderlyingAsset:                common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F"), // DAI
-			ScaledATokenBalance:            big.NewInt(2000),
-			UsageAsCollateralEnabledOnUser: true,
-			ScaledVariableDebt:             big.NewInt(500),
-		},
-		{
-			// Neither (zero balances - should be ignored)
-			UnderlyingAsset:                common.HexToAddress("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"), // WBTC
-			ScaledATokenBalance:            big.NewInt(0),
+			UnderlyingAsset:                usdcAddress,
+			ScaledATokenBalance:            zero,
 			UsageAsCollateralEnabledOnUser: false,
-			ScaledVariableDebt:             big.NewInt(0),
+			ScaledVariableDebt:             debtUSDC,
 		},
-	}
+	})
+	defer cleanup()
 
-	_ = svc // used to confirm the service package compiles with DebtData
+	erc20ABI := mustERC20ABI(t)
+	userReserveDataABI := mustUserReserveDataABI(t)
 
-	// Verify classification logic (what extractUserPositionData should do):
-	var collateralAssets, debtAssets []common.Address
-	for _, r := range reserves {
-		if r.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && r.UsageAsCollateralEnabledOnUser {
-			collateralAssets = append(collateralAssets, r.UnderlyingAsset)
+	multicaller := testutil.NewMockMulticaller()
+	multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i, call := range calls {
+			methodID := hex.EncodeToString(call.CallData[:4])
+			switch {
+			case call.Target == wethAddress || call.Target == usdcAddress:
+				returnData := packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)
+				results[i] = outbound.Result{Success: true, ReturnData: returnData}
+			case methodID == methodIDHex(userReserveDataABI, "getUserReserveData"):
+				asset := unpackUserReserveAsset(t, userReserveDataABI, call.CallData)
+				returnData := packUserReserveDataResponse(t, userReserveDataABI, asset)
+				results[i] = outbound.Result{Success: true, ReturnData: returnData}
+			default:
+				t.Fatalf("unexpected multicall target %s method %s", call.Target.Hex(), methodID)
+			}
 		}
-		if r.ScaledVariableDebt.Cmp(big.NewInt(0)) > 0 {
-			debtAssets = append(debtAssets, r.UnderlyingAsset)
-		}
+		return results, nil
 	}
 
-	if len(collateralAssets) != 2 {
-		t.Errorf("expected 2 collateral assets, got %d", len(collateralAssets))
-	}
-	if len(debtAssets) != 2 {
-		t.Errorf("expected 2 debt assets (USDC debt-only + DAI both), got %d", len(debtAssets))
+	svc := newServiceWithCachedBlockchainService(t, ethClient, multicaller, chainID, protocolAddress)
+
+	collaterals, debts, err := svc.extractUserPositionData(context.Background(), userAddress, protocolAddress, chainID, blockNumber, "0xabc")
+	if err != nil {
+		t.Fatalf("extractUserPositionData() failed: %v", err)
 	}
 
-	// Verify USDC is identified as a debt asset even though it has no collateral
-	usdcAddr := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
-	found := false
-	for _, addr := range debtAssets {
-		if addr == usdcAddr {
-			found = true
-			break
-		}
+	if len(collaterals) != 1 {
+		t.Fatalf("expected 1 collateral, got %d", len(collaterals))
 	}
-	if !found {
-		t.Error("USDC (debt-only asset) should appear in debtAssets")
+	if collaterals[0].Asset != wethAddress {
+		t.Errorf("collateral asset = %s, want %s", collaterals[0].Asset.Hex(), wethAddress.Hex())
+	}
+	if collaterals[0].ActualBalance.Cmp(oneETH) != 0 {
+		t.Errorf("collateral balance = %s, want %s", collaterals[0].ActualBalance.String(), oneETH.String())
+	}
+	if !collaterals[0].CollateralEnabled {
+		t.Error("expected collateral to be enabled")
+	}
+
+	if len(debts) != 1 {
+		t.Fatalf("expected 1 debt position, got %d", len(debts))
+	}
+	if debts[0].Asset != usdcAddress {
+		t.Errorf("debt asset = %s, want %s", debts[0].Asset.Hex(), usdcAddress.Hex())
+	}
+	if debts[0].CurrentDebt.Cmp(debtUSDC) != 0 {
+		t.Errorf("debt amount = %s, want %s", debts[0].CurrentDebt.String(), debtUSDC.String())
 	}
 }
 
-// TestSavePositionSnapshot_BorrowUsesCurrentDebtNotEventDelta verifies that when
-// a Borrow event is processed, SaveBorrower is called with:
-//   - amount = CurrentVariableDebt from getUserReserveData (full outstanding balance)
-//   - change = eventData.Amount (the event delta, decimal-adjusted)
-//
-// This is the core bug fix: previously both amount and change were set to eventData.Amount.
-func TestSavePositionSnapshot_BorrowUsesCurrentDebtNotEventDelta(t *testing.T) {
-	const (
-		chainID     = int64(1)
-		blockNumber = int64(20000000)
-		decimals    = 18
-	)
+func TestSaveBorrowerRecord_BorrowUsesCurrentDebtNotEventDelta(t *testing.T) {
+	const blockNumber = int64(20000000)
+	const decimals = 18
 
-	// eventDelta is what the user borrowed in THIS transaction (1 ETH).
 	eventDelta := new(big.Int).Mul(big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
-
-	// currentDebt is the full outstanding debt AFTER the borrow (3 ETH).
 	currentDebt := new(big.Int).Mul(big.NewInt(3), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 
 	reserveAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
 	userAddr := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
 
 	positionRepo := &mockPositionRepository{}
+	svc := newBorrowerRecordTestService(positionRepo)
 
-	svc := &Service{
-		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		positionRepo: positionRepo,
-		userRepo:     &testutil.MockUserRepository{},
-		protocolRepo: &testutil.MockProtocolRepository{},
-		tokenRepo:    &testutil.MockTokenRepository{},
-		txManager:    &testutil.MockTxManager{},
-	}
-
-	// Inject DebtData directly — this simulates what extractUserPositionData returns.
-	debtData := []DebtData{
-		{
+	err := svc.txManager.WithTransaction(context.Background(), func(tx pgx.Tx) error {
+		return svc.saveBorrowerRecord(context.Background(), tx, &PositionEventData{
+			EventType: EventBorrow,
+			TxHash:    "0xabc",
+			User:      userAddr,
+			Reserve:   reserveAddr,
+			Amount:    eventDelta,
+		}, TokenMetadata{Symbol: "WETH", Decimals: decimals, Name: "Wrapped Ether"}, []DebtData{{
 			Asset:       reserveAddr,
 			Decimals:    decimals,
 			Symbol:      "WETH",
 			Name:        "Wrapped Ether",
 			CurrentDebt: currentDebt,
-		},
-	}
-
-	eventData := &PositionEventData{
-		EventType: EventBorrow,
-		TxHash:    "0xabc",
-		User:      userAddr,
-		Reserve:   reserveAddr,
-		Amount:    eventDelta,
-	}
-
-	tokenMetadata := TokenMetadata{
-		Symbol:   "WETH",
-		Decimals: decimals,
-		Name:     "Wrapped Ether",
-	}
-
-	err := svc.txManager.WithTransaction(context.Background(), func(tx pgx.Tx) error {
-		return svc.saveBorrowerRecord(context.Background(), tx, eventData, tokenMetadata, debtData, 1, 1, 1, blockNumber, 0)
+		}}, 1, 1, 1, blockNumber, 0)
 	})
 	if err != nil {
 		t.Fatalf("saveBorrowerRecord() failed: %v", err)
@@ -224,75 +200,41 @@ func TestSavePositionSnapshot_BorrowUsesCurrentDebtNotEventDelta(t *testing.T) {
 	}
 
 	call := positionRepo.saveBorrowerCalls[0]
-
-	// amount should be the full current debt (3 ETH → "3")
-	wantAmount := "3"
-	if call.Amount != wantAmount {
-		t.Errorf("SaveBorrower amount = %q, want %q (CurrentVariableDebt)", call.Amount, wantAmount)
+	if call.Amount != "3" {
+		t.Errorf("SaveBorrower amount = %q, want %q", call.Amount, "3")
 	}
-
-	// change should be the event delta (1 ETH → "1")
-	wantChange := "1"
-	if call.Change != wantChange {
-		t.Errorf("SaveBorrower change = %q, want %q (event delta)", call.Change, wantChange)
+	if call.Change != "1" {
+		t.Errorf("SaveBorrower change = %q, want %q", call.Change, "1")
 	}
 }
 
-// TestSavePositionSnapshot_RepayUsesCurrentDebtNotEventDelta verifies that for Repay events,
-// amount = CurrentVariableDebt and change = the repaid amount from the event.
-func TestSavePositionSnapshot_RepayUsesCurrentDebtNotEventDelta(t *testing.T) {
-	const (
-		chainID     = int64(1)
-		blockNumber = int64(20000001)
-		decimals    = 6
-	)
+func TestSaveBorrowerRecord_RepayUsesCurrentDebtNotEventDelta(t *testing.T) {
+	const blockNumber = int64(20000001)
+	const decimals = 6
 
-	// repayDelta: user repaid 500 USDC.
 	repayDelta := new(big.Int).Mul(big.NewInt(500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil))
-
-	// currentDebt: outstanding debt after repay is 1500 USDC.
 	currentDebt := new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil))
 
 	reserveAddr := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 	userAddr := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
 
 	positionRepo := &mockPositionRepository{}
+	svc := newBorrowerRecordTestService(positionRepo)
 
-	svc := &Service{
-		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		positionRepo: positionRepo,
-		userRepo:     &testutil.MockUserRepository{},
-		protocolRepo: &testutil.MockProtocolRepository{},
-		tokenRepo:    &testutil.MockTokenRepository{},
-		txManager:    &testutil.MockTxManager{},
-	}
-
-	debtData := []DebtData{
-		{
+	err := svc.txManager.WithTransaction(context.Background(), func(tx pgx.Tx) error {
+		return svc.saveBorrowerRecord(context.Background(), tx, &PositionEventData{
+			EventType: EventRepay,
+			TxHash:    "0xdef",
+			User:      userAddr,
+			Reserve:   reserveAddr,
+			Amount:    repayDelta,
+		}, TokenMetadata{Symbol: "USDC", Decimals: decimals, Name: "USD Coin"}, []DebtData{{
 			Asset:       reserveAddr,
 			Decimals:    decimals,
 			Symbol:      "USDC",
 			Name:        "USD Coin",
 			CurrentDebt: currentDebt,
-		},
-	}
-
-	eventData := &PositionEventData{
-		EventType: EventRepay,
-		TxHash:    "0xdef",
-		User:      userAddr,
-		Reserve:   reserveAddr,
-		Amount:    repayDelta,
-	}
-
-	tokenMetadata := TokenMetadata{
-		Symbol:   "USDC",
-		Decimals: decimals,
-		Name:     "USD Coin",
-	}
-
-	err := svc.txManager.WithTransaction(context.Background(), func(tx pgx.Tx) error {
-		return svc.saveBorrowerRecord(context.Background(), tx, eventData, tokenMetadata, debtData, 1, 1, 1, blockNumber, 0)
+		}}, 1, 1, 1, blockNumber, 0)
 	})
 	if err != nil {
 		t.Fatalf("saveBorrowerRecord() failed: %v", err)
@@ -303,61 +245,32 @@ func TestSavePositionSnapshot_RepayUsesCurrentDebtNotEventDelta(t *testing.T) {
 	}
 
 	call := positionRepo.saveBorrowerCalls[0]
-
-	// amount should be the outstanding debt (1500 USDC → "1500")
-	wantAmount := "1500"
-	if call.Amount != wantAmount {
-		t.Errorf("SaveBorrower amount = %q, want %q (CurrentVariableDebt)", call.Amount, wantAmount)
+	if call.Amount != "1500" {
+		t.Errorf("SaveBorrower amount = %q, want %q", call.Amount, "1500")
 	}
-
-	// change should be the repay delta (500 USDC → "500")
-	// Repay is a reduction so the change is the absolute delta.
-	wantChange := "500"
-	if call.Change != wantChange {
-		t.Errorf("SaveBorrower change = %q, want %q (event delta)", call.Change, wantChange)
+	if call.Change != "500" {
+		t.Errorf("SaveBorrower change = %q, want %q", call.Change, "500")
 	}
 }
 
-// TestSavePositionSnapshot_BorrowFallbackWhenDebtNotFound verifies that when the
-// debt asset is not found in debtData (e.g., full repay edge case with zero balance),
-// both amount and change fall back to eventData.Amount.
-func TestSavePositionSnapshot_BorrowFallbackWhenDebtNotFound(t *testing.T) {
+func TestSaveBorrowerRecord_RepayToZeroUsesZeroAmountWhenDebtMissing(t *testing.T) {
 	const decimals = 18
 
-	eventDelta := new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	repayDelta := new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 	reserveAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
 	userAddr := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
 
 	positionRepo := &mockPositionRepository{}
-
-	svc := &Service{
-		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		positionRepo: positionRepo,
-		userRepo:     &testutil.MockUserRepository{},
-		protocolRepo: &testutil.MockProtocolRepository{},
-		tokenRepo:    &testutil.MockTokenRepository{},
-		txManager:    &testutil.MockTxManager{},
-	}
-
-	// Empty debtData — reserve not found.
-	debtData := []DebtData{}
-
-	eventData := &PositionEventData{
-		EventType: EventBorrow,
-		TxHash:    "0xfallback",
-		User:      userAddr,
-		Reserve:   reserveAddr,
-		Amount:    eventDelta,
-	}
-
-	tokenMetadata := TokenMetadata{
-		Symbol:   "WETH",
-		Decimals: decimals,
-		Name:     "Wrapped Ether",
-	}
+	svc := newBorrowerRecordTestService(positionRepo)
 
 	err := svc.txManager.WithTransaction(context.Background(), func(tx pgx.Tx) error {
-		return svc.saveBorrowerRecord(context.Background(), tx, eventData, tokenMetadata, debtData, 1, 1, 1, 20000000, 0)
+		return svc.saveBorrowerRecord(context.Background(), tx, &PositionEventData{
+			EventType: EventRepay,
+			TxHash:    "0xfallback",
+			User:      userAddr,
+			Reserve:   reserveAddr,
+			Amount:    repayDelta,
+		}, TokenMetadata{Symbol: "WETH", Decimals: decimals, Name: "Wrapped Ether"}, nil, 1, 1, 1, 20000000, 0)
 	})
 	if err != nil {
 		t.Fatalf("saveBorrowerRecord() failed: %v", err)
@@ -368,18 +281,102 @@ func TestSavePositionSnapshot_BorrowFallbackWhenDebtNotFound(t *testing.T) {
 	}
 
 	call := positionRepo.saveBorrowerCalls[0]
-
-	// Fallback: both amount and change should equal the event delta.
-	wantFallback := "2"
-	if call.Amount != wantFallback {
-		t.Errorf("fallback amount = %q, want %q", call.Amount, wantFallback)
+	if call.Amount != "0" {
+		t.Errorf("fallback amount = %q, want %q", call.Amount, "0")
 	}
-	if call.Change != wantFallback {
-		t.Errorf("fallback change = %q, want %q", call.Change, wantFallback)
+	if call.Change != "2" {
+		t.Errorf("fallback change = %q, want %q", call.Change, "2")
 	}
 }
 
-// TestDebtData_Struct verifies that the DebtData struct exists and has the expected fields.
+func TestSaveBorrowerRecord_BorrowReturnsErrorWhenDebtMissing(t *testing.T) {
+	const decimals = 18
+
+	borrowDelta := new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	reserveAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	userAddr := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+
+	positionRepo := &mockPositionRepository{}
+	svc := newBorrowerRecordTestService(positionRepo)
+
+	err := svc.txManager.WithTransaction(context.Background(), func(tx pgx.Tx) error {
+		return svc.saveBorrowerRecord(context.Background(), tx, &PositionEventData{
+			EventType: EventBorrow,
+			TxHash:    "0xmissing",
+			User:      userAddr,
+			Reserve:   reserveAddr,
+			Amount:    borrowDelta,
+		}, TokenMetadata{Symbol: "WETH", Decimals: decimals, Name: "Wrapped Ether"}, nil, 1, 1, 1, 20000000, 0)
+	})
+	if err == nil {
+		t.Fatal("expected error when borrow debt data is missing, got nil")
+	}
+	if len(positionRepo.saveBorrowerCalls) != 0 {
+		t.Fatalf("expected 0 SaveBorrower calls, got %d", len(positionRepo.saveBorrowerCalls))
+	}
+}
+
+func TestSavePositionSnapshot_BorrowAndRepayFailWhenPositionExtractionFails(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	userAddress := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+	wethAddress := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	oneETH := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	zero := big.NewInt(0)
+
+	for _, eventType := range []entity.EventType{EventBorrow, EventRepay} {
+		t.Run(string(eventType), func(t *testing.T) {
+			ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{{
+				UnderlyingAsset:                wethAddress,
+				ScaledATokenBalance:            zero,
+				UsageAsCollateralEnabledOnUser: false,
+				ScaledVariableDebt:             oneETH,
+			}})
+			defer cleanup()
+
+			erc20ABI := mustERC20ABI(t)
+			multicaller := testutil.NewMockMulticaller()
+			executeCount := 0
+			multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+				executeCount++
+				switch executeCount {
+				case 1:
+					results := make([]outbound.Result, len(calls))
+					for i, call := range calls {
+						methodID := hex.EncodeToString(call.CallData[:4])
+						results[i] = outbound.Result{Success: true, ReturnData: packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)}
+					}
+					return results, nil
+				case 2:
+					return nil, errors.New("boom")
+				default:
+					t.Fatalf("unexpected multicall execution count: %d", executeCount)
+					return nil, nil
+				}
+			}
+
+			positionRepo := &mockPositionRepository{}
+			svc := newPositionSnapshotTestService(t, ethClient, multicaller, positionRepo, chainID, protocolAddress)
+
+			err := svc.savePositionSnapshot(context.Background(), &PositionEventData{
+				EventType: eventType,
+				TxHash:    "0xdeadbeef",
+				User:      userAddress,
+				Reserve:   wethAddress,
+				Amount:    oneETH,
+			}, protocolAddress, chainID, blockNumber, 0)
+			if err == nil {
+				t.Fatal("expected savePositionSnapshot to fail, got nil")
+			}
+			if len(positionRepo.saveBorrowerCalls) != 0 {
+				t.Fatalf("expected 0 SaveBorrower calls, got %d", len(positionRepo.saveBorrowerCalls))
+			}
+		})
+	}
+}
+
 func TestDebtData_Struct(t *testing.T) {
 	d := DebtData{
 		Asset:       common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
@@ -398,4 +395,235 @@ func TestDebtData_Struct(t *testing.T) {
 	if d.CurrentDebt.Cmp(big.NewInt(1000000)) != 0 {
 		t.Errorf("DebtData.CurrentDebt = %v, want 1000000", d.CurrentDebt)
 	}
+}
+
+func newBorrowerRecordTestService(positionRepo *mockPositionRepository) *Service {
+	return &Service{
+		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		positionRepo: positionRepo,
+		userRepo:     &testutil.MockUserRepository{},
+		protocolRepo: &testutil.MockProtocolRepository{},
+		tokenRepo:    &testutil.MockTokenRepository{},
+		txManager:    &testutil.MockTxManager{},
+	}
+}
+
+func newPositionSnapshotTestService(t *testing.T, ethClient *ethclient.Client, multicaller outbound.Multicaller, positionRepo *mockPositionRepository, chainID int64, protocolAddress common.Address) *Service {
+	t.Helper()
+
+	svc := newServiceWithCachedBlockchainService(t, ethClient, multicaller, chainID, protocolAddress)
+	svc.positionRepo = positionRepo
+	svc.userRepo = &testutil.MockUserRepository{}
+	svc.protocolRepo = &testutil.MockProtocolRepository{}
+	svc.tokenRepo = &testutil.MockTokenRepository{}
+	svc.txManager = &testutil.MockTxManager{}
+
+	return svc
+}
+
+func newServiceWithCachedBlockchainService(t *testing.T, ethClient *ethclient.Client, multicaller outbound.Multicaller, chainID int64, protocolAddress common.Address) *Service {
+	t.Helper()
+
+	erc20ABI := mustERC20ABI(t)
+	svc := &Service{
+		logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ethClient:          ethClient,
+		multicallClient:    multicaller,
+		erc20ABI:           erc20ABI,
+		blockchainServices: make(map[blockchain.ProtocolKey]*blockchainService),
+	}
+
+	config, ok := blockchain.GetProtocolConfig(chainID, protocolAddress)
+	if !ok {
+		t.Fatalf("protocol config not found for %s", protocolAddress.Hex())
+	}
+
+	blockchainSvc, err := newBlockchainService(
+		chainID,
+		ethClient,
+		multicaller,
+		erc20ABI,
+		config.UIPoolDataProvider.Address,
+		config.PoolAddress.Address,
+		config.PoolAddressesProvider.Address,
+		config.ProtocolVersion,
+		svc.logger,
+	)
+	if err != nil {
+		t.Fatalf("newBlockchainService() failed: %v", err)
+	}
+
+	svc.blockchainServices[blockchain.ProtocolKey{ChainID: chainID, PoolAddress: protocolAddress}] = blockchainSvc
+	return svc
+}
+
+func newEthClientReturningUserReserves(t *testing.T, reserves []sparkLendUserReserve) (*ethclient.Client, func()) {
+	t.Helper()
+
+	response := packSparkLendUserReserves(t, reserves)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		var req rpcutil.Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			testutil.WriteRPCError(w, json.RawMessage(`1`), -32700, "parse error")
+			return
+		}
+
+		switch req.Method {
+		case "eth_call":
+			resultHex := "0x" + hex.EncodeToString(response)
+			resultJSON, err := json.Marshal(resultHex)
+			if err != nil {
+				t.Fatalf("marshal eth_call result: %v", err)
+			}
+			testutil.WriteRPCResult(w, req.ID, json.RawMessage(resultJSON))
+		default:
+			testutil.WriteRPCError(w, req.ID, -32601, "method not found: "+req.Method)
+		}
+	}))
+
+	client, err := ethclient.Dial(server.URL)
+	if err != nil {
+		server.Close()
+		t.Fatalf("ethclient.Dial() failed: %v", err)
+	}
+
+	cleanup := func() {
+		client.Close()
+		server.Close()
+	}
+
+	return client, cleanup
+}
+
+func packSparkLendUserReserves(t *testing.T, reserves []sparkLendUserReserve) []byte {
+	t.Helper()
+
+	sparklendABI, err := abis.GetSparklendUserReservesDataABI()
+	if err != nil {
+		t.Fatalf("load SparkLend ABI: %v", err)
+	}
+
+	data, err := sparklendABI.Methods["getUserReservesData"].Outputs.Pack(reserves, uint8(0))
+	if err != nil {
+		t.Fatalf("pack getUserReservesData: %v", err)
+	}
+
+	return data
+}
+
+func packERC20MetadataResponse(t *testing.T, erc20ABI *abi.ABI, token common.Address, methodID string) []byte {
+	t.Helper()
+
+	switch token {
+	case common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"):
+		switch methodID {
+		case methodIDHex(erc20ABI, "decimals"):
+			return mustPackOutput(t, erc20ABI, "decimals", uint8(18))
+		case methodIDHex(erc20ABI, "symbol"):
+			return mustPackOutput(t, erc20ABI, "symbol", "WETH")
+		case methodIDHex(erc20ABI, "name"):
+			return mustPackOutput(t, erc20ABI, "name", "Wrapped Ether")
+		}
+	case common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"):
+		switch methodID {
+		case methodIDHex(erc20ABI, "decimals"):
+			return mustPackOutput(t, erc20ABI, "decimals", uint8(6))
+		case methodIDHex(erc20ABI, "symbol"):
+			return mustPackOutput(t, erc20ABI, "symbol", "USDC")
+		case methodIDHex(erc20ABI, "name"):
+			return mustPackOutput(t, erc20ABI, "name", "USD Coin")
+		}
+	}
+
+	t.Fatalf("unexpected metadata request for token %s method %s", token.Hex(), methodID)
+	return nil
+}
+
+func packUserReserveDataResponse(t *testing.T, userReserveDataABI *abi.ABI, asset common.Address) []byte {
+	t.Helper()
+
+	zero := big.NewInt(0)
+	stableRateLastUpdated := big.NewInt(0)
+
+	switch asset {
+	case common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"):
+		oneETH := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+		return mustPackOutput(t, userReserveDataABI, "getUserReserveData",
+			oneETH,
+			zero,
+			zero,
+			zero,
+			zero,
+			zero,
+			zero,
+			stableRateLastUpdated,
+			true,
+		)
+	case common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"):
+		debtUSDC := new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil))
+		return mustPackOutput(t, userReserveDataABI, "getUserReserveData",
+			zero,
+			zero,
+			debtUSDC,
+			zero,
+			zero,
+			zero,
+			zero,
+			stableRateLastUpdated,
+			false,
+		)
+	default:
+		t.Fatalf("unexpected asset in getUserReserveData response: %s", asset.Hex())
+		return nil
+	}
+}
+
+func unpackUserReserveAsset(t *testing.T, userReserveDataABI *abi.ABI, callData []byte) common.Address {
+	t.Helper()
+
+	args, err := userReserveDataABI.Methods["getUserReserveData"].Inputs.Unpack(callData[4:])
+	if err != nil {
+		t.Fatalf("unpack getUserReserveData call: %v", err)
+	}
+	asset, ok := args[0].(common.Address)
+	if !ok {
+		t.Fatalf("unexpected asset type %T", args[0])
+	}
+	return asset
+}
+
+func mustPackOutput(t *testing.T, parsedABI *abi.ABI, method string, values ...any) []byte {
+	t.Helper()
+
+	data, err := parsedABI.Methods[method].Outputs.Pack(values...)
+	if err != nil {
+		t.Fatalf("pack %s output: %v", method, err)
+	}
+	return data
+}
+
+func mustERC20ABI(t *testing.T) *abi.ABI {
+	t.Helper()
+
+	parsedABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("load ERC20 ABI: %v", err)
+	}
+	return parsedABI
+}
+
+func mustUserReserveDataABI(t *testing.T) *abi.ABI {
+	t.Helper()
+
+	parsedABI, err := abis.GetPoolDataProviderUserReserveDataABI()
+	if err != nil {
+		t.Fatalf("load user reserve data ABI: %v", err)
+	}
+	return parsedABI
+}
+
+func methodIDHex(parsedABI *abi.ABI, method string) string {
+	return hex.EncodeToString(parsedABI.Methods[method].ID)
 }

@@ -51,6 +51,18 @@ type positionTestFixture struct {
 	tokenID    int64
 }
 
+type borrowerRecord struct {
+	UserID       int64
+	ProtocolID   int64
+	TokenID      int64
+	BlockNumber  int64
+	BlockVersion int
+	Amount       string
+	Change       string
+	EventType    string
+	TxHash       []byte
+}
+
 // setupPositionTest returns a connected PositionRepository using the schema-specific pool.
 func setupPositionTest(t *testing.T) *positionTestFixture {
 	t.Helper()
@@ -131,6 +143,83 @@ func (f *positionTestFixture) queryCollaterals(t *testing.T, ctx context.Context
 		results = append(results, r)
 	}
 	return results
+}
+
+func (f *positionTestFixture) queryBorrowers(t *testing.T, ctx context.Context) []borrowerRecord {
+	t.Helper()
+
+	rows, err := f.pool.Query(ctx,
+		`SELECT user_id, protocol_id, token_id, block_number, block_version, amount::text, change::text, event_type, tx_hash
+		 FROM borrower ORDER BY block_number, block_version`)
+	if err != nil {
+		t.Fatalf("failed to query borrowers: %v", err)
+	}
+	defer rows.Close()
+
+	var results []borrowerRecord
+	for rows.Next() {
+		var r borrowerRecord
+		if err := rows.Scan(&r.UserID, &r.ProtocolID, &r.TokenID, &r.BlockNumber, &r.BlockVersion, &r.Amount, &r.Change, &r.EventType, &r.TxHash); err != nil {
+			t.Fatalf("failed to scan borrower: %v", err)
+		}
+		results = append(results, r)
+	}
+	return results
+}
+
+func TestSaveBorrower_SingleRecord(t *testing.T) {
+	fixture := setupPositionTest(t)
+
+	ctx := context.Background()
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	err = fixture.repo.SaveBorrower(ctx, tx, fixture.userID, fixture.protocolID, fixture.tokenID, 1100, 0, "0", "500", "Repay", []byte{0xaa, 0xbb, 0xcc})
+	if err != nil {
+		t.Fatalf("SaveBorrower failed: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	records := fixture.queryBorrowers(t, ctx)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 borrower record, got %d", len(records))
+	}
+
+	got := records[0]
+	if got.UserID != fixture.userID {
+		t.Errorf("UserID mismatch: got %d, want %d", got.UserID, fixture.userID)
+	}
+	if got.ProtocolID != fixture.protocolID {
+		t.Errorf("ProtocolID mismatch: got %d, want %d", got.ProtocolID, fixture.protocolID)
+	}
+	if got.TokenID != fixture.tokenID {
+		t.Errorf("TokenID mismatch: got %d, want %d", got.TokenID, fixture.tokenID)
+	}
+	if got.BlockNumber != 1100 {
+		t.Errorf("BlockNumber mismatch: got %d, want %d", got.BlockNumber, 1100)
+	}
+	if got.BlockVersion != 0 {
+		t.Errorf("BlockVersion mismatch: got %d, want %d", got.BlockVersion, 0)
+	}
+	if got.Amount != "0" {
+		t.Errorf("Amount mismatch: got %s, want %s", got.Amount, "0")
+	}
+	if got.Change != "500" {
+		t.Errorf("Change mismatch: got %s, want %s", got.Change, "500")
+	}
+	if got.EventType != "Repay" {
+		t.Errorf("EventType mismatch: got %s, want %s", got.EventType, "Repay")
+	}
+	if !bytes.Equal(got.TxHash, []byte{0xaa, 0xbb, 0xcc}) {
+		t.Errorf("TxHash mismatch: got %v, want %v", got.TxHash, []byte{0xaa, 0xbb, 0xcc})
+	}
 }
 
 func TestSaveBorrowerCollaterals_EmptyRecords(t *testing.T) {
