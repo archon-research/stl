@@ -34,7 +34,9 @@ type PositionRepository interface {
 	UpsertBorrowerCollateral(ctx context.Context, collateral []*entity.BorrowerCollateral) error
 
 	// SaveBorrower saves a single borrower position record within an external transaction.
-	SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, eventType string, txHash []byte) error
+	// amount is the full current outstanding debt (from getUserReserveData).
+	// change is the decimal-adjusted event delta (how much was borrowed or repaid).
+	SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte) error
 
 	// SaveBorrowerCollateral saves a single collateral position record within an external transaction.
 	SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, eventType string, txHash []byte, collateralEnabled bool) error
