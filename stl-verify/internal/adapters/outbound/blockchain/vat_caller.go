@@ -4,39 +4,17 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"strings"
 
-	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 // Compile-time check that VatCaller implements the port interface.
 var _ outbound.VatCaller = (*VatCaller)(nil)
-
-const (
-	vatABIJSON = `[
-		{"name":"ilks","type":"function","inputs":[{"name":"","type":"bytes32"}],"outputs":[
-			{"name":"Art","type":"uint256"},
-			{"name":"rate","type":"uint256"},
-			{"name":"spot","type":"uint256"},
-			{"name":"line","type":"uint256"},
-			{"name":"dust","type":"uint256"}
-		]},
-		{"name":"urns","type":"function","inputs":[
-			{"name":"","type":"bytes32"},
-			{"name":"","type":"address"}
-		],"outputs":[
-			{"name":"ink","type":"uint256"},
-			{"name":"art","type":"uint256"}
-		]}
-	]`
-
-	vaultABIJSON = `[
-		{"name":"ilk","type":"function","inputs":[],"outputs":[{"name":"","type":"bytes32"}]}
-	]`
-)
 
 // VatCaller reads debt data from the MakerDAO/Sky Vat contract using batched
 // multicall3 reads. All on-chain calls for a given operation (ilk resolution
@@ -57,12 +35,12 @@ func NewVatCaller(multicaller outbound.Multicaller, vatAddress common.Address) (
 		return nil, fmt.Errorf("vat address must not be the zero address")
 	}
 
-	parsedVatABI, err := abi.JSON(strings.NewReader(vatABIJSON))
+	vatABI, err := abis.GetVatABI()
 	if err != nil {
 		return nil, fmt.Errorf("parse vat abi: %w", err)
 	}
 
-	parsedVaultABI, err := abi.JSON(strings.NewReader(vaultABIJSON))
+	vaultABI, err := abis.GetVaultABI()
 	if err != nil {
 		return nil, fmt.Errorf("parse vault abi: %w", err)
 	}
@@ -70,8 +48,8 @@ func NewVatCaller(multicaller outbound.Multicaller, vatAddress common.Address) (
 	return &VatCaller{
 		multicaller: multicaller,
 		vatAddress:  vatAddress,
-		vatABI:      parsedVatABI,
-		vaultABI:    parsedVaultABI,
+		vatABI:      *vatABI,
+		vaultABI:    *vaultABI,
 	}, nil
 }
 

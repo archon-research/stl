@@ -190,9 +190,13 @@ func (s *VaultDebtService) processBlock(
 	if s.blocksSinceSweep < s.config.SweepEveryNBlocks {
 		return nil
 	}
-	s.blocksSinceSweep = 0
 
-	return s.syncAll(ctx, event.BlockNumber, event.Version)
+	if err := s.syncAll(ctx, event.BlockNumber, event.Version); err != nil {
+		return err
+	}
+
+	s.blocksSinceSweep = 0
+	return nil
 }
 
 // latestBlock fetches the latest block number from the node.
@@ -298,6 +302,12 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 
 	if len(snapshots) == 0 {
 		return fmt.Errorf("all vault reads failed, skipping db write")
+	}
+
+	for i, snap := range snapshots {
+		if err := snap.Validate(); err != nil {
+			return fmt.Errorf("debt snapshot %d: %w", i, err)
+		}
 	}
 
 	if err := s.repo.SaveDebtSnapshots(ctx, snapshots); err != nil {

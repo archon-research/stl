@@ -20,9 +20,9 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 
+	vatAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -198,7 +198,7 @@ func run(ctx context.Context, args []string) error {
 	if !common.IsHexAddress(*vatAddr) {
 		return fmt.Errorf("invalid vat address: %q", *vatAddr)
 	}
-	vatCaller, err := blockchain.NewVatCaller(mc, common.HexToAddress(*vatAddr))
+	vatCaller, err := vatAdapter.NewVatCaller(mc, common.HexToAddress(*vatAddr))
 	if err != nil {
 		return fmt.Errorf("vat caller: %w", err)
 	}

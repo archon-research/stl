@@ -81,12 +81,6 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 		return nil
 	}
 
-	for i, d := range debts {
-		if err := d.Validate(); err != nil {
-			return fmt.Errorf("debt snapshot %d: %w", i, err)
-		}
-	}
-
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		const q = `
 			INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at)

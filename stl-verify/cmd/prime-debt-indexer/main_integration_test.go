@@ -362,7 +362,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	var ilkName, debtWad string
 	var primeID, blockNumber int64
 	err = pool.QueryRow(ctx, `
-		SELECT prime_id, ilk_name, debt_wad::text, block_number FROM prime_debt ORDER BY id LIMIT 1
+		SELECT prime_id, ilk_name, debt_wad::text, block_number FROM prime_debt ORDER BY synced_at LIMIT 1
 	`).Scan(&primeID, &ilkName, &debtWad, &blockNumber)
 	if err != nil {
 		t.Fatalf("query snapshot: %v", err)
@@ -495,8 +495,8 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 	deadline := time.After(15 * time.Second)
 	for {
 		var count int
-		_ = pool.QueryRow(ctx, `SELECT COUNT(DISTINCT prime_id) FROM prime_debt`).Scan(&count)
-		if count >= len(primes) {
+		err := pool.QueryRow(ctx, `SELECT COUNT(DISTINCT prime_id) FROM prime_debt`).Scan(&count)
+		if err == nil && count >= len(primes) {
 			break
 		}
 		select {
@@ -510,7 +510,7 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 		SELECT p.name, pd.ilk_name, pd.debt_wad::text, pd.block_number
 		FROM prime_debt pd
 		JOIN prime p ON p.id = pd.prime_id
-		ORDER BY p.name, pd.id
+		ORDER BY p.name, pd.synced_at
 	`)
 	if err != nil {
 		t.Fatalf("query snapshots: %v", err)
@@ -602,14 +602,16 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	deadline := time.After(15 * time.Second)
 	for {
 		var count int
-		_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&count)
-		if count >= wantRows {
+		err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&count)
+		if err == nil && count >= wantRows {
 			break
 		}
 		select {
 		case <-deadline:
 			var got int
-			_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&got)
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&got); err != nil {
+				t.Fatalf("timed out and failed to query count: %v", err)
+			}
 			t.Fatalf("timed out: want %d rows, have %d", wantRows, got)
 		case <-time.After(100 * time.Millisecond):
 		}

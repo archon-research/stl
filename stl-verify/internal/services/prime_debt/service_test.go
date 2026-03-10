@@ -94,8 +94,9 @@ type fakeVatCaller struct {
 	art  *big.Int
 
 	// Per-vault error injection for ReadDebts.
-	debtErrByVault map[common.Address]error
-	readDebtsErr   error // if set, ReadDebts returns this error (whole batch fails)
+	debtErrByVault  map[common.Address]error
+	readDebtsErr    error // if set, ReadDebts returns this error (whole batch fails)
+	truncateResults int   // if > 0, return only this many results (to test short result handling)
 }
 
 func newFakeVatCaller() *fakeVatCaller {
@@ -162,6 +163,11 @@ func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []entity.DebtQuery,
 		results[i].Rate = new(big.Int).Set(f.rate)
 		results[i].Art = new(big.Int).Set(f.art)
 	}
+
+	if f.truncateResults > 0 && f.truncateResults < len(results) {
+		results = results[:f.truncateResults]
+	}
+
 	return results, nil
 }
 
@@ -486,6 +492,217 @@ func TestSync_PartialFailure_OtherPrimesStillSaved(t *testing.T) {
 		}
 	}
 found:
+	cancel()
+	_ = svc.Stop()
+}
+
+// ---------------------------------------------------------------------------
+// latestBlock error path
+// ---------------------------------------------------------------------------
+
+func TestStart_BlockQuerierError(t *testing.T) {
+	caller := newFakeVatCaller()
+	bq := newFakeBlockQuerier(testBlockNum)
+	bq.err = errors.New("RPC node unreachable")
+
+	consumer := newFakeSQSConsumer(nil)
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{sparkPrime()}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(75), caller, repo, consumer, bq)
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	err = svc.Start(context.Background())
+	if err == nil {
+		t.Fatal("expected error when block querier fails")
+	}
+	if !containsAny(err.Error(), "block number", "RPC node") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ReadDebts batch error
+// ---------------------------------------------------------------------------
+
+func TestSync_ReadDebtsBatchError(t *testing.T) {
+	caller := newFakeVatCaller()
+	caller.setIlk(sparkPrime().VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+	caller.readDebtsErr = errors.New("multicall RPC failure")
+
+	events := makeBlockEvents(testBlockNum, 3)
+	consumer := newFakeSQSConsumer(events)
+
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{sparkPrime()}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	// Give time for processing
+	time.Sleep(500 * time.Millisecond)
+
+	// No snapshots should have been saved due to batch error
+	if repo.savedCount() > 0 {
+		t.Errorf("expected 0 saved snapshots, got %d", repo.savedCount())
+	}
+
+	cancel()
+	_ = svc.Stop()
+}
+
+// ---------------------------------------------------------------------------
+// Missing result for prime (truncated results)
+// ---------------------------------------------------------------------------
+
+func TestSync_MissingResultForPrime(t *testing.T) {
+	primes := []entity.Prime{
+		{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")},
+		{ID: 2, Name: "grove", VaultAddress: common.HexToAddress("0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0")},
+	}
+
+	caller := newFakeVatCaller()
+	for _, p := range primes {
+		caller.setIlk(p.VaultAddress, ilkFrom("ALLOCATOR-"+p.Name+"-A"))
+	}
+	// Return only 1 result for 2 primes
+	caller.truncateResults = 1
+
+	events := makeBlockEvents(testBlockNum, 3)
+	consumer := newFakeSQSConsumer(events)
+
+	repo := &fakePrimeDebtRepository{primes: primes}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		if repo.savedCount() >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for partial snapshot")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	// Only spark (index 0) should be saved; grove (index 1) is missing from results
+	for _, snap := range repo.allSaved() {
+		if snap.PrimeID == 2 {
+			t.Error("grove should not have been saved — its result was truncated")
+		}
+	}
+
+	cancel()
+	_ = svc.Stop()
+}
+
+// ---------------------------------------------------------------------------
+// SaveDebtSnapshots error
+// ---------------------------------------------------------------------------
+
+func TestSync_SaveSnapshotsError(t *testing.T) {
+	caller := newFakeVatCaller()
+	caller.setIlk(sparkPrime().VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+
+	events := makeBlockEvents(testBlockNum, 3)
+	consumer := newFakeSQSConsumer(events)
+
+	repo := &fakePrimeDebtRepository{
+		primes:  []entity.Prime{sparkPrime()},
+		saveErr: errors.New("database write failed"),
+	}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	// Give time for processing attempts
+	time.Sleep(500 * time.Millisecond)
+
+	// Nothing should be saved since repo always returns error
+	if repo.savedCount() > 0 {
+		t.Errorf("expected 0 saved snapshots, got %d", repo.savedCount())
+	}
+
+	cancel()
+	_ = svc.Stop()
+}
+
+// ---------------------------------------------------------------------------
+// Sweep cadence N > 1
+// ---------------------------------------------------------------------------
+
+func TestSync_SweepCadence(t *testing.T) {
+	caller := newFakeVatCaller()
+	caller.setIlk(sparkPrime().VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+
+	// Send 10 block events with sweep every 3 blocks.
+	// First block triggers immediate read (blocksSinceSweep initialized to N-1).
+	// Then blocks 2,3 skip, block 4 reads, blocks 5,6 skip, block 7 reads, etc.
+	// Expected reads: block 1, 4, 7, 10 = 4 syncs.
+	const sweepN = 3
+	const numBlocks = 10
+	events := makeBlockEvents(testBlockNum, numBlocks)
+	consumer := newFakeSQSConsumer(events)
+
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{sparkPrime()}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(sweepN), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	// Wait for all messages to be consumed
+	deadline := time.After(5 * time.Second)
+	for {
+		// 4 expected syncs: blocks 1, 4, 7, 10
+		if repo.savedCount() >= 4 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out: expected 4 snapshots, got %d", repo.savedCount())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	// Should have exactly 4 syncs (not 10)
+	count := repo.savedCount()
+	if count < 3 || count > 5 {
+		t.Errorf("expected ~4 snapshots with sweep every %d blocks over %d blocks, got %d", sweepN, numBlocks, count)
+	}
+
 	cancel()
 	_ = svc.Stop()
 }
