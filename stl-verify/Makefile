@@ -2,7 +2,7 @@
 # Go 1.25+ best practices
 
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
-        dev-up dev-up-rebuild dev-preflight dev-env dev-down dev-wipe dev-ips generate-er \
+        dev-up dev-up-rebuild dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
@@ -305,16 +305,33 @@ dev-up:
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  [6/6] Ready"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "==> Waiting for all pods to be ready..."
-	@kubectl wait --for=condition=ready pod --all -n stl --timeout=120s --field-selector=status.phase!=Succeeded \
-	  || { echo "ERROR: pods not ready after 120s"; kubectl get pods -n stl; exit 1; }
+	@echo "==> Waiting for all deployments to roll out..."
+	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker temporal-worker; do \
+	  kubectl rollout status deployment/$$dep -n stl --timeout=120s || \
+	    { echo "ERROR: deployment $$dep not ready after 120s"; kubectl get pods -n stl; exit 1; }; \
+	done
 	@kubectl get pods -n stl
+
+# Start only the database and run migrations (no app services).
+dev-db:
+	@$(MAKE) dev-preflight
+	$(MAKE) kind-create
+	kubectl apply -f k8s/namespace.yaml
+	$(MAKE) kind-config kind-secrets
+	kubectl apply -f k8s/infra/timescaledb.yaml -n stl
+	@echo "==> Waiting for timescaledb to be ready..."
+	kubectl rollout status statefulset/timescaledb -n stl --timeout=120s
+	$(call build-if-needed,stl-migrate:local,docker-build-migrate)
+	$(MAKE) kind-load-migrate kind-migrate
+	@echo "==> Database ready."
+	@echo "    Connection: postgres://postgres:postgres@127.0.0.1:30432/stl_verify?sslmode=disable"
 
 # Generate .env files for all services (fetches secrets from AWS)
 # Can be re-run independently to refresh secrets without restarting services.
 dev-env:
 	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-watcher-config --query SecretString --output text | jq -r '.alchemy_api_key // empty') || \
 		{ echo "WARNING: Failed to fetch ALCHEMY_API_KEY from AWS Secrets Manager. Set it manually in cmd/watcher/.env"; ALCHEMY_API_KEY=''; }; \
+	printf '%s\n' "ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" > ../.env.secrets && chmod 600 ../.env.secrets; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -458,6 +475,7 @@ dev-env:
 		> cmd/morpho-indexer/.env
 	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
 		{ echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
+	printf '%s\n' "COINGECKO_API_KEY=$$COINGECKO_API_KEY" >> ../.env.secrets; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
@@ -469,6 +487,7 @@ dev-env:
 		> cmd/oracle-pricing-backfill/.env
 	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text) || \
 		{ echo "WARNING: Failed to fetch ETHERSCAN_API_KEY from AWS Secrets Manager."; ETHERSCAN_API_KEY=''; }; \
+	printf '%s\n' "ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" >> ../.env.secrets; \
 	TIGERDATA_URL=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-tigerdata-readonly --query SecretString --output text | jq -r '.connection_url // empty' | sed 's|@[^:]*:|@localhost:|') || \
 		{ echo "WARNING: Failed to fetch TIGERDATA_URL from AWS Secrets Manager."; TIGERDATA_URL=''; }; \
 	printf '%s\n' \
@@ -476,7 +495,7 @@ dev-env:
 		"ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" \
 		"DATABASE_URL=$$TIGERDATA_URL" \
 		> cmd/data-validator/.env
-	@echo "Environment files generated."
+	@echo "Environment files generated (.env.secrets updated)."
 	@echo "Note: data-validator uses staging TigerData. Run 'make tigerdata-tunnel' first."
 
 # Cold start — rebuilds all images from scratch
@@ -1435,15 +1454,18 @@ kind-load-workers:
 
 kind-deploy-watcher:
 	kubectl apply -f k8s/apps/watcher.yaml -n stl
+	kubectl rollout restart deployment/watcher -n stl
 
 kind-deploy-workers:
 	kubectl apply -f k8s/apps/workers/ -n stl
+	kubectl rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/sparklend-position-tracker -n stl
 
 kind-load-temporal-worker:
 	kind load docker-image stl-temporal-worker:local --name stl-local
 
 kind-deploy-temporal-worker:
 	kubectl apply -f k8s/apps/temporal-worker.yaml -n stl
+	kubectl rollout restart deployment/temporal-worker -n stl
 
 # Rebuild and redeploy a specific worker. Usage: make kind-redeploy-worker NAME=morpho-indexer
 kind-redeploy-worker:
