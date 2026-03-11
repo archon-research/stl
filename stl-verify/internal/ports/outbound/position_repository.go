@@ -14,7 +14,8 @@ type CollateralRecord struct {
 	TokenID           int64
 	BlockNumber       int64
 	BlockVersion      int
-	Amount            string // decimal-adjusted amount string
+	Amount            string // decimal-adjusted full current collateral balance
+	Change            string // decimal-adjusted event delta
 	EventType         string
 	TxHash            []byte
 	CollateralEnabled bool
@@ -39,7 +40,8 @@ type PositionRepository interface {
 	SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte) error
 
 	// SaveBorrowerCollateral saves a single collateral position record within an external transaction.
-	SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, eventType string, txHash []byte, collateralEnabled bool) error
+	// amount is the full current collateral balance; change is the event delta.
+	SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte, collateralEnabled bool) error
 
 	// SaveBorrowerCollaterals saves multiple borrower collateral position records in batch.
 	SaveBorrowerCollaterals(ctx context.Context, tx pgx.Tx, records []CollateralRecord) error

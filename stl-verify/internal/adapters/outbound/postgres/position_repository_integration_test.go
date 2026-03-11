@@ -127,7 +127,7 @@ func (f *positionTestFixture) queryCollaterals(t *testing.T, ctx context.Context
 	t.Helper()
 
 	rows, err := f.pool.Query(ctx,
-		`SELECT user_id, protocol_id, token_id, block_number, block_version, amount, event_type, tx_hash, collateral_enabled
+		`SELECT user_id, protocol_id, token_id, block_number, block_version, amount::text, change::text, event_type, tx_hash, collateral_enabled
 		 FROM borrower_collateral ORDER BY block_number, block_version`)
 	if err != nil {
 		t.Fatalf("failed to query collaterals: %v", err)
@@ -137,7 +137,7 @@ func (f *positionTestFixture) queryCollaterals(t *testing.T, ctx context.Context
 	var results []outbound.CollateralRecord
 	for rows.Next() {
 		var r outbound.CollateralRecord
-		if err := rows.Scan(&r.UserID, &r.ProtocolID, &r.TokenID, &r.BlockNumber, &r.BlockVersion, &r.Amount, &r.EventType, &r.TxHash, &r.CollateralEnabled); err != nil {
+		if err := rows.Scan(&r.UserID, &r.ProtocolID, &r.TokenID, &r.BlockNumber, &r.BlockVersion, &r.Amount, &r.Change, &r.EventType, &r.TxHash, &r.CollateralEnabled); err != nil {
 			t.Fatalf("failed to scan collateral: %v", err)
 		}
 		results = append(results, r)
@@ -262,6 +262,7 @@ func TestSaveBorrowerCollaterals_SingleRecord(t *testing.T) {
 		BlockNumber:       1000,
 		BlockVersion:      0,
 		Amount:            "123456789012345678901234567890",
+		Change:            "100",
 		EventType:         "Supply",
 		TxHash:            []byte{0xab, 0xc1, 0x23},
 		CollateralEnabled: true,
@@ -306,6 +307,9 @@ func TestSaveBorrowerCollaterals_SingleRecord(t *testing.T) {
 	}
 	if got.Amount != input.Amount {
 		t.Errorf("Amount mismatch: got %s, want %s", got.Amount, input.Amount)
+	}
+	if got.Change != input.Change {
+		t.Errorf("Change mismatch: got %s, want %s", got.Change, input.Change)
 	}
 	if got.EventType != input.EventType {
 		t.Errorf("EventType mismatch: got %s, want %s", got.EventType, input.EventType)

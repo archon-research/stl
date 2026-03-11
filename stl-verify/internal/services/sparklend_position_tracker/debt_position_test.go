@@ -29,7 +29,7 @@ type mockPositionRepository struct {
 	saveBorrowerCalls []saveBorrowerCall
 
 	SaveBorrowerFn            func(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte) error
-	SaveBorrowerCollateralFn  func(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, eventType string, txHash []byte, collateralEnabled bool) error
+	SaveBorrowerCollateralFn  func(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte, collateralEnabled bool) error
 	SaveBorrowerCollateralsFn func(ctx context.Context, tx pgx.Tx, records []outbound.CollateralRecord) error
 }
 
@@ -51,9 +51,9 @@ func (m *mockPositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, us
 	return nil
 }
 
-func (m *mockPositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, eventType string, txHash []byte, collateralEnabled bool) error {
+func (m *mockPositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte, collateralEnabled bool) error {
 	if m.SaveBorrowerCollateralFn != nil {
-		return m.SaveBorrowerCollateralFn(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, amount, eventType, txHash, collateralEnabled)
+		return m.SaveBorrowerCollateralFn(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, eventType, txHash, collateralEnabled)
 	}
 	return nil
 }

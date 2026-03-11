@@ -618,7 +618,8 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 		}
 
 		decimalAdjustedBalance := s.convertToDecimalAdjusted(balance, metadata.Decimals)
-		if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedBalance, string(eventData.EventType), common.FromHex(eventData.TxHash), eventData.CollateralEnabled); err != nil {
+		change := s.convertToDecimalAdjusted(eventData.Amount, metadata.Decimals)
+		if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedBalance, change, string(eventData.EventType), common.FromHex(eventData.TxHash), eventData.CollateralEnabled); err != nil {
 			return fmt.Errorf("failed to save collateral toggle: %w", err)
 		}
 
@@ -716,12 +717,16 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			}
 
 			records = append(records, outbound.CollateralRecord{
-				UserID:            userID,
-				ProtocolID:        protocolID,
-				TokenID:           tokenID,
-				BlockNumber:       blockNumber,
-				BlockVersion:      blockVersion,
-				Amount:            s.convertToDecimalAdjusted(col.ActualBalance, col.Decimals),
+				UserID:       userID,
+				ProtocolID:   protocolID,
+				TokenID:      tokenID,
+				BlockNumber:  blockNumber,
+				BlockVersion: blockVersion,
+				Amount:       s.convertToDecimalAdjusted(col.ActualBalance, col.Decimals),
+				// Change is "0" here because these records capture the full collateral snapshot
+				// across all assets triggered by a position event (Borrow, Repay, Supply, Withdraw).
+				// The event delta belongs to a specific reserve, not to each collateral asset.
+				Change:            "0",
 				EventType:         string(eventData.EventType),
 				TxHash:            common.FromHex(eventData.TxHash),
 				CollateralEnabled: col.CollateralEnabled,
@@ -772,12 +777,15 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 		}
 
 		records = append(records, outbound.CollateralRecord{
-			UserID:            userID,
-			ProtocolID:        protocolID,
-			TokenID:           tokenID,
-			BlockNumber:       blockNumber,
-			BlockVersion:      blockVersion,
-			Amount:            s.convertToDecimalAdjusted(col.ActualBalance, col.Decimals),
+			UserID:       userID,
+			ProtocolID:   protocolID,
+			TokenID:      tokenID,
+			BlockNumber:  blockNumber,
+			BlockVersion: blockVersion,
+			Amount:       s.convertToDecimalAdjusted(col.ActualBalance, col.Decimals),
+			// Change is "0" here because snapshotUserPosition performs a full position snapshot
+			// (e.g. triggered by a liquidation) with no per-asset event delta available.
+			Change:            "0",
 			EventType:         eventType,
 			TxHash:            txHash,
 			CollateralEnabled: col.CollateralEnabled,
