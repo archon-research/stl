@@ -2,7 +2,7 @@
  * reorg.js — shared reorg injection module.
  *
  * Usage:
- *   import { createReorgRunner } from './watcher-reorg.js';
+ *   import { createReorgRunner } from './reorg.js';
  *   const reorg = createReorgRunner(adminURL);
  *
  *   export default function () {
@@ -22,8 +22,8 @@ export const reorgErrors = new Counter('reorg_errors');
  * Call tick() once per iteration; it fires when the interval has elapsed.
  *
  * Controlled by env vars (read at construction time):
- *   REORG           - enable reorg injection (any non-empty value)
- *   REORG_DEPTH     - reorg depth (default: 5)
+ *   REORG            - enable reorg injection (any non-empty value)
+ *   REORG_DEPTH      - reorg depth (default: 5)
  *   REORG_INTERVAL_S - seconds between reorgs (default: 30)
  */
 export function createReorgRunner(adminURL) {

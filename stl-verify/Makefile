@@ -1625,8 +1625,8 @@ endif
 #
 # Options:
 #   TARGET          - Set to "staging" to target real AWS instead of LocalStack (default: local)
-#   SCENARIO        - Script to run without the watcher- prefix (default: stress)
-#                     e.g. SCENARIO=stress → stress-test/k6/watcher-stress.js
+#   SCENARIO        - Scenario to run from stress-test/k6/scenarios/ (default: watcher)
+#                     e.g. SCENARIO=watcher → scenarios/watcher.js
 #   INTERVAL_MS     - Block emission interval in ms (default: 12000 ~Ethereum)
 #                     Examples: 50 (high-frequency), 250 (Base), 2000 (BNB Chain)
 #   DURATION        - k6 test duration (default: 2m)
@@ -1655,9 +1655,9 @@ else
 	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/$(STRESS_TEST_BACKUP_QUEUE) || true
 endif
 	kubectl wait --for=condition=available deployment/mock-blockchain-server -n stl --timeout=120s
-	kubectl create configmap k6-scripts --from-file=stress-test/k6/ -n stl --dry-run=client -o yaml | kubectl apply -f -
+	kubectl create configmap k6-scripts --from-file=stress-test/k6/scenarios/ --from-file=stress-test/k6/lib/ -n stl --dry-run=client -o yaml | kubectl apply -f -
 	kubectl delete job k6-stress-test -n stl --ignore-not-found
-	sed -e 's|$${SCENARIO}|$(or $(SCENARIO),stress)|g' \
+	sed -e 's|$${SCENARIO}|$(or $(SCENARIO),watcher)|g' \
 	    -e 's|$${INTERVAL_MS}|$(or $(INTERVAL_MS),12000)|g' \
 	    -e 's|$${DURATION}|$(or $(DURATION),2m)|g' \
 	    -e 's|$${REORG}|$(or $(REORG),)|g' \
@@ -1668,8 +1668,7 @@ endif
 	kubectl logs job/k6-stress-test -n stl -f
 	kubectl wait --for=condition=complete job/k6-stress-test -n stl --timeout=10s
 	@echo "==> Verifying chain correctness..."
-	kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify -v chain_id=1 \
-	  -v reorg_depth=$(if $(REORG),$(or $(REORG_DEPTH),5),0) \
+	kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify \
 	  -c "SELECT count(*) AS gaps FROM generate_series((SELECT min(number) FROM block_states WHERE chain_id = 1 AND NOT is_orphaned),(SELECT max(number) FROM block_states WHERE chain_id = 1 AND NOT is_orphaned)) AS s(n) LEFT JOIN block_states b ON b.number = s.n AND b.chain_id = 1 AND NOT b.is_orphaned WHERE b.number IS NULL;" \
-	  -c "SELECT count(*) AS unexpected_orphans FROM block_states WHERE chain_id = 1 AND is_orphaned AND number > (SELECT max(number) - 64 - :reorg_depth FROM block_states WHERE chain_id = 1);" \
+	  -c "SELECT count(*) AS unexpected_orphans FROM block_states WHERE chain_id = 1 AND is_orphaned AND number > (SELECT max(number) - $(shell echo $$(( 64 + $(if $(REORG),$(or $(REORG_DEPTH),5),0) ))) FROM block_states WHERE chain_id = 1);" \
 	  -c "SELECT count(*) AS broken_parent_links FROM block_states b JOIN block_states p ON p.number = b.number - 1 AND p.chain_id = b.chain_id AND NOT p.is_orphaned WHERE NOT b.is_orphaned AND b.chain_id = 1 AND b.parent_hash != p.hash;"

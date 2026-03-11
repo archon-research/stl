@@ -77,13 +77,17 @@ running, so each run starts from a clean state.
 
 ### Adding a new scenario
 
-Drop a `watcher-<name>.js` file in `stress-test/k6/` and run:
+Drop a `<pipeline-component>.js` file in `stress-test/k6/scenarios/` and run:
 
 ```bash
-make k6-stress-test SCENARIO=<name>
+make k6-stress-test SCENARIO=<pipeline-component>
 ```
 
-The shared reorg module (`watcher-reorg.js`) can be imported by any scenario.
+Shared modules live in `stress-test/k6/lib/` and can be imported by any scenario:
+
+```js
+import { createReorgRunner } from './reorg.js';
+```
 
 ---
 

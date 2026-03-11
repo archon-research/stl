@@ -1,8 +1,8 @@
 /**
- * watcher-stress.js
+ * watcher.js — stress test for the block watcher ingestion pipeline.
  *
- * Configurable stress test for the block watcher. Control the test profile
- * entirely through environment variables — no separate scenario files needed.
+ * Drives the mock blockchain server at a configurable block rate and verifies
+ * that the watcher keeps up, processes reorgs correctly, and emits no errors.
  *
  * Environment variables:
  *   ADMIN_URL         - Admin API base URL (default: http://mock-blockchain-server:8547)
@@ -17,7 +17,7 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Counter, Rate } from 'k6/metrics';
-import { createReorgRunner, reorgErrors } from './watcher-reorg.js';
+import { createReorgRunner, reorgErrors } from './reorg.js';
 
 const adminURL = __ENV.ADMIN_URL || 'http://mock-blockchain-server:8547';
 const intervalMs = parseInt(__ENV.INTERVAL_MS || '12000', 10);
@@ -146,7 +146,7 @@ export function teardown(data) {
   const durationSecs = parseDurationSecs(__ENV.DURATION || '2m');
   const expectedMin = Math.floor(durationSecs / (intervalMs / 1000) * 0.8);
   check(null, { 'total throughput ≥ 80% of target': () => totalEmitted >= expectedMin });
-  console.log(`Stress complete — emitted: ${totalEmitted}, expected ≥ ${expectedMin}, interval: ${intervalMs}ms`);
+  console.log(`Watcher stress complete — emitted: ${totalEmitted}, expected ≥ ${expectedMin}, interval: ${intervalMs}ms`);
   if (reorg.enabled) {
     const reorgsThisRun = (statusBody.reorg_count || 0) - (data.initialReorgCount || 0);
     console.log(`Reorgs triggered: ${reorgsThisRun}`);
