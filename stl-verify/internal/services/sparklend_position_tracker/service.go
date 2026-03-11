@@ -976,6 +976,7 @@ func (s *Service) convertToDecimalAdjusted(rawAmount *big.Int, decimals int) str
 	}
 
 	fractionalStr := fmt.Sprintf("%0*s", decimals, remainder.String())
+	fractionalStr = strings.TrimRight(fractionalStr, "0")
 	return fmt.Sprintf("%s.%s", integerPart.String(), fractionalStr)
 }
 
