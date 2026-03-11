@@ -167,7 +167,7 @@ func (f *positionTestFixture) queryBorrowers(t *testing.T, ctx context.Context) 
 	return results
 }
 
-func TestSaveBorrower_SingleRecord(t *testing.T) {
+func TestSaveBorrower_RepayWithZeroBalance(t *testing.T) {
 	fixture := setupPositionTest(t)
 
 	ctx := context.Background()

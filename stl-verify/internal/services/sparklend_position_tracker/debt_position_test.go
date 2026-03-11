@@ -377,26 +377,6 @@ func TestSavePositionSnapshot_BorrowAndRepayFailWhenPositionExtractionFails(t *t
 	}
 }
 
-func TestDebtData_Struct(t *testing.T) {
-	d := DebtData{
-		Asset:       common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
-		Decimals:    6,
-		Symbol:      "USDC",
-		Name:        "USD Coin",
-		CurrentDebt: big.NewInt(1000000),
-	}
-
-	if d.Asset == (common.Address{}) {
-		t.Error("DebtData.Asset should not be empty")
-	}
-	if d.Decimals != 6 {
-		t.Errorf("DebtData.Decimals = %d, want 6", d.Decimals)
-	}
-	if d.CurrentDebt.Cmp(big.NewInt(1000000)) != 0 {
-		t.Errorf("DebtData.CurrentDebt = %v, want 1000000", d.CurrentDebt)
-	}
-}
-
 func newBorrowerRecordTestService(positionRepo *mockPositionRepository) *Service {
 	return &Service{
 		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
