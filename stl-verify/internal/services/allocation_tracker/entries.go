@@ -162,6 +162,9 @@ func mainnetEntries() []*TokenEntry {
 		// ── Grove: Uniswap V3 ──
 		{ContractAddress: common.HexToAddress("0xbafead7c60ea473758ed6c6021505e8bbd7e8e5d"), WalletAddress: grove, AssetAddress: usdc, Star: "grove", Chain: "mainnet", Protocol: "uniswap", AllocationType: "allocation", TokenType: "uni_v3_pool"},
 
+		// ── Grove: Curve ──
+		{ContractAddress: common.HexToAddress("0xe79c1c7e24755574438a26d5e062ad2626c04662"), WalletAddress: grove, AssetAddress: usdc, Star: "grove", Chain: "mainnet", Protocol: "curve", AllocationType: "allocation", TokenType: "curve"},
+
 		// ── Grove: ERC20 assets ──
 		{ContractAddress: common.HexToAddress("0x6b175474e89094c44da98b954eedeac495271d0f"), WalletAddress: grove, Star: "grove", Chain: "mainnet", Protocol: "sky", AllocationType: "asset", TokenType: "erc20"},
 		{ContractAddress: common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), WalletAddress: grove, Star: "grove", Chain: "mainnet", AllocationType: "asset", TokenType: "erc20"},
