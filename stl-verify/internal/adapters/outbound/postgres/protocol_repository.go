@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -70,34 +69,6 @@ func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx,
 
 	r.logger.Info("protocol upserted", "address", address.Hex(), "name", name, "id", protocolID)
 	return protocolID, nil
-}
-
-// GetProtocolByAddress retrieves a protocol by its chain ID and address.
-func (r *ProtocolRepository) GetProtocolByAddress(ctx context.Context, chainID int64, address common.Address) (*entity.Protocol, error) {
-	// Convert address to lowercase hex without 0x prefix for bytea comparison
-	addressHex := strings.ToLower(address.Hex()[2:])
-
-	var protocol entity.Protocol
-	err := r.pool.QueryRow(ctx,
-		`SELECT id, chain_id, address, name, protocol_type, created_at_block
-         FROM protocol
-         WHERE chain_id = $1 AND address = decode($2, 'hex')`,
-		chainID, addressHex).Scan(
-		&protocol.ID,
-		&protocol.ChainID,
-		&protocol.Address,
-		&protocol.Name,
-		&protocol.ProtocolType,
-		&protocol.CreatedAtBlock,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil // Protocol not found
-		}
-		return nil, fmt.Errorf("failed to get protocol by address: %w", err)
-	}
-
-	return &protocol, nil
 }
 
 // UpsertSparkLendReserveData upserts SparkLend reserve data records atomically.

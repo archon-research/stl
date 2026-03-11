@@ -19,6 +19,4 @@ type ProtocolRepository interface {
 	// This stores protocol-level market data (rates, indexes, totals) per token per block.
 	// Conflict resolution: ON CONFLICT (protocol_id, token_id, block_number, block_version) DO UPDATE
 	UpsertReserveData(ctx context.Context, tx pgx.Tx, data []*entity.SparkLendReserveData) error
-	// GetProtocolByAddress retrieves a protocol by its chain ID and address.
-	GetProtocolByAddress(ctx context.Context, chainID int64, address common.Address) (*entity.Protocol, error)
 }
