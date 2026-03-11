@@ -38,59 +38,52 @@ below for prerequisites.
 
 ## Running a test
 
-### Local
+All tests run as a k6 Job inside the cluster via `make k6-stress-test`.
 
 ```bash
-# Default: Ethereum (~12s blocks), sustained scenario, 2 minutes
-./stress-test/run.sh
+# Point kubectl at the target cluster first (local kind or EKS)
+aws eks update-kubeconfig --region eu-west-1 --name archon-staging  # EKS only
 
-# Base chain (~250ms blocks), burst scenario
-./stress-test/run.sh --scenario burst --interval 250
-
-# Skip DB truncate (e.g. continuing a run)
-./stress-test/run.sh --no-clean
+make k6-stress-test                          # defaults: Ethereum pace, 2 minutes
+make k6-stress-test INTERVAL_MS=50           # high-frequency burst
+make k6-stress-test INTERVAL_MS=250          # Base chain pace
+make k6-stress-test REORG=1                  # with reorg injection (default depth 5, every 30s)
+make k6-stress-test TARGET=staging DURATION=5m  # run against real AWS staging
 ```
 
-Run from the `stl-verify/` directory. The script truncates `block_states` before each
-run so the finality boundary is clean.
+The target truncates `block_states`, flushes Redis, and purges the SQS queues before
+running, so each run starts from a clean state.
 
-### EKS (in-cluster Job)
+### Options
 
-```bash
-# Point kubectl at the target cluster first
-aws eks update-kubeconfig --region eu-west-1 --name archon-staging
-
-make k6-stress-test                                        # defaults
-make k6-stress-test SCENARIO=burst INTERVAL_MS=250         # Base burst
-make k6-stress-test SCENARIO=reorg INTERVAL_MS=2000 DURATION=5m
-```
-
----
-
-## Scenarios
-
-| Scenario | Default interval | What it tests |
+| Option | Default | Description |
 |---|---|---|
-| `sustained` | 12000ms (Ethereum) | Steady block processing at configurable rate |
-| `burst` | 50ms | High-frequency ingestion, throughput under load |
-
-Reorgs are an option, not a scenario — inject them into any scenario:
-
-```bash
-# Sustained Ethereum with reorgs every 30s at depth 5 (defaults)
-./stress-test/run.sh --reorg
-
-# Base burst with reorgs every 10s at depth 3
-./stress-test/run.sh --scenario burst --interval 250 --reorg --reorg-depth 3 --reorg-interval 10
-```
+| `TARGET` | _(local)_ | Set to `staging` to target real AWS instead of LocalStack |
+| `SCENARIO` | `stress` | Script to run — `watcher-${SCENARIO}.js` in `stress-test/k6/` |
+| `INTERVAL_MS` | `12000` | Block emission interval in ms |
+| `DURATION` | `2m` | k6 test duration (e.g. `30s`, `5m`, `1h`) |
+| `REORG` | _(off)_ | Any value enables reorg injection |
+| `REORG_DEPTH` | `5` | Blocks rolled back per reorg (1–64) |
+| `REORG_INTERVAL_S` | `30` | Seconds between reorgs |
 
 ### Chain interval reference
 
-| Chain | `--interval` |
+| Chain | `INTERVAL_MS` |
 |---|---|
-| Ethereum | 12000 (default) |
-| BNB Chain | 2000 |
-| Base | 250 |
+| Ethereum | `12000` (default) |
+| BNB Chain | `2000` |
+| Base | `250` |
+| High-frequency / burst | `50` |
+
+### Adding a new scenario
+
+Drop a `watcher-<name>.js` file in `stress-test/k6/` and run:
+
+```bash
+make k6-stress-test SCENARIO=<name>
+```
+
+The shared reorg module (`watcher-reorg.js`) can be imported by any scenario.
 
 ---
 
@@ -149,8 +142,6 @@ make kind-use-alchemy
 ---
 
 ## EKS stress test namespace
-
-> **Status**: blocked — see [Pass 7 in the implementation plan](../../workspace/stress-test-implementation.md).
 
 Prerequisites before EKS stress tests can run:
 - All app manifests present (allocation-tracker, backup, event-persister, backfill)

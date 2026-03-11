@@ -18,8 +18,6 @@ spec:
           env:
             - name: ADMIN_URL
               value: "http://mock-blockchain-server:8547"
-            - name: SCENARIO
-              value: "${SCENARIO}"
             - name: INTERVAL_MS
               value: "${INTERVAL_MS}"
             - name: DURATION
@@ -36,14 +34,9 @@ spec:
             capabilities:
               drop: ["ALL"]
           command:
-            - sh
-            - -c
-            - |
-              case "${SCENARIO}" in
-                sustained|burst) ;;
-                *) echo "unknown SCENARIO: ${SCENARIO}" >&2; exit 1 ;;
-              esac
-              exec k6 run "/scripts/watcher-${SCENARIO}.js"
+            - k6
+            - run
+            - /scripts/watcher-${SCENARIO}.js
           volumeMounts:
             - name: k6-scripts
               mountPath: /scripts

@@ -1,17 +1,17 @@
 /**
- * watcher-sustained.js
+ * watcher-stress.js
  *
- * Sustained load test: runs the mock server at a configurable block interval,
- * measuring throughput and error rate.
+ * Configurable stress test for the block watcher. Control the test profile
+ * entirely through environment variables — no separate scenario files needed.
  *
  * Environment variables:
- *   ADMIN_URL        - Admin API base URL (default: http://mock-blockchain-server:8547)
- *   INTERVAL_MS      - Block emission interval ms (default: 12000 ~Ethereum)
- *                      Examples: 250 for Base, 2000 for BNB Chain
- *   DURATION         - Test duration (default: 2m)
- *   REORG            - Enable reorg injection (set to any value to enable)
- *   REORG_DEPTH      - Reorg depth (default: 5)
- *   REORG_INTERVAL_S - Seconds between reorgs (default: 30)
+ *   ADMIN_URL         - Admin API base URL (default: http://mock-blockchain-server:8547)
+ *   INTERVAL_MS       - Block emission interval ms (default: 12000 ~Ethereum mainnet)
+ *                       Examples: 50 for burst, 250 for Base, 2000 for BNB Chain
+ *   DURATION          - Test duration (default: 2m)
+ *   REORG             - Enable reorg injection (set to any value to enable)
+ *   REORG_DEPTH       - Reorg depth (default: 5)
+ *   REORG_INTERVAL_S  - Seconds between reorgs (default: 30)
  */
 
 import http from 'k6/http';
@@ -28,9 +28,9 @@ const reorg = createReorgRunner(adminURL);
 
 const adminErrors = new Counter('admin_errors');
 const stalledPolls = new Counter('stalled_polls');
-// blockEmissionRate tracks whether blocks_emitted is actually advancing on each poll.
-// For slow intervals (e.g. 12 s Ethereum) polls between blocks are expected; the rate
-// reflects advancement over a window rather than every individual poll.
+// blockEmissionRate tracks whether blocks_emitted is advancing on each poll.
+// For slow intervals (e.g. 12 s Ethereum) gaps between blocks are expected;
+// the rate only records 0 once the stall window is exceeded.
 const blockEmissionRate = new Rate('block_emission_ok');
 
 // Minimum blocks expected per 1 s poll at 50% of the configured rate.
@@ -43,7 +43,7 @@ export const options = {
   duration: __ENV.DURATION || '2m',
   vus: 1,
   thresholds: {
-    admin_errors: ['count<5'],
+    admin_errors: ['count<3'],
     stalled_polls: ['count<3'],
     ...(reorg.enabled && { reorg_errors: ['count<3'] }),
   },
@@ -55,6 +55,13 @@ let pollCount = 0;
 let consecutiveNoAdvance = 0;
 
 export function setup() {
+  // Stop any running replayer first so setup is idempotent regardless of server state.
+  http.post(`${adminURL}/stop`);
+
+  // Snapshot reorg_count before the test so teardown can report the delta.
+  // The server never resets this counter between runs.
+  const initialReorgCount = JSON.parse(http.get(`${adminURL}/status`).body || '{}').reorg_count || 0;
+
   let res = http.post(`${adminURL}/speed`, JSON.stringify({ interval_ms: intervalMs }), {
     headers: { 'Content-Type': 'application/json' },
   });
@@ -66,6 +73,8 @@ export function setup() {
   if (res.status !== 200) {
     throw new Error(`setup: /start failed (${res.status}): ${res.body}`);
   }
+
+  return { initialReorgCount };
 }
 
 export default function () {
@@ -128,16 +137,19 @@ export default function () {
   sleep(1);
 }
 
-export function teardown() {
+export function teardown(data) {
+  const statusBody = JSON.parse(http.get(`${adminURL}/status`).body || '{}');
+
   const res = http.post(`${adminURL}/stop`);
   const body = JSON.parse(res.body || '{}');
   const totalEmitted = body.last_block || 0;
   const durationSecs = parseDurationSecs(__ENV.DURATION || '2m');
   const expectedMin = Math.floor(durationSecs / (intervalMs / 1000) * 0.8);
   check(null, { 'total throughput ≥ 80% of target': () => totalEmitted >= expectedMin });
-  console.log(`Sustained complete — emitted: ${totalEmitted}, expected ≥ ${expectedMin}`);
+  console.log(`Stress complete — emitted: ${totalEmitted}, expected ≥ ${expectedMin}, interval: ${intervalMs}ms`);
   if (reorg.enabled) {
-    console.log(`Reorgs triggered: ${reorg.count}`);
+    const reorgsThisRun = (statusBody.reorg_count || 0) - (data.initialReorgCount || 0);
+    console.log(`Reorgs triggered: ${reorgsThisRun}`);
   }
 }
 

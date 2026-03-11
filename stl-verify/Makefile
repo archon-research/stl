@@ -1540,8 +1540,8 @@ kind-build-mock-blockchain-server:
 kind-load-mock-blockchain-server: kind-build-mock-blockchain-server
 	kind load docker-image stl-mock-blockchain-server:local --name stl-local
 
-# Deploy mock-blockchain-server to kind cluster (populates LocalStack data first)
-kind-deploy-mock-blockchain-server: stress-test-data
+# Deploy mock-blockchain-server to kind cluster (builds image, populates LocalStack data first)
+kind-deploy-mock-blockchain-server: kind-load-mock-blockchain-server stress-test-data
 	kubectl apply -f k8s/apps/mock-blockchain-server.yaml -n stl
 
 # Rebuild, reload, and restart mock-blockchain-server in kind
@@ -1576,12 +1576,12 @@ STRESS_TEST_TRANSFORMER_QUEUE   ?= stl-ethereum-transformer.fifo
 STRESS_TEST_BACKUP_QUEUE        ?= stl-ethereum-backup.fifo
 
 # Populate S3 with stress test block data.
-# Local (default):       creates bucket in LocalStack and exports blocks from staging.
-# Staging (ENV=sentinelstaging): creates real S3 bucket and exports blocks (one-time operator step).
-# Idempotent: skips export only when a manifest written by a previous run matches the requested
-#             start_block, block_count, and version. Any parameter change triggers a fresh export.
+# Local (default):        syncs blocks from staging S3 into LocalStack.
+# Staging (TARGET=staging): exports blocks from raw backup bucket into the staging stress-test bucket
+#                           (one-time operator step).
+# Idempotent: skips when a manifest written by a previous run matches start_block, block_count, and version.
 stress-test-data:
-ifeq ($(ENV),sentinelstaging)
+ifeq ($(TARGET),staging)
 	@echo "==> Creating stress-test bucket in staging S3..."
 	aws s3 mb s3://$(STRESS_TEST_STAGING_BUCKET) --region $(AWS_REGION) 2>/dev/null || true
 	@WANT="start_block=$(STRESS_TEST_START_BLOCK) block_count=$(STRESS_TEST_BLOCK_COUNT) version=$(STRESS_TEST_VERSION)"; \
@@ -1607,44 +1607,43 @@ else
 	GOT=$$(aws --endpoint-url $(STRESS_TEST_LOCAL_ENDPOINT) s3 cp \
 	  s3://$(STRESS_TEST_LOCAL_BUCKET)/$(STRESS_TEST_PREFIX)/.manifest - 2>/dev/null || true); \
 	if [ "$$GOT" = "$$WANT" ]; then \
-	  echo "==> Block data up-to-date ($$WANT), skipping export"; \
+	  echo "==> Block data up-to-date ($$WANT), skipping sync"; \
 	else \
-	  echo "==> Exporting $(STRESS_TEST_BLOCK_COUNT) blocks to LocalStack (requires staging AWS credentials)..."; \
-	  go run ./cmd/stress-test/data-export \
-	    --env staging \
-	    --src-bucket $(STRESS_TEST_SRC_BUCKET) \
-	    --dest-bucket $(STRESS_TEST_LOCAL_BUCKET) \
-	    --dest-prefix $(STRESS_TEST_PREFIX) \
-	    --dest-endpoint $(STRESS_TEST_LOCAL_ENDPOINT) \
-	    --start-block $(STRESS_TEST_START_BLOCK) \
-	    --block-count $(STRESS_TEST_BLOCK_COUNT) \
-	    --version $(STRESS_TEST_VERSION) && \
+	  echo "==> Syncing $(STRESS_TEST_BLOCK_COUNT) blocks from staging S3 to LocalStack (requires staging AWS credentials)..."; \
+	  TMPDIR=$$(mktemp -d) && \
+	  aws s3 sync s3://$(STRESS_TEST_STAGING_BUCKET)/$(STRESS_TEST_PREFIX) "$$TMPDIR" --region $(AWS_REGION) --quiet && \
+	  AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
+	    aws --endpoint-url $(STRESS_TEST_LOCAL_ENDPOINT) s3 sync "$$TMPDIR" \
+	    s3://$(STRESS_TEST_LOCAL_BUCKET)/$(STRESS_TEST_PREFIX) --region us-east-1 --quiet && \
+	  rm -rf "$$TMPDIR" && \
 	  echo "$$WANT" | aws --endpoint-url $(STRESS_TEST_LOCAL_ENDPOINT) s3 cp \
 	    - s3://$(STRESS_TEST_LOCAL_BUCKET)/$(STRESS_TEST_PREFIX)/.manifest; \
 	fi
 endif
 
-# Run k6 stress test locally against the kind cluster.
-# Truncates block_states first so finality boundary is clean.
-# SCENARIO: watcher-sustained (default), watcher-burst  (watcher-reorg.js is a shared module, not a runnable scenario)
-# INTERVAL_MS: block emission interval (default: 12000ms ~Ethereum, e.g. 250 for Base)
-stress-test:
-	kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify -c "TRUNCATE block_states CASCADE;" -q
-	kubectl exec -n stl deployment/redis -- redis-cli FLUSHDB
-	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
-	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-transformer.fifo || true
-	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
-	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/stl-ethereum-backup.fifo || true
-	ADMIN_URL=http://localhost:8547 INTERVAL_MS=$(or $(INTERVAL_MS),12000) k6 run stress-test/k6/$(or $(SCENARIO),watcher-sustained).js
-
 # Run k6 stress test as a Job inside the cluster (kind or EKS).
-# SCENARIO: sustained (default), burst  (watcher-reorg.js is a shared module, not a runnable scenario)
-# INTERVAL_MS: block interval ms (default: 12000)
-# DURATION: test duration (default: 2m)
+#
+# Options:
+#   TARGET          - Set to "staging" to target real AWS instead of LocalStack (default: local)
+#   SCENARIO        - Script to run without the watcher- prefix (default: stress)
+#                     e.g. SCENARIO=stress → stress-test/k6/watcher-stress.js
+#   INTERVAL_MS     - Block emission interval in ms (default: 12000 ~Ethereum)
+#                     Examples: 50 (high-frequency), 250 (Base), 2000 (BNB Chain)
+#   DURATION        - k6 test duration (default: 2m)
+#                     Examples: 30s, 5m, 1h
+#   REORG           - Enable reorg injection; set to any value to enable (default: off)
+#   REORG_DEPTH     - Number of blocks rolled back per reorg, 1–64 (default: 5)
+#   REORG_INTERVAL_S - Seconds between reorgs (default: 30)
+#
+# Examples:
+#   make k6-stress-test
+#   make k6-stress-test INTERVAL_MS=50 DURATION=30s
+#   make k6-stress-test REORG=1 REORG_DEPTH=10 REORG_INTERVAL_S=15
+#   make k6-stress-test TARGET=staging DURATION=5m
 k6-stress-test:
 	kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify -c "TRUNCATE block_states CASCADE;" -q
 	kubectl exec -n stl deployment/redis -- redis-cli FLUSHDB
-ifeq ($(ENV),sentinelstaging)
+ifeq ($(TARGET),staging)
 	aws --region $(AWS_REGION) sqs purge-queue \
 	  --queue-url https://sqs.$(AWS_REGION).amazonaws.com/$(AWS_ACCOUNT_ID)/$(STRESS_TEST_TRANSFORMER_QUEUE) || true
 	aws --region $(AWS_REGION) sqs purge-queue \
@@ -1655,9 +1654,10 @@ else
 	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
 	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/$(STRESS_TEST_BACKUP_QUEUE) || true
 endif
+	kubectl wait --for=condition=available deployment/mock-blockchain-server -n stl --timeout=120s
 	kubectl create configmap k6-scripts --from-file=stress-test/k6/ -n stl --dry-run=client -o yaml | kubectl apply -f -
 	kubectl delete job k6-stress-test -n stl --ignore-not-found
-	sed -e 's|$${SCENARIO}|$(or $(SCENARIO),sustained)|g' \
+	sed -e 's|$${SCENARIO}|$(or $(SCENARIO),stress)|g' \
 	    -e 's|$${INTERVAL_MS}|$(or $(INTERVAL_MS),12000)|g' \
 	    -e 's|$${DURATION}|$(or $(DURATION),2m)|g' \
 	    -e 's|$${REORG}|$(or $(REORG),)|g' \
@@ -1669,6 +1669,7 @@ endif
 	kubectl wait --for=condition=complete job/k6-stress-test -n stl --timeout=10s
 	@echo "==> Verifying chain correctness..."
 	kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify -v chain_id=1 \
+	  -v reorg_depth=$(if $(REORG),$(or $(REORG_DEPTH),5),0) \
 	  -c "SELECT count(*) AS gaps FROM generate_series((SELECT min(number) FROM block_states WHERE chain_id = 1 AND NOT is_orphaned),(SELECT max(number) FROM block_states WHERE chain_id = 1 AND NOT is_orphaned)) AS s(n) LEFT JOIN block_states b ON b.number = s.n AND b.chain_id = 1 AND NOT b.is_orphaned WHERE b.number IS NULL;" \
-	  -c "SELECT count(*) AS unexpected_orphans FROM block_states WHERE chain_id = 1 AND is_orphaned AND number > (SELECT max(number) - 64 FROM block_states WHERE chain_id = 1);" \
+	  -c "SELECT count(*) AS unexpected_orphans FROM block_states WHERE chain_id = 1 AND is_orphaned AND number > (SELECT max(number) - 64 - :reorg_depth FROM block_states WHERE chain_id = 1);" \
 	  -c "SELECT count(*) AS broken_parent_links FROM block_states b JOIN block_states p ON p.number = b.number - 1 AND p.chain_id = b.chain_id AND NOT p.is_orphaned WHERE NOT b.is_orphaned AND b.chain_id = 1 AND b.parent_hash != p.hash;"
