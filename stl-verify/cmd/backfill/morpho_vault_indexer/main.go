@@ -100,7 +100,22 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading AWS config: %w", err)
 	}
-	s3Reader := s3adapter.NewReader(awsCfg, logger)
+	s3HTTPClient := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:          cfg.goroutines + 64,
+			MaxIdleConnsPerHost:   cfg.goroutines + 64,
+			MaxConnsPerHost:       cfg.goroutines + 64,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+	s3Reader := s3adapter.NewReaderWithHTTPClient(awsCfg, s3HTTPClient, logger)
 
 	// PostgreSQL
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
@@ -217,14 +232,26 @@ type candidateEntry struct {
 
 // progress holds atomic counters shared between workers and the progress reporter.
 type progress struct {
-	partitionsDone   atomic.Int64
-	blocksProcessed  atomic.Int64
-	uniqueCandidates atomic.Int64
-	totalPartitions  int64
+	partitionsDone     atomic.Int64
+	blocksProcessed    atomic.Int64
+	uniqueCandidates   atomic.Int64
+	totalPartitions    int64
+	totalBlocks        atomic.Int64
+	listDurationMs     atomic.Int64
+	listCount          atomic.Int64
+	downloadDurationMs atomic.Int64
+	downloadCount      atomic.Int64
+	extractDurationMs  atomic.Int64
 }
 
-// scanBlockRange fans out partition processing across goroutines and merges results.
-// Returns a map of candidate address → earliest block seen.
+// blockWork represents a single block receipt file to download and process.
+type blockWork struct {
+	key         string
+	blockNumber int64
+}
+
+// scanBlockRange discovers receipt keys across partitions, then fans out
+// individual block downloads across a shared worker pool.
 func scanBlockRange(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -239,12 +266,9 @@ func scanBlockRange(
 
 	partitions := partitionsForRange(from, to)
 	prog := &progress{totalPartitions: int64(len(partitions))}
-	logger.Info("partitions to process", "count", prog.totalPartitions)
 
-	partCh := make(chan string, numWorkers)
+	// Start progress reporter early so listing phase is visible.
 	candidateCh := make(chan candidateEntry, 1024)
-	var firstErr atomic.Value
-
 	candidates := make(map[common.Address]int64)
 	var collectorDone sync.WaitGroup
 	collectorDone.Add(1)
@@ -253,13 +277,38 @@ func scanBlockRange(
 	stopProgress := make(chan struct{})
 	go reportProgress(ctx, logger, prog, stopProgress)
 
+	// Phase 1: List all partitions concurrently to collect block keys.
+	logger.Info("listing partitions", "count", len(partitions))
+	blockKeys, err := listAllBlockKeys(ctx, logger, s3Reader, bucket, partitions, from, to, numWorkers, prog)
+	if err != nil {
+		close(candidateCh)
+		close(stopProgress)
+		collectorDone.Wait()
+		return nil, fmt.Errorf("listing block keys: %w", err)
+	}
+	prog.totalBlocks.Store(int64(len(blockKeys)))
+	logger.Info("listing complete", "totalBlocks", len(blockKeys))
+
+	if len(blockKeys) == 0 {
+		close(candidateCh)
+		close(stopProgress)
+		collectorDone.Wait()
+		return nil, nil
+	}
+
+	// Phase 2: Download and process blocks via shared worker pool.
+
+	workCh := make(chan blockWork, numWorkers*2)
+	var firstErr atomic.Value
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Add(1)
-		go scanPartitions(ctx, logger, s3Reader, extractor, bucket, from, to, partCh, candidateCh, prog, &firstErr, cancelScan, &wg)
+		go downloadWorker(ctx, logger, s3Reader, extractor, bucket, workCh, candidateCh, prog, &firstErr, cancelScan, &wg)
 	}
 
-	feedPartitions(ctx, partitions, partCh, &firstErr)
+	// Feed block keys into the work channel.
+	feedBlocks(ctx, blockKeys, workCh, &firstErr)
+	close(workCh)
 
 	wg.Wait()
 	close(candidateCh)
@@ -273,6 +322,160 @@ func scanBlockRange(
 		return nil, err
 	}
 	return candidates, nil
+}
+
+// listAllBlockKeys lists receipt keys from all partitions concurrently and
+// returns a flat list of block work items sorted by block number.
+func listAllBlockKeys(
+	ctx context.Context,
+	logger *slog.Logger,
+	s3Reader outbound.S3Reader,
+	bucket string,
+	partitions []string,
+	from, to int64,
+	numWorkers int,
+	prog *progress,
+) ([]blockWork, error) {
+	// Use fewer workers for listing since each call is heavier.
+	listWorkers := min(numWorkers, 64)
+
+	partCh := make(chan string, listWorkers)
+	type listResult struct {
+		keys []blockWork
+		err  error
+	}
+	resultCh := make(chan listResult, listWorkers)
+
+	var wg sync.WaitGroup
+	for range listWorkers {
+		wg.Go(func() {
+			for part := range partCh {
+				if ctx.Err() != nil {
+					return
+				}
+				listStart := time.Now()
+				receiptKeys, err := listHighestVersionReceipts(ctx, s3Reader, bucket, part)
+				prog.listDurationMs.Add(time.Since(listStart).Milliseconds())
+				prog.listCount.Add(1)
+				if err != nil {
+					resultCh <- listResult{err: fmt.Errorf("listing partition %s: %w", part, err)}
+					return
+				}
+
+				var keys []blockWork
+				for _, key := range receiptKeys {
+					parsed, ok := s3key.Parse(key)
+					if !ok {
+						continue
+					}
+					if parsed.BlockNumber >= from && parsed.BlockNumber <= to {
+						keys = append(keys, blockWork{key: key, blockNumber: parsed.BlockNumber})
+					}
+				}
+
+				logBlockGapsFromKeys(logger, part, keys, from, to)
+				prog.partitionsDone.Add(1)
+				resultCh <- listResult{keys: keys}
+			}
+		})
+	}
+
+	// Feed partitions.
+	go func() {
+		defer close(partCh)
+		for _, part := range partitions {
+			select {
+			case partCh <- part:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Collect results.
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	var allKeys []blockWork
+	for res := range resultCh {
+		if res.err != nil {
+			return nil, res.err
+		}
+		allKeys = append(allKeys, res.keys...)
+	}
+
+	sort.Slice(allKeys, func(i, j int) bool {
+		return allKeys[i].blockNumber < allKeys[j].blockNumber
+	})
+
+	return allKeys, nil
+}
+
+// logBlockGapsFromKeys is like logBlockGaps but works with blockWork slices.
+func logBlockGapsFromKeys(logger *slog.Logger, partitionPrefix string, keys []blockWork, from, to int64) {
+	if len(keys) == 0 {
+		return
+	}
+	blockNums := make([]int64, len(keys))
+	for i, k := range keys {
+		blockNums[i] = k.blockNumber
+	}
+	logBlockGaps(logger, partitionPrefix, blockNums, from, to)
+}
+
+// downloadWorker pulls block work items from workCh, downloads and processes each one.
+func downloadWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	s3Reader outbound.S3Reader,
+	extractor *morpho_indexer.EventExtractor,
+	bucket string,
+	workCh <-chan blockWork,
+	candidateCh chan<- candidateEntry,
+	prog *progress,
+	firstErr *atomic.Value,
+	cancelScan context.CancelFunc,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+	morphoBlueAddr := morpho_indexer.MorphoBlueAddress
+	for work := range workCh {
+		if ctx.Err() != nil {
+			return
+		}
+
+		dlStart := time.Now()
+		receipts, err := downloadReceipts(ctx, s3Reader, bucket, work.key)
+		if err != nil {
+			firstErr.CompareAndSwap(nil, fmt.Errorf("downloading %s: %w", work.key, err))
+			cancelScan()
+			return
+		}
+		prog.downloadDurationMs.Add(time.Since(dlStart).Milliseconds())
+		prog.downloadCount.Add(1)
+
+		extractStart := time.Now()
+		extractCandidatesFromReceipts(logger, receipts, extractor, morphoBlueAddr, work.blockNumber, candidateCh)
+		prog.extractDurationMs.Add(time.Since(extractStart).Milliseconds())
+		prog.blocksProcessed.Add(1)
+	}
+}
+
+// feedBlocks sends block work items into workCh, stopping early on
+// context cancellation or if a worker has recorded an error.
+func feedBlocks(ctx context.Context, blockKeys []blockWork, workCh chan<- blockWork, firstErr *atomic.Value) {
+	for _, bk := range blockKeys {
+		if v := firstErr.Load(); v != nil {
+			return
+		}
+		select {
+		case workCh <- bk:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // collectCandidates reads candidate entries from candidateCh and merges them,
@@ -302,131 +505,37 @@ func reportProgress(ctx context.Context, logger *slog.Logger, prog *progress, st
 		case <-stopCh:
 			return
 		case <-ticker.C:
-			done := prog.partitionsDone.Load()
 			blocks := prog.blocksProcessed.Load()
+			totalBlocks := prog.totalBlocks.Load()
 			elapsed := time.Since(startTime)
 			blocksPerSec := float64(blocks) / elapsed.Seconds()
-			remaining := prog.totalPartitions - done
 			var eta time.Duration
-			if done > 0 {
-				eta = time.Duration(float64(elapsed) / float64(done) * float64(remaining))
+			if blocks > 0 && totalBlocks > 0 {
+				remaining := totalBlocks - blocks
+				eta = time.Duration(float64(elapsed) / float64(blocks) * float64(remaining))
+			}
+			listCount := prog.listCount.Load()
+			dlCount := prog.downloadCount.Load()
+			var avgListMs, avgDlMs, avgExtractMs float64
+			if listCount > 0 {
+				avgListMs = float64(prog.listDurationMs.Load()) / float64(listCount)
+			}
+			if dlCount > 0 {
+				avgDlMs = float64(prog.downloadDurationMs.Load()) / float64(dlCount)
+				avgExtractMs = float64(prog.extractDurationMs.Load()) / float64(dlCount)
 			}
 			logger.Info("progress",
-				"partitions", fmt.Sprintf("%d/%d", done, prog.totalPartitions),
-				"blocksProcessed", blocks,
+				"partitionsListed", fmt.Sprintf("%d/%d", prog.partitionsDone.Load(), prog.totalPartitions),
+				"blocksProcessed", fmt.Sprintf("%d/%d", blocks, totalBlocks),
 				"uniqueCandidates", prog.uniqueCandidates.Load(),
 				"blocksPerSec", fmt.Sprintf("%.0f", blocksPerSec),
 				"elapsed", elapsed.Round(time.Second),
-				"eta", eta.Round(time.Second))
+				"eta", eta.Round(time.Second),
+				"avgListMs", fmt.Sprintf("%.0f", avgListMs),
+				"avgDownloadMs", fmt.Sprintf("%.0f", avgDlMs),
+				"avgExtractMs", fmt.Sprintf("%.0f", avgExtractMs))
 		}
 	}
-}
-
-// scanPartitions reads partition prefixes from partCh, processes each one,
-// and sends discovered candidate addresses to candidateCh.
-func scanPartitions(
-	ctx context.Context,
-	logger *slog.Logger,
-	s3Reader outbound.S3Reader,
-	extractor *morpho_indexer.EventExtractor,
-	bucket string,
-	from, to int64,
-	partCh <-chan string,
-	candidateCh chan<- candidateEntry,
-	prog *progress,
-	firstErr *atomic.Value,
-	cancelScan context.CancelFunc,
-	wg *sync.WaitGroup,
-) {
-	defer wg.Done()
-	for part := range partCh {
-		if ctx.Err() != nil {
-			return
-		}
-		blocks, err := processPartition(ctx, logger, s3Reader, extractor, bucket, part, from, to, candidateCh)
-		if err != nil {
-			firstErr.CompareAndSwap(nil, err)
-			logger.Error("partition failed", "partition", part, "error", err)
-			cancelScan()
-			return
-		}
-		prog.blocksProcessed.Add(int64(blocks))
-		prog.partitionsDone.Add(1)
-	}
-}
-
-// feedPartitions sends partition prefixes into partCh, stopping early on
-// context cancellation or if a worker has recorded an error.
-func feedPartitions(ctx context.Context, partitions []string, partCh chan<- string, firstErr *atomic.Value) {
-	defer close(partCh)
-	for _, part := range partitions {
-		if v := firstErr.Load(); v != nil {
-			return
-		}
-		select {
-		case partCh <- part:
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-// processPartition lists receipts for a single partition, downloads them,
-// and sends candidate addresses to candidateCh.
-// Returns the number of blocks processed.
-func processPartition(
-	ctx context.Context,
-	logger *slog.Logger,
-	s3Reader outbound.S3Reader,
-	extractor *morpho_indexer.EventExtractor,
-	bucket, partitionPrefix string,
-	from, to int64,
-	candidateCh chan<- candidateEntry,
-) (int, error) {
-	morphoBlueAddr := morpho_indexer.MorphoBlueAddress
-
-	receiptKeys, err := listHighestVersionReceipts(ctx, s3Reader, bucket, partitionPrefix)
-	if err != nil {
-		return 0, fmt.Errorf("listing receipts for partition %s: %w", partitionPrefix, err)
-	}
-
-	// Collect in-range block numbers and check for gaps.
-	var inRangeBlocks []int64
-	for _, key := range receiptKeys {
-		parsed, ok := s3key.Parse(key)
-		if !ok {
-			continue
-		}
-		if parsed.BlockNumber >= from && parsed.BlockNumber <= to {
-			inRangeBlocks = append(inRangeBlocks, parsed.BlockNumber)
-		}
-	}
-	logBlockGaps(logger, partitionPrefix, inRangeBlocks, from, to)
-
-	blocks := 0
-	for _, key := range receiptKeys {
-		if ctx.Err() != nil {
-			return blocks, ctx.Err()
-		}
-
-		parsed, ok := s3key.Parse(key)
-		if !ok {
-			continue
-		}
-		if parsed.BlockNumber < from || parsed.BlockNumber > to {
-			continue
-		}
-
-		receipts, err := downloadReceipts(ctx, s3Reader, bucket, key)
-		if err != nil {
-			return blocks, fmt.Errorf("downloading %s: %w", key, err)
-		}
-
-		extractCandidatesFromReceipts(logger, receipts, extractor, morphoBlueAddr, parsed.BlockNumber, candidateCh)
-		blocks++
-	}
-
-	return blocks, nil
 }
 
 // logBlockGaps warns about missing blocks within a partition's expected range.

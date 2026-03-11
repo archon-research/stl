@@ -59,7 +59,7 @@ func (p *vaultProber) probeAllCandidates(
 		end := min(i+batchSize, len(addrs))
 		batch := addrs[i:end]
 
-		vaults, err := p.probeBatch(ctx, batch, candidates, blockNum)
+		vaults, err := p.probeBatchWithRetry(ctx, batch, candidates, blockNum)
 		if err != nil {
 			return nil, fmt.Errorf("probing batch %d-%d: %w", i, end, err)
 		}
@@ -72,6 +72,49 @@ func (p *vaultProber) probeAllCandidates(
 	}
 
 	return confirmed, nil
+}
+
+// probeBatchWithRetry tries probeBatch, and on failure retries with progressively
+// smaller sub-batches down to single-address probes. This handles "out of gas"
+// errors from the multicall when a batch contains contracts that consume excessive gas.
+func (p *vaultProber) probeBatchWithRetry(
+	ctx context.Context,
+	batch []common.Address,
+	firstBlocks map[common.Address]int64,
+	blockNum *big.Int,
+) ([]confirmedVault, error) {
+	vaults, err := p.probeBatch(ctx, batch, firstBlocks, blockNum)
+	if err == nil {
+		return vaults, nil
+	}
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	// Batch failed — retry with halved batch size, down to individual probes.
+	p.logger.Warn("batch probe failed, retrying with smaller batches",
+		"batchSize", len(batch),
+		"error", err)
+
+	if len(batch) == 1 {
+		// Single address failed — skip it.
+		p.logger.Warn("skipping candidate that fails probe",
+			"address", batch[0].Hex(),
+			"error", err)
+		return nil, nil
+	}
+
+	mid := len(batch) / 2
+	left, err := p.probeBatchWithRetry(ctx, batch[:mid], firstBlocks, blockNum)
+	if err != nil {
+		return nil, err
+	}
+	right, err := p.probeBatchWithRetry(ctx, batch[mid:], firstBlocks, blockNum)
+	if err != nil {
+		return nil, err
+	}
+	return append(left, right...), nil
 }
 
 // probeBatch probes a batch of candidate addresses. For each address, it calls
