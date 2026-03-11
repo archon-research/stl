@@ -46,7 +46,7 @@ func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 }
 
 // SaveBorrower saves a single borrower (debt) position record within an external transaction.
-// amount is the full current outstanding debt in raw wei; change is the raw wei event delta.
+// amount is the full current outstanding debt; change is the event delta.
 // Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
 func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte) error {
 	amountStr, err := bigIntToNumeric(amount)
