@@ -424,6 +424,8 @@ func buildBorrowMockRPC(t *testing.T, reserveAddress string) *httptest.Server {
 	const uiPoolDataProvider = "0x56b7a1012765c285afac8b8f25c69bf10ccfe978"
 	// Multicall3 address — aggregate3 calls go here.
 	const multicall3Address = "0xca11bde05977b3631167028862be2a173976ca11"
+	// SparkLend PoolDataProvider active at block 16776400.
+	const poolDataProvider = "0xfc21d6d146e6086b8359705c8b28512a983db0cb"
 
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
@@ -432,6 +434,14 @@ func buildBorrowMockRPC(t *testing.T, reserveAddress string) *httptest.Server {
 	multicallABI, err := abis.GetMulticall3ABI()
 	if err != nil {
 		t.Fatalf("load multicall3 ABI: %v", err)
+	}
+	sparklendABI, err := abis.GetSparklendUserReservesDataABI()
+	if err != nil {
+		t.Fatalf("load sparklend ABI: %v", err)
+	}
+	userReserveDataABI, err := abis.GetPoolDataProviderUserReserveDataABI()
+	if err != nil {
+		t.Fatalf("load pool data provider ABI: %v", err)
 	}
 
 	// Pre-pack ERC-20 metadata responses.
@@ -464,6 +474,57 @@ func buildBorrowMockRPC(t *testing.T, reserveAddress string) *httptest.Server {
 	}
 	aggHex := "0x" + hex.EncodeToString(aggResult)
 
+	// Pre-encode getUserReservesData response: DAI with ScaledVariableDebt > 0
+	// so extractUserPositionData identifies it as a debt asset.
+	type sparklendReserve struct {
+		UnderlyingAsset                common.Address
+		ScaledATokenBalance            *big.Int
+		UsageAsCollateralEnabledOnUser bool
+		ScaledVariableDebt             *big.Int
+	}
+	borrowAmount := new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	daiAddr := common.HexToAddress(reserveAddress)
+	getUserReservesResult, err := sparklendABI.Methods["getUserReservesData"].Outputs.Pack(
+		[]sparklendReserve{
+			{
+				UnderlyingAsset:                daiAddr,
+				ScaledATokenBalance:            big.NewInt(0),
+				UsageAsCollateralEnabledOnUser: false,
+				ScaledVariableDebt:             borrowAmount,
+			},
+		},
+		uint8(0), // eMode category
+	)
+	if err != nil {
+		t.Fatalf("pack getUserReservesData: %v", err)
+	}
+	getUserReservesHex := "0x" + hex.EncodeToString(getUserReservesResult)
+
+	// Pre-pack getUserReserveData result for DAI (via PoolDataProvider multicall).
+	// CurrentVariableDebt = borrowAmount so the debt appears in the DebtData slice.
+	zero := big.NewInt(0)
+	getUserReserveDataResult, err := userReserveDataABI.Methods["getUserReserveData"].Outputs.Pack(
+		zero,         // currentATokenBalance
+		zero,         // currentStableDebt
+		borrowAmount, // currentVariableDebt
+		zero,         // principalStableDebt
+		borrowAmount, // scaledVariableDebt
+		zero,         // stableBorrowRate
+		zero,         // liquidityRate
+		zero,         // stableRateLastUpdated (uint40)
+		false,        // usageAsCollateralEnabled
+	)
+	if err != nil {
+		t.Fatalf("pack getUserReserveData: %v", err)
+	}
+	poolDataProviderAggResult, err := multicallABI.Methods["aggregate3"].Outputs.Pack([]mcResult{
+		{Success: true, ReturnData: getUserReserveDataResult},
+	})
+	if err != nil {
+		t.Fatalf("pack poolDataProvider aggregate3: %v", err)
+	}
+	poolProviderAggHex := "0x" + hex.EncodeToString(poolDataProviderAggResult)
+
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -483,13 +544,23 @@ func buildBorrowMockRPC(t *testing.T, reserveAddress string) *httptest.Server {
 
 		switch strings.ToLower(target) {
 		case uiPoolDataProvider:
-			// getUserReservesData — return empty (0x) so no collateral fetching occurs.
-			testutil.WriteRPCResult(w, req.ID, json.RawMessage(`"0x"`))
+			// getUserReservesData — return DAI with ScaledVariableDebt > 0.
+			resultJSON, _ := json.Marshal(getUserReservesHex)
+			testutil.WriteRPCResult(w, req.ID, json.RawMessage(resultJSON))
 
 		case multicall3Address:
-			// aggregate3 for ERC-20 metadata — return valid encoded metadata.
-			resultJSON, _ := json.Marshal(aggHex)
-			testutil.WriteRPCResult(w, req.ID, json.RawMessage(resultJSON))
+			// Distinguish aggregate3 calls by inspecting the first inner call target.
+			firstTarget := extractFirstAggregate3CallTarget(t, req.Params)
+			switch firstTarget {
+			case poolDataProvider:
+				// getUserReserveData via PoolDataProvider.
+				resultJSON, _ := json.Marshal(poolProviderAggHex)
+				testutil.WriteRPCResult(w, req.ID, json.RawMessage(resultJSON))
+			default:
+				// ERC-20 metadata (DAI).
+				resultJSON, _ := json.Marshal(aggHex)
+				testutil.WriteRPCResult(w, req.ID, json.RawMessage(resultJSON))
+			}
 
 		default:
 			// Unknown target — return empty result rather than error so the
@@ -577,13 +648,72 @@ func extractFirstAggregate3CallTarget(t *testing.T, params json.RawMessage) stri
 	return strings.ToLower(calls[0].Target.Hex())
 }
 
+// extractAggregate3Calls parses the full Call3[] from a Multicall3 aggregate3 eth_call
+// request. Returns nil if parsing fails.
+func extractAggregate3Calls(params json.RawMessage) []struct {
+	Target       common.Address `json:"target"`
+	AllowFailure bool           `json:"allowFailure"`
+	CallData     []byte         `json:"callData"`
+} {
+	var p []json.RawMessage
+	if err := json.Unmarshal(params, &p); err != nil || len(p) < 1 {
+		return nil
+	}
+	var callObj map[string]string
+	if err := json.Unmarshal(p[0], &callObj); err != nil {
+		return nil
+	}
+	rawField := callObj["input"]
+	if rawField == "" {
+		rawField = callObj["data"]
+	}
+	dataHex := strings.TrimPrefix(strings.ToLower(rawField), "0x")
+	if len(dataHex) < 8+128 {
+		return nil
+	}
+	raw, err := hex.DecodeString(dataHex)
+	if err != nil || len(raw) < 4+32+32+32 {
+		return nil
+	}
+
+	multicallABI, err := abis.GetMulticall3ABI()
+	if err != nil {
+		return nil
+	}
+
+	unpacked, err := multicallABI.Methods["aggregate3"].Inputs.Unpack(raw[4:])
+	if err != nil || len(unpacked) == 0 {
+		return nil
+	}
+
+	calls, ok := unpacked[0].([]struct {
+		Target       common.Address `json:"target"`
+		AllowFailure bool           `json:"allowFailure"`
+		CallData     []byte         `json:"callData"`
+	})
+	if !ok {
+		return nil
+	}
+	return calls
+}
+
+// extractAssetFromGetUserReserveDataCalldata extracts the first address parameter
+// (the "asset") from a getUserReserveData(address asset, address user) calldata.
+// The calldata layout is: 4-byte selector + 32-byte asset + 32-byte user.
+func extractAssetFromGetUserReserveDataCalldata(callData []byte) common.Address {
+	if len(callData) < 4+32 {
+		return common.Address{}
+	}
+	return common.BytesToAddress(callData[4 : 4+32])
+}
+
 // buildBorrowWithCollateralMockRPC returns a mock JSON-RPC server that handles all
-// three RPC call patterns made by the position tracker when processing a Borrow event
-// where the borrower has active WETH collateral:
+// RPC call patterns made by the position tracker when processing a Borrow event
+// where the borrower has active WETH collateral and an outstanding DAI debt:
 //
 //  1. Direct eth_call to UiPoolDataProvider.getUserReservesData →
-//     returns ABI-encoded SparkLend 4-field tuple for WETH with
-//     scaledATokenBalance=1e18, usageAsCollateralEnabledOnUser=true
+//     returns ABI-encoded SparkLend 4-field tuples for WETH (collateral)
+//     and DAI (debt with scaledVariableDebt > 0)
 //
 //  2. eth_call to Multicall3.aggregate3 where first call target is DAI →
 //     returns ERC-20 metadata (decimals=18, symbol="DAI", name="Dai Stablecoin")
@@ -592,8 +722,7 @@ func extractFirstAggregate3CallTarget(t *testing.T, params json.RawMessage) stri
 //     returns ERC-20 metadata (decimals=18, symbol="WETH", name="Wrapped Ether")
 //
 //  4. eth_call to Multicall3.aggregate3 where first call target is PoolDataProvider →
-//     returns getUserReserveData for WETH:
-//     currentATokenBalance=1e18, usageAsCollateralEnabled=true
+//     returns getUserReserveData for WETH and DAI, ordered to match the request
 func buildBorrowWithCollateralMockRPC(t *testing.T, daiAddress, wethAddress, borrowerAddress string) *httptest.Server {
 	t.Helper()
 
@@ -650,12 +779,14 @@ func buildBorrowWithCollateralMockRPC(t *testing.T, daiAddress, wethAddress, bor
 		t.Fatalf("pack WETH aggregate3: %v", err)
 	}
 
-	// Pre-pack getUserReserveData result for WETH (via PoolDataProvider).
-	// currentATokenBalance=1e18, rest zeros, usageAsCollateralEnabled=true
+	// Pre-pack getUserReserveData results (via PoolDataProvider multicall).
 	one := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	borrowAmount := new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 	zero := big.NewInt(0)
 	stableRateLastUpdated := big.NewInt(0) // uint40 packed as *big.Int in ABI output
-	getUserReserveDataResult, err := userReserveDataABI.Methods["getUserReserveData"].Outputs.Pack(
+
+	// WETH: currentATokenBalance=1e18, usageAsCollateralEnabled=true
+	wethGetUserReserveDataResult, err := userReserveDataABI.Methods["getUserReserveData"].Outputs.Pack(
 		one,                   // currentATokenBalance
 		zero,                  // currentStableDebt
 		zero,                  // currentVariableDebt
@@ -667,24 +798,41 @@ func buildBorrowWithCollateralMockRPC(t *testing.T, daiAddress, wethAddress, bor
 		true,                  // usageAsCollateralEnabled
 	)
 	if err != nil {
-		t.Fatalf("pack getUserReserveData: %v", err)
+		t.Fatalf("pack WETH getUserReserveData: %v", err)
 	}
-	poolDataProviderAggResult, err := multicallABI.Methods["aggregate3"].Outputs.Pack([]mcResult{
-		{Success: true, ReturnData: getUserReserveDataResult},
-	})
+	// DAI: currentVariableDebt=borrowAmount (debt asset)
+	daiGetUserReserveDataResult, err := userReserveDataABI.Methods["getUserReserveData"].Outputs.Pack(
+		zero,                  // currentATokenBalance
+		zero,                  // currentStableDebt
+		borrowAmount,          // currentVariableDebt
+		zero,                  // principalStableDebt
+		borrowAmount,          // scaledVariableDebt
+		zero,                  // stableBorrowRate
+		zero,                  // liquidityRate
+		stableRateLastUpdated, // stableRateLastUpdated (uint40)
+		false,                 // usageAsCollateralEnabled
+	)
 	if err != nil {
-		t.Fatalf("pack poolDataProvider aggregate3: %v", err)
+		t.Fatalf("pack DAI getUserReserveData: %v", err)
 	}
 
-	// Pre-encode getUserReservesData response: WETH with 1e18 scaledATokenBalance,
-	// usageAsCollateralEnabledOnUser=true. The SparkLend ABI uses a 4-field tuple[].
+	// Map asset address → pre-packed getUserReserveData result for dynamic ordering.
+	wethAddr := common.HexToAddress(wethAddress)
+	daiAddr := common.HexToAddress(daiAddress)
+	reserveDataByAsset := map[common.Address][]byte{
+		wethAddr: wethGetUserReserveDataResult,
+		daiAddr:  daiGetUserReserveDataResult,
+	}
+
+	// Pre-encode getUserReservesData response: WETH with 1e18 scaledATokenBalance +
+	// collateral enabled, AND DAI with scaledVariableDebt > 0 (debt asset).
+	// The SparkLend ABI uses a 4-field tuple[].
 	type sparklendReserve struct {
 		UnderlyingAsset                common.Address
 		ScaledATokenBalance            *big.Int
 		UsageAsCollateralEnabledOnUser bool
 		ScaledVariableDebt             *big.Int
 	}
-	wethAddr := common.HexToAddress(wethAddress)
 	getUserReservesResult, err := sparklendABI.Methods["getUserReservesData"].Outputs.Pack(
 		[]sparklendReserve{
 			{
@@ -692,6 +840,12 @@ func buildBorrowWithCollateralMockRPC(t *testing.T, daiAddress, wethAddress, bor
 				ScaledATokenBalance:            one,
 				UsageAsCollateralEnabledOnUser: true,
 				ScaledVariableDebt:             zero,
+			},
+			{
+				UnderlyingAsset:                daiAddr,
+				ScaledATokenBalance:            zero,
+				UsageAsCollateralEnabledOnUser: false,
+				ScaledVariableDebt:             borrowAmount,
 			},
 		},
 		uint8(0), // eMode category
@@ -703,7 +857,6 @@ func buildBorrowWithCollateralMockRPC(t *testing.T, daiAddress, wethAddress, bor
 	getUserReservesHex := "0x" + hex.EncodeToString(getUserReservesResult)
 	daiAggHex := "0x" + hex.EncodeToString(daiAggResult)
 	wethAggHex := "0x" + hex.EncodeToString(wethAggResult)
-	poolProviderAggHex := "0x" + hex.EncodeToString(poolDataProviderAggResult)
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -736,8 +889,26 @@ func buildBorrowWithCollateralMockRPC(t *testing.T, daiAddress, wethAddress, bor
 				resultJSON, _ := json.Marshal(wethAggHex)
 				testutil.WriteRPCResult(w, req.ID, json.RawMessage(resultJSON))
 			case poolDataProvider:
-				// getUserReserveData via PoolDataProvider.
-				resultJSON, _ := json.Marshal(poolProviderAggHex)
+				// getUserReserveData via PoolDataProvider — build response in
+				// the same order as the request to handle non-deterministic
+				// map iteration in extractUserPositionData.
+				calls := extractAggregate3Calls(req.Params)
+				results := make([]mcResult, 0, len(calls))
+				for _, c := range calls {
+					asset := extractAssetFromGetUserReserveDataCalldata(c.CallData)
+					if data, ok := reserveDataByAsset[asset]; ok {
+						results = append(results, mcResult{Success: true, ReturnData: data})
+					} else {
+						results = append(results, mcResult{Success: false, ReturnData: nil})
+					}
+				}
+				aggOut, packErr := multicallABI.Methods["aggregate3"].Outputs.Pack(results)
+				if packErr != nil {
+					testutil.WriteRPCError(w, req.ID, -32000, "pack error: "+packErr.Error())
+					return
+				}
+				poolHex := "0x" + hex.EncodeToString(aggOut)
+				resultJSON, _ := json.Marshal(poolHex)
 				testutil.WriteRPCResult(w, req.ID, json.RawMessage(resultJSON))
 			default:
 				// DAI ERC-20 metadata (or any other token metadata call).

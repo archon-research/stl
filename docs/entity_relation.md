@@ -146,22 +146,26 @@ erDiagram
         smallint price_decimals
         timestamptz created_at
         timestamptz updated_at
+        varchar oracle_type
     }
 
     ProtocolOracle {
         bigint id PK
-        bigint protocol_id
-        bigint oracle_id
-        bigint from_block
+        bigint protocol_id "UK1"
+        bigint oracle_id "UK1"
+        bigint from_block "UK1"
         timestamptz created_at
     }
 
     OracleAsset {
         bigint id PK
-        bigint oracle_id "UK1"
-        bigint token_id "UK1"
+        bigint oracle_id
+        bigint token_id
         boolean enabled
         timestamptz created_at
+        bytea feed_address
+        smallint feed_decimals
+        varchar quote_currency
     }
 
     OffchainPriceSource {
@@ -215,7 +219,7 @@ erDiagram
         int version "UK1"
         boolean block_published
         int chain_id PK "UK1"
-        timestamptz created_at PK "UK1, hypertable: 1d chunks, hash(chain_id,4), compress 1d, retain 30d"
+        timestamptz created_at PK "UK1, hypertable: 1d chunks, hash(chain_id,4), retain 30d"
     }
 
     ReorgEvents {
@@ -234,6 +238,102 @@ erDiagram
         int chain_id FK "UK"
     }
 
+    AllocationPosition {
+        bigint id PK
+        int chain_id FK "UK1"
+        bigint token_id FK "UK1"
+        text star
+        bytea proxy_address "UK1"
+        numeric balance
+        numeric scaled_balance
+        bigint block_number "UK1"
+        int block_version "UK1"
+        bytea tx_hash "UK1"
+        int log_index "UK1"
+        numeric tx_amount
+        text direction "UK1"
+        timestamptz created_at
+    }
+
+    MorphoMarket {
+        bigint id PK
+        int chain_id FK "UK1"
+        bigint protocol_id FK
+        bytea market_id "UK1"
+        bigint loan_token_id FK
+        bigint collateral_token_id FK
+        bytea oracle_address
+        bytea irm_address
+        numeric lltv
+        bigint created_at_block
+        timestamptz created_at
+    }
+
+    MorphoMarketPosition {
+        bigint user_id PK
+        bigint morpho_market_id PK
+        bigint block_number PK
+        int block_version PK
+        timestamptz timestamp PK "hypertable: 1d chunks, compress 1d"
+        numeric supply_shares
+        numeric borrow_shares
+        numeric collateral
+        numeric supply_assets
+        numeric borrow_assets
+    }
+
+    MorphoMarketState {
+        bigint morpho_market_id PK
+        bigint block_number PK
+        int block_version PK
+        timestamptz timestamp PK "hypertable: 1d chunks, compress 1d"
+        numeric total_supply_assets
+        numeric total_supply_shares
+        numeric total_borrow_assets
+        numeric total_borrow_shares
+        bigint last_update
+        numeric fee
+        numeric prev_borrow_rate
+        numeric interest_accrued
+        numeric fee_shares
+    }
+
+    MorphoVault {
+        bigint id PK
+        int chain_id FK "UK1"
+        bigint protocol_id FK
+        bytea address "UK1"
+        varchar name
+        varchar symbol
+        bigint asset_token_id FK
+        smallint vault_version
+        bigint created_at_block
+        timestamptz created_at
+    }
+
+    MorphoVaultPosition {
+        bigint user_id PK
+        bigint morpho_vault_id PK
+        bigint block_number PK
+        int block_version PK
+        timestamptz timestamp PK "hypertable: 1d chunks, compress 1d"
+        numeric shares
+        numeric assets
+    }
+
+    MorphoVaultState {
+        bigint morpho_vault_id PK
+        bigint block_number PK
+        int block_version PK
+        timestamptz timestamp PK "hypertable: 1d chunks, compress 1d"
+        numeric total_assets
+        numeric total_shares
+        numeric fee_shares
+        numeric new_total_assets
+        numeric previous_total_assets
+        numeric management_fee_shares
+    }
+
     Chain ||--o{ Token : ""
     Chain ||--o{ Protocol : ""
     Chain ||--o{ User : ""
@@ -241,19 +341,33 @@ erDiagram
     Chain ||--o{ BlockStates : ""
     Chain ||--o{ ReorgEvents : ""
     Chain ||--o{ BackfillWatermark : ""
+    Chain ||--o{ AllocationPosition : ""
+    Chain ||--o{ MorphoMarket : ""
+    Chain ||--o{ MorphoVault : ""
     Token ||--o{ ReceiptToken : ""
     Token ||--o{ DebtToken : ""
     Token ||--o{ SparklendReserveData : ""
     Token ||--o{ Borrower : ""
     Token ||--o{ BorrowerCollateral : ""
     Token ||--o{ OffchainPriceAsset : ""
+    Token ||--o{ AllocationPosition : ""
+    Token ||--o{ MorphoMarket : ""
+    Token ||--o{ MorphoVault : ""
     Protocol ||--o{ ReceiptToken : ""
     Protocol ||--o{ DebtToken : ""
     Protocol ||--o{ SparklendReserveData : ""
     Protocol ||--o{ Borrower : ""
     Protocol ||--o{ BorrowerCollateral : ""
     Protocol ||--o{ ProtocolEvent : ""
+    Protocol ||--o{ MorphoMarket : ""
+    Protocol ||--o{ MorphoVault : ""
     User ||--o{ Borrower : ""
     User ||--o{ BorrowerCollateral : ""
+    User ||--o{ MorphoMarketPosition : ""
+    User ||--o{ MorphoVaultPosition : ""
     OffchainPriceSource ||--o{ OffchainPriceAsset : ""
+    MorphoMarket ||--o{ MorphoMarketPosition : ""
+    MorphoMarket ||--o{ MorphoMarketState : ""
+    MorphoVault ||--o{ MorphoVaultPosition : ""
+    MorphoVault ||--o{ MorphoVaultState : ""
 ```

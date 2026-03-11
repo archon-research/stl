@@ -214,7 +214,7 @@ func TestService_ConvertToDecimalAdjusted(t *testing.T) {
 			name:     "1.5 USDC (6 decimals)",
 			amount:   big.NewInt(1500000),
 			decimals: 6,
-			want:     "1.500000",
+			want:     "1.5",
 		},
 		{
 			name:     "1 ETH (18 decimals)",
@@ -226,13 +226,43 @@ func TestService_ConvertToDecimalAdjusted(t *testing.T) {
 			name:     "0.5 ETH (18 decimals)",
 			amount:   new(big.Int).Div(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil), big.NewInt(2)),
 			decimals: 18,
-			want:     "0.500000000000000000",
+			want:     "0.5",
 		},
 		{
 			name:     "no decimals",
 			amount:   big.NewInt(12345),
 			decimals: 0,
 			want:     "12345",
+		},
+		{
+			name:     "trailing zeros stripped: 1500.5 USDC (6 decimals)",
+			amount:   big.NewInt(1500500000),
+			decimals: 6,
+			want:     "1500.5",
+		},
+		{
+			name:     "leading zeros preserved: 0.000001 USDC (6 decimals)",
+			amount:   big.NewInt(1),
+			decimals: 6,
+			want:     "0.000001",
+		},
+		{
+			name:     "leading zeros preserved: 0.000001 ETH (18 decimals)",
+			amount:   new(big.Int).Exp(big.NewInt(10), big.NewInt(12), nil),
+			decimals: 18,
+			want:     "0.000001",
+		},
+		{
+			name:     "1 wei (18 decimals)",
+			amount:   big.NewInt(1),
+			decimals: 18,
+			want:     "0.000000000000000001",
+		},
+		{
+			name:     "mixed fractional: 1500.000001 USDC (6 decimals)",
+			amount:   big.NewInt(1500000001),
+			decimals: 6,
+			want:     "1500.000001",
 		},
 	}
 
