@@ -39,37 +39,7 @@ func multicallFactoryFor(mc outbound.Multicaller) MulticallerFactory {
 // ---------------------------------------------------------------------------
 
 // mockConsumer implements outbound.SQSConsumer.
-type mockConsumer struct {
-	mu                  sync.Mutex
-	receiveMessagesFn   func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
-	deleteMessageFn     func(ctx context.Context, receiptHandle string) error
-	deleteMessageCalls  int
-	receiveMessageCalls int
-}
-
-func (m *mockConsumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error) {
-	m.mu.Lock()
-	m.receiveMessageCalls++
-	m.mu.Unlock()
-	if m.receiveMessagesFn != nil {
-		return m.receiveMessagesFn(ctx, maxMessages)
-	}
-	return nil, nil
-}
-
-func (m *mockConsumer) DeleteMessage(ctx context.Context, receiptHandle string) error {
-	m.mu.Lock()
-	m.deleteMessageCalls++
-	m.mu.Unlock()
-	if m.deleteMessageFn != nil {
-		return m.deleteMessageFn(ctx, receiptHandle)
-	}
-	return nil
-}
-
-func (m *mockConsumer) Close() error {
-	return nil
-}
+type mockConsumer = testutil.MockSQSConsumer
 
 // mockRepo implements outbound.OnchainPriceRepository.
 type mockRepo struct {
@@ -545,7 +515,7 @@ func TestStart(t *testing.T) {
 			// For success case, provide a mock consumer that blocks on receive so the goroutine
 			// doesn't spin. For error cases, it doesn't matter since Start returns early.
 			consumer := &mockConsumer{
-				receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+				ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 					// Block until context is cancelled to avoid spinning
 					<-ctx.Done()
 					return nil, ctx.Err()
@@ -620,7 +590,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		receipt1 := "receipt-1"
 
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -664,11 +634,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		repo.mu.Unlock()
 
 		// Verify delete was called
-		consumer.mu.Lock()
-		if consumer.deleteMessageCalls < 1 {
-			t.Errorf("DeleteMessage call count = %d, want >= 1", consumer.deleteMessageCalls)
+		consumer.Mu.Lock()
+		if consumer.DeleteMessageCalls < 1 {
+			t.Errorf("DeleteMessage call count = %d, want >= 1", consumer.DeleteMessageCalls)
 		}
-		consumer.mu.Unlock()
+		consumer.Mu.Unlock()
 
 		// Now verify change detection: second block with same prices should not upsert.
 		// Reset repo call count and deliver a second message.
@@ -710,7 +680,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}
 
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(_ context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(_ context.Context, _ int) ([]outbound.SQSMessage, error) {
 				return nil, fmt.Errorf("SQS service unavailable")
 			},
 		}
@@ -732,11 +702,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Verify processMessages was attempted (no crash)
-		consumer.mu.Lock()
-		if consumer.receiveMessageCalls == 0 {
+		consumer.Mu.Lock()
+		if consumer.ReceiveMessageCalls == 0 {
 			t.Error("expected at least one ReceiveMessage call")
 		}
-		consumer.mu.Unlock()
+		consumer.Mu.Unlock()
 
 		if stopErr := svc.Stop(); stopErr != nil {
 			t.Errorf("Stop: %v", stopErr)
@@ -751,7 +721,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}
 
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				return nil, nil
 			},
 		}
@@ -792,7 +762,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 		delivered := false
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -823,11 +793,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Message should not have been deleted (process failed)
-		consumer.mu.Lock()
-		if consumer.deleteMessageCalls != 0 {
-			t.Errorf("DeleteMessage call count = %d, want 0 (nil body should fail)", consumer.deleteMessageCalls)
+		consumer.Mu.Lock()
+		if consumer.DeleteMessageCalls != 0 {
+			t.Errorf("DeleteMessage call count = %d, want 0 (nil body should fail)", consumer.DeleteMessageCalls)
 		}
-		consumer.mu.Unlock()
+		consumer.Mu.Unlock()
 
 		// UpsertPrices should NOT have been called
 		repo.mu.Lock()
@@ -850,7 +820,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 		delivered := false
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -881,11 +851,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Message should not have been deleted
-		consumer.mu.Lock()
-		if consumer.deleteMessageCalls != 0 {
-			t.Errorf("DeleteMessage call count = %d, want 0 (invalid JSON)", consumer.deleteMessageCalls)
+		consumer.Mu.Lock()
+		if consumer.DeleteMessageCalls != 0 {
+			t.Errorf("DeleteMessage call count = %d, want 0 (invalid JSON)", consumer.DeleteMessageCalls)
 		}
-		consumer.mu.Unlock()
+		consumer.Mu.Unlock()
 
 		if stopErr := svc.Stop(); stopErr != nil {
 			t.Errorf("Stop: %v", stopErr)
@@ -902,7 +872,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		delivered := false
 		body := makeBlockEventJSON(18000000, 1, blockTimestamp)
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -938,11 +908,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Message should not have been deleted (processBlock failed)
-		consumer.mu.Lock()
-		if consumer.deleteMessageCalls != 0 {
-			t.Errorf("DeleteMessage call count = %d, want 0 (multicall error)", consumer.deleteMessageCalls)
+		consumer.Mu.Lock()
+		if consumer.DeleteMessageCalls != 0 {
+			t.Errorf("DeleteMessage call count = %d, want 0 (multicall error)", consumer.DeleteMessageCalls)
 		}
-		consumer.mu.Unlock()
+		consumer.Mu.Unlock()
 
 		// UpsertPrices should NOT have been called
 		repo.mu.Lock()
@@ -970,7 +940,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		delivered := false
 		body := makeBlockEventJSON(18000000, 1, blockTimestamp)
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -983,7 +953,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
-			deleteMessageFn: func(_ context.Context, _ string) error {
+			DeleteMessageFn: func(_ context.Context, _ string) error {
 				return fmt.Errorf("SQS delete failed")
 			},
 		}
@@ -1008,11 +978,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}, "UpsertPrices to be called")
 
 		// DeleteMessage was attempted (even though it failed)
-		consumer.mu.Lock()
-		if consumer.deleteMessageCalls < 1 {
-			t.Errorf("DeleteMessage call count = %d, want >= 1", consumer.deleteMessageCalls)
+		consumer.Mu.Lock()
+		if consumer.DeleteMessageCalls < 1 {
+			t.Errorf("DeleteMessage call count = %d, want >= 1", consumer.DeleteMessageCalls)
 		}
-		consumer.mu.Unlock()
+		consumer.Mu.Unlock()
 
 		if stopErr := svc.Stop(); stopErr != nil {
 			t.Errorf("Stop: %v", stopErr)
@@ -1033,7 +1003,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		delivered := false
 		body := makeBlockEventJSON(18000000, 1, blockTimestamp)
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -1063,11 +1033,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Message should NOT have been deleted (processBlock returned error)
-		consumer.mu.Lock()
-		if consumer.deleteMessageCalls != 0 {
-			t.Errorf("DeleteMessage call count = %d, want 0 (price mismatch)", consumer.deleteMessageCalls)
+		consumer.Mu.Lock()
+		if consumer.DeleteMessageCalls != 0 {
+			t.Errorf("DeleteMessage call count = %d, want 0 (price mismatch)", consumer.DeleteMessageCalls)
 		}
-		consumer.mu.Unlock()
+		consumer.Mu.Unlock()
 
 		// UpsertPrices should NOT have been called
 		repo.mu.Lock()
@@ -1099,7 +1069,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		delivered := false
 		body := makeBlockEventJSON(18000000, 1, blockTimestamp)
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -1134,11 +1104,11 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}, "UpsertPrices to be called")
 
 		// Message should NOT have been deleted because processMessage returned error
-		consumer.mu.Lock()
-		if consumer.deleteMessageCalls != 0 {
-			t.Errorf("DeleteMessage call count = %d, want 0 (UpsertPrices failed)", consumer.deleteMessageCalls)
+		consumer.Mu.Lock()
+		if consumer.DeleteMessageCalls != 0 {
+			t.Errorf("DeleteMessage call count = %d, want 0 (UpsertPrices failed)", consumer.DeleteMessageCalls)
 		}
-		consumer.mu.Unlock()
+		consumer.Mu.Unlock()
 
 		if stopErr := svc.Stop(); stopErr != nil {
 			t.Errorf("Stop: %v", stopErr)
@@ -1157,7 +1127,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		mc := newOracleMulticallerWithT(t, []*big.Int{price1, price2})
 
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
@@ -1261,7 +1231,7 @@ func TestStart_FeedOracle(t *testing.T) {
 	feedOracleSetup(repo)
 
 	consumer := &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -1330,7 +1300,7 @@ func TestStart_ChronicleOracle(t *testing.T) {
 	}
 
 	consumer := &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -1388,7 +1358,7 @@ func TestProcessBlock_FeedOracle(t *testing.T) {
 	feedOracleSetup(repo)
 
 	consumer := &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -1459,7 +1429,7 @@ func TestProcessBlock_FeedOracle_ChangeDetection(t *testing.T) {
 	feedOracleSetup(repo)
 
 	consumer := &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -1565,7 +1535,7 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 	}
 
 	consumer := &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -1656,7 +1626,7 @@ func TestProcessBlock_FeedOracle_AllFeedsFail(t *testing.T) {
 	feedOracleSetup(repo)
 
 	consumer := &mockConsumer{
-		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -1721,7 +1691,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 		feedOracleSetup(repo)
 
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
@@ -1774,7 +1744,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 		feedOracleSetup(repo)
 
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
@@ -1837,7 +1807,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 		feedOracleSetup(repo)
 
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
@@ -1910,7 +1880,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 		defaultRepoSetup(repo) // aave oracle
 
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
@@ -1978,7 +1948,7 @@ func TestStop(t *testing.T) {
 		}
 
 		consumer := &mockConsumer{
-			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			ReceiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
