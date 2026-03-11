@@ -618,7 +618,10 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 		}
 
 		decimalAdjustedBalance := s.convertToDecimalAdjusted(balance, metadata.Decimals)
-		change := s.convertToDecimalAdjusted(eventData.Amount, metadata.Decimals)
+		change := "0"
+		if eventData.Amount != nil {
+			change = s.convertToDecimalAdjusted(eventData.Amount, metadata.Decimals)
+		}
 		if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedBalance, change, string(eventData.EventType), common.FromHex(eventData.TxHash), eventData.CollateralEnabled); err != nil {
 			return fmt.Errorf("failed to save collateral toggle: %w", err)
 		}
