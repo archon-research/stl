@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/big"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -45,14 +46,23 @@ func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 }
 
 // SaveBorrower saves a single borrower (debt) position record within an external transaction.
-// amount is the full current outstanding debt; change is the event delta.
+// amount is the full current outstanding debt in raw wei; change is the raw wei event delta.
 // Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
-func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte) error {
-	_, err := tx.Exec(ctx,
+func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte) error {
+	amountStr, err := bigIntToNumeric(amount)
+	if err != nil {
+		return fmt.Errorf("failed to convert amount: %w", err)
+	}
+	changeStr, err := bigIntToNumeric(change)
+	if err != nil {
+		return fmt.Errorf("failed to convert change: %w", err)
+	}
+
+	_, err = tx.Exec(ctx,
 		`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
-		userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, eventType, txHash)
+		userID, protocolID, tokenID, blockNumber, blockVersion, amountStr, changeStr, eventType, txHash)
 
 	if err != nil {
 		return fmt.Errorf("failed to save borrower: %w", err)
@@ -61,14 +71,23 @@ func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID
 }
 
 // SaveBorrowerCollateral saves a single collateral position record within an external transaction.
-// amount is the full current collateral balance; change is the event delta.
+// amount is the full current collateral balance in raw wei; change is the raw wei event delta.
 // Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
-func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte, collateralEnabled bool) error {
-	_, err := tx.Exec(ctx,
+func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte, collateralEnabled bool) error {
+	amountStr, err := bigIntToNumeric(amount)
+	if err != nil {
+		return fmt.Errorf("failed to convert amount: %w", err)
+	}
+	changeStr, err := bigIntToNumeric(change)
+	if err != nil {
+		return fmt.Errorf("failed to convert change: %w", err)
+	}
+
+	_, err = tx.Exec(ctx,
 		`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
-		userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, eventType, txHash, collateralEnabled)
+		userID, protocolID, tokenID, blockNumber, blockVersion, amountStr, changeStr, eventType, txHash, collateralEnabled)
 
 	if err != nil {
 		return fmt.Errorf("failed to save collateral: %w", err)
@@ -77,7 +96,7 @@ func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.
 }
 
 // SaveBorrowerCollaterals saves multiple borrower collateral position records using pgx.Batch.
-// amount is the full current collateral balance; change is the event delta.
+// amount is the full current collateral balance in raw wei; change is the raw wei event delta.
 // Uses ON CONFLICT DO NOTHING to ensure immutability - existing records are never modified.
 // This is critical for reproducible calculations: data used in a calculation must not change.
 // Returns nil if records slice is empty.
@@ -88,11 +107,20 @@ func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx
 
 	batch := &pgx.Batch{}
 	for _, rec := range records {
+		amountStr, err := bigIntToNumeric(rec.Amount)
+		if err != nil {
+			return fmt.Errorf("failed to convert amount for record: %w", err)
+		}
+		changeStr, err := bigIntToNumeric(rec.Change)
+		if err != nil {
+			return fmt.Errorf("failed to convert change for record: %w", err)
+		}
+
 		batch.Queue(
 			`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
-			rec.UserID, rec.ProtocolID, rec.TokenID, rec.BlockNumber, rec.BlockVersion, rec.Amount, rec.Change, rec.EventType, rec.TxHash, rec.CollateralEnabled,
+			rec.UserID, rec.ProtocolID, rec.TokenID, rec.BlockNumber, rec.BlockVersion, amountStr, changeStr, rec.EventType, rec.TxHash, rec.CollateralEnabled,
 		)
 	}
 

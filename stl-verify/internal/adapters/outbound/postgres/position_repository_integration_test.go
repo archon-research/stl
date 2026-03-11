@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math/big"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -122,8 +123,24 @@ func (f *positionTestFixture) createTestFixtures(t *testing.T, ctx context.Conte
 	}
 }
 
+// collateralQueryResult is a test-only struct for DB round-trip verification.
+// Amount and Change are read back as strings (via amount::text) to verify
+// the NUMERIC values stored in the DB without needing to parse back into *big.Int.
+type collateralQueryResult struct {
+	UserID            int64
+	ProtocolID        int64
+	TokenID           int64
+	BlockNumber       int64
+	BlockVersion      int
+	Amount            string
+	Change            string
+	EventType         string
+	TxHash            []byte
+	CollateralEnabled bool
+}
+
 // queryCollaterals returns all collateral records for verification.
-func (f *positionTestFixture) queryCollaterals(t *testing.T, ctx context.Context) []outbound.CollateralRecord {
+func (f *positionTestFixture) queryCollaterals(t *testing.T, ctx context.Context) []collateralQueryResult {
 	t.Helper()
 
 	rows, err := f.pool.Query(ctx,
@@ -134,9 +151,9 @@ func (f *positionTestFixture) queryCollaterals(t *testing.T, ctx context.Context
 	}
 	defer rows.Close()
 
-	var results []outbound.CollateralRecord
+	var results []collateralQueryResult
 	for rows.Next() {
-		var r outbound.CollateralRecord
+		var r collateralQueryResult
 		if err := rows.Scan(&r.UserID, &r.ProtocolID, &r.TokenID, &r.BlockNumber, &r.BlockVersion, &r.Amount, &r.Change, &r.EventType, &r.TxHash, &r.CollateralEnabled); err != nil {
 			t.Fatalf("failed to scan collateral: %v", err)
 		}
@@ -178,7 +195,7 @@ func TestSaveBorrower_RepayWithZeroBalance(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	err = fixture.repo.SaveBorrower(ctx, tx, fixture.userID, fixture.protocolID, fixture.tokenID, 1100, 0, "0", "500", "Repay", []byte{0xaa, 0xbb, 0xcc})
+	err = fixture.repo.SaveBorrower(ctx, tx, fixture.userID, fixture.protocolID, fixture.tokenID, 1100, 0, big.NewInt(0), big.NewInt(500), "Repay", []byte{0xaa, 0xbb, 0xcc})
 	if err != nil {
 		t.Fatalf("SaveBorrower failed: %v", err)
 	}
@@ -261,8 +278,8 @@ func TestSaveBorrowerCollaterals_SingleRecord(t *testing.T) {
 		TokenID:           fixture.tokenID,
 		BlockNumber:       1000,
 		BlockVersion:      0,
-		Amount:            "123456789012345678901234567890",
-		Change:            "100",
+		Amount:            bigIntFromString("123456789012345678901234567890"),
+		Change:            big.NewInt(100),
 		EventType:         "Supply",
 		TxHash:            []byte{0xab, 0xc1, 0x23},
 		CollateralEnabled: true,
@@ -305,10 +322,10 @@ func TestSaveBorrowerCollaterals_SingleRecord(t *testing.T) {
 	if got.BlockVersion != input.BlockVersion {
 		t.Errorf("BlockVersion mismatch: got %d, want %d", got.BlockVersion, input.BlockVersion)
 	}
-	if got.Amount != input.Amount {
+	if got.Amount != input.Amount.String() {
 		t.Errorf("Amount mismatch: got %s, want %s", got.Amount, input.Amount)
 	}
-	if got.Change != input.Change {
+	if got.Change != input.Change.String() {
 		t.Errorf("Change mismatch: got %s, want %s", got.Change, input.Change)
 	}
 	if got.EventType != input.EventType {
@@ -329,15 +346,19 @@ func TestSaveBorrowerCollaterals_TenRecords(t *testing.T) {
 
 	// Create 10 unique records (different block_version for same block)
 	inputs := make([]outbound.CollateralRecord, 10)
+	wantAmounts := make([]string, 10) // expected amount strings for DB round-trip
+	wantChanges := make([]string, 10)
 	for i := 0; i < 10; i++ {
+		wantAmounts[i] = fmt.Sprintf("%d000000000000000000", i+1)
+		wantChanges[i] = fmt.Sprintf("%d00", i+1)
 		inputs[i] = outbound.CollateralRecord{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
 			TokenID:           fixture.tokenID,
 			BlockNumber:       2000,
 			BlockVersion:      i,
-			Amount:            fmt.Sprintf("%d000000000000000000", i+1),
-			Change:            fmt.Sprintf("%d00", i+1),
+			Amount:            bigIntFromString(wantAmounts[i]),
+			Change:            bigIntFromString(wantChanges[i]),
 			EventType:         fmt.Sprintf("Event%d", i),
 			TxHash:            []byte{0x00, 0x00, byte(i)},
 			CollateralEnabled: i%2 == 0,
@@ -371,8 +392,11 @@ func TestSaveBorrowerCollaterals_TenRecords(t *testing.T) {
 		if got.BlockVersion != want.BlockVersion {
 			t.Errorf("record %d: BlockVersion mismatch: got %d, want %d", i, got.BlockVersion, want.BlockVersion)
 		}
-		if got.Amount != want.Amount {
-			t.Errorf("record %d: Amount mismatch: got %s, want %s", i, got.Amount, want.Amount)
+		if got.Amount != wantAmounts[i] {
+			t.Errorf("record %d: Amount mismatch: got %s, want %s", i, got.Amount, wantAmounts[i])
+		}
+		if got.Change != wantChanges[i] {
+			t.Errorf("record %d: Change mismatch: got %s, want %s", i, got.Change, wantChanges[i])
 		}
 		if got.EventType != want.EventType {
 			t.Errorf("record %d: EventType mismatch: got %s, want %s", i, got.EventType, want.EventType)
@@ -396,8 +420,8 @@ func TestSaveBorrowerCollaterals_Rollback(t *testing.T) {
 			TokenID:           fixture.tokenID,
 			BlockNumber:       3000,
 			BlockVersion:      i,
-			Amount:            "1000000000000000000",
-			Change:            "0",
+			Amount:            bigIntFromString("1000000000000000000"),
+			Change:            big.NewInt(0),
 			EventType:         "Supply",
 			TxHash:            []byte{0x01, 0x00, byte(i)},
 			CollateralEnabled: true,
@@ -433,15 +457,17 @@ func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 
 	// Create 10 records where record 5 is a duplicate of record 0
 	inputs := make([]outbound.CollateralRecord, 10)
+	wantAmountsD := make([]string, 10)
 	for i := 0; i < 10; i++ {
+		wantAmountsD[i] = fmt.Sprintf("%d000000000000000000", i+1)
 		inputs[i] = outbound.CollateralRecord{
 			UserID:            fixture.userID,
 			ProtocolID:        fixture.protocolID,
 			TokenID:           fixture.tokenID,
 			BlockNumber:       4000,
 			BlockVersion:      i,
-			Amount:            fmt.Sprintf("%d000000000000000000", i+1),
-			Change:            fmt.Sprintf("%d00", i+1),
+			Amount:            bigIntFromString(wantAmountsD[i]),
+			Change:            bigIntFromString(fmt.Sprintf("%d00", i+1)),
 			EventType:         fmt.Sprintf("Event%d", i),
 			TxHash:            []byte{0x02, 0x00, byte(i)},
 			CollateralEnabled: true,
@@ -471,12 +497,12 @@ func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 			ProtocolID:        fixture.protocolID,
 			TokenID:           fixture.tokenID,
 			BlockNumber:       4000,
-			BlockVersion:      i,                        // Same key as before
-			Amount:            "9999999999999999999",    // Different amount - should be ignored
-			Change:            "9999999999999999999",    // Different change - should be ignored
-			EventType:         "Modified",               // Different event type - should be ignored
-			TxHash:            []byte{0xff, 0xff, 0xff}, // Different tx hash - should be ignored
-			CollateralEnabled: false,                    // Different enabled - should be ignored
+			BlockVersion:      i,                                       // Same key as before
+			Amount:            bigIntFromString("9999999999999999999"), // Different amount - should be ignored
+			Change:            bigIntFromString("9999999999999999999"), // Different change - should be ignored
+			EventType:         "Modified",                              // Different event type - should be ignored
+			TxHash:            []byte{0xff, 0xff, 0xff},                // Different tx hash - should be ignored
+			CollateralEnabled: false,                                   // Different enabled - should be ignored
 		}
 	}
 
@@ -504,7 +530,7 @@ func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 	// Verify original data was preserved (not overwritten)
 	for i, got := range records {
 		want := inputs[i]
-		if got.Amount != want.Amount {
+		if got.Amount != want.Amount.String() {
 			t.Errorf("record %d: Amount was modified: got %s, want %s (original should be preserved)", i, got.Amount, want.Amount)
 		}
 		if got.EventType != want.EventType {
@@ -528,8 +554,8 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 		TokenID:           fixture.tokenID,
 		BlockNumber:       5000,
 		BlockVersion:      0,
-		Amount:            "1000000000000000000",
-		Change:            "100",
+		Amount:            bigIntFromString("1000000000000000000"),
+		Change:            big.NewInt(100),
 		EventType:         "Original",
 		TxHash:            []byte{0x03, 0x00, 0x00},
 		CollateralEnabled: true,
@@ -555,8 +581,8 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 			TokenID:           fixture.tokenID,
 			BlockNumber:       5000,
 			BlockVersion:      0, // Duplicate - should be ignored
-			Amount:            "9999999999999999999",
-			Change:            "9999999999999999999",
+			Amount:            bigIntFromString("9999999999999999999"),
+			Change:            bigIntFromString("9999999999999999999"),
 			EventType:         "Duplicate",
 			TxHash:            []byte{0x04, 0x00, 0x00},
 			CollateralEnabled: false,
@@ -567,8 +593,8 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 			TokenID:           fixture.tokenID,
 			BlockNumber:       5000,
 			BlockVersion:      1, // New
-			Amount:            "2000000000000000000",
-			Change:            "200",
+			Amount:            bigIntFromString("2000000000000000000"),
+			Change:            big.NewInt(200),
 			EventType:         "New1",
 			TxHash:            []byte{0x04, 0x00, 0x01},
 			CollateralEnabled: true,
@@ -579,8 +605,8 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 			TokenID:           fixture.tokenID,
 			BlockNumber:       5000,
 			BlockVersion:      2, // New
-			Amount:            "3000000000000000000",
-			Change:            "300",
+			Amount:            bigIntFromString("3000000000000000000"),
+			Change:            big.NewInt(300),
 			EventType:         "New2",
 			TxHash:            []byte{0x04, 0x00, 0x02},
 			CollateralEnabled: false,
@@ -609,7 +635,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 	}
 
 	// Verify version 0 has original data (not overwritten)
-	if records[0].Amount != initial.Amount {
+	if records[0].Amount != initial.Amount.String() {
 		t.Errorf("version 0 was modified: got %s, want %s", records[0].Amount, initial.Amount)
 	}
 	if records[0].EventType != initial.EventType {
@@ -637,8 +663,8 @@ func TestSaveBorrowerCollaterals_ForeignKeyViolation(t *testing.T) {
 		TokenID:           fixture.tokenID,
 		BlockNumber:       6000,
 		BlockVersion:      0,
-		Amount:            "1000000000000000000",
-		Change:            "0",
+		Amount:            bigIntFromString("1000000000000000000"),
+		Change:            big.NewInt(0),
 		EventType:         "Supply",
 		TxHash:            []byte{0x05, 0x00, 0x00},
 		CollateralEnabled: true,
@@ -670,8 +696,8 @@ func TestSaveBorrowerCollaterals_LargeAmountPrecision(t *testing.T) {
 		TokenID:           fixture.tokenID,
 		BlockNumber:       7000,
 		BlockVersion:      0,
-		Amount:            largeAmount,
-		Change:            largeAmount,
+		Amount:            bigIntFromString(largeAmount),
+		Change:            bigIntFromString(largeAmount),
 		EventType:         "Supply",
 		TxHash:            []byte{0x06, 0x00, 0x00},
 		CollateralEnabled: true,
@@ -738,8 +764,8 @@ func TestSaveBorrowerCollaterals_ConcurrentTransactions(t *testing.T) {
 		TokenID:           fixture.tokenID,
 		BlockNumber:       8000,
 		BlockVersion:      0,
-		Amount:            "1000000000000000000",
-		Change:            "100",
+		Amount:            bigIntFromString("1000000000000000000"),
+		Change:            big.NewInt(100),
 		EventType:         "Tx1",
 		TxHash:            []byte{0x07, 0x00, 0x01},
 		CollateralEnabled: true,
@@ -751,8 +777,8 @@ func TestSaveBorrowerCollaterals_ConcurrentTransactions(t *testing.T) {
 		TokenID:           fixture.tokenID,
 		BlockNumber:       8000,
 		BlockVersion:      0,
-		Amount:            "2000000000000000000",
-		Change:            "200",
+		Amount:            bigIntFromString("2000000000000000000"),
+		Change:            big.NewInt(200),
 		EventType:         "Tx2",
 		TxHash:            []byte{0x07, 0x00, 0x02},
 		CollateralEnabled: false,
@@ -792,8 +818,8 @@ func TestSaveBorrowerCollaterals_TransactionIsolation(t *testing.T) {
 		TokenID:           fixture.tokenID,
 		BlockNumber:       9000,
 		BlockVersion:      0,
-		Amount:            "1000000000000000000",
-		Change:            "0",
+		Amount:            bigIntFromString("1000000000000000000"),
+		Change:            big.NewInt(0),
 		EventType:         "Isolated",
 		TxHash:            []byte{0x08, 0x00, 0x00},
 		CollateralEnabled: true,
@@ -836,6 +862,15 @@ func TestSaveBorrowerCollaterals_TransactionIsolation(t *testing.T) {
 	if len(recordsAfterCommit) != 1 {
 		t.Errorf("expected 1 record after commit, got %d", len(recordsAfterCommit))
 	}
+}
+
+// bigIntFromString parses a decimal string into *big.Int. Panics on invalid input.
+func bigIntFromString(s string) *big.Int {
+	n, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		panic("bigIntFromString: invalid input: " + s)
+	}
+	return n
 }
 
 // Compile-time check that pgx.Tx satisfies what we need
