@@ -9,7 +9,7 @@ base/<service>/          # env-agnostic manifests
   kustomization.yaml
 overlays/
   prod/                  # namespace: vector, ECR: 030797368798
-  staging/               # namespace: vector-staging, ECR: 579039992622
+  staging/               # namespace: vector, ECR: 579039992622
 ```
 
 ## Services
