@@ -11,11 +11,6 @@ var q96 = new(big.Int).Lsh(big.NewInt(1), 96)
 // getSqrtRatioAtTick computes sqrt(1.0001^tick) * 2^96.
 // This is the Go equivalent of Uniswap V3's TickMath.getSqrtRatioAtTick.
 func getSqrtRatioAtTick(tick int) *big.Int {
-	absTick := tick
-	if absTick < 0 {
-		absTick = -absTick
-	}
-
 	// Use high-precision float to compute sqrt(1.0001^tick) * 2^96.
 	// For production use with extreme ticks, a lookup-table approach
 	// (matching Solidity's TickMath) would be more precise, but this
@@ -28,7 +23,7 @@ func getSqrtRatioAtTick(tick int) *big.Int {
 	q96F := new(big.Float).SetPrec(256).SetInt(q96)
 	ratioF.Mul(ratioF, q96F)
 
-	result, _ := ratioF.Int(nil)
+	result, _ := ratioF.Int(new(big.Int))
 	return result
 }
 

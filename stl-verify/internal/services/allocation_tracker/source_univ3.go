@@ -166,12 +166,8 @@ func (s *UniV3Source) fetchChainBalances(
 
 	// Flatten all token IDs for positions lookup.
 	var allTokenIDs []*big.Int
-	tokenIDToWallet := make(map[string]common.Address)
-	for wallet, ids := range tokenIDs {
-		for _, id := range ids {
-			allTokenIDs = append(allTokenIDs, id)
-			tokenIDToWallet[id.String()] = wallet
-		}
+	for _, ids := range tokenIDs {
+		allTokenIDs = append(allTokenIDs, ids...)
 	}
 
 	if len(allTokenIDs) == 0 {
@@ -185,11 +181,6 @@ func (s *UniV3Source) fetchChainBalances(
 	}
 
 	// Collect unique pools we need slot0 from.
-	type poolKey struct {
-		token0 common.Address
-		token1 common.Address
-		fee    *big.Int
-	}
 	poolAddresses := make(map[common.Address]bool)
 	for _, e := range entries {
 		poolAddresses[e.ContractAddress] = true
