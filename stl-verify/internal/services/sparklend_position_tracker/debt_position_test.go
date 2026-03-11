@@ -163,156 +163,125 @@ func TestExtractUserPositionData_ReturnsDebtAndCollateral(t *testing.T) {
 	}
 }
 
-func TestSaveBorrowerRecord_BorrowUsesCurrentDebtNotEventDelta(t *testing.T) {
-	const blockNumber = int64(20000000)
-	const decimals = 18
-
-	eventDelta := new(big.Int).Mul(big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
-	currentDebt := new(big.Int).Mul(big.NewInt(3), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
-
+func TestSaveBorrowerRecord(t *testing.T) {
 	reserveAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	usdcAddr := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 	userAddr := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
 
-	positionRepo := &mockPositionRepository{}
-	svc := newBorrowerRecordTestService(positionRepo)
-
-	err := svc.txManager.WithTransaction(context.Background(), func(tx pgx.Tx) error {
-		return svc.saveBorrowerRecord(context.Background(), tx, &PositionEventData{
-			EventType: EventBorrow,
-			TxHash:    "0xabc",
-			User:      userAddr,
-			Reserve:   reserveAddr,
-			Amount:    eventDelta,
-		}, TokenMetadata{Symbol: "WETH", Decimals: decimals, Name: "Wrapped Ether"}, []DebtData{{
-			Asset:       reserveAddr,
-			Decimals:    decimals,
-			Symbol:      "WETH",
-			Name:        "Wrapped Ether",
-			CurrentDebt: currentDebt,
-		}}, 1, 1, 1, blockNumber, 0)
-	})
-	if err != nil {
-		t.Fatalf("saveBorrowerRecord() failed: %v", err)
+	tests := []struct {
+		name        string
+		eventType   entity.EventType
+		eventDelta  *big.Int
+		currentDebt *big.Int // nil means debt data is missing
+		decimals    int
+		reserveAddr common.Address
+		symbol      string
+		tokenName   string
+		wantErr     bool
+		wantAmount  string
+		wantChange  string
+	}{
+		{
+			name:        "BorrowUsesCurrentDebtNotEventDelta",
+			eventType:   EventBorrow,
+			eventDelta:  new(big.Int).Mul(big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			currentDebt: new(big.Int).Mul(big.NewInt(3), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			decimals:    18,
+			reserveAddr: reserveAddr,
+			symbol:      "WETH",
+			tokenName:   "Wrapped Ether",
+			wantAmount:  "3",
+			wantChange:  "1",
+		},
+		{
+			name:        "RepayUsesCurrentDebtNotEventDelta",
+			eventType:   EventRepay,
+			eventDelta:  new(big.Int).Mul(big.NewInt(500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
+			currentDebt: new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
+			decimals:    6,
+			reserveAddr: usdcAddr,
+			symbol:      "USDC",
+			tokenName:   "USD Coin",
+			wantAmount:  "1500",
+			wantChange:  "500",
+		},
+		{
+			name:        "RepayToZeroUsesZeroAmountWhenDebtMissing",
+			eventType:   EventRepay,
+			eventDelta:  new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			currentDebt: nil,
+			decimals:    18,
+			reserveAddr: reserveAddr,
+			symbol:      "WETH",
+			tokenName:   "Wrapped Ether",
+			wantAmount:  "0",
+			wantChange:  "2",
+		},
+		{
+			name:        "BorrowReturnsErrorWhenDebtMissing",
+			eventType:   EventBorrow,
+			eventDelta:  new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			currentDebt: nil,
+			decimals:    18,
+			reserveAddr: reserveAddr,
+			symbol:      "WETH",
+			tokenName:   "Wrapped Ether",
+			wantErr:     true,
+		},
 	}
 
-	if len(positionRepo.saveBorrowerCalls) != 1 {
-		t.Fatalf("expected 1 SaveBorrower call, got %d", len(positionRepo.saveBorrowerCalls))
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			positionRepo := &mockPositionRepository{}
+			svc := newBorrowerRecordTestService(positionRepo)
 
-	call := positionRepo.saveBorrowerCalls[0]
-	if call.Amount != "3" {
-		t.Errorf("SaveBorrower amount = %q, want %q", call.Amount, "3")
-	}
-	if call.Change != "1" {
-		t.Errorf("SaveBorrower change = %q, want %q", call.Change, "1")
-	}
-}
+			var debtData []DebtData
+			if tt.currentDebt != nil {
+				debtData = []DebtData{{
+					Asset:       tt.reserveAddr,
+					Decimals:    tt.decimals,
+					Symbol:      tt.symbol,
+					Name:        tt.tokenName,
+					CurrentDebt: tt.currentDebt,
+				}}
+			}
 
-func TestSaveBorrowerRecord_RepayUsesCurrentDebtNotEventDelta(t *testing.T) {
-	const blockNumber = int64(20000001)
-	const decimals = 6
+			err := svc.txManager.WithTransaction(context.Background(), func(tx pgx.Tx) error {
+				return svc.saveBorrowerRecord(context.Background(), tx, &PositionEventData{
+					EventType: tt.eventType,
+					TxHash:    "0xtest",
+					User:      userAddr,
+					Reserve:   tt.reserveAddr,
+					Amount:    tt.eventDelta,
+				}, TokenMetadata{Symbol: tt.symbol, Decimals: tt.decimals, Name: tt.tokenName}, debtData, 1, 1, 1, 20000000, 0)
+			})
 
-	repayDelta := new(big.Int).Mul(big.NewInt(500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil))
-	currentDebt := new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if len(positionRepo.saveBorrowerCalls) != 0 {
+					t.Fatalf("expected 0 SaveBorrower calls, got %d", len(positionRepo.saveBorrowerCalls))
+				}
+				return
+			}
 
-	reserveAddr := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
-	userAddr := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+			if err != nil {
+				t.Fatalf("saveBorrowerRecord() failed: %v", err)
+			}
 
-	positionRepo := &mockPositionRepository{}
-	svc := newBorrowerRecordTestService(positionRepo)
+			if len(positionRepo.saveBorrowerCalls) != 1 {
+				t.Fatalf("expected 1 SaveBorrower call, got %d", len(positionRepo.saveBorrowerCalls))
+			}
 
-	err := svc.txManager.WithTransaction(context.Background(), func(tx pgx.Tx) error {
-		return svc.saveBorrowerRecord(context.Background(), tx, &PositionEventData{
-			EventType: EventRepay,
-			TxHash:    "0xdef",
-			User:      userAddr,
-			Reserve:   reserveAddr,
-			Amount:    repayDelta,
-		}, TokenMetadata{Symbol: "USDC", Decimals: decimals, Name: "USD Coin"}, []DebtData{{
-			Asset:       reserveAddr,
-			Decimals:    decimals,
-			Symbol:      "USDC",
-			Name:        "USD Coin",
-			CurrentDebt: currentDebt,
-		}}, 1, 1, 1, blockNumber, 0)
-	})
-	if err != nil {
-		t.Fatalf("saveBorrowerRecord() failed: %v", err)
-	}
-
-	if len(positionRepo.saveBorrowerCalls) != 1 {
-		t.Fatalf("expected 1 SaveBorrower call, got %d", len(positionRepo.saveBorrowerCalls))
-	}
-
-	call := positionRepo.saveBorrowerCalls[0]
-	if call.Amount != "1500" {
-		t.Errorf("SaveBorrower amount = %q, want %q", call.Amount, "1500")
-	}
-	if call.Change != "500" {
-		t.Errorf("SaveBorrower change = %q, want %q", call.Change, "500")
-	}
-}
-
-func TestSaveBorrowerRecord_RepayToZeroUsesZeroAmountWhenDebtMissing(t *testing.T) {
-	const decimals = 18
-
-	repayDelta := new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
-	reserveAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
-	userAddr := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
-
-	positionRepo := &mockPositionRepository{}
-	svc := newBorrowerRecordTestService(positionRepo)
-
-	err := svc.txManager.WithTransaction(context.Background(), func(tx pgx.Tx) error {
-		return svc.saveBorrowerRecord(context.Background(), tx, &PositionEventData{
-			EventType: EventRepay,
-			TxHash:    "0xfallback",
-			User:      userAddr,
-			Reserve:   reserveAddr,
-			Amount:    repayDelta,
-		}, TokenMetadata{Symbol: "WETH", Decimals: decimals, Name: "Wrapped Ether"}, nil, 1, 1, 1, 20000000, 0)
-	})
-	if err != nil {
-		t.Fatalf("saveBorrowerRecord() failed: %v", err)
-	}
-
-	if len(positionRepo.saveBorrowerCalls) != 1 {
-		t.Fatalf("expected 1 SaveBorrower call, got %d", len(positionRepo.saveBorrowerCalls))
-	}
-
-	call := positionRepo.saveBorrowerCalls[0]
-	if call.Amount != "0" {
-		t.Errorf("fallback amount = %q, want %q", call.Amount, "0")
-	}
-	if call.Change != "2" {
-		t.Errorf("fallback change = %q, want %q", call.Change, "2")
-	}
-}
-
-func TestSaveBorrowerRecord_BorrowReturnsErrorWhenDebtMissing(t *testing.T) {
-	const decimals = 18
-
-	borrowDelta := new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
-	reserveAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
-	userAddr := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
-
-	positionRepo := &mockPositionRepository{}
-	svc := newBorrowerRecordTestService(positionRepo)
-
-	err := svc.txManager.WithTransaction(context.Background(), func(tx pgx.Tx) error {
-		return svc.saveBorrowerRecord(context.Background(), tx, &PositionEventData{
-			EventType: EventBorrow,
-			TxHash:    "0xmissing",
-			User:      userAddr,
-			Reserve:   reserveAddr,
-			Amount:    borrowDelta,
-		}, TokenMetadata{Symbol: "WETH", Decimals: decimals, Name: "Wrapped Ether"}, nil, 1, 1, 1, 20000000, 0)
-	})
-	if err == nil {
-		t.Fatal("expected error when borrow debt data is missing, got nil")
-	}
-	if len(positionRepo.saveBorrowerCalls) != 0 {
-		t.Fatalf("expected 0 SaveBorrower calls, got %d", len(positionRepo.saveBorrowerCalls))
+			call := positionRepo.saveBorrowerCalls[0]
+			if call.Amount != tt.wantAmount {
+				t.Errorf("SaveBorrower amount = %q, want %q", call.Amount, tt.wantAmount)
+			}
+			if call.Change != tt.wantChange {
+				t.Errorf("SaveBorrower change = %q, want %q", call.Change, tt.wantChange)
+			}
+		})
 	}
 }
 

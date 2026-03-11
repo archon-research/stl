@@ -762,6 +762,8 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	}
 
 	txHashHex := common.BytesToHash(txHash).Hex()
+	// Debts are intentionally discarded: snapshotUserPosition captures only the collateral
+	// side. Debt positions are tracked separately via saveBorrowerRecord on Borrow/Repay events.
 	collaterals, _, err := s.extractUserPositionData(ctx, user, protocolAddress, chainID, blockNumber, txHashHex)
 	if err != nil {
 		s.logger.Warn("failed to extract collateral data for user", "user", user.Hex(), "error", err)
@@ -815,8 +817,7 @@ func (s *Service) extractUserPositionData(ctx context.Context, user common.Addre
 
 	reserves, err := blockchainSvc.getUserReservesData(ctx, user, blockNumber)
 	if err != nil {
-		s.logger.Warn("failed to get user reserves", "error", err, "tx", txHash, "block", blockNumber)
-		return []CollateralData{}, []DebtData{}, nil
+		return nil, nil, fmt.Errorf("failed to get user reserves data: %w", err)
 	}
 
 	// Identify collateral and debt assets, deduplicating for the multicall.

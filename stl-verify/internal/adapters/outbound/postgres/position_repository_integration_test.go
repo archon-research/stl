@@ -337,6 +337,7 @@ func TestSaveBorrowerCollaterals_TenRecords(t *testing.T) {
 			BlockNumber:       2000,
 			BlockVersion:      i,
 			Amount:            fmt.Sprintf("%d000000000000000000", i+1),
+			Change:            fmt.Sprintf("%d00", i+1),
 			EventType:         fmt.Sprintf("Event%d", i),
 			TxHash:            []byte{0x00, 0x00, byte(i)},
 			CollateralEnabled: i%2 == 0,
@@ -396,6 +397,7 @@ func TestSaveBorrowerCollaterals_Rollback(t *testing.T) {
 			BlockNumber:       3000,
 			BlockVersion:      i,
 			Amount:            "1000000000000000000",
+			Change:            "0",
 			EventType:         "Supply",
 			TxHash:            []byte{0x01, 0x00, byte(i)},
 			CollateralEnabled: true,
@@ -439,6 +441,7 @@ func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 			BlockNumber:       4000,
 			BlockVersion:      i,
 			Amount:            fmt.Sprintf("%d000000000000000000", i+1),
+			Change:            fmt.Sprintf("%d00", i+1),
 			EventType:         fmt.Sprintf("Event%d", i),
 			TxHash:            []byte{0x02, 0x00, byte(i)},
 			CollateralEnabled: true,
@@ -470,6 +473,7 @@ func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 			BlockNumber:       4000,
 			BlockVersion:      i,                        // Same key as before
 			Amount:            "9999999999999999999",    // Different amount - should be ignored
+			Change:            "9999999999999999999",    // Different change - should be ignored
 			EventType:         "Modified",               // Different event type - should be ignored
 			TxHash:            []byte{0xff, 0xff, 0xff}, // Different tx hash - should be ignored
 			CollateralEnabled: false,                    // Different enabled - should be ignored
@@ -525,6 +529,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 		BlockNumber:       5000,
 		BlockVersion:      0,
 		Amount:            "1000000000000000000",
+		Change:            "100",
 		EventType:         "Original",
 		TxHash:            []byte{0x03, 0x00, 0x00},
 		CollateralEnabled: true,
@@ -551,6 +556,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 			BlockNumber:       5000,
 			BlockVersion:      0, // Duplicate - should be ignored
 			Amount:            "9999999999999999999",
+			Change:            "9999999999999999999",
 			EventType:         "Duplicate",
 			TxHash:            []byte{0x04, 0x00, 0x00},
 			CollateralEnabled: false,
@@ -562,6 +568,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 			BlockNumber:       5000,
 			BlockVersion:      1, // New
 			Amount:            "2000000000000000000",
+			Change:            "200",
 			EventType:         "New1",
 			TxHash:            []byte{0x04, 0x00, 0x01},
 			CollateralEnabled: true,
@@ -573,6 +580,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 			BlockNumber:       5000,
 			BlockVersion:      2, // New
 			Amount:            "3000000000000000000",
+			Change:            "300",
 			EventType:         "New2",
 			TxHash:            []byte{0x04, 0x00, 0x02},
 			CollateralEnabled: false,
@@ -630,6 +638,7 @@ func TestSaveBorrowerCollaterals_ForeignKeyViolation(t *testing.T) {
 		BlockNumber:       6000,
 		BlockVersion:      0,
 		Amount:            "1000000000000000000",
+		Change:            "0",
 		EventType:         "Supply",
 		TxHash:            []byte{0x05, 0x00, 0x00},
 		CollateralEnabled: true,
@@ -662,6 +671,7 @@ func TestSaveBorrowerCollaterals_LargeAmountPrecision(t *testing.T) {
 		BlockNumber:       7000,
 		BlockVersion:      0,
 		Amount:            largeAmount,
+		Change:            largeAmount,
 		EventType:         "Supply",
 		TxHash:            []byte{0x06, 0x00, 0x00},
 		CollateralEnabled: true,
@@ -729,6 +739,7 @@ func TestSaveBorrowerCollaterals_ConcurrentTransactions(t *testing.T) {
 		BlockNumber:       8000,
 		BlockVersion:      0,
 		Amount:            "1000000000000000000",
+		Change:            "100",
 		EventType:         "Tx1",
 		TxHash:            []byte{0x07, 0x00, 0x01},
 		CollateralEnabled: true,
@@ -741,6 +752,7 @@ func TestSaveBorrowerCollaterals_ConcurrentTransactions(t *testing.T) {
 		BlockNumber:       8000,
 		BlockVersion:      0,
 		Amount:            "2000000000000000000",
+		Change:            "200",
 		EventType:         "Tx2",
 		TxHash:            []byte{0x07, 0x00, 0x02},
 		CollateralEnabled: false,
@@ -781,6 +793,7 @@ func TestSaveBorrowerCollaterals_TransactionIsolation(t *testing.T) {
 		BlockNumber:       9000,
 		BlockVersion:      0,
 		Amount:            "1000000000000000000",
+		Change:            "0",
 		EventType:         "Isolated",
 		TxHash:            []byte{0x08, 0x00, 0x00},
 		CollateralEnabled: true,
