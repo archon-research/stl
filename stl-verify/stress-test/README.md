@@ -143,22 +143,6 @@ Restore to real Alchemy at any time:
 make kind-use-alchemy
 ```
 
----
-
-## EKS stress test namespace
-
-Prerequisites before EKS stress tests can run:
-- All app manifests present (allocation-tracker, backup, event-persister, backfill)
-- Dedicated ElastiCache instance provisioned in infra repo
-- TigerData stress test database created
-- IRSA role for `stl-stress-test` namespace (S3, SNS, SQS permissions)
-- ArgoCD Application deployed pointing at `k8s/stress-test/`
-
-Once in place, the only difference from local is the kubectl context and the absence of
-LocalStack — real AWS services are used throughout.
-
----
-
 ## Admin API reference
 
 | Endpoint | Method | Body / Params | Description |

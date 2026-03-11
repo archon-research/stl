@@ -1,5 +1,6 @@
 -- Stress test verification queries.
--- Run with: psql $DATABASE_URL -v chain_id=1 -f stress-test/verify/checks.sql
+-- Run with: psql $DATABASE_URL -v chain_id=1 -v window=64 -f stress-test/verify/checks.sql
+-- Use window=64 normally; set window=$((64+REORG_DEPTH)) when reorgs were injected.
 --
 -- All queries should return 0 for a healthy canonical chain.
 
@@ -13,13 +14,14 @@ FROM generate_series(
 LEFT JOIN block_states b ON b.number = s.n AND b.chain_id = :chain_id AND NOT b.is_orphaned
 WHERE b.number IS NULL;
 
--- 2. No unexpected orphaned blocks in the recent window (last 64 blocks)
+-- 2. No unexpected orphaned blocks in the recent window (last :window blocks)
 -- Orphaned blocks within the finality window should only exist for reorged forks.
+-- Pass -v window=64 normally; use window=$((64+REORG_DEPTH)) when reorgs were injected.
 SELECT count(*) AS unexpected_orphans
 FROM block_states
 WHERE chain_id = :chain_id
   AND is_orphaned
-  AND number > (SELECT max(number) - 64 FROM block_states WHERE chain_id = :chain_id AND NOT is_orphaned);
+  AND number > (SELECT max(number) - :window FROM block_states WHERE chain_id = :chain_id AND NOT is_orphaned);
 
 -- 3. ParentHash continuity on the canonical chain
 -- Returns: number of canonical blocks whose parent_hash does not match the previous block's hash.
