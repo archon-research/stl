@@ -300,17 +300,17 @@ async def test_single_borrower_full_attribution(
 ) -> None:
     """User 1 has only spUSDS debt, so 100% of their collateral is attributed.
 
-    User 1: 10 WETH ($20,000) + 0.5 cbBTC ($25,000) collateral, 30,000 spUSDS debt.
-    User 2: 5 WETH ($10,000) collateral, 6,000 spUSDS + 4,000 spUSDC debt (60%/40%).
+    User 1: 10 WETH + 0.5 cbBTC collateral, 30,000 spUSDS debt.
+    User 2: 5 WETH collateral, 6,000 spUSDS + 4,000 spUSDC debt (60%/40%).
 
-    Attributed to spUSDS:
-      User 1 WETH:  $20,000 * 1.0 = $20,000
-      User 1 cbBTC: $25,000 * 1.0 = $25,000
-      User 2 WETH:  $10,000 * 0.6 = $6,000
+    Attributed to spUSDS (by raw debt ratio, no price conversion):
+      User 1 WETH:  10 * 1.0  = 10
+      User 1 cbBTC: 0.5 * 1.0 = 0.5
+      User 2 WETH:  5 * 0.6   = 3
 
-    Totals: WETH = $26,000, cbBTC = $25,000, grand total = $51,000
-    WETH pct  = 26000/51000 * 100 = 50.9804%
-    cbBTC pct = 25000/51000 * 100 = 49.0196%
+    Totals: WETH = 13, cbBTC = 0.5, grand total = 13.5
+    WETH pct  = 13/13.5 * 100 = 96.2963%
+    cbBTC pct = 0.5/13.5 * 100 = 3.7037%
     """
     result = await repository.get_backed_breakdown(
         protocol_id=test_ids["protocol_id"],
@@ -326,11 +326,11 @@ async def test_single_borrower_full_attribution(
     assert "WETH" in by_symbol
     assert "cbBTC" in by_symbol
 
-    assert by_symbol["WETH"].total_backing_usd == Decimal("26000.00")
-    assert by_symbol["cbBTC"].total_backing_usd == Decimal("25000.00")
+    assert by_symbol["WETH"].amount == Decimal("13.00000000")
+    assert by_symbol["cbBTC"].amount == Decimal("0.50000000")
 
-    assert by_symbol["WETH"].backing_pct == Decimal("50.9804")
-    assert by_symbol["cbBTC"].backing_pct == Decimal("49.0196")
+    assert by_symbol["WETH"].backing_pct == Decimal("96.2963")
+    assert by_symbol["cbBTC"].backing_pct == Decimal("3.7037")
 
 
 @pytest.mark.asyncio(loop_scope="module")

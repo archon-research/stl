@@ -59,13 +59,13 @@ async def test_delegates_to_default_repository(
             CollateralContribution(
                 token_id=10,
                 symbol="WETH",
-                total_backing_usd=Decimal("1000.00"),
+                amount=Decimal("1000.00"),
                 backing_pct=Decimal("60.0000"),
             ),
             CollateralContribution(
                 token_id=11,
                 symbol="cbBTC",
-                total_backing_usd=Decimal("666.67"),
+                amount=Decimal("666.67"),
                 backing_pct=Decimal("40.0000"),
             ),
         ),
@@ -121,13 +121,13 @@ async def test_routes_to_morpho_when_vault_exists(
             CollateralContribution(
                 token_id=20,
                 symbol="USDC",
-                total_backing_usd=Decimal("530000.00"),
+                amount=Decimal("530000.00"),
                 backing_pct=Decimal("53.00"),
             ),
             CollateralContribution(
                 token_id=21,
                 symbol="WETH",
-                total_backing_usd=Decimal("320000.00"),
+                amount=Decimal("320000.00"),
                 backing_pct=Decimal("32.00"),
             ),
         ),

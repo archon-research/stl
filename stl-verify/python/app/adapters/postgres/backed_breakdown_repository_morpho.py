@@ -106,12 +106,18 @@ WITH morpho_vaults AS (
   ),
   total AS (
       SELECT sum(amount) as total_amount FROM all_backing
+  ),
+  vault_chain AS (
+      SELECT chain_id FROM morpho_vault WHERE id = :vault_id
   )
-  SELECT a.symbol,
+  SELECT t.id AS token_id,
+         a.symbol,
          round(sum(a.amount)::numeric, 2) as backed_amount,
-         round((sum(a.amount) / t.total_amount * 100)::numeric, 2) as backing_pct
-  FROM all_backing a, total t
-  GROUP BY a.symbol, t.total_amount
+         round((sum(a.amount) / tot.total_amount * 100)::numeric, 2) as backing_pct
+  FROM all_backing a
+  CROSS JOIN total tot
+  JOIN token t ON t.symbol = a.symbol AND t.chain_id = (SELECT chain_id FROM vault_chain)
+  GROUP BY t.id, a.symbol, tot.total_amount
   HAVING sum(a.amount) > 0.01
   ORDER BY backed_amount DESC;
 """
@@ -145,7 +151,7 @@ class MorphoBackedBreakdownRepository(BackedBreakdownRepositoryPort):
             CollateralContribution(
                 token_id=row.token_id,
                 symbol=row.symbol,
-                total_backing_usd=Decimal(str(row.backed_amount)),
+                amount=Decimal(str(row.backed_amount)),
                 backing_pct=Decimal(str(row.backing_pct)),
             )
             for row in rows

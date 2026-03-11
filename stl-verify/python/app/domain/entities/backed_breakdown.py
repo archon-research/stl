@@ -8,7 +8,7 @@ class CollateralContribution:
 
     token_id: int
     symbol: str
-    total_backing_usd: Decimal
+    amount: Decimal
     backing_pct: Decimal
 
 
