@@ -21,14 +21,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// errNotVault signals that an address is definitively not a MetaMorpho vault.
-// Transient failures (network, DB) must NOT be wrapped with this type so that
-// discovery is retried on the next event from that address.
-type errNotVault struct{ err error }
-
-func (e *errNotVault) Error() string { return e.err.Error() }
-func (e *errNotVault) Unwrap() error { return e.err }
-
 // morphoBlueDeployBlocks maps chain IDs to the block at which Morpho Blue
 // was deployed on that chain. Morpho Blue is deployed via CREATE2 at the
 // same address on all chains, but each deployment occurred at a different block.
@@ -331,7 +323,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 		default:
 			s.logger.Debug("attempting vault discovery", "address", logAddress.Hex(), "tx", receipt.TransactionHash)
 			if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
-				var nv *errNotVault
+				var nv *ErrNotVault
 				if errors.As(err, &nv) {
 					s.vaultRegistry.MarkNotVault(logAddress)
 					s.logger.Debug("not a MetaMorpho vault", "address", logAddress.Hex(), "reason", err)
@@ -452,7 +444,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 
 	// Validate this is a decodable MetaMorpho event before making on-chain calls.
 	if _, err := s.eventExtractor.ExtractMetaMorphoEvent(log); err != nil {
-		return &errNotVault{err: fmt.Errorf("event decode failed: %w", err)}
+		return &ErrNotVault{Err: fmt.Errorf("event decode failed: %w", err)}
 	}
 
 	// Fetch vault metadata (including version) from on-chain.
