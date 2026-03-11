@@ -11,7 +11,6 @@ import (
 // MockUserRepository implements outbound.UserRepository for testing.
 type MockUserRepository struct {
 	GetOrCreateUserFn            func(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error)
-	UpsertUsersFn                func(ctx context.Context, users []*entity.User) error
 	UpsertUserProtocolMetadataFn func(ctx context.Context, metadata []*entity.UserProtocolMetadata) error
 }
 
@@ -20,13 +19,6 @@ func (m *MockUserRepository) GetOrCreateUser(ctx context.Context, tx pgx.Tx, use
 		return m.GetOrCreateUserFn(ctx, tx, user)
 	}
 	return 1, nil
-}
-
-func (m *MockUserRepository) UpsertUsers(ctx context.Context, users []*entity.User) error {
-	if m.UpsertUsersFn != nil {
-		return m.UpsertUsersFn(ctx, users)
-	}
-	return nil
 }
 
 func (m *MockUserRepository) UpsertUserProtocolMetadata(ctx context.Context, metadata []*entity.UserProtocolMetadata) error {
