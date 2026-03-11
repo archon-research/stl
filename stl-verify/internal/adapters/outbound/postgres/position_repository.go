@@ -71,7 +71,7 @@ func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID
 }
 
 // SaveBorrowerCollateral saves a single collateral position record within an external transaction.
-// amount is the full current collateral balance in raw wei; change is the raw wei event delta.
+// amount is the full current collateral balance; change is the event delta.
 // Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
 func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte, collateralEnabled bool) error {
 	amountStr, err := bigIntToNumeric(amount)
@@ -96,7 +96,7 @@ func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.
 }
 
 // SaveBorrowerCollaterals saves multiple borrower collateral position records using pgx.Batch.
-// amount is the full current collateral balance in raw wei; change is the raw wei event delta.
+// amount is the full current collateral balance; change is the event delta.
 // Uses ON CONFLICT DO NOTHING to ensure immutability - existing records are never modified.
 // This is critical for reproducible calculations: data used in a calculation must not change.
 // Returns nil if records slice is empty.
