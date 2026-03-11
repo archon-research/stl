@@ -24,6 +24,14 @@ func startTestServer(t *testing.T, store *DataStore) *Server {
 	return s
 }
 
+// emitOrFail calls emit and fails the test immediately if an error is returned.
+func emitOrFail(t *testing.T, r *Replayer) {
+	t.Helper()
+	if err := r.emit(); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+}
+
 // serverPost sends a JSON-RPC POST to the server and returns the raw response body.
 func serverPost(t *testing.T, s *Server, body string) []byte {
 	t.Helper()
@@ -138,7 +146,7 @@ func TestServer_HTTP_GetBlockByHash(t *testing.T) {
 	s := startTestServer(t, store)
 
 	// Emit one block to populate the derived-hash map, then retrieve its hash.
-	s.replayer.emit()
+	emitOrFail(t, s.replayer)
 	header, ok := s.replayer.HeaderForNumber(s.replayer.CurrentBlockNumber())
 	if !ok {
 		t.Fatal("expected emitted block to be retrievable")
@@ -179,7 +187,7 @@ func TestServer_HTTP_Batch(t *testing.T) {
 	s := startTestServer(t, store)
 
 	// Emit one block to populate the derived-hash map.
-	s.replayer.emit()
+	emitOrFail(t, s.replayer)
 	header, ok := s.replayer.HeaderForNumber(s.replayer.CurrentBlockNumber())
 	if !ok {
 		t.Fatal("expected emitted block to be retrievable")
@@ -295,7 +303,7 @@ func TestServer_Reorg_BroadcastsAllBlocks(t *testing.T) {
 
 	// Emit depth+1 canonical blocks so there are enough for a depth-3 reorg.
 	for range depth + 1 {
-		s.replayer.emit()
+		emitOrFail(t, s.replayer)
 	}
 	readWSHeaders(t, conn, depth+1)
 
@@ -335,7 +343,7 @@ func TestServer_Reorg_ReplayerContinuesFromTip(t *testing.T) {
 	doSubscribe(t, conn)
 
 	for range depth + 1 {
-		s.replayer.emit()
+		emitOrFail(t, s.replayer)
 	}
 	readWSHeaders(t, conn, depth+1)
 
@@ -346,7 +354,7 @@ func TestServer_Reorg_ReplayerContinuesFromTip(t *testing.T) {
 	reorgTip := reorgHeaders[len(reorgHeaders)-1]
 
 	// Emit one more canonical block and verify it chains from the reorg tip.
-	s.replayer.emit()
+	emitOrFail(t, s.replayer)
 	next := readWSHeaders(t, conn, 1)[0]
 
 	if next.ParentHash != reorgTip.Hash {
@@ -370,8 +378,8 @@ func TestServer_Reorg_ErrorCases(t *testing.T) {
 	}
 
 	// Emit 2 blocks; depth-5 reorg should fail (not enough blocks).
-	s.replayer.emit()
-	s.replayer.emit()
+	emitOrFail(t, s.replayer)
+	emitOrFail(t, s.replayer)
 	if err := s.Reorg(5); err == nil {
 		t.Error("expected error when depth exceeds available blocks")
 	}

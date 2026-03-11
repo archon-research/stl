@@ -186,7 +186,10 @@ func (rc *reorgController) trigger(depth int) error {
 		return fmt.Errorf("no blocks emitted yet")
 	}
 
-	base := rc.replayer.baseBlockNumber()
+	base, err := rc.replayer.baseBlockNumber()
+	if err != nil {
+		return fmt.Errorf("computing base block number: %w", err)
+	}
 	commonAncestorNum := tip - int64(depth)
 	if commonAncestorNum < base {
 		return fmt.Errorf("reorg depth %d exceeds available blocks (%d)", depth, tip-base)
@@ -199,7 +202,11 @@ func (rc *reorgController) trigger(depth int) error {
 
 	// Get the common ancestor hash and snapshot templates under one read lock.
 	rc.replayer.mu.RLock()
-	ancestorHeader := rc.replayer.headerForNumberLocked(commonAncestorNum)
+	ancestorHeader, err := rc.replayer.headerForNumberLocked(commonAncestorNum)
+	if err != nil {
+		rc.replayer.mu.RUnlock()
+		return fmt.Errorf("computing ancestor header: %w", err)
+	}
 	templates := rc.replayer.templates
 	rc.replayer.mu.RUnlock()
 	prevHash := ancestorHeader.Hash

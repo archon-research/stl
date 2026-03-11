@@ -200,6 +200,9 @@ func (ds *DataStore) LoadFromS3(ctx context.Context, getter s3Lister, bucket, pr
 
 	for idx, blockNum := range blockNums {
 		entry := blocks[blockNum]
+		if _, ok := entry.keys["block"]; !ok {
+			return fmt.Errorf("loading from S3: block %d: missing block.json", blockNum)
+		}
 		for _, dataType := range []string{"block", "receipts", "traces", "blobs"} {
 			key, ok := entry.keys[dataType]
 			if !ok {

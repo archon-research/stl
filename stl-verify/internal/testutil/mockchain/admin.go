@@ -12,6 +12,7 @@ package mockchain
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -62,7 +63,11 @@ func (h *adminHandler) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.replayer.Start(); err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, errAlreadyRunning) {
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	if err := writeJSON(w, map[string]bool{"ok": true}); err != nil {

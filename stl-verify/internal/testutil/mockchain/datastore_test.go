@@ -259,6 +259,18 @@ func TestLoadFromS3_Errors(t *testing.T) {
 			wantMessage: "loading from S3: block 1000 block: stream error",
 		},
 		{
+			name: "missing block.json",
+			makeGetter: func() *mockS3Lister {
+				return newStaticS3Lister("bucket", map[string]string{
+					"blocks/1000/block.json":    `{"number":"0x3e8","hash":"0xaaa"}`,
+					"blocks/1001/receipts.json": `[]`, // block.json absent — would corrupt index alignment
+					"blocks/1002/block.json":    `{"number":"0x3ea","hash":"0xccc"}`,
+				})
+			},
+			wantWraps:   nil,
+			wantMessage: "loading from S3: block 1001: missing block.json",
+		},
+		{
 			name: "invalid block JSON",
 			makeGetter: func() *mockS3Lister {
 				return newStaticS3Lister("bucket", map[string]string{
@@ -306,6 +318,90 @@ func TestLoadFromS3_SkipsUnparsableKeys(t *testing.T) {
 	if ds.Len() != 1 {
 		t.Errorf("expected 1 header (unparsable keys skipped), got %d", ds.Len())
 	}
+}
+
+// TestLoadFromS3_PartialLayouts verifies that blocks with partial data sets are loaded correctly,
+// preserving the index-alignment invariant: data for the block at sorted position K is stored at index K.
+func TestLoadFromS3_PartialLayouts(t *testing.T) {
+	t.Run("all four data types", func(t *testing.T) {
+		header := outbound.BlockHeader{Number: "0x3e8", Hash: "0xaaa"}
+		raw, _ := json.Marshal(header)
+		files := map[string]string{
+			"blocks/1000/block.json":    string(raw),
+			"blocks/1000/receipts.json": `[]`,
+			"blocks/1000/traces.json":   `[]`,
+			"blocks/1000/blobs.json":    `[]`,
+		}
+		getter := newStaticS3Lister("bucket", files)
+		ds := NewDataStore()
+		if err := ds.LoadFromS3(context.Background(), getter, "bucket", "blocks"); err != nil {
+			t.Fatalf("LoadFromS3: %v", err)
+		}
+		if ds.Len() != 1 {
+			t.Fatalf("expected 1 block, got %d", ds.Len())
+		}
+		for _, dt := range []string{"block", "receipts", "traces", "blobs"} {
+			if _, ok := ds.Get(0, dt); !ok {
+				t.Errorf("expected data type %q at index 0", dt)
+			}
+		}
+	})
+
+	t.Run("varied completeness across blocks", func(t *testing.T) {
+		h1 := outbound.BlockHeader{Number: "0x3e8", Hash: "0xaaa"} // 1000
+		h2 := outbound.BlockHeader{Number: "0x3e9", Hash: "0xbbb"} // 1001
+		h3 := outbound.BlockHeader{Number: "0x3ea", Hash: "0xccc"} // 1002
+		r1, _ := json.Marshal(h1)
+		r2, _ := json.Marshal(h2)
+		r3, _ := json.Marshal(h3)
+		files := map[string]string{
+			// Block 1000: block + receipts (no traces, no blobs).
+			"blocks/1000/block.json":    string(r1),
+			"blocks/1000/receipts.json": `[]`,
+			// Block 1001: block + traces (no receipts, no blobs).
+			"blocks/1001/block.json":  string(r2),
+			"blocks/1001/traces.json": `[]`,
+			// Block 1002: block only.
+			"blocks/1002/block.json": string(r3),
+		}
+		getter := newStaticS3Lister("bucket", files)
+		ds := NewDataStore()
+		if err := ds.LoadFromS3(context.Background(), getter, "bucket", "blocks"); err != nil {
+			t.Fatalf("LoadFromS3: %v", err)
+		}
+		if ds.Len() != 3 {
+			t.Fatalf("expected 3 blocks, got %d", ds.Len())
+		}
+
+		// Index 0 = block 1000: has receipts, no traces/blobs.
+		if _, ok := ds.Get(0, "receipts"); !ok {
+			t.Error("expected receipts at index 0 (block 1000)")
+		}
+		if _, ok := ds.Get(0, "traces"); ok {
+			t.Error("expected no traces at index 0 (block 1000)")
+		}
+		if _, ok := ds.Get(0, "blobs"); ok {
+			t.Error("expected no blobs at index 0 (block 1000)")
+		}
+
+		// Index 1 = block 1001: has traces, no receipts/blobs.
+		if _, ok := ds.Get(1, "traces"); !ok {
+			t.Error("expected traces at index 1 (block 1001)")
+		}
+		if _, ok := ds.Get(1, "receipts"); ok {
+			t.Error("expected no receipts at index 1 (block 1001)")
+		}
+		if _, ok := ds.Get(1, "blobs"); ok {
+			t.Error("expected no blobs at index 1 (block 1001)")
+		}
+
+		// Index 2 = block 1002: no supplementary data.
+		for _, dt := range []string{"receipts", "traces", "blobs"} {
+			if _, ok := ds.Get(2, dt); ok {
+				t.Errorf("expected no %s at index 2 (block 1002)", dt)
+			}
+		}
+	})
 }
 
 // --- test helpers ---

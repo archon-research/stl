@@ -1,6 +1,7 @@
 package mockchain
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -10,6 +11,16 @@ import (
 )
 
 const testInterval = 250 * time.Millisecond // like Base chain
+
+// mustBaseBlockNumber returns the base block number of r, failing the test if it cannot be parsed.
+func mustBaseBlockNumber(t *testing.T, r *Replayer) int64 {
+	t.Helper()
+	n, err := r.baseBlockNumber()
+	if err != nil {
+		t.Fatalf("baseBlockNumber: %v", err)
+	}
+	return n
+}
 
 // newTestReplayer creates a Replayer with a fast interval and a buffered channel collector.
 func newTestReplayer(t *testing.T) (*Replayer, chan outbound.BlockHeader) {
@@ -122,7 +133,7 @@ func TestReplayer_StartIdempotent(t *testing.T) {
 		t.Fatalf("first Start: %v", err)
 	}
 	if err := r.Start(); err == nil {
-		t.Error("second Start: expected error while already running, got nil")
+		t.Error("second Start while running: got nil, want error")
 	}
 
 	drain(t, received, 2)
@@ -240,13 +251,16 @@ func TestReplayer_LoopContinuity(t *testing.T) {
 
 	n := len(r.templates)*2 + 1 // two full loops + one extra
 	for range n {
-		r.emit()
+		if err := r.emit(); err != nil {
+			t.Fatalf("emit: %v", err)
+		}
 	}
 
 	if len(headers) != n {
 		t.Fatalf("expected %d headers, got %d", n, len(headers))
 	}
 
+	base := mustBaseBlockNumber(t, r)
 	seen := make(map[string]bool)
 	for i, h := range headers {
 		if seen[h.Hash] {
@@ -254,7 +268,7 @@ func TestReplayer_LoopContinuity(t *testing.T) {
 		}
 		seen[h.Hash] = true
 
-		wantNumber := fmt.Sprintf("0x%x", r.baseBlockNumber()+int64(i))
+		wantNumber := fmt.Sprintf("0x%x", base+int64(i))
 		if h.Number != wantNumber {
 			t.Errorf("emission %d: Number %q, want %q", i, h.Number, wantNumber)
 		}
@@ -274,9 +288,11 @@ func TestReplayer_HeaderForHash(t *testing.T) {
 	ds := NewFixtureDataStore()
 	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {}, 0)
 
-	r.emit()
-	r.emit()
-	r.emit()
+	for range 3 {
+		if err := r.emit(); err != nil {
+			t.Fatalf("emit: %v", err)
+		}
+	}
 
 	// HeaderForHash for the third emitted block.
 	thirdHash := r.prevDerivedHash
@@ -289,7 +305,7 @@ func TestReplayer_HeaderForHash(t *testing.T) {
 	}
 
 	// ParentHash of block 3 must equal hash of block 2.
-	h2, ok := r.HeaderForNumber(r.baseBlockNumber() + 1)
+	h2, ok := r.HeaderForNumber(mustBaseBlockNumber(t, r) + 1)
 	if !ok {
 		t.Fatal("expected HeaderForNumber to find block 2")
 	}
@@ -312,12 +328,15 @@ func TestReplayer_HeaderForNumber(t *testing.T) {
 		emitted = append(emitted, h)
 	}, 0)
 
-	r.emit()
-	r.emit()
-	r.emit()
+	for range 3 {
+		if err := r.emit(); err != nil {
+			t.Fatalf("emit: %v", err)
+		}
+	}
 
+	base := mustBaseBlockNumber(t, r)
 	for i, want := range emitted {
-		blockNum := r.baseBlockNumber() + int64(i)
+		blockNum := base + int64(i)
 		got, ok := r.HeaderForNumber(blockNum)
 		if !ok {
 			t.Fatalf("HeaderForNumber(%d) returned false", blockNum)
@@ -331,10 +350,10 @@ func TestReplayer_HeaderForNumber(t *testing.T) {
 	}
 
 	// Block before base and block not yet emitted return false.
-	if _, ok := r.HeaderForNumber(r.baseBlockNumber() - 1); ok {
+	if _, ok := r.HeaderForNumber(base - 1); ok {
 		t.Error("expected false for block before base")
 	}
-	if _, ok := r.HeaderForNumber(r.baseBlockNumber() + 999); ok {
+	if _, ok := r.HeaderForNumber(base + 999); ok {
 		t.Error("expected false for block not yet emitted")
 	}
 }
@@ -411,7 +430,7 @@ func TestReplayer_EmptyTemplates(t *testing.T) {
 	}, 0)
 
 	if err := r.Start(); err == nil {
-		t.Error("Start with empty templates: expected error, got nil")
+		t.Error("Start with empty templates: got nil, want error")
 	}
 	emitted := r.Stop()
 
@@ -450,4 +469,56 @@ func TestReplayer_RestartResetsState(t *testing.T) {
 	}
 
 	r.Stop()
+}
+
+// TestReplayer_StartWithInvalidTemplate verifies that Start returns an error wrapping
+// errInvalidTemplateNum when any template contains an unparseable block number,
+// and that no blocks are emitted.
+func TestReplayer_StartWithInvalidTemplate(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers []outbound.BlockHeader
+	}{
+		{
+			name: "empty Number field",
+			headers: []outbound.BlockHeader{
+				{Number: "", Hash: "0xabc", ParentHash: "0x000"},
+			},
+		},
+		{
+			name: "non-hex Number field",
+			headers: []outbound.BlockHeader{
+				{Number: "not-a-number", Hash: "0xabc", ParentHash: "0x000"},
+			},
+		},
+		{
+			name: "invalid Number in second template",
+			headers: []outbound.BlockHeader{
+				{Number: "0x1", Hash: "0xaaa", ParentHash: "0x000"},
+				{Number: "0xgg", Hash: "0xbbb", ParentHash: "0xaaa"}, // "gg" is not valid hex
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ds := NewDataStore()
+			r := NewReplayer(tt.headers, ds, func(_ outbound.BlockHeader) {
+				t.Error("onBlock must not be called with invalid templates")
+			}, 0)
+
+			err := r.Start()
+			if err == nil {
+				t.Fatal("Start with invalid template: got nil, want error")
+				r.Stop()
+				return
+			}
+			if !errors.Is(err, errInvalidTemplateNum) {
+				t.Errorf("got error %v; want it to wrap errInvalidTemplateNum", err)
+			}
+			if emitted := r.Stop(); emitted != 0 {
+				t.Errorf("expected 0 emissions with invalid templates, got %d", emitted)
+			}
+		})
+	}
 }
