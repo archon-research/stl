@@ -27,8 +27,8 @@ const maxCachedHashes = 128
 var zeroParentHash = "0x" + strings.Repeat("0", 64)
 
 var (
-	errAlreadyRunning    = errors.New("mockchain: replayer is already running")
-	errNoTemplates       = errors.New("mockchain: replayer has no block templates loaded")
+	errAlreadyRunning     = errors.New("mockchain: replayer is already running")
+	errNoTemplates        = errors.New("mockchain: replayer has no block templates loaded")
 	errInvalidTemplateNum = errors.New("mockchain: template has unparseable block number")
 )
 
