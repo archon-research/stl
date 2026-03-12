@@ -14,13 +14,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// s3Lister is a subset of outbound.S3Reader used by LoadFromS3.
-// *s3.Reader from internal/adapters/outbound/s3 satisfies this interface.
-type s3Lister interface {
-	ListFiles(ctx context.Context, bucket, prefix string) ([]outbound.S3File, error)
-	StreamFile(ctx context.Context, bucket, key string) (io.ReadCloser, error)
-}
-
 // DataStore is a thread-safe in-memory store for block headers and associated
 // per-block data (block body, receipts, traces, blobs), keyed by block index.
 type DataStore struct {
@@ -169,8 +162,8 @@ func (ds *DataStore) ClearReorgData() {
 // Blocks are loaded in ascending block number order. The "block" dataType
 // is used to extract the BlockHeader for each block. S3 connection is used
 // only during this call; no ongoing AWS connection is held after it returns.
-func (ds *DataStore) LoadFromS3(ctx context.Context, getter s3Lister, bucket, prefix string) error {
-	files, err := getter.ListFiles(ctx, bucket, prefix)
+func (ds *DataStore) LoadFromS3(ctx context.Context, reader outbound.S3Reader, bucket, prefix string) error {
+	files, err := reader.ListFiles(ctx, bucket, prefix)
 	if err != nil {
 		return fmt.Errorf("loading from S3: listing files: %w", err)
 	}
@@ -208,7 +201,7 @@ func (ds *DataStore) LoadFromS3(ctx context.Context, getter s3Lister, bucket, pr
 			if !ok {
 				continue
 			}
-			raw, err := streamAll(ctx, getter, bucket, key)
+			raw, err := streamAll(ctx, reader, bucket, key)
 			if err != nil {
 				return fmt.Errorf("loading from S3: block %d %s: %w", blockNum, dataType, err)
 			}
@@ -253,8 +246,8 @@ func parseS3Key(key, prefix string) (int64, string, bool) {
 }
 
 // streamAll reads all bytes from a StreamFile call, closing the reader when done.
-func streamAll(ctx context.Context, getter s3Lister, bucket, key string) (json.RawMessage, error) {
-	rc, err := getter.StreamFile(ctx, bucket, key)
+func streamAll(ctx context.Context, reader outbound.S3Reader, bucket, key string) (json.RawMessage, error) {
+	rc, err := reader.StreamFile(ctx, bucket, key)
 	if err != nil {
 		return nil, err
 	}

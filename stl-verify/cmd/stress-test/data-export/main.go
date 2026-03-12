@@ -1,10 +1,15 @@
-// Command data-export copies block data from the staging backup S3 bucket
+// Command data-export transforms and exports block data from the staging backup S3 bucket
 // to a stress-test destination bucket.
 //
-// Usage (local dev — writes to LocalStack):
+// This is not a simple copy: staging keys are gzip-compressed and use a versioned key format
+// ({partition}/{blockNumber}_{version}_{dataType}.json.gz). The mock blockchain server expects
+// plain JSON in a flat key structure ({prefix}/{blockNumber}/{dataType}.json).
+// data-export decompresses and re-keys the data into the format the mock server can load.
+//
+// Usage (local dev — reads from staging, writes to LocalStack):
 //
 //	go run ./cmd/stress-test/data-export \
-//	  --env staging \
+//	  --env local \
 //	  --src-bucket stl-staging-backup \
 //	  --dest-bucket stress-test-data \
 //	  --dest-prefix blocks/chain-1 \
@@ -53,11 +58,11 @@ type cfg struct {
 // Main is the testable entry point.
 func Main() error {
 	c := cfg{}
-	flag.StringVar(&c.env, "env", "", "deployment environment (must be \"staging\")")
+	flag.StringVar(&c.env, "env", "", "deployment environment: \"staging\" (real AWS source) or \"local\" (LocalStack destination)")
 	flag.StringVar(&c.srcBucket, "src-bucket", "", "source staging backup bucket")
 	flag.StringVar(&c.destBucket, "dest-bucket", "", "destination stress-test bucket")
 	flag.StringVar(&c.destPrefix, "dest-prefix", "blocks/chain-1", "key prefix for destination bucket")
-	flag.StringVar(&c.destEndpoint, "dest-endpoint", "", "destination S3 endpoint (e.g. http://localhost:4566 for LocalStack); empty = real AWS")
+	flag.StringVar(&c.destEndpoint, "dest-endpoint", "", "LocalStack endpoint (required when --env=local, e.g. http://localhost:4566)")
 	flag.Int64Var(&c.startBlock, "start-block", 0, "first block number to export")
 	flag.IntVar(&c.blockCount, "block-count", 100, "number of blocks to export")
 	flag.IntVar(&c.version, "version", 0, "block data version (default 0)")
@@ -76,8 +81,14 @@ func Main() error {
 }
 
 func run(ctx context.Context, logger *slog.Logger, c cfg) error {
-	if c.env != "staging" {
-		return fmt.Errorf("--env must be \"staging\", got %q", c.env)
+	if c.env != "staging" && c.env != "local" {
+		return fmt.Errorf("--env must be \"staging\" or \"local\", got %q", c.env)
+	}
+	if c.env == "local" && c.destEndpoint == "" {
+		return fmt.Errorf("--dest-endpoint is required when --env=local")
+	}
+	if c.env != "local" && c.destEndpoint != "" {
+		return fmt.Errorf("--dest-endpoint is only valid when --env=local; refusing to use LocalStack endpoint against %q environment", c.env)
 	}
 	if c.srcBucket == "" {
 		return fmt.Errorf("--src-bucket is required")
@@ -95,7 +106,7 @@ func run(ctx context.Context, logger *slog.Logger, c cfg) error {
 		return fmt.Errorf("loading source AWS config: %w", err)
 	}
 
-	// Write config: LocalStack when --dest-endpoint is set, otherwise real AWS.
+	// Write config: LocalStack when env=local, otherwise real AWS.
 	destCfg, destOptFns, err := buildDestConfig(ctx, c)
 	if err != nil {
 		return fmt.Errorf("building destination config: %w", err)
@@ -117,7 +128,7 @@ func run(ctx context.Context, logger *slog.Logger, c cfg) error {
 		"start_block", c.startBlock,
 		"block_count", c.blockCount,
 		"version", c.version,
-		"localstack", c.destEndpoint != "",
+		"localstack", c.env == "local",
 	)
 
 	if err := exporter.ExportRange(ctx, c.startBlock, c.blockCount, c.version); err != nil {
@@ -132,9 +143,9 @@ func run(ctx context.Context, logger *slog.Logger, c cfg) error {
 }
 
 // buildDestConfig returns an AWS config and S3 option functions for the destination.
-// When destEndpoint is set, configures for LocalStack with dummy credentials and path-style addressing.
+// When env is "local", configures for LocalStack with dummy credentials and path-style addressing.
 func buildDestConfig(ctx context.Context, c cfg) (aws.Config, []func(*awss3.Options), error) {
-	if c.destEndpoint != "" {
+	if c.env == "local" {
 		// LocalStack: dummy credentials, custom endpoint, path-style addressing.
 		destCfg, err := config.LoadDefaultConfig(ctx,
 			config.WithRegion(c.region),

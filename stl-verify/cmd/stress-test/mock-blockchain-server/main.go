@@ -22,7 +22,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":8546", "listen address (e.g. :8546)")
-	adminPort := flag.String("admin-port", "localhost:8547", "admin API listen address (empty to disable; use :8547 to bind all interfaces in k8s)")
+	adminAddr := flag.String("admin-addr", "localhost:8547", "admin API listen address (empty to disable; use :8547 to bind all interfaces in k8s)")
 	interval := flag.Duration("interval", 12*time.Second, "block emission interval (e.g. 1s, 500ms)")
 	s3Bucket := flag.String("s3-bucket", "", "S3 bucket containing block data (empty = use fixture data)")
 	s3Prefix := flag.String("s3-prefix", "blocks/chain-1", "S3 key prefix for block data")
@@ -39,8 +39,8 @@ func main() {
 	defer stop()
 
 	serverCfg := serverConfig{
-		addr:       *addr,
-		adminPort:  *adminPort,
+		addr:      *addr,
+		adminAddr: *adminAddr,
 		interval:   *interval,
 		s3Bucket:   *s3Bucket,
 		s3Prefix:   *s3Prefix,
@@ -56,8 +56,8 @@ func main() {
 
 // serverConfig holds configuration parsed from CLI flags.
 type serverConfig struct {
-	addr       string
-	adminPort  string
+	addr      string
+	adminAddr string
 	interval   time.Duration
 	s3Bucket   string
 	s3Prefix   string
@@ -69,7 +69,7 @@ type serverConfig struct {
 type serverAdapter struct {
 	srv       *mockchain.Server
 	store     *mockchain.DataStore
-	adminPort string
+	adminAddr string
 	addr      string
 	logger    *slog.Logger
 }
@@ -86,11 +86,11 @@ func (a *serverAdapter) Start(_ context.Context) error {
 		"blocks", a.store.Len(),
 	)
 
-	if a.adminPort != "" {
-		if err := a.srv.StartAdmin(a.adminPort); err != nil {
+	if a.adminAddr != "" {
+		if err := a.srv.StartAdmin(a.adminAddr); err != nil {
 			return fmt.Errorf("starting admin server: %w", err)
 		}
-		a.logger.Info("admin API ready", "addr", a.adminPort)
+		a.logger.Info("admin API ready", "addr", a.adminAddr)
 	}
 
 	return nil
@@ -115,7 +115,7 @@ func run(ctx context.Context, logger *slog.Logger, c serverConfig) error {
 	return lifecycle.Run(ctx, logger, &serverAdapter{
 		srv:       srv,
 		store:     store,
-		adminPort: c.adminPort,
+		adminAddr: c.adminAddr,
 		addr:      c.addr,
 		logger:    logger,
 	})

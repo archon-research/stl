@@ -27,7 +27,17 @@ func TestRun_Validation(t *testing.T) {
 		{
 			name:       "wrong env",
 			c:          cfg{env: "production", srcBucket: "src", destBucket: "dest", blockCount: 10, region: "eu-west-1"},
-			wantErrMsg: `--env must be "staging"`,
+			wantErrMsg: `--env must be "staging" or "local"`,
+		},
+		{
+			name:       "local env without dest-endpoint",
+			c:          cfg{env: "local", srcBucket: "src", destBucket: "dest", blockCount: 10, region: "eu-west-1"},
+			wantErrMsg: "--dest-endpoint is required when --env=local",
+		},
+		{
+			name:       "dest-endpoint set on non-local env",
+			c:          cfg{env: "staging", destEndpoint: "http://localhost:4566", srcBucket: "src", destBucket: "dest", blockCount: 10, region: "eu-west-1"},
+			wantErrMsg: "--dest-endpoint is only valid when --env=local",
 		},
 		{
 			name:       "empty src-bucket",
@@ -64,11 +74,12 @@ func TestRun_Validation(t *testing.T) {
 	}
 }
 
-// TestBuildDestConfig_LocalStack verifies that a non-empty destEndpoint produces a config
+// TestBuildDestConfig_LocalStack verifies that env=local produces a config
 // with exactly one option function that enables path-style S3 addressing.
 func TestBuildDestConfig_LocalStack(t *testing.T) {
 	ctx := context.Background()
 	c := cfg{
+		env:          "local",
 		region:       "us-east-1",
 		destEndpoint: "http://localhost:4566",
 	}
@@ -86,12 +97,12 @@ func TestBuildDestConfig_LocalStack(t *testing.T) {
 	}
 }
 
-// TestBuildDestConfig_RealAWS verifies that an empty destEndpoint produces no option functions.
+// TestBuildDestConfig_RealAWS verifies that env=staging produces no option functions.
 func TestBuildDestConfig_RealAWS(t *testing.T) {
 	ctx := context.Background()
 	c := cfg{
-		region:       "us-east-1",
-		destEndpoint: "",
+		env:    "staging",
+		region: "us-east-1",
 	}
 	_, optFns, err := buildDestConfig(ctx, c)
 	if err != nil {

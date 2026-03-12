@@ -1,8 +1,8 @@
-// Package dataexport provides utilities for exporting block data from the
-// staging backup bucket to a stress-test destination bucket.
+// Package dataexport transforms and exports block data from the staging backup bucket
+// into the flat key format expected by the mock blockchain server's LoadFromS3.
 //
-// Staging backup key format: {partition}/{blockNumber}_{version}_{dataType}.json.gz
-// Stress test dest key format: {prefix}/{blockNumber}/{dataType}.json
+// Staging backup key format: {partition}/{blockNumber}_{version}_{dataType}.json.gz (gzipped)
+// Mock server key format:    {prefix}/{blockNumber}/{dataType}.json (plain JSON)
 package dataexport
 
 import (

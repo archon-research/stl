@@ -406,7 +406,7 @@ func TestLoadFromS3_PartialLayouts(t *testing.T) {
 
 // --- test helpers ---
 
-// mockS3Lister is a configurable s3Lister for testing.
+// mockS3Lister is a configurable outbound.S3Reader for testing.
 type mockS3Lister struct {
 	listFiles  func(ctx context.Context, bucket, prefix string) ([]outbound.S3File, error)
 	streamFile func(ctx context.Context, bucket, key string) (io.ReadCloser, error)
@@ -414,6 +414,10 @@ type mockS3Lister struct {
 
 func (m *mockS3Lister) ListFiles(ctx context.Context, bucket, prefix string) ([]outbound.S3File, error) {
 	return m.listFiles(ctx, bucket, prefix)
+}
+
+func (m *mockS3Lister) ListPrefix(ctx context.Context, bucket, prefix string) ([]string, error) {
+	panic("ListPrefix not used by LoadFromS3")
 }
 
 func (m *mockS3Lister) StreamFile(ctx context.Context, bucket, key string) (io.ReadCloser, error) {

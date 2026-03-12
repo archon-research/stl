@@ -24,7 +24,7 @@ spec:
           imagePullPolicy: Never
           args:
             - --addr=:8546
-            - --admin-port=:8547
+            - --admin-addr=:8547
             - --s3-bucket=stress-test-data
             - --s3-prefix=blocks/chain-1
             - --s3-endpoint=http://localstack:4566
