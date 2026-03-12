@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: allocation-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: allocation-tracker
+  template:
+    metadata:
+      labels:
+        app: allocation-tracker
+    spec:
+      serviceAccountName: allocation-tracker
+      containers:
+        - name: allocation-tracker
+          image: allocation-tracker
+          envFrom:
+            - secretRef:
+                name: allocation-tracker
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2048Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2048Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f allocation"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

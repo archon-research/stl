@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: avalanche-sparklend-position-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: avalanche-sparklend-position-tracker
+  template:
+    metadata:
+      labels:
+        app: avalanche-sparklend-position-tracker
+    spec:
+      serviceAccountName: avalanche-sparklend-position-tracker
+      containers:
+        - name: avalanche-sparklend-position-tracker
+          image: avalanche-sparklend-position-tracker
+          envFrom:
+            - secretRef:
+                name: avalanche-sparklend-position-tracker
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2048Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2048Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f sparklend"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60
