@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: watcher
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: watcher
+  template:
+    metadata:
+      labels:
+        app: watcher
+    spec:
+      serviceAccountName: watcher
+      containers:
+        - name: watcher
+          # Image name used as the Kustomize images transformer key.
+          # The overlay kustomization.yaml overrides newName + newTag.
+          image: watcher
+          envFrom:
+            - secretRef:
+                # Populated by ExternalSecret — secret name mirrors the service.
+                name: watcher
+          resources:
+            requests:
+              cpu: "2000m"
+              memory: "4096Mi"
+            limits:
+              cpu: "2000m"
+              memory: "4096Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f watcher"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60
