@@ -28,6 +28,12 @@ nodes:
       - containerPort: 30823   # temporal UI
         hostPort: 8233
         listenAddress: "127.0.0.1"
+      - containerPort: 30546   # mock-blockchain-server RPC + WS
+        hostPort: 8546
+        listenAddress: "127.0.0.1"
+      - containerPort: 30547   # mock-blockchain-server admin API
+        hostPort: 8547
+        listenAddress: "127.0.0.1"
     extraMounts:
       - hostPath: STL_DATA_DIR/timescaledb
         containerPath: /data/timescaledb

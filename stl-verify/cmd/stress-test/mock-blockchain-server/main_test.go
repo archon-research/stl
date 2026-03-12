@@ -27,7 +27,7 @@ func TestRun_StartStop(t *testing.T) {
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- run(ctx, slog.Default(), addr, 12*time.Second)
+		errCh <- run(ctx, slog.Default(), serverConfig{addr: addr, interval: 12 * time.Second})
 	}()
 
 	testutil.WaitForCondition(t, 2*time.Second, func() bool {
@@ -55,7 +55,7 @@ func TestRun_StartStop(t *testing.T) {
 func TestRun_NonPositiveInterval(t *testing.T) {
 	ctx := context.Background()
 	for _, d := range []time.Duration{0, -1 * time.Millisecond} {
-		if err := run(ctx, slog.Default(), ":0", d); err == nil {
+		if err := run(ctx, slog.Default(), serverConfig{addr: ":0", interval: d}); err == nil {
 			t.Errorf("expected error for interval %v, got nil", d)
 		}
 	}
@@ -64,7 +64,7 @@ func TestRun_NonPositiveInterval(t *testing.T) {
 // TestRun_BadAddr verifies that run returns an error when given an invalid address.
 func TestRun_BadAddr(t *testing.T) {
 	ctx := context.Background()
-	err := run(ctx, slog.Default(), "invalid:addr:extra", 12*time.Second)
+	err := run(ctx, slog.Default(), serverConfig{addr: "invalid:addr:extra", interval: 12 * time.Second})
 	if err == nil {
 		t.Fatal("expected error for invalid address, got nil")
 	}
