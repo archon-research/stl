@@ -39,8 +39,8 @@ func main() {
 	defer stop()
 
 	serverCfg := serverConfig{
-		addr:      *addr,
-		adminAddr: *adminAddr,
+		addr:       *addr,
+		adminAddr:  *adminAddr,
 		interval:   *interval,
 		s3Bucket:   *s3Bucket,
 		s3Prefix:   *s3Prefix,
@@ -56,8 +56,8 @@ func main() {
 
 // serverConfig holds configuration parsed from CLI flags.
 type serverConfig struct {
-	addr      string
-	adminAddr string
+	addr       string
+	adminAddr  string
 	interval   time.Duration
 	s3Bucket   string
 	s3Prefix   string
