@@ -7,9 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This repository contains the application code:
 - **stl-verify/** - Main Go service (block watcher, backfill, backup worker)
 - **k8s/** - Kubernetes manifests (Kustomize) for EKS deployment
-  - `k8s/base/` — one subdirectory per service: `Deployment`, `Service`, `ServiceAccount`, `HorizontalPodAutoscaler`
-  - `k8s/overlays/prod/` — prod-specific patches (image tags, replicas, resource limits)
-  - `k8s/overlays/staging/` — staging-specific patches
+  - `k8s/base/` — one subdirectory per service: `Deployment`, `ServiceAccount`
+  - `k8s/overlays/prod/` — prod-specific patches (namespace, images/image tags)
+  - `k8s/overlays/staging/` — staging-specific patches (namespace, images/image tags)
 - **experiments/** - Exploration projects
 - **docs/** - Architecture diagrams and entity relations
 

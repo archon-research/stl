@@ -28,7 +28,7 @@ spec:
               memory: "1024Mi"
           livenessProbe:
             exec:
-              command: ["/bin/sh", "-c", "pgrep -f backup-worker"]
+              command: ["/bin/sh", "-c", "pgrep -f raw_data_backup"]
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3

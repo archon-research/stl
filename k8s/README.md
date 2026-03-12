@@ -39,4 +39,4 @@ Service accounts have no IRSA annotations. AWS access is wired via **EKS Pod Ide
 
 ## Namespaces
 
-`vector` and `vector-staging` are managed by ArgoCD in the infra gitops repo. Do not add namespace manifests here.
+`vector` is managed by ArgoCD in the infra gitops repo. Do not add namespace manifests here.

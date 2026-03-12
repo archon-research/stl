@@ -28,7 +28,7 @@ spec:
               memory: "2048Mi"
           livenessProbe:
             exec:
-              command: ["/bin/sh", "-c", "pgrep -f oracle-price-worker"]
+              command: ["/bin/sh", "-c", "pgrep -f oracle_price_worker"]
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3
