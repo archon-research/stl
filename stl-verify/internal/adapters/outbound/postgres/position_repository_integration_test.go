@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"math/big"
 	"testing"
 
@@ -861,6 +862,102 @@ func TestSaveBorrowerCollaterals_TransactionIsolation(t *testing.T) {
 	recordsAfterCommit := fixture.queryCollaterals(t, ctx)
 	if len(recordsAfterCommit) != 1 {
 		t.Errorf("expected 1 record after commit, got %d", len(recordsAfterCommit))
+	}
+}
+
+func TestSaveBorrowerAndCollateral_BigIntRoundTrip(t *testing.T) {
+	fixture := setupPositionTest(t)
+	ctx := context.Background()
+
+	// Build a range of *big.Int values that exercise small, boundary, and
+	// very large numbers (up to uint256 max) as well as negative values.
+	uint256Max := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	maxInt64Plus1 := new(big.Int).Add(big.NewInt(math.MaxInt64), big.NewInt(1))
+
+	cases := []struct {
+		name   string
+		amount *big.Int
+		change *big.Int
+	}{
+		{"zero amount and change", big.NewInt(0), big.NewInt(0)},
+		{"small positive", big.NewInt(42), big.NewInt(7)},
+		{"MaxInt64 boundary", big.NewInt(math.MaxInt64), big.NewInt(math.MaxInt64)},
+		{"MaxInt64+1 (exceeds int64)", maxInt64Plus1, maxInt64Plus1},
+		{"2^128 power of two", new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1)},
+		{"2^256 power of two", new(big.Int).Lsh(big.NewInt(1), 256), new(big.Int).Lsh(big.NewInt(1), 255)},
+		{"uint256 max", uint256Max, uint256Max},
+		{"negative change", big.NewInt(500), new(big.Int).Neg(big.NewInt(250))},
+		{"negative amount and change", new(big.Int).Neg(big.NewInt(math.MaxInt64)), new(big.Int).Neg(maxInt64Plus1)},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			blockNumber := int64(20000 + i)
+
+			// --- SaveBorrower round-trip ---
+			txB, err := fixture.pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin tx (borrower): %v", err)
+			}
+			defer txB.Rollback(ctx)
+
+			err = fixture.repo.SaveBorrower(ctx, txB, fixture.userID, fixture.protocolID, fixture.tokenID, blockNumber, 0, tc.amount, tc.change, "Borrow", []byte{0xb0, byte(i)})
+			if err != nil {
+				t.Fatalf("SaveBorrower failed: %v", err)
+			}
+			if err := txB.Commit(ctx); err != nil {
+				t.Fatalf("commit (borrower): %v", err)
+			}
+
+			borrowers := fixture.queryBorrowers(t, ctx)
+			var found bool
+			for _, b := range borrowers {
+				if b.BlockNumber == blockNumber {
+					found = true
+					if b.Amount != tc.amount.String() {
+						t.Errorf("borrower amount mismatch: got %s, want %s", b.Amount, tc.amount)
+					}
+					if b.Change != tc.change.String() {
+						t.Errorf("borrower change mismatch: got %s, want %s", b.Change, tc.change)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("borrower record not found for block %d", blockNumber)
+			}
+
+			// --- SaveBorrowerCollateral round-trip ---
+			txC, err := fixture.pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin tx (collateral): %v", err)
+			}
+			defer txC.Rollback(ctx)
+
+			err = fixture.repo.SaveBorrowerCollateral(ctx, txC, fixture.userID, fixture.protocolID, fixture.tokenID, blockNumber, 1, tc.amount, tc.change, "Supply", []byte{0xc0, byte(i)}, true)
+			if err != nil {
+				t.Fatalf("SaveBorrowerCollateral failed: %v", err)
+			}
+			if err := txC.Commit(ctx); err != nil {
+				t.Fatalf("commit (collateral): %v", err)
+			}
+
+			collaterals := fixture.queryCollaterals(t, ctx)
+			found = false
+			for _, c := range collaterals {
+				if c.BlockNumber == blockNumber && c.BlockVersion == 1 {
+					found = true
+					if c.Amount != tc.amount.String() {
+						t.Errorf("collateral amount mismatch: got %s, want %s", c.Amount, tc.amount)
+					}
+					if c.Change != tc.change.String() {
+						t.Errorf("collateral change mismatch: got %s, want %s", c.Change, tc.change)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("collateral record not found for block %d version 1", blockNumber)
+			}
+		})
 	}
 }
 

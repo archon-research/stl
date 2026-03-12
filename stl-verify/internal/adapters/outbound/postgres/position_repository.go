@@ -49,20 +49,12 @@ func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 // amount is the full current outstanding debt; change is the event delta.
 // Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
 func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte) error {
-	amountStr, err := bigIntToNumeric(amount)
-	if err != nil {
-		return fmt.Errorf("failed to convert amount: %w", err)
-	}
-	changeStr, err := bigIntToNumeric(change)
-	if err != nil {
-		return fmt.Errorf("failed to convert change: %w", err)
-	}
 
-	_, err = tx.Exec(ctx,
+	_, err := tx.Exec(ctx,
 		`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
-		userID, protocolID, tokenID, blockNumber, blockVersion, amountStr, changeStr, eventType, txHash)
+		userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, eventType, txHash)
 
 	if err != nil {
 		return fmt.Errorf("failed to save borrower: %w", err)
@@ -74,20 +66,12 @@ func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID
 // amount is the full current collateral balance; change is the event delta.
 // Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
 func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte, collateralEnabled bool) error {
-	amountStr, err := bigIntToNumeric(amount)
-	if err != nil {
-		return fmt.Errorf("failed to convert amount: %w", err)
-	}
-	changeStr, err := bigIntToNumeric(change)
-	if err != nil {
-		return fmt.Errorf("failed to convert change: %w", err)
-	}
 
-	_, err = tx.Exec(ctx,
+	_, err := tx.Exec(ctx,
 		`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
-		userID, protocolID, tokenID, blockNumber, blockVersion, amountStr, changeStr, eventType, txHash, collateralEnabled)
+		userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, eventType, txHash, collateralEnabled)
 
 	if err != nil {
 		return fmt.Errorf("failed to save collateral: %w", err)
