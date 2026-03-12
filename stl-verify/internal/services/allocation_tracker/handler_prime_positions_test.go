@@ -3,6 +3,7 @@ package allocation_tracker
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"math/big"
 	"testing"
 
@@ -39,9 +40,7 @@ func newTestHandler(
 		logger:      slog.Default().With("component", "test-handler"),
 	}
 	// Pre-populate the cache so we don't need a multicaller.
-	for addr, meta := range metadata {
-		h.metadata.cache[addr] = meta
-	}
+	maps.Copy(h.metadata.cache, metadata)
 	return h
 }
 
