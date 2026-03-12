@@ -2,7 +2,7 @@
 
 ## Structure
 
-```
+```text
 base/<service>/          # env-agnostic manifests
   deployment.yaml        # resource sizes match ECS task (CPU/memory)
   serviceaccount.yaml    # no AWS annotations — IAM handled by Pod Identity (SEN-230)
