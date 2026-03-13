@@ -15,11 +15,20 @@ spec:
         app: watcher
     spec:
       serviceAccountName: watcher
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
       containers:
         - name: watcher
           # Image name used as the Kustomize images transformer key.
           # The overlay kustomization.yaml overrides newName + newTag.
           image: watcher
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           envFrom:
             - secretRef:
                 # Populated by ExternalSecret — secret name mirrors the service.
@@ -33,7 +42,7 @@ spec:
               memory: "4096Mi"
           livenessProbe:
             exec:
-              command: ["/bin/sh", "-c", "pgrep -f watcher"]
+              command: ["/bin/sh", "-c", "kill -0 1"]
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3

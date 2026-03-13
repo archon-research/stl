@@ -13,9 +13,18 @@ spec:
         app: morpho-indexer
     spec:
       serviceAccountName: morpho-indexer
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
       containers:
         - name: morpho-indexer
           image: morpho-indexer
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           envFrom:
             - secretRef:
                 name: morpho-indexer
@@ -28,7 +37,7 @@ spec:
               memory: "2048Mi"
           livenessProbe:
             exec:
-              command: ["/bin/sh", "-c", "pgrep -f morpho"]
+              command: ["/bin/sh", "-c", "kill -0 1"]
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3

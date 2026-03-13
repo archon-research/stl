@@ -13,9 +13,18 @@ spec:
         app: backup-worker
     spec:
       serviceAccountName: backup-worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
       containers:
         - name: backup-worker
           image: backup-worker
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           envFrom:
             - secretRef:
                 name: backup-worker
@@ -28,7 +37,7 @@ spec:
               memory: "1024Mi"
           livenessProbe:
             exec:
-              command: ["/bin/sh", "-c", "pgrep -f raw_data_backup"]
+              command: ["/bin/sh", "-c", "kill -0 1"]
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3

@@ -13,9 +13,18 @@ spec:
         app: sparklend-position-tracker
     spec:
       serviceAccountName: sparklend-position-tracker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
       containers:
         - name: sparklend-position-tracker
           image: sparklend-position-tracker
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           envFrom:
             - secretRef:
                 name: sparklend-position-tracker
@@ -28,7 +37,7 @@ spec:
               memory: "2048Mi"
           livenessProbe:
             exec:
-              command: ["/bin/sh", "-c", "pgrep -f sparklend"]
+              command: ["/bin/sh", "-c", "kill -0 1"]
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3

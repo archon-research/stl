@@ -1423,7 +1423,15 @@ kind-delete:
 
 kind-infra:
 	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/ -n $(KUBE_NS)
+	# Apply temporal resources to the temporal namespace (namespace declared in each manifest).
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal-00-namespace.yaml
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal-db.yaml
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal.yaml
+	# Apply remaining infra resources to the app namespace.
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/jaeger.yaml       -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/localstack.yaml   -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/redis.yaml        -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/timescaledb.yaml  -n $(KUBE_NS)
 	@echo "==> Waiting for timescaledb to be ready (may take a moment on first run — image pull)..."
 	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/timescaledb -n $(KUBE_NS) --timeout=120s
 	@echo "==> Waiting for localstack to be ready..."
@@ -1512,7 +1520,8 @@ kind-ci-down: kind-delete
 kind-clean:
 	@echo "$(KUBE_CONTEXT)" | grep -q '^kind-' || { echo "ERROR: kind-clean refused — '$(KUBE_CONTEXT)' is not a local kind context. Only kind-* contexts are allowed."; exit 1; }
 	kubectl --context=$(KUBE_CONTEXT) delete namespace $(KUBE_NS) --ignore-not-found --wait
-	@echo "==> Namespace $(KUBE_NS) deleted."
+	kubectl --context=$(KUBE_CONTEXT) delete namespace temporal      --ignore-not-found --wait
+	@echo "==> Namespaces $(KUBE_NS) and temporal deleted."
 
 # =============================================================================
 # Docker Build & Push - Mock Blockchain Server

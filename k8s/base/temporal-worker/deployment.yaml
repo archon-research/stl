@@ -1,25 +1,27 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: avalanche-sparklend-position-tracker
+  name: temporal-worker
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: avalanche-sparklend-position-tracker
+      app: temporal-worker
   template:
     metadata:
       labels:
-        app: avalanche-sparklend-position-tracker
+        app: temporal-worker
     spec:
-      serviceAccountName: avalanche-sparklend-position-tracker
+      serviceAccountName: temporal-worker
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534
       containers:
-        - name: avalanche-sparklend-position-tracker
-          image: avalanche-sparklend-position-tracker
+        - name: temporal-worker
+          # Image name used as the Kustomize images transformer key.
+          # The overlay kustomization.yaml overrides newName + newTag.
+          image: temporal-worker
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -27,14 +29,15 @@ spec:
               drop: ["ALL"]
           envFrom:
             - secretRef:
-                name: avalanche-sparklend-position-tracker
+                # Populated by ExternalSecret — secret name mirrors the service.
+                name: temporal-worker
           resources:
             requests:
-              cpu: "1000m"
-              memory: "2048Mi"
+              cpu: "250m"
+              memory: "256Mi"
             limits:
-              cpu: "1000m"
-              memory: "2048Mi"
+              cpu: "500m"
+              memory: "512Mi"
           livenessProbe:
             exec:
               command: ["/bin/sh", "-c", "kill -0 1"]

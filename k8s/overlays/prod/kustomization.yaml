@@ -11,6 +11,7 @@ resources:
   - ../../base/morpho-indexer
   - ../../base/allocation-tracker
   - ../../base/avalanche-sparklend-position-tracker
+  - ../../base/temporal-worker
   - external-secrets.yaml
 
 # IAM bindings are managed via EKS Pod Identity associations in the infra repo (SEN-230).
@@ -38,4 +39,7 @@ images:
   - name: avalanche-sparklend-position-tracker
     # Shares the sparklend-position-tracker image — no separate ECR repo exists
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-sparklend-position-tracker
+    newTag: latest
+  - name: temporal-worker
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-temporal-worker
     newTag: latest

@@ -13,9 +13,18 @@ spec:
         app: oracle-price-worker
     spec:
       serviceAccountName: oracle-price-worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
       containers:
         - name: oracle-price-worker
           image: oracle-price-worker
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           envFrom:
             - secretRef:
                 name: oracle-price-worker
@@ -28,7 +37,7 @@ spec:
               memory: "2048Mi"
           livenessProbe:
             exec:
-              command: ["/bin/sh", "-c", "pgrep -f oracle_price_worker"]
+              command: ["/bin/sh", "-c", "kill -0 1"]
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3
