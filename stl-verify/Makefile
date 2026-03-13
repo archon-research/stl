@@ -44,8 +44,10 @@
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
 
-# Local kind cluster context and namespace (override to target EKS: KUBE_CONTEXT=... KUBE_NS=...)
-KUBE_CONTEXT ?= kind-vector
+# Local kind cluster name — single source of truth; KUBE_CONTEXT is derived from it.
+# To target EKS: KUBE_CONTEXT=<arn> KUBE_NS=<ns>
+KIND_CLUSTER ?= vector
+KUBE_CONTEXT ?= kind-$(KIND_CLUSTER)
 KUBE_NS      ?= vector
 
 # Run the application
@@ -281,7 +283,7 @@ dev-up:
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  [2/6] Infrastructure"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/namespace.yaml
+	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	$(MAKE) kind-config kind-secrets kind-infra
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -320,7 +322,7 @@ dev-up:
 dev-db:
 	@$(MAKE) dev-preflight
 	$(MAKE) kind-create
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/namespace.yaml
+	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	$(MAKE) kind-config kind-secrets
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/timescaledb.yaml -n $(KUBE_NS)
 	@echo "==> Waiting for timescaledb to be ready..."
@@ -513,7 +515,7 @@ dev-wipe:
 	@echo "WARNING: This will tear down the cluster and permanently delete all local database data."
 	@read -rp "Are you sure? [y/N] " confirm && [ "$$confirm" = "y" ] || exit 1
 	$(MAKE) kind-delete
-	rm -rf $$HOME/.vector
+	rm -rf $$HOME/.$(KIND_CLUSTER)
 
 # Wipe and recreate the local kind cluster
 dev-reset: dev-down dev-up
@@ -1404,8 +1406,8 @@ erigon-sparklend-backfill:
 # =============================================================================
 
 kind-create:
-	@mkdir -p $$HOME/.vector/timescaledb $$HOME/.vector/temporal-db
-	@STALE=$$(kind get clusters 2>/dev/null | grep -v '^vector$$'); \
+	@mkdir -p $$HOME/.$(KIND_CLUSTER)/timescaledb $$HOME/.$(KIND_CLUSTER)/temporal-db
+	@STALE=$$(kind get clusters 2>/dev/null | grep -v '^$(KIND_CLUSTER)$$' || true); \
 	if [ -n "$$STALE" ]; then \
 	  echo ""; \
 	  echo "⚠️  Found unexpected kind cluster(s): $$STALE"; \
@@ -1413,14 +1415,14 @@ kind-create:
 	  for c in $$STALE; do echo "   kind delete cluster --name $$c"; done; \
 	  echo ""; \
 	fi
-	kind get clusters | grep -qx vector || \
-	  sed "s|STL_DATA_DIR|$$HOME/.vector|g" k8s/kind.yaml | kind create cluster --config -
+	kind get clusters | grep -qx $(KIND_CLUSTER) || \
+	  sed "s|STL_DATA_DIR|$$HOME/.$(KIND_CLUSTER)|g" k8s/kind.yaml | kind create cluster --config -
 
 kind-delete:
-	kind get clusters | grep -qx vector && kind delete cluster --name vector || true
+	kind get clusters | grep -qx $(KIND_CLUSTER) && kind delete cluster --name $(KIND_CLUSTER) || true
 
 kind-infra:
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/namespace.yaml
+	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/ -n $(KUBE_NS)
 	@echo "==> Waiting for timescaledb to be ready (may take a moment on first run — image pull)..."
 	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/timescaledb -n $(KUBE_NS) --timeout=120s
@@ -1446,7 +1448,7 @@ docker-build-migrate:
 	docker build -t stl-migrate:local -f Dockerfile.migrate .
 
 kind-load-migrate:
-	kind load docker-image stl-migrate:local --name vector
+	kind load docker-image stl-migrate:local --name $(KIND_CLUSTER)
 
 kind-migrate:
 	kubectl --context=$(KUBE_CONTEXT) delete job/migrate --ignore-not-found -n $(KUBE_NS)
@@ -1457,12 +1459,12 @@ kind-migrate:
 	kubectl --context=$(KUBE_CONTEXT) logs -l job-name=migrate -n $(KUBE_NS) || true
 
 kind-load-watcher:
-	kind load docker-image stl-watcher:local --name vector
+	kind load docker-image stl-watcher:local --name $(KIND_CLUSTER)
 
 kind-load-workers:
-	kind load docker-image stl-oracle-price-worker:local --name vector
-	kind load docker-image stl-morpho-indexer:local       --name vector
-	kind load docker-image stl-sparklend-position-tracker:local    --name vector
+	kind load docker-image stl-oracle-price-worker:local --name $(KIND_CLUSTER)
+	kind load docker-image stl-morpho-indexer:local       --name $(KIND_CLUSTER)
+	kind load docker-image stl-sparklend-position-tracker:local    --name $(KIND_CLUSTER)
 
 kind-deploy-watcher:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/watcher.yaml -n $(KUBE_NS)
@@ -1473,7 +1475,7 @@ kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/sparklend-position-tracker -n $(KUBE_NS)
 
 kind-load-temporal-worker:
-	kind load docker-image stl-temporal-worker:local --name vector
+	kind load docker-image stl-temporal-worker:local --name $(KIND_CLUSTER)
 
 kind-deploy-temporal-worker:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/temporal-worker.yaml -n $(KUBE_NS)
@@ -1483,18 +1485,18 @@ kind-deploy-temporal-worker:
 kind-redeploy-worker:
 	@test -n "$(NAME)" || { echo "ERROR: NAME is required. Example: make kind-redeploy-worker NAME=morpho-indexer"; exit 1; }
 	$(MAKE) docker-build-$(NAME) LOCAL=1
-	kind load docker-image stl-$(NAME):local --name vector
+	kind load docker-image stl-$(NAME):local --name $(KIND_CLUSTER)
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$(NAME) -n $(KUBE_NS)
 
 kind-redeploy-watcher:
 	$(MAKE) docker-build-watcher LOCAL=1
-	kind load docker-image stl-watcher:local --name vector
+	kind load docker-image stl-watcher:local --name $(KIND_CLUSTER)
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/watcher -n $(KUBE_NS)
 
 # CI targets — infra only, no apps, no secrets needed
 # Migrations run via go run (no Docker build required)
 kind-infra-ci: kind-create
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/namespace.yaml
+	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	$(MAKE) kind-config kind-infra
 	@echo "==> Running migrations..."
 	DATABASE_URL=postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable \
@@ -1508,6 +1510,7 @@ kind-ci-down: kind-delete
 # Delete all resources in the local namespace without tearing down the cluster.
 # Useful for a clean redeploy: make kind-clean && make dev-up
 kind-clean:
+	@echo "$(KUBE_CONTEXT)" | grep -q '^kind-' || { echo "ERROR: kind-clean refused — '$(KUBE_CONTEXT)' is not a local kind context. Only kind-* contexts are allowed."; exit 1; }
 	kubectl --context=$(KUBE_CONTEXT) delete namespace $(KUBE_NS) --ignore-not-found --wait
 	@echo "==> Namespace $(KUBE_NS) deleted."
 
@@ -1578,7 +1581,7 @@ kind-build-mock-blockchain-server:
 
 # Build and load image into kind cluster
 kind-load-mock-blockchain-server: kind-build-mock-blockchain-server
-	kind load docker-image stl-mock-blockchain-server:local --name vector
+	kind load docker-image stl-mock-blockchain-server:local --name $(KIND_CLUSTER)
 
 # Deploy mock-blockchain-server to kind cluster (builds image, populates LocalStack data first)
 kind-deploy-mock-blockchain-server: kind-load-mock-blockchain-server stress-test-data
