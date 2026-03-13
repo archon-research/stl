@@ -12,6 +12,7 @@ resources:
   - ../../base/allocation-tracker
   - ../../base/avalanche-sparklend-position-tracker
   - external-secrets.yaml
+  - configmaps.yaml
 
 # IAM bindings are managed via EKS Pod Identity associations in the infra repo (SEN-230).
 # No annotations needed on ServiceAccounts.

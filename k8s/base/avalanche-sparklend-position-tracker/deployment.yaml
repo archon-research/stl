@@ -16,7 +16,14 @@ spec:
       containers:
         - name: avalanche-sparklend-position-tracker
           image: avalanche-sparklend-position-tracker
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://localhost:4317"
+            - name: JAEGER_ENDPOINT
+              value: "localhost:4317"
           envFrom:
+            - configMapRef:
+                name: avalanche-sparklend-position-tracker-config
             - secretRef:
                 name: avalanche-sparklend-position-tracker
           resources:

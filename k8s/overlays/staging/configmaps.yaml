@@ -1,0 +1,79 @@
+# ConfigMaps for staging — non-secret environment variables matching ECS parity
+# Sensitive values (Redis, SQS, S3, SNS) are in ExternalSecrets via stl-sentinelstaging-infra-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: watcher-config
+data:
+  CHAIN_ID: "1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://eth-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelstaging"
+  ENABLE_BACKFILL: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-worker-config
+data:
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "2"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oracle-price-worker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelstaging"
+  DEPLOY_ENV: "staging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "1"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "staging"
+  CHAIN_ID: "1"
+  ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: morpho-indexer-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelstaging"
+  DEPLOY_ENV: "staging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "43114"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
