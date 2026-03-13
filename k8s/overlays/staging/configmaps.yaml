@@ -1,0 +1,97 @@
+# ConfigMaps for staging — non-secret environment variables matching ECS parity
+# REDIS_ADDR values must be filled from: tofu output -raw module.ethereum.redis_endpoint / module.avalanche.redis_endpoint
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: watcher-config
+data:
+  CHAIN_ID: "1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://eth-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_TOPIC_ARN: "arn:aws:sns:eu-west-1:579039992622:stl-sentinelstaging-ethereum-blocks.fifo"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  REDIS_ADDR: "REPLACE_ME:6379"
+  ENVIRONMENT: "sentinelstaging"
+  ENABLE_BACKFILL: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-worker-config
+data:
+  CHAIN_ID: "1"
+  SQS_QUEUE_URL: "https://sqs.eu-west-1.amazonaws.com/579039992622/stl-sentinelstaging-ethereum-backup.fifo"
+  S3_BUCKET: "stl-sentinelstaging-ethereum-raw-89d540d0"
+  REDIS_ADDR: "REPLACE_ME:6379"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "2"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oracle-price-worker-config
+data:
+  AWS_SQS_QUEUE_URL: "https://sqs.eu-west-1.amazonaws.com/579039992622/stl-sentinelstaging-ethereum-oracle-price.fifo"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelstaging"
+  DEPLOY_ENV: "staging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sparklend-position-tracker-config
+data:
+  AWS_SQS_QUEUE_URL: "https://sqs.eu-west-1.amazonaws.com/579039992622/stl-sentinelstaging-ethereum-sparklend-position.fifo"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  REDIS_ADDR: "REPLACE_ME:6379"
+  CHAIN_ID: "1"
+  S3_BUCKET: "stl-sentinelstaging-ethereum-raw-89d540d0"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: allocation-tracker-config
+data:
+  AWS_SQS_QUEUE_URL: "https://sqs.eu-west-1.amazonaws.com/579039992622/stl-sentinelstaging-ethereum-allocation-tracking.fifo"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  REDIS_ADDR: "REPLACE_ME:6379"
+  S3_BUCKET: "stl-sentinelstaging-ethereum-raw-89d540d0"
+  DEPLOY_ENV: "staging"
+  CHAIN_ID: "1"
+  ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: morpho-indexer-config
+data:
+  AWS_SQS_QUEUE_URL: "https://sqs.eu-west-1.amazonaws.com/579039992622/stl-sentinelstaging-ethereum-morpho-indexing.fifo"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  REDIS_ADDR: "REPLACE_ME:6379"
+  S3_BUCKET: "stl-sentinelstaging-ethereum-raw-89d540d0"
+  ENVIRONMENT: "sentinelstaging"
+  DEPLOY_ENV: "staging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-sparklend-position-tracker-config
+data:
+  AWS_SQS_QUEUE_URL: "https://sqs.eu-west-1.amazonaws.com/579039992622/stl-sentinelstaging-avalanche-sparklend-position.fifo"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
+  REDIS_ADDR: "REPLACE_ME:6379"
+  CHAIN_ID: "43114"
+  S3_BUCKET: "stl-sentinelstaging-avalanche-raw-89d540d0"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
