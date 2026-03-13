@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/big"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -47,7 +48,7 @@ func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 // SaveBorrower saves a single borrower (debt) position record within an external transaction.
 // amount is the full current outstanding debt; change is the event delta.
 // Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
-func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte) error {
+func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte) error {
 	_, err := tx.Exec(ctx,
 		`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -63,7 +64,7 @@ func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID
 // SaveBorrowerCollateral saves a single collateral position record within an external transaction.
 // amount is the full current collateral balance; change is the event delta.
 // Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
-func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte, collateralEnabled bool) error {
+func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte, collateralEnabled bool) error {
 	_, err := tx.Exec(ctx,
 		`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
