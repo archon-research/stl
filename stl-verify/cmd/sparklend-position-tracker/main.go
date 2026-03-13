@@ -27,8 +27,8 @@ import (
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/services/aavelike_position_tracker"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
-	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
 )
 
 // Build-time variables - can be set via ldflags, otherwise populated from Go's build info
@@ -248,7 +248,7 @@ func run(ctx context.Context, args []string) error {
 	eventRepo := postgres.NewEventRepository(logger)
 
 	// Service
-	service, err := sparklend_position_tracker.NewService(
+	service, err := aavelike_position_tracker.NewService(
 		shared.SQSConsumerConfig{
 			MaxMessages: cfg.maxMessages,
 			Logger:      logger,

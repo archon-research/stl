@@ -19,7 +19,7 @@ import (
 )
 
 // ReceiptProcessor processes transaction receipts for a given block.
-// Satisfied by *sparklend_position_tracker.Service.
+// Satisfied by *aavelike_position_tracker.Service.
 type ReceiptProcessor interface {
 	ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []shared.TransactionReceipt) error
 }

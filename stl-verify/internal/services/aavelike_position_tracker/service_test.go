@@ -1,4 +1,4 @@
-package sparklend_position_tracker
+package aavelike_position_tracker
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/aavelike"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -193,11 +194,7 @@ func TestEventExtractor_ExtractEventData_Borrow(t *testing.T) {
 	}
 }
 
-func TestService_ConvertToDecimalAdjusted(t *testing.T) {
-	service := &Service{
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
-
+func TestFormatDecimalAdjusted(t *testing.T) {
 	tests := []struct {
 		name     string
 		amount   *big.Int
@@ -268,9 +265,9 @@ func TestService_ConvertToDecimalAdjusted(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := service.convertToDecimalAdjusted(tt.amount, tt.decimals)
+			result := aavelike.FormatDecimalAdjusted(tt.amount, tt.decimals)
 			if result != tt.want {
-				t.Errorf("convertToDecimalAdjusted() = %v, want %v", result, tt.want)
+				t.Errorf("FormatDecimalAdjusted() = %v, want %v", result, tt.want)
 			}
 		})
 	}

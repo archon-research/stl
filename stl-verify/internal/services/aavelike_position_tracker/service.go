@@ -1,4 +1,4 @@
-package sparklend_position_tracker
+package aavelike_position_tracker
 
 import (
 	"context"
@@ -9,18 +9,17 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/aavelike"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
@@ -50,25 +49,6 @@ type PositionEventData struct {
 	CollateralEnabled          bool
 }
 
-type CollateralData struct {
-	Asset             common.Address
-	Decimals          int
-	Symbol            string
-	Name              string
-	ActualBalance     *big.Int
-	CollateralEnabled bool
-}
-
-// DebtData holds the current outstanding debt for a single asset as returned by
-// getUserReserveData. CurrentDebt is CurrentVariableDebt — the full balance, not a delta.
-type DebtData struct {
-	Asset       common.Address
-	Decimals    int
-	Symbol      string
-	Name        string
-	CurrentDebt *big.Int // CurrentVariableDebt from getUserReserveData
-}
-
 type Service struct {
 	config       shared.SQSConsumerConfig
 	consumer     outbound.SQSConsumer
@@ -81,11 +61,8 @@ type Service struct {
 	positionRepo outbound.PositionRepository
 	eventRepo    outbound.EventRepository
 
-	mu                 sync.RWMutex
-	blockchainServices map[blockchain.ProtocolKey]*blockchainService
-	multicallClient    outbound.Multicaller
-	erc20ABI           *abi.ABI
-	eventExtractor     *EventExtractor
+	reader         *aavelike.PositionReader
+	eventExtractor *EventExtractor
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -123,27 +100,28 @@ func NewService(
 		return nil, fmt.Errorf("failed to load ERC20 ABI: %w", err)
 	}
 
+	readerLogger := config.Logger.With("component", "sparklend-position-tracker")
+	reader := aavelike.NewPositionReader(ethClient, mc, erc20ABI, readerLogger)
+
 	eventExtractor, err := NewEventExtractor()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create event extractor: %w", err)
 	}
 
 	processor := &Service{
-		config:             config,
-		consumer:           consumer,
-		cacheReader:        cacheReader,
-		ethClient:          ethClient,
-		txManager:          txManager,
-		userRepo:           userRepo,
-		protocolRepo:       protocolRepo,
-		tokenRepo:          tokenRepo,
-		positionRepo:       positionRepo,
-		eventRepo:          eventRepo,
-		blockchainServices: make(map[blockchain.ProtocolKey]*blockchainService),
-		multicallClient:    mc,
-		erc20ABI:           erc20ABI,
-		eventExtractor:     eventExtractor,
-		logger:             config.Logger.With("component", "sparklend-position-tracker"),
+		config:         config,
+		consumer:       consumer,
+		cacheReader:    cacheReader,
+		ethClient:      ethClient,
+		txManager:      txManager,
+		userRepo:       userRepo,
+		protocolRepo:   protocolRepo,
+		tokenRepo:      tokenRepo,
+		positionRepo:   positionRepo,
+		eventRepo:      eventRepo,
+		reader:         reader,
+		eventExtractor: eventExtractor,
+		logger:         config.Logger.With("component", "sparklend-position-tracker"),
 	}
 
 	return processor, nil
@@ -163,53 +141,6 @@ func normalizeTokenSymbol(symbol string) string {
 	}
 
 	return symbol
-}
-
-func (s *Service) getOrCreateBlockchainService(chainID int64, protocolAddress common.Address) (*blockchainService, error) {
-	key := blockchain.ProtocolKey{ChainID: chainID, PoolAddress: protocolAddress}
-
-	// First check: read map under read lock.
-	s.mu.RLock()
-	svc, exists := s.blockchainServices[key]
-	s.mu.RUnlock()
-	if exists {
-		return svc, nil
-	}
-
-	protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
-	if !exists {
-		return nil, fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
-	}
-
-	// Construct outside the lock - this hits the network.
-	newSvc, err := newBlockchainService(
-		chainID,
-		s.ethClient,
-		s.multicallClient,
-		s.erc20ABI,
-		protocolConfig.UIPoolDataProvider.Address,
-		protocolConfig.PoolAddress.Address,
-		protocolConfig.PoolAddressesProvider.Address,
-		protocolConfig.ProtocolVersion,
-		s.logger,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create blockchain service for %s: %w", protocolConfig.Name, err)
-	}
-
-	// Second check: re-acquire lock, another goroutine may have created it.
-	s.mu.Lock()
-	if svc, exists = s.blockchainServices[key]; !exists {
-		s.blockchainServices[key] = newSvc
-		svc = newSvc
-		s.logger.Info("created blockchain service",
-			"protocol", protocolConfig.Name,
-			"chainID", chainID,
-			"address", protocolAddress.Hex())
-	}
-	s.mu.Unlock()
-
-	return svc, nil
 }
 
 func (s *Service) Start(ctx context.Context) error {
@@ -436,14 +367,14 @@ func (s *Service) processReserveEventLog(ctx context.Context, log shared.Log, tx
 
 // saveReserveDataSnapshot fetches reserve data from chain and persists it.
 func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Address, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int, txHash string) error {
-	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
+	blockchainSvc, err := s.reader.GetOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
 		return fmt.Errorf("failed to get blockchain service: %w", err)
 	}
 
 	// Get token metadata for the reserve
 	tokensToFetch := map[common.Address]bool{reserve: true}
-	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
+	metadataMap, err := blockchainSvc.BatchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {
 		return fmt.Errorf("failed to get token metadata: %w", err)
 	}
@@ -454,7 +385,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 	}
 
 	// Fetch reserve data and configuration from chain
-	reserveData, configData, err := blockchainSvc.getFullReserveData(ctx, reserve, blockNumber)
+	reserveData, configData, err := blockchainSvc.GetFullReserveData(ctx, reserve, blockNumber)
 	if err != nil {
 		// If reserve doesn't exist at this block or no PoolDataProvider was active,
 		// log and skip (non-fatal). This can happen when:
@@ -463,7 +394,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 		// - The pool was deployed before its first PoolDataProvider became active
 		//   (e.g., SparkLend pool deployed at block 16568452, but first PoolDataProvider
 		//   only active from block 17007086)
-		if errors.Is(err, ErrReserveNotFound) || errors.Is(err, ErrNoPoolDataProvider) {
+		if errors.Is(err, aavelike.ErrReserveNotFound) || errors.Is(err, aavelike.ErrNoPoolDataProvider) {
 			s.logger.Warn("Reserve data unavailable at block, skipping snapshot",
 				"reserve", reserve.Hex(),
 				"protocol", protocolAddress.Hex(),
@@ -512,8 +443,8 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 func (s *Service) buildReserveDataEntity(
 	protocolID, tokenID, blockNumber int64,
 	blockVersion int,
-	reserveData *reserveDataFromProvider,
-	configData *reserveConfigData,
+	reserveData *aavelike.ReserveData,
+	configData *aavelike.ReserveConfigData,
 ) *entity.SparkLendReserveData {
 	sparkReserveData := &entity.SparkLendReserveData{
 		ProtocolID:   protocolID,
@@ -559,13 +490,13 @@ func (s *Service) buildReserveDataEntity(
 
 // saveCollateralToggleEvent handles ReserveUsedAsCollateralEnabled/Disabled events
 func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
-	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
+	blockchainSvc, err := s.reader.GetOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
 		return fmt.Errorf("failed to get blockchain service: %w", err)
 	}
 
 	tokensToFetch := map[common.Address]bool{eventData.Reserve: true}
-	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
+	metadataMap, err := blockchainSvc.BatchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {
 		return fmt.Errorf("failed to get token metadata: %w", err)
 	}
@@ -578,7 +509,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 	collaterals, _, err := s.extractUserPositionData(ctx, eventData.User, protocolAddress, chainID, blockNumber, eventData.TxHash)
 	if err != nil {
 		s.logger.Warn("failed to extract collateral data", "error", err, "tx", eventData.TxHash)
-		collaterals = []CollateralData{}
+		collaterals = []aavelike.CollateralData{}
 	}
 
 	var balance *big.Int
@@ -617,10 +548,10 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 			return fmt.Errorf("failed to get token: %w", err)
 		}
 
-		decimalAdjustedBalance := s.convertToDecimalAdjusted(balance, metadata.Decimals)
+		decimalAdjustedBalance := aavelike.FormatDecimalAdjusted(balance, metadata.Decimals)
 		change := "0"
 		if eventData.Amount != nil {
-			change = s.convertToDecimalAdjusted(eventData.Amount, metadata.Decimals)
+			change = aavelike.FormatDecimalAdjusted(eventData.Amount, metadata.Decimals)
 		}
 		if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedBalance, change, string(eventData.EventType), common.FromHex(eventData.TxHash), eventData.CollateralEnabled); err != nil {
 			return fmt.Errorf("failed to save collateral toggle: %w", err)
@@ -645,16 +576,16 @@ func (s *Service) saveLiquidationEvent(ctx context.Context, eventData *PositionE
 }
 
 func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionEventData, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
-	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
+	blockchainSvc, err := s.reader.GetOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
 		return fmt.Errorf("failed to get blockchain service: %w", err)
 	}
 
 	tokensToFetch := map[common.Address]bool{eventData.Reserve: true}
-	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
+	metadataMap, err := blockchainSvc.BatchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {
 		s.logger.Warn("failed to batch get token metadata", "error", err, "tx", eventData.TxHash, "block", blockNumber)
-		metadataMap = make(map[common.Address]TokenMetadata)
+		metadataMap = make(map[common.Address]aavelike.TokenMetadata)
 	}
 
 	tokenMetadata, ok := metadataMap[eventData.Reserve]
@@ -677,8 +608,8 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 		}
 
 		s.logger.Warn("failed to extract user position data", "error", err, "tx", eventData.TxHash, "block", blockNumber)
-		collaterals = []CollateralData{}
-		debtData = []DebtData{}
+		collaterals = []aavelike.CollateralData{}
+		debtData = []aavelike.DebtData{}
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
@@ -725,7 +656,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 				TokenID:      tokenID,
 				BlockNumber:  blockNumber,
 				BlockVersion: blockVersion,
-				Amount:       s.convertToDecimalAdjusted(col.ActualBalance, col.Decimals),
+				Amount:       aavelike.FormatDecimalAdjusted(col.ActualBalance, col.Decimals),
 				// Change is "0" here because these records capture the full collateral snapshot
 				// across all assets triggered by a position event (Borrow, Repay, Supply, Withdraw).
 				// The event delta belongs to a specific reserve, not to each collateral asset.
@@ -770,7 +701,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	collaterals, _, err := s.extractUserPositionData(ctx, user, protocolAddress, chainID, blockNumber, txHashHex)
 	if err != nil {
 		s.logger.Warn("failed to extract collateral data for user", "user", user.Hex(), "error", err)
-		collaterals = []CollateralData{}
+		collaterals = []aavelike.CollateralData{}
 	}
 
 	records := make([]outbound.CollateralRecord, 0, len(collaterals))
@@ -787,7 +718,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 			TokenID:      tokenID,
 			BlockNumber:  blockNumber,
 			BlockVersion: blockVersion,
-			Amount:       s.convertToDecimalAdjusted(col.ActualBalance, col.Decimals),
+			Amount:       aavelike.FormatDecimalAdjusted(col.ActualBalance, col.Decimals),
 			// Change is "0" here because snapshotUserPosition performs a full position snapshot
 			// (e.g. triggered by a liquidation) with no per-asset event delta available.
 			Change:            "0",
@@ -805,135 +736,99 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	return nil
 }
 
-// extractUserPositionData fetches current collateral and debt positions for a user.
-// It calls getUserReservesData to identify which assets the user holds, then performs
-// a single batched multicall to getUserReserveData for all relevant assets.
-//
-// Collateral: assets where ScaledATokenBalance > 0 && UsageAsCollateralEnabledOnUser.
-// Debt:       assets where ScaledVariableDebt > 0.
-// Assets that qualify for both are included in both slices (with separate per-call data).
-func (s *Service) extractUserPositionData(ctx context.Context, user common.Address, protocolAddress common.Address, chainID, blockNumber int64, txHash string) ([]CollateralData, []DebtData, error) {
-	blockchainSvc, err := s.getOrCreateBlockchainService(chainID, protocolAddress)
+func (s *Service) extractUserPositionData(ctx context.Context, user common.Address, protocolAddress common.Address, chainID, blockNumber int64, txHash string) ([]aavelike.CollateralData, []aavelike.DebtData, error) {
+	return s.reader.GetUserPositionData(ctx, user, protocolAddress, chainID, blockNumber)
+}
+
+// persistPositionData saves a full position snapshot (collaterals + debts) within an
+// existing transaction. Callers are responsible for wrapping this in WithTransaction.
+func (s *Service) persistPositionData(
+	ctx context.Context,
+	tx pgx.Tx,
+	user common.Address,
+	protocolAddress common.Address,
+	chainID, blockNumber int64,
+	blockVersion int,
+	eventType string,
+	txHash []byte,
+	collaterals []aavelike.CollateralData,
+	debts []aavelike.DebtData,
+) error {
+	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
+		ChainID:        chainID,
+		Address:        user,
+		FirstSeenBlock: blockNumber,
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get blockchain service: %w", err)
+		return fmt.Errorf("failed to ensure user: %w", err)
 	}
 
-	reserves, err := blockchainSvc.getUserReservesData(ctx, user, blockNumber)
+	protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
+	if !exists {
+		return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
+	}
+
+	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get user reserves data: %w", err)
+		return fmt.Errorf("failed to get protocol: %w", err)
 	}
 
-	// Identify collateral and debt assets, deduplicating for the multicall.
-	var collateralAssets, debtAssets []common.Address
-	tokensToFetch := make(map[common.Address]bool)
-	for _, r := range reserves {
-		if r.UnderlyingAsset == (common.Address{}) {
+	for _, d := range debts {
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, d.Asset, normalizeTokenSymbol(d.Symbol), d.Decimals, blockNumber)
+		if err != nil {
+			return fmt.Errorf("failed to get debt token: %w", err)
+		}
+		amount := aavelike.FormatDecimalAdjusted(d.CurrentDebt, d.Decimals)
+		if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, amount, "0", eventType, txHash); err != nil {
+			return fmt.Errorf("failed to save borrower: %w", err)
+		}
+	}
+
+	records := make([]outbound.CollateralRecord, 0, len(collaterals))
+	for _, col := range collaterals {
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, normalizeTokenSymbol(col.Symbol), col.Decimals, blockNumber)
+		if err != nil {
+			s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err)
 			continue
 		}
-		if r.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && r.UsageAsCollateralEnabledOnUser {
-			collateralAssets = append(collateralAssets, r.UnderlyingAsset)
-			tokensToFetch[r.UnderlyingAsset] = true
-		}
-		if r.ScaledVariableDebt.Cmp(big.NewInt(0)) > 0 {
-			debtAssets = append(debtAssets, r.UnderlyingAsset)
-			tokensToFetch[r.UnderlyingAsset] = true
-		}
+
+		records = append(records, outbound.CollateralRecord{
+			UserID:            userID,
+			ProtocolID:        protocolID,
+			TokenID:           tokenID,
+			BlockNumber:       blockNumber,
+			BlockVersion:      blockVersion,
+			Amount:            aavelike.FormatDecimalAdjusted(col.ActualBalance, col.Decimals),
+			Change:            "0",
+			EventType:         eventType,
+			TxHash:            txHash,
+			CollateralEnabled: col.CollateralEnabled,
+		})
 	}
 
-	if len(tokensToFetch) == 0 {
-		return []CollateralData{}, []DebtData{}, nil
+	if err := s.positionRepo.SaveBorrowerCollaterals(ctx, tx, records); err != nil {
+		return fmt.Errorf("failed to save collaterals: %w", err)
 	}
 
-	metadataMap, err := blockchainSvc.batchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
+	return nil
+}
+
+// IndexUserPosition queries the current on-chain position for a user and persists
+// a full snapshot (collaterals + debts) to the database. This is the public entry
+// point used by the snapshot indexer CLI.
+func (s *Service) IndexUserPosition(ctx context.Context, user common.Address, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
+	collaterals, debts, err := s.extractUserPositionData(ctx, user, protocolAddress, chainID, blockNumber, "")
 	if err != nil {
-		s.logger.Warn("failed to batch get token metadata", "error", err, "tx", txHash, "block", blockNumber)
-		return []CollateralData{}, []DebtData{}, fmt.Errorf("failed to get token metadata: %w", err)
+		return fmt.Errorf("failed to extract user position data: %w", err)
 	}
 
-	// Build a deduplicated list for the multicall.
-	allAssets := make([]common.Address, 0, len(tokensToFetch))
-	for asset := range tokensToFetch {
-		allAssets = append(allAssets, asset)
+	if len(collaterals) == 0 && len(debts) == 0 {
+		return nil
 	}
 
-	actualDataMap, err := blockchainSvc.batchGetUserReserveData(ctx, allAssets, user, blockNumber)
-	if err != nil {
-		s.logger.Warn("failed to batch get user reserve data", "error", err, "tx", txHash, "block", blockNumber)
-		return []CollateralData{}, []DebtData{}, fmt.Errorf("failed to get user reserve data: %w", err)
-	}
-
-	var collaterals []CollateralData
-	for _, asset := range collateralAssets {
-		metadata, ok := metadataMap[asset]
-		if !ok || metadata.Decimals == 0 {
-			s.logger.Error("Failed to get collateral token metadata",
-				"action", "skipped",
-				"token", asset.Hex(),
-				"tx", txHash,
-				"block", blockNumber,
-				"user", user.Hex())
-			continue
-		}
-
-		actualData, ok := actualDataMap[asset]
-		if !ok {
-			s.logger.Error("Failed to get actual balance",
-				"action", "skipped",
-				"token", asset.Hex(),
-				"tx", txHash,
-				"block", blockNumber,
-				"user", user.Hex())
-			continue
-		}
-
-		if actualData.UsageAsCollateralEnabled && actualData.CurrentATokenBalance.Cmp(big.NewInt(0)) > 0 {
-			collaterals = append(collaterals, CollateralData{
-				Asset:             asset,
-				Decimals:          metadata.Decimals,
-				Symbol:            metadata.Symbol,
-				Name:              metadata.Name,
-				ActualBalance:     actualData.CurrentATokenBalance,
-				CollateralEnabled: actualData.UsageAsCollateralEnabled,
-			})
-		}
-	}
-
-	var debts []DebtData
-	for _, asset := range debtAssets {
-		metadata, ok := metadataMap[asset]
-		if !ok || metadata.Decimals == 0 {
-			s.logger.Error("Failed to get debt token metadata",
-				"action", "skipped",
-				"token", asset.Hex(),
-				"tx", txHash,
-				"block", blockNumber,
-				"user", user.Hex())
-			continue
-		}
-
-		actualData, ok := actualDataMap[asset]
-		if !ok {
-			s.logger.Error("Failed to get actual debt",
-				"action", "skipped",
-				"token", asset.Hex(),
-				"tx", txHash,
-				"block", blockNumber,
-				"user", user.Hex())
-			continue
-		}
-
-		if actualData.CurrentVariableDebt.Cmp(big.NewInt(0)) > 0 {
-			debts = append(debts, DebtData{
-				Asset:       asset,
-				Decimals:    metadata.Decimals,
-				Symbol:      metadata.Symbol,
-				Name:        metadata.Name,
-				CurrentDebt: actualData.CurrentVariableDebt,
-			})
-		}
-	}
-
-	return collaterals, debts, nil
+	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		return s.persistPositionData(ctx, tx, user, protocolAddress, chainID, blockNumber, blockVersion, "Snapshot", []byte{}, collaterals, debts)
+	})
 }
 
 // saveBorrowerRecord saves a single borrow/repay position record.
@@ -945,13 +840,13 @@ func (s *Service) extractUserPositionData(ctx context.Context, user common.Addre
 //     debt was fully repaid and no longer appears in the on-chain snapshot.
 //   - Borrow: if the reserve is missing from debtData, return an error instead of
 //     guessing the outstanding balance.
-func (s *Service) saveBorrowerRecord(ctx context.Context, tx pgx.Tx, eventData *PositionEventData, tokenMetadata TokenMetadata, debtData []DebtData, userID, protocolID, tokenID, blockNumber int64, blockVersion int) error {
-	change := s.convertToDecimalAdjusted(eventData.Amount, tokenMetadata.Decimals)
+func (s *Service) saveBorrowerRecord(ctx context.Context, tx pgx.Tx, eventData *PositionEventData, tokenMetadata aavelike.TokenMetadata, debtData []aavelike.DebtData, userID, protocolID, tokenID, blockNumber int64, blockVersion int) error {
+	change := aavelike.FormatDecimalAdjusted(eventData.Amount, tokenMetadata.Decimals)
 
 	// Look up the current outstanding debt for this reserve.
 	for _, d := range debtData {
 		if d.Asset == eventData.Reserve {
-			amount := s.convertToDecimalAdjusted(d.CurrentDebt, d.Decimals)
+			amount := aavelike.FormatDecimalAdjusted(d.CurrentDebt, d.Decimals)
 			return s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, string(eventData.EventType), common.FromHex(eventData.TxHash))
 		}
 	}
@@ -964,24 +859,6 @@ func (s *Service) saveBorrowerRecord(ctx context.Context, tx pgx.Tx, eventData *
 	default:
 		return fmt.Errorf("unsupported borrower event type %s", eventData.EventType)
 	}
-}
-
-func (s *Service) convertToDecimalAdjusted(rawAmount *big.Int, decimals int) string {
-	if decimals == 0 {
-		return rawAmount.String()
-	}
-
-	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
-	integerPart := new(big.Int).Div(rawAmount, divisor)
-	remainder := new(big.Int).Mod(rawAmount, divisor)
-
-	if remainder.Cmp(big.NewInt(0)) == 0 {
-		return integerPart.String()
-	}
-
-	fractionalStr := fmt.Sprintf("%0*s", decimals, remainder.String())
-	fractionalStr = strings.TrimRight(fractionalStr, "0")
-	return fmt.Sprintf("%s.%s", integerPart.String(), fractionalStr)
 }
 
 // validateDependencies verifies that all required service dependencies are present.

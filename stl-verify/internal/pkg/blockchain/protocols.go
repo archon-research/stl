@@ -51,6 +51,7 @@ type PoolDataProviderHistory []ContractWithBlock
 
 type ProtocolConfig struct {
 	Name                  string
+	Slug                  string
 	ProtocolType          string
 	PoolAddress           ContractWithBlock
 	UIPoolDataProvider    ContractWithBlock
@@ -71,6 +72,7 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 	// Source: https://github.com/aave-dao/aave-address-book/blob/main/src/AaveV2Ethereum.sol
 	{1, common.HexToAddress("0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9")}: {
 		Name:                  "Aave V2",
+		Slug:                  "aave_v2_ethereum",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9"), ActiveAtBlock: 11362579},
 		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x00e50FAB64eBB37b87df06Aa46b8B35d5f1A4e1A"), ActiveAtBlock: 16384806},
 		PoolAddressesProvider: ContractWithBlock{Address: common.HexToAddress("0xB53C1a33016B2DC2fF3653530bfF1848a515c8c5"), ActiveAtBlock: 11362562},
@@ -85,6 +87,7 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 	// Source: https://github.com/aave-dao/aave-address-book/blob/main/src/AaveV3Ethereum.sol
 	{1, common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")}: {
 		Name:                  "Aave V3",
+		Slug:                  "aave_v3_ethereum",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"), ActiveAtBlock: 16291127},
 		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x91c0eA31b49B69Ea18607702c5d9aC360bf3dE7d"), ActiveAtBlock: 16291263},
@@ -104,6 +107,7 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 	// Source: https://github.com/marsfoundation/spark-address-registry
 	{1, common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")}: {
 		Name:                  "Sparklend",
+		Slug:                  "spark_ethereum",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987"), ActiveAtBlock: 16776401},
 		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x56b7A1012765C285afAC8b8F25C69Bf10ccfE978"), ActiveAtBlock: 24033627},
@@ -119,6 +123,7 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 	// Source: https://github.com/aave-dao/aave-address-book/blob/main/src/AaveV3EthereumLido.sol
 	{1, common.HexToAddress("0x4e033931ad43597d96d6bcc25c280717730b58b1")}: {
 		Name:                  "Aave V3 Lido",
+		Slug:                  "aave_v3_lido_ethereum",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x4e033931ad43597d96d6bcc25c280717730b58b1"), ActiveAtBlock: 20262414},
 		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x91c0eA31b49B69Ea18607702c5d9aC360bf3dE7d"), ActiveAtBlock: 16291263},
@@ -137,6 +142,7 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 	// Source: https://github.com/aave-dao/aave-address-book (check for RWA instance)
 	{1, common.HexToAddress("0xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8")}: {
 		Name:                  "Aave V3 RWA",
+		Slug:                  "aave_v3_rwa_ethereum",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8"), ActiveAtBlock: 23125535},
 		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x91c0eA31b49B69Ea18607702c5d9aC360bf3dE7d"), ActiveAtBlock: 16291263},
@@ -155,6 +161,7 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 	// Source: https://github.com/bgd-labs/aave-address-book (AaveV3Avalanche)
 	{43114, common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD")}: {
 		Name:                  "Aave V3 Avalanche",
+		Slug:                  "aave_v3_avalanche",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD"), ActiveAtBlock: 11970506},
 		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x3518E8927A7827CDdAf841872453003CA95906A3"), ActiveAtBlock: 11970506},
@@ -231,6 +238,16 @@ func GetProtocolsForChain(chainID int64) map[common.Address]ProtocolConfig {
 func IsKnownProtocol(chainID int64, protocolAddress common.Address) bool {
 	_, exists := protocolRegistry[ProtocolKey{chainID, protocolAddress}]
 	return exists
+}
+
+// GetProtocolBySlug returns the protocol key and config for a given slug.
+func GetProtocolBySlug(slug string) (ProtocolKey, ProtocolConfig, bool) {
+	for key, config := range protocolRegistry {
+		if config.Slug == slug {
+			return key, config, true
+		}
+	}
+	return ProtocolKey{}, ProtocolConfig{}, false
 }
 
 // GetPoolDataProviderForBlock returns the correct PoolDataProvider for a given

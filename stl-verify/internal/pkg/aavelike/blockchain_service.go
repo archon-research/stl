@@ -1,4 +1,4 @@
-package sparklend_position_tracker
+package aavelike
 
 import (
 	"context"
@@ -56,7 +56,7 @@ type ActualUserReserveData struct {
 // ErrNoPoolDataProvider is returned when no PoolDataProvider exists for the queried block.
 var ErrNoPoolDataProvider = errors.New("no PoolDataProvider available for block")
 
-type blockchainService struct {
+type BlockchainService struct {
 	mu                                         sync.RWMutex
 	chainID                                    int64
 	ethClient                                  *ethclient.Client
@@ -74,8 +74,8 @@ type blockchainService struct {
 	logger                                     *slog.Logger
 }
 
-// reserveConfigData holds parsed data from PoolDataProvider.getReserveConfigurationData
-type reserveConfigData struct {
+// ReserveConfigData holds parsed data from PoolDataProvider.getReserveConfigurationData
+type ReserveConfigData struct {
 	Decimals                 *big.Int
 	LTV                      *big.Int
 	LiquidationThreshold     *big.Int
@@ -88,8 +88,8 @@ type reserveConfigData struct {
 	IsFrozen                 bool
 }
 
-// reserveDataFromProvider holds parsed data from ProtocolDataProvider.getReserveData
-type reserveDataFromProvider struct {
+// ReserveData holds parsed data from ProtocolDataProvider.getReserveData
+type ReserveData struct {
 	Unbacked                *big.Int
 	AccruedToTreasuryScaled *big.Int
 	TotalAToken             *big.Int
@@ -114,8 +114,8 @@ func newBlockchainService(
 	poolAddressesProvider common.Address,
 	protocolVersion blockchain.ProtocolVersion,
 	logger *slog.Logger,
-) (*blockchainService, error) {
-	service := &blockchainService{
+) (*BlockchainService, error) {
+	service := &BlockchainService{
 		chainID:               chainID,
 		ethClient:             ethClient,
 		multicallClient:       multicallClient,
@@ -137,7 +137,7 @@ func newBlockchainService(
 
 // getPoolDataProviderForBlock returns the correct PoolDataProvider address for the given block.
 // Returns an error if no PoolDataProvider was active at that block.
-func (s *blockchainService) getPoolDataProviderForBlock(blockNumber uint64) (common.Address, error) {
+func (s *BlockchainService) getPoolDataProviderForBlock(blockNumber uint64) (common.Address, error) {
 	provider, ok := blockchain.GetPoolDataProviderForBlock(s.chainID, s.poolAddress, blockNumber)
 	if !ok {
 		return common.Address{}, fmt.Errorf("%w: chain=%d pool=%s block=%d", ErrNoPoolDataProvider, s.chainID, s.poolAddress.Hex(), blockNumber)
@@ -145,7 +145,7 @@ func (s *blockchainService) getPoolDataProviderForBlock(blockNumber uint64) (com
 	return provider, nil
 }
 
-func (s *blockchainService) loadABIs(protocolVersion blockchain.ProtocolVersion) error {
+func (s *BlockchainService) loadABIs(protocolVersion blockchain.ProtocolVersion) error {
 	var err error
 
 	// Load getUserReservesData ABI based on protocol version
@@ -190,7 +190,7 @@ func (s *blockchainService) loadABIs(protocolVersion blockchain.ProtocolVersion)
 	return nil
 }
 
-func (s *blockchainService) getUserReservesData(
+func (s *BlockchainService) getUserReservesData(
 	ctx context.Context,
 	user common.Address,
 	blockNumber int64,
@@ -296,7 +296,7 @@ func (s *blockchainService) getUserReservesData(
 	}
 }
 
-func (s *blockchainService) batchGetUserReserveData(ctx context.Context, assets []common.Address, user common.Address, blockNumber int64) (map[common.Address]ActualUserReserveData, error) {
+func (s *BlockchainService) batchGetUserReserveData(ctx context.Context, assets []common.Address, user common.Address, blockNumber int64) (map[common.Address]ActualUserReserveData, error) {
 	if len(assets) == 0 {
 		return make(map[common.Address]ActualUserReserveData), nil
 	}
@@ -375,7 +375,7 @@ func (s *blockchainService) batchGetUserReserveData(ctx context.Context, assets 
 	return dataMap, nil
 }
 
-func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens map[common.Address]bool, blockNumber *big.Int) (map[common.Address]TokenMetadata, error) {
+func (s *BlockchainService) BatchGetTokenMetadata(ctx context.Context, tokens map[common.Address]bool, blockNumber *big.Int) (map[common.Address]TokenMetadata, error) {
 	tokensToFetch := make([]common.Address, 0)
 	result := make(map[common.Address]TokenMetadata)
 
@@ -465,8 +465,8 @@ func (s *blockchainService) batchGetTokenMetadata(ctx context.Context, tokens ma
 	return result, nil
 }
 
-// getFullReserveData fetches both reserve data and configuration data from ProtocolDataProvider.
-func (s *blockchainService) getFullReserveData(ctx context.Context, asset common.Address, blockNumber int64) (*reserveDataFromProvider, *reserveConfigData, error) {
+// GetFullReserveData fetches both reserve data and configuration data from ProtocolDataProvider.
+func (s *BlockchainService) GetFullReserveData(ctx context.Context, asset common.Address, blockNumber int64) (*ReserveData, *ReserveConfigData, error) {
 	// Get the correct PoolDataProvider for this block
 	poolDataProvider, err := s.getPoolDataProviderForBlock(uint64(blockNumber))
 	if err != nil {
@@ -533,7 +533,7 @@ func (s *blockchainService) getFullReserveData(ctx context.Context, asset common
 	return reserveData, configData, nil
 }
 
-func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvider, error) {
+func (s *BlockchainService) parseReserveData(data []byte) (*ReserveData, error) {
 	unpacked, err := s.getPoolDataProviderReserveDataABI.Unpack("getReserveData", data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unpack getReserveData: %w", err)
@@ -555,12 +555,12 @@ func (s *blockchainService) parseReserveData(data []byte) (*reserveDataFromProvi
 }
 
 // parseReserveDataAaveV2 parses Aave V2 reserve data (10 fields).
-func parseReserveDataAaveV2(unpacked []any, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+func parseReserveDataAaveV2(unpacked []any, fieldIndex map[string]int) (*ReserveData, error) {
 	if len(unpacked) < 10 {
 		return nil, fmt.Errorf("expected 10 values from getReserveData (Aave V2), got %d", len(unpacked))
 	}
 
-	result := &reserveDataFromProvider{
+	result := &ReserveData{
 		Unbacked:                big.NewInt(0), // Not available in V2
 		AccruedToTreasuryScaled: big.NewInt(0), // Not available in V2
 	}
@@ -623,12 +623,12 @@ func parseReserveDataAaveV2(unpacked []any, fieldIndex map[string]int) (*reserve
 }
 
 // parseReserveDataAaveV3 parses Aave V3 reserve data (12 fields).
-func parseReserveDataAaveV3(unpacked []any, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
+func parseReserveDataAaveV3(unpacked []any, fieldIndex map[string]int) (*ReserveData, error) {
 	if len(unpacked) < 12 {
 		return nil, fmt.Errorf("expected 12 values from getReserveData (Aave V3), got %d", len(unpacked))
 	}
 
-	result := &reserveDataFromProvider{}
+	result := &ReserveData{}
 	var err error
 
 	result.Unbacked, err = getBigIntByName(unpacked, fieldIndex, "unbacked")
@@ -696,8 +696,8 @@ func parseReserveDataAaveV3(unpacked []any, fieldIndex map[string]int) (*reserve
 }
 
 // parseReserveDataSparklend parses Sparklend reserve data (11 fields, no averageStableBorrowRate).
-func parseReserveDataSparklend(unpacked []any, fieldIndex map[string]int) (*reserveDataFromProvider, error) {
-	result := &reserveDataFromProvider{}
+func parseReserveDataSparklend(unpacked []any, fieldIndex map[string]int) (*ReserveData, error) {
+	result := &ReserveData{}
 	var err error
 
 	result.Unbacked, err = getBigIntByName(unpacked, fieldIndex, "unbacked")
@@ -761,7 +761,7 @@ func parseReserveDataSparklend(unpacked []any, fieldIndex map[string]int) (*rese
 	return result, nil
 }
 
-func (s *blockchainService) parseReserveConfigurationData(data []byte) (*reserveConfigData, error) {
+func (s *BlockchainService) parseReserveConfigurationData(data []byte) (*ReserveConfigData, error) {
 	unpacked, err := s.getPoolDataProviderReserveConfigurationABI.Unpack("getReserveConfigurationData", data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unpack getReserveConfigurationData: %w", err)
@@ -774,7 +774,7 @@ func (s *blockchainService) parseReserveConfigurationData(data []byte) (*reserve
 	outputs := s.getPoolDataProviderReserveConfigurationABI.Methods["getReserveConfigurationData"].Outputs
 	fieldIndex := buildFieldIndexMap(outputs)
 
-	result := &reserveConfigData{}
+	result := &ReserveConfigData{}
 
 	result.Decimals, err = getBigIntByName(unpacked, fieldIndex, "decimals")
 	if err != nil {

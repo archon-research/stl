@@ -1,4 +1,4 @@
-package sparklend_position_tracker
+package aavelike_position_tracker
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/aavelike"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -26,7 +26,8 @@ import (
 )
 
 type mockPositionRepository struct {
-	saveBorrowerCalls []saveBorrowerCall
+	saveBorrowerCalls            []saveBorrowerCall
+	saveBorrowerCollateralsCalls [][]outbound.CollateralRecord
 
 	SaveBorrowerFn            func(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte) error
 	SaveBorrowerCollateralFn  func(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte, collateralEnabled bool) error
@@ -59,6 +60,7 @@ func (m *mockPositionRepository) SaveBorrowerCollateral(ctx context.Context, tx 
 }
 
 func (m *mockPositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx.Tx, records []outbound.CollateralRecord) error {
+	m.saveBorrowerCollateralsCalls = append(m.saveBorrowerCollateralsCalls, records)
 	if m.SaveBorrowerCollateralsFn != nil {
 		return m.SaveBorrowerCollateralsFn(ctx, tx, records)
 	}
@@ -235,9 +237,9 @@ func TestSaveBorrowerRecord(t *testing.T) {
 			positionRepo := &mockPositionRepository{}
 			svc := newBorrowerRecordTestService(positionRepo)
 
-			var debtData []DebtData
+			var debtData []aavelike.DebtData
 			if tt.currentDebt != nil {
-				debtData = []DebtData{{
+				debtData = []aavelike.DebtData{{
 					Asset:       tt.reserveAddr,
 					Decimals:    tt.decimals,
 					Symbol:      tt.symbol,
@@ -253,7 +255,7 @@ func TestSaveBorrowerRecord(t *testing.T) {
 					User:      userAddr,
 					Reserve:   tt.reserveAddr,
 					Amount:    tt.eventDelta,
-				}, TokenMetadata{Symbol: tt.symbol, Decimals: tt.decimals, Name: tt.tokenName}, debtData, 1, 1, 1, 20000000, 0)
+				}, aavelike.TokenMetadata{Symbol: tt.symbol, Decimals: tt.decimals, Name: tt.tokenName}, debtData, 1, 1, 1, 20000000, 0)
 			})
 
 			if tt.wantErr {
@@ -282,6 +284,188 @@ func TestSaveBorrowerRecord(t *testing.T) {
 				t.Errorf("SaveBorrower change = %q, want %q", call.Change, tt.wantChange)
 			}
 		})
+	}
+}
+
+func TestIndexUserPosition(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+	const blockVersion = 0
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	userAddress := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+	wethAddress := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	usdcAddress := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+
+	oneETH := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	debtUSDC := new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil))
+	zero := big.NewInt(0)
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{
+		{
+			UnderlyingAsset:                wethAddress,
+			ScaledATokenBalance:            oneETH,
+			UsageAsCollateralEnabledOnUser: true,
+			ScaledVariableDebt:             zero,
+		},
+		{
+			UnderlyingAsset:                usdcAddress,
+			ScaledATokenBalance:            zero,
+			UsageAsCollateralEnabledOnUser: false,
+			ScaledVariableDebt:             debtUSDC,
+		},
+	})
+	defer cleanup()
+
+	erc20ABI := mustERC20ABI(t)
+	userReserveDataABI := mustUserReserveDataABI(t)
+
+	multicaller := testutil.NewMockMulticaller()
+	multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i, call := range calls {
+			methodID := hex.EncodeToString(call.CallData[:4])
+			switch {
+			case call.Target == wethAddress || call.Target == usdcAddress:
+				returnData := packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)
+				results[i] = outbound.Result{Success: true, ReturnData: returnData}
+			case methodID == methodIDHex(userReserveDataABI, "getUserReserveData"):
+				asset := unpackUserReserveAsset(t, userReserveDataABI, call.CallData)
+				returnData := packUserReserveDataResponse(t, userReserveDataABI, asset)
+				results[i] = outbound.Result{Success: true, ReturnData: returnData}
+			default:
+				t.Fatalf("unexpected multicall target %s method %s", call.Target.Hex(), methodID)
+			}
+		}
+		return results, nil
+	}
+
+	positionRepo := &mockPositionRepository{}
+	svc := newPositionSnapshotTestService(t, ethClient, multicaller, positionRepo, chainID, protocolAddress)
+
+	err := svc.IndexUserPosition(context.Background(), userAddress, protocolAddress, chainID, blockNumber, blockVersion)
+	if err != nil {
+		t.Fatalf("IndexUserPosition() failed: %v", err)
+	}
+
+	// Verify SaveBorrower was called once with Snapshot event type, amount=1500, change=0
+	if len(positionRepo.saveBorrowerCalls) != 1 {
+		t.Fatalf("expected 1 SaveBorrower call, got %d", len(positionRepo.saveBorrowerCalls))
+	}
+	borrowerCall := positionRepo.saveBorrowerCalls[0]
+	if borrowerCall.EventType != "Snapshot" {
+		t.Errorf("SaveBorrower eventType = %q, want %q", borrowerCall.EventType, "Snapshot")
+	}
+	if borrowerCall.Amount != "1500" {
+		t.Errorf("SaveBorrower amount = %q, want %q", borrowerCall.Amount, "1500")
+	}
+	if borrowerCall.Change != "0" {
+		t.Errorf("SaveBorrower change = %q, want %q", borrowerCall.Change, "0")
+	}
+
+	// Verify SaveBorrowerCollaterals was called once with records containing Snapshot event type and change=0
+	if len(positionRepo.saveBorrowerCollateralsCalls) != 1 {
+		t.Fatalf("expected 1 SaveBorrowerCollaterals call, got %d", len(positionRepo.saveBorrowerCollateralsCalls))
+	}
+	collateralRecords := positionRepo.saveBorrowerCollateralsCalls[0]
+	if len(collateralRecords) != 1 {
+		t.Fatalf("expected 1 collateral record, got %d", len(collateralRecords))
+	}
+	if collateralRecords[0].EventType != "Snapshot" {
+		t.Errorf("collateral record eventType = %q, want %q", collateralRecords[0].EventType, "Snapshot")
+	}
+	if collateralRecords[0].Change != "0" {
+		t.Errorf("collateral record change = %q, want %q", collateralRecords[0].Change, "0")
+	}
+}
+
+func TestIndexUserPosition_NoPositions(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+	const blockVersion = 0
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	userAddress := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{})
+	defer cleanup()
+
+	multicaller := testutil.NewMockMulticaller()
+	// No multicall needed since getUserReservesData returns empty
+
+	positionRepo := &mockPositionRepository{}
+	svc := newPositionSnapshotTestService(t, ethClient, multicaller, positionRepo, chainID, protocolAddress)
+
+	err := svc.IndexUserPosition(context.Background(), userAddress, protocolAddress, chainID, blockNumber, blockVersion)
+	if err != nil {
+		t.Fatalf("IndexUserPosition() should return nil for no positions, got: %v", err)
+	}
+
+	if len(positionRepo.saveBorrowerCalls) != 0 {
+		t.Fatalf("expected 0 SaveBorrower calls, got %d", len(positionRepo.saveBorrowerCalls))
+	}
+	if len(positionRepo.saveBorrowerCollateralsCalls) != 0 {
+		t.Fatalf("expected 0 SaveBorrowerCollaterals calls, got %d", len(positionRepo.saveBorrowerCollateralsCalls))
+	}
+}
+
+func TestIndexUserPosition_PropagatesExtractionError(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+	const blockVersion = 0
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	userAddress := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+	wethAddress := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	oneETH := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	zero := big.NewInt(0)
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{
+		{
+			UnderlyingAsset:                wethAddress,
+			ScaledATokenBalance:            zero,
+			UsageAsCollateralEnabledOnUser: false,
+			ScaledVariableDebt:             oneETH,
+		},
+	})
+	defer cleanup()
+
+	erc20ABI := mustERC20ABI(t)
+	multicaller := testutil.NewMockMulticaller()
+	executeCount := 0
+	multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		executeCount++
+		switch executeCount {
+		case 1:
+			// First call: ERC20 metadata succeeds
+			results := make([]outbound.Result, len(calls))
+			for i, call := range calls {
+				methodID := hex.EncodeToString(call.CallData[:4])
+				results[i] = outbound.Result{Success: true, ReturnData: packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)}
+			}
+			return results, nil
+		case 2:
+			// Second call: getUserReserveData fails
+			return nil, errors.New("rpc failure")
+		default:
+			t.Fatalf("unexpected multicall execution count: %d", executeCount)
+			return nil, nil
+		}
+	}
+
+	positionRepo := &mockPositionRepository{}
+	svc := newPositionSnapshotTestService(t, ethClient, multicaller, positionRepo, chainID, protocolAddress)
+
+	err := svc.IndexUserPosition(context.Background(), userAddress, protocolAddress, chainID, blockNumber, blockVersion)
+	if err == nil {
+		t.Fatal("expected IndexUserPosition to fail, got nil")
+	}
+
+	if len(positionRepo.saveBorrowerCalls) != 0 {
+		t.Fatalf("expected 0 SaveBorrower calls, got %d", len(positionRepo.saveBorrowerCalls))
+	}
+	if len(positionRepo.saveBorrowerCollateralsCalls) != 0 {
+		t.Fatalf("expected 0 SaveBorrowerCollaterals calls, got %d", len(positionRepo.saveBorrowerCollateralsCalls))
 	}
 }
 
@@ -373,37 +557,12 @@ func newPositionSnapshotTestService(t *testing.T, ethClient *ethclient.Client, m
 func newServiceWithCachedBlockchainService(t *testing.T, ethClient *ethclient.Client, multicaller outbound.Multicaller, chainID int64, protocolAddress common.Address) *Service {
 	t.Helper()
 
-	erc20ABI := mustERC20ABI(t)
-	svc := &Service{
-		logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ethClient:          ethClient,
-		multicallClient:    multicaller,
-		erc20ABI:           erc20ABI,
-		blockchainServices: make(map[blockchain.ProtocolKey]*blockchainService),
-	}
+	reader := aavelike.NewPositionReader(ethClient, multicaller, mustERC20ABI(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	config, ok := blockchain.GetProtocolConfig(chainID, protocolAddress)
-	if !ok {
-		t.Fatalf("protocol config not found for %s", protocolAddress.Hex())
+	return &Service{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		reader: reader,
 	}
-
-	blockchainSvc, err := newBlockchainService(
-		chainID,
-		ethClient,
-		multicaller,
-		erc20ABI,
-		config.UIPoolDataProvider.Address,
-		config.PoolAddress.Address,
-		config.PoolAddressesProvider.Address,
-		config.ProtocolVersion,
-		svc.logger,
-	)
-	if err != nil {
-		t.Fatalf("newBlockchainService() failed: %v", err)
-	}
-
-	svc.blockchainServices[blockchain.ProtocolKey{ChainID: chainID, PoolAddress: protocolAddress}] = blockchainSvc
-	return svc
 }
 
 func newEthClientReturningUserReserves(t *testing.T, reserves []sparkLendUserReserve) (*ethclient.Client, func()) {
