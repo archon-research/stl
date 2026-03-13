@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
-	"strings"
 	"sync"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
@@ -204,4 +203,3 @@ func buildDebtData(assets []common.Address, metadataMap map[common.Address]Token
 	}
 	return debts
 }
-
