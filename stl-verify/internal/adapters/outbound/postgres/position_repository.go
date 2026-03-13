@@ -93,7 +93,7 @@ func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx
 			`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
-			rec.UserID, rec.ProtocolID, rec.TokenID, rec.BlockNumber, rec.BlockVersion, amount, change, rec.EventType, rec.TxHash, rec.CollateralEnabled,
+			rec.UserID, rec.ProtocolID, rec.TokenID, rec.BlockNumber, rec.BlockVersion, rec.Amount, rec.Change, rec.EventType, rec.TxHash, rec.CollateralEnabled,
 		)
 	}
 
