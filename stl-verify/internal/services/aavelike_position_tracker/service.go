@@ -100,7 +100,7 @@ func NewService(
 		return nil, fmt.Errorf("failed to load ERC20 ABI: %w", err)
 	}
 
-	readerLogger := config.Logger.With("component", "sparklend-position-tracker")
+	readerLogger := config.Logger.With("component", "aavelike-position-tracker")
 	reader := aavelike.NewPositionReader(ethClient, mc, erc20ABI, readerLogger)
 
 	eventExtractor, err := NewEventExtractor()

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -85,14 +84,10 @@ func TestParseFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "")
 			for k, v := range tt.env {
-				os.Setenv(k, v)
+				t.Setenv(k, v)
 			}
-			t.Cleanup(func() {
-				for k := range tt.env {
-					os.Unsetenv(k)
-				}
-			})
 
 			cfg, err := parseFlags(tt.args)
 			if tt.wantErr && err == nil {

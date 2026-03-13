@@ -77,6 +77,9 @@ func parseFlags(args []string) (cliConfig, error) {
 	if cfg.protocolSlug == "" {
 		return cliConfig{}, fmt.Errorf("--protocol is required")
 	}
+	if cfg.concurrency <= 0 {
+		return cliConfig{}, fmt.Errorf("--concurrency must be greater than 0")
+	}
 
 	key, _, ok := blockchain.GetProtocolBySlug(cfg.protocolSlug)
 	if !ok {
@@ -127,6 +130,10 @@ func parseCSVUsers(r io.Reader, protocolSlug string) ([]common.Address, error) {
 			return nil, fmt.Errorf("reading CSV row: %w", err)
 		}
 
+		if len(record) <= max(addrCol, protoCol) {
+			return nil, fmt.Errorf("row %d: expected at least %d columns, got %d", len(users)+1, max(addrCol, protoCol)+1, len(record))
+		}
+
 		protocols := record[protoCol]
 		// Strip brackets: "[aave_v3_ethereum spark_ethereum]" -> "aave_v3_ethereum spark_ethereum"
 		protocols = strings.TrimPrefix(protocols, "[")
@@ -136,7 +143,11 @@ func parseCSVUsers(r io.Reader, protocolSlug string) ([]common.Address, error) {
 			continue
 		}
 
-		addr := common.HexToAddress(record[addrCol])
+		rawAddr := strings.TrimSpace(record[addrCol])
+		if !common.IsHexAddress(rawAddr) {
+			return nil, fmt.Errorf("row %d: invalid address %q", len(users)+1, rawAddr)
+		}
+		addr := common.HexToAddress(rawAddr)
 		if !seen[addr] {
 			seen[addr] = true
 			users = append(users, addr)
