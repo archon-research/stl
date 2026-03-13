@@ -13,11 +13,20 @@ spec:
         app: temporal-worker
     spec:
       serviceAccountName: temporal-worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
       containers:
         - name: temporal-worker
           # Image name used as the Kustomize images transformer key.
           # The overlay kustomization.yaml overrides newName + newTag.
           image: temporal-worker
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           envFrom:
             - secretRef:
                 # Populated by ExternalSecret — secret name mirrors the service.
@@ -29,4 +38,10 @@ spec:
             limits:
               cpu: "500m"
               memory: "512Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f temporal-worker"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
       terminationGracePeriodSeconds: 60

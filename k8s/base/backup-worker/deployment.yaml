@@ -13,9 +13,18 @@ spec:
         app: backup-worker
     spec:
       serviceAccountName: backup-worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
       containers:
         - name: backup-worker
           image: backup-worker
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           envFrom:
             - secretRef:
                 name: backup-worker
