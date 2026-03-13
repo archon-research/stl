@@ -28,18 +28,18 @@ import (
 type mockPositionRepository struct {
 	saveBorrowerCalls []saveBorrowerCall
 
-	SaveBorrowerFn            func(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte) error
-	SaveBorrowerCollateralFn  func(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte, collateralEnabled bool) error
+	SaveBorrowerFn            func(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte) error
+	SaveBorrowerCollateralFn  func(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte, collateralEnabled bool) error
 	SaveBorrowerCollateralsFn func(ctx context.Context, tx pgx.Tx, records []outbound.CollateralRecord) error
 }
 
 type saveBorrowerCall struct {
-	Amount    string
-	Change    string
+	Amount    *big.Int
+	Change    *big.Int
 	EventType string
 }
 
-func (m *mockPositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte) error {
+func (m *mockPositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte) error {
 	m.saveBorrowerCalls = append(m.saveBorrowerCalls, saveBorrowerCall{
 		Amount:    amount,
 		Change:    change,
@@ -51,7 +51,7 @@ func (m *mockPositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, us
 	return nil
 }
 
-func (m *mockPositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change, eventType string, txHash []byte, collateralEnabled bool) error {
+func (m *mockPositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte, collateralEnabled bool) error {
 	if m.SaveBorrowerCollateralFn != nil {
 		return m.SaveBorrowerCollateralFn(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, eventType, txHash, collateralEnabled)
 	}
@@ -178,8 +178,8 @@ func TestSaveBorrowerRecord(t *testing.T) {
 		symbol      string
 		tokenName   string
 		wantErr     bool
-		wantAmount  string
-		wantChange  string
+		wantAmount  *big.Int
+		wantChange  *big.Int
 	}{
 		{
 			name:        "BorrowUsesCurrentDebtNotEventDelta",
@@ -190,8 +190,8 @@ func TestSaveBorrowerRecord(t *testing.T) {
 			reserveAddr: reserveAddr,
 			symbol:      "WETH",
 			tokenName:   "Wrapped Ether",
-			wantAmount:  "3",
-			wantChange:  "1",
+			wantAmount:  new(big.Int).Mul(big.NewInt(3), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			wantChange:  new(big.Int).Mul(big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 		},
 		{
 			name:        "RepayUsesCurrentDebtNotEventDelta",
@@ -202,8 +202,8 @@ func TestSaveBorrowerRecord(t *testing.T) {
 			reserveAddr: usdcAddr,
 			symbol:      "USDC",
 			tokenName:   "USD Coin",
-			wantAmount:  "1500",
-			wantChange:  "500",
+			wantAmount:  new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
+			wantChange:  new(big.Int).Mul(big.NewInt(500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
 		},
 		{
 			name:        "RepayToZeroUsesZeroAmountWhenDebtMissing",
@@ -214,8 +214,8 @@ func TestSaveBorrowerRecord(t *testing.T) {
 			reserveAddr: reserveAddr,
 			symbol:      "WETH",
 			tokenName:   "Wrapped Ether",
-			wantAmount:  "0",
-			wantChange:  "2",
+			wantAmount:  big.NewInt(0),
+			wantChange:  new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 		},
 		{
 			name:        "BorrowReturnsErrorWhenDebtMissing",
@@ -275,11 +275,11 @@ func TestSaveBorrowerRecord(t *testing.T) {
 			}
 
 			call := positionRepo.saveBorrowerCalls[0]
-			if call.Amount != tt.wantAmount {
-				t.Errorf("SaveBorrower amount = %q, want %q", call.Amount, tt.wantAmount)
+			if call.Amount.Cmp(tt.wantAmount) != 0 {
+				t.Errorf("SaveBorrower amount = %s, want %s", call.Amount, tt.wantAmount)
 			}
-			if call.Change != tt.wantChange {
-				t.Errorf("SaveBorrower change = %q, want %q", call.Change, tt.wantChange)
+			if call.Change.Cmp(tt.wantChange) != 0 {
+				t.Errorf("SaveBorrower change = %s, want %s", call.Change, tt.wantChange)
 			}
 		})
 	}

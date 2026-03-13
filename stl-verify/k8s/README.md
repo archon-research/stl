@@ -19,7 +19,7 @@ Local Kubernetes environment for the STL live data pipeline using [kind](https:/
 make dev-up
 ```
 
-This creates the `stl-local` kind cluster and deploys the full pipeline:
+This creates the `vector` kind cluster and deploys the full pipeline:
 
 | Service | Host port |
 |---------|-----------|
@@ -44,7 +44,7 @@ make dev-reset       # dev-down + dev-up (warm)
 make dev-wipe        # tear down cluster and delete all persisted data (prompts for confirmation)
 ```
 
-Database data (TimescaleDB, Temporal) is persisted at `~/.stl-local/` and survives
+Database data (TimescaleDB, Temporal) is persisted at `~/.vector/` and survives
 `dev-down` / `dev-up` cycles.
 
 ## Accessing Services
@@ -76,8 +76,8 @@ Secrets (`ALCHEMY_API_KEY`, `COINGECKO_API_KEY`, `ETHERSCAN_API_KEY`) are loaded
 To override a config value locally, edit `k8s/config/configmap.yaml` and reapply:
 
 ```bash
-kubectl apply -f k8s/config/configmap.yaml -n stl
-kubectl rollout restart deployment/watcher -n stl
+kubectl --context=kind-vector apply -f k8s/config/configmap.yaml -n vector
+kubectl --context=kind-vector rollout restart deployment/watcher -n vector
 ```
 
 ## Fast Iteration
@@ -95,7 +95,7 @@ make kind-redeploy-worker NAME=temporal-worker
 Restart all deployments without rebuilding (e.g. after updating secrets or config):
 
 ```bash
-kubectl rollout restart deployment -n stl
+kubectl --context=kind-vector rollout restart deployment -n vector
 ```
 
 ## Updating Secrets
@@ -104,5 +104,5 @@ Update `.env.secrets` at the repo root then reapply:
 
 ```bash
 make kind-secrets
-kubectl rollout restart deployment -n stl
+kubectl --context=kind-vector rollout restart deployment -n vector
 ```
