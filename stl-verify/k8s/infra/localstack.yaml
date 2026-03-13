@@ -138,8 +138,9 @@ data:
       --attributes RawMessageDelivery=true \
       --region $REGION
 
-    echo "Creating S3 bucket..."
+    echo "Creating S3 buckets..."
     $AWS s3 mb s3://${S3_BUCKET} --region $REGION
+    $AWS s3 mb s3://stress-test-data --region $REGION
 
     echo "=== LocalStack initialization complete ==="
     echo ""

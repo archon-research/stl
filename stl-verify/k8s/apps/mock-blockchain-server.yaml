@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-blockchain-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-blockchain-server
+  template:
+    metadata:
+      labels:
+        app: mock-blockchain-server
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mock-blockchain-server
+          image: stl-mock-blockchain-server:local
+          imagePullPolicy: Never
+          args:
+            - --addr=:8546
+            - --admin-addr=:8547
+            - --s3-bucket=stress-test-data
+            - --s3-prefix=blocks/chain-1
+            - --s3-endpoint=http://localstack:4566
+            - --region=$(AWS_REGION)
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: rpc
+              containerPort: 8546
+            - name: admin
+              containerPort: 8547
+          env:
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-config
+                  key: AWS_REGION
+          envFrom:
+            - configMapRef:
+                name: stl-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-blockchain-server
+spec:
+  type: NodePort
+  selector:
+    app: mock-blockchain-server
+  ports:
+    - name: rpc
+      port: 8546
+      targetPort: 8546
+      nodePort: 30546
+    - name: admin
+      port: 8547
+      targetPort: 8547
+      nodePort: 30547

@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vector
+
+resources:
+  - ../../base/watcher
+  - ../../base/backup-worker
+  - ../../base/oracle-price-worker
+  - ../../base/sparklend-position-tracker
+  - ../../base/morpho-indexer
+  - ../../base/allocation-tracker
+  - ../../base/avalanche-sparklend-position-tracker
+
+# IAM bindings are managed via EKS Pod Identity associations in the infra repo (SEN-230).
+# No annotations needed on ServiceAccounts.
+
+images:
+  - name: watcher
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
+    newTag: latest
+  - name: backup-worker
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
+    newTag: latest
+  - name: oracle-price-worker
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-oracle-price-worker
+    newTag: latest
+  - name: sparklend-position-tracker
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-sparklend-position-tracker
+    newTag: latest
+  - name: morpho-indexer
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-morpho-indexer
+    newTag: latest
+  - name: allocation-tracker
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-allocation-tracker
+    newTag: latest
+  - name: avalanche-sparklend-position-tracker
+    # Shares the sparklend-position-tracker image — no separate ECR repo exists
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-sparklend-position-tracker
+    newTag: latest

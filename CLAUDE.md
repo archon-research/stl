@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This repository contains the application code:
 - **stl-verify/** - Main Go service (block watcher, backfill, backup worker)
+- **k8s/** - Kubernetes manifests (Kustomize) for EKS deployment
+  - `k8s/base/` — one subdirectory per service: `Deployment`, `ServiceAccount`
+  - `k8s/overlays/prod/` — prod-specific patches (namespace, images/image tags)
+  - `k8s/overlays/staging/` — staging-specific patches (namespace, images/image tags)
 - **experiments/** - Exploration projects
 - **docs/** - Architecture diagrams and entity relations
 
@@ -127,5 +131,5 @@ Lean towards returning errors instead of continuing, unless there is an extremel
 
 - Go 1.26+
 - Docker for local development (PostgreSQL, Redis, Jaeger, LocalStack)
-- AWS for production (ECS Fargate ARM64, RDS Aurora, ElastiCache, SNS/SQS, S3)
+- AWS for production (EKS on Graviton arm64 — migrating from ECS Fargate. RDS Aurora (TimescaleDB via TigerData), ElastiCache Redis, SNS/SQS, S3)
 - Alchemy API key required for Ethereum mainnet access

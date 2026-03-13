@@ -35,9 +35,9 @@ func newTestHTTPHandler(t *testing.T) (*httpHandler, []string) {
 	r := NewReplayer(ds.Headers(), ds, func(h outbound.BlockHeader) {
 		hashes = append(hashes, h.Hash)
 	}, 0)
-	r.emit()
-	r.emit()
-	r.emit()
+	emitOrFail(t, r)
+	emitOrFail(t, r)
+	emitOrFail(t, r)
 	return newHTTPHandler(ds, r), hashes
 }
 
@@ -173,9 +173,9 @@ func TestHTTPHandler_BlockNumber(t *testing.T) {
 	}
 
 	// After emitting all 3 templates (base=1), last block number = 3 = 0x3.
-	r.emit()
-	r.emit()
-	r.emit()
+	emitOrFail(t, r)
+	emitOrFail(t, r)
+	emitOrFail(t, r)
 	w = rpcPost(t, h, `{"jsonrpc":"2.0","id":2,"method":"eth_blockNumber","params":[]}`)
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
