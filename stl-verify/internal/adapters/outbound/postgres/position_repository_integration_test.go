@@ -865,6 +865,8 @@ func TestSaveBorrowerCollaterals_TransactionIsolation(t *testing.T) {
 	}
 }
 
+// TestSaveBorrowerAndCollateral_BigIntRoundTrip tests that big.Int values are correctly saved and retrieved without loss of precision
+// If we at some point upgrade pgx or change driver this test should catch any regressions
 func TestSaveBorrowerAndCollateral_BigIntRoundTrip(t *testing.T) {
 	fixture := setupPositionTest(t)
 	ctx := context.Background()
