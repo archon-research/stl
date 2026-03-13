@@ -121,7 +121,7 @@ func NewService(
 		eventRepo:      eventRepo,
 		reader:         reader,
 		eventExtractor: eventExtractor,
-		logger:         config.Logger.With("component", "sparklend-position-tracker"),
+		logger:         config.Logger.With("component", "aavelike-position-tracker"),
 	}
 
 	return processor, nil
@@ -161,7 +161,7 @@ func (s *Service) Start(ctx context.Context) error {
 		ChainID:      s.config.ChainID,
 	}, s.processBlockEvent)
 
-	s.logger.Info("sparklend position tracker started",
+	s.logger.Info("aavelike position tracker started",
 		"maxMessages", s.config.MaxMessages)
 	return nil
 }
@@ -170,7 +170,7 @@ func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	s.logger.Info("sparklend position tracker stopped")
+	s.logger.Info("aavelike position tracker stopped")
 	return nil
 }
 
