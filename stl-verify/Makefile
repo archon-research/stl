@@ -39,10 +39,16 @@
 		docker-build-mock-blockchain-server docker-push-mock-blockchain-server docker-release-mock-blockchain-server \
 		docker-release-mock-blockchain-server-staging \
 		kind-build-mock-blockchain-server kind-load-mock-blockchain-server kind-deploy-mock-blockchain-server kind-redeploy-mock-blockchain-server \
-		kind-use-mock kind-use-alchemy k6-stress-test stress-test-data stress-test
+		kind-use-mock kind-use-alchemy k6-stress-test stress-test-data stress-test kind-clean
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
+
+# Local kind cluster name — single source of truth; KUBE_CONTEXT is derived from it.
+# To target EKS: KUBE_CONTEXT=<arn> KUBE_NS=<ns>
+KIND_CLUSTER ?= vector
+KUBE_CONTEXT ?= kind-$(KIND_CLUSTER)
+KUBE_NS      ?= vector
 
 # Run the application
 run:
@@ -253,13 +259,13 @@ dev-preflight:
 	  echo ""; \
 	  echo "⚠️  .env.secrets created at the repo root (.env.secrets)"; \
 	  echo "   Fill in ALCHEMY_API_KEY (ask a team member), then run:"; \
-	  echo "   make kind-secrets && kubectl rollout restart deployment -n stl"; \
+	  echo "   make kind-secrets && kubectl --context=$(KUBE_CONTEXT) rollout restart deployment -n $(KUBE_NS)"; \
 	  echo ""; \
 	elif ! grep -q 'ALCHEMY_API_KEY=.\+' ../.env.secrets; then \
 	  echo ""; \
 	  echo "⚠️  ALCHEMY_API_KEY is not set in .env.secrets — the watcher will not function."; \
 	  echo "   Fill in the value, then run:"; \
-	  echo "   make kind-secrets && kubectl rollout restart deployment -n stl"; \
+	  echo "   make kind-secrets && kubectl --context=$(KUBE_CONTEXT) rollout restart deployment -n $(KUBE_NS)"; \
 	  echo ""; \
 	fi
 
@@ -277,7 +283,7 @@ dev-up:
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  [2/6] Infrastructure"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	kubectl apply -f k8s/namespace.yaml
+	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	$(MAKE) kind-config kind-secrets kind-infra
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -307,20 +313,20 @@ dev-up:
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "==> Waiting for all deployments to roll out..."
 	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker temporal-worker; do \
-	  kubectl rollout status deployment/$$dep -n stl --timeout=120s || \
-	    { echo "ERROR: deployment $$dep not ready after 120s"; kubectl get pods -n stl; exit 1; }; \
+	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=120s || \
+	    { echo "ERROR: deployment $$dep not ready after 120s"; kubectl --context=$(KUBE_CONTEXT) get pods -n $(KUBE_NS); exit 1; }; \
 	done
-	@kubectl get pods -n stl
+	@kubectl --context=$(KUBE_CONTEXT) get pods -n $(KUBE_NS)
 
 # Start only the database and run migrations (no app services).
 dev-db:
 	@$(MAKE) dev-preflight
 	$(MAKE) kind-create
-	kubectl apply -f k8s/namespace.yaml
+	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	$(MAKE) kind-config kind-secrets
-	kubectl apply -f k8s/infra/timescaledb.yaml -n stl
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/timescaledb.yaml -n $(KUBE_NS)
 	@echo "==> Waiting for timescaledb to be ready..."
-	kubectl rollout status statefulset/timescaledb -n stl --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/timescaledb -n $(KUBE_NS) --timeout=120s
 	$(call build-if-needed,stl-migrate:local,docker-build-migrate)
 	$(MAKE) kind-load-migrate kind-migrate
 	@echo "==> Database ready."
@@ -509,7 +515,7 @@ dev-wipe:
 	@echo "WARNING: This will tear down the cluster and permanently delete all local database data."
 	@read -rp "Are you sure? [y/N] " confirm && [ "$$confirm" = "y" ] || exit 1
 	$(MAKE) kind-delete
-	rm -rf $$HOME/.stl-local
+	rm -rf $$HOME/.$(KIND_CLUSTER)
 
 # Wipe and recreate the local kind cluster
 dev-reset: dev-down dev-up
@@ -1400,89 +1406,97 @@ erigon-sparklend-backfill:
 # =============================================================================
 
 kind-create:
-	@mkdir -p $$HOME/.stl-local/timescaledb $$HOME/.stl-local/temporal-db
-	kind get clusters | grep -qx stl-local || \
-	  sed "s|STL_DATA_DIR|$$HOME/.stl-local|g" k8s/kind.yaml | kind create cluster --config -
+	@mkdir -p $$HOME/.$(KIND_CLUSTER)/timescaledb $$HOME/.$(KIND_CLUSTER)/temporal-db
+	@STALE=$$(kind get clusters 2>/dev/null | grep -v '^$(KIND_CLUSTER)$$' || true); \
+	if [ -n "$$STALE" ]; then \
+	  echo ""; \
+	  echo "⚠️  Found unexpected kind cluster(s): $$STALE"; \
+	  echo "   These may hold ports needed by this cluster. Delete them with:"; \
+	  for c in $$STALE; do echo "   kind delete cluster --name $$c"; done; \
+	  echo ""; \
+	fi
+	kind get clusters | grep -qx $(KIND_CLUSTER) || \
+	  sed "s|STL_DATA_DIR|$$HOME/.$(KIND_CLUSTER)|g" k8s/kind.yaml | kind create cluster --config -
 
 kind-delete:
-	kind get clusters | grep -qx stl-local && kind delete cluster --name stl-local || true
+	kind get clusters | grep -qx $(KIND_CLUSTER) && kind delete cluster --name $(KIND_CLUSTER) || true
 
 kind-infra:
-	kubectl apply -f k8s/namespace.yaml
-	kubectl apply -f k8s/infra/ -n stl
+	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/ -n $(KUBE_NS)
 	@echo "==> Waiting for timescaledb to be ready (may take a moment on first run — image pull)..."
-	kubectl rollout status statefulset/timescaledb -n stl --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/timescaledb -n $(KUBE_NS) --timeout=120s
 	@echo "==> Waiting for localstack to be ready..."
-	kubectl rollout status deployment/localstack   -n stl --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/localstack   -n $(KUBE_NS) --timeout=120s
 
 kind-config:
-	kubectl apply -f k8s/config/configmap.yaml -n stl
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/config/configmap.yaml -n $(KUBE_NS)
 
 kind-secrets:
 	@test -f ../.env.secrets || printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\n' | install -m 600 /dev/stdin ../.env.secrets
 	@set -a; . ../.env.secrets; set +a; \
-	kubectl create secret generic stl-secrets \
+	kubectl --context=$(KUBE_CONTEXT) create secret generic stl-secrets \
 	  --from-literal=ALCHEMY_API_KEY=$$ALCHEMY_API_KEY \
 	  --from-literal=COINGECKO_API_KEY=$${COINGECKO_API_KEY:-} \
 	  --from-literal=ETHERSCAN_API_KEY=$${ETHERSCAN_API_KEY:-} \
 	  --from-literal=AWS_ACCESS_KEY_ID=test \
 	  --from-literal=AWS_SECRET_ACCESS_KEY=test \
-	  --namespace=stl \
-	  --dry-run=client -o yaml | kubectl apply -f -
+	  --namespace=$(KUBE_NS) \
+	  --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 
 docker-build-migrate:
 	docker build -t stl-migrate:local -f Dockerfile.migrate .
 
 kind-load-migrate:
-	kind load docker-image stl-migrate:local --name stl-local
+	kind load docker-image stl-migrate:local --name $(KIND_CLUSTER)
 
 kind-migrate:
-	kubectl delete job/migrate --ignore-not-found -n stl
-	kubectl apply -f k8s/jobs/migrate.yaml -n stl
+	kubectl --context=$(KUBE_CONTEXT) delete job/migrate --ignore-not-found -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/jobs/migrate.yaml -n $(KUBE_NS)
 	@echo "==> Waiting for migration to complete..."
-	kubectl wait --for=condition=complete job/migrate -n stl --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/migrate -n $(KUBE_NS) --timeout=120s
 	@echo "==> Migration logs:"
-	kubectl logs -l job-name=migrate -n stl || true
+	kubectl --context=$(KUBE_CONTEXT) logs -l job-name=migrate -n $(KUBE_NS) || true
 
 kind-load-watcher:
-	kind load docker-image stl-watcher:local --name stl-local
+	kind load docker-image stl-watcher:local --name $(KIND_CLUSTER)
 
 kind-load-workers:
-	kind load docker-image stl-oracle-price-worker:local --name stl-local
-	kind load docker-image stl-morpho-indexer:local       --name stl-local
-	kind load docker-image stl-sparklend-position-tracker:local    --name stl-local
+	kind load docker-image stl-oracle-price-worker:local --name $(KIND_CLUSTER)
+	kind load docker-image stl-morpho-indexer:local       --name $(KIND_CLUSTER)
+	kind load docker-image stl-sparklend-position-tracker:local    --name $(KIND_CLUSTER)
 
 kind-deploy-watcher:
-	kubectl apply -f k8s/apps/watcher.yaml -n stl
-	kubectl rollout restart deployment/watcher -n stl
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/watcher.yaml -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/watcher -n $(KUBE_NS)
 
 kind-deploy-workers:
-	kubectl apply -f k8s/apps/workers/ -n stl
-	kubectl rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/sparklend-position-tracker -n stl
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/workers/ -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/sparklend-position-tracker -n $(KUBE_NS)
 
 kind-load-temporal-worker:
-	kind load docker-image stl-temporal-worker:local --name stl-local
+	kind load docker-image stl-temporal-worker:local --name $(KIND_CLUSTER)
 
 kind-deploy-temporal-worker:
-	kubectl apply -f k8s/apps/temporal-worker.yaml -n stl
-	kubectl rollout restart deployment/temporal-worker -n stl
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/temporal-worker.yaml -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/temporal-worker -n $(KUBE_NS)
 
 # Rebuild and redeploy a specific worker. Usage: make kind-redeploy-worker NAME=morpho-indexer
 kind-redeploy-worker:
 	@test -n "$(NAME)" || { echo "ERROR: NAME is required. Example: make kind-redeploy-worker NAME=morpho-indexer"; exit 1; }
 	$(MAKE) docker-build-$(NAME) LOCAL=1
-	kind load docker-image stl-$(NAME):local --name stl-local
-	kubectl rollout restart deployment/$(NAME) -n stl
+	kind load docker-image stl-$(NAME):local --name $(KIND_CLUSTER)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$(NAME) -n $(KUBE_NS)
 
 kind-redeploy-watcher:
 	$(MAKE) docker-build-watcher LOCAL=1
-	kind load docker-image stl-watcher:local --name stl-local
-	kubectl rollout restart deployment/watcher -n stl
+	kind load docker-image stl-watcher:local --name $(KIND_CLUSTER)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/watcher -n $(KUBE_NS)
 
 # CI targets — infra only, no apps, no secrets needed
 # Migrations run via go run (no Docker build required)
 kind-infra-ci: kind-create
-	kubectl apply -f k8s/namespace.yaml
+	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	$(MAKE) kind-config kind-infra
 	@echo "==> Running migrations..."
 	DATABASE_URL=postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable \
@@ -1492,6 +1506,13 @@ kind-infra-ci: kind-create
 kind-ci-up: kind-infra-ci
 
 kind-ci-down: kind-delete
+
+# Delete all resources in the local namespace without tearing down the cluster.
+# Useful for a clean redeploy: make kind-clean && make dev-up
+kind-clean:
+	@echo "$(KUBE_CONTEXT)" | grep -q '^kind-' || { echo "ERROR: kind-clean refused — '$(KUBE_CONTEXT)' is not a local kind context. Only kind-* contexts are allowed."; exit 1; }
+	kubectl --context=$(KUBE_CONTEXT) delete namespace $(KUBE_NS) --ignore-not-found --wait
+	@echo "==> Namespace $(KUBE_NS) deleted."
 
 # =============================================================================
 # Docker Build & Push - Mock Blockchain Server
@@ -1560,26 +1581,26 @@ kind-build-mock-blockchain-server:
 
 # Build and load image into kind cluster
 kind-load-mock-blockchain-server: kind-build-mock-blockchain-server
-	kind load docker-image stl-mock-blockchain-server:local --name stl-local
+	kind load docker-image stl-mock-blockchain-server:local --name $(KIND_CLUSTER)
 
 # Deploy mock-blockchain-server to kind cluster (builds image, populates LocalStack data first)
 kind-deploy-mock-blockchain-server: kind-load-mock-blockchain-server stress-test-data
-	kubectl apply -f k8s/apps/mock-blockchain-server.yaml -n stl
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/mock-blockchain-server.yaml -n $(KUBE_NS)
 
 # Rebuild, reload, and restart mock-blockchain-server in kind
 kind-redeploy-mock-blockchain-server: kind-load-mock-blockchain-server
-	kubectl rollout restart deployment/mock-blockchain-server -n stl
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/mock-blockchain-server -n $(KUBE_NS)
 
 # Point watcher at mock-blockchain-server instead of Alchemy
 kind-use-mock:
-	kubectl set env deployment/watcher \
+	kubectl --context=$(KUBE_CONTEXT) set env deployment/watcher \
 		ALCHEMY_WS_URL=ws://mock-blockchain-server:8546 \
 		ALCHEMY_HTTP_URL=http://mock-blockchain-server:8546 \
-		-n stl
+		-n $(KUBE_NS)
 
 # Restore watcher to real Alchemy (ConfigMap values take effect)
 kind-use-alchemy:
-	kubectl set env deployment/watcher ALCHEMY_WS_URL- ALCHEMY_HTTP_URL- -n stl
+	kubectl --context=$(KUBE_CONTEXT) set env deployment/watcher ALCHEMY_WS_URL- ALCHEMY_HTTP_URL- -n $(KUBE_NS)
 
 # =============================================================================
 # Stress Tests
@@ -1663,8 +1684,8 @@ endif
 #   make k6-stress-test REORG=1 REORG_DEPTH=10 REORG_INTERVAL_S=15
 #   make k6-stress-test TARGET=staging DURATION=5m
 k6-stress-test:
-	kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify -c "TRUNCATE block_states CASCADE;" -q
-	kubectl exec -n stl deployment/redis -- redis-cli FLUSHDB
+	kubectl --context=$(KUBE_CONTEXT) exec -n $(KUBE_NS) timescaledb-0 -- psql -U postgres -d stl_verify -c "TRUNCATE block_states CASCADE;" -q
+	kubectl --context=$(KUBE_CONTEXT) exec -n $(KUBE_NS) deployment/redis -- redis-cli FLUSHDB
 ifeq ($(TARGET),staging)
 	aws --region $(AWS_REGION) sqs purge-queue \
 	  --queue-url https://sqs.$(AWS_REGION).amazonaws.com/$(AWS_ACCOUNT_ID)/$(STRESS_TEST_TRANSFORMER_QUEUE) || true
@@ -1676,21 +1697,21 @@ else
 	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
 	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/$(STRESS_TEST_BACKUP_QUEUE) || true
 endif
-	kubectl wait --for=condition=available deployment/mock-blockchain-server -n stl --timeout=120s
-	kubectl create configmap k6-scripts --from-file=stress-test/k6/scenarios/ --from-file=stress-test/k6/lib/ -n stl --dry-run=client -o yaml | kubectl apply -f -
-	kubectl delete job k6-stress-test -n stl --ignore-not-found
+	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=available deployment/mock-blockchain-server -n $(KUBE_NS) --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) create configmap k6-scripts --from-file=stress-test/k6/scenarios/ --from-file=stress-test/k6/lib/ -n $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
+	kubectl --context=$(KUBE_CONTEXT) delete job k6-stress-test -n $(KUBE_NS) --ignore-not-found
 	sed -e 's|$${SCENARIO}|$(or $(SCENARIO),watcher)|g' \
 	    -e 's|$${INTERVAL_MS}|$(or $(INTERVAL_MS),12000)|g' \
 	    -e 's|$${DURATION}|$(or $(DURATION),2m)|g' \
 	    -e 's|$${REORG}|$(or $(REORG),)|g' \
 	    -e 's|$${REORG_DEPTH}|$(or $(REORG_DEPTH),5)|g' \
 	    -e 's|$${REORG_INTERVAL_S}|$(or $(REORG_INTERVAL_S),30)|g' \
-	    k8s/jobs/k6-stress-test.yaml | kubectl apply -f - -n stl
-	kubectl wait --for=condition=ready pod -l job-name=k6-stress-test -n stl --timeout=60s
-	kubectl logs job/k6-stress-test -n stl -f
-	kubectl wait --for=condition=complete job/k6-stress-test -n stl --timeout=10s
+	    k8s/jobs/k6-stress-test.yaml | kubectl --context=$(KUBE_CONTEXT) apply -f - -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=ready pod -l job-name=k6-stress-test -n $(KUBE_NS) --timeout=60s
+	kubectl --context=$(KUBE_CONTEXT) logs job/k6-stress-test -n $(KUBE_NS) -f
+	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/k6-stress-test -n $(KUBE_NS) --timeout=10s
 	@echo "==> Verifying chain correctness..."
-	kubectl exec -n stl timescaledb-0 -- psql -U postgres -d stl_verify \
+	kubectl --context=$(KUBE_CONTEXT) exec -n $(KUBE_NS) timescaledb-0 -- psql -U postgres -d stl_verify \
 	  -c "SELECT count(*) AS gaps FROM generate_series((SELECT min(number) FROM block_states WHERE chain_id = 1 AND NOT is_orphaned),(SELECT max(number) FROM block_states WHERE chain_id = 1 AND NOT is_orphaned)) AS s(n) LEFT JOIN block_states b ON b.number = s.n AND b.chain_id = 1 AND NOT b.is_orphaned WHERE b.number IS NULL;" \
 	  -c "SELECT count(*) AS unexpected_orphans FROM block_states WHERE chain_id = 1 AND is_orphaned AND number > (SELECT max(number) - $(shell echo $$(( 64 + $(if $(REORG),$(or $(REORG_DEPTH),5),0) ))) FROM block_states WHERE chain_id = 1);" \
 	  -c "SELECT count(*) AS broken_parent_links FROM block_states b JOIN block_states p ON p.number = b.number - 1 AND p.chain_id = b.chain_id AND NOT p.is_orphaned WHERE NOT b.is_orphaned AND b.chain_id = 1 AND b.parent_hash != p.hash;"
