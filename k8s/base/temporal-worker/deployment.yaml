@@ -40,7 +40,7 @@ spec:
               memory: "512Mi"
           livenessProbe:
             exec:
-              command: ["/bin/sh", "-c", "pgrep -f temporal-worker"]
+              command: ["/bin/sh", "-c", "kill -0 1"]
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3
