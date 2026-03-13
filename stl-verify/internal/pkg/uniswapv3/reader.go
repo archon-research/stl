@@ -46,7 +46,7 @@ const poolABIJSON = `[
 	{"name":"token1","type":"function","inputs":[],"outputs":[{"name":"","type":"address"}]}
 ]`
 
-// Manager reads Uniswap V3 NFT-based positions from the chain.
+// Reader reads Uniswap V3 NFT-based positions from the chain.
 //
 // Flow (4 multicall rounds):
 //  1. balanceOf on NonfungiblePositionManager (mainnet: 0xC36442b4a4522E871399CD717aBDD847Ab11FE88) → NFT count per wallet
@@ -56,15 +56,15 @@ const poolABIJSON = `[
 //
 // Token amounts are computed using Uniswap V3 tick math from the position's
 // liquidity and tick range relative to the pool's current price.
-type Manager struct {
+type Reader struct {
 	multicaller   outbound.Multicaller
 	nftManagerABI abi.ABI
 	poolABI       abi.ABI
 	logger        *slog.Logger
 }
 
-// NewManager creates a new Uniswap V3 Manager.
-func NewManager(multicaller outbound.Multicaller, logger *slog.Logger) (*Manager, error) {
+// NewReader creates a new Uniswap V3 Reader.
+func NewReader(multicaller outbound.Multicaller, logger *slog.Logger) (*Reader, error) {
 	nftABI, err := abi.JSON(strings.NewReader(nftManagerABIJSON))
 	if err != nil {
 		return nil, fmt.Errorf("parse nft manager abi: %w", err)
@@ -75,18 +75,18 @@ func NewManager(multicaller outbound.Multicaller, logger *slog.Logger) (*Manager
 		return nil, fmt.Errorf("parse pool abi: %w", err)
 	}
 
-	return &Manager{
+	return &Reader{
 		multicaller:   multicaller,
 		nftManagerABI: nftABI,
 		poolABI:       pABI,
-		logger:        logger.With("component", "uniswapv3-manager"),
+		logger:        logger.With("component", "uniswapv3-reader"),
 	}, nil
 }
 
 // GetPositions reads all NFT positions held by the given wallets from the
 // NonfungiblePositionManager at the specified block. Returns a map of
 // wallet → positions.
-func (m *Manager) GetPositions(
+func (m *Reader) GetPositions(
 	ctx context.Context,
 	wallets []common.Address,
 	nftManager common.Address,
@@ -136,7 +136,7 @@ func (m *Manager) GetPositions(
 
 // GetPoolStates reads slot0, token0, and token1 for each pool in a single
 // multicall at the given block.
-func (m *Manager) GetPoolStates(
+func (m *Reader) GetPoolStates(
 	ctx context.Context,
 	pools []common.Address,
 	block *big.Int,
@@ -147,7 +147,7 @@ func (m *Manager) GetPoolStates(
 // ── Multicall helpers ──
 
 // fetchNFTCounts reads balanceOf for each wallet on the NonfungiblePositionManager.
-func (m *Manager) fetchNFTCounts(
+func (m *Reader) fetchNFTCounts(
 	ctx context.Context,
 	wallets []common.Address,
 	nftManager common.Address,
@@ -197,7 +197,7 @@ func (m *Manager) fetchNFTCounts(
 }
 
 // fetchTokenIDs reads tokenOfOwnerByIndex for each wallet+index pair.
-func (m *Manager) fetchTokenIDs(
+func (m *Reader) fetchTokenIDs(
 	ctx context.Context,
 	wallets []common.Address,
 	counts map[common.Address]int,
@@ -259,7 +259,7 @@ func (m *Manager) fetchTokenIDs(
 }
 
 // fetchPositions reads positions(tokenId) for each NFT token ID.
-func (m *Manager) fetchPositions(
+func (m *Reader) fetchPositions(
 	ctx context.Context,
 	tokenIDs []*big.Int,
 	nftManager common.Address,
@@ -323,7 +323,7 @@ func (m *Manager) fetchPositions(
 }
 
 // fetchSlot0s reads slot0, token0, and token1 for each pool contract.
-func (m *Manager) fetchSlot0s(
+func (m *Reader) fetchSlot0s(
 	ctx context.Context,
 	pools []common.Address,
 	block *big.Int,

@@ -8,27 +8,27 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/archon-research/stl/stl-verify/internal/managers/uniswapv3"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/uniswapv3"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 // UniV3Source fetches Uniswap V3 NFT-based position balances by delegating
-// to the reusable uniswapv3.Manager for on-chain reads and tick math.
+// to the reusable uniswapv3.Reader for on-chain reads and tick math.
 type UniV3Source struct {
-	manager *uniswapv3.Manager
-	logger  *slog.Logger
+	reader *uniswapv3.Reader
+	logger *slog.Logger
 }
 
-// NewUniV3Source creates a new UniV3Source backed by a uniswapv3.Manager.
+// NewUniV3Source creates a new UniV3Source backed by a uniswapv3.Reader.
 func NewUniV3Source(multicaller outbound.Multicaller, logger *slog.Logger) (*UniV3Source, error) {
-	mgr, err := uniswapv3.NewManager(multicaller, logger)
+	mgr, err := uniswapv3.NewReader(multicaller, logger)
 	if err != nil {
-		return nil, fmt.Errorf("create uniswapv3 manager: %w", err)
+		return nil, fmt.Errorf("create uniswapv3 reader: %w", err)
 	}
 
 	return &UniV3Source{
-		manager: mgr,
-		logger:  logger.With("component", "univ3-source"),
+		reader: mgr,
+		logger: logger.With("component", "univ3-source"),
 	}, nil
 }
 
@@ -94,8 +94,8 @@ func (s *UniV3Source) fetchChainBalances(
 		wallets = append(wallets, w)
 	}
 
-	// Get all NFT positions for these wallets via the manager.
-	walletPositions, err := s.manager.GetPositions(ctx, wallets, nftManager, block)
+	// Get all NFT positions for these wallets via the reader.
+	walletPositions, err := s.reader.GetPositions(ctx, wallets, nftManager, block)
 	if err != nil {
 		return fmt.Errorf("get positions: %w", err)
 	}
@@ -111,7 +111,7 @@ func (s *UniV3Source) fetchChainBalances(
 		pools = append(pools, p)
 	}
 
-	poolStates, err := s.manager.GetPoolStates(ctx, pools, block)
+	poolStates, err := s.reader.GetPoolStates(ctx, pools, block)
 	if err != nil {
 		return fmt.Errorf("get pool states: %w", err)
 	}
