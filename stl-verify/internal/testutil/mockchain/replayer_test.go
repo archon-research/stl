@@ -1,6 +1,7 @@
 package mockchain
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -10,6 +11,16 @@ import (
 )
 
 const testInterval = 250 * time.Millisecond // like Base chain
+
+// mustBaseBlockNumber returns the base block number of r, failing the test if it cannot be parsed.
+func mustBaseBlockNumber(t *testing.T, r *Replayer) int64 {
+	t.Helper()
+	n, err := r.baseBlockNumber()
+	if err != nil {
+		t.Fatalf("baseBlockNumber: %v", err)
+	}
+	return n
+}
 
 // newTestReplayer creates a Replayer with a fast interval and a buffered channel collector.
 func newTestReplayer(t *testing.T) (*Replayer, chan outbound.BlockHeader) {
@@ -63,7 +74,9 @@ func TestNewReplayer(t *testing.T) {
 func TestReplayer_BasicEmit(t *testing.T) {
 	r, received := newTestReplayer(t)
 
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	drain(t, received, 3)
 	emitted := r.Stop()
 
@@ -76,7 +89,9 @@ func TestReplayer_BasicEmit(t *testing.T) {
 func TestReplayer_StopReturnsCount(t *testing.T) {
 	r, received := newTestReplayer(t)
 
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	drain(t, received, 3)
 	emitted := r.Stop()
 
@@ -97,7 +112,9 @@ func TestReplayer_IndexWraps(t *testing.T) {
 	r, received := newTestReplayer(t)
 	n := len(r.templates) // 3
 
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	drain(t, received, n+1) // one full loop plus one more
 	r.Stop()
 
@@ -107,12 +124,17 @@ func TestReplayer_IndexWraps(t *testing.T) {
 	}
 }
 
-// TestReplayer_StartIdempotent verifies that calling Start twice does not launch two goroutines.
+// TestReplayer_StartIdempotent verifies that a second Start while running returns an error
+// and does not launch a second goroutine.
 func TestReplayer_StartIdempotent(t *testing.T) {
 	r, received := newTestReplayer(t)
 
-	r.Start()
-	r.Start() // second call must be a no-op
+	if err := r.Start(); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	if err := r.Start(); err == nil {
+		t.Error("second Start while running: got nil, want error")
+	}
 
 	drain(t, received, 2)
 	emitted := r.Stop()
@@ -152,7 +174,9 @@ func TestReplayer_getStatus(t *testing.T) {
 		t.Errorf("expected BlocksEmitted=0 before Start, got %d", s.BlocksEmitted)
 	}
 
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	drain(t, received, 1)
 
 	s = r.getStatus()
@@ -227,13 +251,16 @@ func TestReplayer_LoopContinuity(t *testing.T) {
 
 	n := len(r.templates)*2 + 1 // two full loops + one extra
 	for range n {
-		r.emit()
+		if err := r.emit(); err != nil {
+			t.Fatalf("emit: %v", err)
+		}
 	}
 
 	if len(headers) != n {
 		t.Fatalf("expected %d headers, got %d", n, len(headers))
 	}
 
+	base := mustBaseBlockNumber(t, r)
 	seen := make(map[string]bool)
 	for i, h := range headers {
 		if seen[h.Hash] {
@@ -241,7 +268,7 @@ func TestReplayer_LoopContinuity(t *testing.T) {
 		}
 		seen[h.Hash] = true
 
-		wantNumber := fmt.Sprintf("0x%x", r.baseBlockNumber()+int64(i))
+		wantNumber := fmt.Sprintf("0x%x", base+int64(i))
 		if h.Number != wantNumber {
 			t.Errorf("emission %d: Number %q, want %q", i, h.Number, wantNumber)
 		}
@@ -261,9 +288,11 @@ func TestReplayer_HeaderForHash(t *testing.T) {
 	ds := NewFixtureDataStore()
 	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {}, 0)
 
-	r.emit()
-	r.emit()
-	r.emit()
+	for range 3 {
+		if err := r.emit(); err != nil {
+			t.Fatalf("emit: %v", err)
+		}
+	}
 
 	// HeaderForHash for the third emitted block.
 	thirdHash := r.prevDerivedHash
@@ -276,7 +305,7 @@ func TestReplayer_HeaderForHash(t *testing.T) {
 	}
 
 	// ParentHash of block 3 must equal hash of block 2.
-	h2, ok := r.HeaderForNumber(r.baseBlockNumber() + 1)
+	h2, ok := r.HeaderForNumber(mustBaseBlockNumber(t, r) + 1)
 	if !ok {
 		t.Fatal("expected HeaderForNumber to find block 2")
 	}
@@ -299,12 +328,15 @@ func TestReplayer_HeaderForNumber(t *testing.T) {
 		emitted = append(emitted, h)
 	}, 0)
 
-	r.emit()
-	r.emit()
-	r.emit()
+	for range 3 {
+		if err := r.emit(); err != nil {
+			t.Fatalf("emit: %v", err)
+		}
+	}
 
+	base := mustBaseBlockNumber(t, r)
 	for i, want := range emitted {
-		blockNum := r.baseBlockNumber() + int64(i)
+		blockNum := base + int64(i)
 		got, ok := r.HeaderForNumber(blockNum)
 		if !ok {
 			t.Fatalf("HeaderForNumber(%d) returned false", blockNum)
@@ -318,10 +350,10 @@ func TestReplayer_HeaderForNumber(t *testing.T) {
 	}
 
 	// Block before base and block not yet emitted return false.
-	if _, ok := r.HeaderForNumber(r.baseBlockNumber() - 1); ok {
+	if _, ok := r.HeaderForNumber(base - 1); ok {
 		t.Error("expected false for block before base")
 	}
-	if _, ok := r.HeaderForNumber(r.baseBlockNumber() + 999); ok {
+	if _, ok := r.HeaderForNumber(base + 999); ok {
 		t.Error("expected false for block not yet emitted")
 	}
 }
@@ -334,7 +366,9 @@ func TestReplayer_SetInterval(t *testing.T) {
 	}
 
 	start := time.Now()
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	drain(t, received, 3)
 	r.Stop()
 	elapsed := time.Since(start)
@@ -350,15 +384,28 @@ func TestReplayer_SetInterval(t *testing.T) {
 	}
 }
 
-// TestReplayer_SetInterval_WhileRunning verifies that SetInterval returns an error when called after Start.
+// TestReplayer_SetInterval_WhileRunning verifies that SetInterval succeeds while running
+// and that the new interval takes effect for subsequent emissions.
 func TestReplayer_SetInterval_WhileRunning(t *testing.T) {
 	r, received := newTestReplayer(t)
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	drain(t, received, 1)
 	defer r.Stop()
 
-	if err := r.SetInterval(100 * time.Millisecond); err == nil {
-		t.Error("expected error when calling SetInterval while running")
+	if err := r.SetInterval(100 * time.Millisecond); err != nil {
+		t.Fatalf("SetInterval while running: %v", err)
+	}
+
+	// The first emission after the change may still arrive on the old cadence.
+	// Measure the gap between the next two emissions to confirm the new interval took effect.
+	drain(t, received, 1) // first post-change emission (may be on old cadence)
+	t1 := time.Now()
+	drain(t, received, 1)
+	gap := time.Since(t1)
+	if gap > 300*time.Millisecond {
+		t.Errorf("inter-block gap after SetInterval: %v (want ≤300ms with 100ms interval)", gap)
 	}
 }
 
@@ -375,14 +422,16 @@ func TestReplayer_SetInterval_NonPositive(t *testing.T) {
 	}
 }
 
-// TestReplayer_EmptyTemplates verifies that Start is a no-op (no panic) when there are no templates.
+// TestReplayer_EmptyTemplates verifies that Start returns an error when there are no templates.
 func TestReplayer_EmptyTemplates(t *testing.T) {
 	ds := NewDataStore() // empty — no headers
 	r := NewReplayer(ds.Headers(), ds, func(_ outbound.BlockHeader) {
 		t.Error("onBlock must not be called with empty templates")
 	}, 0)
 
-	r.Start()
+	if err := r.Start(); err == nil {
+		t.Error("Start with empty templates: got nil, want error")
+	}
 	emitted := r.Stop()
 
 	if emitted != 0 {
@@ -394,7 +443,9 @@ func TestReplayer_EmptyTemplates(t *testing.T) {
 func TestReplayer_RestartResetsState(t *testing.T) {
 	r, received := newTestReplayer(t)
 
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
 	drain(t, received, 2)
 	r.Stop()
 
@@ -403,7 +454,9 @@ func TestReplayer_RestartResetsState(t *testing.T) {
 		<-received
 	}
 
-	r.Start()
+	if err := r.Start(); err != nil {
+		t.Fatalf("second Start: %v", err)
+	}
 	drain(t, received, 1)
 
 	s := r.getStatus()
@@ -416,4 +469,56 @@ func TestReplayer_RestartResetsState(t *testing.T) {
 	}
 
 	r.Stop()
+}
+
+// TestReplayer_StartWithInvalidTemplate verifies that Start returns an error wrapping
+// errInvalidTemplateNum when any template contains an unparseable block number,
+// and that no blocks are emitted.
+func TestReplayer_StartWithInvalidTemplate(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers []outbound.BlockHeader
+	}{
+		{
+			name: "empty Number field",
+			headers: []outbound.BlockHeader{
+				{Number: "", Hash: "0xabc", ParentHash: "0x000"},
+			},
+		},
+		{
+			name: "non-hex Number field",
+			headers: []outbound.BlockHeader{
+				{Number: "not-a-number", Hash: "0xabc", ParentHash: "0x000"},
+			},
+		},
+		{
+			name: "invalid Number in second template",
+			headers: []outbound.BlockHeader{
+				{Number: "0x1", Hash: "0xaaa", ParentHash: "0x000"},
+				{Number: "0xgg", Hash: "0xbbb", ParentHash: "0xaaa"}, // "gg" is not valid hex
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ds := NewDataStore()
+			r := NewReplayer(tt.headers, ds, func(_ outbound.BlockHeader) {
+				t.Error("onBlock must not be called with invalid templates")
+			}, 0)
+
+			err := r.Start()
+			if err == nil {
+				t.Fatal("Start with invalid template: got nil, want error")
+				r.Stop()
+				return
+			}
+			if !errors.Is(err, errInvalidTemplateNum) {
+				t.Errorf("got error %v; want it to wrap errInvalidTemplateNum", err)
+			}
+			if emitted := r.Stop(); emitted != 0 {
+				t.Errorf("expected 0 emissions with invalid templates, got %d", emitted)
+			}
+		})
+	}
 }

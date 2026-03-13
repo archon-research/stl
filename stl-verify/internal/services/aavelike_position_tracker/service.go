@@ -548,12 +548,12 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 			return fmt.Errorf("failed to get token: %w", err)
 		}
 
-		decimalAdjustedBalance := aavelike.FormatDecimalAdjusted(balance, metadata.Decimals)
-		change := "0"
+		change := big.NewInt(0)
 		if eventData.Amount != nil {
-			change = aavelike.FormatDecimalAdjusted(eventData.Amount, metadata.Decimals)
+			// Make sure we don't mutate the original
+			change = big.NewInt(0).Set(eventData.Amount)
 		}
-		if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, decimalAdjustedBalance, change, string(eventData.EventType), common.FromHex(eventData.TxHash), eventData.CollateralEnabled); err != nil {
+		if err := s.positionRepo.SaveBorrowerCollateral(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, balance, change, string(eventData.EventType), common.FromHex(eventData.TxHash), eventData.CollateralEnabled); err != nil {
 			return fmt.Errorf("failed to save collateral toggle: %w", err)
 		}
 
@@ -656,11 +656,11 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 				TokenID:      tokenID,
 				BlockNumber:  blockNumber,
 				BlockVersion: blockVersion,
-				Amount:       aavelike.FormatDecimalAdjusted(col.ActualBalance, col.Decimals),
-				// Change is "0" here because these records capture the full collateral snapshot
+				Amount:       col.ActualBalance,
+				// Change is zero here because these records capture the full collateral snapshot
 				// across all assets triggered by a position event (Borrow, Repay, Supply, Withdraw).
 				// The event delta belongs to a specific reserve, not to each collateral asset.
-				Change:            "0",
+				Change:            big.NewInt(0),
 				EventType:         string(eventData.EventType),
 				TxHash:            common.FromHex(eventData.TxHash),
 				CollateralEnabled: col.CollateralEnabled,
@@ -718,10 +718,10 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 			TokenID:      tokenID,
 			BlockNumber:  blockNumber,
 			BlockVersion: blockVersion,
-			Amount:       aavelike.FormatDecimalAdjusted(col.ActualBalance, col.Decimals),
-			// Change is "0" here because snapshotUserPosition performs a full position snapshot
+			Amount:       col.ActualBalance,
+			// Change is zero here because snapshotUserPosition performs a full position snapshot
 			// (e.g. triggered by a liquidation) with no per-asset event delta available.
-			Change:            "0",
+			Change:            big.NewInt(0),
 			EventType:         eventType,
 			TxHash:            txHash,
 			CollateralEnabled: col.CollateralEnabled,
@@ -778,8 +778,7 @@ func (s *Service) persistPositionData(
 		if err != nil {
 			return fmt.Errorf("failed to get debt token: %w", err)
 		}
-		amount := aavelike.FormatDecimalAdjusted(d.CurrentDebt, d.Decimals)
-		if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, amount, "0", eventType, txHash); err != nil {
+		if err := s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, d.CurrentDebt, big.NewInt(0), eventType, txHash); err != nil {
 			return fmt.Errorf("failed to save borrower: %w", err)
 		}
 	}
@@ -798,8 +797,8 @@ func (s *Service) persistPositionData(
 			TokenID:           tokenID,
 			BlockNumber:       blockNumber,
 			BlockVersion:      blockVersion,
-			Amount:            aavelike.FormatDecimalAdjusted(col.ActualBalance, col.Decimals),
-			Change:            "0",
+			Amount:            col.ActualBalance,
+			Change:            big.NewInt(0),
 			EventType:         eventType,
 			TxHash:            txHash,
 			CollateralEnabled: col.CollateralEnabled,
@@ -832,8 +831,8 @@ func (s *Service) IndexUserPosition(ctx context.Context, user common.Address, pr
 }
 
 // saveBorrowerRecord saves a single borrow/repay position record.
-// amount is the current outstanding debt after the event and change is the
-// decimal-adjusted event delta.
+// amount is the current outstanding debt after the event (raw wei) and change is the
+// raw wei event delta.
 //
 // Fallbacks are event-aware and explicit:
 //   - Repay: if the reserve is missing from debtData, persist amount=0 because the
@@ -841,19 +840,16 @@ func (s *Service) IndexUserPosition(ctx context.Context, user common.Address, pr
 //   - Borrow: if the reserve is missing from debtData, return an error instead of
 //     guessing the outstanding balance.
 func (s *Service) saveBorrowerRecord(ctx context.Context, tx pgx.Tx, eventData *PositionEventData, tokenMetadata aavelike.TokenMetadata, debtData []aavelike.DebtData, userID, protocolID, tokenID, blockNumber int64, blockVersion int) error {
-	change := aavelike.FormatDecimalAdjusted(eventData.Amount, tokenMetadata.Decimals)
-
 	// Look up the current outstanding debt for this reserve.
 	for _, d := range debtData {
 		if d.Asset == eventData.Reserve {
-			amount := aavelike.FormatDecimalAdjusted(d.CurrentDebt, d.Decimals)
-			return s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, string(eventData.EventType), common.FromHex(eventData.TxHash))
+			return s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, d.CurrentDebt, eventData.Amount, string(eventData.EventType), common.FromHex(eventData.TxHash))
 		}
 	}
 
 	switch eventData.EventType {
 	case EventRepay:
-		return s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, "0", change, string(eventData.EventType), common.FromHex(eventData.TxHash))
+		return s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, big.NewInt(0), eventData.Amount, string(eventData.EventType), common.FromHex(eventData.TxHash))
 	case EventBorrow:
 		return fmt.Errorf("missing debt data for borrow reserve %s", eventData.Reserve.Hex())
 	default:

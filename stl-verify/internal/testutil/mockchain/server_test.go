@@ -24,6 +24,14 @@ func startTestServer(t *testing.T, store *DataStore) *Server {
 	return s
 }
 
+// emitOrFail calls emit and fails the test immediately if an error is returned.
+func emitOrFail(t *testing.T, r *Replayer) {
+	t.Helper()
+	if err := r.emit(); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+}
+
 // serverPost sends a JSON-RPC POST to the server and returns the raw response body.
 func serverPost(t *testing.T, s *Server, body string) []byte {
 	t.Helper()
@@ -138,7 +146,7 @@ func TestServer_HTTP_GetBlockByHash(t *testing.T) {
 	s := startTestServer(t, store)
 
 	// Emit one block to populate the derived-hash map, then retrieve its hash.
-	s.replayer.emit()
+	emitOrFail(t, s.replayer)
 	header, ok := s.replayer.HeaderForNumber(s.replayer.CurrentBlockNumber())
 	if !ok {
 		t.Fatal("expected emitted block to be retrievable")
@@ -179,7 +187,7 @@ func TestServer_HTTP_Batch(t *testing.T) {
 	s := startTestServer(t, store)
 
 	// Emit one block to populate the derived-hash map.
-	s.replayer.emit()
+	emitOrFail(t, s.replayer)
 	header, ok := s.replayer.HeaderForNumber(s.replayer.CurrentBlockNumber())
 	if !ok {
 		t.Fatal("expected emitted block to be retrievable")
@@ -257,6 +265,137 @@ func TestServer_SetInterval(t *testing.T) {
 		if err := conn.ReadJSON(&n); err != nil {
 			t.Fatalf("read notification %d: %v", i+1, err)
 		}
+	}
+}
+
+// readWSHeaders reads exactly n block headers from a subscribed WebSocket connection.
+func readWSHeaders(t *testing.T, conn *websocket.Conn, n int) []outbound.BlockHeader {
+	t.Helper()
+	headers := make([]outbound.BlockHeader, 0, n)
+	for range n {
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		var msg jsonRPCNotification
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatalf("read notification: %v", err)
+		}
+		headers = append(headers, msg.Params.Result)
+	}
+	return headers
+}
+
+// TestServer_Reorg_BroadcastsAllBlocks verifies that a reorg of depth N broadcasts
+// exactly N headers to the subscribed client, not just the tip.
+func TestServer_Reorg_BroadcastsAllBlocks(t *testing.T) {
+	const depth = 3
+
+	// Use a slow interval so the replayer doesn't emit extra blocks during the test.
+	s := NewServer(NewFixtureDataStore(), time.Minute)
+	if err := s.Start(":0"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop() })
+
+	wsURL := fmt.Sprintf("ws://%s", s.Addr().String())
+	conn := dialWS(t, wsURL)
+	doSubscribe(t, conn)
+
+	// Emit depth+1 canonical blocks so there are enough for a depth-3 reorg.
+	for range depth + 1 {
+		emitOrFail(t, s.replayer)
+	}
+	readWSHeaders(t, conn, depth+1)
+
+	if err := s.Reorg(depth); err != nil {
+		t.Fatalf("Reorg: %v", err)
+	}
+
+	reorgHeaders := readWSHeaders(t, conn, depth)
+
+	// Verify the correct number of headers was broadcast.
+	if len(reorgHeaders) != depth {
+		t.Fatalf("expected %d reorg headers broadcast, got %d", depth, len(reorgHeaders))
+	}
+
+	// Verify parent chain continuity across all reorg branch blocks.
+	for i := 1; i < len(reorgHeaders); i++ {
+		if reorgHeaders[i].ParentHash != reorgHeaders[i-1].Hash {
+			t.Errorf("reorg block %d: ParentHash %q != previous Hash %q",
+				i, reorgHeaders[i].ParentHash, reorgHeaders[i-1].Hash)
+		}
+	}
+}
+
+// TestServer_Reorg_ReplayerContinuesFromTip verifies that after a reorg the replayer
+// emits the next canonical block with the reorg tip as its parent.
+func TestServer_Reorg_ReplayerContinuesFromTip(t *testing.T) {
+	const depth = 2
+
+	s := NewServer(NewFixtureDataStore(), time.Minute)
+	if err := s.Start(":0"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop() })
+
+	wsURL := fmt.Sprintf("ws://%s", s.Addr().String())
+	conn := dialWS(t, wsURL)
+	doSubscribe(t, conn)
+
+	for range depth + 1 {
+		emitOrFail(t, s.replayer)
+	}
+	readWSHeaders(t, conn, depth+1)
+
+	if err := s.Reorg(depth); err != nil {
+		t.Fatalf("Reorg: %v", err)
+	}
+	reorgHeaders := readWSHeaders(t, conn, depth)
+	reorgTip := reorgHeaders[len(reorgHeaders)-1]
+
+	// Emit one more canonical block and verify it chains from the reorg tip.
+	emitOrFail(t, s.replayer)
+	next := readWSHeaders(t, conn, 1)[0]
+
+	if next.ParentHash != reorgTip.Hash {
+		t.Errorf("next canonical block ParentHash %q != reorg tip Hash %q",
+			next.ParentHash, reorgTip.Hash)
+	}
+}
+
+// TestServer_Reorg_ErrorCases verifies that Reorg rejects invalid depths and
+// attempts to reorg when the replayer has not emitted enough blocks.
+func TestServer_Reorg_ErrorCases(t *testing.T) {
+	s := NewServer(NewFixtureDataStore(), time.Minute)
+	if err := s.Start(":0"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop() })
+
+	// No blocks emitted yet.
+	if err := s.Reorg(1); err == nil {
+		t.Error("expected error when no blocks emitted")
+	}
+
+	// Emit 2 blocks; depth-5 reorg should fail (not enough blocks).
+	emitOrFail(t, s.replayer)
+	emitOrFail(t, s.replayer)
+	if err := s.Reorg(5); err == nil {
+		t.Error("expected error when depth exceeds available blocks")
+	}
+
+	// Depth out of range.
+	if err := s.Reorg(0); err == nil {
+		t.Error("expected error for depth 0")
+	}
+	if err := s.Reorg(maxReorgDepth + 1); err == nil {
+		t.Errorf("expected error for depth > %d", maxReorgDepth)
+	}
+
+	// Replayer not running.
+	s2 := NewServer(NewFixtureDataStore(), time.Minute)
+	if err := s2.Reorg(1); err == nil {
+		t.Error("expected error when replayer is not running")
 	}
 }
 

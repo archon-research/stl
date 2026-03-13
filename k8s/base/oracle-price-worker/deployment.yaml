@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oracle-price-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oracle-price-worker
+  template:
+    metadata:
+      labels:
+        app: oracle-price-worker
+    spec:
+      serviceAccountName: oracle-price-worker
+      containers:
+        - name: oracle-price-worker
+          image: oracle-price-worker
+          envFrom:
+            - secretRef:
+                name: oracle-price-worker
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2048Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2048Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f oracle_price_worker"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

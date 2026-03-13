@@ -11,7 +11,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/aavelike"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -191,85 +190,6 @@ func TestEventExtractor_ExtractEventData_Borrow(t *testing.T) {
 
 	if eventData.TxHash != "0xabc123" {
 		t.Errorf("TxHash = %v, want %v", eventData.TxHash, "0xabc123")
-	}
-}
-
-func TestFormatDecimalAdjusted(t *testing.T) {
-	tests := []struct {
-		name     string
-		amount   *big.Int
-		decimals int
-		want     string
-	}{
-		{
-			name:     "1 USDC (6 decimals)",
-			amount:   big.NewInt(1000000),
-			decimals: 6,
-			want:     "1",
-		},
-		{
-			name:     "1.5 USDC (6 decimals)",
-			amount:   big.NewInt(1500000),
-			decimals: 6,
-			want:     "1.5",
-		},
-		{
-			name:     "1 ETH (18 decimals)",
-			amount:   new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil),
-			decimals: 18,
-			want:     "1",
-		},
-		{
-			name:     "0.5 ETH (18 decimals)",
-			amount:   new(big.Int).Div(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil), big.NewInt(2)),
-			decimals: 18,
-			want:     "0.5",
-		},
-		{
-			name:     "no decimals",
-			amount:   big.NewInt(12345),
-			decimals: 0,
-			want:     "12345",
-		},
-		{
-			name:     "trailing zeros stripped: 1500.5 USDC (6 decimals)",
-			amount:   big.NewInt(1500500000),
-			decimals: 6,
-			want:     "1500.5",
-		},
-		{
-			name:     "leading zeros preserved: 0.000001 USDC (6 decimals)",
-			amount:   big.NewInt(1),
-			decimals: 6,
-			want:     "0.000001",
-		},
-		{
-			name:     "leading zeros preserved: 0.000001 ETH (18 decimals)",
-			amount:   new(big.Int).Exp(big.NewInt(10), big.NewInt(12), nil),
-			decimals: 18,
-			want:     "0.000001",
-		},
-		{
-			name:     "1 wei (18 decimals)",
-			amount:   big.NewInt(1),
-			decimals: 18,
-			want:     "0.000000000000000001",
-		},
-		{
-			name:     "mixed fractional: 1500.000001 USDC (6 decimals)",
-			amount:   big.NewInt(1500000001),
-			decimals: 6,
-			want:     "1500.000001",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := aavelike.FormatDecimalAdjusted(tt.amount, tt.decimals)
-			if result != tt.want {
-				t.Errorf("FormatDecimalAdjusted() = %v, want %v", result, tt.want)
-			}
-		})
 	}
 }
 

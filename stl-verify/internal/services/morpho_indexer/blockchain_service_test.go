@@ -372,9 +372,9 @@ func TestGetVaultMetadata_ProbeExecuteError_IsTransient(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when probe multicall Execute fails")
 	}
-	var nv *errNotVault
+	var nv *ErrNotVault
 	if errors.As(err, &nv) {
-		t.Error("transient RPC error should NOT be classified as errNotVault")
+		t.Error("transient RPC error should NOT be classified as ErrNotVault")
 	}
 }
 

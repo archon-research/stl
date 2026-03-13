@@ -205,22 +205,3 @@ func buildDebtData(assets []common.Address, metadataMap map[common.Address]Token
 	return debts
 }
 
-// FormatDecimalAdjusted converts a raw big.Int amount to a decimal-adjusted string
-// representation (e.g. 1500000 with 6 decimals -> "1.5").
-func FormatDecimalAdjusted(rawAmount *big.Int, decimals int) string {
-	if decimals == 0 {
-		return rawAmount.String()
-	}
-
-	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
-	integerPart := new(big.Int).Div(rawAmount, divisor)
-	remainder := new(big.Int).Mod(rawAmount, divisor)
-
-	if remainder.Cmp(big.NewInt(0)) == 0 {
-		return integerPart.String()
-	}
-
-	fractionalStr := fmt.Sprintf("%0*s", decimals, remainder.String())
-	fractionalStr = strings.TrimRight(fractionalStr, "0")
-	return fmt.Sprintf("%s.%s", integerPart.String(), fractionalStr)
-}
