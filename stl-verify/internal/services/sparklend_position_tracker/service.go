@@ -50,24 +50,11 @@ type PositionEventData struct {
 	CollateralEnabled          bool
 }
 
-type CollateralData struct {
-	Asset             common.Address
-	Decimals          int
-	Symbol            string
-	Name              string
-	ActualBalance     *big.Int
-	CollateralEnabled bool
-}
+type CollateralData = shared.CollateralData
 
 // DebtData holds the current outstanding debt for a single asset as returned by
 // getUserReserveData. CurrentDebt is CurrentVariableDebt — the full balance, not a delta.
-type DebtData struct {
-	Asset       common.Address
-	Decimals    int
-	Symbol      string
-	Name        string
-	CurrentDebt *big.Int // CurrentVariableDebt from getUserReserveData
-}
+type DebtData = shared.DebtData
 
 type Service struct {
 	config       shared.SQSConsumerConfig
@@ -86,6 +73,7 @@ type Service struct {
 	multicallClient    outbound.Multicaller
 	erc20ABI           *abi.ABI
 	eventExtractor     *EventExtractor
+	snapshotter        *shared.PositionSnapshotter
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -128,6 +116,8 @@ func NewService(
 		return nil, fmt.Errorf("failed to create event extractor: %w", err)
 	}
 
+	logger := config.Logger.With("component", "sparklend-position-tracker")
+
 	processor := &Service{
 		config:             config,
 		consumer:           consumer,
@@ -143,8 +133,14 @@ func NewService(
 		multicallClient:    mc,
 		erc20ABI:           erc20ABI,
 		eventExtractor:     eventExtractor,
-		logger:             config.Logger.With("component", "sparklend-position-tracker"),
+		logger:             logger,
 	}
+
+	snapshotter, err := processor.newPositionSnapshotter()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create position snapshotter: %w", err)
+	}
+	processor.snapshotter = snapshotter
 
 	return processor, nil
 }
@@ -745,64 +741,38 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 }
 
 func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user common.Address, eventType string, txHash []byte, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int) error {
-	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
-		ChainID:        chainID,
-		Address:        user,
-		FirstSeenBlock: blockNumber,
-	})
+	snapshotter, err := s.getOrCreatePositionSnapshotter()
 	if err != nil {
-		return fmt.Errorf("failed to ensure user: %w", err)
+		return err
 	}
 
-	protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
-	if !exists {
-		return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
+	return snapshotter.SnapshotUserWithTx(ctx, tx, chainID, protocolAddress, user, blockNumber, blockVersion, eventType, txHash)
+}
+
+func (s *Service) getOrCreatePositionSnapshotter() (*shared.PositionSnapshotter, error) {
+	if s.snapshotter != nil {
+		return s.snapshotter, nil
 	}
 
-	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
+	snapshotter, err := s.newPositionSnapshotter()
 	if err != nil {
-		return fmt.Errorf("failed to get protocol: %w", err)
+		return nil, fmt.Errorf("failed to create position snapshotter: %w", err)
 	}
 
-	txHashHex := common.BytesToHash(txHash).Hex()
-	// Debts are intentionally discarded: snapshotUserPosition captures only the collateral
-	// side. Debt positions are tracked separately via saveBorrowerRecord on Borrow/Repay events.
-	collaterals, _, err := s.extractUserPositionData(ctx, user, protocolAddress, chainID, blockNumber, txHashHex)
-	if err != nil {
-		s.logger.Warn("failed to extract collateral data for user", "user", user.Hex(), "error", err)
-		collaterals = []CollateralData{}
-	}
+	s.snapshotter = snapshotter
+	return s.snapshotter, nil
+}
 
-	records := make([]outbound.CollateralRecord, 0, len(collaterals))
-	for _, col := range collaterals {
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, normalizeTokenSymbol(col.Symbol), col.Decimals, blockNumber)
-		if err != nil {
-			s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err, "tx", txHashHex)
-			continue
-		}
-
-		records = append(records, outbound.CollateralRecord{
-			UserID:       userID,
-			ProtocolID:   protocolID,
-			TokenID:      tokenID,
-			BlockNumber:  blockNumber,
-			BlockVersion: blockVersion,
-			Amount:       s.convertToDecimalAdjusted(col.ActualBalance, col.Decimals),
-			// Change is "0" here because snapshotUserPosition performs a full position snapshot
-			// (e.g. triggered by a liquidation) with no per-asset event delta available.
-			Change:            "0",
-			EventType:         eventType,
-			TxHash:            txHash,
-			CollateralEnabled: col.CollateralEnabled,
-		})
-	}
-
-	if err := s.positionRepo.SaveBorrowerCollaterals(ctx, tx, records); err != nil {
-		return fmt.Errorf("failed to save collaterals: %w", err)
-	}
-
-	s.logger.Info("Saved position snapshot", "user", user.Hex(), "tx", txHashHex, "block", blockNumber)
-	return nil
+func (s *Service) newPositionSnapshotter() (*shared.PositionSnapshotter, error) {
+	return shared.NewPositionSnapshotter(
+		s.ethClient,
+		s.txManager,
+		s.userRepo,
+		s.protocolRepo,
+		s.tokenRepo,
+		s.positionRepo,
+		s.logger,
+	)
 }
 
 // extractUserPositionData fetches current collateral and debt positions for a user.

@@ -16,6 +16,21 @@ import (
 // Compile-time check that UserRepository implements outbound.UserRepository
 var _ outbound.UserRepository = (*UserRepository)(nil)
 
+const upsertUserQuery = `INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
+	 VALUES ($1, $2, $3, NOW(), NOW(), $4)
+	 ON CONFLICT (chain_id, address) DO UPDATE SET
+	     first_seen_block = LEAST("user".first_seen_block, EXCLUDED.first_seen_block),
+	     updated_at = CASE
+	         WHEN EXCLUDED.first_seen_block < "user".first_seen_block THEN NOW()
+	         ELSE "user".updated_at
+	     END
+	 RETURNING id, (xmax = 0) AS created`
+
+type userUpsertResult struct {
+	id      int64
+	created bool
+}
+
 // UserRepository is a PostgreSQL implementation of the outbound.UserRepository port.
 type UserRepository struct {
 	pool      *pgxpool.Pool
@@ -47,29 +62,43 @@ func NewUserRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (
 }
 
 func (r *UserRepository) GetOrCreateUser(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error) {
-	var userID int64
+	result, err := r.upsertUser(ctx, tx, user)
+	if err != nil {
+		return 0, fmt.Errorf("get or create user: %w", err)
+	}
 
+	r.logger.Debug("user upserted", "address", user.Address.Hex(), "id", result.id)
+	return result.id, nil
+}
+
+func (r *UserRepository) EnsureUser(ctx context.Context, tx pgx.Tx, user entity.User) (int64, bool, error) {
+	result, err := r.upsertUser(ctx, tx, user)
+	if err != nil {
+		return 0, false, fmt.Errorf("ensure user: %w", err)
+	}
+
+	r.logger.Debug("user ensured", "address", user.Address.Hex(), "id", result.id, "created", result.created)
+	return result.id, result.created, nil
+}
+
+func (r *UserRepository) upsertUser(ctx context.Context, tx pgx.Tx, user entity.User) (userUpsertResult, error) {
 	// Upsert: on conflict preserve the earliest first_seen_block via LEAST().
 	// This is safe for concurrent workers processing different blocks for the same user —
 	// whichever worker wins the INSERT race, the loser's LEAST() merge still produces
 	// the correct minimum first_seen_block.
-	err := tx.QueryRow(ctx,
-		`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
-		 VALUES ($1, $2, $3, NOW(), NOW(), $4)
-		 ON CONFLICT (chain_id, address) DO UPDATE SET
-		     first_seen_block = LEAST("user".first_seen_block, EXCLUDED.first_seen_block),
-		     updated_at = CASE
-		         WHEN EXCLUDED.first_seen_block < "user".first_seen_block THEN NOW()
-		         ELSE "user".updated_at
-		     END
-		 RETURNING id`,
-		user.ChainID, user.Address.Bytes(), user.FirstSeenBlock, user.Metadata).Scan(&userID)
+	// xmax = 0 reports whether this statement inserted a fresh row.
+	var result userUpsertResult
+	err := tx.QueryRow(ctx, upsertUserQuery,
+		user.ChainID,
+		user.Address.Bytes(),
+		user.FirstSeenBlock,
+		user.Metadata,
+	).Scan(&result.id, &result.created)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get or create user: %w", err)
+		return userUpsertResult{}, fmt.Errorf("upsert user chain_id %d address %s: %w", user.ChainID, user.Address.Hex(), err)
 	}
 
-	r.logger.Debug("user upserted", "address", user.Address.Hex(), "id", userID)
-	return userID, nil
+	return result, nil
 }
 
 // UpsertUserProtocolMetadata upserts user protocol metadata records atomically atomically.
