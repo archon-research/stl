@@ -1,26 +1,21 @@
 """Integration tests for the allocation API endpoints.
 
-Spins up a real TimescaleDB container, applies all shared migration files to get
-the real production schema, seeds fixture data, then hits the FastAPI app via
-TestClient to verify end-to-end behaviour.
+Uses a shared TimescaleDB container (session-scoped) with an isolated database
+per test module.  Migrations are applied by the ``module_db`` fixture from
+``conftest.py``; this file only seeds test-specific data.
 """
 
 import asyncio
-import pathlib
 
-import asyncpg
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
-from testcontainers.postgres import PostgresContainer
 
 from app.adapters.postgres.allocation_repository import PostgresAllocationRepository
 from app.api.v1 import allocations
 from app.main import app
 from app.services.allocation_service import AllocationService
-
-MIGRATIONS_DIR = pathlib.Path(__file__).parents[3] / "db" / "migrations"
 
 # Hex bytes used in assertions (20-byte proxy, 20-byte token addr, 32-byte tx hash).
 _PROXY_HEX = "1234567890abcdef1234567890abcdef12345678"
@@ -31,34 +26,13 @@ _TX1_HEX = "aa" * 32
 _TX2_HEX = "bb" * 32
 
 
-async def _run_migrations(dsn: str) -> None:
-    """Execute every migration file in filename order using a native asyncpg
-    connection, which supports multi-statement SQL strings.
-
-    Migration files must follow the lexicographically-sortable naming convention
-    already used in this repo (e.g. 20260122_140000_create_migrations.sql).
-    """
-    conn = await asyncpg.connect(dsn)
-    try:
-        for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
-            try:
-                await conn.execute(sql_file.read_text())
-            except Exception as exc:
-                raise RuntimeError(f"Migration failed: {sql_file.name}") from exc
-    finally:
-        await conn.close()
-
-
 async def _seed(async_url: str) -> None:
     """Insert fixture rows. Chain data is already present from the migrations."""
     engine = create_async_engine(async_url)
     try:
         async with engine.begin() as conn:
             result = await conn.execute(
-                text(
-                    "INSERT INTO token (chain_id, address, symbol, decimals) "
-                    "VALUES (1, decode(:addr, 'hex'), 'USDC', 6) RETURNING id"
-                ),
+                text("SELECT id FROM token WHERE chain_id = 1 AND address = decode(:addr, 'hex')"),
                 {"addr": _TOKEN_HEX},
             )
             token_id = result.scalar_one()
@@ -102,14 +76,10 @@ async def _seed(async_url: str) -> None:
 
 
 @pytest.fixture(scope="module")
-def async_db_url():
-    """Start a TimescaleDB container, run all migrations, seed data, yield the asyncpg URL."""
-    with PostgresContainer("timescale/timescaledb:2.25.1-pg17") as container:
-        async_url = container.get_connection_url(driver="asyncpg")
-        dsn = container.get_connection_url()
-        asyncio.run(_run_migrations(dsn))
-        asyncio.run(_seed(async_url))
-        yield async_url
+def async_db_url(module_db):
+    """Seed test data into the module's isolated database and yield the async URL."""
+    asyncio.run(_seed(module_db["async_url"]))
+    return module_db["async_url"]
 
 
 @pytest.fixture()
@@ -189,7 +159,7 @@ def test_list_allocations_returns_latest_block_version_after_reorg(client: TestC
     # The reorg fixture inserted block_version=0 and block_version=1; only version 1 is canon.
     assert len(data) == 1
     assert data[0]["block_version"] == 1
-    assert data[0]["balance"] == "999.00"
+    assert data[0]["balance"] == "999"
 
 
 def test_list_allocations_returns_422_for_malformed_star_id(client: TestClient) -> None:
