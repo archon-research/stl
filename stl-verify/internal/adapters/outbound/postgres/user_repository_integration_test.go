@@ -251,3 +251,248 @@ func TestGetOrCreateUser_ConcurrentRaceReturnsSameID(t *testing.T) {
 		t.Errorf("first_seen_block = %d, want 1000 (minimum across workers)", firstSeenBlock)
 	}
 }
+
+// TestEnsureUser_CreatesNewUser covers plan step 1 acceptance criteria:
+// a fresh address must report created=true and return a persisted user id.
+func TestEnsureUser_CreatesNewUser(t *testing.T) {
+	truncateUser(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewUserRepository(userPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewUserRepository: %v", err)
+	}
+
+	user := entity.User{ChainID: 1, Address: common.HexToAddress("0x5555555555555555555555555555555555555555"), FirstSeenBlock: 100}
+
+	tx, err := userPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	id, created, err := repo.EnsureUser(ctx, tx, user)
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if !created {
+		t.Fatal("created = false, want true for a fresh address")
+	}
+	if id == 0 {
+		t.Fatal("expected non-zero id")
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	var firstSeenBlock int64
+	err = userPool.QueryRow(ctx,
+		`SELECT first_seen_block FROM "user" WHERE chain_id = $1 AND address = $2`,
+		1, user.Address.Bytes(),
+	).Scan(&firstSeenBlock)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if firstSeenBlock != 100 {
+		t.Errorf("first_seen_block = %d, want 100", firstSeenBlock)
+	}
+}
+
+// TestEnsureUser_ExistingAddressReturnsSameIDAndCreatedFalse covers plan step 1
+// acceptance criteria that an existing address must report created=false and
+// keep the same user id across calls.
+func TestEnsureUser_ExistingAddressReturnsSameIDAndCreatedFalse(t *testing.T) {
+	truncateUser(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewUserRepository(userPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewUserRepository: %v", err)
+	}
+
+	user := entity.User{ChainID: 1, Address: common.HexToAddress("0x6666666666666666666666666666666666666666"), FirstSeenBlock: 200}
+
+	tx1, err := userPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin tx1: %v", err)
+	}
+	defer tx1.Rollback(ctx)
+	id1, created1, err := repo.EnsureUser(ctx, tx1, user)
+	if err != nil {
+		t.Fatalf("first EnsureUser: %v", err)
+	}
+	if !created1 {
+		t.Fatal("first created = false, want true")
+	}
+	if err := tx1.Commit(ctx); err != nil {
+		t.Fatalf("Commit tx1: %v", err)
+	}
+
+	tx2, err := userPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin tx2: %v", err)
+	}
+	defer tx2.Rollback(ctx)
+	id2, created2, err := repo.EnsureUser(ctx, tx2, user)
+	if err != nil {
+		t.Fatalf("second EnsureUser: %v", err)
+	}
+	if created2 {
+		t.Fatal("second created = true, want false for an existing address")
+	}
+	if err := tx2.Commit(ctx); err != nil {
+		t.Fatalf("Commit tx2: %v", err)
+	}
+
+	if id1 != id2 {
+		t.Errorf("expected same id on second call, got id1=%d id2=%d", id1, id2)
+	}
+}
+
+// TestEnsureUser_FirstSeenBlockUsesLeast covers the requirement that
+// first_seen_block preserves the minimum across calls, matching GetOrCreateUser.
+func TestEnsureUser_FirstSeenBlockUsesLeast(t *testing.T) {
+	truncateUser(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewUserRepository(userPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewUserRepository: %v", err)
+	}
+
+	addr := common.HexToAddress("0x7777777777777777777777777777777777777777")
+
+	tx1, err := userPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin tx1: %v", err)
+	}
+	defer tx1.Rollback(ctx)
+	if _, created, err := repo.EnsureUser(ctx, tx1, entity.User{ChainID: 1, Address: addr, FirstSeenBlock: 500}); err != nil {
+		t.Fatalf("first EnsureUser: %v", err)
+	} else if !created {
+		t.Fatal("first created = false, want true")
+	}
+	if err := tx1.Commit(ctx); err != nil {
+		t.Fatalf("Commit tx1: %v", err)
+	}
+
+	tx2, err := userPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin tx2: %v", err)
+	}
+	defer tx2.Rollback(ctx)
+	if _, created, err := repo.EnsureUser(ctx, tx2, entity.User{ChainID: 1, Address: addr, FirstSeenBlock: 100}); err != nil {
+		t.Fatalf("second EnsureUser: %v", err)
+	} else if created {
+		t.Fatal("second created = true, want false for an existing address")
+	}
+	if err := tx2.Commit(ctx); err != nil {
+		t.Fatalf("Commit tx2: %v", err)
+	}
+
+	var firstSeenBlock int64
+	err = userPool.QueryRow(ctx,
+		`SELECT first_seen_block FROM "user" WHERE chain_id = $1 AND address = $2`,
+		1, addr.Bytes(),
+	).Scan(&firstSeenBlock)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if firstSeenBlock != 100 {
+		t.Errorf("first_seen_block = %d, want 100 (LEAST of 500 and 100)", firstSeenBlock)
+	}
+}
+
+// TestEnsureUser_ConcurrentRaceExactlyOneCreated covers the plan step 1
+// requirement that concurrent EnsureUser calls for the same address are safe and
+// exactly one reports created=true.
+func TestEnsureUser_ConcurrentRaceExactlyOneCreated(t *testing.T) {
+	truncateUser(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewUserRepository(userPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewUserRepository: %v", err)
+	}
+
+	addr := common.HexToAddress("0x8888888888888888888888888888888888888888")
+
+	const workers = 10
+	ids := make([]int64, workers)
+	createdFlags := make([]bool, workers)
+	errors := make([]error, workers)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+
+			tx, err := userPool.Begin(ctx)
+			if err != nil {
+				errors[idx] = err
+				return
+			}
+
+			id, created, err := repo.EnsureUser(ctx, tx, entity.User{
+				ChainID:        1,
+				Address:        addr,
+				FirstSeenBlock: int64(1000 + idx),
+			})
+			if err != nil {
+				tx.Rollback(ctx)
+				errors[idx] = err
+				return
+			}
+			if err := tx.Commit(ctx); err != nil {
+				errors[idx] = err
+				return
+			}
+
+			ids[idx] = id
+			createdFlags[idx] = created
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	for i, err := range errors {
+		if err != nil {
+			t.Errorf("worker %d returned error: %v", i, err)
+		}
+	}
+
+	first := ids[0]
+	for i, id := range ids {
+		if id != first {
+			t.Errorf("worker %d returned id %d, want %d", i, id, first)
+		}
+	}
+
+	createdCount := 0
+	for _, created := range createdFlags {
+		if created {
+			createdCount++
+		}
+	}
+	if createdCount != 1 {
+		t.Errorf("created=true count = %d, want 1", createdCount)
+	}
+
+	var firstSeenBlock int64
+	err = userPool.QueryRow(ctx,
+		`SELECT first_seen_block FROM "user" WHERE chain_id = $1 AND address = $2`,
+		1, addr.Bytes(),
+	).Scan(&firstSeenBlock)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if firstSeenBlock != 1000 {
+		t.Errorf("first_seen_block = %d, want 1000 (minimum across workers)", firstSeenBlock)
+	}
+}
