@@ -1,3 +1,5 @@
+-- migrate: no-transaction
+
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_alloc_pos_proxy
     ON allocation_position (proxy_address, block_number DESC);
 
