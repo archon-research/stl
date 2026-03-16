@@ -75,8 +75,6 @@ func DefaultStubSources(logger *slog.Logger) []PositionSource {
 		NewStubSource("psm3", "psm3", logger),
 		NewStubSource("centrifuge", "centrifuge", logger),
 		NewStubSource("centrifuge-feeder", "centrifuge_feeder", logger),
-		NewStubSource("uni-v3-pool", "uni_v3_pool", logger),
-		NewStubSource("uni-v3-lp", "uni_v3_lp", logger),
 		NewStubSource("galaxy-clo", "galaxy_clo", logger),
 	}
 }

@@ -46,8 +46,23 @@ func (h *PrimePositionHandler) HandleSnapshots(
 
 	blockNum := snapshots[0].BlockNumber
 
+	// Token types where the contract itself isn't ERC20-compatible
+	// (e.g. Uniswap V3 pool contracts don't have decimals/symbol).
+	// For these, we use the AssetAddress metadata instead.
+	nonERC20Types := map[string]bool{
+		"uni_v3_pool": true,
+		"uni_v3_lp":   true,
+	}
+
 	var addrs []common.Address
 	for _, s := range snapshots {
+		if nonERC20Types[s.Entry.TokenType] {
+			// Only fetch metadata for the asset, not the pool contract.
+			if s.Entry.AssetAddress != nil {
+				addrs = append(addrs, *s.Entry.AssetAddress)
+			}
+			continue
+		}
 		addrs = append(addrs, s.Entry.ContractAddress)
 		if s.Entry.AssetAddress != nil {
 			addrs = append(addrs, *s.Entry.AssetAddress)
@@ -59,12 +74,33 @@ func (h *PrimePositionHandler) HandleSnapshots(
 
 	positions := make([]*entity.AllocationPosition, 0, len(snapshots))
 	for _, s := range snapshots {
-		meta, ok := h.metadata.get(s.Entry.ContractAddress)
-		if !ok {
-			return fmt.Errorf(
-				"metadata missing for token %s",
-				s.Entry.ContractAddress.Hex(),
-			)
+		var meta tokenMeta
+		var ok bool
+
+		if nonERC20Types[s.Entry.TokenType] {
+			// Use asset metadata for non-ERC20 contract types.
+			if s.Entry.AssetAddress == nil {
+				return fmt.Errorf(
+					"uni_v3 entry %s has no asset address",
+					s.Entry.ContractAddress.Hex(),
+				)
+			}
+			meta, ok = h.metadata.get(*s.Entry.AssetAddress)
+			if !ok {
+				return fmt.Errorf(
+					"metadata missing for asset %s (pool %s)",
+					s.Entry.AssetAddress.Hex(),
+					s.Entry.ContractAddress.Hex(),
+				)
+			}
+		} else {
+			meta, ok = h.metadata.get(s.Entry.ContractAddress)
+			if !ok {
+				return fmt.Errorf(
+					"metadata missing for token %s",
+					s.Entry.ContractAddress.Hex(),
+				)
+			}
 		}
 
 		var assetDecimals *int
