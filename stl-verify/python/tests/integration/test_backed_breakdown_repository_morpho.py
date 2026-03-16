@@ -15,7 +15,7 @@ from tests.integration.conftest import insert_token, insert_user, store_test_ids
 class ProtocolScopedBackedBreakdownRepository(Protocol):
     """Spec contract: Morpho repository is selected by protocol before invocation."""
 
-    async def get_backed_breakdown(self, debt_token_id: int) -> BackedBreakdown: ...
+    async def get_backed_breakdown(self, backed_asset_id: int) -> BackedBreakdown: ...
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +311,7 @@ async def test_vault_backed_breakdown(
     """
     result = await repository.get_backed_breakdown(test_ids["vault_id"])
 
-    assert result.debt_token_id == test_ids["vault_id"]
+    assert result.backed_asset_id == test_ids["vault_id"]
     assert result.protocol_id == test_ids["protocol_id"]
     assert len(result.items) == 3
 

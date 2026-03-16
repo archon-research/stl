@@ -127,12 +127,12 @@ class MorphoBackedBreakdownRepository(BackedBreakdownRepositoryPort):
         self._engine = engine
         self._protocol_id = protocol_id
 
-    async def get_backed_breakdown(self, debt_token_id: int) -> BackedBreakdown:
+    async def get_backed_breakdown(self, backed_asset_id: int) -> BackedBreakdown:
         """Execute the Morpho vault backed breakdown query and return domain objects."""
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(_MORPHO_BACKED_BREAKDOWN_SQL),
-                {"vault_id": debt_token_id, "protocol_id": self._protocol_id},
+                {"vault_id": backed_asset_id, "protocol_id": self._protocol_id},
             )
             rows = result.fetchall()
 
@@ -147,7 +147,7 @@ class MorphoBackedBreakdownRepository(BackedBreakdownRepositoryPort):
         )
 
         return BackedBreakdown(
-            debt_token_id=debt_token_id,
+            backed_asset_id=backed_asset_id,
             protocol_id=self._protocol_id,
             items=items,
         )

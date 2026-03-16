@@ -16,6 +16,6 @@ class CollateralContribution:
 class BackedBreakdown:
     """The full amount-first breakdown of collateral backing a debt token."""
 
-    debt_token_id: int
+    backed_asset_id: int
     protocol_id: int
     items: tuple[CollateralContribution, ...]

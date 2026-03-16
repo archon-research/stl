@@ -5,7 +5,7 @@ import pytest
 
 
 class ProtocolScopedBackedBreakdownRepository(Protocol):
-    async def get_backed_breakdown(self, debt_token_id: int): ...
+    async def get_backed_breakdown(self, backed_asset_id: int): ...
 
 
 class ProtocolMetadataRepository(Protocol):

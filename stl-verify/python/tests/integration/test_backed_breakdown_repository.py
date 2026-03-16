@@ -15,7 +15,7 @@ from tests.integration.conftest import insert_token, insert_user, store_test_ids
 class ProtocolScopedBackedBreakdownRepository(Protocol):
     """Spec contract: protocol selection happens before repository invocation."""
 
-    async def get_backed_breakdown(self, debt_token_id: int) -> BackedBreakdown: ...
+    async def get_backed_breakdown(self, backed_asset_id: int) -> BackedBreakdown: ...
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +272,7 @@ async def test_single_borrower_full_attribution(
     """
     result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
 
-    assert result.debt_token_id == test_ids["sp_usds_id"]
+    assert result.backed_asset_id == test_ids["sp_usds_id"]
     assert result.protocol_id == test_ids["protocol_id"]
     assert len(result.items) == 2
 

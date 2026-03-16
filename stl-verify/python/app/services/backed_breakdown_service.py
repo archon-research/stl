@@ -13,7 +13,7 @@ class BackedBreakdownService:
     ) -> None:
         self._repository_resolver = repository_resolver
 
-    async def get_backed_breakdown(self, protocol_id: int, debt_token_id: int) -> BackedBreakdown:
+    async def get_backed_breakdown(self, protocol_id: int, backed_asset_id: int) -> BackedBreakdown:
         """Resolve the repository from protocol_id and delegate."""
         repository = await self._repository_resolver.resolve(protocol_id)
-        return await repository.get_backed_breakdown(debt_token_id)
+        return await repository.get_backed_breakdown(backed_asset_id)

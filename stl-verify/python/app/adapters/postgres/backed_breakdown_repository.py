@@ -51,10 +51,10 @@ user_debt_totals AS (
     SELECT
         ud.user_id,
         SUM(ud.debt_amount)                                                         AS total_debt_amount,
-        SUM(ud.debt_amount) FILTER (WHERE ud.token_id = :debt_token_id)             AS target_debt_amount
+        SUM(ud.debt_amount) FILTER (WHERE ud.token_id = :backed_asset_id)             AS target_debt_amount
     FROM user_debts ud
     GROUP BY ud.user_id
-    HAVING SUM(ud.debt_amount) FILTER (WHERE ud.token_id = :debt_token_id) > 0
+    HAVING SUM(ud.debt_amount) FILTER (WHERE ud.token_id = :backed_asset_id) > 0
 ),
 
     -- Step 4: Attribute each user's collateral to the target debt token
@@ -92,12 +92,12 @@ class BackedBreakdownRepository(BackedBreakdownRepositoryPort):
         self._engine = engine
         self._protocol_id = protocol_id
 
-    async def get_backed_breakdown(self, debt_token_id: int) -> BackedBreakdown:
+    async def get_backed_breakdown(self, backed_asset_id: int) -> BackedBreakdown:
         """Execute the backed breakdown query and return domain objects."""
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(_BACKED_BREAKDOWN_SQL),
-                {"protocol_id": self._protocol_id, "debt_token_id": debt_token_id},
+                {"protocol_id": self._protocol_id, "backed_asset_id": backed_asset_id},
             )
             rows = result.fetchall()
 
@@ -112,7 +112,7 @@ class BackedBreakdownRepository(BackedBreakdownRepositoryPort):
         )
 
         return BackedBreakdown(
-            debt_token_id=debt_token_id,
+            backed_asset_id=backed_asset_id,
             protocol_id=self._protocol_id,
             items=items,
         )
