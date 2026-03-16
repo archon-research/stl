@@ -425,6 +425,6 @@ On the **Backed Breakdown** page for DeFi lending allocations, the chart options
 
 | Chart Option | Backing View | Note |
 |--------------|--------------|------|
-| **Full Collateral** | View **#1** (Total Collateral Backing) | Scaled by allocation proportion |
-| **Backed by Threshold** | View **#3** (Collateral by Threshold) | Scaled by allocation proportion |
-| **Backed by Allocation** | View **#7** (Collateral Liabilities) | Scaled by allocation proportion |
+| **Full Collateral** | View **#1** (Total Collateral Backing) | Scaled by allocation proportion of total supply to pool |
+| **Backed by Threshold** | View **#3** (Collateral by Threshold) | Scaled by allocation proportion of total supply to pool |
+| **Backed by Allocation** | View **#7** (Collateral Liabilities) | Scaled by allocation proportion of total supply to pool |
