@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from decimal import Decimal
+from typing import Any, Protocol, cast
 
 import asyncpg
 import pytest
@@ -7,6 +8,14 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
+from app.domain.entities.backed_breakdown import BackedBreakdown
+
+
+class ProtocolScopedBackedBreakdownRepository(Protocol):
+    """Spec contract: Morpho repository is selected by protocol before invocation."""
+
+    async def get_backed_breakdown(self, debt_token_id: int) -> BackedBreakdown: ...
+
 
 # ---------------------------------------------------------------------------
 # Database URL fixtures (derived from the shared module_db)
@@ -34,42 +43,51 @@ _SEED_BLOCK_NUMBER = 20_000_000
 
 async def _insert_token(conn: asyncpg.Connection, symbol: str, decimals: int, address: bytes) -> int:
     """Insert a token or return the existing ID."""
-    return await conn.fetchval(
-        """
+    return cast(
+        int,
+        await conn.fetchval(
+            """
         INSERT INTO token (chain_id, address, symbol, decimals)
         VALUES (1, $1, $2, $3)
         ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol
         RETURNING id
         """,
-        address,
-        symbol,
-        decimals,
+            address,
+            symbol,
+            decimals,
+        ),
     )
 
 
 async def _insert_protocol(conn: asyncpg.Connection) -> int:
     """Insert a Morpho Blue protocol entry and return its ID."""
-    return await conn.fetchval(
-        """
+    return cast(
+        int,
+        await conn.fetchval(
+            """
         INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at)
-        VALUES (1, $1, 'Morpho Blue', 'lending', 18883124, NOW())
+        VALUES (1, $1, 'Morpho Blue', 'morpho_blue', 18883124, NOW())
         ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
         RETURNING id
         """,
-        b"\xbb\xbb\xbb\xbb\xbb\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01",
+            b"\xbb\xbb\xbb\xbb\xbb\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01",
+        ),
     )
 
 
 async def _insert_user(conn: asyncpg.Connection, address: bytes) -> int:
     """Insert a user and return the ID."""
-    return await conn.fetchval(
-        """
+    return cast(
+        int,
+        await conn.fetchval(
+            """
         INSERT INTO "user" (chain_id, address)
         VALUES (1, $1)
         ON CONFLICT (chain_id, address) DO UPDATE SET updated_at = NOW()
         RETURNING id
         """,
-        address,
+            address,
+        ),
     )
 
 
@@ -81,22 +99,25 @@ async def _insert_morpho_market(
     collateral_token_id: int,
 ) -> int:
     """Insert a Morpho market and return its ID."""
-    return await conn.fetchval(
-        """
+    return cast(
+        int,
+        await conn.fetchval(
+            """
         INSERT INTO morpho_market
             (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id,
              oracle_address, irm_address, lltv, created_at_block)
         VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING id
         """,
-        protocol_id,
-        market_id,
-        loan_token_id,
-        collateral_token_id,
-        b"\x00" * 20,  # oracle_address
-        b"\x00" * 20,  # irm_address
-        Decimal("0.86"),  # lltv
-        _SEED_BLOCK_NUMBER,
+            protocol_id,
+            market_id,
+            loan_token_id,
+            collateral_token_id,
+            b"\x00" * 20,  # oracle_address
+            b"\x00" * 20,  # irm_address
+            Decimal("0.86"),  # lltv
+            _SEED_BLOCK_NUMBER,
+        ),
     )
 
 
@@ -132,20 +153,23 @@ async def _insert_morpho_vault(
     symbol: str = "TV",
 ) -> int:
     """Insert a Morpho vault and return its ID."""
-    return await conn.fetchval(
-        """
+    return cast(
+        int,
+        await conn.fetchval(
+            """
         INSERT INTO morpho_vault
             (chain_id, protocol_id, address, name, symbol,
              asset_token_id, vault_version, created_at_block)
         VALUES (1, $1, $2, $3, $4, $5, 1, $6)
         RETURNING id
         """,
-        protocol_id,
-        address,
-        name,
-        symbol,
-        asset_token_id,
-        _SEED_BLOCK_NUMBER,
+            protocol_id,
+            address,
+            name,
+            symbol,
+            asset_token_id,
+            _SEED_BLOCK_NUMBER,
+        ),
     )
 
 
@@ -301,11 +325,17 @@ async def test_ids(db_url: str, _seed_data: None) -> dict[str, int]:
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def repository(async_db_url: str, _seed_data: None) -> AsyncIterator[MorphoBackedBreakdownRepository]:
-    """Create a Morpho repository backed by the test database."""
+async def repository(
+    async_db_url: str, _seed_data: None, test_ids: dict[str, int]
+) -> AsyncIterator[ProtocolScopedBackedBreakdownRepository]:
+    """Create a Morpho repository already bound to the Morpho protocol."""
     engine = create_async_engine(async_db_url)
     try:
-        yield MorphoBackedBreakdownRepository(engine)
+        repository_class = cast(Any, MorphoBackedBreakdownRepository)
+        yield cast(
+            ProtocolScopedBackedBreakdownRepository,
+            repository_class(engine, protocol_id=test_ids["protocol_id"]),
+        )
     finally:
         await engine.dispose()
 
@@ -316,7 +346,9 @@ async def repository(async_db_url: str, _seed_data: None) -> AsyncIterator[Morph
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_vault_backed_breakdown(repository: MorphoBackedBreakdownRepository, test_ids: dict[str, int]) -> None:
+async def test_vault_backed_breakdown(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
     """Vault with two market allocations produces correct collateral and loan token breakdown.
 
     Vault: 1M USDC total assets
@@ -328,12 +360,10 @@ async def test_vault_backed_breakdown(repository: MorphoBackedBreakdownRepositor
       WETH: 320,000 (32%)  — 400K * 0.80
       WBTC: 150,000 (15%)  — 300K * 0.50
     """
-    result = await repository.get_backed_breakdown(
-        protocol_id=test_ids["protocol_id"],
-        debt_token_id=test_ids["vault_id"],
-    )
+    result = await repository.get_backed_breakdown(test_ids["vault_id"])
 
     assert result.debt_token_id == test_ids["vault_id"]
+    assert result.protocol_id == test_ids["protocol_id"]
     assert len(result.items) == 3
 
     by_symbol = {item.symbol: item for item in result.items}
@@ -354,63 +384,52 @@ async def test_vault_backed_breakdown(repository: MorphoBackedBreakdownRepositor
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_nonexistent_vault_returns_empty(
-    repository: MorphoBackedBreakdownRepository, test_ids: dict[str, int]
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
     """A non-existent vault ID returns an empty breakdown."""
-    result = await repository.get_backed_breakdown(
-        protocol_id=test_ids["protocol_id"],
-        debt_token_id=99999,
-    )
+    result = await repository.get_backed_breakdown(99999)
 
     assert result.items == ()
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_protocol_id_is_ignored(repository: MorphoBackedBreakdownRepository, test_ids: dict[str, int]) -> None:
-    """Protocol ID is disregarded — a bogus value still returns results."""
-    result = await repository.get_backed_breakdown(
-        protocol_id=99999,
-        debt_token_id=test_ids["vault_id"],
-    )
+async def test_repository_preserves_protocol_binding_in_result(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """Morpho result should reflect repository-bound protocol context, not call-site pass-through."""
+    result = await repository.get_backed_breakdown(test_ids["vault_id"])
 
-    assert len(result.items) == 3
-    # The returned protocol_id is the one passed in (pass-through)
-    assert result.protocol_id == 99999
+    assert result.protocol_id == test_ids["protocol_id"]
 
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_items_ordered_by_backed_amount_desc(
-    repository: MorphoBackedBreakdownRepository, test_ids: dict[str, int]
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
     """Results should be ordered by backed_amount descending."""
-    result = await repository.get_backed_breakdown(
-        protocol_id=test_ids["protocol_id"],
-        debt_token_id=test_ids["vault_id"],
-    )
+    result = await repository.get_backed_breakdown(test_ids["vault_id"])
 
     amounts = [item.amount for item in result.items]
     assert amounts == sorted(amounts, reverse=True)
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_percentages_sum_to_100(repository: MorphoBackedBreakdownRepository, test_ids: dict[str, int]) -> None:
+async def test_percentages_sum_to_100(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
     """All backing percentages should sum to 100%."""
-    result = await repository.get_backed_breakdown(
-        protocol_id=test_ids["protocol_id"],
-        debt_token_id=test_ids["vault_id"],
-    )
+    result = await repository.get_backed_breakdown(test_ids["vault_id"])
 
     total_pct = sum(item.backing_pct for item in result.items)
     assert total_pct == Decimal("100.00")
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_token_ids_are_populated(repository: MorphoBackedBreakdownRepository, test_ids: dict[str, int]) -> None:
+async def test_token_ids_are_populated(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
     """Each item should have the correct token_id."""
-    result = await repository.get_backed_breakdown(
-        protocol_id=test_ids["protocol_id"],
-        debt_token_id=test_ids["vault_id"],
-    )
+    result = await repository.get_backed_breakdown(test_ids["vault_id"])
 
     by_symbol = {item.symbol: item for item in result.items}
 

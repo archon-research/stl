@@ -57,7 +57,7 @@ user_debt_totals AS (
     HAVING SUM(ud.debt_amount) FILTER (WHERE ud.token_id = :debt_token_id) > 0
 ),
 
--- Step 4: Attribute each user's collateral to target debt token proportionally
+    -- Step 4: Attribute each user's collateral to the target debt token
 attributed AS (
     SELECT
         uc.user_id,
@@ -88,15 +88,16 @@ ORDER BY amount DESC;
 class BackedBreakdownRepository(BackedBreakdownRepositoryPort):
     """Postgres implementation of the backed breakdown repository."""
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, protocol_id: int) -> None:
         self._engine = engine
+        self._protocol_id = protocol_id
 
-    async def get_backed_breakdown(self, protocol_id: int, debt_token_id: int) -> BackedBreakdown:
+    async def get_backed_breakdown(self, debt_token_id: int) -> BackedBreakdown:
         """Execute the backed breakdown query and return domain objects."""
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(_BACKED_BREAKDOWN_SQL),
-                {"protocol_id": protocol_id, "debt_token_id": debt_token_id},
+                {"protocol_id": self._protocol_id, "debt_token_id": debt_token_id},
             )
             rows = result.fetchall()
 
@@ -112,6 +113,6 @@ class BackedBreakdownRepository(BackedBreakdownRepositoryPort):
 
         return BackedBreakdown(
             debt_token_id=debt_token_id,
-            protocol_id=protocol_id,
+            protocol_id=self._protocol_id,
             items=items,
         )

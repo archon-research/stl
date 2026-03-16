@@ -1,4 +1,5 @@
 from decimal import Decimal
+from typing import Protocol
 from unittest.mock import AsyncMock
 
 import pytest
@@ -7,50 +8,55 @@ from app.domain.entities.backed_breakdown import (
     BackedBreakdown,
     CollateralContribution,
 )
-from app.ports.backed_breakdown_repository import BackedBreakdownRepository
-from app.ports.morpho_repository import MorphoRepository
 from app.services.backed_breakdown_service import BackedBreakdownService
+
+
+class ProtocolScopedBackedBreakdownRepository(Protocol):
+    """Spec contract: once selected, repository only needs debt_token_id."""
+
+    async def get_backed_breakdown(self, debt_token_id: int) -> BackedBreakdown: ...
+
+
+class BackedBreakdownRepositoryResolver(Protocol):
+    """Spec contract: select repository explicitly from protocol_id."""
+
+    async def resolve(self, protocol_id: int) -> ProtocolScopedBackedBreakdownRepository: ...
+
+
+@pytest.fixture
+def mock_resolver() -> AsyncMock:
+    return AsyncMock(spec=BackedBreakdownRepositoryResolver)
 
 
 @pytest.fixture
 def mock_repository() -> AsyncMock:
-    return AsyncMock(spec=BackedBreakdownRepository)
-
-
-@pytest.fixture
-def mock_morpho_repository() -> AsyncMock:
-    return AsyncMock(spec=BackedBreakdownRepository)
+    return AsyncMock(spec=ProtocolScopedBackedBreakdownRepository)
 
 
 @pytest.fixture
 def mock_morpho() -> AsyncMock:
-    mock = AsyncMock(spec=MorphoRepository)
+    mock = AsyncMock()
     mock.is_morpho_vault.return_value = False
     return mock
 
 
 @pytest.fixture
 def service(
-    mock_repository: AsyncMock, mock_morpho_repository: AsyncMock, mock_morpho: AsyncMock
+    mock_resolver: AsyncMock,
 ) -> BackedBreakdownService:
-    return BackedBreakdownService(
-        repository=mock_repository,
-        morpho_repository=mock_morpho_repository,
-        morpho=mock_morpho,
-    )
+    return BackedBreakdownService(repository_resolver=mock_resolver)
 
 
 # ---------------------------------------------------------------------------
-# Default (SparkLend) path
+# Spec section: caller-facing service delegates via protocol-based resolver
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_delegates_to_default_repository(
+async def test_calls_resolver_with_protocol_id_and_selected_repository_with_debt_token_id_only(
     service: BackedBreakdownService,
+    mock_resolver: AsyncMock,
     mock_repository: AsyncMock,
-    mock_morpho_repository: AsyncMock,
-    mock_morpho: AsyncMock,
 ) -> None:
     expected = BackedBreakdown(
         debt_token_id=42,
@@ -70,114 +76,73 @@ async def test_delegates_to_default_repository(
             ),
         ),
     )
-    mock_morpho.is_morpho_vault.return_value = False
+    mock_resolver.resolve.return_value = mock_repository
     mock_repository.get_backed_breakdown.return_value = expected
 
     result = await service.get_backed_breakdown(protocol_id=1, debt_token_id=42)
 
     assert result is expected
-    mock_morpho.is_morpho_vault.assert_awaited_once_with(42)
-    mock_repository.get_backed_breakdown.assert_awaited_once_with(protocol_id=1, debt_token_id=42)
-    mock_morpho_repository.get_backed_breakdown.assert_not_awaited()
+    mock_resolver.resolve.assert_awaited_once_with(1)
+    mock_repository.get_backed_breakdown.assert_awaited_once_with(42)
 
 
 @pytest.mark.asyncio
-async def test_returns_empty_breakdown_when_no_backing(
-    service: BackedBreakdownService, mock_repository: AsyncMock
+async def test_returns_empty_breakdown_from_selected_repository(
+    service: BackedBreakdownService,
+    mock_resolver: AsyncMock,
+    mock_repository: AsyncMock,
 ) -> None:
     expected = BackedBreakdown(debt_token_id=99, protocol_id=1, items=())
+    mock_resolver.resolve.return_value = mock_repository
     mock_repository.get_backed_breakdown.return_value = expected
 
     result = await service.get_backed_breakdown(protocol_id=1, debt_token_id=99)
 
     assert result is expected
     assert result.items == ()
+    mock_resolver.resolve.assert_awaited_once_with(1)
+    mock_repository.get_backed_breakdown.assert_awaited_once_with(99)
 
 
 @pytest.mark.asyncio
-async def test_propagates_repository_exception(service: BackedBreakdownService, mock_repository: AsyncMock) -> None:
+async def test_propagates_resolver_errors_unchanged(
+    service: BackedBreakdownService,
+    mock_resolver: AsyncMock,
+) -> None:
+    mock_resolver.resolve.side_effect = RuntimeError("unsupported protocol")
+
+    with pytest.raises(RuntimeError, match="unsupported protocol"):
+        await service.get_backed_breakdown(protocol_id=999, debt_token_id=42)
+
+
+@pytest.mark.asyncio
+async def test_propagates_selected_repository_errors_unchanged(
+    service: BackedBreakdownService,
+    mock_resolver: AsyncMock,
+    mock_repository: AsyncMock,
+) -> None:
+    mock_resolver.resolve.return_value = mock_repository
     mock_repository.get_backed_breakdown.side_effect = RuntimeError("db down")
 
     with pytest.raises(RuntimeError, match="db down"):
         await service.get_backed_breakdown(protocol_id=1, debt_token_id=42)
 
 
-# ---------------------------------------------------------------------------
-# Morpho path
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_routes_to_morpho_when_vault_exists(
+async def test_service_does_not_require_morpho_target_id_probing(
     service: BackedBreakdownService,
+    mock_resolver: AsyncMock,
     mock_repository: AsyncMock,
-    mock_morpho_repository: AsyncMock,
     mock_morpho: AsyncMock,
 ) -> None:
-    expected = BackedBreakdown(
-        debt_token_id=7,
-        protocol_id=1,
-        items=(
-            CollateralContribution(
-                token_id=20,
-                symbol="USDC",
-                amount=Decimal("530000.00"),
-                backing_pct=Decimal("53.00"),
-            ),
-            CollateralContribution(
-                token_id=21,
-                symbol="WETH",
-                amount=Decimal("320000.00"),
-                backing_pct=Decimal("32.00"),
-            ),
-        ),
-    )
-    mock_morpho.is_morpho_vault.return_value = True
-    mock_morpho_repository.get_backed_breakdown.return_value = expected
+    """Spec regression guard: routing is from protocol_id, not debt_token_id probing."""
+    expected = BackedBreakdown(debt_token_id=7, protocol_id=77, items=())
+    mock_morpho.is_morpho_vault.side_effect = AssertionError("service must not probe Morpho vault IDs")
+    mock_resolver.resolve.return_value = mock_repository
+    mock_repository.get_backed_breakdown.return_value = expected
 
-    result = await service.get_backed_breakdown(protocol_id=1, debt_token_id=7)
+    result = await service.get_backed_breakdown(protocol_id=77, debt_token_id=7)
 
     assert result is expected
-    mock_morpho.is_morpho_vault.assert_awaited_once_with(7)
-    mock_morpho_repository.get_backed_breakdown.assert_awaited_once_with(protocol_id=1, debt_token_id=7)
-    mock_repository.get_backed_breakdown.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_morpho_empty_breakdown(
-    service: BackedBreakdownService,
-    mock_morpho_repository: AsyncMock,
-    mock_morpho: AsyncMock,
-) -> None:
-    expected = BackedBreakdown(debt_token_id=7, protocol_id=1, items=())
-    mock_morpho.is_morpho_vault.return_value = True
-    mock_morpho_repository.get_backed_breakdown.return_value = expected
-
-    result = await service.get_backed_breakdown(protocol_id=1, debt_token_id=7)
-
-    assert result is expected
-    assert result.items == ()
-
-
-@pytest.mark.asyncio
-async def test_morpho_propagates_exception(
-    service: BackedBreakdownService,
-    mock_morpho_repository: AsyncMock,
-    mock_morpho: AsyncMock,
-) -> None:
-    mock_morpho.is_morpho_vault.return_value = True
-    mock_morpho_repository.get_backed_breakdown.side_effect = RuntimeError("morpho db down")
-
-    with pytest.raises(RuntimeError, match="morpho db down"):
-        await service.get_backed_breakdown(protocol_id=1, debt_token_id=7)
-
-
-@pytest.mark.asyncio
-async def test_morpho_check_failure_propagates(
-    service: BackedBreakdownService,
-    mock_morpho: AsyncMock,
-) -> None:
-    mock_morpho.is_morpho_vault.side_effect = RuntimeError("morpho down")
-
-    with pytest.raises(RuntimeError, match="morpho down"):
-        await service.get_backed_breakdown(protocol_id=1, debt_token_id=42)
+    mock_resolver.resolve.assert_awaited_once_with(77)
+    mock_repository.get_backed_breakdown.assert_awaited_once_with(7)

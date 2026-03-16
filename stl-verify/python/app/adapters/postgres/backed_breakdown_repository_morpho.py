@@ -13,18 +13,15 @@ from app.ports.backed_breakdown_repository import (
 
 _MORPHO_BACKED_BREAKDOWN_SQL = """
 WITH morpho_vaults AS (
-      SELECT DISTINCT ap.token_id, t.symbol as alloc_symbol, mv.id as vault_id
-      FROM allocation_position ap
-      JOIN token t ON t.id = ap.token_id
-      JOIN morpho_vault mv ON mv.symbol = t.symbol AND mv.chain_id = t.chain_id
-      WHERE ap.star = 'grove'
-        AND t.id != mv.asset_token_id
+      SELECT mv.id as vault_id, mv.address, mv.chain_id, mv.asset_token_id
+      FROM morpho_vault mv
+      WHERE mv.id = :vault_id
+        AND mv.protocol_id = :protocol_id
   ),
   vault_users AS (
       SELECT mv.vault_id, u.id as user_id
       FROM morpho_vaults mv
-      JOIN morpho_vault v ON v.id = mv.vault_id
-      JOIN "user" u ON u.address = v.address AND u.chain_id = v.chain_id
+      JOIN "user" u ON u.address = mv.address AND u.chain_id = mv.chain_id
   ),
   vault_states AS (
       SELECT DISTINCT ON (vs.morpho_vault_id)
@@ -32,8 +29,8 @@ WITH morpho_vaults AS (
           vs.total_assets / power(10, t.decimals) as total_assets,
           t.symbol as loan_token
       FROM morpho_vault_state vs
-      JOIN morpho_vault v ON v.id = vs.morpho_vault_id
-      JOIN token t ON t.id = v.asset_token_id
+      JOIN morpho_vaults mv ON mv.vault_id = vs.morpho_vault_id
+      JOIN token t ON t.id = mv.asset_token_id
       WHERE vs.morpho_vault_id IN (SELECT vault_id FROM morpho_vaults)
       ORDER BY vs.morpho_vault_id, vs.block_number DESC, vs.block_version DESC
   ),
@@ -108,7 +105,7 @@ WITH morpho_vaults AS (
       SELECT sum(amount) as total_amount FROM all_backing
   ),
   vault_chain AS (
-      SELECT chain_id FROM morpho_vault WHERE id = :vault_id
+      SELECT chain_id FROM morpho_vault WHERE id = :vault_id AND protocol_id = :protocol_id
   )
   SELECT t.id AS token_id,
          a.symbol,
@@ -124,26 +121,18 @@ WITH morpho_vaults AS (
 
 
 class MorphoBackedBreakdownRepository(BackedBreakdownRepositoryPort):
-    """Postgres implementation of the backed breakdown repository for Morpho vaults.
+    """Postgres implementation of the backed breakdown repository for Morpho vaults."""
 
-    In this implementation ``debt_token_id`` is interpreted as the Morpho vault ID
-    and ``protocol_id`` is ignored (Morpho vault ID fully identifies the context).
-    """
-
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, protocol_id: int) -> None:
         self._engine = engine
+        self._protocol_id = protocol_id
 
-    async def get_backed_breakdown(self, protocol_id: int, debt_token_id: int) -> BackedBreakdown:
-        """Execute the Morpho vault backed breakdown query and return domain objects.
-
-        Args:
-            protocol_id: Ignored for Morpho – present only to satisfy the port interface.
-            debt_token_id: The Morpho vault ID to analyze.
-        """
+    async def get_backed_breakdown(self, debt_token_id: int) -> BackedBreakdown:
+        """Execute the Morpho vault backed breakdown query and return domain objects."""
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(_MORPHO_BACKED_BREAKDOWN_SQL),
-                {"vault_id": debt_token_id},
+                {"vault_id": debt_token_id, "protocol_id": self._protocol_id},
             )
             rows = result.fetchall()
 
@@ -159,6 +148,6 @@ class MorphoBackedBreakdownRepository(BackedBreakdownRepositoryPort):
 
         return BackedBreakdown(
             debt_token_id=debt_token_id,
-            protocol_id=protocol_id,
+            protocol_id=self._protocol_id,
             items=items,
         )

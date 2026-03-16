@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from decimal import Decimal
+from typing import Any, Protocol, cast
 
 import asyncpg
 import pytest
@@ -7,6 +8,14 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.backed_breakdown_repository import BackedBreakdownRepository
+from app.domain.entities.backed_breakdown import BackedBreakdown
+
+
+class ProtocolScopedBackedBreakdownRepository(Protocol):
+    """Spec contract: protocol selection happens before repository invocation."""
+
+    async def get_backed_breakdown(self, debt_token_id: int) -> BackedBreakdown: ...
+
 
 # ---------------------------------------------------------------------------
 # Database URL fixtures (derived from the shared module_db)
@@ -32,16 +41,19 @@ def async_db_url(module_db) -> str:
 
 async def _insert_token(conn: asyncpg.Connection, symbol: str, decimals: int, address: bytes) -> int:
     """Insert a token or return the existing ID."""
-    return await conn.fetchval(
-        """
+    return cast(
+        int,
+        await conn.fetchval(
+            """
         INSERT INTO token (chain_id, address, symbol, decimals)
         VALUES (1, $1, $2, $3)
         ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol
         RETURNING id
         """,
-        address,
-        symbol,
-        decimals,
+            address,
+            symbol,
+            decimals,
+        ),
     )
 
 
@@ -102,13 +114,16 @@ async def _insert_reserve(
 
 async def _insert_user(conn: asyncpg.Connection, address: bytes) -> int:
     """Insert a user and return the ID."""
-    return await conn.fetchval(
-        """
+    return cast(
+        int,
+        await conn.fetchval(
+            """
         INSERT INTO "user" (chain_id, address)
         VALUES (1, $1)
         RETURNING id
         """,
-        address,
+            address,
+        ),
     )
 
 
@@ -170,8 +185,8 @@ async def _seed_tokens_and_prices(
     conn: asyncpg.Connection, oracle_id: int, block_number: int
 ) -> tuple[int, int, int, int]:
     """Create tokens and their oracle prices. Returns (weth_id, cbbtc_id, sp_usds_id, sp_usdc_id)."""
-    weth_id = await conn.fetchval("SELECT id FROM token WHERE symbol = 'WETH' AND chain_id = 1")
-    cbbtc_id = await conn.fetchval("SELECT id FROM token WHERE symbol = 'cbBTC' AND chain_id = 1")
+    weth_id = cast(int, await conn.fetchval("SELECT id FROM token WHERE symbol = 'WETH' AND chain_id = 1"))
+    cbbtc_id = cast(int, await conn.fetchval("SELECT id FROM token WHERE symbol = 'cbBTC' AND chain_id = 1"))
     sp_usds_id = await _insert_token(
         conn, "spUSDS", 18, b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14"
     )
@@ -280,11 +295,17 @@ async def test_ids(db_url: str, _seed_data: None) -> dict[str, int]:
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def repository(async_db_url: str, _seed_data: None) -> AsyncIterator[BackedBreakdownRepository]:
-    """Create a repository backed by the test database."""
+async def repository(
+    async_db_url: str, _seed_data: None, test_ids: dict[str, int]
+) -> AsyncIterator[ProtocolScopedBackedBreakdownRepository]:
+    """Create a repository already bound to the protocol under test."""
     engine = create_async_engine(async_db_url)
     try:
-        yield BackedBreakdownRepository(engine)
+        repository_class = cast(Any, BackedBreakdownRepository)
+        yield cast(
+            ProtocolScopedBackedBreakdownRepository,
+            repository_class(engine, protocol_id=test_ids["protocol_id"]),
+        )
     finally:
         await engine.dispose()
 
@@ -296,7 +317,7 @@ async def repository(async_db_url: str, _seed_data: None) -> AsyncIterator[Backe
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_single_borrower_full_attribution(
-    repository: BackedBreakdownRepository, test_ids: dict[str, int]
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
     """User 1 has only spUSDS debt, so 100% of their collateral is attributed.
 
@@ -312,10 +333,7 @@ async def test_single_borrower_full_attribution(
     WETH pct  = 13/13.5 * 100 = 96.2963%
     cbBTC pct = 0.5/13.5 * 100 = 3.7037%
     """
-    result = await repository.get_backed_breakdown(
-        protocol_id=test_ids["protocol_id"],
-        debt_token_id=test_ids["sp_usds_id"],
-    )
+    result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
 
     assert result.debt_token_id == test_ids["sp_usds_id"]
     assert result.protocol_id == test_ids["protocol_id"]
@@ -334,24 +352,20 @@ async def test_single_borrower_full_attribution(
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_no_borrowers_returns_empty(repository: BackedBreakdownRepository, test_ids: dict[str, int]) -> None:
+async def test_no_borrowers_returns_empty(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
     """A token nobody has borrowed returns an empty breakdown."""
-    result = await repository.get_backed_breakdown(
-        protocol_id=test_ids["protocol_id"],
-        debt_token_id=test_ids["weth_id"],  # nobody borrows WETH in test data
-    )
+    result = await repository.get_backed_breakdown(test_ids["weth_id"])  # nobody borrows WETH in test data
 
     assert result.items == ()
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_nonexistent_protocol_returns_empty(
-    repository: BackedBreakdownRepository, test_ids: dict[str, int]
+async def test_nonexistent_debt_token_returns_empty(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
-    """A non-existent protocol ID returns an empty breakdown."""
-    result = await repository.get_backed_breakdown(
-        protocol_id=99999,
-        debt_token_id=test_ids["sp_usds_id"],
-    )
+    """Protocol is repository-bound, so only the target debt token remains as input."""
+    result = await repository.get_backed_breakdown(99999)
 
     assert result.items == ()
