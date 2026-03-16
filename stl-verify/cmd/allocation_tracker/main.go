@@ -268,6 +268,12 @@ func run(ctx context.Context, args []string) error {
 	}
 	registry.Register(at.NewCurveSource(mc, curveABI, logger))
 
+	uniV3, err := at.NewUniV3Source(mc, logger)
+	if err != nil {
+		return fmt.Errorf("univ3 source: %w", err)
+	}
+	registry.Register(uniV3)
+
 	for _, s := range at.DefaultStubSources(logger) {
 		registry.Register(s)
 	}
@@ -296,12 +302,27 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("tx manager: %w", err)
 	}
 
+	// Load primes from DB to build star → prime_id lookup
+	primeRepo := postgres.NewPrimeDebtRepository(dbPool, txm, logger)
+	primes, err := primeRepo.GetPrimes(ctx)
+	if err != nil {
+		return fmt.Errorf("load primes: %w", err)
+	}
+	if len(primes) == 0 {
+		return fmt.Errorf("no primes found in database")
+	}
+	primeLookup := make(map[string]int64, len(primes))
+	for _, p := range primes {
+		primeLookup[p.Name] = p.ID
+	}
+	logger.Info("primes loaded", "count", len(primes))
+
 	tokenRepo, err := postgres.NewTokenRepository(dbPool, logger, 1)
 	if err != nil {
 		return fmt.Errorf("token repo: %w", err)
 	}
 	allocRepo := postgres.NewAllocationRepository(dbPool, txm, tokenRepo, logger)
-	pgHandler := at.NewPrimePositionHandler(allocRepo, mc, erc20ABI, logger)
+	pgHandler := at.NewPrimePositionHandler(allocRepo, mc, erc20ABI, primeLookup, logger)
 
 	handler := at.NewMultiHandler(at.NewLogHandler(logger), pgHandler)
 

@@ -1,0 +1,161 @@
+/**
+ * watcher.js — stress test for the block watcher ingestion pipeline.
+ *
+ * Drives the mock blockchain server at a configurable block rate and verifies
+ * that the watcher keeps up, processes reorgs correctly, and emits no errors.
+ *
+ * Environment variables:
+ *   ADMIN_URL         - Admin API base URL (default: http://mock-blockchain-server:8547)
+ *   INTERVAL_MS       - Block emission interval ms (default: 12000 ~Ethereum mainnet)
+ *                       Examples: 50 for burst, 250 for Base, 2000 for BNB Chain
+ *   DURATION          - Test duration (default: 2m)
+ *   REORG             - Enable reorg injection (set to any value to enable)
+ *   REORG_DEPTH       - Reorg depth (default: 5)
+ *   REORG_INTERVAL_S  - Seconds between reorgs (default: 30)
+ */
+
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { Counter, Rate } from 'k6/metrics';
+import { createReorgRunner, reorgErrors } from './reorg.js';
+
+const adminURL = __ENV.ADMIN_URL || 'http://mock-blockchain-server:8547';
+const intervalMs = parseInt(__ENV.INTERVAL_MS || '12000', 10);
+if (isNaN(intervalMs) || intervalMs <= 0) {
+  throw new Error(`INTERVAL_MS must be a positive integer, got: ${__ENV.INTERVAL_MS}`);
+}
+const reorg = createReorgRunner(adminURL);
+
+const adminErrors = new Counter('admin_errors');
+const stalledPolls = new Counter('stalled_polls');
+// blockEmissionRate tracks whether blocks_emitted is advancing on each poll.
+// For slow intervals (e.g. 12 s Ethereum) gaps between blocks are expected;
+// the rate only records 0 once the stall window is exceeded.
+const blockEmissionRate = new Rate('block_emission_ok');
+
+// Minimum blocks expected per 1 s poll at 50% of the configured rate.
+// Only enforced for sub-second block intervals where each poll should see advancement.
+const minDeltaPerPoll = intervalMs < 1000 ? Math.max(1, Math.floor(1000 / intervalMs * 0.5)) : 0;
+// Maximum consecutive polls with zero advancement before flagging a stall.
+const maxNoAdvancePolls = Math.max(2, Math.ceil(intervalMs / 1000) + 1);
+
+export const options = {
+  duration: __ENV.DURATION || '2m',
+  vus: 1,
+  thresholds: {
+    admin_errors: ['count<3'],
+    stalled_polls: ['count<3'],
+    ...(reorg.enabled && { reorg_errors: ['count<3'] }),
+  },
+};
+
+// VU-local state. Safe as module-level vars because vus: 1.
+let prevEmitted = -1;
+let pollCount = 0;
+let consecutiveNoAdvance = 0;
+
+export function setup() {
+  // Stop any running replayer first so setup is idempotent regardless of server state.
+  http.post(`${adminURL}/stop`);
+
+  // Snapshot reorg_count before the test so teardown can report the delta.
+  // The server never resets this counter between runs.
+  const initialReorgCount = JSON.parse(http.get(`${adminURL}/status`).body || '{}').reorg_count || 0;
+
+  let res = http.post(`${adminURL}/speed`, JSON.stringify({ interval_ms: intervalMs }), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (res.status !== 200) {
+    throw new Error(`setup: /speed failed (${res.status}): ${res.body}`);
+  }
+
+  res = http.post(`${adminURL}/start`);
+  if (res.status !== 200) {
+    throw new Error(`setup: /start failed (${res.status}): ${res.body}`);
+  }
+
+  return { initialReorgCount };
+}
+
+export default function () {
+  reorg.tick();
+
+  const res = http.get(`${adminURL}/status`);
+  if (!check(res, { 'admin /status 200': (r) => r.status === 200 })) {
+    adminErrors.add(1);
+    blockEmissionRate.add(0);
+    sleep(1);
+    return;
+  }
+
+  let body;
+  try {
+    body = JSON.parse(res.body);
+  } catch (_) {
+    adminErrors.add(1);
+    blockEmissionRate.add(0);
+    sleep(1);
+    return;
+  }
+
+  check(body, { 'replayer running': (b) => b.running === true });
+
+  const emitted = body.blocks_emitted || 0;
+  pollCount++;
+
+  if (prevEmitted >= 0) {
+    const delta = emitted - prevEmitted;
+
+    if (delta > 0) {
+      consecutiveNoAdvance = 0;
+      blockEmissionRate.add(1);
+    } else {
+      consecutiveNoAdvance++;
+      // blockEmissionRate is false only once the stall window is exceeded,
+      // so normal inter-block gaps on slow chains don't depress the rate.
+      blockEmissionRate.add(consecutiveNoAdvance <= maxNoAdvancePolls ? 1 : 0);
+    }
+
+    // Skip the first 2 polls: let the replayer warm up before asserting rates.
+    if (pollCount > 2) {
+      if (minDeltaPerPoll > 0) {
+        // Sub-second interval: every poll should advance by at least minDeltaPerPoll.
+        if (!check(null, { 'blocks advancing at target rate': () => delta >= minDeltaPerPoll })) {
+          stalledPolls.add(1);
+        }
+      } else if (consecutiveNoAdvance > maxNoAdvancePolls) {
+        // Slower interval: flag a stall only after the expected window is exceeded.
+        stalledPolls.add(1);
+        consecutiveNoAdvance = 0;
+      }
+    }
+  } else {
+    blockEmissionRate.add(1); // first observation, nothing to compare yet
+  }
+
+  prevEmitted = emitted;
+  sleep(1);
+}
+
+export function teardown(data) {
+  const statusBody = JSON.parse(http.get(`${adminURL}/status`).body || '{}');
+
+  const res = http.post(`${adminURL}/stop`);
+  const body = JSON.parse(res.body || '{}');
+  const totalEmitted = body.last_block || 0;
+  const durationSecs = parseDurationSecs(__ENV.DURATION || '2m');
+  const expectedMin = Math.floor(durationSecs / (intervalMs / 1000) * 0.8);
+  check(null, { 'total throughput ≥ 80% of target': () => totalEmitted >= expectedMin });
+  console.log(`Watcher stress complete — emitted: ${totalEmitted}, expected ≥ ${expectedMin}, interval: ${intervalMs}ms`);
+  if (reorg.enabled) {
+    const reorgsThisRun = (statusBody.reorg_count || 0) - (data.initialReorgCount || 0);
+    console.log(`Reorgs triggered: ${reorgsThisRun}`);
+  }
+}
+
+function parseDurationSecs(s) {
+  const m = s.match(/^(\d+)([smh])$/);
+  if (!m) return 120;
+  const n = parseInt(m[1], 10);
+  return m[2] === 'h' ? n * 3600 : m[2] === 'm' ? n * 60 : n;
+}

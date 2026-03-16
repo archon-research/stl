@@ -11,11 +11,6 @@ import (
 // UserRepository defines the interface for user-related data persistence.
 // This aggregate includes users and their protocol-specific metadata.
 type UserRepository interface {
-	// UpsertUsers upserts user records.
-	// Conflict resolution: ON CONFLICT (chain_id, address) DO UPDATE
-	// first_seen_block uses LEAST to keep the earliest block number.
-	UpsertUsers(ctx context.Context, users []*entity.User) error
-
 	// GetOrCreateUser retrieves a user by address, or creates it if it doesn't exist
 	GetOrCreateUser(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error)
 

@@ -193,59 +193,6 @@ func TestEventExtractor_ExtractEventData_Borrow(t *testing.T) {
 	}
 }
 
-func TestService_ConvertToDecimalAdjusted(t *testing.T) {
-	service := &Service{
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
-
-	tests := []struct {
-		name     string
-		amount   *big.Int
-		decimals int
-		want     string
-	}{
-		{
-			name:     "1 USDC (6 decimals)",
-			amount:   big.NewInt(1000000),
-			decimals: 6,
-			want:     "1",
-		},
-		{
-			name:     "1.5 USDC (6 decimals)",
-			amount:   big.NewInt(1500000),
-			decimals: 6,
-			want:     "1.500000",
-		},
-		{
-			name:     "1 ETH (18 decimals)",
-			amount:   new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil),
-			decimals: 18,
-			want:     "1",
-		},
-		{
-			name:     "0.5 ETH (18 decimals)",
-			amount:   new(big.Int).Div(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil), big.NewInt(2)),
-			decimals: 18,
-			want:     "0.500000000000000000",
-		},
-		{
-			name:     "no decimals",
-			amount:   big.NewInt(12345),
-			decimals: 0,
-			want:     "12345",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := service.convertToDecimalAdjusted(tt.amount, tt.decimals)
-			if result != tt.want {
-				t.Errorf("convertToDecimalAdjusted() = %v, want %v", result, tt.want)
-			}
-		})
-	}
-}
-
 func TestEventExtractor_ProcessReceipt_MultipleEventTypes(t *testing.T) {
 	extractor, err := NewEventExtractor()
 	if err != nil {

@@ -15,21 +15,24 @@ import (
 )
 
 type PrimePositionHandler struct {
-	repo     outbound.AllocationRepository
-	metadata *metadataCache
-	logger   *slog.Logger
+	repo        outbound.AllocationRepository
+	metadata    *metadataCache
+	primeLookup map[string]int64 // star name → prime.id
+	logger      *slog.Logger
 }
 
 func NewPrimePositionHandler(
 	repo outbound.AllocationRepository,
 	multicaller outbound.Multicaller,
 	erc20ABI *abi.ABI,
+	primeLookup map[string]int64,
 	logger *slog.Logger,
 ) *PrimePositionHandler {
 	return &PrimePositionHandler{
-		repo:     repo,
-		metadata: newMetadataCache(multicaller, erc20ABI, logger),
-		logger:   logger.With("component", "postgres-handler"),
+		repo:        repo,
+		metadata:    newMetadataCache(multicaller, erc20ABI, logger),
+		primeLookup: primeLookup,
+		logger:      logger.With("component", "postgres-handler"),
 	}
 }
 
@@ -43,8 +46,23 @@ func (h *PrimePositionHandler) HandleSnapshots(
 
 	blockNum := snapshots[0].BlockNumber
 
+	// Token types where the contract itself isn't ERC20-compatible
+	// (e.g. Uniswap V3 pool contracts don't have decimals/symbol).
+	// For these, we use the AssetAddress metadata instead.
+	nonERC20Types := map[string]bool{
+		"uni_v3_pool": true,
+		"uni_v3_lp":   true,
+	}
+
 	var addrs []common.Address
 	for _, s := range snapshots {
+		if nonERC20Types[s.Entry.TokenType] {
+			// Only fetch metadata for the asset, not the pool contract.
+			if s.Entry.AssetAddress != nil {
+				addrs = append(addrs, *s.Entry.AssetAddress)
+			}
+			continue
+		}
 		addrs = append(addrs, s.Entry.ContractAddress)
 		if s.Entry.AssetAddress != nil {
 			addrs = append(addrs, *s.Entry.AssetAddress)
@@ -56,12 +74,33 @@ func (h *PrimePositionHandler) HandleSnapshots(
 
 	positions := make([]*entity.AllocationPosition, 0, len(snapshots))
 	for _, s := range snapshots {
-		meta, ok := h.metadata.get(s.Entry.ContractAddress)
-		if !ok {
-			return fmt.Errorf(
-				"metadata missing for token %s",
-				s.Entry.ContractAddress.Hex(),
-			)
+		var meta tokenMeta
+		var ok bool
+
+		if nonERC20Types[s.Entry.TokenType] {
+			// Use asset metadata for non-ERC20 contract types.
+			if s.Entry.AssetAddress == nil {
+				return fmt.Errorf(
+					"uni_v3 entry %s has no asset address",
+					s.Entry.ContractAddress.Hex(),
+				)
+			}
+			meta, ok = h.metadata.get(*s.Entry.AssetAddress)
+			if !ok {
+				return fmt.Errorf(
+					"metadata missing for asset %s (pool %s)",
+					s.Entry.AssetAddress.Hex(),
+					s.Entry.ContractAddress.Hex(),
+				)
+			}
+		} else {
+			meta, ok = h.metadata.get(s.Entry.ContractAddress)
+			if !ok {
+				return fmt.Errorf(
+					"metadata missing for token %s",
+					s.Entry.ContractAddress.Hex(),
+				)
+			}
 		}
 
 		var assetDecimals *int
@@ -77,6 +116,11 @@ func (h *PrimePositionHandler) HandleSnapshots(
 			assetDecimals = &assetMeta.decimals
 		}
 
+		primeID, ok := h.primeLookup[s.Entry.Star]
+		if !ok {
+			return fmt.Errorf("unknown star %q: no matching prime_id", s.Entry.Star)
+		}
+
 		var createdAtBlock int64
 		if s.Entry.CreatedAtBlock != nil {
 			createdAtBlock = *s.Entry.CreatedAtBlock
@@ -88,7 +132,7 @@ func (h *PrimePositionHandler) HandleSnapshots(
 			TokenSymbol:    meta.symbol,
 			TokenDecimals:  meta.decimals,
 			AssetDecimals:  assetDecimals,
-			Star:           s.Entry.Star,
+			PrimeID:        primeID,
 			ProxyAddress:   s.Entry.WalletAddress,
 			Balance:        s.Balance,
 			ScaledBalance:  s.ScaledBalance,
