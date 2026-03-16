@@ -76,6 +76,27 @@ func TestParseFlags(t *testing.T) {
 			},
 		},
 		{
+			name: "valid flags with --block",
+			args: []string{
+				"--rpc-url", "http://erigon:8545",
+				"--csv", "users.csv",
+				"--protocol", "aave_v3_ethereum",
+				"--db", "postgres://localhost/stl",
+				"--block", "80491259",
+			},
+			wantErr: false,
+			wantCfg: &cliConfig{
+				rpcURL:          "http://erigon:8545",
+				csvPath:         "users.csv",
+				protocolSlug:    "aave_v3_ethereum",
+				dbURL:           "postgres://localhost/stl",
+				concurrency:     10,
+				blockNumber:     80491259,
+				chainID:         1,
+				protocolAddress: common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"),
+			},
+		},
+		{
 			name:    "unknown flag is rejected",
 			args:    []string{"--unknown-flag", "value"},
 			wantErr: true,
@@ -112,6 +133,9 @@ func TestParseFlags(t *testing.T) {
 				}
 				if cfg.concurrency != tt.wantCfg.concurrency {
 					t.Errorf("concurrency: got %d, want %d", cfg.concurrency, tt.wantCfg.concurrency)
+				}
+				if cfg.blockNumber != tt.wantCfg.blockNumber {
+					t.Errorf("blockNumber: got %d, want %d", cfg.blockNumber, tt.wantCfg.blockNumber)
 				}
 				if cfg.chainID != tt.wantCfg.chainID {
 					t.Errorf("chainID: got %d, want %d", cfg.chainID, tt.wantCfg.chainID)

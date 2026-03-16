@@ -44,6 +44,7 @@ type cliConfig struct {
 	protocolSlug    string
 	dbURL           string
 	concurrency     int
+	blockNumber     int64
 	chainID         int64
 	protocolAddress common.Address
 }
@@ -55,6 +56,7 @@ func parseFlags(args []string) (cliConfig, error) {
 	protocol := fs.String("protocol", "", "Protocol slug (e.g. spark_ethereum, aave_v3_ethereum)")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
 	concurrency := fs.Int("concurrency", 10, "Number of concurrent RPC workers")
+	block := fs.Int64("block", 0, "Block number to snapshot at (0 = latest)")
 
 	if err := fs.Parse(args); err != nil {
 		return cliConfig{}, err
@@ -66,6 +68,7 @@ func parseFlags(args []string) (cliConfig, error) {
 		protocolSlug: *protocol,
 		dbURL:        *dbURL,
 		concurrency:  *concurrency,
+		blockNumber:  *block,
 	}
 
 	if cfg.rpcURL == "" {
@@ -290,12 +293,18 @@ func run(args []string) error {
 		return fmt.Errorf("creating position tracker service: %w", err)
 	}
 
-	// Get latest block number
-	blockNumber, err := ethClient.BlockNumber(ctx)
-	if err != nil {
-		return fmt.Errorf("fetching latest block: %w", err)
+	// Determine block number
+	var blockNumber uint64
+	if cfg.blockNumber > 0 {
+		blockNumber = uint64(cfg.blockNumber)
+		logger.Info("using specified block number", "block", blockNumber)
+	} else {
+		blockNumber, err = ethClient.BlockNumber(ctx)
+		if err != nil {
+			return fmt.Errorf("fetching latest block: %w", err)
+		}
+		logger.Info("using latest block number", "block", blockNumber)
 	}
-	logger.Info("using block number", "block", blockNumber)
 
 	// Process users concurrently
 	g, gCtx := errgroup.WithContext(ctx)
