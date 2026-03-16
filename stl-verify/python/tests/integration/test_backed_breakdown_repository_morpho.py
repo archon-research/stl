@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.domain.entities.backed_breakdown import BackedBreakdown
+from tests.integration.conftest import insert_token, insert_user, store_test_ids
 
 
 class ProtocolScopedBackedBreakdownRepository(Protocol):
@@ -18,45 +19,10 @@ class ProtocolScopedBackedBreakdownRepository(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Database URL fixtures (derived from the shared module_db)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def db_url(module_db) -> str:
-    """Plain ``postgresql://`` URL for the module's isolated database."""
-    return module_db["db_url"]
-
-
-@pytest.fixture(scope="module")
-def async_db_url(module_db) -> str:
-    """SQLAlchemy async URL for the module's isolated database."""
-    return module_db["async_url"]
-
-
-# ---------------------------------------------------------------------------
 # Seed helpers
 # ---------------------------------------------------------------------------
 
 _SEED_BLOCK_NUMBER = 20_000_000
-
-
-async def _insert_token(conn: asyncpg.Connection, symbol: str, decimals: int, address: bytes) -> int:
-    """Insert a token or return the existing ID."""
-    return cast(
-        int,
-        await conn.fetchval(
-            """
-        INSERT INTO token (chain_id, address, symbol, decimals)
-        VALUES (1, $1, $2, $3)
-        ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol
-        RETURNING id
-        """,
-            address,
-            symbol,
-            decimals,
-        ),
-    )
 
 
 async def _insert_protocol(conn: asyncpg.Connection) -> int:
@@ -71,22 +37,6 @@ async def _insert_protocol(conn: asyncpg.Connection) -> int:
         RETURNING id
         """,
             b"\xbb\xbb\xbb\xbb\xbb\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01",
-        ),
-    )
-
-
-async def _insert_user(conn: asyncpg.Connection, address: bytes) -> int:
-    """Insert a user and return the ID."""
-    return cast(
-        int,
-        await conn.fetchval(
-            """
-        INSERT INTO "user" (chain_id, address)
-        VALUES (1, $1)
-        ON CONFLICT (chain_id, address) DO UPDATE SET updated_at = NOW()
-        RETURNING id
-        """,
-            address,
         ),
     )
 
@@ -215,19 +165,6 @@ async def _insert_morpho_market_position(
     )
 
 
-async def _store_test_ids(conn: asyncpg.Connection, ids: dict[str, int]) -> None:
-    """Persist seed IDs into a helper table so test fixtures can retrieve them."""
-    await conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS _test_ids (
-            key TEXT PRIMARY KEY,
-            val BIGINT NOT NULL
-        )
-        """
-    )
-    for key, val in ids.items():
-        await conn.execute("INSERT INTO _test_ids (key, val) VALUES ($1, $2)", key, val)
-
 
 # ---------------------------------------------------------------------------
 # Seed data
@@ -254,6 +191,7 @@ async def _store_test_ids(conn: asyncpg.Connection, ids: dict[str, int]) -> None
 
 
 _VAULT_ADDRESS = b"\xcc" * 20
+_IDLE_VAULT_ADDRESS = b"\xdd" * 20
 _USDC_ADDRESS = b"\xa0\xb8\x69\x91\xc6\x21\x8b\x36\xc1\xd1\x9d\x4a\x2e\x9e\xb0\xce\x36\x06\xeb\x48"
 _WETH_ADDRESS = b"\xc0\x2a\xaa\x39\xb2\x23\xfe\x8d\x0a\x0e\x5c\x4f\x27\xea\xd9\x08\x3c\x75\x6c\xc2"
 _WBTC_ADDRESS = b"\x22\x60\xfa\xc5\xe5\x54\x2a\x77\x3a\xa4\x4f\xbc\xfe\xdf\x7c\x19\x3b\xc2\xc5\x99"
@@ -270,12 +208,12 @@ async def _seed_data(db_url: str) -> None:
         protocol_id = await _insert_protocol(conn)
 
         # Tokens – use existing if seeded by migrations, otherwise create
-        usdc_id = await _insert_token(conn, "USDC", 6, _USDC_ADDRESS)
-        weth_id = await _insert_token(conn, "WETH", 18, _WETH_ADDRESS)
-        wbtc_id = await _insert_token(conn, "WBTC", 8, _WBTC_ADDRESS)
+        usdc_id = await insert_token(conn, "USDC", 6, _USDC_ADDRESS)
+        weth_id = await insert_token(conn, "WETH", 18, _WETH_ADDRESS)
+        wbtc_id = await insert_token(conn, "WBTC", 8, _WBTC_ADDRESS)
 
         # User for the vault (vault address == user address)
-        vault_user_id = await _insert_user(conn, _VAULT_ADDRESS)
+        vault_user_id = await insert_user(conn, _VAULT_ADDRESS)
 
         # Vault
         vault_id = await _insert_morpho_vault(
@@ -299,11 +237,22 @@ async def _seed_data(db_url: str) -> None:
         # Vault supplies 300K USDC (raw) to market B
         await _insert_morpho_market_position(conn, vault_user_id, market_b_id, "300000000000", block)
 
-        await _store_test_ids(
+        # Idle-only vault: 500K USDC total_assets, no market positions
+        # This exercises the vault_idle path when breakdown is empty.
+        idle_vault_user_id = await insert_user(conn, _IDLE_VAULT_ADDRESS)
+        idle_vault_id = await _insert_morpho_vault(
+            conn, protocol_id, _IDLE_VAULT_ADDRESS, usdc_id, name="Morpho USDC Idle Vault", symbol="mUSDCi"
+        )
+        # 500K USDC in raw units (500_000 * 10^6)
+        await _insert_morpho_vault_state(conn, idle_vault_id, "500000000000", block)
+        del idle_vault_user_id  # user must exist for vault_users CTE; no positions inserted
+
+        await store_test_ids(
             conn,
             {
                 "protocol_id": protocol_id,
                 "vault_id": vault_id,
+                "idle_vault_id": idle_vault_id,
                 "usdc_id": usdc_id,
                 "weth_id": weth_id,
                 "wbtc_id": wbtc_id,
@@ -436,3 +385,27 @@ async def test_token_ids_are_populated(
     assert by_symbol["USDC"].token_id == test_ids["usdc_id"]
     assert by_symbol["WETH"].token_id == test_ids["weth_id"]
     assert by_symbol["WBTC"].token_id == test_ids["wbtc_id"]
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_vault_with_no_market_positions_is_fully_idle(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """Vault with total_assets > 0 but no market positions should be 100% the asset token (idle).
+
+    Idle-only vault: 500,000 USDC total_assets, zero market positions.
+
+    Expected:
+      vault_idle = total_assets - 0 = 500,000 USDC
+      breakdown and all_backing second-branch are both empty.
+      Result: USDC 100% at 500,000.00
+    """
+    result = await repository.get_backed_breakdown(test_ids["idle_vault_id"])
+
+    assert len(result.items) == 1
+
+    item = result.items[0]
+    assert item.symbol == "USDC"
+    assert item.amount == Decimal("500000.00")
+    assert item.backing_pct == Decimal("100.00")
+    assert item.token_id == test_ids["usdc_id"]

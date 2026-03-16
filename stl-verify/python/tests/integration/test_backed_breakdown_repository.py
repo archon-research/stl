@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.backed_breakdown_repository import BackedBreakdownRepository
 from app.domain.entities.backed_breakdown import BackedBreakdown
+from tests.integration.conftest import insert_token, insert_user, store_test_ids
 
 
 class ProtocolScopedBackedBreakdownRepository(Protocol):
@@ -18,43 +19,8 @@ class ProtocolScopedBackedBreakdownRepository(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Database URL fixtures (derived from the shared module_db)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def db_url(module_db) -> str:
-    """Plain ``postgresql://`` URL for the module's isolated database."""
-    return module_db["db_url"]
-
-
-@pytest.fixture(scope="module")
-def async_db_url(module_db) -> str:
-    """SQLAlchemy async URL for the module's isolated database."""
-    return module_db["async_url"]
-
-
-# ---------------------------------------------------------------------------
 # Seed helpers
 # ---------------------------------------------------------------------------
-
-
-async def _insert_token(conn: asyncpg.Connection, symbol: str, decimals: int, address: bytes) -> int:
-    """Insert a token or return the existing ID."""
-    return cast(
-        int,
-        await conn.fetchval(
-            """
-        INSERT INTO token (chain_id, address, symbol, decimals)
-        VALUES (1, $1, $2, $3)
-        ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol
-        RETURNING id
-        """,
-            address,
-            symbol,
-            decimals,
-        ),
-    )
 
 
 async def _insert_oracle_asset(conn: asyncpg.Connection, oracle_id: int, token_id: int) -> None:
@@ -112,21 +78,6 @@ async def _insert_reserve(
     )
 
 
-async def _insert_user(conn: asyncpg.Connection, address: bytes) -> int:
-    """Insert a user and return the ID."""
-    return cast(
-        int,
-        await conn.fetchval(
-            """
-        INSERT INTO "user" (chain_id, address)
-        VALUES (1, $1)
-        RETURNING id
-        """,
-            address,
-        ),
-    )
-
-
 async def _insert_collateral(
     conn: asyncpg.Connection, user_id: int, protocol_id: int, token_id: int, amount: str, block_number: int
 ) -> None:
@@ -167,30 +118,16 @@ async def _insert_debt(
     )
 
 
-async def _store_test_ids(conn: asyncpg.Connection, ids: dict[str, int]) -> None:
-    """Persist seed IDs into a helper table so test fixtures can retrieve them."""
-    await conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS _test_ids (
-            key TEXT PRIMARY KEY,
-            val BIGINT NOT NULL
-        )
-        """
-    )
-    for key, val in ids.items():
-        await conn.execute("INSERT INTO _test_ids (key, val) VALUES ($1, $2)", key, val)
-
-
 async def _seed_tokens_and_prices(
     conn: asyncpg.Connection, oracle_id: int, block_number: int
 ) -> tuple[int, int, int, int]:
     """Create tokens and their oracle prices. Returns (weth_id, cbbtc_id, sp_usds_id, sp_usdc_id)."""
     weth_id = cast(int, await conn.fetchval("SELECT id FROM token WHERE symbol = 'WETH' AND chain_id = 1"))
     cbbtc_id = cast(int, await conn.fetchval("SELECT id FROM token WHERE symbol = 'cbBTC' AND chain_id = 1"))
-    sp_usds_id = await _insert_token(
+    sp_usds_id = await insert_token(
         conn, "spUSDS", 18, b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14"
     )
-    sp_usdc_id = await _insert_token(
+    sp_usdc_id = await insert_token(
         conn, "spUSDC", 6, b"\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f\x30\x31\x32\x33\x34"
     )
 
@@ -231,7 +168,7 @@ async def _seed_user1(
     conn: asyncpg.Connection, protocol_id: int, block_number: int, weth_id: int, cbbtc_id: int, sp_usds_id: int
 ) -> None:
     """User 1: 10 WETH + 0.5 cbBTC collateral, 30 000 spUSDS debt (single-debt borrower)."""
-    user_id = await _insert_user(conn, b"\xaa" * 20)
+    user_id = await insert_user(conn, b"\xaa" * 20)
     await _insert_collateral(conn, user_id, protocol_id, weth_id, "10", block_number)
     await _insert_collateral(conn, user_id, protocol_id, cbbtc_id, "0.5", block_number)
     await _insert_debt(conn, user_id, protocol_id, sp_usds_id, 30000, block_number)
@@ -241,7 +178,7 @@ async def _seed_user2(
     conn: asyncpg.Connection, protocol_id: int, block_number: int, weth_id: int, sp_usds_id: int, sp_usdc_id: int
 ) -> None:
     """User 2: 5 WETH collateral, 6 000 spUSDS + 4 000 spUSDC debt (mixed-debt borrower)."""
-    user_id = await _insert_user(conn, b"\xbb" * 20)
+    user_id = await insert_user(conn, b"\xbb" * 20)
     await _insert_collateral(conn, user_id, protocol_id, weth_id, "5", block_number)
     await _insert_debt(conn, user_id, protocol_id, sp_usds_id, 6000, block_number)
     await _insert_debt(conn, user_id, protocol_id, sp_usdc_id, 4000, block_number)
@@ -269,7 +206,7 @@ async def _seed_data(db_url: str) -> None:
         await _seed_user1(conn, protocol_id, block, weth_id, cbbtc_id, sp_usds_id)
         await _seed_user2(conn, protocol_id, block, weth_id, sp_usds_id, sp_usdc_id)
 
-        await _store_test_ids(
+        await store_test_ids(
             conn,
             {
                 "protocol_id": protocol_id,
