@@ -15,4 +15,4 @@ class BackedBreakdownRepository(Protocol):
         Returns:
             BackedBreakdown with amount-first collateral contributions.
         """
-        raise NotImplementedError
+        ...

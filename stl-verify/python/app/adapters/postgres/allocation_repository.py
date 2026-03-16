@@ -2,10 +2,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.domain.entities.allocation import AllocationPosition, EthAddress, Star
-from app.ports.allocation_repository import AllocationRepository
 
 
-class PostgresAllocationRepository(AllocationRepository):
+class PostgresAllocationRepository:
     def __init__(self, conn: AsyncConnection) -> None:
         self._conn = conn
 
