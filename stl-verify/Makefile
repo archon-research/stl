@@ -1423,6 +1423,10 @@ kind-delete:
 
 kind-infra:
 	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
+	# Install CNPG operator (required before any Cluster CR can be applied).
+	kubectl --context=$(KUBE_CONTEXT) apply --server-side --force-conflicts -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.25/releases/cnpg-1.25.0.yaml
+	@echo "==> Waiting for CNPG operator to be ready..."
+	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/cnpg-controller-manager -n cnpg-system --timeout=120s
 	# Apply temporal resources to the temporal namespace (namespace declared in each manifest).
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal-00-namespace.yaml
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal-db.yaml
