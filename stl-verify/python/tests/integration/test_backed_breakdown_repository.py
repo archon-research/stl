@@ -7,7 +7,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres.backed_breakdown_repository import BackedBreakdownRepository
+from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.domain.entities.backed_breakdown import BackedBreakdown
 from tests.integration.conftest import insert_token, insert_user, store_test_ids
 
@@ -299,7 +299,7 @@ async def repository(
     """Create a repository already bound to the protocol under test."""
     engine = create_async_engine(async_db_url)
     try:
-        repository_class = cast(Any, BackedBreakdownRepository)
+        repository_class = cast(Any, AaveLikeBackedBreakdownRepository)
         yield cast(
             ProtocolScopedBackedBreakdownRepository,
             repository_class(engine, protocol_id=test_ids["protocol_id"]),

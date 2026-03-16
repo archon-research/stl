@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import AfterValidator, BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.allocation_repository import PostgresAllocationRepository
+from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
 from app.domain.entities.allocation import EthAddress
 from app.services.allocation_service import AllocationService
 

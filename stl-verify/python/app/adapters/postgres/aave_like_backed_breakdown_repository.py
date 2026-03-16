@@ -95,8 +95,8 @@ ORDER BY amount DESC;
 """
 
 
-class BackedBreakdownRepository:
-    """Postgres implementation of the backed breakdown repository."""
+class AaveLikeBackedBreakdownRepository:
+    """Postgres implementation of the backed breakdown repository for Aave-like protocols."""
 
     def __init__(self, engine: AsyncEngine, protocol_id: int) -> None:
         self._engine = engine
