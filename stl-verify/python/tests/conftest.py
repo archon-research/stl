@@ -17,7 +17,7 @@ def make_allocation_position(**overrides) -> AllocationPosition:
     defaults = dict(
         id=1,
         chain_id=1,
-        star="spark",
+        name="spark",
         proxy_address="0xabc",
         token_address="0xdef",
         token_symbol="USDC",

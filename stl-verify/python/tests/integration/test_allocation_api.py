@@ -37,16 +37,22 @@ async def _seed(async_url: str) -> None:
             )
             token_id = result.scalar_one()
 
+            result = await conn.execute(text("SELECT id FROM prime WHERE name = 'spark'"))
+            spark_id = result.scalar_one()
+
+            result = await conn.execute(text("SELECT id FROM prime WHERE name = 'grove'"))
+            grove_id = result.scalar_one()
+
             # Two rows for 'spark' at different block numbers (proxy = _PROXY_HEX).
             for block, tx_hex in [(1000, _TX1_HEX), (2000, _TX2_HEX)]:
                 await conn.execute(
                     text(
                         "INSERT INTO allocation_position "
-                        "(chain_id, token_id, star, proxy_address, balance, "
+                        "(chain_id, token_id, prime_id, proxy_address, balance, "
                         "block_number, tx_hash, log_index, tx_amount, direction) "
-                        "VALUES (1, :tid, 'spark', decode(:proxy, 'hex'), 500, :bn, decode(:tx, 'hex'), 0, 500, 'in')"
+                        "VALUES (1, :tid, :prime_id, decode(:proxy, 'hex'), 500, :bn, decode(:tx, 'hex'), 0, 500, 'in')"
                     ),
-                    {"tid": token_id, "proxy": _PROXY_HEX, "bn": block, "tx": tx_hex},
+                    {"tid": token_id, "prime_id": spark_id, "proxy": _PROXY_HEX, "bn": block, "tx": tx_hex},
                 )
 
             # Reorg simulation: a second block_version (1) for the block-1000 event with
@@ -54,22 +60,22 @@ async def _seed(async_url: str) -> None:
             await conn.execute(
                 text(
                     "INSERT INTO allocation_position "
-                    "(chain_id, token_id, star, proxy_address, balance, "
+                    "(chain_id, token_id, prime_id, proxy_address, balance, "
                     "block_number, block_version, tx_hash, log_index, tx_amount, direction) "
-                    "VALUES (1, :tid, 'spark', decode(:proxy, 'hex'), 999, 1000, 1, decode(:tx, 'hex'), 0, 999, 'in')"
+                    "VALUES (1, :tid, :prime_id, decode(:proxy, 'hex'), 999, 1000, 1, decode(:tx, 'hex'), 0, 999, 'in')"
                 ),
-                {"tid": token_id, "proxy": _PROXY_HEX, "tx": _TX1_HEX},
+                {"tid": token_id, "prime_id": spark_id, "proxy": _PROXY_HEX, "tx": _TX1_HEX},
             )
 
             # One row for a second star ('grove') at block 1000 with its own proxy address.
             await conn.execute(
                 text(
                     "INSERT INTO allocation_position "
-                    "(chain_id, token_id, star, proxy_address, balance, "
+                    "(chain_id, token_id, prime_id, proxy_address, balance, "
                     "block_number, tx_hash, log_index, tx_amount, direction) "
-                    "VALUES (1, :tid, 'grove', decode(:proxy, 'hex'), 100, 1000, decode(:tx, 'hex'), 0, 100, 'in')"
+                    "VALUES (1, :tid, :prime_id, decode(:proxy, 'hex'), 100, 1000, decode(:tx, 'hex'), 0, 100, 'in')"
                 ),
-                {"tid": token_id, "proxy": _GROVE_PROXY_HEX, "tx": "cc" * 32},
+                {"tid": token_id, "prime_id": grove_id, "proxy": _GROVE_PROXY_HEX, "tx": "cc" * 32},
             )
     finally:
         await engine.dispose()
@@ -120,7 +126,7 @@ def test_list_allocations_without_block_number_returns_latest(client: TestClient
     data = response.json()
     assert len(data) == 1
     assert data[0]["block_number"] == 2000
-    assert data[0]["star"] == "spark"
+    assert data[0]["name"] == "spark"
     assert data[0]["token_symbol"] == "USDC"
     assert data[0]["token_decimals"] == 6
     assert data[0]["proxy_address"] == f"0x{_PROXY_HEX}"

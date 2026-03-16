@@ -13,14 +13,15 @@ class PostgresAllocationRepository:
             text(
                 """
                 SELECT DISTINCT ON (proxy_address)
-                    star,
+                    p.name,
                     encode(proxy_address, 'hex') AS address
-                FROM allocation_position
+                FROM allocation_position ap
+                JOIN prime p ON p.id = ap.prime_id
                 ORDER BY proxy_address, block_number DESC
                 """
             )
         )
-        return [Star(id="0x" + row.address, name=row.star, address="0x" + row.address) for row in result]
+        return [Star(id="0x" + row.address, name=row.name, address="0x" + row.address) for row in result]
 
     async def list_allocations_by_star(
         self, star_id: EthAddress, block_number: int | None = None
@@ -40,7 +41,7 @@ class PostgresAllocationRepository:
                 (ap.chain_id, ap.token_id, ap.proxy_address, ap.block_number, ap.tx_hash, ap.log_index, ap.direction)
                     ap.id,
                     ap.chain_id,
-                    ap.star,
+                    p.name,
                     encode(ap.proxy_address, 'hex') AS proxy_address,
                     encode(t.address, 'hex')        AS token_address,
                     t.symbol                        AS token_symbol,
@@ -56,6 +57,7 @@ class PostgresAllocationRepository:
                     ap.created_at
                 FROM allocation_position ap
                 JOIN token t ON t.id = ap.token_id
+                JOIN prime p ON p.id = ap.prime_id
                 WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
                   AND {block_filter}
                 ORDER BY ap.chain_id,
@@ -74,7 +76,7 @@ class PostgresAllocationRepository:
             AllocationPosition(
                 id=row.id,
                 chain_id=row.chain_id,
-                star=row.star,
+                name=row.name,
                 proxy_address="0x" + row.proxy_address,
                 token_address="0x" + row.token_address,
                 token_symbol=row.token_symbol,
