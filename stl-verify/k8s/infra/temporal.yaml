@@ -27,12 +27,18 @@ spec:
               value: postgres12
             - name: DB_PORT
               value: "5432"
-            - name: POSTGRES_USER
-              value: temporal
-            - name: POSTGRES_PWD
-              value: temporal
             - name: POSTGRES_SEEDS
-              value: temporal-db
+              value: temporal-db-rw
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-db-app
+                  key: username
+            - name: POSTGRES_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-db-app
+                  key: password
             - name: BIND_ON_IP
               value: 0.0.0.0
             - name: DEFAULT_NAMESPACE

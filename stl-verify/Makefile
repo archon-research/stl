@@ -1426,6 +1426,8 @@ kind-infra:
 	# Apply temporal resources to the temporal namespace (namespace declared in each manifest).
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal-00-namespace.yaml
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal-db.yaml
+	@echo "==> Waiting for temporal-db CNPG cluster to be ready..."
+	kubectl --context=$(KUBE_CONTEXT) wait cluster/temporal-db -n temporal --for=condition=Ready --timeout=120s
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal.yaml
 	# Apply remaining infra resources to the app namespace.
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/jaeger.yaml       -n $(KUBE_NS)
