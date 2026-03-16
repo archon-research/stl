@@ -5,15 +5,18 @@
 - [Problem Statement](#problem-statement)
 - [Example Scenario](#example-scenario)
 
+**Backing Views:**
 1. [Total Collateral Backing](#1-total-collateral-backing)
 2. [Total Collateralization × Liquidation Threshold](#2-total-collateralization--liquidation-threshold)
 3. [Collateral Liabilities](#3-collateral-liabilities)
 4. [Collateral by Threshold](#4-collateral-by-threshold)
 5. [Including Available Liquidity](#5-including-available-liquidity)
-6. [Comparison](#comparison)
-7. [Extensions](#extensions)
-8. [Appendix A: Why Total Collateral Backing Proportions Cannot Be Used for Collateral Liabilities](#appendix-a-why-total-collateral-backing-proportions-cannot-be-used-for-collateral-liabilities)
-9. [Appendix B: Backing Views on BA Labs' Dashboards](#appendix-b-backing-views-on-ba-labs-dashboards)
+
+**Reference:**
+- [Comparison](#comparison)
+- [Extensions](#extensions)
+- [Appendix A: Why Total Collateral Backing Proportions Cannot Be Used for Collateral Liabilities](#appendix-a-why-total-collateral-backing-proportions-cannot-be-used-for-collateral-liabilities)
+- [Appendix B: Backing Views on BA Labs' Dashboards](#appendix-b-backing-views-on-ba-labs-dashboards)
 
 ---
 
