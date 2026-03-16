@@ -84,5 +84,18 @@ jobs:
       - name: Unit tests
         run: make test-unit
 
+      # Derive image tag directly from the Python source so this step is always
+      # aligned with what the tests actually use. The single source of truth is
+      # stl-verify/python/tests/integration/conftest.py.
+      - name: Pull container images
+        run: |
+          IMAGE=$(grep -oP 'TIMESCALEDB_IMAGE\s*=\s*"\K[^"]+' tests/integration/conftest.py)
+          if [ -z "$IMAGE" ]; then
+            echo "::error::No TIMESCALEDB_IMAGE constant found in stl-verify/python/tests/integration/conftest.py — check the grep pattern"
+            exit 1
+          fi
+          docker pull "$IMAGE"
+
+      # Integration tests require Docker (testcontainers spins up TimescaleDB automatically)
       - name: Integration tests
         run: make test-integration
