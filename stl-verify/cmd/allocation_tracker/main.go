@@ -268,6 +268,12 @@ func run(ctx context.Context, args []string) error {
 	}
 	registry.Register(at.NewCurveSource(mc, curveABI, logger))
 
+	uniV3, err := at.NewUniV3Source(mc, logger)
+	if err != nil {
+		return fmt.Errorf("univ3 source: %w", err)
+	}
+	registry.Register(uniV3)
+
 	for _, s := range at.DefaultStubSources(logger) {
 		registry.Register(s)
 	}
