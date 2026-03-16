@@ -396,8 +396,8 @@ Collateral Liabilities avoids this by weighting each borrower by their share of 
 
 On the **Markets → Debt** tab (e.g., [wstETH debt analysis](https://spark.blockanalitica.com/v1/ethereum/markets/wstETH/debt)), the following charts and metrics correspond to views from this document:
 
-| Dashboard Element | Backing View | Notes |
-|-------------------|--------------|-------|
+| Dashboard Element | Backing View | Description |
+|-------------------|--------------|-------------|
 | **Collateralization** chart | View **#1** | Total Collateral Backing |
 | **Historical Collateralization** chart | View **#5** | Collateralization × LT |
 | **Collateral Liabilities** chart | View **#7** | Collateral Liabilities |
