@@ -139,6 +139,134 @@ func (r *PositionReader) GetUserPositionData(ctx context.Context, user common.Ad
 	return collaterals, debts, nil
 }
 
+// UserPositionResult holds the position data for a single user from a batch query.
+type UserPositionResult struct {
+	Collaterals []CollateralData
+	Debts       []DebtData
+	Err         error
+}
+
+// GetBatchUserPositionData fetches position data for multiple users in batch,
+// using 2 multicalls instead of 2N. Results are functionally identical to
+// calling GetUserPositionData for each user individually.
+func (r *PositionReader) GetBatchUserPositionData(
+	ctx context.Context,
+	users []common.Address,
+	protocolAddress common.Address,
+	chainID, blockNumber int64,
+) (map[common.Address]UserPositionResult, error) {
+	if len(users) == 0 {
+		return make(map[common.Address]UserPositionResult), nil
+	}
+
+	blockchainSvc, err := r.GetOrCreateBlockchainService(chainID, protocolAddress)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get blockchain service: %w", err)
+	}
+
+	// Multicall 1: getUserReservesData for all users in one call.
+	reservesMap, reserveErrors, err := blockchainSvc.getUserReservesDataBatch(ctx, users, blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("batch getUserReservesData failed: %w", err)
+	}
+
+	// For each user, identify collateral/debt assets and collect tokens for metadata.
+	type userAssetInfo struct {
+		collateralAssets []common.Address
+		debtAssets       []common.Address
+	}
+	perUser := make(map[common.Address]*userAssetInfo, len(users))
+	allTokens := make(map[common.Address]bool)
+	userAssetsForData := make(map[common.Address][]common.Address) // for batchGetUserReserveDataMultiUser
+
+	for _, user := range users {
+		if _, hasErr := reserveErrors[user]; hasErr {
+			continue
+		}
+		reserves, ok := reservesMap[user]
+		if !ok {
+			return nil, fmt.Errorf("missing reserves result for user %s", user.Hex())
+		}
+
+		info := &userAssetInfo{}
+		assetsNeeded := make(map[common.Address]bool)
+		for _, rv := range reserves {
+			if rv.UnderlyingAsset == (common.Address{}) {
+				continue
+			}
+			if rv.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && rv.UsageAsCollateralEnabledOnUser {
+				info.collateralAssets = append(info.collateralAssets, rv.UnderlyingAsset)
+				allTokens[rv.UnderlyingAsset] = true
+				assetsNeeded[rv.UnderlyingAsset] = true
+			}
+			if rv.ScaledVariableDebt.Cmp(big.NewInt(0)) > 0 {
+				info.debtAssets = append(info.debtAssets, rv.UnderlyingAsset)
+				allTokens[rv.UnderlyingAsset] = true
+				assetsNeeded[rv.UnderlyingAsset] = true
+			}
+		}
+
+		if len(assetsNeeded) > 0 {
+			perUser[user] = info
+			assets := make([]common.Address, 0, len(assetsNeeded))
+			for a := range assetsNeeded {
+				assets = append(assets, a)
+			}
+			userAssetsForData[user] = assets
+		}
+	}
+
+	// Fetch token metadata for all unique tokens across all users.
+	var metadataMap map[common.Address]TokenMetadata
+	if len(allTokens) > 0 {
+		metadataMap, err = blockchainSvc.BatchGetTokenMetadata(ctx, allTokens, big.NewInt(blockNumber))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get token metadata: %w", err)
+		}
+	}
+
+	// Multicall 2: getUserReserveData for all user×asset pairs in one call.
+	var allActualData map[common.Address]map[common.Address]ActualUserReserveData
+	if len(userAssetsForData) > 0 {
+		allActualData, err = blockchainSvc.batchGetUserReserveDataMultiUser(ctx, userAssetsForData, blockNumber)
+		if err != nil {
+			return nil, fmt.Errorf("batch getUserReserveData failed: %w", err)
+		}
+	}
+
+	// Build results for each user.
+	results := make(map[common.Address]UserPositionResult, len(users))
+	for _, user := range users {
+		if resErr, hasErr := reserveErrors[user]; hasErr {
+			results[user] = UserPositionResult{Err: resErr}
+			continue
+		}
+
+		info, hasPositions := perUser[user]
+		if !hasPositions {
+			results[user] = UserPositionResult{
+				Collaterals: []CollateralData{},
+				Debts:       []DebtData{},
+			}
+			continue
+		}
+
+		userActualData := allActualData[user]
+		if userActualData == nil {
+			userActualData = make(map[common.Address]ActualUserReserveData)
+		}
+
+		collaterals := buildCollateralData(info.collateralAssets, metadataMap, userActualData, r.logger)
+		debts := buildDebtData(info.debtAssets, metadataMap, userActualData, r.logger)
+		results[user] = UserPositionResult{
+			Collaterals: collaterals,
+			Debts:       debts,
+		}
+	}
+
+	return results, nil
+}
+
 func buildCollateralData(assets []common.Address, metadataMap map[common.Address]TokenMetadata, actualDataMap map[common.Address]ActualUserReserveData, logger *slog.Logger) []CollateralData {
 	var collaterals []CollateralData
 	for _, asset := range assets {

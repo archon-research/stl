@@ -830,6 +830,23 @@ func (s *Service) IndexUserPosition(ctx context.Context, user common.Address, pr
 	})
 }
 
+// PersistUserPosition saves pre-fetched position data to the database.
+// Used by the batch backfill CLI which fetches data separately via
+// PositionReader.GetBatchUserPositionData.
+func (s *Service) PersistUserPosition(
+	ctx context.Context,
+	user common.Address,
+	protocolAddress common.Address,
+	chainID, blockNumber int64,
+	blockVersion int,
+	collaterals []aavelike.CollateralData,
+	debts []aavelike.DebtData,
+) error {
+	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		return s.persistPositionData(ctx, tx, user, protocolAddress, chainID, blockNumber, blockVersion, "Snapshot", []byte{}, collaterals, debts)
+	})
+}
+
 // saveBorrowerRecord saves a single borrow/repay position record.
 // amount is the current outstanding debt after the event (raw wei) and change is the
 // raw wei event delta.

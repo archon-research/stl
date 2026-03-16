@@ -213,6 +213,15 @@ func (s *BlockchainService) getUserReservesData(
 	if err != nil {
 		return nil, fmt.Errorf("failed to call UiPoolDataProvider: %w", err)
 	}
+
+	return s.decodeUserReservesResult(result)
+}
+
+// decodeUserReservesResult decodes the raw bytes returned by a getUserReservesData call
+// into a slice of UserReserveData. It handles both ABI-decoded and raw-decoded formats
+// (the latter for chains like Avalanche that encode booleans as uint256).
+// This is shared by both the single-user and batch code paths.
+func (s *BlockchainService) decodeUserReservesResult(result []byte) ([]UserReserveData, error) {
 	if len(result) == 0 {
 		return []UserReserveData{}, nil
 	}
@@ -228,9 +237,6 @@ func (s *BlockchainService) getUserReservesData(
 				errors.Join(err, fmt.Errorf("raw fallback decode failed: %w", rawErr)),
 			)
 		}
-		s.logger.Debug("used raw decoder for getUserReservesData",
-			"user", user.Hex(),
-			"reserves", len(reserves))
 		return reserves, nil
 	}
 	if len(unpacked) == 0 {
@@ -296,6 +302,64 @@ func (s *BlockchainService) getUserReservesData(
 	}
 }
 
+// getUserReservesDataBatch packs getUserReservesData calls for multiple users
+// into a single Multicall3 call. Returns a map from user address to their
+// reserves. If an individual user's sub-call fails, that user's entry will
+// be absent from the results map and the error recorded in the errors map.
+// The top-level error is only for multicall-level failures (gas limit, network).
+func (s *BlockchainService) getUserReservesDataBatch(
+	ctx context.Context,
+	users []common.Address,
+	blockNumber int64,
+) (map[common.Address][]UserReserveData, map[common.Address]error, error) {
+	if len(users) == 0 {
+		return make(map[common.Address][]UserReserveData), nil, nil
+	}
+
+	calls := make([]outbound.Call, 0, len(users))
+	for _, user := range users {
+		data, err := s.getUserReservesABI.Pack(
+			"getUserReservesData",
+			s.poolAddressesProvider,
+			user,
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to pack getUserReservesData for %s: %w", user.Hex(), err)
+		}
+		calls = append(calls, outbound.Call{
+			Target:       s.uiPoolDataProvider,
+			AllowFailure: true,
+			CallData:     data,
+		})
+	}
+
+	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
+	if err != nil {
+		return nil, nil, fmt.Errorf("multicall failed: %w", err)
+	}
+
+	reservesMap := make(map[common.Address][]UserReserveData, len(users))
+	errorsMap := make(map[common.Address]error)
+
+	for i, result := range results {
+		user := users[i]
+		if !result.Success {
+			errorsMap[user] = fmt.Errorf("getUserReservesData sub-call failed for %s", user.Hex())
+			continue
+		}
+
+		reserves, decodeErr := s.decodeUserReservesResult(result.ReturnData)
+		if decodeErr != nil {
+			errorsMap[user] = fmt.Errorf("failed to decode reserves for %s: %w", user.Hex(), decodeErr)
+			continue
+		}
+
+		reservesMap[user] = reserves
+	}
+
+	return reservesMap, errorsMap, nil
+}
+
 func (s *BlockchainService) batchGetUserReserveData(ctx context.Context, assets []common.Address, user common.Address, blockNumber int64) (map[common.Address]ActualUserReserveData, error) {
 	if len(assets) == 0 {
 		return make(map[common.Address]ActualUserReserveData), nil
@@ -334,42 +398,125 @@ func (s *BlockchainService) batchGetUserReserveData(ctx context.Context, assets 
 	dataMap := make(map[common.Address]ActualUserReserveData)
 	for i, result := range results {
 		if !result.Success || len(result.ReturnData) == 0 {
-			s.logger.Debug("getUserReserveData call failed", "asset", assets[i].Hex())
-			continue
+			return nil, fmt.Errorf("getUserReserveData call failed for asset %s", assets[i].Hex())
 		}
 
-		unpacked, err := s.getUserReserveDataABI.Unpack("getUserReserveData", result.ReturnData)
+		data, err := s.decodeUserReserveDataResult(assets[i], result.ReturnData)
 		if err != nil {
-			s.logger.Warn("failed to unpack getUserReserveData result", "asset", assets[i].Hex(), "error", err)
-			continue
+			return nil, fmt.Errorf("decoding getUserReserveData for asset %s: %w", assets[i].Hex(), err)
 		}
 
-		if len(unpacked) < 9 {
-			s.logger.Warn("unexpected getUserReserveData result length", "asset", assets[i].Hex(), "length", len(unpacked))
-			continue
+		dataMap[assets[i]] = data
+	}
+
+	return dataMap, nil
+}
+
+// decodeUserReserveDataResult decodes the raw bytes returned by a getUserReserveData call
+// into an ActualUserReserveData. This is shared by both the single-user and batch code paths.
+func (s *BlockchainService) decodeUserReserveDataResult(asset common.Address, returnData []byte) (ActualUserReserveData, error) {
+	unpacked, err := s.getUserReserveDataABI.Unpack("getUserReserveData", returnData)
+	if err != nil {
+		return ActualUserReserveData{}, fmt.Errorf("failed to unpack: %w", err)
+	}
+
+	if len(unpacked) < 9 {
+		return ActualUserReserveData{}, fmt.Errorf("expected 9 values, got %d", len(unpacked))
+	}
+
+	bi, ok := unpacked[7].(*big.Int)
+	if !ok || bi == nil {
+		return ActualUserReserveData{}, fmt.Errorf("unexpected type for stableRateLastUpdated: %T", unpacked[7])
+	}
+
+	return ActualUserReserveData{
+		Asset:                    asset,
+		CurrentATokenBalance:     unpacked[0].(*big.Int),
+		CurrentStableDebt:        unpacked[1].(*big.Int),
+		CurrentVariableDebt:      unpacked[2].(*big.Int),
+		PrincipalStableDebt:      unpacked[3].(*big.Int),
+		ScaledVariableDebt:       unpacked[4].(*big.Int),
+		StableBorrowRate:         unpacked[5].(*big.Int),
+		LiquidityRate:            unpacked[6].(*big.Int),
+		StableRateLastUpdated:    bi.Uint64(),
+		UsageAsCollateralEnabled: unpacked[8].(bool),
+	}, nil
+}
+
+// userAssetKey tracks which user and asset a multicall sub-call belongs to,
+// so results can be mapped back after batch execution.
+type userAssetKey struct {
+	User  common.Address
+	Asset common.Address
+}
+
+// batchGetUserReserveDataMultiUser packs getUserReserveData calls for
+// multiple user×asset pairs into a single Multicall3 call. Returns a nested
+// map: user → asset → ActualUserReserveData. Per-call failures are silently
+// skipped (same behavior as batchGetUserReserveData).
+func (s *BlockchainService) batchGetUserReserveDataMultiUser(
+	ctx context.Context,
+	userAssets map[common.Address][]common.Address,
+	blockNumber int64,
+) (map[common.Address]map[common.Address]ActualUserReserveData, error) {
+	if len(userAssets) == 0 {
+		return make(map[common.Address]map[common.Address]ActualUserReserveData), nil
+	}
+
+	poolDataProvider, err := s.getPoolDataProviderForBlock(uint64(blockNumber))
+	if err != nil {
+		return nil, err
+	}
+
+	var totalCalls int
+	for _, assets := range userAssets {
+		totalCalls += len(assets)
+	}
+
+	calls := make([]outbound.Call, 0, totalCalls)
+	keys := make([]userAssetKey, 0, totalCalls)
+
+	for user, assets := range userAssets {
+		for _, asset := range assets {
+			callData, err := s.getUserReserveDataABI.Pack("getUserReserveData", asset, user)
+			if err != nil {
+				return nil, fmt.Errorf("packing getUserReserveData for user=%s asset=%s: %w", user.Hex(), asset.Hex(), err)
+			}
+
+			calls = append(calls, outbound.Call{
+				Target:       poolDataProvider,
+				AllowFailure: true,
+				CallData:     callData,
+			})
+			keys = append(keys, userAssetKey{User: user, Asset: asset})
+		}
+	}
+
+	if len(calls) == 0 {
+		return make(map[common.Address]map[common.Address]ActualUserReserveData), nil
+	}
+
+	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
+	if err != nil {
+		return nil, fmt.Errorf("multicall failed: %w", err)
+	}
+
+	dataMap := make(map[common.Address]map[common.Address]ActualUserReserveData)
+	for i, result := range results {
+		key := keys[i]
+		if !result.Success || len(result.ReturnData) == 0 {
+			return nil, fmt.Errorf("getUserReserveData call failed for user=%s asset=%s", key.User.Hex(), key.Asset.Hex())
 		}
 
-		bi, ok := unpacked[7].(*big.Int)
-		if !ok || bi == nil {
-			s.logger.Warn("unexpected type for stableRateLastUpdated",
-				"asset", assets[i].Hex(),
-				"type", fmt.Sprintf("%T", unpacked[7]),
-			)
-			continue
+		data, err := s.decodeUserReserveDataResult(key.Asset, result.ReturnData)
+		if err != nil {
+			return nil, fmt.Errorf("decoding getUserReserveData for user=%s asset=%s: %w", key.User.Hex(), key.Asset.Hex(), err)
 		}
 
-		dataMap[assets[i]] = ActualUserReserveData{
-			Asset:                    assets[i],
-			CurrentATokenBalance:     unpacked[0].(*big.Int),
-			CurrentStableDebt:        unpacked[1].(*big.Int),
-			CurrentVariableDebt:      unpacked[2].(*big.Int),
-			PrincipalStableDebt:      unpacked[3].(*big.Int),
-			ScaledVariableDebt:       unpacked[4].(*big.Int),
-			StableBorrowRate:         unpacked[5].(*big.Int),
-			LiquidityRate:            unpacked[6].(*big.Int),
-			StableRateLastUpdated:    bi.Uint64(),
-			UsageAsCollateralEnabled: unpacked[8].(bool),
+		if dataMap[key.User] == nil {
+			dataMap[key.User] = make(map[common.Address]ActualUserReserveData)
 		}
+		dataMap[key.User][key.Asset] = data
 	}
 
 	return dataMap, nil

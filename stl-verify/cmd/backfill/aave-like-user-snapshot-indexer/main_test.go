@@ -51,6 +51,7 @@ func TestParseFlags(t *testing.T) {
 				protocolSlug:    "spark_ethereum",
 				dbURL:           "postgres://from-env",
 				concurrency:     10,
+				batchSize:       100,
 				chainID:         1,
 				protocolAddress: common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987"),
 			},
@@ -71,6 +72,7 @@ func TestParseFlags(t *testing.T) {
 				protocolSlug:    "aave_v3_ethereum",
 				dbURL:           "postgres://localhost/stl",
 				concurrency:     5,
+				batchSize:       100,
 				chainID:         1,
 				protocolAddress: common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"),
 			},
@@ -91,7 +93,29 @@ func TestParseFlags(t *testing.T) {
 				protocolSlug:    "aave_v3_ethereum",
 				dbURL:           "postgres://localhost/stl",
 				concurrency:     10,
+				batchSize:       100,
 				blockNumber:     80491259,
+				chainID:         1,
+				protocolAddress: common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"),
+			},
+		},
+		{
+			name: "valid flags with --batch-size",
+			args: []string{
+				"--rpc-url", "http://erigon:8545",
+				"--csv", "users.csv",
+				"--protocol", "aave_v3_ethereum",
+				"--db", "postgres://localhost/stl",
+				"--batch-size", "50",
+			},
+			wantErr: false,
+			wantCfg: &cliConfig{
+				rpcURL:          "http://erigon:8545",
+				csvPath:         "users.csv",
+				protocolSlug:    "aave_v3_ethereum",
+				dbURL:           "postgres://localhost/stl",
+				concurrency:     10,
+				batchSize:       50,
 				chainID:         1,
 				protocolAddress: common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"),
 			},
@@ -133,6 +157,9 @@ func TestParseFlags(t *testing.T) {
 				}
 				if cfg.concurrency != tt.wantCfg.concurrency {
 					t.Errorf("concurrency: got %d, want %d", cfg.concurrency, tt.wantCfg.concurrency)
+				}
+				if cfg.batchSize != tt.wantCfg.batchSize {
+					t.Errorf("batchSize: got %d, want %d", cfg.batchSize, tt.wantCfg.batchSize)
 				}
 				if cfg.blockNumber != tt.wantCfg.blockNumber {
 					t.Errorf("blockNumber: got %d, want %d", cfg.blockNumber, tt.wantCfg.blockNumber)

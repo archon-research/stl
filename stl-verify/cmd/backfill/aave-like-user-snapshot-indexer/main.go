@@ -24,7 +24,10 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/aavelike"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/aavelike_position_tracker"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -44,6 +47,7 @@ type cliConfig struct {
 	protocolSlug    string
 	dbURL           string
 	concurrency     int
+	batchSize       int
 	blockNumber     int64
 	chainID         int64
 	protocolAddress common.Address
@@ -55,7 +59,8 @@ func parseFlags(args []string) (cliConfig, error) {
 	csvPath := fs.String("csv", "", "Path to CSV file with user addresses")
 	protocol := fs.String("protocol", "", "Protocol slug (e.g. spark_ethereum, aave_v3_ethereum)")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
-	concurrency := fs.Int("concurrency", 10, "Number of concurrent RPC workers")
+	concurrency := fs.Int("concurrency", 10, "Number of concurrent batch workers")
+	batchSize := fs.Int("batch-size", 100, "Number of users per RPC batch")
 	block := fs.Int64("block", 0, "Block number to snapshot at (0 = latest)")
 
 	if err := fs.Parse(args); err != nil {
@@ -68,6 +73,7 @@ func parseFlags(args []string) (cliConfig, error) {
 		protocolSlug: *protocol,
 		dbURL:        *dbURL,
 		concurrency:  *concurrency,
+		batchSize:    *batchSize,
 		blockNumber:  *block,
 	}
 
@@ -82,6 +88,9 @@ func parseFlags(args []string) (cliConfig, error) {
 	}
 	if cfg.concurrency <= 0 {
 		return cliConfig{}, fmt.Errorf("--concurrency must be greater than 0")
+	}
+	if cfg.batchSize <= 0 {
+		return cliConfig{}, fmt.Errorf("--batch-size must be greater than 0")
 	}
 
 	key, _, ok := blockchain.GetProtocolBySlug(cfg.protocolSlug)
@@ -274,6 +283,19 @@ func run(args []string) error {
 
 	eventRepo := postgres.NewEventRepository(logger)
 
+	// Create PositionReader directly for batch RPC reads
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
+	if err != nil {
+		return fmt.Errorf("creating multicall client: %w", err)
+	}
+
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		return fmt.Errorf("loading ERC20 ABI: %w", err)
+	}
+
+	reader := aavelike.NewPositionReader(ethClient, mc, erc20ABI, logger)
+
 	trackerSvc, err := aavelike_position_tracker.NewService(
 		shared.SQSConsumerConfig{
 			Logger:  logger,
@@ -306,32 +328,85 @@ func run(args []string) error {
 		logger.Info("using latest block number", "block", blockNumber)
 	}
 
-	// Process users concurrently
+	// Split users into batches and process concurrently
+	batches := splitIntoBatches(users, cfg.batchSize)
+	logger.Info("processing users in batches",
+		"totalUsers", len(users),
+		"batchSize", cfg.batchSize,
+		"batches", len(batches))
+
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(cfg.concurrency)
 
 	var processed atomic.Int64
 	var errCount atomic.Int64
 
-	for _, user := range users {
-		user := user
+	for batchIdx, batch := range batches {
 		g.Go(func() error {
 			if gCtx.Err() != nil {
 				return gCtx.Err()
 			}
 
-			if err := trackerSvc.IndexUserPosition(gCtx, user, cfg.protocolAddress, cfg.chainID, int64(blockNumber), 0); err != nil {
-				errCount.Add(1)
-				logger.Warn("failed to index user position",
-					"user", user.Hex(),
-					"error", err)
-				return nil // continue on individual user failures
+			batchStart := time.Now()
+			logger.Info("batch starting", "batch", batchIdx+1, "of", len(batches), "users", len(batch))
+
+			rpcStart := time.Now()
+			results, err := reader.GetBatchUserPositionData(gCtx, batch, cfg.protocolAddress, cfg.chainID, int64(blockNumber))
+			if err != nil {
+				return fmt.Errorf("batch %d RPC failed after %s: %w", batchIdx+1, time.Since(rpcStart), err)
+			}
+			logger.Info("batch RPC done", "batch", batchIdx+1, "rpcDuration", time.Since(rpcStart).Round(time.Millisecond))
+
+			dbStart := time.Now()
+			var persisted int
+			for _, user := range batch {
+				result, ok := results[user]
+				if !ok {
+					return fmt.Errorf("missing result for user %s", user.Hex())
+				}
+				if len(result.Collaterals) == 0 && len(result.Debts) == 0 && result.Err == nil {
+					processed.Add(1)
+					continue
+				}
+				if result.Err != nil {
+					errCount.Add(1)
+					logger.Warn("failed to get user position data",
+						"user", user.Hex(),
+						"error", result.Err)
+					processed.Add(1)
+					continue
+				}
+
+				persistStart := time.Now()
+				if err := trackerSvc.PersistUserPosition(
+					gCtx, user, cfg.protocolAddress, cfg.chainID,
+					int64(blockNumber), 0, result.Collaterals, result.Debts,
+				); err != nil {
+					errCount.Add(1)
+					logger.Warn("failed to persist user position",
+						"user", user.Hex(),
+						"error", err)
+				}
+				persisted++
+				if persisted%10 == 0 {
+					logger.Debug("batch persist progress",
+						"batch", batchIdx+1,
+						"persisted", persisted,
+						"lastPersistMs", time.Since(persistStart).Milliseconds())
+				}
+
+				processed.Add(1)
 			}
 
-			n := processed.Add(1)
-			if n%1000 == 0 {
-				logger.Info("progress", "processed", n, "total", len(users), "errors", errCount.Load())
-			}
+			n := processed.Load()
+			logger.Info("batch done",
+				"batch", batchIdx+1,
+				"persisted", persisted,
+				"rpc", time.Since(rpcStart).Round(time.Millisecond),
+				"db", time.Since(dbStart).Round(time.Millisecond),
+				"total", time.Since(batchStart).Round(time.Millisecond),
+				"progress", fmt.Sprintf("%d/%d", n, len(users)),
+				"errors", errCount.Load())
 			return nil
 		})
 	}
@@ -347,4 +422,16 @@ func run(args []string) error {
 		"block", blockNumber)
 
 	return nil
+}
+
+func splitIntoBatches(users []common.Address, batchSize int) [][]common.Address {
+	var batches [][]common.Address
+	for i := 0; i < len(users); i += batchSize {
+		end := i + batchSize
+		if end > len(users) {
+			end = len(users)
+		}
+		batches = append(batches, users[i:end])
+	}
+	return batches
 }
