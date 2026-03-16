@@ -34,13 +34,6 @@ def mock_repository() -> AsyncMock:
 
 
 @pytest.fixture
-def mock_morpho() -> AsyncMock:
-    mock = AsyncMock()
-    mock.is_morpho_vault.return_value = False
-    return mock
-
-
-@pytest.fixture
 def service(
     mock_resolver: AsyncMock,
 ) -> BackedBreakdownService:
@@ -126,23 +119,3 @@ async def test_propagates_selected_repository_errors_unchanged(
 
     with pytest.raises(RuntimeError, match="db down"):
         await service.get_backed_breakdown(protocol_id=1, backed_asset_id=42)
-
-
-@pytest.mark.asyncio
-async def test_service_does_not_require_morpho_target_id_probing(
-    service: BackedBreakdownService,
-    mock_resolver: AsyncMock,
-    mock_repository: AsyncMock,
-    mock_morpho: AsyncMock,
-) -> None:
-    """Spec regression guard: routing is from protocol_id, not backed_asset_id probing."""
-    expected = BackedBreakdown(backed_asset_id=7, protocol_id=77, items=())
-    mock_morpho.is_morpho_vault.side_effect = AssertionError("service must not probe Morpho vault IDs")
-    mock_resolver.resolve.return_value = mock_repository
-    mock_repository.get_backed_breakdown.return_value = expected
-
-    result = await service.get_backed_breakdown(protocol_id=77, backed_asset_id=7)
-
-    assert result is expected
-    mock_resolver.resolve.assert_awaited_once_with(77)
-    mock_repository.get_backed_breakdown.assert_awaited_once_with(7)

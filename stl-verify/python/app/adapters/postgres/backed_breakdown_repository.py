@@ -7,10 +7,6 @@ from app.domain.entities.backed_breakdown import (
     BackedBreakdown,
     CollateralContribution,
 )
-from app.ports.backed_breakdown_repository import (
-    BackedBreakdownRepository as BackedBreakdownRepositoryPort,
-)
-
 _BACKED_BREAKDOWN_SQL = """
 -- Step 1: Current debt per user per token (sum of deltas)
 WITH user_debts AS (
@@ -85,7 +81,7 @@ ORDER BY amount DESC;
 """
 
 
-class BackedBreakdownRepository(BackedBreakdownRepositoryPort):
+class BackedBreakdownRepository:
     """Postgres implementation of the backed breakdown repository."""
 
     def __init__(self, engine: AsyncEngine, protocol_id: int) -> None:

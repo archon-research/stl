@@ -11,7 +11,7 @@ class ProtocolScopedBackedBreakdownRepository(Protocol):
 class ProtocolMetadataRepository(Protocol):
     """Spec-only dependency for looking up protocol routing metadata."""
 
-    async def get_protocol_type(self, protocol_id: int) -> str: ...
+    async def get_protocol_type(self, protocol_id: int) -> str | None: ...
 
 
 @pytest.fixture
