@@ -2,6 +2,9 @@
 
 ## Table of Contents
 
+- [Problem Statement](#problem-statement)
+- [Example Scenario](#example-scenario)
+
 1. [Total Collateral Backing](#1-total-collateral-backing)
 2. [Total Collateralization × Liquidation Threshold](#2-total-collateralization--liquidation-threshold)
 3. [Collateral Liabilities](#3-collateral-liabilities)
