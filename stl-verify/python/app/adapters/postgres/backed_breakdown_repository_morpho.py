@@ -29,7 +29,7 @@ vault_users AS (
 vault_states AS (
     SELECT DISTINCT ON (vs.morpho_vault_id)
         vs.morpho_vault_id AS vault_id,
-        vs.total_assets / power(10, t.decimals) AS total_assets,
+        vs.total_assets / power(10::numeric, t.decimals) AS total_assets,
         mv.asset_token_id AS loan_token_id
     FROM morpho_vault_state vs
     JOIN morpho_vaults mv ON mv.vault_id = vs.morpho_vault_id
@@ -50,7 +50,7 @@ market_allocs AS (
     SELECT vmi.vault_id,
            vmi.morpho_market_id,
            mm.collateral_token_id,
-           pos.supply_assets / power(10, lt.decimals) AS vault_supply
+           pos.supply_assets / power(10::numeric, lt.decimals) AS vault_supply
     FROM vault_market_ids vmi
     JOIN LATERAL (
         SELECT supply_assets, morpho_market_id

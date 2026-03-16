@@ -18,7 +18,7 @@ WITH user_debts AS (
         SELECT DISTINCT ON (b.user_id, b.token_id)
             b.user_id,
             b.token_id,
-            b.amount / power(10, t.decimals) AS debt_amount
+            b.amount / power(10::numeric, t.decimals) AS debt_amount
         FROM borrower b
         JOIN token t ON t.id = b.token_id
         WHERE b.protocol_id = :protocol_id
@@ -38,7 +38,7 @@ user_collateral AS (
         SELECT DISTINCT ON (bc.user_id, bc.token_id)
             bc.user_id,
             bc.token_id,
-            bc.amount / power(10, t.decimals) AS collateral_amount,
+            bc.amount / power(10::numeric, t.decimals) AS collateral_amount,
             bc.collateral_enabled
         FROM borrower_collateral bc
         JOIN token t ON t.id = bc.token_id
