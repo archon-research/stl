@@ -79,15 +79,22 @@ async def _insert_reserve(
 
 
 async def _insert_collateral(
-    conn: asyncpg.Connection, user_id: int, protocol_id: int, token_id: int, amount: str, block_number: int
+    conn: asyncpg.Connection,
+    user_id: int,
+    protocol_id: int,
+    token_id: int,
+    amount: str,
+    block_number: int,
+    *,
+    collateral_enabled: bool = True,
 ) -> None:
-    """Insert a borrower collateral snapshot."""
+    """Insert a borrower collateral snapshot (raw wei amount)."""
     await conn.execute(
         """
         INSERT INTO borrower_collateral
             (user_id, protocol_id, token_id, block_number, block_version,
              amount, change, event_type, tx_hash, collateral_enabled)
-        VALUES ($1, $2, $3, $4, 0, $5, $5, 'deposit', $6, true)
+        VALUES ($1, $2, $3, $4, 0, $5, $5, 'deposit', $6, $7)
         """,
         user_id,
         protocol_id,
@@ -95,13 +102,14 @@ async def _insert_collateral(
         block_number,
         amount,
         b"\x00" * 32,
+        collateral_enabled,
     )
 
 
 async def _insert_debt(
     conn: asyncpg.Connection, user_id: int, protocol_id: int, token_id: int, amount: int, block_number: int
 ) -> None:
-    """Insert a borrower debt delta."""
+    """Insert a borrower debt snapshot (raw wei amount)."""
     await conn.execute(
         """
         INSERT INTO borrower
@@ -165,23 +173,73 @@ async def _seed_reserves(
 
 
 async def _seed_user1(
-    conn: asyncpg.Connection, protocol_id: int, block_number: int, weth_id: int, cbbtc_id: int, sp_usds_id: int
+    conn: asyncpg.Connection,
+    protocol_id: int,
+    block_number: int,
+    weth_id: int,
+    cbbtc_id: int,
+    sp_usds_id: int,
+    cbbtc_decimals: int,
 ) -> None:
-    """User 1: 10 WETH + 0.5 cbBTC collateral, 30 000 spUSDS debt (single-debt borrower)."""
+    """User 1: 10 WETH + 0.5 cbBTC collateral, two spUSDS debt snapshots.
+
+    Debt events: first snapshot = 20,000 spUSDS, latest snapshot = 30,000 spUSDS.
+    The query must select the latest (30,000), not sum all events (50,000).
+    All amounts stored as raw wei.
+    """
     user_id = await insert_user(conn, b"\xaa" * 20)
-    await _insert_collateral(conn, user_id, protocol_id, weth_id, "10", block_number)
-    await _insert_collateral(conn, user_id, protocol_id, cbbtc_id, "0.5", block_number)
-    await _insert_debt(conn, user_id, protocol_id, sp_usds_id, 30000, block_number)
+    await _insert_collateral(conn, user_id, protocol_id, weth_id, str(10 * 10**18), block_number)
+    await _insert_collateral(conn, user_id, protocol_id, cbbtc_id, str(5 * 10 ** (cbbtc_decimals - 1)), block_number)
+    # Two debt events for the same token — query must use the latest snapshot.
+    await _insert_debt(conn, user_id, protocol_id, sp_usds_id, 20_000 * 10**18, block_number)
+    await _insert_debt(conn, user_id, protocol_id, sp_usds_id, 30_000 * 10**18, block_number + 1)
 
 
 async def _seed_user2(
-    conn: asyncpg.Connection, protocol_id: int, block_number: int, weth_id: int, sp_usds_id: int, sp_usdc_id: int
+    conn: asyncpg.Connection,
+    protocol_id: int,
+    block_number: int,
+    weth_id: int,
+    sp_usds_id: int,
+    sp_usdc_id: int,
 ) -> None:
-    """User 2: 5 WETH collateral, 6 000 spUSDS + 4 000 spUSDC debt (mixed-debt borrower)."""
+    """User 2: 5 WETH collateral, mixed spUSDS + spUSDC debt with two spUSDS snapshots.
+
+    spUSDS debt events: first snapshot = 4,000, latest snapshot = 6,000.
+    If the query incorrectly sums all events, spUSDS = 10,000, total = 14,000,
+    giving a 71.4% ratio instead of the correct 60%, which would change WETH attribution.
+    """
     user_id = await insert_user(conn, b"\xbb" * 20)
-    await _insert_collateral(conn, user_id, protocol_id, weth_id, "5", block_number)
-    await _insert_debt(conn, user_id, protocol_id, sp_usds_id, 6000, block_number)
-    await _insert_debt(conn, user_id, protocol_id, sp_usdc_id, 4000, block_number)
+    await _insert_collateral(conn, user_id, protocol_id, weth_id, str(5 * 10**18), block_number)
+    # Two spUSDS debt events — query must use the latest snapshot.
+    await _insert_debt(conn, user_id, protocol_id, sp_usds_id, 4_000 * 10**18, block_number)
+    await _insert_debt(conn, user_id, protocol_id, sp_usds_id, 6_000 * 10**18, block_number + 1)
+    await _insert_debt(conn, user_id, protocol_id, sp_usdc_id, 4_000 * 10**6, block_number)
+
+
+async def _seed_user3(
+    conn: asyncpg.Connection,
+    protocol_id: int,
+    block_number: int,
+    weth_id: int,
+    sp_usds_id: int,
+) -> None:
+    """User 3: WETH collateral enabled then disabled; spUSDS borrower.
+
+    Latest collateral event has collateral_enabled=False. The query must
+    exclude this user's WETH. If the older enabled snapshot is used instead,
+    WETH total = 10 + 3 + 8 = 21, not 13.
+    """
+    user_id = await insert_user(conn, b"\xcc" * 20)
+    # First event: enabled
+    await _insert_collateral(
+        conn, user_id, protocol_id, weth_id, str(8 * 10**18), block_number, collateral_enabled=True
+    )
+    # Later event: disabled — this is the latest and must win
+    await _insert_collateral(
+        conn, user_id, protocol_id, weth_id, str(8 * 10**18), block_number + 1, collateral_enabled=False
+    )
+    await _insert_debt(conn, user_id, protocol_id, sp_usds_id, 5_000 * 10**18, block_number)
 
 
 _SEED_BLOCK_NUMBER = 20_000_000
@@ -202,9 +260,12 @@ async def _seed_data(db_url: str) -> None:
         block = _SEED_BLOCK_NUMBER
 
         weth_id, cbbtc_id, sp_usds_id, sp_usdc_id = await _seed_tokens_and_prices(conn, oracle_id, block)
+        cbbtc_decimals = cast(int, await conn.fetchval("SELECT decimals FROM token WHERE id = $1", cbbtc_id))
+
         await _seed_reserves(conn, protocol_id, block, weth_id, cbbtc_id, sp_usds_id, sp_usdc_id)
-        await _seed_user1(conn, protocol_id, block, weth_id, cbbtc_id, sp_usds_id)
+        await _seed_user1(conn, protocol_id, block, weth_id, cbbtc_id, sp_usds_id, cbbtc_decimals)
         await _seed_user2(conn, protocol_id, block, weth_id, sp_usds_id, sp_usdc_id)
+        await _seed_user3(conn, protocol_id, block, weth_id, sp_usds_id)
 
         await store_test_ids(
             conn,
@@ -256,19 +317,20 @@ async def repository(
 async def test_single_borrower_full_attribution(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
-    """User 1 has only spUSDS debt, so 100% of their collateral is attributed.
+    """Correct attribution across three users with raw-wei seed data.
 
-    User 1: 10 WETH + 0.5 cbBTC collateral, 30,000 spUSDS debt.
-    User 2: 5 WETH collateral, 6,000 spUSDS + 4,000 spUSDC debt (60%/40%).
+    User 1: 10 WETH + 0.5 cbBTC collateral, latest spUSDS debt = 30,000 (ratio 1.0)
+    User 2: 5 WETH collateral, latest spUSDS debt = 6,000, spUSDC debt = 4,000 (ratio 0.6)
+    User 3: 8 WETH collateral disabled in latest event → excluded
 
-    Attributed to spUSDS (by raw debt ratio, no price conversion):
-      User 1 WETH:  10 * 1.0  = 10
-      User 1 cbBTC: 0.5 * 1.0 = 0.5
-      User 2 WETH:  5 * 0.6   = 3
+    Attributed to spUSDS:
+      User 1 WETH:  10 × 1.0 = 10
+      User 1 cbBTC: 0.5 × 1.0 = 0.5
+      User 2 WETH:  5 × 0.6  = 3
 
     Totals: WETH = 13, cbBTC = 0.5, grand total = 13.5
-    WETH pct  = 13/13.5 * 100 = 96.2963%
-    cbBTC pct = 0.5/13.5 * 100 = 3.7037%
+    WETH pct  = 13 / 13.5 × 100 = 96.2963%
+    cbBTC pct = 0.5 / 13.5 × 100 = 3.7037%
     """
     result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
 
@@ -306,3 +368,35 @@ async def test_nonexistent_debt_token_returns_empty(
     result = await repository.get_backed_breakdown(99999)
 
     assert result.items == ()
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_latest_debt_snapshot_used_not_summed(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """Regression guard: the query must select the latest debt snapshot, not sum all events.
+
+    User 1 spUSDS: events [20,000 → 30,000]; latest = 30,000, sum = 50,000.
+    User 2 spUSDS: events [4,000 → 6,000]; latest = 6,000, sum = 10,000.
+
+    With incorrect SUM, user 2's spUSDS ratio = 10,000 / 14,000 = 71.4% (not 60%),
+    making user 2's attributed WETH = 5 × 0.714 = 3.57, so WETH total ≠ 13.
+    """
+    result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
+    by_symbol = {item.symbol: item for item in result.items}
+    assert by_symbol["WETH"].amount == Decimal("13.00000000")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_disabled_collateral_not_attributed(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """Regression guard: collateral disabled in the latest event must be excluded.
+
+    User 3 has 8 WETH: collateral_enabled=True at block N, then False at N+1.
+    The latest event (False) must win. If the earlier enabled snapshot is used instead,
+    WETH total = 10 + 3 + 8 = 21, not 13.
+    """
+    result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
+    by_symbol = {item.symbol: item for item in result.items}
+    assert by_symbol["WETH"].amount == Decimal("13.00000000")
