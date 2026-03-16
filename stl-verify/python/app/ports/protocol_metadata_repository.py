@@ -6,3 +6,4 @@ class ProtocolMetadataRepository(Protocol):
 
     async def get_protocol_type(self, protocol_id: int) -> str | None:
         """Return the stored protocol_type for the given protocol ID, if any."""
+        ...

@@ -2,18 +2,18 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres.engine import get_engine
 from app.api.v1 import allocations, status
 from app.config import get_settings
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    yield
-    # Dispose the database engine on shutdown
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    engine = get_engine(settings)
+    engine = create_async_engine(settings.database_url.get_secret_value(), pool_pre_ping=True)
+    app.state.engine = engine
+    yield
     await engine.dispose()
 
 

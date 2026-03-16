@@ -3,13 +3,11 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import AfterValidator, BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_repository import PostgresAllocationRepository
-from app.adapters.postgres.engine import get_engine
-from app.config import Settings, get_settings
 from app.domain.entities.allocation import EthAddress
 from app.services.allocation_service import AllocationService
 
@@ -52,8 +50,8 @@ class AllocationPositionResponse(BaseModel):
     created_at: datetime
 
 
-def _get_engine(settings: Settings = Depends(get_settings)) -> AsyncEngine:
-    return get_engine(settings)
+def _get_engine(request: Request) -> AsyncEngine:
+    return request.app.state.engine
 
 
 async def _get_service(engine: AsyncEngine = Depends(_get_engine)) -> AllocationService:

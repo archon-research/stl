@@ -1,5 +1,5 @@
 from app.domain.entities.backed_breakdown import BackedBreakdown
-from app.services.backed_breakdown_repository_resolver import (
+from app.ports.backed_breakdown_repository_resolver import (
     BackedBreakdownRepositoryResolver,
 )
 
