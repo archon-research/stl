@@ -28,7 +28,7 @@ class BackedBreakdownRepositoryResolver:
         if protocol_type is None:
             raise ValueError(f"unsupported protocol: {protocol_id}")
 
-        normalized_protocol_type = protocol_type.casefold()
+        normalized_protocol_type = protocol_type.casefold().replace(" ", "_")
 
         if normalized_protocol_type in _MORPHO_PROTOCOL_TYPES:
             return self._morpho_repository

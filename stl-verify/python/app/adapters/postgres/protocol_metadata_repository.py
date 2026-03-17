@@ -16,7 +16,7 @@ class ProtocolMetadataRepository(ProtocolMetadataRepositoryPort):
         """Return the protocol_type for the requested protocol, if present."""
         async with self._engine.connect() as connection:
             result = await connection.execute(
-                text("SELECT protocol_type FROM protocol WHERE id = :protocol_id LIMIT 1"),
+                text("SELECT name FROM protocol WHERE id = :protocol_id LIMIT 1"),
                 {"protocol_id": protocol_id},
             )
             row = result.fetchone()
@@ -24,4 +24,4 @@ class ProtocolMetadataRepository(ProtocolMetadataRepositoryPort):
         if row is None:
             return None
 
-        return row.protocol_type
+        return row.name
