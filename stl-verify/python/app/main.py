@@ -6,23 +6,24 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.api.v1 import allocations, risk, status
-from app.config import get_settings
+from app.config import Settings, get_settings
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    settings = get_settings()
-    engine = create_async_engine(settings.database_url.get_secret_value(), pool_pre_ping=True)
-    # Verify the database connection before starting the app
-    async with engine.connect() as conn:
-        await conn.execute(text("SELECT 1"))
-    app.state.engine = engine
-    yield
-    await engine.dispose()
+def create_app(settings: Settings) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        engine = create_async_engine(settings.database_url.get_secret_value(), pool_pre_ping=True)
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        app.state.engine = engine
+        yield
+        await engine.dispose()
+
+    application = FastAPI(title="stl-verify", lifespan=lifespan)
+    application.include_router(status.router, prefix="/v1")
+    application.include_router(allocations.router, prefix="/v1")
+    application.include_router(risk.router, prefix="/v1")
+    return application
 
 
-app = FastAPI(title="stl-verify", lifespan=lifespan)
-
-app.include_router(status.router, prefix="/v1")
-app.include_router(allocations.router, prefix="/v1")
-app.include_router(risk.router, prefix="/v1")
+app = create_app(get_settings())

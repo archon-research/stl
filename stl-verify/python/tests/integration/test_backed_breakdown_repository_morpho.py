@@ -165,6 +165,47 @@ async def _insert_morpho_market_position(
     )
 
 
+async def _insert_prime(conn: asyncpg.Connection, name: str, vault_address: bytes) -> int:
+    """Insert a prime entry and return its ID."""
+    return cast(
+        int,
+        await conn.fetchval(
+            """
+        INSERT INTO prime (name, vault_address)
+        VALUES ($1, $2)
+        ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address
+        RETURNING id
+        """,
+            name,
+            vault_address,
+        ),
+    )
+
+
+async def _insert_allocation_position(
+    conn: asyncpg.Connection,
+    token_id: int,
+    prime_id: int,
+    proxy_address: bytes,
+    balance: str,
+    block_number: int,
+) -> None:
+    """Insert an allocation_position row linking a vault share token to a prime."""
+    await conn.execute(
+        """
+        INSERT INTO allocation_position
+            (chain_id, token_id, prime_id, proxy_address, balance, scaled_balance,
+             block_number, block_version, tx_hash, log_index, tx_amount, direction)
+        VALUES (1, $1, $2, $3, $4, $4, $5, 0, $6, 0, $4, 'in')
+        """,
+        token_id,
+        prime_id,
+        proxy_address,
+        balance,
+        block_number,
+        b"\x00" * 32,  # tx_hash
+    )
+
 
 # ---------------------------------------------------------------------------
 # Seed data
@@ -195,6 +236,8 @@ _IDLE_VAULT_ADDRESS = b"\xdd" * 20
 _USDC_ADDRESS = b"\xa0\xb8\x69\x91\xc6\x21\x8b\x36\xc1\xd1\x9d\x4a\x2e\x9e\xb0\xce\x36\x06\xeb\x48"
 _WETH_ADDRESS = b"\xc0\x2a\xaa\x39\xb2\x23\xfe\x8d\x0a\x0e\x5c\x4f\x27\xea\xd9\x08\x3c\x75\x6c\xc2"
 _WBTC_ADDRESS = b"\x22\x60\xfa\xc5\xe5\x54\x2a\x77\x3a\xa4\x4f\xbc\xfe\xdf\x7c\x19\x3b\xc2\xc5\x99"
+_MUSDC_ADDRESS = b"\xee" * 20  # vault share token for mUSDC
+_MUSDCI_ADDRESS = b"\xff" * 20  # vault share token for mUSDCi
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -212,6 +255,13 @@ async def _seed_data(db_url: str) -> None:
         weth_id = await insert_token(conn, "WETH", 18, _WETH_ADDRESS)
         wbtc_id = await insert_token(conn, "WBTC", 8, _WBTC_ADDRESS)
 
+        # Vault share tokens — symbol must match morpho_vault.symbol for the CTE JOIN
+        musdc_token_id = await insert_token(conn, "mUSDC", 18, _MUSDC_ADDRESS)
+        musdci_token_id = await insert_token(conn, "mUSDCi", 18, _MUSDCI_ADDRESS)
+
+        # Prime — needed as FK for allocation_position.prime_id
+        prime_id = await _insert_prime(conn, "test-prime", _VAULT_ADDRESS)
+
         # User for the vault (vault address == user address)
         vault_user_id = await insert_user(conn, _VAULT_ADDRESS)
 
@@ -219,6 +269,9 @@ async def _seed_data(db_url: str) -> None:
         vault_id = await _insert_morpho_vault(
             conn, protocol_id, _VAULT_ADDRESS, usdc_id, name="Morpho USDC Vault", symbol="mUSDC"
         )
+
+        # Allocation positions — link vault share tokens to the SQL entry point
+        await _insert_allocation_position(conn, musdc_token_id, prime_id, _VAULT_ADDRESS, "1000000", block)
 
         # Vault state: 1M USDC in raw units (1_000_000 * 10^6)
         await _insert_morpho_vault_state(conn, vault_id, "1000000000000", block)
@@ -243,6 +296,7 @@ async def _seed_data(db_url: str) -> None:
         idle_vault_id = await _insert_morpho_vault(
             conn, protocol_id, _IDLE_VAULT_ADDRESS, usdc_id, name="Morpho USDC Idle Vault", symbol="mUSDCi"
         )
+        await _insert_allocation_position(conn, musdci_token_id, prime_id, _IDLE_VAULT_ADDRESS, "500000", block)
         # 500K USDC in raw units (500_000 * 10^6)
         await _insert_morpho_vault_state(conn, idle_vault_id, "500000000000", block)
         del idle_vault_user_id  # user must exist for vault_users CTE; no positions inserted
@@ -251,8 +305,8 @@ async def _seed_data(db_url: str) -> None:
             conn,
             {
                 "protocol_id": protocol_id,
-                "vault_id": vault_id,
-                "idle_vault_id": idle_vault_id,
+                "vault_token_id": musdc_token_id,
+                "idle_vault_token_id": musdci_token_id,
                 "usdc_id": usdc_id,
                 "weth_id": weth_id,
                 "wbtc_id": wbtc_id,
@@ -309,9 +363,9 @@ async def test_vault_backed_breakdown(
       WETH: 320,000 (32%)  — 400K * 0.80
       WBTC: 150,000 (15%)  — 300K * 0.50
     """
-    result = await repository.get_backed_breakdown(test_ids["vault_id"])
+    result = await repository.get_backed_breakdown(test_ids["vault_token_id"])
 
-    assert result.backed_asset_id == test_ids["vault_id"]
+    assert result.backed_asset_id == test_ids["vault_token_id"]
     assert result.protocol_id == test_ids["protocol_id"]
     assert len(result.items) == 3
 
@@ -321,13 +375,13 @@ async def test_vault_backed_breakdown(
     assert "WETH" in by_symbol
     assert "WBTC" in by_symbol
 
-    assert by_symbol["USDC"].amount == Decimal("530000.00")
+    assert by_symbol["USDC"].backing_usd == Decimal("530000.00")
     assert by_symbol["USDC"].backing_pct == Decimal("53.00")
 
-    assert by_symbol["WETH"].amount == Decimal("320000.00")
+    assert by_symbol["WETH"].backing_usd == Decimal("320000.00")
     assert by_symbol["WETH"].backing_pct == Decimal("32.00")
 
-    assert by_symbol["WBTC"].amount == Decimal("150000.00")
+    assert by_symbol["WBTC"].backing_usd == Decimal("150000.00")
     assert by_symbol["WBTC"].backing_pct == Decimal("15.00")
 
 
@@ -346,7 +400,7 @@ async def test_repository_preserves_protocol_binding_in_result(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
     """Morpho result should reflect repository-bound protocol context, not call-site pass-through."""
-    result = await repository.get_backed_breakdown(test_ids["vault_id"])
+    result = await repository.get_backed_breakdown(test_ids["vault_token_id"])
 
     assert result.protocol_id == test_ids["protocol_id"]
 
@@ -356,9 +410,9 @@ async def test_items_ordered_by_backed_amount_desc(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
     """Results should be ordered by backed_amount descending."""
-    result = await repository.get_backed_breakdown(test_ids["vault_id"])
+    result = await repository.get_backed_breakdown(test_ids["vault_token_id"])
 
-    amounts = [item.amount for item in result.items]
+    amounts = [item.backing_usd for item in result.items]
     assert amounts == sorted(amounts, reverse=True)
 
 
@@ -367,7 +421,7 @@ async def test_percentages_sum_to_100(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
     """All backing percentages should sum to 100%."""
-    result = await repository.get_backed_breakdown(test_ids["vault_id"])
+    result = await repository.get_backed_breakdown(test_ids["vault_token_id"])
 
     total_pct = sum(item.backing_pct for item in result.items)
     assert total_pct == Decimal("100.00")
@@ -378,7 +432,7 @@ async def test_token_ids_are_populated(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
     """Each item should have the correct token_id."""
-    result = await repository.get_backed_breakdown(test_ids["vault_id"])
+    result = await repository.get_backed_breakdown(test_ids["vault_token_id"])
 
     by_symbol = {item.symbol: item for item in result.items}
 
@@ -400,12 +454,12 @@ async def test_vault_with_no_market_positions_is_fully_idle(
       breakdown and all_backing second-branch are both empty.
       Result: USDC 100% at 500,000.00
     """
-    result = await repository.get_backed_breakdown(test_ids["idle_vault_id"])
+    result = await repository.get_backed_breakdown(test_ids["idle_vault_token_id"])
 
     assert len(result.items) == 1
 
     item = result.items[0]
     assert item.symbol == "USDC"
-    assert item.amount == Decimal("500000.00")
+    assert item.backing_usd == Decimal("500000.00")
     assert item.backing_pct == Decimal("100.00")
     assert item.token_id == test_ids["usdc_id"]

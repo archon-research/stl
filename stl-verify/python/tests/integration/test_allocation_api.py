@@ -9,13 +9,12 @@ import asyncio
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres.allocation_repository import PostgresAllocationRepository
-from app.api.v1 import allocations
-from app.main import app
-from app.services.allocation_service import AllocationService
+from app.config import Settings
+from app.main import create_app
 
 # Hex bytes used in assertions (20-byte proxy, 20-byte token addr, 32-byte tx hash).
 _PROXY_HEX = "1234567890abcdef1234567890abcdef12345678"
@@ -90,19 +89,10 @@ def async_db_url(module_db):
 
 @pytest.fixture()
 def client(async_db_url: str):
-    """Return a TestClient wired to the test database via a dependency override."""
-
-    async def _service_override():
-        engine = create_async_engine(async_db_url)
-        async with engine.connect() as conn:
-            repo = PostgresAllocationRepository(conn)
-            yield AllocationService(repo)
-        await engine.dispose()
-
-    app.dependency_overrides[allocations._get_service] = _service_override
-    with TestClient(app) as c:
+    """Return a TestClient wired to the testcontainer database."""
+    test_app = create_app(Settings(database_url=SecretStr(async_db_url)))
+    with TestClient(test_app) as c:
         yield c
-    # clear_dependency_overrides (autouse in tests/conftest.py) clears overrides after each test
 
 
 def test_list_stars_returns_both_stars(client: TestClient) -> None:
