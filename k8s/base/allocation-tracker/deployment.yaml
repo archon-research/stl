@@ -13,18 +13,9 @@ spec:
         app: allocation-tracker
     spec:
       serviceAccountName: allocation-tracker
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65534
-        runAsGroup: 65534
       containers:
         - name: allocation-tracker
           image: allocation-tracker
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
           envFrom:
             - secretRef:
                 name: allocation-tracker

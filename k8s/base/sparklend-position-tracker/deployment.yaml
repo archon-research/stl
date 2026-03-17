@@ -13,18 +13,9 @@ spec:
         app: sparklend-position-tracker
     spec:
       serviceAccountName: sparklend-position-tracker
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65534
-        runAsGroup: 65534
       containers:
         - name: sparklend-position-tracker
           image: sparklend-position-tracker
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
           envFrom:
             - secretRef:
                 name: sparklend-position-tracker

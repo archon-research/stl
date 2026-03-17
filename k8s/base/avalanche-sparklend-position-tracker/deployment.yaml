@@ -13,18 +13,9 @@ spec:
         app: avalanche-sparklend-position-tracker
     spec:
       serviceAccountName: avalanche-sparklend-position-tracker
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65534
-        runAsGroup: 65534
       containers:
         - name: avalanche-sparklend-position-tracker
           image: avalanche-sparklend-position-tracker
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
           envFrom:
             - secretRef:
                 name: avalanche-sparklend-position-tracker
