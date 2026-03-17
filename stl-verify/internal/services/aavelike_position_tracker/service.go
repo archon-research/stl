@@ -508,8 +508,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 
 	collaterals, _, err := s.extractUserPositionData(ctx, eventData.User, protocolAddress, chainID, blockNumber, eventData.TxHash)
 	if err != nil {
-		s.logger.Warn("failed to extract collateral data", "error", err, "tx", eventData.TxHash)
-		collaterals = []aavelike.CollateralData{}
+		return fmt.Errorf("failed to extract collateral data: %w", err)
 	}
 
 	var balance *big.Int
@@ -584,8 +583,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 	tokensToFetch := map[common.Address]bool{eventData.Reserve: true}
 	metadataMap, err := blockchainSvc.BatchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {
-		s.logger.Warn("failed to batch get token metadata", "error", err, "tx", eventData.TxHash, "block", blockNumber)
-		metadataMap = make(map[common.Address]aavelike.TokenMetadata)
+		return fmt.Errorf("failed to batch get token metadata: %w", err)
 	}
 
 	tokenMetadata, ok := metadataMap[eventData.Reserve]
@@ -603,13 +601,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 
 	collaterals, debtData, err := s.extractUserPositionData(ctx, eventData.User, protocolAddress, chainID, blockNumber, eventData.TxHash)
 	if err != nil {
-		if eventData.EventType == EventBorrow || eventData.EventType == EventRepay {
-			return fmt.Errorf("failed to extract user position data: %w", err)
-		}
-
-		s.logger.Warn("failed to extract user position data", "error", err, "tx", eventData.TxHash, "block", blockNumber)
-		collaterals = []aavelike.CollateralData{}
-		debtData = []aavelike.DebtData{}
+		return fmt.Errorf("failed to extract user position data: %w", err)
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
@@ -646,8 +638,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 		for _, col := range collaterals {
 			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, normalizeTokenSymbol(col.Symbol), col.Decimals, blockNumber)
 			if err != nil {
-				s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err, "tx", eventData.TxHash)
-				continue
+				return fmt.Errorf("failed to get collateral token %s: %w", col.Asset.Hex(), err)
 			}
 
 			records = append(records, outbound.CollateralRecord{
@@ -700,16 +691,14 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	// side. Debt positions are tracked separately via saveBorrowerRecord on Borrow/Repay events.
 	collaterals, _, err := s.extractUserPositionData(ctx, user, protocolAddress, chainID, blockNumber, txHashHex)
 	if err != nil {
-		s.logger.Warn("failed to extract collateral data for user", "user", user.Hex(), "error", err)
-		collaterals = []aavelike.CollateralData{}
+		return fmt.Errorf("failed to extract collateral data for user %s: %w", user.Hex(), err)
 	}
 
 	records := make([]outbound.CollateralRecord, 0, len(collaterals))
 	for _, col := range collaterals {
 		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, normalizeTokenSymbol(col.Symbol), col.Decimals, blockNumber)
 		if err != nil {
-			s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err, "tx", txHashHex)
-			continue
+			return fmt.Errorf("failed to get collateral token %s: %w", col.Asset.Hex(), err)
 		}
 
 		records = append(records, outbound.CollateralRecord{
@@ -787,8 +776,7 @@ func (s *Service) persistPositionData(
 	for _, col := range collaterals {
 		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, normalizeTokenSymbol(col.Symbol), col.Decimals, blockNumber)
 		if err != nil {
-			s.logger.Warn("failed to get collateral token", "token", col.Asset.Hex(), "error", err)
-			continue
+			return fmt.Errorf("failed to get collateral token %s: %w", col.Asset.Hex(), err)
 		}
 
 		records = append(records, outbound.CollateralRecord{

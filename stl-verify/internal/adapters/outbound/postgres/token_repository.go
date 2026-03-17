@@ -1,9 +1,11 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -49,6 +51,12 @@ func (r *TokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, toke
 	if len(tokens) == 0 {
 		return make(map[common.Address]int64), nil
 	}
+
+	// Sort by address to ensure all concurrent transactions lock rows in the
+	// same order, preventing deadlocks when multiple batches upsert the same tokens.
+	slices.SortFunc(tokens, func(a, b outbound.TokenInput) int {
+		return bytes.Compare(a.Address.Bytes(), b.Address.Bytes())
+	})
 
 	batch := &pgx.Batch{}
 	for _, t := range tokens {

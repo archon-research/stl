@@ -249,7 +249,7 @@ func run(args []string) error {
 	}
 	defer rpcClient.Close()
 	ethClient := ethclient.NewClient(rpcClient)
-	logger.Info("Ethereum RPC connected", "url", cfg.rpcURL)
+	logger.Info("Ethereum RPC connected")
 
 	// Connect to PostgreSQL
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))

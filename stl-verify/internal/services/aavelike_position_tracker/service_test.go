@@ -2,16 +2,27 @@ package aavelike_position_tracker
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/aavelike"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -952,4 +963,755 @@ func TestService_IsKnownProtocol_FilterLogic(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- Position snapshot tests (previously in position_snapshot_test.go) ---
+
+type mockPositionRepository struct {
+	saveBorrowerCalls            []saveBorrowerCall
+	saveBorrowerCollateralsCalls [][]outbound.CollateralRecord
+
+	SaveBorrowerFn            func(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte) error
+	SaveBorrowerCollateralFn  func(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte, collateralEnabled bool) error
+	SaveBorrowerCollateralsFn func(ctx context.Context, tx pgx.Tx, records []outbound.CollateralRecord) error
+}
+
+type saveBorrowerCall struct {
+	Amount    *big.Int
+	Change    *big.Int
+	EventType string
+}
+
+func (m *mockPositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte) error {
+	m.saveBorrowerCalls = append(m.saveBorrowerCalls, saveBorrowerCall{
+		Amount:    amount,
+		Change:    change,
+		EventType: eventType,
+	})
+	if m.SaveBorrowerFn != nil {
+		return m.SaveBorrowerFn(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, eventType, txHash)
+	}
+	return nil
+}
+
+func (m *mockPositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte, collateralEnabled bool) error {
+	if m.SaveBorrowerCollateralFn != nil {
+		return m.SaveBorrowerCollateralFn(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, eventType, txHash, collateralEnabled)
+	}
+	return nil
+}
+
+func (m *mockPositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, records []outbound.BorrowerRecord) error {
+	for _, rec := range records {
+		m.saveBorrowerCalls = append(m.saveBorrowerCalls, saveBorrowerCall{
+			Amount:    rec.Amount,
+			Change:    rec.Change,
+			EventType: rec.EventType,
+		})
+	}
+	return nil
+}
+
+func (m *mockPositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx.Tx, records []outbound.CollateralRecord) error {
+	m.saveBorrowerCollateralsCalls = append(m.saveBorrowerCollateralsCalls, records)
+	if m.SaveBorrowerCollateralsFn != nil {
+		return m.SaveBorrowerCollateralsFn(ctx, tx, records)
+	}
+	return nil
+}
+
+func (m *mockPositionRepository) UpsertBorrowers(ctx context.Context, borrowers []*entity.Borrower) error {
+	return nil
+}
+
+func (m *mockPositionRepository) UpsertBorrowerCollateral(ctx context.Context, collateral []*entity.BorrowerCollateral) error {
+	return nil
+}
+
+type sparkLendUserReserve struct {
+	UnderlyingAsset                common.Address
+	ScaledATokenBalance            *big.Int
+	UsageAsCollateralEnabledOnUser bool
+	ScaledVariableDebt             *big.Int
+}
+
+func TestExtractUserPositionData_ReturnsDebtAndCollateral(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	userAddress := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+	wethAddress := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	usdcAddress := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+
+	oneETH := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	debtUSDC := new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil))
+	zero := big.NewInt(0)
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{
+		{
+			UnderlyingAsset:                wethAddress,
+			ScaledATokenBalance:            oneETH,
+			UsageAsCollateralEnabledOnUser: true,
+			ScaledVariableDebt:             zero,
+		},
+		{
+			UnderlyingAsset:                usdcAddress,
+			ScaledATokenBalance:            zero,
+			UsageAsCollateralEnabledOnUser: false,
+			ScaledVariableDebt:             debtUSDC,
+		},
+	})
+	defer cleanup()
+
+	erc20ABI := mustERC20ABI(t)
+	userReserveDataABI := mustUserReserveDataABI(t)
+
+	multicaller := testutil.NewMockMulticaller()
+	multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i, call := range calls {
+			methodID := hex.EncodeToString(call.CallData[:4])
+			switch {
+			case call.Target == wethAddress || call.Target == usdcAddress:
+				returnData := packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)
+				results[i] = outbound.Result{Success: true, ReturnData: returnData}
+			case methodID == methodIDHex(userReserveDataABI, "getUserReserveData"):
+				asset := unpackUserReserveAsset(t, userReserveDataABI, call.CallData)
+				returnData := packUserReserveDataResponse(t, userReserveDataABI, asset)
+				results[i] = outbound.Result{Success: true, ReturnData: returnData}
+			default:
+				t.Fatalf("unexpected multicall target %s method %s", call.Target.Hex(), methodID)
+			}
+		}
+		return results, nil
+	}
+
+	svc := newServiceWithCachedBlockchainService(t, ethClient, multicaller, chainID, protocolAddress)
+
+	collaterals, debts, err := svc.extractUserPositionData(context.Background(), userAddress, protocolAddress, chainID, blockNumber, "0xabc")
+	if err != nil {
+		t.Fatalf("extractUserPositionData() failed: %v", err)
+	}
+
+	if len(collaterals) != 1 {
+		t.Fatalf("expected 1 collateral, got %d", len(collaterals))
+	}
+	if collaterals[0].Asset != wethAddress {
+		t.Errorf("collateral asset = %s, want %s", collaterals[0].Asset.Hex(), wethAddress.Hex())
+	}
+	if collaterals[0].ActualBalance.Cmp(oneETH) != 0 {
+		t.Errorf("collateral balance = %s, want %s", collaterals[0].ActualBalance.String(), oneETH.String())
+	}
+	if !collaterals[0].CollateralEnabled {
+		t.Error("expected collateral to be enabled")
+	}
+
+	if len(debts) != 1 {
+		t.Fatalf("expected 1 debt position, got %d", len(debts))
+	}
+	if debts[0].Asset != usdcAddress {
+		t.Errorf("debt asset = %s, want %s", debts[0].Asset.Hex(), usdcAddress.Hex())
+	}
+	if debts[0].CurrentDebt.Cmp(debtUSDC) != 0 {
+		t.Errorf("debt amount = %s, want %s", debts[0].CurrentDebt.String(), debtUSDC.String())
+	}
+}
+
+func TestSaveBorrowerRecord(t *testing.T) {
+	reserveAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	usdcAddr := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	userAddr := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+
+	tests := []struct {
+		name        string
+		eventType   entity.EventType
+		eventDelta  *big.Int
+		currentDebt *big.Int // nil means debt data is missing
+		decimals    int
+		reserveAddr common.Address
+		symbol      string
+		tokenName   string
+		wantErr     bool
+		wantAmount  *big.Int
+		wantChange  *big.Int
+	}{
+		{
+			name:        "BorrowUsesCurrentDebtNotEventDelta",
+			eventType:   EventBorrow,
+			eventDelta:  new(big.Int).Mul(big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			currentDebt: new(big.Int).Mul(big.NewInt(3), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			decimals:    18,
+			reserveAddr: reserveAddr,
+			symbol:      "WETH",
+			tokenName:   "Wrapped Ether",
+			wantAmount:  new(big.Int).Mul(big.NewInt(3), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			wantChange:  new(big.Int).Mul(big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+		},
+		{
+			name:        "RepayUsesCurrentDebtNotEventDelta",
+			eventType:   EventRepay,
+			eventDelta:  new(big.Int).Mul(big.NewInt(500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
+			currentDebt: new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
+			decimals:    6,
+			reserveAddr: usdcAddr,
+			symbol:      "USDC",
+			tokenName:   "USD Coin",
+			wantAmount:  new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
+			wantChange:  new(big.Int).Mul(big.NewInt(500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
+		},
+		{
+			name:        "RepayToZeroUsesZeroAmountWhenDebtMissing",
+			eventType:   EventRepay,
+			eventDelta:  new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			currentDebt: nil,
+			decimals:    18,
+			reserveAddr: reserveAddr,
+			symbol:      "WETH",
+			tokenName:   "Wrapped Ether",
+			wantAmount:  big.NewInt(0),
+			wantChange:  new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+		},
+		{
+			name:        "BorrowReturnsErrorWhenDebtMissing",
+			eventType:   EventBorrow,
+			eventDelta:  new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			currentDebt: nil,
+			decimals:    18,
+			reserveAddr: reserveAddr,
+			symbol:      "WETH",
+			tokenName:   "Wrapped Ether",
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			positionRepo := &mockPositionRepository{}
+			svc := newBorrowerRecordTestService(positionRepo)
+
+			var debtData []aavelike.DebtData
+			if tt.currentDebt != nil {
+				debtData = []aavelike.DebtData{{
+					Asset:       tt.reserveAddr,
+					Decimals:    tt.decimals,
+					Symbol:      tt.symbol,
+					Name:        tt.tokenName,
+					CurrentDebt: tt.currentDebt,
+				}}
+			}
+
+			err := svc.txManager.WithTransaction(context.Background(), func(tx pgx.Tx) error {
+				return svc.saveBorrowerRecord(context.Background(), tx, &PositionEventData{
+					EventType: tt.eventType,
+					TxHash:    "0xtest",
+					User:      userAddr,
+					Reserve:   tt.reserveAddr,
+					Amount:    tt.eventDelta,
+				}, aavelike.TokenMetadata{Symbol: tt.symbol, Decimals: tt.decimals, Name: tt.tokenName}, debtData, 1, 1, 1, 20000000, 0)
+			})
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if len(positionRepo.saveBorrowerCalls) != 0 {
+					t.Fatalf("expected 0 SaveBorrower calls, got %d", len(positionRepo.saveBorrowerCalls))
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("saveBorrowerRecord() failed: %v", err)
+			}
+
+			if len(positionRepo.saveBorrowerCalls) != 1 {
+				t.Fatalf("expected 1 SaveBorrower call, got %d", len(positionRepo.saveBorrowerCalls))
+			}
+
+			call := positionRepo.saveBorrowerCalls[0]
+			if call.Amount.Cmp(tt.wantAmount) != 0 {
+				t.Errorf("SaveBorrower amount = %s, want %s", call.Amount, tt.wantAmount)
+			}
+			if call.Change.Cmp(tt.wantChange) != 0 {
+				t.Errorf("SaveBorrower change = %s, want %s", call.Change, tt.wantChange)
+			}
+		})
+	}
+}
+
+func TestIndexUserPosition(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+	const blockVersion = 0
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	userAddress := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+	wethAddress := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	usdcAddress := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+
+	oneETH := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	debtUSDC := new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil))
+	zero := big.NewInt(0)
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{
+		{
+			UnderlyingAsset:                wethAddress,
+			ScaledATokenBalance:            oneETH,
+			UsageAsCollateralEnabledOnUser: true,
+			ScaledVariableDebt:             zero,
+		},
+		{
+			UnderlyingAsset:                usdcAddress,
+			ScaledATokenBalance:            zero,
+			UsageAsCollateralEnabledOnUser: false,
+			ScaledVariableDebt:             debtUSDC,
+		},
+	})
+	defer cleanup()
+
+	erc20ABI := mustERC20ABI(t)
+	userReserveDataABI := mustUserReserveDataABI(t)
+
+	multicaller := testutil.NewMockMulticaller()
+	multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i, call := range calls {
+			methodID := hex.EncodeToString(call.CallData[:4])
+			switch {
+			case call.Target == wethAddress || call.Target == usdcAddress:
+				returnData := packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)
+				results[i] = outbound.Result{Success: true, ReturnData: returnData}
+			case methodID == methodIDHex(userReserveDataABI, "getUserReserveData"):
+				asset := unpackUserReserveAsset(t, userReserveDataABI, call.CallData)
+				returnData := packUserReserveDataResponse(t, userReserveDataABI, asset)
+				results[i] = outbound.Result{Success: true, ReturnData: returnData}
+			default:
+				t.Fatalf("unexpected multicall target %s method %s", call.Target.Hex(), methodID)
+			}
+		}
+		return results, nil
+	}
+
+	positionRepo := &mockPositionRepository{}
+	svc := newPositionSnapshotTestService(t, ethClient, multicaller, positionRepo, chainID, protocolAddress)
+
+	err := svc.IndexUserPosition(context.Background(), userAddress, protocolAddress, chainID, blockNumber, blockVersion)
+	if err != nil {
+		t.Fatalf("IndexUserPosition() failed: %v", err)
+	}
+
+	if len(positionRepo.saveBorrowerCalls) != 1 {
+		t.Fatalf("expected 1 SaveBorrower call, got %d", len(positionRepo.saveBorrowerCalls))
+	}
+	borrowerCall := positionRepo.saveBorrowerCalls[0]
+	if borrowerCall.EventType != "Snapshot" {
+		t.Errorf("SaveBorrower eventType = %q, want %q", borrowerCall.EventType, "Snapshot")
+	}
+	if borrowerCall.Amount.Cmp(debtUSDC) != 0 {
+		t.Errorf("SaveBorrower amount = %s, want %s", borrowerCall.Amount, debtUSDC)
+	}
+	if borrowerCall.Change.Cmp(big.NewInt(0)) != 0 {
+		t.Errorf("SaveBorrower change = %s, want 0", borrowerCall.Change)
+	}
+
+	if len(positionRepo.saveBorrowerCollateralsCalls) != 1 {
+		t.Fatalf("expected 1 SaveBorrowerCollaterals call, got %d", len(positionRepo.saveBorrowerCollateralsCalls))
+	}
+	collateralRecords := positionRepo.saveBorrowerCollateralsCalls[0]
+	if len(collateralRecords) != 1 {
+		t.Fatalf("expected 1 collateral record, got %d", len(collateralRecords))
+	}
+	if collateralRecords[0].EventType != "Snapshot" {
+		t.Errorf("collateral record eventType = %q, want %q", collateralRecords[0].EventType, "Snapshot")
+	}
+	if collateralRecords[0].Change.Cmp(big.NewInt(0)) != 0 {
+		t.Errorf("collateral record change = %s, want 0", collateralRecords[0].Change)
+	}
+}
+
+func TestIndexUserPosition_NoPositions(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+	const blockVersion = 0
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	userAddress := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{})
+	defer cleanup()
+
+	multicaller := testutil.NewMockMulticaller()
+
+	positionRepo := &mockPositionRepository{}
+	svc := newPositionSnapshotTestService(t, ethClient, multicaller, positionRepo, chainID, protocolAddress)
+
+	err := svc.IndexUserPosition(context.Background(), userAddress, protocolAddress, chainID, blockNumber, blockVersion)
+	if err != nil {
+		t.Fatalf("IndexUserPosition() should return nil for no positions, got: %v", err)
+	}
+
+	if len(positionRepo.saveBorrowerCalls) != 0 {
+		t.Fatalf("expected 0 SaveBorrower calls, got %d", len(positionRepo.saveBorrowerCalls))
+	}
+	if len(positionRepo.saveBorrowerCollateralsCalls) != 0 {
+		t.Fatalf("expected 0 SaveBorrowerCollaterals calls, got %d", len(positionRepo.saveBorrowerCollateralsCalls))
+	}
+}
+
+func TestIndexUserPosition_PropagatesExtractionError(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+	const blockVersion = 0
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	userAddress := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+	wethAddress := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	oneETH := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	zero := big.NewInt(0)
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{
+		{
+			UnderlyingAsset:                wethAddress,
+			ScaledATokenBalance:            zero,
+			UsageAsCollateralEnabledOnUser: false,
+			ScaledVariableDebt:             oneETH,
+		},
+	})
+	defer cleanup()
+
+	erc20ABI := mustERC20ABI(t)
+	multicaller := testutil.NewMockMulticaller()
+	executeCount := 0
+	multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		executeCount++
+		switch executeCount {
+		case 1:
+			results := make([]outbound.Result, len(calls))
+			for i, call := range calls {
+				methodID := hex.EncodeToString(call.CallData[:4])
+				results[i] = outbound.Result{Success: true, ReturnData: packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)}
+			}
+			return results, nil
+		case 2:
+			return nil, errors.New("rpc failure")
+		default:
+			t.Fatalf("unexpected multicall execution count: %d", executeCount)
+			return nil, nil
+		}
+	}
+
+	positionRepo := &mockPositionRepository{}
+	svc := newPositionSnapshotTestService(t, ethClient, multicaller, positionRepo, chainID, protocolAddress)
+
+	err := svc.IndexUserPosition(context.Background(), userAddress, protocolAddress, chainID, blockNumber, blockVersion)
+	if err == nil {
+		t.Fatal("expected IndexUserPosition to fail, got nil")
+	}
+
+	if len(positionRepo.saveBorrowerCalls) != 0 {
+		t.Fatalf("expected 0 SaveBorrower calls, got %d", len(positionRepo.saveBorrowerCalls))
+	}
+	if len(positionRepo.saveBorrowerCollateralsCalls) != 0 {
+		t.Fatalf("expected 0 SaveBorrowerCollaterals calls, got %d", len(positionRepo.saveBorrowerCollateralsCalls))
+	}
+}
+
+func TestSavePositionSnapshot_AllEventTypesFailWhenPositionExtractionFails(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	userAddress := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+	wethAddress := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	oneETH := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	zero := big.NewInt(0)
+
+	for _, eventType := range []entity.EventType{EventBorrow, EventRepay, EventSupply, EventWithdraw} {
+		t.Run(string(eventType), func(t *testing.T) {
+			ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{{
+				UnderlyingAsset:                wethAddress,
+				ScaledATokenBalance:            zero,
+				UsageAsCollateralEnabledOnUser: false,
+				ScaledVariableDebt:             oneETH,
+			}})
+			defer cleanup()
+
+			erc20ABI := mustERC20ABI(t)
+			multicaller := testutil.NewMockMulticaller()
+			executeCount := 0
+			multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+				executeCount++
+				switch executeCount {
+				case 1:
+					results := make([]outbound.Result, len(calls))
+					for i, call := range calls {
+						methodID := hex.EncodeToString(call.CallData[:4])
+						results[i] = outbound.Result{Success: true, ReturnData: packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)}
+					}
+					return results, nil
+				case 2:
+					return nil, errors.New("boom")
+				default:
+					t.Fatalf("unexpected multicall execution count: %d", executeCount)
+					return nil, nil
+				}
+			}
+
+			positionRepo := &mockPositionRepository{}
+			svc := newPositionSnapshotTestService(t, ethClient, multicaller, positionRepo, chainID, protocolAddress)
+
+			err := svc.savePositionSnapshot(context.Background(), &PositionEventData{
+				EventType: eventType,
+				TxHash:    "0xdeadbeef",
+				User:      userAddress,
+				Reserve:   wethAddress,
+				Amount:    oneETH,
+			}, protocolAddress, chainID, blockNumber, 0)
+			if err == nil {
+				t.Fatal("expected savePositionSnapshot to fail, got nil")
+			}
+			if len(positionRepo.saveBorrowerCalls) != 0 {
+				t.Fatalf("expected 0 SaveBorrower calls, got %d", len(positionRepo.saveBorrowerCalls))
+			}
+			if len(positionRepo.saveBorrowerCollateralsCalls) != 0 {
+				t.Fatalf("expected 0 SaveBorrowerCollaterals calls, got %d", len(positionRepo.saveBorrowerCollateralsCalls))
+			}
+		})
+	}
+}
+
+func TestSavePositionSnapshot_TokenMetadataFailurePropagatesError(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	userAddress := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+	wethAddress := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	oneETH := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{{
+		UnderlyingAsset:                wethAddress,
+		ScaledATokenBalance:            oneETH,
+		UsageAsCollateralEnabledOnUser: true,
+		ScaledVariableDebt:             big.NewInt(0),
+	}})
+	defer cleanup()
+
+	multicaller := testutil.NewMockMulticaller()
+	multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		return nil, errors.New("metadata multicall failure")
+	}
+
+	positionRepo := &mockPositionRepository{}
+	svc := newPositionSnapshotTestService(t, ethClient, multicaller, positionRepo, chainID, protocolAddress)
+
+	err := svc.savePositionSnapshot(context.Background(), &PositionEventData{
+		EventType: EventSupply,
+		TxHash:    "0xdeadbeef",
+		User:      userAddress,
+		Reserve:   wethAddress,
+		Amount:    oneETH,
+	}, protocolAddress, chainID, blockNumber, 0)
+	if err == nil {
+		t.Fatal("expected error when token metadata fetch fails, got nil")
+	}
+	if len(positionRepo.saveBorrowerCalls) != 0 {
+		t.Fatalf("expected 0 SaveBorrower calls, got %d", len(positionRepo.saveBorrowerCalls))
+	}
+	if len(positionRepo.saveBorrowerCollateralsCalls) != 0 {
+		t.Fatalf("expected 0 SaveBorrowerCollaterals calls, got %d", len(positionRepo.saveBorrowerCollateralsCalls))
+	}
+}
+
+// --- Test helpers ---
+
+func newBorrowerRecordTestService(positionRepo *mockPositionRepository) *Service {
+	return &Service{
+		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		positionRepo: positionRepo,
+		userRepo:     &testutil.MockUserRepository{},
+		protocolRepo: &testutil.MockProtocolRepository{},
+		tokenRepo:    &testutil.MockTokenRepository{},
+		txManager:    &testutil.MockTxManager{},
+	}
+}
+
+func newPositionSnapshotTestService(t *testing.T, ethClient *ethclient.Client, multicaller outbound.Multicaller, positionRepo *mockPositionRepository, chainID int64, protocolAddress common.Address) *Service {
+	t.Helper()
+
+	svc := newServiceWithCachedBlockchainService(t, ethClient, multicaller, chainID, protocolAddress)
+	svc.positionRepo = positionRepo
+	svc.userRepo = &testutil.MockUserRepository{}
+	svc.protocolRepo = &testutil.MockProtocolRepository{}
+	svc.tokenRepo = &testutil.MockTokenRepository{}
+	svc.txManager = &testutil.MockTxManager{}
+
+	return svc
+}
+
+func newServiceWithCachedBlockchainService(t *testing.T, ethClient *ethclient.Client, multicaller outbound.Multicaller, chainID int64, protocolAddress common.Address) *Service {
+	t.Helper()
+
+	reader := aavelike.NewPositionReader(ethClient, multicaller, mustERC20ABI(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	return &Service{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		reader: reader,
+	}
+}
+
+func newEthClientReturningUserReserves(t *testing.T, reserves []sparkLendUserReserve) (*ethclient.Client, func()) {
+	t.Helper()
+
+	response := packSparkLendUserReserves(t, reserves)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		var req rpcutil.Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			testutil.WriteRPCError(w, json.RawMessage(`1`), -32700, "parse error")
+			return
+		}
+
+		switch req.Method {
+		case "eth_call":
+			resultHex := "0x" + hex.EncodeToString(response)
+			resultJSON, err := json.Marshal(resultHex)
+			if err != nil {
+				t.Fatalf("marshal eth_call result: %v", err)
+			}
+			testutil.WriteRPCResult(w, req.ID, json.RawMessage(resultJSON))
+		default:
+			testutil.WriteRPCError(w, req.ID, -32601, "method not found: "+req.Method)
+		}
+	}))
+
+	client, err := ethclient.Dial(server.URL)
+	if err != nil {
+		server.Close()
+		t.Fatalf("ethclient.Dial() failed: %v", err)
+	}
+
+	cleanup := func() {
+		client.Close()
+		server.Close()
+	}
+
+	return client, cleanup
+}
+
+func packSparkLendUserReserves(t *testing.T, reserves []sparkLendUserReserve) []byte {
+	t.Helper()
+
+	sparklendABI, err := abis.GetSparklendUserReservesDataABI()
+	if err != nil {
+		t.Fatalf("load SparkLend ABI: %v", err)
+	}
+
+	data, err := sparklendABI.Methods["getUserReservesData"].Outputs.Pack(reserves, uint8(0))
+	if err != nil {
+		t.Fatalf("pack getUserReservesData: %v", err)
+	}
+
+	return data
+}
+
+func packERC20MetadataResponse(t *testing.T, erc20ABI *abi.ABI, token common.Address, methodID string) []byte {
+	t.Helper()
+
+	switch token {
+	case common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"):
+		switch methodID {
+		case methodIDHex(erc20ABI, "decimals"):
+			return mustPackOutput(t, erc20ABI, "decimals", uint8(18))
+		case methodIDHex(erc20ABI, "symbol"):
+			return mustPackOutput(t, erc20ABI, "symbol", "WETH")
+		case methodIDHex(erc20ABI, "name"):
+			return mustPackOutput(t, erc20ABI, "name", "Wrapped Ether")
+		}
+	case common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"):
+		switch methodID {
+		case methodIDHex(erc20ABI, "decimals"):
+			return mustPackOutput(t, erc20ABI, "decimals", uint8(6))
+		case methodIDHex(erc20ABI, "symbol"):
+			return mustPackOutput(t, erc20ABI, "symbol", "USDC")
+		case methodIDHex(erc20ABI, "name"):
+			return mustPackOutput(t, erc20ABI, "name", "USD Coin")
+		}
+	}
+
+	t.Fatalf("unexpected metadata request for token %s method %s", token.Hex(), methodID)
+	return nil
+}
+
+func packUserReserveDataResponse(t *testing.T, userReserveDataABI *abi.ABI, asset common.Address) []byte {
+	t.Helper()
+
+	zero := big.NewInt(0)
+	stableRateLastUpdated := big.NewInt(0)
+
+	switch asset {
+	case common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"):
+		oneETH := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+		return mustPackOutput(t, userReserveDataABI, "getUserReserveData",
+			oneETH, zero, zero, zero, zero, zero, zero, stableRateLastUpdated, true,
+		)
+	case common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"):
+		debtUSDC := new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil))
+		return mustPackOutput(t, userReserveDataABI, "getUserReserveData",
+			zero, zero, debtUSDC, zero, zero, zero, zero, stableRateLastUpdated, false,
+		)
+	default:
+		t.Fatalf("unexpected asset in getUserReserveData response: %s", asset.Hex())
+		return nil
+	}
+}
+
+func unpackUserReserveAsset(t *testing.T, userReserveDataABI *abi.ABI, callData []byte) common.Address {
+	t.Helper()
+
+	args, err := userReserveDataABI.Methods["getUserReserveData"].Inputs.Unpack(callData[4:])
+	if err != nil {
+		t.Fatalf("unpack getUserReserveData call: %v", err)
+	}
+	asset, ok := args[0].(common.Address)
+	if !ok {
+		t.Fatalf("unexpected asset type %T", args[0])
+	}
+	return asset
+}
+
+func mustPackOutput(t *testing.T, parsedABI *abi.ABI, method string, values ...any) []byte {
+	t.Helper()
+
+	data, err := parsedABI.Methods[method].Outputs.Pack(values...)
+	if err != nil {
+		t.Fatalf("pack %s output: %v", method, err)
+	}
+	return data
+}
+
+func mustERC20ABI(t *testing.T) *abi.ABI {
+	t.Helper()
+
+	parsedABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("load ERC20 ABI: %v", err)
+	}
+	return parsedABI
+}
+
+func mustUserReserveDataABI(t *testing.T) *abi.ABI {
+	t.Helper()
+
+	parsedABI, err := abis.GetPoolDataProviderUserReserveDataABI()
+	if err != nil {
+		t.Fatalf("load user reserve data ABI: %v", err)
+	}
+	return parsedABI
+}
+
+func methodIDHex(parsedABI *abi.ABI, method string) string {
+	return hex.EncodeToString(parsedABI.Methods[method].ID)
 }

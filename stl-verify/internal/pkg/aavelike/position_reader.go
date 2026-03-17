@@ -109,6 +109,7 @@ func (r *PositionReader) GetUserPositionData(ctx context.Context, user common.Ad
 	var allReserveAssets []common.Address
 	tokensToFetch := make(map[common.Address]bool)
 	for _, rv := range reserves {
+		// Zero-address entries are ABI padding from the contract response, not real reserves.
 		if rv.UnderlyingAsset == (common.Address{}) {
 			continue
 		}
@@ -133,8 +134,14 @@ func (r *PositionReader) GetUserPositionData(ctx context.Context, user common.Ad
 	// Both buildCollateralData and buildDebtData filter based on actual
 	// PoolDataProvider values (CurrentATokenBalance, CurrentVariableDebt),
 	// so passing all reserves is safe — only non-zero positions are included.
-	collaterals := buildCollateralData(allReserveAssets, metadataMap, actualDataMap, r.logger)
-	debts := buildDebtData(allReserveAssets, metadataMap, actualDataMap, r.logger)
+	collaterals, err := buildCollateralData(allReserveAssets, metadataMap, actualDataMap)
+	if err != nil {
+		return nil, nil, fmt.Errorf("building collateral data: %w", err)
+	}
+	debts, err := buildDebtData(allReserveAssets, metadataMap, actualDataMap)
+	if err != nil {
+		return nil, nil, fmt.Errorf("building debt data: %w", err)
+	}
 
 	return collaterals, debts, nil
 }
@@ -193,6 +200,7 @@ func (r *PositionReader) GetBatchUserPositionData(
 
 		var reserveAssets []common.Address
 		for _, rv := range reserves {
+			// Zero-address entries are ABI padding from the contract response, not real reserves.
 			if rv.UnderlyingAsset == (common.Address{}) {
 				continue
 			}
@@ -246,8 +254,14 @@ func (r *PositionReader) GetBatchUserPositionData(
 			userActualData = make(map[common.Address]ActualUserReserveData)
 		}
 
-		collaterals := buildCollateralData(reserves, metadataMap, userActualData, r.logger)
-		debts := buildDebtData(reserves, metadataMap, userActualData, r.logger)
+		collaterals, err := buildCollateralData(reserves, metadataMap, userActualData)
+		if err != nil {
+			return nil, fmt.Errorf("building collateral data for user %s: %w", user.Hex(), err)
+		}
+		debts, err := buildDebtData(reserves, metadataMap, userActualData)
+		if err != nil {
+			return nil, fmt.Errorf("building debt data for user %s: %w", user.Hex(), err)
+		}
 		results[user] = UserPositionResult{
 			Collaterals: collaterals,
 			Debts:       debts,
@@ -257,22 +271,18 @@ func (r *PositionReader) GetBatchUserPositionData(
 	return results, nil
 }
 
-func buildCollateralData(assets []common.Address, metadataMap map[common.Address]TokenMetadata, actualDataMap map[common.Address]ActualUserReserveData, logger *slog.Logger) []CollateralData {
+func buildCollateralData(assets []common.Address, metadataMap map[common.Address]TokenMetadata, actualDataMap map[common.Address]ActualUserReserveData) ([]CollateralData, error) {
 	var collaterals []CollateralData
 	for _, asset := range assets {
+		// Missing metadata is a programming bug — always error.
 		metadata, ok := metadataMap[asset]
 		if !ok || metadata.Decimals == 0 {
-			logger.Error("Failed to get collateral token metadata",
-				"action", "skipped",
-				"token", asset.Hex())
-			continue
+			return nil, fmt.Errorf("missing or invalid metadata for collateral token %s", asset.Hex())
 		}
 
+		// Missing actual data indicates a transient RPC failure for this asset — skip it.
 		actualData, ok := actualDataMap[asset]
 		if !ok {
-			logger.Error("Failed to get actual balance",
-				"action", "skipped",
-				"token", asset.Hex())
 			continue
 		}
 
@@ -287,25 +297,21 @@ func buildCollateralData(assets []common.Address, metadataMap map[common.Address
 			})
 		}
 	}
-	return collaterals
+	return collaterals, nil
 }
 
-func buildDebtData(assets []common.Address, metadataMap map[common.Address]TokenMetadata, actualDataMap map[common.Address]ActualUserReserveData, logger *slog.Logger) []DebtData {
+func buildDebtData(assets []common.Address, metadataMap map[common.Address]TokenMetadata, actualDataMap map[common.Address]ActualUserReserveData) ([]DebtData, error) {
 	var debts []DebtData
 	for _, asset := range assets {
+		// Missing metadata is a programming bug — always error.
 		metadata, ok := metadataMap[asset]
 		if !ok || metadata.Decimals == 0 {
-			logger.Error("Failed to get debt token metadata",
-				"action", "skipped",
-				"token", asset.Hex())
-			continue
+			return nil, fmt.Errorf("missing or invalid metadata for debt token %s", asset.Hex())
 		}
 
+		// Missing actual data indicates a transient RPC failure for this asset — skip it.
 		actualData, ok := actualDataMap[asset]
 		if !ok {
-			logger.Error("Failed to get actual debt",
-				"action", "skipped",
-				"token", asset.Hex())
 			continue
 		}
 
@@ -319,5 +325,5 @@ func buildDebtData(assets []common.Address, metadataMap map[common.Address]Token
 			})
 		}
 	}
-	return debts
+	return debts, nil
 }
