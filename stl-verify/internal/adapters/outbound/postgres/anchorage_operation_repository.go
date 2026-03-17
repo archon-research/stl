@@ -46,7 +46,7 @@ func (r *AnchorageOperationRepository) SaveOperations(ctx context.Context, opera
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	const cols = 11
 	valueStrings := make([]string, 0, len(operations))

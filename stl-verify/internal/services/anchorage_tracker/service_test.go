@@ -1,11 +1,8 @@
 package anchorage_tracker
 
 import (
-	"context"
 	"testing"
 	"time"
-
-	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
 func TestToSnapshots_FlattensCollateralAssets(t *testing.T) {
@@ -159,14 +156,4 @@ func TestToSnapshots_BadTimestamp(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for bad timestamp")
 	}
-}
-
-// memoryStore implements outbound.AnchorageSnapshotRepository for testing.
-type memoryStore struct {
-	snapshots []entity.AnchoragePackageSnapshot
-}
-
-func (m *memoryStore) SaveSnapshots(_ context.Context, s []entity.AnchoragePackageSnapshot) error {
-	m.snapshots = append(m.snapshots, s...)
-	return nil
 }

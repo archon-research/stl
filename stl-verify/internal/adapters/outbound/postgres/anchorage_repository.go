@@ -42,7 +42,7 @@ func (r *AnchorageSnapshotRepository) SaveSnapshots(ctx context.Context, snapsho
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	const cols = 19
 	valueStrings := make([]string, 0, len(snapshots))
