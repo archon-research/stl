@@ -1,4 +1,3 @@
-import asyncio
 from decimal import Decimal
 
 from app.domain.entities.backed_breakdown import CollateralContribution
@@ -11,10 +10,10 @@ from app.services.liquidation_params_repository_resolver import LiquidationParam
 class RiskCalculationService:
     """Orchestrate bad-debt estimation for a backed asset at a given price gap.
 
-    Three-query flow:
-      1. Fetch collateral breakdown (backed_breakdown_resolver).
-      2. Fetch liquidation params + USD prices concurrently (parallel asyncio.gather).
-      3. Enrich each CollateralContribution → RiskEnrichedCollateral (skip missing data).
+    Two-query flow:
+      1. Fetch collateral breakdown (backed_breakdown_resolver) — includes backing_usd and price_usd.
+      2. Fetch liquidation params for the collateral tokens.
+      3. Enrich each CollateralContribution → RiskEnrichedCollateral (skip missing liq params or price).
       4. Apply gap_sweep formula.
     """
 
@@ -22,11 +21,9 @@ class RiskCalculationService:
         self,
         backed_breakdown_resolver: BackedBreakdownRepositoryResolver,
         liquidation_params_resolver: LiquidationParamsRepositoryResolver,
-        token_price_repository,  # TokenPriceRepository
     ) -> None:
         self._backed_breakdown_resolver = backed_breakdown_resolver
         self._liquidation_params_resolver = liquidation_params_resolver
-        self._token_price_repository = token_price_repository
 
     async def get_risk_breakdown(self, protocol_id: int, backed_asset_id: int) -> RiskBreakdown:
         """Return the enriched breakdown for a backed asset (without gap calculation)."""
@@ -42,7 +39,7 @@ class RiskCalculationService:
     ) -> Decimal:
         """Return the estimated bad debt (as a positive USD value) at the given gap percentage.
 
-        Items with missing prices or liquidation params are excluded (treated as
+        Items with missing price or liquidation params are excluded (treated as
         non-volatile collateral that doesn't contribute to gap-based bad debt).
         """
         items = await self._build_enriched_items(protocol_id, backed_asset_id)
@@ -59,34 +56,28 @@ class RiskCalculationService:
             return []
 
         token_ids = [item.token_id for item in breakdown.items]
-
         liq_params_repo = await self._liquidation_params_resolver.resolve(protocol_id)
-        liq_params, prices = await asyncio.gather(
-            liq_params_repo.get_params(backed_asset_id, token_ids),
-            self._token_price_repository.get_prices(token_ids),
-        )
+        liq_params = await liq_params_repo.get_params(backed_asset_id, token_ids)
 
         return [
-            self._enrich(item, liq_params, prices)
+            self._enrich(item, liq_params)
             for item in breakdown.items
-            if item.token_id in liq_params and item.token_id in prices
+            if item.token_id in liq_params and item.price_usd is not None
         ]
 
     @staticmethod
     def _enrich(
         item: CollateralContribution,
         liq_params: dict[int, LiquidationParams],
-        prices: dict[int, Decimal],
     ) -> RiskEnrichedCollateral:
         params = liq_params[item.token_id]
-        price = prices[item.token_id]
         return RiskEnrichedCollateral(
             token_id=item.token_id,
             symbol=item.symbol,
-            amount=item.amount,
+            amount=item.backing_usd / item.price_usd,
             backing_pct=item.backing_pct,
-            amount_usd=item.amount * price,
-            price_usd=price,
+            amount_usd=item.backing_usd,
+            price_usd=item.price_usd,
             liquidation_threshold=params.liquidation_threshold,
             liquidation_bonus=params.liquidation_bonus,
         )

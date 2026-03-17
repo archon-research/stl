@@ -4,12 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.backed_breakdown_repository import BackedBreakdownRepository
+from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.protocol_metadata_repository import ProtocolMetadataRepository
 from app.adapters.postgres.sparklend_liquidation_params_repository import SparkLendLiquidationParamsRepository
-from app.adapters.postgres.token_price_repository import OffchainTokenPriceRepository
 from app.services.backed_breakdown_repository_resolver import BackedBreakdownRepositoryResolver
 from app.services.liquidation_params_repository_resolver import LiquidationParamsRepositoryResolver
 from app.services.risk_calculation_service import RiskCalculationService
@@ -50,11 +49,10 @@ def _get_service(
     engine: AsyncEngine = Depends(_get_engine),
 ) -> RiskCalculationService:
     metadata_repo = ProtocolMetadataRepository(engine)
-    price_repo = OffchainTokenPriceRepository(engine)
 
     breakdown_resolver = BackedBreakdownRepositoryResolver(
         protocol_metadata_repository=metadata_repo,
-        aave_like_repository=BackedBreakdownRepository(engine, protocol_id=protocol_id),
+        aave_like_repository=AaveLikeBackedBreakdownRepository(engine, protocol_id=protocol_id),
         morpho_repository=MorphoBackedBreakdownRepository(engine, protocol_id=protocol_id),
     )
 
@@ -67,7 +65,6 @@ def _get_service(
     return RiskCalculationService(
         backed_breakdown_resolver=breakdown_resolver,
         liquidation_params_resolver=liq_params_resolver,
-        token_price_repository=price_repo,
     )
 
 

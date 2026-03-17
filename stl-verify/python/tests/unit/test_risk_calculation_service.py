@@ -1,13 +1,12 @@
 # tests/unit/test_risk_calculation_service.py
-import asyncio
 from decimal import Decimal
 from typing import Protocol
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
-from app.risk_engine.entities import LiquidationParams, RiskBreakdown, RiskEnrichedCollateral
+from app.risk_engine.entities import LiquidationParams, RiskBreakdown
 from app.services.risk_calculation_service import RiskCalculationService
 
 
@@ -15,12 +14,13 @@ def _breakdown(items: tuple) -> BackedBreakdown:
     return BackedBreakdown(backed_asset_id=42, protocol_id=1, items=items)
 
 
-def _contrib(token_id: int, symbol: str, amount: str) -> CollateralContribution:
+def _contrib(token_id: int, symbol: str, backing_usd: str, price_usd: str | None = "2000") -> CollateralContribution:
     return CollateralContribution(
         token_id=token_id,
         symbol=symbol,
-        amount=Decimal(amount),
+        backing_usd=Decimal(backing_usd),
         backing_pct=Decimal("100"),
+        price_usd=Decimal(price_usd) if price_usd is not None else None,
     )
 
 
@@ -48,10 +48,6 @@ class MockLiquidationParamsResolver(Protocol):
     async def resolve(self, protocol_id: int) -> MockLiquidationParamsRepository: ...
 
 
-class MockTokenPriceRepository(Protocol):
-    async def get_prices(self, token_ids: list[int]) -> dict[int, Decimal]: ...
-
-
 @pytest.fixture
 def mock_breakdown_resolver() -> AsyncMock:
     return AsyncMock(spec=MockBackedBreakdownResolver)
@@ -73,52 +69,41 @@ def mock_liq_params_repo() -> AsyncMock:
 
 
 @pytest.fixture
-def mock_price_repo() -> AsyncMock:
-    return AsyncMock(spec=MockTokenPriceRepository)
-
-
-@pytest.fixture
 def service(
     mock_breakdown_resolver: AsyncMock,
     mock_liq_params_resolver: AsyncMock,
-    mock_price_repo: AsyncMock,
 ) -> RiskCalculationService:
     return RiskCalculationService(
         backed_breakdown_resolver=mock_breakdown_resolver,
         liquidation_params_resolver=mock_liq_params_resolver,
-        token_price_repository=mock_price_repo,
     )
 
 
 @pytest.mark.asyncio
-async def test_get_bad_debt_orchestrates_three_repos(
+async def test_get_bad_debt_orchestrates_repos(
     service: RiskCalculationService,
     mock_breakdown_resolver: AsyncMock,
     mock_breakdown_repo: AsyncMock,
     mock_liq_params_resolver: AsyncMock,
     mock_liq_params_repo: AsyncMock,
-    mock_price_repo: AsyncMock,
 ) -> None:
-    """Service resolves repos, fetches data concurrently, applies gap formula."""
+    """Service resolves repos, fetches liq params, applies gap formula."""
     mock_breakdown_resolver.resolve.return_value = mock_breakdown_repo
     mock_liq_params_resolver.resolve.return_value = mock_liq_params_repo
 
     mock_breakdown_repo.get_backed_breakdown.return_value = _breakdown(
-        (_contrib(10, "WETH", "5"),)
+        (_contrib(10, "WETH", "10000", "2000"),)
     )
     mock_liq_params_repo.get_params.return_value = {10: _params(10, "0.825", "1.05")}
-    mock_price_repo.get_prices.return_value = {10: Decimal("2000")}
 
     result = await service.get_bad_debt(protocol_id=1, backed_asset_id=42, gap_pct=Decimal("0.15"))
 
     assert isinstance(result, Decimal)
-    # At gap=15%, no bad debt expected for wstETH-like params
     assert result >= Decimal("0")
     mock_breakdown_resolver.resolve.assert_awaited_once_with(1)
     mock_liq_params_resolver.resolve.assert_awaited_once_with(1)
     mock_breakdown_repo.get_backed_breakdown.assert_awaited_once_with(42)
     mock_liq_params_repo.get_params.assert_awaited_once_with(42, [10])
-    mock_price_repo.get_prices.assert_awaited_once_with([10])
 
 
 @pytest.mark.asyncio
@@ -128,22 +113,19 @@ async def test_items_with_missing_price_are_skipped(
     mock_breakdown_repo: AsyncMock,
     mock_liq_params_resolver: AsyncMock,
     mock_liq_params_repo: AsyncMock,
-    mock_price_repo: AsyncMock,
 ) -> None:
     mock_breakdown_resolver.resolve.return_value = mock_breakdown_repo
     mock_liq_params_resolver.resolve.return_value = mock_liq_params_repo
 
     mock_breakdown_repo.get_backed_breakdown.return_value = _breakdown(
-        (_contrib(10, "WETH", "5"), _contrib(11, "UNKNOWN", "1"))
+        (_contrib(10, "WETH", "10000", "2000"), _contrib(11, "UNKNOWN", "500", None))
     )
     mock_liq_params_repo.get_params.return_value = {
         10: _params(10, "0.825", "1.05"),
         11: _params(11, "0.50", "1.20"),
     }
-    # token 11 has no price
-    mock_price_repo.get_prices.return_value = {10: Decimal("2000")}
 
-    # Should not raise — token 11 is silently skipped
+    # Should not raise — token 11 (no price) is silently skipped
     result = await service.get_bad_debt(protocol_id=1, backed_asset_id=42, gap_pct=Decimal("0.50"))
     assert isinstance(result, Decimal)
 
@@ -155,17 +137,15 @@ async def test_items_with_missing_liq_params_are_skipped(
     mock_breakdown_repo: AsyncMock,
     mock_liq_params_resolver: AsyncMock,
     mock_liq_params_repo: AsyncMock,
-    mock_price_repo: AsyncMock,
 ) -> None:
     mock_breakdown_resolver.resolve.return_value = mock_breakdown_repo
     mock_liq_params_resolver.resolve.return_value = mock_liq_params_repo
 
     mock_breakdown_repo.get_backed_breakdown.return_value = _breakdown(
-        (_contrib(10, "WETH", "5"), _contrib(11, "STABLECOIN", "10000"))
+        (_contrib(10, "WETH", "10000", "2000"), _contrib(11, "STABLECOIN", "10000", "1"))
     )
-    # token 11 (stablecoin) has no liquidation params (excluded from collateral)
+    # token 11 (stablecoin) has no liquidation params
     mock_liq_params_repo.get_params.return_value = {10: _params(10, "0.825", "1.05")}
-    mock_price_repo.get_prices.return_value = {10: Decimal("2000"), 11: Decimal("1")}
 
     result = await service.get_bad_debt(protocol_id=1, backed_asset_id=42, gap_pct=Decimal("0.50"))
     assert isinstance(result, Decimal)
@@ -178,13 +158,11 @@ async def test_empty_breakdown_returns_zero(
     mock_breakdown_repo: AsyncMock,
     mock_liq_params_resolver: AsyncMock,
     mock_liq_params_repo: AsyncMock,
-    mock_price_repo: AsyncMock,
 ) -> None:
     mock_breakdown_resolver.resolve.return_value = mock_breakdown_repo
     mock_liq_params_resolver.resolve.return_value = mock_liq_params_repo
     mock_breakdown_repo.get_backed_breakdown.return_value = _breakdown(())
     mock_liq_params_repo.get_params.return_value = {}
-    mock_price_repo.get_prices.return_value = {}
 
     result = await service.get_bad_debt(protocol_id=1, backed_asset_id=42, gap_pct=Decimal("0.15"))
     assert result == Decimal("0")
@@ -197,15 +175,13 @@ async def test_get_risk_breakdown_returns_enriched_items(
     mock_breakdown_repo: AsyncMock,
     mock_liq_params_resolver: AsyncMock,
     mock_liq_params_repo: AsyncMock,
-    mock_price_repo: AsyncMock,
 ) -> None:
     mock_breakdown_resolver.resolve.return_value = mock_breakdown_repo
     mock_liq_params_resolver.resolve.return_value = mock_liq_params_repo
     mock_breakdown_repo.get_backed_breakdown.return_value = _breakdown(
-        (_contrib(10, "WETH", "5"),)
+        (_contrib(10, "WETH", "10000", "2000"),)
     )
     mock_liq_params_repo.get_params.return_value = {10: _params(10, "0.825", "1.05")}
-    mock_price_repo.get_prices.return_value = {10: Decimal("2000")}
 
     result = await service.get_risk_breakdown(protocol_id=1, backed_asset_id=42)
 
@@ -214,7 +190,8 @@ async def test_get_risk_breakdown_returns_enriched_items(
     item = result.items[0]
     assert item.token_id == 10
     assert item.symbol == "WETH"
-    assert item.amount_usd == Decimal("10000")  # 5 × 2000
+    assert item.amount_usd == Decimal("10000")   # backing_usd passed through
     assert item.price_usd == Decimal("2000")
+    assert item.amount == Decimal("5")           # 10000 / 2000
     assert item.liquidation_threshold == Decimal("0.825")
     assert item.liquidation_bonus == Decimal("1.05")
