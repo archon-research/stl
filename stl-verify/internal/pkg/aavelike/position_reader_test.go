@@ -674,6 +674,169 @@ func TestGetBatchUserPositionData(t *testing.T) {
 	}
 }
 
+// TestGetBatchUserPositionData_StaleUIPoolDataProvider verifies that debt is
+// detected even when the UIPoolDataProvider returns ScaledVariableDebt=0 for
+// all reserves (the Aave V3 ETH bug after protocol upgrades). The fix queries
+// the PoolDataProvider for ALL reserves and derives debt from actual
+// CurrentVariableDebt values.
+func TestGetBatchUserPositionData_StaleUIPoolDataProvider(t *testing.T) {
+	userA := common.HexToAddress("0x0000000000000000000000000000000000000001")
+
+	weth := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	usdt := common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7")
+
+	// Simulate stale UIPoolDataProvider: user has WETH collateral and
+	// USDC+USDT debt, but ScaledVariableDebt is 0 for ALL reserves.
+	reservesA := []UserReserveData{
+		{UnderlyingAsset: weth, ScaledATokenBalance: big.NewInt(5e18), UsageAsCollateralEnabledOnUser: true, ScaledVariableDebt: big.NewInt(0)},
+		{UnderlyingAsset: usdc, ScaledATokenBalance: big.NewInt(0), UsageAsCollateralEnabledOnUser: false, ScaledVariableDebt: big.NewInt(0)}, // stale: should be non-zero
+		{UnderlyingAsset: usdt, ScaledATokenBalance: big.NewInt(0), UsageAsCollateralEnabledOnUser: false, ScaledVariableDebt: big.NewInt(0)}, // stale: should be non-zero
+	}
+
+	var svc *BlockchainService
+	callNumber := 0
+
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		callNumber++
+		switch callNumber {
+		case 1:
+			// Multicall 1: getUserReservesDataBatch (1 user)
+			return []outbound.Result{
+				{Success: true, ReturnData: encodeRawUserReserves(reservesA)},
+			}, nil
+
+		case 2:
+			// Multicall 2: token metadata for ALL 3 reserves (WETH cached, USDC+USDT need fetch)
+			// 3 calls per token × 2 uncached tokens = 6 calls
+			results := make([]outbound.Result, len(calls))
+			for i, call := range calls {
+				switch {
+				case call.Target == usdc || call.Target == usdt:
+					symbol := "USDC"
+					decimals := 6
+					if call.Target == usdt {
+						symbol = "USDT"
+					}
+					method, _ := svc.erc20ABI.MethodById(call.CallData[:4])
+					switch method.Name {
+					case "decimals":
+						packed, _ := method.Outputs.Pack(uint8(decimals))
+						results[i] = outbound.Result{Success: true, ReturnData: packed}
+					case "symbol":
+						packed, _ := method.Outputs.Pack(symbol)
+						results[i] = outbound.Result{Success: true, ReturnData: packed}
+					case "name":
+						packed, _ := method.Outputs.Pack(symbol + " Token")
+						results[i] = outbound.Result{Success: true, ReturnData: packed}
+					}
+				default:
+					t.Fatalf("unexpected metadata call for %s", call.Target.Hex())
+				}
+			}
+			return results, nil
+
+		case 3:
+			// Multicall 3: getUserReserveData for ALL 3 reserves (the fix!)
+			// Before the fix, only WETH would be queried (ScaledATokenBalance > 0).
+			// After the fix, ALL reserves are queried.
+			if len(calls) != 3 {
+				t.Errorf("multicall 3: expected 3 calls (all reserves), got %d", len(calls))
+			}
+			results := make([]outbound.Result, len(calls))
+			for i, call := range calls {
+				method, _ := svc.getUserReserveDataABI.MethodById(call.CallData[:4])
+				args, _ := method.Inputs.Unpack(call.CallData[4:])
+				asset := args[0].(common.Address)
+
+				var data ActualUserReserveData
+				switch asset {
+				case weth:
+					data = ActualUserReserveData{
+						Asset: weth, CurrentATokenBalance: big.NewInt(5100e15),
+						CurrentStableDebt: big.NewInt(0), CurrentVariableDebt: big.NewInt(0),
+						PrincipalStableDebt: big.NewInt(0), ScaledVariableDebt: big.NewInt(0),
+						StableBorrowRate: big.NewInt(0), LiquidityRate: big.NewInt(0),
+						UsageAsCollateralEnabled: true,
+					}
+				case usdc:
+					data = ActualUserReserveData{
+						Asset: usdc, CurrentATokenBalance: big.NewInt(0),
+						CurrentStableDebt: big.NewInt(0), CurrentVariableDebt: big.NewInt(75000e6),
+						PrincipalStableDebt: big.NewInt(0), ScaledVariableDebt: big.NewInt(0),
+						StableBorrowRate: big.NewInt(0), LiquidityRate: big.NewInt(0),
+						UsageAsCollateralEnabled: false,
+					}
+				case usdt:
+					data = ActualUserReserveData{
+						Asset: usdt, CurrentATokenBalance: big.NewInt(0),
+						CurrentStableDebt: big.NewInt(0), CurrentVariableDebt: big.NewInt(108000e6),
+						PrincipalStableDebt: big.NewInt(0), ScaledVariableDebt: big.NewInt(0),
+						StableBorrowRate: big.NewInt(0), LiquidityRate: big.NewInt(0),
+						UsageAsCollateralEnabled: false,
+					}
+				default:
+					t.Fatalf("unexpected reserve data call: asset=%s", asset.Hex())
+				}
+				results[i] = outbound.Result{Success: true, ReturnData: encodeUserReserveData(t, svc, data)}
+			}
+			return results, nil
+
+		default:
+			t.Fatalf("unexpected multicall #%d", callNumber)
+			return nil, nil
+		}
+	}
+
+	svc = newTestBlockchainService(t, mock)
+	svc.metadataCache[weth] = TokenMetadata{Symbol: "WETH", Decimals: 18, Name: "Wrapped Ether"}
+
+	reader := &PositionReader{
+		logger:             svc.logger,
+		blockchainServices: make(map[blockchain.ProtocolKey]*BlockchainService),
+	}
+	poolAddress := common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")
+	reader.blockchainServices[blockchain.ProtocolKey{ChainID: 1, PoolAddress: poolAddress}] = svc
+
+	results, err := reader.GetBatchUserPositionData(
+		context.Background(),
+		[]common.Address{userA},
+		poolAddress, 1, 20000000,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ra := results[userA]
+	if ra.Err != nil {
+		t.Fatalf("userA error: %v", ra.Err)
+	}
+
+	// Must detect collateral despite stale UIPoolDataProvider
+	if len(ra.Collaterals) != 1 {
+		t.Fatalf("expected 1 collateral, got %d", len(ra.Collaterals))
+	}
+	if ra.Collaterals[0].Symbol != "WETH" {
+		t.Errorf("collateral symbol = %s, want WETH", ra.Collaterals[0].Symbol)
+	}
+
+	// Must detect debt despite ScaledVariableDebt=0 from UIPoolDataProvider
+	if len(ra.Debts) != 2 {
+		t.Fatalf("expected 2 debts (USDC+USDT), got %d — stale UIPoolDataProvider bug not fixed", len(ra.Debts))
+	}
+	debtSymbols := map[string]bool{}
+	for _, d := range ra.Debts {
+		debtSymbols[d.Symbol] = true
+	}
+	if !debtSymbols["USDC"] {
+		t.Error("expected USDC debt, not found")
+	}
+	if !debtSymbols["USDT"] {
+		t.Error("expected USDT debt, not found")
+	}
+}
+
 func TestGetBatchUserPositionData_EmptyUsers(t *testing.T) {
 	mock := testutil.NewMockMulticaller()
 	mock.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
