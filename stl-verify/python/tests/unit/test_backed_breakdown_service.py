@@ -58,14 +58,16 @@ async def test_calls_resolver_with_protocol_id_and_selected_repository_with_back
             CollateralContribution(
                 token_id=10,
                 symbol="WETH",
-                amount=Decimal("1000.00"),
+                backing_usd=Decimal("1000.00"),
                 backing_pct=Decimal("60.0000"),
+                price_usd=None,
             ),
             CollateralContribution(
                 token_id=11,
                 symbol="cbBTC",
-                amount=Decimal("666.67"),
+                backing_usd=Decimal("666.67"),
                 backing_pct=Decimal("40.0000"),
+                price_usd=None,
             ),
         ),
     )

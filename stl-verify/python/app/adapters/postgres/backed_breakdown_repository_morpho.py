@@ -27,6 +27,7 @@ WITH morpho_vaults AS (
       SELECT DISTINCT ON (vs.morpho_vault_id)
           vs.morpho_vault_id as vault_id,
           vs.total_assets / power(10, t.decimals) as total_assets,
+          t.id as loan_token_id,
           t.symbol as loan_token
       FROM morpho_vault_state vs
       JOIN morpho_vault v ON v.id = vs.morpho_vault_id
@@ -46,6 +47,7 @@ WITH morpho_vaults AS (
   market_allocs AS (
       SELECT vmi.vault_id,
              vmi.morpho_market_id,
+             ct.id as collateral_token_id,
              ct.symbol as collateral,
              pos.supply_assets / power(10, lt.decimals) as vault_supply
       FROM vault_market_ids vmi
@@ -78,37 +80,40 @@ WITH morpho_vaults AS (
   breakdown AS (
       SELECT
           ma.vault_id,
+          ma.collateral_token_id,
           ma.collateral,
           ma.vault_supply * ms.utilization as collateral_amount,
           ma.vault_supply * (1 - ms.utilization) as idle_loan_amount,
+          vs.loan_token_id,
           vs.loan_token
       FROM market_allocs ma
       JOIN market_states ms ON ms.morpho_market_id = ma.morpho_market_id
       JOIN vault_states vs ON vs.vault_id = ma.vault_id
   ),
   vault_idle AS (
-      SELECT vs.vault_id, vs.loan_token,
+      SELECT vs.vault_id, vs.loan_token_id, vs.loan_token,
              vs.total_assets - coalesce(sum(b.collateral_amount + b.idle_loan_amount), 0) as idle_amount
       FROM vault_states vs
       LEFT JOIN breakdown b ON b.vault_id = vs.vault_id
-      GROUP BY vs.vault_id, vs.loan_token, vs.total_assets
+      GROUP BY vs.vault_id, vs.loan_token_id, vs.loan_token, vs.total_assets
   ),
   all_backing AS (
-      SELECT collateral as symbol, collateral_amount as amount FROM breakdown
+      SELECT collateral_token_id as token_id, collateral as symbol, collateral_amount as amount FROM breakdown
       WHERE collateral_amount > 0.01
       UNION ALL
-      SELECT loan_token, sum(idle_loan_amount) FROM breakdown GROUP BY vault_id, loan_token
+      SELECT loan_token_id, loan_token, sum(idle_loan_amount) FROM breakdown GROUP BY vault_id, loan_token_id, loan_token
       UNION ALL
-      SELECT loan_token, idle_amount FROM vault_idle
+      SELECT loan_token_id, loan_token, idle_amount FROM vault_idle
   ),
   total AS (
       SELECT sum(amount) as total_amount FROM all_backing
   )
-  SELECT a.symbol,
+  SELECT a.token_id,
+         a.symbol,
          round(sum(a.amount)::numeric, 2) as backed_amount,
          round((sum(a.amount) / t.total_amount * 100)::numeric, 2) as backing_pct
   FROM all_backing a, total t
-  GROUP BY a.symbol, t.total_amount
+  GROUP BY a.token_id, a.symbol, t.total_amount
   HAVING sum(a.amount) > 0.01
   ORDER BY backed_amount DESC
 """
@@ -132,7 +137,7 @@ class MorphoBackedBreakdownRepository:
 
         items = tuple(
             CollateralContribution(
-                token_id=0,
+                token_id=row.token_id,
                 symbol=row.symbol,
                 backing_usd=Decimal(str(row.backed_amount)),
                 backing_pct=Decimal(str(row.backing_pct)),
