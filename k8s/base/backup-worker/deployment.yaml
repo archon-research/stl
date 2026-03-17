@@ -16,7 +16,14 @@ spec:
       containers:
         - name: backup-worker
           image: backup-worker
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://localhost:4317"
+            - name: JAEGER_ENDPOINT
+              value: "localhost:4317"
           envFrom:
+            - configMapRef:
+                name: backup-worker-config
             - secretRef:
                 name: backup-worker
           resources:
