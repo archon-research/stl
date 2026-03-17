@@ -280,10 +280,9 @@ func buildCollateralData(assets []common.Address, metadataMap map[common.Address
 			return nil, fmt.Errorf("missing or invalid metadata for collateral token %s", asset.Hex())
 		}
 
-		// Missing actual data indicates a transient RPC failure for this asset — skip it.
 		actualData, ok := actualDataMap[asset]
 		if !ok {
-			continue
+			return nil, fmt.Errorf("missing actual balance for collateral token %s", asset.Hex())
 		}
 
 		if actualData.UsageAsCollateralEnabled && actualData.CurrentATokenBalance.Cmp(big.NewInt(0)) > 0 {
@@ -309,10 +308,9 @@ func buildDebtData(assets []common.Address, metadataMap map[common.Address]Token
 			return nil, fmt.Errorf("missing or invalid metadata for debt token %s", asset.Hex())
 		}
 
-		// Missing actual data indicates a transient RPC failure for this asset — skip it.
 		actualData, ok := actualDataMap[asset]
 		if !ok {
-			continue
+			return nil, fmt.Errorf("missing actual data for debt token %s", asset.Hex())
 		}
 
 		if actualData.CurrentVariableDebt.Cmp(big.NewInt(0)) > 0 {

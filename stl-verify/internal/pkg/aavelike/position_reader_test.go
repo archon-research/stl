@@ -423,74 +423,24 @@ func TestBatchGetUserReserveDataMultiUser_HappyPath(t *testing.T) {
 	}
 }
 
-func TestBatchGetUserReserveDataMultiUser_SubCallFailure_SkipsFailedAsset(t *testing.T) {
+func TestBatchGetUserReserveDataMultiUser_SubCallFailure(t *testing.T) {
 	userA := common.HexToAddress("0x0000000000000000000000000000000000000001")
-	userB := common.HexToAddress("0x0000000000000000000000000000000000000002")
 	weth := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
-	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 
 	userAssets := map[common.Address][]common.Address{
-		userA: {weth, usdc},
-		userB: {usdc},
+		userA: {weth},
 	}
-
-	var svc *BlockchainService
 
 	mock := testutil.NewMockMulticaller()
 	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		results := make([]outbound.Result, len(calls))
-		for i, call := range calls {
-			method, _ := svc.getUserReserveDataABI.MethodById(call.CallData[:4])
-			args, _ := method.Inputs.Unpack(call.CallData[4:])
-			asset := args[0].(common.Address)
-			user := args[1].(common.Address)
-
-			if user == userA && asset == weth {
-				// userA's WETH call fails
-				results[i] = outbound.Result{Success: false}
-			} else {
-				// All other calls succeed
-				data := ActualUserReserveData{
-					Asset: asset, CurrentATokenBalance: big.NewInt(100e6), CurrentStableDebt: big.NewInt(0),
-					CurrentVariableDebt: big.NewInt(0), PrincipalStableDebt: big.NewInt(0),
-					ScaledVariableDebt: big.NewInt(0), StableBorrowRate: big.NewInt(0),
-					LiquidityRate: big.NewInt(0), StableRateLastUpdated: 0, UsageAsCollateralEnabled: true,
-				}
-				results[i] = outbound.Result{Success: true, ReturnData: encodeUserReserveData(t, svc, data)}
-			}
-		}
-		return results, nil
+		return []outbound.Result{{Success: false}}, nil
 	}
 
-	svc = newTestBlockchainService(t, mock)
+	svc := newTestBlockchainService(t, mock)
 
-	result, err := svc.batchGetUserReserveDataMultiUser(context.Background(), userAssets, 20000000)
-	if err != nil {
-		t.Fatalf("expected no error (failed sub-call should be skipped), got: %v", err)
-	}
-
-	// userA should have USDC but not WETH (WETH sub-call failed)
-	userAData, ok := result[userA]
-	if !ok {
-		t.Fatal("userA not in results")
-	}
-	if len(userAData) != 1 {
-		t.Fatalf("userA: expected 1 asset (USDC only, WETH skipped), got %d", len(userAData))
-	}
-	if _, hasUSDC := userAData[usdc]; !hasUSDC {
-		t.Error("userA should have USDC data")
-	}
-	if _, hasWETH := userAData[weth]; hasWETH {
-		t.Error("userA should NOT have WETH data (sub-call failed)")
-	}
-
-	// userB should be fully intact
-	userBData, ok := result[userB]
-	if !ok {
-		t.Fatal("userB not in results")
-	}
-	if len(userBData) != 1 {
-		t.Fatalf("userB: expected 1 asset, got %d", len(userBData))
+	_, err := svc.batchGetUserReserveDataMultiUser(context.Background(), userAssets, 20000000)
+	if err == nil {
+		t.Fatal("expected error for failed sub-call, got nil")
 	}
 }
 
@@ -888,20 +838,13 @@ func TestGetBatchUserPositionData_EmptyUsers(t *testing.T) {
 	}
 }
 
-// TestGetBatchUserPositionData_SingleUserReserveDataFailure verifies that when
-// getUserReserveData fails for one user's asset, other users still get their
-// full position data. The failed asset is simply omitted.
-func TestGetBatchUserPositionData_SingleUserReserveDataFailure(t *testing.T) {
+func TestGetBatchUserPositionData_ReserveDataFailure(t *testing.T) {
 	userA := common.HexToAddress("0x0000000000000000000000000000000000000001")
-	userB := common.HexToAddress("0x0000000000000000000000000000000000000002")
 
 	weth := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
-	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 
-	// Both users have WETH + USDC reserves.
-	reservesAB := []UserReserveData{
+	reserves := []UserReserveData{
 		{UnderlyingAsset: weth, ScaledATokenBalance: big.NewInt(1e18), UsageAsCollateralEnabledOnUser: true, ScaledVariableDebt: big.NewInt(0)},
-		{UnderlyingAsset: usdc, ScaledATokenBalance: big.NewInt(0), UsageAsCollateralEnabledOnUser: false, ScaledVariableDebt: big.NewInt(1500e6)},
 	}
 
 	var svc *BlockchainService
@@ -912,61 +855,12 @@ func TestGetBatchUserPositionData_SingleUserReserveDataFailure(t *testing.T) {
 		callNumber++
 		switch callNumber {
 		case 1:
-			// Multicall 1: getUserReservesDataBatch (both users succeed)
 			return []outbound.Result{
-				{Success: true, ReturnData: encodeRawUserReserves(reservesAB)},
-				{Success: true, ReturnData: encodeRawUserReserves(reservesAB)},
+				{Success: true, ReturnData: encodeRawUserReserves(reserves)},
 			}, nil
-
 		case 2:
-			// Multicall 2: getUserReserveData for all user x asset pairs.
-			// Fail userA's WETH call, succeed for everything else.
-			results := make([]outbound.Result, len(calls))
-			for i, call := range calls {
-				method, _ := svc.getUserReserveDataABI.MethodById(call.CallData[:4])
-				args, _ := method.Inputs.Unpack(call.CallData[4:])
-				asset := args[0].(common.Address)
-				user := args[1].(common.Address)
-
-				if user == userA && asset == weth {
-					// Simulate RPC failure for this specific sub-call
-					results[i] = outbound.Result{Success: false}
-					continue
-				}
-
-				var data ActualUserReserveData
-				switch {
-				case user == userA && asset == usdc:
-					data = ActualUserReserveData{
-						Asset: usdc, CurrentATokenBalance: big.NewInt(0),
-						CurrentStableDebt: big.NewInt(0), CurrentVariableDebt: big.NewInt(1500e6),
-						PrincipalStableDebt: big.NewInt(0), ScaledVariableDebt: big.NewInt(0),
-						StableBorrowRate: big.NewInt(0), LiquidityRate: big.NewInt(0),
-						UsageAsCollateralEnabled: false,
-					}
-				case user == userB && asset == weth:
-					data = ActualUserReserveData{
-						Asset: weth, CurrentATokenBalance: big.NewInt(2e18),
-						CurrentStableDebt: big.NewInt(0), CurrentVariableDebt: big.NewInt(0),
-						PrincipalStableDebt: big.NewInt(0), ScaledVariableDebt: big.NewInt(0),
-						StableBorrowRate: big.NewInt(0), LiquidityRate: big.NewInt(0),
-						UsageAsCollateralEnabled: true,
-					}
-				case user == userB && asset == usdc:
-					data = ActualUserReserveData{
-						Asset: usdc, CurrentATokenBalance: big.NewInt(0),
-						CurrentStableDebt: big.NewInt(0), CurrentVariableDebt: big.NewInt(500e6),
-						PrincipalStableDebt: big.NewInt(0), ScaledVariableDebt: big.NewInt(0),
-						StableBorrowRate: big.NewInt(0), LiquidityRate: big.NewInt(0),
-						UsageAsCollateralEnabled: false,
-					}
-				default:
-					t.Fatalf("unexpected call: user=%s asset=%s", user.Hex(), asset.Hex())
-				}
-				results[i] = outbound.Result{Success: true, ReturnData: encodeUserReserveData(t, svc, data)}
-			}
-			return results, nil
-
+			// getUserReserveData sub-call fails
+			return []outbound.Result{{Success: false}}, nil
 		default:
 			t.Fatalf("unexpected multicall #%d", callNumber)
 			return nil, nil
@@ -975,7 +869,6 @@ func TestGetBatchUserPositionData_SingleUserReserveDataFailure(t *testing.T) {
 
 	svc = newTestBlockchainService(t, mock)
 	svc.metadataCache[weth] = TokenMetadata{Symbol: "WETH", Decimals: 18, Name: "Wrapped Ether"}
-	svc.metadataCache[usdc] = TokenMetadata{Symbol: "USDC", Decimals: 6, Name: "USD Coin"}
 
 	reader := &PositionReader{
 		logger:             svc.logger,
@@ -984,48 +877,13 @@ func TestGetBatchUserPositionData_SingleUserReserveDataFailure(t *testing.T) {
 	poolAddress := common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")
 	reader.blockchainServices[blockchain.ProtocolKey{ChainID: 1, PoolAddress: poolAddress}] = svc
 
-	results, err := reader.GetBatchUserPositionData(
+	_, err := reader.GetBatchUserPositionData(
 		context.Background(),
-		[]common.Address{userA, userB},
+		[]common.Address{userA},
 		poolAddress, 1, 20000000,
 	)
-	if err != nil {
-		t.Fatalf("batch should succeed despite single sub-call failure: %v", err)
-	}
-
-	// userA: WETH data was lost (sub-call failed), but USDC debt should still be present.
-	ra := results[userA]
-	if ra.Err != nil {
-		t.Fatalf("userA should not have a top-level error: %v", ra.Err)
-	}
-	// userA had WETH collateral but the sub-call failed, so no collateral returned.
-	if len(ra.Collaterals) != 0 {
-		t.Errorf("userA: expected 0 collaterals (WETH sub-call failed), got %d", len(ra.Collaterals))
-	}
-	// userA's USDC debt should still be present.
-	if len(ra.Debts) != 1 {
-		t.Fatalf("userA: expected 1 debt (USDC), got %d", len(ra.Debts))
-	}
-	if ra.Debts[0].Symbol != "USDC" {
-		t.Errorf("userA debt symbol = %s, want USDC", ra.Debts[0].Symbol)
-	}
-
-	// userB: fully intact — 1 collateral (WETH) + 1 debt (USDC).
-	rb := results[userB]
-	if rb.Err != nil {
-		t.Fatalf("userB error: %v", rb.Err)
-	}
-	if len(rb.Collaterals) != 1 {
-		t.Fatalf("userB: expected 1 collateral, got %d", len(rb.Collaterals))
-	}
-	if rb.Collaterals[0].Symbol != "WETH" {
-		t.Errorf("userB collateral symbol = %s, want WETH", rb.Collaterals[0].Symbol)
-	}
-	if len(rb.Debts) != 1 {
-		t.Fatalf("userB: expected 1 debt, got %d", len(rb.Debts))
-	}
-	if rb.Debts[0].Symbol != "USDC" {
-		t.Errorf("userB debt symbol = %s, want USDC", rb.Debts[0].Symbol)
+	if err == nil {
+		t.Fatal("expected error when getUserReserveData sub-call fails, got nil")
 	}
 }
 
@@ -1056,19 +914,15 @@ func TestBuildCollateralData_ZeroDecimals(t *testing.T) {
 	}
 }
 
-func TestBuildCollateralData_MissingActualData_SkipsAsset(t *testing.T) {
+func TestBuildCollateralData_MissingActualData(t *testing.T) {
 	asset := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
 	metadataMap := map[common.Address]TokenMetadata{
 		asset: {Symbol: "WETH", Decimals: 18, Name: "Wrapped Ether"},
 	}
 
-	// Missing actual data (transient RPC failure) should be skipped, not error.
-	collaterals, err := buildCollateralData([]common.Address{asset}, metadataMap, map[common.Address]ActualUserReserveData{})
-	if err != nil {
-		t.Fatalf("expected no error for missing actual data, got: %v", err)
-	}
-	if len(collaterals) != 0 {
-		t.Fatalf("expected 0 collaterals when actual data is missing, got %d", len(collaterals))
+	_, err := buildCollateralData([]common.Address{asset}, metadataMap, map[common.Address]ActualUserReserveData{})
+	if err == nil {
+		t.Fatal("expected error for missing actual data, got nil")
 	}
 }
 
@@ -1084,18 +938,14 @@ func TestBuildDebtData_MissingMetadata(t *testing.T) {
 	}
 }
 
-func TestBuildDebtData_MissingActualData_SkipsAsset(t *testing.T) {
+func TestBuildDebtData_MissingActualData(t *testing.T) {
 	asset := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 	metadataMap := map[common.Address]TokenMetadata{
 		asset: {Symbol: "USDC", Decimals: 6, Name: "USD Coin"},
 	}
 
-	// Missing actual data (transient RPC failure) should be skipped, not error.
-	debts, err := buildDebtData([]common.Address{asset}, metadataMap, map[common.Address]ActualUserReserveData{})
-	if err != nil {
-		t.Fatalf("expected no error for missing actual data, got: %v", err)
-	}
-	if len(debts) != 0 {
-		t.Fatalf("expected 0 debts when actual data is missing, got %d", len(debts))
+	_, err := buildDebtData([]common.Address{asset}, metadataMap, map[common.Address]ActualUserReserveData{})
+	if err == nil {
+		t.Fatal("expected error for missing actual data, got nil")
 	}
 }
