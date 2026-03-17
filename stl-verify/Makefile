@@ -4,7 +4,7 @@
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
         dev-up dev-up-rebuild dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -20,6 +20,8 @@
         docker-build-temporal-worker-staging docker-push-temporal-worker-staging docker-release-temporal-worker-staging \
         docker-build-morpho-indexer docker-push-morpho-indexer docker-release-morpho-indexer \
         docker-build-morpho-indexer-staging docker-push-morpho-indexer-staging docker-release-morpho-indexer-staging \
+        docker-build-prime-debt-indexer docker-push-prime-debt-indexer docker-release-prime-debt-indexer \
+        docker-build-prime-debt-indexer-staging docker-push-prime-debt-indexer-staging docker-release-prime-debt-indexer-staging \
         run-temporal-worker build-temporal-worker \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         ecs-deploy-oracle-price-worker ecs-deploy-oracle-price-worker-staging \
@@ -673,6 +675,8 @@ docker-release-all:
 	@echo ""
 	@$(MAKE) _docker-release-allocation-tracker-internal ENV=$(ENV)
 	@echo ""
+	@$(MAKE) _docker-release-prime-debt-indexer-internal ENV=$(ENV)
+	@echo ""
 	@echo "==> All Docker images released for ENV=$(ENV)"
 
 # Shortcut: Release all services for sentinelstaging
@@ -1122,6 +1126,50 @@ docker-release-morpho-indexer-staging:
 	@$(MAKE) docker-release-morpho-indexer ENV=sentinelstaging
 
 # =============================================================================
+# Docker Build & Push - Prime Debt Indexer
+# =============================================================================
+
+ECR_REPO_PRIME_DEBT_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-prime-debt-indexer
+
+docker-build-prime-debt-indexer:
+	docker build -t stl-prime-debt-indexer:local -f Dockerfile.prime-debt-indexer .
+
+docker-push-prime-debt-indexer: ecr-login
+	docker push $(ECR_REPO_PRIME_DEBT_INDEXER):latest
+
+docker-release-prime-debt-indexer: ecr-login _docker-release-prime-debt-indexer-internal
+
+_docker-release-prime-debt-indexer-internal:
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Prime Debt Indexer Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_PRIME_DEBT_INDEXER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.prime-debt-indexer \
+		-t $(ECR_REPO_PRIME_DEBT_INDEXER):$$TAG \
+		-t $(ECR_REPO_PRIME_DEBT_INDEXER):latest \
+		--push \
+		. && \
+	echo "==> Prime Debt Indexer Docker image released: $(ECR_REPO_PRIME_DEBT_INDEXER):$$TAG"
+
+docker-build-prime-debt-indexer-staging:
+	@$(MAKE) docker-build-prime-debt-indexer ENV=sentinelstaging
+
+docker-push-prime-debt-indexer-staging:
+	@$(MAKE) docker-push-prime-debt-indexer ENV=sentinelstaging
+
+docker-release-prime-debt-indexer-staging:
+	@$(MAKE) docker-release-prime-debt-indexer ENV=sentinelstaging
+
+# =============================================================================
 # Docker Build & Push - Allocation Tracker
 # =============================================================================
 
@@ -1476,9 +1524,10 @@ kind-load-watcher:
 	kind load docker-image stl-watcher:local --name $(KIND_CLUSTER)
 
 kind-load-workers:
-	kind load docker-image stl-oracle-price-worker:local --name $(KIND_CLUSTER)
-	kind load docker-image stl-morpho-indexer:local       --name $(KIND_CLUSTER)
-	kind load docker-image stl-sparklend-position-tracker:local    --name $(KIND_CLUSTER)
+	kind load docker-image stl-oracle-price-worker:local        --name $(KIND_CLUSTER)
+	kind load docker-image stl-morpho-indexer:local             --name $(KIND_CLUSTER)
+	kind load docker-image stl-sparklend-position-tracker:local --name $(KIND_CLUSTER)
+	kind load docker-image stl-prime-debt-indexer:local         --name $(KIND_CLUSTER)
 
 kind-deploy-watcher:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/watcher.yaml -n $(KUBE_NS)
@@ -1486,7 +1535,7 @@ kind-deploy-watcher:
 
 kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/workers/ -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/sparklend-position-tracker -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
 
 kind-load-temporal-worker:
 	kind load docker-image stl-temporal-worker:local --name $(KIND_CLUSTER)

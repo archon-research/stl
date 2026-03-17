@@ -12,6 +12,7 @@ resources:
   - ../../base/allocation-tracker
   - ../../base/avalanche-sparklend-position-tracker
   - ../../base/temporal-worker
+  - ../../base/prime-debt-indexer
   - external-secrets.yaml
 
 # IAM bindings are managed via EKS Pod Identity associations in the infra repo (SEN-230).
@@ -42,4 +43,7 @@ images:
     newTag: latest
   - name: temporal-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-temporal-worker
+    newTag: latest
+  - name: prime-debt-indexer
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-prime-debt-indexer
     newTag: latest
