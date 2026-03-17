@@ -172,6 +172,8 @@ async def test_returns_lltv_as_threshold_and_lif_as_bonus(
     assert test_ids["cbbtc_id"] in result
     cbbtc = result[test_ids["cbbtc_id"]]
     assert cbbtc.liquidation_threshold == Decimal("0.77")
+    expected_cbbtc_lif = compute_lif(Decimal("0.77"))
+    assert abs(cbbtc.liquidation_bonus - expected_cbbtc_lif) < Decimal("0.0001")
 
 
 @pytest.mark.asyncio(loop_scope="module")
