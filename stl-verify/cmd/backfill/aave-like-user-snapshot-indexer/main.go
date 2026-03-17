@@ -92,6 +92,9 @@ func parseFlags(args []string) (cliConfig, error) {
 	if cfg.batchSize <= 0 {
 		return cliConfig{}, fmt.Errorf("--batch-size must be greater than 0")
 	}
+	if cfg.blockNumber < 0 {
+		return cliConfig{}, fmt.Errorf("--block must be non-negative")
+	}
 
 	key, _, ok := blockchain.GetProtocolBySlug(cfg.protocolSlug)
 	if !ok {

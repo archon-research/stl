@@ -121,6 +121,17 @@ func TestParseFlags(t *testing.T) {
 			},
 		},
 		{
+			name: "negative --block is rejected",
+			args: []string{
+				"--rpc-url", "http://erigon:8545",
+				"--csv", "users.csv",
+				"--protocol", "aave_v3_ethereum",
+				"--db", "postgres://localhost/stl",
+				"--block", "-1",
+			},
+			wantErr: true,
+		},
+		{
 			name:    "unknown flag is rejected",
 			args:    []string{"--unknown-flag", "value"},
 			wantErr: true,

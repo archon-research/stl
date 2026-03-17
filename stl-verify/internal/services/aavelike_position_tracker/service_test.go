@@ -345,7 +345,7 @@ const (
 	testWETH       = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" // WETH
 	testUSDC       = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" // USDC
 	testUser1      = "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0"
-	testUser2      = "0x8ba1f109551bD432803012645Aac136c9A4567d"
+	testUser2      = "0x8ba1f109551bD432803012645Aac136c9A4567d0"
 	testLiquidator = "0xDef1C0ded9bec7F1a1670819833240f027b25EfF"
 	testPool       = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2" // Aave V3 Pool
 )
@@ -1521,6 +1521,126 @@ func TestSavePositionSnapshot_TokenMetadataFailurePropagatesError(t *testing.T) 
 	}
 	if len(positionRepo.saveBorrowerCollateralsCalls) != 0 {
 		t.Fatalf("expected 0 SaveBorrowerCollaterals calls, got %d", len(positionRepo.saveBorrowerCollateralsCalls))
+	}
+}
+
+func TestPersistUserPositionBatch(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(20000000)
+	const blockVersion = 0
+	protocolAddress := common.HexToAddress(testPool) // Aave V3 Ethereum (known protocol)
+
+	tests := []struct {
+		name                     string
+		positions                []UserPositionData
+		wantBorrowerCalls        int
+		wantCollateralBatchCalls int
+		wantErr                  bool
+	}{
+		{
+			name:                     "empty positions returns nil without repo calls",
+			positions:                nil,
+			wantBorrowerCalls:        0,
+			wantCollateralBatchCalls: 0,
+		},
+		{
+			name: "single user with 1 collateral and 1 debt",
+			positions: []UserPositionData{
+				{
+					User: common.HexToAddress(testUser1),
+					Collaterals: []aavelike.CollateralData{
+						{
+							Asset:             common.HexToAddress(testWETH),
+							Decimals:          18,
+							Symbol:            "WETH",
+							ActualBalance:     big.NewInt(1e18),
+							CollateralEnabled: true,
+						},
+					},
+					Debts: []aavelike.DebtData{
+						{
+							Asset:       common.HexToAddress(testUSDC),
+							Decimals:    6,
+							Symbol:      "USDC",
+							CurrentDebt: big.NewInt(1500e6),
+						},
+					},
+				},
+			},
+			wantBorrowerCalls:        1,
+			wantCollateralBatchCalls: 1,
+		},
+		{
+			name: "multiple users",
+			positions: []UserPositionData{
+				{
+					User: common.HexToAddress(testUser1),
+					Debts: []aavelike.DebtData{
+						{
+							Asset:       common.HexToAddress(testUSDC),
+							Decimals:    6,
+							Symbol:      "USDC",
+							CurrentDebt: big.NewInt(1000e6),
+						},
+					},
+				},
+				{
+					User: common.HexToAddress(testUser2),
+					Collaterals: []aavelike.CollateralData{
+						{
+							Asset:             common.HexToAddress(testWETH),
+							Decimals:          18,
+							Symbol:            "WETH",
+							ActualBalance:     big.NewInt(2e18),
+							CollateralEnabled: true,
+						},
+					},
+					Debts: []aavelike.DebtData{
+						{
+							Asset:       common.HexToAddress(testUSDC),
+							Decimals:    6,
+							Symbol:      "USDC",
+							CurrentDebt: big.NewInt(500e6),
+						},
+					},
+				},
+			},
+			wantBorrowerCalls:        2,
+			wantCollateralBatchCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			positionRepo := &mockPositionRepository{}
+			svc := newBorrowerRecordTestService(positionRepo)
+
+			err := svc.PersistUserPositionBatch(
+				context.Background(),
+				tt.positions,
+				protocolAddress,
+				chainID,
+				blockNumber,
+				blockVersion,
+			)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if len(positionRepo.saveBorrowerCalls) != tt.wantBorrowerCalls {
+				t.Errorf("SaveBorrower calls: got %d, want %d", len(positionRepo.saveBorrowerCalls), tt.wantBorrowerCalls)
+			}
+			if len(positionRepo.saveBorrowerCollateralsCalls) != tt.wantCollateralBatchCalls {
+				t.Errorf("SaveBorrowerCollaterals batch calls: got %d, want %d", len(positionRepo.saveBorrowerCollateralsCalls), tt.wantCollateralBatchCalls)
+			}
+		})
 	}
 }
 

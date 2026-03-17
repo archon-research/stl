@@ -75,15 +75,19 @@ func (r *TokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, toke
 	}
 
 	br := tx.SendBatch(ctx, batch)
-	defer br.Close()
 
 	result := make(map[common.Address]int64, len(tokens))
 	for i, t := range tokens {
 		var id int64
 		if err := br.QueryRow().Scan(&id); err != nil {
+			br.Close()
 			return nil, fmt.Errorf("failed to get or create token %d (%s): %w", i, t.Address.Hex(), err)
 		}
 		result[t.Address] = id
+	}
+
+	if err := br.Close(); err != nil {
+		return nil, fmt.Errorf("closing token batch: %w", err)
 	}
 
 	return result, nil

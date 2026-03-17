@@ -912,6 +912,17 @@ func (s *Service) PersistUserPositionBatch(
 		for _, t := range tokenInputs {
 			tokenSlice = append(tokenSlice, t)
 		}
+
+		// Defensive: all tokens in a batch must belong to the same chain.
+		if len(tokenSlice) > 1 {
+			chainID := tokenSlice[0].ChainID
+			for _, t := range tokenSlice[1:] {
+				if t.ChainID != chainID {
+					return fmt.Errorf("mixed chain IDs in token batch: %d and %d", chainID, t.ChainID)
+				}
+			}
+		}
+
 		tokenIDs, err := s.tokenRepo.GetOrCreateTokens(ctx, tx, tokenSlice)
 		if err != nil {
 			return fmt.Errorf("failed to bulk upsert tokens: %w", err)

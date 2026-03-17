@@ -69,15 +69,19 @@ func (r *UserRepository) GetOrCreateUsers(ctx context.Context, tx pgx.Tx, users 
 	}
 
 	br := tx.SendBatch(ctx, batch)
-	defer br.Close()
 
 	result := make(map[common.Address]int64, len(users))
 	for i, u := range users {
 		var id int64
 		if err := br.QueryRow().Scan(&id); err != nil {
+			br.Close()
 			return nil, fmt.Errorf("failed to get or create user %d (%s): %w", i, u.Address.Hex(), err)
 		}
 		result[u.Address] = id
+	}
+
+	if err := br.Close(); err != nil {
+		return nil, fmt.Errorf("closing user batch: %w", err)
 	}
 
 	return result, nil

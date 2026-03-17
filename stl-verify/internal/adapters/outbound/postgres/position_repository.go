@@ -79,12 +79,20 @@ func (r *PositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, recor
 	}
 
 	br := tx.SendBatch(ctx, batch)
-	defer br.Close()
 
 	for i := range records {
 		if _, err := br.Exec(); err != nil {
+			innerErr := br.Close()
+			if innerErr != nil {
+				return fmt.Errorf("failed to save borrower record %d: %w; additionally, failed to close batch: %v", i, err, innerErr)
+			}
+
 			return fmt.Errorf("failed to save borrower record %d: %w", i, err)
 		}
+	}
+
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("closing borrower batch: %w", err)
 	}
 
 	return nil
@@ -127,12 +135,16 @@ func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx
 	}
 
 	br := tx.SendBatch(ctx, batch)
-	defer br.Close()
 
 	for i := range records {
 		if _, err := br.Exec(); err != nil {
+			br.Close()
 			return fmt.Errorf("failed to save collateral record %d: %w", i, err)
 		}
+	}
+
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("closing collateral batch: %w", err)
 	}
 
 	return nil
