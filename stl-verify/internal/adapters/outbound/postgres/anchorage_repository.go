@@ -46,7 +46,7 @@ func (r *AnchorageSnapshotRepository) SaveSnapshots(ctx context.Context, snapsho
 
 	const cols = 19
 	valueStrings := make([]string, 0, len(snapshots))
-	valueArgs := make([]any, 0, len(snapshots)*cols)
+	valueArgs := make([]interface{}, 0, len(snapshots)*cols)
 
 	for i, snap := range snapshots {
 		base := i * cols
@@ -91,5 +91,9 @@ func (r *AnchorageSnapshotRepository) SaveSnapshots(ctx context.Context, snapsho
 		return fmt.Errorf("insert snapshots: %w", err)
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+
+	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -126,5 +127,29 @@ func TestClient_APIError(t *testing.T) {
 	_, err := client.FetchPackages(context.Background())
 	if err == nil {
 		t.Fatal("expected error for 403 response")
+	}
+}
+
+func TestClient_PaginationHostValidation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Return a next URL pointing to a different host.
+		fmt.Fprint(w, `{
+			"data": [{"packageId": "pkg-1", "active": true, "pledgorId": "p1", "securedPartyId": "sp1",
+			  "state": "HEALTHY", "currentLtv": "0.5", "exposureValue": "100", "packageValue": "200",
+			  "ltvTimestamp": "2026-01-01T00:00:00Z", "collateralAssets": [],
+			  "marginCall": {"ltv": "0.8"}, "critical": {"ltv": "0.9"}, "marginReturn": {"ltv": "0.6"}}],
+			"page": {"next": "https://evil.example.com/v2/collateral_management/packages?cursor=abc"}
+		}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "key")
+	_, err := client.FetchPackages(context.Background())
+	if err == nil {
+		t.Fatal("expected error for mismatched pagination host")
+	}
+	if !strings.Contains(err.Error(), "does not match base host") {
+		t.Errorf("expected host mismatch error, got: %v", err)
 	}
 }

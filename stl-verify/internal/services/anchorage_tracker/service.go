@@ -33,6 +33,9 @@ func NewService(
 	pollInterval time.Duration,
 	logger *slog.Logger,
 ) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Service{
 		client:        client,
 		snapshotRepo:  snapshotRepo,
@@ -45,6 +48,10 @@ func NewService(
 
 // Start begins the polling loop in a background goroutine.
 func (s *Service) Start(ctx context.Context) error {
+	if s.pollInterval <= 0 {
+		return fmt.Errorf("poll interval must be positive, got %s", s.pollInterval)
+	}
+
 	ctx, s.cancel = context.WithCancel(ctx)
 
 	// Initial poll before entering the loop.
@@ -74,7 +81,7 @@ func (s *Service) Stop() error {
 }
 
 // BackfillOperations fetches all operations from the Anchorage API and stores them.
-// If operations already exist, it resumes from the last known operation ID.
+// If operations already exist, it resumes from the last known cursor.
 // Returns the number of operations stored.
 func (s *Service) BackfillOperations(ctx context.Context) (int, error) {
 	s.logger.Info("starting operations backfill")
@@ -106,7 +113,10 @@ func (s *Service) syncOperations(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	entities := toOperationEntities(operations, s.primeID)
+	entities, err := toOperationEntities(operations, s.primeID)
+	if err != nil {
+		return 0, fmt.Errorf("convert operations: %w", err)
+	}
 
 	if err := s.operationRepo.SaveOperations(ctx, entities); err != nil {
 		return 0, fmt.Errorf("save operations: %w", err)
@@ -232,12 +242,19 @@ func toSnapshots(packages []Package, primeID int64, now time.Time) ([]entity.Anc
 }
 
 // toOperationEntities converts API operations to domain entities.
-func toOperationEntities(ops []Operation, primeID int64) []entity.AnchorageOperation {
+func toOperationEntities(ops []Operation, primeID int64) ([]entity.AnchorageOperation, error) {
 	entities := make([]entity.AnchorageOperation, 0, len(ops))
 
 	for _, op := range ops {
-		createdAt, _ := time.Parse(time.RFC3339Nano, op.CreatedAt)
-		updatedAt, _ := time.Parse(time.RFC3339Nano, op.UpdatedAt)
+		createdAt, err := time.Parse(time.RFC3339Nano, op.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse created_at for operation %s: %w", op.ID, err)
+		}
+
+		updatedAt, err := time.Parse(time.RFC3339Nano, op.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse updated_at for operation %s: %w", op.ID, err)
+		}
 
 		entities = append(entities, entity.AnchorageOperation{
 			PrimeID:     primeID,
@@ -254,5 +271,5 @@ func toOperationEntities(ops []Operation, primeID int64) []entity.AnchorageOpera
 		})
 	}
 
-	return entities
+	return entities, nil
 }

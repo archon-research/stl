@@ -50,7 +50,7 @@ func (r *AnchorageOperationRepository) SaveOperations(ctx context.Context, opera
 
 	const cols = 11
 	valueStrings := make([]string, 0, len(operations))
-	valueArgs := make([]any, 0, len(operations)*cols)
+	valueArgs := make([]interface{}, 0, len(operations)*cols)
 
 	for i, op := range operations {
 		base := i * cols
@@ -80,13 +80,17 @@ func (r *AnchorageOperationRepository) SaveOperations(ctx context.Context, opera
 			asset_type, custody_type, quantity, notes,
 			created_at, updated_at
 		) VALUES %s
-		ON CONFLICT (operation_id) DO NOTHING`, strings.Join(valueStrings, ","))
+		ON CONFLICT (operation_id, created_at) DO NOTHING`, strings.Join(valueStrings, ","))
 
 	if _, err := tx.Exec(ctx, query, valueArgs...); err != nil {
 		return fmt.Errorf("insert operations: %w", err)
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+
+	return nil
 }
 
 // GetLastCursor returns the pagination cursor for the most recent operation,

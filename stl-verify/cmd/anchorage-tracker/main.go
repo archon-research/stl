@@ -86,16 +86,11 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("anchorage API key is required (use -api-key flag or ANCHORAGE_API_KEY env var)")
 	}
 
-	pollInterval, err := time.ParseDuration(*pollIntervalStr)
-	if err != nil {
-		return fmt.Errorf("parse poll interval: %w", err)
-	}
-
 	logger.Info("starting anchorage tracker",
 		"prime", *prime,
 		"db", maskDBURL(*dbURL),
 		"api_url", *apiURL,
-		"poll_interval", pollInterval,
+		"backfill", *backfill,
 		"git_commit", GitCommit,
 		"build_time", BuildTime,
 	)
@@ -123,10 +118,11 @@ func run(ctx context.Context, args []string) error {
 	client := tracker.NewClient(*apiURL, *apiKey)
 	snapshotRepo := postgres.NewAnchorageSnapshotRepository(dbPool, logger)
 	operationRepo := postgres.NewAnchorageOperationRepository(dbPool, logger)
-	svc := tracker.NewService(client, snapshotRepo, operationRepo, primeID, pollInterval, logger)
 
 	// Backfill mode: fetch all operations, store them, exit.
+	// Poll interval is not required for backfill.
 	if *backfill {
+		svc := tracker.NewService(client, snapshotRepo, operationRepo, primeID, time.Minute, logger)
 		n, err := svc.BackfillOperations(ctx)
 		if err != nil {
 			return fmt.Errorf("backfill: %w", err)
@@ -135,6 +131,13 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	}
 
+	// Parse poll interval only for long-running mode.
+	pollInterval, err := time.ParseDuration(*pollIntervalStr)
+	if err != nil {
+		return fmt.Errorf("parse poll interval: %w", err)
+	}
+
+	svc := tracker.NewService(client, snapshotRepo, operationRepo, primeID, pollInterval, logger)
 	return lifecycle.Run(ctx, logger, svc)
 }
 

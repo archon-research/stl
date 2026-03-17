@@ -133,16 +133,29 @@ func TestRunIntegration_MissingAPIKey(t *testing.T) {
 }
 
 func TestRunIntegration_InvalidPollInterval(t *testing.T) {
-	_, _, dbCleanup := testutil.SetupTimescaleDB(t)
+	ctx := context.Background()
+
+	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
 	defer dbCleanup()
+
+	// Seed a prime so we get past the DB + prime lookup stages.
+	_, err := pool.Exec(ctx, `
+		INSERT INTO prime (name, vault_address)
+		VALUES ('spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')
+		ON CONFLICT (name) DO NOTHING
+	`)
+	if err != nil {
+		t.Fatalf("seed prime: %v", err)
+	}
 
 	apiServer := mockAnchorageAPI(t)
 	defer apiServer.Close()
 
-	err := run(context.Background(), []string{
-		"-db", "postgres://localhost/test",
+	err = run(ctx, []string{
+		"-db", dbURL,
 		"-api-url", apiServer.URL,
 		"-api-key", "test-key",
+		"-prime", "spark",
 		"-poll-interval", "not-a-duration",
 	})
 	if err == nil {
@@ -222,8 +235,12 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		case err := <-errCh:
 			t.Fatalf("run() returned early with error: %v", err)
 		case <-ticker.C:
-			pool.QueryRow(ctx, "SELECT count(*) FROM anchorage_package_snapshot").Scan(&snapshotCount)
-			pool.QueryRow(ctx, "SELECT count(*) FROM anchorage_operation").Scan(&opCount)
+			if err := pool.QueryRow(ctx, "SELECT count(*) FROM anchorage_package_snapshot").Scan(&snapshotCount); err != nil {
+				t.Fatalf("query snapshot count: %v", err)
+			}
+			if err := pool.QueryRow(ctx, "SELECT count(*) FROM anchorage_operation").Scan(&opCount); err != nil {
+				t.Fatalf("query operation count: %v", err)
+			}
 		}
 	}
 
