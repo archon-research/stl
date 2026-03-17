@@ -46,7 +46,7 @@ func (r *AnchorageSnapshotRepository) SaveSnapshots(ctx context.Context, snapsho
 
 	const cols = 19
 	valueStrings := make([]string, 0, len(snapshots))
-	valueArgs := make([]interface{}, 0, len(snapshots)*cols)
+	valueArgs := make([]any, 0, len(snapshots)*cols)
 
 	for i, snap := range snapshots {
 		base := i * cols

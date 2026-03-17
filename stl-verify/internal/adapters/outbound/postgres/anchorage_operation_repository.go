@@ -50,7 +50,7 @@ func (r *AnchorageOperationRepository) SaveOperations(ctx context.Context, opera
 
 	const cols = 11
 	valueStrings := make([]string, 0, len(operations))
-	valueArgs := make([]interface{}, 0, len(operations)*cols)
+	valueArgs := make([]any, 0, len(operations)*cols)
 
 	for i, op := range operations {
 		base := i * cols
