@@ -1131,12 +1131,33 @@ docker-release-morpho-indexer-staging:
 
 ECR_REPO_PRIME_DEBT_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-prime-debt-indexer
 
+# Build Docker image for prime debt indexer (ARM64 for EKS Graviton)
 docker-build-prime-debt-indexer:
+ifdef LOCAL
 	docker build -t stl-prime-debt-indexer:local -f Dockerfile.prime-debt-indexer .
+else
+	@echo "==> Building Prime Debt Indexer Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_PRIME_DEBT_INDEXER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.prime-debt-indexer \
+		-t $(ECR_REPO_PRIME_DEBT_INDEXER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_PRIME_DEBT_INDEXER):latest \
+		--load .
+endif
 
+# Push prime debt indexer Docker image to ECR
 docker-push-prime-debt-indexer: ecr-login
+	@echo "==> Pushing Prime Debt Indexer Docker image to ECR..."
+	docker push $(ECR_REPO_PRIME_DEBT_INDEXER):$(IMAGE_TAG)
 	docker push $(ECR_REPO_PRIME_DEBT_INDEXER):latest
 
+# Build and push prime debt indexer in one step (captures tag at start to ensure consistency)
 docker-release-prime-debt-indexer: ecr-login _docker-release-prime-debt-indexer-internal
 
 _docker-release-prime-debt-indexer-internal:
@@ -1156,8 +1177,10 @@ _docker-release-prime-debt-indexer-internal:
 		-f Dockerfile.prime-debt-indexer \
 		-t $(ECR_REPO_PRIME_DEBT_INDEXER):$$TAG \
 		-t $(ECR_REPO_PRIME_DEBT_INDEXER):latest \
-		--push \
-		. && \
+		--load . && \
+	echo "==> Pushing Prime Debt Indexer Docker image to ECR..." && \
+	docker push $(ECR_REPO_PRIME_DEBT_INDEXER):$$TAG && \
+	docker push $(ECR_REPO_PRIME_DEBT_INDEXER):latest && \
 	echo "==> Prime Debt Indexer Docker image released: $(ECR_REPO_PRIME_DEBT_INDEXER):$$TAG"
 
 docker-build-prime-debt-indexer-staging:

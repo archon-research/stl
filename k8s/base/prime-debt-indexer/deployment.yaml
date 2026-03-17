@@ -19,6 +19,8 @@ spec:
           # The overlay kustomization.yaml overrides newName + newTag.
           image: prime-debt-indexer
           envFrom:
+            - configMapRef:
+                name: prime-debt-indexer
             - secretRef:
                 # Populated by ExternalSecret — secret name mirrors the service.
                 name: prime-debt-indexer
