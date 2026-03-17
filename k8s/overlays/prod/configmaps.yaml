@@ -1,0 +1,103 @@
+# ConfigMaps for prod — non-secret environment variables matching ECS parity
+# Sensitive values (Redis, SQS, S3, SNS) are in ExternalSecrets via stl-sentinelprod-infra-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: watcher-config
+data:
+  CHAIN_ID: "1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://eth-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelprod"
+  ENABLE_BACKFILL: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-worker-config
+data:
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "4"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oracle-price-worker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "1"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "1"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: morpho-indexer-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-watcher-config
+data:
+  CHAIN_ID: "43114"
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://avax-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelprod"
+  ENABLE_BACKFILL: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-backup-worker-config
+data:
+  CHAIN_ID: "43114"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "4"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "43114"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
