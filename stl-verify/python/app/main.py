@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.api.v1 import allocations, status
+from app.api.v1 import allocations, risk, status
 from app.config import get_settings
 
 
@@ -25,3 +25,4 @@ app = FastAPI(title="stl-verify", lifespan=lifespan)
 
 app.include_router(status.router, prefix="/v1")
 app.include_router(allocations.router, prefix="/v1")
+app.include_router(risk.router, prefix="/v1")
