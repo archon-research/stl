@@ -46,7 +46,11 @@ func (r *AnchorageOperationRepository) SaveOperations(ctx context.Context, opera
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() {
+		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			r.logger.Error("rollback failed", "error", rbErr)
+		}
+	}()
 
 	const cols = 11
 	valueStrings := make([]string, 0, len(operations))
@@ -100,7 +104,7 @@ func (r *AnchorageOperationRepository) GetLastCursor(ctx context.Context, primeI
 	var operationID string
 	var createdAt time.Time
 	err := r.pool.QueryRow(ctx,
-		"SELECT operation_id, created_at FROM anchorage_operation WHERE prime_id = $1 ORDER BY created_at DESC LIMIT 1",
+		"SELECT operation_id, created_at FROM anchorage_operation WHERE prime_id = $1 ORDER BY created_at DESC, operation_id DESC LIMIT 1",
 		primeID,
 	).Scan(&operationID, &createdAt)
 

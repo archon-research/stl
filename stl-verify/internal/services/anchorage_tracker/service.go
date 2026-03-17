@@ -54,9 +54,12 @@ func (s *Service) Start(ctx context.Context) error {
 
 	ctx, s.cancel = context.WithCancel(ctx)
 
-	// Initial poll before entering the loop.
+	// Initial sync before entering the loop.
 	if _, err := s.poll(ctx); err != nil {
-		s.logger.Error("initial poll failed", "error", err)
+		return fmt.Errorf("initial poll: %w", err)
+	}
+	if _, err := s.syncOperations(ctx); err != nil {
+		return fmt.Errorf("initial operations sync: %w", err)
 	}
 
 	s.wg.Add(1)

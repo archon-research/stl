@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS anchorage_package_snapshot
 
     ltv_timestamp        TIMESTAMPTZ NOT NULL,
     snapshot_time        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (prime_id, package_id, asset_type, snapshot_time)
+    UNIQUE (prime_id, package_id, asset_type, custody_type, snapshot_time)
 ) WITH ( tsdb.hypertable, tsdb.partition_column = 'snapshot_time', tsdb.chunk_interval = '1 day' );
 
 CREATE INDEX IF NOT EXISTS idx_anchorage_pkg_snap_package_time
@@ -59,7 +59,7 @@ CREATE INDEX IF NOT EXISTS idx_anchorage_op_type_id
     ON anchorage_operation (type_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_anchorage_op_prime_time
-    ON anchorage_operation (prime_id, created_at DESC);
+    ON anchorage_operation (prime_id, created_at DESC, operation_id DESC);
 
 CREATE INDEX IF NOT EXISTS idx_anchorage_op_action
     ON anchorage_operation (action, created_at DESC);

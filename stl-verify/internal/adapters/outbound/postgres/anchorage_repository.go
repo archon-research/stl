@@ -2,10 +2,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -42,7 +44,11 @@ func (r *AnchorageSnapshotRepository) SaveSnapshots(ctx context.Context, snapsho
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() {
+		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			r.logger.Error("rollback failed", "error", rbErr)
+		}
+	}()
 
 	const cols = 19
 	valueStrings := make([]string, 0, len(snapshots))
