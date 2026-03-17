@@ -127,8 +127,8 @@ func parseCSVUsers(r io.Reader, protocolSlug string) ([]common.Address, error) {
 			protoCol = i
 		}
 	}
-	if addrCol < 0 || protoCol < 0 {
-		return nil, fmt.Errorf("CSV must have 'user_address' and 'protocols' columns")
+	if addrCol < 0 {
+		return nil, fmt.Errorf("CSV must have a 'user_address' column")
 	}
 
 	var users []common.Address
@@ -142,17 +142,20 @@ func parseCSVUsers(r io.Reader, protocolSlug string) ([]common.Address, error) {
 			return nil, fmt.Errorf("reading CSV row: %w", err)
 		}
 
-		if len(record) <= max(addrCol, protoCol) {
-			return nil, fmt.Errorf("row %d: expected at least %d columns, got %d", len(users)+1, max(addrCol, protoCol)+1, len(record))
+		if len(record) <= addrCol {
+			return nil, fmt.Errorf("row %d: expected at least %d columns, got %d", len(users)+1, addrCol+1, len(record))
 		}
 
-		protocols := record[protoCol]
-		// Strip brackets: "[aave_v3_ethereum spark_ethereum]" -> "aave_v3_ethereum spark_ethereum"
-		protocols = strings.TrimPrefix(protocols, "[")
-		protocols = strings.TrimSuffix(protocols, "]")
+		// If CSV has a protocols column, filter by it; otherwise include all rows.
+		if protoCol >= 0 && len(record) > protoCol {
+			protocols := record[protoCol]
+			// Strip brackets: "[aave_v3_ethereum spark_ethereum]" -> "aave_v3_ethereum spark_ethereum"
+			protocols = strings.TrimPrefix(protocols, "[")
+			protocols = strings.TrimSuffix(protocols, "]")
 
-		if !containsSlug(protocols, protocolSlug) {
-			continue
+			if !containsSlug(protocols, protocolSlug) {
+				continue
+			}
 		}
 
 		rawAddr := strings.TrimSpace(record[addrCol])
@@ -358,15 +361,11 @@ func run(args []string) error {
 			logger.Info("batch RPC done", "batch", batchIdx+1, "rpcDuration", time.Since(rpcStart).Round(time.Millisecond))
 
 			dbStart := time.Now()
-			var persisted int
+			var positions []aavelike_position_tracker.UserPositionData
 			for _, user := range batch {
 				result, ok := results[user]
 				if !ok {
 					return fmt.Errorf("missing result for user %s", user.Hex())
-				}
-				if len(result.Collaterals) == 0 && len(result.Debts) == 0 && result.Err == nil {
-					processed.Add(1)
-					continue
 				}
 				if result.Err != nil {
 					errCount.Add(1)
@@ -376,32 +375,31 @@ func run(args []string) error {
 					processed.Add(1)
 					continue
 				}
-
-				persistStart := time.Now()
-				if err := trackerSvc.PersistUserPosition(
-					gCtx, user, cfg.protocolAddress, cfg.chainID,
-					int64(blockNumber), 0, result.Collaterals, result.Debts,
-				); err != nil {
-					errCount.Add(1)
-					logger.Warn("failed to persist user position",
-						"user", user.Hex(),
-						"error", err)
+				if len(result.Collaterals) == 0 && len(result.Debts) == 0 {
+					processed.Add(1)
+					continue
 				}
-				persisted++
-				if persisted%10 == 0 {
-					logger.Debug("batch persist progress",
-						"batch", batchIdx+1,
-						"persisted", persisted,
-						"lastPersistMs", time.Since(persistStart).Milliseconds())
-				}
-
-				processed.Add(1)
+				positions = append(positions, aavelike_position_tracker.UserPositionData{
+					User:        user,
+					Collaterals: result.Collaterals,
+					Debts:       result.Debts,
+				})
 			}
+
+			if len(positions) > 0 {
+				if err := trackerSvc.PersistUserPositionBatch(
+					gCtx, positions, cfg.protocolAddress, cfg.chainID,
+					int64(blockNumber), 0,
+				); err != nil {
+					return fmt.Errorf("batch %d DB persist failed: %w", batchIdx+1, err)
+				}
+			}
+			processed.Add(int64(len(positions)))
 
 			n := processed.Load()
 			logger.Info("batch done",
 				"batch", batchIdx+1,
-				"persisted", persisted,
+				"persisted", len(positions),
 				"rpc", time.Since(rpcStart).Round(time.Millisecond),
 				"db", time.Since(dbStart).Round(time.Millisecond),
 				"total", time.Since(batchStart).Round(time.Millisecond),

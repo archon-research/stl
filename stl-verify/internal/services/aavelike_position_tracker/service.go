@@ -847,6 +847,147 @@ func (s *Service) PersistUserPosition(
 	})
 }
 
+// UserPositionData holds position data for a single user, used by PersistUserPositionBatch.
+type UserPositionData struct {
+	User        common.Address
+	Collaterals []aavelike.CollateralData
+	Debts       []aavelike.DebtData
+}
+
+// PersistUserPositionBatch saves position data for multiple users in a single transaction,
+// using bulk upserts for users, tokens, borrowers, and collaterals. This dramatically
+// reduces DB round trips compared to calling PersistUserPosition per user.
+func (s *Service) PersistUserPositionBatch(
+	ctx context.Context,
+	positions []UserPositionData,
+	protocolAddress common.Address,
+	chainID, blockNumber int64,
+	blockVersion int,
+) error {
+	if len(positions) == 0 {
+		return nil
+	}
+
+	protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
+	if !exists {
+		return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
+	}
+
+	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		// 1. Bulk upsert all users (1 round trip).
+		userEntities := make([]entity.User, len(positions))
+		for i, p := range positions {
+			userEntities[i] = entity.User{
+				ChainID:        chainID,
+				Address:        p.User,
+				FirstSeenBlock: blockNumber,
+			}
+		}
+		userIDs, err := s.userRepo.GetOrCreateUsers(ctx, tx, userEntities)
+		if err != nil {
+			return fmt.Errorf("failed to bulk upsert users: %w", err)
+		}
+
+		// 2. Upsert protocol (1 round trip — same protocol for all users).
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
+		if err != nil {
+			return fmt.Errorf("failed to get protocol: %w", err)
+		}
+
+		// 3. Collect all unique tokens across all users and bulk upsert (1 round trip).
+		tokenInputs := make(map[common.Address]outbound.TokenInput)
+		for _, p := range positions {
+			for _, d := range p.Debts {
+				if _, exists := tokenInputs[d.Asset]; !exists {
+					tokenInputs[d.Asset] = outbound.TokenInput{
+						ChainID:        chainID,
+						Address:        d.Asset,
+						Symbol:         normalizeTokenSymbol(d.Symbol),
+						Decimals:       d.Decimals,
+						CreatedAtBlock: blockNumber,
+					}
+				}
+			}
+			for _, c := range p.Collaterals {
+				if _, exists := tokenInputs[c.Asset]; !exists {
+					tokenInputs[c.Asset] = outbound.TokenInput{
+						ChainID:        chainID,
+						Address:        c.Asset,
+						Symbol:         normalizeTokenSymbol(c.Symbol),
+						Decimals:       c.Decimals,
+						CreatedAtBlock: blockNumber,
+					}
+				}
+			}
+		}
+		tokenSlice := make([]outbound.TokenInput, 0, len(tokenInputs))
+		for _, t := range tokenInputs {
+			tokenSlice = append(tokenSlice, t)
+		}
+		tokenIDs, err := s.tokenRepo.GetOrCreateTokens(ctx, tx, tokenSlice)
+		if err != nil {
+			return fmt.Errorf("failed to bulk upsert tokens: %w", err)
+		}
+
+		// 4. Build all borrower and collateral records, then batch insert (2 round trips).
+		var borrowerRecords []outbound.BorrowerRecord
+		var collateralRecords []outbound.CollateralRecord
+
+		for _, p := range positions {
+			userID, ok := userIDs[p.User]
+			if !ok {
+				return fmt.Errorf("missing user ID for %s", p.User.Hex())
+			}
+
+			for _, d := range p.Debts {
+				tokenID, ok := tokenIDs[d.Asset]
+				if !ok {
+					return fmt.Errorf("missing token ID for debt asset %s", d.Asset.Hex())
+				}
+				borrowerRecords = append(borrowerRecords, outbound.BorrowerRecord{
+					UserID:       userID,
+					ProtocolID:   protocolID,
+					TokenID:      tokenID,
+					BlockNumber:  blockNumber,
+					BlockVersion: blockVersion,
+					Amount:       d.CurrentDebt,
+					Change:       big.NewInt(0),
+					EventType:    "Snapshot",
+					TxHash:       []byte{},
+				})
+			}
+
+			for _, c := range p.Collaterals {
+				tokenID, ok := tokenIDs[c.Asset]
+				if !ok {
+					return fmt.Errorf("missing token ID for collateral asset %s", c.Asset.Hex())
+				}
+				collateralRecords = append(collateralRecords, outbound.CollateralRecord{
+					UserID:            userID,
+					ProtocolID:        protocolID,
+					TokenID:           tokenID,
+					BlockNumber:       blockNumber,
+					BlockVersion:      blockVersion,
+					Amount:            c.ActualBalance,
+					Change:            big.NewInt(0),
+					EventType:         "Snapshot",
+					TxHash:            []byte{},
+					CollateralEnabled: c.CollateralEnabled,
+				})
+			}
+		}
+
+		if err := s.positionRepo.SaveBorrowers(ctx, tx, borrowerRecords); err != nil {
+			return fmt.Errorf("failed to batch save borrowers: %w", err)
+		}
+		if err := s.positionRepo.SaveBorrowerCollaterals(ctx, tx, collateralRecords); err != nil {
+			return fmt.Errorf("failed to batch save collaterals: %w", err)
+		}
+
+		return nil
+	})
+}
+
 // saveBorrowerRecord saves a single borrow/repay position record.
 // amount is the current outstanding debt after the event (raw wei) and change is the
 // raw wei event delta.

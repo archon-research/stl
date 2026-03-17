@@ -59,6 +59,17 @@ func (m *mockPositionRepository) SaveBorrowerCollateral(ctx context.Context, tx 
 	return nil
 }
 
+func (m *mockPositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, records []outbound.BorrowerRecord) error {
+	for _, rec := range records {
+		m.saveBorrowerCalls = append(m.saveBorrowerCalls, saveBorrowerCall{
+			Amount:    rec.Amount,
+			Change:    rec.Change,
+			EventType: rec.EventType,
+		})
+	}
+	return nil
+}
+
 func (m *mockPositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx.Tx, records []outbound.CollateralRecord) error {
 	m.saveBorrowerCollateralsCalls = append(m.saveBorrowerCollateralsCalls, records)
 	if m.SaveBorrowerCollateralsFn != nil {

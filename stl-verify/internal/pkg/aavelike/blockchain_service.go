@@ -496,27 +496,35 @@ func (s *BlockchainService) batchGetUserReserveDataMultiUser(
 		return make(map[common.Address]map[common.Address]ActualUserReserveData), nil
 	}
 
-	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
-	if err != nil {
-		return nil, fmt.Errorf("multicall failed: %w", err)
-	}
+	// Split into chunks to avoid exceeding gas limits. Each getUserReserveData
+	// call uses ~25-30k gas; a 500-call chunk stays well under typical limits.
+	const maxCallsPerChunk = 500
 
 	dataMap := make(map[common.Address]map[common.Address]ActualUserReserveData)
-	for i, result := range results {
-		key := keys[i]
-		if !result.Success || len(result.ReturnData) == 0 {
-			return nil, fmt.Errorf("getUserReserveData call failed for user=%s asset=%s", key.User.Hex(), key.Asset.Hex())
-		}
+	for start := 0; start < len(calls); start += maxCallsPerChunk {
+		end := min(start+maxCallsPerChunk, len(calls))
 
-		data, err := s.decodeUserReserveDataResult(key.Asset, result.ReturnData)
+		results, err := s.multicallClient.Execute(ctx, calls[start:end], big.NewInt(blockNumber))
 		if err != nil {
-			return nil, fmt.Errorf("decoding getUserReserveData for user=%s asset=%s: %w", key.User.Hex(), key.Asset.Hex(), err)
+			return nil, fmt.Errorf("multicall failed (chunk %d-%d): %w", start, end, err)
 		}
 
-		if dataMap[key.User] == nil {
-			dataMap[key.User] = make(map[common.Address]ActualUserReserveData)
+		for i, result := range results {
+			key := keys[start+i]
+			if !result.Success || len(result.ReturnData) == 0 {
+				return nil, fmt.Errorf("getUserReserveData call failed for user=%s asset=%s", key.User.Hex(), key.Asset.Hex())
+			}
+
+			data, err := s.decodeUserReserveDataResult(key.Asset, result.ReturnData)
+			if err != nil {
+				return nil, fmt.Errorf("decoding getUserReserveData for user=%s asset=%s: %w", key.User.Hex(), key.Asset.Hex(), err)
+			}
+
+			if dataMap[key.User] == nil {
+				dataMap[key.User] = make(map[common.Address]ActualUserReserveData)
+			}
+			dataMap[key.User][key.Asset] = data
 		}
-		dataMap[key.User][key.Asset] = data
 	}
 
 	return dataMap, nil

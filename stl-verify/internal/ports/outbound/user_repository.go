@@ -3,6 +3,7 @@ package outbound
 import (
 	"context"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -13,6 +14,9 @@ import (
 type UserRepository interface {
 	// GetOrCreateUser retrieves a user by address, or creates it if it doesn't exist
 	GetOrCreateUser(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error)
+
+	// GetOrCreateUsers bulk-upserts multiple users and returns a map of address → user ID.
+	GetOrCreateUsers(ctx context.Context, tx pgx.Tx, users []entity.User) (map[common.Address]int64, error)
 
 	// UpsertUserProtocolMetadata upserts user protocol metadata records.
 	// This stores protocol-specific data like health factors, LTV, etc.

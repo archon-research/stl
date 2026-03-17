@@ -45,6 +45,42 @@ func NewTokenRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) 
 	}, nil
 }
 
+func (r *TokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, tokens []outbound.TokenInput) (map[common.Address]int64, error) {
+	if len(tokens) == 0 {
+		return make(map[common.Address]int64), nil
+	}
+
+	batch := &pgx.Batch{}
+	for _, t := range tokens {
+		batch.Queue(
+			`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, '{}', NOW())
+			 ON CONFLICT (chain_id, address) DO UPDATE SET
+			     created_at_block = LEAST(token.created_at_block, EXCLUDED.created_at_block),
+			     updated_at = CASE
+			         WHEN EXCLUDED.created_at_block < token.created_at_block THEN NOW()
+			         ELSE token.updated_at
+			     END
+			 RETURNING id`,
+			t.ChainID, t.Address.Bytes(), t.Symbol, t.Decimals, t.CreatedAtBlock,
+		)
+	}
+
+	br := tx.SendBatch(ctx, batch)
+	defer br.Close()
+
+	result := make(map[common.Address]int64, len(tokens))
+	for i, t := range tokens {
+		var id int64
+		if err := br.QueryRow().Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to get or create token %d (%s): %w", i, t.Address.Hex(), err)
+		}
+		result[t.Address] = id
+	}
+
+	return result, nil
+}
+
 // GetOrCreateToken retrieves a token by address or creates it if it doesn't exist.
 // This method participates in an external transaction.
 func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {

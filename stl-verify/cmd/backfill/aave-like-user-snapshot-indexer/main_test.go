@@ -213,7 +213,30 @@ func TestParseCSVUsers(t *testing.T) {
 			wantUsers:    []string{},
 		},
 		{
-			name:         "missing columns returns error",
+			name: "address-only CSV includes all users",
+			csv: `user_address
+0x0000000000000000000000000000000000000001
+0x0000000000000000000000000000000000000002
+0x0000000000000000000000000000000000000003`,
+			protocolSlug: "spark_ethereum",
+			wantUsers: []string{
+				"0x0000000000000000000000000000000000000001",
+				"0x0000000000000000000000000000000000000002",
+				"0x0000000000000000000000000000000000000003",
+			},
+		},
+		{
+			name: "address-only CSV deduplicates",
+			csv: `user_address
+0x0000000000000000000000000000000000000001
+0x0000000000000000000000000000000000000001`,
+			protocolSlug: "spark_ethereum",
+			wantUsers: []string{
+				"0x0000000000000000000000000000000000000001",
+			},
+		},
+		{
+			name:         "missing user_address column returns error",
 			csv:          "address,chain\n0x1,1\n",
 			protocolSlug: "spark_ethereum",
 			wantErr:      true,

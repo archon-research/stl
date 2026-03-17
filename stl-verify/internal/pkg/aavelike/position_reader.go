@@ -87,6 +87,11 @@ func (r *PositionReader) GetOrCreateBlockchainService(chainID int64, protocolAdd
 
 // GetUserPositionData fetches current collateral and debt positions for a user
 // from on-chain data using multicall batching.
+//
+// NOTE: The UIPoolDataProvider's ScaledVariableDebt field is unreliable on
+// upgraded Aave V3 deployments (returns 0 even for users with debt). To work
+// around this, we query the PoolDataProvider for ALL reserves and derive debt
+// from the actual CurrentVariableDebt values.
 func (r *PositionReader) GetUserPositionData(ctx context.Context, user common.Address, protocolAddress common.Address, chainID, blockNumber int64) ([]CollateralData, []DebtData, error) {
 	blockchainSvc, err := r.GetOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
@@ -98,20 +103,17 @@ func (r *PositionReader) GetUserPositionData(ctx context.Context, user common.Ad
 		return nil, nil, fmt.Errorf("failed to get user reserves data: %w", err)
 	}
 
-	var collateralAssets, debtAssets []common.Address
+	// Collect ALL non-zero-address reserves. We query the PoolDataProvider for
+	// all of them because the UIPoolDataProvider's ScaledVariableDebt is broken
+	// on upgraded Aave V3 deployments.
+	var allReserveAssets []common.Address
 	tokensToFetch := make(map[common.Address]bool)
 	for _, rv := range reserves {
 		if rv.UnderlyingAsset == (common.Address{}) {
 			continue
 		}
-		if rv.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && rv.UsageAsCollateralEnabledOnUser {
-			collateralAssets = append(collateralAssets, rv.UnderlyingAsset)
-			tokensToFetch[rv.UnderlyingAsset] = true
-		}
-		if rv.ScaledVariableDebt.Cmp(big.NewInt(0)) > 0 {
-			debtAssets = append(debtAssets, rv.UnderlyingAsset)
-			tokensToFetch[rv.UnderlyingAsset] = true
-		}
+		allReserveAssets = append(allReserveAssets, rv.UnderlyingAsset)
+		tokensToFetch[rv.UnderlyingAsset] = true
 	}
 
 	if len(tokensToFetch) == 0 {
@@ -123,18 +125,16 @@ func (r *PositionReader) GetUserPositionData(ctx context.Context, user common.Ad
 		return nil, nil, fmt.Errorf("failed to get token metadata: %w", err)
 	}
 
-	allAssets := make([]common.Address, 0, len(tokensToFetch))
-	for asset := range tokensToFetch {
-		allAssets = append(allAssets, asset)
-	}
-
-	actualDataMap, err := blockchainSvc.batchGetUserReserveData(ctx, allAssets, user, blockNumber)
+	actualDataMap, err := blockchainSvc.batchGetUserReserveData(ctx, allReserveAssets, user, blockNumber)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get user reserve data: %w", err)
 	}
 
-	collaterals := buildCollateralData(collateralAssets, metadataMap, actualDataMap, r.logger)
-	debts := buildDebtData(debtAssets, metadataMap, actualDataMap, r.logger)
+	// Both buildCollateralData and buildDebtData filter based on actual
+	// PoolDataProvider values (CurrentATokenBalance, CurrentVariableDebt),
+	// so passing all reserves is safe — only non-zero positions are included.
+	collaterals := buildCollateralData(allReserveAssets, metadataMap, actualDataMap, r.logger)
+	debts := buildDebtData(allReserveAssets, metadataMap, actualDataMap, r.logger)
 
 	return collaterals, debts, nil
 }
@@ -149,6 +149,11 @@ type UserPositionResult struct {
 // GetBatchUserPositionData fetches position data for multiple users in batch,
 // using 2 multicalls instead of 2N. Results are functionally identical to
 // calling GetUserPositionData for each user individually.
+//
+// NOTE: See GetUserPositionData comment — the UIPoolDataProvider's
+// ScaledVariableDebt is unreliable on upgraded Aave V3 deployments, so we
+// query the PoolDataProvider for ALL reserves per user and derive both
+// collateral and debt from the actual values.
 func (r *PositionReader) GetBatchUserPositionData(
 	ctx context.Context,
 	users []common.Address,
@@ -170,14 +175,12 @@ func (r *PositionReader) GetBatchUserPositionData(
 		return nil, fmt.Errorf("batch getUserReservesData failed: %w", err)
 	}
 
-	// For each user, identify collateral/debt assets and collect tokens for metadata.
-	type userAssetInfo struct {
-		collateralAssets []common.Address
-		debtAssets       []common.Address
-	}
-	perUser := make(map[common.Address]*userAssetInfo, len(users))
+	// For each user, collect ALL non-zero-address reserves. We query the
+	// PoolDataProvider for all of them because the UIPoolDataProvider's
+	// ScaledVariableDebt is broken on upgraded Aave V3 deployments.
+	perUserReserves := make(map[common.Address][]common.Address, len(users))
 	allTokens := make(map[common.Address]bool)
-	userAssetsForData := make(map[common.Address][]common.Address) // for batchGetUserReserveDataMultiUser
+	userAssetsForData := make(map[common.Address][]common.Address)
 
 	for _, user := range users {
 		if _, hasErr := reserveErrors[user]; hasErr {
@@ -188,31 +191,18 @@ func (r *PositionReader) GetBatchUserPositionData(
 			return nil, fmt.Errorf("missing reserves result for user %s", user.Hex())
 		}
 
-		info := &userAssetInfo{}
-		assetsNeeded := make(map[common.Address]bool)
+		var reserveAssets []common.Address
 		for _, rv := range reserves {
 			if rv.UnderlyingAsset == (common.Address{}) {
 				continue
 			}
-			if rv.ScaledATokenBalance.Cmp(big.NewInt(0)) > 0 && rv.UsageAsCollateralEnabledOnUser {
-				info.collateralAssets = append(info.collateralAssets, rv.UnderlyingAsset)
-				allTokens[rv.UnderlyingAsset] = true
-				assetsNeeded[rv.UnderlyingAsset] = true
-			}
-			if rv.ScaledVariableDebt.Cmp(big.NewInt(0)) > 0 {
-				info.debtAssets = append(info.debtAssets, rv.UnderlyingAsset)
-				allTokens[rv.UnderlyingAsset] = true
-				assetsNeeded[rv.UnderlyingAsset] = true
-			}
+			reserveAssets = append(reserveAssets, rv.UnderlyingAsset)
+			allTokens[rv.UnderlyingAsset] = true
 		}
 
-		if len(assetsNeeded) > 0 {
-			perUser[user] = info
-			assets := make([]common.Address, 0, len(assetsNeeded))
-			for a := range assetsNeeded {
-				assets = append(assets, a)
-			}
-			userAssetsForData[user] = assets
+		if len(reserveAssets) > 0 {
+			perUserReserves[user] = reserveAssets
+			userAssetsForData[user] = reserveAssets
 		}
 	}
 
@@ -225,7 +215,7 @@ func (r *PositionReader) GetBatchUserPositionData(
 		}
 	}
 
-	// Multicall 2: getUserReserveData for all user×asset pairs in one call.
+	// Multicall 2: getUserReserveData for all user×reserve pairs in one call.
 	var allActualData map[common.Address]map[common.Address]ActualUserReserveData
 	if len(userAssetsForData) > 0 {
 		allActualData, err = blockchainSvc.batchGetUserReserveDataMultiUser(ctx, userAssetsForData, blockNumber)
@@ -234,7 +224,7 @@ func (r *PositionReader) GetBatchUserPositionData(
 		}
 	}
 
-	// Build results for each user.
+	// Build results for each user from actual PoolDataProvider data.
 	results := make(map[common.Address]UserPositionResult, len(users))
 	for _, user := range users {
 		if resErr, hasErr := reserveErrors[user]; hasErr {
@@ -242,8 +232,8 @@ func (r *PositionReader) GetBatchUserPositionData(
 			continue
 		}
 
-		info, hasPositions := perUser[user]
-		if !hasPositions {
+		reserves, hasReserves := perUserReserves[user]
+		if !hasReserves {
 			results[user] = UserPositionResult{
 				Collaterals: []CollateralData{},
 				Debts:       []DebtData{},
@@ -256,8 +246,8 @@ func (r *PositionReader) GetBatchUserPositionData(
 			userActualData = make(map[common.Address]ActualUserReserveData)
 		}
 
-		collaterals := buildCollateralData(info.collateralAssets, metadataMap, userActualData, r.logger)
-		debts := buildDebtData(info.debtAssets, metadataMap, userActualData, r.logger)
+		collaterals := buildCollateralData(reserves, metadataMap, userActualData, r.logger)
+		debts := buildDebtData(reserves, metadataMap, userActualData, r.logger)
 		results[user] = UserPositionResult{
 			Collaterals: collaterals,
 			Debts:       debts,
