@@ -320,13 +320,13 @@ async def test_vault_backed_breakdown(
     assert "WETH" in by_symbol
     assert "WBTC" in by_symbol
 
-    assert by_symbol["USDC"].amount == Decimal("530000.00")
+    assert by_symbol["USDC"].backing_usd == Decimal("530000.00")
     assert by_symbol["USDC"].backing_pct == Decimal("53.00")
 
-    assert by_symbol["WETH"].amount == Decimal("320000.00")
+    assert by_symbol["WETH"].backing_usd == Decimal("320000.00")
     assert by_symbol["WETH"].backing_pct == Decimal("32.00")
 
-    assert by_symbol["WBTC"].amount == Decimal("150000.00")
+    assert by_symbol["WBTC"].backing_usd == Decimal("150000.00")
     assert by_symbol["WBTC"].backing_pct == Decimal("15.00")
 
 
@@ -357,7 +357,7 @@ async def test_items_ordered_by_backed_amount_desc(
     """Results should be ordered by backed_amount descending."""
     result = await repository.get_backed_breakdown(test_ids["vault_id"])
 
-    amounts = [item.amount for item in result.items]
+    amounts = [item.backing_usd for item in result.items]
     assert amounts == sorted(amounts, reverse=True)
 
 
@@ -405,6 +405,6 @@ async def test_vault_with_no_market_positions_is_fully_idle(
 
     item = result.items[0]
     assert item.symbol == "USDC"
-    assert item.amount == Decimal("500000.00")
+    assert item.backing_usd == Decimal("500000.00")
     assert item.backing_pct == Decimal("100.00")
     assert item.token_id == test_ids["usdc_id"]

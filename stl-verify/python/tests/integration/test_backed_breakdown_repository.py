@@ -317,20 +317,23 @@ async def repository(
 async def test_single_borrower_full_attribution(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
-    """Correct attribution across three users with raw-wei seed data.
+    """Correct USD-space attribution across three users with raw-wei seed data.
 
-    User 1: 10 WETH + 0.5 cbBTC collateral, latest spUSDS debt = 30,000 (ratio 1.0)
-    User 2: 5 WETH collateral, latest spUSDS debt = 6,000, spUSDC debt = 4,000 (ratio 0.6)
+    Seed prices: WETH=$2000, cbBTC=$50000, spUSDS=$1.
+
+    User 1: 10 WETH ($20,000) + 0.5 cbBTC ($25,000) collateral, spUSDS debt = 30,000
+      WETH backing  = (20,000 / 45,000) × 30,000 = $13,333.33
+      cbBTC backing = (25,000 / 45,000) × 30,000 = $16,666.67
+
+    User 2: 5 WETH ($10,000) collateral, spUSDS debt = 6,000 (spUSDC debt is ignored)
+      WETH backing  = (10,000 / 10,000) × 6,000  = $6,000.00
+
     User 3: 8 WETH collateral disabled in latest event → excluded
 
-    Attributed to spUSDS:
-      User 1 WETH:  10 × 1.0 = 10
-      User 1 cbBTC: 0.5 × 1.0 = 0.5
-      User 2 WETH:  5 × 0.6  = 3
-
-    Totals: WETH = 13, cbBTC = 0.5, grand total = 13.5
-    WETH pct  = 13 / 13.5 × 100 = 96.2963%
-    cbBTC pct = 0.5 / 13.5 × 100 = 3.7037%
+    Totals:
+      WETH  = $13,333.33 + $6,000.00 = $19,333.33  (53.7037%)
+      cbBTC = $16,666.67              = $16,666.67  (46.2963%)
+      Grand total = $36,000 = total spUSDS debt with collateral
     """
     result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
 
@@ -343,11 +346,11 @@ async def test_single_borrower_full_attribution(
     assert "WETH" in by_symbol
     assert "cbBTC" in by_symbol
 
-    assert by_symbol["WETH"].amount == Decimal("13.00000000")
-    assert by_symbol["cbBTC"].amount == Decimal("0.50000000")
+    assert by_symbol["WETH"].backing_usd == Decimal("19333.33")
+    assert by_symbol["cbBTC"].backing_usd == Decimal("16666.67")
 
-    assert by_symbol["WETH"].backing_pct == Decimal("96.2963")
-    assert by_symbol["cbBTC"].backing_pct == Decimal("3.7037")
+    assert by_symbol["WETH"].backing_pct == Decimal("53.7037")
+    assert by_symbol["cbBTC"].backing_pct == Decimal("46.2963")
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -384,7 +387,9 @@ async def test_latest_debt_snapshot_used_not_summed(
     """
     result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
     by_symbol = {item.symbol: item for item in result.items}
-    assert by_symbol["WETH"].amount == Decimal("13.00000000")
+    # With incorrect SUM: User 1 has 50,000 spUSDS, User 2 has 10,000.
+    # WETH backing would be (20000/45000)×50000 + 10000 = $32,222.22, not $19,333.33.
+    assert by_symbol["WETH"].backing_usd == Decimal("19333.33")
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -393,10 +398,11 @@ async def test_disabled_collateral_not_attributed(
 ) -> None:
     """Regression guard: collateral disabled in the latest event must be excluded.
 
-    User 3 has 8 WETH: collateral_enabled=True at block N, then False at N+1.
+    User 3 has 8 WETH ($16,000): collateral_enabled=True at block N, then False at N+1.
     The latest event (False) must win. If the earlier enabled snapshot is used instead,
-    WETH total = 10 + 3 + 8 = 21, not 13.
+    User 3 would contribute (16000/16000)×5000 = $5,000 to WETH backing,
+    making WETH total = $19,333.33 + $5,000 = $24,333.33, not $19,333.33.
     """
     result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
     by_symbol = {item.symbol: item for item in result.items}
-    assert by_symbol["WETH"].amount == Decimal("13.00000000")
+    assert by_symbol["WETH"].backing_usd == Decimal("19333.33")

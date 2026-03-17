@@ -14,6 +14,6 @@ class BackedBreakdownRepository(Protocol):
                 for lending protocols, vault ID for Morpho).
 
         Returns:
-            BackedBreakdown with amount-first collateral contributions.
+            BackedBreakdown with USD-denominated collateral contributions.
         """
         ...

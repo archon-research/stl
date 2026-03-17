@@ -56,42 +56,75 @@ user_collateral AS (
     WHERE collateral_enabled = true
 ),
 
--- Step 3: Total and target debt per user (only users who borrowed the target token)
-user_debt_totals AS (
-    SELECT
-        ud.user_id,
-        SUM(ud.debt_amount)                                                         AS total_debt_amount,
-        SUM(ud.debt_amount) FILTER (WHERE ud.token_id = :backed_asset_id)           AS target_debt_amount
+-- Step 3: Latest USD price per token from the protocol's oracle
+token_prices AS (
+    SELECT DISTINCT ON (otp.token_id)
+        otp.token_id,
+        otp.price_usd
+    FROM onchain_token_price otp
+    JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+    WHERE po.protocol_id = :protocol_id
+    ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC
+),
+
+-- Step 4: Target (backed asset) debt per user, only for users who borrowed it.
+user_target_debt AS (
+    SELECT ud.user_id,
+        SUM(ud.debt_amount) FILTER (WHERE ud.token_id = :backed_asset_id) AS target_debt_amount
     FROM user_debts ud
     GROUP BY ud.user_id
     HAVING SUM(ud.debt_amount) FILTER (WHERE ud.token_id = :backed_asset_id) > 0
 ),
 
--- Step 4: Attribute each user's collateral proportionally to the target debt token
+-- Step 5: Collateral USD value per user per token, and each user's total collateral USD.
+-- Only includes users who have target debt (inner join with user_target_debt).
+-- Collateral without a price is excluded — it cannot contribute to USD-denominated backing.
+user_collateral_usd AS (
+    SELECT
+        uc.user_id,
+        uc.token_id,
+        uc.collateral_amount * tp.price_usd AS collateral_usd
+    FROM user_collateral uc
+    JOIN token_prices tp ON tp.token_id = uc.token_id
+    JOIN user_target_debt utd ON utd.user_id = uc.user_id
+),
+user_total_collateral_usd AS (
+    SELECT user_id, SUM(collateral_usd) AS total_collateral_usd
+    FROM user_collateral_usd
+    GROUP BY user_id
+),
+
+-- Step 6: Attribute backing in USD space.
+-- Each collateral token's contribution = its share of the user's total collateral USD
+-- multiplied by the user's target debt. This ensures SUM(backing_usd) == total target debt,
+-- regardless of overcollateralisation.
 attributed AS (
     SELECT
         uc.user_id,
         uc.token_id,
-        uc.collateral_amount * (udt.target_debt_amount / udt.total_debt_amount) AS collateral_attributed
-    FROM user_collateral uc
-    JOIN user_debt_totals udt ON udt.user_id = uc.user_id
+        (uc.collateral_usd / utc.total_collateral_usd) * utd.target_debt_amount AS backing_usd
+    FROM user_collateral_usd uc
+    JOIN user_total_collateral_usd utc ON utc.user_id = uc.user_id
+    JOIN user_target_debt utd ON utd.user_id = uc.user_id
 )
 
--- Step 5: Aggregate across all borrowers
+-- Step 7: Aggregate across all borrowers
 SELECT
     t.id AS token_id,
     t.symbol,
-    ROUND(SUM(a.collateral_attributed)::numeric, 8) AS amount,
+    ROUND(SUM(a.backing_usd)::numeric, 2) AS backing_usd,
     ROUND(
-        SUM(a.collateral_attributed)
-        / SUM(SUM(a.collateral_attributed)) OVER ()
+        SUM(a.backing_usd)
+        / SUM(SUM(a.backing_usd)) OVER ()
         * 100,
         4
-    ) AS backing_pct
+    ) AS backing_pct,
+    tp.price_usd
 FROM attributed a
 JOIN token t ON t.id = a.token_id
-GROUP BY t.id, t.symbol
-ORDER BY amount DESC;
+LEFT JOIN token_prices tp ON tp.token_id = a.token_id
+GROUP BY t.id, t.symbol, tp.price_usd
+ORDER BY backing_usd DESC;
 """
 
 
@@ -115,8 +148,9 @@ class AaveLikeBackedBreakdownRepository:
             CollateralContribution(
                 token_id=row.token_id,
                 symbol=row.symbol,
-                amount=Decimal(str(row.amount)),
+                backing_usd=Decimal(str(row.backing_usd)),
                 backing_pct=Decimal(str(row.backing_pct)),
+                price_usd=Decimal(str(row.price_usd)) if row.price_usd is not None else None,
             )
             for row in rows
         )
