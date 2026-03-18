@@ -10,8 +10,13 @@ resources:
   - ../../base/sparklend-position-tracker
   - ../../base/morpho-indexer
   - ../../base/allocation-tracker
+  - ../../base/avalanche-watcher
+  - ../../base/avalanche-backup-worker
   - ../../base/avalanche-sparklend-position-tracker
+  - ../../base/temporal-worker
+  - ../../base/prime-debt-indexer
   - external-secrets.yaml
+  - configmaps.yaml
 
 # IAM bindings are managed via EKS Pod Identity associations in the infra repo (SEN-230).
 # No annotations needed on ServiceAccounts.
@@ -38,4 +43,17 @@ images:
   - name: avalanche-sparklend-position-tracker
     # Shares the sparklend-position-tracker image — no separate ECR repo exists
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-sparklend-position-tracker
+    newTag: latest
+  - name: avalanche-watcher
+    # Shares the watcher image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
+    newTag: latest
+  - name: avalanche-backup-worker
+    # Shares the backup-worker image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
+  - name: temporal-worker
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-temporal-worker
+    newTag: latest
+  - name: prime-debt-indexer
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-prime-debt-indexer
     newTag: latest

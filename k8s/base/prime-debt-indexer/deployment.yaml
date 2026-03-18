@@ -1,46 +1,39 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: watcher
+  name: prime-debt-indexer
 spec:
   replicas: 1
-  strategy:
-    type: Recreate
   selector:
     matchLabels:
-      app: watcher
+      app: prime-debt-indexer
   template:
     metadata:
       labels:
-        app: watcher
+        app: prime-debt-indexer
     spec:
-      serviceAccountName: watcher
+      serviceAccountName: prime-debt-indexer
       containers:
-        - name: watcher
+        - name: prime-debt-indexer
           # Image name used as the Kustomize images transformer key.
           # The overlay kustomization.yaml overrides newName + newTag.
-          image: watcher
-          env:
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://localhost:4317"
-            - name: JAEGER_ENDPOINT
-              value: "localhost:4317"
+          image: prime-debt-indexer
           envFrom:
             - configMapRef:
-                name: watcher-config
+                name: prime-debt-indexer
             - secretRef:
                 # Populated by ExternalSecret — secret name mirrors the service.
-                name: watcher
+                name: prime-debt-indexer
           resources:
             requests:
-              cpu: "2000m"
-              memory: "4096Mi"
+              cpu: "1000m"
+              memory: "2048Mi"
             limits:
-              cpu: "2000m"
-              memory: "4096Mi"
+              cpu: "1000m"
+              memory: "2048Mi"
           livenessProbe:
             exec:
-              command: ["/bin/sh", "-c", "pgrep -f watcher"]
+              command: ["/bin/sh", "-c", "pgrep -f prime-debt-indexer"]
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3

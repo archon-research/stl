@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal-worker
+  template:
+    metadata:
+      labels:
+        app: temporal-worker
+    spec:
+      serviceAccountName: temporal-worker
+      containers:
+        - name: temporal-worker
+          # Image name used as the Kustomize images transformer key.
+          # The overlay kustomization.yaml overrides newName + newTag.
+          image: temporal-worker
+          envFrom:
+            - configMapRef:
+                name: temporal-worker
+            - secretRef:
+                # Populated by ExternalSecret — secret name mirrors the service.
+                name: temporal-worker
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      terminationGracePeriodSeconds: 60

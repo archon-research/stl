@@ -1,25 +1,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: watcher
+  name: avalanche-backup-worker
 spec:
   replicas: 1
-  strategy:
-    type: Recreate
   selector:
     matchLabels:
-      app: watcher
+      app: avalanche-backup-worker
   template:
     metadata:
       labels:
-        app: watcher
+        app: avalanche-backup-worker
     spec:
-      serviceAccountName: watcher
+      serviceAccountName: avalanche-backup-worker
       containers:
-        - name: watcher
-          # Image name used as the Kustomize images transformer key.
-          # The overlay kustomization.yaml overrides newName + newTag.
-          image: watcher
+        - name: avalanche-backup-worker
+          image: avalanche-backup-worker
           env:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://localhost:4317"
@@ -27,20 +23,19 @@ spec:
               value: "localhost:4317"
           envFrom:
             - configMapRef:
-                name: watcher-config
+                name: avalanche-backup-worker-config
             - secretRef:
-                # Populated by ExternalSecret — secret name mirrors the service.
-                name: watcher
+                name: avalanche-backup-worker
           resources:
             requests:
-              cpu: "2000m"
-              memory: "4096Mi"
+              cpu: "500m"
+              memory: "1024Mi"
             limits:
-              cpu: "2000m"
-              memory: "4096Mi"
+              cpu: "500m"
+              memory: "1024Mi"
           livenessProbe:
             exec:
-              command: ["/bin/sh", "-c", "pgrep -f watcher"]
+              command: ["/bin/sh", "-c", "pgrep -f raw_data_backup"]
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3

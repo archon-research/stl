@@ -4,7 +4,7 @@
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
         dev-up dev-up-rebuild dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -20,6 +20,8 @@
         docker-build-temporal-worker-staging docker-push-temporal-worker-staging docker-release-temporal-worker-staging \
         docker-build-morpho-indexer docker-push-morpho-indexer docker-release-morpho-indexer \
         docker-build-morpho-indexer-staging docker-push-morpho-indexer-staging docker-release-morpho-indexer-staging \
+        docker-build-prime-debt-indexer docker-push-prime-debt-indexer docker-release-prime-debt-indexer \
+        docker-build-prime-debt-indexer-staging docker-push-prime-debt-indexer-staging docker-release-prime-debt-indexer-staging \
         run-temporal-worker build-temporal-worker \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         ecs-deploy-oracle-price-worker ecs-deploy-oracle-price-worker-staging \
@@ -304,6 +306,7 @@ dev-up:
 	$(call build-if-needed,stl-oracle-price-worker:local,docker-build-oracle-price-worker LOCAL=1)
 	$(call build-if-needed,stl-morpho-indexer:local,docker-build-morpho-indexer LOCAL=1)
 	$(call build-if-needed,stl-sparklend-position-tracker:local,docker-build-sparklend-position-tracker LOCAL=1)
+	$(call build-if-needed,stl-prime-debt-indexer:local,docker-build-prime-debt-indexer LOCAL=1)
 	$(MAKE) kind-load-workers kind-deploy-workers
 	$(call build-if-needed,stl-temporal-worker:local,docker-build-temporal-worker LOCAL=1)
 	$(MAKE) kind-load-temporal-worker kind-deploy-temporal-worker
@@ -312,7 +315,7 @@ dev-up:
 	@echo "  [6/6] Ready"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "==> Waiting for all deployments to roll out..."
-	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker temporal-worker; do \
+	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer temporal-worker; do \
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=120s || \
 	    { echo "ERROR: deployment $$dep not ready after 120s"; kubectl --context=$(KUBE_CONTEXT) get pods -n $(KUBE_NS); exit 1; }; \
 	done
@@ -672,6 +675,8 @@ docker-release-all:
 	@$(MAKE) _docker-release-morpho-indexer-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-allocation-tracker-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-prime-debt-indexer-internal ENV=$(ENV)
 	@echo ""
 	@echo "==> All Docker images released for ENV=$(ENV)"
 
@@ -1122,6 +1127,73 @@ docker-release-morpho-indexer-staging:
 	@$(MAKE) docker-release-morpho-indexer ENV=sentinelstaging
 
 # =============================================================================
+# Docker Build & Push - Prime Debt Indexer
+# =============================================================================
+
+ECR_REPO_PRIME_DEBT_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-prime-debt-indexer
+
+# Build Docker image for prime debt indexer (ARM64 for EKS Graviton)
+docker-build-prime-debt-indexer:
+ifdef LOCAL
+	docker build -t stl-prime-debt-indexer:local -f Dockerfile.prime-debt-indexer .
+else
+	@echo "==> Building Prime Debt Indexer Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_PRIME_DEBT_INDEXER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.prime-debt-indexer \
+		-t $(ECR_REPO_PRIME_DEBT_INDEXER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_PRIME_DEBT_INDEXER):latest \
+		--load .
+endif
+
+# Push prime debt indexer Docker image to ECR
+docker-push-prime-debt-indexer: ecr-login
+	@echo "==> Pushing Prime Debt Indexer Docker image to ECR..."
+	docker push $(ECR_REPO_PRIME_DEBT_INDEXER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_PRIME_DEBT_INDEXER):latest
+
+# Build and push prime debt indexer in one step (captures tag at start to ensure consistency)
+docker-release-prime-debt-indexer: ecr-login _docker-release-prime-debt-indexer-internal
+
+_docker-release-prime-debt-indexer-internal:
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Prime Debt Indexer Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_PRIME_DEBT_INDEXER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.prime-debt-indexer \
+		-t $(ECR_REPO_PRIME_DEBT_INDEXER):$$TAG \
+		-t $(ECR_REPO_PRIME_DEBT_INDEXER):latest \
+		--load . && \
+	echo "==> Pushing Prime Debt Indexer Docker image to ECR..." && \
+	docker push $(ECR_REPO_PRIME_DEBT_INDEXER):$$TAG && \
+	docker push $(ECR_REPO_PRIME_DEBT_INDEXER):latest && \
+	echo "==> Prime Debt Indexer Docker image released: $(ECR_REPO_PRIME_DEBT_INDEXER):$$TAG"
+
+docker-build-prime-debt-indexer-staging:
+	@$(MAKE) docker-build-prime-debt-indexer ENV=sentinelstaging
+
+docker-push-prime-debt-indexer-staging:
+	@$(MAKE) docker-push-prime-debt-indexer ENV=sentinelstaging
+
+docker-release-prime-debt-indexer-staging:
+	@$(MAKE) docker-release-prime-debt-indexer ENV=sentinelstaging
+
+# =============================================================================
 # Docker Build & Push - Allocation Tracker
 # =============================================================================
 
@@ -1423,7 +1495,21 @@ kind-delete:
 
 kind-infra:
 	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/ -n $(KUBE_NS)
+	# Install CNPG operator (required before any Cluster CR can be applied).
+	kubectl --context=$(KUBE_CONTEXT) apply --server-side --force-conflicts -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.25/releases/cnpg-1.25.0.yaml
+	@echo "==> Waiting for CNPG operator to be ready..."
+	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/cnpg-controller-manager -n cnpg-system --timeout=120s
+	# Apply temporal resources to the temporal namespace (namespace declared in each manifest).
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal-00-namespace.yaml
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal-db.yaml
+	@echo "==> Waiting for temporal-db CNPG cluster to be ready..."
+	kubectl --context=$(KUBE_CONTEXT) wait cluster/temporal-db -n temporal --for=condition=Ready --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal.yaml
+	# Apply remaining infra resources to the app namespace.
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/jaeger.yaml       -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/localstack.yaml   -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/redis.yaml        -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/timescaledb.yaml  -n $(KUBE_NS)
 	@echo "==> Waiting for timescaledb to be ready (may take a moment on first run — image pull)..."
 	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/timescaledb -n $(KUBE_NS) --timeout=120s
 	@echo "==> Waiting for localstack to be ready..."
@@ -1462,9 +1548,10 @@ kind-load-watcher:
 	kind load docker-image stl-watcher:local --name $(KIND_CLUSTER)
 
 kind-load-workers:
-	kind load docker-image stl-oracle-price-worker:local --name $(KIND_CLUSTER)
-	kind load docker-image stl-morpho-indexer:local       --name $(KIND_CLUSTER)
-	kind load docker-image stl-sparklend-position-tracker:local    --name $(KIND_CLUSTER)
+	kind load docker-image stl-oracle-price-worker:local        --name $(KIND_CLUSTER)
+	kind load docker-image stl-morpho-indexer:local             --name $(KIND_CLUSTER)
+	kind load docker-image stl-sparklend-position-tracker:local --name $(KIND_CLUSTER)
+	kind load docker-image stl-prime-debt-indexer:local         --name $(KIND_CLUSTER)
 
 kind-deploy-watcher:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/watcher.yaml -n $(KUBE_NS)
@@ -1472,7 +1559,7 @@ kind-deploy-watcher:
 
 kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/workers/ -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/sparklend-position-tracker -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
 
 kind-load-temporal-worker:
 	kind load docker-image stl-temporal-worker:local --name $(KIND_CLUSTER)
@@ -1512,7 +1599,8 @@ kind-ci-down: kind-delete
 kind-clean:
 	@echo "$(KUBE_CONTEXT)" | grep -q '^kind-' || { echo "ERROR: kind-clean refused — '$(KUBE_CONTEXT)' is not a local kind context. Only kind-* contexts are allowed."; exit 1; }
 	kubectl --context=$(KUBE_CONTEXT) delete namespace $(KUBE_NS) --ignore-not-found --wait
-	@echo "==> Namespace $(KUBE_NS) deleted."
+	kubectl --context=$(KUBE_CONTEXT) delete namespace temporal      --ignore-not-found --wait
+	@echo "==> Namespaces $(KUBE_NS) and temporal deleted."
 
 # =============================================================================
 # Docker Build & Push - Mock Blockchain Server

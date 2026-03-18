@@ -16,7 +16,14 @@ spec:
       containers:
         - name: oracle-price-worker
           image: oracle-price-worker
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://localhost:4317"
+            - name: JAEGER_ENDPOINT
+              value: "localhost:4317"
           envFrom:
+            - configMapRef:
+                name: oracle-price-worker-config
             - secretRef:
                 name: oracle-price-worker
           resources:

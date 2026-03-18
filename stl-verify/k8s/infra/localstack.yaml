@@ -138,6 +138,25 @@ data:
       --attributes RawMessageDelivery=true \
       --region $REGION
 
+    # Prime debt indexer is Ethereum-only
+    echo "Creating Ethereum prime-debt queues..."
+    $AWS sqs create-queue \
+      --queue-name stl-ethereum-prime-debt-dlq.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sqs create-queue \
+      --queue-name stl-ethereum-prime-debt.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sns subscribe \
+      --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
+      --protocol sqs \
+      --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-prime-debt.fifo" \
+      --attributes RawMessageDelivery=true \
+      --region $REGION
+
     echo "Creating S3 buckets..."
     $AWS s3 mb s3://${S3_BUCKET} --region $REGION
     $AWS s3 mb s3://stress-test-data --region $REGION

@@ -1,25 +1,26 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: watcher
+  name: avalanche-watcher
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: watcher
+      app: avalanche-watcher
   template:
     metadata:
       labels:
-        app: watcher
+        app: avalanche-watcher
     spec:
-      serviceAccountName: watcher
+      serviceAccountName: avalanche-watcher
       containers:
-        - name: watcher
+        - name: avalanche-watcher
           # Image name used as the Kustomize images transformer key.
           # The overlay kustomization.yaml overrides newName + newTag.
-          image: watcher
+          image: avalanche-watcher
+          args: ["--enable-traces=false"]
           env:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://localhost:4317"
@@ -27,10 +28,10 @@ spec:
               value: "localhost:4317"
           envFrom:
             - configMapRef:
-                name: watcher-config
+                name: avalanche-watcher-config
             - secretRef:
                 # Populated by ExternalSecret — secret name mirrors the service.
-                name: watcher
+                name: avalanche-watcher
           resources:
             requests:
               cpu: "2000m"
