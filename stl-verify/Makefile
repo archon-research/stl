@@ -1579,7 +1579,7 @@ kind-deploy-watcher:
 
 kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/workers/ -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
 
 kind-load-temporal-worker:
 	kind load docker-image stl-temporal-worker:local --name $(KIND_CLUSTER)
