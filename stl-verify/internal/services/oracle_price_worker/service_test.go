@@ -138,10 +138,6 @@ func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTok
 	return nil
 }
 
-func (m *mockRepo) GetAllEnabledOracles(ctx context.Context) ([]*entity.Oracle, error) {
-	return nil, errors.New("not implemented: use GetEnabledOraclesByChain")
-}
-
 func (m *mockRepo) GetEnabledOraclesByChain(ctx context.Context, chainID int64) ([]*entity.Oracle, error) {
 	if m.getEnabledOraclesByChainFn != nil {
 		return m.getEnabledOraclesByChainFn(ctx, chainID)

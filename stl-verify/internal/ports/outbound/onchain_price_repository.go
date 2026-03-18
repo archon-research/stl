@@ -29,9 +29,6 @@ type OnchainPriceRepository interface {
 	// oracle assets of the given oracle. Used to build the asset address list for oracle calls.
 	GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error)
 
-	// GetAllEnabledOracles retrieves all enabled oracles.
-	GetAllEnabledOracles(ctx context.Context) ([]*entity.Oracle, error)
-
 	// GetEnabledOraclesByChain retrieves all enabled oracles for a given chain.
 	GetEnabledOraclesByChain(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 

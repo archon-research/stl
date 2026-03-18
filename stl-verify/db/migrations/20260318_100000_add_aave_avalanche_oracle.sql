@@ -18,10 +18,7 @@ VALUES
     (43114, '\x00000000eFE302BEAA2b3e6e1b18d08D69a9012a'::bytea, 'AUSD',   6),
     (43114, '\xfc421aD3C883Bf9E7C4f42dE845C4e4405799e73'::bytea, 'GHO',    18),
     (43114, '\xC891EB4cbdEFf6e073e859e987815Ed1505c2ACD'::bytea, 'EURC',   6)
-ON CONFLICT (chain_id, address) DO UPDATE SET
-    symbol     = EXCLUDED.symbol,
-    decimals   = EXCLUDED.decimals,
-    updated_at = NOW();
+ON CONFLICT (chain_id, address) DO NOTHING;
 
 -- Insert Aave V3 Avalanche oracle
 -- AaveV3Avalanche.ORACLE = 0xEBd36016B3eD09D4693Ed4251c67Bd858c3c7C9C
@@ -44,7 +41,6 @@ FROM oracle o
 WHERE o.name = 'aave_v3_avax'
 ON CONFLICT (protocol_id, oracle_id, from_block) DO NOTHING;
 
--- Seed oracle_asset rows — INNER JOIN ensures migration fails loudly if any token is missing
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, quote_currency)
 SELECT o.id, t.id, true, 'USD'
 FROM oracle o
