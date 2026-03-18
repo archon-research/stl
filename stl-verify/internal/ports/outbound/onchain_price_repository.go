@@ -32,6 +32,9 @@ type OnchainPriceRepository interface {
 	// GetAllEnabledOracles retrieves all enabled oracles.
 	GetAllEnabledOracles(ctx context.Context) ([]*entity.Oracle, error)
 
+	// GetEnabledOraclesByChain retrieves all enabled oracles for a given chain.
+	GetEnabledOraclesByChain(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
+
 	// GetOracleByAddress retrieves an oracle by chain_id and onchain address.
 	GetOracleByAddress(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
 

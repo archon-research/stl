@@ -37,6 +37,7 @@ type MulticallFactory func(entity.OracleType) (outbound.Multicaller, error)
 
 // Config holds configuration for the backfill service.
 type Config struct {
+	ChainID     int64
 	Concurrency int
 	BatchSize   int
 	Logger      *slog.Logger
@@ -92,6 +93,9 @@ func NewService(
 	}
 	if repo == nil {
 		return nil, fmt.Errorf("repo cannot be nil")
+	}
+	if config.ChainID <= 0 {
+		return nil, fmt.Errorf("config.ChainID must be > 0")
 	}
 
 	defaults := configDefaults()
@@ -174,7 +178,7 @@ func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleW
 // buildOracleWorkUnits loads all enabled oracles from DB, deduplicates by oracle_id,
 // and builds the per-oracle data structures needed for price fetching.
 func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, error) {
-	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.logger)
+	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.logger)
 	if err != nil {
 		return nil, err
 	}

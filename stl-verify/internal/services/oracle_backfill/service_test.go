@@ -30,7 +30,7 @@ type mockRepo struct {
 	getLatestBlockFn               func(ctx context.Context, oracleID int64) (int64, error)
 	getTokenAddressesFn            func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
 	upsertPricesFn                 func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
-	getAllEnabledOraclesFn         func(ctx context.Context) ([]*entity.Oracle, error)
+	getEnabledOraclesByChainFn     func(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
 	insertOracleFn                 func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
 	getAllActiveProtocolOraclesFn  func(ctx context.Context) ([]*entity.ProtocolOracle, error)
@@ -89,10 +89,14 @@ func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTok
 }
 
 func (m *mockRepo) GetAllEnabledOracles(ctx context.Context) ([]*entity.Oracle, error) {
-	if m.getAllEnabledOraclesFn != nil {
-		return m.getAllEnabledOraclesFn(ctx)
+	return nil, errors.New("not implemented: use GetEnabledOraclesByChain")
+}
+
+func (m *mockRepo) GetEnabledOraclesByChain(ctx context.Context, chainID int64) ([]*entity.Oracle, error) {
+	if m.getEnabledOraclesByChainFn != nil {
+		return m.getEnabledOraclesByChainFn(ctx, chainID)
 	}
-	return nil, errors.New("GetAllEnabledOracles not mocked")
+	return nil, errors.New("GetEnabledOraclesByChain not mocked")
 }
 
 func (m *mockRepo) GetOracleByAddress(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error) {
@@ -240,10 +244,10 @@ func blockDependentPrices(t *testing.T) func(ctx context.Context, calls []outbou
 }
 
 // defaultRepoSetup returns a mockRepo preconfigured for common test scenarios.
-// It mocks GetAllEnabledOracles, GetEnabledAssets, and GetTokenAddresses.
+// It mocks GetEnabledOraclesByChain, GetEnabledAssets, and GetTokenAddresses.
 func defaultRepoSetup() *mockRepo {
 	return &mockRepo{
-		getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+		getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 			return []*entity.Oracle{defaultOracle()}, nil
 		},
 		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -259,7 +263,7 @@ func feedOracleRepoSetup() *mockRepo {
 	feedAddr := common.HexToAddress("0x0000000000000000000000000000000000000F01")
 	wethAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
 	return &mockRepo{
-		getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+		getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 			return []*entity.Oracle{{
 				ID: 1, Name: "chainlink", Enabled: true,
 				OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
@@ -395,6 +399,7 @@ func TestNewService(t *testing.T) {
 		{
 			name: "success with all valid params",
 			config: Config{
+				ChainID:     1,
 				Concurrency: 2,
 				BatchSize:   50,
 				Logger:      testutil.DiscardLogger(),
@@ -418,7 +423,7 @@ func TestNewService(t *testing.T) {
 		},
 		{
 			name:           "success with default config values",
-			config:         Config{}, // all zero values
+			config:         Config{ChainID: 1}, // all zero values except ChainID
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
 			repo:           validRepo,
@@ -440,6 +445,7 @@ func TestNewService(t *testing.T) {
 		{
 			name: "success with negative concurrency uses default",
 			config: Config{
+				ChainID:     1,
 				Concurrency: -5,
 				Logger:      testutil.DiscardLogger(),
 			},
@@ -457,6 +463,7 @@ func TestNewService(t *testing.T) {
 		{
 			name: "success with negative batch size uses default",
 			config: Config{
+				ChainID:   1,
 				BatchSize: -1,
 				Logger:    testutil.DiscardLogger(),
 			},
@@ -473,7 +480,7 @@ func TestNewService(t *testing.T) {
 		},
 		{
 			name:           "error nil headerFetcher",
-			config:         Config{Logger: testutil.DiscardLogger()},
+			config:         Config{ChainID: 1, Logger: testutil.DiscardLogger()},
 			headerFetcher:  nil,
 			newMulticaller: validFactory,
 			repo:           validRepo,
@@ -482,7 +489,7 @@ func TestNewService(t *testing.T) {
 		},
 		{
 			name:           "error nil newMulticaller",
-			config:         Config{Logger: testutil.DiscardLogger()},
+			config:         Config{ChainID: 1, Logger: testutil.DiscardLogger()},
 			headerFetcher:  validFetcher,
 			newMulticaller: nil,
 			repo:           validRepo,
@@ -491,12 +498,30 @@ func TestNewService(t *testing.T) {
 		},
 		{
 			name:           "error nil repo",
-			config:         Config{Logger: testutil.DiscardLogger()},
+			config:         Config{ChainID: 1, Logger: testutil.DiscardLogger()},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
 			repo:           nil,
 			wantErr:        true,
 			errContains:    "repo cannot be nil",
+		},
+		{
+			name:           "error zero ChainID",
+			config:         Config{ChainID: 0, Logger: testutil.DiscardLogger()},
+			headerFetcher:  validFetcher,
+			newMulticaller: validFactory,
+			repo:           validRepo,
+			wantErr:        true,
+			errContains:    "config.ChainID must be > 0",
+		},
+		{
+			name:           "error negative ChainID",
+			config:         Config{ChainID: -1, Logger: testutil.DiscardLogger()},
+			headerFetcher:  validFetcher,
+			newMulticaller: validFactory,
+			repo:           validRepo,
+			wantErr:        true,
+			errContains:    "config.ChainID must be > 0",
 		},
 	}
 
@@ -557,6 +582,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -591,6 +617,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   101,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 10,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -625,6 +652,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -666,13 +694,14 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{defaultOracle()}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -691,17 +720,18 @@ func TestRun(t *testing.T) {
 			errContains: "no enabled assets",
 		},
 		{
-			name:      "error GetAllEnabledOracles fails",
+			name:      "error GetEnabledOraclesByChain fails",
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return nil, errors.New("database connection failed")
 					},
 				}
@@ -718,13 +748,14 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{defaultOracle()}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -744,13 +775,14 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{defaultOracle()}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -775,6 +807,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   3, // small batch size forces flush during for loop
 				Logger:      testutil.DiscardLogger(),
@@ -809,6 +842,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   3, // small batch triggers mid-loop flush
 				Logger:      testutil.DiscardLogger(),
@@ -840,6 +874,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -871,6 +906,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -897,6 +933,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -949,6 +986,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -992,6 +1030,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   102,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -1049,6 +1088,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   102,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -1105,6 +1145,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 0,
 			toBlock:   0,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -1142,6 +1183,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   10099,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -1168,6 +1210,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   101,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -1175,7 +1218,7 @@ func TestRun(t *testing.T) {
 			setupRepo: func() *mockRepo {
 				oracle := defaultOracle()
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						// Return the same oracle twice (simulating generic + protocol-bound)
 						return []*entity.Oracle{oracle, oracle}, nil
 					},
@@ -1214,6 +1257,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -1246,6 +1290,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -1284,6 +1329,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   100,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -1294,7 +1340,7 @@ func TestRun(t *testing.T) {
 				wethAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
 				weETHAddr := common.HexToAddress("0x0000000000000000000000000000000000000ABC")
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "chainlink", Enabled: true,
 							OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
@@ -1366,6 +1412,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   102,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -1407,6 +1454,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   100,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -1415,7 +1463,7 @@ func TestRun(t *testing.T) {
 				feedAddr := common.HexToAddress("0x0000000000000000000000000000000000000F01")
 				tokenAddr := common.HexToAddress("0x0000000000000000000000000000000000000010")
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "chronicle-oracle", Enabled: true,
 							OracleType: entity.OracleTypeChronicle, PriceDecimals: 8,
@@ -1459,6 +1507,7 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   100,
 			config: Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
@@ -1476,7 +1525,7 @@ func TestRun(t *testing.T) {
 					Enabled:         true,
 				}
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{oracle1, oracle2}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
@@ -1609,6 +1658,7 @@ func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
+		ChainID:     1,
 		Concurrency: 1,
 		BatchSize:   100,
 		Logger:      testutil.DiscardLogger(),
@@ -1687,6 +1737,7 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
+		ChainID:     1,
 		Concurrency: 1,
 		BatchSize:   100,
 		Logger:      testutil.DiscardLogger(),
@@ -1759,6 +1810,7 @@ func TestRun_DuplicateBlocksSafeWithIdempotentUpsert(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
+		ChainID:     1,
 		Concurrency: 1,
 		BatchSize:   100,
 		Logger:      testutil.DiscardLogger(),
@@ -2117,7 +2169,7 @@ func TestRun_BlockRangeClamping(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := &mockRepo{
-				getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+				getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{tt.oracle}, nil
 				},
 				getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -2138,6 +2190,7 @@ func TestRun_BlockRangeClamping(t *testing.T) {
 			}
 
 			svc, err := NewService(Config{
+				ChainID:     1,
 				Concurrency: 1,
 				BatchSize:   1000,
 				Logger:      testutil.DiscardLogger(),
@@ -2191,7 +2244,7 @@ func TestRun_FeedOracle_ChangeDetection(t *testing.T) {
 	}
 
 	repo := &mockRepo{
-		getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+		getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 			return []*entity.Oracle{{
 				ID: 1, Name: "chainlink", Enabled: true,
 				OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
@@ -2234,6 +2287,7 @@ func TestRun_FeedOracle_ChangeDetection(t *testing.T) {
 	mcFactory := decimalsPassFactory(t, []uint8{8}, innerFactory)
 
 	svc, err := NewService(Config{
+		ChainID:     1,
 		Concurrency: 1,
 		BatchSize:   100,
 		Logger:      testutil.DiscardLogger(),
@@ -2310,7 +2364,7 @@ func TestRun_FeedDecimalsValidation(t *testing.T) {
 		}
 
 		svc, err := NewService(
-			Config{Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+			Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
 			&mockHeaderFetcher{},
 			mcFactory,
 			repo,
@@ -2369,7 +2423,7 @@ func TestRun_FeedDecimalsValidation(t *testing.T) {
 		}
 
 		svc, err := NewService(
-			Config{Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+			Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
 			&mockHeaderFetcher{},
 			mcFactory,
 			repo,

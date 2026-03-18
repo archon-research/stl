@@ -24,7 +24,7 @@ type mockRepo struct {
 	getLatestBlockFn               func(ctx context.Context, oracleID int64) (int64, error)
 	getTokenAddressesFn            func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
 	upsertPricesFn                 func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
-	getAllEnabledOraclesFn         func(ctx context.Context) ([]*entity.Oracle, error)
+	getEnabledOraclesByChainFn     func(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
 	insertOracleFn                 func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
 	getAllActiveProtocolOraclesFn  func(ctx context.Context) ([]*entity.ProtocolOracle, error)
@@ -70,10 +70,13 @@ func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTok
 	return nil
 }
 func (m *mockRepo) GetAllEnabledOracles(ctx context.Context) ([]*entity.Oracle, error) {
-	if m.getAllEnabledOraclesFn != nil {
-		return m.getAllEnabledOraclesFn(ctx)
+	return nil, errors.New("not implemented: use GetEnabledOraclesByChain")
+}
+func (m *mockRepo) GetEnabledOraclesByChain(ctx context.Context, chainID int64) ([]*entity.Oracle, error) {
+	if m.getEnabledOraclesByChainFn != nil {
+		return m.getEnabledOraclesByChainFn(ctx, chainID)
 	}
-	return nil, errors.New("not mocked")
+	return nil, errors.New("GetEnabledOraclesByChain not mocked")
 }
 func (m *mockRepo) GetOracleByAddress(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error) {
 	if m.getOracleByAddressFn != nil {
@@ -133,7 +136,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			name: "success with aave oracle",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "sparklend", Address: [20]byte{0xBB},
 							Enabled: true, OracleType: entity.OracleTypeAave,
@@ -172,7 +175,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			name: "success with feed oracle",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "chainlink", Enabled: true,
 							OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
@@ -205,7 +208,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			name: "success with chronicle oracle (uses feed path)",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "chronicle", Enabled: true,
 							OracleType: entity.OracleTypeChronicle, PriceDecimals: 18,
@@ -239,7 +242,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			setupRepo: func() *mockRepo {
 				oracle := &entity.Oracle{ID: 1, Name: "test", Address: [20]byte{0xBB}, Enabled: true}
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{oracle, oracle}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -256,7 +259,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			name: "oracle with no enabled assets returns error",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{ID: 1, Name: "empty", Enabled: true}}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -268,10 +271,10 @@ func TestLoadOracleUnits(t *testing.T) {
 			errContains: "no enabled assets",
 		},
 		{
-			name: "error from GetAllEnabledOracles",
+			name: "error from GetEnabledOraclesByChain",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return nil, errors.New("db error")
 					},
 				}
@@ -283,7 +286,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			name: "build error is returned",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{ID: 1, Name: "bad", Enabled: true}}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -298,7 +301,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			name: "aave oracle with zero address returns error",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "sparklend", Address: common.Address{},
 							Enabled: true, OracleType: entity.OracleTypeAave,
@@ -323,7 +326,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			name: "feed oracle missing feed address returns error",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "feed", Enabled: true,
 							OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
@@ -347,7 +350,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			name: "feed oracle with missing quote currency returns error",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "feed", Enabled: true,
 							OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
@@ -371,7 +374,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			name: "feed oracle with zero decimals returns error",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "feed", Enabled: true,
 							OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
@@ -395,7 +398,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			name: "oracle ID overflow returns error",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 40000, Name: "large-id", Address: [20]byte{0xBB},
 							Enabled: true, OracleType: entity.OracleTypeAave,
@@ -418,7 +421,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			name: "OracleID field is set on loaded units",
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 42, Name: "sparklend", Address: [20]byte{0xBB},
 							Enabled: true, OracleType: entity.OracleTypeAave,
@@ -447,7 +450,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			setupRepo: func() *mockRepo {
 				nonWethAddr := common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F") // DAI
 				return &mockRepo{
-					getAllEnabledOraclesFn: func(_ context.Context) ([]*entity.Oracle, error) {
+					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "missing-ref", Enabled: true,
 							OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
@@ -474,7 +477,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			repo := tt.setupRepo()
 			logger := testutil.DiscardLogger()
 
-			units, err := LoadOracleUnits(context.Background(), repo, logger)
+			units, err := LoadOracleUnits(context.Background(), repo, 1, logger)
 
 			if tt.wantErr {
 				if err == nil {

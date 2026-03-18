@@ -271,6 +271,39 @@ func (r *OnchainPriceRepository) GetAllEnabledOracles(ctx context.Context) ([]*e
 	return oracles, nil
 }
 
+// GetEnabledOraclesByChain retrieves all enabled oracles for a given chain.
+func (r *OnchainPriceRepository) GetEnabledOraclesByChain(ctx context.Context, chainID int64) ([]*entity.Oracle, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, name, display_name, chain_id, address, oracle_type,
+		       deployment_block, enabled, price_decimals, created_at, updated_at
+		FROM oracle
+		WHERE enabled = true AND chain_id = $1
+		ORDER BY id
+	`, chainID)
+	if err != nil {
+		return nil, fmt.Errorf("querying enabled oracles by chain: %w", err)
+	}
+	defer rows.Close()
+
+	var oracles []*entity.Oracle
+	for rows.Next() {
+		var o entity.Oracle
+		var addrBytes []byte
+		if err := rows.Scan(
+			&o.ID, &o.Name, &o.DisplayName, &o.ChainID, &addrBytes, &o.OracleType,
+			&o.DeploymentBlock, &o.Enabled, &o.PriceDecimals, &o.CreatedAt, &o.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scanning oracle: %w", err)
+		}
+		copy(o.Address[:], addrBytes)
+		oracles = append(oracles, &o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating oracles: %w", err)
+	}
+	return oracles, nil
+}
+
 // GetOracleByAddress retrieves an oracle by chain_id and onchain address.
 func (r *OnchainPriceRepository) GetOracleByAddress(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error) {
 	var o entity.Oracle
