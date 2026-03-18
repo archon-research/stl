@@ -22,9 +22,9 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/services/aavelike_position_tracker"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_backfill"
-	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_position_tracker"
 )
 
 func main() {
@@ -210,7 +210,7 @@ func run(args []string) error {
 	eventRepo := postgres.NewEventRepository(logger)
 
 	// Build position tracker (nil consumer and nil redisClient for backfill mode)
-	trackerSvc, err := sparklend_position_tracker.NewService(
+	trackerSvc, err := aavelike_position_tracker.NewService(
 		shared.SQSConsumerConfig{
 			Logger:  logger,
 			ChainID: cfg.chainID,

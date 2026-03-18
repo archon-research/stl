@@ -61,6 +61,43 @@ func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID
 	return nil
 }
 
+// SaveBorrowers saves multiple borrower (debt) position records using pgx.Batch.
+// Uses ON CONFLICT DO NOTHING to ensure immutability - existing records are never modified.
+func (r *PositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, records []outbound.BorrowerRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+
+	batch := &pgx.Batch{}
+	for _, rec := range records {
+		batch.Queue(
+			`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
+			rec.UserID, rec.ProtocolID, rec.TokenID, rec.BlockNumber, rec.BlockVersion, rec.Amount, rec.Change, rec.EventType, rec.TxHash,
+		)
+	}
+
+	br := tx.SendBatch(ctx, batch)
+
+	for i := range records {
+		if _, err := br.Exec(); err != nil {
+			innerErr := br.Close()
+			if innerErr != nil {
+				return fmt.Errorf("failed to save borrower record %d: %w; additionally, failed to close batch: %v", i, err, innerErr)
+			}
+
+			return fmt.Errorf("failed to save borrower record %d: %w", i, err)
+		}
+	}
+
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("closing borrower batch: %w", err)
+	}
+
+	return nil
+}
+
 // SaveBorrowerCollateral saves a single collateral position record within an external transaction.
 // amount is the full current collateral balance; change is the event delta.
 // Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
@@ -98,12 +135,16 @@ func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx
 	}
 
 	br := tx.SendBatch(ctx, batch)
-	defer br.Close()
 
 	for i := range records {
 		if _, err := br.Exec(); err != nil {
+			br.Close()
 			return fmt.Errorf("failed to save collateral record %d: %w", i, err)
 		}
+	}
+
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("closing collateral batch: %w", err)
 	}
 
 	return nil
