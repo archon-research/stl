@@ -71,7 +71,7 @@ def test_list_allocations_returns_200_with_positions():
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 1
-    assert data[0]["star"] == "spark"
+    assert data[0]["name"] == "spark"
     assert data[0]["token_symbol"] == "USDC"
     assert data[0]["direction"] == "in"
     service.list_allocations_by_star.assert_awaited_once_with(EthAddress(_VALID_ADDR), None)
