@@ -22,6 +22,11 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -o /prime-debt-indexer \
     ./cmd/prime-debt-indexer
 
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
+    -ldflags="-w -s -extldflags '-static'" \
+    -o /migrate \
+    ./cmd/migrate
+
 # -----------------------------------------------------------------------------
 # Runtime Stage
 # -----------------------------------------------------------------------------
@@ -34,6 +39,8 @@ RUN adduser -D -g '' appuser
 WORKDIR /app
 
 COPY --from=builder /prime-debt-indexer /app/prime-debt-indexer
+COPY --from=builder /migrate /app/migrate
+COPY db/migrations/ /app/db/migrations/
 
 USER appuser
 
