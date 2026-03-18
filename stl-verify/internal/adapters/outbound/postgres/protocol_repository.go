@@ -67,7 +67,7 @@ func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx,
 		return 0, fmt.Errorf("failed to get or create protocol: %w", err)
 	}
 
-	r.logger.Info("protocol upserted", "address", address.Hex(), "name", name, "id", protocolID)
+	r.logger.Debug("protocol upserted", "address", address.Hex(), "name", name, "id", protocolID)
 	return protocolID, nil
 }
 

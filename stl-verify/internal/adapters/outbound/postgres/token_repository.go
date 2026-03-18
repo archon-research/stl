@@ -1,9 +1,11 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -43,6 +45,52 @@ func NewTokenRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) 
 		logger:    logger,
 		batchSize: batchSize,
 	}, nil
+}
+
+func (r *TokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, tokens []outbound.TokenInput) (map[common.Address]int64, error) {
+	if len(tokens) == 0 {
+		return make(map[common.Address]int64), nil
+	}
+
+	// Sort by address to ensure all concurrent transactions lock rows in the
+	// same order, preventing deadlocks when multiple batches upsert the same tokens.
+	slices.SortFunc(tokens, func(a, b outbound.TokenInput) int {
+		return bytes.Compare(a.Address.Bytes(), b.Address.Bytes())
+	})
+
+	batch := &pgx.Batch{}
+	for _, t := range tokens {
+		batch.Queue(
+			`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, '{}', NOW())
+			 ON CONFLICT (chain_id, address) DO UPDATE SET
+			     created_at_block = LEAST(token.created_at_block, EXCLUDED.created_at_block),
+			     updated_at = CASE
+			         WHEN EXCLUDED.created_at_block < token.created_at_block THEN NOW()
+			         ELSE token.updated_at
+			     END
+			 RETURNING id`,
+			t.ChainID, t.Address.Bytes(), t.Symbol, t.Decimals, t.CreatedAtBlock,
+		)
+	}
+
+	br := tx.SendBatch(ctx, batch)
+
+	result := make(map[common.Address]int64, len(tokens))
+	for i, t := range tokens {
+		var id int64
+		if err := br.QueryRow().Scan(&id); err != nil {
+			br.Close()
+			return nil, fmt.Errorf("failed to get or create token %d (%s): %w", i, t.Address.Hex(), err)
+		}
+		result[t.Address] = id
+	}
+
+	if err := br.Close(); err != nil {
+		return nil, fmt.Errorf("closing token batch: %w", err)
+	}
+
+	return result, nil
 }
 
 // GetOrCreateToken retrieves a token by address or creates it if it doesn't exist.

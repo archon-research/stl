@@ -20,7 +20,7 @@ spec:
           image: temporal-worker
           envFrom:
             - configMapRef:
-                name: temporal-worker-config
+                name: temporal-worker
             - secretRef:
                 # Populated by ExternalSecret — secret name mirrors the service.
                 name: temporal-worker
