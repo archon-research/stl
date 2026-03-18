@@ -19,6 +19,8 @@ spec:
           # The overlay kustomization.yaml overrides newName + newTag.
           image: temporal-worker
           envFrom:
+            - configMapRef:
+                name: temporal-worker
             - secretRef:
                 # Populated by ExternalSecret — secret name mirrors the service.
                 name: temporal-worker

@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prime-debt-indexer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prime-debt-indexer
+  template:
+    metadata:
+      labels:
+        app: prime-debt-indexer
+    spec:
+      containers:
+        - name: prime-debt-indexer
+          image: stl-prime-debt-indexer:local
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: stl-config
+            - secretRef:
+                name: stl-secrets
+          env:
+            - name: AWS_SQS_QUEUE_URL
+              value: http://localstack:4566/000000000000/stl-ethereum-prime-debt.fifo
