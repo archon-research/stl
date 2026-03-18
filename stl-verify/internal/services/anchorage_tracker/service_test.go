@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -41,11 +42,14 @@ func (m *mockClient) ForEachOperationsPage(_ context.Context, _ string, fn func(
 }
 
 type mockSnapshotRepo struct {
+	mu        sync.Mutex
 	snapshots []entity.AnchoragePackageSnapshot
 	saveErr   error
 }
 
 func (m *mockSnapshotRepo) SaveSnapshots(_ context.Context, s []entity.AnchoragePackageSnapshot) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.saveErr != nil {
 		return m.saveErr
 	}
@@ -53,13 +57,22 @@ func (m *mockSnapshotRepo) SaveSnapshots(_ context.Context, s []entity.Anchorage
 	return nil
 }
 
+func (m *mockSnapshotRepo) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.snapshots)
+}
+
 type mockOperationRepo struct {
+	mu         sync.Mutex
 	operations []entity.AnchorageOperation
 	cursor     string
 	saveErr    error
 }
 
 func (m *mockOperationRepo) SaveOperations(_ context.Context, ops []entity.AnchorageOperation) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.saveErr != nil {
 		return m.saveErr
 	}
@@ -69,6 +82,12 @@ func (m *mockOperationRepo) SaveOperations(_ context.Context, ops []entity.Ancho
 
 func (m *mockOperationRepo) GetLastCursor(_ context.Context, _ int64) (string, error) {
 	return m.cursor, nil
+}
+
+func (m *mockOperationRepo) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.operations)
 }
 
 // ---------------------------------------------------------------------------
@@ -300,11 +319,11 @@ func TestService_StartAndStop(t *testing.T) {
 		t.Fatalf("Start failed: %v", err)
 	}
 
-	// Initial sync should have stored data.
-	if len(snapRepo.snapshots) == 0 {
+	// Initial sync should have stored data (read with mutex-safe accessors).
+	if snapRepo.count() == 0 {
 		t.Error("expected snapshots after Start")
 	}
-	if len(opRepo.operations) == 0 {
+	if opRepo.count() == 0 {
 		t.Error("expected operations after Start")
 	}
 
@@ -316,8 +335,8 @@ func TestService_StartAndStop(t *testing.T) {
 	}
 
 	// Should have more snapshots from the tick.
-	if len(snapRepo.snapshots) < 2 {
-		t.Errorf("expected at least 2 snapshots (initial + tick), got %d", len(snapRepo.snapshots))
+	if snapRepo.count() < 2 {
+		t.Errorf("expected at least 2 snapshots (initial + tick), got %d", snapRepo.count())
 	}
 }
 
@@ -356,21 +375,24 @@ func TestService_BackfillOperations(t *testing.T) {
 	if n != 1 {
 		t.Errorf("expected 1 operation backfilled, got %d", n)
 	}
-	if len(opRepo.operations) != 1 {
-		t.Errorf("expected 1 operation in repo, got %d", len(opRepo.operations))
+	if opRepo.count() != 1 {
+		t.Errorf("expected 1 operation in repo, got %d", opRepo.count())
 	}
+
+	opRepo.mu.Lock()
 	assertField(t, "OperationID", opRepo.operations[0].OperationID, "op-1")
 	assertField(t, "OperationType", opRepo.operations[0].OperationType, "COLLATERAL_PACKAGE")
+	opRepo.mu.Unlock()
 }
 
 func TestService_RetryOnTransientError(t *testing.T) {
 	callCount := atomic.Int32{}
-	snapRepo := &mockSnapshotRepo{}
-	opRepo := &mockOperationRepo{}
 
-	svc := NewService(&mockClient{}, snapRepo, opRepo, 1, time.Minute, slog.Default())
+	svc := NewService(&mockClient{}, &mockSnapshotRepo{}, &mockOperationRepo{}, 1, time.Minute, slog.Default())
+	// Use fast backoff for tests.
+	svc.baseBackoff = 1 * time.Millisecond
+	svc.maxBackoff = 10 * time.Millisecond
 
-	// Use runWithRetry directly — fails twice, succeeds on third.
 	ctx := context.Background()
 	svc.runWithRetry(ctx, "test", func() error {
 		n := callCount.Add(1)
@@ -388,6 +410,9 @@ func TestService_RetryOnTransientError(t *testing.T) {
 func TestService_RetryExhausted(t *testing.T) {
 	callCount := atomic.Int32{}
 	svc := NewService(&mockClient{}, &mockSnapshotRepo{}, &mockOperationRepo{}, 1, time.Minute, slog.Default())
+	// Use fast backoff for tests.
+	svc.baseBackoff = 1 * time.Millisecond
+	svc.maxBackoff = 10 * time.Millisecond
 
 	ctx := context.Background()
 	svc.runWithRetry(ctx, "test", func() error {

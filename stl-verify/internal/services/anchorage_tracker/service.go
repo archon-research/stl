@@ -20,11 +20,11 @@ type AnchorageClient interface {
 	ForEachOperationsPage(ctx context.Context, afterID string, fn func([]Operation) error) error
 }
 
-// retry settings for transient API errors.
+// Default retry settings for transient API errors.
 const (
-	maxRetries  = 3
-	baseBackoff = 2 * time.Second
-	maxBackoff  = 30 * time.Second
+	defaultMaxRetries  = 3
+	defaultBaseBackoff = 2 * time.Second
+	defaultMaxBackoff  = 30 * time.Second
 )
 
 // Service polls the Anchorage API and persists package snapshots.
@@ -35,6 +35,11 @@ type Service struct {
 	primeID       int64
 	pollInterval  time.Duration
 	logger        *slog.Logger
+
+	// Retry config (defaults applied in NewService).
+	maxRetries  int
+	baseBackoff time.Duration
+	maxBackoff  time.Duration
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -59,6 +64,9 @@ func NewService(
 		primeID:       primeID,
 		pollInterval:  pollInterval,
 		logger:        logger,
+		maxRetries:    defaultMaxRetries,
+		baseBackoff:   defaultBaseBackoff,
+		maxBackoff:    defaultMaxBackoff,
 	}
 }
 
@@ -174,13 +182,13 @@ func (s *Service) run(ctx context.Context) {
 // runWithRetry executes fn with exponential backoff on failure.
 // It retries up to maxRetries times before logging the error and moving on.
 func (s *Service) runWithRetry(ctx context.Context, name string, fn func() error) {
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 0; attempt <= s.maxRetries; attempt++ {
 		err := fn()
 		if err == nil {
 			return
 		}
 
-		if attempt == maxRetries {
+		if attempt == s.maxRetries {
 			s.logger.Error(name+" failed after retries",
 				"error", err,
 				"attempts", attempt+1,
@@ -189,8 +197,8 @@ func (s *Service) runWithRetry(ctx context.Context, name string, fn func() error
 		}
 
 		backoff := time.Duration(math.Min(
-			float64(baseBackoff)*math.Pow(2, float64(attempt)),
-			float64(maxBackoff),
+			float64(s.baseBackoff)*math.Pow(2, float64(attempt)),
+			float64(s.maxBackoff),
 		))
 
 		s.logger.Warn(name+" failed, retrying",
