@@ -306,6 +306,7 @@ dev-up:
 	$(call build-if-needed,stl-oracle-price-worker:local,docker-build-oracle-price-worker LOCAL=1)
 	$(call build-if-needed,stl-morpho-indexer:local,docker-build-morpho-indexer LOCAL=1)
 	$(call build-if-needed,stl-sparklend-position-tracker:local,docker-build-sparklend-position-tracker LOCAL=1)
+	$(call build-if-needed,stl-prime-debt-indexer:local,docker-build-prime-debt-indexer LOCAL=1)
 	$(MAKE) kind-load-workers kind-deploy-workers
 	$(call build-if-needed,stl-temporal-worker:local,docker-build-temporal-worker LOCAL=1)
 	$(MAKE) kind-load-temporal-worker kind-deploy-temporal-worker
@@ -314,7 +315,7 @@ dev-up:
 	@echo "  [6/6] Ready"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "==> Waiting for all deployments to roll out..."
-	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker temporal-worker; do \
+	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer temporal-worker; do \
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=120s || \
 	    { echo "ERROR: deployment $$dep not ready after 120s"; kubectl --context=$(KUBE_CONTEXT) get pods -n $(KUBE_NS); exit 1; }; \
 	done
