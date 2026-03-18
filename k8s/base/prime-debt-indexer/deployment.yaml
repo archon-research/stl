@@ -13,6 +13,15 @@ spec:
         app: prime-debt-indexer
     spec:
       serviceAccountName: prime-debt-indexer
+      initContainers:
+        - name: migrate
+          image: prime-debt-indexer
+          command: ["/app/migrate"]
+          envFrom:
+            - configMapRef:
+                name: prime-debt-indexer
+            - secretRef:
+                name: prime-debt-indexer
       containers:
         - name: prime-debt-indexer
           # Image name used as the Kustomize images transformer key.

@@ -12,6 +12,16 @@ spec:
       labels:
         app: prime-debt-indexer
     spec:
+      initContainers:
+        - name: migrate
+          image: stl-prime-debt-indexer:local
+          imagePullPolicy: Never
+          command: ["/app/migrate"]
+          envFrom:
+            - configMapRef:
+                name: stl-config
+            - secretRef:
+                name: stl-secrets
       containers:
         - name: prime-debt-indexer
           image: stl-prime-debt-indexer:local

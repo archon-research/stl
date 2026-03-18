@@ -1,4 +1,4 @@
-package sparklend_position_tracker
+package aavelike
 
 import (
 	"context"
@@ -26,7 +26,7 @@ func TestBlockchainService_LoadABIs(t *testing.T) {
 		t.Fatalf("failed to load ERC20 ABI: %v", err)
 	}
 
-	service := &blockchainService{
+	service := &BlockchainService{
 		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		metadataCache:   make(map[common.Address]TokenMetadata),
 		erc20ABI:        erc20ABI,
@@ -94,7 +94,7 @@ func TestBlockchainService_LoadABIs_AllProtocols(t *testing.T) {
 
 	for _, protocol := range protocols {
 		t.Run(string(protocol), func(t *testing.T) {
-			service := &blockchainService{
+			service := &BlockchainService{
 				logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 				metadataCache:   make(map[common.Address]TokenMetadata),
 				erc20ABI:        erc20ABI,
@@ -128,7 +128,7 @@ func TestBlockchainService_LoadABIs_InvalidProtocol(t *testing.T) {
 		t.Fatalf("failed to load ERC20 ABI: %v", err)
 	}
 
-	service := &blockchainService{
+	service := &BlockchainService{
 		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		metadataCache: make(map[common.Address]TokenMetadata),
 		erc20ABI:      erc20ABI,
@@ -150,7 +150,7 @@ func TestBlockchainService_ERC20ABI_Methods(t *testing.T) {
 		t.Fatalf("failed to load ERC20 ABI: %v", err)
 	}
 
-	service := &blockchainService{
+	service := &BlockchainService{
 		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		metadataCache:   make(map[common.Address]TokenMetadata),
 		erc20ABI:        erc20ABI,
@@ -183,7 +183,7 @@ func TestBlockchainService_GetUserReservesDataABI_Structure(t *testing.T) {
 		t.Fatalf("failed to load ERC20 ABI: %v", err)
 	}
 
-	service := &blockchainService{
+	service := &BlockchainService{
 		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		metadataCache:   make(map[common.Address]TokenMetadata),
 		erc20ABI:        erc20ABI,
@@ -237,7 +237,7 @@ func TestBlockchainService_GetUserReserveDataABI_Structure(t *testing.T) {
 		t.Fatalf("failed to load ERC20 ABI: %v", err)
 	}
 
-	service := &blockchainService{
+	service := &BlockchainService{
 		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		metadataCache:   make(map[common.Address]TokenMetadata),
 		erc20ABI:        erc20ABI,
@@ -291,7 +291,7 @@ func TestABI_PackingDoesNotPanic(t *testing.T) {
 		t.Fatalf("failed to load ERC20 ABI: %v", err)
 	}
 
-	service := &blockchainService{
+	service := &BlockchainService{
 		logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
 		metadataCache:         make(map[common.Address]TokenMetadata),
 		erc20ABI:              erc20ABI,
@@ -432,7 +432,7 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 
 	for _, proto := range protocols {
 		t.Run(proto.name, func(t *testing.T) {
-			service := &blockchainService{
+			service := &BlockchainService{
 				logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 				metadataCache:   make(map[common.Address]TokenMetadata),
 				protocolVersion: proto.version,
@@ -568,7 +568,7 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 }
 
 func TestBlockchainService_ParseReserveConfigurationData(t *testing.T) {
-	service := &blockchainService{
+	service := &BlockchainService{
 		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		metadataCache:   make(map[common.Address]TokenMetadata),
 		protocolVersion: "sparklend",
@@ -668,7 +668,7 @@ func TestBlockchainService_ParseReserveConfigurationData(t *testing.T) {
 }
 
 // TestBlockchainService_BatchGetTokenMetadata_ConcurrentAccess verifies that
-// concurrent calls to batchGetTokenMetadata on a shared blockchainService do
+// concurrent calls to BatchGetTokenMetadata on a shared BlockchainService do
 // not race on the metadataCache map. Run with -race to detect violations.
 func TestBlockchainService_BatchGetTokenMetadata_ConcurrentAccess(t *testing.T) {
 	erc20ABI, err := abis.GetERC20ABI()
@@ -688,7 +688,7 @@ func TestBlockchainService_BatchGetTokenMetadata_ConcurrentAccess(t *testing.T) 
 		return results, nil
 	}
 
-	svc := &blockchainService{
+	svc := &BlockchainService{
 		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		metadataCache:   make(map[common.Address]TokenMetadata),
 		erc20ABI:        erc20ABI,
@@ -703,9 +703,9 @@ func TestBlockchainService_BatchGetTokenMetadata_ConcurrentAccess(t *testing.T) 
 		go func() {
 			defer wg.Done()
 			tokens := map[common.Address]bool{token: true}
-			_, err := svc.batchGetTokenMetadata(context.Background(), tokens, big.NewInt(1))
+			_, err := svc.BatchGetTokenMetadata(context.Background(), tokens, big.NewInt(1))
 			if err != nil {
-				t.Errorf("batchGetTokenMetadata() unexpected error: %v", err)
+				t.Errorf("BatchGetTokenMetadata() unexpected error: %v", err)
 			}
 		}()
 	}
