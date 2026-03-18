@@ -47,7 +47,7 @@ class Star:
 class AllocationPosition:
     id: int
     chain_id: int
-    star: str
+    name: str
     proxy_address: str
     token_address: str
     token_symbol: str | None
