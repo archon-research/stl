@@ -153,3 +153,53 @@ func TestClient_PaginationHostValidation(t *testing.T) {
 		t.Errorf("expected host mismatch error, got: %v", err)
 	}
 }
+
+func TestClient_ForEachOperationsPage(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+
+		if callCount == 1 {
+			fmt.Fprintf(w, `{
+				"data": [{"id": "op-1", "action": "INITIAL_DEPOSIT", "type": "COLLATERAL_PACKAGE",
+				  "typeId": "pkg-1", "asset": {"assetType": "BTC", "type": "ANCHORAGECUSTODY"},
+				  "quantity": "1000", "notes": "", "createdAt": "2025-12-19T12:00:00Z", "updatedAt": "2025-12-19T12:00:00Z"}],
+				"page": {"next": "http://%s/v2/collateral_management/operations?cursor=abc"}
+			}`, r.Host)
+			return
+		}
+
+		fmt.Fprint(w, `{
+			"data": [{"id": "op-2", "action": "TOP_UP", "type": "COLLATERAL_PACKAGE",
+			  "typeId": "pkg-1", "asset": {"assetType": "BTC", "type": "ANCHORAGECUSTODY"},
+			  "quantity": "500", "notes": "", "createdAt": "2026-01-15T10:00:00Z", "updatedAt": "2026-01-15T10:00:00Z"}],
+			"page": {"next": null}
+		}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "key")
+
+	var allOps []Operation
+	err := client.ForEachOperationsPage(context.Background(), "", func(ops []Operation) error {
+		allOps = append(allOps, ops...)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(allOps) != 2 {
+		t.Fatalf("expected 2 operations across 2 pages, got %d", len(allOps))
+	}
+	if allOps[0].ID != "op-1" {
+		t.Errorf("expected first op=op-1, got %s", allOps[0].ID)
+	}
+	if allOps[1].ID != "op-2" {
+		t.Errorf("expected second op=op-2, got %s", allOps[1].ID)
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 HTTP calls, got %d", callCount)
+	}
+}

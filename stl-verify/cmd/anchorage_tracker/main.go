@@ -5,24 +5,21 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	tracker "github.com/archon-research/stl/stl-verify/internal/services/anchorage_tracker"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 var (
 	GitCommit string
-	GitBranch string
 	BuildTime string
 )
 
@@ -88,7 +85,7 @@ func run(ctx context.Context, args []string) error {
 
 	logger.Info("starting anchorage tracker",
 		"prime", *prime,
-		"db", maskDBURL(*dbURL),
+		"db", shared.MaskDBURL(*dbURL),
 		"api_url", *apiURL,
 		"backfill", *backfill,
 		"git_commit", GitCommit,
@@ -96,15 +93,11 @@ func run(ctx context.Context, args []string) error {
 	)
 
 	// Database
-	dbPool, err := pgxpool.New(ctx, *dbURL)
+	dbPool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(*dbURL))
 	if err != nil {
-		return fmt.Errorf("db connect: %w", err)
+		return fmt.Errorf("database: %w", err)
 	}
 	defer dbPool.Close()
-
-	if err := dbPool.Ping(ctx); err != nil {
-		return fmt.Errorf("db ping: %w", err)
-	}
 	logger.Info("postgres connected")
 
 	// Look up prime ID
@@ -116,13 +109,12 @@ func run(ctx context.Context, args []string) error {
 
 	// Dependencies
 	client := tracker.NewClient(*apiURL, *apiKey)
-	snapshotRepo := postgres.NewAnchorageSnapshotRepository(dbPool, logger)
-	operationRepo := postgres.NewAnchorageOperationRepository(dbPool, logger)
+	repo := postgres.NewAnchorageRepository(dbPool, logger)
 
 	// Backfill mode: fetch all operations, store them, exit.
 	// Poll interval is not required for backfill.
 	if *backfill {
-		svc := tracker.NewService(client, snapshotRepo, operationRepo, primeID, time.Minute, logger)
+		svc := tracker.NewService(client, repo, repo, primeID, time.Minute, logger)
 		n, err := svc.BackfillOperations(ctx)
 		if err != nil {
 			return fmt.Errorf("backfill: %w", err)
@@ -137,15 +129,6 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("parse poll interval: %w", err)
 	}
 
-	svc := tracker.NewService(client, snapshotRepo, operationRepo, primeID, pollInterval, logger)
+	svc := tracker.NewService(client, repo, repo, primeID, pollInterval, logger)
 	return lifecycle.Run(ctx, logger, svc)
-}
-
-// maskDBURL redacts credentials from a Postgres connection string.
-func maskDBURL(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "***"
-	}
-	return fmt.Sprintf("%s://%s@%s/%s", u.Scheme, "***:***", u.Host, u.Path)
 }

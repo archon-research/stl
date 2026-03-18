@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net/url"
 	"strings"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -82,4 +83,14 @@ func FormatAmount(rawAmount *big.Int, decimals int) string {
 	padded = strings.TrimRight(padded, "0")
 
 	return fmt.Sprintf("%s%s.%s", prefix, integerPart.String(), padded)
+}
+
+// MaskDBURL redacts credentials from a Postgres connection string.
+// Example: "postgres://user:pass@host:5432/db" → "postgres://***:***@host:5432/db"
+func MaskDBURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "***"
+	}
+	return fmt.Sprintf("%s://%s@%s%s", u.Scheme, "***:***", u.Host, u.Path)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -11,9 +12,24 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
+// AnchorageClient defines the interface for fetching data from the Anchorage API.
+// The concrete Client in client.go implements this. Define here (consumer side)
+// so the service can be unit-tested with a mock.
+type AnchorageClient interface {
+	FetchPackages(ctx context.Context) ([]Package, error)
+	ForEachOperationsPage(ctx context.Context, afterID string, fn func([]Operation) error) error
+}
+
+// retry settings for transient API errors.
+const (
+	maxRetries  = 3
+	baseBackoff = 2 * time.Second
+	maxBackoff  = 30 * time.Second
+)
+
 // Service polls the Anchorage API and persists package snapshots.
 type Service struct {
-	client        *Client
+	client        AnchorageClient
 	snapshotRepo  outbound.AnchorageSnapshotRepository
 	operationRepo outbound.AnchorageOperationRepository
 	primeID       int64
@@ -26,7 +42,7 @@ type Service struct {
 
 // NewService creates a new anchorage tracker service.
 func NewService(
-	client *Client,
+	client AnchorageClient,
 	snapshotRepo outbound.AnchorageSnapshotRepository,
 	operationRepo outbound.AnchorageOperationRepository,
 	primeID int64,
@@ -96,7 +112,8 @@ func (s *Service) BackfillOperations(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// syncOperations fetches new operations since the last known cursor and stores them.
+// syncOperations fetches new operations page by page, persisting each page
+// immediately to avoid unbounded memory accumulation during large backfills.
 func (s *Service) syncOperations(ctx context.Context) (int, error) {
 	cursor, err := s.operationRepo.GetLastCursor(ctx, s.primeID)
 	if err != nil {
@@ -107,26 +124,28 @@ func (s *Service) syncOperations(ctx context.Context) (int, error) {
 		s.logger.Debug("fetching operations after", "cursor", cursor)
 	}
 
-	operations, err := s.client.FetchOperations(ctx, cursor)
+	var total int
+	err = s.client.ForEachOperationsPage(ctx, cursor, func(ops []Operation) error {
+		entities, err := toOperationEntities(ops, s.primeID)
+		if err != nil {
+			return fmt.Errorf("convert operations: %w", err)
+		}
+
+		if err := s.operationRepo.SaveOperations(ctx, entities); err != nil {
+			return fmt.Errorf("save operations: %w", err)
+		}
+
+		total += len(entities)
+		return nil
+	})
 	if err != nil {
-		return 0, fmt.Errorf("fetch operations: %w", err)
+		return 0, fmt.Errorf("sync operations: %w", err)
 	}
 
-	if len(operations) == 0 {
-		return 0, nil
+	if total > 0 {
+		s.logger.Info("synced operations", "count", total)
 	}
-
-	entities, err := toOperationEntities(operations, s.primeID)
-	if err != nil {
-		return 0, fmt.Errorf("convert operations: %w", err)
-	}
-
-	if err := s.operationRepo.SaveOperations(ctx, entities); err != nil {
-		return 0, fmt.Errorf("save operations: %w", err)
-	}
-
-	s.logger.Info("synced operations", "count", len(entities))
-	return len(entities), nil
+	return total, nil
 }
 
 func (s *Service) run(ctx context.Context) {
@@ -140,12 +159,50 @@ func (s *Service) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := s.poll(ctx); err != nil {
-				s.logger.Error("poll failed", "error", err)
-			}
-			if _, err := s.syncOperations(ctx); err != nil {
-				s.logger.Error("sync operations failed", "error", err)
-			}
+			s.runWithRetry(ctx, "poll", func() error {
+				_, err := s.poll(ctx)
+				return err
+			})
+			s.runWithRetry(ctx, "sync operations", func() error {
+				_, err := s.syncOperations(ctx)
+				return err
+			})
+		}
+	}
+}
+
+// runWithRetry executes fn with exponential backoff on failure.
+// It retries up to maxRetries times before logging the error and moving on.
+func (s *Service) runWithRetry(ctx context.Context, name string, fn func() error) {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		err := fn()
+		if err == nil {
+			return
+		}
+
+		if attempt == maxRetries {
+			s.logger.Error(name+" failed after retries",
+				"error", err,
+				"attempts", attempt+1,
+			)
+			return
+		}
+
+		backoff := time.Duration(math.Min(
+			float64(baseBackoff)*math.Pow(2, float64(attempt)),
+			float64(maxBackoff),
+		))
+
+		s.logger.Warn(name+" failed, retrying",
+			"error", err,
+			"attempt", attempt+1,
+			"backoff", backoff,
+		)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
 		}
 	}
 }
@@ -185,7 +242,7 @@ func toSnapshots(packages []Package, primeID int64, now time.Time) ([]entity.Anc
 	var snapshots []entity.AnchoragePackageSnapshot
 
 	for _, pkg := range packages {
-		ltvTimestamp, err := time.Parse(time.RFC3339, pkg.LTVTimestamp)
+		ltvTimestamp, err := time.Parse(time.RFC3339Nano, pkg.LTVTimestamp)
 		if err != nil {
 			return nil, fmt.Errorf("parse ltv_timestamp for package %s: %w", pkg.PackageID, err)
 		}
@@ -217,28 +274,6 @@ func toSnapshots(packages []Package, primeID int64, now time.Time) ([]entity.Anc
 				SnapshotTime: now,
 			})
 		}
-
-		if len(pkg.CollateralAssets) == 0 {
-			snapshots = append(snapshots, entity.AnchoragePackageSnapshot{
-				PrimeID:        primeID,
-				PackageID:      pkg.PackageID,
-				PledgorID:      pkg.PledgorID,
-				SecuredPartyID: pkg.SecuredPartyID,
-				Active:         pkg.Active,
-				State:          pkg.State,
-
-				CurrentLTV:    pkg.CurrentLTV,
-				ExposureValue: pkg.ExposureValue,
-				PackageValue:  pkg.PackageValue,
-
-				MarginCallLTV:   pkg.MarginCall.LTV,
-				CriticalLTV:     pkg.Critical.LTV,
-				MarginReturnLTV: pkg.MarginReturn.LTV,
-
-				LTVTimestamp: ltvTimestamp,
-				SnapshotTime: now,
-			})
-		}
 	}
 
 	return snapshots, nil
@@ -254,23 +289,17 @@ func toOperationEntities(ops []Operation, primeID int64) ([]entity.AnchorageOper
 			return nil, fmt.Errorf("parse created_at for operation %s: %w", op.ID, err)
 		}
 
-		updatedAt, err := time.Parse(time.RFC3339Nano, op.UpdatedAt)
-		if err != nil {
-			return nil, fmt.Errorf("parse updated_at for operation %s: %w", op.ID, err)
-		}
-
 		entities = append(entities, entity.AnchorageOperation{
-			PrimeID:     primeID,
-			OperationID: op.ID,
-			Action:      op.Action,
-			Type:        op.Type,
-			TypeID:      op.TypeID,
-			AssetType:   op.Asset.AssetType,
-			CustodyType: op.Asset.Type,
-			Quantity:    op.Quantity,
-			Notes:       op.Notes,
-			CreatedAt:   createdAt,
-			UpdatedAt:   updatedAt,
+			PrimeID:       primeID,
+			OperationID:   op.ID,
+			Action:        op.Action,
+			OperationType: op.Type,
+			TypeID:        op.TypeID,
+			AssetType:     op.Asset.AssetType,
+			CustodyType:   op.Asset.Type,
+			Quantity:      op.Quantity,
+			Notes:         op.Notes,
+			CreatedAt:     createdAt,
 		})
 	}
 

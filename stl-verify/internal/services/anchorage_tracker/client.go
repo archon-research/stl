@@ -39,7 +39,7 @@ func NewClient(baseURL, apiKey string) *Client {
 }
 
 // FetchPackages retrieves all collateral management packages.
-// Handles pagination automatically.
+// Handles pagination automatically. Safe to accumulate — package count is small.
 func (c *Client) FetchPackages(ctx context.Context) ([]Package, error) {
 	var all []Package
 	u := fmt.Sprintf("%s/v2/collateral_management/packages?limit=100", c.baseURL)
@@ -61,11 +61,10 @@ func (c *Client) FetchPackages(ctx context.Context) ([]Package, error) {
 	return all, nil
 }
 
-// FetchOperations retrieves all collateral management operations.
-// If afterID is non-empty (a cursor in "timestamp|id" format), only operations
-// after that cursor are returned. Handles pagination automatically.
-func (c *Client) FetchOperations(ctx context.Context, afterID string) ([]Operation, error) {
-	var all []Operation
+// ForEachOperationsPage fetches operations page by page, calling fn for each page.
+// This avoids accumulating all operations in memory during large backfills.
+// If afterID is non-empty, only operations after that cursor are fetched.
+func (c *Client) ForEachOperationsPage(ctx context.Context, afterID string, fn func([]Operation) error) error {
 	u := fmt.Sprintf("%s/v2/collateral_management/operations?limit=100", c.baseURL)
 	if afterID != "" {
 		u += "&afterId=" + url.QueryEscape(afterID)
@@ -74,18 +73,23 @@ func (c *Client) FetchOperations(ctx context.Context, afterID string) ([]Operati
 	for u != "" {
 		var page OperationsResponse
 		if err := c.doGet(ctx, u, &page); err != nil {
-			return nil, err
+			return err
 		}
-		all = append(all, page.Data...)
+
+		if len(page.Data) > 0 {
+			if err := fn(page.Data); err != nil {
+				return fmt.Errorf("process operations page: %w", err)
+			}
+		}
 
 		next, err := c.validatedNextURL(page.Page)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		u = next
 	}
 
-	return all, nil
+	return nil
 }
 
 // doGet performs an authenticated GET request and decodes the JSON response.
