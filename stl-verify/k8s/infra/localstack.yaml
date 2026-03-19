@@ -80,6 +80,10 @@ data:
     # Create resources for each supported chain
     create_chain_resources "ethereum"
     create_chain_resources "avalanche"
+    create_chain_resources "base"
+    create_chain_resources "optimism"
+    create_chain_resources "unichain"
+    create_chain_resources "arbitrum"
 
     echo "Creating oracle price queues..."
     $AWS sqs create-queue \
