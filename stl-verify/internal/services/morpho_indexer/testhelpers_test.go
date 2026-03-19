@@ -56,6 +56,7 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 	tokenRepo := &testutil.MockTokenRepository{}
 	morphoRepo := &testutil.MockMorphoRepository{}
 	eventRepo := &testutil.MockEventRepository{}
+	receiptTokenRepo := &testutil.MockReceiptTokenRepository{}
 	consumer := &testutil.MockSQSConsumer{}
 
 	// Set up sequential token IDs for GetOrCreateToken.
@@ -71,7 +72,7 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 		SQSConsumerConfig: sqsCfg,
 	}
 
-	svc, err := NewService(config, consumer, cache, multicaller, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo)
+	svc, err := NewService(config, consumer, cache, multicaller, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo, receiptTokenRepo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

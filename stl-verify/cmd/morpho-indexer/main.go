@@ -297,6 +297,11 @@ func run(ctx context.Context, args []string) error {
 
 	eventRepo := postgres.NewEventRepository(logger)
 
+	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger)
+	if err != nil {
+		return fmt.Errorf("creating receipt token repository: %w", err)
+	}
+
 	// Service
 	svcConfig := morpho_indexer.Config{
 		SQSConsumerConfig: shared.SQSConsumerConfig{
@@ -318,6 +323,7 @@ func run(ctx context.Context, args []string) error {
 		tokenRepo,
 		morphoRepo,
 		eventRepo,
+		receiptTokenRepo,
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)

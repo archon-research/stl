@@ -50,16 +50,17 @@ type PositionEventData struct {
 }
 
 type Service struct {
-	config       shared.SQSConsumerConfig
-	consumer     outbound.SQSConsumer
-	cacheReader  outbound.BlockCacheReader
-	ethClient    *ethclient.Client
-	txManager    outbound.TxManager
-	userRepo     outbound.UserRepository
-	protocolRepo outbound.ProtocolRepository
-	tokenRepo    outbound.TokenRepository
-	positionRepo outbound.PositionRepository
-	eventRepo    outbound.EventRepository
+	config           shared.SQSConsumerConfig
+	consumer         outbound.SQSConsumer
+	cacheReader      outbound.BlockCacheReader
+	ethClient        *ethclient.Client
+	txManager        outbound.TxManager
+	userRepo         outbound.UserRepository
+	protocolRepo     outbound.ProtocolRepository
+	tokenRepo        outbound.TokenRepository
+	positionRepo     outbound.PositionRepository
+	eventRepo        outbound.EventRepository
+	receiptTokenRepo outbound.ReceiptTokenRepository
 
 	reader         *aavelike.PositionReader
 	eventExtractor *EventExtractor
@@ -80,8 +81,9 @@ func NewService(
 	tokenRepo outbound.TokenRepository,
 	positionRepo outbound.PositionRepository,
 	eventRepo outbound.EventRepository,
+	receiptTokenRepo outbound.ReceiptTokenRepository,
 ) (*Service, error) {
-	if err := validateDependencies(consumer, cacheReader, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo); err != nil {
+	if err := validateDependencies(consumer, cacheReader, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo, receiptTokenRepo); err != nil {
 		return nil, err
 	}
 
@@ -109,19 +111,20 @@ func NewService(
 	}
 
 	processor := &Service{
-		config:         config,
-		consumer:       consumer,
-		cacheReader:    cacheReader,
-		ethClient:      ethClient,
-		txManager:      txManager,
-		userRepo:       userRepo,
-		protocolRepo:   protocolRepo,
-		tokenRepo:      tokenRepo,
-		positionRepo:   positionRepo,
-		eventRepo:      eventRepo,
-		reader:         reader,
-		eventExtractor: eventExtractor,
-		logger:         config.Logger.With("component", "aavelike-position-tracker"),
+		config:           config,
+		consumer:         consumer,
+		cacheReader:      cacheReader,
+		ethClient:        ethClient,
+		txManager:        txManager,
+		userRepo:         userRepo,
+		protocolRepo:     protocolRepo,
+		tokenRepo:        tokenRepo,
+		positionRepo:     positionRepo,
+		eventRepo:        eventRepo,
+		receiptTokenRepo: receiptTokenRepo,
+		reader:           reader,
+		eventExtractor:   eventExtractor,
+		logger:           config.Logger.With("component", "aavelike-position-tracker"),
 	}
 
 	return processor, nil
@@ -385,7 +388,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 	}
 
 	// Fetch reserve data and configuration from chain
-	reserveData, configData, err := blockchainSvc.GetFullReserveData(ctx, reserve, blockNumber)
+	reserveData, configData, tokenAddresses, err := blockchainSvc.GetFullReserveData(ctx, reserve, blockNumber)
 	if err != nil {
 		// If reserve doesn't exist at this block or no PoolDataProvider was active,
 		// log and skip (non-fatal). This can happen when:
@@ -421,6 +424,17 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reserve, normalizeTokenSymbol(tokenMetadata.Symbol), tokenMetadata.Decimals, blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get token: %w", err)
+		}
+
+		// Create receipt token entry for the aToken (symbol left empty, populated later)
+		if tokenAddresses != nil && tokenAddresses.ATokenAddress != (common.Address{}) {
+			receiptToken, err := entity.NewReceiptToken(chainID, protocolID, tokenID, blockNumber, tokenAddresses.ATokenAddress, "")
+			if err != nil {
+				return fmt.Errorf("creating receipt token entity: %w", err)
+			}
+			if _, err := s.receiptTokenRepo.GetOrCreateReceiptToken(ctx, tx, *receiptToken); err != nil {
+				return fmt.Errorf("failed to upsert receipt token: %w", err)
+			}
 		}
 
 		// Build and persist the entity
@@ -1035,6 +1049,7 @@ func validateDependencies(
 	tokenRepo outbound.TokenRepository,
 	positionRepo outbound.PositionRepository,
 	eventRepo outbound.EventRepository,
+	receiptTokenRepo outbound.ReceiptTokenRepository,
 ) error {
 	// consumer and cacheReader may be nil in backfill mode (ProcessReceipts only).
 	if ethClient == nil {
@@ -1057,6 +1072,9 @@ func validateDependencies(
 	}
 	if eventRepo == nil {
 		return fmt.Errorf("eventRepo is required")
+	}
+	if receiptTokenRepo == nil {
+		return fmt.Errorf("receiptTokenRepo is required")
 	}
 	return nil
 }

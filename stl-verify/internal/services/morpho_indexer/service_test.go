@@ -79,6 +79,7 @@ func TestNewService_ValidateDependencies(t *testing.T) {
 	tr := &testutil.MockTokenRepository{}
 	mRepo := &testutil.MockMorphoRepository{}
 	er := &testutil.MockEventRepository{}
+	rtr := &testutil.MockReceiptTokenRepository{}
 	cons := &testutil.MockSQSConsumer{}
 
 	sqsCfg := shared.SQSConsumerConfigDefaults()
@@ -86,32 +87,34 @@ func TestNewService_ValidateDependencies(t *testing.T) {
 	config := Config{SQSConsumerConfig: sqsCfg}
 
 	tests := []struct {
-		name        string
-		consumer    outbound.SQSConsumer
-		cache       outbound.BlockCache
-		multicall   outbound.Multicaller
-		txMgr       outbound.TxManager
-		userRepo    outbound.UserRepository
-		protoRepo   outbound.ProtocolRepository
-		tokenRepo   outbound.TokenRepository
-		morphoRepo  outbound.MorphoRepository
-		eventRepo   outbound.EventRepository
-		errContains string
+		name             string
+		consumer         outbound.SQSConsumer
+		cache            outbound.BlockCache
+		multicall        outbound.Multicaller
+		txMgr            outbound.TxManager
+		userRepo         outbound.UserRepository
+		protoRepo        outbound.ProtocolRepository
+		tokenRepo        outbound.TokenRepository
+		morphoRepo       outbound.MorphoRepository
+		eventRepo        outbound.EventRepository
+		receiptTokenRepo outbound.ReceiptTokenRepository
+		errContains      string
 	}{
-		{"nil consumer", nil, rc, mc, tm, ur, pr, tr, mRepo, er, "consumer is required"},
-		{"nil cache", cons, nil, mc, tm, ur, pr, tr, mRepo, er, "cache is required"},
-		{"nil multicall", cons, rc, nil, tm, ur, pr, tr, mRepo, er, "multicallClient is required"},
-		{"nil txManager", cons, rc, mc, nil, ur, pr, tr, mRepo, er, "txManager is required"},
-		{"nil userRepo", cons, rc, mc, tm, nil, pr, tr, mRepo, er, "userRepo is required"},
-		{"nil protocolRepo", cons, rc, mc, tm, ur, nil, tr, mRepo, er, "protocolRepo is required"},
-		{"nil tokenRepo", cons, rc, mc, tm, ur, pr, nil, mRepo, er, "tokenRepo is required"},
-		{"nil morphoRepo", cons, rc, mc, tm, ur, pr, tr, nil, er, "morphoRepo is required"},
-		{"nil eventRepo", cons, rc, mc, tm, ur, pr, tr, mRepo, nil, "eventRepo is required"},
+		{"nil consumer", nil, rc, mc, tm, ur, pr, tr, mRepo, er, rtr, "consumer is required"},
+		{"nil cache", cons, nil, mc, tm, ur, pr, tr, mRepo, er, rtr, "cache is required"},
+		{"nil multicall", cons, rc, nil, tm, ur, pr, tr, mRepo, er, rtr, "multicallClient is required"},
+		{"nil txManager", cons, rc, mc, nil, ur, pr, tr, mRepo, er, rtr, "txManager is required"},
+		{"nil userRepo", cons, rc, mc, tm, nil, pr, tr, mRepo, er, rtr, "userRepo is required"},
+		{"nil protocolRepo", cons, rc, mc, tm, ur, nil, tr, mRepo, er, rtr, "protocolRepo is required"},
+		{"nil tokenRepo", cons, rc, mc, tm, ur, pr, nil, mRepo, er, rtr, "tokenRepo is required"},
+		{"nil morphoRepo", cons, rc, mc, tm, ur, pr, tr, nil, er, rtr, "morphoRepo is required"},
+		{"nil eventRepo", cons, rc, mc, tm, ur, pr, tr, mRepo, nil, rtr, "eventRepo is required"},
+		{"nil receiptTokenRepo", cons, rc, mc, tm, ur, pr, tr, mRepo, er, nil, "receiptTokenRepo is required"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewService(config, tt.consumer, tt.cache, tt.multicall, tt.txMgr, tt.userRepo, tt.protoRepo, tt.tokenRepo, tt.morphoRepo, tt.eventRepo)
+			_, err := NewService(config, tt.consumer, tt.cache, tt.multicall, tt.txMgr, tt.userRepo, tt.protoRepo, tt.tokenRepo, tt.morphoRepo, tt.eventRepo, tt.receiptTokenRepo)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -122,7 +125,7 @@ func TestNewService_ValidateDependencies(t *testing.T) {
 	}
 
 	// All deps provided: should succeed.
-	svc, err := NewService(config, cons, rc, mc, tm, ur, pr, tr, mRepo, er)
+	svc, err := NewService(config, cons, rc, mc, tm, ur, pr, tr, mRepo, er, rtr)
 	if err != nil {
 		t.Fatalf("NewService with all deps: %v", err)
 	}
