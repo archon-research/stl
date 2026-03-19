@@ -17,4 +17,5 @@ type AnchorageSnapshotRepository interface {
 type AnchorageOperationRepository interface {
 	SaveOperations(ctx context.Context, operations []entity.AnchorageOperation) error
 	GetLastCursor(ctx context.Context, primeID int64) (string, error)
+	GetPrimeIDByName(ctx context.Context, name string) (int64, error)
 }

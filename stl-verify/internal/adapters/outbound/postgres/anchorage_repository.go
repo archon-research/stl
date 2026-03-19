@@ -227,3 +227,16 @@ func (r *AnchorageRepository) GetLastCursor(ctx context.Context, primeID int64) 
 	ts := fmt.Sprintf("%d", createdAt.UTC().Unix())
 	return ts + "|" + operationID, nil
 }
+
+// GetPrimeIDByName returns the prime ID for the given name.
+func (r *AnchorageRepository) GetPrimeIDByName(ctx context.Context, name string) (int64, error) {
+	var id int64
+	err := r.pool.QueryRow(ctx, "SELECT id FROM prime WHERE name = $1", name).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("prime %q not found", name)
+		}
+		return 0, fmt.Errorf("get prime by name: %w", err)
+	}
+	return id, nil
+}

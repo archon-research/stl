@@ -84,6 +84,13 @@ func (m *mockOperationRepo) GetLastCursor(_ context.Context, _ int64) (string, e
 	return m.cursor, nil
 }
 
+func (m *mockOperationRepo) GetPrimeIDByName(_ context.Context, name string) (int64, error) {
+	if name == "" {
+		return 0, fmt.Errorf("prime name is required")
+	}
+	return 1, nil
+}
+
 func (m *mockOperationRepo) count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()

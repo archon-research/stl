@@ -15,7 +15,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	tracker "github.com/archon-research/stl/stl-verify/internal/services/anchorage_tracker"
-	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 var (
@@ -61,8 +60,8 @@ func run(ctx context.Context, args []string) error {
 	pollIntervalStr := fs.String("poll-interval", env.Get("POLL_INTERVAL", "15m"),
 		"Polling interval (e.g. 15m, 1h)")
 
-	prime := fs.String("prime", env.Get("ANCHORAGE_PRIME", "spark"),
-		"Prime name for these packages (e.g. spark, grove)")
+	prime := fs.String("prime", env.Get("ANCHORAGE_PRIME", ""),
+		"Prime name (e.g. spark, grove)")
 
 	backfill := fs.Bool("backfill", false,
 		"Backfill operations from the Anchorage API, then exit")
@@ -82,10 +81,12 @@ func run(ctx context.Context, args []string) error {
 	if *apiKey == "" {
 		return fmt.Errorf("anchorage API key is required (use -api-key flag or ANCHORAGE_API_KEY env var)")
 	}
+	if *prime == "" {
+		return fmt.Errorf("prime name is required (use -prime flag or ANCHORAGE_PRIME env var)")
+	}
 
 	logger.Info("starting anchorage tracker",
 		"prime", *prime,
-		"db", shared.MaskDBURL(*dbURL),
 		"api_url", *apiURL,
 		"backfill", *backfill,
 		"git_commit", GitCommit,
@@ -100,16 +101,16 @@ func run(ctx context.Context, args []string) error {
 	defer dbPool.Close()
 	logger.Info("postgres connected")
 
-	// Look up prime ID
-	var primeID int64
-	if err := dbPool.QueryRow(ctx, "SELECT id FROM prime WHERE name = $1", *prime).Scan(&primeID); err != nil {
-		return fmt.Errorf("prime %q not found in database: %w", *prime, err)
-	}
-	logger.Info("resolved prime", "name", *prime, "id", primeID)
-
 	// Dependencies
 	client := tracker.NewClient(*apiURL, *apiKey)
 	repo := postgres.NewAnchorageRepository(dbPool, logger)
+
+	// Look up prime ID
+	primeID, err := repo.GetPrimeIDByName(ctx, *prime)
+	if err != nil {
+		return fmt.Errorf("resolve prime: %w", err)
+	}
+	logger.Info("resolved prime", "name", *prime, "id", primeID)
 
 	// Backfill mode: fetch all operations, store them, exit.
 	// Poll interval is not required for backfill.
