@@ -238,17 +238,17 @@ func (r *OnchainPriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx
 	return nil
 }
 
-// GetAllEnabledOracles retrieves all enabled oracles.
-func (r *OnchainPriceRepository) GetAllEnabledOracles(ctx context.Context) ([]*entity.Oracle, error) {
+// GetEnabledOraclesByChain retrieves all enabled oracles for a given chain.
+func (r *OnchainPriceRepository) GetEnabledOraclesByChain(ctx context.Context, chainID int64) ([]*entity.Oracle, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, name, display_name, chain_id, address, oracle_type,
 		       deployment_block, enabled, price_decimals, created_at, updated_at
 		FROM oracle
-		WHERE enabled = true
+		WHERE enabled = true AND chain_id = $1
 		ORDER BY id
-	`)
+	`, chainID)
 	if err != nil {
-		return nil, fmt.Errorf("querying enabled oracles: %w", err)
+		return nil, fmt.Errorf("querying enabled oracles by chain: %w", err)
 	}
 	defer rows.Close()
 
@@ -262,7 +262,7 @@ func (r *OnchainPriceRepository) GetAllEnabledOracles(ctx context.Context) ([]*e
 		); err != nil {
 			return nil, fmt.Errorf("scanning oracle: %w", err)
 		}
-		copy(o.Address[:], addrBytes)
+		o.Address = common.BytesToAddress(addrBytes)
 		oracles = append(oracles, &o)
 	}
 	if err := rows.Err(); err != nil {

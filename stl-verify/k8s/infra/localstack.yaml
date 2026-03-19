@@ -81,8 +81,7 @@ data:
     create_chain_resources "ethereum"
     create_chain_resources "avalanche"
 
-    # Oracle price worker is Ethereum-only
-    echo "Creating Ethereum oracle price queues..."
+    echo "Creating oracle price queues..."
     $AWS sqs create-queue \
       --queue-name stl-ethereum-oracle-price-dlq.fifo \
       --attributes FifoQueue=true,ContentBasedDeduplication=true \
@@ -97,6 +96,23 @@ data:
       --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
       --protocol sqs \
       --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-oracle-price.fifo" \
+      --attributes RawMessageDelivery=true \
+      --region $REGION
+
+    $AWS sqs create-queue \
+      --queue-name stl-avalanche-oracle-price-dlq.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sqs create-queue \
+      --queue-name stl-avalanche-oracle-price.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sns subscribe \
+      --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-avalanche-blocks.fifo" \
+      --protocol sqs \
+      --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-avalanche-oracle-price.fifo" \
       --attributes RawMessageDelivery=true \
       --region $REGION
 

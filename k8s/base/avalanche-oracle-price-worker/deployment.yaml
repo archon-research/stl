@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: avalanche-oracle-price-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: avalanche-oracle-price-worker
+  template:
+    metadata:
+      labels:
+        app: avalanche-oracle-price-worker
+    spec:
+      serviceAccountName: avalanche-oracle-price-worker
+      containers:
+        - name: avalanche-oracle-price-worker
+          # Distinct image key — overlay maps this to the oracle-price-worker ECR repo.
+          # Same binary as oracle-price-worker; chain is selected via CHAIN_ID env var.
+          image: avalanche-oracle-price-worker
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://localhost:4317"
+            - name: JAEGER_ENDPOINT
+              value: "localhost:4317"
+          envFrom:
+            - configMapRef:
+                name: avalanche-oracle-price-worker-config
+            - secretRef:
+                name: avalanche-oracle-price-worker
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2048Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2048Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f oracle_price_worker"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

@@ -37,8 +37,8 @@ type OracleUnit struct {
 
 // LoadOracleUnits loads all enabled oracles from DB, deduplicates by oracle ID,
 // and builds OracleUnit structs for each.
-func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, logger *slog.Logger) ([]*OracleUnit, error) {
-	allOracles, err := repo.GetAllEnabledOracles(ctx)
+func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, chainID int64, logger *slog.Logger) ([]*OracleUnit, error) {
+	allOracles, err := repo.GetEnabledOraclesByChain(ctx, chainID)
 	if err != nil {
 		return nil, fmt.Errorf("getting enabled oracles: %w", err)
 	}

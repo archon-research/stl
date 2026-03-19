@@ -121,6 +121,7 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 	// Create service — no tokenAddresses needed, service loads from DB
 	svc, err := NewService(
 		Config{
+			ChainID:     1,
 			Concurrency: 2,
 			BatchSize:   50,
 			Logger:      logger,
@@ -210,6 +211,7 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 
 	svc, err := NewService(
 		Config{
+			ChainID:     1,
 			Concurrency: 1,
 			BatchSize:   100,
 			Logger:      logger,
@@ -290,6 +292,7 @@ func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 	// First run: insert prices for blocks 100-102
 	svc, err := NewService(
 		Config{
+			ChainID:     1,
 			Concurrency: 1,
 			BatchSize:   100,
 			Logger:      logger,
@@ -369,6 +372,7 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 	// Run backfill
 	svc, err := NewService(
 		Config{
+			ChainID:     1,
 			Concurrency: 1,
 			BatchSize:   100,
 			Logger:      logger,
@@ -417,6 +421,7 @@ func TestIntegration_BackfillRun_RespectsDeploymentBlock(t *testing.T) {
 
 	svc, err := NewService(
 		Config{
+			ChainID:     1,
 			Concurrency: 1,
 			BatchSize:   100,
 			Logger:      logger,
@@ -485,6 +490,7 @@ func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
 
 	svc, err := NewService(
 		Config{
+			ChainID:     1,
 			Concurrency: 1,
 			BatchSize:   100,
 			Logger:      logger,
@@ -592,6 +598,7 @@ func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
 
 	svc, err := NewService(
 		Config{
+			ChainID:     1,
 			Concurrency: 1,
 			BatchSize:   100,
 			Logger:      logger,
@@ -668,7 +675,7 @@ func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T)
 
 	newService := func() *Service {
 		svc, err := NewService(
-			Config{Concurrency: 1, BatchSize: 100, Logger: logger},
+			Config{ChainID: 1, Concurrency: 1, BatchSize: 100, Logger: logger},
 			integrationMockHeaderFetcher(),
 			integrationMockMulticallFactory(t, 2),
 			repo,
@@ -756,6 +763,7 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 
 	svc, err := NewService(
 		Config{
+			ChainID:     1,
 			Concurrency: 1,
 			BatchSize:   100,
 			Logger:      logger,

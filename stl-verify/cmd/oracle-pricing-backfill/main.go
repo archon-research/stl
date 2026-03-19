@@ -35,6 +35,7 @@ func main() {
 }
 
 type cliConfig struct {
+	chainID     int64
 	rpcURL      string
 	fromBlock   int64
 	toBlock     int64
@@ -45,6 +46,7 @@ type cliConfig struct {
 
 func parseFlags(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("oracle-pricing-backfill", flag.ContinueOnError)
+	chainID := fs.Int64("chain-id", 1, "Chain ID to backfill oracles for (default: 1 for Ethereum mainnet)")
 	rpcURL := fs.String("rpc-url", "", "Erigon HTTP RPC endpoint (e.g., http://erigon:8545)")
 	fromBlock := fs.Int64("from", 0, "Start block number (required)")
 	toBlock := fs.Int64("to", 0, "End block number (required)")
@@ -56,6 +58,7 @@ func parseFlags(args []string) (cliConfig, error) {
 	}
 
 	cfg := cliConfig{
+		chainID:     *chainID,
 		rpcURL:      *rpcURL,
 		fromBlock:   *fromBlock,
 		toBlock:     *toBlock,
@@ -156,6 +159,7 @@ func run(args []string) error {
 
 	service, err := oracle_backfill.NewService(
 		oracle_backfill.Config{
+			ChainID:     cfg.chainID,
 			Concurrency: cfg.concurrency,
 			BatchSize:   cfg.batchSize,
 			Logger:      logger,
