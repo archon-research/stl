@@ -1656,6 +1656,79 @@ func TestPersistUserPositionBatch(t *testing.T) {
 	}
 }
 
+func TestSaveReserveDataSnapshot_CreatesReceiptTokenWithBatchedSymbol(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	reserve := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	aTokenAddr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{})
+	defer cleanup()
+
+	erc20ABI := mustERC20ABI(t)
+	reserveDataABI := mustSparklendReserveDataABI(t)
+	configABI := mustReserveConfigABI(t)
+	tokenAddrsABI := mustReserveTokenAddrsABI(t)
+
+	multicaller := testutil.NewMockMulticaller()
+	executeCount := 0
+	multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, bn *big.Int) ([]outbound.Result, error) {
+		executeCount++
+		switch executeCount {
+		case 1:
+			// GetFullReserveData multicall
+			results := make([]outbound.Result, 3)
+			results[0] = outbound.Result{Success: true, ReturnData: packSparklendReserveDataResponse(t, reserveDataABI)}
+			results[1] = outbound.Result{Success: true, ReturnData: packReserveConfigResponse(t, configABI)}
+			results[2] = outbound.Result{Success: true, ReturnData: packReserveTokenAddrsResponse(t, tokenAddrsABI, aTokenAddr)}
+			return results, nil
+		case 2:
+			// BatchGetTokenMetadata for reserve + aToken
+			results := make([]outbound.Result, len(calls))
+			for i, call := range calls {
+				methodID := hex.EncodeToString(call.CallData[:4])
+				results[i] = outbound.Result{Success: true, ReturnData: packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)}
+			}
+			return results, nil
+		default:
+			t.Fatalf("unexpected multicall execution count: %d", executeCount)
+			return nil, nil
+		}
+	}
+
+	var capturedToken entity.ReceiptToken
+	receiptTokenRepo := &testutil.MockReceiptTokenRepository{
+		GetOrCreateReceiptTokenFn: func(ctx context.Context, tx pgx.Tx, token entity.ReceiptToken) (int64, error) {
+			capturedToken = token
+			return 42, nil
+		},
+	}
+
+	svc := newServiceWithCachedBlockchainService(t, ethClient, multicaller, chainID, protocolAddress)
+	svc.userRepo = &testutil.MockUserRepository{}
+	svc.protocolRepo = &testutil.MockProtocolRepository{}
+	svc.tokenRepo = &testutil.MockTokenRepository{}
+	svc.txManager = &testutil.MockTxManager{}
+	svc.receiptTokenRepo = receiptTokenRepo
+
+	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, 0, "0xtest")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if capturedToken.ReceiptTokenAddress != aTokenAddr {
+		t.Errorf("receipt token address = %s, want %s", capturedToken.ReceiptTokenAddress.Hex(), aTokenAddr.Hex())
+	}
+	if capturedToken.Symbol != "spWETH" {
+		t.Errorf("receipt token symbol = %q, want %q (fetched from batched metadata call)", capturedToken.Symbol, "spWETH")
+	}
+	if capturedToken.ChainID != chainID {
+		t.Errorf("receipt token chainID = %d, want %d", capturedToken.ChainID, chainID)
+	}
+}
+
 func TestSaveReserveDataSnapshot_ReceiptTokenRepoErrorPropagates(t *testing.T) {
 	const chainID = int64(1)
 	const blockNumber = int64(24033627)
