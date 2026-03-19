@@ -1,15 +1,17 @@
 -- Migration: Create dedicated migration role with DDL access
 --
 -- This migration creates one PostgreSQL role:
---   stl_migrator - Schema owner, full DDL access, no application data access
+--   stl_migrator - Owns objects it creates, no application data access
 --
 -- stl_migrator can:
---   - CREATE/ALTER/DROP tables, indexes, sequences, types
+--   - CREATE new tables/sequences/indexes (via GRANT CREATE ON SCHEMA public)
+--   - ALTER/DROP objects it owns (PostgreSQL grants full DDL to the object owner)
 --   - CREATEROLE (needed to create stl_readonly/stl_readwrite on fresh envs)
---   - Read/write the migrations tracking table
+--   - SELECT/INSERT on the migrations tracking table
 --
 -- stl_migrator cannot:
 --   - Read or write application data (SELECT/INSERT/UPDATE/DELETE on app tables)
+--   - ALTER/DROP objects it does not own (e.g., tables created by other roles)
 --
 -- Default privileges (granting SELECT/DML to stl_readonly/stl_readwrite on objects
 -- created by stl_migrator) are set in 20260319_000001_migrator_default_privileges.sql,
@@ -29,8 +31,10 @@ BEGIN
     END IF;
     EXECUTE format('GRANT CONNECT ON DATABASE %I TO stl_migrator', current_database());
     EXECUTE 'GRANT CREATE, USAGE ON SCHEMA public TO stl_migrator';
-    EXECUTE 'GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO stl_migrator';
-    EXECUTE 'GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO stl_migrator';
+    -- Allow stl_migrator to track which migrations have run.
+    -- Objects created by stl_migrator are owned by it (full DDL access).
+    -- App tables are NOT accessible — no blanket grants on existing tables.
+    EXECUTE 'GRANT SELECT, INSERT ON migrations TO stl_migrator';
     INSERT INTO migrations (filename)
     VALUES ('20260319_000000_create_migrator_role.sql')
     ON CONFLICT (filename) DO NOTHING;
