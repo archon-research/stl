@@ -79,5 +79,4 @@ type Operation struct {
 	Quantity                   string     `json:"quantity"`
 	Type                       string     `json:"type"`
 	TypeID                     string     `json:"typeId"`
-	UpdatedAt                  string     `json:"updatedAt"`
 }

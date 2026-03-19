@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
-	"sync"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -13,36 +11,18 @@ import (
 )
 
 // AnchorageClient defines the interface for fetching data from the Anchorage API.
-// The concrete Client in client.go implements this. Define here (consumer side)
-// so the service can be unit-tested with a mock.
 type AnchorageClient interface {
 	FetchPackages(ctx context.Context) ([]Package, error)
 	ForEachOperationsPage(ctx context.Context, afterID string, fn func([]Operation) error) error
 }
 
-// Default retry settings for transient API errors.
-const (
-	defaultMaxRetries  = 3
-	defaultBaseBackoff = 2 * time.Second
-	defaultMaxBackoff  = 30 * time.Second
-)
-
-// Service polls the Anchorage API and persists package snapshots.
+// Service fetches Anchorage collateral data and persists it.
 type Service struct {
 	client        AnchorageClient
 	snapshotRepo  outbound.AnchorageSnapshotRepository
 	operationRepo outbound.AnchorageOperationRepository
 	primeID       int64
-	pollInterval  time.Duration
 	logger        *slog.Logger
-
-	// Retry config (defaults applied in NewService).
-	maxRetries  int
-	baseBackoff time.Duration
-	maxBackoff  time.Duration
-
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
 }
 
 // NewService creates a new anchorage tracker service.
@@ -51,7 +31,6 @@ func NewService(
 	snapshotRepo outbound.AnchorageSnapshotRepository,
 	operationRepo outbound.AnchorageOperationRepository,
 	primeID int64,
-	pollInterval time.Duration,
 	logger *slog.Logger,
 ) *Service {
 	if logger == nil {
@@ -62,48 +41,18 @@ func NewService(
 		snapshotRepo:  snapshotRepo,
 		operationRepo: operationRepo,
 		primeID:       primeID,
-		pollInterval:  pollInterval,
 		logger:        logger,
-		maxRetries:    defaultMaxRetries,
-		baseBackoff:   defaultBaseBackoff,
-		maxBackoff:    defaultMaxBackoff,
 	}
 }
 
-// Start begins the polling loop in a background goroutine.
-func (s *Service) Start(ctx context.Context) error {
-	if s.pollInterval <= 0 {
-		return fmt.Errorf("poll interval must be positive, got %s", s.pollInterval)
-	}
-
-	ctx, s.cancel = context.WithCancel(ctx)
-
-	// Initial sync before entering the loop.
+// Run fetches current package snapshots and syncs new operations, then returns.
+func (s *Service) Run(ctx context.Context) error {
 	if _, err := s.poll(ctx); err != nil {
-		return fmt.Errorf("initial poll: %w", err)
+		return fmt.Errorf("poll packages: %w", err)
 	}
 	if _, err := s.syncOperations(ctx); err != nil {
-		return fmt.Errorf("initial operations sync: %w", err)
+		return fmt.Errorf("sync operations: %w", err)
 	}
-
-	s.wg.Add(1)
-	go s.run(ctx)
-
-	s.logger.Info("anchorage tracker started",
-		"prime_id", s.primeID,
-		"poll_interval", s.pollInterval,
-	)
-
-	return nil
-}
-
-// Stop cancels the polling loop and waits for it to finish.
-func (s *Service) Stop() error {
-	if s.cancel != nil {
-		s.cancel()
-	}
-	s.wg.Wait()
-	s.logger.Info("anchorage tracker stopped")
 	return nil
 }
 
@@ -154,65 +103,6 @@ func (s *Service) syncOperations(ctx context.Context) (int, error) {
 		s.logger.Info("synced operations", "count", total)
 	}
 	return total, nil
-}
-
-func (s *Service) run(ctx context.Context) {
-	defer s.wg.Done()
-
-	ticker := time.NewTicker(s.pollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.runWithRetry(ctx, "poll", func() error {
-				_, err := s.poll(ctx)
-				return err
-			})
-			s.runWithRetry(ctx, "sync operations", func() error {
-				_, err := s.syncOperations(ctx)
-				return err
-			})
-		}
-	}
-}
-
-// runWithRetry executes fn with exponential backoff on failure.
-// It retries up to maxRetries times before logging the error and moving on.
-func (s *Service) runWithRetry(ctx context.Context, name string, fn func() error) {
-	for attempt := 0; attempt <= s.maxRetries; attempt++ {
-		err := fn()
-		if err == nil {
-			return
-		}
-
-		if attempt == s.maxRetries {
-			s.logger.Error(name+" failed after retries",
-				"error", err,
-				"attempts", attempt+1,
-			)
-			return
-		}
-
-		backoff := time.Duration(math.Min(
-			float64(s.baseBackoff)*math.Pow(2, float64(attempt)),
-			float64(s.maxBackoff),
-		))
-
-		s.logger.Warn(name+" failed, retrying",
-			"error", err,
-			"attempt", attempt+1,
-			"backoff", backoff,
-		)
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
-	}
 }
 
 // poll fetches all packages from the Anchorage API and stores snapshots.

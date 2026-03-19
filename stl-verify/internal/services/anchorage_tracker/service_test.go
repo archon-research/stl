@@ -3,9 +3,7 @@ package anchorage_tracker
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,11 +18,9 @@ type mockClient struct {
 	packages   []Package
 	operations []Operation
 	fetchErr   error
-	callCount  atomic.Int32
 }
 
 func (m *mockClient) FetchPackages(_ context.Context) ([]Package, error) {
-	m.callCount.Add(1)
 	if m.fetchErr != nil {
 		return nil, m.fetchErr
 	}
@@ -273,7 +269,7 @@ func TestToSnapshots_BadTimestamp(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Service tests (using mocks)
+// Service tests
 // ---------------------------------------------------------------------------
 
 func newTestPackage() Package {
@@ -306,11 +302,10 @@ func newTestOperation() Operation {
 		Quantity:  "1000",
 		Notes:     "test",
 		CreatedAt: "2025-12-19T12:00:00.000000Z",
-		UpdatedAt: "2025-12-19T12:00:00.000000Z",
 	}
 }
 
-func TestService_StartAndStop(t *testing.T) {
+func TestService_Run(t *testing.T) {
 	client := &mockClient{
 		packages:   []Package{newTestPackage()},
 		operations: []Operation{newTestOperation()},
@@ -318,51 +313,27 @@ func TestService_StartAndStop(t *testing.T) {
 	snapRepo := &mockSnapshotRepo{}
 	opRepo := &mockOperationRepo{}
 
-	svc := NewService(client, snapRepo, opRepo, 1, 100*time.Millisecond, slog.Default())
+	svc := NewService(client, snapRepo, opRepo, 1, nil)
 
-	ctx := t.Context()
-
-	if err := svc.Start(ctx); err != nil {
-		t.Fatalf("Start failed: %v", err)
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
 	}
 
-	// Initial sync should have stored data (read with mutex-safe accessors).
-	if snapRepo.count() == 0 {
-		t.Error("expected snapshots after Start")
+	if snapRepo.count() != 1 {
+		t.Errorf("expected 1 snapshot, got %d", snapRepo.count())
 	}
-	if opRepo.count() == 0 {
-		t.Error("expected operations after Start")
-	}
-
-	// Wait for at least one tick.
-	time.Sleep(200 * time.Millisecond)
-
-	if err := svc.Stop(); err != nil {
-		t.Fatalf("Stop failed: %v", err)
-	}
-
-	// Should have more snapshots from the tick.
-	if snapRepo.count() < 2 {
-		t.Errorf("expected at least 2 snapshots (initial + tick), got %d", snapRepo.count())
+	if opRepo.count() != 1 {
+		t.Errorf("expected 1 operation, got %d", opRepo.count())
 	}
 }
 
-func TestService_StartFailsOnBadPollInterval(t *testing.T) {
-	svc := NewService(&mockClient{}, &mockSnapshotRepo{}, &mockOperationRepo{}, 1, 0, slog.Default())
-
-	err := svc.Start(context.Background())
-	if err == nil {
-		t.Fatal("expected error for zero poll interval")
-	}
-}
-
-func TestService_StartFailsOnAPIError(t *testing.T) {
+func TestService_RunFailsOnAPIError(t *testing.T) {
 	client := &mockClient{fetchErr: fmt.Errorf("api down")}
-	svc := NewService(client, &mockSnapshotRepo{}, &mockOperationRepo{}, 1, time.Minute, slog.Default())
+	svc := NewService(client, &mockSnapshotRepo{}, &mockOperationRepo{}, 1, nil)
 
-	err := svc.Start(context.Background())
+	err := svc.Run(context.Background())
 	if err == nil {
-		t.Fatal("expected error when initial poll fails")
+		t.Fatal("expected error when API fails")
 	}
 }
 
@@ -372,7 +343,7 @@ func TestService_BackfillOperations(t *testing.T) {
 	}
 	opRepo := &mockOperationRepo{}
 
-	svc := NewService(client, &mockSnapshotRepo{}, opRepo, 1, time.Minute, slog.Default())
+	svc := NewService(client, &mockSnapshotRepo{}, opRepo, 1, nil)
 
 	n, err := svc.BackfillOperations(context.Background())
 	if err != nil {
@@ -390,47 +361,6 @@ func TestService_BackfillOperations(t *testing.T) {
 	assertField(t, "OperationID", opRepo.operations[0].OperationID, "op-1")
 	assertField(t, "OperationType", opRepo.operations[0].OperationType, "COLLATERAL_PACKAGE")
 	opRepo.mu.Unlock()
-}
-
-func TestService_RetryOnTransientError(t *testing.T) {
-	callCount := atomic.Int32{}
-
-	svc := NewService(&mockClient{}, &mockSnapshotRepo{}, &mockOperationRepo{}, 1, time.Minute, slog.Default())
-	// Use fast backoff for tests.
-	svc.baseBackoff = 1 * time.Millisecond
-	svc.maxBackoff = 10 * time.Millisecond
-
-	ctx := context.Background()
-	svc.runWithRetry(ctx, "test", func() error {
-		n := callCount.Add(1)
-		if n <= 2 {
-			return fmt.Errorf("transient error")
-		}
-		return nil
-	})
-
-	if callCount.Load() != 3 {
-		t.Errorf("expected 3 attempts (2 failures + 1 success), got %d", callCount.Load())
-	}
-}
-
-func TestService_RetryExhausted(t *testing.T) {
-	callCount := atomic.Int32{}
-	svc := NewService(&mockClient{}, &mockSnapshotRepo{}, &mockOperationRepo{}, 1, time.Minute, slog.Default())
-	// Use fast backoff for tests.
-	svc.baseBackoff = 1 * time.Millisecond
-	svc.maxBackoff = 10 * time.Millisecond
-
-	ctx := context.Background()
-	svc.runWithRetry(ctx, "test", func() error {
-		callCount.Add(1)
-		return fmt.Errorf("permanent error")
-	})
-
-	// maxRetries is 3, so 4 total attempts (0, 1, 2, 3).
-	if callCount.Load() != 4 {
-		t.Errorf("expected 4 attempts, got %d", callCount.Load())
-	}
 }
 
 // ---------------------------------------------------------------------------

@@ -8,12 +8,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	tracker "github.com/archon-research/stl/stl-verify/internal/services/anchorage_tracker"
 )
 
@@ -56,9 +54,6 @@ func run(ctx context.Context, args []string) error {
 
 	apiKey := fs.String("api-key", env.Get("ANCHORAGE_API_KEY", ""),
 		"Anchorage API key")
-
-	pollIntervalStr := fs.String("poll-interval", env.Get("POLL_INTERVAL", "15m"),
-		"Polling interval (e.g. 15m, 1h)")
 
 	prime := fs.String("prime", env.Get("ANCHORAGE_PRIME", ""),
 		"Prime name (e.g. spark, grove)")
@@ -103,19 +98,23 @@ func run(ctx context.Context, args []string) error {
 
 	// Dependencies
 	client := tracker.NewClient(*apiURL, *apiKey)
-	repo := postgres.NewAnchorageRepository(dbPool, logger)
+	txm, err := postgres.NewTxManager(dbPool, logger)
+	if err != nil {
+		return fmt.Errorf("tx manager: %w", err)
+	}
+	repo := postgres.NewAnchorageRepository(dbPool, txm, logger)
+	primeRepo := postgres.NewPrimeRepository(dbPool)
 
 	// Look up prime ID
-	primeID, err := repo.GetPrimeIDByName(ctx, *prime)
+	primeID, err := primeRepo.GetPrimeIDByName(ctx, *prime)
 	if err != nil {
 		return fmt.Errorf("resolve prime: %w", err)
 	}
 	logger.Info("resolved prime", "name", *prime, "id", primeID)
 
-	// Backfill mode: fetch all operations, store them, exit.
-	// Poll interval is not required for backfill.
+	svc := tracker.NewService(client, repo, repo, primeID, logger)
+
 	if *backfill {
-		svc := tracker.NewService(client, repo, repo, primeID, time.Minute, logger)
 		n, err := svc.BackfillOperations(ctx)
 		if err != nil {
 			return fmt.Errorf("backfill: %w", err)
@@ -124,12 +123,10 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	// Parse poll interval only for long-running mode.
-	pollInterval, err := time.ParseDuration(*pollIntervalStr)
-	if err != nil {
-		return fmt.Errorf("parse poll interval: %w", err)
+	if err := svc.Run(ctx); err != nil {
+		return fmt.Errorf("run: %w", err)
 	}
 
-	svc := tracker.NewService(client, repo, repo, primeID, pollInterval, logger)
-	return lifecycle.Run(ctx, logger, svc)
+	logger.Info("anchorage tracker finished")
+	return nil
 }

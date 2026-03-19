@@ -71,7 +71,6 @@ func mockAnchorageAPI(t *testing.T) *httptest.Server {
 						"quantity":  "1000",
 						"notes":     "Test deposit",
 						"createdAt": "2025-12-19T12:00:00.000000Z",
-						"updatedAt": "2025-12-19T12:00:00.000000Z",
 					},
 				},
 				"page": map[string]interface{}{"next": nil},
@@ -83,10 +82,6 @@ func mockAnchorageAPI(t *testing.T) *httptest.Server {
 		}
 	}))
 }
-
-// ---------------------------------------------------------------------------
-// Integration tests
-// ---------------------------------------------------------------------------
 
 func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	apiServer := mockAnchorageAPI(t)
@@ -132,40 +127,6 @@ func TestRunIntegration_MissingAPIKey(t *testing.T) {
 	}
 }
 
-func TestRunIntegration_InvalidPollInterval(t *testing.T) {
-	ctx := context.Background()
-
-	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
-	defer dbCleanup()
-
-	// Seed a prime so we get past the DB + prime lookup stages.
-	_, err := pool.Exec(ctx, `
-		INSERT INTO prime (name, vault_address)
-		VALUES ('spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')
-		ON CONFLICT (name) DO NOTHING
-	`)
-	if err != nil {
-		t.Fatalf("seed prime: %v", err)
-	}
-
-	apiServer := mockAnchorageAPI(t)
-	defer apiServer.Close()
-
-	err = run(ctx, []string{
-		"-db", dbURL,
-		"-api-url", apiServer.URL,
-		"-api-key", "test-key",
-		"-prime", "spark",
-		"-poll-interval", "not-a-duration",
-	})
-	if err == nil {
-		t.Fatal("expected error for invalid poll interval")
-	}
-	if !strings.Contains(err.Error(), "poll interval") {
-		t.Errorf("expected poll interval error, got: %v", err)
-	}
-}
-
 func TestRunIntegration_InvalidPrime(t *testing.T) {
 	ctx := context.Background()
 
@@ -208,56 +169,33 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	apiServer := mockAnchorageAPI(t)
 	defer apiServer.Close()
 
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- run(runCtx, []string{
-			"-db", dbURL,
-			"-api-url", apiServer.URL,
-			"-api-key", "test-key",
-			"-prime", "spark",
-			"-poll-interval", "200ms",
-		})
-	}()
-
-	// Wait for at least one snapshot and one operation to be written.
-	deadline := time.After(15 * time.Second)
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	err = run(ctx, []string{
+		"-db", dbURL,
+		"-api-url", apiServer.URL,
+		"-api-key", "test-key",
+		"-prime", "spark",
+	})
+	if err != nil {
+		t.Fatalf("run() failed: %v", err)
+	}
 
 	var snapshotCount, opCount int
-	for snapshotCount == 0 || opCount == 0 {
-		select {
-		case <-deadline:
-			t.Fatalf("timed out waiting for data (snapshots=%d, operations=%d)", snapshotCount, opCount)
-		case err := <-errCh:
-			t.Fatalf("run() returned early with error: %v", err)
-		case <-ticker.C:
-			if err := pool.QueryRow(ctx, "SELECT count(*) FROM anchorage_package_snapshot").Scan(&snapshotCount); err != nil {
-				t.Fatalf("query snapshot count: %v", err)
-			}
-			if err := pool.QueryRow(ctx, "SELECT count(*) FROM anchorage_operation").Scan(&opCount); err != nil {
-				t.Fatalf("query operation count: %v", err)
-			}
-		}
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM anchorage_package_snapshot").Scan(&snapshotCount); err != nil {
+		t.Fatalf("query snapshot count: %v", err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM anchorage_operation").Scan(&opCount); err != nil {
+		t.Fatalf("query operation count: %v", err)
+	}
+
+	if snapshotCount == 0 {
+		t.Error("expected at least 1 snapshot")
+	}
+	if opCount == 0 {
+		t.Error("expected at least 1 operation")
 	}
 
 	t.Logf("snapshots written: %d", snapshotCount)
 	t.Logf("operations written: %d", opCount)
-
-	// Trigger shutdown.
-	cancel()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("run() returned error on shutdown: %v", err)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("run() did not return after context cancellation")
-	}
 }
 
 func TestRunIntegration_BackfillMode(t *testing.T) {
@@ -285,7 +223,7 @@ func TestRunIntegration_BackfillMode(t *testing.T) {
 		"-api-url", apiServer.URL,
 		"-api-key", "test-key",
 		"-prime", "spark",
-		"--backfill",
+		"-backfill",
 	})
 	if err != nil {
 		t.Fatalf("backfill failed: %v", err)
@@ -308,7 +246,7 @@ func TestRunIntegration_BackfillMode(t *testing.T) {
 		"-api-url", apiServer.URL,
 		"-api-key", "test-key",
 		"-prime", "spark",
-		"--backfill",
+		"-backfill",
 	})
 	if err != nil {
 		t.Fatalf("second backfill failed: %v", err)

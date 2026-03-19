@@ -164,7 +164,7 @@ func TestClient_ForEachOperationsPage(t *testing.T) {
 			fmt.Fprintf(w, `{
 				"data": [{"id": "op-1", "action": "INITIAL_DEPOSIT", "type": "COLLATERAL_PACKAGE",
 				  "typeId": "pkg-1", "asset": {"assetType": "BTC", "type": "ANCHORAGECUSTODY"},
-				  "quantity": "1000", "notes": "", "createdAt": "2025-12-19T12:00:00Z", "updatedAt": "2025-12-19T12:00:00Z"}],
+				  "quantity": "1000", "notes": "", "createdAt": "2025-12-19T12:00:00Z"}],
 				"page": {"next": "http://%s/v2/collateral_management/operations?cursor=abc"}
 			}`, r.Host)
 			return
@@ -173,7 +173,7 @@ func TestClient_ForEachOperationsPage(t *testing.T) {
 		fmt.Fprint(w, `{
 			"data": [{"id": "op-2", "action": "TOP_UP", "type": "COLLATERAL_PACKAGE",
 			  "typeId": "pkg-1", "asset": {"assetType": "BTC", "type": "ANCHORAGECUSTODY"},
-			  "quantity": "500", "notes": "", "createdAt": "2026-01-15T10:00:00Z", "updatedAt": "2026-01-15T10:00:00Z"}],
+			  "quantity": "500", "notes": "", "createdAt": "2026-01-15T10:00:00Z"}],
 			"page": {"next": null}
 		}`)
 	}))

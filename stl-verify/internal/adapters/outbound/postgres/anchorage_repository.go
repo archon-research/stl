@@ -30,16 +30,18 @@ var (
 // AnchorageRepository persists Anchorage package snapshots and operations to Postgres.
 type AnchorageRepository struct {
 	pool   *pgxpool.Pool
+	txm    *TxManager
 	logger *slog.Logger
 }
 
 // NewAnchorageRepository creates a new AnchorageRepository.
-func NewAnchorageRepository(pool *pgxpool.Pool, logger *slog.Logger) *AnchorageRepository {
+func NewAnchorageRepository(pool *pgxpool.Pool, txm *TxManager, logger *slog.Logger) *AnchorageRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &AnchorageRepository{
 		pool:   pool,
+		txm:    txm,
 		logger: logger.With("component", "anchorage-repo"),
 	}
 }
@@ -54,31 +56,18 @@ func (r *AnchorageRepository) SaveSnapshots(ctx context.Context, snapshots []ent
 		return nil
 	}
 
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() {
-		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			r.logger.Error("rollback failed", "error", rbErr)
+	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		for i := 0; i < len(snapshots); i += snapshotBatchSize {
+			end := min(i+snapshotBatchSize, len(snapshots))
+			if err := insertSnapshotBatch(ctx, tx, snapshots[i:end]); err != nil {
+				return err
+			}
 		}
-	}()
-
-	for i := 0; i < len(snapshots); i += snapshotBatchSize {
-		end := min(i+snapshotBatchSize, len(snapshots))
-		if err := r.insertSnapshotBatch(ctx, tx, snapshots[i:end]); err != nil {
-			return err
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
-	}
-
-	return nil
+		return nil
+	})
 }
 
-func (r *AnchorageRepository) insertSnapshotBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchoragePackageSnapshot) error {
+func insertSnapshotBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchoragePackageSnapshot) error {
 	const cols = 19
 	valueStrings := make([]string, 0, len(batch))
 	valueArgs := make([]any, 0, len(batch)*cols)
@@ -141,31 +130,18 @@ func (r *AnchorageRepository) SaveOperations(ctx context.Context, operations []e
 		return nil
 	}
 
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() {
-		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			r.logger.Error("rollback failed", "error", rbErr)
+	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		for i := 0; i < len(operations); i += operationBatchSize {
+			end := min(i+operationBatchSize, len(operations))
+			if err := insertOperationBatch(ctx, tx, operations[i:end]); err != nil {
+				return err
+			}
 		}
-	}()
-
-	for i := 0; i < len(operations); i += operationBatchSize {
-		end := min(i+operationBatchSize, len(operations))
-		if err := r.insertOperationBatch(ctx, tx, operations[i:end]); err != nil {
-			return err
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
-	}
-
-	return nil
+		return nil
+	})
 }
 
-func (r *AnchorageRepository) insertOperationBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchorageOperation) error {
+func insertOperationBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchorageOperation) error {
 	const cols = 10
 	valueStrings := make([]string, 0, len(batch))
 	valueArgs := make([]any, 0, len(batch)*cols)
@@ -226,17 +202,4 @@ func (r *AnchorageRepository) GetLastCursor(ctx context.Context, primeID int64) 
 
 	ts := fmt.Sprintf("%d", createdAt.UTC().Unix())
 	return ts + "|" + operationID, nil
-}
-
-// GetPrimeIDByName returns the prime ID for the given name.
-func (r *AnchorageRepository) GetPrimeIDByName(ctx context.Context, name string) (int64, error) {
-	var id int64
-	err := r.pool.QueryRow(ctx, "SELECT id FROM prime WHERE name = $1", name).Scan(&id)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, fmt.Errorf("prime %q not found", name)
-		}
-		return 0, fmt.Errorf("get prime by name: %w", err)
-	}
-	return id, nil
 }
