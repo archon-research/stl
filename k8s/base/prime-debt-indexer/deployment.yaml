@@ -21,7 +21,7 @@ spec:
             - configMapRef:
                 name: prime-debt-indexer
             - secretRef:
-                name: prime-debt-indexer
+                name: migrate
       containers:
         - name: prime-debt-indexer
           # Image name used as the Kustomize images transformer key.
