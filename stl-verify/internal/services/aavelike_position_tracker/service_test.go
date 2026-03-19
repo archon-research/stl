@@ -1678,34 +1678,19 @@ func TestSaveReserveDataSnapshot_ReceiptTokenRepoErrorPropagates(t *testing.T) {
 		executeCount++
 		switch executeCount {
 		case 1:
-			// BatchGetTokenMetadata for reserve token (decimals, symbol, name)
-			results := make([]outbound.Result, len(calls))
-			for i, call := range calls {
-				methodID := hex.EncodeToString(call.CallData[:4])
-				results[i] = outbound.Result{Success: true, ReturnData: packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)}
-				_ = call
-			}
-			return results, nil
-		case 2:
 			// GetFullReserveData multicall: getReserveData, getReserveConfigurationData, getReserveTokensAddresses
 			results := make([]outbound.Result, 3)
 			results[0] = outbound.Result{Success: true, ReturnData: packSparklendReserveDataResponse(t, reserveDataABI)}
 			results[1] = outbound.Result{Success: true, ReturnData: packReserveConfigResponse(t, configABI)}
 			results[2] = outbound.Result{Success: true, ReturnData: packReserveTokenAddrsResponse(t, tokenAddrsABI, aTokenAddr)}
 			return results, nil
-		case 3:
-			// BatchGetTokenMetadata for aToken (decimals, symbol, name)
+		case 2:
+			// BatchGetTokenMetadata for reserve + aToken (decimals, symbol, name for each)
 			results := make([]outbound.Result, len(calls))
-			for i := range calls {
-				methodID := hex.EncodeToString(calls[i].CallData[:4])
-				switch methodID {
-				case methodIDHex(erc20ABI, "decimals"):
-					results[i] = outbound.Result{Success: true, ReturnData: mustPackOutput(t, erc20ABI, "decimals", uint8(18))}
-				case methodIDHex(erc20ABI, "symbol"):
-					results[i] = outbound.Result{Success: true, ReturnData: mustPackOutput(t, erc20ABI, "symbol", "spWETH")}
-				case methodIDHex(erc20ABI, "name"):
-					results[i] = outbound.Result{Success: true, ReturnData: mustPackOutput(t, erc20ABI, "name", "Spark WETH")}
-				}
+			for i, call := range calls {
+				methodID := hex.EncodeToString(call.CallData[:4])
+				results[i] = outbound.Result{Success: true, ReturnData: packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)}
+				_ = call
 			}
 			return results, nil
 		default:
@@ -1913,6 +1898,15 @@ func packERC20MetadataResponse(t *testing.T, erc20ABI *abi.ABI, token common.Add
 			return mustPackOutput(t, erc20ABI, "symbol", "USDC")
 		case methodIDHex(erc20ABI, "name"):
 			return mustPackOutput(t, erc20ABI, "name", "USD Coin")
+		}
+	case common.HexToAddress("0x1234567890123456789012345678901234567890"):
+		switch methodID {
+		case methodIDHex(erc20ABI, "decimals"):
+			return mustPackOutput(t, erc20ABI, "decimals", uint8(18))
+		case methodIDHex(erc20ABI, "symbol"):
+			return mustPackOutput(t, erc20ABI, "symbol", "spWETH")
+		case methodIDHex(erc20ABI, "name"):
+			return mustPackOutput(t, erc20ABI, "name", "Spark WETH")
 		}
 	}
 

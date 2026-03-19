@@ -375,19 +375,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 		return fmt.Errorf("failed to get blockchain service: %w", err)
 	}
 
-	// Get token metadata for the reserve
-	tokensToFetch := map[common.Address]bool{reserve: true}
-	metadataMap, err := blockchainSvc.BatchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
-	if err != nil {
-		return fmt.Errorf("failed to get token metadata: %w", err)
-	}
-
-	tokenMetadata, ok := metadataMap[reserve]
-	if !ok || tokenMetadata.Decimals == 0 {
-		return fmt.Errorf("token metadata not found for %s", reserve.Hex())
-	}
-
-	// Fetch reserve data and configuration from chain
+	// Fetch reserve data, configuration, and token addresses from chain
 	reserveData, configData, tokenAddresses, err := blockchainSvc.GetFullReserveData(ctx, reserve, blockNumber)
 	if err != nil {
 		// If reserve doesn't exist at this block or no PoolDataProvider was active,
@@ -409,6 +397,21 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 		return fmt.Errorf("failed to get reserve data: %w", err)
 	}
 
+	// Batch-fetch token metadata for the reserve and aToken in a single call
+	tokensToFetch := map[common.Address]bool{reserve: true}
+	if tokenAddresses != nil && tokenAddresses.ATokenAddress != (common.Address{}) {
+		tokensToFetch[tokenAddresses.ATokenAddress] = true
+	}
+	metadataMap, err := blockchainSvc.BatchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
+	if err != nil {
+		return fmt.Errorf("failed to get token metadata: %w", err)
+	}
+
+	tokenMetadata, ok := metadataMap[reserve]
+	if !ok || tokenMetadata.Decimals == 0 {
+		return fmt.Errorf("token metadata not found for %s", reserve.Hex())
+	}
+
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
 		if !exists {
@@ -426,9 +429,13 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 			return fmt.Errorf("failed to get token: %w", err)
 		}
 
-		// Create receipt token entry for the aToken (symbol left empty, populated later)
+		// Create receipt token entry for the aToken
 		if tokenAddresses != nil && tokenAddresses.ATokenAddress != (common.Address{}) {
-			receiptToken, err := entity.NewReceiptToken(chainID, protocolID, tokenID, blockNumber, tokenAddresses.ATokenAddress, "")
+			aTokenSymbol := ""
+			if meta, ok := metadataMap[tokenAddresses.ATokenAddress]; ok {
+				aTokenSymbol = meta.Symbol
+			}
+			receiptToken, err := entity.NewReceiptToken(chainID, protocolID, tokenID, blockNumber, tokenAddresses.ATokenAddress, aTokenSymbol)
 			if err != nil {
 				return fmt.Errorf("creating receipt token entity: %w", err)
 			}
