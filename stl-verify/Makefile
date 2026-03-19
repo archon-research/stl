@@ -27,7 +27,7 @@
         ecs-deploy-oracle-price-worker ecs-deploy-oracle-price-worker-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
         bastion-create-tailscale-secret bastion-create-tailscale-secret-staging tigerdata-tunnel \
-        db-migrate db-set-passwords db-test-app-user \
+        db-migrate db-migrate-staging db-set-passwords db-test-app-user \
         erigon-status erigon-logs erigon-logs-follow erigon-deploy-readonly erigon-switch-readonly erigon-switch-sync erigon-mode \
         erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download \
 		build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill deploy-oracle-pricing-backfill-worker \
@@ -740,6 +740,55 @@ db-migrate:
 	@echo "==> Running database migrations..."
 	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate
 	@echo "==> Migrations complete"
+
+# Run migrations against staging TigerData (auto-discovers bastion, credentials, and tunnel)
+# Usage: make db-migrate-staging
+# Requires: tailscale connected, AWS profile 'sentinel-stg' configured
+# Optional: AWS_PROFILE=sentinel-stg TIGERDATA_HOST=<host> (auto-discovered if not set)
+db-migrate-staging:
+	@echo "==> [1/5] Discovering staging bastion IP from Tailscale..."
+	@BASTION_IP=$$(tailscale status | grep -i 'sentinelstaging-bastion' | awk '{print $$1}') && \
+	if [ -z "$$BASTION_IP" ]; then \
+		echo "Error: Could not find staging bastion in tailscale status. Is Tailscale connected?"; \
+		exit 1; \
+	fi && \
+	echo "  Bastion IP: $$BASTION_IP" && \
+	\
+	echo "==> [2/5] Fetching TigerData credentials from Secrets Manager..." && \
+	DB_SECRET=$$(aws secretsmanager get-secret-value --profile sentinel-stg \
+		--secret-id stl-sentinelstaging-tigerdata-db \
+		--query SecretString --output text) && \
+	DB_USER=$$(echo "$$DB_SECRET" | jq -r '.username') && \
+	DB_PASS=$$(echo "$$DB_SECRET" | jq -r '.password') && \
+	DB_HOST=$$(echo "$$DB_SECRET" | jq -r '.hostname') && \
+	if [ -z "$$DB_USER" ] || [ -z "$$DB_PASS" ] || [ -z "$$DB_HOST" ]; then \
+		echo "Error: Failed to extract credentials from secret"; \
+		exit 1; \
+	fi && \
+	echo "  TigerData host: $$DB_HOST" && \
+	echo "  User: $$DB_USER" && \
+	\
+	echo "==> [3/5] Opening SSH tunnel (localhost:5432 -> $$DB_HOST:5432)..." && \
+	ssh -f -N -L 5432:$$DB_HOST:5432 ec2-user@$$BASTION_IP && \
+	TUNNEL_PID=$$(lsof -ti tcp:5432 -s tcp:established 2>/dev/null || lsof -ti tcp:5432 2>/dev/null | head -1) && \
+	if [ -z "$$TUNNEL_PID" ]; then \
+		echo "Error: Failed to start SSH tunnel"; \
+		exit 1; \
+	fi && \
+	echo "  Tunnel PID: $$TUNNEL_PID" && \
+	\
+	echo "==> [4/5] Running migrations..." && \
+	DATABASE_URL="postgres://$$DB_USER:$$DB_PASS@localhost:5432/tsdb?sslmode=require" go run ./cmd/migrate; \
+	MIGRATE_EXIT=$$?; \
+	\
+	echo "==> [5/5] Closing SSH tunnel (PID: $$TUNNEL_PID)..." && \
+	kill $$TUNNEL_PID 2>/dev/null; \
+	\
+	if [ $$MIGRATE_EXIT -ne 0 ]; then \
+		echo "Error: Migration failed (exit code $$MIGRATE_EXIT)"; \
+		exit $$MIGRATE_EXIT; \
+	fi && \
+	echo "==> Staging migrations complete"
 
 # Set database user passwords from Secrets Manager
 # Usage: make db-set-passwords DATABASE_URL="postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require" ENV=sentineldev|sentinelstaging|sentinelprod
