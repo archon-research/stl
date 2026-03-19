@@ -80,7 +80,7 @@ type mockRepo struct {
 	getLatestBlockFn               func(ctx context.Context, oracleID int64) (int64, error)
 	getTokenAddressesFn            func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
 	upsertPricesFn                 func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
-	getAllEnabledOraclesFn         func(ctx context.Context) ([]*entity.Oracle, error)
+	getEnabledOraclesByChainFn     func(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
 	insertOracleFn                 func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
 	getAllActiveProtocolOraclesFn  func(ctx context.Context) ([]*entity.ProtocolOracle, error)
@@ -138,11 +138,11 @@ func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTok
 	return nil
 }
 
-func (m *mockRepo) GetAllEnabledOracles(ctx context.Context) ([]*entity.Oracle, error) {
-	if m.getAllEnabledOraclesFn != nil {
-		return m.getAllEnabledOraclesFn(ctx)
+func (m *mockRepo) GetEnabledOraclesByChain(ctx context.Context, chainID int64) ([]*entity.Oracle, error) {
+	if m.getEnabledOraclesByChainFn != nil {
+		return m.getEnabledOraclesByChainFn(ctx, chainID)
 	}
-	return nil, errors.New("GetAllEnabledOracles not mocked")
+	return nil, errors.New("GetEnabledOraclesByChain not mocked")
 }
 
 func (m *mockRepo) GetOracleByAddress(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error) {
@@ -227,7 +227,7 @@ func defaultTokenAddressBytes() map[int64][]byte {
 
 // defaultRepoSetup configures the mock repo with defaults for a successful initialization.
 func defaultRepoSetup(r *mockRepo) {
-	r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+	r.getEnabledOraclesByChainFn = func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 		return []*entity.Oracle{defaultOracle()}, nil
 	}
 	r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -405,9 +405,9 @@ func TestStart(t *testing.T) {
 			wantErr:   false,
 		},
 		{
-			name: "error GetAllEnabledOracles fails",
+			name: "error GetEnabledOraclesByChain fails",
 			setupRepo: func(r *mockRepo) {
-				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+				r.getEnabledOraclesByChainFn = func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 					return nil, fmt.Errorf("db connection refused")
 				}
 			},
@@ -417,7 +417,7 @@ func TestStart(t *testing.T) {
 		{
 			name: "error GetEnabledAssets fails returns error",
 			setupRepo: func(r *mockRepo) {
-				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+				r.getEnabledOraclesByChainFn = func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{defaultOracle()}, nil
 				}
 				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -430,7 +430,7 @@ func TestStart(t *testing.T) {
 		{
 			name: "error no enabled assets returns error",
 			setupRepo: func(r *mockRepo) {
-				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+				r.getEnabledOraclesByChainFn = func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{defaultOracle()}, nil
 				}
 				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -443,7 +443,7 @@ func TestStart(t *testing.T) {
 		{
 			name: "error token address not found returns error",
 			setupRepo: func(r *mockRepo) {
-				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+				r.getEnabledOraclesByChainFn = func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{defaultOracle()}, nil
 				}
 				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -461,7 +461,7 @@ func TestStart(t *testing.T) {
 		{
 			name: "error GetLatestPrices fails is warned and skipped",
 			setupRepo: func(r *mockRepo) {
-				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+				r.getEnabledOraclesByChainFn = func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{defaultOracle()}, nil
 				}
 				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -481,7 +481,7 @@ func TestStart(t *testing.T) {
 			name: "success multiple oracles deduplicates by oracle_id",
 			setupRepo: func(r *mockRepo) {
 				oracle := defaultOracle()
-				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+				r.getEnabledOraclesByChainFn = func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{oracle, oracle}, nil // same oracle twice
 				}
 				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
@@ -510,7 +510,7 @@ func TestStart(t *testing.T) {
 					DeploymentBlock: 18000000,
 					Enabled:         true,
 				}
-				r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+				r.getEnabledOraclesByChainFn = func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{oracle1, oracle2}, nil
 				}
 				r.getEnabledAssetsFn = func(_ context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
@@ -1210,7 +1210,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 func feedOracleSetup(r *mockRepo) {
 	feedAddr := common.HexToAddress("0x0000000000000000000000000000000000000F01")
 	wethAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
-	r.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+	r.getEnabledOraclesByChainFn = func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 		return []*entity.Oracle{{
 			ID: 1, Name: "chainlink", Enabled: true,
 			OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
@@ -1310,7 +1310,7 @@ func TestStart_ChronicleOracle(t *testing.T) {
 	wethAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
 
 	repo := &mockRepo{}
-	repo.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+	repo.getEnabledOraclesByChainFn = func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 		return []*entity.Oracle{{
 			ID: 2, Name: "chronicle", Enabled: true,
 			OracleType: entity.OracleTypeChronicle, PriceDecimals: 18,
@@ -1536,7 +1536,7 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 	feedAddr2 := common.HexToAddress("0x0000000000000000000000000000000000000F02") // weETH/ETH
 
 	repo := &mockRepo{}
-	repo.getAllEnabledOraclesFn = func(_ context.Context) ([]*entity.Oracle, error) {
+	repo.getEnabledOraclesByChainFn = func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 		return []*entity.Oracle{{
 			ID: 1, Name: "chainlink-feeds", Enabled: true,
 			OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,

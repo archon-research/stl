@@ -136,7 +136,7 @@ func (s *Service) Stop() error {
 }
 
 func (s *Service) initialize(ctx context.Context) error {
-	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.logger)
+	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.logger)
 	if err != nil {
 		return err
 	}

@@ -13,6 +13,7 @@ resources:
   - ../../base/avalanche-watcher
   - ../../base/avalanche-backup-worker
   - ../../base/avalanche-sparklend-position-tracker
+  - ../../base/avalanche-oracle-price-worker
   - ../../base/temporal-worker
   - ../../base/prime-debt-indexer
   - external-secrets.yaml
@@ -51,6 +52,10 @@ images:
   - name: avalanche-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
+  - name: avalanche-oracle-price-worker
+    # Shares the oracle-price-worker image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-oracle-price-worker
+    newTag: latest
   - name: temporal-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-temporal-worker
     newTag: latest
