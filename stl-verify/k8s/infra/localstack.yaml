@@ -27,7 +27,8 @@ data:
     export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
     export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
 
-    # Helper: create SNS topic, SQS queues, and subscriptions for a chain
+    # Helper: create SNS topic, backup SQS queue, and subscription for a chain.
+    # Worker-specific queues (oracle-price, sparklend, etc.) are created separately below.
     create_chain_resources() {
       local CHAIN_NAME=$1
 
@@ -37,20 +38,7 @@ data:
         --attributes FifoTopic=true,ContentBasedDeduplication=true \
         --region $REGION
 
-      echo "Creating ${CHAIN_NAME} SQS FIFO queues..."
-
-      # Transformer queue + DLQ
-      $AWS sqs create-queue \
-        --queue-name "stl-${CHAIN_NAME}-transformer-dlq.fifo" \
-        --attributes FifoQueue=true,ContentBasedDeduplication=true \
-        --region $REGION
-
-      $AWS sqs create-queue \
-        --queue-name "stl-${CHAIN_NAME}-transformer.fifo" \
-        --attributes FifoQueue=true,ContentBasedDeduplication=true \
-        --region $REGION
-
-      # Backup queue + DLQ
+      echo "Creating ${CHAIN_NAME} backup SQS FIFO queues..."
       $AWS sqs create-queue \
         --queue-name "stl-${CHAIN_NAME}-backup-dlq.fifo" \
         --attributes FifoQueue=true,ContentBasedDeduplication=true \
@@ -61,14 +49,7 @@ data:
         --attributes FifoQueue=true,ContentBasedDeduplication=true \
         --region $REGION
 
-      echo "Subscribing ${CHAIN_NAME} queues to topic..."
-      $AWS sns subscribe \
-        --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-${CHAIN_NAME}-blocks.fifo" \
-        --protocol sqs \
-        --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-${CHAIN_NAME}-transformer.fifo" \
-        --attributes RawMessageDelivery=true \
-        --region $REGION
-
+      echo "Subscribing ${CHAIN_NAME} backup queue to topic..."
       $AWS sns subscribe \
         --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-${CHAIN_NAME}-blocks.fifo" \
         --protocol sqs \
