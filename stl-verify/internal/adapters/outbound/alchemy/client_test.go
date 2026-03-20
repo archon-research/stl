@@ -1123,3 +1123,42 @@ func TestClientConfigDefaults_IncludesRetryConfig(t *testing.T) {
 		t.Errorf("expected BackoffFactor=2.0, got %v", defaults.BackoffFactor)
 	}
 }
+
+func TestClient_DoesNotRetryUnfinalizedError(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		resp := jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      1,
+			Error: &jsonRPCError{
+				Code:    -32000,
+				Message: "cannot query unfinalized data",
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		HTTPURL:        server.URL,
+		MaxRetries:     3,
+		InitialBackoff: 1 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	_, err = client.GetBlockByNumber(context.Background(), 999999999, false)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unfinalized data") {
+		t.Errorf("expected 'unfinalized data' in error, got %v", err)
+	}
+	if attempts != 1 {
+		t.Errorf("expected 1 attempt (no retries for unfinalized), got %d", attempts)
+	}
+}
