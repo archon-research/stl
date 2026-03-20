@@ -6,10 +6,6 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - "stl-verify/python/**"
-      - ".github/workflows/python-ci.yml"
-      - 'k8s/overlays/**/kustomization.yaml'
   pull_request:
     branches:
       - main
