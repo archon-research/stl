@@ -20,7 +20,9 @@ jobs:
     env:
       AWS_REGION: eu-west-1
       STAGING_REGISTRY: 579039992622.dkr.ecr.eu-west-1.amazonaws.com
+      STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
       PROD_REGISTRY: 030797368798.dkr.ecr.eu-west-1.amazonaws.com
+      PROD_ROLE_ARN: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
     permissions:
       id-token: write
     steps:
@@ -37,7 +39,7 @@ jobs:
       - name: Configure AWS credentials (staging)
         uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
         with:
-          role-to-assume: ${{ vars.AWS_STAGING_ROLE_ARN }}
+          role-to-assume: ${{ env.STAGING_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to staging ECR
@@ -52,7 +54,7 @@ jobs:
       - name: Configure AWS credentials (prod)
         uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
         with:
-          role-to-assume: ${{ vars.AWS_PROD_ROLE_ARN }}
+          role-to-assume: ${{ env.PROD_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to prod ECR
