@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -191,6 +192,14 @@ func (s *LiveService) processHeaders(headers <-chan outbound.BlockHeader) {
 			// Process the block with prefetch
 			if err := s.processBlockWithPrefetch(header, receivedAt); err != nil {
 				blockNum, _ := hexutil.ParseInt64(header.Number)
+
+				if rpcutil.IsUnfinalizedError(err) {
+					s.logger.Debug("block not yet finalized, skipping",
+						"block", blockNum,
+						"hash", header.Hash)
+					continue
+				}
+
 				s.logger.Warn("failed to process live block",
 					"block", blockNum,
 					"hash", header.Hash,
