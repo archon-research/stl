@@ -2311,6 +2311,98 @@ func TestProcessBlockEvent_Liquidate_SaveMarketStateFails(t *testing.T) {
 	}
 }
 
+// --- tryDiscoverVault receipt token tests ---
+
+func TestProcessBlockEvent_VaultDiscovery_ReceiptTokenCreated(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			if calls[0].Target == unknownVault {
+				if calls[1].Target == unknownVault {
+					return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+				}
+				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+			}
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 3:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+		case 4:
+			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	var capturedToken entity.ReceiptToken
+	receiptTokenCalled := false
+	h.receiptTokenRepo.GetOrCreateReceiptTokenFn = func(_ context.Context, _ pgx.Tx, token entity.ReceiptToken) (int64, error) {
+		receiptTokenCalled = true
+		capturedToken = token
+		return 1, nil
+	}
+
+	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	receipt := makeReceipt(testTxHash, log)
+
+	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})
+	if err != nil {
+		t.Fatalf("processBlock should succeed, got: %v", err)
+	}
+
+	if !receiptTokenCalled {
+		t.Fatal("expected receiptTokenRepo.GetOrCreateReceiptToken to be called")
+	}
+	if capturedToken.ChainID != 1 {
+		t.Errorf("receipt token ChainID = %d, want 1", capturedToken.ChainID)
+	}
+	if capturedToken.ReceiptTokenAddress != unknownVault {
+		t.Errorf("receipt token address = %s, want %s", capturedToken.ReceiptTokenAddress.Hex(), unknownVault.Hex())
+	}
+	if capturedToken.Symbol != "mVLT" {
+		t.Errorf("receipt token symbol = %q, want %q", capturedToken.Symbol, "mVLT")
+	}
+}
+
+func TestProcessBlockEvent_VaultDiscovery_ReceiptTokenRepoError(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			if calls[0].Target == unknownVault {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 4:
+			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	h.receiptTokenRepo.GetOrCreateReceiptTokenFn = func(_ context.Context, _ pgx.Tx, _ entity.ReceiptToken) (int64, error) {
+		return 0, errors.New("receipt token db error")
+	}
+
+	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	receipt := makeReceipt(testTxHash, log)
+
+	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})
+	if err == nil {
+		t.Fatal("processBlock should fail on receipt token repo error")
+	}
+	if !strings.Contains(err.Error(), "receipt token") {
+		t.Errorf("error should mention receipt token, got: %s", err.Error())
+	}
+	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
+		t.Error("vault should NOT be marked as not-vault on transient receipt token error")
+	}
+}
+
 // Suppress unused import warnings.
 var (
 	_ = testutil.DiscardLogger

@@ -14,3 +14,7 @@ ALTER TABLE receipt_token ADD CONSTRAINT receipt_token_chain_address_unique
 
 CREATE INDEX IF NOT EXISTS idx_receipt_token_protocol ON receipt_token (protocol_id);
 CREATE INDEX IF NOT EXISTS idx_receipt_token_underlying ON receipt_token (underlying_token_id);
+
+INSERT INTO migrations (filename)
+VALUES ('20260319_100000_update_receipt_token.sql')
+ON CONFLICT (filename) DO NOTHING;

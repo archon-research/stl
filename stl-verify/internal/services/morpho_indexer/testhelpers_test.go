@@ -28,8 +28,9 @@ type serviceTestHarness struct {
 	userRepo     *testutil.MockUserRepository
 	protocolRepo *testutil.MockProtocolRepository
 	tokenRepo    *testutil.MockTokenRepository
-	morphoRepo   *testutil.MockMorphoRepository
-	eventRepo    *testutil.MockEventRepository
+	morphoRepo       *testutil.MockMorphoRepository
+	receiptTokenRepo *testutil.MockReceiptTokenRepository
+	eventRepo        *testutil.MockEventRepository
 	consumer     *testutil.MockSQSConsumer
 	cache        *testutil.MockBlockCache
 
@@ -112,8 +113,9 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 		userRepo:     userRepo,
 		protocolRepo: protocolRepo,
 		tokenRepo:    tokenRepo,
-		morphoRepo:   morphoRepo,
-		eventRepo:    eventRepo,
+		morphoRepo:       morphoRepo,
+		receiptTokenRepo: receiptTokenRepo,
+		eventRepo:        eventRepo,
 		consumer:     consumer,
 		cache:        cache,
 
