@@ -175,6 +175,50 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: base-backup-worker-config
+data:
+  CHAIN_ID: "8453"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "2"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-backup-worker-config
+data:
+  CHAIN_ID: "10"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "2"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-backup-worker-config
+data:
+  CHAIN_ID: "130"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "2"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-backup-worker-config
+data:
+  CHAIN_ID: "42161"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "2"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: avalanche-oracle-price-worker-config
 data:
   AWS_REGION: "eu-west-1"
