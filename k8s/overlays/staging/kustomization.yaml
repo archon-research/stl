@@ -14,6 +14,14 @@ resources:
   - ../../base/avalanche-backup-worker
   - ../../base/avalanche-sparklend-position-tracker
   - ../../base/avalanche-oracle-price-worker
+  - ../../base/base-watcher
+  - ../../base/base-backup-worker
+  - ../../base/optimism-watcher
+  - ../../base/optimism-backup-worker
+  - ../../base/unichain-watcher
+  - ../../base/unichain-backup-worker
+  - ../../base/arbitrum-watcher
+  - ../../base/arbitrum-backup-worker
   - ../../base/temporal-worker
   - ../../base/prime-debt-indexer
   - external-secrets.yaml
@@ -55,6 +63,38 @@ images:
   - name: avalanche-oracle-price-worker
     # Shares the oracle-price-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-oracle-price-worker
+    newTag: latest
+  - name: base-watcher
+    # Shares the watcher image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
+    newTag: latest
+  - name: optimism-watcher
+    # Shares the watcher image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
+    newTag: latest
+  - name: unichain-watcher
+    # Shares the watcher image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
+    newTag: latest
+  - name: arbitrum-watcher
+    # Shares the watcher image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
+    newTag: latest
+  - name: base-backup-worker
+    # Shares the backup-worker image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
+    newTag: latest
+  - name: optimism-backup-worker
+    # Shares the backup-worker image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
+    newTag: latest
+  - name: unichain-backup-worker
+    # Shares the backup-worker image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
+    newTag: latest
+  - name: arbitrum-backup-worker
+    # Shares the backup-worker image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
     newTag: latest
   - name: temporal-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-temporal-worker

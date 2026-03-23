@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unichain-watcher
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: unichain-watcher
+  template:
+    metadata:
+      labels:
+        app: unichain-watcher
+    spec:
+      serviceAccountName: unichain-watcher
+      containers:
+        - name: unichain-watcher
+          # Image name used as the Kustomize images transformer key.
+          # The overlay kustomization.yaml overrides newName + newTag.
+          image: unichain-watcher
+          args: ["--enable-traces=false"]
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://localhost:4317"
+            - name: JAEGER_ENDPOINT
+              value: "localhost:4317"
+          envFrom:
+            - configMapRef:
+                name: unichain-watcher-config
+            - secretRef:
+                # Populated by ExternalSecret — secret name mirrors the service.
+                name: unichain-watcher
+          resources:
+            requests:
+              cpu: "2000m"
+              memory: "4096Mi"
+            limits:
+              cpu: "2000m"
+              memory: "4096Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f watcher"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

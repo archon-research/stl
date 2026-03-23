@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arbitrum-backup-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arbitrum-backup-worker
+  template:
+    metadata:
+      labels:
+        app: arbitrum-backup-worker
+    spec:
+      serviceAccountName: arbitrum-backup-worker
+      containers:
+        - name: arbitrum-backup-worker
+          image: arbitrum-backup-worker
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://localhost:4317"
+            - name: JAEGER_ENDPOINT
+              value: "localhost:4317"
+          envFrom:
+            - configMapRef:
+                name: arbitrum-backup-worker-config
+            - secretRef:
+                name: arbitrum-backup-worker
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1024Mi"
+            limits:
+              cpu: "500m"
+              memory: "1024Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f raw_data_backup"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

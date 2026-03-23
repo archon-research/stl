@@ -123,6 +123,102 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: base-watcher-config
+data:
+  CHAIN_ID: "8453"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://base-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelprod"
+  ENABLE_BACKFILL: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-watcher-config
+data:
+  CHAIN_ID: "10"
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://opt-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelprod"
+  ENABLE_BACKFILL: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-watcher-config
+data:
+  CHAIN_ID: "130"
+  ALCHEMY_HTTP_URL: "https://unichain-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://unichain-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelprod"
+  ENABLE_BACKFILL: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-watcher-config
+data:
+  CHAIN_ID: "42161"
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://arb-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelprod"
+  ENABLE_BACKFILL: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-backup-worker-config
+data:
+  CHAIN_ID: "8453"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "4"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-backup-worker-config
+data:
+  CHAIN_ID: "10"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "4"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-backup-worker-config
+data:
+  CHAIN_ID: "130"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "4"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-backup-worker-config
+data:
+  CHAIN_ID: "42161"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "4"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: avalanche-oracle-price-worker-config
 data:
   AWS_REGION: "eu-west-1"
