@@ -70,3 +70,100 @@ jobs:
             docker tag "$STAGING_REGISTRY/stl-sentinelstaging-$service:$SHA" "$PROD_REGISTRY/stl-sentinelprod-$service:$SHA"
             docker push "$PROD_REGISTRY/stl-sentinelprod-$service:$SHA"
           done
+
+  update-staging:
+    name: Update Staging Image Tags
+    needs: build-push
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-update-staging
+      cancel-in-progress: false
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: main
+
+      - name: Update staging kustomization image tags
+        run: |
+          SHA=${{ inputs.sha }}
+          sed -i "s/newTag: .*/newTag: \"$SHA\"/" k8s/overlays/staging/kustomization.yaml
+
+      - name: Commit and push to main
+        run: |
+          git config user.name "stl-deploy-bot[bot]"
+          git config user.email "stl-deploy-bot[bot]@users.noreply.github.com"
+          git add k8s/overlays/staging/kustomization.yaml
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "deploy(staging): update image tags to ${{ inputs.sha }}"
+            git pull --rebase origin main
+            git push origin main
+          fi
+
+  create-prod-pr:
+    name: Create Prod Deploy PR
+    needs: build-push
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-prod-pr
+      cancel-in-progress: false
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Update prod kustomization image tags
+        run: |
+          SHA=${{ inputs.sha }}
+          sed -i "s/newTag: .*/newTag: \"$SHA\"/" k8s/overlays/prod/kustomization.yaml
+
+      - name: Create or update prod PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          SHA=${{ inputs.sha }}
+          SHORT_SHA=${SHA:0:7}
+          BRANCH="deploy/prod-${SHORT_SHA}"
+
+          git config user.name "stl-deploy-bot[bot]"
+          git config user.email "stl-deploy-bot[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add k8s/overlays/prod/kustomization.yaml
+          git commit -m "deploy(prod): update image tags to ${SHORT_SHA}"
+          git push origin "$BRANCH"
+
+          # Close any existing deploy/prod-* PRs
+          EXISTING_PRS=$(gh pr list --search "deploy(prod): update image tags" --json number --jq '.[].number' 2>/dev/null || echo "")
+          for pr in $EXISTING_PRS; do
+            gh pr close "$pr" --comment "Superseded by deploy for ${SHORT_SHA}"
+          done
+
+          gh pr create \
+            --title "deploy(prod): update image tags to ${SHORT_SHA}" \
+            --body "$(cat <<EOF
+          Automated prod image tag update.
+
+          **Commit:** ${SHA}
+          **Images pushed to:** prod ECR (030797368798)
+
+          Merge this PR to update prod kustomization, then manually sync in ArgoCD.
+          EOF
+          )" \
+            --head "$BRANCH" \
+            --base main
