@@ -994,8 +994,7 @@ func (s *Service) PersistUserPositionBatch(
 // Fallbacks are event-aware and explicit:
 //   - Repay: if the reserve is missing from debtData, persist amount=0 because the
 //     debt was fully repaid and no longer appears in the on-chain snapshot.
-//   - Borrow: if the reserve is missing from debtData, return an error instead of
-//     guessing the outstanding balance.
+//   - Borrow: if the reserve is missing from debtData, skip the record.
 func (s *Service) saveBorrowerRecord(ctx context.Context, tx pgx.Tx, eventData *PositionEventData, tokenMetadata aavelike.TokenMetadata, debtData []aavelike.DebtData, userID, protocolID, tokenID, blockNumber int64, blockVersion int) error {
 	// Look up the current outstanding debt for this reserve.
 	for _, d := range debtData {
@@ -1008,11 +1007,11 @@ func (s *Service) saveBorrowerRecord(ctx context.Context, tx pgx.Tx, eventData *
 	case EventRepay:
 		return s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, big.NewInt(0), eventData.Amount, string(eventData.EventType), common.FromHex(eventData.TxHash))
 	case EventBorrow:
-		s.logger.Warn("debt not visible at end-of-block, using event amount as fallback",
+		s.logger.Warn("debt not visible at end-of-block, skipping borrow record",
 			"reserve", eventData.Reserve.Hex(),
 			"user", eventData.User.Hex(),
 			"block", blockNumber)
-		return s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, eventData.Amount, eventData.Amount, string(eventData.EventType), common.FromHex(eventData.TxHash))
+		return nil
 	default:
 		return fmt.Errorf("unsupported borrower event type %s", eventData.EventType)
 	}
