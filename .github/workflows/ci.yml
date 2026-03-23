@@ -6,6 +6,8 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "k8s/overlays/**/.argocd-source-*.yaml"
   pull_request:
     branches:
       - main

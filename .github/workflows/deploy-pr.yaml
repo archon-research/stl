@@ -1,0 +1,64 @@
+# Triggered by ArgoCD Image Updater pushing tag updates to deploy/* branches.
+# Creates PRs to main: staging PRs auto-merge, prod PRs require review.
+name: Deploy PR
+
+on:
+  push:
+    branches:
+      - deploy/staging
+      - deploy/prod
+
+jobs:
+  create-pr:
+    name: Create Deploy PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+
+      - name: Determine environment
+        id: env
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          if [[ "$BRANCH" == "deploy/staging" ]]; then
+            echo "env=staging" >> "$GITHUB_OUTPUT"
+            echo "auto_merge=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$BRANCH" == "deploy/prod" ]]; then
+            echo "env=prod" >> "$GITHUB_OUTPUT"
+            echo "auto_merge=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ENV_NAME: ${{ steps.env.outputs.env }}
+          AUTO_MERGE: ${{ steps.env.outputs.auto_merge }}
+        run: |
+          BRANCH="deploy/${ENV_NAME}"
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "PR #${EXISTING_PR} already exists — branch push updates it automatically."
+          else
+            gh pr create \
+              --title "deploy(${ENV_NAME}): update image tags" \
+              --body "$(cat <<EOF
+          Automated image tag update by ArgoCD Image Updater.
+
+          **Environment:** ${ENV_NAME}
+          **Branch:** ${BRANCH}
+          EOF
+            )" \
+              --head "$BRANCH" \
+              --base main
+
+            if [ "$AUTO_MERGE" = "true" ]; then
+              gh pr merge --auto --squash --head "$BRANCH"
+            fi
+          fi
