@@ -84,13 +84,14 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 
 	// Aave V3 - Pool created at block 16291127
 	// PoolDataProvider has been updated multiple times via AddressSet events
+	// UIPoolDataProvider updated to 0x56b7A101... at block 24033627 (Dec 2025)
 	// Source: https://github.com/aave-dao/aave-address-book/blob/main/src/AaveV3Ethereum.sol
 	{1, common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")}: {
 		Name:                  "Aave V3",
 		Slug:                  "aave_v3_ethereum",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"), ActiveAtBlock: 16291127},
-		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x91c0eA31b49B69Ea18607702c5d9aC360bf3dE7d"), ActiveAtBlock: 16291263},
+		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x56b7A1012765C285afAC8b8F25C69Bf10ccfE978"), ActiveAtBlock: 24033627},
 		PoolAddressesProvider: ContractWithBlock{Address: common.HexToAddress("0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e"), ActiveAtBlock: 16291071},
 		ProtocolVersion:       ProtocolVersionAaveV3,
 		PoolDataProviderHistory: PoolDataProviderHistory{
@@ -120,13 +121,14 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 
 	// Aave V3 Lido - Pool created at block 20262414
 	// PoolDataProvider has been updated multiple times via AddressSet events
+	// UIPoolDataProvider updated to 0x56b7A101... at block 24033627 (Dec 2025)
 	// Source: https://github.com/aave-dao/aave-address-book/blob/main/src/AaveV3EthereumLido.sol
 	{1, common.HexToAddress("0x4e033931ad43597d96d6bcc25c280717730b58b1")}: {
 		Name:                  "Aave V3 Lido",
 		Slug:                  "aave_v3_lido_ethereum",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x4e033931ad43597d96d6bcc25c280717730b58b1"), ActiveAtBlock: 20262414},
-		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x91c0eA31b49B69Ea18607702c5d9aC360bf3dE7d"), ActiveAtBlock: 16291263},
+		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x56b7A1012765C285afAC8b8F25C69Bf10ccfE978"), ActiveAtBlock: 24033627},
 		PoolAddressesProvider: ContractWithBlock{Address: common.HexToAddress("0xcfBf336fe147D643B9Cb705648500e101504B16d"), ActiveAtBlock: 20262370},
 		ProtocolVersion:       ProtocolVersionAaveV3,
 		PoolDataProviderHistory: PoolDataProviderHistory{
@@ -139,13 +141,14 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 
 	// Aave V3 RWA - Pool created at block 23125535
 	// PoolDataProvider has been stable since deployment
+	// UIPoolDataProvider updated to 0x56b7A101... at block 24033627 (Dec 2025)
 	// Source: https://github.com/aave-dao/aave-address-book (check for RWA instance)
 	{1, common.HexToAddress("0xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8")}: {
 		Name:                  "Aave V3 RWA",
 		Slug:                  "aave_v3_rwa_ethereum",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8"), ActiveAtBlock: 23125535},
-		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x91c0eA31b49B69Ea18607702c5d9aC360bf3dE7d"), ActiveAtBlock: 16291263},
+		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x56b7A1012765C285afAC8b8F25C69Bf10ccfE978"), ActiveAtBlock: 24033627},
 		PoolAddressesProvider: ContractWithBlock{Address: common.HexToAddress("0x5D39E06b825C1F2B80bf2756a73e28eFAA128ba0"), ActiveAtBlock: 23125530},
 		ProtocolVersion:       ProtocolVersionAaveV3,
 		PoolDataProviderHistory: PoolDataProviderHistory{
