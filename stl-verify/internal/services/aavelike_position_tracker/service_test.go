@@ -1173,7 +1173,7 @@ func TestSaveBorrowerRecord(t *testing.T) {
 			wantChange:  new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 		},
 		{
-			name:        "BorrowReturnsErrorWhenDebtMissing",
+			name:        "BorrowUsesEventAmountWhenDebtMissing",
 			eventType:   EventBorrow,
 			eventDelta:  new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 			currentDebt: nil,
@@ -1181,7 +1181,9 @@ func TestSaveBorrowerRecord(t *testing.T) {
 			reserveAddr: reserveAddr,
 			symbol:      "WETH",
 			tokenName:   "Wrapped Ether",
-			wantErr:     true,
+			wantErr:     false,
+			wantAmount:  new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			wantChange:  new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 		},
 	}
 

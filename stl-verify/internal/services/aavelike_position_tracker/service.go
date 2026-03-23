@@ -1008,7 +1008,11 @@ func (s *Service) saveBorrowerRecord(ctx context.Context, tx pgx.Tx, eventData *
 	case EventRepay:
 		return s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, big.NewInt(0), eventData.Amount, string(eventData.EventType), common.FromHex(eventData.TxHash))
 	case EventBorrow:
-		return fmt.Errorf("missing debt data for borrow reserve %s", eventData.Reserve.Hex())
+		s.logger.Warn("debt not visible at end-of-block, using event amount as fallback",
+			"reserve", eventData.Reserve.Hex(),
+			"user", eventData.User.Hex(),
+			"block", blockNumber)
+		return s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, eventData.Amount, eventData.Amount, string(eventData.EventType), common.FromHex(eventData.TxHash))
 	default:
 		return fmt.Errorf("unsupported borrower event type %s", eventData.EventType)
 	}
