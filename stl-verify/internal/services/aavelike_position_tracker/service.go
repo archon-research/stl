@@ -1007,6 +1007,10 @@ func (s *Service) saveBorrowerRecord(ctx context.Context, tx pgx.Tx, eventData *
 	case EventRepay:
 		return s.positionRepo.SaveBorrower(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, big.NewInt(0), eventData.Amount, string(eventData.EventType), common.FromHex(eventData.TxHash))
 	case EventBorrow:
+		// Flash loan or same-block repay: the debt was repaid before end-of-block,
+		// so the on-chain snapshot shows zero debt and buildDebtData filters it out.
+		// Skip instead of error to avoid blocking the entire block's SQS processing.
+		// The raw event is already persisted in protocol_events for auditability.
 		s.logger.Warn("debt not visible at end-of-block, skipping borrow record",
 			"reserve", eventData.Reserve.Hex(),
 			"user", eventData.User.Hex(),
