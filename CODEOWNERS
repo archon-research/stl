@@ -1,5 +1,0 @@
-CODEOWNERS           @archon-research/vector-engineers
-.github/             @archon-research/vector-engineers
-k8s/overlays/prod/   @archon-research/vector-engineers
-stl-verify/Makefile  @archon-research/vector-engineers
-stl-verify/Dockerfile*  @archon-research/vector-engineers
