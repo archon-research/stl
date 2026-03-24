@@ -40,7 +40,7 @@ func TestBalanceOfSource_Supports(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.tokenType, func(t *testing.T) {
+		t.Run(tt.tokenType+"_"+tt.protocol, func(t *testing.T) {
 			got := src.Supports(tt.tokenType, tt.protocol)
 			if got != tt.want {
 				t.Errorf("Supports(%q, %q) = %v, want %v", tt.tokenType, tt.protocol, got, tt.want)
