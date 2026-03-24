@@ -63,8 +63,6 @@ func (s *StubSource) FetchBalances(ctx context.Context, entries []*TokenEntry, b
 // DefaultSkipSources returns sources for types handled by the existing SparkLend worker.
 func DefaultSkipSources(logger *slog.Logger) []PositionSource {
 	return []PositionSource{
-		NewSkipSource("sparklend-skip", "atoken", []string{"sparklend"}, logger),
-		NewSkipSource("aave-skip", "atoken", []string{"aave"}, logger),
 		NewSkipSource("anchorage-skip", "anchorage", nil, logger),
 	}
 }
