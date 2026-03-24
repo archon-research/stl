@@ -63,10 +63,10 @@ type CronjobConfig struct {
 	TaskQueue string
 
 	// Schedule configuration.
-	ScheduleID      string
+	ScheduleID      string // defaults to Name if empty
 	IntervalEnv     string // env var name for the interval (optional)
 	IntervalDefault string // default interval (e.g. "5m", "1h")
-	WorkflowID      string // workflow ID for scheduled runs
+	WorkflowID      string // defaults to "scheduled-"+Name if empty
 
 	// Workflow is the workflow function to register and schedule.
 	Workflow     any
@@ -81,6 +81,13 @@ type CronjobConfig struct {
 // connects to the database and Temporal, registers the workflow/activities,
 // ensures the schedule exists, and runs the worker until ctx is cancelled.
 func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
+	if cfg.ScheduleID == "" {
+		cfg.ScheduleID = cfg.Name
+	}
+	if cfg.WorkflowID == "" {
+		cfg.WorkflowID = "scheduled-" + cfg.Name
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
