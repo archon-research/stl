@@ -8,6 +8,12 @@ on:
       sha:
         required: true
         type: string
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit SHA to deploy (defaults to HEAD of selected branch)"
+        required: false
+        type: string
 
 jobs:
   build-push-staging:
@@ -47,7 +53,7 @@ jobs:
 
       - name: Build and push all images to staging ECR
         working-directory: stl-verify
-        run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha }}
+        run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha || github.sha }}
 
   update-staging:
     name: Update Staging Image Tags
@@ -71,7 +77,7 @@ jobs:
 
       - name: Update staging kustomization image tags
         run: |
-          SHA=${{ inputs.sha }}
+          SHA=${{ inputs.sha || github.sha }}
           sed -i "s/newTag: .*/newTag: \"$SHA\"/" k8s/overlays/staging/kustomization.yaml
 
       - name: Commit and push to main
@@ -82,7 +88,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "deploy(staging): update image tags to ${{ inputs.sha }}"
+            git commit -m "deploy(staging): update image tags to ${{ inputs.sha || github.sha }}"
             git pull --rebase origin main
             git push origin main
           fi
@@ -90,6 +96,7 @@ jobs:
   build-push-prod:
     name: Build & Push Images (Prod)
     needs: build-push-staging
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
@@ -102,6 +109,7 @@ jobs:
       STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
       PROD_REGISTRY: 030797368798.dkr.ecr.eu-west-1.amazonaws.com
       PROD_ROLE_ARN: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
+      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker temporal-worker prime-debt-indexer
     permissions:
       id-token: write
     steps:
@@ -127,11 +135,10 @@ jobs:
           aws ecr get-login-password --region "$AWS_REGION" | \
             docker login --username AWS --password-stdin "$STAGING_REGISTRY"
 
-      - name: Pull images from staging ECR
+      - name: Pull all images from staging ECR
         run: |
-          SERVICES=(watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker temporal-worker prime-debt-indexer)
-          SHA=${{ inputs.sha }}
-          for service in "${SERVICES[@]}"; do
+          SHA=${{ inputs.sha || github.sha }}
+          for service in $SERVICES; do
             docker pull "$STAGING_REGISTRY/stl-sentinelstaging-$service:$SHA"
           done
 
@@ -149,9 +156,8 @@ jobs:
 
       - name: Retag and push all images to prod ECR
         run: |
-          SERVICES=(watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker temporal-worker prime-debt-indexer)
-          SHA=${{ inputs.sha }}
-          for service in "${SERVICES[@]}"; do
+          SHA=${{ inputs.sha || github.sha }}
+          for service in $SERVICES; do
             docker tag "$STAGING_REGISTRY/stl-sentinelstaging-$service:$SHA" "$PROD_REGISTRY/stl-sentinelprod-$service:$SHA"
             docker push "$PROD_REGISTRY/stl-sentinelprod-$service:$SHA"
           done
@@ -159,6 +165,7 @@ jobs:
   create-prod-pr:
     name: Create Prod Deploy PR
     needs: build-push-prod
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     concurrency:
       group: deploy-prod-pr
@@ -177,14 +184,14 @@ jobs:
 
       - name: Update prod kustomization image tags
         run: |
-          SHA=${{ inputs.sha }}
+          SHA=${{ inputs.sha || github.sha }}
           sed -i "s/newTag: .*/newTag: \"$SHA\"/" k8s/overlays/prod/kustomization.yaml
 
       - name: Create or update prod PR
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          SHA=${{ inputs.sha }}
+          SHA=${{ inputs.sha || github.sha }}
           SHORT_SHA=${SHA:0:7}
           BRANCH="deploy/prod-${SHORT_SHA}"
 
