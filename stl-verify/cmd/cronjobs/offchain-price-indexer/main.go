@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	temporaladapter "github.com/archon-research/stl/stl-verify/internal/adapters/inbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coingecko"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -36,21 +35,16 @@ func main() {
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporalutil.CronjobConfig{
 		Name:            "offchain-price-indexer",
-		TaskQueue:       temporaladapter.TaskQueue,
-		ScheduleID:      temporaladapter.PriceFetchScheduleID,
 		IntervalEnv:     "PRICE_FETCH_INTERVAL",
 		IntervalDefault: "5m",
-		Workflow:        temporaladapter.PriceFetchWorkflow,
-		// Empty AssetIDs signals the service to load all known assets from the DB.
-		WorkflowArgs: []any{temporaladapter.PriceFetchWorkflowInput{AssetIDs: []string{}}},
-		Setup:        setupActivities,
+		Setup:           setupRunner,
 	}); err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
 }
 
-func setupActivities(_ context.Context, deps temporalutil.Dependencies) (any, error) {
+func setupRunner(_ context.Context, deps temporalutil.Dependencies) (any, error) {
 	apiKey := os.Getenv("COINGECKO_API_KEY")
 	if apiKey == "" {
 		return nil, fmt.Errorf("COINGECKO_API_KEY environment variable is required")
@@ -79,5 +73,8 @@ func setupActivities(_ context.Context, deps temporalutil.Dependencies) (any, er
 		return nil, fmt.Errorf("creating price fetcher service: %w", err)
 	}
 
-	return temporaladapter.NewPriceFetchActivities(service)
+	// Wrap FetchCurrentPrices as a Runner — empty AssetIDs loads all from DB.
+	return temporalutil.RunnerFunc(func(ctx context.Context) error {
+		return service.FetchCurrentPrices(ctx, []string{})
+	}), nil
 }

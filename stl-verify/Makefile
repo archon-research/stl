@@ -1479,12 +1479,13 @@ kind-config:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/config/configmap.yaml -n $(KUBE_NS)
 
 kind-secrets:
-	@test -f ../.env.secrets || printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\n' | install -m 600 /dev/stdin ../.env.secrets
+	@test -f ../.env.secrets || printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\nANCHORAGE_API_KEY=\n' | install -m 600 /dev/stdin ../.env.secrets
 	@set -a; . ../.env.secrets; set +a; \
 	kubectl --context=$(KUBE_CONTEXT) create secret generic stl-secrets \
 	  --from-literal=ALCHEMY_API_KEY=$$ALCHEMY_API_KEY \
 	  --from-literal=COINGECKO_API_KEY=$${COINGECKO_API_KEY:-} \
 	  --from-literal=ETHERSCAN_API_KEY=$${ETHERSCAN_API_KEY:-} \
+	  --from-literal=ANCHORAGE_API_KEY=$${ANCHORAGE_API_KEY:-} \
 	  --from-literal=AWS_ACCESS_KEY_ID=test \
 	  --from-literal=AWS_SECRET_ACCESS_KEY=test \
 	  --namespace=$(KUBE_NS) \

@@ -71,7 +71,7 @@ open http://localhost:8233/namespaces/sentinel/schedules
 
 Non-sensitive environment variables are defined in `k8s/config/configmap.yaml` (`stl-config`) and applied automatically during `dev-up`. This includes database URLs, AWS endpoints, Temporal host, chain ID, and blockchain provider URLs.
 
-Secrets (`ALCHEMY_API_KEY`, `COINGECKO_API_KEY`, `ETHERSCAN_API_KEY`) are loaded from `.env.secrets` at the repo root and stored in the `stl-secrets` Kubernetes secret. Run `make kind-secrets` to reapply them (e.g. after rotating keys or on a fresh cluster).
+Secrets (`ALCHEMY_API_KEY`, `COINGECKO_API_KEY`, `ETHERSCAN_API_KEY`, `ANCHORAGE_API_KEY`) are loaded from `.env.secrets` at the repo root and stored in the `stl-secrets` Kubernetes secret. Run `make kind-secrets` to reapply them (e.g. after rotating keys or on a fresh cluster).
 
 To override a config value locally, edit `k8s/config/configmap.yaml` and reapply:
 

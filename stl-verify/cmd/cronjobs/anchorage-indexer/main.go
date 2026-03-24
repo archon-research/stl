@@ -1,8 +1,9 @@
+// Package main implements a Temporal cronjob worker that indexes Anchorage
+// collateral package snapshots and operations on a schedule.
 package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,11 +13,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/temporalutil"
 	tracker "github.com/archon-research/stl/stl-verify/internal/services/anchorage_tracker"
 )
 
 var (
 	GitCommit string
+	GitBranch string
 	BuildTime string
 )
 
@@ -25,108 +28,52 @@ func init() {
 }
 
 func main() {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigChan
-		slog.Info("received signal", "signal", sig)
-		cancel()
-	}()
-
-	if err := run(ctx, os.Args[1:]); err != nil {
-		slog.Error("anchorage-indexer exited with error", "error", err)
+	if err := temporalutil.RunCronjob(ctx, temporalutil.BuildMeta{
+		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
+	}, temporalutil.CronjobConfig{
+		Name:            "anchorage-indexer",
+		IntervalEnv:     "ANCHORAGE_INDEX_INTERVAL",
+		IntervalDefault: "15m",
+		Setup:           setupRunner,
+	}); err != nil {
+		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("anchorage-indexer", flag.ContinueOnError)
-
-	dbURL := fs.String("db", env.Get("DATABASE_URL",
-		"postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"),
-		"PostgreSQL connection string")
-
-	apiURL := fs.String("api-url", env.Get("ANCHORAGE_API_URL", ""),
-		"Anchorage API base URL (e.g. https://api.anchorage.com)")
-
-	apiKey := fs.String("api-key", env.Get("ANCHORAGE_API_KEY", ""),
-		"Anchorage API key")
-
-	prime := fs.String("prime", env.Get("ANCHORAGE_PRIME", ""),
-		"Prime name (e.g. spark, grove)")
-
-	backfill := fs.Bool("backfill", false,
-		"Backfill operations from the Anchorage API, then exit")
-
-	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("parse flags: %w", err)
+func setupRunner(ctx context.Context, deps temporalutil.Dependencies) (any, error) {
+	apiURL := env.Get("ANCHORAGE_API_URL", "")
+	if apiURL == "" {
+		return nil, fmt.Errorf("ANCHORAGE_API_URL environment variable is required")
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: env.ParseLogLevel(slog.LevelInfo),
-	}))
-	slog.SetDefault(logger)
-
-	if *apiURL == "" {
-		return fmt.Errorf("anchorage API URL is required (use -api-url flag or ANCHORAGE_API_URL env var)")
-	}
-	if *apiKey == "" {
-		return fmt.Errorf("anchorage API key is required (use -api-key flag or ANCHORAGE_API_KEY env var)")
-	}
-	if *prime == "" {
-		return fmt.Errorf("prime name is required (use -prime flag or ANCHORAGE_PRIME env var)")
+	apiKey := os.Getenv("ANCHORAGE_API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("ANCHORAGE_API_KEY environment variable is required")
 	}
 
-	logger.Info("starting anchorage indexer",
-		"prime", *prime,
-		"api_url", *apiURL,
-		"backfill", *backfill,
-		"git_commit", GitCommit,
-		"build_time", BuildTime,
-	)
+	primeName := env.Get("ANCHORAGE_PRIME", "")
+	if primeName == "" {
+		return nil, fmt.Errorf("ANCHORAGE_PRIME environment variable is required")
+	}
 
-	// Database
-	dbPool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(*dbURL))
+	txm, err := postgres.NewTxManager(deps.Pool, deps.Logger)
 	if err != nil {
-		return fmt.Errorf("database: %w", err)
+		return nil, fmt.Errorf("creating tx manager: %w", err)
 	}
-	defer dbPool.Close()
-	logger.Info("postgres connected")
 
-	// Dependencies
-	client := tracker.NewClient(*apiURL, *apiKey)
-	txm, err := postgres.NewTxManager(dbPool, logger)
+	repo := postgres.NewAnchorageRepository(deps.Pool, txm, deps.Logger)
+	primeRepo := postgres.NewPrimeRepository(deps.Pool)
+
+	primeID, err := primeRepo.GetPrimeIDByName(ctx, primeName)
 	if err != nil {
-		return fmt.Errorf("tx manager: %w", err)
+		return nil, fmt.Errorf("resolving prime %q: %w", primeName, err)
 	}
-	repo := postgres.NewAnchorageRepository(dbPool, txm, logger)
-	primeRepo := postgres.NewPrimeRepository(dbPool)
+	deps.Logger.Info("resolved prime", "name", primeName, "id", primeID)
 
-	// Look up prime ID
-	primeID, err := primeRepo.GetPrimeIDByName(ctx, *prime)
-	if err != nil {
-		return fmt.Errorf("resolve prime: %w", err)
-	}
-	logger.Info("resolved prime", "name", *prime, "id", primeID)
-
-	svc := tracker.NewService(client, repo, repo, primeID, logger)
-
-	if *backfill {
-		n, err := svc.BackfillOperations(ctx)
-		if err != nil {
-			return fmt.Errorf("backfill: %w", err)
-		}
-		logger.Info("backfill finished", "operations", n)
-		return nil
-	}
-
-	if err := svc.Run(ctx); err != nil {
-		return fmt.Errorf("run: %w", err)
-	}
-
-	logger.Info("anchorage indexer finished")
-	return nil
+	client := tracker.NewClient(apiURL, apiKey)
+	return tracker.NewService(client, repo, repo, primeID, deps.Logger), nil
 }

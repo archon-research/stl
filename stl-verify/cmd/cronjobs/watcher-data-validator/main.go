@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	temporaladapter "github.com/archon-research/stl/stl-verify/internal/adapters/inbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/etherscan"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -36,19 +35,16 @@ func main() {
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporalutil.CronjobConfig{
 		Name:            "watcher-data-validator",
-		TaskQueue:       temporaladapter.TaskQueue,
-		ScheduleID:      temporaladapter.DataValidationScheduleID,
 		IntervalEnv:     "DATA_VALIDATION_INTERVAL",
 		IntervalDefault: "1h",
-		Workflow:        temporaladapter.DataValidationWorkflow,
-		Setup:           setupActivities,
+		Setup:           setupRunner,
 	}); err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
 }
 
-func setupActivities(_ context.Context, deps temporalutil.Dependencies) (any, error) {
+func setupRunner(_ context.Context, deps temporalutil.Dependencies) (any, error) {
 	etherscanAPIKey := os.Getenv("ETHERSCAN_API_KEY")
 	if etherscanAPIKey == "" {
 		return nil, fmt.Errorf("ETHERSCAN_API_KEY environment variable is required")
@@ -74,5 +70,16 @@ func setupActivities(_ context.Context, deps temporalutil.Dependencies) (any, er
 		return nil, fmt.Errorf("creating data validator service: %w", err)
 	}
 
-	return temporaladapter.NewDataValidationActivities(service)
+	// Wrap Validate as a Runner — returns error on validation failure.
+	return temporalutil.RunnerFunc(func(ctx context.Context) error {
+		report, err := service.Validate(ctx)
+		if err != nil {
+			return fmt.Errorf("running validation: %w", err)
+		}
+		report.Finalize()
+		if !report.Success() {
+			return fmt.Errorf("validation failed: %d failures, %d errors", report.Failed, report.Errors)
+		}
+		return nil
+	}), nil
 }
