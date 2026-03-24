@@ -1,3 +1,5 @@
+# Actions are pinned to commit SHAs for supply-chain security.
+# To update: git ls-remote --tags https://github.com/<org>/<action>.git | grep <tag>
 name: CI
 
 on:
@@ -5,8 +7,8 @@ on:
     branches:
       - main
     paths-ignore:
-      - "stl-verify/python/**"
-      - ".github/workflows/python-ci.yml"
+      - "k8s/overlays/staging/kustomization.yaml"
+      - "k8s/overlays/prod/kustomization.yaml"
   pull_request:
     branches:
       - main
@@ -14,7 +16,8 @@ on:
       - "stl-verify/python/**"
       - ".github/workflows/python-ci.yml"
 
-# Cancel in-progress runs for the same branch/PR
+# Cancel in-progress CI runs for the same branch/PR.
+# Safe: the deploy workflow has its own concurrency groups that prevent cancellation.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -31,10 +34,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.26.1"
           cache: true
@@ -73,10 +76,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.26.1"
           cache: true
@@ -100,3 +103,12 @@ jobs:
       # testcontainers will spin up these services automatically
       - name: Run integration tests
         run: make test-integration
+
+  call-deploy:
+    name: Deploy
+    needs: [integration]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/deploy.yaml
+    secrets: inherit
+    with:
+      sha: ${{ github.sha }}
