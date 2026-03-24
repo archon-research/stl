@@ -1,0 +1,169 @@
+# Actions are pinned to commit SHAs for supply-chain security.
+# To update: git ls-remote --tags https://github.com/<org>/<action>.git | grep <tag>
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        required: true
+        type: string
+
+jobs:
+  build-push:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: deploy-build
+      cancel-in-progress: false
+    env:
+      AWS_REGION: eu-west-1
+      STAGING_REGISTRY: 579039992622.dkr.ecr.eu-west-1.amazonaws.com
+      STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
+      PROD_REGISTRY: 030797368798.dkr.ecr.eu-west-1.amazonaws.com
+      PROD_ROLE_ARN: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Configure AWS credentials (staging)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ env.STAGING_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to staging ECR
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" | \
+            docker login --username AWS --password-stdin "$STAGING_REGISTRY"
+
+      - name: Build and push all images to staging ECR
+        working-directory: stl-verify
+        run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha }}
+
+      - name: Configure AWS credentials (prod)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ env.PROD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to prod ECR
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" | \
+            docker login --username AWS --password-stdin "$PROD_REGISTRY"
+
+      - name: Retag and push all images to prod ECR
+        run: |
+          SERVICES=(watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker temporal-worker prime-debt-indexer)
+          SHA=${{ inputs.sha }}
+          for service in "${SERVICES[@]}"; do
+            docker tag "$STAGING_REGISTRY/stl-sentinelstaging-$service:$SHA" "$PROD_REGISTRY/stl-sentinelprod-$service:$SHA"
+            docker push "$PROD_REGISTRY/stl-sentinelprod-$service:$SHA"
+          done
+
+  update-staging:
+    name: Update Staging Image Tags
+    needs: build-push
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-update-staging
+      cancel-in-progress: false
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: main
+
+      - name: Update staging kustomization image tags
+        run: |
+          SHA=${{ inputs.sha }}
+          sed -i "s/newTag: .*/newTag: \"$SHA\"/" k8s/overlays/staging/kustomization.yaml
+
+      - name: Commit and push to main
+        run: |
+          git config user.name "stl-deploy-bot[bot]"
+          git config user.email "stl-deploy-bot[bot]@users.noreply.github.com"
+          git add k8s/overlays/staging/kustomization.yaml
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "deploy(staging): update image tags to ${{ inputs.sha }}"
+            git pull --rebase origin main
+            git push origin main
+          fi
+
+  create-prod-pr:
+    name: Create Prod Deploy PR
+    needs: build-push
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-prod-pr
+      cancel-in-progress: false
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Update prod kustomization image tags
+        run: |
+          SHA=${{ inputs.sha }}
+          sed -i "s/newTag: .*/newTag: \"$SHA\"/" k8s/overlays/prod/kustomization.yaml
+
+      - name: Create or update prod PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          SHA=${{ inputs.sha }}
+          SHORT_SHA=${SHA:0:7}
+          BRANCH="deploy/prod-${SHORT_SHA}"
+
+          git config user.name "stl-deploy-bot[bot]"
+          git config user.email "stl-deploy-bot[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add k8s/overlays/prod/kustomization.yaml
+          git commit -m "deploy(prod): update image tags to ${SHORT_SHA}"
+          git push origin "$BRANCH"
+
+          # Close any existing deploy/prod-* PRs
+          EXISTING_PRS=$(gh pr list --search "deploy(prod): update image tags" --json number --jq '.[].number' 2>/dev/null || echo "")
+          for pr in $EXISTING_PRS; do
+            gh pr close "$pr" --comment "Superseded by deploy for ${SHORT_SHA}"
+          done
+
+          gh pr create \
+            --title "deploy(prod): update image tags to ${SHORT_SHA}" \
+            --body "$(cat <<EOF
+          Automated prod image tag update.
+
+          **Commit:** ${SHA}
+          **Images pushed to:** prod ECR (030797368798)
+
+          Merge this PR to update prod kustomization, then manually sync in ArgoCD.
+          EOF
+          )" \
+            --head "$BRANCH" \
+            --base main

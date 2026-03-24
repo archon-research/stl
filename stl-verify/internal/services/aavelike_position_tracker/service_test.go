@@ -1124,64 +1124,69 @@ func TestSaveBorrowerRecord(t *testing.T) {
 	userAddr := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
 
 	tests := []struct {
-		name        string
-		eventType   entity.EventType
-		eventDelta  *big.Int
-		currentDebt *big.Int // nil means debt data is missing
-		decimals    int
-		reserveAddr common.Address
-		symbol      string
-		tokenName   string
-		wantErr     bool
-		wantAmount  *big.Int
-		wantChange  *big.Int
+		name           string
+		eventType      entity.EventType
+		eventDelta     *big.Int
+		currentDebt    *big.Int // nil means debt data is missing
+		decimals       int
+		reserveAddr    common.Address
+		symbol         string
+		tokenName      string
+		wantErr        bool
+		wantSaveCalled bool
+		wantAmount     *big.Int
+		wantChange     *big.Int
 	}{
 		{
-			name:        "BorrowUsesCurrentDebtNotEventDelta",
-			eventType:   EventBorrow,
-			eventDelta:  new(big.Int).Mul(big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-			currentDebt: new(big.Int).Mul(big.NewInt(3), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-			decimals:    18,
-			reserveAddr: reserveAddr,
-			symbol:      "WETH",
-			tokenName:   "Wrapped Ether",
-			wantAmount:  new(big.Int).Mul(big.NewInt(3), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-			wantChange:  new(big.Int).Mul(big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			name:           "BorrowUsesCurrentDebtNotEventDelta",
+			eventType:      EventBorrow,
+			eventDelta:     new(big.Int).Mul(big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			currentDebt:    new(big.Int).Mul(big.NewInt(3), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			decimals:       18,
+			reserveAddr:    reserveAddr,
+			symbol:         "WETH",
+			tokenName:      "Wrapped Ether",
+			wantSaveCalled: true,
+			wantAmount:     new(big.Int).Mul(big.NewInt(3), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			wantChange:     new(big.Int).Mul(big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 		},
 		{
-			name:        "RepayUsesCurrentDebtNotEventDelta",
-			eventType:   EventRepay,
-			eventDelta:  new(big.Int).Mul(big.NewInt(500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
-			currentDebt: new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
-			decimals:    6,
-			reserveAddr: usdcAddr,
-			symbol:      "USDC",
-			tokenName:   "USD Coin",
-			wantAmount:  new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
-			wantChange:  new(big.Int).Mul(big.NewInt(500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
+			name:           "RepayUsesCurrentDebtNotEventDelta",
+			eventType:      EventRepay,
+			eventDelta:     new(big.Int).Mul(big.NewInt(500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
+			currentDebt:    new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
+			decimals:       6,
+			reserveAddr:    usdcAddr,
+			symbol:         "USDC",
+			tokenName:      "USD Coin",
+			wantSaveCalled: true,
+			wantAmount:     new(big.Int).Mul(big.NewInt(1500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
+			wantChange:     new(big.Int).Mul(big.NewInt(500), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
 		},
 		{
-			name:        "RepayToZeroUsesZeroAmountWhenDebtMissing",
-			eventType:   EventRepay,
-			eventDelta:  new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-			currentDebt: nil,
-			decimals:    18,
-			reserveAddr: reserveAddr,
-			symbol:      "WETH",
-			tokenName:   "Wrapped Ether",
-			wantAmount:  big.NewInt(0),
-			wantChange:  new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			name:           "RepayToZeroUsesZeroAmountWhenDebtMissing",
+			eventType:      EventRepay,
+			eventDelta:     new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			currentDebt:    nil,
+			decimals:       18,
+			reserveAddr:    reserveAddr,
+			symbol:         "WETH",
+			tokenName:      "Wrapped Ether",
+			wantSaveCalled: true,
+			wantAmount:     big.NewInt(0),
+			wantChange:     new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 		},
 		{
-			name:        "BorrowReturnsErrorWhenDebtMissing",
-			eventType:   EventBorrow,
-			eventDelta:  new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-			currentDebt: nil,
-			decimals:    18,
-			reserveAddr: reserveAddr,
-			symbol:      "WETH",
-			tokenName:   "Wrapped Ether",
-			wantErr:     true,
+			name:           "BorrowSkipsRecordWhenDebtMissing",
+			eventType:      EventBorrow,
+			eventDelta:     new(big.Int).Mul(big.NewInt(2), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			currentDebt:    nil,
+			decimals:       18,
+			reserveAddr:    reserveAddr,
+			symbol:         "WETH",
+			tokenName:      "Wrapped Ether",
+			wantErr:        false,
+			wantSaveCalled: false,
 		},
 	}
 
@@ -1223,6 +1228,13 @@ func TestSaveBorrowerRecord(t *testing.T) {
 
 			if err != nil {
 				t.Fatalf("saveBorrowerRecord() failed: %v", err)
+			}
+
+			if !tt.wantSaveCalled {
+				if len(positionRepo.saveBorrowerCalls) != 0 {
+					t.Fatalf("expected 0 SaveBorrower calls, got %d", len(positionRepo.saveBorrowerCalls))
+				}
+				return
 			}
 
 			if len(positionRepo.saveBorrowerCalls) != 1 {
