@@ -16,13 +16,15 @@
         docker-build-allocation-tracker docker-push-allocation-tracker docker-release-allocation-tracker \
         docker-build-allocation-tracker-staging docker-push-allocation-tracker-staging docker-release-allocation-tracker-staging \
         docker-release-all docker-release-all-staging \
-        docker-build-temporal-worker docker-push-temporal-worker docker-release-temporal-worker \
-        docker-build-temporal-worker-staging docker-push-temporal-worker-staging docker-release-temporal-worker-staging \
+        docker-build-offchain-price-indexer docker-push-offchain-price-indexer docker-release-offchain-price-indexer \
+        docker-build-offchain-price-indexer-staging docker-push-offchain-price-indexer-staging docker-release-offchain-price-indexer-staging \
+        docker-build-watcher-data-validator docker-push-watcher-data-validator docker-release-watcher-data-validator \
+        docker-build-watcher-data-validator-staging docker-push-watcher-data-validator-staging docker-release-watcher-data-validator-staging \
         docker-build-morpho-indexer docker-push-morpho-indexer docker-release-morpho-indexer \
         docker-build-morpho-indexer-staging docker-push-morpho-indexer-staging docker-release-morpho-indexer-staging \
         docker-build-prime-debt-indexer docker-push-prime-debt-indexer docker-release-prime-debt-indexer \
         docker-build-prime-debt-indexer-staging docker-push-prime-debt-indexer-staging docker-release-prime-debt-indexer-staging \
-        run-temporal-worker build-temporal-worker \
+        run-offchain-price-indexer build-offchain-price-indexer run-watcher-data-validator build-watcher-data-validator \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         ecs-deploy-oracle-price-worker ecs-deploy-oracle-price-worker-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
@@ -33,10 +35,10 @@
 		build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill deploy-oracle-pricing-backfill-worker \
 		build-sparklend-backfill-arm64 deploy-sparklend-backfill erigon-sparklend-backfill \
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-migrate \
-		kind-load-migrate kind-load-watcher kind-load-workers kind-load-temporal-worker \
-		kind-deploy-watcher kind-deploy-workers kind-deploy-temporal-worker \
+		kind-load-migrate kind-load-watcher kind-load-workers kind-load-cronjobs \
+		kind-deploy-watcher kind-deploy-workers kind-deploy-cronjobs \
 		kind-redeploy-watcher kind-redeploy-worker \
-		docker-build-migrate docker-build-temporal-worker \
+		docker-build-migrate docker-build-offchain-price-indexer docker-build-watcher-data-validator \
 		kind-infra-ci kind-ci-up kind-ci-down \
 		docker-build-mock-blockchain-server docker-push-mock-blockchain-server docker-release-mock-blockchain-server \
 		docker-release-mock-blockchain-server-staging \
@@ -313,14 +315,15 @@ dev-up:
 	$(call build-if-needed,stl-sparklend-position-tracker:local,docker-build-sparklend-position-tracker LOCAL=1)
 	$(call build-if-needed,stl-prime-debt-indexer:local,docker-build-prime-debt-indexer LOCAL=1)
 	$(MAKE) kind-load-workers kind-deploy-workers
-	$(call build-if-needed,stl-temporal-worker:local,docker-build-temporal-worker LOCAL=1)
-	$(MAKE) kind-load-temporal-worker kind-deploy-temporal-worker
+	$(call build-if-needed,stl-offchain-price-indexer:local,docker-build-offchain-price-indexer LOCAL=1)
+	$(call build-if-needed,stl-watcher-data-validator:local,docker-build-watcher-data-validator LOCAL=1)
+	$(MAKE) kind-load-cronjobs kind-deploy-cronjobs
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  [6/6] Ready"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "==> Waiting for all deployments to roll out..."
-	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer temporal-worker; do \
+	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer offchain-price-indexer watcher-data-validator; do \
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=120s || \
 	    { echo "ERROR: deployment $$dep not ready after 120s"; kubectl --context=$(KUBE_CONTEXT) get pods -n $(KUBE_NS); exit 1; }; \
 	done
@@ -1005,19 +1008,17 @@ docker-release-sparklend-position-tracker-staging:
 	@$(MAKE) docker-release-sparklend-position-tracker ENV=sentinelstaging
 
 # =============================================================================
-# Docker Build & Push - Temporal Worker
+# Docker Build & Push - Offchain Price Indexer (Temporal cronjob)
 # =============================================================================
 
-# ECR repository URL for temporal worker
-ECR_REPO_TEMPORAL_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-temporal-worker
+ECR_REPO_OFFCHAIN_PRICE_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-offchain-price-indexer
 
-# Build Docker image for temporal worker (ARM64 for Fargate Graviton)
-docker-build-temporal-worker:
+docker-build-offchain-price-indexer:
 ifdef LOCAL
-	docker build -t stl-temporal-worker:local -f Dockerfile.temporal-worker .
+	docker build -t stl-offchain-price-indexer:local -f cmd/cronjobs/offchain-price-indexer/Dockerfile .
 else
-	@echo "==> Building Temporal Worker Docker image for ARM64..."
-	@echo "    Repository: $(ECR_REPO_TEMPORAL_WORKER)"
+	@echo "==> Building Offchain Price Indexer Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_OFFCHAIN_PRICE_INDEXER)"
 	@echo "    Tag: $(IMAGE_TAG)"
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
@@ -1025,26 +1026,24 @@ else
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.temporal-worker \
-		-t $(ECR_REPO_TEMPORAL_WORKER):$(IMAGE_TAG) \
-		-t $(ECR_REPO_TEMPORAL_WORKER):latest \
+		-f cmd/cronjobs/offchain-price-indexer/Dockerfile \
+		-t $(ECR_REPO_OFFCHAIN_PRICE_INDEXER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_OFFCHAIN_PRICE_INDEXER):latest \
 		--load .
 endif
 
-# Push temporal worker Docker image to ECR
-docker-push-temporal-worker: ecr-login
-	@echo "==> Pushing Temporal Worker Docker image to ECR..."
-	docker push $(ECR_REPO_TEMPORAL_WORKER):$(IMAGE_TAG)
-	docker push $(ECR_REPO_TEMPORAL_WORKER):latest
+docker-push-offchain-price-indexer: ecr-login
+	@echo "==> Pushing Offchain Price Indexer Docker image to ECR..."
+	docker push $(ECR_REPO_OFFCHAIN_PRICE_INDEXER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_OFFCHAIN_PRICE_INDEXER):latest
 
-# Build and push temporal worker in one step (captures tag at start to ensure consistency)
-docker-release-temporal-worker: ecr-login
+docker-release-offchain-price-indexer: ecr-login
 	@TAG=$$(git rev-parse --short HEAD) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
 	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
-	echo "==> Building Temporal Worker Docker image for ARM64..." && \
-	echo "    Repository: $(ECR_REPO_TEMPORAL_WORKER)" && \
+	echo "==> Building Offchain Price Indexer Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_OFFCHAIN_PRICE_INDEXER)" && \
 	echo "    Tag: $$TAG" && \
 	echo "    Commit: $$COMMIT" && \
 	echo "    Branch: $$BRANCH" && \
@@ -1052,27 +1051,85 @@ docker-release-temporal-worker: ecr-login
 		--build-arg GIT_COMMIT=$$COMMIT \
 		--build-arg GIT_BRANCH=$$BRANCH \
 		--build-arg BUILD_TIME=$$TIME \
-		-f Dockerfile.temporal-worker \
-		-t $(ECR_REPO_TEMPORAL_WORKER):$$TAG \
-		-t $(ECR_REPO_TEMPORAL_WORKER):latest \
+		-f cmd/cronjobs/offchain-price-indexer/Dockerfile \
+		-t $(ECR_REPO_OFFCHAIN_PRICE_INDEXER):$$TAG \
+		-t $(ECR_REPO_OFFCHAIN_PRICE_INDEXER):latest \
 		--load . && \
-	echo "==> Pushing Temporal Worker Docker image to ECR..." && \
-	docker push $(ECR_REPO_TEMPORAL_WORKER):$$TAG && \
-	docker push $(ECR_REPO_TEMPORAL_WORKER):latest && \
-	echo "==> Temporal Worker Docker image released: $(ECR_REPO_TEMPORAL_WORKER):$$TAG"
+	echo "==> Pushing Offchain Price Indexer Docker image to ECR..." && \
+	docker push $(ECR_REPO_OFFCHAIN_PRICE_INDEXER):$$TAG && \
+	docker push $(ECR_REPO_OFFCHAIN_PRICE_INDEXER):latest && \
+	echo "==> Offchain Price Indexer Docker image released: $(ECR_REPO_OFFCHAIN_PRICE_INDEXER):$$TAG"
+
+docker-build-offchain-price-indexer-staging:
+	@$(MAKE) docker-build-offchain-price-indexer ENV=sentinelstaging
+
+docker-push-offchain-price-indexer-staging:
+	@$(MAKE) docker-push-offchain-price-indexer ENV=sentinelstaging
+
+docker-release-offchain-price-indexer-staging:
+	@$(MAKE) docker-release-offchain-price-indexer ENV=sentinelstaging
 
 # =============================================================================
-# Sentinelstaging Temporal Worker Docker Shortcuts
+# Docker Build & Push - Watcher Data Validator (Temporal cronjob)
 # =============================================================================
 
-docker-build-temporal-worker-staging:
-	@$(MAKE) docker-build-temporal-worker ENV=sentinelstaging
+ECR_REPO_WATCHER_DATA_VALIDATOR = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-watcher-data-validator
 
-docker-push-temporal-worker-staging:
-	@$(MAKE) docker-push-temporal-worker ENV=sentinelstaging
+docker-build-watcher-data-validator:
+ifdef LOCAL
+	docker build -t stl-watcher-data-validator:local -f cmd/cronjobs/watcher-data-validator/Dockerfile .
+else
+	@echo "==> Building Watcher Data Validator Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_WATCHER_DATA_VALIDATOR)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f cmd/cronjobs/watcher-data-validator/Dockerfile \
+		-t $(ECR_REPO_WATCHER_DATA_VALIDATOR):$(IMAGE_TAG) \
+		-t $(ECR_REPO_WATCHER_DATA_VALIDATOR):latest \
+		--load .
+endif
 
-docker-release-temporal-worker-staging:
-	@$(MAKE) docker-release-temporal-worker ENV=sentinelstaging
+docker-push-watcher-data-validator: ecr-login
+	@echo "==> Pushing Watcher Data Validator Docker image to ECR..."
+	docker push $(ECR_REPO_WATCHER_DATA_VALIDATOR):$(IMAGE_TAG)
+	docker push $(ECR_REPO_WATCHER_DATA_VALIDATOR):latest
+
+docker-release-watcher-data-validator: ecr-login
+	@TAG=$$(git rev-parse --short HEAD) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Watcher Data Validator Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_WATCHER_DATA_VALIDATOR)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f cmd/cronjobs/watcher-data-validator/Dockerfile \
+		-t $(ECR_REPO_WATCHER_DATA_VALIDATOR):$$TAG \
+		-t $(ECR_REPO_WATCHER_DATA_VALIDATOR):latest \
+		--load . && \
+	echo "==> Pushing Watcher Data Validator Docker image to ECR..." && \
+	docker push $(ECR_REPO_WATCHER_DATA_VALIDATOR):$$TAG && \
+	docker push $(ECR_REPO_WATCHER_DATA_VALIDATOR):latest && \
+	echo "==> Watcher Data Validator Docker image released: $(ECR_REPO_WATCHER_DATA_VALIDATOR):$$TAG"
+
+docker-build-watcher-data-validator-staging:
+	@$(MAKE) docker-build-watcher-data-validator ENV=sentinelstaging
+
+docker-push-watcher-data-validator-staging:
+	@$(MAKE) docker-push-watcher-data-validator ENV=sentinelstaging
+
+docker-release-watcher-data-validator-staging:
+	@$(MAKE) docker-release-watcher-data-validator ENV=sentinelstaging
 
 # =============================================================================
 # Docker Build & Push - Morpho Indexer
@@ -1387,17 +1444,29 @@ build-allocation-tracker:
 	go build -o dist/allocation-tracker ./cmd/allocation_tracker
 	@echo "==> Built: dist/allocation-tracker"
 
-# Build temporal-worker binary
-build-temporal-worker:
-	@echo "==> Building temporal-worker..."
+# Build offchain-price-indexer binary
+build-offchain-price-indexer:
+	@echo "==> Building offchain-price-indexer..."
 	mkdir -p dist
-	go build -o dist/temporal-worker ./cmd/temporal-worker
-	@echo "==> Built: dist/temporal-worker"
+	go build -o dist/offchain-price-indexer ./cmd/cronjobs/offchain-price-indexer
+	@echo "==> Built: dist/offchain-price-indexer"
 
-# Run temporal-worker locally (requires dev-up first for Temporal server)
-run-temporal-worker:
-	@echo "==> Running Temporal Worker..."
-	COINGECKO_API_KEY=$${COINGECKO_API_KEY} go run ./cmd/temporal-worker
+# Run offchain-price-indexer locally (requires dev-up first for Temporal server)
+run-offchain-price-indexer:
+	@echo "==> Running Offchain Price Indexer..."
+	COINGECKO_API_KEY=$${COINGECKO_API_KEY} go run ./cmd/cronjobs/offchain-price-indexer
+
+# Build watcher-data-validator binary
+build-watcher-data-validator:
+	@echo "==> Building watcher-data-validator..."
+	mkdir -p dist
+	go build -o dist/watcher-data-validator ./cmd/cronjobs/watcher-data-validator
+	@echo "==> Built: dist/watcher-data-validator"
+
+# Run watcher-data-validator locally (requires dev-up first for Temporal server)
+run-watcher-data-validator:
+	@echo "==> Running Watcher Data Validator..."
+	ETHERSCAN_API_KEY=$${ETHERSCAN_API_KEY} go run ./cmd/cronjobs/watcher-data-validator
 
 # Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
 build-oracle-pricing-backfill-arm64:
@@ -1581,12 +1650,12 @@ kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/workers/ -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
 
-kind-load-temporal-worker:
-	kind load docker-image stl-temporal-worker:local --name $(KIND_CLUSTER)
+kind-load-cronjobs:
+	kind load docker-image stl-offchain-price-indexer:local --name $(KIND_CLUSTER)
+	kind load docker-image stl-watcher-data-validator:local --name $(KIND_CLUSTER)
 
-kind-deploy-temporal-worker:
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/temporal-worker.yaml -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/temporal-worker -n $(KUBE_NS)
+kind-deploy-cronjobs:
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/offchain-price-indexer deployment/watcher-data-validator -n $(KUBE_NS)
 
 # Rebuild and redeploy a specific worker. Usage: make kind-redeploy-worker NAME=morpho-indexer
 kind-redeploy-worker:

@@ -89,7 +89,8 @@ make kind-redeploy-watcher                          # watcher
 make kind-redeploy-worker NAME=morpho-indexer       # any worker
 make kind-redeploy-worker NAME=oracle-price-worker
 make kind-redeploy-worker NAME=sparklend-position-tracker
-make kind-redeploy-worker NAME=temporal-worker
+make kind-redeploy-worker NAME=offchain-price-indexer
+make kind-redeploy-worker NAME=watcher-data-validator
 ```
 
 Restart all deployments without rebuilding (e.g. after updating secrets or config):
