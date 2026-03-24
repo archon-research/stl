@@ -37,13 +37,13 @@ func main() {
 	}()
 
 	if err := run(ctx, os.Args[1:]); err != nil {
-		slog.Error("anchorage-tracker exited with error", "error", err)
+		slog.Error("anchorage-indexer exited with error", "error", err)
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("anchorage-tracker", flag.ContinueOnError)
+	fs := flag.NewFlagSet("anchorage-indexer", flag.ContinueOnError)
 
 	dbURL := fs.String("db", env.Get("DATABASE_URL",
 		"postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"),
@@ -80,7 +80,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("prime name is required (use -prime flag or ANCHORAGE_PRIME env var)")
 	}
 
-	logger.Info("starting anchorage tracker",
+	logger.Info("starting anchorage indexer",
 		"prime", *prime,
 		"api_url", *apiURL,
 		"backfill", *backfill,
@@ -127,6 +127,6 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("run: %w", err)
 	}
 
-	logger.Info("anchorage tracker finished")
+	logger.Info("anchorage indexer finished")
 	return nil
 }
