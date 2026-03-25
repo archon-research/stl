@@ -21,7 +21,7 @@
         docker-build-morpho-indexer-staging docker-push-morpho-indexer-staging docker-release-morpho-indexer-staging \
         docker-build-prime-debt-indexer docker-push-prime-debt-indexer docker-release-prime-debt-indexer \
         docker-build-prime-debt-indexer-staging docker-push-prime-debt-indexer-staging docker-release-prime-debt-indexer-staging \
-        run-offchain-price-indexer build-offchain-price-indexer run-watcher-data-validator build-watcher-data-validator \
+        \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         ecs-deploy-oracle-price-worker ecs-deploy-oracle-price-worker-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
@@ -32,8 +32,8 @@
 		build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill deploy-oracle-pricing-backfill-worker \
 		build-sparklend-backfill-arm64 deploy-sparklend-backfill erigon-sparklend-backfill \
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-migrate \
-		kind-load-migrate kind-load-watcher kind-load-workers \
-		kind-deploy-watcher kind-deploy-workers \
+		kind-load-migrate kind-load-watcher kind-load-workers kind-load-cronjobs \
+		kind-deploy-watcher kind-deploy-workers kind-deploy-cronjobs generate-cronjob-manifests \
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
@@ -261,7 +261,7 @@ dev-preflight:
 	@command -v kubectl >/dev/null 2>&1 || { echo "ERROR: kubectl not found. Install from https://kubernetes.io/docs/tasks/tools/"; exit 1; }
 	@docker info        >/dev/null 2>&1 || { echo "ERROR: Docker is not running. Start Docker and try again."; exit 1; }
 	@if [ ! -f ../.env.secrets ]; then \
-	  printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\n' | install -m 600 /dev/stdin ../.env.secrets; \
+	  printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\nANCHORAGE_API_KEY=\n' > ../.env.secrets && chmod 600 ../.env.secrets; \
 	  echo ""; \
 	  echo "⚠️  .env.secrets created at the repo root (.env.secrets)"; \
 	  echo "   Fill in ALCHEMY_API_KEY (ask a team member), then run:"; \
@@ -282,30 +282,30 @@ dev-up:
 	@$(MAKE) dev-preflight
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [1/6] Cluster"
+	@echo "  [1/7] Cluster"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(MAKE) kind-create
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [2/6] Infrastructure"
+	@echo "  [2/7] Infrastructure"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	$(MAKE) kind-config kind-secrets kind-infra
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [3/6] Database migrations"
+	@echo "  [3/7] Database migrations"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-migrate:local,docker-build-migrate)
 	$(MAKE) kind-load-migrate kind-migrate
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [4/6] Watcher"
+	@echo "  [4/7] Watcher"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-watcher:local,docker-build-watcher LOCAL=1)
 	$(MAKE) kind-load-watcher kind-deploy-watcher
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [5/6] Workers"
+	@echo "  [5/7] Workers"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-oracle-price-worker:local,docker-build-oracle-price-worker LOCAL=1)
 	$(call build-if-needed,stl-morpho-indexer:local,docker-build-morpho-indexer LOCAL=1)
@@ -314,10 +314,22 @@ dev-up:
 	$(MAKE) kind-load-workers kind-deploy-workers
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [6/6] Ready"
+	@echo "  [6/7] Cronjobs (Temporal)"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@for cj in $(CRONJOBS); do \
+	  if [ "$(COLD)" = "1" ] || ! docker image inspect stl-$$cj:local >/dev/null 2>&1; then \
+	    $(MAKE) docker-build-cronjob-$$cj; \
+	  else \
+	    echo "  stl-$$cj:local already present — skipping build (use COLD=1 to force rebuild)"; \
+	  fi; \
+	done
+	$(MAKE) kind-load-cronjobs kind-deploy-cronjobs
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "  [7/7] Ready"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "==> Waiting for all deployments to roll out..."
-	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer; do \
+	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer $(CRONJOBS); do \
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=120s || \
 	    { echo "ERROR: deployment $$dep not ready after 120s"; kubectl --context=$(KUBE_CONTEXT) get pods -n $(KUBE_NS); exit 1; }; \
 	done
@@ -341,7 +353,7 @@ dev-db:
 # Can be re-run independently to refresh secrets without restarting services.
 dev-env:
 	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-watcher-config --query SecretString --output text | jq -r '.alchemy_api_key // empty') || \
-		{ echo "WARNING: Failed to fetch ALCHEMY_API_KEY from AWS Secrets Manager. Set it manually in cmd/watcher/.env"; ALCHEMY_API_KEY=''; }; \
+		{ echo "WARNING: Failed to fetch ALCHEMY_API_KEY from AWS Secrets Manager. Set it manually in .env.secrets"; ALCHEMY_API_KEY=''; }; \
 	printf '%s\n' "ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" > ../.env.secrets && chmod 600 ../.env.secrets; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
@@ -360,7 +372,7 @@ dev-env:
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"ENABLE_BACKFILL=false" \
-		> cmd/watcher/.env && \
+		> cmd/base/watcher/.env && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -378,7 +390,7 @@ dev-env:
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"ENABLE_BACKFILL=false" \
-		> cmd/watcher/.env.avax && \
+		> cmd/base/watcher/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -392,7 +404,7 @@ dev-env:
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"LOG_LEVEL=debug" \
-		> cmd/oracle-price-worker/.env && \
+		> cmd/workers/oracle-price-indexer/.env && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -407,7 +419,7 @@ dev-env:
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"LOG_LEVEL=debug" \
-		> cmd/oracle-price-worker/.env.avax && \
+		> cmd/workers/oracle-price-indexer/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -425,7 +437,7 @@ dev-env:
 		"S3_BUCKET=stl-sentineldevelopment-ethereum-raw" \
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
-		> cmd/sparklend-position-tracker/.env && \
+		> cmd/workers/sparklend-indexer/.env && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -443,7 +455,7 @@ dev-env:
 		"S3_BUCKET=stl-sentineldevelopment-avalanche-raw" \
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
-		> cmd/sparklend-position-tracker/.env.avax && \
+		> cmd/workers/sparklend-indexer/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -461,7 +473,7 @@ dev-env:
 		"S3_BUCKET=stl-sentineldevelopment-ethereum-raw" \
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
-		> cmd/allocation_tracker/.env && \
+		> cmd/workers/prime-allocation-indexer/.env && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -479,7 +491,7 @@ dev-env:
 		"S3_BUCKET=stl-sentineldevelopment-avalanche-raw" \
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
-		> cmd/allocation_tracker/.env.avax && \
+		> cmd/workers/prime-allocation-indexer/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -498,31 +510,48 @@ dev-env:
 		"SQS_WAIT_TIME=1" \
 		"SQS_VISIBILITY_TIMEOUT=30" \
 		"LOG_LEVEL=debug" \
-		> cmd/morpho-indexer/.env
+		> cmd/workers/morpho-indexer/.env
 	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
 		{ echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
-	printf '%s\n' "COINGECKO_API_KEY=$$COINGECKO_API_KEY" >> ../.env.secrets; \
-	printf '%s\n' \
-		"ENVIRONMENT=development" \
-		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
-		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
-		> cmd/price-fetcher/.env
+	printf '%s\n' "COINGECKO_API_KEY=$$COINGECKO_API_KEY" >> ../.env.secrets
 	@printf '%s\n' \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
-		> cmd/oracle-pricing-backfill/.env
+		> cmd/backfillers/oracle-pricing-backfill/.env
 	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text) || \
 		{ echo "WARNING: Failed to fetch ETHERSCAN_API_KEY from AWS Secrets Manager."; ETHERSCAN_API_KEY=''; }; \
-	printf '%s\n' "ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" >> ../.env.secrets; \
-	TIGERDATA_URL=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-tigerdata-readonly --query SecretString --output text | jq -r '.connection_url // empty' | sed 's|@[^:]*:|@localhost:|') || \
-		{ echo "WARNING: Failed to fetch TIGERDATA_URL from AWS Secrets Manager."; TIGERDATA_URL=''; }; \
+	printf '%s\n' "ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" >> ../.env.secrets
+	@ANCHORAGE_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-anchorage-api-key --query SecretString --output text 2>/dev/null) || \
+		{ echo "WARNING: Failed to fetch ANCHORAGE_API_KEY from AWS Secrets Manager."; ANCHORAGE_API_KEY=''; }; \
+	printf '%s\n' "ANCHORAGE_API_KEY=$$ANCHORAGE_API_KEY" >> ../.env.secrets
+	@set -a; . ../.env.secrets; set +a; \
 	printf '%s\n' \
-		"ENVIRONMENT=development" \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
+		"LOG_LEVEL=debug" \
+		> cmd/cronjobs/offchain-price-indexer/.env; \
+	printf '%s\n' \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
 		"ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" \
-		"DATABASE_URL=$$TIGERDATA_URL" \
-		> cmd/data-validator/.env
+		"LOG_LEVEL=debug" \
+		> cmd/cronjobs/watcher-data-validator/.env; \
+	printf '%s\n' \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"ANCHORAGE_API_URL=" \
+		"ANCHORAGE_API_KEY=$$ANCHORAGE_API_KEY" \
+		"ANCHORAGE_PRIME=" \
+		"LOG_LEVEL=debug" \
+		> cmd/cronjobs/anchorage-indexer/.env
 	@echo "Environment files generated (.env.secrets updated)."
-	@echo "Note: data-validator uses staging TigerData. Run 'make tigerdata-tunnel' first."
 
 # Cold start — rebuilds all images from scratch
 dev-up-rebuild:
@@ -1315,29 +1344,16 @@ build-allocation-tracker:
 	go build -o dist/allocation-tracker ./cmd/allocation_tracker
 	@echo "==> Built: dist/allocation-tracker"
 
-# Build offchain-price-indexer binary
-build-offchain-price-indexer:
-	@echo "==> Building offchain-price-indexer..."
+# Pattern rules for cronjob binaries — work for any cronjob under cmd/cronjobs/.
+build-cronjob-%:
+	@echo "==> Building $*..."
 	mkdir -p dist
-	go build -o dist/offchain-price-indexer ./cmd/cronjobs/offchain-price-indexer
-	@echo "==> Built: dist/offchain-price-indexer"
+	go build -o dist/$* ./cmd/cronjobs/$*
+	@echo "==> Built: dist/$*"
 
-# Run offchain-price-indexer locally (requires dev-up first for Temporal server)
-run-offchain-price-indexer:
-	@echo "==> Running Offchain Price Indexer..."
-	COINGECKO_API_KEY=$${COINGECKO_API_KEY} go run ./cmd/cronjobs/offchain-price-indexer
-
-# Build watcher-data-validator binary
-build-watcher-data-validator:
-	@echo "==> Building watcher-data-validator..."
-	mkdir -p dist
-	go build -o dist/watcher-data-validator ./cmd/cronjobs/watcher-data-validator
-	@echo "==> Built: dist/watcher-data-validator"
-
-# Run watcher-data-validator locally (requires dev-up first for Temporal server)
-run-watcher-data-validator:
-	@echo "==> Running Watcher Data Validator..."
-	ETHERSCAN_API_KEY=$${ETHERSCAN_API_KEY} go run ./cmd/cronjobs/watcher-data-validator
+run-cronjob-%:
+	@echo "==> Running $*..."
+	@set -a && . cmd/cronjobs/$*/.env && [ -f cmd/cronjobs/$*/.env.local ] && . cmd/cronjobs/$*/.env.local; set +a && go run ./cmd/cronjobs/$*
 
 # Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
 build-oracle-pricing-backfill-arm64:
@@ -1479,7 +1495,7 @@ kind-config:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/config/configmap.yaml -n $(KUBE_NS)
 
 kind-secrets:
-	@test -f ../.env.secrets || printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\nANCHORAGE_API_KEY=\n' | install -m 600 /dev/stdin ../.env.secrets
+	@test -f ../.env.secrets || { printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\nANCHORAGE_API_KEY=\n' > ../.env.secrets && chmod 600 ../.env.secrets; }
 	@set -a; . ../.env.secrets; set +a; \
 	kubectl --context=$(KUBE_CONTEXT) create secret generic stl-secrets \
 	  --from-literal=ALCHEMY_API_KEY=$$ALCHEMY_API_KEY \
@@ -1522,6 +1538,30 @@ kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/workers/ -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
 
+# --- Cronjobs (Temporal workers) ---
+# Auto-discovered from cmd/cronjobs/*/main.go — no changes needed when adding a new cronjob.
+
+CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/main.go))))
+CRONJOB_DOCKERFILE = cmd/cronjobs/Dockerfile
+
+# Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
+docker-build-cronjob-%:
+	docker build --build-arg CRONJOB=$* -t stl-$*:local -f $(CRONJOB_DOCKERFILE) .
+
+kind-load-cronjobs:
+	@for cj in $(CRONJOBS); do \
+	  kind load docker-image stl-$$cj:local --name $(KIND_CLUSTER); \
+	done
+
+# Regenerate k8s manifests from cmd/cronjobs/ and apply them.
+kind-deploy-cronjobs:
+	go run ./cmd/util/cronjob-manifest
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/cronjobs/ -n $(KUBE_NS)
+	@kubectl --context=$(KUBE_CONTEXT) rollout restart $(addprefix deployment/,$(CRONJOBS)) -n $(KUBE_NS)
+
+# Regenerate cronjob manifests without deploying (for committing to source control).
+generate-cronjob-manifests:
+	go run ./cmd/util/cronjob-manifest
 
 # Rebuild and redeploy a specific worker. Usage: make kind-redeploy-worker NAME=morpho-indexer
 kind-redeploy-worker:
