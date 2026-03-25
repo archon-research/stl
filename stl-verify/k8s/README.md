@@ -91,6 +91,7 @@ make kind-redeploy-worker NAME=oracle-price-worker
 make kind-redeploy-worker NAME=sparklend-position-tracker
 make kind-redeploy-worker NAME=offchain-price-indexer
 make kind-redeploy-worker NAME=watcher-data-validator
+make kind-redeploy-worker NAME=anchorage-indexer
 ```
 
 Restart all deployments without rebuilding (e.g. after updating secrets or config):

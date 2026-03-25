@@ -65,16 +65,31 @@ type CronjobConfig struct {
 	// IntervalDefault is the default schedule interval (e.g. "5m", "1h").
 	IntervalDefault string
 
-	// Setup creates the activities struct for this cronjob.
-	// The returned value must implement temporal.Runner.
-	// It will be wrapped in temporal.NewCronjobActivities automatically.
+	// Setup returns a Runner (or RunnerFunc) for the cronjob's business logic.
+	// It will be wrapped in Temporal activities automatically.
 	Setup func(ctx context.Context, deps Dependencies) (runner any, err error)
+}
+
+func (c CronjobConfig) validate() error {
+	if c.Name == "" {
+		return fmt.Errorf("CronjobConfig.Name is required")
+	}
+	if c.IntervalDefault == "" {
+		return fmt.Errorf("CronjobConfig.IntervalDefault is required")
+	}
+	if c.Setup == nil {
+		return fmt.Errorf("CronjobConfig.Setup is required")
+	}
+	return nil
 }
 
 // RunCronjob runs a Temporal cronjob worker end-to-end: sets up logging,
 // connects to the database and Temporal, registers the workflow/activities,
 // ensures the schedule exists, and runs the worker until ctx is cancelled.
 func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
+	if err := cfg.validate(); err != nil {
+		return err
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))

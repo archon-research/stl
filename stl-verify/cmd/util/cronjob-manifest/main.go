@@ -136,8 +136,9 @@ func generateManifests(names []string, imageTag, outDir string) error {
 	return nil
 }
 
-// removeStaleManifests deletes .yaml files in outDir that don't correspond
-// to any discovered cronjob name.
+// removeStaleManifests deletes generated .yaml files in outDir that don't
+// correspond to any discovered cronjob. Only files with the generated header
+// are removed — hand-maintained files (e.g. kustomization.yaml) are left alone.
 func removeStaleManifests(outDir string, validNames []string) error {
 	valid := make(map[string]bool, len(validNames))
 	for _, n := range validNames {
@@ -149,17 +150,23 @@ func removeStaleManifests(outDir string, validNames []string) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("reading %s: %w", outDir, err)
 	}
 
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") || valid[e.Name()] {
 			continue
 		}
-		if !valid[e.Name()] {
-			if err := os.Remove(filepath.Join(outDir, e.Name())); err != nil {
-				return err
-			}
+		path := filepath.Join(outDir, e.Name())
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", path, err)
+		}
+		if !strings.HasPrefix(string(content), header) {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("removing %s: %w", path, err)
 		}
 	}
 
