@@ -202,14 +202,14 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 		metas = append(metas, callMeta{pool: i, field: "fee"})
 
 		// coins(i) for each coin
-		for j := 0; j < nCoins; j++ {
+		for j := range nCoins {
 			data, _ = s.poolABI.Pack("coins", big.NewInt(int64(j)))
 			calls = append(calls, outbound.Call{Target: p.Address, AllowFailure: true, CallData: data})
 			metas = append(metas, callMeta{pool: i, field: "coins", index: j})
 		}
 
 		// price_oracle(i) for i = 0..n-2 (coin i+1 relative to coin 0)
-		for j := 0; j < nCoins-1; j++ {
+		for j := range nCoins - 1 {
 			data, _ = s.poolABI.Pack("price_oracle", big.NewInt(int64(j)))
 			calls = append(calls, outbound.Call{Target: p.Address, AllowFailure: true, CallData: data})
 			metas = append(metas, callMeta{pool: i, field: "price_oracle", index: j})
