@@ -4,7 +4,7 @@
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
         dev-up dev-up-rebuild dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-temporal-worker-internal _docker-release-prime-debt-indexer-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -633,7 +633,7 @@ docker-push: ecr-login
 docker-release: ecr-login _docker-release-internal
 
 _docker-release-internal:
-	@IMAGE_TAG=$$(git rev-parse --short HEAD) && \
+	@IMAGE_TAG=$(IMAGE_TAG) && \
 	GIT_COMMIT_FULL=$$(git rev-parse HEAD) && \
 	GIT_BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
 	BUILD_TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
@@ -721,6 +721,8 @@ docker-release-all:
 	@$(MAKE) _docker-release-morpho-indexer-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-allocation-tracker-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-temporal-worker-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-prime-debt-indexer-internal ENV=$(ENV)
 	@echo ""
@@ -841,7 +843,7 @@ docker-push-backup: ecr-login
 docker-release-backup: ecr-login _docker-release-backup-internal
 
 _docker-release-backup-internal:
-	@TAG=$$(git rev-parse --short HEAD) && \
+	@TAG=$(IMAGE_TAG) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
 	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
@@ -913,7 +915,7 @@ docker-push-oracle-price-worker: ecr-login
 docker-release-oracle-price-worker: ecr-login _docker-release-oracle-price-worker-internal
 
 _docker-release-oracle-price-worker-internal:
-	@TAG=$$(git rev-parse --short HEAD) && \
+	@TAG=$(IMAGE_TAG) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
 	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
@@ -995,7 +997,7 @@ docker-push-sparklend-position-tracker: ecr-login
 docker-release-sparklend-position-tracker: ecr-login _docker-release-sparklend-position-tracker-internal
 
 _docker-release-sparklend-position-tracker-internal:
-	@TAG=$$(git rev-parse --short HEAD) && \
+	@TAG=$(IMAGE_TAG) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
 	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
@@ -1068,7 +1070,7 @@ docker-push-morpho-indexer: ecr-login
 docker-release-morpho-indexer: ecr-login _docker-release-morpho-indexer-internal
 
 _docker-release-morpho-indexer-internal:
-	@TAG=$$(git rev-parse --short HEAD) && \
+	@TAG=$(IMAGE_TAG) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
 	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
@@ -1139,7 +1141,7 @@ docker-push-prime-debt-indexer: ecr-login
 docker-release-prime-debt-indexer: ecr-login _docker-release-prime-debt-indexer-internal
 
 _docker-release-prime-debt-indexer-internal:
-	@TAG=$$(git rev-parse --short HEAD) && \
+	@TAG=$(IMAGE_TAG) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
 	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
@@ -1203,7 +1205,7 @@ docker-push-allocation-tracker: ecr-login
 docker-release-allocation-tracker: ecr-login _docker-release-allocation-tracker-internal
 
 _docker-release-allocation-tracker-internal:
-	@TAG=$$(git rev-parse --short HEAD) && \
+	@TAG=$(IMAGE_TAG) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
 	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
@@ -1629,7 +1631,7 @@ docker-push-mock-blockchain-server: ecr-login
 docker-release-mock-blockchain-server: ecr-login _docker-release-mock-blockchain-server-internal
 
 _docker-release-mock-blockchain-server-internal:
-	@TAG=$$(git rev-parse --short HEAD) && \
+	@TAG=$(IMAGE_TAG) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
 	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \

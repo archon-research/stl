@@ -86,22 +86,26 @@ func TestDefaultSkipSources(t *testing.T) {
 	logger := slog.Default()
 	sources := DefaultSkipSources(logger)
 
-	if len(sources) == 0 {
-		t.Fatal("expected at least 1 skip source")
+	if len(sources) != 1 {
+		t.Fatalf("expected 1 skip source, got %d", len(sources))
 	}
 
-	// Verify sparklend-skip exists
-	found := false
-	for _, s := range sources {
-		if s.Name() == "sparklend-skip" {
-			found = true
-			if !s.Supports("atoken", "sparklend") {
-				t.Error("sparklend-skip should support atoken/sparklend")
-			}
-		}
+	// Only anchorage-skip should remain
+	if sources[0].Name() != "anchorage-skip" {
+		t.Errorf("expected anchorage-skip, got %s", sources[0].Name())
 	}
-	if !found {
-		t.Error("sparklend-skip not found in DefaultSkipSources")
+	if !sources[0].Supports("anchorage", "") {
+		t.Error("anchorage-skip should support anchorage type")
+	}
+
+	// atokens should NOT be skipped — they're handled by BalanceOfSource now
+	for _, s := range sources {
+		if s.Supports("atoken", "sparklend") {
+			t.Error("no skip source should match atoken/sparklend")
+		}
+		if s.Supports("atoken", "aave") {
+			t.Error("no skip source should match atoken/aave")
+		}
 	}
 }
 
