@@ -36,6 +36,10 @@ func (c *Chain) validate() error {
 // ChainIDToName maps chain IDs to internal chain names used by service configs.
 var ChainIDToName = map[int64]string{
 	1:     "mainnet",
+	10:    "optimism",
+	130:   "unichain",
+	8453:  "base",
+	42161: "arbitrum",
 	43114: "avalanche-c",
 }
 
@@ -43,5 +47,9 @@ var ChainIDToName = map[int64]string{
 // Example: stl-sentinelstaging-ethereum-raw, stl-sentinelstaging-avalanche-raw.
 var ChainIDToS3Bucket = map[int64]string{
 	1:     "ethereum",
+	10:    "optimism",
+	130:   "unichain",
+	8453:  "base",
+	42161: "arbitrum",
 	43114: "avalanche",
 }

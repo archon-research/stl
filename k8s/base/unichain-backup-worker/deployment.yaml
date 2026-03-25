@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unichain-backup-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: unichain-backup-worker
+  template:
+    metadata:
+      labels:
+        app: unichain-backup-worker
+    spec:
+      serviceAccountName: unichain-backup-worker
+      containers:
+        - name: unichain-backup-worker
+          image: unichain-backup-worker
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://localhost:4317"
+            - name: JAEGER_ENDPOINT
+              value: "localhost:4317"
+          envFrom:
+            - configMapRef:
+                name: unichain-backup-worker-config
+            - secretRef:
+                name: unichain-backup-worker
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1024Mi"
+            limits:
+              cpu: "500m"
+              memory: "1024Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f raw_data_backup"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60
