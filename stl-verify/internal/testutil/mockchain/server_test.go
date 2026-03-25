@@ -13,11 +13,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// startTestServer starts a Server on a random port and registers cleanup.
+// startTestServer starts a Server on a random port on 127.0.0.1 and registers cleanup.
 func startTestServer(t *testing.T, store *DataStore) *Server {
 	t.Helper()
 	s := NewServer(store, defaultInterval)
-	if err := s.Start(":0"); err != nil {
+	if err := s.Start("127.0.0.1:0"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Stop() })
@@ -247,7 +247,7 @@ func TestServer_Disconnect(t *testing.T) {
 // SetInterval must be called before Start.
 func TestServer_SetInterval(t *testing.T) {
 	s := NewServer(NewFixtureDataStore(), 50*time.Millisecond)
-	if err := s.Start(":0"); err != nil {
+	if err := s.Start("127.0.0.1:0"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Stop() })
@@ -292,7 +292,7 @@ func TestServer_Reorg_BroadcastsAllBlocks(t *testing.T) {
 
 	// Use a slow interval so the replayer doesn't emit extra blocks during the test.
 	s := NewServer(NewFixtureDataStore(), time.Minute)
-	if err := s.Start(":0"); err != nil {
+	if err := s.Start("127.0.0.1:0"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Stop() })
@@ -333,7 +333,7 @@ func TestServer_Reorg_ReplayerContinuesFromTip(t *testing.T) {
 	const depth = 2
 
 	s := NewServer(NewFixtureDataStore(), time.Minute)
-	if err := s.Start(":0"); err != nil {
+	if err := s.Start("127.0.0.1:0"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Stop() })
@@ -367,7 +367,7 @@ func TestServer_Reorg_ReplayerContinuesFromTip(t *testing.T) {
 // attempts to reorg when the replayer has not emitted enough blocks.
 func TestServer_Reorg_ErrorCases(t *testing.T) {
 	s := NewServer(NewFixtureDataStore(), time.Minute)
-	if err := s.Start(":0"); err != nil {
+	if err := s.Start("127.0.0.1:0"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Stop() })
@@ -406,7 +406,7 @@ func TestServer_WSSubscriberLike(t *testing.T) {
 	// Start server with a fast replayer so we don't wait 12s in CI.
 	store := NewFixtureDataStore()
 	s := NewServer(store, 100*time.Millisecond)
-	if err := s.Start(":0"); err != nil {
+	if err := s.Start("127.0.0.1:0"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Stop() })
