@@ -27,6 +27,7 @@ func NewBalanceOfSource(multicaller outbound.Multicaller, erc20ABI *abi.ABI, log
 		logger:      logger.With("source", "balanceof"),
 		supportedTypes: map[string]bool{
 			"erc20":      true,
+			"atoken":     true,
 			"buidl":      true,
 			"securitize": true,
 			"superstate": true,

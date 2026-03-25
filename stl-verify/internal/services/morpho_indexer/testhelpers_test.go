@@ -21,17 +21,18 @@ import (
 
 // serviceTestHarness provides a fully wired Service with mock dependencies.
 type serviceTestHarness struct {
-	t            testing.TB
-	svc          *Service
-	multicaller  *testutil.MockMulticaller
-	txManager    *testutil.MockTxManager
-	userRepo     *testutil.MockUserRepository
-	protocolRepo *testutil.MockProtocolRepository
-	tokenRepo    *testutil.MockTokenRepository
-	morphoRepo   *testutil.MockMorphoRepository
-	eventRepo    *testutil.MockEventRepository
-	consumer     *testutil.MockSQSConsumer
-	cache        *testutil.MockBlockCache
+	t                testing.TB
+	svc              *Service
+	multicaller      *testutil.MockMulticaller
+	txManager        *testutil.MockTxManager
+	userRepo         *testutil.MockUserRepository
+	protocolRepo     *testutil.MockProtocolRepository
+	tokenRepo        *testutil.MockTokenRepository
+	morphoRepo       *testutil.MockMorphoRepository
+	receiptTokenRepo *testutil.MockReceiptTokenRepository
+	eventRepo        *testutil.MockEventRepository
+	consumer         *testutil.MockSQSConsumer
+	cache            *testutil.MockBlockCache
 
 	// ABIs for building multicall return data.
 	morphoBlueReadABI *abi.ABI
@@ -56,6 +57,7 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 	tokenRepo := &testutil.MockTokenRepository{}
 	morphoRepo := &testutil.MockMorphoRepository{}
 	eventRepo := &testutil.MockEventRepository{}
+	receiptTokenRepo := &testutil.MockReceiptTokenRepository{}
 	consumer := &testutil.MockSQSConsumer{}
 
 	// Set up sequential token IDs for GetOrCreateToken.
@@ -71,7 +73,7 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 		SQSConsumerConfig: sqsCfg,
 	}
 
-	svc, err := NewService(config, consumer, cache, multicaller, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo)
+	svc, err := NewService(config, consumer, cache, multicaller, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo, receiptTokenRepo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -104,17 +106,18 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 	}
 
 	return &serviceTestHarness{
-		t:            t,
-		svc:          svc,
-		multicaller:  multicaller,
-		txManager:    txManager,
-		userRepo:     userRepo,
-		protocolRepo: protocolRepo,
-		tokenRepo:    tokenRepo,
-		morphoRepo:   morphoRepo,
-		eventRepo:    eventRepo,
-		consumer:     consumer,
-		cache:        cache,
+		t:                t,
+		svc:              svc,
+		multicaller:      multicaller,
+		txManager:        txManager,
+		userRepo:         userRepo,
+		protocolRepo:     protocolRepo,
+		tokenRepo:        tokenRepo,
+		morphoRepo:       morphoRepo,
+		receiptTokenRepo: receiptTokenRepo,
+		eventRepo:        eventRepo,
+		consumer:         consumer,
+		cache:            cache,
 
 		morphoBlueReadABI:     morphoBlueReadABI,
 		metaMorphoReadABI:     metaMorphoReadABI,

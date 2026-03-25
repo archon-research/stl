@@ -247,6 +247,11 @@ func run(ctx context.Context, args []string) error {
 
 	eventRepo := postgres.NewEventRepository(logger)
 
+	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger)
+	if err != nil {
+		return fmt.Errorf("creating receipt token repository: %w", err)
+	}
+
 	// Service
 	service, err := aavelike_position_tracker.NewService(
 		shared.SQSConsumerConfig{
@@ -263,6 +268,7 @@ func run(ctx context.Context, args []string) error {
 		tokenRepo,
 		positionRepo,
 		eventRepo,
+		receiptTokenRepo,
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)

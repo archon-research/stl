@@ -1656,7 +1656,208 @@ func TestPersistUserPositionBatch(t *testing.T) {
 	}
 }
 
+func TestSaveReserveDataSnapshot_CreatesReceiptTokenWithBatchedSymbol(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	reserve := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	aTokenAddr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{})
+	defer cleanup()
+
+	erc20ABI := mustERC20ABI(t)
+	reserveDataABI := mustSparklendReserveDataABI(t)
+	configABI := mustReserveConfigABI(t)
+	tokenAddrsABI := mustReserveTokenAddrsABI(t)
+
+	multicaller := testutil.NewMockMulticaller()
+	executeCount := 0
+	multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, bn *big.Int) ([]outbound.Result, error) {
+		executeCount++
+		switch executeCount {
+		case 1:
+			// GetFullReserveData multicall
+			results := make([]outbound.Result, 3)
+			results[0] = outbound.Result{Success: true, ReturnData: packSparklendReserveDataResponse(t, reserveDataABI)}
+			results[1] = outbound.Result{Success: true, ReturnData: packReserveConfigResponse(t, configABI)}
+			results[2] = outbound.Result{Success: true, ReturnData: packReserveTokenAddrsResponse(t, tokenAddrsABI, aTokenAddr)}
+			return results, nil
+		case 2:
+			// BatchGetTokenMetadata for reserve + aToken
+			results := make([]outbound.Result, len(calls))
+			for i, call := range calls {
+				methodID := hex.EncodeToString(call.CallData[:4])
+				results[i] = outbound.Result{Success: true, ReturnData: packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)}
+			}
+			return results, nil
+		default:
+			t.Fatalf("unexpected multicall execution count: %d", executeCount)
+			return nil, nil
+		}
+	}
+
+	var capturedToken entity.ReceiptToken
+	receiptTokenRepo := &testutil.MockReceiptTokenRepository{
+		GetOrCreateReceiptTokenFn: func(ctx context.Context, tx pgx.Tx, token entity.ReceiptToken) (int64, error) {
+			capturedToken = token
+			return 42, nil
+		},
+	}
+
+	svc := newServiceWithCachedBlockchainService(t, ethClient, multicaller, chainID, protocolAddress)
+	svc.userRepo = &testutil.MockUserRepository{}
+	svc.protocolRepo = &testutil.MockProtocolRepository{}
+	svc.tokenRepo = &testutil.MockTokenRepository{}
+	svc.txManager = &testutil.MockTxManager{}
+	svc.receiptTokenRepo = receiptTokenRepo
+
+	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, 0, "0xtest")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if capturedToken.ReceiptTokenAddress != aTokenAddr {
+		t.Errorf("receipt token address = %s, want %s", capturedToken.ReceiptTokenAddress.Hex(), aTokenAddr.Hex())
+	}
+	if capturedToken.Symbol != "spWETH" {
+		t.Errorf("receipt token symbol = %q, want %q (fetched from batched metadata call)", capturedToken.Symbol, "spWETH")
+	}
+	if capturedToken.ChainID != chainID {
+		t.Errorf("receipt token chainID = %d, want %d", capturedToken.ChainID, chainID)
+	}
+}
+
+func TestSaveReserveDataSnapshot_ReceiptTokenRepoErrorPropagates(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	reserve := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	aTokenAddr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{})
+	defer cleanup()
+
+	erc20ABI := mustERC20ABI(t)
+	reserveDataABI := mustSparklendReserveDataABI(t)
+	configABI := mustReserveConfigABI(t)
+	tokenAddrsABI := mustReserveTokenAddrsABI(t)
+
+	multicaller := testutil.NewMockMulticaller()
+	executeCount := 0
+	multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, bn *big.Int) ([]outbound.Result, error) {
+		executeCount++
+		switch executeCount {
+		case 1:
+			// GetFullReserveData multicall: getReserveData, getReserveConfigurationData, getReserveTokensAddresses
+			results := make([]outbound.Result, 3)
+			results[0] = outbound.Result{Success: true, ReturnData: packSparklendReserveDataResponse(t, reserveDataABI)}
+			results[1] = outbound.Result{Success: true, ReturnData: packReserveConfigResponse(t, configABI)}
+			results[2] = outbound.Result{Success: true, ReturnData: packReserveTokenAddrsResponse(t, tokenAddrsABI, aTokenAddr)}
+			return results, nil
+		case 2:
+			// BatchGetTokenMetadata for reserve + aToken (decimals, symbol, name for each)
+			results := make([]outbound.Result, len(calls))
+			for i, call := range calls {
+				methodID := hex.EncodeToString(call.CallData[:4])
+				results[i] = outbound.Result{Success: true, ReturnData: packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)}
+				_ = call
+			}
+			return results, nil
+		default:
+			t.Fatalf("unexpected multicall execution count: %d", executeCount)
+			return nil, nil
+		}
+	}
+
+	receiptTokenRepo := &testutil.MockReceiptTokenRepository{
+		GetOrCreateReceiptTokenFn: func(ctx context.Context, tx pgx.Tx, token entity.ReceiptToken) (int64, error) {
+			return 0, errors.New("receipt token repo failure")
+		},
+	}
+
+	svc := newServiceWithCachedBlockchainService(t, ethClient, multicaller, chainID, protocolAddress)
+	svc.userRepo = &testutil.MockUserRepository{}
+	svc.protocolRepo = &testutil.MockProtocolRepository{}
+	svc.tokenRepo = &testutil.MockTokenRepository{}
+	svc.txManager = &testutil.MockTxManager{}
+	svc.receiptTokenRepo = receiptTokenRepo
+
+	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, 0, "0xtest")
+	if err == nil {
+		t.Fatal("expected error when receipt token repo fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to upsert receipt token") {
+		t.Errorf("expected error to contain 'failed to upsert receipt token', got: %v", err)
+	}
+}
+
 // --- Test helpers ---
+
+func mustSparklendReserveDataABI(t *testing.T) *abi.ABI {
+	t.Helper()
+	parsedABI, err := abis.GetSparklendPoolDataProviderReserveDataABI()
+	if err != nil {
+		t.Fatalf("load sparklend reserve data ABI: %v", err)
+	}
+	return parsedABI
+}
+
+func mustReserveConfigABI(t *testing.T) *abi.ABI {
+	t.Helper()
+	parsedABI, err := abis.GetPoolDataProviderReserveConfigurationABI()
+	if err != nil {
+		t.Fatalf("load reserve config ABI: %v", err)
+	}
+	return parsedABI
+}
+
+func mustReserveTokenAddrsABI(t *testing.T) *abi.ABI {
+	t.Helper()
+	parsedABI, err := abis.GetPoolDataProviderReserveTokensAddressesABI()
+	if err != nil {
+		t.Fatalf("load reserve token addrs ABI: %v", err)
+	}
+	return parsedABI
+}
+
+func packSparklendReserveDataResponse(t *testing.T, reserveDataABI *abi.ABI) []byte {
+	t.Helper()
+	zero := big.NewInt(0)
+	return mustPackOutput(t, reserveDataABI, "getReserveData",
+		zero, zero, zero, zero, zero, // unbacked, accruedToTreasuryScaled, totalAToken, totalStableDebt, totalVariableDebt
+		zero, zero, zero, // liquidityRate, variableBorrowRate, stableBorrowRate
+		zero, zero, // liquidityIndex, variableBorrowIndex
+		zero, // lastUpdateTimestamp (uint40)
+	)
+}
+
+func packReserveConfigResponse(t *testing.T, configABI *abi.ABI) []byte {
+	t.Helper()
+	return mustPackOutput(t, configABI, "getReserveConfigurationData",
+		big.NewInt(18),    // decimals
+		big.NewInt(8000),  // ltv
+		big.NewInt(8500),  // liquidationThreshold
+		big.NewInt(10500), // liquidationBonus
+		big.NewInt(1000),  // reserveFactor
+		true,              // usageAsCollateralEnabled
+		true,              // borrowingEnabled
+		true,              // stableBorrowRateEnabled
+		true,              // isActive
+		false,             // isFrozen
+	)
+}
+
+func packReserveTokenAddrsResponse(t *testing.T, tokenAddrsABI *abi.ABI, aTokenAddr common.Address) []byte {
+	t.Helper()
+	return mustPackOutput(t, tokenAddrsABI, "getReserveTokensAddresses",
+		aTokenAddr,       // aTokenAddress
+		common.Address{}, // stableDebtTokenAddress
+		common.Address{}, // variableDebtTokenAddress
+	)
+}
 
 func newBorrowerRecordTestService(positionRepo *mockPositionRepository) *Service {
 	return &Service{
@@ -1770,6 +1971,15 @@ func packERC20MetadataResponse(t *testing.T, erc20ABI *abi.ABI, token common.Add
 			return mustPackOutput(t, erc20ABI, "symbol", "USDC")
 		case methodIDHex(erc20ABI, "name"):
 			return mustPackOutput(t, erc20ABI, "name", "USD Coin")
+		}
+	case common.HexToAddress("0x1234567890123456789012345678901234567890"):
+		switch methodID {
+		case methodIDHex(erc20ABI, "decimals"):
+			return mustPackOutput(t, erc20ABI, "decimals", uint8(18))
+		case methodIDHex(erc20ABI, "symbol"):
+			return mustPackOutput(t, erc20ABI, "symbol", "spWETH")
+		case methodIDHex(erc20ABI, "name"):
+			return mustPackOutput(t, erc20ABI, "name", "Spark WETH")
 		}
 	}
 
