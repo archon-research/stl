@@ -79,6 +79,7 @@ func TestNewService_ValidateDependencies(t *testing.T) {
 	tr := &testutil.MockTokenRepository{}
 	mRepo := &testutil.MockMorphoRepository{}
 	er := &testutil.MockEventRepository{}
+	rtr := &testutil.MockReceiptTokenRepository{}
 	cons := &testutil.MockSQSConsumer{}
 
 	sqsCfg := shared.SQSConsumerConfigDefaults()
@@ -86,32 +87,34 @@ func TestNewService_ValidateDependencies(t *testing.T) {
 	config := Config{SQSConsumerConfig: sqsCfg}
 
 	tests := []struct {
-		name        string
-		consumer    outbound.SQSConsumer
-		cache       outbound.BlockCache
-		multicall   outbound.Multicaller
-		txMgr       outbound.TxManager
-		userRepo    outbound.UserRepository
-		protoRepo   outbound.ProtocolRepository
-		tokenRepo   outbound.TokenRepository
-		morphoRepo  outbound.MorphoRepository
-		eventRepo   outbound.EventRepository
-		errContains string
+		name             string
+		consumer         outbound.SQSConsumer
+		cache            outbound.BlockCache
+		multicall        outbound.Multicaller
+		txMgr            outbound.TxManager
+		userRepo         outbound.UserRepository
+		protoRepo        outbound.ProtocolRepository
+		tokenRepo        outbound.TokenRepository
+		morphoRepo       outbound.MorphoRepository
+		eventRepo        outbound.EventRepository
+		receiptTokenRepo outbound.ReceiptTokenRepository
+		errContains      string
 	}{
-		{"nil consumer", nil, rc, mc, tm, ur, pr, tr, mRepo, er, "consumer is required"},
-		{"nil cache", cons, nil, mc, tm, ur, pr, tr, mRepo, er, "cache is required"},
-		{"nil multicall", cons, rc, nil, tm, ur, pr, tr, mRepo, er, "multicallClient is required"},
-		{"nil txManager", cons, rc, mc, nil, ur, pr, tr, mRepo, er, "txManager is required"},
-		{"nil userRepo", cons, rc, mc, tm, nil, pr, tr, mRepo, er, "userRepo is required"},
-		{"nil protocolRepo", cons, rc, mc, tm, ur, nil, tr, mRepo, er, "protocolRepo is required"},
-		{"nil tokenRepo", cons, rc, mc, tm, ur, pr, nil, mRepo, er, "tokenRepo is required"},
-		{"nil morphoRepo", cons, rc, mc, tm, ur, pr, tr, nil, er, "morphoRepo is required"},
-		{"nil eventRepo", cons, rc, mc, tm, ur, pr, tr, mRepo, nil, "eventRepo is required"},
+		{"nil consumer", nil, rc, mc, tm, ur, pr, tr, mRepo, er, rtr, "consumer is required"},
+		{"nil cache", cons, nil, mc, tm, ur, pr, tr, mRepo, er, rtr, "cache is required"},
+		{"nil multicall", cons, rc, nil, tm, ur, pr, tr, mRepo, er, rtr, "multicallClient is required"},
+		{"nil txManager", cons, rc, mc, nil, ur, pr, tr, mRepo, er, rtr, "txManager is required"},
+		{"nil userRepo", cons, rc, mc, tm, nil, pr, tr, mRepo, er, rtr, "userRepo is required"},
+		{"nil protocolRepo", cons, rc, mc, tm, ur, nil, tr, mRepo, er, rtr, "protocolRepo is required"},
+		{"nil tokenRepo", cons, rc, mc, tm, ur, pr, nil, mRepo, er, rtr, "tokenRepo is required"},
+		{"nil morphoRepo", cons, rc, mc, tm, ur, pr, tr, nil, er, rtr, "morphoRepo is required"},
+		{"nil eventRepo", cons, rc, mc, tm, ur, pr, tr, mRepo, nil, rtr, "eventRepo is required"},
+		{"nil receiptTokenRepo", cons, rc, mc, tm, ur, pr, tr, mRepo, er, nil, "receiptTokenRepo is required"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewService(config, tt.consumer, tt.cache, tt.multicall, tt.txMgr, tt.userRepo, tt.protoRepo, tt.tokenRepo, tt.morphoRepo, tt.eventRepo)
+			_, err := NewService(config, tt.consumer, tt.cache, tt.multicall, tt.txMgr, tt.userRepo, tt.protoRepo, tt.tokenRepo, tt.morphoRepo, tt.eventRepo, tt.receiptTokenRepo)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -122,7 +125,7 @@ func TestNewService_ValidateDependencies(t *testing.T) {
 	}
 
 	// All deps provided: should succeed.
-	svc, err := NewService(config, cons, rc, mc, tm, ur, pr, tr, mRepo, er)
+	svc, err := NewService(config, cons, rc, mc, tm, ur, pr, tr, mRepo, er, rtr)
 	if err != nil {
 		t.Fatalf("NewService with all deps: %v", err)
 	}
@@ -2305,6 +2308,98 @@ func TestProcessBlockEvent_Liquidate_SaveMarketStateFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "save market state failed in liquidate") {
 		t.Errorf("error should propagate, got: %s", err.Error())
+	}
+}
+
+// --- tryDiscoverVault receipt token tests ---
+
+func TestProcessBlockEvent_VaultDiscovery_ReceiptTokenCreated(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			if calls[0].Target == unknownVault {
+				if calls[1].Target == unknownVault {
+					return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+				}
+				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+			}
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 3:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+		case 4:
+			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	var capturedToken entity.ReceiptToken
+	receiptTokenCalled := false
+	h.receiptTokenRepo.GetOrCreateReceiptTokenFn = func(_ context.Context, _ pgx.Tx, token entity.ReceiptToken) (int64, error) {
+		receiptTokenCalled = true
+		capturedToken = token
+		return 1, nil
+	}
+
+	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	receipt := makeReceipt(testTxHash, log)
+
+	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})
+	if err != nil {
+		t.Fatalf("processBlock should succeed, got: %v", err)
+	}
+
+	if !receiptTokenCalled {
+		t.Fatal("expected receiptTokenRepo.GetOrCreateReceiptToken to be called")
+	}
+	if capturedToken.ChainID != 1 {
+		t.Errorf("receipt token ChainID = %d, want 1", capturedToken.ChainID)
+	}
+	if capturedToken.ReceiptTokenAddress != unknownVault {
+		t.Errorf("receipt token address = %s, want %s", capturedToken.ReceiptTokenAddress.Hex(), unknownVault.Hex())
+	}
+	if capturedToken.Symbol != "mVLT" {
+		t.Errorf("receipt token symbol = %q, want %q", capturedToken.Symbol, "mVLT")
+	}
+}
+
+func TestProcessBlockEvent_VaultDiscovery_ReceiptTokenRepoError(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			if calls[0].Target == unknownVault {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 4:
+			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	h.receiptTokenRepo.GetOrCreateReceiptTokenFn = func(_ context.Context, _ pgx.Tx, _ entity.ReceiptToken) (int64, error) {
+		return 0, errors.New("receipt token db error")
+	}
+
+	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	receipt := makeReceipt(testTxHash, log)
+
+	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})
+	if err == nil {
+		t.Fatal("processBlock should fail on receipt token repo error")
+	}
+	if !strings.Contains(err.Error(), "receipt token") {
+		t.Errorf("error should mention receipt token, got: %s", err.Error())
+	}
+	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
+		t.Error("vault should NOT be marked as not-vault on transient receipt token error")
 	}
 }
 

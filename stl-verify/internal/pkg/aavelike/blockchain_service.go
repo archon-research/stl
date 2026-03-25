@@ -66,6 +66,7 @@ type BlockchainService struct {
 	getUserReserveDataABI                      *abi.ABI
 	getPoolDataProviderReserveConfigurationABI *abi.ABI
 	getPoolDataProviderReserveDataABI          *abi.ABI
+	getReserveTokensAddressesABI               *abi.ABI
 	uiPoolDataProvider                         common.Address
 	poolAddress                                common.Address
 	poolAddressesProvider                      common.Address
@@ -86,6 +87,13 @@ type ReserveConfigData struct {
 	StableBorrowRateEnabled  bool
 	IsActive                 bool
 	IsFrozen                 bool
+}
+
+// ReserveTokenAddresses holds the aToken and debt token addresses for a reserve.
+type ReserveTokenAddresses struct {
+	ATokenAddress            common.Address
+	StableDebtTokenAddress   common.Address
+	VariableDebtTokenAddress common.Address
 }
 
 // ReserveData holds parsed data from ProtocolDataProvider.getReserveData
@@ -185,6 +193,11 @@ func (s *BlockchainService) loadABIs(protocolVersion blockchain.ProtocolVersion)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to load getReserveData ABI: %w", err)
+	}
+
+	s.getReserveTokensAddressesABI, err = abis.GetPoolDataProviderReserveTokensAddressesABI()
+	if err != nil {
+		return fmt.Errorf("failed to load getReserveTokensAddresses ABI: %w", err)
 	}
 
 	return nil
@@ -620,23 +633,28 @@ func (s *BlockchainService) BatchGetTokenMetadata(ctx context.Context, tokens ma
 	return result, nil
 }
 
-// GetFullReserveData fetches both reserve data and configuration data from ProtocolDataProvider.
-func (s *BlockchainService) GetFullReserveData(ctx context.Context, asset common.Address, blockNumber int64) (*ReserveData, *ReserveConfigData, error) {
+// GetFullReserveData fetches reserve data, configuration data, and token addresses from ProtocolDataProvider.
+func (s *BlockchainService) GetFullReserveData(ctx context.Context, asset common.Address, blockNumber int64) (*ReserveData, *ReserveConfigData, *ReserveTokenAddresses, error) {
 	// Get the correct PoolDataProvider for this block
 	poolDataProvider, err := s.getPoolDataProviderForBlock(uint64(blockNumber))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	// Build multicall requests for both getReserveData and getReserveConfigurationData
+	// Build multicall requests for getReserveData, getReserveConfigurationData, and getReserveTokensAddresses
 	getReserveDataCallData, err := s.getPoolDataProviderReserveDataABI.Pack("getReserveData", asset)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to pack getReserveData: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to pack getReserveData: %w", err)
 	}
 
 	getConfigCallData, err := s.getPoolDataProviderReserveConfigurationABI.Pack("getReserveConfigurationData", asset)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to pack getReserveConfigurationData: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to pack getReserveConfigurationData: %w", err)
+	}
+
+	getTokenAddrsCallData, err := s.getReserveTokensAddressesABI.Pack("getReserveTokensAddresses", asset)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to pack getReserveTokensAddresses: %w", err)
 	}
 
 	calls := []outbound.Call{
@@ -650,42 +668,88 @@ func (s *BlockchainService) GetFullReserveData(ctx context.Context, asset common
 			AllowFailure: true,
 			CallData:     getConfigCallData,
 		},
+		{
+			Target:       poolDataProvider,
+			AllowFailure: true,
+			CallData:     getTokenAddrsCallData,
+		},
 	}
 
 	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
 	if err != nil {
-		return nil, nil, fmt.Errorf("multicall failed: %w", err)
+		return nil, nil, nil, fmt.Errorf("multicall failed: %w", err)
 	}
 
-	if len(results) < 2 {
-		return nil, nil, fmt.Errorf("expected 2 results, got %d", len(results))
+	if len(results) < 3 {
+		return nil, nil, nil, fmt.Errorf("expected 3 results, got %d", len(results))
 	}
 
 	// Parse getReserveData result
 	if !results[0].Success {
-		return nil, nil, fmt.Errorf("getReserveData call failed for asset %s at block %d", asset.Hex(), blockNumber)
+		return nil, nil, nil, fmt.Errorf("getReserveData call failed for asset %s at block %d", asset.Hex(), blockNumber)
 	}
 	if len(results[0].ReturnData) == 0 {
-		return nil, nil, fmt.Errorf("%w: getReserveData returned empty data for asset %s at block %d", ErrReserveNotFound, asset.Hex(), blockNumber)
+		return nil, nil, nil, fmt.Errorf("%w: getReserveData returned empty data for asset %s at block %d", ErrReserveNotFound, asset.Hex(), blockNumber)
 	}
 	reserveData, err := s.parseReserveData(results[0].ReturnData)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse reserve data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
+		return nil, nil, nil, fmt.Errorf("failed to parse reserve data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
 	}
 
 	// Parse getReserveConfigurationData result
 	if !results[1].Success {
-		return nil, nil, fmt.Errorf("getReserveConfigurationData call failed for asset %s at block %d", asset.Hex(), blockNumber)
+		return nil, nil, nil, fmt.Errorf("getReserveConfigurationData call failed for asset %s at block %d", asset.Hex(), blockNumber)
 	}
 	if len(results[1].ReturnData) == 0 {
-		return nil, nil, fmt.Errorf("%w: getReserveConfigurationData returned empty data for asset %s at block %d", ErrReserveNotFound, asset.Hex(), blockNumber)
+		return nil, nil, nil, fmt.Errorf("%w: getReserveConfigurationData returned empty data for asset %s at block %d", ErrReserveNotFound, asset.Hex(), blockNumber)
 	}
 	configData, err := s.parseReserveConfigurationData(results[1].ReturnData)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse configuration data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
+		return nil, nil, nil, fmt.Errorf("failed to parse configuration data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
 	}
 
-	return reserveData, configData, nil
+	// Parse getReserveTokensAddresses result
+	if !results[2].Success {
+		return nil, nil, nil, fmt.Errorf("getReserveTokensAddresses call failed for asset %s at block %d", asset.Hex(), blockNumber)
+	}
+	if len(results[2].ReturnData) == 0 {
+		return nil, nil, nil, fmt.Errorf("getReserveTokensAddresses returned empty data for asset %s at block %d", asset.Hex(), blockNumber)
+	}
+	tokenAddresses, err := s.parseReserveTokenAddresses(results[2].ReturnData)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to parse reserve token addresses for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
+	}
+
+	return reserveData, configData, tokenAddresses, nil
+}
+
+func (s *BlockchainService) parseReserveTokenAddresses(data []byte) (*ReserveTokenAddresses, error) {
+	unpacked, err := s.getReserveTokensAddressesABI.Unpack("getReserveTokensAddresses", data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unpack getReserveTokensAddresses: %w", err)
+	}
+	if len(unpacked) < 3 {
+		return nil, fmt.Errorf("expected 3 values from getReserveTokensAddresses, got %d", len(unpacked))
+	}
+
+	aToken, ok := unpacked[0].(common.Address)
+	if !ok {
+		return nil, fmt.Errorf("aTokenAddress: expected common.Address, got %T", unpacked[0])
+	}
+	stableDebt, ok := unpacked[1].(common.Address)
+	if !ok {
+		return nil, fmt.Errorf("stableDebtTokenAddress: expected common.Address, got %T", unpacked[1])
+	}
+	variableDebt, ok := unpacked[2].(common.Address)
+	if !ok {
+		return nil, fmt.Errorf("variableDebtTokenAddress: expected common.Address, got %T", unpacked[2])
+	}
+
+	return &ReserveTokenAddresses{
+		ATokenAddress:            aToken,
+		StableDebtTokenAddress:   stableDebt,
+		VariableDebtTokenAddress: variableDebt,
+	}, nil
 }
 
 func (s *BlockchainService) parseReserveData(data []byte) (*ReserveData, error) {

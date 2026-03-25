@@ -762,6 +762,11 @@ func persistVaults(
 		return fmt.Errorf("creating token repository: %w", err)
 	}
 
+	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger)
+	if err != nil {
+		return fmt.Errorf("creating receipt token repository: %w", err)
+	}
+
 	for _, v := range vaults {
 		if err := txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 			protocolID, err := protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, morpho_indexer.MorphoBlueAddress, "Morpho Blue", "lending", deployBlock)
@@ -782,6 +787,15 @@ func persistVaults(
 			_, err = morphoRepo.GetOrCreateVault(ctx, tx, vault)
 			if err != nil {
 				return fmt.Errorf("persisting vault: %w", err)
+			}
+
+			// Create receipt token entry — vault address IS the receipt token
+			receiptToken, err := entity.NewReceiptToken(chainID, protocolID, tokenID, v.FirstBlock, v.Address, v.Symbol)
+			if err != nil {
+				return fmt.Errorf("creating receipt token entity: %w", err)
+			}
+			if _, err := receiptTokenRepo.GetOrCreateReceiptToken(ctx, tx, *receiptToken); err != nil {
+				return fmt.Errorf("upserting receipt token: %w", err)
 			}
 
 			return nil
