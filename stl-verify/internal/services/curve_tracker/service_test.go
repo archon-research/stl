@@ -12,7 +12,6 @@ import (
 
 	curveapi "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/curve"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -41,14 +40,6 @@ func (m *mockCurveRepository) LookupTokenID(ctx context.Context, chainID int64, 
 		return id, nil
 	}
 	return 0, fmt.Errorf("not found")
-}
-
-type mockMulticaller struct {
-	executeFn func(ctx context.Context, calls []outbound.Call, block *big.Int) ([]outbound.Result, error)
-}
-
-func (m *mockMulticaller) Execute(ctx context.Context, calls []outbound.Call, block *big.Int) ([]outbound.Result, error) {
-	return m.executeFn(ctx, calls, block)
 }
 
 // ── DefaultPools ──
