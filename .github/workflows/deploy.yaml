@@ -99,6 +99,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: production
     concurrency:
       group: deploy-build-prod
       cancel-in-progress: false
@@ -156,7 +157,6 @@ jobs:
     needs: build-push-prod
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
-    environment: production
     concurrency:
       group: deploy-prod-pr
       cancel-in-progress: false
