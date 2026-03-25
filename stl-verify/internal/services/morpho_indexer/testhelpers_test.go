@@ -21,18 +21,18 @@ import (
 
 // serviceTestHarness provides a fully wired Service with mock dependencies.
 type serviceTestHarness struct {
-	t            testing.TB
-	svc          *Service
-	multicaller  *testutil.MockMulticaller
-	txManager    *testutil.MockTxManager
-	userRepo     *testutil.MockUserRepository
-	protocolRepo *testutil.MockProtocolRepository
-	tokenRepo    *testutil.MockTokenRepository
+	t                testing.TB
+	svc              *Service
+	multicaller      *testutil.MockMulticaller
+	txManager        *testutil.MockTxManager
+	userRepo         *testutil.MockUserRepository
+	protocolRepo     *testutil.MockProtocolRepository
+	tokenRepo        *testutil.MockTokenRepository
 	morphoRepo       *testutil.MockMorphoRepository
 	receiptTokenRepo *testutil.MockReceiptTokenRepository
 	eventRepo        *testutil.MockEventRepository
-	consumer     *testutil.MockSQSConsumer
-	cache        *testutil.MockBlockCache
+	consumer         *testutil.MockSQSConsumer
+	cache            *testutil.MockBlockCache
 
 	// ABIs for building multicall return data.
 	morphoBlueReadABI *abi.ABI
@@ -106,18 +106,18 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 	}
 
 	return &serviceTestHarness{
-		t:            t,
-		svc:          svc,
-		multicaller:  multicaller,
-		txManager:    txManager,
-		userRepo:     userRepo,
-		protocolRepo: protocolRepo,
-		tokenRepo:    tokenRepo,
+		t:                t,
+		svc:              svc,
+		multicaller:      multicaller,
+		txManager:        txManager,
+		userRepo:         userRepo,
+		protocolRepo:     protocolRepo,
+		tokenRepo:        tokenRepo,
 		morphoRepo:       morphoRepo,
 		receiptTokenRepo: receiptTokenRepo,
 		eventRepo:        eventRepo,
-		consumer:     consumer,
-		cache:        cache,
+		consumer:         consumer,
+		cache:            cache,
 
 		morphoBlueReadABI:     morphoBlueReadABI,
 		metaMorphoReadABI:     metaMorphoReadABI,
