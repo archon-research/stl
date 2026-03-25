@@ -20,5 +20,5 @@ data:
   ENABLE_BACKFILL: "false"
   TEMPORAL_HOST_PORT: temporal-server.temporal:7233
   TEMPORAL_NAMESPACE: vector
-  ANCHORAGE_API_URL: ""
-  ANCHORAGE_PRIME: ""
+  ANCHORAGE_API_URL: "https://api.anchorage.com"
+  ANCHORAGE_PRIME: "spark"

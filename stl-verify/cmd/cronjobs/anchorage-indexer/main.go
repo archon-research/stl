@@ -55,6 +55,8 @@ func setupRunner(ctx context.Context, deps temporalutil.Dependencies) (any, erro
 		return nil, fmt.Errorf("ANCHORAGE_API_KEY environment variable is required")
 	}
 
+	// IMPORTANT: An API key only has access to one prime, but there is no error if the prime doesnt match the api key,
+	// we just get back the data for the api key prime, but write the wrong prime id in the database.
 	primeName := env.Get("ANCHORAGE_PRIME", "")
 	if primeName == "" {
 		return nil, fmt.Errorf("ANCHORAGE_PRIME environment variable is required")
