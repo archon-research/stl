@@ -88,7 +88,7 @@ func (c CronjobConfig) validate() error {
 // ensures the schedule exists, and runs the worker until ctx is cancelled.
 func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 	if err := cfg.validate(); err != nil {
-		return err
+		return fmt.Errorf("validating cronjob config: %w", err)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: env.ParseLogLevel(slog.LevelInfo),
@@ -103,7 +103,7 @@ func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 
 	chainID, err := getChainID()
 	if err != nil {
-		return err
+		return fmt.Errorf("resolving CHAIN_ID: %w", err)
 	}
 
 	pool, err := openDatabase(ctx)
@@ -176,7 +176,9 @@ func createClient() (client.Client, error) {
 
 func waitForServer(ctx context.Context, c client.Client, logger *slog.Logger) error {
 	for {
-		_, err := c.WorkflowService().GetSystemInfo(ctx, &workflowservicepb.GetSystemInfoRequest{})
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, err := c.WorkflowService().GetSystemInfo(probeCtx, &workflowservicepb.GetSystemInfoRequest{})
+		cancel()
 		if err == nil {
 			return nil
 		}

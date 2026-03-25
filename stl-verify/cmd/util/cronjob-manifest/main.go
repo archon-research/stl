@@ -57,6 +57,8 @@ func discoverCronjobs(dir string) ([]string, error) {
 		mainFile := filepath.Join(dir, e.Name(), "main.go")
 		if _, err := os.Stat(mainFile); err == nil {
 			names = append(names, e.Name())
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("stating %s: %w", mainFile, err)
 		}
 	}
 	sort.Strings(names)
