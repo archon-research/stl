@@ -54,16 +54,17 @@ func ConfigDefaults() Config {
 
 // Service is the Morpho indexer SQS consumer service.
 type Service struct {
-	config       Config
-	deployBlock  int64 // resolved Morpho Blue deploy block for the configured chain
-	consumer     outbound.SQSConsumer
-	cache        outbound.BlockCacheReader
-	txManager    outbound.TxManager
-	userRepo     outbound.UserRepository
-	protocolRepo outbound.ProtocolRepository
-	tokenRepo    outbound.TokenRepository
-	morphoRepo   outbound.MorphoRepository
-	eventRepo    outbound.EventRepository
+	config           Config
+	deployBlock      int64 // resolved Morpho Blue deploy block for the configured chain
+	consumer         outbound.SQSConsumer
+	cache            outbound.BlockCacheReader
+	txManager        outbound.TxManager
+	userRepo         outbound.UserRepository
+	protocolRepo     outbound.ProtocolRepository
+	tokenRepo        outbound.TokenRepository
+	morphoRepo       outbound.MorphoRepository
+	eventRepo        outbound.EventRepository
+	receiptTokenRepo outbound.ReceiptTokenRepository
 
 	blockchainSvc  *blockchainService
 	eventExtractor *EventExtractor
@@ -87,8 +88,9 @@ func NewService(
 	tokenRepo outbound.TokenRepository,
 	morphoRepo outbound.MorphoRepository,
 	eventRepo outbound.EventRepository,
+	receiptTokenRepo outbound.ReceiptTokenRepository,
 ) (*Service, error) {
-	if err := validateDependencies(consumer, cache, multicallClient, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo); err != nil {
+	if err := validateDependencies(consumer, cache, multicallClient, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo, receiptTokenRepo); err != nil {
 		return nil, fmt.Errorf("validating dependencies: %w", err)
 	}
 
@@ -118,21 +120,22 @@ func NewService(
 	}
 
 	return &Service{
-		config:         config,
-		deployBlock:    deployBlock,
-		consumer:       consumer,
-		cache:          cache,
-		txManager:      txManager,
-		userRepo:       userRepo,
-		protocolRepo:   protocolRepo,
-		tokenRepo:      tokenRepo,
-		morphoRepo:     morphoRepo,
-		eventRepo:      eventRepo,
-		blockchainSvc:  blockchainSvc,
-		eventExtractor: eventExtractor,
-		vaultRegistry:  NewVaultRegistry(config.Logger),
-		telemetry:      config.Telemetry,
-		logger:         config.Logger.With("component", "morpho-indexer"),
+		config:           config,
+		deployBlock:      deployBlock,
+		consumer:         consumer,
+		cache:            cache,
+		txManager:        txManager,
+		userRepo:         userRepo,
+		protocolRepo:     protocolRepo,
+		tokenRepo:        tokenRepo,
+		morphoRepo:       morphoRepo,
+		eventRepo:        eventRepo,
+		receiptTokenRepo: receiptTokenRepo,
+		blockchainSvc:    blockchainSvc,
+		eventExtractor:   eventExtractor,
+		vaultRegistry:    NewVaultRegistry(config.Logger),
+		telemetry:        config.Telemetry,
+		logger:           config.Logger.With("component", "morpho-indexer"),
 	}, nil
 }
 
@@ -480,6 +483,15 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 		vaultID, err := s.morphoRepo.GetOrCreateVault(ctx, tx, vault)
 		if err != nil {
 			return fmt.Errorf("persisting vault: %w", err)
+		}
+
+		// Create receipt token entry — vault address IS the receipt token
+		receiptToken, err := entity.NewReceiptToken(chainID, protocolID, tokenID, blockNumber, vaultAddress, metadata.Symbol)
+		if err != nil {
+			return fmt.Errorf("creating receipt token entity: %w", err)
+		}
+		if _, err := s.receiptTokenRepo.GetOrCreateReceiptToken(ctx, tx, *receiptToken); err != nil {
+			return fmt.Errorf("upserting receipt token: %w", err)
 		}
 
 		vault.ID = vaultID
@@ -883,6 +895,7 @@ func validateDependencies(
 	tokenRepo outbound.TokenRepository,
 	morphoRepo outbound.MorphoRepository,
 	eventRepo outbound.EventRepository,
+	receiptTokenRepo outbound.ReceiptTokenRepository,
 ) error {
 	if consumer == nil {
 		return fmt.Errorf("consumer is required")
@@ -910,6 +923,9 @@ func validateDependencies(
 	}
 	if eventRepo == nil {
 		return fmt.Errorf("eventRepo is required")
+	}
+	if receiptTokenRepo == nil {
+		return fmt.Errorf("receiptTokenRepo is required")
 	}
 	return nil
 }

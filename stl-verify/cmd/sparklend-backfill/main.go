@@ -209,6 +209,11 @@ func run(args []string) error {
 
 	eventRepo := postgres.NewEventRepository(logger)
 
+	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger)
+	if err != nil {
+		return fmt.Errorf("creating receipt token repository: %w", err)
+	}
+
 	// Build position tracker (nil consumer and nil redisClient for backfill mode)
 	trackerSvc, err := aavelike_position_tracker.NewService(
 		shared.SQSConsumerConfig{
@@ -224,6 +229,7 @@ func run(args []string) error {
 		tokenRepo,
 		positionRepo,
 		eventRepo,
+		receiptTokenRepo,
 	)
 	if err != nil {
 		return fmt.Errorf("creating position tracker service: %w", err)
