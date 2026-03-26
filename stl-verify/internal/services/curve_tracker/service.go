@@ -174,7 +174,7 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 	for i, p := range s.pools {
 		nCoins := nCoinsMap[p.Address]
 
-		packAndAppend := func(method string, args []interface{}, field string, index int, required bool) error {
+		packAndAppend := func(method string, args []any, field string, index int, required bool) error {
 			var data []byte
 			var err error
 			if len(args) > 0 {
@@ -208,14 +208,14 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 		}
 
 		for j := range nCoins {
-			if err := packAndAppend("coins", []interface{}{big.NewInt(int64(j))}, "coins", j, true); err != nil {
+			if err := packAndAppend("coins", []any{big.NewInt(int64(j))}, "coins", j, true); err != nil {
 				return nil, err
 			}
 		}
 
 		// Optional fields — pool is kept with partial data
 		for j := range nCoins - 1 {
-			if err := packAndAppend("price_oracle", []interface{}{big.NewInt(int64(j))}, "price_oracle", j, false); err != nil {
+			if err := packAndAppend("price_oracle", []any{big.NewInt(int64(j))}, "price_oracle", j, false); err != nil {
 				return nil, err
 			}
 		}
