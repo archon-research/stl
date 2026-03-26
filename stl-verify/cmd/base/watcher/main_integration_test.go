@@ -647,7 +647,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 
 	// Run migrations
 	_, currentFile, _, _ := runtime.Caller(0)
-	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../db/migrations")
+	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../db/migrations")
 	m := migrator.New(pool, migrationsDir)
 	if err := m.ApplyAll(ctx); err != nil {
 		t.Fatalf("failed to apply migrations: %v", err)
