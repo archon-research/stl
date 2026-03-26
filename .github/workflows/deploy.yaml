@@ -72,26 +72,74 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          token: ${{ steps.app-token.outputs.token }}
           ref: main
 
-      - name: Update staging kustomization image tags
+      - name: Commit and push to main (via API for verified commits)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           SHA=${{ inputs.sha || github.sha }}
-          sed -i "s/newTag: .*/newTag: \"$SHA\"/" k8s/overlays/staging/kustomization.yaml
+          REPO="${{ github.repository }}"
 
-      - name: Commit and push to main
-        run: |
-          git config user.name "stl-deploy-bot[bot]"
-          git config user.email "stl-deploy-bot[bot]@users.noreply.github.com"
-          git add k8s/overlays/staging/kustomization.yaml
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "deploy(staging): update image tags to ${{ inputs.sha || github.sha }}"
-            git pull --rebase origin main
-            git push origin main
-          fi
+          # Retry loop to handle concurrent updates to main
+          MAX_RETRIES=3
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt ${attempt}/${MAX_RETRIES}"
+
+            # Fetch latest main and apply the tag update on top of it
+            git fetch origin main
+            git checkout FETCH_HEAD -- k8s/overlays/staging/kustomization.yaml
+            sed -i "s/newTag: .*/newTag: \"$SHA\"/" k8s/overlays/staging/kustomization.yaml
+
+            # Check if the file actually changed vs current main
+            if git diff --quiet FETCH_HEAD -- k8s/overlays/staging/kustomization.yaml; then
+              echo "No changes to commit"
+              exit 0
+            fi
+
+            # Get current main HEAD and its tree
+            MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+            BASE_TREE=$(gh api "repos/${REPO}/git/commits/${MAIN_SHA}" --jq '.tree.sha')
+
+            # Create a new tree with the updated file
+            NEW_TREE=$(gh api "repos/${REPO}/git/trees" \
+              --method POST \
+              --input - <<TREE_EOF | jq -r '.sha'
+          {
+            "base_tree": "${BASE_TREE}",
+            "tree": [{
+              "path": "k8s/overlays/staging/kustomization.yaml",
+              "mode": "100644",
+              "type": "blob",
+              "content": $(cat k8s/overlays/staging/kustomization.yaml | jq -Rs .)
+            }]
+          }
+          TREE_EOF
+            )
+
+            # Create a verified commit via the API
+            NEW_COMMIT=$(gh api "repos/${REPO}/git/commits" \
+              --method POST \
+              --field "message=deploy(staging): update image tags to ${SHA}" \
+              --field "tree=${NEW_TREE}" \
+              --field "parents[]=${MAIN_SHA}" \
+              --jq '.sha')
+
+            # Try to fast-forward main — fails if main moved since we read MAIN_SHA
+            REF_OUTPUT=$(gh api "repos/${REPO}/git/refs/heads/main" \
+              --method PATCH \
+              --field "sha=${NEW_COMMIT}" 2>&1) && {
+              echo "Successfully updated main to ${NEW_COMMIT}"
+              exit 0
+            }
+
+            echo "Ref update failed: ${REF_OUTPUT}"
+            echo "Retrying..."
+            sleep 1
+          done
+
+          echo "Failed to update main after ${MAX_RETRIES} attempts"
+          exit 1
 
   build-push-prod:
     name: Build & Push Images (Prod)
@@ -171,6 +219,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           token: ${{ steps.app-token.outputs.token }}
+          ref: main
 
       - name: Update prod kustomization image tags
         run: |
@@ -184,13 +233,45 @@ jobs:
           SHA=${{ inputs.sha || github.sha }}
           SHORT_SHA=${SHA:0:7}
           BRANCH="deploy/prod-${SHORT_SHA}"
+          REPO="${{ github.repository }}"
 
-          git config user.name "stl-deploy-bot[bot]"
-          git config user.email "stl-deploy-bot[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
-          git add k8s/overlays/prod/kustomization.yaml
-          git commit -m "deploy(prod): update image tags to ${SHORT_SHA}"
-          git push origin "$BRANCH"
+          # Get current main HEAD and its tree
+          MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+          BASE_TREE=$(gh api "repos/${REPO}/git/commits/${MAIN_SHA}" --jq '.tree.sha')
+
+          # Create a new tree with the updated file
+          NEW_TREE=$(gh api "repos/${REPO}/git/trees" \
+            --method POST \
+            --input - <<TREE_EOF | jq -r '.sha'
+          {
+            "base_tree": "${BASE_TREE}",
+            "tree": [{
+              "path": "k8s/overlays/prod/kustomization.yaml",
+              "mode": "100644",
+              "type": "blob",
+              "content": $(cat k8s/overlays/prod/kustomization.yaml | jq -Rs .)
+            }]
+          }
+          TREE_EOF
+          )
+
+          # Create a verified commit via the API
+          NEW_COMMIT=$(gh api "repos/${REPO}/git/commits" \
+            --method POST \
+            --field "message=deploy(prod): update image tags to ${SHORT_SHA}" \
+            --field "tree=${NEW_TREE}" \
+            --field "parents[]=${MAIN_SHA}" \
+            --jq '.sha')
+
+          # Create the branch pointing to the new commit
+          gh api "repos/${REPO}/git/refs" \
+            --method POST \
+            --field "ref=refs/heads/${BRANCH}" \
+            --field "sha=${NEW_COMMIT}" || \
+          gh api "repos/${REPO}/git/refs/heads/${BRANCH}" \
+            --method PATCH \
+            --field "sha=${NEW_COMMIT}" \
+            --field "force=true"
 
           # Close any existing deploy/prod-* PRs
           EXISTING_PRS=$(gh pr list --search "deploy(prod): update image tags" --json number --jq '.[].number' 2>/dev/null || echo "")
