@@ -8,21 +8,24 @@ import (
 
 // CurvePoolSnapshot represents a point-in-time state of a Curve pool.
 type CurvePoolSnapshot struct {
-	PoolAddress  []byte
-	ChainID      int64
-	BlockNumber  int64
-	CoinBalances json.RawMessage // JSONB
-	NCoins       int
-	TotalSupply  string // NUMERIC as string
-	VirtualPrice string // NUMERIC as string
-	TvlUSD       *string
-	AmpFactor    int
-	Fee          string          // NUMERIC as string
-	OraclePrices json.RawMessage // JSONB, nullable
-	FeeAPY       *string
-	CrvAPYMin    *string
-	CrvAPYMax    *string
-	SnapshotTime time.Time
+	PoolAddress   []byte
+	ChainID       int64
+	BlockNumber   int64
+	CoinBalances  json.RawMessage // JSONB
+	NCoins        int
+	TotalSupply   string // NUMERIC as string
+	VirtualPrice  string // NUMERIC as string
+	TvlUSD        *string
+	AmpFactor     int
+	Fee           string          // NUMERIC as string
+	OraclePrices  json.RawMessage // JSONB, nullable — EMA prices
+	LastPrices    json.RawMessage // JSONB, nullable — spot prices
+	ExchangeRates json.RawMessage // JSONB, nullable — get_dy results
+	FeeAPYDaily   *string
+	FeeAPYWeekly  *string
+	CrvAPYMin     *string
+	CrvAPYMax     *string
+	SnapshotTime  time.Time
 }
 
 func (s *CurvePoolSnapshot) Validate() error {

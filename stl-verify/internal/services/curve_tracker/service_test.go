@@ -57,17 +57,17 @@ func TestDefaultPools(t *testing.T) {
 		"AUSDUSDC":  "0xE79C1C7E24755574438A26D5e062Ad2626C04662",
 	}
 
-	seen := make(map[string]bool)
+	seen := make(map[string]struct{})
 	for _, p := range pools {
 		want, ok := expected[p.Name]
 		if !ok {
 			t.Errorf("unexpected pool name: %s", p.Name)
 			continue
 		}
-		if seen[p.Name] {
+		if _, dup := seen[p.Name]; dup {
 			t.Errorf("duplicate pool name: %s", p.Name)
 		}
-		seen[p.Name] = true
+		seen[p.Name] = struct{}{}
 		if p.Address != common.HexToAddress(want) {
 			t.Errorf("pool %s: address = %s, want %s", p.Name, p.Address.Hex(), want)
 		}
@@ -76,9 +76,34 @@ func TestDefaultPools(t *testing.T) {
 		}
 	}
 	for name := range expected {
-		if !seen[name] {
+		if _, ok := seen[name]; !ok {
 			t.Errorf("expected pool %s not found in DefaultPools()", name)
 		}
+	}
+}
+
+// ── PoolsForChainID ──
+
+func TestPoolsForChainID(t *testing.T) {
+	pools := []PoolConfig{
+		{Address: common.HexToAddress("0xaaa"), ChainID: 1, Name: "eth-pool"},
+		{Address: common.HexToAddress("0xbbb"), ChainID: 42161, Name: "arb-pool"},
+		{Address: common.HexToAddress("0xccc"), ChainID: 1, Name: "eth-pool-2"},
+	}
+
+	ethPools := PoolsForChainID(pools, 1)
+	if len(ethPools) != 2 {
+		t.Fatalf("expected 2 Ethereum pools, got %d", len(ethPools))
+	}
+
+	arbPools := PoolsForChainID(pools, 42161)
+	if len(arbPools) != 1 {
+		t.Fatalf("expected 1 Arbitrum pool, got %d", len(arbPools))
+	}
+
+	noPools := PoolsForChainID(pools, 999)
+	if len(noPools) != 0 {
+		t.Fatalf("expected 0 pools for chain 999, got %d", len(noPools))
 	}
 }
 
@@ -89,8 +114,8 @@ func TestCalculateTVL_StablecoinPool(t *testing.T) {
 
 	snap := &PoolSnapshot{
 		CoinBalances: []CoinBalance{
-			{Balance: "50000000000000", Decimals: 6, Symbol: "USDC"},              // 50M USDC
-			{Balance: "50000000000000000000000000", Decimals: 18, Symbol: "USDS"}, // 50M USDS
+			{Balance: "50000000000000", Decimals: 6, Symbol: "USDC"},
+			{Balance: "50000000000000000000000000", Decimals: 18, Symbol: "USDS"},
 		},
 	}
 
@@ -111,7 +136,7 @@ func TestCalculateTVL_sUSDSUSDT(t *testing.T) {
 	snap := &PoolSnapshot{
 		CoinBalances: []CoinBalance{
 			{Balance: "8108953488903302589788809", Decimals: 18, Symbol: "sUSDS"},
-			{Balance: "41168269354572", Decimals: 6, Symbol: "USDT"},
+			{Balance: "37214492547797", Decimals: 6, Symbol: "USDT"},
 		},
 	}
 
@@ -121,8 +146,8 @@ func TestCalculateTVL_sUSDSUSDT(t *testing.T) {
 	}
 
 	tvlFloat, _ := tvl.Float64()
-	if tvlFloat < 48_000_000 || tvlFloat > 51_000_000 {
-		t.Errorf("expected TVL ~49M, got %.2f", tvlFloat)
+	if tvlFloat < 44_000_000 || tvlFloat > 47_000_000 {
+		t.Errorf("expected TVL ~45M, got %.2f", tvlFloat)
 	}
 }
 
@@ -237,12 +262,14 @@ func TestBuildEntity_WithTVLAndAPY(t *testing.T) {
 		OraclePrices: []OraclePrice{{Index: 0, Price: "1.000000000000000000"}},
 	}
 
-	feeAPY := 1.33
+	feeDaily := 1.25
+	feeWeekly := 1.33
 	apyData := map[common.Address]*outbound.APYData{
-		snap.PoolAddress: {FeeAPY: &feeAPY},
+		snap.PoolAddress: {FeeAPYDaily: &feeDaily, FeeAPYWeekly: &feeWeekly},
 	}
 
-	e, err := svc.buildEntity(snap, apyData, time.Now())
+	blockTime := time.Date(2026, 3, 25, 21, 0, 0, 0, time.UTC)
+	e, err := svc.buildEntity(snap, apyData, blockTime)
 	if err != nil {
 		t.Fatalf("buildEntity failed: %v", err)
 	}
@@ -250,11 +277,17 @@ func TestBuildEntity_WithTVLAndAPY(t *testing.T) {
 	if e.TvlUSD == nil {
 		t.Error("expected tvl_usd to be set")
 	}
-	if e.FeeAPY == nil {
-		t.Error("expected fee_apy to be set")
+	if e.FeeAPYDaily == nil {
+		t.Error("expected fee_apy_daily to be set")
+	}
+	if e.FeeAPYWeekly == nil {
+		t.Error("expected fee_apy_weekly to be set")
 	}
 	if e.CrvAPYMin != nil || e.CrvAPYMax != nil {
 		t.Error("expected crv_apy to be nil when not provided")
+	}
+	if e.SnapshotTime != blockTime {
+		t.Errorf("expected snapshot_time = %v, got %v", blockTime, e.SnapshotTime)
 	}
 
 	var coins []CoinBalance
@@ -286,20 +319,43 @@ func TestBuildEntity_NilAPY_DoesNotCoerceToZero(t *testing.T) {
 		Fee:          big.NewInt(100000),
 	}
 
-	// No APY data at all
-	e, err := svc.buildEntity(snap, nil, time.Now())
+	blockTime := time.Date(2026, 3, 25, 21, 0, 0, 0, time.UTC)
+	e, err := svc.buildEntity(snap, nil, blockTime)
 	if err != nil {
 		t.Fatalf("buildEntity failed: %v", err)
 	}
 
-	if e.FeeAPY != nil {
-		t.Errorf("expected nil FeeAPY when no APY data, got %v", *e.FeeAPY)
+	if e.FeeAPYDaily != nil {
+		t.Errorf("expected nil FeeAPYDaily when no APY data, got %v", *e.FeeAPYDaily)
+	}
+	if e.FeeAPYWeekly != nil {
+		t.Errorf("expected nil FeeAPYWeekly when no APY data, got %v", *e.FeeAPYWeekly)
 	}
 	if e.CrvAPYMin != nil {
 		t.Errorf("expected nil CrvAPYMin, got %v", *e.CrvAPYMin)
 	}
 	if e.CrvAPYMax != nil {
 		t.Errorf("expected nil CrvAPYMax, got %v", *e.CrvAPYMax)
+	}
+}
+
+func TestBuildEntity_CallsValidate(t *testing.T) {
+	svc := &Service{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	snap := &PoolSnapshot{
+		PoolAddress:  common.Address{}, // invalid — 0x0 produces 20 zero bytes but ChainID=0
+		ChainID:      0,
+		BlockNumber:  0,
+		NCoins:       0,
+		TotalSupply:  big.NewInt(1),
+		VirtualPrice: big.NewInt(1),
+		Fee:          big.NewInt(1),
+	}
+
+	blockTime := time.Date(2026, 3, 25, 21, 0, 0, 0, time.UTC)
+	_, err := svc.buildEntity(snap, nil, blockTime)
+	if err == nil {
+		t.Fatal("expected buildEntity to fail on invalid entity")
 	}
 }
 
@@ -395,48 +451,5 @@ func TestCurvePoolSnapshot_Validate(t *testing.T) {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
-	}
-}
-
-// ── Snapshot Struct ──
-
-func TestPoolSnapshot_CoinBalances(t *testing.T) {
-	snap := &PoolSnapshot{
-		PoolAddress: common.HexToAddress("0xaaaa"),
-		ChainID:     1,
-		BlockNumber: 24720000,
-		NCoins:      2,
-		CoinBalances: []CoinBalance{
-			{
-				Address:  common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD"),
-				Balance:  "11732289241147089339012420",
-				Decimals: 18,
-				Symbol:   "sUSDS",
-				TokenID:  12,
-			},
-			{
-				Address:  common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7"),
-				Balance:  "37214492547797",
-				Decimals: 6,
-				Symbol:   "USDT",
-				TokenID:  9,
-			},
-		},
-	}
-
-	if len(snap.CoinBalances) != 2 {
-		t.Fatalf("expected 2 coin balances, got %d", len(snap.CoinBalances))
-	}
-	if snap.CoinBalances[0].Symbol != "sUSDS" {
-		t.Errorf("expected sUSDS, got %s", snap.CoinBalances[0].Symbol)
-	}
-	if snap.CoinBalances[0].TokenID != 12 {
-		t.Errorf("expected token_id 12, got %d", snap.CoinBalances[0].TokenID)
-	}
-	if snap.CoinBalances[1].Symbol != "USDT" {
-		t.Errorf("expected USDT, got %s", snap.CoinBalances[1].Symbol)
-	}
-	if snap.CoinBalances[1].TokenID != 9 {
-		t.Errorf("expected token_id 9, got %d", snap.CoinBalances[1].TokenID)
 	}
 }

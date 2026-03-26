@@ -3,7 +3,8 @@
 --
 -- Note: snapshot_time is included in the unique constraint because TimescaleDB
 -- requires the partition column in all unique indexes. Idempotency is handled
--- via ON CONFLICT DO UPDATE in the repository layer.
+-- via ON CONFLICT DO UPDATE in the repository layer. snapshot_time is derived
+-- from the block header timestamp, making it deterministic for a given block.
 --
 -- Compression strategy (consistent with anchorage/morpho tables):
 -- - Segment by pool_address, chain_id (queries always filter by these)
@@ -12,34 +13,37 @@
 -- - Tier to S3 after 1 year
 CREATE TABLE IF NOT EXISTS curve_pool_snapshot
 (
-    pool_address  BYTEA       NOT NULL,
-    chain_id      INT         NOT NULL REFERENCES chain (chain_id),
-    block_number  BIGINT      NOT NULL,
+    pool_address   BYTEA       NOT NULL,
+    chain_id       INT         NOT NULL REFERENCES chain (chain_id),
+    block_number   BIGINT      NOT NULL,
 
     -- Pool composition (per-coin balances stored as JSON array)
     -- e.g. [{"coin": "0xa393...", "token_id": 12, "balance": "11732289.24", "decimals": 18}]
-    coin_balances JSONB       NOT NULL,
-    n_coins       INT         NOT NULL,
+    coin_balances  JSONB       NOT NULL,
+    n_coins        INT         NOT NULL,
 
     -- Pool metrics
-    total_supply  NUMERIC     NOT NULL,
-    virtual_price NUMERIC     NOT NULL,
-    tvl_usd       NUMERIC,
+    total_supply   NUMERIC     NOT NULL,
+    virtual_price  NUMERIC     NOT NULL,
+    tvl_usd        NUMERIC,
 
     -- Pool parameters
-    amp_factor    INT         NOT NULL,
-    fee           NUMERIC     NOT NULL,
+    amp_factor     INT         NOT NULL,
+    fee            NUMERIC     NOT NULL,
 
     -- Oracle prices (JSON array, coin i+1 relative to coin 0)
     -- e.g. [{"index": 0, "price": "0.999915871162500393"}]
-    oracle_prices JSONB,
+    oracle_prices  JSONB, -- EMA prices (manipulation-resistant)
+    last_prices    JSONB, -- spot prices (most recent trade)
+    exchange_rates JSONB, -- get_dy results (1-unit swap outputs)
 
     -- APY (from Curve API)
-    fee_apy       NUMERIC,
-    crv_apy_min   NUMERIC,
-    crv_apy_max   NUMERIC,
+    fee_apy_daily  NUMERIC,
+    fee_apy_weekly NUMERIC,
+    crv_apy_min    NUMERIC,
+    crv_apy_max    NUMERIC,
 
-    snapshot_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    snapshot_time  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (pool_address, chain_id, block_number, snapshot_time)
 ) WITH (
       tsdb.hypertable,

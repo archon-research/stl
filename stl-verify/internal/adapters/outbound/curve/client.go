@@ -82,15 +82,17 @@ func (c *Client) FetchAPYs(ctx context.Context, chainName string, pools []common
 
 	var errs []error
 
-	// Fetch base APYs (trading fees)
+	// Fetch base APYs (trading fees) — store both daily and weekly
 	feeAPYs, err := c.fetchBaseAPYs(ctx, chainName)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("base APYs: %w", err))
 	} else {
 		for addrHex, apy := range feeAPYs {
 			if pool, ok := poolSet[addrHex]; ok {
-				v := apy
-				results[pool] = &outbound.APYData{FeeAPY: &v}
+				results[pool] = &outbound.APYData{
+					FeeAPYDaily:  apy.daily,
+					FeeAPYWeekly: apy.weekly,
+				}
 			}
 		}
 	}
@@ -119,8 +121,13 @@ func (c *Client) FetchAPYs(ctx context.Context, chainName string, pools []common
 	return results, nil
 }
 
-// fetchBaseAPYs returns fee APYs keyed by lowercase pool address.
-func (c *Client) fetchBaseAPYs(ctx context.Context, chainName string) (map[string]float64, error) {
+type feeAPY struct {
+	daily  *float64
+	weekly *float64
+}
+
+// fetchBaseAPYs returns fee APYs (both daily and weekly) keyed by lowercase pool address.
+func (c *Client) fetchBaseAPYs(ctx context.Context, chainName string) (map[string]*feeAPY, error) {
 	url := fmt.Sprintf("%s/getBaseApys/%s", c.baseURL, chainName)
 
 	body, err := c.doGet(ctx, url)
@@ -136,13 +143,20 @@ func (c *Client) fetchBaseAPYs(ctx context.Context, chainName string) (map[strin
 		return nil, fmt.Errorf("getBaseApys returned success=false")
 	}
 
-	result := make(map[string]float64, len(resp.Data.BaseApys))
+	result := make(map[string]*feeAPY, len(resp.Data.BaseApys))
 	for _, entry := range resp.Data.BaseApys {
 		addr := strings.ToLower(entry.Address)
+		apy := &feeAPY{}
+		if entry.LatestDailyAPY != nil {
+			v := *entry.LatestDailyAPY
+			apy.daily = &v
+		}
 		if entry.LatestWeeklyAPY != nil {
-			result[addr] = *entry.LatestWeeklyAPY
-		} else if entry.LatestDailyAPY != nil {
-			result[addr] = *entry.LatestDailyAPY
+			v := *entry.LatestWeeklyAPY
+			apy.weekly = &v
+		}
+		if apy.daily != nil || apy.weekly != nil {
+			result[addr] = apy
 		}
 	}
 

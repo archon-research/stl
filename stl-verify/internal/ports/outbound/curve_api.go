@@ -8,9 +8,10 @@ import (
 
 // APYData holds APY information for a single Curve pool.
 type APYData struct {
-	FeeAPY    *float64
-	CrvAPYMin *float64
-	CrvAPYMax *float64
+	FeeAPYDaily  *float64
+	FeeAPYWeekly *float64
+	CrvAPYMin    *float64
+	CrvAPYMax    *float64
 }
 
 // CurveAPYFetcher retrieves APY data from the Curve Finance API.

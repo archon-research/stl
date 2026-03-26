@@ -19,10 +19,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// ---------------------------------------------------------------------------
-// Integration tests for run()
-// ---------------------------------------------------------------------------
-
 func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer rpcServer.Close()
@@ -69,15 +65,12 @@ func TestRunIntegration_MissingAlchemyKey(t *testing.T) {
 func TestRunIntegration_FullSnapshot(t *testing.T) {
 	ctx := context.Background()
 
-	// Setup test DB with migrations
 	dbPool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
 	defer dbCleanup()
 
-	// Mock Curve API
 	curveAPIServer := startMockCurveAPI(t)
 	defer curveAPIServer.Close()
 
-	// Mock Ethereum RPC with multicall support
 	rpcServer := startMockRPC(t)
 	defer rpcServer.Close()
 
@@ -132,20 +125,23 @@ func startMockCurveAPI(t *testing.T) *httptest.Server {
 
 		switch {
 		case strings.Contains(r.URL.Path, "getBaseApys"):
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			json.NewEncoder(w).Encode(map[string]any{
 				"success": true,
-				"data": map[string]interface{}{
-					"baseApys": []map[string]interface{}{
+				"data": map[string]any{
+					"baseApys": []map[string]any{
 						{
 							"address":              "0x00836fe54625be242bcfa286207795405ca4fd10",
+							"latestDailyApyPcent":  1.25,
 							"latestWeeklyApyPcent": 1.33,
 						},
 						{
 							"address":              "0xa632d59b9b804a956bfaa9b48af3a1b74808fc1f",
+							"latestDailyApyPcent":  0.08,
 							"latestWeeklyApyPcent": 0.10,
 						},
 						{
 							"address":              "0xe79c1c7e24755574438a26d5e062ad2626c04662",
+							"latestDailyApyPcent":  0.005,
 							"latestWeeklyApyPcent": 0.01,
 						},
 					},
@@ -153,7 +149,7 @@ func startMockCurveAPI(t *testing.T) *httptest.Server {
 			})
 
 		case strings.Contains(r.URL.Path, "getAllGauges"):
-			json.NewEncoder(w).Encode(map[string]interface{}{})
+			json.NewEncoder(w).Encode(map[string]any{})
 
 		default:
 			http.NotFound(w, r)
@@ -189,6 +185,32 @@ func init() {
 	}
 }
 
+// Mock block header for finalized block responses.
+// Block 24749716 with timestamp 2026-03-25T21:09:38Z.
+var mockBlockHeader = `{
+	"number": "0x179A694",
+	"hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+	"parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+	"nonce": "0x0000000000000000",
+	"sha3Uncles": "0x0000000000000000000000000000000000000000000000000000000000000000",
+	"logsBloom": "0x` + strings.Repeat("00", 256) + `",
+	"transactionsRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+	"stateRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+	"receiptsRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+	"miner": "0x0000000000000000000000000000000000000000",
+	"difficulty": "0x0",
+	"totalDifficulty": "0x0",
+	"extraData": "0x",
+	"size": "0x0",
+	"gasLimit": "0x1c9c380",
+	"gasUsed": "0x0",
+	"timestamp": "0x67E35B92",
+	"transactions": [],
+	"uncles": [],
+	"baseFeePerGas": "0x0",
+	"mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+}`
+
 func startMockRPC(t *testing.T) *httptest.Server {
 	t.Helper()
 
@@ -212,17 +234,32 @@ func startMockRPC(t *testing.T) *httptest.Server {
 			w.Write([]byte(resp))
 		}
 
+		writeResultRaw := func(result string) {
+			resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":%s}`, string(req.ID), result)
+			w.Write([]byte(resp))
+		}
+
 		switch req.Method {
 		case "eth_blockNumber":
 			writeResult("0x179A694")
+
+		case "eth_getBlockByNumber":
+			// Returns the finalized block header
+			writeResultRaw(mockBlockHeader)
+
 		case "eth_chainId":
 			writeResult("0x1")
+
 		case "net_version":
 			writeResult("1")
+
 		case "eth_call":
 			writeResult(handleEthCall(t, req.Params, curveABI, erc20ABI))
+
 		default:
-			writeResult("0x1")
+			t.Errorf("unexpected RPC method: %s", req.Method)
+			errResp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"method not found: %s"}}`, string(req.ID), req.Method)
+			w.Write([]byte(errResp))
 		}
 	}))
 }
@@ -243,7 +280,6 @@ func handleEthCall(t *testing.T, params []json.RawMessage, curveABI, erc20ABI *a
 		return "0x"
 	}
 
-	// go-ethereum may use "input" instead of "data"
 	callData := callObj.Data
 	if callData == "" {
 		callData = callObj.Input
@@ -416,6 +452,28 @@ func handleCurveMethod(t *testing.T, method string, inputData []byte, curveABI *
 		result, _ := curveABI.Methods["price_oracle"].Outputs.Pack(price)
 		return "0x" + common.Bytes2Hex(result)
 
+	case "last_price":
+		price := new(big.Int).SetUint64(999_750_000_000_000_000) // slightly different from EMA
+		result, _ := curveABI.Methods["last_price"].Outputs.Pack(price)
+		return "0x" + common.Bytes2Hex(result)
+
+	case "get_dy":
+		// Return ~1:1 for stablecoin swaps (slightly less due to fees)
+		// For 1 unit input, return ~0.9999 units output
+		args, err := curveABI.Methods["get_dy"].Inputs.Unpack(inputData)
+		if err != nil {
+			return "0x"
+		}
+		dx, ok := args[2].(*big.Int)
+		if !ok {
+			return "0x"
+		}
+		// Simulate ~0.01% fee: dy = dx * 9999 / 10000
+		dy := new(big.Int).Mul(dx, big.NewInt(9999))
+		dy.Div(dy, big.NewInt(10000))
+		result, _ := curveABI.Methods["get_dy"].Outputs.Pack(dy)
+		return "0x" + common.Bytes2Hex(result)
+
 	default:
 		return "0x"
 	}
@@ -487,7 +545,9 @@ func parseCurveABI(t *testing.T) *abi.ABI {
 		{"name":"totalSupply","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
 		{"name":"A","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
 		{"name":"fee","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
-		{"name":"price_oracle","inputs":[{"name":"i","type":"uint256"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}
+		{"name":"price_oracle","inputs":[{"name":"i","type":"uint256"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+		{"name":"last_price","inputs":[{"name":"i","type":"uint256"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+		{"name":"get_dy","inputs":[{"name":"i","type":"int128"},{"name":"j","type":"int128"},{"name":"dx","type":"uint256"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}
 	]`
 	parsed, err := abi.JSON(strings.NewReader(curveJSON))
 	if err != nil {

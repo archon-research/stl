@@ -39,17 +39,27 @@ type OraclePrice struct {
 	Price string `json:"price"`
 }
 
+// ExchangeRate holds the result of get_dy(i, j, dx) — expected output for a swap.
+type ExchangeRate struct {
+	From int    `json:"i"`
+	To   int    `json:"j"`
+	Dx   string `json:"dx"` // input amount (1 unit of coin i in raw decimals)
+	Dy   string `json:"dy"` // output amount (raw decimals of coin j)
+}
+
 // PoolSnapshot holds a complete snapshot of a Curve pool's state.
 type PoolSnapshot struct {
-	PoolAddress  common.Address
-	ChainID      int64
-	BlockNumber  int64
-	NCoins       int
-	CoinBalances []CoinBalance
-	TotalSupply  *big.Int
-	VirtualPrice *big.Int
-	TvlUSD       *big.Float // nil if prices unavailable
-	AmpFactor    int64
-	Fee          *big.Int
-	OraclePrices []OraclePrice
+	PoolAddress   common.Address
+	ChainID       int64
+	BlockNumber   int64
+	NCoins        int
+	CoinBalances  []CoinBalance
+	TotalSupply   *big.Int
+	VirtualPrice  *big.Int
+	TvlUSD        *big.Float // nil if prices unavailable
+	AmpFactor     int64
+	Fee           *big.Int
+	OraclePrices  []OraclePrice  // EMA prices (manipulation-resistant)
+	LastPrices    []OraclePrice  // spot prices (most recent trade)
+	ExchangeRates []ExchangeRate // get_dy results for 1 unit swaps
 }
