@@ -26,8 +26,8 @@ type CurvePoolSnapshot struct {
 }
 
 func (s *CurvePoolSnapshot) Validate() error {
-	if len(s.PoolAddress) == 0 {
-		return fmt.Errorf("pool address is required")
+	if len(s.PoolAddress) != 20 {
+		return fmt.Errorf("pool address must be 20 bytes, got %d", len(s.PoolAddress))
 	}
 	if s.ChainID == 0 {
 		return fmt.Errorf("chain ID is required")
@@ -37,6 +37,9 @@ func (s *CurvePoolSnapshot) Validate() error {
 	}
 	if s.NCoins == 0 {
 		return fmt.Errorf("n_coins is required")
+	}
+	if s.SnapshotTime.IsZero() {
+		return fmt.Errorf("snapshot_time is required")
 	}
 	return nil
 }

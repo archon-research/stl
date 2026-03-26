@@ -1,6 +1,15 @@
 -- Curve Stableswap-NG pool snapshots (periodic state, polled every N minutes).
 -- Stores composition, TVL, prices, params, and APY for tracked Curve pools.
--- Partitioned as a TimescaleDB hypertable on snapshot_time.
+--
+-- Note: snapshot_time is included in the unique constraint because TimescaleDB
+-- requires the partition column in all unique indexes. Idempotency is handled
+-- via ON CONFLICT DO UPDATE in the repository layer.
+--
+-- Compression strategy (consistent with anchorage/morpho tables):
+-- - Segment by pool_address, chain_id (queries always filter by these)
+-- - Order by snapshot_time DESC (time-series access pattern)
+-- - Compress chunks older than 2 days (2x chunk_interval)
+-- - Tier to S3 after 1 year
 CREATE TABLE IF NOT EXISTS curve_pool_snapshot
 (
     pool_address  BYTEA       NOT NULL,
@@ -44,14 +53,12 @@ CREATE INDEX IF NOT EXISTS idx_curve_snap_pool_time
 CREATE INDEX IF NOT EXISTS idx_curve_snap_time
     ON curve_pool_snapshot (snapshot_time DESC);
 
+CREATE INDEX IF NOT EXISTS idx_curve_snap_chain
+    ON curve_pool_snapshot (chain_id);
+
 GRANT SELECT ON curve_pool_snapshot TO stl_readonly;
 GRANT SELECT, INSERT, UPDATE, DELETE ON curve_pool_snapshot TO stl_readwrite;
 
--- Compression strategy (consistent with anchorage/morpho tables):
--- - Segment by pool_address, chain_id (queries always filter by these)
--- - Order by snapshot_time DESC (time-series access pattern)
--- - Compress chunks older than 2 days (2x chunk_interval)
--- - Tier to S3 after 1 year
 ALTER TABLE curve_pool_snapshot
     SET (
         timescaledb.compress,

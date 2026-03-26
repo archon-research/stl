@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -13,6 +14,7 @@ import (
 
 	curveapi "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/curve"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
@@ -62,6 +64,17 @@ func run(ctx context.Context) error {
 	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
 	alchemyURL := fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
 
+	chainIDStr := env.Get("CHAIN_ID", "1")
+	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
+	}
+
+	chainName, ok := entity.ChainIDToName[chainID]
+	if !ok {
+		return fmt.Errorf("unsupported CHAIN_ID: %d", chainID)
+	}
+
 	// Database
 	dbPool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
@@ -103,7 +116,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("erc20 abi: %w", err)
 	}
 
-	// Curve API client
+	// Curve API client (implements outbound.CurveAPYFetcher)
 	curveClient := curveapi.NewClient(logger)
 	if baseURL := env.Get("CURVE_API_BASE_URL", ""); baseURL != "" {
 		curveClient.SetBaseURL(baseURL)
@@ -113,8 +126,10 @@ func run(ctx context.Context) error {
 	curveRepo := postgres.NewCurveRepository(dbPool, txm, logger)
 
 	// Service
-	pools := ct.DefaultPools()
-	chainName := env.Get("CURVE_CHAIN_NAME", "ethereum")
+	pools := ct.PoolsForChainID(ct.DefaultPools(), chainID)
+	if len(pools) == 0 {
+		return fmt.Errorf("no Curve pools configured for chain ID %d", chainID)
+	}
 
 	svc := ct.NewService(
 		ethClient,
@@ -129,7 +144,7 @@ func run(ctx context.Context) error {
 	)
 
 	// Run once
-	logger.Info("running", "pools", len(pools), "chain", chainName)
+	logger.Info("running", "pools", len(pools), "chainID", chainID)
 
 	if err := svc.Run(ctx); err != nil {
 		return fmt.Errorf("run: %w", err)

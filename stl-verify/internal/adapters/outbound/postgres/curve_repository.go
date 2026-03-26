@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -54,7 +55,19 @@ func (r *CurveRepository) SaveSnapshots(ctx context.Context, snapshots []*entity
 					fee_apy, crv_apy_min, crv_apy_max,
 					snapshot_time
 				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-				ON CONFLICT DO NOTHING
+				ON CONFLICT (pool_address, chain_id, block_number, snapshot_time)
+				DO UPDATE SET
+					coin_balances = EXCLUDED.coin_balances,
+					n_coins       = EXCLUDED.n_coins,
+					total_supply  = EXCLUDED.total_supply,
+					virtual_price = EXCLUDED.virtual_price,
+					tvl_usd       = EXCLUDED.tvl_usd,
+					amp_factor    = EXCLUDED.amp_factor,
+					fee           = EXCLUDED.fee,
+					oracle_prices = EXCLUDED.oracle_prices,
+					fee_apy       = EXCLUDED.fee_apy,
+					crv_apy_min   = EXCLUDED.crv_apy_min,
+					crv_apy_max   = EXCLUDED.crv_apy_max
 			`,
 				s.PoolAddress,
 				s.ChainID,
@@ -90,7 +103,8 @@ func (r *CurveRepository) SaveSnapshots(ctx context.Context, snapshots []*entity
 	})
 }
 
-// LookupTokenID returns the token ID for a given chain + address, or an error if not found.
+// LookupTokenID returns the token ID for a given chain + address.
+// Returns outbound.ErrTokenNotFound if no matching token exists.
 func (r *CurveRepository) LookupTokenID(ctx context.Context, chainID int64, address common.Address) (int64, error) {
 	var id int64
 	err := r.pool.QueryRow(ctx,
@@ -98,6 +112,9 @@ func (r *CurveRepository) LookupTokenID(ctx context.Context, chainID int64, addr
 		chainID, address.Bytes(),
 	).Scan(&id)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, outbound.ErrTokenNotFound
+		}
 		return 0, fmt.Errorf("lookup token %s on chain %d: %w", address.Hex(), chainID, err)
 	}
 	return id, nil

@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -85,6 +84,7 @@ func TestRunIntegration_FullSnapshot(t *testing.T) {
 	t.Setenv("ALCHEMY_API_KEY", "test-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("DATABASE_URL", dbURL)
+	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("LOG_LEVEL", "debug")
 	t.Setenv("CURVE_API_BASE_URL", curveAPIServer.URL)
 
@@ -204,7 +204,6 @@ func startMockRPC(t *testing.T) *httptest.Server {
 			ID     json.RawMessage   `json:"id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Logf("decode RPC request: %v", err)
 			return
 		}
 
@@ -213,25 +212,16 @@ func startMockRPC(t *testing.T) *httptest.Server {
 			w.Write([]byte(resp))
 		}
 
-		t.Logf("RPC: %s", req.Method)
-
 		switch req.Method {
 		case "eth_blockNumber":
-			writeResult("0x179A694") // block 24750740
-
+			writeResult("0x179A694")
 		case "eth_chainId":
 			writeResult("0x1")
-
 		case "net_version":
 			writeResult("1")
-
 		case "eth_call":
-			result := handleEthCall(t, req.Params, curveABI, erc20ABI)
-			t.Logf("eth_call result length: %d", len(result))
-			writeResult(result)
-
+			writeResult(handleEthCall(t, req.Params, curveABI, erc20ABI))
 		default:
-			t.Logf("unhandled RPC method: %s", req.Method)
 			writeResult("0x1")
 		}
 	}))
@@ -241,7 +231,6 @@ func handleEthCall(t *testing.T, params []json.RawMessage, curveABI, erc20ABI *a
 	t.Helper()
 
 	if len(params) == 0 {
-		t.Logf("eth_call: no params")
 		return "0x"
 	}
 
@@ -251,7 +240,6 @@ func handleEthCall(t *testing.T, params []json.RawMessage, curveABI, erc20ABI *a
 		Input string `json:"input"`
 	}
 	if err := json.Unmarshal(params[0], &callObj); err != nil {
-		t.Logf("eth_call: unmarshal error: %v", err)
 		return "0x"
 	}
 
@@ -261,25 +249,18 @@ func handleEthCall(t *testing.T, params []json.RawMessage, curveABI, erc20ABI *a
 		callData = callObj.Input
 	}
 
-	t.Logf("eth_call: to=%s data_len=%d", callObj.To, len(callData))
-
 	data := common.FromHex(callData)
 	if len(data) < 4 {
-		t.Logf("eth_call: data too short: %d bytes", len(data))
 		return "0x"
 	}
 
-	// Check if this is a multicall3 aggregate3 call
 	methodID := data[:4]
 	aggregate3ID := mc3ABI.Methods["aggregate3"].ID
 
-	t.Logf("eth_call: methodID=%x aggregate3ID=%x match=%v", methodID, aggregate3ID, bytes.Equal(methodID, aggregate3ID))
-
-	if bytes.Equal(methodID, aggregate3ID) {
+	if string(methodID) == string(aggregate3ID) {
 		return handleMulticall3(t, data, curveABI, erc20ABI)
 	}
 
-	// Direct call
 	return dispatchCall(t, common.HexToAddress(callObj.To), data, curveABI, erc20ABI)
 }
 
@@ -288,7 +269,6 @@ func handleMulticall3(t *testing.T, data []byte, curveABI, erc20ABI *abi.ABI) st
 
 	unpacked, err := mc3ABI.Methods["aggregate3"].Inputs.Unpack(data[4:])
 	if err != nil {
-		t.Logf("unpack aggregate3: %v", err)
 		return "0x"
 	}
 
@@ -296,7 +276,7 @@ func handleMulticall3(t *testing.T, data []byte, curveABI, erc20ABI *abi.ABI) st
 	numCalls := callsSlice.Len()
 
 	results := make([]subResultData, numCalls)
-	for i := 0; i < numCalls; i++ {
+	for i := range numCalls {
 		call := callsSlice.Index(i)
 		target := call.FieldByName("Target").Interface().(common.Address)
 		callData := call.FieldByName("CallData").Interface().([]byte)
@@ -313,17 +293,12 @@ type subResultData struct {
 	returnData []byte
 }
 
-// encodeAggregate3Output manually ABI-encodes a Result[] for aggregate3 output.
 func encodeAggregate3Output(results []subResultData) []byte {
 	n := len(results)
 
-	// Top level: offset to the dynamic array
 	buf := pad32(big.NewInt(32))
-
-	// Array length
 	buf = append(buf, pad32(big.NewInt(int64(n)))...)
 
-	// Offsets for each tuple element (relative to start of array data)
 	offsets := make([]int, n)
 	currentOffset := n * 32
 	for i, r := range results {
@@ -336,7 +311,6 @@ func encodeAggregate3Output(results []subResultData) []byte {
 		buf = append(buf, pad32(big.NewInt(int64(off)))...)
 	}
 
-	// Encode each tuple
 	for _, r := range results {
 		if r.success {
 			buf = append(buf, pad32(big.NewInt(1))...)
@@ -353,7 +327,6 @@ func encodeAggregate3Output(results []subResultData) []byte {
 	return buf
 }
 
-// pad32 returns a 32-byte big-endian representation of v.
 func pad32(v *big.Int) []byte {
 	b := make([]byte, 32)
 	vBytes := v.Bytes()
@@ -370,14 +343,12 @@ func dispatchCall(t *testing.T, target common.Address, data []byte, curveABI, er
 
 	methodID := data[:4]
 
-	// Try curve pool methods first
 	for name, method := range curveABI.Methods {
 		if string(method.ID) == string(methodID) {
 			return handleCurveMethod(t, name, data[4:], curveABI)
 		}
 	}
 
-	// Try ERC20 methods
 	for name, method := range erc20ABI.Methods {
 		if string(method.ID) == string(methodID) {
 			return handleERC20Method(t, name, target, erc20ABI)
@@ -397,8 +368,8 @@ func handleCurveMethod(t *testing.T, method string, inputData []byte, curveABI *
 
 	case "get_balances":
 		balances := []*big.Int{
-			new(big.Int).Mul(big.NewInt(8_000_000), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)), // 8M sUSDS
-			new(big.Int).Mul(big.NewInt(41_000_000), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)), // 41M USDT
+			new(big.Int).Mul(big.NewInt(8_000_000), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			new(big.Int).Mul(big.NewInt(41_000_000), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
 		}
 		result, _ := curveABI.Methods["get_balances"].Outputs.Pack(balances)
 		return "0x" + common.Bytes2Hex(result)
@@ -409,7 +380,7 @@ func handleCurveMethod(t *testing.T, method string, inputData []byte, curveABI *
 		return "0x" + common.Bytes2Hex(result)
 
 	case "get_virtual_price":
-		vp := new(big.Int).SetUint64(1_027_699_000_000_000_000) // 1.0277
+		vp := new(big.Int).SetUint64(1_027_699_000_000_000_000)
 		result, _ := curveABI.Methods["get_virtual_price"].Outputs.Pack(vp)
 		return "0x" + common.Bytes2Hex(result)
 
@@ -422,7 +393,6 @@ func handleCurveMethod(t *testing.T, method string, inputData []byte, curveABI *
 		return "0x" + common.Bytes2Hex(result)
 
 	case "coins":
-		// Return sUSDS for index 0, USDT for index 1
 		args, err := curveABI.Methods["coins"].Inputs.Unpack(inputData)
 		if err != nil {
 			return "0x"
@@ -430,15 +400,15 @@ func handleCurveMethod(t *testing.T, method string, inputData []byte, curveABI *
 		index := args[0].(*big.Int).Int64()
 		var addr common.Address
 		if index == 0 {
-			addr = common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD") // sUSDS
+			addr = common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD")
 		} else {
-			addr = common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7") // USDT
+			addr = common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7")
 		}
 		result, _ := curveABI.Methods["coins"].Outputs.Pack(addr)
 		return "0x" + common.Bytes2Hex(result)
 
 	case "price_oracle":
-		price := new(big.Int).SetUint64(999_809_000_000_000_000) // 0.9998
+		price := new(big.Int).SetUint64(999_809_000_000_000_000)
 		result, _ := curveABI.Methods["price_oracle"].Outputs.Pack(price)
 		return "0x" + common.Bytes2Hex(result)
 
@@ -454,17 +424,17 @@ func handleERC20Method(t *testing.T, method string, target common.Address, erc20
 	case "decimals":
 		var dec uint8
 		switch target {
-		case common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD"): // sUSDS
+		case common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD"):
 			dec = 18
-		case common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7"): // USDT
+		case common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7"):
 			dec = 6
-		case common.HexToAddress("0x6c3ea9036406852006290770BEdFcAbA0e23A0e8"): // PYUSD
+		case common.HexToAddress("0x6c3ea9036406852006290770BEdFcAbA0e23A0e8"):
 			dec = 6
-		case common.HexToAddress("0xdC035D45d973E3EC169d2276DDab16f1e407384F"): // USDS
+		case common.HexToAddress("0xdC035D45d973E3EC169d2276DDab16f1e407384F"):
 			dec = 18
-		case common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"): // USDC
+		case common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"):
 			dec = 6
-		case common.HexToAddress("0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a"): // AUSD
+		case common.HexToAddress("0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a"):
 			dec = 6
 		default:
 			dec = 18

@@ -13,6 +13,17 @@ type PoolConfig struct {
 	Name    string // Human-readable label (e.g. "sUSDSUSDT")
 }
 
+// PoolsForChainID filters the pool list by chain ID.
+func PoolsForChainID(pools []PoolConfig, chainID int64) []PoolConfig {
+	var result []PoolConfig
+	for _, p := range pools {
+		if p.ChainID == chainID {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
 // CoinBalance holds a single coin's balance within a pool snapshot.
 type CoinBalance struct {
 	Address  common.Address `json:"coin"`
@@ -41,16 +52,4 @@ type PoolSnapshot struct {
 	AmpFactor    int64
 	Fee          *big.Int
 	OraclePrices []OraclePrice
-
-	// APY from Curve API (nil if API call fails)
-	FeeAPY    *float64
-	CrvAPYMin *float64
-	CrvAPYMax *float64
-}
-
-// APYData holds APY information from the Curve API for a single pool.
-type APYData struct {
-	FeeAPY    float64
-	CrvAPYMin float64
-	CrvAPYMax float64
 }

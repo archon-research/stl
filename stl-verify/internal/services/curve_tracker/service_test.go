@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	curveapi "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/curve"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -39,7 +39,7 @@ func (m *mockCurveRepository) LookupTokenID(ctx context.Context, chainID int64, 
 	if id, ok := m.tokenIDs[key]; ok {
 		return id, nil
 	}
-	return 0, fmt.Errorf("not found")
+	return 0, outbound.ErrTokenNotFound
 }
 
 // ── DefaultPools ──
@@ -57,17 +57,27 @@ func TestDefaultPools(t *testing.T) {
 		"AUSDUSDC":  "0xE79C1C7E24755574438A26D5e062Ad2626C04662",
 	}
 
+	seen := make(map[string]bool)
 	for _, p := range pools {
 		want, ok := expected[p.Name]
 		if !ok {
 			t.Errorf("unexpected pool name: %s", p.Name)
 			continue
 		}
+		if seen[p.Name] {
+			t.Errorf("duplicate pool name: %s", p.Name)
+		}
+		seen[p.Name] = true
 		if p.Address != common.HexToAddress(want) {
 			t.Errorf("pool %s: address = %s, want %s", p.Name, p.Address.Hex(), want)
 		}
 		if p.ChainID != 1 {
 			t.Errorf("pool %s: chainID = %d, want 1", p.Name, p.ChainID)
+		}
+	}
+	for name := range expected {
+		if !seen[name] {
+			t.Errorf("expected pool %s not found in DefaultPools()", name)
 		}
 	}
 }
@@ -89,7 +99,6 @@ func TestCalculateTVL_StablecoinPool(t *testing.T) {
 		t.Fatal("expected non-nil TVL")
 	}
 
-	// Should be ~100M
 	tvlFloat, _ := tvl.Float64()
 	if tvlFloat < 99_000_000 || tvlFloat > 101_000_000 {
 		t.Errorf("expected TVL ~100M, got %.2f", tvlFloat)
@@ -99,7 +108,6 @@ func TestCalculateTVL_StablecoinPool(t *testing.T) {
 func TestCalculateTVL_sUSDSUSDT(t *testing.T) {
 	svc := &Service{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
-	// Real data from sUSDSUSDT pool
 	snap := &PoolSnapshot{
 		CoinBalances: []CoinBalance{
 			{Balance: "8108953488903302589788809", Decimals: 18, Symbol: "sUSDS"},
@@ -112,7 +120,6 @@ func TestCalculateTVL_sUSDSUSDT(t *testing.T) {
 		t.Fatal("expected non-nil TVL")
 	}
 
-	// sUSDS ~8.1M + USDT ~41.2M ≈ 49.3M (slightly under actual due to sUSDS yield)
 	tvlFloat, _ := tvl.Float64()
 	if tvlFloat < 48_000_000 || tvlFloat > 51_000_000 {
 		t.Errorf("expected TVL ~49M, got %.2f", tvlFloat)
@@ -133,8 +140,8 @@ func TestCalculateTVL_ZeroDecimals_Skipped(t *testing.T) {
 
 	snap := &PoolSnapshot{
 		CoinBalances: []CoinBalance{
-			{Balance: "1000000", Decimals: 0, Symbol: "UNKNOWN"},  // should be skipped
-			{Balance: "50000000000", Decimals: 6, Symbol: "USDC"}, // 50K USDC
+			{Balance: "1000000", Decimals: 0, Symbol: "UNKNOWN"},
+			{Balance: "50000000000", Decimals: 6, Symbol: "USDC"},
 		},
 	}
 
@@ -145,7 +152,7 @@ func TestCalculateTVL_ZeroDecimals_Skipped(t *testing.T) {
 
 	tvlFloat, _ := tvl.Float64()
 	if tvlFloat < 49_000 || tvlFloat > 51_000 {
-		t.Errorf("expected TVL ~50K (skipping zero-decimals coin), got %.2f", tvlFloat)
+		t.Errorf("expected TVL ~50K, got %.2f", tvlFloat)
 	}
 }
 
@@ -179,7 +186,6 @@ func TestResolveTokenIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	if ids[sUSDS] != 12 {
 		t.Errorf("sUSDS token_id = %d, want 12", ids[sUSDS])
 	}
@@ -189,7 +195,7 @@ func TestResolveTokenIDs(t *testing.T) {
 }
 
 func TestResolveTokenIDs_MissingToken(t *testing.T) {
-	unknown := common.HexToAddress("0xdeadbeef")
+	unknown := common.HexToAddress("0x000000000000000000000000000000000000dead")
 
 	repo := newMockRepo(nil)
 	svc := &Service{
@@ -205,7 +211,6 @@ func TestResolveTokenIDs_MissingToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	if _, ok := ids[unknown]; ok {
 		t.Error("expected missing token to not be in results")
 	}
@@ -217,7 +222,7 @@ func TestBuildEntity_WithTVLAndAPY(t *testing.T) {
 	svc := &Service{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	snap := &PoolSnapshot{
-		PoolAddress: common.HexToAddress("0xaaaa"),
+		PoolAddress: common.HexToAddress("0x00836fe54625be242bcfa286207795405ca4fd10"),
 		ChainID:     1,
 		BlockNumber: 24720000,
 		NCoins:      2,
@@ -233,8 +238,8 @@ func TestBuildEntity_WithTVLAndAPY(t *testing.T) {
 	}
 
 	feeAPY := 1.33
-	apyData := map[common.Address]*curveapi.PoolAPY{
-		snap.PoolAddress: {FeeAPY: feeAPY},
+	apyData := map[common.Address]*outbound.APYData{
+		snap.PoolAddress: {FeeAPY: &feeAPY},
 	}
 
 	e, err := svc.buildEntity(snap, apyData, time.Now())
@@ -242,22 +247,16 @@ func TestBuildEntity_WithTVLAndAPY(t *testing.T) {
 		t.Fatalf("buildEntity failed: %v", err)
 	}
 
-	// TVL should be populated
 	if e.TvlUSD == nil {
 		t.Error("expected tvl_usd to be set")
 	}
-
-	// Fee APY should be populated
 	if e.FeeAPY == nil {
 		t.Error("expected fee_apy to be set")
 	}
-
-	// CRV APY should be nil (not provided)
 	if e.CrvAPYMin != nil || e.CrvAPYMax != nil {
 		t.Error("expected crv_apy to be nil when not provided")
 	}
 
-	// Coin balances should include token_id
 	var coins []CoinBalance
 	if err := json.Unmarshal(e.CoinBalances, &coins); err != nil {
 		t.Fatalf("unmarshal coin balances: %v", err)
@@ -273,9 +272,43 @@ func TestBuildEntity_WithTVLAndAPY(t *testing.T) {
 	}
 }
 
+func TestBuildEntity_NilAPY_DoesNotCoerceToZero(t *testing.T) {
+	svc := &Service{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	snap := &PoolSnapshot{
+		PoolAddress:  common.HexToAddress("0x00836fe54625be242bcfa286207795405ca4fd10"),
+		ChainID:      1,
+		BlockNumber:  24720000,
+		NCoins:       2,
+		CoinBalances: []CoinBalance{{Balance: "1000000", Decimals: 6}},
+		TotalSupply:  big.NewInt(1000000),
+		VirtualPrice: big.NewInt(1000000000000000000),
+		Fee:          big.NewInt(100000),
+	}
+
+	// No APY data at all
+	e, err := svc.buildEntity(snap, nil, time.Now())
+	if err != nil {
+		t.Fatalf("buildEntity failed: %v", err)
+	}
+
+	if e.FeeAPY != nil {
+		t.Errorf("expected nil FeeAPY when no APY data, got %v", *e.FeeAPY)
+	}
+	if e.CrvAPYMin != nil {
+		t.Errorf("expected nil CrvAPYMin, got %v", *e.CrvAPYMin)
+	}
+	if e.CrvAPYMax != nil {
+		t.Errorf("expected nil CrvAPYMax, got %v", *e.CrvAPYMax)
+	}
+}
+
 // ── Entity Validation ──
 
 func TestCurvePoolSnapshot_Validate(t *testing.T) {
+	validAddr := common.HexToAddress("0x00836fe54625be242bcfa286207795405ca4fd10").Bytes()
+	now := time.Now()
+
 	tests := []struct {
 		name    string
 		snap    entity.CurvePoolSnapshot
@@ -284,46 +317,72 @@ func TestCurvePoolSnapshot_Validate(t *testing.T) {
 		{
 			name: "valid",
 			snap: entity.CurvePoolSnapshot{
-				PoolAddress: []byte{0x01},
-				ChainID:     1,
-				BlockNumber: 100,
-				NCoins:      2,
+				PoolAddress:  validAddr,
+				ChainID:      1,
+				BlockNumber:  100,
+				NCoins:       2,
+				SnapshotTime: now,
 			},
 			wantErr: false,
 		},
 		{
+			name: "invalid pool address length",
+			snap: entity.CurvePoolSnapshot{
+				PoolAddress:  []byte{0x01},
+				ChainID:      1,
+				BlockNumber:  100,
+				NCoins:       2,
+				SnapshotTime: now,
+			},
+			wantErr: true,
+		},
+		{
 			name: "missing pool address",
 			snap: entity.CurvePoolSnapshot{
-				ChainID:     1,
-				BlockNumber: 100,
-				NCoins:      2,
+				ChainID:      1,
+				BlockNumber:  100,
+				NCoins:       2,
+				SnapshotTime: now,
 			},
 			wantErr: true,
 		},
 		{
 			name: "missing chain ID",
 			snap: entity.CurvePoolSnapshot{
-				PoolAddress: []byte{0x01},
-				BlockNumber: 100,
-				NCoins:      2,
+				PoolAddress:  validAddr,
+				BlockNumber:  100,
+				NCoins:       2,
+				SnapshotTime: now,
 			},
 			wantErr: true,
 		},
 		{
 			name: "missing block number",
 			snap: entity.CurvePoolSnapshot{
-				PoolAddress: []byte{0x01},
-				ChainID:     1,
-				NCoins:      2,
+				PoolAddress:  validAddr,
+				ChainID:      1,
+				NCoins:       2,
+				SnapshotTime: now,
 			},
 			wantErr: true,
 		},
 		{
 			name: "missing n_coins",
 			snap: entity.CurvePoolSnapshot{
-				PoolAddress: []byte{0x01},
+				PoolAddress:  validAddr,
+				ChainID:      1,
+				BlockNumber:  100,
+				SnapshotTime: now,
+			},
+			wantErr: true,
+		},
+		{
+			name: "zero snapshot_time",
+			snap: entity.CurvePoolSnapshot{
+				PoolAddress: validAddr,
 				ChainID:     1,
 				BlockNumber: 100,
+				NCoins:      2,
 			},
 			wantErr: true,
 		},
@@ -368,7 +427,6 @@ func TestPoolSnapshot_CoinBalances(t *testing.T) {
 	if len(snap.CoinBalances) != 2 {
 		t.Fatalf("expected 2 coin balances, got %d", len(snap.CoinBalances))
 	}
-
 	if snap.CoinBalances[0].Symbol != "sUSDS" {
 		t.Errorf("expected sUSDS, got %s", snap.CoinBalances[0].Symbol)
 	}

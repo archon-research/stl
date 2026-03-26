@@ -3,6 +3,7 @@ package curve_tracker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -12,7 +13,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 
-	curveapi "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/curve"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -44,7 +44,7 @@ type Service struct {
 	multicaller outbound.Multicaller
 	poolABI     *abi.ABI
 	erc20ABI    *abi.ABI
-	curveAPI    *curveapi.Client
+	apyFetcher  outbound.CurveAPYFetcher
 	repo        outbound.CurveRepository
 	pools       []PoolConfig
 	chainName   string
@@ -56,7 +56,7 @@ func NewService(
 	multicaller outbound.Multicaller,
 	poolABI *abi.ABI,
 	erc20ABI *abi.ABI,
-	curveAPI *curveapi.Client,
+	apyFetcher outbound.CurveAPYFetcher,
 	repo outbound.CurveRepository,
 	pools []PoolConfig,
 	chainName string,
@@ -67,7 +67,7 @@ func NewService(
 		multicaller: multicaller,
 		poolABI:     poolABI,
 		erc20ABI:    erc20ABI,
-		curveAPI:    curveAPI,
+		apyFetcher:  apyFetcher,
 		repo:        repo,
 		pools:       pools,
 		chainName:   chainName,
@@ -98,9 +98,9 @@ func (s *Service) Run(ctx context.Context) error {
 	for i, p := range s.pools {
 		poolAddrs[i] = p.Address
 	}
-	apyData, err := s.curveAPI.FetchAPYs(ctx, s.chainName, poolAddrs)
+	apyData, err := s.apyFetcher.FetchAPYs(ctx, s.chainName, poolAddrs)
 	if err != nil {
-		s.logger.Warn("curve API fetch failed, proceeding without APY", "error", err)
+		s.logger.Warn("curve API fetch failed, proceeding with partial APY", "error", err)
 	}
 
 	// Build entities
@@ -132,8 +132,6 @@ func (s *Service) Run(ctx context.Context) error {
 func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*PoolSnapshot, error) {
 	block := big.NewInt(blockNumber)
 
-	// Build calls: for each pool we need N_COINS, get_balances, totalSupply,
-	// get_virtual_price, A, fee. We'll add price_oracle calls after knowing N_COINS.
 	// First pass: fetch N_COINS for all pools.
 	nCoinsCalls := make([]outbound.Call, len(s.pools))
 	for i, p := range s.pools {
@@ -163,11 +161,11 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 	}
 
 	// Second pass: batch all remaining calls.
-	// Per pool: get_balances, totalSupply, get_virtual_price, A, fee, coins(0..n-1), price_oracle(0..n-2)
 	type callMeta struct {
-		pool  int
-		field string
-		index int // for coins/price_oracle
+		pool     int
+		field    string
+		index    int  // for coins/price_oracle
+		required bool // if true, missing data drops the pool
 	}
 
 	var calls []outbound.Call
@@ -176,43 +174,50 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 	for i, p := range s.pools {
 		nCoins := nCoinsMap[p.Address]
 
-		// get_balances
-		data, _ := s.poolABI.Pack("get_balances")
-		calls = append(calls, outbound.Call{Target: p.Address, AllowFailure: true, CallData: data})
-		metas = append(metas, callMeta{pool: i, field: "get_balances"})
-
-		// totalSupply
-		data, _ = s.poolABI.Pack("totalSupply")
-		calls = append(calls, outbound.Call{Target: p.Address, AllowFailure: true, CallData: data})
-		metas = append(metas, callMeta{pool: i, field: "totalSupply"})
-
-		// get_virtual_price
-		data, _ = s.poolABI.Pack("get_virtual_price")
-		calls = append(calls, outbound.Call{Target: p.Address, AllowFailure: true, CallData: data})
-		metas = append(metas, callMeta{pool: i, field: "get_virtual_price"})
-
-		// A
-		data, _ = s.poolABI.Pack("A")
-		calls = append(calls, outbound.Call{Target: p.Address, AllowFailure: true, CallData: data})
-		metas = append(metas, callMeta{pool: i, field: "A"})
-
-		// fee
-		data, _ = s.poolABI.Pack("fee")
-		calls = append(calls, outbound.Call{Target: p.Address, AllowFailure: true, CallData: data})
-		metas = append(metas, callMeta{pool: i, field: "fee"})
-
-		// coins(i) for each coin
-		for j := range nCoins {
-			data, _ = s.poolABI.Pack("coins", big.NewInt(int64(j)))
+		packAndAppend := func(method string, args []interface{}, field string, index int, required bool) error {
+			var data []byte
+			var err error
+			if len(args) > 0 {
+				data, err = s.poolABI.Pack(method, args...)
+			} else {
+				data, err = s.poolABI.Pack(method)
+			}
+			if err != nil {
+				return fmt.Errorf("pack %s for %s: %w", method, p.Name, err)
+			}
 			calls = append(calls, outbound.Call{Target: p.Address, AllowFailure: true, CallData: data})
-			metas = append(metas, callMeta{pool: i, field: "coins", index: j})
+			metas = append(metas, callMeta{pool: i, field: field, index: index, required: required})
+			return nil
 		}
 
-		// price_oracle(i) for i = 0..n-2 (coin i+1 relative to coin 0)
+		// Required fields — pool is dropped if any of these fail
+		if err := packAndAppend("get_balances", nil, "get_balances", 0, true); err != nil {
+			return nil, err
+		}
+		if err := packAndAppend("totalSupply", nil, "totalSupply", 0, true); err != nil {
+			return nil, err
+		}
+		if err := packAndAppend("get_virtual_price", nil, "get_virtual_price", 0, true); err != nil {
+			return nil, err
+		}
+		if err := packAndAppend("A", nil, "A", 0, true); err != nil {
+			return nil, err
+		}
+		if err := packAndAppend("fee", nil, "fee", 0, true); err != nil {
+			return nil, err
+		}
+
+		for j := range nCoins {
+			if err := packAndAppend("coins", []interface{}{big.NewInt(int64(j))}, "coins", j, true); err != nil {
+				return nil, err
+			}
+		}
+
+		// Optional fields — pool is kept with partial data
 		for j := range nCoins - 1 {
-			data, _ = s.poolABI.Pack("price_oracle", big.NewInt(int64(j)))
-			calls = append(calls, outbound.Call{Target: p.Address, AllowFailure: true, CallData: data})
-			metas = append(metas, callMeta{pool: i, field: "price_oracle", index: j})
+			if err := packAndAppend("price_oracle", []interface{}{big.NewInt(int64(j))}, "price_oracle", j, false); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -232,6 +237,9 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 		}
 	}
 
+	// Track which pools have failed required fields.
+	failedPools := make(map[int]bool)
+
 	for i, meta := range metas {
 		if i >= len(results) {
 			break
@@ -240,10 +248,18 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 		snap := snapshots[meta.pool]
 
 		if !r.Success || len(r.ReturnData) == 0 {
-			s.logger.Warn("call failed",
-				"pool", s.pools[meta.pool].Name,
-				"field", meta.field,
-				"index", meta.index)
+			if meta.required {
+				s.logger.Error("required call failed, dropping pool",
+					"pool", s.pools[meta.pool].Name,
+					"field", meta.field,
+					"index", meta.index)
+				failedPools[meta.pool] = true
+			} else {
+				s.logger.Warn("optional call failed",
+					"pool", s.pools[meta.pool].Name,
+					"field", meta.field,
+					"index", meta.index)
+			}
 			continue
 		}
 
@@ -304,12 +320,27 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 		}
 	}
 
+	// Filter out pools with failed required data.
+	var validSnapshots []*PoolSnapshot
+	for i, snap := range snapshots {
+		if failedPools[i] {
+			continue
+		}
+		// Double-check required fields are populated
+		if snap.TotalSupply == nil || snap.VirtualPrice == nil || snap.Fee == nil || len(snap.CoinBalances) == 0 {
+			s.logger.Error("dropping pool with incomplete required data",
+				"pool", snap.PoolAddress.Hex())
+			continue
+		}
+		validSnapshots = append(validSnapshots, snap)
+	}
+
 	// Fetch decimals and symbols for all coins via ERC20 multicall.
-	if err := s.enrichCoinMetadata(ctx, snapshots, block); err != nil {
+	if err := s.enrichCoinMetadata(ctx, validSnapshots, block); err != nil {
 		s.logger.Warn("failed to enrich coin metadata", "error", err)
 	}
 
-	return snapshots, nil
+	return validSnapshots, nil
 }
 
 // enrichCoinMetadata fetches decimals, symbol, and token_id for each coin via ERC20 multicall
@@ -338,10 +369,16 @@ func (s *Service) enrichCoinMetadata(ctx context.Context, snapshots []*PoolSnaps
 	// Build calls: decimals() and symbol() for each coin.
 	var calls []outbound.Call
 	for _, addr := range coins {
-		decData, _ := s.erc20ABI.Pack("decimals")
+		decData, err := s.erc20ABI.Pack("decimals")
+		if err != nil {
+			return fmt.Errorf("pack decimals: %w", err)
+		}
 		calls = append(calls, outbound.Call{Target: addr, AllowFailure: true, CallData: decData})
 
-		symData, _ := s.erc20ABI.Pack("symbol")
+		symData, err := s.erc20ABI.Pack("symbol")
+		if err != nil {
+			return fmt.Errorf("pack symbol: %w", err)
+		}
 		calls = append(calls, outbound.Call{Target: addr, AllowFailure: true, CallData: symData})
 	}
 
@@ -407,10 +444,10 @@ func (s *Service) enrichCoinMetadata(ctx context.Context, snapshots []*PoolSnaps
 
 // resolveTokenIDs looks up token IDs from the token table for each coin address.
 // Tokens should already exist from the allocation tracker. If not found, token_id stays 0.
+// Operational DB errors are propagated; missing tokens are silently skipped.
 func (s *Service) resolveTokenIDs(ctx context.Context, coins []common.Address, snapshots []*PoolSnapshot) (map[common.Address]int64, error) {
 	result := make(map[common.Address]int64, len(coins))
 	for _, addr := range coins {
-		// Find chainID from the first snapshot that has this coin.
 		var chainID int64
 		for _, snap := range snapshots {
 			for _, cb := range snap.CoinBalances {
@@ -426,10 +463,13 @@ func (s *Service) resolveTokenIDs(ctx context.Context, coins []common.Address, s
 
 		id, err := s.repo.LookupTokenID(ctx, chainID, addr)
 		if err != nil {
-			s.logger.Debug("token not found in DB",
-				"address", addr.Hex(),
-				"chainID", chainID)
-			continue
+			if errors.Is(err, outbound.ErrTokenNotFound) {
+				s.logger.Debug("token not found in DB",
+					"address", addr.Hex(),
+					"chainID", chainID)
+				continue
+			}
+			return nil, fmt.Errorf("lookup token ID for %s: %w", addr.Hex(), err)
 		}
 		result[addr] = id
 	}
@@ -458,7 +498,6 @@ func (s *Service) calculateTVL(snap *PoolSnapshot) *big.Float {
 			continue
 		}
 
-		// Normalize: rawBalance / 10^decimals ≈ USD value for stablecoins
 		balFloat := new(big.Float).SetInt(rawBal)
 		divisor := new(big.Float).SetInt(new(big.Int).Exp(
 			big.NewInt(10), big.NewInt(int64(cb.Decimals)), nil,
@@ -471,7 +510,7 @@ func (s *Service) calculateTVL(snap *PoolSnapshot) *big.Float {
 	return tvl
 }
 
-func (s *Service) buildEntity(snap *PoolSnapshot, apyData map[common.Address]*curveapi.PoolAPY, now time.Time) (*entity.CurvePoolSnapshot, error) {
+func (s *Service) buildEntity(snap *PoolSnapshot, apyData map[common.Address]*outbound.APYData, now time.Time) (*entity.CurvePoolSnapshot, error) {
 	coinJSON, err := json.Marshal(snap.CoinBalances)
 	if err != nil {
 		return nil, fmt.Errorf("marshal coin balances: %w", err)
@@ -521,15 +560,19 @@ func (s *Service) buildEntity(snap *PoolSnapshot, apyData map[common.Address]*cu
 		e.TvlUSD = &tvlStr
 	}
 
-	// APY data (nullable)
+	// APY data — only set fields that are actually present
 	if apyData != nil {
 		if apy, ok := apyData[snap.PoolAddress]; ok {
-			feeStr := fmt.Sprintf("%f", apy.FeeAPY)
-			e.FeeAPY = &feeStr
-			if apy.CrvAPYMin > 0 || apy.CrvAPYMax > 0 {
-				minStr := fmt.Sprintf("%f", apy.CrvAPYMin)
-				maxStr := fmt.Sprintf("%f", apy.CrvAPYMax)
+			if apy.FeeAPY != nil {
+				feeStr := fmt.Sprintf("%f", *apy.FeeAPY)
+				e.FeeAPY = &feeStr
+			}
+			if apy.CrvAPYMin != nil {
+				minStr := fmt.Sprintf("%f", *apy.CrvAPYMin)
 				e.CrvAPYMin = &minStr
+			}
+			if apy.CrvAPYMax != nil {
+				maxStr := fmt.Sprintf("%f", *apy.CrvAPYMax)
 				e.CrvAPYMax = &maxStr
 			}
 		}

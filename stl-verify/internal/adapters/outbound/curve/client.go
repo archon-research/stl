@@ -3,6 +3,7 @@ package curve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 const (
@@ -19,11 +22,14 @@ const (
 )
 
 // Client interacts with the Curve Finance REST API.
+// Implements outbound.CurveAPYFetcher.
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
 	logger     *slog.Logger
 }
+
+var _ outbound.CurveAPYFetcher = (*Client)(nil)
 
 func NewClient(logger *slog.Logger) *Client {
 	return &Client{
@@ -38,13 +44,6 @@ func NewClient(logger *slog.Logger) *Client {
 // SetBaseURL overrides the default API base URL (used for testing).
 func (c *Client) SetBaseURL(url string) {
 	c.baseURL = url
-}
-
-// PoolAPY holds APY data for a single pool.
-type PoolAPY struct {
-	FeeAPY    float64
-	CrvAPYMin float64
-	CrvAPYMax float64
 }
 
 // baseApyResponse is the API response structure for getBaseApys.
@@ -70,8 +69,10 @@ type gaugeEntry struct {
 
 // FetchAPYs returns APY data for the given pool addresses.
 // Merges fee APY from getBaseApys with CRV APY from getAllGauges.
-func (c *Client) FetchAPYs(ctx context.Context, chainName string, pools []common.Address) (map[common.Address]*PoolAPY, error) {
-	results := make(map[common.Address]*PoolAPY, len(pools))
+// Returns partial results alongside any errors — the caller decides
+// whether to proceed with incomplete data.
+func (c *Client) FetchAPYs(ctx context.Context, chainName string, pools []common.Address) (map[common.Address]*outbound.APYData, error) {
+	results := make(map[common.Address]*outbound.APYData, len(pools))
 
 	// Build lookup set (lowercase)
 	poolSet := make(map[string]common.Address, len(pools))
@@ -79,14 +80,17 @@ func (c *Client) FetchAPYs(ctx context.Context, chainName string, pools []common
 		poolSet[strings.ToLower(p.Hex())] = p
 	}
 
+	var errs []error
+
 	// Fetch base APYs (trading fees)
 	feeAPYs, err := c.fetchBaseAPYs(ctx, chainName)
 	if err != nil {
-		c.logger.Warn("failed to fetch base APYs", "error", err)
+		errs = append(errs, fmt.Errorf("base APYs: %w", err))
 	} else {
 		for addrHex, apy := range feeAPYs {
 			if pool, ok := poolSet[addrHex]; ok {
-				results[pool] = &PoolAPY{FeeAPY: apy}
+				v := apy
+				results[pool] = &outbound.APYData{FeeAPY: &v}
 			}
 		}
 	}
@@ -94,20 +98,24 @@ func (c *Client) FetchAPYs(ctx context.Context, chainName string, pools []common
 	// Fetch CRV gauge APYs
 	crvAPYs, err := c.fetchGaugeAPYs(ctx, chainName)
 	if err != nil {
-		c.logger.Warn("failed to fetch gauge APYs", "error", err)
+		errs = append(errs, fmt.Errorf("gauge APYs: %w", err))
 	} else {
 		for addrHex, crv := range crvAPYs {
 			if pool, ok := poolSet[addrHex]; ok {
+				minVal, maxVal := crv[0], crv[1]
 				if existing, ok := results[pool]; ok {
-					existing.CrvAPYMin = crv[0]
-					existing.CrvAPYMax = crv[1]
+					existing.CrvAPYMin = &minVal
+					existing.CrvAPYMax = &maxVal
 				} else {
-					results[pool] = &PoolAPY{CrvAPYMin: crv[0], CrvAPYMax: crv[1]}
+					results[pool] = &outbound.APYData{CrvAPYMin: &minVal, CrvAPYMax: &maxVal}
 				}
 			}
 		}
 	}
 
+	if len(errs) > 0 {
+		return results, fmt.Errorf("partial APY failures: %w", errors.Join(errs...))
+	}
 	return results, nil
 }
 
