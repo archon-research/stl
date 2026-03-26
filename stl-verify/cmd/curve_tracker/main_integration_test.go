@@ -397,7 +397,11 @@ func handleCurveMethod(t *testing.T, method string, inputData []byte, curveABI *
 		if err != nil {
 			return "0x"
 		}
-		index := args[0].(*big.Int).Int64()
+		indexBig, ok := args[0].(*big.Int)
+		if !ok {
+			return "0x"
+		}
+		index := indexBig.Int64()
 		var addr common.Address
 		if index == 0 {
 			addr = common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD")
