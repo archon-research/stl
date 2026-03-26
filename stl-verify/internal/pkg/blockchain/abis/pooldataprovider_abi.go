@@ -118,6 +118,24 @@ func GetPoolDataProviderReserveConfigurationABI() (*abi.ABI, error) {
 	]`)
 }
 
+func GetPoolDataProviderReserveTokensAddressesABI() (*abi.ABI, error) {
+	return ParseABI(`[
+		{
+			"inputs": [
+				{"name": "asset", "type": "address"}
+			],
+			"name": "getReserveTokensAddresses",
+			"outputs": [
+				{"name": "aTokenAddress", "type": "address"},
+				{"name": "stableDebtTokenAddress", "type": "address"},
+				{"name": "variableDebtTokenAddress", "type": "address"}
+			],
+			"stateMutability": "view",
+			"type": "function"
+		}
+	]`)
+}
+
 func GetPoolDataProviderReserveData() (*abi.ABI, error) {
 	return ParseABI(`[
 	{

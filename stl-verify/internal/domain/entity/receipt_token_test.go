@@ -3,28 +3,27 @@ package entity
 import (
 	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestNewReceiptToken(t *testing.T) {
-	validAddr := make([]byte, 20)
-	for i := range validAddr {
-		validAddr[i] = byte(i)
-	}
+	validAddr := common.HexToAddress("0x000102030405060708090a0b0c0d0e0f10111213")
 
 	tests := []struct {
 		name                string
-		id                  int64
+		chainID             int64
 		protocolID          int64
 		underlyingTokenID   int64
 		createdAtBlock      int64
-		receiptTokenAddress []byte
+		receiptTokenAddress common.Address
 		symbol              string
 		wantErr             bool
 		errContains         string
 	}{
 		{
 			name:                "valid receipt token",
-			id:                  1,
+			chainID:             1,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
@@ -33,30 +32,30 @@ func TestNewReceiptToken(t *testing.T) {
 			wantErr:             false,
 		},
 		{
-			name:                "zero id",
-			id:                  0,
+			name:                "zero chainID",
+			chainID:             0,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
 			receiptTokenAddress: validAddr,
 			symbol:              "spDAI",
 			wantErr:             true,
-			errContains:         "id must be positive",
+			errContains:         "chainID must be positive",
 		},
 		{
-			name:                "negative id",
-			id:                  -1,
+			name:                "negative chainID",
+			chainID:             -1,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
 			receiptTokenAddress: validAddr,
 			symbol:              "spDAI",
 			wantErr:             true,
-			errContains:         "id must be positive",
+			errContains:         "chainID must be positive",
 		},
 		{
 			name:                "zero protocolID",
-			id:                  1,
+			chainID:             1,
 			protocolID:          0,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
@@ -67,7 +66,7 @@ func TestNewReceiptToken(t *testing.T) {
 		},
 		{
 			name:                "zero underlyingTokenID",
-			id:                  1,
+			chainID:             1,
 			protocolID:          5,
 			underlyingTokenID:   0,
 			createdAtBlock:      1000,
@@ -78,7 +77,7 @@ func TestNewReceiptToken(t *testing.T) {
 		},
 		{
 			name:                "zero createdAtBlock",
-			id:                  1,
+			chainID:             1,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      0,
@@ -88,41 +87,29 @@ func TestNewReceiptToken(t *testing.T) {
 			errContains:         "createdAtBlock must be positive",
 		},
 		{
-			name:                "invalid address length - too short",
-			id:                  1,
+			name:                "zero address",
+			chainID:             1,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
-			receiptTokenAddress: make([]byte, 19),
+			receiptTokenAddress: common.Address{},
 			symbol:              "spDAI",
 			wantErr:             true,
-			errContains:         "invalid receipt token address length",
+			errContains:         "receipt token address must not be zero",
 		},
 		{
-			name:                "invalid address length - too long",
-			id:                  1,
-			protocolID:          5,
-			underlyingTokenID:   10,
-			createdAtBlock:      1000,
-			receiptTokenAddress: make([]byte, 21),
-			symbol:              "spDAI",
-			wantErr:             true,
-			errContains:         "invalid receipt token address length",
-		},
-		{
-			name:                "empty symbol",
-			id:                  1,
+			name:                "empty symbol is allowed",
+			chainID:             1,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
 			receiptTokenAddress: validAddr,
 			symbol:              "",
-			wantErr:             true,
-			errContains:         "symbol must not be empty",
+			wantErr:             false,
 		},
 		{
 			name:                "valid aToken",
-			id:                  2,
+			chainID:             1,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      5000,
@@ -134,7 +121,7 @@ func TestNewReceiptToken(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rt, err := NewReceiptToken(tt.id, tt.protocolID, tt.underlyingTokenID, tt.createdAtBlock, tt.receiptTokenAddress, tt.symbol)
+			rt, err := NewReceiptToken(tt.chainID, tt.protocolID, tt.underlyingTokenID, tt.createdAtBlock, tt.receiptTokenAddress, tt.symbol)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("NewReceiptToken() expected error, got nil")
@@ -153,8 +140,8 @@ func TestNewReceiptToken(t *testing.T) {
 				t.Errorf("NewReceiptToken() returned nil")
 				return
 			}
-			if rt.ID != tt.id {
-				t.Errorf("NewReceiptToken() ID = %v, want %v", rt.ID, tt.id)
+			if rt.ChainID != tt.chainID {
+				t.Errorf("NewReceiptToken() ChainID = %v, want %v", rt.ChainID, tt.chainID)
 			}
 			if rt.ProtocolID != tt.protocolID {
 				t.Errorf("NewReceiptToken() ProtocolID = %v, want %v", rt.ProtocolID, tt.protocolID)
@@ -176,10 +163,7 @@ func TestNewReceiptToken(t *testing.T) {
 }
 
 func TestReceiptToken_AddressHex(t *testing.T) {
-	addr := make([]byte, 20)
-	for i := range addr {
-		addr[i] = byte(i)
-	}
+	addr := common.HexToAddress("0x000102030405060708090a0b0c0d0e0f10111213")
 
 	rt := &ReceiptToken{ReceiptTokenAddress: addr}
 	hex := rt.AddressHex()
@@ -188,5 +172,10 @@ func TestReceiptToken_AddressHex(t *testing.T) {
 	}
 	if hex[:2] != "0x" {
 		t.Errorf("AddressHex() should start with 0x, got %v", hex)
+	}
+	// Verify EIP-55 checksummed output
+	expected := common.HexToAddress("0x000102030405060708090a0b0c0d0e0f10111213").Hex()
+	if hex != expected {
+		t.Errorf("AddressHex() = %v, want %v (EIP-55 checksummed)", hex, expected)
 	}
 }
