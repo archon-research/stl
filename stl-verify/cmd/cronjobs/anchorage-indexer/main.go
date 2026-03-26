@@ -13,7 +13,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/temporalutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/temporal"
 	tracker "github.com/archon-research/stl/stl-verify/internal/services/anchorage_tracker"
 )
 
@@ -31,9 +31,9 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := temporalutil.RunCronjob(ctx, temporalutil.BuildMeta{
+	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
-	}, temporalutil.CronjobConfig{
+	}, temporal.CronjobConfig{
 		Name:            "anchorage-indexer",
 		IntervalEnv:     "ANCHORAGE_INDEX_INTERVAL",
 		IntervalDefault: "15m",
@@ -45,7 +45,7 @@ func main() {
 	}
 }
 
-func setupRunner(ctx context.Context, deps temporalutil.Dependencies) (temporalutil.Runner, error) {
+func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
 	apiURL, err := env.Require("ANCHORAGE_API_URL")
 	if err != nil {
 		return nil, err

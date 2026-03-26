@@ -14,7 +14,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/temporalutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/services/offchain_price_fetcher"
 )
 
@@ -32,9 +32,9 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := temporalutil.RunCronjob(ctx, temporalutil.BuildMeta{
+	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
-	}, temporalutil.CronjobConfig{
+	}, temporal.CronjobConfig{
 		Name:            "offchain-price-indexer",
 		IntervalEnv:     "PRICE_FETCH_INTERVAL",
 		IntervalDefault: "5m",
@@ -46,7 +46,7 @@ func main() {
 	}
 }
 
-func setupRunner(_ context.Context, deps temporalutil.Dependencies) (temporalutil.Runner, error) {
+func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
 	apiKey, err := env.Require("COINGECKO_API_KEY")
 	if err != nil {
 		return nil, err
@@ -76,7 +76,7 @@ func setupRunner(_ context.Context, deps temporalutil.Dependencies) (temporaluti
 	}
 
 	// Wrap FetchCurrentPrices as a Runner — empty AssetIDs loads all from DB.
-	return temporalutil.RunnerFunc(func(ctx context.Context) error {
+	return temporal.RunnerFunc(func(ctx context.Context) error {
 		return service.FetchCurrentPrices(ctx, []string{})
 	}), nil
 }

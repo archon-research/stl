@@ -1,4 +1,4 @@
-// Package temporalutil provides shared infrastructure for Temporal cronjob workers.
+// Package temporal provides shared infrastructure for Temporal cronjob workers.
 //
 // To create a new cronjob, define a CronjobConfig and call RunCronjob.
 // Only Name, IntervalDefault, and Setup are required:
@@ -7,7 +7,7 @@
 //	    ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 //	    defer cancel()
 //
-//	    if err := temporalutil.RunCronjob(ctx, meta, temporalutil.CronjobConfig{
+//	    if err := temporal.RunCronjob(ctx, meta, temporal.CronjobConfig{
 //	        Name:            "my-cronjob",
 //	        IntervalDefault: "5m",
 //	        OpenDatabase:    openDB,
@@ -17,7 +17,7 @@
 //	        os.Exit(1)
 //	    }
 //	}
-package temporalutil
+package temporal
 
 import (
 	"context"

@@ -14,7 +14,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/temporalutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/services/data_validator"
 )
 
@@ -32,9 +32,9 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := temporalutil.RunCronjob(ctx, temporalutil.BuildMeta{
+	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
-	}, temporalutil.CronjobConfig{
+	}, temporal.CronjobConfig{
 		Name:            "watcher-data-validator",
 		IntervalEnv:     "DATA_VALIDATION_INTERVAL",
 		IntervalDefault: "1h",
@@ -46,7 +46,7 @@ func main() {
 	}
 }
 
-func setupRunner(_ context.Context, deps temporalutil.Dependencies) (temporalutil.Runner, error) {
+func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
 	etherscanAPIKey, err := env.Require("ETHERSCAN_API_KEY")
 	if err != nil {
 		return nil, err
@@ -73,7 +73,7 @@ func setupRunner(_ context.Context, deps temporalutil.Dependencies) (temporaluti
 	}
 
 	// Wrap Validate as a Runner — returns error on validation failure.
-	return temporalutil.RunnerFunc(func(ctx context.Context) error {
+	return temporal.RunnerFunc(func(ctx context.Context) error {
 		report, err := service.Validate(ctx)
 		if err != nil {
 			return fmt.Errorf("running validation: %w", err)
