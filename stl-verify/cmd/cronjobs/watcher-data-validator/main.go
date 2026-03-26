@@ -13,6 +13,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/etherscan"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/temporalutil"
 	"github.com/archon-research/stl/stl-verify/internal/services/data_validator"
 )
@@ -37,6 +38,7 @@ func main() {
 		Name:            "watcher-data-validator",
 		IntervalEnv:     "DATA_VALIDATION_INTERVAL",
 		IntervalDefault: "1h",
+		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
 		Setup:           setupRunner,
 	}); err != nil {
 		slog.Error("fatal", "error", err)
@@ -44,10 +46,10 @@ func main() {
 	}
 }
 
-func setupRunner(_ context.Context, deps temporalutil.Dependencies) (any, error) {
-	etherscanAPIKey := os.Getenv("ETHERSCAN_API_KEY")
-	if etherscanAPIKey == "" {
-		return nil, fmt.Errorf("ETHERSCAN_API_KEY environment variable is required")
+func setupRunner(_ context.Context, deps temporalutil.Dependencies) (temporalutil.Runner, error) {
+	etherscanAPIKey, err := env.Require("ETHERSCAN_API_KEY")
+	if err != nil {
+		return nil, err
 	}
 
 	etherscanClient, err := etherscan.NewClient(etherscan.ClientConfig{

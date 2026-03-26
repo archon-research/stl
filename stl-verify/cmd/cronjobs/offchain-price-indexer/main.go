@@ -13,6 +13,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coingecko"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/temporalutil"
 	"github.com/archon-research/stl/stl-verify/internal/services/offchain_price_fetcher"
 )
@@ -37,6 +38,7 @@ func main() {
 		Name:            "offchain-price-indexer",
 		IntervalEnv:     "PRICE_FETCH_INTERVAL",
 		IntervalDefault: "5m",
+		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
 		Setup:           setupRunner,
 	}); err != nil {
 		slog.Error("fatal", "error", err)
@@ -44,10 +46,10 @@ func main() {
 	}
 }
 
-func setupRunner(_ context.Context, deps temporalutil.Dependencies) (any, error) {
-	apiKey := os.Getenv("COINGECKO_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("COINGECKO_API_KEY environment variable is required")
+func setupRunner(_ context.Context, deps temporalutil.Dependencies) (temporalutil.Runner, error) {
+	apiKey, err := env.Require("COINGECKO_API_KEY")
+	if err != nil {
+		return nil, err
 	}
 
 	provider, err := coingecko.NewClient(coingecko.ClientConfig{

@@ -37,6 +37,7 @@ func main() {
 		Name:            "anchorage-indexer",
 		IntervalEnv:     "ANCHORAGE_INDEX_INTERVAL",
 		IntervalDefault: "15m",
+		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
 		Setup:           setupRunner,
 	}); err != nil {
 		slog.Error("fatal", "error", err)
@@ -44,22 +45,22 @@ func main() {
 	}
 }
 
-func setupRunner(ctx context.Context, deps temporalutil.Dependencies) (any, error) {
-	apiURL := env.Get("ANCHORAGE_API_URL", "")
-	if apiURL == "" {
-		return nil, fmt.Errorf("ANCHORAGE_API_URL environment variable is required")
+func setupRunner(ctx context.Context, deps temporalutil.Dependencies) (temporalutil.Runner, error) {
+	apiURL, err := env.Require("ANCHORAGE_API_URL")
+	if err != nil {
+		return nil, err
 	}
 
-	apiKey := os.Getenv("ANCHORAGE_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("ANCHORAGE_API_KEY environment variable is required")
+	apiKey, err := env.Require("ANCHORAGE_API_KEY")
+	if err != nil {
+		return nil, err
 	}
 
 	// IMPORTANT: An API key only has access to one prime, but there is no error if the prime doesnt match the api key,
 	// we just get back the data for the api key prime, but write the wrong prime id in the database.
-	primeName := env.Get("ANCHORAGE_PRIME", "")
-	if primeName == "" {
-		return nil, fmt.Errorf("ANCHORAGE_PRIME environment variable is required")
+	primeName, err := env.Require("ANCHORAGE_PRIME")
+	if err != nil {
+		return nil, err
 	}
 
 	txm, err := postgres.NewTxManager(deps.Pool, deps.Logger)

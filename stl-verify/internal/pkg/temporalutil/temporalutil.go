@@ -10,6 +10,7 @@
 //	    if err := temporalutil.RunCronjob(ctx, meta, temporalutil.CronjobConfig{
 //	        Name:            "my-cronjob",
 //	        IntervalDefault: "5m",
+//	        OpenDatabase:    openDB,
 //	        Setup:           createRunner,
 //	    }); err != nil {
 //	        slog.Error("fatal", "error", err)
@@ -34,7 +35,6 @@ import (
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
@@ -65,9 +65,12 @@ type CronjobConfig struct {
 	// IntervalDefault is the default schedule interval (e.g. "5m", "1h").
 	IntervalDefault string
 
+	// OpenDatabase opens a database connection pool. Required.
+	OpenDatabase func(ctx context.Context) (*pgxpool.Pool, error)
+
 	// Setup returns a Runner (or RunnerFunc) for the cronjob's business logic.
 	// It will be wrapped in Temporal activities automatically.
-	Setup func(ctx context.Context, deps Dependencies) (runner any, err error)
+	Setup func(ctx context.Context, deps Dependencies) (Runner, error)
 }
 
 func (c CronjobConfig) validate() error {
@@ -76,6 +79,9 @@ func (c CronjobConfig) validate() error {
 	}
 	if c.IntervalDefault == "" {
 		return fmt.Errorf("CronjobConfig.IntervalDefault is required")
+	}
+	if c.OpenDatabase == nil {
+		return fmt.Errorf("CronjobConfig.OpenDatabase is required")
 	}
 	if c.Setup == nil {
 		return fmt.Errorf("CronjobConfig.Setup is required")
@@ -106,7 +112,7 @@ func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 		return fmt.Errorf("resolving CHAIN_ID: %w", err)
 	}
 
-	pool, err := openDatabase(ctx)
+	pool, err := cfg.OpenDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("connecting to database: %w", err)
 	}
@@ -131,12 +137,7 @@ func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 		return fmt.Errorf("setting up %s: %w", cfg.Name, err)
 	}
 
-	// Wrap the runner in generic Temporal activities.
-	r, ok := runner.(Runner)
-	if !ok {
-		return fmt.Errorf("setup must return a temporalutil.Runner, got %T", runner)
-	}
-	activities, err := newCronjobActivities(r)
+	activities, err := newCronjobActivities(runner)
 	if err != nil {
 		return fmt.Errorf("creating cronjob activities: %w", err)
 	}
@@ -246,11 +247,6 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 
 	logger.Info("schedule created", "scheduleID", scheduleID, "interval", intervalDuration)
 	return nil
-}
-
-func openDatabase(ctx context.Context) (*pgxpool.Pool, error) {
-	postgresURL := env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
-	return postgres.OpenPool(ctx, postgres.DefaultDBConfig(postgresURL))
 }
 
 func getChainID() (int, error) {

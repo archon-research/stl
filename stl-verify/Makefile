@@ -1565,10 +1565,16 @@ kind-deploy-cronjobs:
 generate-cronjob-manifests:
 	go run ./cmd/util/cronjob-manifest
 
-# Rebuild and redeploy a specific worker. Usage: make kind-redeploy-worker NAME=morpho-indexer
+# Rebuild and redeploy a specific worker or cronjob.
+# Usage: make kind-redeploy-worker NAME=morpho-indexer
+#        make kind-redeploy-worker NAME=anchorage-indexer
 kind-redeploy-worker:
 	@test -n "$(NAME)" || { echo "ERROR: NAME is required. Example: make kind-redeploy-worker NAME=morpho-indexer"; exit 1; }
-	$(MAKE) docker-build-$(NAME) LOCAL=1
+	@if echo " $(CRONJOBS) " | grep -q " $(NAME) "; then \
+	  $(MAKE) docker-build-cronjob-$(NAME); \
+	else \
+	  $(MAKE) docker-build-$(NAME) LOCAL=1; \
+	fi
 	kind load docker-image stl-$(NAME):local --name $(KIND_CLUSTER)
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$(NAME) -n $(KUBE_NS)
 
