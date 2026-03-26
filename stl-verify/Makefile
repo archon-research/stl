@@ -4,7 +4,7 @@
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
         dev-up dev-up-rebuild dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-temporal-worker-internal _docker-release-prime-debt-indexer-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-temporal-worker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -684,6 +684,8 @@ docker-release-all:
 	@$(MAKE) ecr-login ENV=$(ENV)
 	@echo "==> Releasing all Docker images for ENV=$(ENV)..."
 	@echo ""
+	@$(MAKE) _docker-release-migrate-internal ENV=$(ENV)
+	@echo ""
 	@$(MAKE) _docker-release-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-backup-internal ENV=$(ENV)
@@ -1284,6 +1286,35 @@ docker-push-allocation-tracker-staging:
 
 docker-release-allocation-tracker-staging:
 	@$(MAKE) docker-release-allocation-tracker ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - Migrate
+# =============================================================================
+
+# ECR repository URL for migrate
+ECR_REPO_MIGRATE = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-migrate
+
+# Build and push migrate in one step (captures tag at start to ensure consistency)
+docker-release-migrate: ecr-login _docker-release-migrate-internal
+
+_docker-release-migrate-internal:
+	@TAG=$(IMAGE_TAG) && \
+	echo "==> Building Migrate Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_MIGRATE)" && \
+	echo "    Tag: $$TAG" && \
+	docker buildx build --platform linux/arm64 \
+		-f Dockerfile.migrate \
+		-t $(ECR_REPO_MIGRATE):$$TAG \
+		-t $(ECR_REPO_MIGRATE):latest \
+		--load . && \
+	echo "==> Pushing Migrate Docker image to ECR..." && \
+	docker push $(ECR_REPO_MIGRATE):$$TAG && \
+	docker push $(ECR_REPO_MIGRATE):latest && \
+	echo "==> Migrate Docker image released: $(ECR_REPO_MIGRATE):$$TAG"
+
+# Sentinelstaging Migrate Docker Shortcuts
+docker-release-migrate-staging:
+	@$(MAKE) docker-release-migrate ENV=sentinelstaging
 
 # =============================================================================
 # Erigon Node Management (via Tailscale)
