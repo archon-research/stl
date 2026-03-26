@@ -266,49 +266,68 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 		switch meta.field {
 		case "get_balances":
 			unpacked, err := s.poolABI.Unpack("get_balances", r.ReturnData)
-			if err == nil && len(unpacked) > 0 {
-				if bals, ok := unpacked[0].([]*big.Int); ok {
-					snap.CoinBalances = make([]CoinBalance, len(bals))
-					for j, b := range bals {
-						snap.CoinBalances[j].Balance = b.String()
-					}
+			if err != nil || len(unpacked) == 0 {
+				s.logger.Error("unpack get_balances failed", "pool", s.pools[meta.pool].Name, "error", err)
+				failedPools[meta.pool] = true
+				continue
+			}
+			if bals, ok := unpacked[0].([]*big.Int); ok {
+				snap.CoinBalances = make([]CoinBalance, len(bals))
+				for j, b := range bals {
+					snap.CoinBalances[j].Balance = b.String()
 				}
 			}
 
 		case "totalSupply":
 			unpacked, err := s.poolABI.Unpack("totalSupply", r.ReturnData)
-			if err == nil && len(unpacked) > 0 {
-				snap.TotalSupply = unpacked[0].(*big.Int)
+			if err != nil || len(unpacked) == 0 {
+				s.logger.Error("unpack totalSupply failed", "pool", s.pools[meta.pool].Name, "error", err)
+				failedPools[meta.pool] = true
+				continue
 			}
+			snap.TotalSupply = unpacked[0].(*big.Int)
 
 		case "get_virtual_price":
 			unpacked, err := s.poolABI.Unpack("get_virtual_price", r.ReturnData)
-			if err == nil && len(unpacked) > 0 {
-				snap.VirtualPrice = unpacked[0].(*big.Int)
+			if err != nil || len(unpacked) == 0 {
+				s.logger.Error("unpack get_virtual_price failed", "pool", s.pools[meta.pool].Name, "error", err)
+				failedPools[meta.pool] = true
+				continue
 			}
+			snap.VirtualPrice = unpacked[0].(*big.Int)
 
 		case "A":
 			unpacked, err := s.poolABI.Unpack("A", r.ReturnData)
-			if err == nil && len(unpacked) > 0 {
-				snap.AmpFactor = unpacked[0].(*big.Int).Int64()
+			if err != nil || len(unpacked) == 0 {
+				s.logger.Error("unpack A failed", "pool", s.pools[meta.pool].Name, "error", err)
+				failedPools[meta.pool] = true
+				continue
 			}
+			snap.AmpFactor = unpacked[0].(*big.Int).Int64()
 
 		case "fee":
 			unpacked, err := s.poolABI.Unpack("fee", r.ReturnData)
-			if err == nil && len(unpacked) > 0 {
-				snap.Fee = unpacked[0].(*big.Int)
+			if err != nil || len(unpacked) == 0 {
+				s.logger.Error("unpack fee failed", "pool", s.pools[meta.pool].Name, "error", err)
+				failedPools[meta.pool] = true
+				continue
 			}
+			snap.Fee = unpacked[0].(*big.Int)
 
 		case "coins":
 			unpacked, err := s.poolABI.Unpack("coins", r.ReturnData)
-			if err == nil && len(unpacked) > 0 {
-				addr := unpacked[0].(common.Address)
-				if meta.index < len(snap.CoinBalances) {
-					snap.CoinBalances[meta.index].Address = addr
-				}
+			if err != nil || len(unpacked) == 0 {
+				s.logger.Error("unpack coins failed", "pool", s.pools[meta.pool].Name, "error", err)
+				failedPools[meta.pool] = true
+				continue
+			}
+			addr := unpacked[0].(common.Address)
+			if meta.index < len(snap.CoinBalances) {
+				snap.CoinBalances[meta.index].Address = addr
 			}
 
 		case "price_oracle":
+			// Optional — don't fail the pool
 			unpacked, err := s.poolABI.Unpack("price_oracle", r.ReturnData)
 			if err == nil && len(unpacked) > 0 {
 				price := unpacked[0].(*big.Int)
