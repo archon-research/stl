@@ -34,11 +34,11 @@ spec:
                 name: arbitrum-watcher
           resources:
             requests:
-              cpu: "2000m"
-              memory: "4096Mi"
+              cpu: "100m"
+              memory: "128Mi"
             limits:
-              cpu: "2000m"
-              memory: "4096Mi"
+              cpu: "100m"
+              memory: "128Mi"
           livenessProbe:
             exec:
               command: ["/bin/sh", "-c", "pgrep -f watcher"]

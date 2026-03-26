@@ -28,11 +28,11 @@ spec:
                 name: unichain-backup-worker
           resources:
             requests:
-              cpu: "500m"
-              memory: "1024Mi"
+              cpu: "50m"
+              memory: "64Mi"
             limits:
-              cpu: "500m"
-              memory: "1024Mi"
+              cpu: "200m"
+              memory: "256Mi"
           livenessProbe:
             exec:
               command: ["/bin/sh", "-c", "pgrep -f raw_data_backup"]
