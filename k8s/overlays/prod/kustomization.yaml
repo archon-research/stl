@@ -24,6 +24,7 @@ resources:
   - ../../base/arbitrum-backup-worker
   - ../../base/temporal-worker
   - ../../base/prime-debt-indexer
+  - ../../base/migrate
   - external-secrets.yaml
   - configmaps.yaml
 
@@ -102,4 +103,7 @@ images:
     newTag: latest
   - name: prime-debt-indexer
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-prime-debt-indexer
+    newTag: latest
+  - name: migrate
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-migrate
     newTag: latest
