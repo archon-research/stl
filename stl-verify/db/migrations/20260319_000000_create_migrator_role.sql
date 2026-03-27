@@ -35,6 +35,7 @@ BEGIN
     -- Objects created by stl_migrator are owned by it (full DDL access).
     -- App tables are NOT accessible — no blanket grants on existing tables.
     EXECUTE 'GRANT SELECT, INSERT, UPDATE ON migrations TO stl_migrator';
+    EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE migrations_id_seq TO stl_migrator';
     INSERT INTO migrations (filename)
     VALUES ('20260319_000000_create_migrator_role.sql')
     ON CONFLICT (filename) DO NOTHING;
