@@ -7,7 +7,7 @@
 --   - CREATE new tables/sequences/indexes (via GRANT CREATE ON SCHEMA public)
 --   - ALTER/DROP objects it owns (PostgreSQL grants full DDL to the object owner)
 --   - CREATEROLE (needed to create stl_readonly/stl_readwrite on fresh envs)
---   - SELECT/INSERT/UPDATE on the migrations tracking table
+--   - SELECT/INSERT on the migrations tracking table
 --
 -- stl_migrator cannot:
 --   - Read or write application data (SELECT/INSERT/UPDATE/DELETE on app tables)
@@ -34,8 +34,7 @@ BEGIN
     -- Allow stl_migrator to track which migrations have run.
     -- Objects created by stl_migrator are owned by it (full DDL access).
     -- App tables are NOT accessible — no blanket grants on existing tables.
-    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON migrations TO stl_migrator';
-    EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE migrations_id_seq TO stl_migrator';
+    EXECUTE 'GRANT SELECT, INSERT ON migrations TO stl_migrator';
     INSERT INTO migrations (filename)
     VALUES ('20260319_000000_create_migrator_role.sql')
     ON CONFLICT (filename) DO NOTHING;
