@@ -1,7 +1,9 @@
+from decimal import Decimal
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.domain.entities.allocation import AllocationPosition, EthAddress, Star
+from app.domain.entities.allocation import AllocationPosition, EthAddress, ReceiptTokenPosition, Star
 
 
 class PostgresAllocationRepository:
@@ -22,6 +24,65 @@ class PostgresAllocationRepository:
             )
         )
         return [Star(id="0x" + row.address, name=row.name, address="0x" + row.address) for row in result]
+
+    async def get_star(self, address: EthAddress) -> Star | None:
+        result = await self._conn.execute(
+            text("""
+                SELECT DISTINCT p.name, encode(ap.proxy_address, 'hex') AS address
+                FROM allocation_position ap
+                JOIN prime p ON p.id = ap.prime_id
+                WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+                LIMIT 1
+            """),
+            {"proxy_hex": address.hex},
+        )
+        row = result.fetchone()
+        if row is None:
+            return None
+        return Star(id="0x" + row.address, name=row.name, address="0x" + row.address)
+
+    async def list_receipt_token_positions(self, star_id: EthAddress) -> list[ReceiptTokenPosition]:
+        proxy_hex = star_id.hex
+        result = await self._conn.execute(
+            text("""
+                WITH latest_positions AS (
+                    SELECT DISTINCT ON (ap.token_id, ap.proxy_address)
+                        ap.token_id,
+                        ap.balance
+                    FROM allocation_position ap
+                    JOIN prime p ON p.id = ap.prime_id
+                    WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+                    ORDER BY ap.token_id, ap.proxy_address, ap.block_number DESC, ap.block_version DESC
+                )
+                SELECT
+                    rt.id                                        AS receipt_token_id,
+                    rt.symbol                                    AS symbol,
+                    ut.symbol                                    AS underlying_symbol,
+                    pr.name                                      AS protocol_name,
+                    lp.balance,
+                    encode(rt.receipt_token_address, 'hex')      AS token_address
+                FROM latest_positions lp
+                JOIN token t ON t.id = lp.token_id
+                JOIN receipt_token rt ON rt.underlying_token_id = t.id
+                                      OR rt.receipt_token_address = t.address
+                JOIN token ut ON ut.id = rt.underlying_token_id
+                JOIN protocol pr ON pr.id = rt.protocol_id
+                WHERE lp.balance > 0
+                ORDER BY lp.balance DESC
+            """),
+            {"proxy_hex": proxy_hex},
+        )
+        return [
+            ReceiptTokenPosition(
+                receipt_token_id=row.receipt_token_id,
+                symbol=row.symbol,
+                underlying_symbol=row.underlying_symbol,
+                protocol_name=row.protocol_name,
+                balance=Decimal(str(row.balance)),
+                token_address="0x" + row.token_address if row.token_address else "",
+            )
+            for row in result
+        ]
 
     async def list_allocations_by_star(
         self, star_id: EthAddress, block_number: int | None = None

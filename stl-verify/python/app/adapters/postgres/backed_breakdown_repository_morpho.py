@@ -9,14 +9,15 @@ from app.domain.entities.backed_breakdown import (
     CollateralContribution,
 )
 
+_VAULT_ID_SQL = """
+SELECT id FROM morpho_vault WHERE address = :addr AND chain_id = :chain_id
+"""
+
 _MORPHO_BACKED_BREAKDOWN_SQL = """
 WITH morpho_vaults AS (
-      SELECT DISTINCT ap.token_id, t.symbol as alloc_symbol, mv.id as vault_id
-      FROM allocation_position ap
-      JOIN token t ON t.id = ap.token_id
-      JOIN morpho_vault mv ON mv.symbol = t.symbol AND mv.chain_id = t.chain_id
-      WHERE ap.token_id = :backed_asset_id
-        AND t.id != mv.asset_token_id
+      SELECT mv.id as vault_id
+      FROM morpho_vault mv
+      WHERE mv.id = :backed_asset_id
   ),
   vault_users AS (
       SELECT mv.vault_id, u.id as user_id
@@ -127,6 +128,13 @@ class MorphoBackedBreakdownRepository:
         self._engine = engine
         self._protocol_id = protocol_id
 
+    async def resolve_vault_id(self, address: bytes, chain_id: int) -> int | None:
+        """Resolve a Morpho vault's internal ID from its onchain address."""
+        async with self._engine.connect() as conn:
+            result = await conn.execute(text(_VAULT_ID_SQL), {"addr": address, "chain_id": chain_id})
+            row = result.fetchone()
+        return row.id if row is not None else None
+
     async def get_backed_breakdown(self, backed_asset_id: int) -> BackedBreakdown:
         """Execute the Morpho vault backed breakdown query and return domain objects."""
         async with self._engine.connect() as connection:
@@ -149,6 +157,5 @@ class MorphoBackedBreakdownRepository:
 
         return BackedBreakdown(
             backed_asset_id=backed_asset_id,
-            protocol_id=self._protocol_id,
             items=items,
         )

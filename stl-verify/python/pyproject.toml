@@ -11,7 +11,12 @@ dependencies = [
     "pydantic-settings",
     "python-dotenv",
     "web3",
+    "synome-specs",
+    "httpx>=0.28.1",
 ]
+
+[tool.uv.sources]
+synome-specs = { path = "../../../../synome/baekdahl/stl-asc-example-standalone/specs", editable = true }
 
 [project.optional-dependencies]
 dev = [

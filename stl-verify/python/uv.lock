@@ -1544,10 +1544,12 @@ source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "synome-specs" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "web3" },
 ]
@@ -1565,6 +1567,7 @@ dev = [
 requires-dist = [
     { name = "asyncpg" },
     { name = "fastapi" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'dev'" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-settings" },
@@ -1573,11 +1576,17 @@ requires-dist = [
     { name = "python-dotenv" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "sqlalchemy", extras = ["asyncio"] },
+    { name = "synome-specs", editable = "../../../../synome/baekdahl/stl-asc-example-standalone/specs" },
     { name = "testcontainers", extras = ["postgres"], marker = "extra == 'dev'" },
     { name = "uvicorn", extras = ["standard"] },
     { name = "web3" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "synome-specs"
+version = "0.1.0"
+source = { editable = "../../../../synome/baekdahl/stl-asc-example-standalone/specs" }
 
 [[package]]
 name = "testcontainers"

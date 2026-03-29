@@ -23,5 +23,4 @@ class BackedBreakdown:
     """The full amount-first breakdown of collateral backing a debt token."""
 
     backed_asset_id: int
-    protocol_id: int
     items: tuple[CollateralContribution, ...]

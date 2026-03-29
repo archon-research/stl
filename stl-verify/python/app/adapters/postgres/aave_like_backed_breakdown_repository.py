@@ -158,6 +158,5 @@ class AaveLikeBackedBreakdownRepository:
 
         return BackedBreakdown(
             backed_asset_id=backed_asset_id,
-            protocol_id=self._protocol_id,
             items=items,
         )

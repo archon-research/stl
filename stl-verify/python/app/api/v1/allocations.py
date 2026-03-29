@@ -3,6 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
+from axis.asc.entities.assets_by_prime import ASSETS_BY_PRIME
 from fastapi import APIRouter, Depends, Request
 from pydantic import AfterValidator, BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -29,6 +30,17 @@ class StarResponse(BaseModel):
     id: str
     name: str
     address: str
+
+
+class ReceiptTokenPositionResponse(BaseModel):
+    receipt_token_id: int | None
+    symbol: str
+    underlying_symbol: str
+    protocol_name: str
+    balance: Decimal | None
+    token_address: str | None
+    network: str | None
+    indexed: bool
 
 
 class AllocationPositionResponse(BaseModel):
@@ -64,6 +76,31 @@ async def _get_service(engine: AsyncEngine = Depends(_get_engine)) -> Allocation
 async def list_stars(service: AllocationService = Depends(_get_service)):
     stars = await service.list_stars()
     return [StarResponse(id=s.id, name=s.name, address=s.address) for s in stars]
+
+
+@router.get("/stars/{star_id}/receipt-tokens", response_model=list[ReceiptTokenPositionResponse])
+async def list_receipt_tokens(
+    star_id: EthAddressPath,
+    service: AllocationService = Depends(_get_service),
+):
+    positions = await service.list_receipt_token_positions(star_id)
+
+    result = []
+    for p in positions:
+        result.append(
+            ReceiptTokenPositionResponse(
+                receipt_token_id=p.receipt_token_id,
+                symbol=p.symbol,
+                underlying_symbol=p.underlying_symbol,
+                protocol_name=p.protocol_name,
+                balance=p.balance,
+                token_address=p.token_address or None,
+                network=None,
+                indexed=True,
+            )
+        )
+
+    return result
 
 
 @router.get("/stars/{star_id}/allocations", response_model=list[AllocationPositionResponse])
