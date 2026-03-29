@@ -305,6 +305,8 @@ async def _seed_data(db_url: str) -> None:
             conn,
             {
                 "protocol_id": protocol_id,
+                "vault_id": vault_id,
+                "idle_vault_id": idle_vault_id,
                 "vault_token_id": musdc_token_id,
                 "idle_vault_token_id": musdci_token_id,
                 "usdc_id": usdc_id,
@@ -363,10 +365,9 @@ async def test_vault_backed_breakdown(
       WETH: 320,000 (32%)  — 400K * 0.80
       WBTC: 150,000 (15%)  — 300K * 0.50
     """
-    result = await repository.get_backed_breakdown(test_ids["vault_token_id"])
+    result = await repository.get_backed_breakdown(test_ids["vault_id"])
 
-    assert result.backed_asset_id == test_ids["vault_token_id"]
-    assert result.protocol_id == test_ids["protocol_id"]
+    assert result.backed_asset_id == test_ids["vault_id"]
     assert len(result.items) == 3
 
     by_symbol = {item.symbol: item for item in result.items}
@@ -396,21 +397,11 @@ async def test_nonexistent_vault_returns_empty(
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_repository_preserves_protocol_binding_in_result(
-    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
-) -> None:
-    """Morpho result should reflect repository-bound protocol context, not call-site pass-through."""
-    result = await repository.get_backed_breakdown(test_ids["vault_token_id"])
-
-    assert result.protocol_id == test_ids["protocol_id"]
-
-
-@pytest.mark.asyncio(loop_scope="module")
 async def test_items_ordered_by_backed_amount_desc(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
     """Results should be ordered by backed_amount descending."""
-    result = await repository.get_backed_breakdown(test_ids["vault_token_id"])
+    result = await repository.get_backed_breakdown(test_ids["vault_id"])
 
     amounts = [item.backing_usd for item in result.items]
     assert amounts == sorted(amounts, reverse=True)
@@ -421,7 +412,7 @@ async def test_percentages_sum_to_100(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
     """All backing percentages should sum to 100%."""
-    result = await repository.get_backed_breakdown(test_ids["vault_token_id"])
+    result = await repository.get_backed_breakdown(test_ids["vault_id"])
 
     total_pct = sum(item.backing_pct for item in result.items)
     assert total_pct == Decimal("100.00")
@@ -432,7 +423,7 @@ async def test_token_ids_are_populated(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
     """Each item should have the correct token_id."""
-    result = await repository.get_backed_breakdown(test_ids["vault_token_id"])
+    result = await repository.get_backed_breakdown(test_ids["vault_id"])
 
     by_symbol = {item.symbol: item for item in result.items}
 
@@ -454,7 +445,7 @@ async def test_vault_with_no_market_positions_is_fully_idle(
       breakdown and all_backing second-branch are both empty.
       Result: USDC 100% at 500,000.00
     """
-    result = await repository.get_backed_breakdown(test_ids["idle_vault_token_id"])
+    result = await repository.get_backed_breakdown(test_ids["idle_vault_id"])
 
     assert len(result.items) == 1
 

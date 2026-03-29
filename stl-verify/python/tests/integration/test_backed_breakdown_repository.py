@@ -338,7 +338,6 @@ async def test_single_borrower_full_attribution(
     result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
 
     assert result.backed_asset_id == test_ids["sp_usds_id"]
-    assert result.protocol_id == test_ids["protocol_id"]
     assert len(result.items) == 2
 
     by_symbol = {item.symbol: item for item in result.items}
