@@ -103,7 +103,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	apyData, err := s.apyFetcher.FetchAPYs(ctx, s.chainName, poolAddrs)
 	if err != nil {
-		s.logger.Warn("curve API fetch failed, proceeding with partial APY", "error", err)
+		return fmt.Errorf("fetch APYs: %w", err)
 	}
 
 	// Build entities
