@@ -2,6 +2,7 @@ import logging
 import re
 from decimal import Decimal
 
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -22,7 +23,11 @@ from app.services.risk_calculation_service import RiskCalculationService
 logger = logging.getLogger(__name__)
 
 _AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa"})
-_MORPHO    = frozenset({"morpho_blue"})
+_MORPHO = frozenset({"morpho_blue"})
+
+# Protocol names in the DB may use spaces, hyphens, or mixed case (e.g. "Aave V3", "morpho-blue").
+# Normalise to lowercase underscore-separated before matching against the sets above.
+_NORMALIZE_RE = re.compile(r"[\s\-_]+")
 
 _WALLET_LOOKUP_SQL = """
 SELECT ap.proxy_address
@@ -56,19 +61,17 @@ class RiskServiceFactory:
         if info is None:
             return None
 
-        # Normalize: strip whitespace, lowercase, replace spaces/hyphens with underscores,
-        # then collapse any runs of underscores.
-        normalized = re.sub(r"_+", "_", info.protocol_name.strip().casefold().replace(" ", "_").replace("-", "_"))
+        normalized = _NORMALIZE_RE.sub("_", info.protocol_name.strip().casefold())
         breakdown_repo: BackedBreakdownRepository
         liq_repo: LiquidationParamsRepository
         share_port: AllocationSharePort
 
         if normalized in _AAVE_LIKE:
             breakdown_repo = AaveLikeBackedBreakdownRepository(self._engine, info.protocol_id)
-            liq_repo       = AaveLikeLiquidationParamsRepository(self._engine, info.protocol_id)
-            asset_id       = info.underlying_token_id
-            wallet         = await self._lookup_wallet(info.receipt_token_address, info.chain_id)
-            share_port     = OnchainAllocationShareClient(
+            liq_repo = AaveLikeLiquidationParamsRepository(self._engine, info.protocol_id)
+            asset_id = info.underlying_token_id
+            wallet = await self._lookup_wallet(info.receipt_token_address, info.chain_id)
+            share_port = OnchainAllocationShareClient(
                 receipt_token_address=info.receipt_token_address,
                 wallet_address=wallet,
                 alchemy_url=self._alchemy_url,
@@ -76,18 +79,16 @@ class RiskServiceFactory:
 
         elif normalized in _MORPHO:
             morpho_repo = MorphoBackedBreakdownRepository(self._engine, info.protocol_id)
-            vault_id    = await morpho_repo.resolve_vault_id(info.receipt_token_address, info.chain_id)
+            vault_id = await morpho_repo.resolve_vault_id(info.receipt_token_address, info.chain_id)
             if vault_id is None:
                 raise ValueError(f"morpho vault not found for receipt token {receipt_token_id}")
             breakdown_repo = morpho_repo
-            liq_repo       = MorphoLiquidationParamsRepository(self._engine)
-            asset_id       = vault_id
-            share_port     = FixedAllocationShare(Decimal("1"))  # Morpho breakdown is already vault-scoped
+            liq_repo = MorphoLiquidationParamsRepository(self._engine)
+            asset_id = vault_id
+            share_port = FixedAllocationShare(Decimal("1"))  # Morpho breakdown is already vault-scoped
 
         else:
-            raise ValueError(
-                f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})"
-            )
+            raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
 
         service = RiskCalculationService(
             breakdown_repo=breakdown_repo,
