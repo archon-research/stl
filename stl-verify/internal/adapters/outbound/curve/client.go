@@ -3,7 +3,6 @@ package curve
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -74,50 +73,40 @@ type gaugeEntry struct {
 func (c *Client) FetchAPYs(ctx context.Context, chainName string, pools []common.Address) (map[common.Address]*outbound.APYData, error) {
 	results := make(map[common.Address]*outbound.APYData, len(pools))
 
-	// Build lookup set (lowercase)
 	poolSet := make(map[string]common.Address, len(pools))
 	for _, p := range pools {
 		poolSet[strings.ToLower(p.Hex())] = p
 	}
 
-	var errs []error
-
-	// Fetch base APYs (trading fees) — store both daily and weekly
 	feeAPYs, err := c.fetchBaseAPYs(ctx, chainName)
 	if err != nil {
-		errs = append(errs, fmt.Errorf("base APYs: %w", err))
-	} else {
-		for addrHex, apy := range feeAPYs {
-			if pool, ok := poolSet[addrHex]; ok {
-				results[pool] = &outbound.APYData{
-					FeeAPYDaily:  apy.daily,
-					FeeAPYWeekly: apy.weekly,
-				}
+		return nil, fmt.Errorf("base APYs: %w", err)
+	}
+	for addrHex, apy := range feeAPYs {
+		if pool, ok := poolSet[addrHex]; ok {
+			results[pool] = &outbound.APYData{
+				FeeAPYDaily:  apy.daily,
+				FeeAPYWeekly: apy.weekly,
 			}
 		}
 	}
 
-	// Fetch CRV gauge APYs
 	crvAPYs, err := c.fetchGaugeAPYs(ctx, chainName)
 	if err != nil {
-		errs = append(errs, fmt.Errorf("gauge APYs: %w", err))
-	} else {
-		for addrHex, crv := range crvAPYs {
-			if pool, ok := poolSet[addrHex]; ok {
-				minVal, maxVal := crv[0], crv[1]
-				if existing, ok := results[pool]; ok {
-					existing.CrvAPYMin = &minVal
-					existing.CrvAPYMax = &maxVal
-				} else {
-					results[pool] = &outbound.APYData{CrvAPYMin: &minVal, CrvAPYMax: &maxVal}
-				}
+		return results, fmt.Errorf("gauge APYs: %w", err)
+	}
+	for addrHex, crv := range crvAPYs {
+		if pool, ok := poolSet[addrHex]; ok {
+			minVal, maxVal := crv[0], crv[1]
+			if existing, ok := results[pool]; ok {
+				existing.CrvAPYMin = &minVal
+				existing.CrvAPYMax = &maxVal
+			} else {
+				results[pool] = &outbound.APYData{CrvAPYMin: &minVal, CrvAPYMax: &maxVal}
 			}
 		}
 	}
 
-	if len(errs) > 0 {
-		return results, fmt.Errorf("partial APY failures: %w", errors.Join(errs...))
-	}
 	return results, nil
 }
 
@@ -186,7 +175,7 @@ func (c *Client) fetchGaugeAPYs(ctx context.Context, chainName string) (map[stri
 		if err := json.Unmarshal(v, &gauge); err != nil {
 			continue // skip non-gauge entries (booleans, numbers, etc.)
 		}
-		if gauge.BlockchainID != chainName {
+		if !strings.EqualFold(gauge.BlockchainID, chainName) {
 			continue
 		}
 		if gauge.IsKilled || gauge.HasNoCrv {

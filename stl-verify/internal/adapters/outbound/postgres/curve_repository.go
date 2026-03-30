@@ -55,22 +55,7 @@ func (r *CurveRepository) SaveSnapshots(ctx context.Context, snapshots []*entity
 					fee_apy_daily, fee_apy_weekly, crv_apy_min, crv_apy_max,
 					snapshot_time
 				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-				ON CONFLICT (pool_address, chain_id, block_number, snapshot_time)
-				DO UPDATE SET
-					coin_balances   = EXCLUDED.coin_balances,
-					n_coins         = EXCLUDED.n_coins,
-					total_supply    = EXCLUDED.total_supply,
-					virtual_price   = EXCLUDED.virtual_price,
-					tvl_usd         = EXCLUDED.tvl_usd,
-					amp_factor      = EXCLUDED.amp_factor,
-					fee             = EXCLUDED.fee,
-					oracle_prices   = EXCLUDED.oracle_prices,
-					last_prices     = EXCLUDED.last_prices,
-					exchange_rates  = EXCLUDED.exchange_rates,
-					fee_apy_daily   = EXCLUDED.fee_apy_daily,
-					fee_apy_weekly  = EXCLUDED.fee_apy_weekly,
-					crv_apy_min     = EXCLUDED.crv_apy_min,
-					crv_apy_max     = EXCLUDED.crv_apy_max
+				ON CONFLICT DO NOTHING
 			`,
 				s.PoolAddress,
 				s.ChainID,

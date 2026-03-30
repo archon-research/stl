@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -79,9 +80,9 @@ func NewService(
 func (s *Service) Run(ctx context.Context) error {
 	start := time.Now()
 
-	// Fetch finalized header — deterministic block number and timestamp.
-	// Using finalized avoids persisting orphaned state from reorgs.
-	header, err := s.ethClient.HeaderByNumber(ctx, big.NewInt(-3)) // -3 = finalized
+	// Finalized block (Ethereum post-merge). Safe for mainnet only.
+	// Other chains may need a different finality strategy.
+	header, err := s.ethClient.HeaderByNumber(ctx, big.NewInt(int64(rpc.FinalizedBlockNumber)))
 	if err != nil {
 		return fmt.Errorf("get finalized header: %w", err)
 	}
@@ -111,8 +112,7 @@ func (s *Service) Run(ctx context.Context) error {
 	for _, snap := range snapshots {
 		e, err := s.buildEntity(snap, apyData, blockTime)
 		if err != nil {
-			s.logger.Error("failed to build entity", "pool", snap.PoolAddress.Hex(), "error", err)
-			continue
+			return fmt.Errorf("build entity for %s: %w", snap.PoolAddress.Hex(), err)
 		}
 		entities = append(entities, e)
 	}
