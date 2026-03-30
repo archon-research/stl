@@ -71,7 +71,13 @@ async def get_bad_debt(
         raise HTTPException(status_code=422, detail="gap_pct must be between 0 and 1")
 
     service, asset_id = resolved
-    bad_debt = await service.get_bad_debt(backed_asset_id=asset_id, gap_pct=gap_pct)
+    try:
+        bad_debt = await service.get_bad_debt(backed_asset_id=asset_id, gap_pct=gap_pct)
+    except IOError as exc:
+        # Transient RPC failure after all retries exhausted.
+        raise HTTPException(status_code=502, detail=f"upstream RPC error: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return BadDebtResponse(
         receipt_token_id=receipt_token_id,
         gap_pct=gap_pct,
@@ -86,7 +92,12 @@ async def get_risk_breakdown(
 ) -> RiskBreakdownResponse:
     """Return the full risk-enriched collateral breakdown for a receipt token position."""
     service, asset_id = resolved
-    breakdown = await service.get_risk_breakdown(backed_asset_id=asset_id)
+    try:
+        breakdown = await service.get_risk_breakdown(backed_asset_id=asset_id)
+    except IOError as exc:
+        raise HTTPException(status_code=502, detail=f"upstream RPC error: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return RiskBreakdownResponse(
         receipt_token_id=receipt_token_id,
         items=[

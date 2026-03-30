@@ -51,8 +51,13 @@ async def test_get_share_returns_correct_ratio() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_share_raises_on_zero_total_supply() -> None:
-    """Zero total supply should raise ValueError -- division by zero is a data error."""
+async def test_get_share_returns_zero_on_zero_total_supply() -> None:
+    """Zero total supply returns Decimal('0') with a warning rather than raising.
+
+    A zero total supply is an unexpected state but not a programming error — the
+    caller (RiskCalculationService) will simply produce a zero-valued position,
+    which is preferable to an unhandled exception surfacing as a 500.
+    """
     mock_client = _mock_http_client(
         [
             {"id": 1, "result": "0x" + (0).to_bytes(32, "big").hex()},
@@ -66,8 +71,8 @@ async def test_get_share_raises_on_zero_total_supply() -> None:
         alchemy_url="https://eth-mainnet.g.alchemy.com/v2/FAKE",
         http_client=mock_client,
     )
-    with pytest.raises(ValueError, match="total supply is zero"):
-        await client.get_share()
+    share = await client.get_share()
+    assert share == Decimal("0")
 
 
 @pytest.mark.asyncio

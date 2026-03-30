@@ -53,7 +53,8 @@ class PostgresAllocationRepository:
                     FROM allocation_position ap
                     JOIN prime p ON p.id = ap.prime_id
                     WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-                    ORDER BY ap.token_id, ap.proxy_address, ap.block_number DESC, ap.block_version DESC
+                    ORDER BY ap.token_id, ap.proxy_address,
+                             ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
                 )
                 SELECT DISTINCT ON (rt.id)
                     rt.id                                        AS receipt_token_id,

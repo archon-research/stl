@@ -1,7 +1,12 @@
+import logging
+
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.entities.receipt_token import ReceiptTokenInfo
+
+logger = logging.getLogger(__name__)
 
 _RECEIPT_TOKEN_SQL = """
 SELECT rt.id, rt.protocol_id, rt.underlying_token_id, rt.receipt_token_address,
@@ -19,9 +24,13 @@ class ReceiptTokenRepository:
         self._engine = engine
 
     async def get(self, receipt_token_id: int) -> ReceiptTokenInfo | None:
-        async with self._engine.connect() as conn:
-            result = await conn.execute(text(_RECEIPT_TOKEN_SQL), {"receipt_token_id": receipt_token_id})
-            row = result.fetchone()
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(text(_RECEIPT_TOKEN_SQL), {"receipt_token_id": receipt_token_id})
+                row = result.fetchone()
+        except SQLAlchemyError:
+            logger.exception("receipt_token_repository: DB error fetching receipt_token_id=%d", receipt_token_id)
+            raise
 
         if row is None:
             return None

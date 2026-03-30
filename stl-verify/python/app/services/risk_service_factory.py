@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import httpx
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.onchain.allocation_share_client import (
@@ -30,23 +31,36 @@ _MORPHO = frozenset({"morpho_blue"})
 _NORMALIZE_RE = re.compile(r"[\s\-_]+")
 
 _WALLET_LOOKUP_SQL = """
-SELECT proxy_address, balance FROM (
-    -- Wallets holding the receipt token directly
-    SELECT ap.proxy_address, ap.balance
+WITH latest_receipt AS (
+    -- Most-recent balance snapshot per wallet for the receipt token itself.
+    -- DISTINCT ON ensures we read the current state, not a historical peak.
+    SELECT DISTINCT ON (ap.proxy_address)
+        ap.proxy_address,
+        ap.balance
     FROM allocation_position ap
     JOIN token t ON t.id = ap.token_id AND t.address = :receipt_token_address
-    WHERE ap.chain_id = :chain_id AND ap.balance > 0
-
-    UNION ALL
-
-    -- Wallets holding the underlying token
-    SELECT ap.proxy_address, ap.balance
+    WHERE ap.chain_id = :chain_id
+    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
+),
+latest_underlying AS (
+    -- Most-recent balance snapshot per wallet for the underlying token.
+    SELECT DISTINCT ON (ap.proxy_address)
+        ap.proxy_address,
+        ap.balance
     FROM allocation_position ap
     JOIN token t ON t.id = ap.token_id
     JOIN receipt_token rt ON rt.underlying_token_id = t.id
                          AND rt.receipt_token_address = :receipt_token_address
-    WHERE ap.chain_id = :chain_id AND ap.balance > 0
+    WHERE ap.chain_id = :chain_id
+    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
+)
+SELECT proxy_address, balance
+FROM (
+    SELECT proxy_address, balance FROM latest_receipt
+    UNION ALL
+    SELECT proxy_address, balance FROM latest_underlying
 ) combined
+WHERE balance > 0
 ORDER BY balance DESC
 LIMIT 1
 """
@@ -106,12 +120,21 @@ class RiskServiceFactory:
 
     async def _lookup_wallet(self, receipt_token_address: bytes, chain_id: int) -> bytes:
         """Find the allocator proxy address that currently holds this receipt token."""
-        async with self._engine.connect() as conn:
-            result = await conn.execute(
-                text(_WALLET_LOOKUP_SQL).execution_options(timeout=5.0),
-                {"receipt_token_address": receipt_token_address, "chain_id": chain_id},
+        token_hex = receipt_token_address.hex()
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(
+                    text(_WALLET_LOOKUP_SQL).execution_options(timeout=5.0),
+                    {"receipt_token_address": receipt_token_address, "chain_id": chain_id},
+                )
+                row = result.fetchone()
+        except SQLAlchemyError:
+            logger.exception(
+                "risk_service_factory: DB error looking up wallet for receipt_token=%s chain_id=%d",
+                token_hex,
+                chain_id,
             )
-            row = result.fetchone()
+            raise
         if row is None:
-            raise ValueError(f"no active allocation position found for receipt token {receipt_token_address.hex()}")
+            raise ValueError(f"no active allocation position found for receipt token {token_hex}")
         return bytes(row.proxy_address)

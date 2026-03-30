@@ -47,14 +47,16 @@ class RiskCalculationService:
         for item in breakdown.items:
             if item.token_id not in liq_params:
                 logger.warning(
-                    "Dropping collateral item token_id=%d symbol=%s: missing liquidation params",
+                    "Dropping collateral item backed_asset_id=%d token_id=%d symbol=%s: missing liquidation params",
+                    backed_asset_id,
                     item.token_id,
                     item.symbol,
                 )
                 continue
             if item.price_usd is None:
                 logger.warning(
-                    "Dropping collateral item token_id=%d symbol=%s: missing price",
+                    "Dropping collateral item backed_asset_id=%d token_id=%d symbol=%s: missing price",
+                    backed_asset_id,
                     item.token_id,
                     item.symbol,
                 )
