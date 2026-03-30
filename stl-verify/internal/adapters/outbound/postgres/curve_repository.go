@@ -47,19 +47,20 @@ func (r *CurveRepository) SaveSnapshots(ctx context.Context, snapshots []*entity
 		for _, s := range snapshots {
 			batch.Queue(`
 				INSERT INTO curve_pool_snapshot (
-					pool_address, chain_id, block_number,
+					pool_address, chain_id, block_number, block_version,
 					coin_balances, n_coins,
 					total_supply, virtual_price, tvl_usd,
 					amp_factor, fee,
 					oracle_prices, last_prices, exchange_rates,
 					fee_apy_daily, fee_apy_weekly, crv_apy_min, crv_apy_max,
 					snapshot_time
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 				ON CONFLICT DO NOTHING
 			`,
 				s.PoolAddress,
 				s.ChainID,
 				s.BlockNumber,
+				s.BlockVersion,
 				s.CoinBalances,
 				s.NCoins,
 				s.TotalSupply,

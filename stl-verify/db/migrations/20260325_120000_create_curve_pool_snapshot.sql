@@ -2,9 +2,11 @@
 -- Stores composition, TVL, prices, params, and APY for tracked Curve pools.
 --
 -- Note: snapshot_time is included in the unique constraint because TimescaleDB
--- requires the partition column in all unique indexes. Idempotency is handled
--- via ON CONFLICT DO UPDATE in the repository layer. snapshot_time is derived
+-- requires the partition column in all unique indexes. snapshot_time is derived
 -- from the block header timestamp, making it deterministic for a given block.
+--
+-- block_version is always 0 because this worker reads finalized blocks only.
+-- Included for schema consistency with other tables and auditability.
 --
 -- Compression strategy (consistent with anchorage/morpho tables):
 -- - Segment by pool_address, chain_id (queries always filter by these)
@@ -16,6 +18,7 @@ CREATE TABLE IF NOT EXISTS curve_pool_snapshot
     pool_address   BYTEA       NOT NULL,
     chain_id       INT         NOT NULL REFERENCES chain (chain_id),
     block_number   BIGINT      NOT NULL,
+    block_version  INT         NOT NULL DEFAULT 0,
 
     -- Pool composition (per-coin balances stored as JSON array)
     -- e.g. [{"coin": "0xa393...", "token_id": 12, "balance": "11732289.24", "decimals": 18}]
@@ -44,7 +47,7 @@ CREATE TABLE IF NOT EXISTS curve_pool_snapshot
     crv_apy_max    NUMERIC,
 
     snapshot_time  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (pool_address, chain_id, block_number, snapshot_time)
+    UNIQUE (pool_address, chain_id, block_number, block_version, snapshot_time)
 ) WITH (
       tsdb.hypertable,
       tsdb.partition_column = 'snapshot_time',

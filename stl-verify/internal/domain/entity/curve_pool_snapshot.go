@@ -11,6 +11,7 @@ type CurvePoolSnapshot struct {
 	PoolAddress   []byte
 	ChainID       int64
 	BlockNumber   int64
+	BlockVersion  int             // always 0 for finalized blocks
 	CoinBalances  json.RawMessage // JSONB
 	NCoins        int
 	TotalSupply   string // NUMERIC as string
