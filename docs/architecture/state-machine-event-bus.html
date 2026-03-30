@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>State Machine + Event Bus Demo</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f9fafb;
+    color: #111827;
+    min-height: 100vh;
+    padding: 24px 16px;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #6b7280; margin-bottom: 20px; }
+  .controls { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; }
+  button {
+    padding: 7px 18px; border-radius: 8px; font-size: 13px; font-weight: 500;
+    cursor: pointer; border: 1px solid #d1d5db; background: #fff; color: #111827;
+    transition: background 0.2s, color 0.2s, border-color 0.2s;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.run  { background: #111827; color: #fff; border-color: #111827; }
+  button.done { background: #059669; color: #fff; border-color: #059669; }
+  button.insert { background: #ede9fe; color: #5b21b6; border-color: #a78bfa; }
+  button.insert.blocked { background: #fef2f2; color: #dc2626; border-color: #fca5a5; }
+  .hint { font-size: 11px; color: #9ca3af; }
+  .done-msg { font-size: 12px; color: #059669; font-weight: 500; }
+  .msg { padding: 6px 12px; border-radius: 8px; font-size: 12px; font-weight: 500; margin-bottom: 8px; }
+  .msg.ok   { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+  .msg.warn { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #6b7280; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 2px; }
+  svg { display: block; }
+  .scroll { overflow-x: auto; }
+  .log-header { font-size: 12px; font-weight: 500; color: #6b7280; margin: 14px 0 5px; }
+  .log-list { display: flex; flex-direction: column; gap: 3px; max-height: 160px; overflow-y: auto; }
+  .log-entry {
+    display: flex; gap: 10px; align-items: center;
+    padding: 3px 10px; border-radius: 6px; font-size: 12px;
+  }
+  .log-entry .name { font-weight: 600; min-width: 52px; }
+  .log-entry .status { flex: 1; font-size: 11px; }
+  .log-entry .time { font-size: 11px; opacity: 0.5; }
+  .badge-new {
+    font-size: 8px; font-weight: 700; color: #fff; background: #7c3aed;
+    border-radius: 3px; padding: 1px 4px;
+  }
+</style>
+</head>
+<body>
+<h1>State Machine + Event Bus</h1>
+<p class="subtitle">Watch steps activate as dependencies complete — insert new steps mid-run</p>
+
+<div class="controls" id="controls"></div>
+<div id="msg-area"></div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#e9ecef;border:1px solid #adb5bd"></div>PENDING</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ffc107;border:1px solid #f0a500"></div>IN PROGRESS</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#059669;border:1px solid #059669"></div>COMPLETED</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#7c3aed;border:1px solid #7c3aed"></div>DYNAMICALLY INSERTED</div>
+  <div class="legend-item">
+    <svg width="24" height="10"><line x1="0" y1="5" x2="24" y2="5" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4 2"/></svg>
+    dependency
+  </div>
+</div>
+
+<div class="scroll"><svg id="diagram"></svg></div>
+
+<div class="log-header">Event log — events consumed by workers via XReadGroup</div>
+<div class="log-list" id="log-list">
+  <div style="color:#9ca3af;font-size:12px">Press "Run simulation" to start</div>
+</div>
+
+<script>
+// ─── Data ────────────────────────────────────────────────────────────────────
+const INITIAL_STAGES = [
+  { id:"s1", label:"Step 1", sub:"No dependencies",   deps:[],           col:0, row:0, fixed:true },
+  { id:"s2", label:"Step 2", sub:"No dependencies",   deps:[],           col:1, row:0, fixed:true },
+  { id:"s3", label:"Step 3", sub:"Needs Step 1",      deps:["s1"],       col:0, row:1, fixed:true },
+  { id:"s4", label:"Step 4", sub:"Needs Step 1 + 2",  deps:["s1","s2"],  col:1, row:1, fixed:true },
+  { id:"s5", label:"Step 5", sub:"Needs Step 3 + 4",  deps:["s3","s4"],  col:0, row:2, fixed:true },
+];
+
+const INSERTABLE = [
+  {
+    id:"ins1", label:"Step 3b", sub:"Needs Step 3",
+    deps:["s3"], patchDeps:{ s5:["s3","s4","ins1"] },
+    col:1, row:2,
+    isBlocked: () => stMap["s5"] != null && stMap["s5"] !== "pending",
+    warning: "Step 5 already started — insertion blocked.",
+  },
+  {
+    id:"ins2", label:"Step 2b", sub:"Needs Step 2",
+    deps:["s2"], patchDeps:{ s4:["s1","s2","ins2"] },
+    col:2, row:1,
+    isBlocked: () => stMap["s4"] != null && stMap["s4"] !== "pending",
+    warning: "Step 4 already started — insertion blocked.",
+  },
+];
+
+const BASE_DELAYS = { s1:1200, s2:1800, s3:1400, s4:1600, s5:1500, ins1:1100, ins2:900 };
+
+const SC = {
+  pending:     { fill:"#f8f9fa", stroke:"#adb5bd", text:"#6c757d", badge:"#e9ecef", badgeText:"#6c757d" },
+  in_progress: { fill:"#fff3cd", stroke:"#f0a500", text:"#856404", badge:"#ffc107", badgeText:"#212529" },
+  completed:   { fill:"#d1fae5", stroke:"#059669", text:"#065f46", badge:"#059669", badgeText:"#fff"    },
+};
+const SL = { pending:"PENDING", in_progress:"IN PROGRESS", completed:"COMPLETED" };
+
+// ─── Layout ──────────────────────────────────────────────────────────────────
+const SW=150, SH=60, GAP_X=52, GAP_Y=84;
+const COL_X=[40, 40+SW+GAP_X, 40+(SW+GAP_X)*2];
+const ROW_Y=[50, 50+SH+GAP_Y, 50+(SH+GAP_Y)*2];
+const SM_W=COL_X[2]+SW+24, SM_H=ROW_Y[2]+SH+30;
+const BUS_X=SM_W+36, BUS_W=52, BUS_H=SM_H;
+const DB_X=BUS_X+BUS_W+36, DB_Y=SM_H/2-90, DB_W=130;
+const TOTAL_W=DB_X+DB_W+24, TOTAL_H=SM_H+20;
+const busCx=BUS_X+BUS_W/2, busTopY=16, busBottomY=BUS_H-10;
+
+// ─── State ───────────────────────────────────────────────────────────────────
+let stages     = INITIAL_STAGES.map(s=>({...s}));
+let stMap      = {};   // stageId → status string (source of truth for logic)
+let dbMap      = {};   // stageId → status (for DB panel)
+let inserted   = [];
+let running    = false;
+let done       = false;
+let timers     = [];
+let pktId      = 0;
+let logEntries = [];
+
+// ─── SVG helpers ─────────────────────────────────────────────────────────────
+const SVG_NS = "http://www.w3.org/2000/svg";
+function el(tag, attrs={}, parent){
+  const e = document.createElementNS(SVG_NS, tag);
+  for(const [k,v] of Object.entries(attrs)) e.setAttribute(k,v);
+  if(parent) parent.appendChild(e);
+  return e;
+}
+function txt(content, attrs={}, parent){
+  const e = el("text", attrs, parent);
+  e.textContent = content;
+  return e;
+}
+
+// ─── Build static SVG skeleton ───────────────────────────────────────────────
+function buildSVG(){
+  const svg = document.getElementById("diagram");
+  svg.innerHTML = "";
+  svg.setAttribute("width", TOTAL_W);
+  svg.setAttribute("height", TOTAL_H);
+
+  // Defs
+  const defs = el("defs",{},svg);
+  function marker(id, stroke){
+    const m = el("marker",{id,viewBox:"0 0 10 10",refX:"8",refY:"5",markerWidth:"6",markerHeight:"6",orient:"auto-start-reverse"},defs);
+    el("path",{d:"M2 1L8 5L2 9",fill:"none",stroke,strokeWidth:"1.5","stroke-linecap":"round"},m);
+  }
+  marker("arr","#94a3b8");
+  marker("arr-new","#7c3aed");
+  marker("arr-db","#7dd3fc");
+
+  // SM container
+  el("rect",{x:8,y:8,width:SM_W-8,height:SM_H-8,rx:14,fill:"none",stroke:"#d1d5db","stroke-width":1.5,"stroke-dasharray":"6 3"},svg);
+  txt("STATE MACHINE",{x:20,y:24,"font-size":10,fill:"#9ca3af","font-weight":500,"letter-spacing":1},svg);
+
+  // Dep arrows layer
+  el("g",{id:"dep-arrows"},svg);
+
+  // Emit lines layer
+  el("g",{id:"emit-lines"},svg);
+
+  // Packets layer
+  el("g",{id:"packets"},svg);
+
+  // Stage boxes layer
+  el("g",{id:"stage-boxes"},svg);
+
+  // Event bus pipe
+  el("rect",{x:BUS_X,y:busTopY,width:BUS_W,height:busBottomY-busTopY,rx:BUS_W/2,fill:"#eef2ff",stroke:"#a5b4fc","stroke-width":1.5},svg);
+  txt("EVENT",  {x:busCx,y:busTopY+14,"font-size":9,fill:"#4338ca","text-anchor":"middle","font-weight":700,"letter-spacing":0.5},svg);
+  txt("BUS",    {x:busCx,y:busTopY+24,"font-size":9,fill:"#4338ca","text-anchor":"middle","font-weight":700,"letter-spacing":0.5},svg);
+  txt("Redis",  {x:busCx,y:busBottomY-18,"font-size":8,fill:"#6366f1","text-anchor":"middle",opacity:0.7},svg);
+  txt("Streams",{x:busCx,y:busBottomY-8, "font-size":8,fill:"#6366f1","text-anchor":"middle",opacity:0.7},svg);
+  [0.3,0.5,0.7].forEach(t=>txt("↓",{x:busCx,y:busTopY+36+(busBottomY-busTopY-60)*t,"font-size":10,fill:"#a5b4fc","text-anchor":"middle"},svg));
+
+  // Bus→DB arrow
+  el("line",{x1:BUS_X+BUS_W,y1:SM_H/2,x2:DB_X,y2:DB_Y+90,"stroke":"#7dd3fc","stroke-width":1.5,"marker-end":"url(#arr-db)"},svg);
+  txt("persist",{x:BUS_X+BUS_W+4,y:SM_H/2-6,"font-size":9,fill:"#7dd3fc"},svg);
+
+  // DB shell (body drawn dynamically)
+  el("g",{id:"db-group"},svg);
+}
+
+// ─── Render dep arrows ───────────────────────────────────────────────────────
+function renderDeps(){
+  const g = document.getElementById("dep-arrows");
+  g.innerHTML = "";
+  stages.forEach(to=>{
+    to.deps.forEach(fromId=>{
+      const from = stages.find(s=>s.id===fromId);
+      if(!from) return;
+      const isNew = to.isNew || from.isNew;
+      const path = depPath(from, to);
+      el("path",{d:path,fill:"none",
+        stroke:isNew?"#a78bfa":"#cbd5e1",
+        "stroke-width":isNew?2:1.5,
+        "stroke-dasharray":isNew?"4 2":"5 3",
+        "marker-end":isNew?"url(#arr-new)":"url(#arr)"},g);
+    });
+  });
+}
+
+function depPath(from, to){
+  const fx=COL_X[from.col]+SW/2, fy=ROW_Y[from.row]+SH;
+  const tx=COL_X[to.col]+SW/2,   ty=ROW_Y[to.row];
+  if(from.row===to.row){
+    const mx=(fx+tx)/2, my=ROW_Y[from.row]-18;
+    return `M ${fx} ${ROW_Y[from.row]} Q ${mx} ${my} ${tx} ${ty}`;
+  }
+  const my=fy+(ty-fy)/2;
+  return `M ${fx} ${fy} L ${fx} ${my} L ${tx} ${my} L ${tx} ${ty}`;
+}
+
+// ─── Render emit lines ───────────────────────────────────────────────────────
+function renderEmitLines(){
+  const g = document.getElementById("emit-lines");
+  g.innerHTML = "";
+  stages.forEach(s=>{
+    if(COL_X[s.col]+SW >= BUS_X) return;
+    const y=ROW_Y[s.row]+SH/2;
+    el("line",{x1:COL_X[s.col]+SW,y1:y,x2:BUS_X,y2:y,
+      stroke:s.isNew?"#c4b5fd":"#c7d2fe","stroke-width":1,"stroke-dasharray":"4 3",opacity:0.55},g);
+  });
+}
+
+// ─── Render stage boxes ──────────────────────────────────────────────────────
+function renderStages(){
+  const g = document.getElementById("stage-boxes");
+  g.innerHTML = "";
+  stages.forEach(s=>{
+    const x=COL_X[s.col], y=ROW_Y[s.row];
+    const st=stMap[s.id]||"pending";
+    const sc=SC[st];
+    const stroke=s.isNew&&st==="pending"?"#7c3aed":sc.stroke;
+    const sg = el("g",{},g);
+
+    el("rect",{x,y,width:SW,height:SH,rx:10,fill:sc.fill,stroke,
+      "stroke-width":s.isNew?2:1.5,
+      "stroke-dasharray":s.isNew&&st==="pending"?"5 3":"0"},sg);
+
+    if(s.isNew&&st==="pending"){
+      el("rect",{x:x+6,y:y+6,width:28,height:14,rx:4,fill:"#7c3aed"},sg);
+      txt("NEW",{x:x+20,y:y+16,"font-size":8,fill:"#fff","text-anchor":"middle","font-weight":700},sg);
+    }
+    // status badge
+    el("rect",{x:x+SW-80,y:y+8,width:72,height:15,rx:4,fill:sc.badge},sg);
+    txt(SL[st],{x:x+SW-80+36,y:y+18,"font-size":8.5,fill:sc.badgeText,"text-anchor":"middle","font-weight":600,"letter-spacing":0.3},sg);
+
+    txt(s.label,{x:x+10,y:y+24,"font-size":12,fill:sc.text,"font-weight":600},sg);
+    txt(s.sub,  {x:x+10,y:y+40,"font-size":9.5,fill:sc.text,opacity:0.75},sg);
+  });
+}
+
+// ─── Render DB panel ─────────────────────────────────────────────────────────
+function renderDB(){
+  const g = document.getElementById("db-group");
+  g.innerHTML = "";
+  const n=stages.length, dbH=62+n*22+8;
+
+  el("rect",{x:DB_X,y:DB_Y+16,width:DB_W,height:dbH-16,rx:8,fill:"#f0f9ff",stroke:"#7dd3fc","stroke-width":1.5},g);
+  el("ellipse",{cx:DB_X+DB_W/2,cy:DB_Y+16,rx:DB_W/2,ry:12,fill:"#e0f2fe",stroke:"#7dd3fc","stroke-width":1.5},g);
+  el("ellipse",{cx:DB_X+DB_W/2,cy:DB_Y+16,rx:DB_W/2-2,ry:10,fill:"#bae6fd",stroke:"none"},g);
+  txt("PostgreSQL",{x:DB_X+DB_W/2,y:DB_Y+21,"font-size":9,fill:"#0369a1","text-anchor":"middle","font-weight":700,"letter-spacing":0.5},g);
+  txt("DATABASE",  {x:DB_X+DB_W/2,y:DB_Y+38,"font-size":10,fill:"#0369a1","text-anchor":"middle","font-weight":600},g);
+  txt("source of truth",{x:DB_X+DB_W/2,y:DB_Y+50,"font-size":8,fill:"#7dd3fc","text-anchor":"middle"},g);
+  el("line",{x1:DB_X+8,y1:DB_Y+56,x2:DB_X+DB_W-8,y2:DB_Y+56,stroke:"#bae6fd","stroke-width":1},g);
+
+  stages.forEach((s,i)=>{
+    const st=dbMap[s.id]||"pending";
+    const sc=SC[st];
+    el("rect",{x:DB_X+8,y:DB_Y+62+i*22,width:DB_W-16,height:18,rx:4,fill:sc.fill,stroke:sc.stroke,"stroke-width":1},g);
+    if(s.isNew){
+      el("rect",{x:DB_X+10,y:DB_Y+63+i*22,width:20,height:15,rx:3,fill:"#7c3aed"},g);
+      txt("NEW",{x:DB_X+20,y:DB_Y+74+i*22,"font-size":7.5,fill:"#fff","text-anchor":"middle","font-weight":700},g);
+    }
+    txt(s.label,{x:DB_X+(s.isNew?34:14),y:DB_Y+74+i*22,"font-size":9,fill:sc.text,"font-weight":500},g);
+    el("circle",{cx:DB_X+DB_W-16,cy:DB_Y+71+i*22,r:5,fill:sc.badge},g);
+  });
+}
+
+// ─── Render all ──────────────────────────────────────────────────────────────
+function render(){
+  renderDeps();
+  renderEmitLines();
+  renderStages();
+  renderDB();
+  renderControls();
+}
+
+// ─── Packet animation ─────────────────────────────────────────────────────────
+function firePacket(s, status){
+  const y=ROW_Y[s.row]+SH/2;
+  const x1=COL_X[s.col]+SW, x2=BUS_X+BUS_W;
+  const color=status==="completed"?"#059669":status==="in_progress"?"#f0a500":"#7c3aed";
+  const pid=++pktId;
+  const g=document.getElementById("packets");
+  const c=el("circle",{r:5,fill:color,opacity:0.9},g);
+  const am=el("animateMotion",{dur:"0.5s",fill:"freeze","repeat-count":1,
+    path:`M${x1},${y} L${x2},${y}`},c);
+  am.beginElement();
+  const t1=setTimeout(()=>c.remove(),600);
+  const t2=setTimeout(()=>{ dbMap[s.id]=status; renderDB(); },500);
+  timers.push(t1,t2);
+}
+
+// ─── Log ─────────────────────────────────────────────────────────────────────
+function addLog(label, status, isNew){
+  const sc=SC[status];
+  const time=new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+  logEntries.unshift({label,status,isNew,time});
+  if(logEntries.length>40) logEntries.pop();
+  renderLog();
+}
+
+function renderLog(){
+  const el2=document.getElementById("log-list");
+  if(logEntries.length===0){ el2.innerHTML='<div style="color:#9ca3af;font-size:12px">Press "Run simulation" to start</div>'; return; }
+  el2.innerHTML=logEntries.map(e=>{
+    const sc=SC[e.status];
+    return `<div class="log-entry" style="background:${e.isNew?"#ede9fe":sc.fill};border:1px solid ${e.isNew?"#a78bfa":sc.stroke}">
+      ${e.isNew?'<span class="badge-new">NEW</span>':''}
+      <span class="name" style="color:${e.isNew?"#4c1d95":sc.text}">${e.label}</span>
+      <span class="status" style="color:${e.isNew?"#5b21b6":sc.text}">${SL[e.status]}</span>
+      <span class="time">${e.time}</span>
+    </div>`;
+  }).join("");
+}
+
+// ─── Stage scheduling ─────────────────────────────────────────────────────────
+function scheduleStage(stageId, delay){
+  const t1=setTimeout(()=>{
+    const s=stages.find(x=>x.id===stageId);
+    if(!s) return;
+    stMap[stageId]="in_progress";
+    render();
+    firePacket(s,"in_progress");
+    addLog(s.label,"in_progress",s.isNew);
+  }, delay);
+
+  const t2=setTimeout(()=>{
+    const s=stages.find(x=>x.id===stageId);
+    if(!s) return;
+    stMap[stageId]="completed";
+    render();
+    firePacket(s,"completed");
+    addLog(s.label,"completed",s.isNew);
+
+    // Unlock dependents
+    stages.forEach(dep=>{
+      if(stMap[dep.id]) return;
+      if(dep.deps.length===0) return;
+      if(dep.deps.every(d=>stMap[d]==="completed")){
+        scheduleStage(dep.id, BASE_DELAYS[dep.id]||1200);
+      }
+    });
+
+    // Done check
+    const allDone=stages.every(x=>x.id===stageId?true:stMap[x.id]==="completed");
+    if(allDone){ running=false; done=true; render(); }
+  }, delay+(BASE_DELAYS[stageId]||1200));
+
+  timers.push(t1,t2);
+}
+
+// ─── Insert ───────────────────────────────────────────────────────────────────
+function tryInsert(ins){
+  if(inserted.includes(ins.id)){
+    showMsg("warn", `${ins.label} already inserted.`); return;
+  }
+  if(ins.isBlocked()){
+    showMsg("warn", ins.warning); return;
+  }
+
+  const newStage={id:ins.id,label:ins.label,sub:ins.sub,deps:ins.deps,col:ins.col,row:ins.row,isNew:true};
+  stages=stages.map(s=>{
+    if(ins.patchDeps&&ins.patchDeps[s.id]) return {...s,deps:ins.patchDeps[s.id]};
+    return s;
+  });
+  stages=[...stages,newStage];
+  inserted=[...inserted,ins.id];
+  stMap[ins.id]=undefined;
+  dbMap[ins.id]="pending";
+
+  render();
+  showMsg("ok",`✓ ${ins.label} inserted — dependencies of affected steps updated.`);
+
+  if(ins.deps.every(d=>stMap[d]==="completed")){
+    scheduleStage(ins.id,400);
+  }
+}
+
+function showMsg(type, text){
+  const area=document.getElementById("msg-area");
+  area.innerHTML=`<div class="msg ${type}">${text}</div>`;
+  setTimeout(()=>area.innerHTML="",3000);
+}
+
+// ─── Reset ────────────────────────────────────────────────────────────────────
+function reset(){
+  timers.forEach(clearTimeout); timers=[];
+  stages=INITIAL_STAGES.map(s=>({...s}));
+  stMap={}; dbMap={}; inserted=[];
+  running=false; done=false;
+  logEntries=[];
+  document.getElementById("msg-area").innerHTML="";
+  buildSVG();
+  render();
+  renderLog();
+}
+
+// ─── Start ────────────────────────────────────────────────────────────────────
+function start(){
+  if(running) return;
+  reset();
+  running=true;
+  render();
+  setTimeout(()=>{
+    stages.filter(s=>s.deps.length===0).forEach(s=>scheduleStage(s.id,300));
+  },150);
+}
+
+// ─── Controls render ──────────────────────────────────────────────────────────
+function renderControls(){
+  const c=document.getElementById("controls");
+  c.innerHTML="";
+
+  const btn=document.createElement("button");
+  if(done){
+    btn.textContent="↺ Run again"; btn.className="done";
+    btn.onclick=reset;
+  } else if(running){
+    btn.textContent="Running…"; btn.disabled=true; btn.className="run";
+  } else {
+    btn.textContent="▶ Run simulation"; btn.className="run";
+    btn.onclick=start;
+  }
+  c.appendChild(btn);
+
+  if(running && !done){
+    INSERTABLE.filter(i=>!inserted.includes(i.id)).forEach(ins=>{
+      const b=document.createElement("button");
+      const blocked=ins.isBlocked();
+      b.textContent=`+ Insert ${ins.label}`;
+      b.className="insert"+(blocked?" blocked":"");
+      b.title=ins.description||"";
+      b.onclick=()=>tryInsert(ins);
+      c.appendChild(b);
+    });
+  }
+
+  const hint=document.createElement("span");
+  if(done){
+    hint.className="done-msg"; hint.textContent="✓ All steps completed — Book state: CREATED";
+  } else if(!running){
+    hint.className="hint"; hint.textContent="Start the simulation — insert buttons appear mid-run";
+  }
+  c.appendChild(hint);
+}
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+buildSVG();
+render();
+renderLog();
+</script>
+</body>
+</html>

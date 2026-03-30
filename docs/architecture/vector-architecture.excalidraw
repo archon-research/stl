@@ -653,10 +653,6 @@
         {
           "type": "arrow",
           "id": "a_nfat_db"
-        },
-        {
-          "type": "arrow",
-          "id": "a_coll_nfat"
         }
       ],
       "index": "aI",
@@ -809,10 +805,6 @@
         {
           "type": "text",
           "id": "t_collector"
-        },
-        {
-          "type": "arrow",
-          "id": "a_coll_nfat"
         }
       ],
       "index": "aO",
@@ -893,10 +885,10 @@
     {
       "id": "t_box_eventbus",
       "type": "text",
-      "x": 75,
+      "x": 353.8600387573242,
       "y": 467,
-      "width": 660,
-      "height": 20,
+      "width": 102.27992248535156,
+      "height": 25,
       "angle": 0,
       "strokeColor": "#c2255c",
       "backgroundColor": "transparent",
@@ -909,13 +901,13 @@
       "frameId": null,
       "roundness": null,
       "seed": 800002,
-      "version": 2,
-      "versionNonce": 1322898966,
+      "version": 7,
+      "versionNonce": 455390681,
       "isDeleted": false,
       "link": null,
       "locked": false,
       "text": "Event Bus",
-      "fontSize": 14,
+      "fontSize": 20,
       "fontFamily": 1,
       "textAlign": "center",
       "verticalAlign": "top",
@@ -925,44 +917,7 @@
       "lineHeight": 1.25,
       "boundElements": [],
       "index": "aP4",
-      "updated": 1774537695457
-    },
-    {
-      "id": "t_event_newblock",
-      "type": "text",
-      "x": 95,
-      "y": 490,
-      "width": 200,
-      "height": 20,
-      "angle": 0,
-      "strokeColor": "#c2255c",
-      "backgroundColor": "transparent",
-      "fillStyle": "solid",
-      "strokeWidth": 1,
-      "strokeStyle": "solid",
-      "roughness": 0,
-      "opacity": 70,
-      "groupIds": [],
-      "frameId": null,
-      "roundness": null,
-      "seed": 800003,
-      "version": 2,
-      "versionNonce": 82230858,
-      "isDeleted": false,
-      "link": null,
-      "locked": false,
-      "text": "NewBlockData · PositionVerified · NFATRecordCreated · RecordApproved",
-      "fontSize": 10,
-      "fontFamily": 1,
-      "textAlign": "center",
-      "verticalAlign": "middle",
-      "containerId": null,
-      "originalText": "NewBlockData · PositionVerified · NFATRecordCreated · RecordApproved",
-      "autoResize": true,
-      "lineHeight": 1.25,
-      "boundElements": [],
-      "index": "aP6",
-      "updated": 1774537695457
+      "updated": 1774858626241
     },
     {
       "id": "a_bus_nfat",
