@@ -4,14 +4,15 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-# Minimum collateral amount (in loan-token units) to include in the breakdown.
-# Filters out dust positions that would add noise to the percentage calculation.
-_MIN_COLLATERAL_AMOUNT = "0.01"
-
 from app.domain.entities.backed_breakdown import (
     BackedBreakdown,
     CollateralContribution,
 )
+
+# Minimum collateral amount in loan-token units (not USD) to include in the breakdown.
+# Filters out dust positions that would add noise to the percentage calculation.
+_MIN_COLLATERAL_AMOUNT = Decimal("0.01")
+
 
 _VAULT_ID_SQL = """
 SELECT id FROM morpho_vault WHERE address = :addr AND chain_id = :chain_id
@@ -117,7 +118,7 @@ WITH morpho_vaults AS (
   SELECT a.token_id,
          a.symbol,
          round(sum(a.amount)::numeric, 2) as backed_amount,
-         round((sum(a.amount) / t.total_amount * 100)::numeric, 2) as backing_pct
+         round((sum(a.amount) / NULLIF(t.total_amount, 0) * 100)::numeric, 2) as backing_pct
   FROM all_backing a, total t
   GROUP BY a.token_id, a.symbol, t.total_amount
   HAVING sum(a.amount) > {_MIN_COLLATERAL_AMOUNT}

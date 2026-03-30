@@ -1,3 +1,4 @@
+import logging
 from decimal import Decimal
 
 from sqlalchemy import text
@@ -5,6 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.entities.risk import LiquidationParams
 from app.risk_engine.crypto_lending.lif import compute_lif
+
+logger = logging.getLogger(__name__)
 
 # lltv values in morpho_market are assumed to be in [0,1] decimal range (e.g. 0.86 for 86%).
 # When a collateral token appears in multiple markets of the same vault, MIN(lltv) is used
@@ -51,6 +54,12 @@ class MorphoLiquidationParamsRepository:
                 {"backed_asset_id": backed_asset_id, "token_ids": token_ids},
             )
             rows = result.fetchall()
+
+        if not rows:
+            logger.warning(
+                "morpho_liquidation_params: no rows for vault_id=%d token_ids=%s",
+                backed_asset_id, token_ids,
+            )
 
         params = {}
         for row in rows:

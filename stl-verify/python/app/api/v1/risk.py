@@ -1,12 +1,13 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from decimal import Decimal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.api.deps import get_engine
-from app.config import get_settings
+from app.api.deps import get_engine, get_http_client
+from app.config import Settings, get_settings
 from app.services.risk_calculation_service import RiskCalculationService
 from app.services.risk_service_factory import RiskServiceFactory
 
@@ -41,13 +42,15 @@ class RiskBreakdownResponse(BaseModel):
 async def _resolve(
     receipt_token_id: int,
     engine: AsyncEngine = Depends(get_engine),
-) -> AsyncIterator[tuple[RiskCalculationService, int]]:
+    settings: Settings = Depends(get_settings),
+    http_client: httpx.AsyncClient = Depends(get_http_client),
+) -> AsyncGenerator[tuple[RiskCalculationService, int], None]:
     """Resolve receipt token into a service + backed_asset_id, or raise HTTP errors.
 
     Uses ``async with`` + ``yield`` so the DB connection is properly cleaned up.
     """
-    alchemy_url = get_settings().alchemy_http_url.get_secret_value()
-    factory = RiskServiceFactory(engine, alchemy_url=alchemy_url)
+    alchemy_url = settings.alchemy_http_url.get_secret_value()
+    factory = RiskServiceFactory(engine, alchemy_url=alchemy_url, http_client=http_client)
     try:
         result = await factory.create(receipt_token_id)
     except ValueError as exc:

@@ -72,7 +72,7 @@ class RiskCalculationService:
             token_id=item.token_id,
             symbol=item.symbol,
             amount=scaled_backing_value / price_usd,
-            backing_pct=item.backing_pct,  # relative share among collaterals; unchanged because all items are scaled by the same scalar
+            backing_pct=item.backing_pct,
             amount_usd=scaled_backing_value,
             price_usd=price_usd,
             liquidation_threshold=params.liquidation_threshold,

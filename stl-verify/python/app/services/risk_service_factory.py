@@ -2,7 +2,7 @@ import logging
 import re
 from decimal import Decimal
 
-
+import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -30,29 +30,35 @@ _MORPHO = frozenset({"morpho_blue"})
 _NORMALIZE_RE = re.compile(r"[\s\-_]+")
 
 _WALLET_LOOKUP_SQL = """
-SELECT ap.proxy_address
-FROM allocation_position ap
-JOIN token t ON t.id = ap.token_id
-LEFT JOIN receipt_token rt ON rt.underlying_token_id = t.id
-                          AND rt.receipt_token_address = :receipt_token_address
-WHERE (t.address = :receipt_token_address OR rt.id IS NOT NULL)
-  AND ap.chain_id = :chain_id
-  AND ap.balance > 0
-ORDER BY ap.balance DESC, ap.block_number DESC
+SELECT proxy_address, balance FROM (
+    -- Wallets holding the receipt token directly
+    SELECT ap.proxy_address, ap.balance
+    FROM allocation_position ap
+    JOIN token t ON t.id = ap.token_id AND t.address = :receipt_token_address
+    WHERE ap.chain_id = :chain_id AND ap.balance > 0
+
+    UNION ALL
+
+    -- Wallets holding the underlying token
+    SELECT ap.proxy_address, ap.balance
+    FROM allocation_position ap
+    JOIN token t ON t.id = ap.token_id
+    JOIN receipt_token rt ON rt.underlying_token_id = t.id
+                         AND rt.receipt_token_address = :receipt_token_address
+    WHERE ap.chain_id = :chain_id AND ap.balance > 0
+) combined
+ORDER BY balance DESC
 LIMIT 1
 """
-# Matches wallets that hold either the receipt token directly (e.g. spPYUSD) or its
-# underlying token (e.g. PYUSD) — allocation_position may index either depending on
-# which Transfer event was captured. If multiple proxy addresses match, picks the one
-# with the largest current balance. Treat violations as data quality issues.
 
 
 class RiskServiceFactory:
     """Build a RiskCalculationService from a receipt_token_id."""
 
-    def __init__(self, engine: AsyncEngine, alchemy_url: str) -> None:
+    def __init__(self, engine: AsyncEngine, alchemy_url: str, http_client: httpx.AsyncClient) -> None:
         self._engine = engine
         self._alchemy_url = alchemy_url
+        self._http_client = http_client
         self._receipt_token_repo = ReceiptTokenRepository(engine)
 
     async def create(self, receipt_token_id: int) -> tuple[RiskCalculationService, int] | None:
@@ -75,6 +81,7 @@ class RiskServiceFactory:
                 receipt_token_address=info.receipt_token_address,
                 wallet_address=wallet,
                 alchemy_url=self._alchemy_url,
+                http_client=self._http_client,
             )
 
         elif normalized in _MORPHO:
@@ -101,7 +108,7 @@ class RiskServiceFactory:
         """Find the allocator proxy address that currently holds this receipt token."""
         async with self._engine.connect() as conn:
             result = await conn.execute(
-                text(_WALLET_LOOKUP_SQL),
+                text(_WALLET_LOOKUP_SQL).execution_options(timeout=5.0),
                 {"receipt_token_address": receipt_token_address, "chain_id": chain_id},
             )
             row = result.fetchone()

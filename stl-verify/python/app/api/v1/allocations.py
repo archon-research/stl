@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import AfterValidator, BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -40,8 +40,6 @@ class ReceiptTokenPositionResponse(BaseModel):
     protocol_name: str
     balance: Decimal | None
     token_address: str | None
-    network: str | None
-    indexed: bool
 
 
 class AllocationPositionResponse(BaseModel):
@@ -80,6 +78,10 @@ async def list_receipt_tokens(
     star_id: EthAddressPath,
     service: AllocationService = Depends(_get_service),
 ):
+    star = await service.get_star(star_id)
+    if star is None:
+        raise HTTPException(status_code=404, detail="star not found")
+
     positions = await service.list_receipt_token_positions(star_id)
 
     result = []
@@ -91,9 +93,7 @@ async def list_receipt_tokens(
                 underlying_symbol=p.underlying_symbol,
                 protocol_name=p.protocol_name,
                 balance=p.balance,
-                token_address=p.token_address or None,
-                network=None,
-                indexed=True,
+                token_address=p.token_address,
             )
         )
 

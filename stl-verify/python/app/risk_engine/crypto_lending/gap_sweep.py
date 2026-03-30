@@ -5,21 +5,21 @@ from app.domain.entities.risk import RiskEnrichedCollateral
 
 
 def bad_debt_at_gap(item: RiskEnrichedCollateral, gap_pct: Decimal) -> Decimal:
-    """Compute bad debt for one collateral item at a given price gap.
+    """Compute bad debt (≤ 0) for one collateral item at a given price gap.
 
-    Assumes the position is at HF=1 (liquidation trigger). The gap is the
-    fraction of the collateral price that drops before liquidation executes.
+    Assumes the position is at HF=1 (liquidation trigger). The gap models the
+    price decline between liquidation trigger and liquidation execution.
 
     Formula:
-        gross     = amount_usd / liquidation_threshold
-        recoverable = gross × (1 - gap_pct) / liquidation_bonus
-        bad_debt  = min(0, recoverable - amount_usd)
+        collateral_at_trigger = amount_usd / liquidation_threshold
+        recovered_after_gap   = collateral_at_trigger × (1 - gap_pct) / liquidation_bonus
+        bad_debt              = min(0, recovered_after_gap - amount_usd)
 
-    Returns a value ≤ 0. Zero means no bad debt; negative means bad debt.
+    Returns ≤ 0. Zero = fully covered; negative = bad debt in USD.
     """
-    gross = item.amount_usd / item.liquidation_threshold
-    recoverable = gross * (1 - gap_pct) / item.liquidation_bonus
-    return min(Decimal("0"), recoverable - item.amount_usd)
+    collateral_at_trigger = item.amount_usd / item.liquidation_threshold
+    recovered_after_gap = collateral_at_trigger * (1 - gap_pct) / item.liquidation_bonus
+    return min(Decimal("0"), recovered_after_gap - item.amount_usd)
 
 
 def total_bad_debt(items: Iterable[RiskEnrichedCollateral], gap_pct: Decimal) -> Decimal:

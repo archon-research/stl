@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from decimal import Decimal
 
 from app.domain.entities.risk import RiskEnrichedCollateral
@@ -26,16 +27,16 @@ class TestBadDebtAtGap:
 
     def test_small_gap_no_bad_debt(self) -> None:
         """A small gap is absorbed by the buffer (1/LT/LB - 1 > gap)."""
-        # gross = 1000/0.825 = 1212.12; buffer = 1212.12/1.05 - 1000 = 154.4
-        # At gap=0.10: recoverable = 1212.12*(1-0.10)/1.05 = 1038.10 > 1000
+        # collateral_at_trigger = 1000/0.825 = 1212.12; buffer = 1212.12/1.05 - 1000 = 154.4
+        # At gap=0.10: recovered_after_gap = 1212.12*(1-0.10)/1.05 = 1038.10 > 1000
         item = _item("1000", "0.825", "1.05")
         result = bad_debt_at_gap(item, Decimal("0.10"))
         assert result == Decimal("0")
 
     def test_large_gap_produces_bad_debt(self) -> None:
         """A gap larger than the buffer produces negative bad debt."""
-        # gross = 1000/0.825 ≈ 1212.12
-        # At gap=0.40: recoverable = 1212.12*(1-0.40)/1.05 ≈ 692.64 < 1000
+        # collateral_at_trigger = 1000/0.825 ≈ 1212.12
+        # At gap=0.40: recovered_after_gap = 1212.12*(1-0.40)/1.05 ≈ 692.64 < 1000
         # bad_debt = 692.64 - 1000 ≈ -307.36
         item = _item("1000", "0.825", "1.05")
         result = bad_debt_at_gap(item, Decimal("0.40"))
@@ -67,7 +68,7 @@ class TestTotalBadDebt:
         ]
         result = total_bad_debt(items, Decimal("0.15"))
         # Only second item contributes bad debt
-        # gross2 = 500/0.70 ≈ 714.29; recoverable = 714.29*(1-0.15)/1.10 ≈ 551.65 > 500 → no bad debt
+        # collateral_at_trigger2 = 500/0.70 ≈ 714.29; recovered_after_gap = 714.29*(1-0.15)/1.10 ≈ 551.65 > 500 → no bad debt
         # At 0.15 both should be 0 — let's just assert ≤ 0
         assert result <= Decimal("0")
 

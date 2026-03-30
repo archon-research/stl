@@ -28,10 +28,11 @@ class PostgresAllocationRepository:
     async def get_star(self, address: EthAddress) -> Star | None:
         result = await self._conn.execute(
             text("""
-                SELECT DISTINCT p.name, encode(ap.proxy_address, 'hex') AS address
+                SELECT p.name, encode(ap.proxy_address, 'hex') AS address
                 FROM allocation_position ap
                 JOIN prime p ON p.id = ap.prime_id
                 WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+                ORDER BY ap.block_number DESC
                 LIMIT 1
             """),
             {"proxy_hex": address.hex},
@@ -54,7 +55,7 @@ class PostgresAllocationRepository:
                     WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
                     ORDER BY ap.token_id, ap.proxy_address, ap.block_number DESC, ap.block_version DESC
                 )
-                SELECT
+                SELECT DISTINCT ON (rt.id)
                     rt.id                                        AS receipt_token_id,
                     rt.symbol                                    AS symbol,
                     ut.symbol                                    AS underlying_symbol,
@@ -68,7 +69,7 @@ class PostgresAllocationRepository:
                 JOIN token ut ON ut.id = rt.underlying_token_id
                 JOIN protocol pr ON pr.id = rt.protocol_id
                 WHERE lp.balance > 0
-                ORDER BY lp.balance DESC
+                ORDER BY rt.id, lp.balance DESC
             """),
             {"proxy_hex": proxy_hex},
         )
@@ -79,7 +80,7 @@ class PostgresAllocationRepository:
                 underlying_symbol=row.underlying_symbol,
                 protocol_name=row.protocol_name,
                 balance=Decimal(str(row.balance)),
-                token_address="0x" + row.token_address if row.token_address else "",
+                token_address="0x" + row.token_address if row.token_address else None,
             )
             for row in result
         ]

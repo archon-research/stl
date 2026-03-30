@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -16,7 +17,9 @@ def create_app(settings: Settings) -> FastAPI:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         app.state.engine = engine
-        yield
+        async with httpx.AsyncClient() as http_client:
+            app.state.http_client = http_client
+            yield
         await engine.dispose()
 
     application = FastAPI(title="stl-verify", lifespan=lifespan)

@@ -2,17 +2,18 @@ from decimal import Decimal
 
 import httpx
 
-
 _TOTAL_SUPPLY_SELECTOR = "0x18160ddd"
 _BALANCE_OF_SELECTOR   = "0x70a08231"
 
-# Note: This is temporary until we also have this data indexed or can derive it from database numbers
 class OnchainAllocationShareClient:
     """Fetch allocation share via JSON-RPC: balanceOf(wallet) / totalSupply().
 
     Makes a single batched eth_call request to Alchemy to retrieve both values.
     Intended for Aave-like protocols (SparkLend, Aave v2/v3) where the receipt
     token is a standard ERC-20 aToken.
+
+    TODO: Remove this client once allocation share data is indexed or can be
+    derived from database numbers.
     """
 
     def __init__(
@@ -20,7 +21,7 @@ class OnchainAllocationShareClient:
         receipt_token_address: bytes,
         wallet_address: bytes,
         alchemy_url: str,
-        http_client: httpx.AsyncClient | None = None,
+        http_client: httpx.AsyncClient,
     ) -> None:
         if len(receipt_token_address) != 20:
             raise ValueError(f"receipt_token_address must be 20 bytes, got {len(receipt_token_address)}")
@@ -29,7 +30,7 @@ class OnchainAllocationShareClient:
         self._token_addr = "0x" + receipt_token_address.hex()
         self._wallet_addr = "0x" + wallet_address.hex()
         self._alchemy_url = alchemy_url
-        self._http_client = http_client or httpx.AsyncClient()
+        self._http_client = http_client
 
     async def get_share(self) -> Decimal:
         """Return wallet's share of the pool: balanceOf / totalSupply."""

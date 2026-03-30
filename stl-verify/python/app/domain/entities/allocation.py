@@ -45,7 +45,7 @@ class ReceiptTokenPosition:
     underlying_symbol: str
     protocol_name: str
     balance: Decimal
-    token_address: str
+    token_address: str | None
 
 
 @dataclass

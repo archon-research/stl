@@ -1,3 +1,8 @@
+"""Morpho Liquidation Incentive Factor (LIF) computation.
+
+Spec: https://docs.morpho.org/learn/concepts/liquidation/
+"""
+
 from decimal import Decimal
 
 _BETA = Decimal("0.3")  # LIF formula steepness parameter
