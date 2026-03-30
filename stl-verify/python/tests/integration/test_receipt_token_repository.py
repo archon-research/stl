@@ -15,15 +15,11 @@ async def _seed_data(db_url: str) -> None:
     try:
         protocol_id = cast(
             int,
-            await conn.fetchval(
-                "SELECT id FROM protocol WHERE name = 'SparkLend' AND chain_id = 1"
-            ),
+            await conn.fetchval("SELECT id FROM protocol WHERE name = 'SparkLend' AND chain_id = 1"),
         )
         token_id = cast(
             int,
-            await conn.fetchval(
-                "SELECT id FROM token WHERE symbol = 'WETH' AND chain_id = 1"
-            ),
+            await conn.fetchval("SELECT id FROM token WHERE symbol = 'WETH' AND chain_id = 1"),
         )
         rt_id = cast(
             int,

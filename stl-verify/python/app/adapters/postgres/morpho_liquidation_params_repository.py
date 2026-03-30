@@ -58,7 +58,8 @@ class MorphoLiquidationParamsRepository:
         if not rows:
             logger.warning(
                 "morpho_liquidation_params: no rows for vault_id=%d token_ids=%s",
-                backed_asset_id, token_ids,
+                backed_asset_id,
+                token_ids,
             )
 
         params = {}

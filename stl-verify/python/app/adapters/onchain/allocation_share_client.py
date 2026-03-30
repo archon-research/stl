@@ -3,7 +3,8 @@ from decimal import Decimal
 import httpx
 
 _TOTAL_SUPPLY_SELECTOR = "0x18160ddd"
-_BALANCE_OF_SELECTOR   = "0x70a08231"
+_BALANCE_OF_SELECTOR = "0x70a08231"
+
 
 class OnchainAllocationShareClient:
     """Fetch allocation share via JSON-RPC: balanceOf(wallet) / totalSupply().
@@ -55,12 +56,10 @@ class OnchainAllocationShareClient:
         results = {}
         for item in response.json():
             if "error" in item:
-                raise ValueError(
-                    f"eth_call failed for token {self._token_addr}: {item['error']}"
-                )
+                raise ValueError(f"eth_call failed for token {self._token_addr}: {item['error']}")
             results[item["id"]] = item["result"]
         total_supply = int(results[1], 16)
-        balance      = int(results[2], 16)
+        balance = int(results[2], 16)
 
         if total_supply == 0:
             raise ValueError(f"total supply is zero for token {self._token_addr}")

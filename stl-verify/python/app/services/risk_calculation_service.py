@@ -48,13 +48,15 @@ class RiskCalculationService:
             if item.token_id not in liq_params:
                 logger.warning(
                     "Dropping collateral item token_id=%d symbol=%s: missing liquidation params",
-                    item.token_id, item.symbol,
+                    item.token_id,
+                    item.symbol,
                 )
                 continue
             if item.price_usd is None:
                 logger.warning(
                     "Dropping collateral item token_id=%d symbol=%s: missing price",
-                    item.token_id, item.symbol,
+                    item.token_id,
+                    item.symbol,
                 )
                 continue
             enriched.append(self._enrich(item, share, item.price_usd, liq_params[item.token_id]))

@@ -34,9 +34,7 @@ async def test_aave_like_creates_onchain_share_client() -> None:
 
         factory = RiskServiceFactory(engine, alchemy_url="https://fake-alchemy-url", http_client=MagicMock())
         # Patch the wallet lookup to avoid needing a real DB
-        factory._lookup_wallet = AsyncMock(
-            return_value=bytes.fromhex("1601843c5e9bc251a3272907010afa41fa18347e")
-        )
+        factory._lookup_wallet = AsyncMock(return_value=bytes.fromhex("1601843c5e9bc251a3272907010afa41fa18347e"))
 
         await factory.create(receipt_token_id=99)
 

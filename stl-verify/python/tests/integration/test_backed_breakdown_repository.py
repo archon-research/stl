@@ -282,7 +282,9 @@ async def _seed_data(db_url: str) -> None:
 
         # Zero-price token: oracle reports price_usd = 0
         zero_token_id = await insert_token(
-            conn, "ZERO", 18,
+            conn,
+            "ZERO",
+            18,
             b"\xde\xad\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01",
         )
         await _insert_oracle_asset(conn, oracle_id, zero_token_id)

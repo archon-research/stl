@@ -171,9 +171,7 @@ async def test_share_scales_backing_value(
     mock_share_port: AsyncMock,
 ) -> None:
     """backing_value is multiplied by share before the gap formula runs."""
-    mock_breakdown_repo.get_backed_breakdown.return_value = _breakdown(
-        (_contrib(10, "WETH", "100000", "2000"),)
-    )
+    mock_breakdown_repo.get_backed_breakdown.return_value = _breakdown((_contrib(10, "WETH", "100000", "2000"),))
     mock_liq_params_repo.get_params.return_value = {10: _params(10, "0.825", "1.05")}
     mock_share_port.get_share.return_value = Decimal("0.5")
 
@@ -196,9 +194,7 @@ async def test_full_share_leaves_backing_value_unchanged(
     mock_share_port: AsyncMock,
 ) -> None:
     """share=1.0 is a no-op."""
-    mock_breakdown_repo.get_backed_breakdown.return_value = _breakdown(
-        (_contrib(10, "WETH", "10000", "2000"),)
-    )
+    mock_breakdown_repo.get_backed_breakdown.return_value = _breakdown((_contrib(10, "WETH", "10000", "2000"),))
     mock_liq_params_repo.get_params.return_value = {10: _params(10, "0.825", "1.05")}
     mock_share_port.get_share.return_value = Decimal("1")
 
