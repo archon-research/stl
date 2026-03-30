@@ -1,4 +1,4 @@
-# tests/integration/test_morpho_liquidation_params_repository.py
+import datetime
 from decimal import Decimal
 from typing import cast
 
@@ -70,8 +70,6 @@ async def _insert_morpho_market(
 
 
 async def _insert_market_position(conn: asyncpg.Connection, user_id: int, market_id: int) -> None:
-    import datetime
-
     await conn.execute(
         """
         INSERT INTO morpho_market_position

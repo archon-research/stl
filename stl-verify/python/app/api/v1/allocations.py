@@ -1,14 +1,15 @@
 import dataclasses
+from collections.abc import AsyncIterator
 from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from axis.asc.entities.assets_by_prime import ASSETS_BY_PRIME
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from pydantic import AfterValidator, BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
+from app.api.deps import get_engine
 from app.domain.entities.allocation import EthAddress
 from app.services.allocation_service import AllocationService
 
@@ -62,11 +63,7 @@ class AllocationPositionResponse(BaseModel):
     created_at: datetime
 
 
-def _get_engine(request: Request) -> AsyncEngine:
-    return request.app.state.engine
-
-
-async def _get_service(engine: AsyncEngine = Depends(_get_engine)) -> AllocationService:
+async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AsyncIterator[AllocationService]:
     async with engine.connect() as conn:
         repo = PostgresAllocationRepository(conn)
         yield AllocationService(repo)

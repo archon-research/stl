@@ -1,13 +1,19 @@
+from collections.abc import AsyncIterator
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.api.deps import get_engine
+from app.config import get_settings
 from app.services.risk_calculation_service import RiskCalculationService
 from app.services.risk_service_factory import RiskServiceFactory
 
 router = APIRouter()
+
+_ZERO = Decimal("0")
+_ONE = Decimal("1")
 
 
 class BadDebtResponse(BaseModel):
@@ -32,33 +38,36 @@ class RiskBreakdownResponse(BaseModel):
     items: list[RiskBreakdownItemResponse]
 
 
-def _get_engine(request: Request) -> AsyncEngine:
-    return request.app.state.engine
+async def _resolve(
+    receipt_token_id: int,
+    engine: AsyncEngine = Depends(get_engine),
+) -> AsyncIterator[tuple[RiskCalculationService, int]]:
+    """Resolve receipt token into a service + backed_asset_id, or raise HTTP errors.
 
-
-async def _resolve(engine: AsyncEngine, receipt_token_id: int) -> tuple[RiskCalculationService, int]:
-    """Resolve receipt token into a service + backed_asset_id, or raise HTTP errors."""
-    factory = RiskServiceFactory(engine)
+    Uses ``async with`` + ``yield`` so the DB connection is properly cleaned up.
+    """
+    alchemy_url = get_settings().alchemy_http_url.get_secret_value()
+    factory = RiskServiceFactory(engine, alchemy_url=alchemy_url)
     try:
         result = await factory.create(receipt_token_id)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     if result is None:
         raise HTTPException(404, "receipt token not found")
-    return result
+    yield result
 
 
 @router.get("/risk/{receipt_token_id}/bad-debt", response_model=BadDebtResponse)
 async def get_bad_debt(
     receipt_token_id: int,
     gap_pct: Decimal,
-    engine: AsyncEngine = Depends(_get_engine),
+    resolved: tuple[RiskCalculationService, int] = Depends(_resolve),
 ) -> BadDebtResponse:
     """Estimate bad debt for a receipt token position at the given collateral price gap."""
-    if gap_pct < Decimal("0") or gap_pct > Decimal("1"):
+    if not (_ZERO <= gap_pct <= _ONE):
         raise HTTPException(status_code=422, detail="gap_pct must be between 0 and 1")
 
-    service, asset_id = await _resolve(engine, receipt_token_id)
+    service, asset_id = resolved
     bad_debt = await service.get_bad_debt(backed_asset_id=asset_id, gap_pct=gap_pct)
     return BadDebtResponse(
         receipt_token_id=receipt_token_id,
@@ -70,10 +79,10 @@ async def get_bad_debt(
 @router.get("/risk/{receipt_token_id}/breakdown", response_model=RiskBreakdownResponse)
 async def get_risk_breakdown(
     receipt_token_id: int,
-    engine: AsyncEngine = Depends(_get_engine),
+    resolved: tuple[RiskCalculationService, int] = Depends(_resolve),
 ) -> RiskBreakdownResponse:
     """Return the full risk-enriched collateral breakdown for a receipt token position."""
-    service, asset_id = await _resolve(engine, receipt_token_id)
+    service, asset_id = resolved
     breakdown = await service.get_risk_breakdown(backed_asset_id=asset_id)
     return RiskBreakdownResponse(
         receipt_token_id=receipt_token_id,

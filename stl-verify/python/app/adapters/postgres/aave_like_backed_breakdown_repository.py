@@ -149,7 +149,7 @@ class AaveLikeBackedBreakdownRepository:
             CollateralContribution(
                 token_id=row.token_id,
                 symbol=row.symbol,
-                backing_usd=Decimal(str(row.backing_usd)),
+                backing_value=Decimal(str(row.backing_usd)),
                 backing_pct=Decimal(str(row.backing_pct)),
                 price_usd=Decimal(str(row.price_usd)) if row.price_usd is not None else None,
             )

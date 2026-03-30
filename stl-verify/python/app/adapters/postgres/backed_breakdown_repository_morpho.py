@@ -4,6 +4,10 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+# Minimum collateral amount (in loan-token units) to include in the breakdown.
+# Filters out dust positions that would add noise to the percentage calculation.
+_MIN_COLLATERAL_AMOUNT = "0.01"
+
 from app.domain.entities.backed_breakdown import (
     BackedBreakdown,
     CollateralContribution,
@@ -13,7 +17,7 @@ _VAULT_ID_SQL = """
 SELECT id FROM morpho_vault WHERE address = :addr AND chain_id = :chain_id
 """
 
-_MORPHO_BACKED_BREAKDOWN_SQL = """
+_MORPHO_BACKED_BREAKDOWN_SQL = f"""
 WITH morpho_vaults AS (
       SELECT mv.id as vault_id
       FROM morpho_vault mv
@@ -101,7 +105,7 @@ WITH morpho_vaults AS (
   ),
   all_backing AS (
       SELECT collateral_token_id as token_id, collateral as symbol, collateral_amount as amount FROM breakdown
-      WHERE collateral_amount > 0.01
+      WHERE collateral_amount > {_MIN_COLLATERAL_AMOUNT}
       UNION ALL
       SELECT loan_token_id, loan_token, sum(idle_loan_amount) FROM breakdown GROUP BY vault_id, loan_token_id, loan_token
       UNION ALL
@@ -116,7 +120,7 @@ WITH morpho_vaults AS (
          round((sum(a.amount) / t.total_amount * 100)::numeric, 2) as backing_pct
   FROM all_backing a, total t
   GROUP BY a.token_id, a.symbol, t.total_amount
-  HAVING sum(a.amount) > 0.01
+  HAVING sum(a.amount) > {_MIN_COLLATERAL_AMOUNT}
   ORDER BY backed_amount DESC
 """
 
@@ -148,7 +152,7 @@ class MorphoBackedBreakdownRepository:
             CollateralContribution(
                 token_id=row.token_id,
                 symbol=row.symbol,
-                backing_usd=Decimal(str(row.backed_amount)),
+                backing_value=Decimal(str(row.backed_amount)),
                 backing_pct=Decimal(str(row.backing_pct)),
                 price_usd=None,
             )

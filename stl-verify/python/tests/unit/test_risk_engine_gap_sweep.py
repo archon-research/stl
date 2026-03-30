@@ -1,4 +1,3 @@
-# tests/unit/test_risk_engine_gap_sweep.py
 from decimal import Decimal
 
 from app.domain.entities.risk import RiskEnrichedCollateral

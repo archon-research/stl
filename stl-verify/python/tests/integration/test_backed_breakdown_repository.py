@@ -345,8 +345,8 @@ async def test_single_borrower_full_attribution(
     assert "WETH" in by_symbol
     assert "cbBTC" in by_symbol
 
-    assert by_symbol["WETH"].backing_usd == Decimal("19333.33")
-    assert by_symbol["cbBTC"].backing_usd == Decimal("16666.67")
+    assert by_symbol["WETH"].backing_value == Decimal("19333.33")
+    assert by_symbol["cbBTC"].backing_value == Decimal("16666.67")
 
     assert by_symbol["WETH"].backing_pct == Decimal("53.7037")
     assert by_symbol["cbBTC"].backing_pct == Decimal("46.2963")
@@ -388,7 +388,7 @@ async def test_latest_debt_snapshot_used_not_summed(
     by_symbol = {item.symbol: item for item in result.items}
     # With incorrect SUM: User 1 has 50,000 spUSDS, User 2 has 10,000.
     # WETH backing would be (20000/45000)×50000 + 10000 = $32,222.22, not $19,333.33.
-    assert by_symbol["WETH"].backing_usd == Decimal("19333.33")
+    assert by_symbol["WETH"].backing_value == Decimal("19333.33")
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -404,4 +404,4 @@ async def test_disabled_collateral_not_attributed(
     """
     result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
     by_symbol = {item.symbol: item for item in result.items}
-    assert by_symbol["WETH"].backing_usd == Decimal("19333.33")
+    assert by_symbol["WETH"].backing_value == Decimal("19333.33")

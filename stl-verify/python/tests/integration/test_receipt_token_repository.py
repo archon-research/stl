@@ -13,7 +13,35 @@ from tests.integration.conftest import store_test_ids
 async def _seed_data(db_url: str) -> None:
     conn = await asyncpg.connect(db_url)
     try:
-        rt_id = cast(int, await conn.fetchval("SELECT id FROM receipt_token WHERE symbol = 'spWETH'"))
+        protocol_id = cast(
+            int,
+            await conn.fetchval(
+                "SELECT id FROM protocol WHERE name = 'SparkLend' AND chain_id = 1"
+            ),
+        )
+        token_id = cast(
+            int,
+            await conn.fetchval(
+                "SELECT id FROM token WHERE symbol = 'WETH' AND chain_id = 1"
+            ),
+        )
+        rt_id = cast(
+            int,
+            await conn.fetchval(
+                """
+                INSERT INTO receipt_token
+                    (protocol_id, underlying_token_id, receipt_token_address, symbol,
+                     created_at_block, chain_id)
+                VALUES ($1, $2, $3, 'spWETH', 16776401, 1)
+                ON CONFLICT ON CONSTRAINT receipt_token_chain_address_unique
+                    DO UPDATE SET symbol = EXCLUDED.symbol
+                RETURNING id
+                """,
+                protocol_id,
+                token_id,
+                bytes.fromhex("59cD1C87501baa753d0B5B5Ab5D8416A45cD71DB"),
+            ),
+        )
         await store_test_ids(conn, {"receipt_token_id": rt_id})
     finally:
         await conn.close()

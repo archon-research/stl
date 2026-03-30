@@ -1,4 +1,3 @@
-# app/adapters/onchain/allocation_share_client.py
 from decimal import Decimal
 
 import httpx
@@ -7,7 +6,7 @@ import httpx
 _TOTAL_SUPPLY_SELECTOR = "0x18160ddd"
 _BALANCE_OF_SELECTOR   = "0x70a08231"
 
-
+# Note: This is temporary until we also have this data indexed or can derive it from database numbers
 class OnchainAllocationShareClient:
     """Fetch allocation share via JSON-RPC: balanceOf(wallet) / totalSupply().
 
@@ -21,6 +20,7 @@ class OnchainAllocationShareClient:
         receipt_token_address: bytes,
         wallet_address: bytes,
         alchemy_url: str,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         if len(receipt_token_address) != 20:
             raise ValueError(f"receipt_token_address must be 20 bytes, got {len(receipt_token_address)}")
@@ -29,10 +29,11 @@ class OnchainAllocationShareClient:
         self._token_addr = "0x" + receipt_token_address.hex()
         self._wallet_addr = "0x" + wallet_address.hex()
         self._alchemy_url = alchemy_url
+        self._http_client = http_client or httpx.AsyncClient()
 
     async def get_share(self) -> Decimal:
         """Return wallet's share of the pool: balanceOf / totalSupply."""
-        padded_wallet = "000000000000000000000000" + self._wallet_addr[2:]
+        padded_wallet = self._wallet_addr[2:].zfill(64)
         payload = [
             {
                 "jsonrpc": "2.0",
@@ -47,9 +48,8 @@ class OnchainAllocationShareClient:
                 "params": [{"to": self._token_addr, "data": _BALANCE_OF_SELECTOR + padded_wallet}, "latest"],
             },
         ]
-        async with httpx.AsyncClient() as client:
-            response = await client.post(self._alchemy_url, json=payload)
-            response.raise_for_status()
+        response = await self._http_client.post(self._alchemy_url, json=payload)
+        response.raise_for_status()
 
         results = {}
         for item in response.json():

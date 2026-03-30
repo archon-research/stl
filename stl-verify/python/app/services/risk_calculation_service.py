@@ -1,3 +1,4 @@
+import logging
 from decimal import Decimal
 
 from app.domain.entities.backed_breakdown import CollateralContribution
@@ -6,6 +7,8 @@ from app.ports.allocation_share_port import AllocationSharePort
 from app.ports.backed_breakdown_repository import BackedBreakdownRepository
 from app.ports.liquidation_params_repository import LiquidationParamsRepository
 from app.risk_engine.crypto_lending import gap_sweep
+
+logger = logging.getLogger(__name__)
 
 
 class RiskCalculationService:
@@ -40,11 +43,22 @@ class RiskCalculationService:
         token_ids = [item.token_id for item in breakdown.items]
         liq_params = await self._liq_params_repo.get_params(backed_asset_id, token_ids)
 
-        return [
-            self._enrich(item, share, item.price_usd, liq_params[item.token_id])
-            for item in breakdown.items
-            if item.token_id in liq_params and item.price_usd is not None
-        ]
+        enriched: list[RiskEnrichedCollateral] = []
+        for item in breakdown.items:
+            if item.token_id not in liq_params:
+                logger.warning(
+                    "Dropping collateral item token_id=%d symbol=%s: missing liquidation params",
+                    item.token_id, item.symbol,
+                )
+                continue
+            if item.price_usd is None:
+                logger.warning(
+                    "Dropping collateral item token_id=%d symbol=%s: missing price",
+                    item.token_id, item.symbol,
+                )
+                continue
+            enriched.append(self._enrich(item, share, item.price_usd, liq_params[item.token_id]))
+        return enriched
 
     @staticmethod
     def _enrich(
@@ -53,13 +67,13 @@ class RiskCalculationService:
         price_usd: Decimal,
         params: LiquidationParams,
     ) -> RiskEnrichedCollateral:
-        scaled_backing_usd = item.backing_usd * share
+        scaled_backing_value = item.backing_value * share
         return RiskEnrichedCollateral(
             token_id=item.token_id,
             symbol=item.symbol,
-            amount=scaled_backing_usd / price_usd,
+            amount=scaled_backing_value / price_usd,
             backing_pct=item.backing_pct,  # relative share among collaterals; unchanged because all items are scaled by the same scalar
-            amount_usd=scaled_backing_usd,
+            amount_usd=scaled_backing_value,
             price_usd=price_usd,
             liquidation_threshold=params.liquidation_threshold,
             liquidation_bonus=params.liquidation_bonus,

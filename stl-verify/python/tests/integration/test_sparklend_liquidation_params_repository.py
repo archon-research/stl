@@ -1,4 +1,3 @@
-# tests/integration/test_sparklend_liquidation_params_repository.py
 from decimal import Decimal
 from typing import cast
 

@@ -1,4 +1,3 @@
-# tests/unit/test_risk_calculation_service.py
 from decimal import Decimal
 from typing import Protocol
 from unittest.mock import AsyncMock
@@ -14,11 +13,11 @@ def _breakdown(items: tuple) -> BackedBreakdown:
     return BackedBreakdown(backed_asset_id=42, items=items)
 
 
-def _contrib(token_id: int, symbol: str, backing_usd: str, price_usd: str | None = "2000") -> CollateralContribution:
+def _contrib(token_id: int, symbol: str, backing_value: str, price_usd: str | None = "2000") -> CollateralContribution:
     return CollateralContribution(
         token_id=token_id,
         symbol=symbol,
-        backing_usd=Decimal(backing_usd),
+        backing_value=Decimal(backing_value),
         backing_pct=Decimal("100"),
         price_usd=Decimal(price_usd) if price_usd is not None else None,
     )
@@ -158,7 +157,7 @@ async def test_get_risk_breakdown_returns_enriched_items(
     item = result.items[0]
     assert item.token_id == 10
     assert item.symbol == "WETH"
-    assert item.amount_usd == Decimal("10000")  # backing_usd passed through
+    assert item.amount_usd == Decimal("10000")  # backing_value passed through
     assert item.price_usd == Decimal("2000")
     assert item.amount == Decimal("5")  # 10000 / 2000
     assert item.liquidation_threshold == Decimal("0.825")
@@ -166,12 +165,12 @@ async def test_get_risk_breakdown_returns_enriched_items(
 
 
 @pytest.mark.asyncio
-async def test_share_scales_backing_usd(
+async def test_share_scales_backing_value(
     mock_breakdown_repo: AsyncMock,
     mock_liq_params_repo: AsyncMock,
     mock_share_port: AsyncMock,
 ) -> None:
-    """backing_usd is multiplied by share before the gap formula runs."""
+    """backing_value is multiplied by share before the gap formula runs."""
     mock_breakdown_repo.get_backed_breakdown.return_value = _breakdown(
         (_contrib(10, "WETH", "100000", "2000"),)
     )
@@ -185,13 +184,13 @@ async def test_share_scales_backing_usd(
     )
     breakdown = await svc.get_risk_breakdown(backed_asset_id=42)
 
-    # backing_usd should be 100000 * 0.5 = 50000
+    # backing_value should be 100000 * 0.5 = 50000
     assert breakdown.items[0].amount_usd == Decimal("50000")
     mock_share_port.get_share.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_full_share_leaves_backing_usd_unchanged(
+async def test_full_share_leaves_backing_value_unchanged(
     mock_breakdown_repo: AsyncMock,
     mock_liq_params_repo: AsyncMock,
     mock_share_port: AsyncMock,

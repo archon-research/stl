@@ -1,15 +1,13 @@
-# tests/unit/test_risk_service_factory.py
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import SecretStr
 
 from app.adapters.onchain.allocation_share_client import FixedAllocationShare, OnchainAllocationShareClient
 from app.services.risk_service_factory import RiskServiceFactory
 
 
-def _make_receipt_token_info(protocol_name: str):
+def _make_receipt_token_info(protocol_name: str) -> MagicMock:
     info = MagicMock()
     info.protocol_name = protocol_name
     info.protocol_id = 1
@@ -29,17 +27,12 @@ async def test_aave_like_creates_onchain_share_client() -> None:
         patch("app.services.risk_service_factory.AaveLikeBackedBreakdownRepository"),
         patch("app.services.risk_service_factory.AaveLikeLiquidationParamsRepository"),
         patch("app.services.risk_service_factory.RiskCalculationService") as mock_svc_cls,
-        patch("app.services.risk_service_factory.get_settings") as mock_get_settings,
     ):
         mock_rt_repo = AsyncMock()
         mock_rt_repo.get.return_value = _make_receipt_token_info("SparkLend")
         mock_rt_repo_cls.return_value = mock_rt_repo
 
-        mock_settings = MagicMock()
-        mock_settings.alchemy_http_url.get_secret_value.return_value = "https://fake-alchemy-url"
-        mock_get_settings.return_value = mock_settings
-
-        factory = RiskServiceFactory(engine)
+        factory = RiskServiceFactory(engine, alchemy_url="https://fake-alchemy-url")
         # Patch the wallet lookup to avoid needing a real DB
         factory._lookup_wallet = AsyncMock(
             return_value=bytes.fromhex("1601843c5e9bc251a3272907010afa41fa18347e")
@@ -70,7 +63,7 @@ async def test_morpho_creates_fixed_share_of_one() -> None:
         mock_morpho_repo.resolve_vault_id = AsyncMock(return_value=55)
         mock_morpho_cls.return_value = mock_morpho_repo
 
-        factory = RiskServiceFactory(engine)
+        factory = RiskServiceFactory(engine, alchemy_url="https://fake-alchemy-url")
         await factory.create(receipt_token_id=99)
 
     _, kwargs = mock_svc_cls.call_args
@@ -89,7 +82,7 @@ async def test_lookup_wallet_raises_when_no_position_found() -> None:
     mock_conn.execute = AsyncMock(return_value=MagicMock(fetchone=MagicMock(return_value=None)))
     engine.connect.return_value = mock_conn
 
-    factory = RiskServiceFactory(engine)
+    factory = RiskServiceFactory(engine, alchemy_url="https://fake-alchemy-url")
     with pytest.raises(ValueError, match="no active allocation position"):
         await factory._lookup_wallet(bytes(20), 1)
 
@@ -106,6 +99,6 @@ async def test_unknown_protocol_raises_value_error() -> None:
         mock_rt_repo.get.return_value = _make_receipt_token_info("unknown_protocol_xyz")
         mock_rt_repo_cls.return_value = mock_rt_repo
 
-        factory = RiskServiceFactory(engine)
+        factory = RiskServiceFactory(engine, alchemy_url="https://fake-alchemy-url")
         with pytest.raises(ValueError, match="unsupported protocol"):
             await factory.create(receipt_token_id=99)
