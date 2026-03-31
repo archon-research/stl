@@ -59,48 +59,48 @@ run:
 # Run the Ethereum watcher (requires dev-up first)
 run-watcher:
 	@echo "==> Running Ethereum watcher (chain_id=1)..."
-	@set -a && . cmd/watcher/.env && [ -f cmd/watcher/.env.local ] && . cmd/watcher/.env.local; set +a && go run ./cmd/watcher
+	@set -a && . cmd/base/watcher/.env && [ -f cmd/base/watcher/.env.local ] && . cmd/base/watcher/.env.local; set +a && go run ./cmd/base/watcher
 
 # Run the Avalanche watcher (requires dev-up first)
 # Avalanche C-Chain does not support trace_block, so traces are disabled.
 run-watcher-avax:
 	@echo "==> Running Avalanche watcher (chain_id=43114)..."
-	@set -a && . cmd/watcher/.env.avax && [ -f cmd/watcher/.env.avax.local ] && . cmd/watcher/.env.avax.local; set +a && go run ./cmd/watcher --enable-traces=false
+	@set -a && . cmd/base/watcher/.env.avax && [ -f cmd/base/watcher/.env.avax.local ] && . cmd/base/watcher/.env.avax.local; set +a && go run ./cmd/base/watcher --enable-traces=false
 
 # Run the oracle price worker (requires dev-up first)
 run-oracle-price-worker:
 	@echo "==> Running oracle price worker..."
-	@set -a && . cmd/oracle-price-worker/.env && [ -f cmd/oracle-price-worker/.env.local ] && . cmd/oracle-price-worker/.env.local; set +a && go run ./cmd/oracle-price-worker
+	@set -a && . cmd/workers/oracle-price-indexer/.env && [ -f cmd/workers/oracle-price-indexer/.env.local ] && . cmd/workers/oracle-price-indexer/.env.local; set +a && go run ./cmd/workers/oracle-price-indexer
 
 # Run the Avalanche oracle price worker (requires dev-up first)
 run-oracle-price-worker-avax:
 	@echo "==> Running Avalanche oracle price worker (chain_id=43114)..."
-	@set -a && . cmd/oracle-price-worker/.env.avax && [ -f cmd/oracle-price-worker/.env.avax.local ] && . cmd/oracle-price-worker/.env.avax.local; set +a && go run ./cmd/oracle-price-worker
+	@set -a && . cmd/workers/oracle-price-indexer/.env.avax && [ -f cmd/workers/oracle-price-indexer/.env.avax.local ] && . cmd/workers/oracle-price-indexer/.env.avax.local; set +a && go run ./cmd/workers/oracle-price-indexer
 
 # Run the Morpho indexer (requires dev-up first)
 run-morpho-indexer:
 	@echo "==> Running Morpho indexer..."
-	@set -a && . cmd/morpho-indexer/.env && [ -f cmd/morpho-indexer/.env.local ] && . cmd/morpho-indexer/.env.local; set +a && go run ./cmd/morpho-indexer
+	@set -a && . cmd/workers/morpho-indexer/.env && [ -f cmd/workers/morpho-indexer/.env.local ] && . cmd/workers/morpho-indexer/.env.local; set +a && go run ./cmd/workers/morpho-indexer
 
 # Run the allocation tracker (requires dev-up first)
 run-allocation-tracker:
 	@echo "==> Running allocation tracker..."
-	@set -a && . cmd/allocation_tracker/.env && [ -f cmd/allocation_tracker/.env.local ] && . cmd/allocation_tracker/.env.local; set +a && go run ./cmd/allocation_tracker
+	@set -a && . cmd/workers/prime-allocation-indexer/.env && [ -f cmd/workers/prime-allocation-indexer/.env.local ] && . cmd/workers/prime-allocation-indexer/.env.local; set +a && go run ./cmd/workers/prime-allocation-indexer
 
 # Run the Avalanche allocation tracker (requires dev-up first)
 run-allocation-tracker-avax:
 	@echo "==> Running Avalanche allocation tracker (chain_id=43114)..."
-	@set -a && . cmd/allocation_tracker/.env.avax && [ -f cmd/allocation_tracker/.env.avax.local ] && . cmd/allocation_tracker/.env.avax.local; set +a && go run ./cmd/allocation_tracker
+	@set -a && . cmd/workers/prime-allocation-indexer/.env.avax && [ -f cmd/workers/prime-allocation-indexer/.env.avax.local ] && . cmd/workers/prime-allocation-indexer/.env.avax.local; set +a && go run ./cmd/workers/prime-allocation-indexer
 
 # Run the SparkLend position tracker (requires dev-up first)
 run-sparklend-position-tracker:
 	@echo "==> Running SparkLend position tracker..."
-	@set -a && . cmd/sparklend-position-tracker/.env && [ -f cmd/sparklend-position-tracker/.env.local ] && . cmd/sparklend-position-tracker/.env.local; set +a && go run ./cmd/sparklend-position-tracker
+	@set -a && . cmd/workers/sparklend-indexer/.env && [ -f cmd/workers/sparklend-indexer/.env.local ] && . cmd/workers/sparklend-indexer/.env.local; set +a && go run ./cmd/workers/sparklend-indexer
 
 # Run the Avalanche SparkLend position tracker (requires dev-up first)
 run-sparklend-position-tracker-avax:
 	@echo "==> Running Avalanche SparkLend position tracker (chain_id=43114)..."
-	@set -a && . cmd/sparklend-position-tracker/.env.avax && [ -f cmd/sparklend-position-tracker/.env.avax.local ] && . cmd/sparklend-position-tracker/.env.avax.local; set +a && go run ./cmd/sparklend-position-tracker
+	@set -a && . cmd/workers/sparklend-indexer/.env.avax && [ -f cmd/workers/sparklend-indexer/.env.avax.local ] && . cmd/workers/sparklend-indexer/.env.avax.local; set +a && go run ./cmd/workers/sparklend-indexer
 
 # Run tests with race detector
 test-race:
@@ -222,7 +222,7 @@ bench-postgres-explain:
 e2e:
 	@echo "==> Running end-to-end tests..."
 	@echo "    This uses testcontainers to spin up PostgreSQL, Redis, and LocalStack."
-	go test -tags=e2e -v -timeout=5m ./cmd/watcher/...
+	go test -tags=e2e -v -timeout=5m ./cmd/base/watcher/...
 
 # Install development tools
 tools:
@@ -727,7 +727,7 @@ docker-release-all:
 	@$(MAKE) _docker-release-prime-debt-indexer-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
-		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV); \
+		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
 		echo ""; \
 	done
 	@echo "==> All Docker images released for ENV=$(ENV)"
@@ -1362,21 +1362,21 @@ erigon-run:
 build-oracle-worker:
 	@echo "==> Building oracle-price-worker..."
 	mkdir -p dist
-	go build -o dist/oracle-price-worker ./cmd/oracle-price-worker
+	go build -o dist/oracle-price-worker ./cmd/workers/oracle-price-indexer
 	@echo "==> Built: dist/oracle-price-worker"
 
 # Build sparklend-position-tracker binary
 build-sparklend-position-tracker:
 	@echo "==> Building sparklend-position-tracker..."
 	mkdir -p dist
-	go build -o dist/sparklend-position-tracker ./cmd/sparklend-position-tracker
+	go build -o dist/sparklend-position-tracker ./cmd/workers/sparklend-indexer
 	@echo "==> Built: dist/sparklend-position-tracker"
 
 # Build allocation-tracker binary
 build-allocation-tracker:
 	@echo "==> Building allocation-tracker..."
 	mkdir -p dist
-	go build -o dist/allocation-tracker ./cmd/allocation_tracker
+	go build -o dist/allocation-tracker ./cmd/workers/prime-allocation-indexer
 	@echo "==> Built: dist/allocation-tracker"
 
 # Pattern rules for cronjob binaries — work for any cronjob under cmd/cronjobs/.
