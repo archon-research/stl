@@ -106,15 +106,6 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: temporal-worker
-data:
-  TEMPORAL_HOST_PORT: temporal-server.temporal:7233
-  TEMPORAL_NAMESPACE: vector
-  CHAIN_ID: "1"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
   name: prime-debt-indexer
 data:
   CHAIN_ID: "1"

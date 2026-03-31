@@ -4,7 +4,7 @@
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
         dev-up dev-up-rebuild dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-temporal-worker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -723,8 +723,6 @@ docker-release-all:
 	@$(MAKE) _docker-release-morpho-indexer-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-allocation-tracker-internal ENV=$(ENV)
-	@echo ""
-	@$(MAKE) _docker-release-temporal-worker-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-prime-debt-indexer-internal ENV=$(ENV)
 	@echo ""

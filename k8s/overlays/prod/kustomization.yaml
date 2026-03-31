@@ -22,7 +22,6 @@ resources:
   - ../../base/unichain-backup-worker
   - ../../base/arbitrum-watcher
   - ../../base/arbitrum-backup-worker
-  - ../../base/temporal-worker
   - ../../base/prime-debt-indexer
   - ../../base/migrate
   - external-secrets.yaml
@@ -97,9 +96,6 @@ images:
   - name: arbitrum-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-backup-worker
-    newTag: "7ec6e04b2723166631f512cd8dd0264f811359b2"
-  - name: temporal-worker
-    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-temporal-worker
     newTag: "7ec6e04b2723166631f512cd8dd0264f811359b2"
   - name: prime-debt-indexer
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-prime-debt-indexer
