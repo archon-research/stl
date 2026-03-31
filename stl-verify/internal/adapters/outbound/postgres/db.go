@@ -91,3 +91,12 @@ func OpenPool(ctx context.Context, cfg DBConfig) (*pgxpool.Pool, error) {
 
 	return pool, nil
 }
+
+// PoolOpener returns a function that opens a connection pool with the given config.
+// This is useful for passing database initialization as a dependency without
+// immediately opening the connection.
+func PoolOpener(cfg DBConfig) func(ctx context.Context) (*pgxpool.Pool, error) {
+	return func(ctx context.Context) (*pgxpool.Pool, error) {
+		return OpenPool(ctx, cfg)
+	}
+}

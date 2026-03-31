@@ -16,13 +16,12 @@
         docker-build-allocation-tracker docker-push-allocation-tracker docker-release-allocation-tracker \
         docker-build-allocation-tracker-staging docker-push-allocation-tracker-staging docker-release-allocation-tracker-staging \
         docker-release-all docker-release-all-staging \
-        docker-build-temporal-worker docker-push-temporal-worker docker-release-temporal-worker \
-        docker-build-temporal-worker-staging docker-push-temporal-worker-staging docker-release-temporal-worker-staging \
+        \
         docker-build-morpho-indexer docker-push-morpho-indexer docker-release-morpho-indexer \
         docker-build-morpho-indexer-staging docker-push-morpho-indexer-staging docker-release-morpho-indexer-staging \
         docker-build-prime-debt-indexer docker-push-prime-debt-indexer docker-release-prime-debt-indexer \
         docker-build-prime-debt-indexer-staging docker-push-prime-debt-indexer-staging docker-release-prime-debt-indexer-staging \
-        run-temporal-worker build-temporal-worker \
+        \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         ecs-deploy-oracle-price-worker ecs-deploy-oracle-price-worker-staging \
         bastion-connect bastion-connect-staging bastion-tailscale-status bastion-tailscale-status-staging \
@@ -33,10 +32,10 @@
 		build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill deploy-oracle-pricing-backfill-worker \
 		build-sparklend-backfill-arm64 deploy-sparklend-backfill erigon-sparklend-backfill \
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-migrate \
-		kind-load-migrate kind-load-watcher kind-load-workers kind-load-temporal-worker \
-		kind-deploy-watcher kind-deploy-workers kind-deploy-temporal-worker \
+		kind-load-migrate kind-load-watcher kind-load-workers kind-load-cronjobs \
+		kind-deploy-watcher kind-deploy-workers kind-deploy-cronjobs generate-cronjob-manifests \
 		kind-redeploy-watcher kind-redeploy-worker \
-		docker-build-migrate docker-build-temporal-worker \
+		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
 		docker-build-mock-blockchain-server docker-push-mock-blockchain-server docker-release-mock-blockchain-server \
 		docker-release-mock-blockchain-server-staging \
@@ -262,7 +261,7 @@ dev-preflight:
 	@command -v kubectl >/dev/null 2>&1 || { echo "ERROR: kubectl not found. Install from https://kubernetes.io/docs/tasks/tools/"; exit 1; }
 	@docker info        >/dev/null 2>&1 || { echo "ERROR: Docker is not running. Start Docker and try again."; exit 1; }
 	@if [ ! -f ../.env.secrets ]; then \
-	  printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\n' | install -m 600 /dev/stdin ../.env.secrets; \
+	  printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\nANCHORAGE_API_KEY=\n' > ../.env.secrets && chmod 600 ../.env.secrets; \
 	  echo ""; \
 	  echo "⚠️  .env.secrets created at the repo root (.env.secrets)"; \
 	  echo "   Fill in ALCHEMY_API_KEY (ask a team member), then run:"; \
@@ -283,44 +282,54 @@ dev-up:
 	@$(MAKE) dev-preflight
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [1/6] Cluster"
+	@echo "  [1/7] Cluster"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(MAKE) kind-create
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [2/6] Infrastructure"
+	@echo "  [2/7] Infrastructure"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	$(MAKE) kind-config kind-secrets kind-infra
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [3/6] Database migrations"
+	@echo "  [3/7] Database migrations"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-migrate:local,docker-build-migrate)
 	$(MAKE) kind-load-migrate kind-migrate
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [4/6] Watcher"
+	@echo "  [4/7] Watcher"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-watcher:local,docker-build-watcher LOCAL=1)
 	$(MAKE) kind-load-watcher kind-deploy-watcher
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [5/6] Workers"
+	@echo "  [5/7] Workers"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-oracle-price-worker:local,docker-build-oracle-price-worker LOCAL=1)
 	$(call build-if-needed,stl-morpho-indexer:local,docker-build-morpho-indexer LOCAL=1)
 	$(call build-if-needed,stl-sparklend-position-tracker:local,docker-build-sparklend-position-tracker LOCAL=1)
 	$(call build-if-needed,stl-prime-debt-indexer:local,docker-build-prime-debt-indexer LOCAL=1)
 	$(MAKE) kind-load-workers kind-deploy-workers
-	$(call build-if-needed,stl-temporal-worker:local,docker-build-temporal-worker LOCAL=1)
-	$(MAKE) kind-load-temporal-worker kind-deploy-temporal-worker
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [6/6] Ready"
+	@echo "  [6/7] Cronjobs (Temporal)"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@for cj in $(CRONJOBS); do \
+	  if [ "$(COLD)" = "1" ] || ! docker image inspect stl-$$cj:local >/dev/null 2>&1; then \
+	    $(MAKE) docker-build-cronjob-$$cj; \
+	  else \
+	    echo "  stl-$$cj:local already present — skipping build (use COLD=1 to force rebuild)"; \
+	  fi; \
+	done
+	$(MAKE) kind-load-cronjobs kind-deploy-cronjobs
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "  [7/7] Ready"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "==> Waiting for all deployments to roll out..."
-	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer temporal-worker; do \
+	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer $(CRONJOBS); do \
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=120s || \
 	    { echo "ERROR: deployment $$dep not ready after 120s"; kubectl --context=$(KUBE_CONTEXT) get pods -n $(KUBE_NS); exit 1; }; \
 	done
@@ -344,7 +353,7 @@ dev-db:
 # Can be re-run independently to refresh secrets without restarting services.
 dev-env:
 	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-watcher-config --query SecretString --output text | jq -r '.alchemy_api_key // empty') || \
-		{ echo "WARNING: Failed to fetch ALCHEMY_API_KEY from AWS Secrets Manager. Set it manually in cmd/watcher/.env"; ALCHEMY_API_KEY=''; }; \
+		{ echo "WARNING: Failed to fetch ALCHEMY_API_KEY from AWS Secrets Manager. Set it manually in .env.secrets"; ALCHEMY_API_KEY=''; }; \
 	printf '%s\n' "ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" > ../.env.secrets && chmod 600 ../.env.secrets; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
@@ -363,7 +372,7 @@ dev-env:
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"ENABLE_BACKFILL=false" \
-		> cmd/watcher/.env && \
+		> cmd/base/watcher/.env && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -381,7 +390,7 @@ dev-env:
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"ENABLE_BACKFILL=false" \
-		> cmd/watcher/.env.avax && \
+		> cmd/base/watcher/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -395,7 +404,7 @@ dev-env:
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"LOG_LEVEL=debug" \
-		> cmd/oracle-price-worker/.env && \
+		> cmd/workers/oracle-price-indexer/.env && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -410,7 +419,7 @@ dev-env:
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"LOG_LEVEL=debug" \
-		> cmd/oracle-price-worker/.env.avax && \
+		> cmd/workers/oracle-price-indexer/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -428,7 +437,7 @@ dev-env:
 		"S3_BUCKET=stl-sentineldevelopment-ethereum-raw" \
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
-		> cmd/sparklend-position-tracker/.env && \
+		> cmd/workers/sparklend-indexer/.env && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -446,7 +455,7 @@ dev-env:
 		"S3_BUCKET=stl-sentineldevelopment-avalanche-raw" \
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
-		> cmd/sparklend-position-tracker/.env.avax && \
+		> cmd/workers/sparklend-indexer/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -464,7 +473,7 @@ dev-env:
 		"S3_BUCKET=stl-sentineldevelopment-ethereum-raw" \
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
-		> cmd/allocation_tracker/.env && \
+		> cmd/workers/prime-allocation-indexer/.env && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -482,7 +491,7 @@ dev-env:
 		"S3_BUCKET=stl-sentineldevelopment-avalanche-raw" \
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
-		> cmd/allocation_tracker/.env.avax && \
+		> cmd/workers/prime-allocation-indexer/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -501,31 +510,48 @@ dev-env:
 		"SQS_WAIT_TIME=1" \
 		"SQS_VISIBILITY_TIMEOUT=30" \
 		"LOG_LEVEL=debug" \
-		> cmd/morpho-indexer/.env
+		> cmd/workers/morpho-indexer/.env
 	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
 		{ echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
-	printf '%s\n' "COINGECKO_API_KEY=$$COINGECKO_API_KEY" >> ../.env.secrets; \
-	printf '%s\n' \
-		"ENVIRONMENT=development" \
-		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
-		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
-		> cmd/price-fetcher/.env
+	printf '%s\n' "COINGECKO_API_KEY=$$COINGECKO_API_KEY" >> ../.env.secrets
 	@printf '%s\n' \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
-		> cmd/oracle-pricing-backfill/.env
+		> cmd/backfillers/oracle-pricing-backfill/.env
 	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text) || \
 		{ echo "WARNING: Failed to fetch ETHERSCAN_API_KEY from AWS Secrets Manager."; ETHERSCAN_API_KEY=''; }; \
-	printf '%s\n' "ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" >> ../.env.secrets; \
-	TIGERDATA_URL=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-tigerdata-readonly --query SecretString --output text | jq -r '.connection_url // empty' | sed 's|@[^:]*:|@localhost:|') || \
-		{ echo "WARNING: Failed to fetch TIGERDATA_URL from AWS Secrets Manager."; TIGERDATA_URL=''; }; \
+	printf '%s\n' "ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" >> ../.env.secrets
+	@ANCHORAGE_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-anchorage-api-key --query SecretString --output text 2>/dev/null) || \
+		{ echo "WARNING: Failed to fetch ANCHORAGE_API_KEY from AWS Secrets Manager."; ANCHORAGE_API_KEY=''; }; \
+	printf '%s\n' "ANCHORAGE_API_KEY=$$ANCHORAGE_API_KEY" >> ../.env.secrets
+	@set -a; . ../.env.secrets; set +a; \
 	printf '%s\n' \
-		"ENVIRONMENT=development" \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
+		"LOG_LEVEL=debug" \
+		> cmd/cronjobs/offchain-price-indexer/.env; \
+	printf '%s\n' \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
 		"ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" \
-		"DATABASE_URL=$$TIGERDATA_URL" \
-		> cmd/data-validator/.env
+		"LOG_LEVEL=debug" \
+		> cmd/cronjobs/watcher-data-validator/.env; \
+	printf '%s\n' \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"ANCHORAGE_API_URL=" \
+		"ANCHORAGE_API_KEY=$$ANCHORAGE_API_KEY" \
+		"ANCHORAGE_PRIME=" \
+		"LOG_LEVEL=debug" \
+		> cmd/cronjobs/anchorage-indexer/.env
 	@echo "Environment files generated (.env.secrets updated)."
-	@echo "Note: data-validator uses staging TigerData. Run 'make tigerdata-tunnel' first."
 
 # Cold start — rebuilds all images from scratch
 dev-up-rebuild:
@@ -1008,77 +1034,6 @@ docker-push-sparklend-position-tracker-staging:
 docker-release-sparklend-position-tracker-staging:
 	@$(MAKE) docker-release-sparklend-position-tracker ENV=sentinelstaging
 
-# =============================================================================
-# Docker Build & Push - Temporal Worker
-# =============================================================================
-
-# ECR repository URL for temporal worker
-ECR_REPO_TEMPORAL_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-temporal-worker
-
-# Build Docker image for temporal worker (ARM64 for Fargate Graviton)
-docker-build-temporal-worker:
-ifdef LOCAL
-	docker build -t stl-temporal-worker:local -f Dockerfile.temporal-worker .
-else
-	@echo "==> Building Temporal Worker Docker image for ARM64..."
-	@echo "    Repository: $(ECR_REPO_TEMPORAL_WORKER)"
-	@echo "    Tag: $(IMAGE_TAG)"
-	@echo "    Commit: $(GIT_COMMIT_FULL)"
-	@echo "    Branch: $(GIT_BRANCH)"
-	docker buildx build --platform linux/arm64 \
-		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
-		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
-		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.temporal-worker \
-		-t $(ECR_REPO_TEMPORAL_WORKER):$(IMAGE_TAG) \
-		-t $(ECR_REPO_TEMPORAL_WORKER):latest \
-		--load .
-endif
-
-# Push temporal worker Docker image to ECR
-docker-push-temporal-worker: ecr-login
-	@echo "==> Pushing Temporal Worker Docker image to ECR..."
-	docker push $(ECR_REPO_TEMPORAL_WORKER):$(IMAGE_TAG)
-	docker push $(ECR_REPO_TEMPORAL_WORKER):latest
-
-# Build and push temporal worker in one step (captures tag at start to ensure consistency)
-docker-release-temporal-worker: ecr-login _docker-release-temporal-worker-internal
-
-_docker-release-temporal-worker-internal:
-	@TAG=$(IMAGE_TAG) && \
-	COMMIT=$$(git rev-parse HEAD) && \
-	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
-	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
-	echo "==> Building Temporal Worker Docker image for ARM64..." && \
-	echo "    Repository: $(ECR_REPO_TEMPORAL_WORKER)" && \
-	echo "    Tag: $$TAG" && \
-	echo "    Commit: $$COMMIT" && \
-	echo "    Branch: $$BRANCH" && \
-	docker buildx build --platform linux/arm64 \
-		--build-arg GIT_COMMIT=$$COMMIT \
-		--build-arg GIT_BRANCH=$$BRANCH \
-		--build-arg BUILD_TIME=$$TIME \
-		-f Dockerfile.temporal-worker \
-		-t $(ECR_REPO_TEMPORAL_WORKER):$$TAG \
-		-t $(ECR_REPO_TEMPORAL_WORKER):latest \
-		--load . && \
-	echo "==> Pushing Temporal Worker Docker image to ECR..." && \
-	docker push $(ECR_REPO_TEMPORAL_WORKER):$$TAG && \
-	docker push $(ECR_REPO_TEMPORAL_WORKER):latest && \
-	echo "==> Temporal Worker Docker image released: $(ECR_REPO_TEMPORAL_WORKER):$$TAG"
-
-# =============================================================================
-# Sentinelstaging Temporal Worker Docker Shortcuts
-# =============================================================================
-
-docker-build-temporal-worker-staging:
-	@$(MAKE) docker-build-temporal-worker ENV=sentinelstaging
-
-docker-push-temporal-worker-staging:
-	@$(MAKE) docker-push-temporal-worker ENV=sentinelstaging
-
-docker-release-temporal-worker-staging:
-	@$(MAKE) docker-release-temporal-worker ENV=sentinelstaging
 
 # =============================================================================
 # Docker Build & Push - Morpho Indexer
@@ -1422,17 +1377,16 @@ build-allocation-tracker:
 	go build -o dist/allocation-tracker ./cmd/allocation_tracker
 	@echo "==> Built: dist/allocation-tracker"
 
-# Build temporal-worker binary
-build-temporal-worker:
-	@echo "==> Building temporal-worker..."
+# Pattern rules for cronjob binaries — work for any cronjob under cmd/cronjobs/.
+build-cronjob-%:
+	@echo "==> Building $*..."
 	mkdir -p dist
-	go build -o dist/temporal-worker ./cmd/temporal-worker
-	@echo "==> Built: dist/temporal-worker"
+	go build -o dist/$* ./cmd/cronjobs/$*
+	@echo "==> Built: dist/$*"
 
-# Run temporal-worker locally (requires dev-up first for Temporal server)
-run-temporal-worker:
-	@echo "==> Running Temporal Worker..."
-	COINGECKO_API_KEY=$${COINGECKO_API_KEY} go run ./cmd/temporal-worker
+run-cronjob-%:
+	@echo "==> Running $*..."
+	@set -a && . cmd/cronjobs/$*/.env && [ -f cmd/cronjobs/$*/.env.local ] && . cmd/cronjobs/$*/.env.local; set +a && go run ./cmd/cronjobs/$*
 
 # Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
 build-oracle-pricing-backfill-arm64:
@@ -1574,12 +1528,13 @@ kind-config:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/config/configmap.yaml -n $(KUBE_NS)
 
 kind-secrets:
-	@test -f ../.env.secrets || printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\n' | install -m 600 /dev/stdin ../.env.secrets
+	@test -f ../.env.secrets || { printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\nANCHORAGE_API_KEY=\n' > ../.env.secrets && chmod 600 ../.env.secrets; }
 	@set -a; . ../.env.secrets; set +a; \
 	kubectl --context=$(KUBE_CONTEXT) create secret generic stl-secrets \
 	  --from-literal=ALCHEMY_API_KEY=$$ALCHEMY_API_KEY \
 	  --from-literal=COINGECKO_API_KEY=$${COINGECKO_API_KEY:-} \
 	  --from-literal=ETHERSCAN_API_KEY=$${ETHERSCAN_API_KEY:-} \
+	  --from-literal=ANCHORAGE_API_KEY=$${ANCHORAGE_API_KEY:-} \
 	  --from-literal=AWS_ACCESS_KEY_ID=test \
 	  --from-literal=AWS_SECRET_ACCESS_KEY=test \
 	  --namespace=$(KUBE_NS) \
@@ -1616,17 +1571,41 @@ kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/workers/ -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
 
-kind-load-temporal-worker:
-	kind load docker-image stl-temporal-worker:local --name $(KIND_CLUSTER)
+# --- Cronjobs (Temporal workers) ---
+# Auto-discovered from cmd/cronjobs/*/main.go — no changes needed when adding a new cronjob.
 
-kind-deploy-temporal-worker:
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/temporal-worker.yaml -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/temporal-worker -n $(KUBE_NS)
+CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/main.go))))
+CRONJOB_DOCKERFILE = cmd/cronjobs/Dockerfile
 
-# Rebuild and redeploy a specific worker. Usage: make kind-redeploy-worker NAME=morpho-indexer
+# Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
+docker-build-cronjob-%:
+	docker build --build-arg CRONJOB=$* -t stl-$*:local -f $(CRONJOB_DOCKERFILE) .
+
+kind-load-cronjobs:
+	@for cj in $(CRONJOBS); do \
+	  kind load docker-image stl-$$cj:local --name $(KIND_CLUSTER); \
+	done
+
+# Regenerate k8s manifests from cmd/cronjobs/ and apply them.
+kind-deploy-cronjobs:
+	go run ./cmd/util/cronjob-manifest
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/cronjobs/ -n $(KUBE_NS)
+	@kubectl --context=$(KUBE_CONTEXT) rollout restart $(addprefix deployment/,$(CRONJOBS)) -n $(KUBE_NS)
+
+# Regenerate cronjob manifests without deploying (for committing to source control).
+generate-cronjob-manifests:
+	go run ./cmd/util/cronjob-manifest
+
+# Rebuild and redeploy a specific worker or cronjob.
+# Usage: make kind-redeploy-worker NAME=morpho-indexer
+#        make kind-redeploy-worker NAME=anchorage-indexer
 kind-redeploy-worker:
 	@test -n "$(NAME)" || { echo "ERROR: NAME is required. Example: make kind-redeploy-worker NAME=morpho-indexer"; exit 1; }
-	$(MAKE) docker-build-$(NAME) LOCAL=1
+	@if echo " $(CRONJOBS) " | grep -q " $(NAME) "; then \
+	  $(MAKE) docker-build-cronjob-$(NAME); \
+	else \
+	  $(MAKE) docker-build-$(NAME) LOCAL=1; \
+	fi
 	kind load docker-image stl-$(NAME):local --name $(KIND_CLUSTER)
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$(NAME) -n $(KUBE_NS)
 

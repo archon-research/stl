@@ -22,7 +22,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s -extldflags '-static'" \
     -o /migrate \
-    ./cmd/migrate
+    ./cmd/util/migrate
 
 # -----------------------------------------------------------------------------
 # Runtime Stage
