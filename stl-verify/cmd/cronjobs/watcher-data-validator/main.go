@@ -13,6 +13,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/etherscan"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/services/data_validator"
@@ -47,6 +48,11 @@ func main() {
 }
 
 func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+	chainID, err := chainutil.RequireChainID()
+	if err != nil {
+		return nil, err
+	}
+
 	etherscanAPIKey, err := env.Require("ETHERSCAN_API_KEY")
 	if err != nil {
 		return nil, err
@@ -54,14 +60,14 @@ func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner
 
 	etherscanClient, err := etherscan.NewClient(etherscan.ClientConfig{
 		APIKey:  etherscanAPIKey,
-		ChainID: int64(deps.ChainID),
+		ChainID: int64(chainID),
 		Logger:  deps.Logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating etherscan client: %w", err)
 	}
 
-	blockStateRepo := postgres.NewBlockStateRepository(deps.Pool, int64(deps.ChainID), deps.Logger)
+	blockStateRepo := postgres.NewBlockStateRepository(deps.Pool, int64(chainID), deps.Logger)
 
 	service, err := data_validator.NewService(
 		data_validator.DefaultConfig(),

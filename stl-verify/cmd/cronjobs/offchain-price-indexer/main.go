@@ -13,6 +13,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coingecko"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/services/offchain_price_fetcher"
@@ -47,6 +48,11 @@ func main() {
 }
 
 func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+	chainID, err := chainutil.RequireChainID()
+	if err != nil {
+		return nil, err
+	}
+
 	apiKey, err := env.Require("COINGECKO_API_KEY")
 	if err != nil {
 		return nil, err
@@ -67,7 +73,7 @@ func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner
 	}
 
 	service, err := offchain_price_fetcher.NewService(offchain_price_fetcher.ServiceConfig{
-		ChainID:     deps.ChainID,
+		ChainID:     chainID,
 		Concurrency: 5,
 		Logger:      deps.Logger,
 	}, provider, priceRepo)

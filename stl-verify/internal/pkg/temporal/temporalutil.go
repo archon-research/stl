@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -47,9 +46,8 @@ type BuildMeta struct {
 
 // Dependencies are the shared resources available to every cronjob's Setup function.
 type Dependencies struct {
-	Pool    *pgxpool.Pool
-	Logger  *slog.Logger
-	ChainID int
+	Pool   *pgxpool.Pool
+	Logger *slog.Logger
 }
 
 // CronjobConfig defines everything needed to run a Temporal cronjob worker.
@@ -107,11 +105,6 @@ func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 		"buildTime", meta.BuildTime,
 	)
 
-	chainID, err := getChainID()
-	if err != nil {
-		return fmt.Errorf("resolving CHAIN_ID: %w", err)
-	}
-
 	pool, err := cfg.OpenDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("connecting to database: %w", err)
@@ -129,9 +122,8 @@ func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 	}
 
 	runner, err := cfg.Setup(ctx, Dependencies{
-		Pool:    pool,
-		Logger:  logger,
-		ChainID: chainID,
+		Pool:   pool,
+		Logger: logger,
 	})
 	if err != nil {
 		return fmt.Errorf("setting up %s: %w", cfg.Name, err)
@@ -247,18 +239,6 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 
 	logger.Info("schedule created", "scheduleID", scheduleID, "interval", intervalDuration)
 	return nil
-}
-
-func getChainID() (int, error) {
-	chainIDStr, err := env.Require("CHAIN_ID")
-	if err != nil {
-		return 0, err
-	}
-	chainID, err := strconv.Atoi(chainIDStr)
-	if err != nil {
-		return 0, fmt.Errorf("CHAIN_ID must be a valid integer: %w", err)
-	}
-	return chainID, nil
 }
 
 func interruptFromContext(ctx context.Context) <-chan any {

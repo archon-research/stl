@@ -106,7 +106,7 @@ func TestCronjobActivities_Execute(t *testing.T) {
 			}
 
 			activityEnv.RegisterActivity(activities.Execute)
-			result, err := activityEnv.ExecuteActivity(activities.Execute)
+			_, err = activityEnv.ExecuteActivity(activities.Execute)
 
 			if !called {
 				t.Fatal("expected runner.Run to be called")
@@ -125,28 +125,19 @@ func TestCronjobActivities_Execute(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			var output CronjobOutput
-			if err := result.Get(&output); err != nil {
-				t.Fatalf("failed to get output: %v", err)
-			}
-			if !output.Success {
-				t.Error("expected output.Success to be true")
-			}
 		})
 	}
 }
 
 func TestCronjobWorkflow(t *testing.T) {
 	tests := []struct {
-		name           string
-		activityResult *CronjobOutput
-		activityErr    error
-		wantErr        bool
-		errContains    string
+		name        string
+		activityErr error
+		wantErr     bool
+		errContains string
 	}{
 		{
-			name:           "successful workflow",
-			activityResult: &CronjobOutput{Success: true},
+			name: "successful workflow",
 		},
 		{
 			name:        "activity returns error",
@@ -161,11 +152,10 @@ func TestCronjobWorkflow(t *testing.T) {
 			suite := &testsuite.WorkflowTestSuite{}
 			env := suite.NewTestWorkflowEnvironment()
 
-			result := tt.activityResult
 			activityErr := tt.activityErr
 			env.RegisterActivityWithOptions(
-				func(_ context.Context) (*CronjobOutput, error) {
-					return result, activityErr
+				func(_ context.Context) error {
+					return activityErr
 				},
 				activity.RegisterOptions{Name: "Execute"},
 			)
@@ -189,13 +179,6 @@ func TestCronjobWorkflow(t *testing.T) {
 
 			if err != nil {
 				t.Fatalf("unexpected workflow error: %v", err)
-			}
-			var wfResult CronjobOutput
-			if err := env.GetWorkflowResult(&wfResult); err != nil {
-				t.Fatalf("failed to get workflow result: %v", err)
-			}
-			if !wfResult.Success {
-				t.Error("expected result.Success to be true")
 			}
 		})
 	}

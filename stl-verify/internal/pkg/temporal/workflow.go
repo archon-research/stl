@@ -25,7 +25,6 @@ type cronjobActivities struct {
 	runner Runner
 }
 
-// newCronjobActivities creates a new cronjobActivities instance.
 func newCronjobActivities(runner Runner) (*cronjobActivities, error) {
 	if runner == nil {
 		return nil, fmt.Errorf("runner cannot be nil")
@@ -33,26 +32,21 @@ func newCronjobActivities(runner Runner) (*cronjobActivities, error) {
 	return &cronjobActivities{runner: runner}, nil
 }
 
-// CronjobOutput is the output of the cronjob workflow and activity.
-type CronjobOutput struct {
-	Success bool `json:"success"`
-}
-
 // Execute runs the cronjob.
-func (a *cronjobActivities) Execute(ctx context.Context) (*CronjobOutput, error) {
+func (a *cronjobActivities) Execute(ctx context.Context) error {
 	logger := activity.GetLogger(ctx)
 	logger.Info("starting cronjob execution")
 
 	if err := a.runner.Run(ctx); err != nil {
-		return nil, fmt.Errorf("running cronjob: %w", err)
+		return fmt.Errorf("running cronjob: %w", err)
 	}
 
 	logger.Info("cronjob execution completed")
-	return &CronjobOutput{Success: true}, nil
+	return nil
 }
 
 // cronjobWorkflow orchestrates a single cronjob activity execution.
-func cronjobWorkflow(ctx workflow.Context) (*CronjobOutput, error) {
+func cronjobWorkflow(ctx workflow.Context) error {
 	logger := workflow.GetLogger(ctx)
 	logger.Info("starting cronjob workflow")
 
@@ -69,12 +63,10 @@ func cronjobWorkflow(ctx workflow.Context) (*CronjobOutput, error) {
 	ctx = workflow.WithActivityOptions(ctx, activityOptions)
 
 	var activities *cronjobActivities
-	var result CronjobOutput
-	err := workflow.ExecuteActivity(ctx, activities.Execute).Get(ctx, &result)
-	if err != nil {
-		return nil, fmt.Errorf("executing cronjob activity: %w", err)
+	if err := workflow.ExecuteActivity(ctx, activities.Execute).Get(ctx, nil); err != nil {
+		return fmt.Errorf("executing cronjob activity: %w", err)
 	}
 
 	logger.Info("cronjob workflow completed")
-	return &CronjobOutput{Success: result.Success}, nil
+	return nil
 }
