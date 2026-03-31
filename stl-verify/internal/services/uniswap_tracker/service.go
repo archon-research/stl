@@ -264,7 +264,11 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 			tickCumulatives := unpacked[0].([]*big.Int)
 			if len(tickCumulatives) == 2 {
 				diff := new(big.Int).Sub(tickCumulatives[1], tickCumulatives[0])
-				avgTick := int(diff.Int64() / int64(s.twapWindow))
+				// Use big.Int.Div for floor division (correct for negative tick deltas).
+				// Go's native / truncates toward zero, which biases negative ticks upward.
+				window := big.NewInt(int64(s.twapWindow))
+				avgTickBig := new(big.Int).Div(diff, window)
+				avgTick := int(avgTickBig.Int64())
 				twapPrice := uniswapv3.ComputePriceFromTick(avgTick)
 				snap.TwapTick = &avgTick
 				snap.TwapPrice = &twapPrice
@@ -451,8 +455,7 @@ func (s *Service) enrichTokenMetadata(ctx context.Context, snapshots []*PoolSnap
 				s.logger.Debug("token not found in DB", "address", addr.Hex(), "chainID", chainID)
 				continue
 			}
-			s.logger.Warn("failed to lookup token ID", "address", addr.Hex(), "error", err)
-			continue
+			return fmt.Errorf("lookup token ID for %s on chain %d: %w", addr.Hex(), chainID, err)
 		}
 		tokenIDs[addr] = id
 	}
@@ -466,16 +469,14 @@ func (s *Service) enrichTokenMetadata(ctx context.Context, snapshots []*PoolSnap
 	if len(ids) > 0 {
 		priceStrings, err := s.tokenRepo.LookupTokenPrices(ctx, ids)
 		if err != nil {
-			s.logger.Warn("failed to lookup token prices", "error", err)
-		} else {
-			for id, priceStr := range priceStrings {
-				p, _, err := new(big.Float).Parse(priceStr, 10)
-				if err != nil {
-					s.logger.Warn("failed to parse price", "tokenID", id, "price", priceStr, "error", err)
-					continue
-				}
-				tokenPrices[id] = p
+			return fmt.Errorf("lookup token prices: %w", err)
+		}
+		for id, priceStr := range priceStrings {
+			p, _, err := new(big.Float).Parse(priceStr, 10)
+			if err != nil {
+				return fmt.Errorf("parse price for token %d (%q): %w", id, priceStr, err)
 			}
+			tokenPrices[id] = p
 		}
 	}
 
