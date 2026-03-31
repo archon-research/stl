@@ -116,5 +116,5 @@ $$
 $$;
 
 INSERT INTO migrations (filename)
-VALUES ('20260317_120000_create_anchorage_tables.sql')
+VALUES ('20260319_120000_create_anchorage_tables.sql')
 ON CONFLICT (filename) DO NOTHING;

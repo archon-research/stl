@@ -3,9 +3,11 @@ package chainutil
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
 // ValidateS3BucketForChain checks that the S3 bucket name has the expected prefix
@@ -37,4 +39,18 @@ func ValidateS3BucketForChain(chainID int64, bucket string, environment string) 
 	}
 
 	return nil
+}
+
+// RequireChainID reads CHAIN_ID from the environment and parses it as an int.
+// Returns an error if the variable is unset or not a valid integer.
+func RequireChainID() (int, error) {
+	s, err := env.Require("CHAIN_ID")
+	if err != nil {
+		return 0, err
+	}
+	id, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("CHAIN_ID must be a valid integer: %w", err)
+	}
+	return id, nil
 }

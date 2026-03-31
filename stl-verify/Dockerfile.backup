@@ -29,8 +29,8 @@ COPY . .
 # Build the binary for target architecture (ARM64 for Fargate)
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s -extldflags '-static' -X main.GitCommit=${GIT_COMMIT} -X main.GitBranch=${GIT_BRANCH} -X main.BuildTime=${BUILD_TIME}" \
-    -o /raw_data_backup \
-    ./cmd/raw_data_backup
+    -o /raw-data-backup \
+    ./cmd/workers/raw-data-backup
 
 # -----------------------------------------------------------------------------
 # Runtime Stage
@@ -46,11 +46,11 @@ RUN adduser -D -g '' appuser
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /raw_data_backup /app/raw_data_backup
+COPY --from=builder /raw-data-backup /app/raw-data-backup
 
 # Use non-root user
 USER appuser
 
 # Expose no ports - this is a background worker
 
-ENTRYPOINT ["/app/raw_data_backup"]
+ENTRYPOINT ["/app/raw-data-backup"]
