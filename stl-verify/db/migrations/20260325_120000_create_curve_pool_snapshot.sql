@@ -1,12 +1,12 @@
 -- Curve Stableswap-NG pool snapshots (periodic state, polled every N minutes).
--- Stores composition, TVL, prices, params, and APY for tracked Curve pools.
+-- Stores composition, TVL, prices, params for tracked Curve pools.
 --
--- Note: snapshot_time is included in the unique constraint because TimescaleDB
--- requires the partition column in all unique indexes. snapshot_time is derived
--- from the block header timestamp, making it deterministic for a given block.
+-- Fee APY is NOT stored — it is computed at query time from virtual_price
+-- deltas between any two snapshots:
+--   fee_apy = (vp_new - vp_old) / vp_old * (365 / days_elapsed)
 --
 -- block_version is always 0 because this worker reads finalized blocks only.
--- Included for schema consistency with other tables and auditability.
+-- snapshot_time is derived from the block header timestamp (deterministic).
 --
 -- Compression strategy (consistent with anchorage/morpho tables):
 -- - Segment by pool_address, chain_id (queries always filter by these)
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS curve_pool_snapshot
 
     -- Pool metrics
     total_supply   NUMERIC     NOT NULL,
-    virtual_price  NUMERIC     NOT NULL,
+    virtual_price  NUMERIC     NOT NULL, -- used to derive fee APY between snapshots
     tvl_usd        NUMERIC,
 
     -- Pool parameters
@@ -36,15 +36,13 @@ CREATE TABLE IF NOT EXISTS curve_pool_snapshot
 
     -- Oracle prices (JSON array, coin i+1 relative to coin 0)
     -- e.g. [{"index": 0, "price": "0.999915871162500393"}]
-    oracle_prices  JSONB, -- EMA prices (manipulation-resistant)
-    last_prices    JSONB, -- spot prices (most recent trade)
-    exchange_rates JSONB, -- get_dy results (1-unit swap outputs)
+    oracle_prices  JSONB,                -- EMA prices (manipulation-resistant)
+    last_prices    JSONB,                -- spot prices (most recent trade)
+    exchange_rates JSONB,                -- get_dy results (1-unit swap outputs)
 
-    -- APY (from Curve API)
-    fee_apy_daily  NUMERIC,
-    fee_apy_weekly NUMERIC,
-    crv_apy_min    NUMERIC,
-    crv_apy_max    NUMERIC,
+    -- Fee APY (computed from virtual_price delta vs previous snapshot)
+    -- NULL on first snapshot for a pool (no prior data to compare)
+    fee_apy        NUMERIC,
 
     snapshot_time  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (pool_address, chain_id, block_number, block_version, snapshot_time)

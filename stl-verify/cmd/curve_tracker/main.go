@@ -12,7 +12,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	curveapi "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/curve"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
@@ -51,7 +50,7 @@ func run(ctx context.Context) error {
 
 	logger.Info("starting curve tracker", "commit", GitCommit)
 
-	// Validate required config upfront — fail fast before opening connections.
+	// Validate required config upfront.
 	dbURL := env.Get("DATABASE_URL", "")
 	if dbURL == "" {
 		return fmt.Errorf("DATABASE_URL is required")
@@ -70,8 +69,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
 	}
 
-	chainName, ok := entity.ChainIDToName[chainID]
-	if !ok {
+	if _, ok := entity.ChainIDToName[chainID]; !ok {
 		return fmt.Errorf("unsupported CHAIN_ID: %d", chainID)
 	}
 
@@ -108,7 +106,7 @@ func run(ctx context.Context) error {
 	// ABIs
 	poolABI, err := abis.GetCurveStableswapNGABI()
 	if err != nil {
-		return fmt.Errorf("curve stableswap-ng abi: %w", err)
+		return fmt.Errorf("curve pool abi: %w", err)
 	}
 
 	erc20ABI, err := abis.GetERC20ABI()
@@ -116,16 +114,10 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("erc20 abi: %w", err)
 	}
 
-	// Curve API client (implements outbound.CurveAPYFetcher)
-	curveClient := curveapi.NewClient(logger)
-	if baseURL := env.Get("CURVE_API_BASE_URL", ""); baseURL != "" {
-		curveClient.SetBaseURL(baseURL)
-	}
-
 	// Repository
 	curveRepo := postgres.NewCurveRepository(dbPool, txm, logger)
 
-	// Service
+	// Service — pure on-chain, no API dependency
 	pools := ct.PoolsForChainID(ct.DefaultPools(), chainID)
 	if len(pools) == 0 {
 		return fmt.Errorf("no Curve pools configured for chain ID %d", chainID)
@@ -136,10 +128,8 @@ func run(ctx context.Context) error {
 		mc,
 		poolABI,
 		erc20ABI,
-		curveClient,
 		curveRepo,
 		pools,
-		chainName,
 		logger,
 	)
 

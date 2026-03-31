@@ -7,6 +7,10 @@ import (
 )
 
 // CurvePoolSnapshot represents a point-in-time state of a Curve pool.
+// Fee APY is not stored — it is computed at query time from virtual_price
+// deltas between any two snapshots:
+//
+//	fee_apy = (vp_new - vp_old) / vp_old × (365 / days_elapsed)
 type CurvePoolSnapshot struct {
 	PoolAddress   []byte
 	ChainID       int64
@@ -22,10 +26,7 @@ type CurvePoolSnapshot struct {
 	OraclePrices  json.RawMessage // JSONB, nullable — EMA prices
 	LastPrices    json.RawMessage // JSONB, nullable — spot prices
 	ExchangeRates json.RawMessage // JSONB, nullable — get_dy results
-	FeeAPYDaily   *string
-	FeeAPYWeekly  *string
-	CrvAPYMin     *string
-	CrvAPYMax     *string
+	FeeAPY        *string         // annualized fee APY from virtual_price delta (nil on first snapshot)
 	SnapshotTime  time.Time
 }
 

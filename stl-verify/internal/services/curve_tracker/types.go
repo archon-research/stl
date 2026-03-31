@@ -24,7 +24,7 @@ func PoolsForChainID(pools []PoolConfig, chainID int64) []PoolConfig {
 	return result
 }
 
-// CoinBalance holds a single coin's balance within a pool snapshot.
+// CoinBalance holds a single coin's balance and metadata within a pool.
 type CoinBalance struct {
 	Address  common.Address `json:"coin"`
 	TokenID  int64          `json:"token_id"`
@@ -48,6 +48,7 @@ type ExchangeRate struct {
 }
 
 // PoolSnapshot holds a complete snapshot of a Curve pool's state.
+// Fee APY is derived at query time from virtual_price deltas between snapshots.
 type PoolSnapshot struct {
 	PoolAddress   common.Address
 	ChainID       int64

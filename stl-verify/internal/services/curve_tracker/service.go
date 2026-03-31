@@ -45,10 +45,8 @@ type Service struct {
 	multicaller outbound.Multicaller
 	poolABI     *abi.ABI
 	erc20ABI    *abi.ABI
-	apyFetcher  outbound.CurveAPYFetcher
 	repo        outbound.CurveRepository
 	pools       []PoolConfig
-	chainName   string
 	logger      *slog.Logger
 }
 
@@ -57,10 +55,8 @@ func NewService(
 	multicaller outbound.Multicaller,
 	poolABI *abi.ABI,
 	erc20ABI *abi.ABI,
-	apyFetcher outbound.CurveAPYFetcher,
 	repo outbound.CurveRepository,
 	pools []PoolConfig,
-	chainName string,
 	logger *slog.Logger,
 ) *Service {
 	return &Service{
@@ -68,15 +64,15 @@ func NewService(
 		multicaller: multicaller,
 		poolABI:     poolABI,
 		erc20ABI:    erc20ABI,
-		apyFetcher:  apyFetcher,
 		repo:        repo,
 		pools:       pools,
-		chainName:   chainName,
 		logger:      logger.With("component", "curve-tracker"),
 	}
 }
 
 // Run executes a single snapshot cycle for all pools.
+// Fee APY is not computed here — it is derived at query time from
+// virtual_price deltas between any two snapshots.
 func (s *Service) Run(ctx context.Context) error {
 	start := time.Now()
 
@@ -96,30 +92,23 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("fetch pool data: %w", err)
 	}
 
-	// Fetch APY data from Curve API (non-fatal)
-	poolAddrs := make([]common.Address, len(s.pools))
-	for i, p := range s.pools {
-		poolAddrs[i] = p.Address
-	}
-	apyData, err := s.apyFetcher.FetchAPYs(ctx, s.chainName, poolAddrs)
-	if err != nil {
-		return fmt.Errorf("fetch APYs: %w", err)
-	}
-
 	// Build entities
 	entities := make([]*entity.CurvePoolSnapshot, 0, len(snapshots))
-
 	for _, snap := range snapshots {
-		e, err := s.buildEntity(snap, apyData, blockTime)
+		e, err := s.buildEntity(snap, blockTime)
 		if err != nil {
 			return fmt.Errorf("build entity for %s: %w", snap.PoolAddress.Hex(), err)
 		}
-		entities = append(entities, e)
-	}
 
-	if len(entities) == 0 && len(snapshots) > 0 {
-		s.logger.Warn("all entity builds failed, nothing to persist",
-			"snapshots", len(snapshots))
+		// Compute fee APY from virtual_price delta vs previous snapshot.
+		feeAPY, err := s.computeFeeAPY(ctx, e)
+		if err != nil {
+			s.logger.Warn("failed to compute fee APY", "pool", snap.PoolAddress.Hex(), "error", err)
+		} else if feeAPY != nil {
+			e.FeeAPY = feeAPY
+		}
+
+		entities = append(entities, e)
 	}
 
 	// Persist
@@ -340,7 +329,6 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 			}
 
 		case "price_oracle":
-			// Optional — don't fail the pool
 			unpacked, err := s.poolABI.Unpack("price_oracle", r.ReturnData)
 			if err == nil && len(unpacked) > 0 {
 				price := unpacked[0].(*big.Int)
@@ -351,7 +339,6 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 			}
 
 		case "last_price":
-			// Optional — don't fail the pool
 			unpacked, err := s.poolABI.Unpack("last_price", r.ReturnData)
 			if err == nil && len(unpacked) > 0 {
 				price := unpacked[0].(*big.Int)
@@ -369,7 +356,6 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 		if _, failed := failedPools[i]; failed {
 			continue
 		}
-		// Double-check required fields are populated
 		if snap.TotalSupply == nil || snap.VirtualPrice == nil || snap.Fee == nil || len(snap.CoinBalances) == 0 {
 			s.logger.Error("dropping pool with incomplete required data",
 				"pool", snap.PoolAddress.Hex())
@@ -394,7 +380,6 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 // enrichCoinMetadata fetches decimals, symbol, and token_id for each coin via ERC20 multicall
 // and token table lookup.
 func (s *Service) enrichCoinMetadata(ctx context.Context, snapshots []*PoolSnapshot, block *big.Int) error {
-	// Deduplicate coin addresses.
 	seen := make(map[common.Address]struct{})
 	var coins []common.Address
 
@@ -414,7 +399,6 @@ func (s *Service) enrichCoinMetadata(ctx context.Context, snapshots []*PoolSnaps
 		return nil
 	}
 
-	// Build calls: decimals() and symbol() for each coin.
 	var calls []outbound.Call
 	for _, addr := range coins {
 		decData, err := s.erc20ABI.Pack("decimals")
@@ -467,13 +451,12 @@ func (s *Service) enrichCoinMetadata(ctx context.Context, snapshots []*PoolSnaps
 		metaMap[addr] = m
 	}
 
-	// Resolve token IDs from the token table (informational — warn on failure, don't fail cycle).
+	// Resolve token IDs (informational — warn on failure, don't fail cycle).
 	tokenIDs, err := s.resolveTokenIDs(ctx, coins, snapshots)
 	if err != nil {
 		s.logger.Warn("failed to resolve token IDs", "error", err)
 	}
 
-	// Apply metadata + token IDs to snapshots.
 	for _, snap := range snapshots {
 		for j := range snap.CoinBalances {
 			addr := snap.CoinBalances[j].Address
@@ -491,8 +474,6 @@ func (s *Service) enrichCoinMetadata(ctx context.Context, snapshots []*PoolSnaps
 }
 
 // resolveTokenIDs looks up token IDs from the token table for each coin address.
-// Tokens should already exist from the allocation tracker. If not found, token_id stays 0.
-// Operational DB errors are propagated; missing tokens are silently skipped.
 func (s *Service) resolveTokenIDs(ctx context.Context, coins []common.Address, snapshots []*PoolSnapshot) (map[common.Address]int64, error) {
 	result := make(map[common.Address]int64, len(coins))
 	for _, addr := range coins {
@@ -526,8 +507,6 @@ func (s *Service) resolveTokenIDs(ctx context.Context, coins []common.Address, s
 }
 
 // fetchExchangeRates calls get_dy(i, j, 1 unit) for each coin pair in each pool.
-// This requires decimals to be populated (call after enrichCoinMetadata).
-// Results are optional — failures don't drop the pool.
 func (s *Service) fetchExchangeRates(ctx context.Context, snapshots []*PoolSnapshot, block *big.Int) error {
 	type rateMeta struct {
 		snapIdx int
@@ -545,7 +524,6 @@ func (s *Service) fetchExchangeRates(ctx context.Context, snapshots []*PoolSnaps
 				if i == j {
 					continue
 				}
-				// dx = 1 full unit of coin i = 10^decimals[i]
 				decimals := snap.CoinBalances[i].Decimals
 				if decimals == 0 {
 					continue
@@ -598,10 +576,7 @@ func (s *Service) fetchExchangeRates(ctx context.Context, snapshots []*PoolSnaps
 }
 
 // calculateTVL computes the approximate TVL in USD for a stablecoin pool.
-// All coins are assumed ~$1 since these are stablecoin pools. This slightly
-// underreports sUSDS (~8%) since it accrues yield, but is accurate for
-// USDT, USDC, USDS, PYUSD, AUSD.
-// TODO: Use convertToAssets on sUSDS for accurate USD value.
+// TODO: Use prices table for accurate sUSDS value.
 func (s *Service) calculateTVL(snap *PoolSnapshot) *big.Float {
 	if len(snap.CoinBalances) == 0 {
 		return nil
@@ -631,7 +606,45 @@ func (s *Service) calculateTVL(snap *PoolSnapshot) *big.Float {
 	return tvl
 }
 
-func (s *Service) buildEntity(snap *PoolSnapshot, apyData map[common.Address]*outbound.APYData, blockTime time.Time) (*entity.CurvePoolSnapshot, error) {
+// computeFeeAPY derives annualized fee APY from virtual_price delta.
+// fee_apy = (vp_new - vp_old) / vp_old × (365 days / elapsed days) × 100
+// Returns nil if no previous snapshot exists (first run).
+func (s *Service) computeFeeAPY(ctx context.Context, e *entity.CurvePoolSnapshot) (*string, error) {
+	prevVP, prevTime, err := s.repo.GetPreviousSnapshot(ctx, e.PoolAddress, e.ChainID)
+	if err != nil {
+		return nil, fmt.Errorf("get previous snapshot: %w", err)
+	}
+	if prevVP == "" || prevTime.IsZero() {
+		return nil, nil // first snapshot for this pool
+	}
+
+	vpOld, _, err1 := new(big.Float).Parse(prevVP, 10)
+	vpNew, _, err2 := new(big.Float).Parse(e.VirtualPrice, 10)
+	if err1 != nil || err2 != nil || vpOld.Sign() == 0 {
+		return nil, nil
+	}
+
+	elapsed := e.SnapshotTime.Sub(prevTime).Seconds()
+	if elapsed <= 0 {
+		return nil, nil
+	}
+
+	// (vpNew - vpOld) / vpOld
+	delta := new(big.Float).Sub(vpNew, vpOld)
+	ratio := new(big.Float).Quo(delta, vpOld)
+
+	// Annualize: × (365 * 86400 / elapsed) × 100
+	secsPerYear := new(big.Float).SetFloat64(365.0 * 86400.0)
+	elapsedF := new(big.Float).SetFloat64(elapsed)
+	annualized := new(big.Float).Quo(secsPerYear, elapsedF)
+	apy := new(big.Float).Mul(ratio, annualized)
+	apy.Mul(apy, new(big.Float).SetFloat64(100.0))
+
+	result := apy.Text('f', 6)
+	return &result, nil
+}
+
+func (s *Service) buildEntity(snap *PoolSnapshot, blockTime time.Time) (*entity.CurvePoolSnapshot, error) {
 	coinJSON, err := json.Marshal(snap.CoinBalances)
 	if err != nil {
 		return nil, fmt.Errorf("marshal coin balances: %w", err)
@@ -673,7 +686,7 @@ func (s *Service) buildEntity(snap *PoolSnapshot, apyData map[common.Address]*ou
 
 	fee := "0"
 	if snap.Fee != nil {
-		fee = shared.FormatAmount(snap.Fee, 10) // fee is 10 decimals
+		fee = shared.FormatAmount(snap.Fee, 10)
 	}
 
 	e := &entity.CurvePoolSnapshot{
@@ -692,33 +705,10 @@ func (s *Service) buildEntity(snap *PoolSnapshot, apyData map[common.Address]*ou
 		SnapshotTime:  blockTime,
 	}
 
-	// TVL
 	tvl := s.calculateTVL(snap)
 	if tvl != nil {
 		tvlStr := tvl.Text('f', 6)
 		e.TvlUSD = &tvlStr
-	}
-
-	// APY data — only set fields that are actually present
-	if apyData != nil {
-		if apy, ok := apyData[snap.PoolAddress]; ok {
-			if apy.FeeAPYDaily != nil {
-				s := fmt.Sprintf("%.6f", *apy.FeeAPYDaily)
-				e.FeeAPYDaily = &s
-			}
-			if apy.FeeAPYWeekly != nil {
-				s := fmt.Sprintf("%.6f", *apy.FeeAPYWeekly)
-				e.FeeAPYWeekly = &s
-			}
-			if apy.CrvAPYMin != nil {
-				s := fmt.Sprintf("%.6f", *apy.CrvAPYMin)
-				e.CrvAPYMin = &s
-			}
-			if apy.CrvAPYMax != nil {
-				s := fmt.Sprintf("%.6f", *apy.CrvAPYMax)
-				e.CrvAPYMax = &s
-			}
-		}
 	}
 
 	if err := e.Validate(); err != nil {

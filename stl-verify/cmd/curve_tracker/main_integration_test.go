@@ -19,6 +19,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
+// ---------------------------------------------------------------------------
+// Integration tests for run()
+// ---------------------------------------------------------------------------
+
 func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer rpcServer.Close()
@@ -68,9 +72,6 @@ func TestRunIntegration_FullSnapshot(t *testing.T) {
 	dbPool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
 	defer dbCleanup()
 
-	curveAPIServer := startMockCurveAPI(t)
-	defer curveAPIServer.Close()
-
 	rpcServer := startMockRPC(t)
 	defer rpcServer.Close()
 
@@ -79,82 +80,38 @@ func TestRunIntegration_FullSnapshot(t *testing.T) {
 	t.Setenv("DATABASE_URL", dbURL)
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("LOG_LEVEL", "debug")
-	t.Setenv("CURVE_API_BASE_URL", curveAPIServer.URL)
 
 	err := run(ctx)
 	if err != nil {
 		t.Fatalf("run() failed: %v", err)
 	}
 
-	// Verify snapshots were saved
+	// Verify snapshots were saved (3 pools)
 	var count int
 	err = dbPool.QueryRow(ctx, "SELECT count(*) FROM curve_pool_snapshot").Scan(&count)
 	if err != nil {
 		t.Fatalf("query snapshot count: %v", err)
 	}
 	if count != 3 {
-		t.Errorf("expected 3 snapshots (one per pool), got %d", count)
+		t.Errorf("expected 3 snapshots, got %d", count)
 	}
 
-	// Verify snapshot data
+	// Verify snapshot data for one pool
 	var tvlUSD *string
-	var nCoins int
+	var virtualPrice string
 	err = dbPool.QueryRow(ctx,
-		"SELECT tvl_usd, n_coins FROM curve_pool_snapshot WHERE pool_address = $1",
+		"SELECT tvl_usd, virtual_price FROM curve_pool_snapshot WHERE pool_address = $1",
 		common.HexToAddress("0x00836fe54625be242bcfa286207795405ca4fd10").Bytes(),
-	).Scan(&tvlUSD, &nCoins)
+	).Scan(&tvlUSD, &virtualPrice)
 	if err != nil {
-		t.Fatalf("query sUSDSUSDT snapshot: %v", err)
-	}
-	if nCoins != 2 {
-		t.Errorf("expected 2 coins, got %d", nCoins)
+		t.Fatalf("query snapshot: %v", err)
 	}
 	if tvlUSD == nil {
 		t.Error("expected tvl_usd to be set")
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Mock Curve API
-// ---------------------------------------------------------------------------
-
-func startMockCurveAPI(t *testing.T) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-
-		switch {
-		case strings.Contains(r.URL.Path, "getBaseApys"):
-			json.NewEncoder(w).Encode(map[string]any{
-				"success": true,
-				"data": map[string]any{
-					"baseApys": []map[string]any{
-						{
-							"address":              "0x00836fe54625be242bcfa286207795405ca4fd10",
-							"latestDailyApyPcent":  1.25,
-							"latestWeeklyApyPcent": 1.33,
-						},
-						{
-							"address":              "0xa632d59b9b804a956bfaa9b48af3a1b74808fc1f",
-							"latestDailyApyPcent":  0.08,
-							"latestWeeklyApyPcent": 0.10,
-						},
-						{
-							"address":              "0xe79c1c7e24755574438a26d5e062ad2626c04662",
-							"latestDailyApyPcent":  0.005,
-							"latestWeeklyApyPcent": 0.01,
-						},
-					},
-				},
-			})
-
-		case strings.Contains(r.URL.Path, "getAllGauges"):
-			json.NewEncoder(w).Encode(map[string]any{})
-
-		default:
-			http.NotFound(w, r)
-		}
-	}))
+	if virtualPrice == "" || virtualPrice == "0" {
+		t.Error("expected virtual_price to be non-zero")
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -185,8 +142,6 @@ func init() {
 	}
 }
 
-// Mock block header for finalized block responses.
-// Block 24749716 with timestamp 2026-03-25T21:09:38Z.
 var mockBlockHeader = `{
 	"number": "0x179A694",
 	"hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
@@ -242,20 +197,14 @@ func startMockRPC(t *testing.T) *httptest.Server {
 		switch req.Method {
 		case "eth_blockNumber":
 			writeResult("0x179A694")
-
 		case "eth_getBlockByNumber":
-			// Returns the finalized block header
 			writeResultRaw(mockBlockHeader)
-
 		case "eth_chainId":
 			writeResult("0x1")
-
 		case "net_version":
 			writeResult("1")
-
 		case "eth_call":
 			writeResult(handleEthCall(t, req.Params, curveABI, erc20ABI))
-
 		default:
 			t.Errorf("unexpected RPC method: %s", req.Method)
 			errResp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"method not found: %s"}}`, string(req.ID), req.Method)
@@ -315,9 +264,9 @@ func handleMulticall3(t *testing.T, data []byte, curveABI, erc20ABI *abi.ABI) st
 	for i := range numCalls {
 		call := callsSlice.Index(i)
 		target := call.FieldByName("Target").Interface().(common.Address)
-		callData := call.FieldByName("CallData").Interface().([]byte)
+		cd := call.FieldByName("CallData").Interface().([]byte)
 
-		ret := dispatchCall(t, target, callData, curveABI, erc20ABI)
+		ret := dispatchCall(t, target, cd, curveABI, erc20ABI)
 		results[i] = subResultData{success: true, returnData: common.FromHex(ret)}
 	}
 
@@ -331,7 +280,6 @@ type subResultData struct {
 
 func encodeAggregate3Output(results []subResultData) []byte {
 	n := len(results)
-
 	buf := pad32(big.NewInt(32))
 	buf = append(buf, pad32(big.NewInt(int64(n)))...)
 
@@ -403,20 +351,20 @@ func handleCurveMethod(t *testing.T, method string, inputData []byte, curveABI *
 		return "0x" + common.Bytes2Hex(result)
 
 	case "get_balances":
-		balances := []*big.Int{
-			new(big.Int).Mul(big.NewInt(8_000_000), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-			new(big.Int).Mul(big.NewInt(41_000_000), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
+		bals := []*big.Int{
+			new(big.Int).Mul(big.NewInt(6_000_000), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			new(big.Int).Mul(big.NewInt(42_000_000), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
 		}
-		result, _ := curveABI.Methods["get_balances"].Outputs.Pack(balances)
+		result, _ := curveABI.Methods["get_balances"].Outputs.Pack(bals)
 		return "0x" + common.Bytes2Hex(result)
 
 	case "totalSupply":
-		supply := new(big.Int).Mul(big.NewInt(48_666_473), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+		supply := new(big.Int).Mul(big.NewInt(48_000_000), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 		result, _ := curveABI.Methods["totalSupply"].Outputs.Pack(supply)
 		return "0x" + common.Bytes2Hex(result)
 
 	case "get_virtual_price":
-		vp := new(big.Int).SetUint64(1_027_699_000_000_000_000)
+		vp := new(big.Int).SetUint64(1_027_000_000_000_000_000)
 		result, _ := curveABI.Methods["get_virtual_price"].Outputs.Pack(vp)
 		return "0x" + common.Bytes2Hex(result)
 
@@ -425,7 +373,7 @@ func handleCurveMethod(t *testing.T, method string, inputData []byte, curveABI *
 		return "0x" + common.Bytes2Hex(result)
 
 	case "fee":
-		result, _ := curveABI.Methods["fee"].Outputs.Pack(big.NewInt(100000))
+		result, _ := curveABI.Methods["fee"].Outputs.Pack(big.NewInt(1000000))
 		return "0x" + common.Bytes2Hex(result)
 
 	case "coins":
@@ -433,33 +381,28 @@ func handleCurveMethod(t *testing.T, method string, inputData []byte, curveABI *
 		if err != nil {
 			return "0x"
 		}
-		indexBig, ok := args[0].(*big.Int)
-		if !ok {
-			return "0x"
-		}
-		index := indexBig.Int64()
+		idx := args[0].(*big.Int).Int64()
 		var addr common.Address
-		if index == 0 {
-			addr = common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD")
-		} else {
-			addr = common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7")
+		switch idx {
+		case 0:
+			addr = common.HexToAddress("0xa3931d71877c0e7a3148cb7eb4463524fec27fbd") // sUSDS
+		case 1:
+			addr = common.HexToAddress("0xdac17f958d2ee523a2206206994597c13d831ec7") // USDT
 		}
 		result, _ := curveABI.Methods["coins"].Outputs.Pack(addr)
 		return "0x" + common.Bytes2Hex(result)
 
 	case "price_oracle":
-		price := new(big.Int).SetUint64(999_809_000_000_000_000)
+		price := new(big.Int).SetUint64(999_900_000_000_000_000)
 		result, _ := curveABI.Methods["price_oracle"].Outputs.Pack(price)
 		return "0x" + common.Bytes2Hex(result)
 
 	case "last_price":
-		price := new(big.Int).SetUint64(999_750_000_000_000_000) // slightly different from EMA
+		price := new(big.Int).SetUint64(999_750_000_000_000_000)
 		result, _ := curveABI.Methods["last_price"].Outputs.Pack(price)
 		return "0x" + common.Bytes2Hex(result)
 
 	case "get_dy":
-		// Return ~1:1 for stablecoin swaps (slightly less due to fees)
-		// For 1 unit input, return ~0.9999 units output
 		args, err := curveABI.Methods["get_dy"].Inputs.Unpack(inputData)
 		if err != nil {
 			return "0x"
@@ -468,7 +411,6 @@ func handleCurveMethod(t *testing.T, method string, inputData []byte, curveABI *
 		if !ok {
 			return "0x"
 		}
-		// Simulate ~0.01% fee: dy = dx * 9999 / 10000
 		dy := new(big.Int).Mul(dx, big.NewInt(9999))
 		dy.Div(dy, big.NewInt(10000))
 		result, _ := curveABI.Methods["get_dy"].Outputs.Pack(dy)
@@ -486,20 +428,10 @@ func handleERC20Method(t *testing.T, method string, target common.Address, erc20
 	case "decimals":
 		var dec uint8
 		switch target {
-		case common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD"):
+		case common.HexToAddress("0xa3931d71877c0e7a3148cb7eb4463524fec27fbd"): // sUSDS
 			dec = 18
-		case common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7"):
-			dec = 6
-		case common.HexToAddress("0x6c3ea9036406852006290770BEdFcAbA0e23A0e8"):
-			dec = 6
-		case common.HexToAddress("0xdC035D45d973E3EC169d2276DDab16f1e407384F"):
-			dec = 18
-		case common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"):
-			dec = 6
-		case common.HexToAddress("0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a"):
-			dec = 6
 		default:
-			dec = 18
+			dec = 6
 		}
 		result, _ := erc20ABI.Methods["decimals"].Outputs.Pack(dec)
 		return "0x" + common.Bytes2Hex(result)
@@ -507,17 +439,17 @@ func handleERC20Method(t *testing.T, method string, target common.Address, erc20
 	case "symbol":
 		var sym string
 		switch target {
-		case common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD"):
+		case common.HexToAddress("0xa3931d71877c0e7a3148cb7eb4463524fec27fbd"):
 			sym = "sUSDS"
-		case common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7"):
+		case common.HexToAddress("0xdac17f958d2ee523a2206206994597c13d831ec7"):
 			sym = "USDT"
-		case common.HexToAddress("0x6c3ea9036406852006290770BEdFcAbA0e23A0e8"):
+		case common.HexToAddress("0x6c3ea9036406852006290770bedfcaba0e23a0e8"):
 			sym = "PYUSD"
-		case common.HexToAddress("0xdC035D45d973E3EC169d2276DDab16f1e407384F"):
+		case common.HexToAddress("0xdc035d45d973e3ec169d2276ddab16f1e407384f"):
 			sym = "USDS"
-		case common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"):
+		case common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"):
 			sym = "USDC"
-		case common.HexToAddress("0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a"):
+		case common.HexToAddress("0x00000000efe302beaa2b3e6e1b18d08d69a9012a"):
 			sym = "AUSD"
 		default:
 			sym = "UNKNOWN"
@@ -537,14 +469,13 @@ func handleERC20Method(t *testing.T, method string, target common.Address, erc20
 func parseCurveABI(t *testing.T) *abi.ABI {
 	t.Helper()
 	const curveJSON = `[
-		{"name":"coins","inputs":[{"name":"i","type":"uint256"}],"outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},
-		{"name":"balances","inputs":[{"name":"i","type":"uint256"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
-		{"name":"get_balances","inputs":[],"outputs":[{"name":"","type":"uint256[]"}],"stateMutability":"view","type":"function"},
 		{"name":"N_COINS","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
-		{"name":"get_virtual_price","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+		{"name":"get_balances","inputs":[],"outputs":[{"name":"","type":"uint256[]"}],"stateMutability":"view","type":"function"},
 		{"name":"totalSupply","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+		{"name":"get_virtual_price","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
 		{"name":"A","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
 		{"name":"fee","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+		{"name":"coins","inputs":[{"name":"i","type":"uint256"}],"outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},
 		{"name":"price_oracle","inputs":[{"name":"i","type":"uint256"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
 		{"name":"last_price","inputs":[{"name":"i","type":"uint256"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
 		{"name":"get_dy","inputs":[{"name":"i","type":"int128"},{"name":"j","type":"int128"},{"name":"dx","type":"uint256"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}

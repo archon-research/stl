@@ -18,8 +18,10 @@ import (
 // ── Mocks ──
 
 type mockCurveRepository struct {
-	saved    []*entity.CurvePoolSnapshot
-	tokenIDs map[string]int64 // key: "chainID:address"
+	saved            []*entity.CurvePoolSnapshot
+	tokenIDs         map[string]int64 // key: "chainID:address"
+	prevVirtualPrice string
+	prevSnapshotTime time.Time
 }
 
 func newMockRepo(tokenIDs map[string]int64) *mockCurveRepository {
@@ -40,6 +42,10 @@ func (m *mockCurveRepository) LookupTokenID(ctx context.Context, chainID int64, 
 		return id, nil
 	}
 	return 0, outbound.ErrTokenNotFound
+}
+
+func (m *mockCurveRepository) GetPreviousSnapshot(ctx context.Context, poolAddress []byte, chainID int64) (string, time.Time, error) {
+	return m.prevVirtualPrice, m.prevSnapshotTime, nil
 }
 
 // ── DefaultPools ──
@@ -243,7 +249,7 @@ func TestResolveTokenIDs_MissingToken(t *testing.T) {
 
 // ── Build Entity ──
 
-func TestBuildEntity_WithTVLAndAPY(t *testing.T) {
+func TestBuildEntity_WithTVL(t *testing.T) {
 	svc := &Service{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	snap := &PoolSnapshot{
@@ -262,29 +268,14 @@ func TestBuildEntity_WithTVLAndAPY(t *testing.T) {
 		OraclePrices: []OraclePrice{{Index: 0, Price: "1.000000000000000000"}},
 	}
 
-	feeDaily := 1.25
-	feeWeekly := 1.33
-	apyData := map[common.Address]*outbound.APYData{
-		snap.PoolAddress: {FeeAPYDaily: &feeDaily, FeeAPYWeekly: &feeWeekly},
-	}
-
 	blockTime := time.Date(2026, 3, 25, 21, 0, 0, 0, time.UTC)
-	e, err := svc.buildEntity(snap, apyData, blockTime)
+	e, err := svc.buildEntity(snap, blockTime)
 	if err != nil {
 		t.Fatalf("buildEntity failed: %v", err)
 	}
 
 	if e.TvlUSD == nil {
 		t.Error("expected tvl_usd to be set")
-	}
-	if e.FeeAPYDaily == nil {
-		t.Error("expected fee_apy_daily to be set")
-	}
-	if e.FeeAPYWeekly == nil {
-		t.Error("expected fee_apy_weekly to be set")
-	}
-	if e.CrvAPYMin != nil || e.CrvAPYMax != nil {
-		t.Error("expected crv_apy to be nil when not provided")
 	}
 	if e.SnapshotTime != blockTime {
 		t.Errorf("expected snapshot_time = %v, got %v", blockTime, e.SnapshotTime)
@@ -305,7 +296,7 @@ func TestBuildEntity_WithTVLAndAPY(t *testing.T) {
 	}
 }
 
-func TestBuildEntity_NilAPY_DoesNotCoerceToZero(t *testing.T) {
+func TestBuildEntity_FeeAPY_NilOnFirstSnapshot(t *testing.T) {
 	svc := &Service{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	snap := &PoolSnapshot{
@@ -320,22 +311,15 @@ func TestBuildEntity_NilAPY_DoesNotCoerceToZero(t *testing.T) {
 	}
 
 	blockTime := time.Date(2026, 3, 25, 21, 0, 0, 0, time.UTC)
-	e, err := svc.buildEntity(snap, nil, blockTime)
+	e, err := svc.buildEntity(snap, blockTime)
 	if err != nil {
 		t.Fatalf("buildEntity failed: %v", err)
 	}
 
-	if e.FeeAPYDaily != nil {
-		t.Errorf("expected nil FeeAPYDaily when no APY data, got %v", *e.FeeAPYDaily)
-	}
-	if e.FeeAPYWeekly != nil {
-		t.Errorf("expected nil FeeAPYWeekly when no APY data, got %v", *e.FeeAPYWeekly)
-	}
-	if e.CrvAPYMin != nil {
-		t.Errorf("expected nil CrvAPYMin, got %v", *e.CrvAPYMin)
-	}
-	if e.CrvAPYMax != nil {
-		t.Errorf("expected nil CrvAPYMax, got %v", *e.CrvAPYMax)
+	// fee_apy is not set by buildEntity — it's set by computeFeeAPY in Run()
+	// so it should be nil here
+	if e.FeeAPY != nil {
+		t.Errorf("expected nil FeeAPY from buildEntity, got %v", *e.FeeAPY)
 	}
 }
 
@@ -343,7 +327,7 @@ func TestBuildEntity_CallsValidate(t *testing.T) {
 	svc := &Service{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	snap := &PoolSnapshot{
-		PoolAddress:  common.Address{}, // invalid — 0x0 produces 20 zero bytes but ChainID=0
+		PoolAddress:  common.Address{},
 		ChainID:      0,
 		BlockNumber:  0,
 		NCoins:       0,
@@ -353,9 +337,82 @@ func TestBuildEntity_CallsValidate(t *testing.T) {
 	}
 
 	blockTime := time.Date(2026, 3, 25, 21, 0, 0, 0, time.UTC)
-	_, err := svc.buildEntity(snap, nil, blockTime)
+	_, err := svc.buildEntity(snap, blockTime)
 	if err == nil {
 		t.Fatal("expected buildEntity to fail on invalid entity")
+	}
+}
+
+// ── Compute Fee APY ──
+
+func TestComputeFeeAPY_FirstSnapshot(t *testing.T) {
+	repo := newMockRepo(nil)
+	// No previous snapshot
+	svc := &Service{repo: repo, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	e := &entity.CurvePoolSnapshot{
+		PoolAddress:  common.HexToAddress("0x00836fe54625be242bcfa286207795405ca4fd10").Bytes(),
+		ChainID:      1,
+		VirtualPrice: "1.027775761135531411",
+		SnapshotTime: time.Date(2026, 3, 31, 9, 52, 23, 0, time.UTC),
+	}
+
+	apy, err := svc.computeFeeAPY(context.Background(), e)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if apy != nil {
+		t.Errorf("expected nil APY on first snapshot, got %v", *apy)
+	}
+}
+
+func TestComputeFeeAPY_WithPreviousSnapshot(t *testing.T) {
+	repo := newMockRepo(nil)
+	repo.prevVirtualPrice = "1.027775761135531411"
+	repo.prevSnapshotTime = time.Date(2026, 3, 31, 9, 52, 23, 0, time.UTC)
+
+	svc := &Service{repo: repo, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	e := &entity.CurvePoolSnapshot{
+		PoolAddress:  common.HexToAddress("0x00836fe54625be242bcfa286207795405ca4fd10").Bytes(),
+		ChainID:      1,
+		VirtualPrice: "1.027775825356730284",
+		SnapshotTime: time.Date(2026, 3, 31, 9, 58, 47, 0, time.UTC),
+	}
+
+	apy, err := svc.computeFeeAPY(context.Background(), e)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if apy == nil {
+		t.Fatal("expected non-nil APY")
+	}
+
+	// Should be approximately 0.51% based on real data
+	t.Logf("computed fee APY: %s%%", *apy)
+}
+
+func TestComputeFeeAPY_SameTimestamp(t *testing.T) {
+	repo := newMockRepo(nil)
+	ts := time.Date(2026, 3, 31, 9, 52, 23, 0, time.UTC)
+	repo.prevVirtualPrice = "1.027775761135531411"
+	repo.prevSnapshotTime = ts
+
+	svc := &Service{repo: repo, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	e := &entity.CurvePoolSnapshot{
+		PoolAddress:  common.HexToAddress("0x00836fe54625be242bcfa286207795405ca4fd10").Bytes(),
+		ChainID:      1,
+		VirtualPrice: "1.027775825356730284",
+		SnapshotTime: ts, // same timestamp
+	}
+
+	apy, err := svc.computeFeeAPY(context.Background(), e)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if apy != nil {
+		t.Errorf("expected nil APY when elapsed=0, got %v", *apy)
 	}
 }
 
