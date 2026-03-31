@@ -23,4 +23,7 @@ spec:
                 name: stl-config
           env:
             - name: DATABASE_URL
-              value: postgres://stl_migrator:localdev@timescaledb:5432/stl_verify?sslmode=disable
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-config
+                  key: MIGRATOR_DATABASE_URL

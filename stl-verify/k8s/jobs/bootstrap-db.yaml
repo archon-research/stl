@@ -35,4 +35,7 @@ spec:
               echo "Bootstrap complete."
           env:
             - name: ADMIN_DATABASE_URL
-              value: postgres://postgres:postgres@timescaledb:5432/stl_verify?sslmode=disable
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-config
+                  key: DATABASE_URL

@@ -11,6 +11,7 @@ data:
   AWS_S3_ENDPOINT: http://localstack:4566
   S3_BUCKET: stl-sentineldevelopment-ethereum-raw
   DATABASE_URL: postgres://postgres:postgres@timescaledb:5432/stl_verify?sslmode=disable
+  MIGRATOR_DATABASE_URL: postgres://stl_migrator:localdev@timescaledb:5432/stl_verify?sslmode=disable
   REDIS_ADDR: redis:6379
   JAEGER_ENDPOINT: jaeger:4317
   ENVIRONMENT: development
