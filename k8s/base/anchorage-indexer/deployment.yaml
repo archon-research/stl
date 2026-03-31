@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anchorage-indexer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: anchorage-indexer
+  template:
+    metadata:
+      labels:
+        app: anchorage-indexer
+    spec:
+      serviceAccountName: anchorage-indexer
+      containers:
+        - name: anchorage-indexer
+          image: anchorage-indexer
+          envFrom:
+            - configMapRef:
+                name: anchorage-indexer
+            - secretRef:
+                name: anchorage-indexer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f cronjob"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

@@ -114,6 +114,34 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: anchorage-indexer
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  ANCHORAGE_API_URL: "https://api.anchorage.com"
+  ANCHORAGE_PRIME: "spark"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: offchain-price-indexer
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: watcher-data-validator
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: base-watcher-config
 data:
   CHAIN_ID: "8453"

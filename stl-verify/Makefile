@@ -4,7 +4,7 @@
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
         dev-up dev-up-rebuild dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -726,6 +726,10 @@ docker-release-all:
 	@echo ""
 	@$(MAKE) _docker-release-prime-debt-indexer-internal ENV=$(ENV)
 	@echo ""
+	@for cj in $(CRONJOBS); do \
+		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV); \
+		echo ""; \
+	done
 	@echo "==> All Docker images released for ENV=$(ENV)"
 
 # Shortcut: Release all services for sentinelstaging
@@ -1578,6 +1582,36 @@ CRONJOB_DOCKERFILE = cmd/cronjobs/Dockerfile
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
 	docker build --build-arg CRONJOB=$* -t stl-$*:local -f $(CRONJOB_DOCKERFILE) .
+
+# Pattern rule: release a cronjob image to ECR (build + push).
+# All cronjobs share a single ECR repo; the cronjob name is part of the tag.
+# Usage: make docker-release-cronjob-anchorage-indexer ENV=sentinelstaging
+docker-release-cronjob-%: ecr-login _docker-release-cronjob-%-internal
+
+_docker-release-cronjob-%-internal:
+	@TAG=$(IMAGE_TAG) && \
+	REPO=$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Cronjob $* Docker image for ARM64..." && \
+	echo "    Repository: $$REPO" && \
+	echo "    Tag: $*-$$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg CRONJOB=$* \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f $(CRONJOB_DOCKERFILE) \
+		-t $$REPO:$*-$$TAG \
+		-t $$REPO:$*-latest \
+		--load . && \
+	echo "==> Pushing Cronjob $* Docker image to ECR..." && \
+	docker push $$REPO:$*-$$TAG && \
+	docker push $$REPO:$*-latest && \
+	echo "==> Cronjob $* Docker image released: $$REPO:$*-$$TAG"
 
 kind-load-cronjobs:
 	@for cj in $(CRONJOBS); do \
