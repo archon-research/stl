@@ -11,9 +11,9 @@ import (
 	"syscall"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	tracker "github.com/archon-research/stl/stl-verify/internal/services/anchorage_tracker"
 )
 
