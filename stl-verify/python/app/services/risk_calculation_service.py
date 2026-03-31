@@ -53,9 +53,9 @@ class RiskCalculationService:
                     item.symbol,
                 )
                 continue
-            if item.price_usd is None:
+            if item.price_usd is None or item.price_usd == 0:
                 logger.warning(
-                    "Dropping collateral item backed_asset_id=%d token_id=%d symbol=%s: missing price",
+                    "Dropping collateral item backed_asset_id=%d token_id=%d symbol=%s: missing or zero price",
                     backed_asset_id,
                     item.token_id,
                     item.symbol,

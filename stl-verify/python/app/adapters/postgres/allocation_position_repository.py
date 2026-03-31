@@ -56,21 +56,45 @@ class PostgresAllocationRepository:
                     ORDER BY ap.token_id, ap.proxy_address,
                              ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
                 )
-                SELECT DISTINCT ON (rt.id)
-                    rt.id                                        AS receipt_token_id,
-                    rt.symbol                                    AS symbol,
-                    ut.symbol                                    AS underlying_symbol,
-                    pr.name                                      AS protocol_name,
-                    lp.balance,
-                    encode(rt.receipt_token_address, 'hex')      AS token_address
-                FROM latest_positions lp
-                JOIN token t ON t.id = lp.token_id
-                JOIN receipt_token rt ON rt.underlying_token_id = t.id
-                                      OR rt.receipt_token_address = t.address
-                JOIN token ut ON ut.id = rt.underlying_token_id
-                JOIN protocol pr ON pr.id = rt.protocol_id
-                WHERE lp.balance > 0
-                ORDER BY rt.id, lp.balance DESC
+                SELECT DISTINCT ON (receipt_token_id)
+                    receipt_token_id,
+                    symbol,
+                    underlying_symbol,
+                    protocol_name,
+                    balance,
+                    token_address
+                FROM (
+                    SELECT
+                        rt.id                                        AS receipt_token_id,
+                        rt.symbol                                    AS symbol,
+                        ut.symbol                                    AS underlying_symbol,
+                        pr.name                                      AS protocol_name,
+                        lp.balance,
+                        encode(rt.receipt_token_address, 'hex')      AS token_address
+                    FROM latest_positions lp
+                    JOIN token t ON t.id = lp.token_id
+                    JOIN receipt_token rt ON rt.underlying_token_id = t.id
+                    JOIN token ut ON ut.id = rt.underlying_token_id
+                    JOIN protocol pr ON pr.id = rt.protocol_id
+                    WHERE lp.balance > 0
+
+                    UNION ALL
+
+                    SELECT
+                        rt.id                                        AS receipt_token_id,
+                        rt.symbol                                    AS symbol,
+                        ut.symbol                                    AS underlying_symbol,
+                        pr.name                                      AS protocol_name,
+                        lp.balance,
+                        encode(rt.receipt_token_address, 'hex')      AS token_address
+                    FROM latest_positions lp
+                    JOIN token t ON t.id = lp.token_id
+                    JOIN receipt_token rt ON rt.receipt_token_address = t.address
+                    JOIN token ut ON ut.id = rt.underlying_token_id
+                    JOIN protocol pr ON pr.id = rt.protocol_id
+                    WHERE lp.balance > 0
+                ) combined
+                ORDER BY receipt_token_id, balance DESC
             """),
             {"proxy_hex": proxy_hex},
         )

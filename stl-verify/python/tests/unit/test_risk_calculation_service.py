@@ -113,6 +113,24 @@ async def test_items_with_missing_price_are_skipped(
 
 
 @pytest.mark.asyncio
+async def test_items_with_zero_price_are_skipped(
+    service: RiskCalculationService,
+    mock_breakdown_repo: AsyncMock,
+    mock_liq_params_repo: AsyncMock,
+) -> None:
+    mock_breakdown_repo.get_backed_breakdown.return_value = _breakdown(
+        (_contrib(10, "WETH", "10000", "2000"), _contrib(11, "ZERO", "500", "0"))
+    )
+    mock_liq_params_repo.get_params.return_value = {
+        10: _params(10, "0.825", "1.05"),
+        11: _params(11, "0.50", "1.20"),
+    }
+
+    result = await service.get_bad_debt(backed_asset_id=42, gap_pct=Decimal("0.50"))
+    assert isinstance(result, Decimal)
+
+
+@pytest.mark.asyncio
 async def test_items_with_missing_liq_params_are_skipped(
     service: RiskCalculationService,
     mock_breakdown_repo: AsyncMock,

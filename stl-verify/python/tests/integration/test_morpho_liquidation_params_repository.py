@@ -117,13 +117,15 @@ async def _seed_data(db_url: str) -> None:
             int, await conn.fetchval('SELECT id FROM "user" WHERE address = $1 AND chain_id = 1', vault_address)
         )
 
+        # Store LLTV in WAD format (18 decimals) to match Go indexer behaviour.
+        # 0.86 → 860000000000000000, 0.77 → 770000000000000000.
         weth_market_id = await _insert_morpho_market(
             conn,
             protocol_id,
             chain_id=1,
             loan_token_id=usdc_id,
             collateral_token_id=weth_id,
-            lltv=Decimal("0.86"),
+            lltv=Decimal("860000000000000000"),
             market_index=1,
         )
         cbbtc_market_id = await _insert_morpho_market(
@@ -132,7 +134,7 @@ async def _seed_data(db_url: str) -> None:
             chain_id=1,
             loan_token_id=usdc_id,
             collateral_token_id=cbbtc_id,
-            lltv=Decimal("0.77"),
+            lltv=Decimal("770000000000000000"),
             market_index=2,
         )
 

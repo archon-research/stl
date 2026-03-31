@@ -9,7 +9,9 @@ from app.risk_engine.crypto_lending.lif import compute_lif
 
 logger = logging.getLogger(__name__)
 
-# lltv values in morpho_market are assumed to be in [0,1] decimal range (e.g. 0.86 for 86%).
+# lltv values in morpho_market are stored in WAD format (18 decimals, e.g. 860000000000000000 = 86%).
+# The Go indexer persists the raw big.Int via bigIntToNumeric(), so we must divide by 1e18
+# to normalise into [0, 1] before passing to compute_lif().
 # When a collateral token appears in multiple markets of the same vault, MIN(lltv) is used
 # as the conservative liquidation threshold.
 _SQL = """
@@ -64,7 +66,7 @@ class MorphoLiquidationParamsRepository:
 
         params = {}
         for row in rows:
-            lltv = Decimal(str(row.lltv))
+            lltv = Decimal(str(row.lltv)) / Decimal("1000000000000000000")  # WAD → [0, 1]
             params[row.token_id] = LiquidationParams(
                 token_id=row.token_id,
                 liquidation_threshold=lltv,

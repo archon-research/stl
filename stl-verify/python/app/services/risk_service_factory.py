@@ -123,8 +123,9 @@ class RiskServiceFactory:
         token_hex = receipt_token_address.hex()
         try:
             async with self._engine.connect() as conn:
+                await conn.exec_driver_sql("SET LOCAL statement_timeout = '5s'")
                 result = await conn.execute(
-                    text(_WALLET_LOOKUP_SQL).execution_options(timeout=5.0),
+                    text(_WALLET_LOOKUP_SQL),
                     {"receipt_token_address": receipt_token_address, "chain_id": chain_id},
                 )
                 row = result.fetchone()
