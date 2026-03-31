@@ -30,7 +30,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s -extldflags '-static' -X main.GitCommit=${GIT_COMMIT} -X main.GitBranch=${GIT_BRANCH} -X main.BuildTime=${BUILD_TIME}" \
     -o /mock-blockchain-server \
-    ./cmd/stress-test/mock-blockchain-server
+    ./cmd/util/stress-test/mock-blockchain-server
 
 # -----------------------------------------------------------------------------
 # Runtime Stage
