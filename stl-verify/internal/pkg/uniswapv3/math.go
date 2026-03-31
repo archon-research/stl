@@ -1,6 +1,7 @@
 package uniswapv3
 
 import (
+	"fmt"
 	"math"
 	"math/big"
 )
@@ -83,4 +84,21 @@ func getAmount1ForLiquidity(sqrtRatioAX96, sqrtRatioBX96, liquidity *big.Int) *b
 	numerator := new(big.Int).Mul(liquidity, diff)
 
 	return new(big.Int).Div(numerator, q96)
+}
+
+// ComputePrice converts sqrtPriceX96 to token1/token0 price.
+// price = (sqrtPriceX96 / 2^96)^2
+func ComputePrice(sqrtPriceX96 *big.Int) string {
+	q96F := new(big.Float).SetInt(q96)
+	sqrtPrice := new(big.Float).SetInt(sqrtPriceX96)
+	ratio := new(big.Float).Quo(sqrtPrice, q96F)
+	price := new(big.Float).Mul(ratio, ratio)
+	return price.Text('f', 18)
+}
+
+// ComputePriceFromTick converts a tick to price.
+// price = 1.0001^tick
+func ComputePriceFromTick(tick int) string {
+	price := math.Pow(1.0001, float64(tick))
+	return fmt.Sprintf("%.18f", price)
 }
