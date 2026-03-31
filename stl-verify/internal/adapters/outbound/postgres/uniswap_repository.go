@@ -36,6 +36,9 @@ func (r *UniswapRepository) SaveSnapshots(ctx context.Context, snapshots []*enti
 	}
 
 	for i, s := range snapshots {
+		if s == nil {
+			return fmt.Errorf("snapshot %d is nil", i)
+		}
 		if err := s.Validate(); err != nil {
 			return fmt.Errorf("snapshot %d: %w", i, err)
 		}
@@ -103,7 +106,7 @@ func (r *UniswapRepository) LookupTokenID(ctx context.Context, chainID int64, ad
 	).Scan(&id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, outbound.ErrTokenNotFound
+			return 0, fmt.Errorf("token %s on chain %d: %w", address.Hex(), chainID, outbound.ErrTokenNotFound)
 		}
 		return 0, fmt.Errorf("lookup token %s on chain %d: %w", address.Hex(), chainID, err)
 	}

@@ -31,14 +31,14 @@ func (s *UniswapPoolSnapshot) Validate() error {
 	if len(s.PoolAddress) != 20 {
 		return fmt.Errorf("pool address must be 20 bytes, got %d", len(s.PoolAddress))
 	}
-	if s.ChainID == 0 {
-		return fmt.Errorf("chain ID is required")
+	if s.ChainID <= 0 {
+		return fmt.Errorf("chain ID must be positive, got %d", s.ChainID)
 	}
-	if s.BlockNumber == 0 {
-		return fmt.Errorf("block number is required")
+	if s.BlockNumber <= 0 {
+		return fmt.Errorf("block number must be positive, got %d", s.BlockNumber)
 	}
-	if s.Fee == 0 {
-		return fmt.Errorf("fee is required")
+	if s.Fee <= 0 {
+		return fmt.Errorf("fee must be positive, got %d", s.Fee)
 	}
 	if s.SnapshotTime.IsZero() {
 		return fmt.Errorf("snapshot_time is required")
