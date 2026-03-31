@@ -4,8 +4,9 @@
 
 1. **Naming:** `YYYYMMDD_HHMMSS_description.sql` (use `date +"%Y%m%d_%H%M%S"`)
 2. **Plain SQL only** with self-tracking INSERT at end
-3. **Production:** Manual execution only
-4. **Local/Tests:** Auto-applied via the kind cluster (`make dev-up`) and migrator
+3. **Never modify an applied migration.** The migrator tracks checksums — any change to an already-applied file causes a checksum mismatch and breaks deployments. If you need to fix or extend a previous migration, create a new migration file with the corrective SQL.
+4. **Production:** Migrations run automatically via the ArgoCD PreSync hook
+5. **Local/Tests:** Auto-applied via the kind cluster (`make dev-up`) and migrator
 
 ## Template
 ```sql

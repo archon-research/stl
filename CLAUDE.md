@@ -118,6 +118,7 @@ Lean towards returning errors instead of continuing, unless there is an extremel
     Always think hard and carefully about how the wrong data could be written to the database.
     Always think hard and carefully about schema design.
     For timeseries tables, use Tigerdata primitives, and make sure they support distributed tables.
+    NEVER modify an existing migration file in `stl-verify/db/migrations/`. Migrations are immutable once applied — the migrator tracks checksums and will reject modified files. Always create a new migration file for fixes or additions.
 
 ## Do NOT
 
