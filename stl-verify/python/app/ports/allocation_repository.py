@@ -1,11 +1,19 @@
 from typing import Protocol
 
-from app.domain.entities.allocation import AllocationPosition, EthAddress, Star
+from app.domain.entities.allocation import AllocationPosition, EthAddress, ReceiptTokenPosition, Star
 
 
 class AllocationRepository(Protocol):
     async def list_stars(self) -> list[Star]:
         """Return all distinct stars."""
+        ...
+
+    async def get_star(self, address: EthAddress) -> Star | None:
+        """Return the star with the given address, or None if not found."""
+        ...
+
+    async def list_receipt_token_positions(self, star_id: EthAddress) -> list[ReceiptTokenPosition]:
+        """Return receipt token positions with balances for the given star."""
         ...
 
     async def list_allocations_by_star(
