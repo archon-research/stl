@@ -1,0 +1,251 @@
+// Package temporal provides shared infrastructure for Temporal cronjob workers.
+//
+// To create a new cronjob, define a CronjobConfig and call RunCronjob.
+// Only Name, IntervalDefault, and Setup are required:
+//
+//	func main() {
+//	    ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+//	    defer cancel()
+//
+//	    if err := temporal.RunCronjob(ctx, meta, temporal.CronjobConfig{
+//	        Name:            "my-cronjob",
+//	        IntervalDefault: "5m",
+//	        OpenDatabase:    openDB,
+//	        Setup:           createRunner,
+//	    }); err != nil {
+//	        slog.Error("fatal", "error", err)
+//	        os.Exit(1)
+//	    }
+//	}
+package temporal
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	workflowservicepb "go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/worker"
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+)
+
+// BuildMeta holds build-time metadata injected via ldflags.
+type BuildMeta struct {
+	Commit    string
+	Branch    string
+	BuildTime string
+}
+
+// Dependencies are the shared resources available to every cronjob's Setup function.
+type Dependencies struct {
+	Pool   *pgxpool.Pool
+	Logger *slog.Logger
+}
+
+// CronjobConfig defines everything needed to run a Temporal cronjob worker.
+// Only Name, IntervalDefault, and Setup are required — everything else has
+// sensible defaults derived from Name.
+type CronjobConfig struct {
+	// Name identifies this cronjob (e.g. "anchorage-indexer").
+	// Used to derive TaskQueue, ScheduleID, and WorkflowID when not set.
+	Name string
+
+	// IntervalEnv is the env var name for the schedule interval (optional).
+	IntervalEnv string
+	// IntervalDefault is the default schedule interval (e.g. "5m", "1h").
+	IntervalDefault string
+
+	// OpenDatabase opens a database connection pool. Required.
+	OpenDatabase func(ctx context.Context) (*pgxpool.Pool, error)
+
+	// Setup returns a Runner (or RunnerFunc) for the cronjob's business logic.
+	// It will be wrapped in Temporal activities automatically.
+	Setup func(ctx context.Context, deps Dependencies) (Runner, error)
+}
+
+func (c CronjobConfig) validate() error {
+	if c.Name == "" {
+		return fmt.Errorf("CronjobConfig.Name is required")
+	}
+	if c.IntervalDefault == "" {
+		return fmt.Errorf("CronjobConfig.IntervalDefault is required")
+	}
+	if c.OpenDatabase == nil {
+		return fmt.Errorf("CronjobConfig.OpenDatabase is required")
+	}
+	if c.Setup == nil {
+		return fmt.Errorf("CronjobConfig.Setup is required")
+	}
+	return nil
+}
+
+// RunCronjob runs a Temporal cronjob worker end-to-end: sets up logging,
+// connects to the database and Temporal, registers the workflow/activities,
+// ensures the schedule exists, and runs the worker until ctx is cancelled.
+func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
+	if err := cfg.validate(); err != nil {
+		return fmt.Errorf("validating cronjob config: %w", err)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: env.ParseLogLevel(slog.LevelInfo),
+	}))
+	slog.SetDefault(logger)
+
+	logger.Info("starting "+cfg.Name+" worker",
+		"commit", meta.Commit,
+		"branch", meta.Branch,
+		"buildTime", meta.BuildTime,
+	)
+
+	pool, err := cfg.OpenDatabase(ctx)
+	if err != nil {
+		return fmt.Errorf("connecting to database: %w", err)
+	}
+	defer pool.Close()
+
+	temporalClient, err := createClient()
+	if err != nil {
+		return fmt.Errorf("creating temporal client: %w", err)
+	}
+	defer temporalClient.Close()
+
+	if err := waitForServer(ctx, temporalClient, logger); err != nil {
+		return fmt.Errorf("waiting for Temporal: %w", err)
+	}
+
+	runner, err := cfg.Setup(ctx, Dependencies{
+		Pool:   pool,
+		Logger: logger,
+	})
+	if err != nil {
+		return fmt.Errorf("setting up %s: %w", cfg.Name, err)
+	}
+
+	activities, err := newCronjobActivities(runner)
+	if err != nil {
+		return fmt.Errorf("creating cronjob activities: %w", err)
+	}
+
+	taskQueue := cfg.Name
+	w := worker.New(temporalClient, taskQueue, worker.Options{})
+	w.RegisterWorkflow(cronjobWorkflow)
+	w.RegisterActivity(activities)
+
+	if err := ensureSchedule(ctx, temporalClient, logger, taskQueue, cfg); err != nil {
+		return fmt.Errorf("ensuring schedule: %w", err)
+	}
+
+	logger.Info("starting worker", "taskQueue", taskQueue)
+
+	if err := w.Run(interruptFromContext(ctx)); err != nil {
+		return fmt.Errorf("running worker: %w", err)
+	}
+
+	logger.Info("worker stopped")
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+func createClient() (client.Client, error) {
+	hostPort := env.Get("TEMPORAL_HOST_PORT", "localhost:7233")
+	namespace := env.Get("TEMPORAL_NAMESPACE", "sentinel")
+
+	return client.Dial(client.Options{
+		HostPort:  hostPort,
+		Namespace: namespace,
+	})
+}
+
+func waitForServer(ctx context.Context, c client.Client, logger *slog.Logger) error {
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, err := c.WorkflowService().GetSystemInfo(probeCtx, &workflowservicepb.GetSystemInfoRequest{})
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if st, ok := grpcstatus.FromError(err); ok {
+			switch st.Code() {
+			case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted:
+				// Transient — keep retrying.
+			default:
+				return fmt.Errorf("unexpected Temporal error: %w", err)
+			}
+		}
+		logger.Info("waiting for Temporal to become ready", "error", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, taskQueue string, cfg CronjobConfig) error {
+	interval := env.Get(cfg.IntervalEnv, cfg.IntervalDefault)
+
+	intervalDuration, err := time.ParseDuration(interval)
+	if err != nil {
+		return fmt.Errorf("parsing %s %q: %w", cfg.IntervalEnv, interval, err)
+	}
+
+	scheduleID := cfg.Name
+	workflowID := "scheduled-" + cfg.Name
+
+	// Attempt to create the schedule directly. Temporal returns AlreadyExists if it is
+	// already present (normal after any restart). Skipping a Describe-first check avoids
+	// a race window and also sidesteps the case where Describe returns an internal error
+	// due to a stuck workflow task left over from a previous run.
+	//
+	// Note: changes to the interval env var will NOT take effect until the existing
+	// schedule is deleted from Temporal and the worker is restarted.
+	// Use the Temporal UI or CLI to delete a schedule.
+	_, err = c.ScheduleClient().Create(ctx, client.ScheduleOptions{
+		ID: scheduleID,
+		Spec: client.ScheduleSpec{
+			Intervals: []client.ScheduleIntervalSpec{
+				{Every: intervalDuration},
+			},
+		},
+		Action: &client.ScheduleWorkflowAction{
+			Workflow:  cronjobWorkflow,
+			ID:        workflowID,
+			TaskQueue: taskQueue,
+		},
+	})
+	if err != nil {
+		// The Temporal SDK wraps the gRPC AlreadyExists error inconsistently across
+		// SDK versions, so we check both the gRPC status code and the error message.
+		if grpcstatus.Code(err) == codes.AlreadyExists || strings.Contains(err.Error(), "already registered") {
+			logger.Info("schedule already exists", "scheduleID", scheduleID)
+			return nil
+		}
+		return fmt.Errorf("creating schedule %q: %w", scheduleID, err)
+	}
+
+	logger.Info("schedule created", "scheduleID", scheduleID, "interval", intervalDuration)
+	return nil
+}
+
+func interruptFromContext(ctx context.Context) <-chan any {
+	ch := make(chan any)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch
+}
