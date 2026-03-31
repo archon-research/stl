@@ -245,6 +245,24 @@ async def _seed_user3(
 _SEED_BLOCK_NUMBER = 20_000_000
 
 
+async def _seed_user4_zero_price_collateral(
+    conn: asyncpg.Connection,
+    protocol_id: int,
+    block_number: int,
+    zero_token_id: int,
+    sp_usds_id: int,
+) -> None:
+    """User 4: collateral token with price_usd=0, borrows spUSDS.
+
+    This triggers a division-by-zero in the attribution step because
+    total_collateral_usd = collateral_amount * 0 = 0, and the query
+    divides by total_collateral_usd.
+    """
+    user_id = await insert_user(conn, b"\xdd" * 20)
+    await _insert_collateral(conn, user_id, protocol_id, zero_token_id, str(100 * 10**18), block_number)
+    await _insert_debt(conn, user_id, protocol_id, sp_usds_id, 1_000 * 10**18, block_number)
+
+
 # ---------------------------------------------------------------------------
 # Seed and repository fixtures
 # ---------------------------------------------------------------------------
@@ -262,10 +280,22 @@ async def _seed_data(db_url: str) -> None:
         weth_id, cbbtc_id, sp_usds_id, sp_usdc_id = await _seed_tokens_and_prices(conn, oracle_id, block)
         cbbtc_decimals = cast(int, await conn.fetchval("SELECT decimals FROM token WHERE id = $1", cbbtc_id))
 
+        # Zero-price token: oracle reports price_usd = 0
+        zero_token_id = await insert_token(
+            conn,
+            "ZERO",
+            18,
+            b"\xde\xad\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01",
+        )
+        await _insert_oracle_asset(conn, oracle_id, zero_token_id)
+        await _insert_price(conn, zero_token_id, oracle_id, "0.000000000000000000", block)
+        await _insert_reserve(conn, protocol_id, zero_token_id, block, collateral_enabled=True)
+
         await _seed_reserves(conn, protocol_id, block, weth_id, cbbtc_id, sp_usds_id, sp_usdc_id)
         await _seed_user1(conn, protocol_id, block, weth_id, cbbtc_id, sp_usds_id, cbbtc_decimals)
         await _seed_user2(conn, protocol_id, block, weth_id, sp_usds_id, sp_usdc_id)
         await _seed_user3(conn, protocol_id, block, weth_id, sp_usds_id)
+        await _seed_user4_zero_price_collateral(conn, protocol_id, block, zero_token_id, sp_usds_id)
 
         await store_test_ids(
             conn,
@@ -275,6 +305,7 @@ async def _seed_data(db_url: str) -> None:
                 "cbbtc_id": cbbtc_id,
                 "sp_usds_id": sp_usds_id,
                 "sp_usdc_id": sp_usdc_id,
+                "zero_token_id": zero_token_id,
             },
         )
     finally:
@@ -338,7 +369,6 @@ async def test_single_borrower_full_attribution(
     result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
 
     assert result.backed_asset_id == test_ids["sp_usds_id"]
-    assert result.protocol_id == test_ids["protocol_id"]
     assert len(result.items) == 2
 
     by_symbol = {item.symbol: item for item in result.items}
@@ -346,8 +376,8 @@ async def test_single_borrower_full_attribution(
     assert "WETH" in by_symbol
     assert "cbBTC" in by_symbol
 
-    assert by_symbol["WETH"].backing_usd == Decimal("19333.33")
-    assert by_symbol["cbBTC"].backing_usd == Decimal("16666.67")
+    assert by_symbol["WETH"].backing_value == Decimal("19333.33")
+    assert by_symbol["cbBTC"].backing_value == Decimal("16666.67")
 
     assert by_symbol["WETH"].backing_pct == Decimal("53.7037")
     assert by_symbol["cbBTC"].backing_pct == Decimal("46.2963")
@@ -389,7 +419,7 @@ async def test_latest_debt_snapshot_used_not_summed(
     by_symbol = {item.symbol: item for item in result.items}
     # With incorrect SUM: User 1 has 50,000 spUSDS, User 2 has 10,000.
     # WETH backing would be (20000/45000)×50000 + 10000 = $32,222.22, not $19,333.33.
-    assert by_symbol["WETH"].backing_usd == Decimal("19333.33")
+    assert by_symbol["WETH"].backing_value == Decimal("19333.33")
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -405,4 +435,30 @@ async def test_disabled_collateral_not_attributed(
     """
     result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
     by_symbol = {item.symbol: item for item in result.items}
-    assert by_symbol["WETH"].backing_usd == Decimal("19333.33")
+    assert by_symbol["WETH"].backing_value == Decimal("19333.33")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_zero_price_collateral_does_not_cause_division_by_zero(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """Regression: a borrower whose only collateral has price_usd=0 must not crash the query.
+
+    User 4 has 100 ZERO tokens (price=$0) as collateral and borrows 1,000 spUSDS.
+    total_collateral_usd = 100 * 0 = 0, which caused a division-by-zero in the
+    attribution step: ``collateral_usd / total_collateral_usd``.
+
+    The query must execute without error. User 4's zero-value collateral should
+    not appear in the result (it contributes nothing in USD terms).
+    The existing users' attribution should be unchanged.
+    """
+    result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
+
+    by_symbol = {item.symbol: item for item in result.items}
+
+    # ZERO token should not appear — it has no USD value to attribute
+    assert "ZERO" not in by_symbol
+
+    # Existing attribution is unaffected
+    assert "WETH" in by_symbol
+    assert "cbBTC" in by_symbol

@@ -10,7 +10,7 @@ dependencies = [
     "pydantic>=2.0",
     "pydantic-settings",
     "python-dotenv",
-    "web3",
+    "httpx>=0.28.1",
 ]
 
 [project.optional-dependencies]
