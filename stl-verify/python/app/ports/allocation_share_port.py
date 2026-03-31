@@ -11,5 +11,5 @@ class AllocationSharePort(Protocol):
     """
 
     async def get_share(self) -> Decimal:
-        """Return a value in (0, 1] representing the allocator's share."""
+        """Return a value in [0, 1] representing the allocator's share."""
         ...

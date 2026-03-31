@@ -34,11 +34,11 @@ class StarResponse(BaseModel):
 
 
 class ReceiptTokenPositionResponse(BaseModel):
-    receipt_token_id: int | None
+    receipt_token_id: int
     symbol: str
     underlying_symbol: str
     protocol_name: str
-    balance: Decimal | None
+    balance: Decimal
     token_address: str | None
 
 

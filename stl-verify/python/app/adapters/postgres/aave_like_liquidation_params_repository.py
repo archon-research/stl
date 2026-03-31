@@ -10,8 +10,8 @@ from app.domain.entities.risk import LiquidationParams
 _SQL = """
 SELECT
     srd.token_id,
-    srd.liquidation_threshold / 10000.0 AS liquidation_threshold,
-    srd.liquidation_bonus      / 10000.0 AS liquidation_bonus
+    srd.liquidation_threshold / 10000::numeric AS liquidation_threshold,
+    srd.liquidation_bonus      / 10000::numeric AS liquidation_bonus
 FROM (
     SELECT DISTINCT ON (token_id)
         token_id,
