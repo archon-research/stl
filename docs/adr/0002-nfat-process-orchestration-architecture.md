@@ -73,7 +73,7 @@ Step 0.11 (deps: Step 0.7 + 14-day lock elapsed, Step 0.6)
        └→ Step 0.14  → Phase 0 Complete
 ```
 
-The step graph for each phase — which steps exist, their dependencies, actors, types, and time gates — is defined in a versioned configuration file checked into the repository. When a new process instance is created, the current version of the definition is snapshotted into `nfat_process_definition` in the database. This means process changes go through code review, and in-flight instances are unaffected by subsequent definition updates. In-flight instances can still have steps added — see [Dynamic Step Insertion](#dynamic-step-insertion) — but that operates on the database rows directly, not the config file.
+Process definitions are versioned. In-flight instances are isolated from future definition changes but can still have steps added — see [Dynamic Step Insertion](#dynamic-step-insertion).
 
 ### Event Bus
 
