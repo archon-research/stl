@@ -31,6 +31,7 @@ type TokenBalance struct {
 	Balance  string         `json:"balance"`
 	Decimals int            `json:"decimals"`
 	Symbol   string         `json:"symbol"`
+	PriceUSD *big.Float     `json:"-"` // from onchain_token_price, not persisted
 }
 
 // PoolSnapshot holds a complete snapshot of a Uniswap V3 pool's state.
@@ -46,8 +47,8 @@ type PoolSnapshot struct {
 	Price                string // token1/token0 price (human-readable)
 	ActiveLiquidity      *big.Int
 	TvlUSD               *big.Float
-	TwapTick             *int    // 30-min TWAP tick (nil if observe fails)
-	TwapPrice            *string // 30-min TWAP price (nil if observe fails)
+	TwapTick             *int    // TWAP tick (nil if observe fails)
+	TwapPrice            *string // TWAP price (nil if observe fails)
 	FeeGrowthGlobal0X128 string  // cumulative fees in token0 per liquidity unit
 	FeeGrowthGlobal1X128 string  // cumulative fees in token1 per liquidity unit
 }

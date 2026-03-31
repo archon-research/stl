@@ -25,4 +25,12 @@ type TokenRepository interface {
 
 	// GetOrCreateTokens bulk-upserts multiple tokens and returns a map of address → token ID.
 	GetOrCreateTokens(ctx context.Context, tx pgx.Tx, tokens []TokenInput) (map[common.Address]int64, error)
+
+	// LookupTokenID returns the token ID for a given chain + address.
+	// Returns ErrTokenNotFound if no matching token exists.
+	LookupTokenID(ctx context.Context, chainID int64, address common.Address) (int64, error)
+
+	// LookupTokenPrices returns the latest USD price for each token ID from onchain_token_price.
+	// Tokens without a price entry are omitted from the result (no error).
+	LookupTokenPrices(ctx context.Context, tokenIDs []int64) (map[int64]string, error)
 }

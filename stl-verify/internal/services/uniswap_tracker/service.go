@@ -19,8 +19,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// DefaultPools returns the hardcoded list of Uniswap V3 pools to track.
-func DefaultPools() []PoolConfig {
+// TrackedPools returns the hardcoded list of Uniswap V3 pools to track.
+func TrackedPools() []PoolConfig {
 	return []PoolConfig{
 		{
 			Address: common.HexToAddress("0xbafead7c60ea473758ed6c6021505e8bbd7e8e5d"),
@@ -36,9 +36,14 @@ type Service struct {
 	poolABI     *abi.ABI
 	erc20ABI    *abi.ABI
 	repo        outbound.UniswapRepository
+	tokenRepo   outbound.TokenRepository
 	pools       []PoolConfig
+	twapWindow  uint32
 	logger      *slog.Logger
 }
+
+// DefaultTWAPWindow is the default TWAP observation window in seconds (30 minutes).
+const DefaultTWAPWindow uint32 = 1800
 
 func NewService(
 	ethClient *ethclient.Client,
@@ -46,16 +51,23 @@ func NewService(
 	poolABI *abi.ABI,
 	erc20ABI *abi.ABI,
 	repo outbound.UniswapRepository,
+	tokenRepo outbound.TokenRepository,
 	pools []PoolConfig,
+	twapWindow uint32,
 	logger *slog.Logger,
 ) *Service {
+	if twapWindow == 0 {
+		twapWindow = DefaultTWAPWindow
+	}
 	return &Service{
 		ethClient:   ethClient,
 		multicaller: multicaller,
 		poolABI:     poolABI,
 		erc20ABI:    erc20ABI,
 		repo:        repo,
+		tokenRepo:   tokenRepo,
 		pools:       pools,
+		twapWindow:  twapWindow,
 		logger:      logger.With("component", "uniswap-tracker"),
 	}
 }
@@ -153,8 +165,8 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 			return nil, err
 		}
 
-		// observe([1800, 0]) for 30-min TWAP
-		secondsAgos := []uint32{1800, 0}
+		// observe for TWAP
+		secondsAgos := []uint32{s.twapWindow, 0}
 		observeData, err := s.poolABI.Pack("observe", secondsAgos)
 		if err != nil {
 			return nil, fmt.Errorf("pack observe for %s: %w", p.Name, err)
@@ -252,7 +264,7 @@ func (s *Service) fetchPoolData(ctx context.Context, blockNumber int64) ([]*Pool
 			tickCumulatives := unpacked[0].([]*big.Int)
 			if len(tickCumulatives) == 2 {
 				diff := new(big.Int).Sub(tickCumulatives[1], tickCumulatives[0])
-				avgTick := int(diff.Int64() / 1800)
+				avgTick := int(diff.Int64() / int64(s.twapWindow))
 				twapPrice := uniswapv3.ComputePriceFromTick(avgTick)
 				snap.TwapTick = &avgTick
 				snap.TwapPrice = &twapPrice
@@ -294,7 +306,11 @@ func (s *Service) fetchTokenBalances(ctx context.Context, snapshots []*PoolSnaps
 	for i, snap := range snapshots {
 		for tokenIdx, tokenAddr := range []common.Address{snap.Token0.Address, snap.Token1.Address} {
 			if tokenAddr == (common.Address{}) {
-				continue
+				tokenLabel := "token0"
+				if tokenIdx == 1 {
+					tokenLabel = "token1"
+				}
+				return fmt.Errorf("%s is zero address for pool %s", tokenLabel, snap.PoolAddress.Hex())
 			}
 			data, err := s.erc20ABI.Pack("balanceOf", snap.PoolAddress)
 			if err != nil {
@@ -316,11 +332,18 @@ func (s *Service) fetchTokenBalances(ctx context.Context, snapshots []*PoolSnaps
 
 	for i, meta := range metas {
 		if i >= len(results) || !results[i].Success || len(results[i].ReturnData) == 0 {
-			continue
+			tokenLabel := "token0"
+			if meta.token == 1 {
+				tokenLabel = "token1"
+			}
+			return fmt.Errorf("balanceOf %s failed for pool %s", tokenLabel, snapshots[meta.snapIdx].PoolAddress.Hex())
 		}
 		unpacked, err := s.erc20ABI.Unpack("balanceOf", results[i].ReturnData)
-		if err != nil || len(unpacked) == 0 {
-			continue
+		if err != nil {
+			return fmt.Errorf("unpack balanceOf: %w", err)
+		}
+		if len(unpacked) == 0 {
+			return fmt.Errorf("balanceOf returned empty result for pool %s", snapshots[meta.snapIdx].PoolAddress.Hex())
 		}
 		balance := unpacked[0].(*big.Int)
 		if meta.token == 0 {
@@ -340,9 +363,13 @@ func (s *Service) enrichTokenMetadata(ctx context.Context, snapshots []*PoolSnap
 	var tokens []common.Address
 
 	for _, snap := range snapshots {
-		for _, addr := range []common.Address{snap.Token0.Address, snap.Token1.Address} {
+		for idx, addr := range []common.Address{snap.Token0.Address, snap.Token1.Address} {
 			if addr == (common.Address{}) {
-				continue
+				tokenLabel := "token0"
+				if idx == 1 {
+					tokenLabel = "token1"
+				}
+				return fmt.Errorf("%s is zero address for pool %s", tokenLabel, snap.PoolAddress.Hex())
 			}
 			if _, exists := seen[addr]; !exists {
 				seen[addr] = struct{}{}
@@ -418,7 +445,7 @@ func (s *Service) enrichTokenMetadata(ctx context.Context, snapshots []*PoolSnap
 				break
 			}
 		}
-		id, err := s.repo.LookupTokenID(ctx, chainID, addr)
+		id, err := s.tokenRepo.LookupTokenID(ctx, chainID, addr)
 		if err != nil {
 			if errors.Is(err, outbound.ErrTokenNotFound) {
 				s.logger.Debug("token not found in DB", "address", addr.Hex(), "chainID", chainID)
@@ -430,6 +457,28 @@ func (s *Service) enrichTokenMetadata(ctx context.Context, snapshots []*PoolSnap
 		tokenIDs[addr] = id
 	}
 
+	// Look up USD prices from onchain_token_price.
+	tokenPrices := make(map[int64]*big.Float)
+	var ids []int64
+	for _, id := range tokenIDs {
+		ids = append(ids, id)
+	}
+	if len(ids) > 0 {
+		priceStrings, err := s.tokenRepo.LookupTokenPrices(ctx, ids)
+		if err != nil {
+			s.logger.Warn("failed to lookup token prices", "error", err)
+		} else {
+			for id, priceStr := range priceStrings {
+				p, _, err := new(big.Float).Parse(priceStr, 10)
+				if err != nil {
+					s.logger.Warn("failed to parse price", "tokenID", id, "price", priceStr, "error", err)
+					continue
+				}
+				tokenPrices[id] = p
+			}
+		}
+	}
+
 	// Apply metadata to snapshots.
 	for _, snap := range snapshots {
 		if m, ok := metaMap[snap.Token0.Address]; ok {
@@ -438,6 +487,9 @@ func (s *Service) enrichTokenMetadata(ctx context.Context, snapshots []*PoolSnap
 		}
 		if id, ok := tokenIDs[snap.Token0.Address]; ok {
 			snap.Token0.TokenID = id
+			if price, ok := tokenPrices[id]; ok {
+				snap.Token0.PriceUSD = price
+			}
 		}
 
 		if m, ok := metaMap[snap.Token1.Address]; ok {
@@ -446,17 +498,20 @@ func (s *Service) enrichTokenMetadata(ctx context.Context, snapshots []*PoolSnap
 		}
 		if id, ok := tokenIDs[snap.Token1.Address]; ok {
 			snap.Token1.TokenID = id
+			if price, ok := tokenPrices[id]; ok {
+				snap.Token1.PriceUSD = price
+			}
 		}
 
-		// Compute TVL now that we have decimals.
+		// Compute TVL now that we have decimals and prices.
 		snap.TvlUSD = s.calculateTVL(snap)
 	}
 
 	return nil
 }
 
-// calculateTVL computes TVL assuming stablecoin pairs (~$1 per token).
-// TODO: Use prices table for non-stablecoin pools.
+// calculateTVL computes TVL using USD prices from onchain_token_price.
+// Falls back to $1 per token if no price is available (safe for stablecoin pools).
 func (s *Service) calculateTVL(snap *PoolSnapshot) *big.Float {
 	tvl := new(big.Float)
 
@@ -473,6 +528,14 @@ func (s *Service) calculateTVL(snap *PoolSnapshot) *big.Float {
 			big.NewInt(10), big.NewInt(int64(tb.Decimals)), nil,
 		))
 		balFloat.Quo(balFloat, divisor)
+
+		// Multiply by USD price (default $1 if not available).
+		price := new(big.Float).SetFloat64(1.0)
+		if tb.PriceUSD != nil {
+			price = tb.PriceUSD
+		}
+		balFloat.Mul(balFloat, price)
+
 		tvl.Add(tvl, balFloat)
 	}
 

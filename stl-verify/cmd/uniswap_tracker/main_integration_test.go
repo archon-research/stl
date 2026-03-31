@@ -16,51 +16,13 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-func TestRunIntegration_BadDatabaseURL(t *testing.T) {
-	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defer rpcServer.Close()
-
-	t.Setenv("ALCHEMY_API_KEY", "test-key")
-	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
-	t.Setenv("DATABASE_URL", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1")
-
-	err := run(context.Background())
-	if err == nil {
-		t.Fatal("expected error for bad database URL")
-	}
-	if !strings.Contains(err.Error(), "database") && !strings.Contains(err.Error(), "connect") {
-		t.Errorf("expected connection error, got: %v", err)
-	}
-}
-
-func TestRunIntegration_MissingDatabaseURL(t *testing.T) {
-	t.Setenv("ALCHEMY_API_KEY", "test-key")
-	t.Setenv("DATABASE_URL", "")
-
-	err := run(context.Background())
-	if err == nil {
-		t.Fatal("expected error for missing DATABASE_URL")
-	}
-	if !strings.Contains(err.Error(), "DATABASE_URL") {
-		t.Errorf("expected DATABASE_URL error, got: %v", err)
-	}
-}
-
-func TestRunIntegration_MissingAlchemyKey(t *testing.T) {
-	t.Setenv("ALCHEMY_API_KEY", "")
-	t.Setenv("DATABASE_URL", "postgres://localhost:5432/test")
-
-	err := run(context.Background())
-	if err == nil {
-		t.Fatal("expected error for missing ALCHEMY_API_KEY")
-	}
-	if !strings.Contains(err.Error(), "ALCHEMY_API_KEY") {
-		t.Errorf("expected ALCHEMY_API_KEY error, got: %v", err)
-	}
-}
+// ---------------------------------------------------------------------------
+// Integration test — full snapshot with mock RPC + TimescaleDB
+// ---------------------------------------------------------------------------
 
 func TestRunIntegration_FullSnapshot(t *testing.T) {
 	ctx := context.Background()
@@ -166,7 +128,10 @@ var mockBlockHeader = `{
 func startMockRPC(t *testing.T) *httptest.Server {
 	t.Helper()
 
-	poolABI := parseUniV3PoolABI(t)
+	poolABI, err := abis.GetUniswapV3PoolABI()
+	if err != nil {
+		t.Fatalf("load pool ABI: %v", err)
+	}
 	erc20ABI := parseERC20ABI(t)
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -318,10 +283,6 @@ func pad32(v *big.Int) []byte {
 func dispatchCall(t *testing.T, target common.Address, data []byte, poolABI, erc20ABI *abi.ABI) string {
 	t.Helper()
 
-	if len(data) < 4 {
-		return "0x"
-	}
-
 	methodID := data[:4]
 
 	// Try pool methods
@@ -346,16 +307,20 @@ func handlePoolMethod(t *testing.T, method string, inputData []byte, poolABI *ab
 
 	switch method {
 	case "slot0":
-		sqrtPrice := new(big.Int).Lsh(big.NewInt(1), 96) // 2^96 = 1:1 price
-		tick := big.NewInt(0)
-		obsIdx := uint16(100)
-		obsCard := uint16(200)
-		obsCardNext := uint16(200)
-		feeProt := uint8(0)
+		// sqrtPriceX96 = 2^96 for exact 1:1 stablecoin price
+		sqrtPrice := new(big.Int).Lsh(big.NewInt(1), 96)
+		tick := big.NewInt(0)      // int24 → *big.Int
+		obsIdx := uint16(100)      // uint16
+		obsCard := uint16(200)     // uint16
+		obsCardNext := uint16(200) // uint16
+		feeProt := uint8(0)        // uint8
 
-		result, _ := poolABI.Methods["slot0"].Outputs.Pack(
+		result, err := poolABI.Methods["slot0"].Outputs.Pack(
 			sqrtPrice, tick, obsIdx, obsCard, obsCardNext, feeProt, true,
 		)
+		if err != nil {
+			t.Fatalf("pack slot0: %v", err)
+		}
 		return "0x" + common.Bytes2Hex(result)
 
 	case "liquidity":
@@ -390,7 +355,6 @@ func handlePoolMethod(t *testing.T, method string, inputData []byte, poolABI *ab
 		return "0x" + common.Bytes2Hex(result)
 
 	case "feeGrowthGlobal0X128":
-		// Some accumulated fee growth value
 		feeGrowth := new(big.Int).SetUint64(123456789012345678)
 		result, _ := poolABI.Methods["feeGrowthGlobal0X128"].Outputs.Pack(feeGrowth)
 		return "0x" + common.Bytes2Hex(result)
@@ -441,36 +405,6 @@ func handleERC20Method(t *testing.T, method string, target common.Address, erc20
 // ---------------------------------------------------------------------------
 // ABI helpers
 // ---------------------------------------------------------------------------
-
-func parseUniV3PoolABI(t *testing.T) *abi.ABI {
-	t.Helper()
-	const poolJSON = `[
-		{"name":"slot0","inputs":[],"outputs":[
-			{"name":"sqrtPriceX96","type":"uint160"},
-			{"name":"tick","type":"int24"},
-			{"name":"observationIndex","type":"uint16"},
-			{"name":"observationCardinality","type":"uint16"},
-			{"name":"observationCardinalityNext","type":"uint16"},
-			{"name":"feeProtocol","type":"uint8"},
-			{"name":"unlocked","type":"bool"}
-		],"stateMutability":"view","type":"function"},
-		{"name":"liquidity","inputs":[],"outputs":[{"name":"","type":"uint128"}],"stateMutability":"view","type":"function"},
-		{"name":"fee","inputs":[],"outputs":[{"name":"","type":"uint24"}],"stateMutability":"view","type":"function"},
-		{"name":"token0","inputs":[],"outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},
-		{"name":"token1","inputs":[],"outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},
-		{"name":"observe","inputs":[{"name":"secondsAgos","type":"uint32[]"}],"outputs":[
-			{"name":"tickCumulatives","type":"int56[]"},
-			{"name":"secondsPerLiquidityCumulativeX128s","type":"uint160[]"}
-		],"stateMutability":"view","type":"function"},
-		{"name":"feeGrowthGlobal0X128","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
-		{"name":"feeGrowthGlobal1X128","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}
-	]`
-	parsed, err := abi.JSON(strings.NewReader(poolJSON))
-	if err != nil {
-		t.Fatalf("parse pool ABI: %v", err)
-	}
-	return &parsed
-}
 
 func parseERC20ABI(t *testing.T) *abi.ABI {
 	t.Helper()

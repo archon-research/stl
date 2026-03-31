@@ -2,11 +2,9 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -36,15 +34,12 @@ func (r *UniswapRepository) SaveSnapshots(ctx context.Context, snapshots []*enti
 	}
 
 	for i, s := range snapshots {
-		if s == nil {
-			return fmt.Errorf("snapshot %d is nil", i)
-		}
 		if err := s.Validate(); err != nil {
 			return fmt.Errorf("snapshot %d: %w", i, err)
 		}
 	}
 
-	err := r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		batch := &pgx.Batch{}
 
 		for _, s := range snapshots {
@@ -83,10 +78,7 @@ func (r *UniswapRepository) SaveSnapshots(ctx context.Context, snapshots []*enti
 		results := tx.SendBatch(ctx, batch)
 		for i := range snapshots {
 			if _, err := results.Exec(); err != nil {
-				closeErr := results.Close()
-				if closeErr != nil {
-					return fmt.Errorf("insert snapshot %d: %w; close: %v", i, err, closeErr)
-				}
+				_ = results.Close()
 				return fmt.Errorf("insert snapshot %d: %w", i, err)
 			}
 		}
@@ -94,29 +86,7 @@ func (r *UniswapRepository) SaveSnapshots(ctx context.Context, snapshots []*enti
 			return fmt.Errorf("close batch: %w", err)
 		}
 
+		r.logger.Info("snapshots saved", "count", len(snapshots))
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-
-	r.logger.Info("snapshots saved", "count", len(snapshots))
-	return nil
-}
-
-// LookupTokenID returns the token ID for a given chain + address.
-// Returns outbound.ErrTokenNotFound if no matching token exists.
-func (r *UniswapRepository) LookupTokenID(ctx context.Context, chainID int64, address common.Address) (int64, error) {
-	var id int64
-	err := r.pool.QueryRow(ctx,
-		`SELECT id FROM token WHERE chain_id = $1 AND address = $2`,
-		chainID, address.Bytes(),
-	).Scan(&id)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, fmt.Errorf("token %s on chain %d: %w", address.Hex(), chainID, outbound.ErrTokenNotFound)
-		}
-		return 0, fmt.Errorf("lookup token %s on chain %d: %w", address.Hex(), chainID, err)
-	}
-	return id, nil
 }

@@ -16,7 +16,7 @@ import (
 // ── DefaultPools ──
 
 func TestDefaultPools(t *testing.T) {
-	pools := DefaultPools()
+	pools := TrackedPools()
 
 	if len(pools) != 1 {
 		t.Fatalf("expected 1 pool, got %d", len(pools))

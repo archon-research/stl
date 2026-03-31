@@ -73,6 +73,16 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("unsupported CHAIN_ID: %d", chainID)
 	}
 
+	// Optional TWAP window override (default: 30 minutes).
+	var twapWindow uint32
+	if v := env.Get("TWAP_WINDOW", ""); v != "" {
+		parsed, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return fmt.Errorf("parsing TWAP_WINDOW %q: %w", v, err)
+		}
+		twapWindow = uint32(parsed)
+	}
+
 	// Database
 	dbPool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
@@ -114,11 +124,16 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("erc20 abi: %w", err)
 	}
 
-	// Repository
+	// Repositories
 	uniRepo := postgres.NewUniswapRepository(dbPool, txm, logger)
 
+	tokenRepo, err := postgres.NewTokenRepository(dbPool, logger, 0)
+	if err != nil {
+		return fmt.Errorf("token repository: %w", err)
+	}
+
 	// Service
-	pools := ut.PoolsForChainID(ut.DefaultPools(), chainID)
+	pools := ut.PoolsForChainID(ut.TrackedPools(), chainID)
 	if len(pools) == 0 {
 		return fmt.Errorf("no Uniswap V3 pools configured for chain ID %d", chainID)
 	}
@@ -129,7 +144,9 @@ func run(ctx context.Context) error {
 		poolABI,
 		erc20ABI,
 		uniRepo,
+		tokenRepo,
 		pools,
+		twapWindow,
 		logger,
 	)
 

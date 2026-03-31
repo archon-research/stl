@@ -35,3 +35,11 @@ func (m *MockTokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, 
 	}
 	return result, nil
 }
+
+func (m *MockTokenRepository) LookupTokenID(ctx context.Context, chainID int64, address common.Address) (int64, error) {
+	return 0, outbound.ErrTokenNotFound
+}
+
+func (m *MockTokenRepository) LookupTokenPrices(ctx context.Context, tokenIDs []int64) (map[int64]string, error) {
+	return nil, nil
+}
