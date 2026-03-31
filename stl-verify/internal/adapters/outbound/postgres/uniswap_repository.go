@@ -44,7 +44,7 @@ func (r *UniswapRepository) SaveSnapshots(ctx context.Context, snapshots []*enti
 		}
 	}
 
-	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+	err := r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		batch := &pgx.Batch{}
 
 		for _, s := range snapshots {
@@ -83,7 +83,10 @@ func (r *UniswapRepository) SaveSnapshots(ctx context.Context, snapshots []*enti
 		results := tx.SendBatch(ctx, batch)
 		for i := range snapshots {
 			if _, err := results.Exec(); err != nil {
-				_ = results.Close()
+				closeErr := results.Close()
+				if closeErr != nil {
+					return fmt.Errorf("insert snapshot %d: %w; close: %v", i, err, closeErr)
+				}
 				return fmt.Errorf("insert snapshot %d: %w", i, err)
 			}
 		}
@@ -91,9 +94,14 @@ func (r *UniswapRepository) SaveSnapshots(ctx context.Context, snapshots []*enti
 			return fmt.Errorf("close batch: %w", err)
 		}
 
-		r.logger.Info("snapshots saved", "count", len(snapshots))
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	r.logger.Info("snapshots saved", "count", len(snapshots))
+	return nil
 }
 
 // LookupTokenID returns the token ID for a given chain + address.
