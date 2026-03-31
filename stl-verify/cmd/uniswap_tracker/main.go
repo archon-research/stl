@@ -106,6 +106,15 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("eth dial: %w", err)
 	}
 	defer ethClient.Close()
+
+	nodeChainID, err := ethClient.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("fetching rpc chain ID: %w", err)
+	}
+	if nodeChainID.Int64() != chainID {
+		return fmt.Errorf("rpc chain ID %d does not match configured CHAIN_ID %d", nodeChainID.Int64(), chainID)
+	}
+
 	logger.Info("Ethereum node connected")
 
 	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)

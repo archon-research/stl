@@ -302,6 +302,15 @@ func dispatchCall(t *testing.T, target common.Address, data []byte, poolABI, erc
 	return "0x"
 }
 
+func mustPack(t *testing.T, method string, outputs abi.Arguments, args ...any) []byte {
+	t.Helper()
+	result, err := outputs.Pack(args...)
+	if err != nil {
+		t.Fatalf("pack %s: %v", method, err)
+	}
+	return result
+}
+
 func handlePoolMethod(t *testing.T, method string, inputData []byte, poolABI *abi.ABI) string {
 	t.Helper()
 
@@ -309,60 +318,41 @@ func handlePoolMethod(t *testing.T, method string, inputData []byte, poolABI *ab
 	case "slot0":
 		// sqrtPriceX96 = 2^96 for exact 1:1 stablecoin price
 		sqrtPrice := new(big.Int).Lsh(big.NewInt(1), 96)
-		tick := big.NewInt(0)      // int24 → *big.Int
-		obsIdx := uint16(100)      // uint16
-		obsCard := uint16(200)     // uint16
-		obsCardNext := uint16(200) // uint16
-		feeProt := uint8(0)        // uint8
-
-		result, err := poolABI.Methods["slot0"].Outputs.Pack(
-			sqrtPrice, tick, obsIdx, obsCard, obsCardNext, feeProt, true,
+		result := mustPack(t, "slot0", poolABI.Methods["slot0"].Outputs,
+			sqrtPrice, big.NewInt(0), uint16(100), uint16(200), uint16(200), uint8(0), true,
 		)
-		if err != nil {
-			t.Fatalf("pack slot0: %v", err)
-		}
 		return "0x" + common.Bytes2Hex(result)
 
 	case "liquidity":
 		liq := new(big.Int).SetUint64(250_012_631_439_399_290)
-		result, _ := poolABI.Methods["liquidity"].Outputs.Pack(liq)
-		return "0x" + common.Bytes2Hex(result)
+		return "0x" + common.Bytes2Hex(mustPack(t, "liquidity", poolABI.Methods["liquidity"].Outputs, liq))
 
 	case "fee":
-		result, _ := poolABI.Methods["fee"].Outputs.Pack(big.NewInt(100))
-		return "0x" + common.Bytes2Hex(result)
+		return "0x" + common.Bytes2Hex(mustPack(t, "fee", poolABI.Methods["fee"].Outputs, big.NewInt(100)))
 
 	case "token0":
 		addr := common.HexToAddress("0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a") // AUSD
-		result, _ := poolABI.Methods["token0"].Outputs.Pack(addr)
-		return "0x" + common.Bytes2Hex(result)
+		return "0x" + common.Bytes2Hex(mustPack(t, "token0", poolABI.Methods["token0"].Outputs, addr))
 
 	case "token1":
 		addr := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48") // USDC
-		result, _ := poolABI.Methods["token1"].Outputs.Pack(addr)
-		return "0x" + common.Bytes2Hex(result)
+		return "0x" + common.Bytes2Hex(mustPack(t, "token1", poolABI.Methods["token1"].Outputs, addr))
 
 	case "observe":
-		// Return tick cumulatives for 30-min TWAP: tick=0 → price=1.0
-		tickCum0 := big.NewInt(0)
-		tickCum1 := big.NewInt(0)
-		secPerLiq0 := new(big.Int).SetUint64(1000)
-		secPerLiq1 := new(big.Int).SetUint64(2000)
-		result, _ := poolABI.Methods["observe"].Outputs.Pack(
-			[]*big.Int{tickCum0, tickCum1},
-			[]*big.Int{secPerLiq0, secPerLiq1},
+		// Return tick cumulatives for TWAP: tick=0 → price=1.0
+		result := mustPack(t, "observe", poolABI.Methods["observe"].Outputs,
+			[]*big.Int{big.NewInt(0), big.NewInt(0)},
+			[]*big.Int{new(big.Int).SetUint64(1000), new(big.Int).SetUint64(2000)},
 		)
 		return "0x" + common.Bytes2Hex(result)
 
 	case "feeGrowthGlobal0X128":
-		feeGrowth := new(big.Int).SetUint64(123456789012345678)
-		result, _ := poolABI.Methods["feeGrowthGlobal0X128"].Outputs.Pack(feeGrowth)
-		return "0x" + common.Bytes2Hex(result)
+		fg := new(big.Int).SetUint64(123456789012345678)
+		return "0x" + common.Bytes2Hex(mustPack(t, "feeGrowthGlobal0X128", poolABI.Methods["feeGrowthGlobal0X128"].Outputs, fg))
 
 	case "feeGrowthGlobal1X128":
-		feeGrowth := new(big.Int).SetUint64(987654321098765432)
-		result, _ := poolABI.Methods["feeGrowthGlobal1X128"].Outputs.Pack(feeGrowth)
-		return "0x" + common.Bytes2Hex(result)
+		fg := new(big.Int).SetUint64(987654321098765432)
+		return "0x" + common.Bytes2Hex(mustPack(t, "feeGrowthGlobal1X128", poolABI.Methods["feeGrowthGlobal1X128"].Outputs, fg))
 
 	default:
 		return "0x"
@@ -374,9 +364,7 @@ func handleERC20Method(t *testing.T, method string, target common.Address, erc20
 
 	switch method {
 	case "decimals":
-		// Both AUSD and USDC have 6 decimals
-		result, _ := erc20ABI.Methods["decimals"].Outputs.Pack(uint8(6))
-		return "0x" + common.Bytes2Hex(result)
+		return "0x" + common.Bytes2Hex(mustPack(t, "decimals", erc20ABI.Methods["decimals"].Outputs, uint8(6)))
 
 	case "symbol":
 		var sym string
@@ -388,14 +376,12 @@ func handleERC20Method(t *testing.T, method string, target common.Address, erc20
 		default:
 			sym = "UNKNOWN"
 		}
-		result, _ := erc20ABI.Methods["symbol"].Outputs.Pack(sym)
-		return "0x" + common.Bytes2Hex(result)
+		return "0x" + common.Bytes2Hex(mustPack(t, "symbol", erc20ABI.Methods["symbol"].Outputs, sym))
 
 	case "balanceOf":
 		// ~12M for each token in the pool
 		balance := new(big.Int).Mul(big.NewInt(12_000_000), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil))
-		result, _ := erc20ABI.Methods["balanceOf"].Outputs.Pack(balance)
-		return "0x" + common.Bytes2Hex(result)
+		return "0x" + common.Bytes2Hex(mustPack(t, "balanceOf", erc20ABI.Methods["balanceOf"].Outputs, balance))
 
 	default:
 		return "0x"

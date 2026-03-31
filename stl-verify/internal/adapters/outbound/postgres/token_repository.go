@@ -150,7 +150,7 @@ func (r *TokenRepository) LookupTokenPrices(ctx context.Context, tokenIDs []int6
 		SELECT DISTINCT ON (token_id) token_id, price_usd
 		FROM onchain_token_price
 		WHERE token_id = ANY($1)
-		ORDER BY token_id, timestamp DESC
+		ORDER BY token_id, timestamp DESC, block_number DESC
 	`, tokenIDs)
 	if err != nil {
 		return nil, fmt.Errorf("query token prices: %w", err)

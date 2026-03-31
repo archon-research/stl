@@ -533,6 +533,8 @@ func (s *Service) calculateTVL(snap *PoolSnapshot) *big.Float {
 		price := new(big.Float).SetFloat64(1.0)
 		if tb.PriceUSD != nil {
 			price = tb.PriceUSD
+		} else {
+			s.logger.Warn("no price found, defaulting to $1", "symbol", tb.Symbol, "tokenID", tb.TokenID)
 		}
 		balFloat.Mul(balFloat, price)
 
