@@ -1,7 +1,9 @@
+from decimal import Decimal
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.domain.entities.allocation import AllocationPosition, EthAddress, Star
+from app.domain.entities.allocation import AllocationPosition, EthAddress, ReceiptTokenPosition, Star
 
 
 class PostgresAllocationRepository:
@@ -23,54 +25,135 @@ class PostgresAllocationRepository:
         )
         return [Star(id="0x" + row.address, name=row.name, address="0x" + row.address) for row in result]
 
+    async def get_star(self, address: EthAddress) -> Star | None:
+        result = await self._conn.execute(
+            text("""
+                SELECT p.name, encode(ap.proxy_address, 'hex') AS address
+                FROM allocation_position ap
+                JOIN prime p ON p.id = ap.prime_id
+                WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+                ORDER BY ap.block_number DESC
+                LIMIT 1
+            """),
+            {"proxy_hex": address.hex},
+        )
+        row = result.fetchone()
+        if row is None:
+            return None
+        return Star(id="0x" + row.address, name=row.name, address="0x" + row.address)
+
+    async def list_receipt_token_positions(self, star_id: EthAddress) -> list[ReceiptTokenPosition]:
+        proxy_hex = star_id.hex
+        result = await self._conn.execute(
+            text("""
+                WITH latest_positions AS (
+                    SELECT DISTINCT ON (ap.token_id, ap.proxy_address)
+                        ap.token_id,
+                        ap.balance
+                    FROM allocation_position ap
+                    JOIN prime p ON p.id = ap.prime_id
+                    WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+                    ORDER BY ap.token_id, ap.proxy_address,
+                             ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
+                )
+                SELECT DISTINCT ON (receipt_token_id)
+                    receipt_token_id,
+                    symbol,
+                    underlying_symbol,
+                    protocol_name,
+                    balance,
+                    token_address
+                FROM (
+                    SELECT
+                        rt.id                                        AS receipt_token_id,
+                        rt.symbol                                    AS symbol,
+                        ut.symbol                                    AS underlying_symbol,
+                        pr.name                                      AS protocol_name,
+                        lp.balance,
+                        encode(rt.receipt_token_address, 'hex')      AS token_address
+                    FROM latest_positions lp
+                    JOIN token t ON t.id = lp.token_id
+                    JOIN receipt_token rt ON rt.underlying_token_id = t.id
+                    JOIN token ut ON ut.id = rt.underlying_token_id
+                    JOIN protocol pr ON pr.id = rt.protocol_id
+                    WHERE lp.balance > 0
+
+                    UNION ALL
+
+                    SELECT
+                        rt.id                                        AS receipt_token_id,
+                        rt.symbol                                    AS symbol,
+                        ut.symbol                                    AS underlying_symbol,
+                        pr.name                                      AS protocol_name,
+                        lp.balance,
+                        encode(rt.receipt_token_address, 'hex')      AS token_address
+                    FROM latest_positions lp
+                    JOIN token t ON t.id = lp.token_id
+                    JOIN receipt_token rt ON rt.receipt_token_address = t.address
+                    JOIN token ut ON ut.id = rt.underlying_token_id
+                    JOIN protocol pr ON pr.id = rt.protocol_id
+                    WHERE lp.balance > 0
+                ) combined
+                ORDER BY receipt_token_id, balance DESC
+            """),
+            {"proxy_hex": proxy_hex},
+        )
+        return [
+            ReceiptTokenPosition(
+                receipt_token_id=row.receipt_token_id,
+                symbol=row.symbol,
+                underlying_symbol=row.underlying_symbol,
+                protocol_name=row.protocol_name,
+                balance=Decimal(str(row.balance)),
+                token_address="0x" + row.token_address if row.token_address else None,
+            )
+            for row in result
+        ]
+
+    _ALLOCATIONS_SQL = text("""
+        SELECT DISTINCT ON
+        (ap.chain_id, ap.token_id, ap.proxy_address, ap.block_number, ap.tx_hash, ap.log_index, ap.direction)
+            ap.id,
+            ap.chain_id,
+            p.name,
+            encode(ap.proxy_address, 'hex') AS proxy_address,
+            encode(t.address, 'hex')        AS token_address,
+            t.symbol                        AS token_symbol,
+            t.decimals                      AS token_decimals,
+            ap.balance,
+            ap.scaled_balance,
+            ap.block_number,
+            ap.block_version,
+            encode(ap.tx_hash, 'hex')       AS tx_hash,
+            ap.log_index,
+            ap.tx_amount,
+            ap.direction,
+            ap.created_at
+        FROM allocation_position ap
+        JOIN token t ON t.id = ap.token_id
+        JOIN prime p ON p.id = ap.prime_id
+        WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+          AND ap.block_number = COALESCE(
+              :block_number,
+              (SELECT MAX(block_number) FROM allocation_position
+               WHERE proxy_address = decode(:proxy_hex, 'hex'))
+          )
+        ORDER BY ap.chain_id,
+                 ap.token_id,
+                 ap.proxy_address,
+                 ap.block_number,
+                 ap.tx_hash,
+                 ap.log_index,
+                 ap.direction,
+                 ap.block_version DESC
+    """)
+
     async def list_allocations_by_star(
         self, star_id: EthAddress, block_number: int | None = None
     ) -> list[AllocationPosition]:
-        proxy_hex = star_id.hex
-        if block_number is None:
-            block_filter = "ap.block_number = (SELECT MAX(block_number) FROM allocation_position WHERE proxy_address = decode(:proxy_hex, 'hex'))"  # noqa: E501
-            params: dict = {"proxy_hex": proxy_hex}
-        else:
-            block_filter = "ap.block_number = :block_number"
-            params = {"proxy_hex": proxy_hex, "block_number": block_number}
-
         result = await self._conn.execute(
-            text(
-                f"""
-                SELECT DISTINCT ON
-                (ap.chain_id, ap.token_id, ap.proxy_address, ap.block_number, ap.tx_hash, ap.log_index, ap.direction)
-                    ap.id,
-                    ap.chain_id,
-                    p.name,
-                    encode(ap.proxy_address, 'hex') AS proxy_address,
-                    encode(t.address, 'hex')        AS token_address,
-                    t.symbol                        AS token_symbol,
-                    t.decimals                      AS token_decimals,
-                    ap.balance,
-                    ap.scaled_balance,
-                    ap.block_number,
-                    ap.block_version,
-                    encode(ap.tx_hash, 'hex')       AS tx_hash,
-                    ap.log_index,
-                    ap.tx_amount,
-                    ap.direction,
-                    ap.created_at
-                FROM allocation_position ap
-                JOIN token t ON t.id = ap.token_id
-                JOIN prime p ON p.id = ap.prime_id
-                WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-                  AND {block_filter}
-                ORDER BY ap.chain_id,
-                         ap.token_id,
-                         ap.proxy_address,
-                         ap.block_number,
-                         ap.tx_hash,
-                         ap.log_index,
-                         ap.direction,
-                         ap.block_version DESC
-                """
-            ),
-            params,
+            self._ALLOCATIONS_SQL,
+            {"proxy_hex": star_id.hex, "block_number": block_number},
         )
         return [
             AllocationPosition(

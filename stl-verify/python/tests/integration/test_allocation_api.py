@@ -158,6 +158,27 @@ def test_list_allocations_returns_latest_block_version_after_reorg(client: TestC
     assert data[0]["balance"] == "999"
 
 
+def test_get_star_via_receipt_tokens(client: TestClient) -> None:
+    """Regression: get_star must not use SELECT DISTINCT with ORDER BY on a non-selected column.
+
+    The original query used ``SELECT DISTINCT ... ORDER BY block_number DESC``
+    which PostgreSQL rejects because block_number is not in the select list.
+    This test exercises that code path (receipt-tokens calls get_star internally).
+    """
+    response = client.get(f"/v1/stars/0x{_PROXY_HEX}/receipt-tokens")
+
+    # The star exists so we should not get a 500 (SQL error) or 404.
+    # An empty list is fine — the important thing is the query executes.
+    assert response.status_code == 200
+
+
+def test_get_star_returns_404_for_unknown_star(client: TestClient) -> None:
+    """receipt-tokens endpoint returns 404 when the star doesn't exist."""
+    response = client.get(f"/v1/stars/0x{_UNKNOWN_PROXY_HEX}/receipt-tokens")
+
+    assert response.status_code == 404
+
+
 def test_list_allocations_returns_422_for_malformed_star_id(client: TestClient) -> None:
     """A star_id that is not a valid Ethereum address should be rejected at the API boundary."""
     response = client.get("/v1/stars/0xdeadbeef/allocations")
