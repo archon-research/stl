@@ -31,7 +31,7 @@
         erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download \
 		build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill deploy-oracle-pricing-backfill-worker \
 		build-sparklend-backfill-arm64 deploy-sparklend-backfill erigon-sparklend-backfill \
-		kind-create kind-delete kind-infra kind-config kind-secrets kind-migrate \
+		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate \
 		kind-load-migrate kind-load-watcher kind-load-workers kind-load-cronjobs \
 		kind-deploy-watcher kind-deploy-workers kind-deploy-cronjobs generate-cronjob-manifests \
 		kind-redeploy-watcher kind-redeploy-worker \
@@ -1546,7 +1546,15 @@ docker-build-migrate:
 kind-load-migrate:
 	kind load docker-image stl-migrate:local --name $(KIND_CLUSTER)
 
-kind-migrate:
+kind-bootstrap-db:
+	kubectl --context=$(KUBE_CONTEXT) delete job/bootstrap-db --ignore-not-found -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/jobs/bootstrap-db.yaml -n $(KUBE_NS)
+	@echo "==> Waiting for database bootstrap to complete..."
+	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/bootstrap-db -n $(KUBE_NS) --timeout=120s
+	@echo "==> Bootstrap logs:"
+	kubectl --context=$(KUBE_CONTEXT) logs -l job-name=bootstrap-db -n $(KUBE_NS) || true
+
+kind-migrate: kind-bootstrap-db
 	kubectl --context=$(KUBE_CONTEXT) delete job/migrate --ignore-not-found -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/jobs/migrate.yaml -n $(KUBE_NS)
 	@echo "==> Waiting for migration to complete..."

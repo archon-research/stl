@@ -1,5 +1,5 @@
--- Enable TimescaleDB extension for time-series data
-CREATE EXTENSION IF NOT EXISTS timescaledb;
+-- TimescaleDB extension is enabled by the infrastructure bootstrap script
+-- (bootstrap-db.sh) before migrations run. Do not add CREATE EXTENSION here.
 
 CREATE TABLE IF NOT EXISTS block_states
 (
