@@ -12,9 +12,9 @@ on:
   pull_request:
     branches:
       - main
-    paths-ignore:
-      - "stl-verify/python/**"
-      - ".github/workflows/python-ci.yml"
+    # No paths-ignore here — required checks must always report a status.
+    # Jobs detect relevant changes internally and skip expensive steps
+    # when only Python files are changed.
 
 # Cancel in-progress CI runs for the same branch/PR.
 # Safe: the deploy workflow has its own concurrency groups that prevent cancellation.
