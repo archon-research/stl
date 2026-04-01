@@ -1,6 +1,8 @@
 from collections.abc import Iterable
 from decimal import Decimal
 
+from axis.risk_capital.formulas.required_risk_capital import loss_given_default
+
 from app.domain.entities.risk import RiskEnrichedCollateral
 
 
@@ -17,9 +19,12 @@ def bad_debt_at_gap(item: RiskEnrichedCollateral, gap_pct: Decimal) -> Decimal:
 
     Returns ≤ 0. Zero = fully covered; negative = bad debt in USD.
     """
-    collateral_at_trigger = item.amount_usd / item.liquidation_threshold
-    recovered_after_gap = collateral_at_trigger * (1 - gap_pct) / item.liquidation_bonus
-    return min(Decimal("0"), recovered_after_gap - item.amount_usd)
+    lgd = loss_given_default(
+        liquidation_threshold=float(item.liquidation_threshold),
+        liquidation_bonus=float(item.liquidation_bonus),
+        slippage=float(gap_pct),
+    )
+    return -Decimal.from_float(lgd) * item.amount_usd
 
 
 def total_bad_debt(items: Iterable[RiskEnrichedCollateral], gap_pct: Decimal) -> Decimal:

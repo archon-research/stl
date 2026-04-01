@@ -5,8 +5,7 @@ Spec: https://docs.morpho.org/learn/concepts/liquidation/
 
 from decimal import Decimal
 
-_BETA = Decimal("0.3")  # LIF formula steepness parameter
-_MAX_LIF = Decimal("1.15")  # upper cap on liquidation incentive factor
+from axis.crypto_lending.formulas.lif import compute_lif as compute_lif_float
 
 
 def compute_lif(lltv: Decimal) -> Decimal:
@@ -19,5 +18,4 @@ def compute_lif(lltv: Decimal) -> Decimal:
     lltv must be in [0, 1] range.
     Returns a value in [1.0, 1.15].
     """
-    denominator = _BETA * lltv + (1 - _BETA)
-    return min(_MAX_LIF, Decimal("1") / denominator)
+    return Decimal.from_float(compute_lif_float(float(lltv)))
