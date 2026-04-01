@@ -19,9 +19,11 @@ def bad_debt_at_gap(item: RiskEnrichedCollateral, gap_pct: Decimal) -> Decimal:
 
     Returns ≤ 0. Zero = fully covered; negative = bad debt in USD.
     """
+    bonus = float(item.liquidation_bonus)
+    liquidation_penalty = 1 - 1 / bonus
     lgd = loss_given_default(
         liquidation_threshold=float(item.liquidation_threshold),
-        liquidation_bonus=float(item.liquidation_bonus),
+        liquidation_penalty=liquidation_penalty,
         slippage=float(gap_pct),
     )
     return -Decimal.from_float(lgd) * item.amount_usd
