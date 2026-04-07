@@ -4,7 +4,7 @@
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
         dev-up dev-up-rebuild dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-temporal-worker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -59,48 +59,48 @@ run:
 # Run the Ethereum watcher (requires dev-up first)
 run-watcher:
 	@echo "==> Running Ethereum watcher (chain_id=1)..."
-	@set -a && . cmd/watcher/.env && [ -f cmd/watcher/.env.local ] && . cmd/watcher/.env.local; set +a && go run ./cmd/watcher
+	@set -a && . cmd/base/watcher/.env && [ -f cmd/base/watcher/.env.local ] && . cmd/base/watcher/.env.local; set +a && go run ./cmd/base/watcher
 
 # Run the Avalanche watcher (requires dev-up first)
 # Avalanche C-Chain does not support trace_block, so traces are disabled.
 run-watcher-avax:
 	@echo "==> Running Avalanche watcher (chain_id=43114)..."
-	@set -a && . cmd/watcher/.env.avax && [ -f cmd/watcher/.env.avax.local ] && . cmd/watcher/.env.avax.local; set +a && go run ./cmd/watcher --enable-traces=false
+	@set -a && . cmd/base/watcher/.env.avax && [ -f cmd/base/watcher/.env.avax.local ] && . cmd/base/watcher/.env.avax.local; set +a && go run ./cmd/base/watcher --enable-traces=false
 
 # Run the oracle price worker (requires dev-up first)
 run-oracle-price-worker:
 	@echo "==> Running oracle price worker..."
-	@set -a && . cmd/oracle-price-worker/.env && [ -f cmd/oracle-price-worker/.env.local ] && . cmd/oracle-price-worker/.env.local; set +a && go run ./cmd/oracle-price-worker
+	@set -a && . cmd/workers/oracle-price-indexer/.env && [ -f cmd/workers/oracle-price-indexer/.env.local ] && . cmd/workers/oracle-price-indexer/.env.local; set +a && go run ./cmd/workers/oracle-price-indexer
 
 # Run the Avalanche oracle price worker (requires dev-up first)
 run-oracle-price-worker-avax:
 	@echo "==> Running Avalanche oracle price worker (chain_id=43114)..."
-	@set -a && . cmd/oracle-price-worker/.env.avax && [ -f cmd/oracle-price-worker/.env.avax.local ] && . cmd/oracle-price-worker/.env.avax.local; set +a && go run ./cmd/oracle-price-worker
+	@set -a && . cmd/workers/oracle-price-indexer/.env.avax && [ -f cmd/workers/oracle-price-indexer/.env.avax.local ] && . cmd/workers/oracle-price-indexer/.env.avax.local; set +a && go run ./cmd/workers/oracle-price-indexer
 
 # Run the Morpho indexer (requires dev-up first)
 run-morpho-indexer:
 	@echo "==> Running Morpho indexer..."
-	@set -a && . cmd/morpho-indexer/.env && [ -f cmd/morpho-indexer/.env.local ] && . cmd/morpho-indexer/.env.local; set +a && go run ./cmd/morpho-indexer
+	@set -a && . cmd/workers/morpho-indexer/.env && [ -f cmd/workers/morpho-indexer/.env.local ] && . cmd/workers/morpho-indexer/.env.local; set +a && go run ./cmd/workers/morpho-indexer
 
 # Run the allocation tracker (requires dev-up first)
 run-allocation-tracker:
 	@echo "==> Running allocation tracker..."
-	@set -a && . cmd/allocation_tracker/.env && [ -f cmd/allocation_tracker/.env.local ] && . cmd/allocation_tracker/.env.local; set +a && go run ./cmd/allocation_tracker
+	@set -a && . cmd/workers/prime-allocation-indexer/.env && [ -f cmd/workers/prime-allocation-indexer/.env.local ] && . cmd/workers/prime-allocation-indexer/.env.local; set +a && go run ./cmd/workers/prime-allocation-indexer
 
 # Run the Avalanche allocation tracker (requires dev-up first)
 run-allocation-tracker-avax:
 	@echo "==> Running Avalanche allocation tracker (chain_id=43114)..."
-	@set -a && . cmd/allocation_tracker/.env.avax && [ -f cmd/allocation_tracker/.env.avax.local ] && . cmd/allocation_tracker/.env.avax.local; set +a && go run ./cmd/allocation_tracker
+	@set -a && . cmd/workers/prime-allocation-indexer/.env.avax && [ -f cmd/workers/prime-allocation-indexer/.env.avax.local ] && . cmd/workers/prime-allocation-indexer/.env.avax.local; set +a && go run ./cmd/workers/prime-allocation-indexer
 
 # Run the SparkLend position tracker (requires dev-up first)
 run-sparklend-position-tracker:
 	@echo "==> Running SparkLend position tracker..."
-	@set -a && . cmd/sparklend-position-tracker/.env && [ -f cmd/sparklend-position-tracker/.env.local ] && . cmd/sparklend-position-tracker/.env.local; set +a && go run ./cmd/sparklend-position-tracker
+	@set -a && . cmd/workers/sparklend-indexer/.env && [ -f cmd/workers/sparklend-indexer/.env.local ] && . cmd/workers/sparklend-indexer/.env.local; set +a && go run ./cmd/workers/sparklend-indexer
 
 # Run the Avalanche SparkLend position tracker (requires dev-up first)
 run-sparklend-position-tracker-avax:
 	@echo "==> Running Avalanche SparkLend position tracker (chain_id=43114)..."
-	@set -a && . cmd/sparklend-position-tracker/.env.avax && [ -f cmd/sparklend-position-tracker/.env.avax.local ] && . cmd/sparklend-position-tracker/.env.avax.local; set +a && go run ./cmd/sparklend-position-tracker
+	@set -a && . cmd/workers/sparklend-indexer/.env.avax && [ -f cmd/workers/sparklend-indexer/.env.avax.local ] && . cmd/workers/sparklend-indexer/.env.avax.local; set +a && go run ./cmd/workers/sparklend-indexer
 
 # Run tests with race detector
 test-race:
@@ -196,9 +196,15 @@ golangci-lint:
 	$(GOBIN)/golangci-lint run
 
 # Run govulncheck for security vulnerabilities (install if needed)
+# GO-2026-4887, GO-2026-4883: docker/docker vulns with no upstream fix — only affects test code (testcontainers)
+GOVULN_IGNORE := GO-2026-4887|GO-2026-4883
 vulncheck:
 	@echo "==> Running govulncheck..."
-	$(GOBIN)/govulncheck ./...
+	@$(GOBIN)/govulncheck ./... 2>&1; rc=$$?; \
+	if [ $$rc -eq 0 ]; then exit 0; fi; \
+	unmatched=$$($(GOBIN)/govulncheck ./... 2>&1 | grep '^Vulnerability' | grep -v -E '$(GOVULN_IGNORE)'); \
+	if [ -n "$$unmatched" ]; then echo "ERROR: unignored vulnerabilities found"; exit 1; fi; \
+	echo "WARNING: only ignored vulnerabilities found ($(GOVULN_IGNORE)) — passing"
 
 # Clean build artifacts
 clean:
@@ -222,7 +228,7 @@ bench-postgres-explain:
 e2e:
 	@echo "==> Running end-to-end tests..."
 	@echo "    This uses testcontainers to spin up PostgreSQL, Redis, and LocalStack."
-	go test -tags=e2e -v -timeout=5m ./cmd/watcher/...
+	go test -tags=e2e -v -timeout=5m ./cmd/base/watcher/...
 
 # Install development tools
 tools:
@@ -724,10 +730,12 @@ docker-release-all:
 	@echo ""
 	@$(MAKE) _docker-release-allocation-tracker-internal ENV=$(ENV)
 	@echo ""
-	@$(MAKE) _docker-release-temporal-worker-internal ENV=$(ENV)
-	@echo ""
 	@$(MAKE) _docker-release-prime-debt-indexer-internal ENV=$(ENV)
 	@echo ""
+	@for cj in $(CRONJOBS); do \
+		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
+		echo ""; \
+	done
 	@echo "==> All Docker images released for ENV=$(ENV)"
 
 # Shortcut: Release all services for sentinelstaging
@@ -1360,21 +1368,21 @@ erigon-run:
 build-oracle-worker:
 	@echo "==> Building oracle-price-worker..."
 	mkdir -p dist
-	go build -o dist/oracle-price-worker ./cmd/oracle-price-worker
+	go build -o dist/oracle-price-worker ./cmd/workers/oracle-price-indexer
 	@echo "==> Built: dist/oracle-price-worker"
 
 # Build sparklend-position-tracker binary
 build-sparklend-position-tracker:
 	@echo "==> Building sparklend-position-tracker..."
 	mkdir -p dist
-	go build -o dist/sparklend-position-tracker ./cmd/sparklend-position-tracker
+	go build -o dist/sparklend-position-tracker ./cmd/workers/sparklend-indexer
 	@echo "==> Built: dist/sparklend-position-tracker"
 
 # Build allocation-tracker binary
 build-allocation-tracker:
 	@echo "==> Building allocation-tracker..."
 	mkdir -p dist
-	go build -o dist/allocation-tracker ./cmd/allocation_tracker
+	go build -o dist/allocation-tracker ./cmd/workers/prime-allocation-indexer
 	@echo "==> Built: dist/allocation-tracker"
 
 # Pattern rules for cronjob binaries — work for any cronjob under cmd/cronjobs/.
@@ -1580,6 +1588,36 @@ CRONJOB_DOCKERFILE = cmd/cronjobs/Dockerfile
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
 	docker build --build-arg CRONJOB=$* -t stl-$*:local -f $(CRONJOB_DOCKERFILE) .
+
+# Pattern rule: release a cronjob image to ECR (build + push).
+# All cronjobs share a single ECR repo; the cronjob name is part of the tag.
+# Usage: make docker-release-cronjob-anchorage-indexer ENV=sentinelstaging
+docker-release-cronjob-%: ecr-login _docker-release-cronjob-%-internal
+
+_docker-release-cronjob-%-internal:
+	@TAG=$(IMAGE_TAG) && \
+	REPO=$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Cronjob $* Docker image for ARM64..." && \
+	echo "    Repository: $$REPO" && \
+	echo "    Tag: $*-$$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg CRONJOB=$* \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f $(CRONJOB_DOCKERFILE) \
+		-t $$REPO:$*-$$TAG \
+		-t $$REPO:$*-latest \
+		--load . && \
+	echo "==> Pushing Cronjob $* Docker image to ECR..." && \
+	docker push $$REPO:$*-$$TAG && \
+	docker push $$REPO:$*-latest && \
+	echo "==> Cronjob $* Docker image released: $$REPO:$*-$$TAG"
 
 kind-load-cronjobs:
 	@for cj in $(CRONJOBS); do \

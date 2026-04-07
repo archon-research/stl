@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: watcher-data-validator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: watcher-data-validator
+  template:
+    metadata:
+      labels:
+        app: watcher-data-validator
+    spec:
+      serviceAccountName: watcher-data-validator
+      containers:
+        - name: watcher-data-validator
+          image: watcher-data-validator
+          envFrom:
+            - configMapRef:
+                name: watcher-data-validator
+            - secretRef:
+                name: watcher-data-validator
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      terminationGracePeriodSeconds: 60

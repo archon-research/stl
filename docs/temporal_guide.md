@@ -39,7 +39,12 @@ Price Fetch is always enabled. Data Validation is optional — it activates only
 Temporal adapters live in `internal/adapters/inbound/temporal/` following hexagonal architecture:
 
 ```text
-cmd/temporal-worker/main.go              ← Composition root: wires deps, registers, runs
+cmd/cronjobs/
+├── Dockerfile                           ← Shared multi-stage Dockerfile for all cronjobs
+├── offchain-price-indexer/main.go       ← Price fetch cronjob
+├── watcher-data-validator/main.go       ← Data validation cronjob
+└── anchorage-indexer/main.go            ← Anchorage collateral snapshot cronjob
+
 internal/adapters/inbound/temporal/
 ├── constants.go                         ← Shared task queue name + schedule IDs
 ├── price_fetch_activities.go             ← Price fetch activity (PriceFetcher interface)
@@ -117,7 +122,7 @@ The activity converts the `Report` struct into a flat `ValidateDataOutput` with 
 
 ## Composition Root (main.go)
 
-`cmd/temporal-worker/main.go` is the entry point. It wires all dependencies and runs a single Temporal worker.
+Each cronjob under `cmd/cronjobs/` is its own entry point. It wires its dependencies and runs a single Temporal worker.
 
 ### Startup Flow
 
@@ -190,13 +195,10 @@ The `temporalio/auto-setup` image automatically creates the `sentinel` namespace
 ### 2. Start the worker
 
 ```bash
-# Minimum (only price fetch):
-COINGECKO_API_KEY=xxx make run-temporal-worker
-
-# All jobs enabled:
-COINGECKO_API_KEY=xxx \
-ETHERSCAN_API_KEY=xxx \
-make run-temporal-worker
+# Run a specific cronjob locally:
+COINGECKO_API_KEY=xxx go run ./cmd/cronjobs/offchain-price-indexer
+ETHERSCAN_API_KEY=xxx go run ./cmd/cronjobs/watcher-data-validator
+go run ./cmd/cronjobs/anchorage-indexer
 ```
 
 ### 3. Verify
@@ -209,17 +211,14 @@ Open **http://localhost:8233** → namespace `sentinel`. You should see:
 
 ## Docker Build & Push
 
-The worker has a multi-stage Dockerfile (`Dockerfile.temporal-worker`):
+All cronjobs share a single multi-stage Dockerfile (`cmd/cronjobs/Dockerfile`). The `CRONJOB` build arg selects which one to build:
 
 ```bash
-# Build ARM64 Docker image
-make docker-build-temporal-worker ENV=sentinelstaging
+# Build a specific cronjob image
+make docker-build-cronjob-offchain-price-indexer
 
-# Push to ECR
-make docker-push-temporal-worker ENV=sentinelstaging
-
-# Build + push in one step
-make docker-release-temporal-worker ENV=sentinelstaging
+# Or directly:
+docker build --build-arg CRONJOB=offchain-price-indexer -t stl-offchain-price-indexer:local -f cmd/cronjobs/Dockerfile .
 ```
 
 The image injects `GitCommit`, `GitBranch`, and `BuildTime` via ldflags for observability.
@@ -376,7 +375,7 @@ func ensureNewJobSchedule(ctx context.Context, c client.Client, logger *slog.Log
 
 3. **Worker connects to two databases.** `TEMPORAL_HOST_PORT` → Temporal Server (workflow orchestration). `DATABASE_URL` → App database (blocks, prices, etc.). These are completely separate databases.
 
-4. **No `.env` file for temporal-worker.** Unlike the watcher, `make dev-env` does not generate one. Pass env vars directly.
+4. **No `.env` files for cronjobs.** Unlike the watcher, `make dev-env` does not generate one. Pass env vars directly.
 
 5. **Workflows must be deterministic.** No `time.Now()`, no `rand`, no network calls, no goroutines. All side effects go through activities.
 

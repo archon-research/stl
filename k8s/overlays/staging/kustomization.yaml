@@ -22,8 +22,10 @@ resources:
   - ../../base/unichain-backup-worker
   - ../../base/arbitrum-watcher
   - ../../base/arbitrum-backup-worker
-  - ../../base/temporal-worker
   - ../../base/prime-debt-indexer
+  - ../../base/spark-anchorage-indexer
+  - ../../base/offchain-price-indexer
+  - ../../base/watcher-data-validator
   - ../../base/migrate
   - external-secrets.yaml
   - configmaps.yaml
@@ -98,12 +100,18 @@ images:
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
     newTag: "b5012e699804f0a8f84ca5fe6caaecc6000da598"
-  - name: temporal-worker
-    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-temporal-worker
-    newTag: "b5012e699804f0a8f84ca5fe6caaecc6000da598"
   - name: prime-debt-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-prime-debt-indexer
     newTag: "b5012e699804f0a8f84ca5fe6caaecc6000da598"
+  - name: spark-anchorage-indexer
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
+    newTag: "anchorage-indexer-b5012e699804f0a8f84ca5fe6caaecc6000da598"
+  - name: offchain-price-indexer
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
+    newTag: "offchain-price-indexer-b5012e699804f0a8f84ca5fe6caaecc6000da598"
+  - name: watcher-data-validator
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
+    newTag: "watcher-data-validator-b5012e699804f0a8f84ca5fe6caaecc6000da598"
   - name: migrate
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-migrate
     newTag: "b5012e699804f0a8f84ca5fe6caaecc6000da598"
