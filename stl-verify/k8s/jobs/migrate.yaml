@@ -21,3 +21,9 @@ spec:
           envFrom:
             - configMapRef:
                 name: stl-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-config
+                  key: MIGRATOR_DATABASE_URL
