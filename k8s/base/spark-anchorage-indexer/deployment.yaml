@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-anchorage-indexer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-anchorage-indexer
+  template:
+    metadata:
+      labels:
+        app: spark-anchorage-indexer
+    spec:
+      serviceAccountName: spark-anchorage-indexer
+      containers:
+        - name: spark-anchorage-indexer
+          image: spark-anchorage-indexer
+          envFrom:
+            - configMapRef:
+                name: spark-anchorage-indexer
+            - secretRef:
+                name: spark-anchorage-indexer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      terminationGracePeriodSeconds: 60

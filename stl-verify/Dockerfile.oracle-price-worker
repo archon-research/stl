@@ -30,7 +30,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s -extldflags '-static' -X main.GitCommit=${GIT_COMMIT} -X main.GitBranch=${GIT_BRANCH} -X main.BuildTime=${BUILD_TIME}" \
     -o /oracle_price_worker \
-    ./cmd/oracle-price-worker
+    ./cmd/workers/oracle-price-indexer
 
 # -----------------------------------------------------------------------------
 # Runtime Stage

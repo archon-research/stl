@@ -30,7 +30,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s -extldflags '-static' -X main.GitCommit=${GIT_COMMIT} -X main.GitBranch=${GIT_BRANCH} -X main.BuildTime=${BUILD_TIME}" \
     -o /watcher \
-    ./cmd/watcher
+    ./cmd/base/watcher
 
 # -----------------------------------------------------------------------------
 # Runtime Stage

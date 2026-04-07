@@ -25,7 +25,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s -extldflags '-static' -X main.GitCommit=${GIT_COMMIT} -X main.GitBranch=${GIT_BRANCH} -X main.BuildTime=${BUILD_TIME}" \
     -o /morpho-indexer \
-    ./cmd/morpho-indexer
+    ./cmd/workers/morpho-indexer
 
 # -----------------------------------------------------------------------------
 # Runtime Stage

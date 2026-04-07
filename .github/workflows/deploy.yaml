@@ -89,7 +89,8 @@ jobs:
             # Fetch latest main and apply the tag update on top of it
             git fetch origin main
             git checkout FETCH_HEAD -- k8s/overlays/staging/kustomization.yaml
-            sed -i "s/newTag: .*/newTag: \"$SHA\"/" k8s/overlays/staging/kustomization.yaml
+            # Update plain SHA tags (regular services) and prefixed tags (cronjobs: name-SHA)
+            sed -i -E "s/(newTag: \")(([a-z]+-)*)[a-f0-9]{40}/\1\2$SHA/" k8s/overlays/staging/kustomization.yaml
 
             # Check if the file actually changed vs current main
             if git diff --quiet FETCH_HEAD -- k8s/overlays/staging/kustomization.yaml; then
@@ -156,7 +157,8 @@ jobs:
       STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
       PROD_REGISTRY: 030797368798.dkr.ecr.eu-west-1.amazonaws.com
       PROD_ROLE_ARN: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
-      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker temporal-worker prime-debt-indexer migrate
+      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer migrate
+      CRONJOBS: anchorage-indexer offchain-price-indexer watcher-data-validator
     permissions:
       id-token: write
     steps:
@@ -178,6 +180,9 @@ jobs:
           for service in $SERVICES; do
             docker pull "$STAGING_REGISTRY/stl-sentinelstaging-$service:$SHA"
           done
+          for cj in $CRONJOBS; do
+            docker pull "$STAGING_REGISTRY/stl-sentinelstaging-cronjob:$cj-$SHA"
+          done
 
       # Retag and push to prod ECR
       - name: Configure AWS credentials (prod)
@@ -197,6 +202,10 @@ jobs:
           for service in $SERVICES; do
             docker tag "$STAGING_REGISTRY/stl-sentinelstaging-$service:$SHA" "$PROD_REGISTRY/stl-sentinelprod-$service:$SHA"
             docker push "$PROD_REGISTRY/stl-sentinelprod-$service:$SHA"
+          done
+          for cj in $CRONJOBS; do
+            docker tag "$STAGING_REGISTRY/stl-sentinelstaging-cronjob:$cj-$SHA" "$PROD_REGISTRY/stl-sentinelprod-cronjob:$cj-$SHA"
+            docker push "$PROD_REGISTRY/stl-sentinelprod-cronjob:$cj-$SHA"
           done
 
   create-prod-pr:
@@ -224,7 +233,8 @@ jobs:
       - name: Update prod kustomization image tags
         run: |
           SHA=${{ inputs.sha || github.sha }}
-          sed -i "s/newTag: .*/newTag: \"$SHA\"/" k8s/overlays/prod/kustomization.yaml
+          # Update plain SHA tags (regular services) and prefixed tags (cronjobs: name-SHA)
+          sed -i -E "s/(newTag: \")(([a-z]+-)*)[a-f0-9]{40}/\1\2$SHA/" k8s/overlays/prod/kustomization.yaml
 
       - name: Create or update prod PR
         env:
