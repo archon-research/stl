@@ -196,9 +196,15 @@ golangci-lint:
 	$(GOBIN)/golangci-lint run
 
 # Run govulncheck for security vulnerabilities (install if needed)
+# GO-2026-4887, GO-2026-4883: docker/docker vulns with no upstream fix — only affects test code (testcontainers)
+GOVULN_IGNORE := GO-2026-4887|GO-2026-4883
 vulncheck:
 	@echo "==> Running govulncheck..."
-	$(GOBIN)/govulncheck ./...
+	@$(GOBIN)/govulncheck ./... 2>&1; rc=$$?; \
+	if [ $$rc -eq 0 ]; then exit 0; fi; \
+	unmatched=$$($(GOBIN)/govulncheck ./... 2>&1 | grep '^Vulnerability' | grep -v -E '$(GOVULN_IGNORE)'); \
+	if [ -n "$$unmatched" ]; then echo "ERROR: unignored vulnerabilities found"; exit 1; fi; \
+	echo "WARNING: only ignored vulnerabilities found ($(GOVULN_IGNORE)) — passing"
 
 # Clean build artifacts
 clean:
