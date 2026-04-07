@@ -28,10 +28,4 @@ spec:
             limits:
               cpu: "200m"
               memory: "256Mi"
-          livenessProbe:
-            exec:
-              command: ["/bin/sh", "-c", "pgrep -f cronjob"]
-            initialDelaySeconds: 30
-            periodSeconds: 30
-            failureThreshold: 3
       terminationGracePeriodSeconds: 60
