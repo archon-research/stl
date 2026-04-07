@@ -23,7 +23,7 @@ resources:
   - ../../base/arbitrum-watcher
   - ../../base/arbitrum-backup-worker
   - ../../base/prime-debt-indexer
-  - ../../base/anchorage-indexer
+  - ../../base/spark-anchorage-indexer
   - ../../base/offchain-price-indexer
   - ../../base/watcher-data-validator
   - ../../base/migrate
@@ -103,7 +103,7 @@ images:
   - name: prime-debt-indexer
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-prime-debt-indexer
     newTag: "7ec6e04b2723166631f512cd8dd0264f811359b2"
-  - name: anchorage-indexer
+  - name: spark-anchorage-indexer
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
     newTag: "anchorage-indexer-7ec6e04b2723166631f512cd8dd0264f811359b2"
   - name: offchain-price-indexer

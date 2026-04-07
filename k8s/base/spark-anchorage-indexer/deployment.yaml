@@ -1,26 +1,26 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: anchorage-indexer
+  name: spark-anchorage-indexer
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: anchorage-indexer
+      app: spark-anchorage-indexer
   template:
     metadata:
       labels:
-        app: anchorage-indexer
+        app: spark-anchorage-indexer
     spec:
-      serviceAccountName: anchorage-indexer
+      serviceAccountName: spark-anchorage-indexer
       containers:
-        - name: anchorage-indexer
-          image: anchorage-indexer
+        - name: spark-anchorage-indexer
+          image: spark-anchorage-indexer
           envFrom:
             - configMapRef:
-                name: anchorage-indexer
+                name: spark-anchorage-indexer
             - secretRef:
-                name: anchorage-indexer
+                name: spark-anchorage-indexer
           resources:
             requests:
               cpu: "50m"

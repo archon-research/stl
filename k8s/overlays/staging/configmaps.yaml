@@ -114,7 +114,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: anchorage-indexer
+  name: spark-anchorage-indexer
 data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
