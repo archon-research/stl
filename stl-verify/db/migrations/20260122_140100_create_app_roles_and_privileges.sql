@@ -105,8 +105,7 @@ GRANT stl_readonly TO stl_migrator WITH ADMIN OPTION;
 -- =============================================================================
 -- Table and sequence privileges
 -- =============================================================================
-GRANT ALL ON ALL TABLES IN SCHEMA public TO stl_migrator;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO stl_migrator;
+REASSIGN OWNED BY tsdbadmin TO stl_migrator;
 
 -- =============================================================================
 -- Record this migration
