@@ -97,6 +97,18 @@ $$;
 GRANT stl_readonly TO stl_read_only;
 
 -- =============================================================================
+-- Role grants — allow stl_migrator to GRANT app roles to login users
+-- =============================================================================
+GRANT stl_readwrite TO stl_migrator WITH ADMIN OPTION;
+GRANT stl_readonly TO stl_migrator WITH ADMIN OPTION;
+
+-- =============================================================================
+-- Table and sequence privileges
+-- =============================================================================
+GRANT ALL ON ALL TABLES IN SCHEMA public TO stl_migrator;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO stl_migrator;
+
+-- =============================================================================
 -- Record this migration
 -- =============================================================================
 INSERT INTO migrations (filename)
