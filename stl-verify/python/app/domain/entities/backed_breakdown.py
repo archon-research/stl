@@ -6,14 +6,15 @@ from decimal import Decimal
 class CollateralContribution:
     """A single collateral asset contribution.
 
-    backing_usd is the USD value of this asset's contribution to the total backing.
-    It is computed as: (collateral_usd / total_collateral_usd_for_user) * usds_debt_usd,
-    summed across all borrowers. This ensures SUM(backing_usd) == total backed asset debt.
+    backing_value is the attributed value of this asset's contribution to the total
+    backing, expressed in debt-token units (not necessarily USD).
+    It is computed as: (collateral_usd / total_collateral_usd_for_user) * target_debt,
+    summed across all borrowers. This ensures SUM(backing_value) == total backed asset debt.
     """
 
     token_id: int
     symbol: str
-    backing_usd: Decimal
+    backing_value: Decimal
     backing_pct: Decimal
     price_usd: Decimal | None
 
@@ -23,5 +24,4 @@ class BackedBreakdown:
     """The full amount-first breakdown of collateral backing a debt token."""
 
     backed_asset_id: int
-    protocol_id: int
     items: tuple[CollateralContribution, ...]

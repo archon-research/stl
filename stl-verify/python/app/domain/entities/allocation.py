@@ -36,6 +36,18 @@ class EthAddress:
         return hash(self._hex.lower())
 
 
+@dataclass(frozen=True)
+class ReceiptTokenPosition:
+    """A receipt token held by a star, with balance and protocol info."""
+
+    receipt_token_id: int
+    symbol: str
+    underlying_symbol: str
+    protocol_name: str
+    balance: Decimal
+    token_address: str | None
+
+
 @dataclass
 class Star:
     id: str

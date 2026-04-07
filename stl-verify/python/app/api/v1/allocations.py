@@ -1,13 +1,15 @@
 import dataclasses
+from collections.abc import AsyncIterator
 from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import AfterValidator, BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
+from app.api.deps import get_engine
 from app.domain.entities.allocation import EthAddress
 from app.services.allocation_service import AllocationService
 
@@ -31,6 +33,15 @@ class StarResponse(BaseModel):
     address: str
 
 
+class ReceiptTokenPositionResponse(BaseModel):
+    receipt_token_id: int
+    symbol: str
+    underlying_symbol: str
+    protocol_name: str
+    balance: Decimal
+    token_address: str | None
+
+
 class AllocationPositionResponse(BaseModel):
     id: int
     chain_id: int
@@ -50,11 +61,7 @@ class AllocationPositionResponse(BaseModel):
     created_at: datetime
 
 
-def _get_engine(request: Request) -> AsyncEngine:
-    return request.app.state.engine
-
-
-async def _get_service(engine: AsyncEngine = Depends(_get_engine)) -> AllocationService:
+async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AsyncIterator[AllocationService]:
     async with engine.connect() as conn:
         repo = PostgresAllocationRepository(conn)
         yield AllocationService(repo)
@@ -64,6 +71,33 @@ async def _get_service(engine: AsyncEngine = Depends(_get_engine)) -> Allocation
 async def list_stars(service: AllocationService = Depends(_get_service)):
     stars = await service.list_stars()
     return [StarResponse(id=s.id, name=s.name, address=s.address) for s in stars]
+
+
+@router.get("/stars/{star_id}/receipt-tokens", response_model=list[ReceiptTokenPositionResponse])
+async def list_receipt_tokens(
+    star_id: EthAddressPath,
+    service: AllocationService = Depends(_get_service),
+):
+    star = await service.get_star(star_id)
+    if star is None:
+        raise HTTPException(status_code=404, detail="star not found")
+
+    positions = await service.list_receipt_token_positions(star_id)
+
+    result = []
+    for p in positions:
+        result.append(
+            ReceiptTokenPositionResponse(
+                receipt_token_id=p.receipt_token_id,
+                symbol=p.symbol,
+                underlying_symbol=p.underlying_symbol,
+                protocol_name=p.protocol_name,
+                balance=p.balance,
+                token_address=p.token_address,
+            )
+        )
+
+    return result
 
 
 @router.get("/stars/{star_id}/allocations", response_model=list[AllocationPositionResponse])

@@ -103,7 +103,7 @@ attributed AS (
     SELECT
         uc.user_id,
         uc.token_id,
-        (uc.collateral_usd / utc.total_collateral_usd) * utd.target_debt_amount AS backing_usd
+        COALESCE((uc.collateral_usd / NULLIF(utc.total_collateral_usd, 0)) * utd.target_debt_amount, 0) AS backing_usd
     FROM user_collateral_usd uc
     JOIN user_total_collateral_usd utc ON utc.user_id = uc.user_id
     JOIN user_target_debt utd ON utd.user_id = uc.user_id
@@ -125,6 +125,7 @@ FROM attributed a
 JOIN token t ON t.id = a.token_id
 LEFT JOIN token_prices tp ON tp.token_id = a.token_id
 GROUP BY t.id, t.symbol, tp.price_usd
+HAVING SUM(a.backing_usd) > 0
 ORDER BY backing_usd DESC;
 """
 
@@ -149,7 +150,7 @@ class AaveLikeBackedBreakdownRepository:
             CollateralContribution(
                 token_id=row.token_id,
                 symbol=row.symbol,
-                backing_usd=Decimal(str(row.backing_usd)),
+                backing_value=Decimal(str(row.backing_usd)),
                 backing_pct=Decimal(str(row.backing_pct)),
                 price_usd=Decimal(str(row.price_usd)) if row.price_usd is not None else None,
             )
@@ -158,6 +159,5 @@ class AaveLikeBackedBreakdownRepository:
 
         return BackedBreakdown(
             backed_asset_id=backed_asset_id,
-            protocol_id=self._protocol_id,
             items=items,
         )
