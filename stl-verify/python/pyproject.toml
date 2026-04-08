@@ -11,12 +11,12 @@ dependencies = [
     "pydantic-settings",
     "python-dotenv",
     "httpx>=0.28.1",
+    "axis",
 ]
 
 [tool.uv.sources]
 # TODO: Replace git references with published packages once synome-specs and axis-common are on a private registry.
-synome-specs = { git = "ssh://git@github.com/archon-research/synome.git", subdirectory = "specs", branch = "baekdahl/move-bad-debt-to-specs" }
-axis-common = { git = "ssh://git@github.com/archon-research/synome.git", subdirectory = "axis-common", branch = "baekdahl/move-bad-debt-to-specs" }
+axis = { git = "ssh://git@github.com/archon-research/synome.git", subdirectory = "specs", branch = "baekdahl/move-bad-debt-to-specs" }
 
 [project.optional-dependencies]
 dev = [
