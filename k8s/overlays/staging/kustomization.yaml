@@ -118,5 +118,5 @@ images:
     newTag: "487ad59e66230c021026482f6a87fabf6f40ec08"
   - name: python-api
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-python-api
-    # TODO: Replace with the SHA from the first CI build that pushes this image to ECR
-    newTag: "REPLACE_WITH_FIRST_BUILD_SHA"
+    # Bootstrap with a SHA-shaped placeholder so deploy.yaml can rewrite it automatically.
+    newTag: "0000000000000000000000000000000000000000"
