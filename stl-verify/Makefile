@@ -4,7 +4,7 @@
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
         dev-up dev-up-rebuild dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-cronjob-%-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -37,6 +37,8 @@
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
+		docker-build-python-api docker-push-python-api docker-release-python-api \
+		docker-release-python-api-staging \
 		docker-build-mock-blockchain-server docker-push-mock-blockchain-server docker-release-mock-blockchain-server \
 		docker-release-mock-blockchain-server-staging \
 		kind-build-mock-blockchain-server kind-load-mock-blockchain-server kind-deploy-mock-blockchain-server kind-redeploy-mock-blockchain-server \
@@ -731,6 +733,8 @@ docker-release-all:
 	@$(MAKE) _docker-release-allocation-tracker-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-prime-debt-indexer-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-python-api-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -1681,6 +1685,54 @@ kind-clean:
 	kubectl --context=$(KUBE_CONTEXT) delete namespace $(KUBE_NS) --ignore-not-found --wait
 	kubectl --context=$(KUBE_CONTEXT) delete namespace temporal      --ignore-not-found --wait
 	@echo "==> Namespaces $(KUBE_NS) and temporal deleted."
+
+# =============================================================================
+# Docker Build & Push - Python API
+# =============================================================================
+
+ECR_REPO_PYTHON_API = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-python-api
+
+# Build Docker image for python-api (ARM64 for Graviton)
+docker-build-python-api:
+ifdef LOCAL
+	docker build -t stl-python-api:local -f python/Dockerfile python/
+else
+	@echo "==> Building Python API Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_PYTHON_API)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	docker buildx build --platform linux/arm64 \
+		-f python/Dockerfile \
+		-t $(ECR_REPO_PYTHON_API):$(IMAGE_TAG) \
+		-t $(ECR_REPO_PYTHON_API):latest \
+		--load python/
+endif
+
+# Push python-api Docker image to ECR
+docker-push-python-api: ecr-login
+	@echo "==> Pushing Python API Docker image to ECR..."
+	docker push $(ECR_REPO_PYTHON_API):$(IMAGE_TAG)
+	docker push $(ECR_REPO_PYTHON_API):latest
+
+# Build and push python-api in one step (captures tag at start for consistency)
+docker-release-python-api: ecr-login _docker-release-python-api-internal
+
+_docker-release-python-api-internal:
+	@TAG=$(IMAGE_TAG) && \
+	echo "==> Building Python API Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_PYTHON_API)" && \
+	echo "    Tag: $$TAG" && \
+	docker buildx build --platform linux/arm64 \
+		-f python/Dockerfile \
+		-t $(ECR_REPO_PYTHON_API):$$TAG \
+		-t $(ECR_REPO_PYTHON_API):latest \
+		--load python/ && \
+	echo "==> Pushing Python API Docker image to ECR..." && \
+	docker push $(ECR_REPO_PYTHON_API):$$TAG && \
+	docker push $(ECR_REPO_PYTHON_API):latest && \
+	echo "==> Python API Docker image released: $(ECR_REPO_PYTHON_API):$$TAG"
+
+docker-release-python-api-staging:
+	@$(MAKE) docker-release-python-api ENV=sentinelstaging
 
 # =============================================================================
 # Docker Build & Push - Mock Blockchain Server

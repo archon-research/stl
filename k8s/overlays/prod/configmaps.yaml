@@ -245,3 +245,11 @@ data:
   CHAIN_ID: "43114"
   ENVIRONMENT: "sentinelprod"
   DEPLOY_ENV: "prod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: python-api-config
+data:
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"

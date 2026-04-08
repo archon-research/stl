@@ -14,6 +14,18 @@ class Settings(BaseSettings):
     # SecretStr prevents the URL (which embeds the API key) from appearing in logs or repr.
     alchemy_http_url: SecretStr = SecretStr("https://eth-mainnet.g.alchemy.com/v2/MISSING_KEY")
 
+    @property
+    def async_database_url(self) -> str:
+        """Return the database URL with the asyncpg driver.
+
+        The shared secret (pooler_url) stores a plain ``postgresql://`` URL.
+        SQLAlchemy's async engine requires the ``postgresql+asyncpg://`` scheme.
+        """
+        url = self.database_url.get_secret_value()
+        if url.startswith("postgresql://"):
+            return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return url
+
 
 @functools.lru_cache
 def get_settings() -> Settings:

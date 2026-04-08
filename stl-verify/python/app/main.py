@@ -13,7 +13,7 @@ from app.config import Settings, get_settings
 def create_app(settings: Settings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = create_async_engine(settings.database_url.get_secret_value(), pool_pre_ping=True)
+        engine = create_async_engine(settings.async_database_url, pool_pre_ping=True)
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         app.state.engine = engine
