@@ -1,6 +1,6 @@
 # Shared Dockerfile for all cronjob workers.
 # Usage: docker build --build-arg CRONJOB=anchorage-indexer -f cmd/cronjobs/Dockerfile .
-FROM --platform=$BUILDPLATFORM golang:1.26.1-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.2-alpine AS builder
 
 ARG TARGETARCH
 ARG CRONJOB

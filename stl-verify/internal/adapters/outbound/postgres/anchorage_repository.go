@@ -189,7 +189,7 @@ func (r *AnchorageRepository) GetLastCursor(ctx context.Context, primeID int64) 
 	var operationID string
 	var createdAt time.Time
 	err := r.pool.QueryRow(ctx,
-		"SELECT operation_id, created_at FROM anchorage_operation WHERE prime_id = $1 ORDER BY created_at DESC, operation_id DESC LIMIT 1",
+		"SELECT operation_id, created_at FROM anchorage_operation WHERE prime_id = $1 ORDER BY created_at DESC LIMIT 1",
 		primeID,
 	).Scan(&operationID, &createdAt)
 
