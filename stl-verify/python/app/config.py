@@ -2,6 +2,7 @@ import functools
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 
 class Settings(BaseSettings):
@@ -11,8 +12,29 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     database_url: SecretStr = SecretStr("postgresql+asyncpg://postgres:postgres@localhost:5432/stl_verify")
-    # SecretStr prevents the URL (which embeds the API key) from appearing in logs or repr.
-    alchemy_http_url: SecretStr = SecretStr("https://eth-mainnet.g.alchemy.com/v2/MISSING_KEY")
+    alchemy_api_key: SecretStr = SecretStr("MISSING_KEY")
+
+    @property
+    def async_database_url(self) -> str:
+        """Return the database URL with the asyncpg driver.
+
+        The shared secret (pooler_url) stores a plain ``postgresql://`` or
+        ``postgres://`` URL. SQLAlchemy's async engine requires the
+        ``postgresql+asyncpg://`` dialect. ``make_url`` handles scheme
+        normalisation and query-parameter compatibility automatically.
+        """
+        url = make_url(self.database_url.get_secret_value())
+        url = url.set(drivername="postgresql+asyncpg")
+        # asyncpg does not accept sslmode (it uses ssl instead);
+        # drop it to avoid a TypeError at connect time.
+        query = dict(url.query)
+        query.pop("sslmode", None)
+        return url.set(query=query).render_as_string(hide_password=False)
+
+    @property
+    def alchemy_http_url(self) -> str:
+        """Construct the Alchemy HTTP URL from the API key."""
+        return f"https://eth-mainnet.g.alchemy.com/v2/{self.alchemy_api_key.get_secret_value()}"
 
 
 @functools.lru_cache
