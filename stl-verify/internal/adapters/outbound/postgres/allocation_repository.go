@@ -134,8 +134,8 @@ func (r *AllocationRepository) buildInsertArgs(
 			chain_id, token_id, prime_id, proxy_address,
 			balance, scaled_balance,
 			block_number, block_version,
-			tx_hash, log_index, tx_amount, direction
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			tx_hash, log_index, tx_amount, direction, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		ON CONFLICT DO NOTHING
 	`
 
@@ -152,6 +152,7 @@ func (r *AllocationRepository) buildInsertArgs(
 		pos.LogIndex,
 		txAmount,
 		pos.Direction,
+		pos.CreatedAt,
 	}
 
 	return query, args, nil

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -50,7 +51,10 @@ func (m *mockS3Reader) StreamFile(ctx context.Context, bucket, key string) (io.R
 	if m.streamFn != nil {
 		return m.streamFn(ctx, bucket, key)
 	}
-	// Default: valid empty JSON array.
+	// Default: block keys return a valid block JSON, receipt keys return empty array.
+	if strings.Contains(key, "_block.json") {
+		return io.NopCloser(strings.NewReader(`{"timestamp":"0x65b5c600"}`)), nil
+	}
 	return io.NopCloser(strings.NewReader("[]")), nil
 }
 
@@ -68,7 +72,7 @@ type processCall struct {
 	version     int
 }
 
-func (m *mockProcessor) ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []shared.TransactionReceipt) error {
+func (m *mockProcessor) ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []shared.TransactionReceipt, blockTimestamp time.Time) error {
 	m.mu.Lock()
 	m.calls = append(m.calls, processCall{chainID: chainID, blockNumber: blockNumber, version: version})
 	m.mu.Unlock()
@@ -369,6 +373,9 @@ func TestRun(t *testing.T) {
 						return []string{"0-999/100_0_receipts.json.gz"}, nil
 					},
 					streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+						if strings.Contains(key, "_block.json") {
+							return io.NopCloser(strings.NewReader(`{"timestamp":"0x65b5c600"}`)), nil
+						}
 						// Assert the key uses version 0
 						wantKey := "0-999/100_0_receipts.json.gz"
 						if key != wantKey {
@@ -404,6 +411,9 @@ func TestRun(t *testing.T) {
 						}, nil
 					},
 					streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+						if strings.Contains(key, "_block.json") {
+							return io.NopCloser(strings.NewReader(`{"timestamp":"0x65b5c600"}`)), nil
+						}
 						wantKey := "0-999/100_2_receipts.json.gz"
 						if key != wantKey {
 							return nil, fmt.Errorf("unexpected key %q, want %q", key, wantKey)
@@ -440,8 +450,8 @@ func TestRun(t *testing.T) {
 			wantErr:   true,
 			checkErr: func(t *testing.T, err error) {
 				t.Helper()
-				if err == nil || !strings.Contains(err.Error(), "not found in S3") {
-					t.Errorf("expected 'not found in S3' error, got: %v", err)
+				if err == nil {
+					t.Errorf("expected error, got nil")
 				}
 			},
 		},

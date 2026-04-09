@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -340,6 +341,13 @@ func run(args []string) error {
 		logger.Info("using latest block number", "block", blockNumber)
 	}
 
+	// Fetch block timestamp for hypertable partition column
+	header, err := ethClient.HeaderByNumber(ctx, big.NewInt(int64(blockNumber)))
+	if err != nil {
+		return fmt.Errorf("fetching block header for timestamp: %w", err)
+	}
+	blockTimestamp := time.Unix(int64(header.Time), 0).UTC()
+
 	// Split users into batches and process concurrently
 	batches := splitIntoBatches(users, cfg.batchSize)
 	logger.Info("processing users in batches",
@@ -398,7 +406,7 @@ func run(args []string) error {
 			if len(positions) > 0 {
 				if err := trackerSvc.PersistUserPositionBatch(
 					gCtx, positions, cfg.protocolAddress, cfg.chainID,
-					int64(blockNumber), 0,
+					int64(blockNumber), 0, blockTimestamp,
 				); err != nil {
 					return fmt.Errorf("batch %d DB persist failed: %w", batchIdx+1, err)
 				}

@@ -3,11 +3,11 @@ package entity
 import (
 	"fmt"
 	"math/big"
+	"time"
 )
 
 // Borrower represents a user's debt position at a specific block.
 type Borrower struct {
-	ID           int64
 	UserID       int64
 	ProtocolID   int64
 	TokenID      int64
@@ -17,12 +17,12 @@ type Borrower struct {
 	Change       *big.Int  // change from previous snapshot
 	EventType    EventType // The type of event that triggered this position snapshot (e.g., "Borrow", "Repay", "LiquidationCall")
 	TxHash       []byte    // The transaction hash
+	CreatedAt    time.Time // block timestamp — deterministic for hypertable dedup
 }
 
 // NewBorrower creates a new Borrower entity.
-func NewBorrower(id, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType EventType, txHash []byte) (*Borrower, error) {
+func NewBorrower(userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType EventType, txHash []byte, createdAt time.Time) (*Borrower, error) {
 	b := &Borrower{
-		ID:           id,
 		UserID:       userID,
 		ProtocolID:   protocolID,
 		TokenID:      tokenID,
@@ -32,6 +32,7 @@ func NewBorrower(id, userID, protocolID, tokenID, blockNumber int64, blockVersio
 		Change:       change,
 		EventType:    eventType,
 		TxHash:       txHash,
+		CreatedAt:    createdAt,
 	}
 	if err := b.validate(); err != nil {
 		return nil, err
@@ -41,8 +42,8 @@ func NewBorrower(id, userID, protocolID, tokenID, blockNumber int64, blockVersio
 
 // validate checks that all fields have valid values.
 func (b *Borrower) validate() error {
-	if b.ID <= 0 {
-		return fmt.Errorf("id must be positive, got %d", b.ID)
+	if b.CreatedAt.IsZero() {
+		return fmt.Errorf("createdAt must be set explicitly (block timestamp)")
 	}
 	if b.UserID <= 0 {
 		return fmt.Errorf("userID must be positive, got %d", b.UserID)

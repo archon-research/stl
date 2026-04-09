@@ -3,6 +3,7 @@ package entity
 import (
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -25,9 +26,13 @@ type AllocationPosition struct {
 	TxAmount       *big.Int
 	Direction      string
 	CreatedAtBlock int64
+	CreatedAt      time.Time // block timestamp — deterministic for hypertable dedup
 }
 
 func (p *AllocationPosition) Validate() error {
+	if p.CreatedAt.IsZero() {
+		return fmt.Errorf("created_at must be set explicitly (block timestamp)")
+	}
 	if p.ChainID == 0 {
 		return fmt.Errorf("chain_id is required")
 	}
