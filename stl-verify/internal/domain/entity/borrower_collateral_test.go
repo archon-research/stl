@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -15,9 +16,10 @@ func TestNewBorrowerCollateral(t *testing.T) {
 	validEventType := EventSupply
 	validTxHash := common.FromHex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
+	testCreatedAt := time.Unix(1700000000, 0).UTC()
+
 	tests := []struct {
 		name              string
-		id                int64
 		userID            int64
 		protocolID        int64
 		tokenID           int64
@@ -33,7 +35,6 @@ func TestNewBorrowerCollateral(t *testing.T) {
 	}{
 		{
 			name:              "valid borrower collateral",
-			id:                1,
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -48,7 +49,6 @@ func TestNewBorrowerCollateral(t *testing.T) {
 		},
 		{
 			name:              "valid borrower collateral with collateral disabled",
-			id:                1,
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -62,40 +62,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			wantErr:           false,
 		},
 		{
-			name:              "zero id",
-			id:                0,
-			userID:            10,
-			protocolID:        5,
-			tokenID:           3,
-			blockNumber:       1000,
-			blockVersion:      0,
-			amount:            validAmount,
-			change:            validChange,
-			eventType:         validEventType,
-			txHash:            validTxHash,
-			collateralEnabled: true,
-			wantErr:           true,
-			errContains:       "id must be positive",
-		},
-		{
-			name:              "negative id",
-			id:                -1,
-			userID:            10,
-			protocolID:        5,
-			tokenID:           3,
-			blockNumber:       1000,
-			blockVersion:      0,
-			amount:            validAmount,
-			change:            validChange,
-			eventType:         validEventType,
-			txHash:            validTxHash,
-			collateralEnabled: true,
-			wantErr:           true,
-			errContains:       "id must be positive",
-		},
-		{
 			name:              "zero userID",
-			id:                1,
 			userID:            0,
 			protocolID:        5,
 			tokenID:           3,
@@ -110,8 +77,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			errContains:       "userID must be positive",
 		},
 		{
-			name:              "zero protocolID",
-			id:                1,
+			name: "zero protocolID",
+
 			userID:            10,
 			protocolID:        0,
 			tokenID:           3,
@@ -126,8 +93,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			errContains:       "protocolID must be positive",
 		},
 		{
-			name:              "zero tokenID",
-			id:                1,
+			name: "zero tokenID",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           0,
@@ -142,8 +109,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			errContains:       "tokenID must be positive",
 		},
 		{
-			name:              "zero blockNumber",
-			id:                1,
+			name: "zero blockNumber",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -158,8 +125,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			errContains:       "blockNumber must be positive",
 		},
 		{
-			name:              "negative blockVersion",
-			id:                1,
+			name: "negative blockVersion",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -174,8 +141,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			errContains:       "blockVersion must be non-negative",
 		},
 		{
-			name:              "nil amount",
-			id:                1,
+			name: "nil amount",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -190,8 +157,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			errContains:       "amount must not be nil",
 		},
 		{
-			name:              "negative amount",
-			id:                1,
+			name: "negative amount",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -206,8 +173,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			errContains:       "amount must be non-negative",
 		},
 		{
-			name:              "nil change",
-			id:                1,
+			name: "nil change",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -222,8 +189,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			errContains:       "change must not be nil",
 		},
 		{
-			name:              "zero amount and change",
-			id:                1,
+			name: "zero amount and change",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -237,8 +204,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			wantErr:           false,
 		},
 		{
-			name:              "negative change allowed",
-			id:                1,
+			name: "negative change allowed",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -252,8 +219,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			wantErr:           false,
 		},
 		{
-			name:              "empty eventType",
-			id:                1,
+			name: "empty eventType",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -268,8 +235,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			errContains:       "invalid eventType",
 		},
 		{
-			name:              "invalid eventType",
-			id:                1,
+			name: "invalid eventType",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -284,8 +251,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			errContains:       "invalid eventType",
 		},
 		{
-			name:              "empty txHash",
-			id:                1,
+			name: "empty txHash",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -300,8 +267,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			errContains:       "txHash must not be empty",
 		},
 		{
-			name:              "liquidation event type",
-			id:                1,
+			name: "liquidation event type",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -315,8 +282,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			wantErr:           false,
 		},
 		{
-			name:              "reserve collateral enabled event type",
-			id:                1,
+			name: "reserve collateral enabled event type",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -330,8 +297,8 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			wantErr:           false,
 		},
 		{
-			name:              "reserve collateral disabled event type",
-			id:                1,
+			name: "reserve collateral disabled event type",
+
 			userID:            10,
 			protocolID:        5,
 			tokenID:           3,
@@ -348,7 +315,7 @@ func TestNewBorrowerCollateral(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bc, err := NewBorrowerCollateral(tt.id, tt.userID, tt.protocolID, tt.tokenID, tt.blockNumber, tt.blockVersion, tt.amount, tt.change, tt.eventType, tt.txHash, tt.collateralEnabled)
+			bc, err := NewBorrowerCollateral(tt.userID, tt.protocolID, tt.tokenID, tt.blockNumber, tt.blockVersion, tt.amount, tt.change, tt.eventType, tt.txHash, tt.collateralEnabled, testCreatedAt)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("NewBorrowerCollateral() expected error, got nil")
@@ -366,9 +333,6 @@ func TestNewBorrowerCollateral(t *testing.T) {
 			if bc == nil {
 				t.Errorf("NewBorrowerCollateral() returned nil")
 				return
-			}
-			if bc.ID != tt.id {
-				t.Errorf("NewBorrowerCollateral() ID = %v, want %v", bc.ID, tt.id)
 			}
 			if bc.UserID != tt.userID {
 				t.Errorf("NewBorrowerCollateral() UserID = %v, want %v", bc.UserID, tt.userID)

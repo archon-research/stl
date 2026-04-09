@@ -134,6 +134,8 @@ func (s *Service) processBlock(
 		transfers = append(transfers, s.extractor.Extract(receipt)...)
 	}
 
+	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
+
 	// Process transfers if any matched
 	if len(transfers) > 0 {
 		affected := s.matchTransfers(transfers)
@@ -143,7 +145,7 @@ func (s *Service) processBlock(
 				s.logger.Warn("partial balance fetch", "error", err)
 			}
 
-			snapshots := s.buildSnapshots(affected, balances, transfers, event)
+			snapshots := s.buildSnapshots(affected, balances, transfers, event, blockTimestamp)
 			if len(snapshots) > 0 {
 				if err := s.handler.HandleSnapshots(ctx, snapshots); err != nil {
 					return fmt.Errorf("handler: %w", err)
@@ -163,7 +165,7 @@ func (s *Service) processBlock(
 	s.blocksSinceSweep++
 	if s.blocksSinceSweep >= s.config.SweepEveryNBlocks {
 		s.blocksSinceSweep = 0
-		if err := s.sweep(ctx, event.BlockNumber); err != nil {
+		if err := s.sweep(ctx, event.BlockNumber, blockTimestamp); err != nil {
 			s.logger.Error("sweep failed", "error", err)
 		}
 	}
@@ -197,6 +199,7 @@ func (s *Service) buildSnapshots(
 	balances map[EntryKey]*PositionBalance,
 	transfers []*TransferEvent,
 	event outbound.BlockEvent,
+	blockTimestamp time.Time,
 ) []*PositionSnapshot {
 	tLookup := make(map[EntryKey]*TransferEvent)
 	for _, t := range transfers {
@@ -217,12 +220,13 @@ func (s *Service) buildSnapshots(
 		}
 
 		snap := &PositionSnapshot{
-			Entry:         entry,
-			Balance:       bal.Balance,
-			ScaledBalance: bal.ScaledBalance,
-			ChainID:       event.ChainID,
-			BlockNumber:   event.BlockNumber,
-			BlockVersion:  event.Version,
+			Entry:          entry,
+			Balance:        bal.Balance,
+			ScaledBalance:  bal.ScaledBalance,
+			ChainID:        event.ChainID,
+			BlockNumber:    event.BlockNumber,
+			BlockVersion:   event.Version,
+			BlockTimestamp: blockTimestamp,
 		}
 		if t, ok := tLookup[entry.Key()]; ok {
 			snap.TxHash = t.TxHash
@@ -239,7 +243,7 @@ func (s *Service) buildSnapshots(
 // emit Transfer events — e.g. aToken interest accrual, ERC4626 yield compounding,
 // and BUIDL rebases. Without this, positions would drift between transfer-triggered
 // snapshots.
-func (s *Service) sweep(ctx context.Context, blockNumber int64) error {
+func (s *Service) sweep(ctx context.Context, blockNumber int64, blockTimestamp time.Time) error {
 	start := time.Now()
 
 	balances, err := s.registry.FetchAll(ctx, s.entries, blockNumber)
@@ -254,13 +258,14 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64) error {
 			continue
 		}
 		snapshots = append(snapshots, &PositionSnapshot{
-			Entry:         entry,
-			Balance:       bal.Balance,
-			ScaledBalance: bal.ScaledBalance,
-			ChainID:       s.config.ChainID,
-			BlockNumber:   blockNumber,
-			TxAmount:      big.NewInt(0),
-			Direction:     DirectionSweep,
+			Entry:          entry,
+			Balance:        bal.Balance,
+			ScaledBalance:  bal.ScaledBalance,
+			ChainID:        s.config.ChainID,
+			BlockNumber:    blockNumber,
+			TxAmount:       big.NewInt(0),
+			Direction:      DirectionSweep,
+			BlockTimestamp: blockTimestamp,
 		})
 	}
 

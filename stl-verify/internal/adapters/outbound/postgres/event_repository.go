@@ -37,11 +37,12 @@ func (r *EventRepository) SaveEvent(ctx context.Context, tx pgx.Tx, event *entit
 	}
 
 	_, err := tx.Exec(ctx,
-		`INSERT INTO protocol_event (chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		 ON CONFLICT (chain_id, block_number, block_version, tx_hash, log_index) DO NOTHING`,
+		`INSERT INTO protocol_event (chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		 ON CONFLICT (chain_id, block_number, block_version, tx_hash, log_index, created_at) DO NOTHING`,
 		event.ChainID, event.ProtocolID, event.BlockNumber, event.BlockVersion,
-		event.TxHash, event.LogIndex, event.ContractAddress, event.EventName, event.EventData)
+		event.TxHash, event.LogIndex, event.ContractAddress, event.EventName, event.EventData,
+		event.CreatedAt)
 
 	if err != nil {
 		return fmt.Errorf("failed to save protocol event: %w", err)

@@ -3,6 +3,7 @@ package allocation_tracker
 import (
 	"context"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -60,6 +61,8 @@ type PositionSnapshot struct {
 	LogIndex  int
 	TxAmount  *big.Int
 	Direction Direction
+
+	BlockTimestamp time.Time // block timestamp for hypertable partition column
 }
 
 // PositionSource knows how to fetch on-chain balances for specific token types.
