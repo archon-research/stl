@@ -18,8 +18,6 @@ spec:
           type: RuntimeDefault
       containers:
         - name: python-api
-          # Image name used as the Kustomize images transformer key.
-          # The overlay kustomization.yaml overrides newName + newTag.
           image: python-api
           ports:
             - containerPort: 8000
@@ -37,7 +35,6 @@ spec:
             - configMapRef:
                 name: python-api-config
             - secretRef:
-                # Populated by ExternalSecret — secret name mirrors the service.
                 name: python-api
           resources:
             requests:

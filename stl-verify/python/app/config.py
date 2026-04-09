@@ -2,6 +2,7 @@ import functools
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 
 class Settings(BaseSettings):
@@ -17,15 +18,18 @@ class Settings(BaseSettings):
     def async_database_url(self) -> str:
         """Return the database URL with the asyncpg driver.
 
-        The shared secret (pooler_url) stores a plain ``postgresql://`` URL.
-        SQLAlchemy's async engine requires the ``postgresql+asyncpg://`` scheme.
+        The shared secret (pooler_url) stores a plain ``postgresql://`` or
+        ``postgres://`` URL. SQLAlchemy's async engine requires the
+        ``postgresql+asyncpg://`` dialect. ``make_url`` handles scheme
+        normalisation and query-parameter compatibility automatically.
         """
-        url = self.database_url.get_secret_value()
-        if url.startswith("postgresql://"):
-            return url.replace("postgresql://", "postgresql+asyncpg://", 1)
-        if url.startswith("postgres://"):
-            return url.replace("postgres://", "postgresql+asyncpg://", 1)
-        return url
+        url = make_url(self.database_url.get_secret_value())
+        url = url.set(drivername="postgresql+asyncpg")
+        # asyncpg does not accept sslmode (it uses ssl instead);
+        # drop it to avoid a TypeError at connect time.
+        query = dict(url.query)
+        query.pop("sslmode", None)
+        return url.set(query=query).render_as_string(hide_password=False)
 
     @property
     def alchemy_http_url(self) -> str:
