@@ -1,5 +1,3 @@
-# Actions are pinned to commit SHAs for supply-chain security.
-# To update: git ls-remote --tags https://github.com/<org>/<action>.git | grep <tag>
 name: Python (stl-verify)
 
 on:
