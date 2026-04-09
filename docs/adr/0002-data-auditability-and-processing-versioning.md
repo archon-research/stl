@@ -18,8 +18,10 @@ If a bug in our indexing code (e.g. an incorrect rate calculation in the Morpho 
 wrong data, we need to fix the code, reprocess the affected block range, and store corrected data
 alongside the original — without destroying the original for audit purposes.
 
-Today this is impossible. Reprocessing a block range with fixed code would hit `ON CONFLICT DO
-NOTHING` on the existing primary keys, silently discarding the corrected data.
+Today this is impossible. Our inserts use `ON CONFLICT DO NOTHING` to ensure idempotent retries
+(pod restarts, SQS re-deliveries) don't create duplicates — this is essential and must be
+preserved. But it also means reprocessing a block range with fixed code silently discards the
+corrected data, since the old rows already occupy the primary key.
 
 We need two things:
 
@@ -42,7 +44,7 @@ CREATE TABLE build_registry (
     id           SERIAL PRIMARY KEY,
     git_hash     TEXT NOT NULL UNIQUE,
     built_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    docker_image TEXT,
+    docker_sha   TEXT,   -- nullable: not all builds produce Docker images (local dev, tests)
     notes        TEXT
 );
 
@@ -51,11 +53,14 @@ VALUES (0, 'pre-tracking', NOW(), 'Data produced before provenance tracking was 
 SELECT setval(pg_get_serial_sequence('build_registry', 'id'), 1, false);
 ```
 
-Each service binary already embeds its git commit at build time via `-ldflags` (using the full
-40-character hash for unambiguous auditability):
+Each service binary must expose its git commit at runtime for provenance. `GitCommit` can be set
+at build time via `-ldflags` and, when it is not provided, is populated from Go's embedded VCS
+build info (`debug.ReadBuildInfo`). We use the full 40-character hash for unambiguous
+auditability, so provenance does not depend on a specific build pipeline:
 
 ```go
-var GitCommit string // set by: go build -ldflags "-X main.GitCommit=${GIT_COMMIT}"
+var GitCommit string // optionally set by: go build -ldflags "-X main.GitCommit=${GIT_COMMIT}"
+                     // otherwise populated from Go build info at runtime
 ```
 
 Build resolution happens once, in shared infrastructure code, so individual workers and jobs
@@ -93,6 +98,16 @@ Each service's `main.go` creates the registry once and passes it (or just the `i
 whatever services and repositories need it — the same way database pools and other shared
 dependencies are wired today. Individual workers never interact with `build_registry` directly;
 they just receive a `buildID int` and include it in their writes.
+
+To prevent new services from accidentally omitting build registration, repository constructors
+should require `buildID` as a parameter — making the omission a compile error rather than a
+runtime bug. If a repository can be constructed without a `buildID`, it can silently write
+`build_id = 0`, which is indistinguishable from pre-tracking data.
+
+Note that `build_id` is per **row**, not per calculation or per service. If a risk calculation
+consumes sparklend data indexed by build X and morpho data indexed by build Y, the input rows
+carry their respective `build_id` values. This is correct and expected — it captures exactly
+which code produced each data point, even when services are deployed independently.
 
 ### 2. Processing Version and Build ID on State Tables
 
@@ -159,18 +174,34 @@ insert. If the `build_id` is different (or no row exists), it assigns the next v
 
 #### Concurrency
 
-Following the established pattern in `blockstate_repository.go`, inserts that need version
-assignment must be wrapped in a `READ COMMITTED` transaction with an advisory lock to serialize
-concurrent writers for the same natural key. `SERIALIZABLE` isolation alone cannot detect
-version races on TimescaleDB hypertables due to chunk-level constraints — it produces unique
-constraint violations (23505) instead of serialization failures (40001). The advisory lock
-serializes inserts, and `READ COMMITTED` allows the trigger to see committed changes from the
-lock-holder.
+Following the established pattern in `blockstate_repository.go`, the **application/repository
+layer** is responsible for concurrency control. Inserts that need version assignment must be
+wrapped in a `READ COMMITTED` transaction, and the caller must acquire an advisory lock before
+executing the insert to serialize concurrent writers for the same natural key.
 
-The advisory lock key should be derived from the natural key columns (e.g. via `hashtext()`
-on the concatenated key values).
+The trigger's responsibility is limited to reading existing rows and assigning the correct
+version number inside that already-serialized transaction. The trigger does **not** acquire
+advisory locks itself — keeping the serialization contract in one layer (the repository) rather
+than splitting it across trigger and application code.
+
+`SERIALIZABLE` isolation alone cannot detect version races on TimescaleDB hypertables due to
+chunk-level constraints — it produces unique constraint violations (23505) instead of
+serialization failures (40001). The advisory lock serializes inserts, and `READ COMMITTED`
+allows the trigger to see committed changes from the prior lock-holder.
+
+The advisory lock key should be derived from stable natural key components using a low-collision
+strategy. Prefer `pg_advisory_xact_lock($1::int, $2::int)` when the natural key has stable
+integer parts (e.g. `(chain_id, block_number)` as in `blockstate_repository.go`). If it cannot
+be expressed as two integers, use a 64-bit derived key such as
+`pg_advisory_xact_lock(hashtextextended(concatenated_key, 0)::bigint)`. Avoid plain
+`hashtext()` — it is only 32-bit and can unexpectedly serialize unrelated natural keys.
+
+Any new repository that writes to these tables must follow the same locking pattern.
 
 #### Trigger Examples
+
+The examples below assume the caller has already started a `READ COMMITTED` transaction and
+acquired the advisory lock for the row's natural key.
 
 ```sql
 -- ============================================================================
@@ -184,13 +215,6 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
-    -- Serialize concurrent writers for the same natural key (same pattern as
-    -- assign_block_version). Uncontended lock adds ~5us overhead.
-    PERFORM pg_advisory_xact_lock(
-        hashtext(NEW.morpho_market_id::text || ',' || NEW.block_number::text || ','
-                 || NEW.block_version::text || ',' || NEW.timestamp::text)
-    );
-
     -- Check if this build already produced a version for this key (retry)
     SELECT processing_version INTO existing_ver
     FROM morpho_market_state
@@ -231,12 +255,6 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
-    PERFORM pg_advisory_xact_lock(
-        hashtext(NEW.token_id::text || ',' || NEW.oracle_id::text || ','
-                 || NEW.block_number::text || ',' || NEW.block_version::text
-                 || ',' || NEW.timestamp::text)
-    );
-
     SELECT processing_version INTO existing_ver
     FROM onchain_token_price
     WHERE token_id = NEW.token_id
@@ -286,12 +304,6 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
-    PERFORM pg_advisory_xact_lock(
-        hashtext(NEW.prime_id::text || ',' || NEW.package_id || ','
-                 || NEW.asset_type || ',' || NEW.custody_type
-                 || ',' || NEW.snapshot_time::text)
-    );
-
     SELECT processing_version INTO existing_ver
     FROM anchorage_package_snapshot
     WHERE prime_id = NEW.prime_id
@@ -332,10 +344,6 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
-    PERFORM pg_advisory_xact_lock(
-        hashtext(NEW.operation_id || ',' || NEW.created_at::text)
-    );
-
     SELECT processing_version INTO existing_ver
     FROM anchorage_operation
     WHERE operation_id = NEW.operation_id
@@ -370,11 +378,6 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
-    PERFORM pg_advisory_xact_lock(
-        hashtext(NEW.token_id::text || ',' || NEW.source_id::text
-                 || ',' || NEW.timestamp::text)
-    );
-
     SELECT processing_version INTO existing_ver
     FROM offchain_token_price
     WHERE token_id = NEW.token_id
@@ -420,14 +423,15 @@ Each trigger function uses static SQL with hardcoded column names, allowing Post
 the query plan across invocations. The queries run as index-only scans on the existing PK/unique
 index.
 
-The trigger acquires an advisory lock (~5us uncontended), then performs up to two index lookups:
-one to check for a retry (by `build_id`), and if not found, one to get
-`MAX(processing_version)`. On the normal path (first insert, no existing row, no contention),
-all three operations return quickly.
+The trigger performs up to two index lookups per insert: one to check for a retry (by
+`build_id`), and if not found, one to get `MAX(processing_version)`. On the normal path (first
+insert, no existing row), both return empty results quickly. The advisory lock is acquired by
+the caller before the insert, not by the trigger.
 
-Estimated per-insert overhead: ~35-105us (advisory lock + plan lookup from cache + index scans).
-For normal block processing (~50-200 rows per 12-second block), total trigger overhead is
-2-21ms — negligible relative to network I/O.
+Estimated per-insert trigger overhead: ~30-100us (plan lookup from cache + index scans).
+The advisory lock adds ~5us uncontended at the repository level. For normal block processing
+(~50-200 rows per 12-second block), total overhead is 2-21ms — negligible relative to
+network I/O.
 
 ### 4. Canonical Version: Latest-Wins
 
@@ -619,8 +623,8 @@ canonical-data query and introduces a coordination point that must be kept in sy
 - Applies uniformly to both blockchain-derived and off-chain polled data
 
 **Negative / Trade-offs:**
-- Every INSERT on state tables incurs ~35-105us trigger overhead (~5-15% increase on insert
-  latency) for the advisory lock + plan-cached index probes
+- Every INSERT on state tables incurs ~30-100us trigger overhead plus ~5us for the
+  repository-level advisory lock (~5-15% increase on insert latency)
 - Primary keys / unique constraints on all state tables grow by one column, slightly increasing
   index size
 - The `DISTINCT ON ... ORDER BY processing_version DESC` query pattern for canonical data must
