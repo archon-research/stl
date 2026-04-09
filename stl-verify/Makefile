@@ -4,7 +4,7 @@
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
         dev-up dev-up-rebuild dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-cronjob-%-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -32,11 +32,13 @@
 		build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill deploy-oracle-pricing-backfill-worker \
 		build-sparklend-backfill-arm64 deploy-sparklend-backfill erigon-sparklend-backfill \
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate \
-		kind-load-migrate kind-load-watcher kind-load-workers kind-load-cronjobs \
-		kind-deploy-watcher kind-deploy-workers kind-deploy-cronjobs generate-cronjob-manifests \
+		kind-load-migrate kind-load-watcher kind-load-workers kind-load-python-api kind-load-cronjobs \
+		kind-deploy-watcher kind-deploy-workers kind-deploy-python-api kind-deploy-cronjobs generate-cronjob-manifests \
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
+		docker-build-python-api docker-push-python-api docker-release-python-api \
+		docker-release-python-api-staging \
 		docker-build-mock-blockchain-server docker-push-mock-blockchain-server docker-release-mock-blockchain-server \
 		docker-release-mock-blockchain-server-staging \
 		kind-build-mock-blockchain-server kind-load-mock-blockchain-server kind-deploy-mock-blockchain-server kind-redeploy-mock-blockchain-server \
@@ -288,30 +290,30 @@ dev-up:
 	@$(MAKE) dev-preflight
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [1/7] Cluster"
+	@echo "  [1/8] Cluster"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(MAKE) kind-create
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [2/7] Infrastructure"
+	@echo "  [2/8] Infrastructure"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	$(MAKE) kind-config kind-secrets kind-infra
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [3/7] Database migrations"
+	@echo "  [3/8] Database migrations"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-migrate:local,docker-build-migrate)
 	$(MAKE) kind-load-migrate kind-migrate
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [4/7] Watcher"
+	@echo "  [4/8] Watcher"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-watcher:local,docker-build-watcher LOCAL=1)
 	$(MAKE) kind-load-watcher kind-deploy-watcher
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [5/7] Workers"
+	@echo "  [5/8] Workers"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-oracle-price-worker:local,docker-build-oracle-price-worker LOCAL=1)
 	$(call build-if-needed,stl-morpho-indexer:local,docker-build-morpho-indexer LOCAL=1)
@@ -320,7 +322,13 @@ dev-up:
 	$(MAKE) kind-load-workers kind-deploy-workers
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [6/7] Cronjobs (Temporal)"
+	@echo "  [6/8] Python API"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	$(call build-if-needed,stl-python-api:local,docker-build-python-api LOCAL=1)
+	$(MAKE) kind-load-python-api kind-deploy-python-api
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "  [7/8] Cronjobs (Temporal)"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@for cj in $(CRONJOBS); do \
 	  if [ "$(COLD)" = "1" ] || ! docker image inspect stl-$$cj:local >/dev/null 2>&1; then \
@@ -332,10 +340,10 @@ dev-up:
 	$(MAKE) kind-load-cronjobs kind-deploy-cronjobs
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [7/7] Ready"
+	@echo "  [8/8] Ready"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "==> Waiting for all deployments to roll out..."
-	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer $(CRONJOBS); do \
+	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer python-api $(CRONJOBS); do \
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=120s || \
 	    { echo "ERROR: deployment $$dep not ready after 120s"; kubectl --context=$(KUBE_CONTEXT) get pods -n $(KUBE_NS); exit 1; }; \
 	done
@@ -731,6 +739,8 @@ docker-release-all:
 	@$(MAKE) _docker-release-allocation-tracker-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-prime-debt-indexer-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-python-api-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -1587,6 +1597,13 @@ kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/workers/ -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
 
+kind-load-python-api:
+	kind load docker-image stl-python-api:local --name $(KIND_CLUSTER)
+
+kind-deploy-python-api:
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/python-api.yaml -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/python-api -n $(KUBE_NS)
+
 # --- Cronjobs (Temporal workers) ---
 # Auto-discovered from cmd/cronjobs/*/main.go — no changes needed when adding a new cronjob.
 
@@ -1681,6 +1698,54 @@ kind-clean:
 	kubectl --context=$(KUBE_CONTEXT) delete namespace $(KUBE_NS) --ignore-not-found --wait
 	kubectl --context=$(KUBE_CONTEXT) delete namespace temporal      --ignore-not-found --wait
 	@echo "==> Namespaces $(KUBE_NS) and temporal deleted."
+
+# =============================================================================
+# Docker Build & Push - Python API
+# =============================================================================
+
+ECR_REPO_PYTHON_API = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-python-api
+
+# Build Docker image for python-api (ARM64 for Graviton)
+docker-build-python-api:
+ifdef LOCAL
+	docker build -t stl-python-api:local -f python/Dockerfile python/
+else
+	@echo "==> Building Python API Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_PYTHON_API)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	docker buildx build --platform linux/arm64 \
+		-f python/Dockerfile \
+		-t $(ECR_REPO_PYTHON_API):$(IMAGE_TAG) \
+		-t $(ECR_REPO_PYTHON_API):latest \
+		--load python/
+endif
+
+# Push python-api Docker image to ECR
+docker-push-python-api: ecr-login
+	@echo "==> Pushing Python API Docker image to ECR..."
+	docker push $(ECR_REPO_PYTHON_API):$(IMAGE_TAG)
+	docker push $(ECR_REPO_PYTHON_API):latest
+
+# Build and push python-api in one step (captures tag at start for consistency)
+docker-release-python-api: ecr-login _docker-release-python-api-internal
+
+_docker-release-python-api-internal:
+	@TAG=$(IMAGE_TAG) && \
+	echo "==> Building Python API Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_PYTHON_API)" && \
+	echo "    Tag: $$TAG" && \
+	docker buildx build --platform linux/arm64 \
+		-f python/Dockerfile \
+		-t $(ECR_REPO_PYTHON_API):$$TAG \
+		-t $(ECR_REPO_PYTHON_API):latest \
+		--load python/ && \
+	echo "==> Pushing Python API Docker image to ECR..." && \
+	docker push $(ECR_REPO_PYTHON_API):$$TAG && \
+	docker push $(ECR_REPO_PYTHON_API):latest && \
+	echo "==> Python API Docker image released: $(ECR_REPO_PYTHON_API):$$TAG"
+
+docker-release-python-api-staging:
+	@$(MAKE) docker-release-python-api ENV=sentinelstaging
 
 # =============================================================================
 # Docker Build & Push - Mock Blockchain Server

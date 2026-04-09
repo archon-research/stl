@@ -49,7 +49,7 @@ async def _resolve(
 
     Uses ``async with`` + ``yield`` so the DB connection is properly cleaned up.
     """
-    alchemy_url = settings.alchemy_http_url.get_secret_value()
+    alchemy_url = settings.alchemy_http_url
     factory = RiskServiceFactory(engine, alchemy_url=alchemy_url, http_client=http_client)
     try:
         result = await factory.create(receipt_token_id)
