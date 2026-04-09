@@ -48,6 +48,7 @@ CREATE TABLE build_registry (
 
 INSERT INTO build_registry (id, git_hash, built_at, notes)
 VALUES (0, 'pre-tracking', NOW(), 'Data produced before provenance tracking was enabled');
+SELECT setval(pg_get_serial_sequence('build_registry', 'id'), 1, false);
 ```
 
 Each service binary already embeds its git commit at build time via `-ldflags` (using the full
