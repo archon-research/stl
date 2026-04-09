@@ -42,7 +42,8 @@ async def test_request_id_set_in_response_header(client: httpx.AsyncClient):
     rid = response.headers.get("x-request-id")
     assert rid is not None
     # Validate it is a valid UUID4
-    parsed = uuid.UUID(rid, version=4)
+    parsed = uuid.UUID(rid)
+    assert parsed.version == 4
     assert str(parsed) == rid
 
 

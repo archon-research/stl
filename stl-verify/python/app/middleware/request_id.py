@@ -16,7 +16,9 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         rid = str(uuid.uuid4())
         token = request_id_var.set(rid)
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = rid
-        request_id_var.reset(token)
-        return response
+        try:
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = rid
+            return response
+        finally:
+            request_id_var.reset(token)
