@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", frozen=True)
 
     log_level: str = "INFO"
+    log_format: str = "json"
     database_url: SecretStr = SecretStr("postgresql+asyncpg://postgres:postgres@localhost:5432/stl_verify")
     alchemy_api_key: SecretStr = SecretStr("MISSING_KEY")
 

@@ -8,10 +8,13 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.api.v1 import allocations, risk, status
 from app.config import Settings, get_settings
+from app.logging import setup_logging
 from app.middleware.request_id import RequestIdMiddleware
 
 
 def create_app(settings: Settings) -> FastAPI:
+    setup_logging()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(settings.async_database_url, pool_pre_ping=True)
