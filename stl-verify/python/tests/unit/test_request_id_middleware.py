@@ -60,6 +60,16 @@ async def test_request_id_available_in_context(client: httpx.AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_inbound_request_id_is_preserved(client: httpx.AsyncClient):
+    inbound_id = "upstream-trace-id-abc-123"
+    async with client:
+        response = await client.get("/request-id", headers={"X-Request-ID": inbound_id})
+
+    assert response.headers.get("x-request-id") == inbound_id
+    assert response.json()["request_id"] == inbound_id
+
+
+@pytest.mark.asyncio
 async def test_request_id_isolated_per_request(client: httpx.AsyncClient):
     async with client:
         response1 = await client.get("/ping")
