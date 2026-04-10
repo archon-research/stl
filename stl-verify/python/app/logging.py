@@ -6,13 +6,11 @@ injection from the context variable defined in ``app.middleware.request_id``.
 
 import json
 import logging
-import os
 from datetime import UTC, datetime
 
-try:
-    from app.middleware.request_id import request_id_var
-except ImportError:  # pragma: no cover – VEC-69 may not be merged yet
-    request_id_var = None
+from app.middleware.request_id import request_id_var
+
+_APP_LOGGER_NAME = "app"
 
 
 class JsonFormatter(logging.Formatter):
@@ -53,16 +51,18 @@ class TextFormatter(logging.Formatter):
         return base
 
 
-def setup_logging() -> None:
-    """Configure the root logger based on ``LOG_FORMAT`` and ``LOG_LEVEL`` env vars."""
+def setup_logging(log_level: str = "INFO", log_format: str = "json") -> None:
+    """Configure the application logger tree.
 
-    log_format = os.environ.get("LOG_FORMAT", "json").lower()
-    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    if logging.getLevelNamesMapping().get(log_level) is None:
-        log_level = "INFO"
+    Only touches the ``app`` logger — leaves the root logger (and any
+    Uvicorn/Gunicorn/platform handlers) untouched.
+    """
+    level = log_level.upper()
+    if logging.getLevelNamesMapping().get(level) is None:
+        level = "INFO"
 
     formatter: logging.Formatter
-    if log_format == "text":
+    if log_format.lower() == "text":
         formatter = TextFormatter()
     else:
         formatter = JsonFormatter()
@@ -70,19 +70,17 @@ def setup_logging() -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
 
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
-    # Avoid duplicate handlers when called multiple times (e.g. in tests).
-    root_logger.handlers.clear()
-    root_logger.addHandler(handler)
+    app_logger = logging.getLogger(_APP_LOGGER_NAME)
+    app_logger.setLevel(level)
+    app_logger.handlers.clear()
+    app_logger.addHandler(handler)
+    app_logger.propagate = False
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Return a named logger."""
+    """Return a named logger under the ``app`` tree."""
     return logging.getLogger(name)
 
 
 def _get_request_id() -> str | None:
-    if request_id_var is None:
-        return None
     return request_id_var.get(None)

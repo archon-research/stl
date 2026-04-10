@@ -13,7 +13,7 @@ from app.middleware.request_id import RequestIdMiddleware
 
 
 def create_app(settings: Settings) -> FastAPI:
-    setup_logging()
+    setup_logging(log_level=settings.log_level, log_format=settings.log_format)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

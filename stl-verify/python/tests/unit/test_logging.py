@@ -8,6 +8,21 @@ import pytest
 from app.logging import JsonFormatter, TextFormatter, get_logger, setup_logging
 from app.middleware.request_id import request_id_var
 
+_APP_LOGGER_NAME = "app"
+
+
+@pytest.fixture(autouse=True)
+def _reset_app_logger():
+    """Restore the app logger state after each test."""
+    app_logger = logging.getLogger(_APP_LOGGER_NAME)
+    original_level = app_logger.level
+    original_handlers = app_logger.handlers[:]
+    original_propagate = app_logger.propagate
+    yield
+    app_logger.handlers = original_handlers
+    app_logger.setLevel(original_level)
+    app_logger.propagate = original_propagate
+
 
 def _make_record(
     name: str = "test.logger",
@@ -51,7 +66,6 @@ class TestJsonFormatter:
             request_id_var.reset(token)
 
     def test_json_formatter_omits_request_id_when_not_set(self) -> None:
-        # Ensure context var is at default (None)
         formatter = JsonFormatter()
         record = _make_record()
         output = formatter.format(record)
@@ -69,7 +83,6 @@ class TestTextFormatter:
         assert "[INFO]" in output
         assert "test.logger" in output
         assert "hello world" in output
-        # Should not contain request_id when not set
         assert "request_id=" not in output
 
     def test_text_formatter_includes_request_id_when_set(self) -> None:
@@ -85,37 +98,37 @@ class TestTextFormatter:
 
 
 class TestSetupLogging:
-    def test_setup_logging_json_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("LOG_FORMAT", "json")
-        monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    def test_setup_logging_json_mode(self) -> None:
+        setup_logging(log_level="DEBUG", log_format="json")
 
+        app_logger = logging.getLogger(_APP_LOGGER_NAME)
+        assert app_logger.level == logging.DEBUG
+        assert len(app_logger.handlers) == 1
+        assert isinstance(app_logger.handlers[0].formatter, JsonFormatter)
+        assert app_logger.propagate is False
+
+    def test_setup_logging_text_mode(self) -> None:
+        setup_logging(log_level="WARNING", log_format="text")
+
+        app_logger = logging.getLogger(_APP_LOGGER_NAME)
+        assert app_logger.level == logging.WARNING
+        assert len(app_logger.handlers) == 1
+        assert isinstance(app_logger.handlers[0].formatter, TextFormatter)
+
+    def test_setup_logging_defaults_to_json(self) -> None:
         setup_logging()
 
+        app_logger = logging.getLogger(_APP_LOGGER_NAME)
+        assert app_logger.level == logging.INFO
+        assert isinstance(app_logger.handlers[0].formatter, JsonFormatter)
+
+    def test_setup_logging_does_not_touch_root_logger(self) -> None:
         root = logging.getLogger()
-        assert root.level == logging.DEBUG
-        assert len(root.handlers) == 1
-        assert isinstance(root.handlers[0].formatter, JsonFormatter)
+        original_handlers = root.handlers[:]
 
-    def test_setup_logging_text_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("LOG_FORMAT", "text")
-        monkeypatch.setenv("LOG_LEVEL", "WARNING")
+        setup_logging(log_level="DEBUG", log_format="text")
 
-        setup_logging()
-
-        root = logging.getLogger()
-        assert root.level == logging.WARNING
-        assert len(root.handlers) == 1
-        assert isinstance(root.handlers[0].formatter, TextFormatter)
-
-    def test_setup_logging_defaults_to_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("LOG_FORMAT", raising=False)
-        monkeypatch.delenv("LOG_LEVEL", raising=False)
-
-        setup_logging()
-
-        root = logging.getLogger()
-        assert root.level == logging.INFO
-        assert isinstance(root.handlers[0].formatter, JsonFormatter)
+        assert root.handlers == original_handlers
 
 
 class TestGetLogger:
