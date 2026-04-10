@@ -30,6 +30,9 @@ class JsonFormatter(logging.Formatter):
         if request_id is not None:
             log_entry["request_id"] = request_id
 
+        if record.exc_info and record.exc_info[0] is not None:
+            log_entry["exception"] = self.formatException(record.exc_info)
+
         return json.dumps(log_entry, default=str)
 
 
@@ -44,6 +47,9 @@ class TextFormatter(logging.Formatter):
         if request_id is not None:
             base += f" [request_id={request_id}]"
 
+        if record.exc_info and record.exc_info[0] is not None:
+            base += f"\n{self.formatException(record.exc_info)}"
+
         return base
 
 
@@ -52,6 +58,8 @@ def setup_logging() -> None:
 
     log_format = os.environ.get("LOG_FORMAT", "json").lower()
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    if logging.getLevelNamesMapping().get(log_level) is None:
+        log_level = "INFO"
 
     formatter: logging.Formatter
     if log_format == "text":
@@ -77,4 +85,4 @@ def get_logger(name: str) -> logging.Logger:
 def _get_request_id() -> str | None:
     if request_id_var is None:
         return None
-    return request_id_var.get()
+    return request_id_var.get(None)
