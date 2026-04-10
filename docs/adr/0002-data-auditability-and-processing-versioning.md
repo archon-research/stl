@@ -459,110 +459,75 @@ triggers:
 
 | Table | Natural Key (WHERE clause) | Type |
 |-------|---------------------------|------|
-| `borrower` | `user_id, protocol_id, token_id, block_number, block_version` | Regular table, surrogate PK `(id)` |
-| `borrower_collateral` | `user_id, protocol_id, token_id, block_number, block_version` | Regular table, surrogate PK `(id)` |
+| `borrower` | `user_id, protocol_id, token_id, block_number, block_version, created_at` | Hypertable (columnstore), natural PK |
+| `borrower_collateral` | `user_id, protocol_id, token_id, block_number, block_version, created_at` | Hypertable (columnstore), natural PK |
 | `sparklend_reserve_data` | `protocol_id, token_id, block_number, block_version` | Hypertable, surrogate PK `(id, block_number)` |
-| `onchain_token_price` | `token_id, oracle_id, block_number, block_version, timestamp` | Hypertable |
-| `morpho_market_state` | `morpho_market_id, block_number, block_version, timestamp` | Hypertable |
-| `morpho_market_position` | `user_id, morpho_market_id, block_number, block_version, timestamp` | Hypertable |
-| `morpho_vault_state` | `morpho_vault_id, block_number, block_version, timestamp` | Hypertable |
-| `morpho_vault_position` | `user_id, morpho_vault_id, block_number, block_version, timestamp` | Hypertable |
+| `onchain_token_price` | `token_id, oracle_id, block_number, block_version, timestamp` | Hypertable (compression) |
+| `morpho_market_state` | `morpho_market_id, block_number, block_version, timestamp` | Hypertable (compression) |
+| `morpho_market_position` | `user_id, morpho_market_id, block_number, block_version, timestamp` | Hypertable (compression) |
+| `morpho_vault_state` | `morpho_vault_id, block_number, block_version, timestamp` | Hypertable (compression) |
+| `morpho_vault_position` | `user_id, morpho_vault_id, block_number, block_version, timestamp` | Hypertable (compression) |
 | `prime_debt` | `prime_id, block_number, block_version, synced_at` | Hypertable, UNIQUE only (no PK) |
-| `allocation_position` | `chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction` | Regular table, surrogate PK `(id)` |
-| `protocol_event` | `chain_id, block_number, block_version, tx_hash, log_index` | Regular table, surrogate PK `(id)` |
+| `allocation_position` | `chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, created_at` | Hypertable (columnstore), natural PK |
+| `protocol_event` | `chain_id, block_number, block_version, tx_hash, log_index, created_at` | Hypertable (columnstore), natural PK |
 
 ### Off-chain / polled (no `block_number` or `block_version`)
 
 | Table | Natural Key (WHERE clause) | Type |
 |-------|---------------------------|------|
-| `anchorage_package_snapshot` | `prime_id, package_id, asset_type, custody_type, snapshot_time` | Hypertable |
-| `anchorage_operation` | `operation_id, created_at` | Hypertable |
-| `offchain_token_price` | `token_id, source_id, timestamp` | Hypertable |
+| `anchorage_package_snapshot` | `prime_id, package_id, asset_type, custody_type, snapshot_time` | Hypertable (compression) |
+| `anchorage_operation` | `operation_id, created_at` | Hypertable (compression) |
+| `offchain_token_price` | `token_id, source_id, timestamp` | Hypertable (compression) |
 
 **Notes:**
-- Regular tables (`borrower`, `borrower_collateral`, `allocation_position`, `protocol_event`)
-  have no compression/decompression concerns during migration.
-- Several tables have surrogate PKs (`id` or `(id, block_number)`) with a **separate** UNIQUE
-  constraint on the natural key: `borrower`, `borrower_collateral`, `sparklend_reserve_data`,
-  `allocation_position`, `protocol_event`. For these tables, `processing_version` must be added
-  to the **UNIQUE constraint**, not the surrogate PK. `prime_debt` has no PK at all — only a
-  UNIQUE constraint that receives `processing_version`.
-- The trigger WHERE clause always matches against the natural key columns (the UNIQUE constraint
-  columns), regardless of whether the table uses a surrogate PK.
+- All state tables are now hypertables. Tables using the old compression API
+  (`timescaledb.compress`) require `remove_compression_policy` + `decompress_chunk` before
+  constraint alteration. Tables using the columnstore API (`timescaledb.enable_columnstore`)
+  require pausing the job, decompressing, and disabling columnstore before alteration.
+- `sparklend_reserve_data` has a surrogate PK `(id, block_number)` with a **separate** UNIQUE
+  constraint on the natural key. `processing_version` is added to the UNIQUE constraint, not
+  the surrogate PK. `prime_debt` has no PK — only a UNIQUE constraint.
+- The trigger WHERE clause always matches against the natural key columns.
 
 ## Migration Strategy
 
-Existing data is not backfilled. The migration must be executed in a specific order due to
-TimescaleDB constraints around compressed chunks.
+Existing data is not backfilled. The migration is split into separate files so that each step
+is an independent transaction. If decompression fails, no schema changes have occurred. If
+constraint alteration fails, compression settings are unchanged.
 
-### Step 1: Create `build_registry` table
+Tiered (S3) chunks may need to be recalled before decompression. The total data volume should
+be estimated to plan an appropriate maintenance window.
 
-Create the table and seed the `pre-tracking` entry (id=0).
+### File 1: `20260410_100000_create_build_registry.sql`
 
-### Step 2: Add columns to all state tables
+Create the `build_registry` table and seed the `pre-tracking` entry (id=0).
 
-```sql
-ALTER TABLE <table> ADD COLUMN processing_version INT NOT NULL DEFAULT 0;
-ALTER TABLE <table> ADD COLUMN build_id INT NOT NULL DEFAULT 0;
-```
+### File 2: `20260410_110000_add_auditability_columns.sql`
 
-Adding `NOT NULL` columns with `DEFAULT` is supported on compressed hypertables since
-TimescaleDB 2.6 — no decompression needed for this step.
+Add `processing_version INT NOT NULL DEFAULT 0` and `build_id INT NOT NULL DEFAULT 0` to all
+14 state tables. Adding `NOT NULL` columns with `DEFAULT` is supported on compressed
+hypertables since TimescaleDB 2.6 — no decompression needed.
 
-### Step 3: Decompress hypertable chunks
+### File 3: `20260410_120000_remove_policies_and_decompress.sql`
 
-Dropping/recreating PK and UNIQUE constraints is NOT supported on compressed chunks. Every
-compressed chunk across affected hypertables must be decompressed first:
+Remove compression/columnstore policies and decompress all chunks. Tables using the old
+compression API (`timescaledb.compress`) use `remove_compression_policy` + `decompress_chunk`.
+Tables using the columnstore API (`timescaledb.enable_columnstore`) pause their jobs,
+decompress, and disable columnstore. Tables with no compression (`sparklend_reserve_data`,
+`prime_debt`) are skipped.
 
-```sql
--- For each affected hypertable:
-SELECT remove_compression_policy('<table>', if_exists => true);
-SELECT decompress_chunk(c, if_not_exists => true)
-FROM show_chunks('<table>') c;
-```
+### File 4: `20260410_130000_alter_constraints.sql`
 
-Tiered (S3) chunks may need to be recalled before decompression. This should be verified in
-staging. The total data volume should be estimated to plan an appropriate maintenance window.
+Drop and recreate PK/UNIQUE constraints to include `processing_version`. For most tables this
+is the PK. For `sparklend_reserve_data` (surrogate PK) and `prime_debt` (no PK), it is the
+UNIQUE constraint. Uses a helper function for dynamic constraint name lookup.
 
-Regular tables (`borrower`, `borrower_collateral`, `allocation_position`, `protocol_event`) skip
-this step entirely — no compression concerns.
+### File 5: `20260410_140000_update_settings_and_recompress.sql`
 
-### Step 4: Alter UNIQUE constraints
+Update compression/columnstore `orderby` settings to append `processing_version DESC`, re-add
+policies, and recompress chunks older than 2 days.
 
-Drop and recreate the natural-key UNIQUE constraints to include `processing_version`. For tables
-with surrogate PKs (`borrower`, `borrower_collateral`, `sparklend_reserve_data`,
-`allocation_position`, `protocol_event`) and `prime_debt` (UNIQUE only, no PK), this means
-the UNIQUE constraint — not the surrogate PK. For tables where the PK is the natural key
-(e.g. `morpho_market_state`, `onchain_token_price`), it means the PK.
-
-### Step 5: Update compression settings
-
-```sql
--- Example for morpho_market_state (was: 'block_number DESC, block_version DESC')
-ALTER TABLE morpho_market_state SET (
-    timescaledb.compress_orderby = 'block_number DESC, block_version DESC, processing_version DESC'
-);
-
--- Example for anchorage_package_snapshot (was: 'snapshot_time DESC')
-ALTER TABLE anchorage_package_snapshot SET (
-    timescaledb.compress_orderby = 'snapshot_time DESC, processing_version DESC'
-);
-
--- Same pattern for all other hypertables — append processing_version DESC to existing orderby.
-```
-
-Without this, `processing_version` values would not benefit from RLE/dictionary compression.
-
-### Step 6: Re-enable compression and recompress
-
-```sql
-SELECT add_compression_policy('<table>', INTERVAL '2 days', if_not_exists => true);
--- Recompress previously decompressed chunks:
-SELECT compress_chunk(c, if_not_exists => true)
-FROM show_chunks('<table>', older_than => INTERVAL '2 days') c;
-```
-
-### Step 7: Create trigger functions and triggers
+### File 6: `20260410_150000_create_processing_version_triggers.sql`
 
 Create the per-table `assign_processing_version_*` functions and triggers as described in
 section 3.
