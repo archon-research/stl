@@ -23,6 +23,7 @@ type ProtocolRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
 	batchSize int
+	buildID   int
 }
 
 // NewProtocolRepository creates a new PostgreSQL Protocol repository.
@@ -31,7 +32,7 @@ type ProtocolRepository struct {
 //
 // Note: This function does not verify that the database connection is alive.
 // Use a separate health check or call pool.Ping() if connection validation is needed.
-func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (*ProtocolRepository, error) {
+func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int, buildID int) (*ProtocolRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -45,6 +46,7 @@ func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 		pool:      pool,
 		logger:    logger,
 		batchSize: batchSize,
+		buildID:   buildID,
 	}, nil
 }
 
@@ -98,7 +100,7 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 	var sb strings.Builder
 	sb.WriteString(`
 		INSERT INTO sparklend_reserve_data (
-			protocol_id, token_id, block_number, block_version,
+			protocol_id, token_id, block_number, block_version, build_id,
 			unbacked, accrued_to_treasury_scaled, total_a_token, total_stable_debt, total_variable_debt,
 			liquidity_rate, variable_borrow_rate, stable_borrow_rate, average_stable_borrow_rate,
 			liquidity_index, variable_borrow_index, last_update_timestamp,
@@ -106,18 +108,18 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 			usage_as_collateral_enabled, borrowing_enabled, stable_borrow_rate_enabled, is_active, is_frozen
 		) VALUES `)
 
-	args := make([]any, 0, len(data)*26)
+	args := make([]any, 0, len(data)*27)
 	for i, d := range data {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 26
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+		baseIdx := i * 27
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8,
 			baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14, baseIdx+15, baseIdx+16,
 			baseIdx+17, baseIdx+18, baseIdx+19, baseIdx+20, baseIdx+21, baseIdx+22, baseIdx+23, baseIdx+24,
-			baseIdx+25, baseIdx+26))
-		args = append(args, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion)
+			baseIdx+25, baseIdx+26, baseIdx+27))
+		args = append(args, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion, r.buildID)
 
 		for _, valToConvert := range []*big.Int{
 			d.Unbacked,
@@ -160,7 +162,7 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 	}
 
 	sb.WriteString(`
-		ON CONFLICT (protocol_id, token_id, block_number, block_version) DO NOTHING
+		ON CONFLICT (protocol_id, token_id, block_number, block_version, processing_version) DO NOTHING
 	`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)

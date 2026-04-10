@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
@@ -152,7 +153,12 @@ func run(args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, cfg.batchSize)
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("registering build: %w", err)
+	}
+
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), cfg.batchSize)
 	if err != nil {
 		return fmt.Errorf("creating repository: %w", err)
 	}

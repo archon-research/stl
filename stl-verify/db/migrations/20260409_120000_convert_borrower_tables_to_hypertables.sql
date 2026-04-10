@@ -56,7 +56,7 @@ ALTER TABLE borrower SET (
     timescaledb.orderby = 'block_number DESC, block_version DESC'
 );
 
-SELECT add_columnstore_policy('borrower', INTERVAL '2 days', if_not_exists => TRUE);
+CALL add_columnstore_policy('borrower', INTERVAL '2 days', if_not_exists => TRUE);
 
 DO $$ BEGIN
     PERFORM add_tiering_policy('borrower', INTERVAL '1 year', if_not_exists => TRUE);
@@ -101,7 +101,7 @@ ALTER TABLE borrower_collateral SET (
     timescaledb.orderby = 'block_number DESC, block_version DESC'
 );
 
-SELECT add_columnstore_policy('borrower_collateral', INTERVAL '2 days', if_not_exists => TRUE);
+CALL add_columnstore_policy('borrower_collateral', INTERVAL '2 days', if_not_exists => TRUE);
 
 DO $$ BEGIN
     PERFORM add_tiering_policy('borrower_collateral', INTERVAL '1 year', if_not_exists => TRUE);

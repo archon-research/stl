@@ -19,6 +19,7 @@ var _ outbound.PositionRepository = (*PositionRepository)(nil)
 type PositionRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
+	buildID   int
 	batchSize int
 }
 
@@ -28,7 +29,7 @@ type PositionRepository struct {
 //
 // Note: This function does not verify that the database connection is alive.
 // Use a separate health check or call pool.Ping() if connection validation is needed.
-func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (*PositionRepository, error) {
+func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID int, batchSize int) (*PositionRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -41,6 +42,7 @@ func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 	return &PositionRepository{
 		pool:      pool,
 		logger:    logger,
+		buildID:   buildID,
 		batchSize: batchSize,
 	}, nil
 }
@@ -49,11 +51,11 @@ func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 // Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
 func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, b *entity.Borrower) error {
 	_, err := tx.Exec(ctx,
-		`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, created_at) DO NOTHING`,
+		`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, created_at, build_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
 		b.UserID, b.ProtocolID, b.TokenID, b.BlockNumber, b.BlockVersion,
-		b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt)
+		b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt, r.buildID)
 
 	if err != nil {
 		return fmt.Errorf("failed to save borrower: %w", err)
@@ -71,11 +73,11 @@ func (r *PositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, borro
 	batch := &pgx.Batch{}
 	for _, b := range borrowers {
 		batch.Queue(
-			`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, created_at) DO NOTHING`,
+			`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, created_at, build_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
 			b.UserID, b.ProtocolID, b.TokenID, b.BlockNumber, b.BlockVersion,
-			b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt,
+			b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt, r.buildID,
 		)
 	}
 
@@ -103,11 +105,11 @@ func (r *PositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, borro
 // Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
 func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, bc *entity.BorrowerCollateral) error {
 	_, err := tx.Exec(ctx,
-		`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, created_at) DO NOTHING`,
+		`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled, created_at, build_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
 		bc.UserID, bc.ProtocolID, bc.TokenID, bc.BlockNumber, bc.BlockVersion,
-		bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt)
+		bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt, r.buildID)
 
 	if err != nil {
 		return fmt.Errorf("failed to save collateral: %w", err)
@@ -126,11 +128,11 @@ func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx
 	batch := &pgx.Batch{}
 	for _, bc := range collaterals {
 		batch.Queue(
-			`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, created_at) DO NOTHING`,
+			`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled, created_at, build_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
 			bc.UserID, bc.ProtocolID, bc.TokenID, bc.BlockNumber, bc.BlockVersion,
-			bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt,
+			bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt, r.buildID,
 		)
 	}
 

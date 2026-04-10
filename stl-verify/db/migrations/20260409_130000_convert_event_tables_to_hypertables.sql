@@ -47,7 +47,7 @@ ALTER TABLE protocol_event SET (
     timescaledb.orderby = 'block_number DESC, block_version DESC'
 );
 
-SELECT add_columnstore_policy('protocol_event', INTERVAL '2 days', if_not_exists => TRUE);
+CALL add_columnstore_policy('protocol_event', INTERVAL '2 days', if_not_exists => TRUE);
 
 DO $$ BEGIN
     PERFORM add_tiering_policy('protocol_event', INTERVAL '1 year', if_not_exists => TRUE);
@@ -93,7 +93,7 @@ ALTER TABLE allocation_position SET (
     timescaledb.orderby = 'block_number DESC, block_version DESC'
 );
 
-SELECT add_columnstore_policy('allocation_position', INTERVAL '2 days', if_not_exists => TRUE);
+CALL add_columnstore_policy('allocation_position', INTERVAL '2 days', if_not_exists => TRUE);
 
 DO $$ BEGIN
     PERFORM add_tiering_policy('allocation_position', INTERVAL '1 year', if_not_exists => TRUE);

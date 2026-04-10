@@ -21,6 +21,7 @@ type AllocationRepository struct {
 	txm       *TxManager
 	tokenRepo outbound.TokenRepository
 	logger    *slog.Logger
+	buildID   int
 }
 
 type tokenCacheKey struct {
@@ -33,6 +34,7 @@ func NewAllocationRepository(
 	txm *TxManager,
 	tokenRepo outbound.TokenRepository,
 	logger *slog.Logger,
+	buildID int,
 ) *AllocationRepository {
 	if logger == nil {
 		logger = slog.Default()
@@ -42,6 +44,7 @@ func NewAllocationRepository(
 		txm:       txm,
 		tokenRepo: tokenRepo,
 		logger:    logger,
+		buildID:   buildID,
 	}
 }
 
@@ -134,9 +137,9 @@ func (r *AllocationRepository) buildInsertArgs(
 			chain_id, token_id, prime_id, proxy_address,
 			balance, scaled_balance,
 			block_number, block_version,
-			tx_hash, log_index, tx_amount, direction, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-		ON CONFLICT DO NOTHING
+			tx_hash, log_index, tx_amount, direction, created_at, build_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		ON CONFLICT (chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, processing_version, created_at) DO NOTHING
 	`
 
 	args := []any{
@@ -153,6 +156,7 @@ func (r *AllocationRepository) buildInsertArgs(
 		txAmount,
 		pos.Direction,
 		pos.CreatedAt,
+		r.buildID,
 	}
 
 	return query, args, nil

@@ -73,7 +73,7 @@ func setupPositionTest(t *testing.T) *positionTestFixture {
 
 	truncateCollaterals(t, ctx)
 
-	repo, err := NewPositionRepository(positionPool, nil, 100)
+	repo, err := NewPositionRepository(positionPool, nil, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestSaveBorrowerCollaterals_SingleRecord(t *testing.T) {
 	if got.Change != input.Change.String() {
 		t.Errorf("Change mismatch: got %s, want %s", got.Change, input.Change)
 	}
-	if got.EventType != input.EventType {
+	if got.EventType != string(input.EventType) {
 		t.Errorf("EventType mismatch: got %s, want %s", got.EventType, input.EventType)
 	}
 	if !bytes.Equal(got.TxHash, input.TxHash) {
@@ -408,7 +408,7 @@ func TestSaveBorrowerCollaterals_TenRecords(t *testing.T) {
 		if got.Change != wantChanges[i] {
 			t.Errorf("record %d: Change mismatch: got %s, want %s", i, got.Change, wantChanges[i])
 		}
-		if got.EventType != want.EventType {
+		if got.EventType != string(want.EventType) {
 			t.Errorf("record %d: EventType mismatch: got %s, want %s", i, got.EventType, want.EventType)
 		}
 		if got.CollateralEnabled != want.CollateralEnabled {
@@ -546,7 +546,7 @@ func TestSaveBorrowerCollaterals_DuplicateIgnored(t *testing.T) {
 		if got.Amount != want.Amount.String() {
 			t.Errorf("record %d: Amount was modified: got %s, want %s (original should be preserved)", i, got.Amount, want.Amount)
 		}
-		if got.EventType != want.EventType {
+		if got.EventType != string(want.EventType) {
 			t.Errorf("record %d: EventType was modified: got %s, want %s (original should be preserved)", i, got.EventType, want.EventType)
 		}
 		if got.CollateralEnabled != want.CollateralEnabled {
@@ -655,7 +655,7 @@ func TestSaveBorrowerCollaterals_PartialDuplicatesInSameBatch(t *testing.T) {
 	if records[0].Amount != initial.Amount.String() {
 		t.Errorf("version 0 was modified: got %s, want %s", records[0].Amount, initial.Amount)
 	}
-	if records[0].EventType != initial.EventType {
+	if records[0].EventType != string(initial.EventType) {
 		t.Errorf("version 0 EventType was modified: got %s, want %s", records[0].EventType, initial.EventType)
 	}
 

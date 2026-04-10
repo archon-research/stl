@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -63,12 +64,17 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, err
 	}
 
+	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	if err != nil {
+		return nil, fmt.Errorf("registering build: %w", err)
+	}
+
 	txm, err := postgres.NewTxManager(deps.Pool, deps.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("creating tx manager: %w", err)
 	}
 
-	repo := postgres.NewAnchorageRepository(deps.Pool, txm, deps.Logger)
+	repo := postgres.NewAnchorageRepository(deps.Pool, txm, deps.Logger, buildReg.BuildID())
 	primeRepo := postgres.NewPrimeRepository(deps.Pool)
 
 	primeID, err := primeRepo.GetPrimeIDByName(ctx, primeName)

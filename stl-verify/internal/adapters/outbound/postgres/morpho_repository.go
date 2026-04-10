@@ -20,12 +20,13 @@ var _ outbound.MorphoRepository = (*MorphoRepository)(nil)
 
 // MorphoRepository is a PostgreSQL implementation of the outbound.MorphoRepository port.
 type MorphoRepository struct {
-	pool   *pgxpool.Pool
-	logger *slog.Logger
+	pool    *pgxpool.Pool
+	logger  *slog.Logger
+	buildID int
 }
 
 // NewMorphoRepository creates a new PostgreSQL Morpho repository.
-func NewMorphoRepository(pool *pgxpool.Pool, logger *slog.Logger) (*MorphoRepository, error) {
+func NewMorphoRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID int) (*MorphoRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -33,8 +34,9 @@ func NewMorphoRepository(pool *pgxpool.Pool, logger *slog.Logger) (*MorphoReposi
 		logger = slog.Default()
 	}
 	return &MorphoRepository{
-		pool:   pool,
-		logger: logger,
+		pool:    pool,
+		logger:  logger,
+		buildID: buildID,
 	}, nil
 }
 
@@ -150,12 +152,12 @@ func (r *MorphoRepository) SaveMarketState(ctx context.Context, tx pgx.Tx, state
 	// snapshot (eth_call reads end-of-block state), so the first insert captures
 	// the correct state. Reorgs use a different block_version, so they insert cleanly.
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_market_state (morpho_market_id, block_number, block_version, timestamp, total_supply_assets, total_supply_shares, total_borrow_assets, total_borrow_shares, last_update, fee, prev_borrow_rate, interest_accrued, fee_shares)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-		 ON CONFLICT (morpho_market_id, block_number, block_version, timestamp) DO NOTHING`,
+		`INSERT INTO morpho_market_state (morpho_market_id, block_number, block_version, timestamp, total_supply_assets, total_supply_shares, total_borrow_assets, total_borrow_shares, last_update, fee, prev_borrow_rate, interest_accrued, fee_shares, build_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		 ON CONFLICT (morpho_market_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		state.MorphoMarketID, state.BlockNumber, state.BlockVersion, state.BlockTimestamp,
 		totalSupplyAssets, totalSupplyShares, totalBorrowAssets, totalBorrowShares,
-		state.LastUpdate, fee, prevBorrowRate, interestAccrued, feeShares,
+		state.LastUpdate, fee, prevBorrowRate, interestAccrued, feeShares, r.buildID,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho market state: %w", err)
@@ -187,11 +189,11 @@ func (r *MorphoRepository) SaveMarketPosition(ctx context.Context, tx pgx.Tx, po
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		 ON CONFLICT (user_id, morpho_market_id, block_number, block_version, timestamp) DO NOTHING`,
+		`INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets, build_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 ON CONFLICT (user_id, morpho_market_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		position.UserID, position.MorphoMarketID, position.BlockNumber, position.BlockVersion, position.Timestamp,
-		supplyShares, borrowShares, collateral, supplyAssets, borrowAssets,
+		supplyShares, borrowShares, collateral, supplyAssets, borrowAssets, r.buildID,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho market position: %w", err)
@@ -294,11 +296,11 @@ func (r *MorphoRepository) SaveVaultState(ctx context.Context, tx pgx.Tx, state 
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_vault_state (morpho_vault_id, block_number, block_version, timestamp, total_assets, total_shares, fee_shares, new_total_assets, previous_total_assets, management_fee_shares)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		 ON CONFLICT (morpho_vault_id, block_number, block_version, timestamp) DO NOTHING`,
+		`INSERT INTO morpho_vault_state (morpho_vault_id, block_number, block_version, timestamp, total_assets, total_shares, fee_shares, new_total_assets, previous_total_assets, management_fee_shares, build_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 ON CONFLICT (morpho_vault_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		state.MorphoVaultID, state.BlockNumber, state.BlockVersion, state.BlockTimestamp,
-		totalAssets, totalShares, feeShares, newTotalAssets, previousTotalAssets, managementFeeShares,
+		totalAssets, totalShares, feeShares, newTotalAssets, previousTotalAssets, managementFeeShares, r.buildID,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho vault state: %w", err)
@@ -318,11 +320,11 @@ func (r *MorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, pos
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, timestamp, shares, assets)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 ON CONFLICT (user_id, morpho_vault_id, block_number, block_version, timestamp) DO NOTHING`,
+		`INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, timestamp, shares, assets, build_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 ON CONFLICT (user_id, morpho_vault_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		position.UserID, position.MorphoVaultID, position.BlockNumber, position.BlockVersion, position.Timestamp,
-		shares, assets,
+		shares, assets, r.buildID,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho vault position: %w", err)

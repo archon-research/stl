@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/aavelike_position_tracker"
@@ -182,6 +183,11 @@ func run(args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("registering build: %w", err)
+	}
+
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
 		return fmt.Errorf("creating tx manager: %w", err)
@@ -192,7 +198,7 @@ func run(args []string) error {
 		return fmt.Errorf("creating user repository: %w", err)
 	}
 
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0, buildReg.BuildID())
 	if err != nil {
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}
@@ -202,12 +208,12 @@ func run(args []string) error {
 		return fmt.Errorf("creating token repository: %w", err)
 	}
 
-	positionRepo, err := postgres.NewPositionRepository(pool, logger, 0)
+	positionRepo, err := postgres.NewPositionRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
 		return fmt.Errorf("creating position repository: %w", err)
 	}
 
-	eventRepo := postgres.NewEventRepository(logger)
+	eventRepo := postgres.NewEventRepository(logger, buildReg.BuildID())
 
 	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger)
 	if err != nil {

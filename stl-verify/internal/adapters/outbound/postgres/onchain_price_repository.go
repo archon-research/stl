@@ -22,12 +22,13 @@ var _ outbound.OnchainPriceRepository = (*OnchainPriceRepository)(nil)
 type OnchainPriceRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
+	buildID   int
 	batchSize int
 }
 
 // NewOnchainPriceRepository creates a new PostgreSQL onchain price repository.
 // If batchSize is <= 0, a default batch size of 1000 is used.
-func NewOnchainPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (*OnchainPriceRepository, error) {
+func NewOnchainPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID int, batchSize int) (*OnchainPriceRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -40,6 +41,7 @@ func NewOnchainPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSiz
 	return &OnchainPriceRepository{
 		pool:      pool,
 		logger:    logger,
+		buildID:   buildID,
 		batchSize: batchSize,
 	}, nil
 }
@@ -214,22 +216,22 @@ func (r *OnchainPriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO onchain_token_price (token_id, oracle_id, block_number, block_version, timestamp, price_usd)
+		INSERT INTO onchain_token_price (token_id, oracle_id, block_number, block_version, timestamp, price_usd, build_id)
 		VALUES `)
 
-	args := make([]any, 0, len(prices)*6)
+	args := make([]any, 0, len(prices)*7)
 	for i, price := range prices {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 6
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6))
+		baseIdx := i * 7
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
 
-		args = append(args, price.TokenID, price.OracleID, price.BlockNumber, price.BlockVersion, price.Timestamp, price.PriceUSD)
+		args = append(args, price.TokenID, price.OracleID, price.BlockNumber, price.BlockVersion, price.Timestamp, price.PriceUSD, r.buildID)
 	}
 
-	sb.WriteString(` ON CONFLICT (token_id, oracle_id, block_number, block_version, timestamp) DO NOTHING`)
+	sb.WriteString(` ON CONFLICT (token_id, oracle_id, block_number, block_version, processing_version, timestamp) DO NOTHING`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {

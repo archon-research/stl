@@ -152,7 +152,7 @@ func BenchmarkProtocolRepository_UpsertSparkLendReserveData(b *testing.B) {
 	ctx := context.Background()
 	seedReferenceData(b, pool, ctx)
 
-	repo, err := NewProtocolRepository(pool, nil, 1000)
+	repo, err := NewProtocolRepository(pool, nil, 1000, 0)
 	if err != nil {
 		b.Fatalf("failed to create repository: %v", err)
 	}

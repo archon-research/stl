@@ -47,7 +47,7 @@ func setupEventTest(t *testing.T) *eventTestFixture {
 
 	truncateEvents(t, ctx)
 
-	repo := NewEventRepository(nil)
+	repo := NewEventRepository(nil, 0)
 
 	fixture := &eventTestFixture{
 		repo: repo,

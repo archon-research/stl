@@ -30,7 +30,7 @@ func TestNewUserRepository_NilDB(t *testing.T) {
 
 // TestNewPositionRepository_NilDB tests that NewPositionRepository returns an error when pool is nil.
 func TestNewPositionRepository_NilDB(t *testing.T) {
-	_, err := NewPositionRepository(nil, nil, 0)
+	_, err := NewPositionRepository(nil, nil, 0, 0)
 	if err == nil {
 		t.Fatal("expected error when pool is nil, got nil")
 	}
@@ -42,7 +42,7 @@ func TestNewPositionRepository_NilDB(t *testing.T) {
 
 // TestNewProtocolRepository_NilDB tests that NewProtocolRepository returns an error when pool is nil.
 func TestNewProtocolRepository_NilDB(t *testing.T) {
-	_, err := NewProtocolRepository(nil, nil, 0)
+	_, err := NewProtocolRepository(nil, nil, 0, 0)
 	if err == nil {
 		t.Fatal("expected error when pool is nil, got nil")
 	}

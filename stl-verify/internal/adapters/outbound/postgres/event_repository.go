@@ -16,16 +16,18 @@ var _ outbound.EventRepository = (*EventRepository)(nil)
 
 // EventRepository is a PostgreSQL implementation of the outbound.EventRepository port.
 type EventRepository struct {
-	logger *slog.Logger
+	logger  *slog.Logger
+	buildID int
 }
 
 // NewEventRepository creates a new PostgreSQL Event repository.
-func NewEventRepository(logger *slog.Logger) *EventRepository {
+func NewEventRepository(logger *slog.Logger, buildID int) *EventRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &EventRepository{
-		logger: logger,
+		logger:  logger,
+		buildID: buildID,
 	}
 }
 
@@ -37,12 +39,12 @@ func (r *EventRepository) SaveEvent(ctx context.Context, tx pgx.Tx, event *entit
 	}
 
 	_, err := tx.Exec(ctx,
-		`INSERT INTO protocol_event (chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		 ON CONFLICT (chain_id, block_number, block_version, tx_hash, log_index, created_at) DO NOTHING`,
+		`INSERT INTO protocol_event (chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data, created_at, build_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 ON CONFLICT (chain_id, block_number, block_version, tx_hash, log_index, processing_version, created_at) DO NOTHING`,
 		event.ChainID, event.ProtocolID, event.BlockNumber, event.BlockVersion,
 		event.TxHash, event.LogIndex, event.ContractAddress, event.EventName, event.EventData,
-		event.CreatedAt)
+		event.CreatedAt, r.buildID)
 
 	if err != nil {
 		return fmt.Errorf("failed to save protocol event: %w", err)
