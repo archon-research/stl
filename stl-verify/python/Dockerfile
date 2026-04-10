@@ -23,7 +23,7 @@ WORKDIR /app
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 COPY --from=builder --chown=appuser:appuser /app/app /app/app
 
-USER appuser
+USER 10001
 
 ENV PATH="/app/.venv/bin:$PATH"
 
