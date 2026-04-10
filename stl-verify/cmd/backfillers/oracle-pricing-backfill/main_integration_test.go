@@ -55,6 +55,8 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	rpcServer := testutil.StartMockEthRPC(t, tokenCount)
 	defer rpcServer.Close()
 
+	t.Setenv("BUILD_GIT_HASH", "test")
+
 	args := []string{
 		"-rpc-url", rpcServer.URL,
 		"-from", "100",
@@ -92,6 +94,8 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	// Use a mock RPC so we get past the RPC dial (which is lazy for HTTP)
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer rpcServer.Close()
+
+	t.Setenv("BUILD_GIT_HASH", "test")
 
 	err := run([]string{
 		"-rpc-url", rpcServer.URL,
