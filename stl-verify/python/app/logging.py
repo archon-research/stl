@@ -1,7 +1,8 @@
 """Structured logging module.
 
-Provides JSON and human-readable log formatters with automatic ``request_id``
-injection from the context variable defined in ``app.middleware.request_id``.
+Provides JSON and human-readable log formatters that include ``request_id``
+when the context variable defined in ``app.middleware.request_id`` has been
+populated by application middleware or other request-scoped code.
 """
 
 import json
@@ -58,8 +59,10 @@ def setup_logging(log_level: str = "INFO", log_format: str = "json") -> None:
     Uvicorn/Gunicorn/platform handlers) untouched.
     """
     level = log_level.upper()
-    if logging.getLevelNamesMapping().get(level) is None:
-        level = "INFO"
+    level_names = logging.getLevelNamesMapping()
+    if level_names.get(level) is None:
+        valid_levels = ", ".join(sorted(name for name in level_names if name.isupper()))
+        raise ValueError(f"invalid log level {log_level!r}; expected one of: {valid_levels}")
 
     formatter: logging.Formatter
     if log_format.lower() == "text":
