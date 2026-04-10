@@ -2,7 +2,8 @@
 --
 -- Each trigger is build-aware:
 --   - If a row with the same natural key AND same build_id exists → retry,
---     reuse existing processing_version (ON CONFLICT DO NOTHING deduplicates).
+--     reuse existing processing_version so the repository's ON CONFLICT DO
+--     NOTHING clause deduplicates the insert.
 --   - If build_id differs or no row exists → assign MAX(processing_version) + 1.
 --
 -- Advisory locking is the caller's responsibility (repository layer), not the

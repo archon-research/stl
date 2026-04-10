@@ -32,7 +32,7 @@ type ProtocolRepository struct {
 //
 // Note: This function does not verify that the database connection is alive.
 // Use a separate health check or call pool.Ping() if connection validation is needed.
-func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int, buildID int) (*ProtocolRepository, error) {
+func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID int, batchSize int) (*ProtocolRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}

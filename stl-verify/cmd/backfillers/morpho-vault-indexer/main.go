@@ -759,7 +759,7 @@ func persistVaults(
 		return fmt.Errorf("creating morpho repository: %w", err)
 	}
 
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0, buildID)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildID, 0)
 	if err != nil {
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}

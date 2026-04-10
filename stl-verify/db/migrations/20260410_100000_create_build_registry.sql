@@ -16,8 +16,8 @@ CREATE TABLE IF NOT EXISTS build_registry (
 INSERT INTO build_registry (id, git_hash, built_at, notes)
 VALUES (0, 'pre-tracking', NOW(), 'Data produced before provenance tracking was enabled');
 
--- SERIAL sequence is unaware of the explicit id=0 insert above.
--- Advance it so the next auto-generated id is 1, not 0.
+-- Defensive: ensure the sequence starts at 1 after the explicit id=0 insert.
+-- SERIAL sequences default to starting at 1, but this guards against edge cases.
 SELECT setval(pg_get_serial_sequence('build_registry', 'id'), 1, false);
 
 INSERT INTO migrations (filename)

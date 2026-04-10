@@ -198,7 +198,7 @@ func run(args []string) error {
 		return fmt.Errorf("creating user repository: %w", err)
 	}
 
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0, buildReg.BuildID())
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}

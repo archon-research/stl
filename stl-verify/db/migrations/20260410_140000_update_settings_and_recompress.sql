@@ -7,24 +7,32 @@
 -- See ADR-0002: Data Auditability and Processing Versioning.
 
 -- ============================================================================
--- Helper: compress chunks older than an interval, skipping already-compressed.
--- compress_chunk() on self-hosted TimescaleDB does not support if_not_exists.
+-- Helper: compress uncompressed chunks older than an interval.
+-- Only targets chunks that are not already compressed, avoiding errors
+-- without swallowing real failures.
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION _compress_old_chunks(p_hypertable regclass, p_older_than interval)
 RETURNS void AS $$
 DECLARE
     v_chunk regclass;
+    v_ht_schema text;
+    v_ht_name text;
+    v_cutoff timestamptz := NOW() - p_older_than;
 BEGIN
+    SELECT nspname, relname INTO v_ht_schema, v_ht_name
+    FROM pg_class JOIN pg_namespace ON pg_namespace.oid = relnamespace
+    WHERE pg_class.oid = p_hypertable;
+
     FOR v_chunk IN
-        SELECT show_chunks(p_hypertable, older_than => p_older_than)
+        SELECT format('%I.%I', chunk_schema, chunk_name)::regclass
+        FROM timescaledb_information.chunks
+        WHERE hypertable_schema = v_ht_schema
+          AND hypertable_name = v_ht_name
+          AND is_compressed = false
+          AND range_end < v_cutoff
     LOOP
-        BEGIN
-            PERFORM compress_chunk(v_chunk);
-        EXCEPTION WHEN OTHERS THEN
-            -- Chunk was already compressed; skip.
-            NULL;
-        END;
+        PERFORM compress_chunk(v_chunk);
     END LOOP;
 END;
 $$ LANGUAGE plpgsql;

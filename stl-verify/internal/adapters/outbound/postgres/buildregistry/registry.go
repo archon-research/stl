@@ -22,8 +22,8 @@ type Registry struct {
 
 // New registers the current build's git hash in build_registry and returns the
 // resolved build_id. The git hash and build time are obtained from Go's embedded
-// VCS build info (or ldflags if set). If the hash is already registered (pod
-// restart, multiple replicas), it looks up the existing ID.
+// VCS build info, with BUILD_GIT_HASH env var as fallback. If the hash is already
+// registered (pod restart, multiple replicas), it looks up the existing ID.
 func New(ctx context.Context, db *pgxpool.Pool) (*Registry, error) {
 	var gitHash, buildTime string
 	buildinfo.PopulateFromVCS(&gitHash, &buildTime)

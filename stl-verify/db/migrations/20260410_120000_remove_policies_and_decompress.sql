@@ -9,9 +9,9 @@
 -- See ADR-0002: Data Auditability and Processing Versioning.
 
 -- ============================================================================
--- Helper: decompress all chunks for a hypertable, skipping already-decompressed.
--- decompress_chunk() on self-hosted TimescaleDB does not support if_not_exists,
--- so we check chunk status first.
+-- Helper: decompress all compressed chunks for a hypertable.
+-- Only targets chunks that are actually compressed, avoiding errors on
+-- already-decompressed chunks without swallowing real failures.
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION _decompress_all_chunks(p_hypertable regclass)
@@ -20,14 +20,13 @@ DECLARE
     v_chunk regclass;
 BEGIN
     FOR v_chunk IN
-        SELECT show_chunks(p_hypertable)
+        SELECT format('%I.%I', chunk_schema, chunk_name)::regclass
+        FROM timescaledb_information.chunks
+        WHERE hypertable_schema = (SELECT nspname FROM pg_namespace WHERE oid = (SELECT relnamespace FROM pg_class WHERE oid = p_hypertable))
+          AND hypertable_name = (SELECT relname FROM pg_class WHERE oid = p_hypertable)
+          AND is_compressed = true
     LOOP
-        BEGIN
-            PERFORM decompress_chunk(v_chunk);
-        EXCEPTION WHEN OTHERS THEN
-            -- Chunk was not compressed; skip.
-            NULL;
-        END;
+        PERFORM decompress_chunk(v_chunk);
     END LOOP;
 END;
 $$ LANGUAGE plpgsql;
