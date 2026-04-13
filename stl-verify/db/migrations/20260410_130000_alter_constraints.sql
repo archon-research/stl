@@ -17,6 +17,8 @@ BEGIN
     WHERE conrelid = p_table AND contype = p_type;
     IF v_conname IS NOT NULL THEN
         EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', p_table::text, v_conname);
+    ELSE
+        RAISE NOTICE '_drop_constraint: no constraint of type % found on %', p_type, p_table;
     END IF;
 END;
 $$ LANGUAGE plpgsql;

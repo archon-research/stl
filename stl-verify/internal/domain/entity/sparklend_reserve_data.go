@@ -49,14 +49,14 @@ func NewSparkLendReserveData(id, protocolID, tokenID, blockNumber int64) (*Spark
 		TokenID:     tokenID,
 		BlockNumber: blockNumber,
 	}
-	if err := srd.validate(); err != nil {
+	if err := srd.Validate(); err != nil {
 		return nil, err
 	}
 	return srd, nil
 }
 
 // validate checks that all fields have valid values.
-func (srd *SparkLendReserveData) validate() error {
+func (srd *SparkLendReserveData) Validate() error {
 	if srd.ID <= 0 {
 		return fmt.Errorf("id must be positive, got %d", srd.ID)
 	}

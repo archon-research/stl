@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -22,11 +23,11 @@ var _ outbound.MorphoRepository = (*MorphoRepository)(nil)
 type MorphoRepository struct {
 	pool    *pgxpool.Pool
 	logger  *slog.Logger
-	buildID int
+	buildID buildregistry.BuildID
 }
 
 // NewMorphoRepository creates a new PostgreSQL Morpho repository.
-func NewMorphoRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID int) (*MorphoRepository, error) {
+func NewMorphoRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID) (*MorphoRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -157,7 +158,7 @@ func (r *MorphoRepository) SaveMarketState(ctx context.Context, tx pgx.Tx, state
 		 ON CONFLICT (morpho_market_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		state.MorphoMarketID, state.BlockNumber, state.BlockVersion, state.BlockTimestamp,
 		totalSupplyAssets, totalSupplyShares, totalBorrowAssets, totalBorrowShares,
-		state.LastUpdate, fee, prevBorrowRate, interestAccrued, feeShares, r.buildID,
+		state.LastUpdate, fee, prevBorrowRate, interestAccrued, feeShares, int(r.buildID),
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho market state: %w", err)
@@ -193,7 +194,7 @@ func (r *MorphoRepository) SaveMarketPosition(ctx context.Context, tx pgx.Tx, po
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 ON CONFLICT (user_id, morpho_market_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		position.UserID, position.MorphoMarketID, position.BlockNumber, position.BlockVersion, position.Timestamp,
-		supplyShares, borrowShares, collateral, supplyAssets, borrowAssets, r.buildID,
+		supplyShares, borrowShares, collateral, supplyAssets, borrowAssets, int(r.buildID),
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho market position: %w", err)
@@ -300,7 +301,7 @@ func (r *MorphoRepository) SaveVaultState(ctx context.Context, tx pgx.Tx, state 
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 ON CONFLICT (morpho_vault_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		state.MorphoVaultID, state.BlockNumber, state.BlockVersion, state.BlockTimestamp,
-		totalAssets, totalShares, feeShares, newTotalAssets, previousTotalAssets, managementFeeShares, r.buildID,
+		totalAssets, totalShares, feeShares, newTotalAssets, previousTotalAssets, managementFeeShares, int(r.buildID),
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho vault state: %w", err)
@@ -324,7 +325,7 @@ func (r *MorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, pos
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT (user_id, morpho_vault_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		position.UserID, position.MorphoVaultID, position.BlockNumber, position.BlockVersion, position.Timestamp,
-		shares, assets, r.buildID,
+		shares, assets, int(r.buildID),
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho vault position: %w", err)

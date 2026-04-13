@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -34,11 +35,11 @@ type AnchorageRepository struct {
 	pool    *pgxpool.Pool
 	txm     *TxManager
 	logger  *slog.Logger
-	buildID int
+	buildID buildregistry.BuildID
 }
 
 // NewAnchorageRepository creates a new AnchorageRepository.
-func NewAnchorageRepository(pool *pgxpool.Pool, txm *TxManager, logger *slog.Logger, buildID int) *AnchorageRepository {
+func NewAnchorageRepository(pool *pgxpool.Pool, txm *TxManager, logger *slog.Logger, buildID buildregistry.BuildID) *AnchorageRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -74,7 +75,7 @@ func (r *AnchorageRepository) SaveSnapshots(ctx context.Context, snapshots []ent
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		for i := 0; i < len(snapshots); i += snapshotBatchSize {
 			end := min(i+snapshotBatchSize, len(snapshots))
-			if err := insertSnapshotBatch(ctx, tx, snapshots[i:end], r.buildID); err != nil {
+			if err := insertSnapshotBatch(ctx, tx, snapshots[i:end], int(r.buildID)); err != nil {
 				return err
 			}
 		}
@@ -157,7 +158,7 @@ func (r *AnchorageRepository) SaveOperations(ctx context.Context, operations []e
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		for i := 0; i < len(operations); i += operationBatchSize {
 			end := min(i+operationBatchSize, len(operations))
-			if err := insertOperationBatch(ctx, tx, operations[i:end], r.buildID); err != nil {
+			if err := insertOperationBatch(ctx, tx, operations[i:end], int(r.buildID)); err != nil {
 				return err
 			}
 		}

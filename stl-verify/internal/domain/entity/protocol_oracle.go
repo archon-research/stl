@@ -21,13 +21,13 @@ func NewProtocolOracle(protocolID, oracleID, fromBlock int64) (*ProtocolOracle, 
 		OracleID:   oracleID,
 		FromBlock:  fromBlock,
 	}
-	if err := po.validate(); err != nil {
+	if err := po.Validate(); err != nil {
 		return nil, err
 	}
 	return po, nil
 }
 
-func (po *ProtocolOracle) validate() error {
+func (po *ProtocolOracle) Validate() error {
 	if po.ProtocolID <= 0 {
 		return fmt.Errorf("protocolID must be positive, got %d", po.ProtocolID)
 	}

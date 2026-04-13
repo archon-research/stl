@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -24,7 +25,7 @@ type AllocationRepository struct {
 	txm       *TxManager
 	tokenRepo outbound.TokenRepository
 	logger    *slog.Logger
-	buildID   int
+	buildID   buildregistry.BuildID
 }
 
 type tokenCacheKey struct {
@@ -37,7 +38,7 @@ func NewAllocationRepository(
 	txm *TxManager,
 	tokenRepo outbound.TokenRepository,
 	logger *slog.Logger,
-	buildID int,
+	buildID buildregistry.BuildID,
 ) *AllocationRepository {
 	if logger == nil {
 		logger = slog.Default()
@@ -175,7 +176,7 @@ func (r *AllocationRepository) buildInsertArgs(
 		txAmount,
 		pos.Direction,
 		pos.CreatedAt,
-		r.buildID,
+		int(r.buildID),
 	}
 
 	return query, args, nil

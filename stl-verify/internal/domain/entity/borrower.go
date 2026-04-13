@@ -34,14 +34,14 @@ func NewBorrower(userID, protocolID, tokenID, blockNumber int64, blockVersion in
 		TxHash:       txHash,
 		CreatedAt:    createdAt,
 	}
-	if err := b.validate(); err != nil {
+	if err := b.Validate(); err != nil {
 		return nil, err
 	}
 	return b, nil
 }
 
 // validate checks that all fields have valid values.
-func (b *Borrower) validate() error {
+func (b *Borrower) Validate() error {
 	if b.CreatedAt.IsZero() {
 		return fmt.Errorf("createdAt must be set explicitly (block timestamp)")
 	}

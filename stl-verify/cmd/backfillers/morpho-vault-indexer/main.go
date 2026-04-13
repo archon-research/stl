@@ -747,7 +747,7 @@ func persistVaults(
 	vaults []confirmedVault,
 	chainID int64,
 	deployBlock int64,
-	buildID int,
+	buildID buildregistry.BuildID,
 ) error {
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -21,7 +22,7 @@ var _ outbound.PositionRepository = (*PositionRepository)(nil)
 type PositionRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
-	buildID   int
+	buildID   buildregistry.BuildID
 	batchSize int
 }
 
@@ -31,7 +32,7 @@ type PositionRepository struct {
 //
 // Note: This function does not verify that the database connection is alive.
 // Use a separate health check or call pool.Ping() if connection validation is needed.
-func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID int, batchSize int) (*PositionRepository, error) {
+func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, batchSize int) (*PositionRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -57,7 +58,7 @@ func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, b *ent
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
 		b.UserID, b.ProtocolID, b.TokenID, b.BlockNumber, b.BlockVersion,
-		b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt, r.buildID)
+		b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt, int(r.buildID))
 
 	if err != nil {
 		return fmt.Errorf("failed to save borrower: %w", err)
@@ -91,7 +92,7 @@ func (r *PositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, borro
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
 			b.UserID, b.ProtocolID, b.TokenID, b.BlockNumber, b.BlockVersion,
-			b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt, r.buildID,
+			b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt, int(r.buildID),
 		)
 	}
 
@@ -123,7 +124,7 @@ func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
 		bc.UserID, bc.ProtocolID, bc.TokenID, bc.BlockNumber, bc.BlockVersion,
-		bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt, r.buildID)
+		bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt, int(r.buildID))
 
 	if err != nil {
 		return fmt.Errorf("failed to save collateral: %w", err)
@@ -158,7 +159,7 @@ func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
 			bc.UserID, bc.ProtocolID, bc.TokenID, bc.BlockNumber, bc.BlockVersion,
-			bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt, r.buildID,
+			bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt, int(r.buildID),
 		)
 	}
 

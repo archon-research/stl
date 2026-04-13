@@ -1318,8 +1318,8 @@ func TestIndexUserPosition(t *testing.T) {
 		t.Fatalf("expected 1 SaveBorrower call, got %d", len(positionRepo.saveBorrowerCalls))
 	}
 	borrowerCall := positionRepo.saveBorrowerCalls[0]
-	if borrowerCall.EventType != "Snapshot" {
-		t.Errorf("SaveBorrower eventType = %q, want %q", borrowerCall.EventType, "Snapshot")
+	if borrowerCall.EventType != string(entity.InternalSnapshot) {
+		t.Errorf("SaveBorrower eventType = %q, want %q", borrowerCall.EventType, entity.InternalSnapshot)
 	}
 	if borrowerCall.Amount.Cmp(debtUSDC) != 0 {
 		t.Errorf("SaveBorrower amount = %s, want %s", borrowerCall.Amount, debtUSDC)
@@ -1335,8 +1335,8 @@ func TestIndexUserPosition(t *testing.T) {
 	if len(collateralRecords) != 1 {
 		t.Fatalf("expected 1 collateral record, got %d", len(collateralRecords))
 	}
-	if collateralRecords[0].EventType != "Snapshot" {
-		t.Errorf("collateral record eventType = %q, want %q", collateralRecords[0].EventType, "Snapshot")
+	if collateralRecords[0].EventType != entity.InternalSnapshot {
+		t.Errorf("collateral record eventType = %q, want %q", collateralRecords[0].EventType, entity.InternalSnapshot)
 	}
 	if collateralRecords[0].Change.Cmp(big.NewInt(0)) != 0 {
 		t.Errorf("collateral record change = %s, want 0", collateralRecords[0].Change)

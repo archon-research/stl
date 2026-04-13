@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -25,7 +26,7 @@ type ProtocolRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
 	batchSize int
-	buildID   int
+	buildID   buildregistry.BuildID
 }
 
 // NewProtocolRepository creates a new PostgreSQL Protocol repository.
@@ -34,7 +35,7 @@ type ProtocolRepository struct {
 //
 // Note: This function does not verify that the database connection is alive.
 // Use a separate health check or call pool.Ping() if connection validation is needed.
-func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID int, batchSize int) (*ProtocolRepository, error) {
+func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, batchSize int) (*ProtocolRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -131,7 +132,7 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 			baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14, baseIdx+15, baseIdx+16,
 			baseIdx+17, baseIdx+18, baseIdx+19, baseIdx+20, baseIdx+21, baseIdx+22, baseIdx+23, baseIdx+24,
 			baseIdx+25, baseIdx+26, baseIdx+27))
-		args = append(args, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion, r.buildID)
+		args = append(args, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion, int(r.buildID))
 
 		for _, valToConvert := range []*big.Int{
 			d.Unbacked,

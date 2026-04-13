@@ -776,7 +776,7 @@ func (s *Service) persistPositionData(
 	protocolAddress common.Address,
 	chainID, blockNumber int64,
 	blockVersion int,
-	eventType string,
+	eventType entity.EventType,
 	txHash []byte,
 	collaterals []aavelike.CollateralData,
 	debts []aavelike.DebtData,
@@ -814,7 +814,7 @@ func (s *Service) persistPositionData(
 			BlockVersion: blockVersion,
 			Amount:       d.CurrentDebt,
 			Change:       big.NewInt(0),
-			EventType:    entity.EventType(eventType),
+			EventType:    eventType,
 			TxHash:       txHash,
 			CreatedAt:    blockTimestamp,
 		}
@@ -866,7 +866,7 @@ func (s *Service) IndexUserPosition(ctx context.Context, user common.Address, pr
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.persistPositionData(ctx, tx, user, protocolAddress, chainID, blockNumber, blockVersion, "Snapshot", []byte{}, collaterals, debts, blockTimestamp)
+		return s.persistPositionData(ctx, tx, user, protocolAddress, chainID, blockNumber, blockVersion, entity.InternalSnapshot, []byte{}, collaterals, debts, blockTimestamp)
 	})
 }
 
@@ -884,7 +884,7 @@ func (s *Service) PersistUserPosition(
 	blockTimestamp time.Time,
 ) error {
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.persistPositionData(ctx, tx, user, protocolAddress, chainID, blockNumber, blockVersion, "Snapshot", []byte{}, collaterals, debts, blockTimestamp)
+		return s.persistPositionData(ctx, tx, user, protocolAddress, chainID, blockNumber, blockVersion, entity.InternalSnapshot, []byte{}, collaterals, debts, blockTimestamp)
 	})
 }
 
@@ -1005,7 +1005,7 @@ func (s *Service) PersistUserPositionBatch(
 					BlockVersion: blockVersion,
 					Amount:       d.CurrentDebt,
 					Change:       big.NewInt(0),
-					EventType:    "Snapshot",
+					EventType:    entity.InternalSnapshot,
 					TxHash:       []byte{},
 					CreatedAt:    blockTimestamp,
 				})
@@ -1024,7 +1024,7 @@ func (s *Service) PersistUserPositionBatch(
 					BlockVersion:      blockVersion,
 					Amount:            c.ActualBalance,
 					Change:            big.NewInt(0),
-					EventType:         "Snapshot",
+					EventType:         entity.InternalSnapshot,
 					TxHash:            []byte{},
 					CollateralEnabled: c.CollateralEnabled,
 					CreatedAt:         blockTimestamp,

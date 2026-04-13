@@ -140,6 +140,8 @@ BEGIN
           AND hypertable_name = v_table;
         IF v_job_id IS NOT NULL THEN
             PERFORM alter_job(v_job_id, scheduled => true);
+        ELSE
+            RAISE WARNING 'no compression job found for table %, cannot resume', v_table;
         END IF;
     END LOOP;
 END $$;

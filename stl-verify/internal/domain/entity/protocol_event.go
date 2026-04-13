@@ -34,13 +34,13 @@ func NewProtocolEvent(chainID int, protocolID, blockNumber int64, blockVersion i
 		EventData:       eventData,
 		CreatedAt:       createdAt,
 	}
-	if err := e.validate(); err != nil {
+	if err := e.Validate(); err != nil {
 		return nil, err
 	}
 	return e, nil
 }
 
-func (e *ProtocolEvent) validate() error {
+func (e *ProtocolEvent) Validate() error {
 	if e.CreatedAt.IsZero() {
 		return fmt.Errorf("createdAt must be set explicitly (block timestamp)")
 	}
@@ -50,6 +50,8 @@ func (e *ProtocolEvent) validate() error {
 	if e.ProtocolID <= 0 {
 		return fmt.Errorf("protocolID must be positive, got %d", e.ProtocolID)
 	}
+	// Non-negative (allows block 0 / genesis) — unlike position entities which require
+	// positive block numbers, events can occur in the genesis block (e.g. contract deploys).
 	if e.BlockNumber < 0 {
 		return fmt.Errorf("blockNumber must be non-negative, got %d", e.BlockNumber)
 	}

@@ -30,14 +30,14 @@ func NewDebtToken(id, protocolID, underlyingTokenID, createdAtBlock int64, varia
 		CreatedAtBlock:      createdAtBlock,
 		Metadata:            make(map[string]any),
 	}
-	if err := dt.validate(); err != nil {
+	if err := dt.Validate(); err != nil {
 		return nil, err
 	}
 	return dt, nil
 }
 
 // validate checks that all fields have valid values.
-func (dt *DebtToken) validate() error {
+func (dt *DebtToken) Validate() error {
 	if dt.ID <= 0 {
 		return fmt.Errorf("id must be positive, got %d", dt.ID)
 	}

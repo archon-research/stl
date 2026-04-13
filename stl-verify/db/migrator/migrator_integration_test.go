@@ -379,8 +379,10 @@ func TestProcessingVersion_ConcurrentBuilds(t *testing.T) {
 
 	// tx2: insert same natural key with different build_id in a goroutine.
 	// Without advisory lock: trigger reads MAX=-1, assigns processing_version=0,
-	//   insert succeeds immediately (different connection, no blocking).
-	// With advisory lock: trigger blocks on the lock until tx1 commits.
+	//   INSERT blocks on unique index row lock, ON CONFLICT DO NOTHING drops the
+	//   row after tx1 commits (though PostgreSQL may restart the statement).
+	// With advisory lock: trigger blocks on the lock until tx1 commits, then
+	//   reads MAX=0 and assigns processing_version=1.
 	errCh := make(chan error, 1)
 	go func() {
 		tx2, err := conn2.Begin(ctx)
@@ -458,6 +460,112 @@ func TestProcessingVersion_ConcurrentBuilds(t *testing.T) {
 	if len(versions) != 2 || versions[0] != 0 || versions[1] != 1 {
 		t.Fatalf("expected processing_versions [0, 1], got %v", versions)
 	}
+}
+
+// TestProcessingVersion_RetryDedup verifies that re-inserting the same natural key with
+// the same build_id (pod restart, SQS re-delivery) reuses the existing processing_version
+// and ON CONFLICT DO NOTHING deduplicates the row. No duplicate rows should be created.
+func TestProcessingVersion_RetryDedup(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupPostgres(ctx, t)
+	defer cleanup()
+
+	m := migrator.New(pool, getMigrationsPath())
+	if err := m.ApplyAll(ctx); err != nil {
+		t.Fatalf("migrations failed: %v", err)
+	}
+
+	var buildID int
+	if err := pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash) VALUES ('retry-test') RETURNING id`).Scan(&buildID); err != nil {
+		t.Fatalf("inserting build: %v", err)
+	}
+
+	fixedTS := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+
+	// First insert.
+	_, err := pool.Exec(ctx, `
+		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, build_id)
+		VALUES (555, 1, $1, 100.0, $2)
+		ON CONFLICT (token_id, source_id, processing_version, timestamp) DO NOTHING`,
+		fixedTS, buildID)
+	if err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+
+	// Retry: same natural key, same build_id.
+	_, err = pool.Exec(ctx, `
+		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, build_id)
+		VALUES (555, 1, $1, 100.0, $2)
+		ON CONFLICT (token_id, source_id, processing_version, timestamp) DO NOTHING`,
+		fixedTS, buildID)
+	if err != nil {
+		t.Fatalf("retry insert: %v", err)
+	}
+
+	// Should be exactly 1 row — the retry was deduplicated.
+	var count int
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM offchain_token_price
+		WHERE token_id = 555 AND source_id = 1 AND timestamp = $1`, fixedTS).Scan(&count); err != nil {
+		t.Fatalf("counting rows: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 row (retry deduplicated), got %d", count)
+	}
+
+	var pv int
+	if err := pool.QueryRow(ctx, `
+		SELECT processing_version FROM offchain_token_price
+		WHERE token_id = 555 AND source_id = 1 AND timestamp = $1`, fixedTS).Scan(&pv); err != nil {
+		t.Fatalf("reading pv: %v", err)
+	}
+	if pv != 0 {
+		t.Fatalf("expected processing_version 0, got %d", pv)
+	}
+	t.Logf("retry correctly deduplicated: 1 row, processing_version=%d", pv)
+}
+
+// TestProcessingVersion_NonZeroBuildID verifies that build_id is actually written
+// to the row (not relying on DEFAULT 0).
+func TestProcessingVersion_NonZeroBuildID(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupPostgres(ctx, t)
+	defer cleanup()
+
+	m := migrator.New(pool, getMigrationsPath())
+	if err := m.ApplyAll(ctx); err != nil {
+		t.Fatalf("migrations failed: %v", err)
+	}
+
+	var buildID int
+	if err := pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash) VALUES ('nonzero-bid') RETURNING id`).Scan(&buildID); err != nil {
+		t.Fatalf("inserting build: %v", err)
+	}
+	if buildID == 0 {
+		t.Fatal("build_id should be non-zero for this test")
+	}
+
+	fixedTS := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+
+	_, err := pool.Exec(ctx, `
+		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, build_id)
+		VALUES (666, 1, $1, 42.0, $2)
+		ON CONFLICT (token_id, source_id, processing_version, timestamp) DO NOTHING`,
+		fixedTS, buildID)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	var storedBID int
+	if err := pool.QueryRow(ctx, `
+		SELECT build_id FROM offchain_token_price
+		WHERE token_id = 666 AND source_id = 1 AND timestamp = $1`, fixedTS).Scan(&storedBID); err != nil {
+		t.Fatalf("reading build_id: %v", err)
+	}
+	if storedBID != buildID {
+		t.Fatalf("expected build_id %d, got %d", buildID, storedBID)
+	}
+	t.Logf("build_id correctly stored: %d", storedBID)
 }
 
 // BenchmarkProcessingVersionTrigger_WithLock measures per-insert overhead of the

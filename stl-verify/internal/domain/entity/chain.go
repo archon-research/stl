@@ -16,14 +16,14 @@ func NewChain(chainID int, name string) (*Chain, error) {
 		ChainID: chainID,
 		Name:    name,
 	}
-	if err := c.validate(); err != nil {
+	if err := c.Validate(); err != nil {
 		return nil, err
 	}
 	return c, nil
 }
 
 // validate checks that all fields have valid values.
-func (c *Chain) validate() error {
+func (c *Chain) Validate() error {
 	if c.ChainID <= 0 {
 		return fmt.Errorf("chainID must be positive, got %d", c.ChainID)
 	}

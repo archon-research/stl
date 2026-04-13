@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -23,7 +24,7 @@ type PrimeDebtRepository struct {
 	pool    *pgxpool.Pool
 	txm     *TxManager
 	logger  *slog.Logger
-	buildID int
+	buildID buildregistry.BuildID
 }
 
 // NewPrimeDebtRepository creates a new PrimeDebtRepository.
@@ -31,7 +32,7 @@ func NewPrimeDebtRepository(
 	pool *pgxpool.Pool,
 	txm *TxManager,
 	logger *slog.Logger,
-	buildID int,
+	buildID buildregistry.BuildID,
 ) *PrimeDebtRepository {
 	if logger == nil {
 		logger = slog.Default()
@@ -112,7 +113,7 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 				d.BlockNumber,
 				d.BlockVersion,
 				d.SyncedAt,
-				r.buildID,
+				int(r.buildID),
 			)
 		}
 

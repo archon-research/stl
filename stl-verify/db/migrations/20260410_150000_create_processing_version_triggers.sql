@@ -7,9 +7,9 @@
 --   - If build_id differs or no row exists → assign MAX(processing_version) + 1.
 --
 -- Each trigger acquires a pg_advisory_xact_lock keyed on the natural key
--- (using hashtextextended) so concurrent inserts for the same entity are
--- serialised within the transaction.  The lock is released automatically
--- when the transaction commits or rolls back.
+-- (using hashtextextended) to serialise concurrent inserts for the same
+-- entity across transactions. The lock is held for the duration of the
+-- transaction and released automatically on commit or rollback.
 --
 -- See ADR-0002: Data Auditability and Processing Versioning.
 

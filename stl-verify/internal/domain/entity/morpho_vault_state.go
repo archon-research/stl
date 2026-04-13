@@ -33,7 +33,7 @@ func NewMorphoVaultState(morphoVaultID, blockNumber int64, blockVersion int, tim
 		TotalAssets:    totalAssets,
 		TotalShares:    totalShares,
 	}
-	if err := s.validate(); err != nil {
+	if err := s.Validate(); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -47,7 +47,7 @@ func (s *MorphoVaultState) WithAccrueInterest(feeShares, newTotalAssets, previou
 	s.ManagementFeeShares = managementFeeShares
 }
 
-func (s *MorphoVaultState) validate() error {
+func (s *MorphoVaultState) Validate() error {
 	if s.MorphoVaultID <= 0 {
 		return fmt.Errorf("morphoVaultID must be positive, got %d", s.MorphoVaultID)
 	}

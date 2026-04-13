@@ -39,7 +39,7 @@ func NewMorphoMarketState(morphoMarketID, blockNumber int64, blockVersion int, t
 		LastUpdate:        lastUpdate,
 		Fee:               fee,
 	}
-	if err := s.validate(); err != nil {
+	if err := s.Validate(); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -52,7 +52,7 @@ func (s *MorphoMarketState) WithAccrueInterest(prevBorrowRate, interestAccrued, 
 	s.FeeShares = feeShares
 }
 
-func (s *MorphoMarketState) validate() error {
+func (s *MorphoMarketState) Validate() error {
 	if s.MorphoMarketID <= 0 {
 		return fmt.Errorf("morphoMarketID must be positive, got %d", s.MorphoMarketID)
 	}

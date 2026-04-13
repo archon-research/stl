@@ -26,14 +26,14 @@ func NewToken(id int64, chainID int, address []byte, symbol string, decimals int
 		CreatedAtBlock: createdAtBlock,
 		Metadata:       make(map[string]any),
 	}
-	if err := t.validate(); err != nil {
+	if err := t.Validate(); err != nil {
 		return nil, err
 	}
 	return t, nil
 }
 
 // validate checks that all fields have valid values.
-func (t *Token) validate() error {
+func (t *Token) Validate() error {
 	if t.ID <= 0 {
 		return fmt.Errorf("id must be positive, got %d", t.ID)
 	}

@@ -84,13 +84,13 @@ func NewOnchainTokenPrice(tokenID int64, oracleID int16, blockNumber int64, bloc
 		Timestamp:    timestamp,
 		PriceUSD:     priceUSD,
 	}
-	if err := p.validate(); err != nil {
+	if err := p.Validate(); err != nil {
 		return nil, err
 	}
 	return p, nil
 }
 
-func (p *OnchainTokenPrice) validate() error {
+func (p *OnchainTokenPrice) Validate() error {
 	if p.TokenID <= 0 {
 		return fmt.Errorf("tokenID must be positive, got %d", p.TokenID)
 	}

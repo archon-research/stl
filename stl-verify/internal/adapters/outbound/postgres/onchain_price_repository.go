@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -24,13 +25,13 @@ var _ outbound.OnchainPriceRepository = (*OnchainPriceRepository)(nil)
 type OnchainPriceRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
-	buildID   int
+	buildID   buildregistry.BuildID
 	batchSize int
 }
 
 // NewOnchainPriceRepository creates a new PostgreSQL onchain price repository.
 // If batchSize is <= 0, a default batch size of 1000 is used.
-func NewOnchainPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID int, batchSize int) (*OnchainPriceRepository, error) {
+func NewOnchainPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, batchSize int) (*OnchainPriceRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -241,7 +242,7 @@ func (r *OnchainPriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
 
-		args = append(args, price.TokenID, price.OracleID, price.BlockNumber, price.BlockVersion, price.Timestamp, price.PriceUSD, r.buildID)
+		args = append(args, price.TokenID, price.OracleID, price.BlockNumber, price.BlockVersion, price.Timestamp, price.PriceUSD, int(r.buildID))
 	}
 
 	sb.WriteString(` ON CONFLICT (token_id, oracle_id, block_number, block_version, processing_version, timestamp) DO NOTHING`)

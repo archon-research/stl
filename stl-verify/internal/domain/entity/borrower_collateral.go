@@ -36,14 +36,14 @@ func NewBorrowerCollateral(userID, protocolID, tokenID, blockNumber int64, block
 		CollateralEnabled: collateralEnabled,
 		CreatedAt:         createdAt,
 	}
-	if err := bc.validate(); err != nil {
+	if err := bc.Validate(); err != nil {
 		return nil, err
 	}
 	return bc, nil
 }
 
 // validate checks that all fields have valid values.
-func (bc *BorrowerCollateral) validate() error {
+func (bc *BorrowerCollateral) Validate() error {
 	if bc.CreatedAt.IsZero() {
 		return fmt.Errorf("createdAt must be set explicitly (block timestamp)")
 	}

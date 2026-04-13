@@ -2,6 +2,7 @@ package buildregistry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -11,11 +12,16 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 )
 
+// BuildID is a typed integer for build registry IDs.
+// Using a named type prevents accidental transposition with other int parameters
+// (e.g. batchSize) at compile time.
+type BuildID int
+
 // Registry resolves and caches the build_id for the running service's git commit.
 // Created once at startup; the resolved ID is passed into repositories that write
 // to state tables.
 type Registry struct {
-	buildID   int
+	buildID   BuildID
 	gitHash   string
 	buildTime string
 }
@@ -35,7 +41,7 @@ func New(ctx context.Context, db *pgxpool.Pool) (*Registry, error) {
 	}
 
 	if gitHash == "" {
-		return nil, fmt.Errorf("git hash not available: build with VCS info, set via -ldflags, or set BUILD_GIT_HASH env var")
+		return nil, fmt.Errorf("git hash not available: build with VCS info or set BUILD_GIT_HASH env var")
 	}
 
 	var id int
@@ -44,7 +50,7 @@ func New(ctx context.Context, db *pgxpool.Pool) (*Registry, error) {
 		ON CONFLICT (git_hash) DO NOTHING
 		RETURNING id`, gitHash).Scan(&id)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			// Already registered — look up the existing id.
 			err = db.QueryRow(ctx, `
 				SELECT id FROM build_registry WHERE git_hash = $1`,
@@ -55,11 +61,11 @@ func New(ctx context.Context, db *pgxpool.Pool) (*Registry, error) {
 		}
 	}
 
-	return &Registry{buildID: id, gitHash: gitHash, buildTime: buildTime}, nil
+	return &Registry{buildID: BuildID(id), gitHash: gitHash, buildTime: buildTime}, nil
 }
 
 // BuildID returns the resolved build_id for this service's git commit.
-func (r *Registry) BuildID() int { return r.buildID }
+func (r *Registry) BuildID() BuildID { return r.buildID }
 
 // GitHash returns the git commit hash that was registered.
 func (r *Registry) GitHash() string { return r.gitHash }
