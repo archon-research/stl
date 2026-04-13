@@ -197,7 +197,7 @@ func (r *PriceRepository) GetLatestPrice(ctx context.Context, tokenID int64) (*e
 		SELECT token_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd
 		FROM offchain_token_price
 		WHERE token_id = $1
-		ORDER BY timestamp DESC
+		ORDER BY timestamp DESC, processing_version DESC
 		LIMIT 1
 	`, tokenID).Scan(
 		&tp.TokenID, &tp.SourceID, &tp.Timestamp, &tp.PriceUSD, &tp.MarketCapUSD, &tp.VolumeUSD,

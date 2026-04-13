@@ -35,7 +35,7 @@ func NewMorphoMarket(chainID, protocolID int64, marketID common.Hash, loanTokenI
 		CreatedAtBlock:    createdAtBlock,
 	}
 	if err := m.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewMorphoMarket: %w", err)
 	}
 	return m, nil
 }

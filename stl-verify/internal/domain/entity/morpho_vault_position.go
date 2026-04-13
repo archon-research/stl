@@ -30,7 +30,7 @@ func NewMorphoVaultPosition(userID, morphoVaultID, blockNumber int64, blockVersi
 		Assets:        assets,
 	}
 	if err := p.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewMorphoVaultPosition: %w", err)
 	}
 	return p, nil
 }

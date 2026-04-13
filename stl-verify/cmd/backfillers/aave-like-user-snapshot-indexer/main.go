@@ -347,6 +347,17 @@ func run(args []string) error {
 		logger.Info("using latest block number", "block", blockNumber)
 	}
 
+	// Verify the block is finalized to prevent mixed-state data from reorgs
+	finalizedHeader, err := ethClient.HeaderByNumber(ctx, big.NewInt(int64(rpc.FinalizedBlockNumber)))
+	if err != nil {
+		return fmt.Errorf("fetching finalized block: %w", err)
+	}
+	if int64(blockNumber) > finalizedHeader.Number.Int64() {
+		return fmt.Errorf("block %d is not finalized (latest finalized: %d), specify a finalized block number",
+			blockNumber, finalizedHeader.Number.Int64())
+	}
+	logger.Info("block finalization verified", "block", blockNumber, "finalized", finalizedHeader.Number.Int64())
+
 	// Fetch block timestamp for hypertable partition column
 	header, err := ethClient.HeaderByNumber(ctx, big.NewInt(int64(blockNumber)))
 	if err != nil {

@@ -34,7 +34,7 @@ func NewMorphoVaultState(morphoVaultID, blockNumber int64, blockVersion int, tim
 		TotalShares:    totalShares,
 	}
 	if err := s.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewMorphoVaultState: %w", err)
 	}
 	return s, nil
 }

@@ -115,7 +115,7 @@ func (r *OnchainPriceRepository) GetLatestPrices(ctx context.Context, oracleID i
 		SELECT DISTINCT ON (token_id) token_id, price_usd
 		FROM onchain_token_price
 		WHERE oracle_id = $1
-		ORDER BY token_id, block_number DESC, block_version DESC
+		ORDER BY token_id, block_number DESC, block_version DESC, processing_version DESC
 	`, oracleID)
 	if err != nil {
 		return nil, fmt.Errorf("querying latest onchain prices: %w", err)

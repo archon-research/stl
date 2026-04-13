@@ -85,7 +85,7 @@ func NewOnchainTokenPrice(tokenID int64, oracleID int16, blockNumber int64, bloc
 		PriceUSD:     priceUSD,
 	}
 	if err := p.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewOnchainTokenPrice: %w", err)
 	}
 	return p, nil
 }

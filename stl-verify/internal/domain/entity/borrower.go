@@ -35,7 +35,7 @@ func NewBorrower(userID, protocolID, tokenID, blockNumber int64, blockVersion in
 		CreatedAt:    createdAt,
 	}
 	if err := b.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewBorrower: %w", err)
 	}
 	return b, nil
 }

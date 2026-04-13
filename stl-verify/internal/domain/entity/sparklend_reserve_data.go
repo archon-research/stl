@@ -50,7 +50,7 @@ func NewSparkLendReserveData(id, protocolID, tokenID, blockNumber int64) (*Spark
 		BlockNumber: blockNumber,
 	}
 	if err := srd.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewSparkLendReserveData: %w", err)
 	}
 	return srd, nil
 }

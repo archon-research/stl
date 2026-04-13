@@ -30,7 +30,7 @@ func NewReceiptToken(chainID, protocolID, underlyingTokenID, createdAtBlock int6
 		Metadata:            make(map[string]any),
 	}
 	if err := rt.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewReceiptToken: %w", err)
 	}
 	return rt, nil
 }

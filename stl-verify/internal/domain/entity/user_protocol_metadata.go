@@ -19,7 +19,7 @@ func NewUserProtocolMetadata(id, userID, protocolID int64) (*UserProtocolMetadat
 		Metadata:   make(map[string]any),
 	}
 	if err := upm.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewUserProtocolMetadata: %w", err)
 	}
 	return upm, nil
 }

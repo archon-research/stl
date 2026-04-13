@@ -36,7 +36,7 @@ func NewMorphoVault(chainID, protocolID int64, address []byte, name, symbol stri
 		CreatedAtBlock: createdAtBlock,
 	}
 	if err := v.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewMorphoVault: %w", err)
 	}
 	return v, nil
 }

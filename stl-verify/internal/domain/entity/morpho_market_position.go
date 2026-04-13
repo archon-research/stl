@@ -36,7 +36,7 @@ func NewMorphoMarketPosition(userID, morphoMarketID, blockNumber int64, blockVer
 		BorrowAssets:   borrowAssets,
 	}
 	if err := p.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewMorphoMarketPosition: %w", err)
 	}
 	return p, nil
 }

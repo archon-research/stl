@@ -32,7 +32,7 @@ func NewPriceSource(id int64, name, displayName, baseURL string, rateLimitPerMin
 		UpdatedAt:          time.Now(),
 	}
 	if err := ps.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewPriceSource: %w", err)
 	}
 	return ps, nil
 }
@@ -77,7 +77,7 @@ func NewPriceAsset(id, sourceID int64, sourceAssetID string, tokenID *int64, nam
 		UpdatedAt:     time.Now(),
 	}
 	if err := pa.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewPriceAsset: %w", err)
 	}
 	return pa, nil
 }
@@ -122,7 +122,7 @@ func NewTokenPrice(tokenID int64, sourceID int16, priceUSD float64, marketCapUSD
 		Timestamp:    timestamp,
 	}
 	if err := tp.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewTokenPrice: %w", err)
 	}
 	return tp, nil
 }

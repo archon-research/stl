@@ -40,7 +40,7 @@ func NewMorphoMarketState(morphoMarketID, blockNumber int64, blockVersion int, t
 		Fee:               fee,
 	}
 	if err := s.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewMorphoMarketState: %w", err)
 	}
 	return s, nil
 }

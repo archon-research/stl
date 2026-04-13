@@ -35,7 +35,7 @@ func NewProtocolEvent(chainID int, protocolID, blockNumber int64, blockVersion i
 		CreatedAt:       createdAt,
 	}
 	if err := e.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewProtocolEvent: %w", err)
 	}
 	return e, nil
 }

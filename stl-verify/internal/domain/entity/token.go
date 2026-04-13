@@ -27,7 +27,7 @@ func NewToken(id int64, chainID int, address []byte, symbol string, decimals int
 		Metadata:       make(map[string]any),
 	}
 	if err := t.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewToken: %w", err)
 	}
 	return t, nil
 }

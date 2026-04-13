@@ -25,7 +25,7 @@ func NewUser(id, chainID int64, address common.Address, firstSeenBlock int64) (*
 		Metadata:       make(map[string]any),
 	}
 	if err := u.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewUser: %w", err)
 	}
 	return u, nil
 }

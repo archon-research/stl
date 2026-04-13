@@ -17,7 +17,7 @@ func NewChain(chainID int, name string) (*Chain, error) {
 		Name:    name,
 	}
 	if err := c.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewChain: %w", err)
 	}
 	return c, nil
 }

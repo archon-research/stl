@@ -452,6 +452,8 @@ func TestRun(t *testing.T) {
 				t.Helper()
 				if err == nil {
 					t.Errorf("expected error, got nil")
+				} else if !strings.Contains(err.Error(), "not found in S3") {
+					t.Errorf("expected 'not found in S3' error, got: %v", err)
 				}
 			},
 		},

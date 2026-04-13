@@ -37,7 +37,7 @@ func NewBorrowerCollateral(userID, protocolID, tokenID, blockNumber int64, block
 		CreatedAt:         createdAt,
 	}
 	if err := bc.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewBorrowerCollateral: %w", err)
 	}
 	return bc, nil
 }

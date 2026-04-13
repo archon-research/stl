@@ -419,10 +419,6 @@ func TestProcessingVersion_ConcurrentBuilds(t *testing.T) {
 		t.Fatalf("tx2 failed: %v", err)
 	}
 
-	// Release connections before querying results.
-	conn1.Release()
-	conn2.Release()
-
 	// Count rows for this natural key.
 	var count int
 	err = pool.QueryRow(ctx, `

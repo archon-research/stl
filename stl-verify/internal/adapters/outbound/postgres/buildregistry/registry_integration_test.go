@@ -4,9 +4,9 @@ package buildregistry
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
@@ -92,18 +92,15 @@ func TestNew_DifferentHashesDifferentIDs(t *testing.T) {
 
 func TestNew_EmptyHashNoEnvVar(t *testing.T) {
 	pool := setupDB(t)
+	// Set to empty string — os.Getenv returns "" for both unset and empty,
+	// so this effectively clears the fallback. t.Setenv auto-restores after test.
 	t.Setenv("BUILD_GIT_HASH", "")
-	// Also clear any VCS info that might be embedded.
-	// In test binaries, VCS info is typically available, so we need to
-	// test this by unsetting the env var and hoping no VCS info exists.
-	// If VCS info IS available, this test verifies that path works too.
-
-	os.Unsetenv("BUILD_GIT_HASH")
 	_, err := New(context.Background(), pool)
-	// Either succeeds (VCS info available) or fails with a clear error.
+	// In test binaries, VCS info is typically available from the Go build,
+	// so New() succeeds via that path. If VCS info is unavailable, it should
+	// fail with a clear error.
 	if err != nil {
-		expected := "git hash not available"
-		if len(err.Error()) < len(expected) || err.Error()[:len(expected)] != expected {
+		if !strings.Contains(err.Error(), "git hash not available") {
 			t.Errorf("unexpected error: %v", err)
 		}
 	}

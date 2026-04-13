@@ -22,7 +22,7 @@ func NewProtocolOracle(protocolID, oracleID, fromBlock int64) (*ProtocolOracle, 
 		FromBlock:  fromBlock,
 	}
 	if err := po.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewProtocolOracle: %w", err)
 	}
 	return po, nil
 }

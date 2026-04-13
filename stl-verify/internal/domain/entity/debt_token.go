@@ -31,7 +31,7 @@ func NewDebtToken(id, protocolID, underlyingTokenID, createdAtBlock int64, varia
 		Metadata:            make(map[string]any),
 	}
 	if err := dt.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewDebtToken: %w", err)
 	}
 	return dt, nil
 }

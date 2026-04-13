@@ -27,7 +27,7 @@ func NewProtocol(id int64, chainID int, address []byte, name, protocolType strin
 		Metadata:       make(map[string]any),
 	}
 	if err := p.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewProtocol: %w", err)
 	}
 	return p, nil
 }
