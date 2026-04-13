@@ -54,7 +54,7 @@ class PostgresAllocationRepository:
                     JOIN prime p ON p.id = ap.prime_id
                     WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
                     ORDER BY ap.token_id, ap.proxy_address,
-                             ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
+                             ap.block_number DESC, ap.block_version DESC, ap.processing_version DESC, ap.log_index DESC
                 )
                 SELECT DISTINCT ON (receipt_token_id)
                     receipt_token_id,
@@ -144,7 +144,8 @@ class PostgresAllocationRepository:
                  ap.tx_hash,
                  ap.log_index,
                  ap.direction,
-                 ap.block_version DESC
+                 ap.block_version DESC,
+                 ap.processing_version DESC
     """)
 
     async def list_allocations_by_star(
