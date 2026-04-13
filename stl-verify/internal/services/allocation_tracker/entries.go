@@ -93,6 +93,7 @@ func mainnetEntries() []*TokenEntry {
 		{ContractAddress: common.HexToAddress("0x09aa30b182488f769a9824f15e6ce58591da4781"), WalletAddress: spark, AssetAddress: usds, Star: "spark", Chain: "mainnet", Protocol: "aave", AllocationType: "allocation", TokenType: "atoken"},
 		{ContractAddress: common.HexToAddress("0x32a6268f9ba3642dda7892add74f1d34469a4259"), WalletAddress: spark, AssetAddress: usds, Star: "spark", Chain: "mainnet", Protocol: "aave", AllocationType: "allocation", TokenType: "atoken"},
 		{ContractAddress: common.HexToAddress("0x98c23e9d8f34fefb1b7bd6a91b7ff122f4e16f5c"), WalletAddress: spark, AssetAddress: usdc, Star: "spark", Chain: "mainnet", Protocol: "aave", AllocationType: "allocation", TokenType: "atoken"},
+		{ContractAddress: common.HexToAddress("0x23878914efe38d27c4d67ab83ed1b93a74d4086a"), WalletAddress: spark, AssetAddress: usdt, Star: "spark", Chain: "mainnet", Protocol: "aave", AllocationType: "allocation", TokenType: "atoken"},
 
 		// ── Spark: Morpho vaults (ERC4626) ──
 		{ContractAddress: common.HexToAddress("0x56a76b428244a50513ec81e225a293d128fd581d"), WalletAddress: spark, AssetAddress: usdc, Star: "spark", Chain: "mainnet", Protocol: "morpho", AllocationType: "allocation", TokenType: "erc4626", CreatedAtBlock: new(int64(23319630))},
