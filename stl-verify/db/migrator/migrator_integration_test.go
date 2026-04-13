@@ -4,11 +4,13 @@ package migrator_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -306,4 +308,192 @@ func TestMigrations_AuditabilityOnSelfHosted(t *testing.T) {
 		t.Fatalf("expected processing_version 0, got %d", pv)
 	}
 	t.Logf("trigger assigned processing_version = %d", pv)
+}
+
+// TestProcessingVersion_ConcurrentBuilds verifies that two concurrent inserts for the
+// same natural key with different build_ids produce two rows with processing_version 0
+// and 1 respectively.
+//
+// PostgreSQL's row-level locking on the unique index already serializes this case:
+// tx2's INSERT blocks when it detects tx1's uncommitted row occupies the same PK slot.
+// Once tx1 commits, tx2's trigger re-evaluates under READ COMMITTED, sees MAX=0, and
+// assigns processing_version=1. The advisory lock in the trigger provides defense-in-depth.
+//
+// The test uses two explicit connections to guarantee truly concurrent transactions.
+func TestProcessingVersion_ConcurrentBuilds(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupPostgres(ctx, t)
+	defer cleanup()
+
+	m := migrator.New(pool, getMigrationsPath())
+	if err := m.ApplyAll(ctx); err != nil {
+		t.Fatalf("migrations failed: %v", err)
+	}
+
+	// Register two builds.
+	var build1, build2 int
+	err := pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash) VALUES ('build-race-1') RETURNING id`).Scan(&build1)
+	if err != nil {
+		t.Fatalf("inserting build 1: %v", err)
+	}
+	err = pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash) VALUES ('build-race-2') RETURNING id`).Scan(&build2)
+	if err != nil {
+		t.Fatalf("inserting build 2: %v", err)
+	}
+
+	// Fixed timestamp for both inserts (same natural key).
+	fixedTS := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Acquire two separate connections from the pool to guarantee independent
+	// transaction visibility (same connection cannot have two open transactions).
+	conn1, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire conn1: %v", err)
+	}
+	defer conn1.Release()
+
+	conn2, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire conn2: %v", err)
+	}
+	defer conn2.Release()
+
+	// tx1: begin, insert, hold open.
+	tx1, err := conn1.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx1: %v", err)
+	}
+	defer tx1.Rollback(ctx)
+
+	_, err = tx1.Exec(ctx, `
+		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, build_id)
+		VALUES (888, 1, $1, 100.0, $2)
+		ON CONFLICT (token_id, source_id, processing_version, timestamp) DO NOTHING`,
+		fixedTS, build1)
+	if err != nil {
+		t.Fatalf("tx1 insert: %v", err)
+	}
+	// tx1 is now open with an uncommitted row (processing_version=0).
+	// Under READ COMMITTED, this row is invisible to tx2.
+
+	// tx2: insert same natural key with different build_id in a goroutine.
+	// Without advisory lock: trigger reads MAX=-1, assigns processing_version=0,
+	//   insert succeeds immediately (different connection, no blocking).
+	// With advisory lock: trigger blocks on the lock until tx1 commits.
+	errCh := make(chan error, 1)
+	go func() {
+		tx2, err := conn2.Begin(ctx)
+		if err != nil {
+			errCh <- fmt.Errorf("begin tx2: %w", err)
+			return
+		}
+		defer tx2.Rollback(ctx)
+
+		_, err = tx2.Exec(ctx, `
+			INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, build_id)
+			VALUES (888, 1, $1, 200.0, $2)
+			ON CONFLICT (token_id, source_id, processing_version, timestamp) DO NOTHING`,
+			fixedTS, build2)
+		if err != nil {
+			errCh <- fmt.Errorf("tx2 insert: %w", err)
+			return
+		}
+		errCh <- tx2.Commit(ctx)
+	}()
+
+	// Wait for tx2 to enter the trigger. Without advisory lock it completes
+	// in ~100us. With advisory lock it blocks. 200ms guarantees tx2 has entered
+	// the trigger before we commit tx1.
+	time.Sleep(200 * time.Millisecond)
+
+	// Commit tx1 — if advisory lock is held, this unblocks tx2.
+	if err := tx1.Commit(ctx); err != nil {
+		t.Fatalf("tx1 commit: %v", err)
+	}
+
+	// Wait for tx2 to finish.
+	if err := <-errCh; err != nil {
+		t.Fatalf("tx2 failed: %v", err)
+	}
+
+	// Release connections before querying results.
+	conn1.Release()
+	conn2.Release()
+
+	// Count rows for this natural key.
+	var count int
+	err = pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM offchain_token_price
+		WHERE token_id = 888 AND source_id = 1 AND timestamp = $1`, fixedTS).Scan(&count)
+	if err != nil {
+		t.Fatalf("counting rows: %v", err)
+	}
+
+	if count != 2 {
+		t.Fatalf("expected 2 rows (processing_version 0 and 1), got %d — "+
+			"the race condition caused one row to be silently dropped", count)
+	}
+
+	// Verify distinct processing_versions.
+	rows, err := pool.Query(ctx, `
+		SELECT processing_version, build_id FROM offchain_token_price
+		WHERE token_id = 888 AND source_id = 1 AND timestamp = $1
+		ORDER BY processing_version`, fixedTS)
+	if err != nil {
+		t.Fatalf("querying versions: %v", err)
+	}
+	defer rows.Close()
+
+	var versions []int
+	for rows.Next() {
+		var pv, bid int
+		if err := rows.Scan(&pv, &bid); err != nil {
+			t.Fatalf("scanning row: %v", err)
+		}
+		versions = append(versions, pv)
+		t.Logf("processing_version=%d, build_id=%d", pv, bid)
+	}
+
+	if len(versions) != 2 || versions[0] != 0 || versions[1] != 1 {
+		t.Fatalf("expected processing_versions [0, 1], got %v", versions)
+	}
+}
+
+// BenchmarkProcessingVersionTrigger_WithLock measures per-insert overhead of the
+// processing_version trigger (including advisory lock). Each iteration inserts one
+// row with a unique natural key, so the lock is always uncontended — this measures
+// the cost added to normal (non-reprocessing) operations.
+func BenchmarkProcessingVersionTrigger_WithLock(b *testing.B) {
+	ctx := context.Background()
+	dsn, containerCleanup := testutil.StartTimescaleDBForMain()
+	pool := testutil.ConnectPoolForMain(dsn)
+	defer func() {
+		pool.Close()
+		containerCleanup()
+	}()
+
+	m := migrator.New(pool, getMigrationsPath())
+	if err := m.ApplyAll(ctx); err != nil {
+		b.Fatalf("migrations failed: %v", err)
+	}
+
+	var buildID int
+	err := pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash) VALUES ('bench-build') RETURNING id`).Scan(&buildID)
+	if err != nil {
+		b.Fatalf("inserting build: %v", err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Each iteration uses a unique token_id so the advisory lock is uncontended.
+		ts := time.Date(2026, 1, 1, 0, 0, i, 0, time.UTC)
+		_, err := pool.Exec(ctx, `
+			INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, build_id)
+			VALUES ($1, 1, $2, 100.0, $3)
+			ON CONFLICT (token_id, source_id, processing_version, timestamp) DO NOTHING`,
+			int64(i+10000), ts, buildID)
+		if err != nil {
+			b.Fatalf("insert %d: %v", i, err)
+		}
+	}
 }

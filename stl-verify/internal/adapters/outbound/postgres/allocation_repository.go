@@ -1,10 +1,13 @@
 package postgres
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -61,6 +64,22 @@ func (r *AllocationRepository) SavePositions(
 			return fmt.Errorf("position %d: %w", i, err)
 		}
 	}
+
+	// Sort by natural key to ensure consistent lock acquisition order and prevent deadlocks.
+	slices.SortFunc(positions, func(a, b *entity.AllocationPosition) int {
+		return cmp.Or(
+			cmp.Compare(a.ChainID, b.ChainID),
+			bytes.Compare(a.TokenAddress[:], b.TokenAddress[:]),
+			cmp.Compare(a.PrimeID, b.PrimeID),
+			bytes.Compare(a.ProxyAddress[:], b.ProxyAddress[:]),
+			cmp.Compare(a.BlockNumber, b.BlockNumber),
+			cmp.Compare(a.BlockVersion, b.BlockVersion),
+			cmp.Compare(a.TxHash, b.TxHash),
+			cmp.Compare(a.LogIndex, b.LogIndex),
+			cmp.Compare(a.Direction, b.Direction),
+			a.CreatedAt.Compare(b.CreatedAt),
+		)
+	})
 
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		tokenIDs, err := r.resolveTokenIDs(ctx, tx, positions)

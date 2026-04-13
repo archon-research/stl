@@ -6,9 +6,10 @@
 --     NOTHING clause deduplicates the insert.
 --   - If build_id differs or no row exists → assign MAX(processing_version) + 1.
 --
--- Advisory locking is the caller's responsibility (repository layer), not the
--- trigger's. The caller must use READ COMMITTED + pg_advisory_xact_lock before
--- inserting, matching the pattern in blockstate_repository.go.
+-- Each trigger acquires a pg_advisory_xact_lock keyed on the natural key
+-- (using hashtextextended) so concurrent inserts for the same entity are
+-- serialised within the transaction.  The lock is released automatically
+-- when the transaction commits or rolls back.
 --
 -- See ADR-0002: Data Auditability and Processing Versioning.
 
@@ -23,6 +24,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('b|%s|%s|%s|%s|%s|%s', NEW.user_id, NEW.protocol_id, NEW.token_id, NEW.block_number, NEW.block_version, NEW.created_at), 0));
+
     SELECT processing_version INTO existing_ver
     FROM borrower
     WHERE user_id = NEW.user_id
@@ -64,6 +67,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('bc|%s|%s|%s|%s|%s|%s', NEW.user_id, NEW.protocol_id, NEW.token_id, NEW.block_number, NEW.block_version, NEW.created_at), 0));
+
     SELECT processing_version INTO existing_ver
     FROM borrower_collateral
     WHERE user_id = NEW.user_id
@@ -105,6 +110,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('srd|%s|%s|%s|%s', NEW.protocol_id, NEW.token_id, NEW.block_number, NEW.block_version), 0));
+
     SELECT processing_version INTO existing_ver
     FROM sparklend_reserve_data
     WHERE protocol_id = NEW.protocol_id
@@ -142,6 +149,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('otp|%s|%s|%s|%s|%s', NEW.token_id, NEW.oracle_id, NEW.block_number, NEW.block_version, NEW.timestamp), 0));
+
     SELECT processing_version INTO existing_ver
     FROM onchain_token_price
     WHERE token_id = NEW.token_id
@@ -181,6 +190,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('mms|%s|%s|%s|%s', NEW.morpho_market_id, NEW.block_number, NEW.block_version, NEW.timestamp), 0));
+
     SELECT processing_version INTO existing_ver
     FROM morpho_market_state
     WHERE morpho_market_id = NEW.morpho_market_id
@@ -218,6 +229,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('mmp|%s|%s|%s|%s|%s', NEW.user_id, NEW.morpho_market_id, NEW.block_number, NEW.block_version, NEW.timestamp), 0));
+
     SELECT processing_version INTO existing_ver
     FROM morpho_market_position
     WHERE user_id = NEW.user_id
@@ -257,6 +270,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('mvs|%s|%s|%s|%s', NEW.morpho_vault_id, NEW.block_number, NEW.block_version, NEW.timestamp), 0));
+
     SELECT processing_version INTO existing_ver
     FROM morpho_vault_state
     WHERE morpho_vault_id = NEW.morpho_vault_id
@@ -294,6 +309,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('mvp|%s|%s|%s|%s|%s', NEW.user_id, NEW.morpho_vault_id, NEW.block_number, NEW.block_version, NEW.timestamp), 0));
+
     SELECT processing_version INTO existing_ver
     FROM morpho_vault_position
     WHERE user_id = NEW.user_id
@@ -333,6 +350,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('pd|%s|%s|%s|%s', NEW.prime_id, NEW.block_number, NEW.block_version, NEW.synced_at), 0));
+
     SELECT processing_version INTO existing_ver
     FROM prime_debt
     WHERE prime_id = NEW.prime_id
@@ -370,6 +389,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('ap|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s', NEW.chain_id, NEW.token_id, NEW.prime_id, NEW.proxy_address, NEW.block_number, NEW.block_version, NEW.tx_hash, NEW.log_index, NEW.direction, NEW.created_at), 0));
+
     SELECT processing_version INTO existing_ver
     FROM allocation_position
     WHERE chain_id = NEW.chain_id
@@ -419,6 +440,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('pe|%s|%s|%s|%s|%s|%s', NEW.chain_id, NEW.block_number, NEW.block_version, NEW.tx_hash, NEW.log_index, NEW.created_at), 0));
+
     SELECT processing_version INTO existing_ver
     FROM protocol_event
     WHERE chain_id = NEW.chain_id
@@ -464,6 +487,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('aps|%s|%s|%s|%s|%s', NEW.prime_id, NEW.package_id, NEW.asset_type, NEW.custody_type, NEW.snapshot_time), 0));
+
     SELECT processing_version INTO existing_ver
     FROM anchorage_package_snapshot
     WHERE prime_id = NEW.prime_id
@@ -503,6 +528,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('ao|%s|%s', NEW.operation_id, NEW.created_at), 0));
+
     SELECT processing_version INTO existing_ver
     FROM anchorage_operation
     WHERE operation_id = NEW.operation_id
@@ -536,6 +563,8 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format('ofp|%s|%s|%s', NEW.token_id, NEW.source_id, NEW.timestamp), 0));
+
     SELECT processing_version INTO existing_ver
     FROM offchain_token_price
     WHERE token_id = NEW.token_id
