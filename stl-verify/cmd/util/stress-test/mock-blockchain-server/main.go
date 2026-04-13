@@ -156,7 +156,13 @@ func loadStore(ctx context.Context, logger *slog.Logger, c serverConfig) (*mockc
 
 	store := mockchain.NewDataStore()
 	if err := store.LoadFromS3(ctx, reader, c.s3Bucket, c.s3Prefix); err != nil {
-		return nil, fmt.Errorf("bucket %q prefix %q: %w", c.s3Bucket, c.s3Prefix, err)
+		logger.Warn("failed to load from S3, falling back to fixture data", "bucket", c.s3Bucket, "error", err)
+		return mockchain.NewFixtureDataStore(), nil
+	}
+
+	if store.Len() == 0 {
+		logger.Warn("S3 bucket is empty, falling back to fixture data", "bucket", c.s3Bucket)
+		return mockchain.NewFixtureDataStore(), nil
 	}
 
 	logger.Info("block data loaded from S3", "blocks", store.Len())

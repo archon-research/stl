@@ -22,7 +22,7 @@ The watcher consists of two main services:
 make dev-up
 ```
 
-This creates a local `kind` Kubernetes cluster and deploys the full pipeline. See [k8s/README.md](k8s/README.md) for service ports, lifecycle commands, and configuration details.
+This creates a local `kind` Kubernetes cluster and deploys the full pipeline, including a mock blockchain server that replaces Alchemy by default. No API keys or AWS credentials are needed to get started. See [k8s/README.md](k8s/README.md) for service ports, lifecycle commands, and configuration details.
 
 ## Command-Line Flags
 
@@ -33,13 +33,13 @@ This creates a local `kind` Kubernetes cluster and deploys the full pipeline. Se
 
 ## Environment Variables
 
-### Required
+### Optional
+
+All environment variables are optional for local development. The mock blockchain server is used by default.
 
 | Variable | Description |
 |----------|-------------|
-| `ALCHEMY_API_KEY` | Alchemy API key for Ethereum mainnet |
-
-### Optional
+| `ALCHEMY_API_KEY` | Alchemy API key for Ethereum mainnet (only needed when using real Alchemy via `make kind-use-alchemy`) |
 
 | Variable | Description | Default |
 |----------|-------------|---------|

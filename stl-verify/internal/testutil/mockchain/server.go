@@ -232,10 +232,19 @@ func (rc *reorgController) trigger(depth int) error {
 		}
 		rc.store.AddReorgHeader(reorgHash, header)
 
-		for _, dt := range []string{"receipts", "traces", "blobs"} {
-			if raw, ok := rc.store.Get(templateIndex, dt); ok {
-				rc.store.AddReorgBlock(reorgHash, dt, raw)
+		for _, dt := range []string{"block", "receipts", "traces", "blobs"} {
+			raw, ok := rc.store.Get(templateIndex, dt)
+			if !ok {
+				continue
 			}
+			if dt == "block" {
+				patched, err := patchBlockJSON(raw, header.Number, reorgHash, prevHash)
+				if err != nil {
+					continue
+				}
+				raw = patched
+			}
+			rc.store.AddReorgBlock(reorgHash, dt, raw)
 		}
 
 		prevHash = reorgHash

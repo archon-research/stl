@@ -31,8 +31,12 @@ This creates the `vector` kind cluster and deploys the full pipeline:
 | OTLP gRPC | 4317 |
 | Temporal gRPC | 7233 |
 | Temporal UI | 8233 |
+| Mock Blockchain RPC/WS | 8546 |
+| Mock Blockchain Admin | 8547 |
 
 All services are accessible at `localhost` — no port-forwarding needed.
+
+The watcher uses the mock blockchain server by default instead of real Alchemy. No API keys or AWS credentials are needed to get started.
 
 ## Lifecycle
 
@@ -78,6 +82,24 @@ To override a config value locally, edit `k8s/config/configmap.yaml` and reapply
 ```bash
 kubectl --context=kind-vector apply -f k8s/config/configmap.yaml -n vector
 kubectl --context=kind-vector rollout restart deployment/watcher -n vector
+```
+
+## Switching Between Mock and Real Alchemy
+
+By default, the watcher uses the mock blockchain server. To switch at any time while the cluster is running:
+
+```bash
+# Switch to real Alchemy (requires ALCHEMY_API_KEY in .env.secrets)
+make kind-secrets && make kind-use-alchemy
+
+# Switch back to mock
+make kind-use-mock
+```
+
+To load real block data (500 blocks from staging) into the mock server:
+
+```bash
+make stress-test-data && make kind-redeploy-mock-blockchain-server
 ```
 
 ## Fast Iteration

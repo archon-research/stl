@@ -111,36 +111,23 @@ All three queries must return 0:
 
 ## Local setup (first time)
 
-### 1. Start the kind cluster
+`make dev-up` deploys the mock blockchain server and points the watcher at it by default.
+The mock starts with synthetic fixture blocks. To load real block data for stress testing:
 
 ```bash
-make dev-up
-```
-
-### 2. Export block data to LocalStack (one-time, needs staging AWS credentials)
-
-```bash
+# One-time: sync 500 real blocks from staging S3 into LocalStack (requires staging AWS credentials)
 make stress-test-data
-```
 
-Copies 500 blocks from the staging backup bucket into LocalStack. Data persists across
-kind restarts. Re-run only if you need different blocks.
-
-### 3. Deploy the mock server
-
-```bash
+# Restart the mock to pick up real data
 make kind-redeploy-mock-blockchain-server
 ```
 
-### 4. Point the watcher at the mock server
+Data persists across kind restarts. Re-run `stress-test-data` only if you need different blocks.
 
+To switch the watcher between mock and real Alchemy at any time:
 ```bash
-make kind-use-mock
-```
-
-Restore to real Alchemy at any time:
-```bash
-make kind-use-alchemy
+make kind-use-alchemy   # switch to real Alchemy (requires ALCHEMY_API_KEY)
+make kind-use-mock       # switch back to mock
 ```
 
 ## Admin API reference

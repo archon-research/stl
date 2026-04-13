@@ -21,7 +21,7 @@ All commands run from `stl-verify/`:
 
 ```bash
 # Development
-make dev-up              # Start Docker services (PostgreSQL, Redis, Jaeger, LocalStack)
+make dev-up              # Start kind cluster with full pipeline (mock blockchain server by default)
 make dev-down            # Stop services
 make run-watcher         # Run watcher (loads .env from cmd/watcher/)
 
