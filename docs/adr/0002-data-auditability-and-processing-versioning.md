@@ -174,34 +174,32 @@ insert. If the `build_id` is different (or no row exists), it assigns the next v
 
 #### Concurrency
 
-Following the established pattern in `blockstate_repository.go`, the **application/repository
-layer** is responsible for concurrency control. Inserts that need version assignment must be
-wrapped in a `READ COMMITTED` transaction, and the caller must acquire an advisory lock before
-executing the insert to serialize concurrent writers for the same natural key.
+Each trigger function acquires `pg_advisory_xact_lock` on a 64-bit hash of the table prefix +
+full natural key columns before reading `MAX(processing_version)`. This serializes concurrent
+inserts for the same natural key at the database level — every INSERT is protected regardless
+of which client, code path, or language performs it.
 
-The trigger's responsibility is limited to reading existing rows and assigning the correct
-version number inside that already-serialized transaction. The trigger does **not** acquire
-advisory locks itself — keeping the serialization contract in one layer (the repository) rather
-than splitting it across trigger and application code.
+The lock key is built with `format()` and pipe delimiters. The table prefix prevents
+cross-table collisions. `format()` converts each argument independently, preventing ambiguity
+between value boundaries.
 
-`SERIALIZABLE` isolation alone cannot detect version races on TimescaleDB hypertables due to
-chunk-level constraints — it produces unique constraint violations (23505) instead of
-serialization failures (40001). The advisory lock serializes inserts, and `READ COMMITTED`
-allows the trigger to see committed changes from the prior lock-holder.
+```sql
+PERFORM pg_advisory_xact_lock(hashtextextended(
+    format('mms|%s|%s|%s|%s',
+        NEW.morpho_market_id, NEW.block_number, NEW.block_version, NEW.timestamp),
+    0));
+```
 
-The advisory lock key should be derived from stable natural key components using a low-collision
-strategy. Prefer `pg_advisory_xact_lock($1::int, $2::int)` when the natural key has stable
-integer parts (e.g. `(chain_id, block_number)` as in `blockstate_repository.go`). If it cannot
-be expressed as two integers, use a 64-bit derived key such as
-`pg_advisory_xact_lock(hashtextextended(concatenated_key, 0)::bigint)`. Avoid plain
-`hashtext()` — it is only 32-bit and can unexpectedly serialize unrelated natural keys.
+The only requirement from callers: use `READ COMMITTED` isolation (PostgreSQL's default, and
+explicitly configured in `OpenPool`). `SERIALIZABLE` would snapshot too early, preventing the
+trigger from seeing committed rows from the lock holder.
 
-Any new repository that writes to these tables must follow the same locking pattern.
+**Deadlock prevention in batch inserts:** The trigger fires per row in VALUES clause order.
+Two concurrent transactions inserting overlapping rows in different order would deadlock.
+Batch repository methods must sort rows by natural key before building the INSERT to ensure
+consistent lock acquisition order across transactions.
 
 #### Trigger Examples
-
-The examples below assume the caller has already started a `READ COMMITTED` transaction and
-acquired the advisory lock for the row's natural key.
 
 ```sql
 -- ============================================================================
@@ -215,6 +213,12 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    -- Serialize concurrent inserts for the same natural key.
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        format('mms|%s|%s|%s|%s',
+            NEW.morpho_market_id, NEW.block_number, NEW.block_version, NEW.timestamp),
+        0));
+
     -- Check if this build already produced a version for this key (retry)
     SELECT processing_version INTO existing_ver
     FROM morpho_market_state
@@ -378,6 +382,10 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        format('ofp|%s|%s|%s', NEW.token_id, NEW.source_id, NEW.timestamp),
+        0));
+
     SELECT processing_version INTO existing_ver
     FROM offchain_token_price
     WHERE token_id = NEW.token_id
@@ -423,15 +431,15 @@ Each trigger function uses static SQL with hardcoded column names, allowing Post
 the query plan across invocations. The queries run as index-only scans on the existing PK/unique
 index.
 
-The trigger performs up to two index lookups per insert: one to check for a retry (by
-`build_id`), and if not found, one to get `MAX(processing_version)`. On the normal path (first
-insert, no existing row), both return empty results quickly. The advisory lock is acquired by
-the caller before the insert, not by the trigger.
+The trigger acquires an advisory lock (~2-5us uncontended), then performs up to two index
+lookups: one to check for a retry (by `build_id`), and if not found, one to get
+`MAX(processing_version)`. On the normal path (first insert, no existing row), all operations
+return quickly.
 
-Estimated per-insert trigger overhead: ~30-100us (plan lookup from cache + index scans).
-The advisory lock adds ~5us uncontended at the repository level. For normal block processing
-(~50-200 rows per 12-second block), total overhead is 2-21ms — negligible relative to
-network I/O.
+Benchmarked at ~200us per INSERT total (advisory lock + trigger + INSERT + network roundtrip
+to containerized PostgreSQL). The advisory lock itself is a small fraction of the total cost.
+For normal block processing (~50-200 rows per 12-second block), total overhead is negligible
+relative to network I/O.
 
 ### 4. Canonical Version: Latest-Wins
 
@@ -544,6 +552,12 @@ from caching the query plan, adding ~100-250us per insert (2-3x slower than a de
 function). Rejected because the boilerplate cost of per-table functions is low and the
 performance benefit of plan caching matters on high-throughput tables.
 
+**Application-level advisory locking** — Instead of acquiring the advisory lock in the trigger,
+a Go-side helper function would be called by each repository before inserting. Rejected because
+it duplicates the natural key definition (the trigger already has it in the WHERE clause),
+relies on caller discipline across 14+ call sites, doesn't protect inserts from non-Go clients
+(migrations, scripts, psql), and creates the same class of bug as untyped variadic parameters.
+
 **Application-level version assignment** — Instead of a trigger, each repository's INSERT
 statement would include a subquery to compute the next `processing_version`. Normal inserts would
 hardcode `0`; reprocessing jobs would query `MAX + 1` at startup for their target block range and
@@ -588,8 +602,8 @@ canonical-data query and introduces a coordination point that must be kept in sy
 - Applies uniformly to both blockchain-derived and off-chain polled data
 
 **Negative / Trade-offs:**
-- Every INSERT on state tables incurs ~30-100us trigger overhead plus ~5us for the
-  repository-level advisory lock (~5-15% increase on insert latency)
+- Every INSERT on state tables incurs ~200us total overhead (advisory lock + trigger + INSERT),
+  benchmarked against containerized PostgreSQL
 - Primary keys / unique constraints on all state tables grow by one column, slightly increasing
   index size
 - The `DISTINCT ON ... ORDER BY processing_version DESC` query pattern for canonical data must
@@ -597,4 +611,6 @@ canonical-data query and introduces a coordination point that must be kept in sy
 - Migration requires decompressing all compressed hypertable chunks, altering constraints,
   updating compression settings, and recompressing — this is a significant operation that needs
   a maintenance window
-- Per-table trigger functions are boilerplate-heavy (~15 functions with near-identical structure)
+- Per-table trigger functions are boilerplate-heavy (~14 functions with near-identical structure)
+- Batch insert methods must sort rows by natural key before INSERT to prevent deadlocks from
+  the per-row advisory lock in the trigger

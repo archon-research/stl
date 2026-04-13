@@ -314,10 +314,11 @@ func TestMigrations_AuditabilityOnSelfHosted(t *testing.T) {
 // same natural key with different build_ids produce two rows with processing_version 0
 // and 1 respectively.
 //
-// PostgreSQL's row-level locking on the unique index already serializes this case:
-// tx2's INSERT blocks when it detects tx1's uncommitted row occupies the same PK slot.
-// Once tx1 commits, tx2's trigger re-evaluates under READ COMMITTED, sees MAX=0, and
-// assigns processing_version=1. The advisory lock in the trigger provides defense-in-depth.
+// Without the advisory lock in the trigger, tx2's BEFORE INSERT trigger would read
+// MAX(processing_version) = -1 (tx1's uncommitted row is invisible under READ COMMITTED),
+// assign processing_version = 0, and then block on the unique index. After tx1 commits,
+// tx2's ON CONFLICT DO NOTHING would drop the row — silently losing data. The advisory
+// lock serializes trigger execution so tx2 sees tx1's committed row before computing MAX.
 //
 // The test uses two explicit connections to guarantee truly concurrent transactions.
 func TestProcessingVersion_ConcurrentBuilds(t *testing.T) {
