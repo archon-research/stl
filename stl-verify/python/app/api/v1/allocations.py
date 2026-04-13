@@ -43,7 +43,6 @@ class ReceiptTokenPositionResponse(BaseModel):
 
 
 class AllocationPositionResponse(BaseModel):
-    id: int
     chain_id: int
     name: str
     proxy_address: str

@@ -113,7 +113,6 @@ class PostgresAllocationRepository:
     _ALLOCATIONS_SQL = text("""
         SELECT DISTINCT ON
         (ap.chain_id, ap.token_id, ap.proxy_address, ap.block_number, ap.tx_hash, ap.log_index, ap.direction)
-            ap.id,
             ap.chain_id,
             p.name,
             encode(ap.proxy_address, 'hex') AS proxy_address,
@@ -157,7 +156,6 @@ class PostgresAllocationRepository:
         )
         return [
             AllocationPosition(
-                id=row.id,
                 chain_id=row.chain_id,
                 name=row.name,
                 proxy_address="0x" + row.proxy_address,
