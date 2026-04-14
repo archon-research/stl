@@ -116,8 +116,23 @@ SELECT _compress_old_chunks('morpho_vault_position', INTERVAL '2 days');
 SELECT _compress_old_chunks('anchorage_package_snapshot', INTERVAL '2 days');
 SELECT _compress_old_chunks('anchorage_operation', INTERVAL '2 days');
 SELECT _compress_old_chunks('offchain_token_price', INTERVAL '2 days');
-SELECT _compress_old_chunks('sparklend_reserve_data', INTERVAL '2 days');
-SELECT _compress_old_chunks('prime_debt', INTERVAL '2 days');
+
+-- sparklend_reserve_data and prime_debt: compress all uncompressed chunks directly.
+-- _compress_old_chunks uses range_end < timestamptz, which doesn't work for
+-- sparklend_reserve_data (integer-partitioned on block_number — range_end is NULL
+-- in timescaledb_information.chunks, so the comparison silently matches nothing).
+DO $$
+DECLARE v_chunk regclass;
+BEGIN
+    FOR v_chunk IN
+        SELECT format('%I.%I', chunk_schema, chunk_name)::regclass
+        FROM timescaledb_information.chunks
+        WHERE hypertable_name IN ('sparklend_reserve_data', 'prime_debt')
+          AND is_compressed = false
+    LOOP
+        PERFORM compress_chunk(v_chunk);
+    END LOOP;
+END $$;
 
 -- ============================================================================
 -- Columnstore API tables — re-enable columnstore with updated orderby, restart jobs
