@@ -1,6 +1,7 @@
 import contextvars
 import uuid
 
+from opentelemetry import trace
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -19,6 +20,8 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         rid = request.headers.get(_REQUEST_ID_HEADER) or str(uuid.uuid4())
         token = request_id_var.set(rid)
+        span = trace.get_current_span()
+        span.set_attribute("request_id", rid)
         try:
             response = await call_next(request)
             response.headers[_REQUEST_ID_HEADER] = rid
