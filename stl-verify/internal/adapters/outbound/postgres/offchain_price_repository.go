@@ -1,12 +1,10 @@
 package postgres
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -128,15 +126,6 @@ func (r *PriceRepository) UpsertPrices(ctx context.Context, prices []*entity.Tok
 	if len(prices) == 0 {
 		return nil
 	}
-
-	// Sort by natural key to ensure consistent lock acquisition order and prevent deadlocks.
-	slices.SortFunc(prices, func(a, b *entity.TokenPrice) int {
-		return cmp.Or(
-			cmp.Compare(a.TokenID, b.TokenID),
-			cmp.Compare(a.SourceID, b.SourceID),
-			a.Timestamp.Compare(b.Timestamp),
-		)
-	})
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {

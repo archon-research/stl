@@ -1,12 +1,10 @@
 package postgres
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -60,17 +58,6 @@ func (r *AnchorageRepository) SaveSnapshots(ctx context.Context, snapshots []ent
 	if len(snapshots) == 0 {
 		return nil
 	}
-
-	// Sort by natural key to ensure consistent lock acquisition order and prevent deadlocks.
-	slices.SortFunc(snapshots, func(a, b entity.AnchoragePackageSnapshot) int {
-		return cmp.Or(
-			cmp.Compare(a.PrimeID, b.PrimeID),
-			cmp.Compare(a.PackageID, b.PackageID),
-			cmp.Compare(a.AssetType, b.AssetType),
-			cmp.Compare(a.CustodyType, b.CustodyType),
-			a.SnapshotTime.Compare(b.SnapshotTime),
-		)
-	})
 
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		for i := 0; i < len(snapshots); i += snapshotBatchSize {
@@ -146,14 +133,6 @@ func (r *AnchorageRepository) SaveOperations(ctx context.Context, operations []e
 	if len(operations) == 0 {
 		return nil
 	}
-
-	// Sort by natural key to ensure consistent lock acquisition order and prevent deadlocks.
-	slices.SortFunc(operations, func(a, b entity.AnchorageOperation) int {
-		return cmp.Or(
-			cmp.Compare(a.OperationID, b.OperationID),
-			a.CreatedAt.Compare(b.CreatedAt),
-		)
-	})
 
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		for i := 0; i < len(operations); i += operationBatchSize {

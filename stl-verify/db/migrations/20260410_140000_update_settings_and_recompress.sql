@@ -89,6 +89,24 @@ ALTER TABLE offchain_token_price SET (
 );
 SELECT add_compression_policy('offchain_token_price', INTERVAL '2 days', if_not_exists => true);
 
+-- sparklend_reserve_data (compression was set externally; re-enable with processing_version)
+-- Partitioned on block_number (integer), so compress_after uses block count, not interval.
+-- 200000 blocks ≈ ~27 days at 12s/block.
+ALTER TABLE sparklend_reserve_data SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'protocol_id, token_id',
+    timescaledb.compress_orderby = 'block_number DESC, block_version DESC, processing_version DESC'
+);
+SELECT add_compression_policy('sparklend_reserve_data', 200000, if_not_exists => true);
+
+-- prime_debt (compression was set externally; re-enable with processing_version)
+ALTER TABLE prime_debt SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'prime_id',
+    timescaledb.compress_orderby = 'block_number DESC, block_version DESC, processing_version DESC'
+);
+SELECT add_compression_policy('prime_debt', INTERVAL '2 days', if_not_exists => true);
+
 -- Recompress chunks older than 2 days
 SELECT _compress_old_chunks('onchain_token_price', INTERVAL '2 days');
 SELECT _compress_old_chunks('morpho_market_state', INTERVAL '2 days');
@@ -98,6 +116,8 @@ SELECT _compress_old_chunks('morpho_vault_position', INTERVAL '2 days');
 SELECT _compress_old_chunks('anchorage_package_snapshot', INTERVAL '2 days');
 SELECT _compress_old_chunks('anchorage_operation', INTERVAL '2 days');
 SELECT _compress_old_chunks('offchain_token_price', INTERVAL '2 days');
+SELECT _compress_old_chunks('sparklend_reserve_data', INTERVAL '2 days');
+SELECT _compress_old_chunks('prime_debt', INTERVAL '2 days');
 
 -- ============================================================================
 -- Columnstore API tables — re-enable columnstore with updated orderby, restart jobs

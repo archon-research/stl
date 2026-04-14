@@ -1,11 +1,9 @@
 package postgres
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
-	"slices"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -73,18 +71,6 @@ func (r *PositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, borro
 		return nil
 	}
 
-	// Sort by natural key to ensure consistent lock acquisition order and prevent deadlocks.
-	slices.SortFunc(borrowers, func(a, b *entity.Borrower) int {
-		return cmp.Or(
-			cmp.Compare(a.UserID, b.UserID),
-			cmp.Compare(a.ProtocolID, b.ProtocolID),
-			cmp.Compare(a.TokenID, b.TokenID),
-			cmp.Compare(a.BlockNumber, b.BlockNumber),
-			cmp.Compare(a.BlockVersion, b.BlockVersion),
-			a.CreatedAt.Compare(b.CreatedAt),
-		)
-	})
-
 	batch := &pgx.Batch{}
 	for _, b := range borrowers {
 		batch.Queue(
@@ -139,18 +125,6 @@ func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx
 	if len(collaterals) == 0 {
 		return nil
 	}
-
-	// Sort by natural key to ensure consistent lock acquisition order and prevent deadlocks.
-	slices.SortFunc(collaterals, func(a, b *entity.BorrowerCollateral) int {
-		return cmp.Or(
-			cmp.Compare(a.UserID, b.UserID),
-			cmp.Compare(a.ProtocolID, b.ProtocolID),
-			cmp.Compare(a.TokenID, b.TokenID),
-			cmp.Compare(a.BlockNumber, b.BlockNumber),
-			cmp.Compare(a.BlockVersion, b.BlockVersion),
-			a.CreatedAt.Compare(b.CreatedAt),
-		)
-	})
 
 	batch := &pgx.Batch{}
 	for _, bc := range collaterals {

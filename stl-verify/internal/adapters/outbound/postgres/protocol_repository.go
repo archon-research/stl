@@ -1,12 +1,10 @@
 package postgres
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
 	"math/big"
-	"slices"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -82,16 +80,6 @@ func (r *ProtocolRepository) UpsertReserveData(ctx context.Context, tx pgx.Tx, d
 	if len(data) == 0 {
 		return nil
 	}
-
-	// Sort by natural key to ensure consistent lock acquisition order and prevent deadlocks.
-	slices.SortFunc(data, func(a, b *entity.SparkLendReserveData) int {
-		return cmp.Or(
-			cmp.Compare(a.ProtocolID, b.ProtocolID),
-			cmp.Compare(a.TokenID, b.TokenID),
-			cmp.Compare(a.BlockNumber, b.BlockNumber),
-			cmp.Compare(a.BlockVersion, b.BlockVersion),
-		)
-	})
 
 	for i := 0; i < len(data); i += r.batchSize {
 		end := min(i+r.batchSize, len(data))

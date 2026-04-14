@@ -1,12 +1,10 @@
 package postgres
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -190,17 +188,6 @@ func (r *OnchainPriceRepository) UpsertPrices(ctx context.Context, prices []*ent
 	if len(prices) == 0 {
 		return nil
 	}
-
-	// Sort by natural key to ensure consistent lock acquisition order and prevent deadlocks.
-	slices.SortFunc(prices, func(a, b *entity.OnchainTokenPrice) int {
-		return cmp.Or(
-			cmp.Compare(a.TokenID, b.TokenID),
-			cmp.Compare(a.OracleID, b.OracleID),
-			cmp.Compare(a.BlockNumber, b.BlockNumber),
-			cmp.Compare(a.BlockVersion, b.BlockVersion),
-			a.Timestamp.Compare(b.Timestamp),
-		)
-	})
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
