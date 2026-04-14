@@ -8,7 +8,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
 from app.middleware.request_id import RequestIdMiddleware, get_request_id
-from app.telemetry import instrument_sqlalchemy_engine, setup_telemetry
+from app.telemetry import instrument_sqlalchemy_engine, setup_telemetry, shutdown_telemetry
 
 
 class _CollectingExporter(SpanExporter):
@@ -62,6 +62,30 @@ def test_setup_telemetry_configures_provider_when_enabled():
     provider = trace.get_tracer_provider()
     assert isinstance(provider, TracerProvider)
     provider.shutdown()
+
+
+def test_shutdown_telemetry_noop_when_none():
+    """shutdown_telemetry(None) should be a silent no-op."""
+    shutdown_telemetry(None)  # must not raise
+
+
+def test_shutdown_telemetry_only_affects_passed_provider():
+    """Shutting down a provider must not touch an externally installed global."""
+    global_provider = TracerProvider()
+    global_shutdown = MagicMock(wraps=global_provider.shutdown)
+    global_provider.shutdown = global_shutdown
+    trace.set_tracer_provider(global_provider)
+
+    owned_provider = TracerProvider()
+    owned_shutdown = MagicMock(wraps=owned_provider.shutdown)
+    owned_provider.shutdown = owned_shutdown
+
+    shutdown_telemetry(owned_provider)
+
+    owned_shutdown.assert_called_once_with()
+    global_shutdown.assert_not_called()
+
+    global_provider.shutdown()
 
 
 def test_instrument_sqlalchemy_engine_noop_when_no_provider():

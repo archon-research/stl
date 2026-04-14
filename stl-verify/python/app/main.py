@@ -29,11 +29,11 @@ def create_app(settings: Settings) -> FastAPI:
         try:
             await engine.dispose()
         finally:
-            shutdown_telemetry()
+            shutdown_telemetry(app.state.tracer_provider)
 
     application = FastAPI(title="stl-verify", lifespan=lifespan)
     application.add_middleware(RequestIdMiddleware)
-    setup_telemetry(application, settings)
+    application.state.tracer_provider = setup_telemetry(application, settings)
     application.include_router(status.router, prefix="/v1")
     application.include_router(allocations.router, prefix="/v1")
     application.include_router(risk.router, prefix="/v1")

@@ -26,10 +26,9 @@ def setup_telemetry(app, settings: Settings) -> TracerProvider | None:
     return provider
 
 
-def shutdown_telemetry() -> None:
-    """Flush and shut down the tracer provider if active."""
-    provider = trace.get_tracer_provider()
-    if isinstance(provider, TracerProvider):
+def shutdown_telemetry(provider: TracerProvider | None) -> None:
+    """Flush and shut down the given tracer provider. No-op for None."""
+    if provider is not None:
         provider.shutdown()
 
 
