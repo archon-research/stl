@@ -10,29 +10,46 @@ from app.domain.entities.backed_breakdown import (
 )
 
 _BACKED_BREAKDOWN_SQL = """
--- Step 1: Latest debt snapshot per user per token, scaled to human-readable units.
--- Uses DISTINCT ON to select the most-recent row; does NOT sum across events because
--- the writer stores a running balance snapshot on every Borrow/Repay, not signed deltas.
-WITH user_debts AS (
-    SELECT user_id, token_id, debt_amount
+-- Step 1: Latest target-debt snapshot per user, scaled to human-readable units.
+-- We only need the backed asset itself here, so avoid materialising latest debt snapshots
+-- for every token in the protocol.
+WITH user_target_debt AS (
+    SELECT user_id, target_debt_amount
     FROM (
-        SELECT DISTINCT ON (b.user_id, b.token_id)
+        SELECT DISTINCT ON (b.user_id)
             b.user_id,
-            b.token_id,
-            b.amount / power(10::numeric, t.decimals) AS debt_amount
+            b.amount / power(10::numeric, t.decimals) AS target_debt_amount
         FROM borrower b
         JOIN token t ON t.id = b.token_id
         WHERE b.protocol_id = :protocol_id
-        ORDER BY b.user_id, b.token_id, b.block_number DESC, b.block_version DESC, b.processing_version DESC
+          AND b.token_id = :backed_asset_id
+        ORDER BY b.user_id, b.block_number DESC, b.block_version DESC, b.processing_version DESC
     ) latest
-    WHERE debt_amount > 0
+    WHERE target_debt_amount > 0
 ),
 
--- Step 2: Latest collateral snapshot per user per token, scaled to human-readable units.
+-- Step 2: Latest protocol-level collateral-enabled state per token.
+-- This is computed once per token instead of via a per-row LATERAL lookup from
+-- borrower_collateral.
+enabled_collateral_tokens AS (
+    SELECT token_id
+    FROM (
+        SELECT DISTINCT ON (srd.token_id)
+            srd.token_id,
+            srd.usage_as_collateral_enabled
+        FROM sparklend_reserve_data srd
+        WHERE srd.protocol_id = :protocol_id
+        ORDER BY srd.token_id, srd.block_number DESC, srd.block_version DESC, srd.processing_version DESC
+    ) latest
+    WHERE usage_as_collateral_enabled = true
+),
+
+-- Step 3: Latest collateral snapshot per target borrower per token, scaled to human-readable units.
 -- DISTINCT ON picks the most-recent row first; the outer WHERE then filters on the
 -- collateral_enabled flag from that latest row, so a subsequent disable event correctly
 -- excludes the position even though earlier enabled rows exist.
--- The LATERAL join additionally excludes assets disabled at the protocol level.
+-- Joining user_target_debt here avoids computing latest collateral for users who do not
+-- borrow the backed asset.
 user_collateral AS (
     SELECT user_id, token_id, collateral_amount
     FROM (
@@ -42,43 +59,36 @@ user_collateral AS (
             bc.amount / power(10::numeric, t.decimals) AS collateral_amount,
             bc.collateral_enabled
         FROM borrower_collateral bc
+        JOIN user_target_debt utd ON utd.user_id = bc.user_id
+        JOIN enabled_collateral_tokens ect ON ect.token_id = bc.token_id
         JOIN token t ON t.id = bc.token_id
-        JOIN LATERAL (
-            SELECT usage_as_collateral_enabled
-            FROM sparklend_reserve_data srd
-            WHERE srd.token_id = bc.token_id
-              AND srd.protocol_id = :protocol_id
-            ORDER BY srd.block_number DESC, srd.block_version DESC, srd.processing_version DESC
-            LIMIT 1
-        ) srd ON srd.usage_as_collateral_enabled = true
         WHERE bc.protocol_id = :protocol_id
         ORDER BY bc.user_id, bc.token_id, bc.block_number DESC, bc.block_version DESC, bc.processing_version DESC
     ) latest
     WHERE collateral_enabled = true
 ),
 
--- Step 3: Latest USD price per token from the protocol's oracle
-token_prices AS (
-    SELECT DISTINCT ON (otp.token_id)
-        otp.token_id,
-        otp.price_usd
-    FROM onchain_token_price otp
-    JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
-    WHERE po.protocol_id = :protocol_id
-    ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+-- Step 4: Latest USD price only for collateral tokens that are actually needed.
+-- The LATERAL lookup preserves the original semantics (latest price across the protocol's
+-- configured oracle rows) while avoiding a full DISTINCT ON over every priced token.
+needed_tokens AS (
+    SELECT DISTINCT token_id FROM user_collateral
 ),
-
--- Step 4: Target (backed asset) debt per user, only for users who borrowed it.
-user_target_debt AS (
-    SELECT ud.user_id,
-        SUM(ud.debt_amount) FILTER (WHERE ud.token_id = :backed_asset_id) AS target_debt_amount
-    FROM user_debts ud
-    GROUP BY ud.user_id
-    HAVING SUM(ud.debt_amount) FILTER (WHERE ud.token_id = :backed_asset_id) > 0
+token_prices AS (
+    SELECT nt.token_id, otp.price_usd
+    FROM needed_tokens nt
+    JOIN LATERAL (
+        SELECT otp.price_usd
+        FROM onchain_token_price otp
+        JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+        WHERE po.protocol_id = :protocol_id
+          AND otp.token_id = nt.token_id
+        ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+        LIMIT 1
+    ) otp ON true
 ),
 
 -- Step 5: Collateral USD value per user per token, and each user's total collateral USD.
--- Only includes users who have target debt (inner join with user_target_debt).
 -- Collateral without a price is excluded — it cannot contribute to USD-denominated backing.
 user_collateral_usd AS (
     SELECT
@@ -87,7 +97,6 @@ user_collateral_usd AS (
         uc.collateral_amount * tp.price_usd AS collateral_usd
     FROM user_collateral uc
     JOIN token_prices tp ON tp.token_id = uc.token_id
-    JOIN user_target_debt utd ON utd.user_id = uc.user_id
 ),
 user_total_collateral_usd AS (
     SELECT user_id, SUM(collateral_usd) AS total_collateral_usd
