@@ -10,6 +10,7 @@ from app.api.v1 import allocations, risk, status
 from app.config import Settings, get_settings
 from app.logging import setup_logging
 from app.middleware.request_id import RequestIdMiddleware
+from app.telemetry import instrument_sqlalchemy_engine, setup_telemetry, shutdown_telemetry
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -21,13 +22,18 @@ def create_app(settings: Settings) -> FastAPI:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         app.state.engine = engine
+        instrument_sqlalchemy_engine(engine)
         async with httpx.AsyncClient() as http_client:
             app.state.http_client = http_client
             yield
-        await engine.dispose()
+        try:
+            await engine.dispose()
+        finally:
+            shutdown_telemetry()
 
     application = FastAPI(title="stl-verify", lifespan=lifespan)
     application.add_middleware(RequestIdMiddleware)
+    setup_telemetry(application, settings)
     application.include_router(status.router, prefix="/v1")
     application.include_router(allocations.router, prefix="/v1")
     application.include_router(risk.router, prefix="/v1")
