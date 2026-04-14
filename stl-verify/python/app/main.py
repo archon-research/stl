@@ -8,9 +8,13 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.api.v1 import allocations, risk, status
 from app.config import Settings, get_settings
+from app.logging import setup_logging
+from app.middleware.request_id import RequestIdMiddleware
 
 
 def create_app(settings: Settings) -> FastAPI:
+    setup_logging(log_level=settings.log_level, log_format=settings.log_format)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(settings.async_database_url, pool_pre_ping=True)
@@ -23,6 +27,7 @@ def create_app(settings: Settings) -> FastAPI:
         await engine.dispose()
 
     application = FastAPI(title="stl-verify", lifespan=lifespan)
+    application.add_middleware(RequestIdMiddleware)
     application.include_router(status.router, prefix="/v1")
     application.include_router(allocations.router, prefix="/v1")
     application.include_router(risk.router, prefix="/v1")
