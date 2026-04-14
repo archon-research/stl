@@ -3,11 +3,11 @@ package entity
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // ProtocolEvent represents a decoded protocol event stored for analytics and auditability.
 type ProtocolEvent struct {
-	ID              int64
 	ChainID         int
 	ProtocolID      int64
 	BlockNumber     int64
@@ -17,10 +17,11 @@ type ProtocolEvent struct {
 	ContractAddress []byte
 	EventName       string
 	EventData       json.RawMessage
+	CreatedAt       time.Time // block timestamp — deterministic for hypertable dedup
 }
 
 // NewProtocolEvent creates a new ProtocolEvent with validation.
-func NewProtocolEvent(chainID int, protocolID, blockNumber int64, blockVersion int, txHash []byte, logIndex int, contractAddress []byte, eventName string, eventData json.RawMessage) (*ProtocolEvent, error) {
+func NewProtocolEvent(chainID int, protocolID, blockNumber int64, blockVersion int, txHash []byte, logIndex int, contractAddress []byte, eventName string, eventData json.RawMessage, createdAt time.Time) (*ProtocolEvent, error) {
 	e := &ProtocolEvent{
 		ChainID:         chainID,
 		ProtocolID:      protocolID,
@@ -31,20 +32,26 @@ func NewProtocolEvent(chainID int, protocolID, blockNumber int64, blockVersion i
 		ContractAddress: contractAddress,
 		EventName:       eventName,
 		EventData:       eventData,
+		CreatedAt:       createdAt,
 	}
-	if err := e.validate(); err != nil {
-		return nil, err
+	if err := e.Validate(); err != nil {
+		return nil, fmt.Errorf("NewProtocolEvent: %w", err)
 	}
 	return e, nil
 }
 
-func (e *ProtocolEvent) validate() error {
+func (e *ProtocolEvent) Validate() error {
+	if e.CreatedAt.IsZero() {
+		return fmt.Errorf("createdAt must be set explicitly (block timestamp)")
+	}
 	if e.ChainID <= 0 {
 		return fmt.Errorf("chainID must be positive, got %d", e.ChainID)
 	}
 	if e.ProtocolID <= 0 {
 		return fmt.Errorf("protocolID must be positive, got %d", e.ProtocolID)
 	}
+	// Non-negative (allows block 0 / genesis) — unlike position entities which require
+	// positive block numbers, events can occur in the genesis block (e.g. contract deploys).
 	if e.BlockNumber < 0 {
 		return fmt.Errorf("blockNumber must be non-negative, got %d", e.BlockNumber)
 	}

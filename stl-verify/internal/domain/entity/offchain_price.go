@@ -31,13 +31,13 @@ func NewPriceSource(id int64, name, displayName, baseURL string, rateLimitPerMin
 		CreatedAt:          time.Now(),
 		UpdatedAt:          time.Now(),
 	}
-	if err := ps.validate(); err != nil {
-		return nil, err
+	if err := ps.Validate(); err != nil {
+		return nil, fmt.Errorf("NewPriceSource: %w", err)
 	}
 	return ps, nil
 }
 
-func (ps *PriceSource) validate() error {
+func (ps *PriceSource) Validate() error {
 	if ps.ID <= 0 {
 		return fmt.Errorf("id must be positive, got %d", ps.ID)
 	}
@@ -76,13 +76,13 @@ func NewPriceAsset(id, sourceID int64, sourceAssetID string, tokenID *int64, nam
 		CreatedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
 	}
-	if err := pa.validate(); err != nil {
-		return nil, err
+	if err := pa.Validate(); err != nil {
+		return nil, fmt.Errorf("NewPriceAsset: %w", err)
 	}
 	return pa, nil
 }
 
-func (pa *PriceAsset) validate() error {
+func (pa *PriceAsset) Validate() error {
 	if pa.ID <= 0 {
 		return fmt.Errorf("id must be positive, got %d", pa.ID)
 	}
@@ -121,13 +121,13 @@ func NewTokenPrice(tokenID int64, sourceID int16, priceUSD float64, marketCapUSD
 		VolumeUSD:    volumeUSD,
 		Timestamp:    timestamp,
 	}
-	if err := tp.validate(); err != nil {
-		return nil, err
+	if err := tp.Validate(); err != nil {
+		return nil, fmt.Errorf("NewTokenPrice: %w", err)
 	}
 	return tp, nil
 }
 
-func (tp *TokenPrice) validate() error {
+func (tp *TokenPrice) Validate() error {
 	if tp.TokenID <= 0 {
 		return fmt.Errorf("tokenID must be positive, got %d", tp.TokenID)
 	}

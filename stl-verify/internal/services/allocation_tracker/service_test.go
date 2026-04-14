@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -192,7 +193,7 @@ func TestBuildSnapshots_Basic(t *testing.T) {
 	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0}
 
 	svc := &Service{}
-	snapshots := svc.buildSnapshots([]*TokenEntry{entry}, balances, transfers, event)
+	snapshots := svc.buildSnapshots([]*TokenEntry{entry}, balances, transfers, event, time.Unix(1700000000, 0).UTC())
 
 	if len(snapshots) != 1 {
 		t.Fatalf("expected 1 snapshot, got %d", len(snapshots))
@@ -232,7 +233,7 @@ func TestBuildSnapshots_SkipsMissingBalance(t *testing.T) {
 	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100}
 
 	svc := &Service{}
-	snapshots := svc.buildSnapshots([]*TokenEntry{entry}, balances, nil, event)
+	snapshots := svc.buildSnapshots([]*TokenEntry{entry}, balances, nil, event, time.Unix(1700000000, 0).UTC())
 	if len(snapshots) != 0 {
 		t.Errorf("expected 0 snapshots when balance missing, got %d", len(snapshots))
 	}
@@ -249,7 +250,7 @@ func TestBuildSnapshots_NoTransferContext(t *testing.T) {
 
 	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 50}
 	svc := &Service{}
-	snapshots := svc.buildSnapshots([]*TokenEntry{entry}, balances, nil, event)
+	snapshots := svc.buildSnapshots([]*TokenEntry{entry}, balances, nil, event, time.Unix(1700000000, 0).UTC())
 
 	if len(snapshots) != 1 {
 		t.Fatalf("expected 1 snapshot, got %d", len(snapshots))

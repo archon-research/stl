@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -21,6 +22,7 @@ type AllocationRepository struct {
 	txm       *TxManager
 	tokenRepo outbound.TokenRepository
 	logger    *slog.Logger
+	buildID   buildregistry.BuildID
 }
 
 type tokenCacheKey struct {
@@ -33,6 +35,7 @@ func NewAllocationRepository(
 	txm *TxManager,
 	tokenRepo outbound.TokenRepository,
 	logger *slog.Logger,
+	buildID buildregistry.BuildID,
 ) *AllocationRepository {
 	if logger == nil {
 		logger = slog.Default()
@@ -42,6 +45,7 @@ func NewAllocationRepository(
 		txm:       txm,
 		tokenRepo: tokenRepo,
 		logger:    logger,
+		buildID:   buildID,
 	}
 }
 
@@ -134,9 +138,9 @@ func (r *AllocationRepository) buildInsertArgs(
 			chain_id, token_id, prime_id, proxy_address,
 			balance, scaled_balance,
 			block_number, block_version,
-			tx_hash, log_index, tx_amount, direction
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		ON CONFLICT DO NOTHING
+			tx_hash, log_index, tx_amount, direction, created_at, build_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		ON CONFLICT (chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, processing_version, created_at) DO NOTHING
 	`
 
 	args := []any{
@@ -152,6 +156,8 @@ func (r *AllocationRepository) buildInsertArgs(
 		pos.LogIndex,
 		txAmount,
 		pos.Direction,
+		pos.CreatedAt,
+		int(r.buildID),
 	}
 
 	return query, args, nil

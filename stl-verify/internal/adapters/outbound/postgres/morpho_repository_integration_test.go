@@ -76,7 +76,7 @@ func setupMorphoTest(t *testing.T) *morphoTestFixture {
 
 	truncateMorpho(t, ctx)
 
-	repo, err := NewMorphoRepository(morphoPool, nil)
+	repo, err := NewMorphoRepository(morphoPool, nil, 0)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}

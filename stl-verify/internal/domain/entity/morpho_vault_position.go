@@ -29,13 +29,13 @@ func NewMorphoVaultPosition(userID, morphoVaultID, blockNumber int64, blockVersi
 		Shares:        shares,
 		Assets:        assets,
 	}
-	if err := p.validate(); err != nil {
-		return nil, err
+	if err := p.Validate(); err != nil {
+		return nil, fmt.Errorf("NewMorphoVaultPosition: %w", err)
 	}
 	return p, nil
 }
 
-func (p *MorphoVaultPosition) validate() error {
+func (p *MorphoVaultPosition) Validate() error {
 	if p.UserID <= 0 {
 		return fmt.Errorf("userID must be positive, got %d", p.UserID)
 	}

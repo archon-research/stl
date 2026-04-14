@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -18,9 +19,10 @@ var _ outbound.PrimeDebtRepository = (*PrimeDebtRepository)(nil)
 
 // PrimeDebtRepository persists prime debt snapshots to Postgres.
 type PrimeDebtRepository struct {
-	pool   *pgxpool.Pool
-	txm    *TxManager
-	logger *slog.Logger
+	pool    *pgxpool.Pool
+	txm     *TxManager
+	logger  *slog.Logger
+	buildID buildregistry.BuildID
 }
 
 // NewPrimeDebtRepository creates a new PrimeDebtRepository.
@@ -28,14 +30,16 @@ func NewPrimeDebtRepository(
 	pool *pgxpool.Pool,
 	txm *TxManager,
 	logger *slog.Logger,
+	buildID buildregistry.BuildID,
 ) *PrimeDebtRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &PrimeDebtRepository{
-		pool:   pool,
-		txm:    txm,
-		logger: logger.With("component", "prime-debt-repo"),
+		pool:    pool,
+		txm:     txm,
+		logger:  logger.With("component", "prime-debt-repo"),
+		buildID: buildID,
 	}
 }
 
@@ -83,9 +87,9 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		const q = `
-			INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT DO NOTHING
+			INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, build_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			ON CONFLICT (prime_id, block_number, block_version, processing_version, synced_at) DO NOTHING
 		`
 
 		batch := &pgx.Batch{}
@@ -97,6 +101,7 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 				d.BlockNumber,
 				d.BlockVersion,
 				d.SyncedAt,
+				int(r.buildID),
 			)
 		}
 

@@ -57,7 +57,6 @@ class Star:
 
 @dataclass
 class AllocationPosition:
-    id: int
     chain_id: int
     name: str
     proxy_address: str

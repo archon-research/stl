@@ -11,14 +11,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 // Batch size limits to stay well under PostgreSQL's 65,535 parameter ceiling.
 const (
-	snapshotBatchSize  = 500 // 500 × 19 cols = 9,500 params
-	operationBatchSize = 500 // 500 × 10 cols = 5,000 params
+	snapshotBatchSize  = 500 // 500 × 20 cols = 10,000 params
+	operationBatchSize = 500 // 500 × 11 cols = 5,500 params
 )
 
 // Compile-time checks.
@@ -29,20 +30,22 @@ var (
 
 // AnchorageRepository persists Anchorage package snapshots and operations to Postgres.
 type AnchorageRepository struct {
-	pool   *pgxpool.Pool
-	txm    *TxManager
-	logger *slog.Logger
+	pool    *pgxpool.Pool
+	txm     *TxManager
+	logger  *slog.Logger
+	buildID buildregistry.BuildID
 }
 
 // NewAnchorageRepository creates a new AnchorageRepository.
-func NewAnchorageRepository(pool *pgxpool.Pool, txm *TxManager, logger *slog.Logger) *AnchorageRepository {
+func NewAnchorageRepository(pool *pgxpool.Pool, txm *TxManager, logger *slog.Logger, buildID buildregistry.BuildID) *AnchorageRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &AnchorageRepository{
-		pool:   pool,
-		txm:    txm,
-		logger: logger.With("component", "anchorage-repo"),
+		pool:    pool,
+		txm:     txm,
+		logger:  logger.With("component", "anchorage-repo"),
+		buildID: buildID,
 	}
 }
 
@@ -59,7 +62,7 @@ func (r *AnchorageRepository) SaveSnapshots(ctx context.Context, snapshots []ent
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		for i := 0; i < len(snapshots); i += snapshotBatchSize {
 			end := min(i+snapshotBatchSize, len(snapshots))
-			if err := insertSnapshotBatch(ctx, tx, snapshots[i:end]); err != nil {
+			if err := insertSnapshotBatch(ctx, tx, snapshots[i:end], int(r.buildID)); err != nil {
 				return err
 			}
 		}
@@ -67,17 +70,17 @@ func (r *AnchorageRepository) SaveSnapshots(ctx context.Context, snapshots []ent
 	})
 }
 
-func insertSnapshotBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchoragePackageSnapshot) error {
-	const cols = 19
+func insertSnapshotBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchoragePackageSnapshot, buildID int) error {
+	const cols = 20
 	valueStrings := make([]string, 0, len(batch))
 	valueArgs := make([]any, 0, len(batch)*cols)
 
 	for i, snap := range batch {
 		base := i * cols
 		valueStrings = append(valueStrings, fmt.Sprintf(
-			"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+			"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
 			base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8,
-			base+9, base+10, base+11, base+12, base+13, base+14, base+15, base+16, base+17, base+18, base+19,
+			base+9, base+10, base+11, base+12, base+13, base+14, base+15, base+16, base+17, base+18, base+19, base+20,
 		))
 		valueArgs = append(valueArgs,
 			snap.PrimeID,
@@ -99,6 +102,7 @@ func insertSnapshotBatch(ctx context.Context, tx pgx.Tx, batch []entity.Anchorag
 			snap.AssetWeightedValue,
 			snap.LTVTimestamp,
 			snap.SnapshotTime,
+			buildID,
 		)
 	}
 
@@ -108,9 +112,9 @@ func insertSnapshotBatch(ctx context.Context, tx pgx.Tx, batch []entity.Anchorag
 			current_ltv, exposure_value, package_value,
 			margin_call_ltv, critical_ltv, margin_return_ltv,
 			asset_type, custody_type, asset_price, asset_quantity, asset_weighted_value,
-			ltv_timestamp, snapshot_time
+			ltv_timestamp, snapshot_time, build_id
 		) VALUES %s
-		ON CONFLICT (prime_id, package_id, asset_type, custody_type, snapshot_time) DO NOTHING`, strings.Join(valueStrings, ","))
+		ON CONFLICT (prime_id, package_id, asset_type, custody_type, processing_version, snapshot_time) DO NOTHING`, strings.Join(valueStrings, ","))
 
 	if _, err := tx.Exec(ctx, query, valueArgs...); err != nil {
 		return fmt.Errorf("insert snapshot batch: %w", err)
@@ -133,7 +137,7 @@ func (r *AnchorageRepository) SaveOperations(ctx context.Context, operations []e
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		for i := 0; i < len(operations); i += operationBatchSize {
 			end := min(i+operationBatchSize, len(operations))
-			if err := insertOperationBatch(ctx, tx, operations[i:end]); err != nil {
+			if err := insertOperationBatch(ctx, tx, operations[i:end], int(r.buildID)); err != nil {
 				return err
 			}
 		}
@@ -141,17 +145,17 @@ func (r *AnchorageRepository) SaveOperations(ctx context.Context, operations []e
 	})
 }
 
-func insertOperationBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchorageOperation) error {
-	const cols = 10
+func insertOperationBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchorageOperation, buildID int) error {
+	const cols = 11
 	valueStrings := make([]string, 0, len(batch))
 	valueArgs := make([]any, 0, len(batch)*cols)
 
 	for i, op := range batch {
 		base := i * cols
 		valueStrings = append(valueStrings, fmt.Sprintf(
-			"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+			"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
 			base+1, base+2, base+3, base+4, base+5, base+6,
-			base+7, base+8, base+9, base+10,
+			base+7, base+8, base+9, base+10, base+11,
 		))
 		valueArgs = append(valueArgs,
 			op.PrimeID,
@@ -164,6 +168,7 @@ func insertOperationBatch(ctx context.Context, tx pgx.Tx, batch []entity.Anchora
 			op.Quantity,
 			op.Notes,
 			op.CreatedAt,
+			buildID,
 		)
 	}
 
@@ -171,9 +176,9 @@ func insertOperationBatch(ctx context.Context, tx pgx.Tx, batch []entity.Anchora
 		INSERT INTO anchorage_operation (
 			prime_id, operation_id, action, operation_type, type_id,
 			asset_type, custody_type, quantity, notes,
-			created_at
+			created_at, build_id
 		) VALUES %s
-		ON CONFLICT (operation_id, created_at) DO NOTHING`, strings.Join(valueStrings, ","))
+		ON CONFLICT (operation_id, processing_version, created_at) DO NOTHING`, strings.Join(valueStrings, ","))
 
 	if _, err := tx.Exec(ctx, query, valueArgs...); err != nil {
 		return fmt.Errorf("insert operation batch: %w", err)

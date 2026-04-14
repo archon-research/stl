@@ -40,7 +40,8 @@ WITH latest_receipt AS (
     FROM allocation_position ap
     JOIN token t ON t.id = ap.token_id AND t.address = :receipt_token_address
     WHERE ap.chain_id = :chain_id
-    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
+    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC,
+             ap.processing_version DESC, ap.log_index DESC
 ),
 latest_underlying AS (
     -- Most-recent balance snapshot per wallet for the underlying token.
@@ -52,7 +53,8 @@ latest_underlying AS (
     JOIN receipt_token rt ON rt.underlying_token_id = t.id
                          AND rt.receipt_token_address = :receipt_token_address
     WHERE ap.chain_id = :chain_id
-    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
+    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC,
+             ap.processing_version DESC, ap.log_index DESC
 )
 SELECT proxy_address, balance
 FROM (

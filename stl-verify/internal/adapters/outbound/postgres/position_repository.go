@@ -4,11 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/big"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -19,6 +20,7 @@ var _ outbound.PositionRepository = (*PositionRepository)(nil)
 type PositionRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
+	buildID   buildregistry.BuildID
 	batchSize int
 }
 
@@ -28,7 +30,7 @@ type PositionRepository struct {
 //
 // Note: This function does not verify that the database connection is alive.
 // Use a separate health check or call pool.Ping() if connection validation is needed.
-func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (*PositionRepository, error) {
+func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, batchSize int) (*PositionRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -41,19 +43,20 @@ func NewPositionRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 	return &PositionRepository{
 		pool:      pool,
 		logger:    logger,
+		buildID:   buildID,
 		batchSize: batchSize,
 	}, nil
 }
 
 // SaveBorrower saves a single borrower (debt) position record within an external transaction.
-// amount is the full current outstanding debt; change is the event delta.
 // Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
-func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte) error {
+func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, b *entity.Borrower) error {
 	_, err := tx.Exec(ctx,
-		`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
-		userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, eventType, txHash)
+		`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, created_at, build_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
+		b.UserID, b.ProtocolID, b.TokenID, b.BlockNumber, b.BlockVersion,
+		b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt, int(r.buildID))
 
 	if err != nil {
 		return fmt.Errorf("failed to save borrower: %w", err)
@@ -63,24 +66,25 @@ func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID
 
 // SaveBorrowers saves multiple borrower (debt) position records using pgx.Batch.
 // Uses ON CONFLICT DO NOTHING to ensure immutability - existing records are never modified.
-func (r *PositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, records []outbound.BorrowerRecord) error {
-	if len(records) == 0 {
+func (r *PositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, borrowers []*entity.Borrower) error {
+	if len(borrowers) == 0 {
 		return nil
 	}
 
 	batch := &pgx.Batch{}
-	for _, rec := range records {
+	for _, b := range borrowers {
 		batch.Queue(
-			`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
-			rec.UserID, rec.ProtocolID, rec.TokenID, rec.BlockNumber, rec.BlockVersion, rec.Amount, rec.Change, rec.EventType, rec.TxHash,
+			`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, created_at, build_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
+			b.UserID, b.ProtocolID, b.TokenID, b.BlockNumber, b.BlockVersion,
+			b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt, int(r.buildID),
 		)
 	}
 
 	br := tx.SendBatch(ctx, batch)
 
-	for i := range records {
+	for i := range borrowers {
 		if _, err := br.Exec(); err != nil {
 			innerErr := br.Close()
 			if innerErr != nil {
@@ -99,14 +103,14 @@ func (r *PositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, recor
 }
 
 // SaveBorrowerCollateral saves a single collateral position record within an external transaction.
-// amount is the full current collateral balance; change is the event delta.
 // Uses append-only semantics: ON CONFLICT DO NOTHING preserves the first write.
-func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte, collateralEnabled bool) error {
+func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, bc *entity.BorrowerCollateral) error {
 	_, err := tx.Exec(ctx,
-		`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
-		userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, eventType, txHash, collateralEnabled)
+		`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled, created_at, build_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
+		bc.UserID, bc.ProtocolID, bc.TokenID, bc.BlockNumber, bc.BlockVersion,
+		bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt, int(r.buildID))
 
 	if err != nil {
 		return fmt.Errorf("failed to save collateral: %w", err)
@@ -115,28 +119,27 @@ func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.
 }
 
 // SaveBorrowerCollaterals saves multiple borrower collateral position records using pgx.Batch.
-// amount is the full current collateral balance; change is the event delta.
 // Uses ON CONFLICT DO NOTHING to ensure immutability - existing records are never modified.
-// This is critical for reproducible calculations: data used in a calculation must not change.
-// Returns nil if records slice is empty.
-func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx.Tx, records []outbound.CollateralRecord) error {
-	if len(records) == 0 {
+// Returns nil if collaterals slice is empty.
+func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx.Tx, collaterals []*entity.BorrowerCollateral) error {
+	if len(collaterals) == 0 {
 		return nil
 	}
 
 	batch := &pgx.Batch{}
-	for _, rec := range records {
+	for _, bc := range collaterals {
 		batch.Queue(
-			`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version) DO NOTHING`,
-			rec.UserID, rec.ProtocolID, rec.TokenID, rec.BlockNumber, rec.BlockVersion, rec.Amount, rec.Change, rec.EventType, rec.TxHash, rec.CollateralEnabled,
+			`INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled, created_at, build_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
+			bc.UserID, bc.ProtocolID, bc.TokenID, bc.BlockNumber, bc.BlockVersion,
+			bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt, int(r.buildID),
 		)
 	}
 
 	br := tx.SendBatch(ctx, batch)
 
-	for i := range records {
+	for i := range collaterals {
 		if _, err := br.Exec(); err != nil {
 			br.Close()
 			return fmt.Errorf("failed to save collateral record %d: %w", i, err)

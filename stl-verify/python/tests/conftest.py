@@ -6,7 +6,6 @@ from app.domain.entities.allocation import AllocationPosition
 
 def make_allocation_position(**overrides) -> AllocationPosition:
     defaults = dict(
-        id=1,
         chain_id=1,
         name="spark",
         proxy_address="0xabc",

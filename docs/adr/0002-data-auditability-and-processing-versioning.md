@@ -174,34 +174,32 @@ insert. If the `build_id` is different (or no row exists), it assigns the next v
 
 #### Concurrency
 
-Following the established pattern in `blockstate_repository.go`, the **application/repository
-layer** is responsible for concurrency control. Inserts that need version assignment must be
-wrapped in a `READ COMMITTED` transaction, and the caller must acquire an advisory lock before
-executing the insert to serialize concurrent writers for the same natural key.
+Each trigger function acquires `pg_advisory_xact_lock` on a 64-bit hash of the table prefix +
+full natural key columns before reading `MAX(processing_version)`. This serializes concurrent
+inserts for the same natural key at the database level — every INSERT is protected regardless
+of which client, code path, or language performs it.
 
-The trigger's responsibility is limited to reading existing rows and assigning the correct
-version number inside that already-serialized transaction. The trigger does **not** acquire
-advisory locks itself — keeping the serialization contract in one layer (the repository) rather
-than splitting it across trigger and application code.
+The lock key is built with `format()` and pipe delimiters. The table prefix prevents
+cross-table collisions. `format()` converts each argument independently, preventing ambiguity
+between value boundaries.
 
-`SERIALIZABLE` isolation alone cannot detect version races on TimescaleDB hypertables due to
-chunk-level constraints — it produces unique constraint violations (23505) instead of
-serialization failures (40001). The advisory lock serializes inserts, and `READ COMMITTED`
-allows the trigger to see committed changes from the prior lock-holder.
+```sql
+PERFORM pg_advisory_xact_lock(hashtextextended(
+    format('mms|%s|%s|%s|%s',
+        NEW.morpho_market_id, NEW.block_number, NEW.block_version, NEW.timestamp),
+    0));
+```
 
-The advisory lock key should be derived from stable natural key components using a low-collision
-strategy. Prefer `pg_advisory_xact_lock($1::int, $2::int)` when the natural key has stable
-integer parts (e.g. `(chain_id, block_number)` as in `blockstate_repository.go`). If it cannot
-be expressed as two integers, use a 64-bit derived key such as
-`pg_advisory_xact_lock(hashtextextended(concatenated_key, 0)::bigint)`. Avoid plain
-`hashtext()` — it is only 32-bit and can unexpectedly serialize unrelated natural keys.
+The only requirement from callers: use `READ COMMITTED` isolation (PostgreSQL's default, and
+explicitly configured in `OpenPool`). `SERIALIZABLE` would snapshot too early, preventing the
+trigger from seeing committed rows from the lock holder.
 
-Any new repository that writes to these tables must follow the same locking pattern.
+**Deadlock prevention in batch inserts:** The trigger fires per row in VALUES clause order.
+Two concurrent transactions inserting overlapping rows in different order would deadlock.
+Batch repository methods must sort rows by natural key before building the INSERT to ensure
+consistent lock acquisition order across transactions.
 
 #### Trigger Examples
-
-The examples below assume the caller has already started a `READ COMMITTED` transaction and
-acquired the advisory lock for the row's natural key.
 
 ```sql
 -- ============================================================================
@@ -215,6 +213,12 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    -- Serialize concurrent inserts for the same natural key.
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        format('mms|%s|%s|%s|%s',
+            NEW.morpho_market_id, NEW.block_number, NEW.block_version, NEW.timestamp),
+        0));
+
     -- Check if this build already produced a version for this key (retry)
     SELECT processing_version INTO existing_ver
     FROM morpho_market_state
@@ -378,6 +382,10 @@ DECLARE
     existing_ver INT;
     max_ver INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        format('ofp|%s|%s|%s', NEW.token_id, NEW.source_id, NEW.timestamp),
+        0));
+
     SELECT processing_version INTO existing_ver
     FROM offchain_token_price
     WHERE token_id = NEW.token_id
@@ -423,15 +431,15 @@ Each trigger function uses static SQL with hardcoded column names, allowing Post
 the query plan across invocations. The queries run as index-only scans on the existing PK/unique
 index.
 
-The trigger performs up to two index lookups per insert: one to check for a retry (by
-`build_id`), and if not found, one to get `MAX(processing_version)`. On the normal path (first
-insert, no existing row), both return empty results quickly. The advisory lock is acquired by
-the caller before the insert, not by the trigger.
+The trigger acquires an advisory lock (~2-5us uncontended), then performs up to two index
+lookups: one to check for a retry (by `build_id`), and if not found, one to get
+`MAX(processing_version)`. On the normal path (first insert, no existing row), all operations
+return quickly.
 
-Estimated per-insert trigger overhead: ~30-100us (plan lookup from cache + index scans).
-The advisory lock adds ~5us uncontended at the repository level. For normal block processing
-(~50-200 rows per 12-second block), total overhead is 2-21ms — negligible relative to
-network I/O.
+Benchmarked at ~200us per INSERT total (advisory lock + trigger + INSERT + network roundtrip
+to containerized PostgreSQL). The advisory lock itself is a small fraction of the total cost.
+For normal block processing (~50-200 rows per 12-second block), total overhead is negligible
+relative to network I/O.
 
 ### 4. Canonical Version: Latest-Wins
 
@@ -459,110 +467,75 @@ triggers:
 
 | Table | Natural Key (WHERE clause) | Type |
 |-------|---------------------------|------|
-| `borrower` | `user_id, protocol_id, token_id, block_number, block_version` | Regular table, surrogate PK `(id)` |
-| `borrower_collateral` | `user_id, protocol_id, token_id, block_number, block_version` | Regular table, surrogate PK `(id)` |
+| `borrower` | `user_id, protocol_id, token_id, block_number, block_version, created_at` | Hypertable (columnstore), natural PK |
+| `borrower_collateral` | `user_id, protocol_id, token_id, block_number, block_version, created_at` | Hypertable (columnstore), natural PK |
 | `sparklend_reserve_data` | `protocol_id, token_id, block_number, block_version` | Hypertable, surrogate PK `(id, block_number)` |
-| `onchain_token_price` | `token_id, oracle_id, block_number, block_version, timestamp` | Hypertable |
-| `morpho_market_state` | `morpho_market_id, block_number, block_version, timestamp` | Hypertable |
-| `morpho_market_position` | `user_id, morpho_market_id, block_number, block_version, timestamp` | Hypertable |
-| `morpho_vault_state` | `morpho_vault_id, block_number, block_version, timestamp` | Hypertable |
-| `morpho_vault_position` | `user_id, morpho_vault_id, block_number, block_version, timestamp` | Hypertable |
+| `onchain_token_price` | `token_id, oracle_id, block_number, block_version, timestamp` | Hypertable (compression) |
+| `morpho_market_state` | `morpho_market_id, block_number, block_version, timestamp` | Hypertable (compression) |
+| `morpho_market_position` | `user_id, morpho_market_id, block_number, block_version, timestamp` | Hypertable (compression) |
+| `morpho_vault_state` | `morpho_vault_id, block_number, block_version, timestamp` | Hypertable (compression) |
+| `morpho_vault_position` | `user_id, morpho_vault_id, block_number, block_version, timestamp` | Hypertable (compression) |
 | `prime_debt` | `prime_id, block_number, block_version, synced_at` | Hypertable, UNIQUE only (no PK) |
-| `allocation_position` | `chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction` | Regular table, surrogate PK `(id)` |
-| `protocol_event` | `chain_id, block_number, block_version, tx_hash, log_index` | Regular table, surrogate PK `(id)` |
+| `allocation_position` | `chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, created_at` | Hypertable (columnstore), natural PK |
+| `protocol_event` | `chain_id, block_number, block_version, tx_hash, log_index, created_at` | Hypertable (columnstore), natural PK |
 
 ### Off-chain / polled (no `block_number` or `block_version`)
 
 | Table | Natural Key (WHERE clause) | Type |
 |-------|---------------------------|------|
-| `anchorage_package_snapshot` | `prime_id, package_id, asset_type, custody_type, snapshot_time` | Hypertable |
-| `anchorage_operation` | `operation_id, created_at` | Hypertable |
-| `offchain_token_price` | `token_id, source_id, timestamp` | Hypertable |
+| `anchorage_package_snapshot` | `prime_id, package_id, asset_type, custody_type, snapshot_time` | Hypertable (compression) |
+| `anchorage_operation` | `operation_id, created_at` | Hypertable (compression) |
+| `offchain_token_price` | `token_id, source_id, timestamp` | Hypertable (compression) |
 
 **Notes:**
-- Regular tables (`borrower`, `borrower_collateral`, `allocation_position`, `protocol_event`)
-  have no compression/decompression concerns during migration.
-- Several tables have surrogate PKs (`id` or `(id, block_number)`) with a **separate** UNIQUE
-  constraint on the natural key: `borrower`, `borrower_collateral`, `sparklend_reserve_data`,
-  `allocation_position`, `protocol_event`. For these tables, `processing_version` must be added
-  to the **UNIQUE constraint**, not the surrogate PK. `prime_debt` has no PK at all — only a
-  UNIQUE constraint that receives `processing_version`.
-- The trigger WHERE clause always matches against the natural key columns (the UNIQUE constraint
-  columns), regardless of whether the table uses a surrogate PK.
+- All state tables are now hypertables. Tables using the old compression API
+  (`timescaledb.compress`) require `remove_compression_policy` + `decompress_chunk` before
+  constraint alteration. Tables using the columnstore API (`timescaledb.enable_columnstore`)
+  require pausing the job, decompressing, and disabling columnstore before alteration.
+- `sparklend_reserve_data` has a surrogate PK `(id, block_number)` with a **separate** UNIQUE
+  constraint on the natural key. `processing_version` is added to the UNIQUE constraint, not
+  the surrogate PK. `prime_debt` has no PK — only a UNIQUE constraint.
+- The trigger WHERE clause always matches against the natural key columns.
 
 ## Migration Strategy
 
-Existing data is not backfilled. The migration must be executed in a specific order due to
-TimescaleDB constraints around compressed chunks.
+Existing data is not backfilled. The migration is split into separate files so that each step
+is an independent transaction. If decompression fails, no schema changes have occurred. If
+constraint alteration fails, compression settings are unchanged.
 
-### Step 1: Create `build_registry` table
+Tiered (S3) chunks may need to be recalled before decompression. The total data volume should
+be estimated to plan an appropriate maintenance window.
 
-Create the table and seed the `pre-tracking` entry (id=0).
+### File 1: `20260410_100000_create_build_registry.sql`
 
-### Step 2: Add columns to all state tables
+Create the `build_registry` table and seed the `pre-tracking` entry (id=0).
 
-```sql
-ALTER TABLE <table> ADD COLUMN processing_version INT NOT NULL DEFAULT 0;
-ALTER TABLE <table> ADD COLUMN build_id INT NOT NULL DEFAULT 0;
-```
+### File 2: `20260410_110000_add_auditability_columns.sql`
 
-Adding `NOT NULL` columns with `DEFAULT` is supported on compressed hypertables since
-TimescaleDB 2.6 — no decompression needed for this step.
+Add `processing_version INT NOT NULL DEFAULT 0` and `build_id INT NOT NULL DEFAULT 0` to all
+14 state tables. Adding `NOT NULL` columns with `DEFAULT` is supported on compressed
+hypertables since TimescaleDB 2.6 — no decompression needed.
 
-### Step 3: Decompress hypertable chunks
+### File 3: `20260410_120000_remove_policies_and_decompress.sql`
 
-Dropping/recreating PK and UNIQUE constraints is NOT supported on compressed chunks. Every
-compressed chunk across affected hypertables must be decompressed first:
+Remove compression/columnstore policies and decompress all chunks. Tables using the old
+compression API (`timescaledb.compress`) use `remove_compression_policy` + `decompress_chunk`.
+Tables using the columnstore API (`timescaledb.enable_columnstore`) pause their jobs,
+decompress, and disable columnstore. Tables with no compression (`sparklend_reserve_data`,
+`prime_debt`) are skipped.
 
-```sql
--- For each affected hypertable:
-SELECT remove_compression_policy('<table>', if_exists => true);
-SELECT decompress_chunk(c, if_not_exists => true)
-FROM show_chunks('<table>') c;
-```
+### File 4: `20260410_130000_alter_constraints.sql`
 
-Tiered (S3) chunks may need to be recalled before decompression. This should be verified in
-staging. The total data volume should be estimated to plan an appropriate maintenance window.
+Drop and recreate PK/UNIQUE constraints to include `processing_version`. For most tables this
+is the PK. For `sparklend_reserve_data` (surrogate PK) and `prime_debt` (no PK), it is the
+UNIQUE constraint. Uses a helper function for dynamic constraint name lookup.
 
-Regular tables (`borrower`, `borrower_collateral`, `allocation_position`, `protocol_event`) skip
-this step entirely — no compression concerns.
+### File 5: `20260410_140000_update_settings_and_recompress.sql`
 
-### Step 4: Alter UNIQUE constraints
+Update compression/columnstore `orderby` settings to append `processing_version DESC`, re-add
+policies, and recompress chunks older than 2 days.
 
-Drop and recreate the natural-key UNIQUE constraints to include `processing_version`. For tables
-with surrogate PKs (`borrower`, `borrower_collateral`, `sparklend_reserve_data`,
-`allocation_position`, `protocol_event`) and `prime_debt` (UNIQUE only, no PK), this means
-the UNIQUE constraint — not the surrogate PK. For tables where the PK is the natural key
-(e.g. `morpho_market_state`, `onchain_token_price`), it means the PK.
-
-### Step 5: Update compression settings
-
-```sql
--- Example for morpho_market_state (was: 'block_number DESC, block_version DESC')
-ALTER TABLE morpho_market_state SET (
-    timescaledb.compress_orderby = 'block_number DESC, block_version DESC, processing_version DESC'
-);
-
--- Example for anchorage_package_snapshot (was: 'snapshot_time DESC')
-ALTER TABLE anchorage_package_snapshot SET (
-    timescaledb.compress_orderby = 'snapshot_time DESC, processing_version DESC'
-);
-
--- Same pattern for all other hypertables — append processing_version DESC to existing orderby.
-```
-
-Without this, `processing_version` values would not benefit from RLE/dictionary compression.
-
-### Step 6: Re-enable compression and recompress
-
-```sql
-SELECT add_compression_policy('<table>', INTERVAL '2 days', if_not_exists => true);
--- Recompress previously decompressed chunks:
-SELECT compress_chunk(c, if_not_exists => true)
-FROM show_chunks('<table>', older_than => INTERVAL '2 days') c;
-```
-
-### Step 7: Create trigger functions and triggers
+### File 6: `20260410_150000_create_processing_version_triggers.sql`
 
 Create the per-table `assign_processing_version_*` functions and triggers as described in
 section 3.
@@ -578,6 +551,12 @@ accepts natural key column names as trigger arguments and builds the WHERE claus
 from caching the query plan, adding ~100-250us per insert (2-3x slower than a dedicated
 function). Rejected because the boilerplate cost of per-table functions is low and the
 performance benefit of plan caching matters on high-throughput tables.
+
+**Application-level advisory locking** — Instead of acquiring the advisory lock in the trigger,
+a Go-side helper function would be called by each repository before inserting. Rejected because
+it duplicates the natural key definition (the trigger already has it in the WHERE clause),
+relies on caller discipline across 14+ call sites, doesn't protect inserts from non-Go clients
+(migrations, scripts, psql), and creates the same class of bug as untyped variadic parameters.
 
 **Application-level version assignment** — Instead of a trigger, each repository's INSERT
 statement would include a subquery to compute the next `processing_version`. Normal inserts would
@@ -623,8 +602,8 @@ canonical-data query and introduces a coordination point that must be kept in sy
 - Applies uniformly to both blockchain-derived and off-chain polled data
 
 **Negative / Trade-offs:**
-- Every INSERT on state tables incurs ~30-100us trigger overhead plus ~5us for the
-  repository-level advisory lock (~5-15% increase on insert latency)
+- Every INSERT on state tables incurs ~200us total overhead (advisory lock + trigger + INSERT),
+  benchmarked against containerized PostgreSQL
 - Primary keys / unique constraints on all state tables grow by one column, slightly increasing
   index size
 - The `DISTINCT ON ... ORDER BY processing_version DESC` query pattern for canonical data must
@@ -632,4 +611,6 @@ canonical-data query and introduces a coordination point that must be kept in sy
 - Migration requires decompressing all compressed hypertable chunks, altering constraints,
   updating compression settings, and recompressing — this is a significant operation that needs
   a maintenance window
-- Per-table trigger functions are boilerplate-heavy (~15 functions with near-identical structure)
+- Per-table trigger functions are boilerplate-heavy (~14 functions with near-identical structure)
+- Batch insert methods must sort rows by natural key before INSERT to prevent deadlocks from
+  the per-row advisory lock in the trigger

@@ -24,14 +24,14 @@ func NewUser(id, chainID int64, address common.Address, firstSeenBlock int64) (*
 		FirstSeenBlock: firstSeenBlock,
 		Metadata:       make(map[string]any),
 	}
-	if err := u.validate(); err != nil {
-		return nil, err
+	if err := u.Validate(); err != nil {
+		return nil, fmt.Errorf("NewUser: %w", err)
 	}
 	return u, nil
 }
 
 // validate checks that all fields have valid values.
-func (u *User) validate() error {
+func (u *User) Validate() error {
 	if u.ID <= 0 {
 		return fmt.Errorf("id must be positive, got %d", u.ID)
 	}

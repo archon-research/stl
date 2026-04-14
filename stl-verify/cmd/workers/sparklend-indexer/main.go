@@ -23,6 +23,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
@@ -142,12 +143,6 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
-	logger.Info("starting sparklend position tracker",
-		"queue", cfg.queueURL,
-		"redis", cfg.redisAddr,
-		"chainID", cfg.chainID,
-		"commit", GitCommit)
-
 	// AWS config
 	awsRegion := env.Get("AWS_REGION", "us-east-1")
 	awsOpts := []func(*awsconfig.LoadOptions) error{
@@ -219,6 +214,17 @@ func run(ctx context.Context, args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("registering build: %w", err)
+	}
+
+	logger.Info("starting sparklend position tracker",
+		"queue", cfg.queueURL,
+		"redis", cfg.redisAddr,
+		"chainID", cfg.chainID,
+		"commit", buildReg.GitHash())
+
 	// Repositories
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
@@ -230,7 +236,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating user repository: %w", err)
 	}
 
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}
@@ -240,12 +246,12 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating token repository: %w", err)
 	}
 
-	positionRepo, err := postgres.NewPositionRepository(pool, logger, 0)
+	positionRepo, err := postgres.NewPositionRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
 		return fmt.Errorf("creating position repository: %w", err)
 	}
 
-	eventRepo := postgres.NewEventRepository(logger)
+	eventRepo := postgres.NewEventRepository(logger, buildReg.BuildID())
 
 	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger)
 	if err != nil {

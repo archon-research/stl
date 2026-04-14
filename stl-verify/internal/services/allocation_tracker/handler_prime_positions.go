@@ -143,6 +143,7 @@ func (h *PrimePositionHandler) HandleSnapshots(
 			TxAmount:       s.TxAmount,
 			Direction:      string(s.Direction),
 			CreatedAtBlock: createdAtBlock,
+			CreatedAt:      s.BlockTimestamp,
 		})
 	}
 
