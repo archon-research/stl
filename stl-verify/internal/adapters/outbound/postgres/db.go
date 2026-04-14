@@ -64,11 +64,6 @@ func OpenPool(ctx context.Context, cfg DBConfig) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("failed to parse database URL: %w", err)
 	}
 
-	// Explicit READ COMMITTED isolation. The processing_version triggers use
-	// pg_advisory_xact_lock which requires READ COMMITTED to see committed rows
-	// from the lock holder. SERIALIZABLE would snapshot too early and defeat the lock.
-	poolConfig.ConnConfig.RuntimeParams["default_transaction_isolation"] = "read committed"
-
 	// Apply connection pool settings
 	if cfg.MaxConns > 0 {
 		poolConfig.MaxConns = cfg.MaxConns
