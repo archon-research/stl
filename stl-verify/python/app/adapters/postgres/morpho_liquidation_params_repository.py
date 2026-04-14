@@ -1,13 +1,13 @@
-import logging
 from decimal import Decimal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.entities.risk import LiquidationParams
+from app.logging import get_logger
 from app.risk_engine.crypto_lending.lif import compute_lif
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # lltv values in morpho_market are stored in WAD format (18 decimals, e.g. 860000000000000000 = 86%).
 # The Go indexer persists the raw big.Int via bigIntToNumeric(), so we must divide by 1e18
