@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     log_format: str = "json"
     database_url: SecretStr = SecretStr("postgresql+asyncpg://postgres:postgres@localhost:5432/stl_verify")
     alchemy_api_key: SecretStr = SecretStr("MISSING_KEY")
+    otel_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = "http://localhost:4317"
+    otel_service_name: str = "stl-verify-python"
 
     @property
     def async_database_url(self) -> str:
