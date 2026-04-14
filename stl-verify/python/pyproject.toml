@@ -11,6 +11,10 @@ dependencies = [
     "pydantic-settings",
     "python-dotenv",
     "httpx>=0.28.1",
+    "opentelemetry-sdk>=1.41.0,<2",
+    "opentelemetry-instrumentation-fastapi>=0.62b0,<1",
+    "opentelemetry-instrumentation-sqlalchemy>=0.62b0,<1",
+    "opentelemetry-exporter-otlp>=1.41.0,<2",
 ]
 
 [project.optional-dependencies]
