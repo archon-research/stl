@@ -190,6 +190,10 @@ SELECT _compress_old_chunks('allocation_position', INTERVAL '2 days');
 -- Cleanup helper
 DROP FUNCTION _compress_old_chunks(regclass, interval);
 
+-- Tiering policies were not removed (they survived the migration sequence),
+-- so no re-enable is needed. The existing policies will continue to tier
+-- chunks older than 1 year.
+
 INSERT INTO migrations (filename)
 VALUES ('20260410_140000_update_settings_and_recompress.sql')
 ON CONFLICT (filename) DO NOTHING;
