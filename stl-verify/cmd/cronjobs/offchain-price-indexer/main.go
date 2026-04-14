@@ -59,7 +59,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, err
 	}
 
-	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	buildReg, err := buildregistry.New(ctx, deps.Pool, GitCommit, BuildTime)
 	if err != nil {
 		return nil, fmt.Errorf("registering build: %w", err)
 	}

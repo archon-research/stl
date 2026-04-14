@@ -27,15 +27,15 @@ type Registry struct {
 }
 
 // New registers the current build's git hash in build_registry and returns the
-// resolved build_id. The git hash and build time are obtained from Go's embedded
-// VCS build info, with BUILD_GIT_HASH env var as fallback. If the hash is already
-// registered (pod restart, multiple replicas), it looks up the existing ID.
-func New(ctx context.Context, db *pgxpool.Pool) (*Registry, error) {
-	var gitHash, buildTime string
-	buildinfo.PopulateFromVCS(&gitHash, &buildTime)
-
-	// Fallback: BUILD_GIT_HASH env var (useful in test binaries where
-	// go test does not embed VCS info).
+// resolved build_id. When gitHash is provided (e.g. from ldflags), it is used
+// directly. Otherwise falls back to Go's embedded VCS info, then BUILD_GIT_HASH
+// env var. If the hash is already registered (pod restart, multiple replicas),
+// it looks up the existing ID.
+func New(ctx context.Context, db *pgxpool.Pool, gitHash, buildTime string) (*Registry, error) {
+	// Fallback chain: ldflags → VCS info → BUILD_GIT_HASH env var
+	if gitHash == "" {
+		buildinfo.PopulateFromVCS(&gitHash, &buildTime)
+	}
 	if gitHash == "" {
 		gitHash = os.Getenv("BUILD_GIT_HASH")
 	}

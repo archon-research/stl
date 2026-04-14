@@ -38,7 +38,7 @@ func TestNew_FirstRegistration(t *testing.T) {
 	pool := setupDB(t)
 	t.Setenv("BUILD_GIT_HASH", "abc123def456")
 
-	reg, err := New(context.Background(), pool)
+	reg, err := New(context.Background(), pool, "", "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -55,12 +55,12 @@ func TestNew_IdempotentReregistration(t *testing.T) {
 	pool := setupDB(t)
 	t.Setenv("BUILD_GIT_HASH", "idempotent-hash")
 
-	reg1, err := New(context.Background(), pool)
+	reg1, err := New(context.Background(), pool, "", "")
 	if err != nil {
 		t.Fatalf("first New: %v", err)
 	}
 
-	reg2, err := New(context.Background(), pool)
+	reg2, err := New(context.Background(), pool, "", "")
 	if err != nil {
 		t.Fatalf("second New: %v", err)
 	}
@@ -74,13 +74,13 @@ func TestNew_DifferentHashesDifferentIDs(t *testing.T) {
 	pool := setupDB(t)
 
 	t.Setenv("BUILD_GIT_HASH", "hash-aaa")
-	reg1, err := New(context.Background(), pool)
+	reg1, err := New(context.Background(), pool, "", "")
 	if err != nil {
 		t.Fatalf("first New: %v", err)
 	}
 
 	t.Setenv("BUILD_GIT_HASH", "hash-bbb")
-	reg2, err := New(context.Background(), pool)
+	reg2, err := New(context.Background(), pool, "", "")
 	if err != nil {
 		t.Fatalf("second New: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestNew_EmptyHashNoEnvVar(t *testing.T) {
 	// Set to empty string — os.Getenv returns "" for both unset and empty,
 	// so this effectively clears the fallback. t.Setenv auto-restores after test.
 	t.Setenv("BUILD_GIT_HASH", "")
-	_, err := New(context.Background(), pool)
+	_, err := New(context.Background(), pool, "", "")
 	// In test binaries, VCS info is typically available from the Go build,
 	// so New() succeeds via that path. If VCS info is unavailable, it should
 	// fail with a clear error.
@@ -110,7 +110,7 @@ func TestNew_BuildTimePopulated(t *testing.T) {
 	pool := setupDB(t)
 	t.Setenv("BUILD_GIT_HASH", "buildtime-test")
 
-	reg, err := New(context.Background(), pool)
+	reg, err := New(context.Background(), pool, "", "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

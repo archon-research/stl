@@ -292,7 +292,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	logger.Info("PostgreSQL connected")
 
-	buildReg, err := buildregistry.New(ctx, dbPool)
+	buildReg, err := buildregistry.New(ctx, dbPool, GitCommit, BuildTime)
 	if err != nil {
 		return fmt.Errorf("registering build: %w", err)
 	}

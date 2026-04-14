@@ -183,7 +183,7 @@ func run(args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	buildReg, err := buildregistry.New(ctx, pool)
+	buildReg, err := buildregistry.New(ctx, pool, "", "")
 	if err != nil {
 		return fmt.Errorf("registering build: %w", err)
 	}
