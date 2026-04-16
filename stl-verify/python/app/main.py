@@ -10,12 +10,30 @@ from app.api.v1 import allocations, risk, status
 from app.config import Settings, get_settings
 from app.logging import setup_logging
 from app.middleware.request_id import RequestIdMiddleware
+from app.risk_engine.mapping import MappingError, load_asset_mapping
 from app.risk_engine.suraf.loader import load_all_ratings
+from app.risk_engine.suraf.result import SurafResult
 from app.telemetry import instrument_sqlalchemy_engine, setup_telemetry, shutdown_telemetry
+
+
+def _check_mapping_refs(mapping: dict[str, str], ratings: dict[str, SurafResult]) -> None:
+    unknown = sorted(set(mapping.values()) - set(ratings))
+    if unknown:
+        raise MappingError(f"asset mapping references unknown rating_ids: {unknown}")
 
 
 def create_app(settings: Settings) -> FastAPI:
     setup_logging(log_level=settings.log_level, log_format=settings.log_format)
+
+    # Validate risk-engine config before acquiring any resources so a bad
+    # configuration fails startup without leaking a telemetry provider or
+    # DB engine.
+    suraf_ratings = load_all_ratings(
+        settings.suraf_inputs_dir,
+        source_commit_sha=settings.git_commit,
+    )
+    asset_to_rating = load_asset_mapping(settings.suraf_mappings_file)
+    _check_mapping_refs(asset_to_rating, suraf_ratings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -24,12 +42,6 @@ def create_app(settings: Settings) -> FastAPI:
             await conn.execute(text("SELECT 1"))
         app.state.engine = engine
         instrument_sqlalchemy_engine(engine)
-        # Fail fast: bad SURAF inputs should prevent startup, not silently
-        # run without a risk model.
-        app.state.suraf_ratings = load_all_ratings(
-            settings.suraf_inputs_dir,
-            source_commit_sha=settings.git_commit,
-        )
         async with httpx.AsyncClient() as http_client:
             app.state.http_client = http_client
             yield
@@ -39,6 +51,8 @@ def create_app(settings: Settings) -> FastAPI:
             shutdown_telemetry(app.state.tracer_provider)
 
     application = FastAPI(title="stl-verify", lifespan=lifespan)
+    application.state.suraf_ratings = suraf_ratings
+    application.state.asset_to_rating = asset_to_rating
     application.add_middleware(RequestIdMiddleware)
     application.state.tracer_provider = setup_telemetry(application, settings)
     application.include_router(status.router, prefix="/v1")
