@@ -1565,11 +1565,9 @@ kind-load-images:
 	@test -n "$(IMAGES)" || { echo "ERROR: IMAGES is required."; exit 1; }
 	@for img in $(IMAGES); do \
 		canonical="localhost/$$img"; \
-		if ! docker image inspect "$$canonical" >/dev/null 2>&1; then \
-			docker image inspect "$$img" >/dev/null 2>&1 || { echo "ERROR: local image $$img not found."; exit 1; }; \
-			echo "==> Tagging $$img as $$canonical"; \
-			docker tag "$$img" "$$canonical"; \
-		fi; \
+		docker image inspect "$$img" >/dev/null 2>&1 || { echo "ERROR: local image $$img not found."; exit 1; }; \
+		echo "==> Tagging $$img as $$canonical"; \
+		docker tag "$$img" "$$canonical"; \
 		if [ "$(KIND_EXPERIMENTAL_PROVIDER)" = "podman" ]; then \
 			echo "==> Loading $$canonical into kind cluster via podman+ctr..."; \
 			docker save "$$canonical" | podman exec -i $(KIND_CLUSTER)-control-plane ctr --namespace=k8s.io images import -; \
