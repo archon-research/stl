@@ -240,7 +240,7 @@ func (rc *reorgController) trigger(depth int) error {
 			if dt == "block" {
 				patched, err := patchBlockJSON(raw, header.Number, reorgHash, prevHash)
 				if err != nil {
-					continue
+					return fmt.Errorf("patching reorg block %d: %w", blockNum, err)
 				}
 				raw = patched
 			}

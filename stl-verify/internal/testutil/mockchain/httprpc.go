@@ -241,12 +241,7 @@ func (h *httpHandler) getBlockByHash(req rpcutil.Request) (json.RawMessage, *jso
 	}
 	raw, ok := h.store.Get(idx, "block")
 	if !ok {
-		// No full block data in store — fall back to header-only.
-		headerJSON, err := json.Marshal(header)
-		if err != nil {
-			return nil, &jsonRPCErrorObj{Code: rpcErrInternal, Message: "internal error"}
-		}
-		return headerJSON, nil
+		return nil, &jsonRPCErrorObj{Code: rpcErrInternal, Message: "missing block data for template"}
 	}
 	patched, err := patchBlockJSON(raw, header.Number, header.Hash, header.ParentHash)
 	if err != nil {
@@ -274,12 +269,7 @@ func (h *httpHandler) getBlockByNumber(req rpcutil.Request) (json.RawMessage, *j
 	}
 	raw, ok := h.store.Get(idx, "block")
 	if !ok {
-		// No full block data in store — fall back to header-only.
-		headerJSON, err := json.Marshal(header)
-		if err != nil {
-			return nil, &jsonRPCErrorObj{Code: rpcErrInternal, Message: "internal error"}
-		}
-		return headerJSON, nil
+		return nil, &jsonRPCErrorObj{Code: rpcErrInternal, Message: "missing block data for template"}
 	}
 	patched, err := patchBlockJSON(raw, header.Number, header.Hash, header.ParentHash)
 	if err != nil {
