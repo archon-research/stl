@@ -210,9 +210,7 @@ func isHashParam(s string) bool {
 }
 
 // getBlockByHash returns the full block JSON for a given hash, with number/hash/parentHash
-// patched to match the derived values. The fullTx second parameter is currently ignored —
-// the watcher calls with fullTx=true for GetBlockDataByHash and fullTx=false for reorg
-// walk-back (which only reads header fields), so returning full transactions is harmless.
+// patched to match the derived values.
 func (h *httpHandler) getBlockByHash(req rpcutil.Request) (json.RawMessage, *jsonRPCErrorObj) {
 	hash, ok := extractStringParam(req)
 	if !ok {
