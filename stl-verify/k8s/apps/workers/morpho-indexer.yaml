@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: morpho-indexer
-          image: stl-morpho-indexer:local
+          image: localhost/stl-morpho-indexer:local
           imagePullPolicy: Never
           envFrom:
             - configMapRef:

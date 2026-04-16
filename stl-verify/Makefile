@@ -1561,8 +1561,23 @@ kind-secrets:
 docker-build-migrate:
 	docker build -t stl-migrate:local -f Dockerfile.migrate .
 
+kind-load-images:
+	@test -n "$(IMAGES)" || { echo "ERROR: IMAGES is required."; exit 1; }
+	@if [ "$(KIND_EXPERIMENTAL_PROVIDER)" = "podman" ]; then \
+		for img in $(IMAGES); do \
+			echo "==> Loading $$img into kind cluster via podman+ctr..."; \
+			docker save localhost/$$img 2>/dev/null | podman exec -i $(KIND_CLUSTER)-control-plane ctr --namespace=k8s.io images import - || \
+			docker save $$img 2>/dev/null | podman exec -i $(KIND_CLUSTER)-control-plane ctr --namespace=k8s.io images import - || true; \
+		done; \
+	else \
+		for img in $(IMAGES); do \
+			echo "==> Loading $$img into kind cluster via kind load..."; \
+			kind load docker-image $$img --name $(KIND_CLUSTER); \
+		done; \
+	fi
+
 kind-load-migrate:
-	kind load docker-image stl-migrate:local --name $(KIND_CLUSTER)
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-migrate:local"
 
 kind-bootstrap-db:
 	kubectl --context=$(KUBE_CONTEXT) delete job/bootstrap-db --ignore-not-found -n $(KUBE_NS)
@@ -1581,13 +1596,10 @@ kind-migrate: kind-bootstrap-db
 	kubectl --context=$(KUBE_CONTEXT) logs -l job-name=migrate -n $(KUBE_NS) || true
 
 kind-load-watcher:
-	kind load docker-image stl-watcher:local --name $(KIND_CLUSTER)
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-watcher:local"
 
 kind-load-workers:
-	kind load docker-image stl-oracle-price-worker:local        --name $(KIND_CLUSTER)
-	kind load docker-image stl-morpho-indexer:local             --name $(KIND_CLUSTER)
-	kind load docker-image stl-sparklend-position-tracker:local --name $(KIND_CLUSTER)
-	kind load docker-image stl-prime-debt-indexer:local         --name $(KIND_CLUSTER)
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-oracle-price-worker:local stl-morpho-indexer:local stl-sparklend-position-tracker:local stl-prime-debt-indexer:local"
 
 kind-deploy-watcher:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/watcher.yaml -n $(KUBE_NS)
@@ -1598,7 +1610,7 @@ kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
 
 kind-load-python-api:
-	kind load docker-image stl-python-api:local --name $(KIND_CLUSTER)
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-python-api:local"
 
 kind-deploy-python-api:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/python-api.yaml -n $(KUBE_NS)
@@ -1645,9 +1657,7 @@ _docker-release-cronjob-%-internal:
 	echo "==> Cronjob $* Docker image released: $$REPO:$*-$$TAG"
 
 kind-load-cronjobs:
-	@for cj in $(CRONJOBS); do \
-	  kind load docker-image stl-$$cj:local --name $(KIND_CLUSTER); \
-	done
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):local)"
 
 # Regenerate k8s manifests from cmd/cronjobs/ and apply them.
 kind-deploy-cronjobs:
@@ -1669,12 +1679,12 @@ kind-redeploy-worker:
 	else \
 	  $(MAKE) docker-build-$(NAME) LOCAL=1; \
 	fi
-	kind load docker-image stl-$(NAME):local --name $(KIND_CLUSTER)
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-$(NAME):local"
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$(NAME) -n $(KUBE_NS)
 
 kind-redeploy-watcher:
 	$(MAKE) docker-build-watcher LOCAL=1
-	kind load docker-image stl-watcher:local --name $(KIND_CLUSTER)
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-watcher:local"
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/watcher -n $(KUBE_NS)
 
 # CI targets — infra only, no apps, no secrets needed
@@ -1814,7 +1824,7 @@ kind-build-mock-blockchain-server:
 
 # Build and load image into kind cluster
 kind-load-mock-blockchain-server: kind-build-mock-blockchain-server
-	kind load docker-image stl-mock-blockchain-server:local --name $(KIND_CLUSTER)
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-mock-blockchain-server:local"
 
 # Deploy mock-blockchain-server to kind cluster (builds image, populates LocalStack data first)
 kind-deploy-mock-blockchain-server: kind-load-mock-blockchain-server stress-test-data
