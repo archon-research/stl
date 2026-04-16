@@ -1563,18 +1563,21 @@ docker-build-migrate:
 
 kind-load-images:
 	@test -n "$(IMAGES)" || { echo "ERROR: IMAGES is required."; exit 1; }
-	@if [ "$(KIND_EXPERIMENTAL_PROVIDER)" = "podman" ]; then \
-		for img in $(IMAGES); do \
-			echo "==> Loading $$img into kind cluster via podman+ctr..."; \
-			docker save localhost/$$img 2>/dev/null | podman exec -i $(KIND_CLUSTER)-control-plane ctr --namespace=k8s.io images import - || \
-			docker save $$img 2>/dev/null | podman exec -i $(KIND_CLUSTER)-control-plane ctr --namespace=k8s.io images import - || true; \
-		done; \
-	else \
-		for img in $(IMAGES); do \
-			echo "==> Loading $$img into kind cluster via kind load..."; \
-			kind load docker-image $$img --name $(KIND_CLUSTER); \
-		done; \
-	fi
+	@for img in $(IMAGES); do \
+		canonical="localhost/$$img"; \
+		if ! docker image inspect "$$canonical" >/dev/null 2>&1; then \
+			docker image inspect "$$img" >/dev/null 2>&1 || { echo "ERROR: local image $$img not found."; exit 1; }; \
+			echo "==> Tagging $$img as $$canonical"; \
+			docker tag "$$img" "$$canonical"; \
+		fi; \
+		if [ "$(KIND_EXPERIMENTAL_PROVIDER)" = "podman" ]; then \
+			echo "==> Loading $$canonical into kind cluster via podman+ctr..."; \
+			docker save "$$canonical" | podman exec -i $(KIND_CLUSTER)-control-plane ctr --namespace=k8s.io images import -; \
+		else \
+			echo "==> Loading $$canonical into kind cluster via kind load..."; \
+			kind load docker-image "$$canonical" --name $(KIND_CLUSTER); \
+		fi; \
+	done
 
 kind-load-migrate:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-migrate:local"
