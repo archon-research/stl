@@ -41,7 +41,7 @@
 		docker-release-python-api-staging \
 		docker-build-mock-blockchain-server docker-push-mock-blockchain-server docker-release-mock-blockchain-server \
 		docker-release-mock-blockchain-server-staging \
-		kind-build-mock-blockchain-server kind-load-mock-blockchain-server kind-deploy-mock-blockchain-server kind-redeploy-mock-blockchain-server \
+		kind-build-mock-blockchain-server kind-load-mock-blockchain-server kind-deploy-mock-blockchain-server kind-deploy-mock-blockchain-server-s3 \
 		kind-use-mock kind-use-alchemy k6-stress-test stress-test-data stress-test kind-clean
 
 # Go bin path for installed tools
@@ -1903,13 +1903,16 @@ kind-build-mock-blockchain-server:
 kind-load-mock-blockchain-server: kind-build-mock-blockchain-server
 	kind load docker-image stl-mock-blockchain-server:local --name $(KIND_CLUSTER)
 
-# Deploy mock-blockchain-server to kind cluster (builds image, populates LocalStack data first)
-kind-deploy-mock-blockchain-server: kind-load-mock-blockchain-server stress-test-data
+# Deploy mock-blockchain-server to kind cluster (uses fixture data by default).
+# To load real blocks for stress testing, run: make stress-test-data && make kind-deploy-mock-blockchain-server-s3
+kind-deploy-mock-blockchain-server: kind-load-mock-blockchain-server
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/mock-blockchain-server.yaml -n $(KUBE_NS)
 
-# Rebuild, reload, and restart mock-blockchain-server in kind
-kind-redeploy-mock-blockchain-server: kind-load-mock-blockchain-server
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/mock-blockchain-server -n $(KUBE_NS)
+# Deploy mock-blockchain-server with S3 block data (for stress testing).
+kind-deploy-mock-blockchain-server-s3: kind-load-mock-blockchain-server stress-test-data
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/mock-blockchain-server.yaml -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) patch deployment mock-blockchain-server -n $(KUBE_NS) --type=json \
+	  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args","value":["--addr=:8546","--admin-addr=:8547","--s3-bucket=stress-test-data","--s3-prefix=blocks/chain-1","--s3-endpoint=http://localstack:4566","--region=us-east-1"]}]'
 
 # Point watcher at mock-blockchain-server instead of Alchemy
 kind-use-mock:

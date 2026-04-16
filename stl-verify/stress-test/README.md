@@ -115,11 +115,8 @@ All three queries must return 0:
 The mock starts with synthetic fixture blocks. To load real block data for stress testing:
 
 ```bash
-# One-time: sync 500 real blocks from staging S3 into LocalStack (requires staging AWS credentials)
-make stress-test-data
-
-# Restart the mock to pick up real data
-make kind-redeploy-mock-blockchain-server
+# One-time: sync 500 real blocks from staging S3 and deploy mock with S3 args (requires staging AWS credentials)
+make kind-deploy-mock-blockchain-server-s3
 ```
 
 Data persists across kind restarts. Re-run `stress-test-data` only if you need different blocks.

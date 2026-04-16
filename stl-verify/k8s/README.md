@@ -99,7 +99,7 @@ make kind-use-mock
 To load real block data (500 blocks from staging) into the mock server:
 
 ```bash
-make stress-test-data && make kind-redeploy-mock-blockchain-server
+make kind-deploy-mock-blockchain-server-s3
 ```
 
 ## Fast Iteration

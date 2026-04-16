@@ -25,10 +25,6 @@ spec:
           args:
             - --addr=:8546
             - --admin-addr=:8547
-            - --s3-bucket=stress-test-data
-            - --s3-prefix=blocks/chain-1
-            - --s3-endpoint=http://localstack:4566
-            - --region=$(AWS_REGION)
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -39,15 +35,6 @@ spec:
               containerPort: 8546
             - name: admin
               containerPort: 8547
-          env:
-            - name: AWS_REGION
-              valueFrom:
-                configMapKeyRef:
-                  name: stl-config
-                  key: AWS_REGION
-          envFrom:
-            - configMapRef:
-                name: stl-config
 ---
 apiVersion: v1
 kind: Service
