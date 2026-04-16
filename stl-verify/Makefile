@@ -291,24 +291,24 @@ dev-up:
 	@$(MAKE) dev-preflight
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [1/9] Cluster"
+	@echo "  Cluster"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(MAKE) kind-create
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [2/9] Infrastructure"
+	@echo "  Infrastructure"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	$(MAKE) kind-config kind-secrets kind-infra
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [3/9] Database migrations"
+	@echo "  Database migrations"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-migrate:local,docker-build-migrate)
 	$(MAKE) kind-load-migrate kind-migrate
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [4/9] Mock Blockchain Server"
+	@echo "  Mock Blockchain Server"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-mock-blockchain-server:local,kind-build-mock-blockchain-server)
 	$(MAKE) kind-load-mock-blockchain-server
@@ -317,14 +317,14 @@ dev-up:
 	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/mock-blockchain-server -n $(KUBE_NS) --timeout=120s
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [5/9] Watcher"
+	@echo "  Watcher"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-watcher:local,docker-build-watcher LOCAL=1)
 	$(MAKE) kind-load-watcher kind-deploy-watcher
 	$(MAKE) kind-use-mock
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [6/9] Workers"
+	@echo "  Workers"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
 	if [ -n "$$ALCHEMY_API_KEY" ]; then \
@@ -335,13 +335,13 @@ dev-up:
 	fi
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [7/9] Python API"
+	@echo "  Python API"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-python-api:local,docker-build-python-api LOCAL=1)
 	$(MAKE) kind-load-python-api kind-deploy-python-api
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [8/9] Cronjobs (Temporal)"
+	@echo "  Cronjobs (Temporal)"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@for cj in $(CRONJOBS); do \
 	  if [ "$(COLD)" = "1" ] || ! docker image inspect stl-$$cj:local >/dev/null 2>&1; then \
@@ -353,7 +353,7 @@ dev-up:
 	$(MAKE) kind-load-cronjobs kind-deploy-cronjobs
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [9/9] Ready"
+	@echo "  Ready"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "==> Waiting for all deployments to roll out..."
 	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
