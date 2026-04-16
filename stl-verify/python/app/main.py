@@ -10,6 +10,7 @@ from app.api.v1 import allocations, risk, status
 from app.config import Settings, get_settings
 from app.logging import setup_logging
 from app.middleware.request_id import RequestIdMiddleware
+from app.risk_engine.suraf.loader import load_all_ratings
 from app.telemetry import instrument_sqlalchemy_engine, setup_telemetry, shutdown_telemetry
 
 
@@ -23,6 +24,12 @@ def create_app(settings: Settings) -> FastAPI:
             await conn.execute(text("SELECT 1"))
         app.state.engine = engine
         instrument_sqlalchemy_engine(engine)
+        # Fail fast: bad SURAF inputs should prevent startup, not silently
+        # run without a risk model.
+        app.state.suraf_ratings = load_all_ratings(
+            settings.suraf_inputs_dir,
+            source_commit_sha=settings.git_commit,
+        )
         async with httpx.AsyncClient() as http_client:
             app.state.http_client = http_client
             yield
