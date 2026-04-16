@@ -5,7 +5,6 @@ from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
-
 ENV_DIR = Path(__file__).resolve().parents[1]
 
 
