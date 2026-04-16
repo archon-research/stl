@@ -6,8 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.api.deps import get_engine, get_http_client
+from app.api.deps import get_asset_to_rating, get_engine, get_http_client, get_suraf_ratings
 from app.config import Settings, get_settings
+from app.risk_engine.rrc import (
+    PortfolioRrcResult,
+    ScenarioRrcResult,
+    compute_portfolio_rrc,
+    compute_scenario_rrc,
+)
+from app.risk_engine.suraf.result import SurafResult
 from app.services.risk_calculation_service import RiskCalculationService
 from app.services.risk_service_factory import RiskServiceFactory
 
@@ -37,6 +44,46 @@ class RiskBreakdownItemResponse(BaseModel):
 class RiskBreakdownResponse(BaseModel):
     receipt_token_id: int
     items: list[RiskBreakdownItemResponse]
+
+
+class RrcModelEntryResponse(BaseModel):
+    name: str
+    source_commit_sha: str
+    modeled_exposure_usd: Decimal
+    crr_pct: Decimal
+    rrc_usd: Decimal
+
+
+class RrcItemResponse(BaseModel):
+    token_id: int
+    symbol: str
+    amount_usd: Decimal
+    rating_id: str | None
+    crr_pct: Decimal | None
+    rrc_usd: Decimal | None
+
+
+class PortfolioRrcResponse(BaseModel):
+    receipt_token_id: int
+    total_exposure_usd: Decimal
+    modeled_exposure_usd: Decimal
+    final_crr_pct: Decimal | None
+    final_rrc_usd: Decimal | None
+    models: list[RrcModelEntryResponse]
+    items: list[RrcItemResponse]
+
+
+class ScenarioRrcResponse(BaseModel):
+    asset: str
+    usd_exposure: Decimal
+    final_crr_pct: Decimal
+    final_rrc_usd: Decimal
+    models: list[RrcModelEntryResponse]
+
+
+class ScenarioRrcRequest(BaseModel):
+    asset: str
+    usd_exposure: Decimal
 
 
 async def _resolve(
@@ -114,3 +161,89 @@ async def get_risk_breakdown(
             for item in breakdown.items
         ],
     )
+
+
+def _portfolio_response(receipt_token_id: int, result: PortfolioRrcResult) -> PortfolioRrcResponse:
+    return PortfolioRrcResponse(
+        receipt_token_id=receipt_token_id,
+        total_exposure_usd=result.total_exposure_usd,
+        modeled_exposure_usd=result.modeled_exposure_usd,
+        final_crr_pct=result.final_crr_pct,
+        final_rrc_usd=result.final_rrc_usd,
+        models=[
+            RrcModelEntryResponse(
+                name=m.name,
+                source_commit_sha=m.source_commit_sha,
+                modeled_exposure_usd=m.modeled_exposure_usd,
+                crr_pct=m.crr_pct,
+                rrc_usd=m.rrc_usd,
+            )
+            for m in result.models
+        ],
+        items=[
+            RrcItemResponse(
+                token_id=i.token_id,
+                symbol=i.symbol,
+                amount_usd=i.amount_usd,
+                rating_id=i.rating_id,
+                crr_pct=i.crr_pct,
+                rrc_usd=i.rrc_usd,
+            )
+            for i in result.items
+        ],
+    )
+
+
+def _scenario_response(result: ScenarioRrcResult) -> ScenarioRrcResponse:
+    return ScenarioRrcResponse(
+        asset=result.asset,
+        usd_exposure=result.usd_exposure,
+        final_crr_pct=result.final_crr_pct,
+        final_rrc_usd=result.final_rrc_usd,
+        models=[
+            RrcModelEntryResponse(
+                name=m.name,
+                source_commit_sha=m.source_commit_sha,
+                modeled_exposure_usd=m.modeled_exposure_usd,
+                crr_pct=m.crr_pct,
+                rrc_usd=m.rrc_usd,
+            )
+            for m in result.models
+        ],
+    )
+
+
+@router.get("/risk/{receipt_token_id}/rrc", response_model=PortfolioRrcResponse)
+async def get_rrc(
+    receipt_token_id: int,
+    resolved: tuple[RiskCalculationService, int] = Depends(_resolve),
+    asset_to_rating: dict[str, str] = Depends(get_asset_to_rating),
+    suraf_ratings: dict[str, SurafResult] = Depends(get_suraf_ratings),
+) -> PortfolioRrcResponse:
+    """Return per-collateral RRC computed from the receipt token's current backing."""
+    service, asset_id = resolved
+    try:
+        breakdown = await service.get_risk_breakdown(backed_asset_id=asset_id)
+    except IOError as exc:
+        raise HTTPException(status_code=502, detail=f"upstream RPC error: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    result = compute_portfolio_rrc(breakdown, asset_to_rating, suraf_ratings)
+    return _portfolio_response(receipt_token_id, result)
+
+
+@router.post("/risk/rrc", response_model=ScenarioRrcResponse)
+async def post_rrc(
+    body: ScenarioRrcRequest,
+    asset_to_rating: dict[str, str] = Depends(get_asset_to_rating),
+    suraf_ratings: dict[str, SurafResult] = Depends(get_suraf_ratings),
+) -> ScenarioRrcResponse:
+    """Return RRC for a single asset at a caller-supplied USD exposure. No DB lookup."""
+    if body.usd_exposure <= _ZERO:
+        raise HTTPException(status_code=422, detail="usd_exposure must be positive")
+
+    result = compute_scenario_rrc(body.asset, body.usd_exposure, asset_to_rating, suraf_ratings)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"no rating mapped for asset: {body.asset}")
+    return _scenario_response(result)
