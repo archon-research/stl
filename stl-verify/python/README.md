@@ -27,6 +27,21 @@ Then start the FastAPI server:
 make run
 ```
 
+To test the static UI hosting locally, build the frontend into the FastAPI app
+and then start the server:
+
+```bash
+# From stl-verify/python/
+make run-static
+```
+
+If you only want to refresh the staged frontend assets without starting the
+server:
+
+```bash
+make build-ui-static
+```
+
 ## Test
 
 ```bash

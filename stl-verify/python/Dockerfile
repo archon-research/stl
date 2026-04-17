@@ -1,3 +1,18 @@
+# Build UI
+FROM node:22-alpine AS ui-builder
+
+WORKDIR /ui
+
+COPY ts/package.json ts/package-lock.json ./
+COPY ts/ui/package.json ui/package.json
+
+RUN npm ci
+
+COPY ts/ui ui/
+
+RUN npm run build --workspace=@stl-verify/ui
+
+# Build Python dependencies
 FROM python:3.12-slim AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.5 /uv /uvx /bin/
@@ -24,6 +39,9 @@ WORKDIR /app
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 COPY --from=builder --chown=appuser:appuser /app/app /app/app
 COPY --from=builder --chown=appuser:appuser /app/.env.default /app/.env.default
+
+# Copy built UI assets for static hosting
+COPY --from=ui-builder --chown=appuser:appuser /ui/ui/dist /app/app/static
 
 USER 10001
 
