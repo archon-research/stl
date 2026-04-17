@@ -4,7 +4,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-
 ROMAN_TO_ARABIC = {"I": "1", "II": "2", "III": "3", "IV": "4", "V": "5"}
 
 
@@ -57,14 +56,10 @@ class SURAFResults:
 
         pillar_rows = df[df["pillar_weight"] != ""].copy()
         pillar_rows["pillar_num"] = (
-            pillar_rows["title"]
-            .str.extract(r"PILLAR\s+([IVX]+)", expand=False)
-            .map(ROMAN_TO_ARABIC)
+            pillar_rows["title"].str.extract(r"PILLAR\s+([IVX]+)", expand=False).map(ROMAN_TO_ARABIC)
         )
         pillar_rows = pillar_rows.dropna(subset="pillar_num")
-        self.pillar_weights = (
-            pillar_rows.set_index("pillar_num")["pillar_weight"].astype(int)
-        )
+        self.pillar_weights = pillar_rows.set_index("pillar_num")["pillar_weight"].astype(int)
 
     def load_assessor_scores(self, assessor_paths: list[Path | str]) -> None:
         """Load assessor score CSVs and compute per-assessor results."""
@@ -74,30 +69,26 @@ class SURAFResults:
             path = Path(path)
             df = pd.read_csv(path, keep_default_na=False)
 
-            scoreable = df[df["pillar"].str.isnumeric()][
-                ["pillar", "subsection_ref"]
-            ].copy()
-            scoreable["score"] = pd.to_numeric(
-                df.loc[scoreable.index, "score"], errors="coerce"
-            )
+            scoreable = df[df["pillar"].str.isnumeric()][["pillar", "subsection_ref"]].copy()
+            scoreable["score"] = pd.to_numeric(df.loc[scoreable.index, "score"], errors="coerce")
             scoreable["sub_weight"] = scoreable["subsection_ref"].map(self.sub_weights)
 
             # Weighted average per pillar
-            pillar_scores = scoreable.groupby("pillar").apply(
-                _weighted_avg, include_groups=False
-            )
+            pillar_scores = scoreable.groupby("pillar").apply(_weighted_avg, include_groups=False)
 
             # Overall weighted average across pillars
             pw = self.pillar_weights.reindex(pillar_scores.index)
             valid = pillar_scores.dropna()
             overall = np.average(valid, weights=pw.reindex(valid.index))
 
-            rows.append({
-                "assessor": path.stem,
-                "overall_score": overall,
-                "n_score_1": int((scoreable["score"] == 1).sum()),
-                "n_scored": int(scoreable["score"].notna().sum()),
-            })
+            rows.append(
+                {
+                    "assessor": path.stem,
+                    "overall_score": overall,
+                    "n_score_1": int((scoreable["score"] == 1).sum()),
+                    "n_scored": int(scoreable["score"].notna().sum()),
+                }
+            )
 
         self.assessor_results = pd.DataFrame(rows)
 
@@ -121,15 +112,11 @@ class SURAFResults:
 
     def map_crr(self) -> None:
         """Map the average score to an unadjusted CRR via interpolation."""
-        self.unadjusted_crr = float(
-            np.interp(self.avg_score, self._crr_scores, self._crr_values)
-        )
+        self.unadjusted_crr = float(np.interp(self.avg_score, self._crr_scores, self._crr_values))
 
     def apply_penalty(self) -> None:
         """Apply the score-of-1 penalty and compute the adjusted CRR."""
-        self.penalty = float(
-            np.interp(self.total_score_1, self._penalty_ns, self._penalty_pps)
-        )
+        self.penalty = float(np.interp(self.total_score_1, self._penalty_ns, self._penalty_pps))
         self.adjusted_crr = min(self.unadjusted_crr + self.penalty, 100.0)
 
     def run(
@@ -154,8 +141,7 @@ class SURAFResults:
             f"Average score:         {self.avg_score:.3f}",
             f"Unadjusted CRR:        {self.unadjusted_crr:.1f}%",
             "",
-            f"Subsections scored 1:  {self.total_score_1} "
-            f"(out of {self.total_scored} scored)",
+            f"Subsections scored 1:  {self.total_score_1} (out of {self.total_scored} scored)",
             f"Score-1 penalty:       +{self.penalty:.1f}pp",
             "",
             f"Adjusted CRR:          {self.adjusted_crr:.1f}%",

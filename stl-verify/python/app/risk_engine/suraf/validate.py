@@ -40,8 +40,7 @@ def validate_package(path: Path) -> None:
     assessors = assessor_paths(path)
     if len(assessors) != REQUIRED_ASSESSOR_COUNT:
         raise SurafValidationError(
-            f"expected {REQUIRED_ASSESSOR_COUNT} {ASSESSOR_GLOB} files in {path}, "
-            f"found {len(assessors)}"
+            f"expected {REQUIRED_ASSESSOR_COUNT} {ASSESSOR_GLOB} files in {path}, found {len(assessors)}"
         )
 
     weights = path / WEIGHTS_FILE

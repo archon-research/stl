@@ -19,14 +19,7 @@ from app.main import create_app
 from app.risk_engine.suraf.result import SurafResult
 from app.risk_engine.suraf.validate import SurafValidationError
 
-SAMPLE_PACKAGE = (
-    Path(__file__).resolve().parents[1]
-    / "unit"
-    / "risk_engine"
-    / "suraf"
-    / "testdata"
-    / "sample_rating"
-)
+SAMPLE_PACKAGE = Path(__file__).resolve().parents[1] / "unit" / "risk_engine" / "suraf" / "testdata" / "sample_rating"
 
 
 def _settings(async_db_url: str, suraf_inputs_dir: Path) -> Settings:
