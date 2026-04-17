@@ -23,6 +23,7 @@ All commands run from `stl-verify/`:
 # Development
 make dev-up              # Start Docker services (PostgreSQL, Redis, Jaeger, LocalStack)
 make dev-down            # Stop services
+make dev-env             # Generate .env files for all services (fetches secrets from AWS)
 make run-watcher         # Run watcher (loads .env from cmd/watcher/)
 
 # Testing
@@ -47,6 +48,8 @@ make docker-release-backup ENV=sentinelstaging  # Build and push backup worker i
 make erigon-status ERIGON_USER=<user> ERIGON_IP=<ip>
 make deploy-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip>
 ```
+
+See [stl-verify/Makefile](stl-verify/Makefile) for the complete list of targets.
 
 ## Architecture
 
