@@ -15,7 +15,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: watcher
-          image: stl-watcher:local
+          image: localhost/stl-watcher:local
           imagePullPolicy: Never
           envFrom:
             - configMapRef:

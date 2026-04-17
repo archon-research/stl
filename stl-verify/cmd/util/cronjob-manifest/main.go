@@ -83,7 +83,7 @@ spec:
     spec:
       containers:
         - name: {{.Name}}
-          image: stl-{{.Name}}:{{.ImageTag}}
+          image: localhost/stl-{{.Name}}:{{.ImageTag}}
           imagePullPolicy: {{.ImagePullPolicy}}
           envFrom:
             - configMapRef:

@@ -1,22 +1,30 @@
 import functools
+from pathlib import Path
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
+ENV_DIR = Path(__file__).resolve().parents[1]
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", frozen=True)
+    model_config = SettingsConfigDict(
+        env_file=(ENV_DIR / ".env.default", ENV_DIR / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+        frozen=True,
+    )
 
-    log_level: str = "INFO"
-    log_format: str = "json"
-    database_url: SecretStr = SecretStr("postgresql+asyncpg://postgres:postgres@localhost:5432/stl_verify")
-    alchemy_api_key: SecretStr = SecretStr("MISSING_KEY")
-    otel_enabled: bool = False
-    otel_exporter_otlp_endpoint: str = "http://localhost:4317"
-    otel_service_name: str = "stl-verify-python"
+    log_level: str
+    log_format: str
+    database_url: SecretStr
+    alchemy_api_key: SecretStr
+    otel_enabled: bool
+    otel_exporter_otlp_endpoint: str
+    otel_service_name: str
 
     @property
     def async_database_url(self) -> str:
