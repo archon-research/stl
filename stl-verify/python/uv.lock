@@ -1104,7 +1104,7 @@ requires-dist = [
     { name = "opentelemetry-instrumentation-fastapi", specifier = ">=0.62b0,<1" },
     { name = "opentelemetry-instrumentation-sqlalchemy", specifier = ">=0.62b0,<1" },
     { name = "opentelemetry-sdk", specifier = ">=1.41.0,<2" },
-    { name = "pandas" },
+    { name = "pandas", specifier = ">=2.2.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-settings" },
     { name = "pytest", marker = "extra == 'dev'" },

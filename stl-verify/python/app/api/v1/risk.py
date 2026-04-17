@@ -40,12 +40,12 @@ class RiskBreakdownResponse(BaseModel):
     items: list[RiskBreakdownItemResponse]
 
 
-class RrcRequest(BaseModel):
+class ScenarioRrcRequest(BaseModel):
     asset: str
     usd_exposure: Decimal
 
 
-class RrcResponse(BaseModel):
+class ScenarioRrcResponse(BaseModel):
     asset: str
     usd_exposure: Decimal
     rating_id: str
@@ -131,17 +131,17 @@ async def get_risk_breakdown(
     )
 
 
-@router.post("/risk/rrc", response_model=RrcResponse)
-async def post_rrc(
-    body: RrcRequest,
+@router.post("/risk/rrc/scenario", response_model=ScenarioRrcResponse)
+async def post_rrc_scenario(
+    body: ScenarioRrcRequest,
     service: SurafRrcService = Depends(get_suraf_rrc_service),
-) -> RrcResponse:
-    """Return SURAF RRC for a single asset at the caller-supplied USD exposure.
+) -> ScenarioRrcResponse:
+    """Return SURAF RRC for a hypothetical ``(asset, usd_exposure)`` pair.
 
     ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
-    for the asset. This endpoint doesn't use ``RiskCalculationService``
-    because SURAF rates assets directly — no per-collateral decomposition
-    is needed, so no DB lookup is required.
+    for the asset. Pure scenario calculation — no DB lookup, no position
+    state. Position-level RRC (``GET /risk/{receipt_token_id}/rrc``) is
+    deferred pending a decision on how to derive USD exposure from holdings.
     """
     if body.usd_exposure <= _ZERO:
         raise HTTPException(status_code=422, detail="usd_exposure must be positive")
@@ -149,4 +149,4 @@ async def post_rrc(
     result = service.compute(body.asset, body.usd_exposure)
     if result is None:
         raise HTTPException(status_code=404, detail=f"no rating mapped for asset: {body.asset}")
-    return RrcResponse(**result.model_dump())
+    return ScenarioRrcResponse(**result.model_dump())
