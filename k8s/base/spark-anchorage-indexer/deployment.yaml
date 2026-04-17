@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: spark-anchorage-indexer
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: spark-anchorage-indexer
