@@ -25,6 +25,7 @@ def configure_static_hosting(application: FastAPI, static_dir: Path) -> None:
         return
 
     static_root = static_dir.resolve()
+
     @application.get("/", include_in_schema=False)
     async def serve_root() -> FileResponse:
         return FileResponse(index_file)
@@ -46,8 +47,7 @@ def configure_static_hosting(application: FastAPI, static_dir: Path) -> None:
 
 def _is_reserved_frontend_path(requested_path: str) -> bool:
     return any(
-        requested_path == prefix or requested_path.startswith(f"{prefix}/")
-        for prefix in RESERVED_FRONTEND_PREFIXES
+        requested_path == prefix or requested_path.startswith(f"{prefix}/") for prefix in RESERVED_FRONTEND_PREFIXES
     )
 
 
