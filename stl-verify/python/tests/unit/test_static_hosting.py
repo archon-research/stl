@@ -60,5 +60,3 @@ def test_static_hosting_keeps_reserved_prefixes_unhandled(tmp_path) -> None:
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Not Found"}
-
-
