@@ -1,0 +1,5 @@
+**/node_modules
+**/dist
+**/dist-ssr
+**/.pytest_cache
+**/__pycache__

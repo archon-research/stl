@@ -16,5 +16,7 @@ build/
 
 # OS
 .DS_Store
+
+# Local env
 .env.local
 .env.*.local

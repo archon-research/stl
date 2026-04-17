@@ -1,38 +1,15 @@
-@font-face {
-  font-family: 'TT Hoves';
-  src: url('https://cdn.prod.website-files.com/66c5c2bab55d37d8e443322b/66c7380aa0326ad51007744b_TT%20Hoves%20Regular.otf') format('opentype');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'TT Hoves';
-  src: url('https://cdn.prod.website-files.com/66c5c2bab55d37d8e443322b/66c7380ae1ef4e5326bce592_TT%20Hoves%20Medium.otf') format('opentype');
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'TT Hoves';
-  src: url('https://cdn.prod.website-files.com/66c5c2bab55d37d8e443322b/66c7380a23e5017733553db6_TT%20Hoves%20Bold.otf') format('opentype');
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
-
 :root {
   --archon-space: #000037;
   --archon-white: #fafafa;
   --archon-life: #6dfb6e;
   --archon-grey: #d4d4d4;
   --archon-ink: #fafafa;
-  font-family: 'TT Hoves', sans-serif;
+
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   color: var(--archon-ink);
   background: var(--archon-space);
   font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  text-rendering: optimizelegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }

@@ -25,7 +25,6 @@ def configure_static_hosting(application: FastAPI, static_dir: Path) -> None:
         return
 
     static_root = static_dir.resolve()
-
     @application.get("/", include_in_schema=False)
     async def serve_root() -> FileResponse:
         return FileResponse(index_file)
@@ -39,7 +38,7 @@ def configure_static_hosting(application: FastAPI, static_dir: Path) -> None:
         if requested_file is not None and requested_file.is_file():
             return FileResponse(requested_file)
 
-        if Path(requested_path).suffix:
+        if _is_asset_path(requested_path):
             raise HTTPException(status_code=404, detail="Not Found")
 
         return FileResponse(index_file)
@@ -47,7 +46,8 @@ def configure_static_hosting(application: FastAPI, static_dir: Path) -> None:
 
 def _is_reserved_frontend_path(requested_path: str) -> bool:
     return any(
-        requested_path == prefix or requested_path.startswith(f"{prefix}/") for prefix in RESERVED_FRONTEND_PREFIXES
+        requested_path == prefix or requested_path.startswith(f"{prefix}/")
+        for prefix in RESERVED_FRONTEND_PREFIXES
     )
 
 
@@ -58,6 +58,10 @@ def _resolve_static_file(static_root: Path, requested_path: str) -> Path | None:
     except ValueError:
         return None
     return candidate
+
+
+def _is_asset_path(requested_path: str) -> bool:
+    return requested_path.split("/", 1)[0] == "assets"
 
 
 def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:

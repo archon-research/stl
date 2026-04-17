@@ -9,7 +9,7 @@ This is an npm monorepo containing the frontend applications for STL Verify.
 ## Setup
 
 ```bash
-# Install dependencies (from repository root)
+# Install dependencies (from the workspace root: stl-verify/ts)
 npm install
 
 # Or from this directory
