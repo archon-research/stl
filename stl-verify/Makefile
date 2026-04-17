@@ -114,13 +114,7 @@ test:
 	@echo "==> Running unit tests..."
 	go test -v ./...
 
-# Run integration tests (requires integration build tag)
-# -p 2: run at most 2 package test binaries in parallel to avoid spinning up
-# too many containers concurrently on CI (13 packages x containers = OOM).
-check-container-runtime:
-	@docker info >/dev/null 2>&1 || (echo "Docker runtime unavailable; integration tests require a running Docker-compatible daemon." >&2; exit 1)
-
-test-integration: check-container-runtime
+test-integration: 
 	@echo "==> Running integration tests..."
 	GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=10m -p 2 ./...
 
