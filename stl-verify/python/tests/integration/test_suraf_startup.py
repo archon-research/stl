@@ -86,9 +86,7 @@ def test_startup_fails_when_mapping_file_missing(async_db_url: str, tmp_path: Pa
         create_app(_settings(async_db_url, inputs_dir, mapping_file))
 
 
-def test_startup_fails_when_mapping_references_unknown_rating(
-    async_db_url: str, tmp_path: Path
-) -> None:
+def test_startup_fails_when_mapping_references_unknown_rating(async_db_url: str, tmp_path: Path) -> None:
     inputs_dir = _build_inputs_dir(tmp_path)
     mapping_file = _write_mapping(tmp_path, '{"aUSDC": "does_not_exist"}')
 

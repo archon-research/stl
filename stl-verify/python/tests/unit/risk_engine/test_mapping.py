@@ -11,7 +11,15 @@ class TestLoadAssetMapping:
     def test_loads_valid_json(self) -> None:
         mapping = load_asset_mapping(TESTDATA / "valid_mapping.json")
 
-        assert mapping == {"aUSDC": "aave_ausdc", "spUSDC": "sparklend_spusdc"}
+        # Keys are casefolded at load time for case-insensitive lookup.
+        assert mapping == {"ausdc": "aave_ausdc", "spusdc": "sparklend_spusdc"}
+
+    def test_casefolds_keys(self, tmp_path: Path) -> None:
+        path = tmp_path / "mixed_case.json"
+        path.write_text('{"AUSDC": "aave_ausdc", "SpUsDc": "sparklend_spusdc"}')
+        mapping = load_asset_mapping(path)
+
+        assert mapping == {"ausdc": "aave_ausdc", "spusdc": "sparklend_spusdc"}
 
     def test_raises_on_missing_file(self, tmp_path: Path) -> None:
         with pytest.raises(MappingError, match="not found"):

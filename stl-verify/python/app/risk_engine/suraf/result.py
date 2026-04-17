@@ -12,6 +12,15 @@ from pydantic import BaseModel, ConfigDict
 
 
 class SurafResult(BaseModel):
+    """SURAF scoring result for a single rating package.
+
+    CRR fields are percentages on a 0–100 scale (e.g. ``Decimal("33.7")``
+    means 33.7%, not 0.337). ``crr_pct`` may differ from
+    ``unadjusted_crr_pct + penalty_pp`` by up to ~1e-10 because the
+    scorer computes ``adjusted = min(unadj + pen, 100)`` in float before
+    the Decimal conversion at this boundary.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     rating_id: str

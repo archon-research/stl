@@ -38,11 +38,3 @@ class TestValidatePackage:
 
         with pytest.raises(SurafValidationError, match="missing required file"):
             validate_package(sample_package)
-
-    def test_dry_run_scoring_failure(self, sample_package: Path) -> None:
-        # Clobber crr_mapping.csv so the scorer's read_csv raises on missing
-        # required columns.
-        (sample_package / "crr_mapping.csv").write_text("not,a,real,schema\n1,2,3,4\n")
-
-        with pytest.raises(SurafValidationError, match="dry-run scoring failed"):
-            validate_package(sample_package)

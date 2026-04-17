@@ -1,8 +1,7 @@
 """Integration tests for ``POST /v1/risk/rrc``.
 
 Uses the real FastAPI app via ``create_app`` so SURAF startup wiring is
-exercised end-to-end. The endpoint is DB-free by design, so no
-``_resolve`` override is needed.
+exercised end-to-end.
 """
 
 from __future__ import annotations

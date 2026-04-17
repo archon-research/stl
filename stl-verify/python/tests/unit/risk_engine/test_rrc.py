@@ -19,7 +19,7 @@ def _rating(rating_id: str, crr_pct: str, sha: str = "abc123") -> SurafResult:
 
 class TestComputeRrc:
     def test_mapped_asset(self) -> None:
-        mapping = {"aUSDC": "aave_ausdc"}
+        mapping = {"ausdc": "aave_ausdc"}
         ratings = {"aave_ausdc": _rating("aave_ausdc", "33.7")}
 
         result = compute_rrc("aUSDC", Decimal("1000"), mapping, ratings)
@@ -36,7 +36,7 @@ class TestComputeRrc:
         assert compute_rrc("WBTC", Decimal("1000"), {}, {}) is None
 
     def test_zero_crr(self) -> None:
-        mapping = {"aUSDC": "aave_ausdc"}
+        mapping = {"ausdc": "aave_ausdc"}
         ratings = {"aave_ausdc": _rating("aave_ausdc", "0")}
 
         result = compute_rrc("aUSDC", Decimal("1000"), mapping, ratings)
@@ -46,10 +46,19 @@ class TestComputeRrc:
 
     def test_is_pure(self) -> None:
         """Repeated calls with the same inputs produce identical results."""
-        mapping = {"aUSDC": "aave_ausdc"}
+        mapping = {"ausdc": "aave_ausdc"}
         ratings = {"aave_ausdc": _rating("aave_ausdc", "25")}
 
         r1 = compute_rrc("aUSDC", Decimal("500"), mapping, ratings)
         r2 = compute_rrc("aUSDC", Decimal("500"), mapping, ratings)
 
         assert r1 == r2
+
+    def test_case_insensitive_asset_lookup(self) -> None:
+        mapping = {"ausdc": "aave_ausdc"}
+        ratings = {"aave_ausdc": _rating("aave_ausdc", "50")}
+
+        for variant in ("aUSDC", "AUSDC", "ausdc", "aUsDc"):
+            result = compute_rrc(variant, Decimal("100"), mapping, ratings)
+            assert result is not None
+            assert result.rating_id == "aave_ausdc"

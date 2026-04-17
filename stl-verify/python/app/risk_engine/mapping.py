@@ -5,6 +5,9 @@ The mapping file is a flat JSON object: ``{asset: rating_id}``. The
 key format (token symbol vs address vs something else) is an open
 question tracked in the mapping file itself.
 
+Lookups are case-insensitive: keys are casefolded at load time and
+callers must casefold the asset argument before ``.get(...)``.
+
 This module is deliberately independent of the SURAF loader: it does
 not check that a ``rating_id`` exists in the loaded ratings. That kind
 of cross-validation, if we want it, belongs in startup wiring.
@@ -36,6 +39,7 @@ def load_asset_mapping(path: Path) -> dict[str, str]:
         raise MappingError(f"asset mapping file is not valid JSON ({path}): {exc}") from exc
 
     try:
-        return _AssetMapping.model_validate(raw).root
+        parsed = _AssetMapping.model_validate(raw).root
     except ValidationError as exc:
         raise MappingError(f"asset mapping file has wrong shape ({path}): {exc}") from exc
+    return {k.casefold(): v for k, v in parsed.items()}

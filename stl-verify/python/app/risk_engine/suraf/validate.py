@@ -1,20 +1,17 @@
-"""Validation for a single SURAF rating package.
+"""File-shape validation for a single SURAF rating package.
 
 A rating package is a directory containing exactly three assessor CSVs,
 plus ``weights.csv``, ``crr_mapping.csv`` and ``penalty.csv``. Validation
 fails fast with ``SurafValidationError`` on the first problem.
 
-The final check is a dry-run of the scorer, which is the cheapest way
-to surface structural issues inside the CSVs (missing columns, unparseable
-values, weight/score mismatches) without re-implementing the scorer's
-internal assumptions here.
+Scoring-correctness (unparseable cells, weight/score mismatches, etc.) is
+caught by the loader when it actually scores the package, and by CI's
+dry-run on PRs that add or change rating packages.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-
-from .scoring import SURAFResults
 
 ASSESSOR_GLOB = "Assessor_*_scores.csv"
 REQUIRED_ASSESSOR_COUNT = 3
@@ -43,19 +40,6 @@ def validate_package(path: Path) -> None:
             f"expected {REQUIRED_ASSESSOR_COUNT} {ASSESSOR_GLOB} files in {path}, found {len(assessors)}"
         )
 
-    weights = path / WEIGHTS_FILE
-    crr_mapping = path / CRR_MAPPING_FILE
-    penalty = path / PENALTY_FILE
-    for required in (weights, crr_mapping, penalty):
+    for required in (path / WEIGHTS_FILE, path / CRR_MAPPING_FILE, path / PENALTY_FILE):
         if not required.is_file():
             raise SurafValidationError(f"missing required file: {required}")
-
-    try:
-        SURAFResults().run(
-            weights_path=weights,
-            assessor_paths=list(assessors),
-            crr_path=crr_mapping,
-            penalty_path=penalty,
-        )
-    except Exception as exc:
-        raise SurafValidationError(f"dry-run scoring failed for {path}: {exc}") from exc

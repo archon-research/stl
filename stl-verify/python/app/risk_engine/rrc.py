@@ -33,8 +33,11 @@ def compute_rrc(
     asset_to_rating: dict[str, str],
     suraf_ratings: dict[str, SurafResult],
 ) -> RrcResult | None:
-    """Return ``None`` if no rating is mapped for ``asset``."""
-    rating_id = asset_to_rating.get(asset)
+    """Return ``None`` if no rating is mapped for ``asset``.
+
+    Asset lookup is case-insensitive
+    """
+    rating_id = asset_to_rating.get(asset.casefold())
     if rating_id is None:
         return None
     rating = suraf_ratings[rating_id]

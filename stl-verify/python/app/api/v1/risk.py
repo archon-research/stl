@@ -6,12 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.api.deps import get_asset_to_rating, get_engine, get_http_client, get_suraf_ratings
+from app.api.deps import get_engine, get_http_client, get_suraf_rrc_service
 from app.config import Settings, get_settings
-from app.risk_engine.rrc import compute_rrc
-from app.risk_engine.suraf.result import SurafResult
 from app.services.risk_calculation_service import RiskCalculationService
 from app.services.risk_service_factory import RiskServiceFactory
+from app.services.suraf_rrc_service import SurafRrcService
 
 router = APIRouter()
 
@@ -135,19 +134,19 @@ async def get_risk_breakdown(
 @router.post("/risk/rrc", response_model=RrcResponse)
 async def post_rrc(
     body: RrcRequest,
-    asset_to_rating: dict[str, str] = Depends(get_asset_to_rating),
-    suraf_ratings: dict[str, SurafResult] = Depends(get_suraf_ratings),
+    service: SurafRrcService = Depends(get_suraf_rrc_service),
 ) -> RrcResponse:
     """Return SURAF RRC for a single asset at the caller-supplied USD exposure.
 
     ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
-    for the asset. No DB lookup; a future GET endpoint will derive
-    ``usd_exposure`` from current holdings.
+    for the asset. This endpoint doesn't use ``RiskCalculationService``
+    because SURAF rates assets directly — no per-collateral decomposition
+    is needed, so no DB lookup is required.
     """
     if body.usd_exposure <= _ZERO:
         raise HTTPException(status_code=422, detail="usd_exposure must be positive")
 
-    result = compute_rrc(body.asset, body.usd_exposure, asset_to_rating, suraf_ratings)
+    result = service.compute(body.asset, body.usd_exposure)
     if result is None:
         raise HTTPException(status_code=404, detail=f"no rating mapped for asset: {body.asset}")
     return RrcResponse(**result.model_dump())
