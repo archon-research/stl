@@ -29,9 +29,10 @@ const erc4626ABIJson = `[
 	}
 ]`
 
-// ERC4626Source fetches vault positions via two multicall rounds:
-//  1. balanceOf(proxy) → shares (stored as ScaledBalance)
-//  2. convertToAssets(shares) → underlying (stored as Balance)
+// ERC4626Source fetches vault share balances via balanceOf(proxy).
+// We store the token's own on-chain units in Balance so allocation tracking
+// matches the held receipt token, while ScaledBalance preserves the raw share
+// amount for consumers that want it explicitly.
 type ERC4626Source struct {
 	multicaller outbound.Multicaller
 	vaultABI    abi.ABI
@@ -66,81 +67,28 @@ func (s *ERC4626Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 		block = big.NewInt(blockNumber)
 	}
 
-	// Round 1: balanceOf → shares
 	shares, valid1, err := s.fetchShares(ctx, entries, block)
 	if err != nil {
 		return nil, fmt.Errorf("fetch shares: %w", err)
 	}
 
-	// Round 2: convertToAssets for non-zero shares
 	results := make(map[EntryKey]*PositionBalance, len(entries))
-
-	// Prepare entries with non-zero shares for convert call
-	var toConvert []*TokenEntry
 	for _, e := range valid1 {
 		sh := shares[e.Key()]
-		if sh != nil && sh.Sign() > 0 {
-			toConvert = append(toConvert, e)
-		} else {
+		if sh == nil || sh.Sign() == 0 {
 			results[e.Key()] = &PositionBalance{
 				Balance:       big.NewInt(0),
 				ScaledBalance: big.NewInt(0),
 			}
-		}
-	}
-
-	if len(toConvert) == 0 {
-		return results, nil
-	}
-
-	// Build convertToAssets calls
-	calls := make([]outbound.Call, 0, len(toConvert))
-	var valid2 []*TokenEntry
-	for _, e := range toConvert {
-		data, err := s.vaultABI.Pack("convertToAssets", shares[e.Key()])
-		if err != nil {
-			s.logger.Warn("pack convertToAssets failed", "contract", e.ContractAddress.Hex(), "error", err)
 			continue
 		}
-		calls = append(calls, outbound.Call{Target: e.ContractAddress, AllowFailure: true, CallData: data})
-		valid2 = append(valid2, e)
-	}
-
-	mc, err := s.multicaller.Execute(ctx, calls, block)
-	if err != nil {
-		// Fallback: use shares as balance
-		for _, e := range valid2 {
-			sh := shares[e.Key()]
-			results[e.Key()] = &PositionBalance{
-				Balance:       new(big.Int).Set(sh),
-				ScaledBalance: sh,
-			}
-		}
-		return results, fmt.Errorf("convertToAssets multicall: %w", err)
-	}
-
-	for i, e := range valid2 {
-		if i >= len(mc) {
-			break
-		}
-		sh := shares[e.Key()]
-		bal := &PositionBalance{
-			ScaledBalance: sh,
-			Balance:       new(big.Int).Set(sh), // fallback
-		}
-		if mc[i].Success && len(mc[i].ReturnData) > 0 {
-			if unpacked, err := s.vaultABI.Unpack("convertToAssets", mc[i].ReturnData); err == nil && len(unpacked) > 0 {
-				if v, ok := unpacked[0].(*big.Int); ok {
-					bal.Balance = v
-				}
-			}
-		}
-		results[e.Key()] = bal
-
 		s.logger.Debug("erc4626 position",
 			"contract", e.ContractAddress.Hex(),
-			"shares", sh.String(),
-			"assets", bal.Balance.String())
+			"shares", sh.String())
+		results[e.Key()] = &PositionBalance{
+			Balance:       new(big.Int).Set(sh),
+			ScaledBalance: new(big.Int).Set(sh),
+		}
 	}
 
 	return results, nil

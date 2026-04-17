@@ -42,8 +42,8 @@ func (e *TokenEntry) Key() EntryKey {
 
 // PositionBalance is what a PositionSource returns.
 type PositionBalance struct {
-	Balance       *big.Int // actual value (underlying for erc4626, rebased for atoken)
-	ScaledBalance *big.Int // raw shares (nil if not applicable)
+	Balance       *big.Int // primary tracked balance in the token's own units
+	ScaledBalance *big.Int // optional auxiliary balance (typically raw shares)
 }
 
 // PositionSnapshot is the final output: entry + balance + trigger context.
