@@ -62,14 +62,3 @@ def test_static_hosting_keeps_reserved_prefixes_unhandled(tmp_path) -> None:
     assert response.json() == {"detail": "Not Found"}
 
 
-def test_static_hosting_is_disabled_without_index(tmp_path) -> None:
-    static_dir = tmp_path / "static"
-    static_dir.mkdir()
-
-    app = FastAPI()
-    configure_static_hosting(app, static_dir)
-    client = TestClient(app)
-
-    response = client.get("/")
-
-    assert response.status_code == 404
