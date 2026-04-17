@@ -264,5 +264,5 @@ data:
   ENVIRONMENT: "sentinelprod"
   DEPLOY_ENV: "prod"
   OTEL_ENABLED: "true"
-  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
+  OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
   OTEL_SERVICE_NAME: "stl-verify-python-api"
