@@ -58,7 +58,8 @@ def test_startup_populates_suraf_ratings(async_db_url: str, tmp_path: Path) -> N
         assert set(ratings.keys()) == {"sample_rating"}
         assert isinstance(ratings["sample_rating"], SurafResult)
 
-        assert app.state.asset_to_rating == {"aUSDC": "sample_rating"}
+        # Mapping keys are casefolded at load time for case-insensitive lookup.
+        assert app.state.asset_to_rating == {"ausdc": "sample_rating"}
 
 
 def test_startup_fails_on_invalid_package(async_db_url: str, tmp_path: Path) -> None:
