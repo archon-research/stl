@@ -15,7 +15,7 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi>=0.62b0,<1",
     "opentelemetry-instrumentation-sqlalchemy>=0.62b0,<1",
     "opentelemetry-exporter-otlp>=1.41.0,<2",
-    "pandas",
+    "pandas>=2.2.0",
     "numpy",
 ]
 
