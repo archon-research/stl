@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: python-api
-          image: stl-python-api:local
+          image: localhost/stl-python-api:local
           imagePullPolicy: Never
           ports:
             - containerPort: 8000

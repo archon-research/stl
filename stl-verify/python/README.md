@@ -8,6 +8,9 @@ FastAPI service for sentinel verify.
 uv sync
 ```
 
+Configuration defaults live in `.env.default`. Optional local overrides go in
+`.env` (same directory), which takes precedence over `.env.default`.
+
 ## Run
 
 Start the local infrastructure first (PostgreSQL, Redis, Jaeger):

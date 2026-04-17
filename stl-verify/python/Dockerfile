@@ -9,6 +9,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy application code and install the project
+COPY .env.default ./.env.default
 COPY app/ app/
 RUN uv sync --frozen --no-dev
 
@@ -22,6 +23,7 @@ WORKDIR /app
 # Copy the virtual environment and app from builder
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 COPY --from=builder --chown=appuser:appuser /app/app /app/app
+COPY --from=builder --chown=appuser:appuser /app/.env.default /app/.env.default
 
 USER 10001
 
