@@ -47,7 +47,7 @@ func StartTimescaleDB(t *testing.T) (dsn string, cleanup func()) {
 		Started:          true,
 	})
 	if err != nil {
-		t.Fatalf("start container: %v", err)
+		HandleContainerRuntimeError(t, err, "start container")
 	}
 
 	host, err := container.Host(ctx)
@@ -143,6 +143,9 @@ func StartTimescaleDBForMain() (dsn string, cleanup func()) {
 		Started:          true,
 	})
 	if err != nil {
+		if IsContainerRuntimeUnavailable(err) {
+			log.Fatalf("start container: container runtime unavailable: %v", err)
+		}
 		log.Fatalf("start container: %v", err)
 	}
 
