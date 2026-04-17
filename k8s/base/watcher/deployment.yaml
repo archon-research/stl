@@ -20,12 +20,9 @@ spec:
           # Image name used as the Kustomize images transformer key.
           # The overlay kustomization.yaml overrides newName + newTag.
           image: watcher
-          env:
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://localhost:4317"
-            - name: JAEGER_ENDPOINT
-              value: "localhost:4317"
           envFrom:
+            - configMapRef:
+                name: otel-config
             - configMapRef:
                 name: watcher-config
             - secretRef:
