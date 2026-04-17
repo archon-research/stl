@@ -47,8 +47,7 @@ def configure_static_hosting(application: FastAPI, static_dir: Path) -> None:
 
 def _is_reserved_frontend_path(requested_path: str) -> bool:
     return any(
-        requested_path == prefix or requested_path.startswith(f"{prefix}/")
-        for prefix in RESERVED_FRONTEND_PREFIXES
+        requested_path == prefix or requested_path.startswith(f"{prefix}/") for prefix in RESERVED_FRONTEND_PREFIXES
     )
 
 
