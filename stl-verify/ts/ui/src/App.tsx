@@ -1,18 +1,18 @@
-import './App.css'
-import { useEffect } from 'react'
+import './App.css';
+import { useEffect } from 'react';
 
-import { getStars } from './lib/http-client'
+import { getStars } from './lib/http-client';
 
 function App() {
   useEffect(() => {
     void getStars()
       .then((stars) => {
-        console.info('[stl-verify/ui] /v1/stars response', stars)
+        console.info('[stl-verify/ui] /v1/stars response', stars);
       })
       .catch((error: unknown) => {
-        console.error('[stl-verify/ui] /v1/stars request failed', error)
-      })
-  }, [])
+        console.error('[stl-verify/ui] /v1/stars request failed', error);
+      });
+  }, []);
 
   return (
     <main className="app-shell">
@@ -22,7 +22,7 @@ function App() {
       </section>
       <div className="footer-logo-pattern" aria-hidden="true" />
     </main>
-  )
+  );
 }
 
-export default App
+export default App;

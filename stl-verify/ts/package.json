@@ -4,7 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "generate:openapi": "make -C ../python export-openapi-schema && npm run generate:openapi-types --workspace=@stl-verify/ui"
+    "build": "npm run build --workspace=@stl-verify/ui",
+    "format": "npm run format --workspaces --if-present",
+    "format:check": "npm run format:check --workspaces --if-present",
+    "generate:openapi": "make -C ../python export-openapi-schema && npm run generate:openapi-types --workspace=@stl-verify/ui",
+    "lint": "npm run lint --workspaces --if-present",
+    "uikit:link": "uikit-cli link --consumer-root .",
+    "uikit:unlink": "uikit-cli unlink --consumer-root ."
+  },
+  "devDependencies": {
+    "@archon-research/uikit-cli": "0.0.0"
+  },
+  "volta": {
+    "node": "24.14.1"
   },
   "workspaces": [
     "ui"

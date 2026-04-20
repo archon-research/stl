@@ -1,26 +1,10 @@
 name: Python (stl-verify)
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "stl-verify/python/**"
-      - "stl-verify/db/migrations/**"
-      - ".github/workflows/python-ci.yml"
-  pull_request:
-    branches:
-      - main
-    paths:
-      - "stl-verify/python/**"
-      - "stl-verify/db/migrations/**"
-      - ".github/workflows/python-ci.yml"
-  workflow_dispatch:
+  workflow_call:
 
-# Cancel in-progress runs for the same branch/PR
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: read
 
 jobs:
   lint:
