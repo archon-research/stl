@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: watcher
 spec:
-  replicas: 0
+  replicas: 1
   strategy:
     type: Recreate
   selector:
@@ -20,12 +20,9 @@ spec:
           # Image name used as the Kustomize images transformer key.
           # The overlay kustomization.yaml overrides newName + newTag.
           image: watcher
-          env:
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://localhost:4317"
-            - name: JAEGER_ENDPOINT
-              value: "localhost:4317"
           envFrom:
+            - configMapRef:
+                name: otel-config
             - configMapRef:
                 name: watcher-config
             - secretRef:
@@ -34,10 +31,10 @@ spec:
           resources:
             requests:
               cpu: "100m"
-              memory: "128Mi"
+              memory: "1024Mi"
             limits:
               cpu: "100m"
-              memory: "128Mi"
+              memory: "1024Mi"
           livenessProbe:
             exec:
               command: ["/bin/sh", "-c", "pgrep -f watcher"]

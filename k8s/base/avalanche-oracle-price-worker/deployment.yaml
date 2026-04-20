@@ -18,12 +18,9 @@ spec:
           # Distinct image key — overlay maps this to the oracle-price-worker ECR repo.
           # Same binary as oracle-price-worker; chain is selected via CHAIN_ID env var.
           image: avalanche-oracle-price-worker
-          env:
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://localhost:4317"
-            - name: JAEGER_ENDPOINT
-              value: "localhost:4317"
           envFrom:
+            - configMapRef:
+                name: otel-config
             - configMapRef:
                 name: avalanche-oracle-price-worker-config
             - secretRef:

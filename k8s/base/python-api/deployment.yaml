@@ -33,6 +33,8 @@ spec:
               mountPath: /tmp
           envFrom:
             - configMapRef:
+                name: otel-config
+            - configMapRef:
                 name: python-api-config
             - secretRef:
                 name: python-api

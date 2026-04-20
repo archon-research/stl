@@ -1716,7 +1716,7 @@ ECR_REPO_PYTHON_API = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-
 # Build Docker image for python-api (ARM64 for Graviton)
 docker-build-python-api:
 ifdef LOCAL
-	docker build -t stl-python-api:local -f python/Dockerfile python/
+	docker build -t stl-python-api:local -f python/Dockerfile .
 else
 	@echo "==> Building Python API Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_PYTHON_API)"
@@ -1725,7 +1725,7 @@ else
 		-f python/Dockerfile \
 		-t $(ECR_REPO_PYTHON_API):$(IMAGE_TAG) \
 		-t $(ECR_REPO_PYTHON_API):latest \
-		--load python/
+		--load .
 endif
 
 # Push python-api Docker image to ECR
@@ -1746,7 +1746,7 @@ _docker-release-python-api-internal:
 		-f python/Dockerfile \
 		-t $(ECR_REPO_PYTHON_API):$$TAG \
 		-t $(ECR_REPO_PYTHON_API):latest \
-		--load python/ && \
+		--load . && \
 	echo "==> Pushing Python API Docker image to ECR..." && \
 	docker push $(ECR_REPO_PYTHON_API):$$TAG && \
 	docker push $(ECR_REPO_PYTHON_API):latest && \
