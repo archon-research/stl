@@ -26,9 +26,13 @@ RUN uv sync --frozen --no-dev --no-install-project
 # Copy application code and install the project
 COPY python/.env.default ./.env.default
 COPY python/app/ app/
+COPY python/suraf/ suraf/
 RUN uv sync --frozen --no-dev
 
 FROM python:3.12-slim
+
+ARG GIT_COMMIT=unknown
+ENV GIT_COMMIT=${GIT_COMMIT}
 
 RUN groupadd --system --gid 10001 appuser \
     && useradd --system --uid 10001 --gid 10001 --no-create-home appuser
@@ -38,6 +42,7 @@ WORKDIR /app
 # Copy the virtual environment and app from builder
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 COPY --from=builder --chown=appuser:appuser /app/app /app/app
+COPY --from=builder --chown=appuser:appuser /app/suraf /app/suraf
 COPY --from=builder --chown=appuser:appuser /app/.env.default /app/.env.default
 
 # Copy built UI assets for static hosting

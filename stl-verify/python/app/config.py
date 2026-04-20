@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     otel_enabled: bool
     otel_exporter_otlp_endpoint: str
     otel_service_name: str
+    suraf_inputs_dir: Path = ENV_DIR / "suraf" / "inputs"
+    suraf_mappings_file: Path = ENV_DIR / "suraf" / "mappings" / "asset_to_rating.json"
+    # Injected as a Docker build arg; see stl-verify/python/Dockerfile.
+    # Falls back to "unknown" so local dev and tests don't need it set.
+    git_commit: str = "unknown"
 
     @property
     def async_database_url(self) -> str:
