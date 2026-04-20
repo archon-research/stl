@@ -2923,17 +2923,19 @@
     {
       "id": "python-api-box",
       "type": "rectangle",
-      "x": 1340,
-      "y": 80,
+      "x": 1340.6916809082031,
+      "y": 80.19325256347656,
       "width": 260,
-      "height": 215,
+      "height": 185.69972991943362,
       "strokeColor": "#1e1e1e",
       "backgroundColor": "#ffec99",
       "fillStyle": "solid",
       "strokeWidth": 2,
-      "roundness": { "type": 3 },
-      "version": 1,
-      "versionNonce": 111000222,
+      "roundness": {
+        "type": 3
+      },
+      "version": 73,
+      "versionNonce": 2013443642,
       "index": "bH",
       "isDeleted": false,
       "strokeStyle": "solid",
@@ -2944,7 +2946,7 @@
       "groupIds": [],
       "frameId": null,
       "boundElements": [],
-      "updated": 1766132726601,
+      "updated": 1776669789183,
       "link": null,
       "locked": false
     },
@@ -2990,15 +2992,15 @@
       "type": "text",
       "x": 1355,
       "y": 140,
-      "width": 230,
-      "height": 140,
-      "text": "/v1/stars\n/v1/stars/{id}/allocations\n/v1/stars/{id}/receipt-tokens\n/v1/risk/{id}/bad-debt\n/v1/risk/{id}/breakdown\n/v1/status, /v1/ready\n\n+ Alchemy RPC (risk)",
+      "width": 186.9140625,
+      "height": 99,
+      "text": "/v1/stars\n/v1/stars/{id}/allocations\n/v1/stars/{id}/receipt-tokens\n/v1/risk/{id}/bad-debt\n/v1/risk/{id}/breakdown\n/v1/status, /v1/ready",
       "fontSize": 11,
       "fontFamily": 3,
       "textAlign": "left",
       "strokeColor": "#495057",
-      "version": 1,
-      "versionNonce": 333000444,
+      "version": 5,
+      "versionNonce": 1397737146,
       "index": "bJ",
       "isDeleted": false,
       "fillStyle": "solid",
@@ -3013,12 +3015,12 @@
       "frameId": null,
       "roundness": null,
       "boundElements": [],
-      "updated": 1766132726601,
+      "updated": 1776669786227,
       "link": null,
       "locked": false,
       "verticalAlign": "top",
       "containerId": null,
-      "originalText": "/v1/stars\n/v1/stars/{id}/allocations\n/v1/stars/{id}/receipt-tokens\n/v1/risk/{id}/bad-debt\n/v1/risk/{id}/breakdown\n/v1/status, /v1/ready\n\n+ Alchemy RPC (risk)",
+      "originalText": "/v1/stars\n/v1/stars/{id}/allocations\n/v1/stars/{id}/receipt-tokens\n/v1/risk/{id}/bad-debt\n/v1/risk/{id}/breakdown\n/v1/status, /v1/ready",
       "autoResize": true,
       "lineHeight": 1.5
     },
@@ -3032,7 +3034,16 @@
       "strokeColor": "#1e1e1e",
       "strokeWidth": 2,
       "strokeStyle": "solid",
-      "points": [[0, 0], [-145, 0]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -145,
+          0
+        ]
+      ],
       "startArrowhead": null,
       "endArrowhead": "arrow",
       "lastCommittedPoint": null,
@@ -3050,7 +3061,10 @@
       "frameId": null,
       "roundness": null,
       "boundElements": [
-        { "type": "text", "id": "arrow-pyapi-pg-label" }
+        {
+          "type": "text",
+          "id": "arrow-pyapi-pg-label"
+        }
       ],
       "updated": 1766132726601,
       "link": null,
