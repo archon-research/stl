@@ -5,6 +5,7 @@ package mockchain
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"sync/atomic"
@@ -208,13 +209,19 @@ func isHashParam(s string) bool {
 	return common.IsHexHash(s)
 }
 
+// getBlockByHash returns the full block JSON for a given hash, with number/hash/parentHash
+// patched to match the derived values.
 func (h *httpHandler) getBlockByHash(req rpcutil.Request) (json.RawMessage, *jsonRPCErrorObj) {
 	hash, ok := extractStringParam(req)
 	if !ok {
 		return nil, &jsonRPCErrorObj{Code: rpcErrInvalidParams, Message: "missing or invalid hash parameter"}
 	}
 
-	// Check reorg blocks first (reorg walk-back uses these hashes).
+	// Check reorg blocks first — full block data is pre-patched during reorg creation.
+	if raw, found := h.store.GetReorgBlock(hash, "block"); found {
+		return raw, nil
+	}
+	// Fall back to reorg header if no full block data is stored.
 	if reorgHeader, found := h.store.GetReorgHeader(hash); found {
 		raw, err := json.Marshal(reorgHeader)
 		if err != nil {
@@ -223,15 +230,24 @@ func (h *httpHandler) getBlockByHash(req rpcutil.Request) (json.RawMessage, *jso
 		return raw, nil
 	}
 
+	// Canonical block: look up template index, get full block data, patch derived fields.
+	idx, found := h.replayer.TemplateIndexForHash(hash)
+	if !found {
+		return json.RawMessage("null"), nil
+	}
 	header, found := h.replayer.HeaderForHash(hash)
 	if !found {
 		return json.RawMessage("null"), nil
 	}
-	raw, err := json.Marshal(header)
+	raw, ok := h.store.Get(idx, "block")
+	if !ok {
+		return nil, &jsonRPCErrorObj{Code: rpcErrInternal, Message: "missing block data for template"}
+	}
+	patched, err := patchBlockJSON(raw, header.Number, header.Hash, header.ParentHash)
 	if err != nil {
 		return nil, &jsonRPCErrorObj{Code: rpcErrInternal, Message: "internal error"}
 	}
-	return raw, nil
+	return patched, nil
 }
 
 func (h *httpHandler) getBlockByNumber(req rpcutil.Request) (json.RawMessage, *jsonRPCErrorObj) {
@@ -247,11 +263,19 @@ func (h *httpHandler) getBlockByNumber(req rpcutil.Request) (json.RawMessage, *j
 	if !found {
 		return json.RawMessage("null"), nil
 	}
-	raw, err := json.Marshal(header)
+	idx, found := h.replayer.TemplateIndexForNumber(blockNum)
+	if !found {
+		return json.RawMessage("null"), nil
+	}
+	raw, ok := h.store.Get(idx, "block")
+	if !ok {
+		return nil, &jsonRPCErrorObj{Code: rpcErrInternal, Message: "missing block data for template"}
+	}
+	patched, err := patchBlockJSON(raw, header.Number, header.Hash, header.ParentHash)
 	if err != nil {
 		return nil, &jsonRPCErrorObj{Code: rpcErrInternal, Message: "internal error"}
 	}
-	return raw, nil
+	return patched, nil
 }
 
 // getDataByHashOrNumber serves eth_getBlockReceipts, trace_block, and eth_getBlobSidecars.
@@ -292,6 +316,30 @@ func (h *httpHandler) getDataByHashOrNumber(req rpcutil.Request, dataType string
 		return json.RawMessage("null"), nil
 	}
 	return raw, nil
+}
+
+// patchBlockJSON overwrites the "number", "hash", and "parentHash" fields in raw block JSON
+// while preserving all other fields (transactions, uncles, withdrawals, etc.).
+// Only top-level keys are parsed; nested arrays stay as raw bytes.
+func patchBlockJSON(raw json.RawMessage, number, hash, parentHash string) (json.RawMessage, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, fmt.Errorf("unmarshalling block JSON: %w", err)
+	}
+	var marshalErr error
+	obj["number"], marshalErr = json.Marshal(number)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("marshalling number: %w", marshalErr)
+	}
+	obj["hash"], marshalErr = json.Marshal(hash)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("marshalling hash: %w", marshalErr)
+	}
+	obj["parentHash"], marshalErr = json.Marshal(parentHash)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("marshalling parentHash: %w", marshalErr)
+	}
+	return json.Marshal(obj)
 }
 
 func (h *httpHandler) blockNumber() (json.RawMessage, *jsonRPCErrorObj) {
