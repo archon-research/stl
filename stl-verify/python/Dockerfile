@@ -20,12 +20,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.5 /uv /uvx /bin/
 WORKDIR /app
 
 # Install dependencies first for better layer caching
-COPY pyproject.toml uv.lock ./
+COPY python/pyproject.toml python/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy application code and install the project
-COPY .env.default ./.env.default
-COPY app/ app/
+COPY python/.env.default ./.env.default
+COPY python/app/ app/
 RUN uv sync --frozen --no-dev
 
 FROM python:3.12-slim
