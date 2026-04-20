@@ -1,8 +1,11 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -12,8 +15,66 @@ from app.logging import setup_logging
 from app.middleware.request_id import RequestIdMiddleware
 from app.telemetry import instrument_sqlalchemy_engine, setup_telemetry, shutdown_telemetry
 
+APP_DIR = Path(__file__).resolve().parent
+DEFAULT_STATIC_DIR = APP_DIR / "static"
+RESERVED_FRONTEND_PREFIXES = ("v1", "docs", "redoc", "openapi.json")
+DOCS_FAVICON_URL = "/assets/archon-32.png"
 
-def create_app(settings: Settings) -> FastAPI:
+
+def configure_static_hosting(application: FastAPI, static_dir: Path) -> None:
+    index_file = static_dir / "index.html"
+    static_root = static_dir.resolve()
+
+    @application.get("/", include_in_schema=False)
+    async def serve_root() -> FileResponse:
+        return FileResponse(index_file)
+
+    @application.get("/{requested_path:path}", include_in_schema=False)
+    async def serve_frontend(requested_path: str) -> FileResponse:
+        if _is_reserved_frontend_path(requested_path):
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        requested_file = _resolve_static_file(static_root, requested_path)
+        if requested_file is not None and requested_file.is_file():
+            return FileResponse(requested_file)
+
+        if _is_asset_path(requested_path):
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        return FileResponse(index_file)
+
+
+def _is_reserved_frontend_path(requested_path: str) -> bool:
+    return any(
+        requested_path == prefix or requested_path.startswith(f"{prefix}/") for prefix in RESERVED_FRONTEND_PREFIXES
+    )
+
+
+def _resolve_static_file(static_root: Path, requested_path: str) -> Path | None:
+    candidate = (static_root / requested_path).resolve()
+    try:
+        candidate.relative_to(static_root)
+    except ValueError:
+        return None
+    return candidate
+
+
+def _is_asset_path(requested_path: str) -> bool:
+    return requested_path.split("/", 1)[0] == "assets"
+
+
+def configure_docs(application: FastAPI) -> None:
+    @application.get("/docs", include_in_schema=False)
+    async def swagger_ui_html():
+        openapi_url = application.openapi_url or "/openapi.json"
+        return get_swagger_ui_html(
+            openapi_url=openapi_url,
+            title=f"{application.title} - Swagger UI",
+            swagger_favicon_url=DOCS_FAVICON_URL,
+        )
+
+
+def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     setup_logging(log_level=settings.log_level, log_format=settings.log_format)
 
     @asynccontextmanager
@@ -31,12 +92,14 @@ def create_app(settings: Settings) -> FastAPI:
         finally:
             shutdown_telemetry(app.state.tracer_provider)
 
-    application = FastAPI(title="stl-verify", lifespan=lifespan)
+    application = FastAPI(title="stl-verify", lifespan=lifespan, docs_url=None)
     application.add_middleware(RequestIdMiddleware)
     application.state.tracer_provider = setup_telemetry(application, settings)
     application.include_router(status.router, prefix="/v1")
     application.include_router(allocations.router, prefix="/v1")
     application.include_router(risk.router, prefix="/v1")
+    configure_docs(application)
+    configure_static_hosting(application, static_dir or DEFAULT_STATIC_DIR)
     return application
 
 
