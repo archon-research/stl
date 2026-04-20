@@ -20,11 +20,22 @@ func TestCurveSource_Supports(t *testing.T) {
 	}
 
 	src := NewCurveSource(nil, curveABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if !src.Supports("curve", "curve") {
-		t.Fatal("expected curve source to support curve token type")
+
+	tests := []struct {
+		name      string
+		tokenType string
+		protocol  string
+		want      bool
+	}{
+		{"curve token type", "curve", "curve", true},
+		{"erc20 token type", "erc20", "curve", false},
 	}
-	if src.Supports("erc20", "curve") {
-		t.Fatal("curve source should not support erc20 token type")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := src.Supports(tc.tokenType, tc.protocol); got != tc.want {
+				t.Fatalf("Supports(%q, %q) = %v, want %v", tc.tokenType, tc.protocol, got, tc.want)
+			}
+		})
 	}
 }
 

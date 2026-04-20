@@ -54,6 +54,55 @@ func TestBuildInsertArgs_TxAmountPlainERC20(t *testing.T) {
 	assertNumeric(t, "txAmount", txAmount, big.NewInt(32361621161), -6)
 }
 
+func TestBuildInsertArgs_VaultPositionUsesTokenDecimals(t *testing.T) {
+	// Vault-like position (ERC4626 / Curve LP): Balance and ScaledBalance are
+	// both denominated in the held token's units. balance, scaled_balance, and
+	// tx_amount must all be encoded with TokenDecimals so the three columns
+	// stay on a single decimal basis — guards against re-introducing a
+	// mixed-decimals path for positions with an underlying asset.
+	r := &AllocationRepository{}
+	rawShares, _ := new(big.Int).SetString("1759386773255205923032", 10)
+
+	pos := &entity.AllocationPosition{
+		ChainID:       1,
+		TokenAddress:  common.HexToAddress("0x00836Fe54625BE242BcFA286207795405ca4fD10"),
+		TokenSymbol:   "sUSDSUSDT",
+		TokenDecimals: 18,
+		PrimeID:       1,
+		ProxyAddress:  common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		Balance:       rawShares,
+		ScaledBalance: rawShares,
+		BlockNumber:   24584100,
+		TxHash:        "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c",
+		LogIndex:      42,
+		TxAmount:      rawShares,
+		Direction:     "out",
+	}
+
+	_, args, err := r.buildInsertArgs(pos, 609)
+	if err != nil {
+		t.Fatalf("buildInsertArgs: %v", err)
+	}
+
+	balance, ok := args[4].(pgtype.Numeric)
+	if !ok {
+		t.Fatalf("expected args[4] to be pgtype.Numeric, got %T", args[4])
+	}
+	assertNumeric(t, "balance", balance, rawShares, -18)
+
+	scaled, ok := args[5].(pgtype.Numeric)
+	if !ok {
+		t.Fatalf("expected args[5] to be pgtype.Numeric, got %T", args[5])
+	}
+	assertNumeric(t, "scaledBalance", scaled, rawShares, -18)
+
+	txAmount, ok := args[10].(pgtype.Numeric)
+	if !ok {
+		t.Fatalf("expected args[10] to be pgtype.Numeric, got %T", args[10])
+	}
+	assertNumeric(t, "txAmount", txAmount, rawShares, -18)
+}
+
 func TestBuildInsertArgs_NilScaledBalanceIsNull(t *testing.T) {
 	// ScaledBalance is optional — nil should produce a NULL numeric.
 	r := &AllocationRepository{}

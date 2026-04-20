@@ -19,13 +19,6 @@ const erc4626ABIJson = `[
 		"outputs": [{"name": "", "type": "uint256"}],
 		"stateMutability": "view",
 		"type": "function"
-	},
-	{
-		"inputs": [{"name": "shares", "type": "uint256"}],
-		"name": "convertToAssets",
-		"outputs": [{"name": "", "type": "uint256"}],
-		"stateMutability": "view",
-		"type": "function"
 	}
 ]`
 

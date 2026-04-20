@@ -42,7 +42,7 @@ func (e *TokenEntry) Key() EntryKey {
 
 // PositionBalance is what a PositionSource returns.
 type PositionBalance struct {
-	Balance       *big.Int // primary tracked balance in the token's own units
+	Balance       *big.Int // primary tracked balance in the entry's tracked unit (token units for ERC20-like entries; underlying-asset units for pool-style entries like UniV3)
 	ScaledBalance *big.Int // optional auxiliary balance (typically raw shares)
 }
 

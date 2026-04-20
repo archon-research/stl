@@ -144,7 +144,7 @@ func StartTimescaleDBForMain() (dsn string, cleanup func()) {
 	})
 	if err != nil {
 		if IsContainerRuntimeUnavailable(err) {
-			log.Fatalf("start container: container runtime unavailable: %v", err)
+			log.Fatalf("container runtime unavailable (is Docker/Podman running?): %v", err)
 		}
 		log.Fatalf("start container: %v", err)
 	}

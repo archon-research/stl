@@ -19,6 +19,9 @@ func IsContainerRuntimeUnavailable(err error) bool {
 		"cannot connect to the docker daemon",
 		"is the docker daemon running",
 		"docker daemon is not running",
+		"podman machine",
+		"cannot connect to podman",
+		"podman.socket",
 	} {
 		if strings.Contains(msg, needle) {
 			return true
@@ -28,8 +31,9 @@ func IsContainerRuntimeUnavailable(err error) bool {
 	return false
 }
 
-// HandleContainerRuntimeError fails the current test immediately. We keep the
-// unavailable-runtime detection only to improve the failure message.
+// HandleContainerRuntimeError is a no-op when err is nil; otherwise it fails
+// the current test via tb.Fatalf. When IsContainerRuntimeUnavailable reports
+// true, the fatal message is prefixed to make the root cause clear.
 func HandleContainerRuntimeError(tb testing.TB, err error, subject string) {
 	tb.Helper()
 	if err == nil {

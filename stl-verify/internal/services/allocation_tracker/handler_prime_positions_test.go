@@ -219,8 +219,8 @@ func TestHandleSnapshots_ERC4626_PreservesTokenUnits(t *testing.T) {
 				Chain:           "mainnet",
 				TokenType:       "erc4626",
 			},
-			Balance:       rawShares,
-			ScaledBalance: rawShares,
+			Balance:       new(big.Int).Set(rawShares),
+			ScaledBalance: new(big.Int).Set(rawShares),
 			ChainID:       1,
 			BlockNumber:   100,
 			TxAmount:      big.NewInt(0),
@@ -247,9 +247,6 @@ func TestHandleSnapshots_ERC4626_PreservesTokenUnits(t *testing.T) {
 	}
 	if pos.ScaledBalance == nil || pos.ScaledBalance.Cmp(rawShares) != 0 {
 		t.Errorf("scaled balance = %v, want %s", pos.ScaledBalance, rawShares)
-	}
-	if pos.AssetDecimals == nil || *pos.AssetDecimals != 18 {
-		t.Errorf("asset decimals = %v, want 18", pos.AssetDecimals)
 	}
 }
 
@@ -278,8 +275,8 @@ func TestHandleSnapshots_Curve_PreservesLPUnits(t *testing.T) {
 				Chain:           "mainnet",
 				TokenType:       "curve",
 			},
-			Balance:       rawLP,
-			ScaledBalance: rawLP,
+			Balance:       new(big.Int).Set(rawLP),
+			ScaledBalance: new(big.Int).Set(rawLP),
 			ChainID:       1,
 			BlockNumber:   100,
 			TxAmount:      big.NewInt(0),
@@ -300,9 +297,6 @@ func TestHandleSnapshots_Curve_PreservesLPUnits(t *testing.T) {
 	}
 	if pos.TokenDecimals != 18 {
 		t.Errorf("decimals = %d, want 18", pos.TokenDecimals)
-	}
-	if pos.AssetDecimals == nil || *pos.AssetDecimals != 6 {
-		t.Errorf("asset decimals = %v, want 6", pos.AssetDecimals)
 	}
 	if pos.Balance.Cmp(rawLP) != 0 {
 		t.Errorf("balance = %s, want %s", pos.Balance, rawLP)

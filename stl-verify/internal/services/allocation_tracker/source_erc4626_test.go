@@ -7,7 +7,6 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/ethereum/go-ethereum/common"
@@ -19,11 +18,21 @@ func TestERC4626Source_Supports(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !src.Supports("erc4626", "sky") {
-		t.Fatal("expected erc4626 source to support erc4626 tokens")
+	tests := []struct {
+		name      string
+		tokenType string
+		protocol  string
+		want      bool
+	}{
+		{"erc4626 token type", "erc4626", "sky", true},
+		{"plain erc20 token type", "erc20", "sky", false},
 	}
-	if src.Supports("erc20", "sky") {
-		t.Fatal("erc4626 source should not support plain erc20 tokens")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := src.Supports(tc.tokenType, tc.protocol); got != tc.want {
+				t.Fatalf("Supports(%q, %q) = %v, want %v", tc.tokenType, tc.protocol, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -83,11 +92,6 @@ func TestERC4626Source_FetchBalances_StoresShareBalance(t *testing.T) {
 }
 
 func TestERC4626Source_FetchBalances_FailedCallStoresZero(t *testing.T) {
-	erc20ABI, err := abis.GetERC20ABI()
-	if err != nil {
-		t.Fatalf("failed to load ERC20 ABI: %v", err)
-	}
-
 	mc := testutil.NewMockMulticaller()
 	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 		return []outbound.Result{{Success: false, ReturnData: nil}}, nil
@@ -119,8 +123,4 @@ func TestERC4626Source_FetchBalances_FailedCallStoresZero(t *testing.T) {
 	if got.ScaledBalance == nil || got.ScaledBalance.Cmp(big.NewInt(0)) != 0 {
 		t.Fatalf("scaled balance = %v, want 0", got.ScaledBalance)
 	}
-
-	// Keep a local ERC20 ABI reference so the test fails fast if the shared ABI
-	// helpers disappear; the source relies on standard balanceOf semantics.
-	_ = erc20ABI
 }
