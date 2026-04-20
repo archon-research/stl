@@ -774,23 +774,6 @@ func TestBackfillWatermark(t *testing.T) {
 		}
 	})
 
-	t.Run("returns 0 when no watermark row exists (new chain)", func(t *testing.T) {
-		// Delete the watermark row entirely to simulate a brand new chain
-		// that has never had a watermark set (no row in the table).
-		_, err := blockstatePool.Exec(ctx, `DELETE FROM backfill_watermark WHERE chain_id = $1`, int64(1))
-		if err != nil {
-			t.Fatalf("failed to delete watermark row: %v", err)
-		}
-
-		watermark, err := repo.GetBackfillWatermark(ctx)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if watermark != 0 {
-			t.Errorf("expected watermark 0 for missing row, got %d", watermark)
-		}
-	})
-
 	t.Run("set and get watermark", func(t *testing.T) {
 		if err := repo.SetBackfillWatermark(ctx, 100); err != nil {
 			t.Fatalf("failed to set watermark: %v", err)
@@ -816,6 +799,23 @@ func TestBackfillWatermark(t *testing.T) {
 		}
 		if watermark != 500 {
 			t.Errorf("expected watermark 500, got %d", watermark)
+		}
+	})
+
+	t.Run("returns 0 when no watermark row exists (new chain)", func(t *testing.T) {
+		// Delete the watermark row entirely to simulate a brand new chain
+		// that has never had a watermark set (no row in the table).
+		_, err := blockstatePool.Exec(ctx, `DELETE FROM backfill_watermark WHERE chain_id = $1`, int64(1))
+		if err != nil {
+			t.Fatalf("failed to delete watermark row: %v", err)
+		}
+
+		watermark, err := repo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if watermark != 0 {
+			t.Errorf("expected watermark 0 for missing row, got %d", watermark)
 		}
 	})
 }
