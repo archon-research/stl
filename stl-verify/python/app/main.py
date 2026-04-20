@@ -32,6 +32,7 @@ def _check_mapping_refs(mapping: dict[str, str], ratings: dict[str, SurafResult]
     if unknown:
         raise MappingError(f"asset mapping references unknown rating_ids: {unknown}")
 
+
 def configure_static_hosting(application: FastAPI, static_dir: Path) -> None:
     index_file = static_dir / "index.html"
     static_root = static_dir.resolve()
