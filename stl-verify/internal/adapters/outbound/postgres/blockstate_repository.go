@@ -583,9 +583,14 @@ func (r *BlockStateRepository) GetMaxBlockNumber(ctx context.Context) (int64, er
 
 // GetBackfillWatermark returns the highest block number that has been verified as gap-free.
 // Blocks at or below this number are guaranteed to have no gaps.
+// Returns 0 if no watermark exists yet (e.g., first run for a new chain).
 func (r *BlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64, error) {
 	var watermark int64
 	err := r.pool.QueryRow(ctx, `SELECT watermark FROM backfill_watermark WHERE chain_id = $1`, r.chainID).Scan(&watermark)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// No watermark exists yet for this chain - return 0 to start from beginning
+		return 0, nil
+	}
 	if err != nil {
 		return 0, fmt.Errorf("failed to get backfill watermark: %w", err)
 	}
