@@ -4,8 +4,6 @@ metadata:
   name: python-api
   annotations:
     tailscale.com/expose: "true"
-    tailscale.com/hostname: "python-api"
-    tailscale.com/tags: "tag:k8s-external"
 spec:
   selector:
     app: python-api
