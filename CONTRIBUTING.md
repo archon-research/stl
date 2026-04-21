@@ -129,8 +129,8 @@ that repo must land **before** the code here can deploy cleanly.
 
 Pick the language **before** you start, and when in doubt, ask first.
 
-- **APIs are Python.** Anything user- or client-facing — HTTP/JSON
-  endpoints, GraphQL, anything that serves data out to another system —
+- **APIs are Python.** Anything user- or client-facing —
+  endpoints, anything that serves data out to another system —
   belongs in `stl-verify/python/`. The existing `python-api` service is
   the reference; extend it rather than starting a new HTTP server.
 - **Workers, cronjobs, and backfillers can be any language you prefer,
@@ -143,14 +143,15 @@ Pick the language **before** you start, and when in doubt, ask first.
 - **Anything outside Go or Python needs prior discussion.** Open an
   issue or start a thread with
   `@archon-research/vector-engineers` **before** writing code. PRs
-  introducing a new runtime (Rust, TypeScript services, Java, …) without
+  introducing a new runtime (Rust, TypeScript, Java, …) without
   a prior design conversation **may be rejected** regardless of code
   quality — every new language adds build infrastructure, observability
   integration, deployment, dependency-management, and on-call load that
   the team has to absorb forever. That cost is only worth paying when
   we've agreed it is.
-- The existing `stl-verify/ts/` directory is a small set of helpers, not
-  a license to add new TypeScript services.
+- The existing `stl-verify/ts/` is for the frontend/UI (currently being
+  built out). That's the established use case; anything else in
+  TypeScript still needs prior discussion.
 
 ---
 
@@ -161,22 +162,24 @@ Dependencies point inward: `domain ← ports ← services ← adapters`, and
 `cmd/*` wires concrete adapters into services.
 
 ```text
-   Alchemy WS ──► watcher ──► Redis (block cache, 2d TTL)
-                     │                │
-                     │                └─► SNS FIFO (one topic per chain)
-                     ▼                         │
-              Postgres (block_state)           ▼
-                                        SQS FIFO queues
-                                               │
-                              ┌────────────────┼────────────────┐
-                              ▼                ▼                ▼
-                       oracle-price-    sparklend-       morpho-indexer
-                         worker          tracker          (and others)
-                              │                │                │
-                              └────────────────┴────────────────┘
-                                               ▼
-                                     Postgres / TimescaleDB
-                                     (time-series, append-only)
+                                 ┌─► Redis (block cache, 2d TTL)
+                                 │
+   Alchemy WS ──► watcher ───────┼─► Postgres (block_state)
+                                 │
+                                 └─► SNS FIFO (one topic per chain)
+                                             │
+                                             ▼
+                                       SQS FIFO queues
+                                             │
+                            ┌────────────────┼────────────────┐
+                            ▼                ▼                ▼
+                     oracle-price-    sparklend-       morpho-indexer
+                       worker          tracker          (and others)
+                            │                │                │
+                            └────────────────┴────────────────┘
+                                             ▼
+                                   Postgres / TimescaleDB
+                                   (time-series, append-only)
 
    Temporal schedules ──► cronjob pods ──► external APIs ──► Postgres
                           (anchorage,       (CoinGecko,
@@ -184,14 +187,18 @@ Dependencies point inward: `domain ← ports ← services ← adapters`, and
                            data-validator)    …)
 ```
 
-The cache key convention is:
+The watcher fans out three independent writes per block: Redis (hot
+cache), Postgres (`block_state` bookkeeping), and SNS (the message that
+triggers workers). The cache key convention is:
 
 ```text
 stl:{chainId}:{blockNumber}:{version}:{dataType}
 ```
 
 where `version` is bumped when a reorg invalidates a block and `dataType`
-is one of `block`, `receipts`, `traces`, `blobs`.
+is one of `block`, `receipts`, `traces`, `blobs`. The SNS/SQS message
+only carries a block pointer — workers fetch the actual payload from
+Redis using this key.
 
 ---
 
@@ -210,6 +217,11 @@ lifecycle:
 
 If you're adding data acquisition, **pick the category first** — it
 determines the plumbing, deployment shape, and tests you'll write.
+
+**Examples:** "Track liquidations on a new lending protocol" → per-block
+worker in `cmd/workers/`. "Snapshot an off-chain API every 15 min" →
+cronjob in `cmd/cronjobs/`. "Re-ingest last month's oracle prices" →
+backfiller in `cmd/backfillers/`.
 
 ---
 
@@ -245,7 +257,7 @@ func run(ctx context.Context, args []string) error {
     repo, err   := postgres.NewOnchainPriceRepository(pool, logger, buildID, 0)
     service, err := oracle_price_worker.NewService(shared.SQSConsumerConfig{...}, consumer, repo, ...)
 
-    return lifecycle.Run(ctx, logger, service) // handles SIGINT/SIGTERM + graceful stop
+    return lifecycle.Run(ctx, logger, service) // runs the consume loop; handles SIGINT/SIGTERM graceful stop
 }
 ```
 
@@ -275,6 +287,12 @@ func run(ctx context.Context, args []string) error {
    the SQS queue, SNS subscription, IAM policy, and any secrets — your
    code PR depends on those resources existing.
 
+> **Tip:** It's welcome (often preferred) to split the k8s-manifest and
+> Infrastructure-repo changes into a follow-up PR. The code PR stays
+> narrowly scoped for engineering review, and the deploy/infra PR stays
+> narrowly scoped for the infra owner — each reviewer only sees their
+> domain.
+
 ### If you're writing the worker in Python
 
 **The flow is identical to the Go version** — same SNS FIFO fan-out,
@@ -282,14 +300,14 @@ same SQS FIFO queue, same Redis cache lookup by
 `stl:{chainId}:{blockNumber}:{version}:{dataType}`, same Postgres
 writes. Only the language changes.
 
-Put everything under `stl-verify/python/`, mirroring the Go layout
-one-to-one:
+Put everything under `stl-verify/python/`, mirroring the Go structure
+(Python uses `cli/` for entry points where Go uses `cmd/` — same role,
+more Pythonic name):
 
-- `stl-verify/python/cmd/workers/<my_worker>/main.py` — the **entry
-  point**, directly analogous to Go's `cmd/workers/<name>/main.go`.
-  Keep it small: parse config + env, wire adapters, start the SQS
-  consume loop, hand off to the graceful-shutdown harness. No business
-  logic here.
+- `stl-verify/python/cli/workers/<my_worker>/main.py` — the **entry
+  point**, analogous to Go's `cmd/workers/<name>/main.go`. Keep it
+  small: parse config + env, wire adapters, start the SQS consume loop,
+  hand off to the graceful-shutdown harness. No business logic here.
 - `stl-verify/python/app/services/<my_worker>/` — business logic for
   one block event. Full unit tests; mock the SQS consumer, the Redis
   reader, the repo, and any contract caller.
@@ -388,6 +406,10 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 5. **Infra PR** for any new secrets/IAM + a Temporal namespace entry if
    needed.
 
+> **Tip:** As with workers, splitting the k8s-manifest and
+> Infrastructure-repo changes into a follow-up PR keeps each review
+> narrow and domain-scoped.
+
 Cronjobs are **idempotent by design** — a tick may be retried by
 Temporal. Your service must tolerate running twice on the same window
 without producing duplicates.
@@ -398,12 +420,13 @@ without producing duplicates.
 scheduler, the worker still registers a schedule on startup, and each
 tick still runs one activity. Only the language changes.
 
-Put everything under `stl-verify/python/`, mirroring the Go layout
-one-to-one:
+Put everything under `stl-verify/python/`, mirroring the Go structure
+(Python uses `cli/` for entry points where Go uses `cmd/` — same role,
+more Pythonic name):
 
-- `stl-verify/python/cmd/cronjobs/<my_cronjob>/main.py` — the **entry
-  point**, directly analogous to Go's `cmd/cronjobs/<name>/main.go`.
-  Keep it small: parse config, wire adapters, start the Temporal worker,
+- `stl-verify/python/cli/cronjobs/<my_cronjob>/main.py` — the **entry
+  point**, analogous to Go's `cmd/cronjobs/<name>/main.go`. Keep it
+  small: parse config, wire adapters, start the Temporal worker,
   register the schedule. No business logic here.
 - `stl-verify/python/app/services/<my_cronjob>/` — business logic
   (the body of one tick). Full unit tests, mock external HTTP clients.
