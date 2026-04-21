@@ -44,8 +44,8 @@ make dev-up
 ```
 
 The first run builds every Docker image and takes several minutes. Warm
-re-runs skip already-built images; pass `COLD=1 make dev-up` to force a
-rebuild.
+re-runs skip already-built images; run `make dev-up-rebuild` (alias for
+`COLD=1 make dev-up`) to force a rebuild.
 
 When it finishes:
 
@@ -94,7 +94,7 @@ writes per-service `.env` files.
 
 ## 3. Repo layout
 
-```
+```text
 stl/
 ├── stl-verify/           # All Go code lives here (single Go module)
 │   ├── cmd/              # One subdirectory per binary (see §6)
@@ -115,7 +115,7 @@ stl/
 │   └── overlays/{staging,prod}/  # image tags + namespace per environment
 ├── docs/                 # Protocol specs, ADRs, entity diagrams
 ├── experiments/          # Scratch — not shipped
-└── CLAUDE.md / AGENTS.md # Conventions for AI agents (worth reading as a human too)
+└── CLAUDE.md / AGENTS.md # Agent conventions (also at stl-verify/AGENTS.md — worth reading as a human too)
 ```
 
 **Infrastructure (Terraform/OpenTofu) lives in a separate private repo**
@@ -160,7 +160,7 @@ The repo follows a **hexagonal (ports and adapters)** architecture.
 Dependencies point inward: `domain ← ports ← services ← adapters`, and
 `cmd/*` wires concrete adapters into services.
 
-```
+```text
    Alchemy WS ──► watcher ──► Redis (block cache, 2d TTL)
                      │                │
                      │                └─► SNS FIFO (one topic per chain)
@@ -186,7 +186,7 @@ Dependencies point inward: `domain ← ports ← services ← adapters`, and
 
 The cache key convention is:
 
-```
+```text
 stl:{chainId}:{blockNumber}:{version}:{dataType}
 ```
 
