@@ -21,8 +21,6 @@ function formatHash(hash: string): string {
 }
 
 type AllocationGridProps = {
-  activeNetworkLabel: string | null;
-  activeProtocolLabel: string | null;
   allocations: AllocationPosition[];
   errorMessage: string | null;
   filteredAllocations: AllocationPosition[];
@@ -122,8 +120,6 @@ function SkeletonRows() {
 }
 
 export function AllocationGrid({
-  activeNetworkLabel,
-  activeProtocolLabel,
   allocations,
   errorMessage,
   filteredAllocations,
@@ -133,8 +129,6 @@ export function AllocationGrid({
   selectedAllocationKey,
   selectedStar,
 }: AllocationGridProps) {
-  const allocationSummary = `${filteredAllocations.length} of ${allocations.length} positions`;
-
   return (
     <div
       className={css({
@@ -155,27 +149,39 @@ export function AllocationGrid({
           boxShadow: '0 24px 80px rgba(15, 23, 42, 0.08)',
         })}
       >
-        <div
-          className={flex({
-            align: 'flex-start',
-            justify: 'space-between',
-            gap: '4',
-            wrap: 'wrap',
-          })}
-        >
-          <div className={css({ display: 'grid', gap: '2', maxWidth: '3xl' })}>
-            <p
-              className={css({
-                m: 0,
-                fontSize: 'xs',
-                textTransform: 'uppercase',
-                letterSpacing: '0.16em',
-                color: 'text.muted',
-              })}
-            >
-              Allocations
-            </p>
-            <h2
+        <div className={css({ display: 'grid', gap: '4', maxWidth: '3xl' })}>
+          <span
+            className={css({
+              display: 'inline-flex',
+              width: 'fit-content',
+              alignItems: 'center',
+              borderRadius: 'full',
+              bg: 'surface.subtle',
+              px: '3',
+              py: '1',
+              fontSize: 'xs',
+              fontWeight: 'semibold',
+              letterSpacing: '0.14em',
+              textTransform: 'uppercase',
+              color: 'text.muted',
+            })}
+          >
+            Allocations
+          </span>
+          <p
+            className={css({
+              m: 0,
+              fontSize: 'sm',
+              lineHeight: '1.7',
+              color: 'text.default',
+            })}
+          >
+            Live position snapshots for the selected star. Filter by network or
+            protocol above, then focus a row to inspect the matching receipt
+            token in the lower risk panel.
+          </p>
+          <div className={css({ display: 'grid', gap: '1' })}>
+            <h1
               className={css({
                 m: 0,
                 fontSize: { base: '2xl', md: '3xl' },
@@ -183,64 +189,19 @@ export function AllocationGrid({
                 color: 'text.strong',
               })}
             >
-              {selectedStar
-                ? `${selectedStar.name} positions`
-                : 'Select a star'}
-            </h2>
-            <p
-              className={css({
-                m: 0,
-                fontSize: 'sm',
-                lineHeight: '1.7',
-                color: 'text.default',
-              })}
-            >
-              Live position snapshots for the selected star. Filter by network
-              or protocol above, then focus a row to inspect the matching
-              receipt token in the lower risk panel.
-            </p>
-          </div>
-
-          <div
-            className={css({ display: 'grid', gap: '2', minWidth: '16rem' })}
-          >
-            <p className={css({ m: 0, fontSize: 'xs', color: 'text.muted' })}>
-              {allocationSummary}
-            </p>
-            <div className={flex({ gap: '2', wrap: 'wrap' })}>
-              {activeNetworkLabel ? (
-                <span
-                  className={css({
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    borderRadius: 'sm',
-                    bg: 'interactive.selected',
-                    color: 'text.strong',
-                    fontSize: 'xs',
-                    px: '3',
-                    py: '1.5',
-                  })}
-                >
-                  {activeNetworkLabel}
-                </span>
-              ) : null}
-              {activeProtocolLabel ? (
-                <span
-                  className={css({
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    borderRadius: 'sm',
-                    bg: 'surface.subtle',
-                    color: 'text.strong',
-                    fontSize: 'xs',
-                    px: '3',
-                    py: '1.5',
-                  })}
-                >
-                  {activeProtocolLabel}
-                </span>
-              ) : null}
-            </div>
+              {selectedStar ? selectedStar.name : 'Select a star'}
+            </h1>
+            {selectedStar ? (
+              <p
+                className={css({
+                  m: 0,
+                  fontSize: 'sm',
+                  color: 'text.muted',
+                })}
+              >
+                {selectedStar.id}
+              </p>
+            ) : null}
           </div>
         </div>
 
@@ -408,22 +369,6 @@ export function AllocationGrid({
                                     >
                                       {symbol}
                                     </p>
-                                    {isSelected ? (
-                                      <span
-                                        className={css({
-                                          display: 'inline-flex',
-                                          alignItems: 'center',
-                                          borderRadius: 'sm',
-                                          bg: 'surface.default',
-                                          color: 'text.strong',
-                                          fontSize: 'xs',
-                                          px: '2.5',
-                                          py: '0.5',
-                                        })}
-                                      >
-                                        Focused
-                                      </span>
-                                    ) : null}
                                   </div>
                                   <div
                                     className={flex({

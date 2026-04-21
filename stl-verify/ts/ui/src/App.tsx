@@ -220,14 +220,6 @@ function App() {
     [filteredAllocations, selectedAllocationKey],
   );
 
-  const activeNetworkLabel =
-    networkOptions.find((option) => option.value === selectedNetwork)?.label ??
-    null;
-
-  const activeProtocolLabel =
-    protocolOptions.find((option) => option.value === selectedProtocol)
-      ?.label ?? null;
-
   return (
     <SidebarLayout
       sidebar={
@@ -242,22 +234,17 @@ function App() {
       }
       topBar={
         <TopBar
-          allocationCount={allocations.length}
-          filteredAllocationCount={filteredAllocations.length}
+          hasSelectedStar={selectedStar !== null}
           networkOptions={networkOptions}
           onNetworkChange={setSelectedNetwork}
           onProtocolChange={setSelectedProtocol}
           protocolOptions={protocolOptions}
           selectedNetwork={selectedNetwork}
           selectedProtocol={selectedProtocol}
-          selectedStar={selectedStar}
-          starCount={stars.length}
         />
       }
       main={
         <AllocationGrid
-          activeNetworkLabel={activeNetworkLabel}
-          activeProtocolLabel={activeProtocolLabel}
           allocations={allocations}
           errorMessage={allocationsErrorMessage}
           filteredAllocations={filteredAllocations}

@@ -63,27 +63,15 @@ export function StarSidebar({
       <div
         className={css({
           px: '5',
-          py: '5',
+          py: '4',
           borderBottomWidth: '1px',
           borderBottomStyle: 'solid',
           borderBottomColor: 'border.subtle',
         })}
       >
-        <p
-          className={css({
-            m: 0,
-            fontSize: 'xs',
-            textTransform: 'uppercase',
-            letterSpacing: '0.16em',
-            color: 'text.muted',
-          })}
-        >
-          Registered Stars
-        </p>
         <h2
           className={css({
             m: 0,
-            mt: '2',
             fontSize: '2xl',
             lineHeight: 'tight',
             color: 'text.strong',
@@ -91,17 +79,6 @@ export function StarSidebar({
         >
           STL Verify
         </h2>
-        <p
-          className={css({
-            m: 0,
-            mt: '2',
-            fontSize: 'sm',
-            color: 'text.muted',
-          })}
-        >
-          Explore registered stars, compare live allocations, and inspect
-          receipt-token risk from the focused position below.
-        </p>
       </div>
 
       <div
@@ -210,40 +187,22 @@ export function StarSidebar({
                   })}
                 >
                   <div
-                    className={flex({
-                      align: 'center',
-                      justify: 'space-between',
-                      gap: '3',
+                    className={css({
+                      width: '9',
+                      height: '9',
+                      borderRadius: 'full',
+                      bg: isSelected ? 'interactive.accent' : 'surface.subtle',
+                      color: isSelected ? 'white' : 'text.strong',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: 'xs',
+                      fontWeight: 'semibold',
+                      textTransform: 'uppercase',
+                      flexShrink: 0,
                     })}
                   >
-                    <div
-                      className={css({
-                        width: '9',
-                        height: '9',
-                        borderRadius: 'full',
-                        bg: isSelected
-                          ? 'interactive.accent'
-                          : 'surface.subtle',
-                        color: isSelected ? 'white' : 'text.strong',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        fontSize: 'xs',
-                        fontWeight: 'semibold',
-                        textTransform: 'uppercase',
-                        flexShrink: 0,
-                      })}
-                    >
-                      {star.name.slice(0, 2)}
-                    </div>
-                    <span
-                      className={css({
-                        fontSize: 'xs',
-                        color: isSelected ? 'text.strong' : 'text.muted',
-                      })}
-                    >
-                      {isSelected ? 'Selected' : 'Available'}
-                    </span>
+                    {star.name.slice(0, 2)}
                   </div>
                   <p
                     className={css({

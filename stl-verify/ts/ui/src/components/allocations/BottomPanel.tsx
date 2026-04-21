@@ -1,4 +1,8 @@
-import { Toggle, ToggleGroup } from '@archon-research/design-system';
+import {
+  StyledSelect,
+  Toggle,
+  ToggleGroup,
+} from '@archon-research/design-system';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
@@ -19,7 +23,6 @@ import type {
   ReceiptTokenPosition,
   Star,
 } from '../../types/allocation';
-import { StyledSelect } from '../shared/StyledSelect';
 import { BadDebtTab } from './tabs/BadDebtTab';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 
@@ -254,41 +257,12 @@ export function BottomPanel({
     >
       <div
         className={flex({
-          align: 'flex-start',
-          justify: 'space-between',
+          align: 'center',
+          justify: 'flex-end',
           gap: '4',
           wrap: 'wrap',
         })}
       >
-        <div className={css({ display: 'grid', gap: '2', maxWidth: '3xl' })}>
-          <p
-            className={css({
-              m: 0,
-              fontSize: 'xs',
-              textTransform: 'uppercase',
-              letterSpacing: '0.16em',
-              color: 'text.muted',
-            })}
-          >
-            Risk analysis
-          </p>
-          <h2 className={css({ m: 0, fontSize: 'xl', color: 'text.strong' })}>
-            Breakdown and bad debt
-          </h2>
-          <p
-            className={css({
-              m: 0,
-              fontSize: 'sm',
-              lineHeight: '1.7',
-              color: 'text.default',
-            })}
-          >
-            Start from the focused allocation, or choose any receipt token
-            returned for the selected star. The panel keeps your active view and
-            receipt token in the URL.
-          </p>
-        </div>
-
         <ToggleGroup
           value={[activeTab]}
           onValueChange={(value) => {

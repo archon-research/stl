@@ -97,7 +97,7 @@ export function getChainLabel(chainId: number): string {
 }
 
 export function getProtocolLabel(protocol: string): string {
-  const normalized = protocol.trim().toLowerCase();
+  const normalized = normalizeLabel(protocol);
   return PROTOCOL_LABELS[normalized] ?? titleCase(protocol);
 }
 
