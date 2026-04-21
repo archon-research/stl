@@ -2,7 +2,7 @@
 # Go 1.25+ best practices
 
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
-        dev-up dev-up-rebuild dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
+        dev-up dev-up-rebuild dev-up-workers dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
@@ -41,7 +41,7 @@
 		docker-release-python-api-staging \
 		docker-build-mock-blockchain-server docker-push-mock-blockchain-server docker-release-mock-blockchain-server \
 		docker-release-mock-blockchain-server-staging \
-		kind-build-mock-blockchain-server kind-load-mock-blockchain-server kind-deploy-mock-blockchain-server kind-redeploy-mock-blockchain-server \
+		kind-build-mock-blockchain-server kind-load-mock-blockchain-server kind-deploy-mock-blockchain-server kind-deploy-mock-blockchain-server-s3 \
 		kind-use-mock kind-use-alchemy k6-stress-test stress-test-data stress-test kind-clean
 
 # Go bin path for installed tools
@@ -268,15 +268,16 @@ dev-preflight:
 	@if [ ! -f ../.env.secrets ]; then \
 	  printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\nANCHORAGE_API_KEY=\n' > ../.env.secrets && chmod 600 ../.env.secrets; \
 	  echo ""; \
-	  echo "⚠️  .env.secrets created at the repo root (.env.secrets)"; \
-	  echo "   Fill in ALCHEMY_API_KEY (ask a team member), then run:"; \
-	  echo "   make kind-secrets && kubectl --context=$(KUBE_CONTEXT) rollout restart deployment -n $(KUBE_NS)"; \
+	  echo "ℹ️  .env.secrets created at the repo root with empty values."; \
+	  echo "   The watcher will use the mock blockchain server by default."; \
+	  echo "   To switch to real Alchemy: set ALCHEMY_API_KEY in .env.secrets, then run:"; \
+	  echo "   make kind-secrets && make kind-use-alchemy"; \
 	  echo ""; \
 	elif ! grep -q 'ALCHEMY_API_KEY=.\+' ../.env.secrets; then \
 	  echo ""; \
-	  echo "⚠️  ALCHEMY_API_KEY is not set in .env.secrets — the watcher will not function."; \
-	  echo "   Fill in the value, then run:"; \
-	  echo "   make kind-secrets && kubectl --context=$(KUBE_CONTEXT) rollout restart deployment -n $(KUBE_NS)"; \
+	  echo "ℹ️  ALCHEMY_API_KEY is not set in .env.secrets — watcher will use the mock blockchain server."; \
+	  echo "   To switch to real Alchemy at any time: set ALCHEMY_API_KEY, then run:"; \
+	  echo "   make kind-secrets && make kind-use-alchemy"; \
 	  echo ""; \
 	fi
 
@@ -287,45 +288,57 @@ dev-up:
 	@$(MAKE) dev-preflight
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [1/8] Cluster"
+	@echo "  Cluster"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(MAKE) kind-create
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [2/8] Infrastructure"
+	@echo "  Infrastructure"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	$(MAKE) kind-config kind-secrets kind-infra
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [3/8] Database migrations"
+	@echo "  Database migrations"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-migrate:local,docker-build-migrate)
 	$(MAKE) kind-load-migrate kind-migrate
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [4/8] Watcher"
+	@echo "  Mock Blockchain Server"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	$(call build-if-needed,stl-mock-blockchain-server:local,kind-build-mock-blockchain-server)
+	$(MAKE) kind-load-mock-blockchain-server
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/mock-blockchain-server.yaml -n $(KUBE_NS)
+	@echo "==> Waiting for mock-blockchain-server to be ready..."
+	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/mock-blockchain-server -n $(KUBE_NS) --timeout=120s
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "  Watcher"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-watcher:local,docker-build-watcher LOCAL=1)
 	$(MAKE) kind-load-watcher kind-deploy-watcher
+	$(MAKE) kind-use-mock
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [5/8] Workers"
+	@echo "  Workers"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	$(call build-if-needed,stl-oracle-price-worker:local,docker-build-oracle-price-worker LOCAL=1)
-	$(call build-if-needed,stl-morpho-indexer:local,docker-build-morpho-indexer LOCAL=1)
-	$(call build-if-needed,stl-sparklend-position-tracker:local,docker-build-sparklend-position-tracker LOCAL=1)
-	$(call build-if-needed,stl-prime-debt-indexer:local,docker-build-prime-debt-indexer LOCAL=1)
-	$(MAKE) kind-load-workers kind-deploy-workers
+	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
+	if [ -n "$$ALCHEMY_API_KEY" ]; then \
+	  echo "==> API keys found — deploying workers..."; \
+	  $(MAKE) dev-up-workers; \
+	else \
+	  echo "==> API keys not set — skipping workers."; \
+	fi
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [6/8] Python API"
+	@echo "  Python API"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-python-api:local,docker-build-python-api LOCAL=1)
 	$(MAKE) kind-load-python-api kind-deploy-python-api
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [7/8] Cronjobs (Temporal)"
+	@echo "  Cronjobs (Temporal)"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@for cj in $(CRONJOBS); do \
 	  if [ "$(COLD)" = "1" ] || ! docker image inspect stl-$$cj:local >/dev/null 2>&1; then \
@@ -337,14 +350,88 @@ dev-up:
 	$(MAKE) kind-load-cronjobs kind-deploy-cronjobs
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  [8/8] Ready"
+	@echo "  Ready"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "==> Waiting for all deployments to roll out..."
-	@for dep in watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer python-api $(CRONJOBS); do \
+	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
+	if [ -n "$$ALCHEMY_API_KEY" ]; then \
+	  DEPS="mock-blockchain-server watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer temporal-worker python-api $(CRONJOBS)"; \
+	else \
+	  DEPS="mock-blockchain-server watcher python-api $(CRONJOBS)"; \
+	fi; \
+	for dep in $$DEPS; do \
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=120s || \
 	    { echo "ERROR: deployment $$dep not ready after 120s"; kubectl --context=$(KUBE_CONTEXT) get pods -n $(KUBE_NS); exit 1; }; \
 	done
 	@kubectl --context=$(KUBE_CONTEXT) get pods -n $(KUBE_NS)
+	@echo ""
+	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
+	if [ -z "$$ALCHEMY_API_KEY" ]; then \
+	  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \
+	  echo "  ℹ️  Workers not deployed (missing API keys)"; \
+	  echo ""; \
+	  echo "  The watcher pipeline is running with the mock blockchain server."; \
+	  echo "  Workers require the following keys in .env.secrets:"; \
+	  echo ""; \
+	  echo "    ALCHEMY_API_KEY    — oracle-price-worker, morpho-indexer,"; \
+	  echo "                         sparklend-position-tracker, prime-debt-indexer"; \
+	  echo "    COINGECKO_API_KEY  — temporal-worker"; \
+	  echo "    ETHERSCAN_API_KEY  — temporal-worker (data validation)"; \
+	  echo ""; \
+	  echo "  Once set, run: make kind-secrets && make dev-up-workers"; \
+	  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \
+	fi
+
+# Build and deploy workers that require API keys.
+# Checks which keys are available and only deploys workers whose dependencies are met.
+# Usage: make kind-secrets && make dev-up-workers
+dev-up-workers:
+	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
+	MISSING=""; \
+	if [ -z "$$ALCHEMY_API_KEY" ]; then \
+	  MISSING="$$MISSING\n    ALCHEMY_API_KEY    — oracle-price-worker, morpho-indexer, sparklend-position-tracker, prime-debt-indexer"; \
+	fi; \
+	if [ -z "$$COINGECKO_API_KEY" ]; then \
+	  MISSING="$$MISSING\n    COINGECKO_API_KEY  — temporal-worker"; \
+	fi; \
+	if [ -z "$$ETHERSCAN_API_KEY" ]; then \
+	  MISSING="$$MISSING\n    ETHERSCAN_API_KEY  — temporal-worker (data validation)"; \
+	fi; \
+	if [ -n "$$MISSING" ]; then \
+	  echo "==> Missing API keys:"; \
+	  printf "$$MISSING\n\n"; \
+	  echo "    Set them in .env.secrets and run: make kind-secrets && make dev-up-workers"; \
+	  echo ""; \
+	fi; \
+	if [ -n "$$ALCHEMY_API_KEY" ]; then \
+	  echo "==> Deploying Alchemy workers (oracle-price-worker, morpho-indexer, sparklend-position-tracker, prime-debt-indexer)..."; \
+	  $(MAKE) _dev-up-alchemy-workers; \
+	else \
+	  echo "==> Skipping Alchemy workers (no ALCHEMY_API_KEY)"; \
+	fi; \
+	if [ -n "$$COINGECKO_API_KEY" ]; then \
+	  echo "==> Deploying temporal-worker..."; \
+	  $(MAKE) _dev-up-temporal-worker; \
+	else \
+	  echo "==> Skipping temporal-worker (no COINGECKO_API_KEY)"; \
+	fi
+
+_dev-up-alchemy-workers:
+	$(call build-if-needed,stl-oracle-price-worker:local,docker-build-oracle-price-worker LOCAL=1)
+	$(call build-if-needed,stl-morpho-indexer:local,docker-build-morpho-indexer LOCAL=1)
+	$(call build-if-needed,stl-sparklend-position-tracker:local,docker-build-sparklend-position-tracker LOCAL=1)
+	$(call build-if-needed,stl-prime-debt-indexer:local,docker-build-prime-debt-indexer LOCAL=1)
+	$(MAKE) kind-load-workers kind-deploy-workers
+	@for dep in morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer; do \
+	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=120s || \
+	    { echo "ERROR: deployment $$dep not ready after 120s"; exit 1; }; \
+	done
+
+_dev-up-temporal-worker:
+	$(call build-if-needed,stl-temporal-worker:local,docker-build-temporal-worker LOCAL=1)
+	$(MAKE) kind-load-temporal-worker kind-deploy-temporal-worker
+	@kubectl --context=$(KUBE_CONTEXT) rollout status deployment/temporal-worker -n $(KUBE_NS) --timeout=120s || \
+	  { echo "ERROR: deployment temporal-worker not ready after 120s"; exit 1; }
 
 # Start only the database and run migrations (no app services).
 dev-db:
@@ -1546,7 +1633,7 @@ kind-secrets:
 	@test -f ../.env.secrets || { printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\nANCHORAGE_API_KEY=\n' > ../.env.secrets && chmod 600 ../.env.secrets; }
 	@set -a; . ../.env.secrets; set +a; \
 	kubectl --context=$(KUBE_CONTEXT) create secret generic stl-secrets \
-	  --from-literal=ALCHEMY_API_KEY=$$ALCHEMY_API_KEY \
+	  --from-literal=ALCHEMY_API_KEY=$${ALCHEMY_API_KEY:-mock} \
 	  --from-literal=COINGECKO_API_KEY=$${COINGECKO_API_KEY:-} \
 	  --from-literal=ETHERSCAN_API_KEY=$${ETHERSCAN_API_KEY:-} \
 	  --from-literal=ANCHORAGE_API_KEY=$${ANCHORAGE_API_KEY:-} \
@@ -1716,12 +1803,16 @@ ECR_REPO_PYTHON_API = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-
 # Build Docker image for python-api (ARM64 for Graviton)
 docker-build-python-api:
 ifdef LOCAL
-	docker build -t stl-python-api:local -f python/Dockerfile .
+	docker build \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		-t stl-python-api:local -f python/Dockerfile .
 else
 	@echo "==> Building Python API Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_PYTHON_API)"
 	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		-f python/Dockerfile \
 		-t $(ECR_REPO_PYTHON_API):$(IMAGE_TAG) \
 		-t $(ECR_REPO_PYTHON_API):latest \
@@ -1739,10 +1830,13 @@ docker-release-python-api: ecr-login _docker-release-python-api-internal
 
 _docker-release-python-api-internal:
 	@TAG=$(IMAGE_TAG) && \
+	COMMIT=$$(git rev-parse HEAD) && \
 	echo "==> Building Python API Docker image for ARM64..." && \
 	echo "    Repository: $(ECR_REPO_PYTHON_API)" && \
 	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
 	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
 		-f python/Dockerfile \
 		-t $(ECR_REPO_PYTHON_API):$$TAG \
 		-t $(ECR_REPO_PYTHON_API):latest \
@@ -1824,13 +1918,16 @@ kind-build-mock-blockchain-server:
 kind-load-mock-blockchain-server: kind-build-mock-blockchain-server
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-mock-blockchain-server:local"
 
-# Deploy mock-blockchain-server to kind cluster (builds image, populates LocalStack data first)
-kind-deploy-mock-blockchain-server: kind-load-mock-blockchain-server stress-test-data
+# Deploy mock-blockchain-server to kind cluster (uses fixture data by default).
+# To load real blocks for stress testing, run: make stress-test-data && make kind-deploy-mock-blockchain-server-s3
+kind-deploy-mock-blockchain-server: kind-load-mock-blockchain-server
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/mock-blockchain-server.yaml -n $(KUBE_NS)
 
-# Rebuild, reload, and restart mock-blockchain-server in kind
-kind-redeploy-mock-blockchain-server: kind-load-mock-blockchain-server
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/mock-blockchain-server -n $(KUBE_NS)
+# Deploy mock-blockchain-server with S3 block data (for stress testing).
+kind-deploy-mock-blockchain-server-s3: kind-load-mock-blockchain-server stress-test-data
+	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/mock-blockchain-server.yaml -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) patch deployment mock-blockchain-server -n $(KUBE_NS) --type=json \
+	  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args","value":["--addr=:8546","--admin-addr=:8547","--s3-bucket=stress-test-data","--s3-prefix=blocks/chain-1","--s3-endpoint=http://localstack:4566","--region=us-east-1"]}]'
 
 # Point watcher at mock-blockchain-server instead of Alchemy
 kind-use-mock:
