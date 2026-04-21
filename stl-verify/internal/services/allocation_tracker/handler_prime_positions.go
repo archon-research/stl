@@ -103,19 +103,6 @@ func (h *PrimePositionHandler) HandleSnapshots(
 			}
 		}
 
-		var assetDecimals *int
-		if s.Entry.AssetAddress != nil {
-			assetMeta, ok := h.metadata.get(*s.Entry.AssetAddress)
-			if !ok {
-				return fmt.Errorf(
-					"metadata missing for asset %s (token %s)",
-					s.Entry.AssetAddress.Hex(),
-					s.Entry.ContractAddress.Hex(),
-				)
-			}
-			assetDecimals = &assetMeta.decimals
-		}
-
 		primeID, ok := h.primeLookup[s.Entry.Star]
 		if !ok {
 			return fmt.Errorf("unknown star %q: no matching prime_id", s.Entry.Star)
@@ -131,7 +118,6 @@ func (h *PrimePositionHandler) HandleSnapshots(
 			TokenAddress:   s.Entry.ContractAddress,
 			TokenSymbol:    meta.symbol,
 			TokenDecimals:  meta.decimals,
-			AssetDecimals:  assetDecimals,
 			PrimeID:        primeID,
 			ProxyAddress:   s.Entry.WalletAddress,
 			Balance:        s.Balance,
