@@ -20,7 +20,7 @@ expected to follow when opening a pull request.
 | Docker | Local infra (Postgres, Redis, Temporal, LocalStack) | Docker Desktop / Colima |
 | [`kind`](https://kind.sigs.k8s.io/) | Runs a Kubernetes cluster inside Docker — mirrors prod | `brew install kind` |
 | `kubectl` | Talks to the kind cluster | `brew install kubectl` |
-| `kustomize` | Renders our k8s manifests | `brew install kustomize` |
+| `kustomize` (optional) | Only needed for manually previewing a deploy (`kustomize build … \| kubectl diff -f -`). `make dev-up` uses `kubectl`'s built-in kustomize. | `brew install kustomize` |
 | AWS CLI (optional) | Only needed if you want to fetch real Alchemy keys via `make dev-env` | `brew install awscli` |
 | An Alchemy API key | Mainnet access | ask a team member or sign up at alchemy.com |
 
