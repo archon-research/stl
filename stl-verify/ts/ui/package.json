@@ -3,28 +3,48 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "imports": {
+    "#src/*": "./src/*",
+    "#styled-system/*": "./styled-system/*"
+  },
   "scripts": {
+    "codegen:styles": "panda codegen",
+    "prepare": "npm run codegen:styles",
+    "predev": "npm run codegen:styles",
     "dev": "vite",
+    "prebuild": "npm run codegen:styles",
     "build": "tsc -b && vite build",
-    "format": "oxfmt -c ./.oxfmtrc.ts --write \"src/**/*.ts\" \"src/**/*.tsx\" vite.config.ts",
-    "format:check": "oxfmt -c ./.oxfmtrc.ts --check \"src/**/*.ts\" \"src/**/*.tsx\" vite.config.ts",
+    "pretype:check": "npm run codegen:styles",
+    "type:check": "tsc -b",
+    "format": "oxfmt -c ./.oxfmtrc.ts --write \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
+    "format:check": "oxfmt -c ./.oxfmtrc.ts --check \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
     "preview": "vite preview",
     "generate:openapi-types": "openapi-typescript ./src/generated/openapi-schema.json --output ./src/generated/openapi-types.ts",
-    "lint": "oxlint -c ./.oxlintrc.ts src vite.config.ts"
+    "prelint": "npm run codegen:styles",
+    "lint": "oxlint -c ./.oxlintrc.ts src panda.config.ts vite.config.ts"
   },
   "dependencies": {
+    "@archon-research/http-client-core": "0.0.0",
+    "@archon-research/http-client-react": "0.0.0",
+    "@tanstack/react-query": "^5.99.2",
+    "openapi-fetch": "^0.17.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@archon-research/design-system": "0.0.0",
     "@archon-research/oxfmt-config": "0.0.0",
     "@archon-research/oxlint-config": "0.0.0",
+    "@archon-research/tsconfig": "0.0.0",
+    "@pandacss/dev": "^1.9.1",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.0",
     "openapi-typescript": "^7.6.1",
     "oxfmt": "^0.45.0",
     "oxlint": "^1.60.0",
+    "postcss": "^8.5.6",
     "typescript": "^5.4.5",
     "vite": "^5.2.0"
   }

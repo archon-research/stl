@@ -1,12 +1,20 @@
-import React from 'react';
-import ReactDOM from 'react-dom/client';
+import { ThemeProvider } from '@archon-research/design-system';
+import { HttpProvider } from '@archon-research/http-client-react';
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
 
 import App from './App.tsx';
 
+// Required global stylesheet side effects.
+// oxlint-disable-next-line import/no-unassigned-import
 import './index.css';
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <ThemeProvider>
+      <HttpProvider>
+        <App />
+      </HttpProvider>
+    </ThemeProvider>
+  </StrictMode>,
 );
