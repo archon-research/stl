@@ -337,7 +337,7 @@ func run(ctx context.Context, args []string) error {
 3. **Add outbound ports/adapters if needed.** A new protocol reader goes
    in `internal/adapters/outbound/<vendor>/`; expose it behind a small
    interface in `internal/ports/outbound/`.
-4. **Add migrations** (see §10) for any new tables.
+4. **Add migrations** (see §11) for any new tables.
 5. **Add k8s manifests** under `k8s/base/<my-worker>/`:
    `deployment.yaml`, `serviceaccount.yaml`, `kustomization.yaml`. Copy
    `k8s/base/oracle-price-worker/` as the template. Wire the new service
@@ -448,7 +448,7 @@ Run it locally with `uv run python -m cli.workers.<my_worker>.main` (from `stl-v
 4. **Add dependencies with `uv`** — e.g. `uv add aioboto3 redis` from
    `stl-verify/python/`. This updates both `pyproject.toml` and
    `uv.lock` atomically.
-5. **Add migrations** (see §10) for any new tables.
+5. **Add migrations** (see §11) for any new tables.
 6. **Add a Dockerfile.** The existing `stl-verify/python/Dockerfile`
    is FastAPI-specific. First Python worker introduces either a
    multi-target Dockerfile (build arg picks `cli/workers/<name>`) or
@@ -654,7 +654,7 @@ Run it locally with `uv run python -m cli.cronjobs.<my_cronjob>.main` (from `stl
    `httpx` if you need a new HTTP client, though it's already in).
    Run from `stl-verify/python/`; updates `pyproject.toml` and
    `uv.lock` together.
-5. **Add migrations** (see §10) for any new tables.
+5. **Add migrations** (see §11) for any new tables.
 6. **Dockerfile & Makefile targets** — same situation as Python
    workers; the first Python cronjob introduces the shared plumbing
    (use the `uv` base image pattern already in `stl-verify/python/Dockerfile`).
@@ -672,7 +672,66 @@ Idempotency and migration rules above still apply.
 
 ---
 
-## 10. Database migrations
+## 10. Adding a new risk model
+
+Risk models are Python and live under
+`stl-verify/python/app/risk_engine/<model>/`. Every model exposes the
+same contract: **Required Risk Capital (RRC) in USD**, computed at the
+model's documented default stress and overrideable via a scenario map.
+Many models are expected, and more than one may apply to the same
+`(asset_id, prime_id)` — the API returns all applicable results in one
+response.
+
+Two families exist today and illustrate the range:
+
+- **Asset-level rating (`risk_engine/suraf/`)** — pre-computed CRR per
+  asset; `RRC = usd_exposure × CRR`. Default `usd_exposure` derived
+  from `prime_id`.
+- **Position-level (`risk_engine/crypto_lending/`)** — reads collateral
+  state via ports; RRC computed under a default x% gap between
+  liquidation trigger and execution.
+
+### Where code goes
+
+```text
+app/risk_engine/<model>/          # Pure math. No I/O.
+app/ports/                        # One `-er` interface per data dependency
+app/adapters/{postgres,onchain}/  # One adapter per protocol variant
+app/services/<model>_service.py   # Wraps math + ports; implements compute(...)
+app/api/v1/risk.py                # The two routes below. Never import risk_engine/ here.
+```
+
+### API contract — two routes cover every model
+
+Both return `{ asset_id, prime_id?, results: [{ version, model, rrc_usd, details }, ...] }`.
+Each `details` is a discriminated union keyed on `model`.
+Version is a reference to block_version and processing_version. These allow auditability of the results.
+
+- `GET /v1/risk/rrc?asset_id=…&prime_id=…` — every applicable model at
+  its defaults.
+- `POST /v1/risk/rrc` with `{ asset_id, prime_id?, overrides: { <model>: {...knobs} } }`
+  — same, with per-model scenario overrides. Unknown models/keys → 422.
+
+### Model-side interface
+
+Every service implements
+`compute(asset_id, prime_id, overrides) -> RrcResult`, with defaults
+and override schema documented in its docstring. A registry in
+`app/services/` maps `(asset_id, prime_id)` to the set of applicable
+services — handlers iterate the registry, never branch on model.
+
+### Startup and tests
+
+Anything loaded once (rating packages, mappings) goes in
+`app/main.py::create_app` **before** resources are acquired, so a bad
+config fails startup, not a request. Stash on `app.state.<name>`,
+expose via `app/api/deps.py`. Unit-test services with mocked ports;
+integration-test the endpoint against real Postgres (testcontainers) —
+mock only third-party APIs. Migrations for any new tables: see §11.
+
+---
+
+## 11. Database migrations
 
 A **migration** is a single SQL file that makes one versioned change to
 the database schema (create or alter a table, add an index, backfill a
@@ -717,7 +776,7 @@ ArgoCD PreSync hook in staging/prod.
 
 ---
 
-## 11. Testing
+## 12. Testing
 
 | Command | What it runs | When you need it |
 |---|---|---|
@@ -760,7 +819,7 @@ Go code.
 
 ---
 
-## 12. Code conventions
+## 13. Code conventions
 
 Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 [stl-verify/AGENTS.md](./stl-verify/AGENTS.md), which apply to humans too.
@@ -784,7 +843,7 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 
 ---
 
-## 13. Pull request workflow
+## 14. Pull request workflow
 
 1. **Branch off `main`.** Name the branch after the Linear ticket if
    there is one (`VEC-123-short-slug`).
@@ -816,7 +875,7 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 
 ---
 
-## 14. Things that will save you time
+## 15. Things that will save you time
 
 - **Read the Makefile directly** — `stl-verify/Makefile` is the source
   of truth for every workflow and has many more targets than are
@@ -833,7 +892,7 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 
 ---
 
-## 15. Getting help
+## 16. Getting help
 
 - **Code questions / design review:** @archon-research/vector-engineers
   (review is required anyway — ask early).
