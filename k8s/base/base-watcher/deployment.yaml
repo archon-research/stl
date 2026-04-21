@@ -32,10 +32,10 @@ spec:
           resources:
             requests:
               cpu: "100m"
-              memory: "128Mi"
+              memory: "512Mi"
             limits:
               cpu: "100m"
-              memory: "128Mi"
+              memory: "512Mi"
           livenessProbe:
             exec:
               command: ["/bin/sh", "-c", "pgrep -f watcher"]
