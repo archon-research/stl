@@ -599,8 +599,12 @@ func (r *BlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64,
 
 // SetBackfillWatermark updates the watermark to the given block number.
 // Should only be called after confirming all blocks up to this number exist.
+// Uses UPSERT so the row is auto-created for new chains that have no watermark yet.
 func (r *BlockStateRepository) SetBackfillWatermark(ctx context.Context, watermark int64) error {
-	_, err := r.pool.Exec(ctx, `UPDATE backfill_watermark SET watermark = $1 WHERE chain_id = $2`, watermark, r.chainID)
+	_, err := r.pool.Exec(ctx,
+		`INSERT INTO backfill_watermark (chain_id, watermark) VALUES ($1, $2)
+		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark`,
+		r.chainID, watermark)
 	if err != nil {
 		return fmt.Errorf("failed to set backfill watermark: %w", err)
 	}
