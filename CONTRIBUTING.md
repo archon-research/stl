@@ -2,10 +2,32 @@
 
 Welcome!
 
-This document is aimed at someone who has never seen the repo before. It
-explains the layout, how to run things locally, how data acquisition works
-(both per-block and on a cron schedule), and the conventions you are
-expected to follow when opening a pull request.
+> **TL;DR — the non-negotiables** (read this even if you skip the rest)
+> - Pick a category first (see "What goes where" below): worker,
+>   cronjob, backfiller, model, or API endpoint — each has a home.
+> - **Go/Python** for workers / cronjobs / backfillers. **Python** for APIs
+>   and quantitative risk models. Anything else needs prior discussion.
+> - **Prefer on-chain data.** Off-chain feeds (CoinGecko, etc.) need a
+>   good reason and vector-team approval.
+> - **Keep data pipelines separate from model pipelines** — ingest
+>   ≠ compute-meaning.
+> - Every timeseries table must be a hypertable + compressed + S3-tiered,
+>   in the same migration that creates it.
+> - **Never modify an applied migration** — write a new one.
+> - PR title: `TICKET-1234: <description>`. GitHub squash-merges; don't
+>   squash locally.
+
+This document is aimed at anyone who has never seen the repo before — in
+particular:
+
+- **contributors of quantitative risk models** (the `app/risk_engine/`
+  side)
+- **contributors of data pipelines** that ingest on-chain and off-chain
+  data (the workers, cronjobs, backfillers)
+
+It explains the layout, how to run things locally, how data acquisition
+works, and the conventions you're expected to follow when opening a
+pull request.
 
 > If anything here is wrong or unclear, fix it in the same PR as the work
 > that surfaced the problem. Docs rot fast — keep them honest.
@@ -97,7 +119,7 @@ writes per-service `.env` files.
 ```text
 stl/
 ├── stl-verify/           # All Go code lives here (single Go module)
-│   ├── cmd/              # One subdirectory per binary (see §6)
+│   ├── cmd/              # One subdirectory per binary (see §7)
 │   ├── internal/
 │   │   ├── domain/       # Business entities — zero dependencies
 │   │   ├── ports/        # Interfaces (inbound = use cases, outbound = infra)
@@ -122,6 +144,21 @@ stl/
 for security reasons. If your change needs new AWS resources (a new SQS
 queue, an SNS subscription, an IAM policy, a secret, etc.), the change to
 that repo must land **before** the code here can deploy cleanly.
+
+### What goes where
+
+| If you're adding… | It goes in… |
+|---|---|
+| A **quantitative risk model** (Python) | `stl-verify/python/app/risk_engine/<model>/`, exposed via a service in `app/services/` |
+| An **on-chain per-block data pipeline** | `cmd/workers/<name>/` (Go) or `cli/workers/<name>/` (Python) |
+| An **off-chain API data pipeline** (periodic) | `cmd/cronjobs/<name>/` (Go) or `cli/cronjobs/<name>/` (Python) |
+| A **historical on-chain backfill** | `cmd/backfillers/<name>/` |
+| A **new HTTP endpoint** for serving data out | `stl-verify/python/app/api/v1/` (extend the `python-api` service) |
+| A **new TimescaleDB schema** (table, index, backfill) | A new migration file under `stl-verify/db/migrations/` |
+| A **protocol spec or design doc** | `docs/` |
+
+**Don't touch** `experiments/` (scratch, not shipped), the image tags in
+`k8s/overlays/{staging,prod}/kustomization.yaml` (CI owns those).
 
 ---
 
@@ -155,7 +192,34 @@ Pick the language **before** you start, and when in doubt, ask first.
 
 ---
 
-## 5. Architecture in one picture
+## 5. Patterns and anti-patterns
+
+Two rules that apply everywhere in this repo — they override local
+convenience:
+
+- **Prefer on-chain data whenever we can.** If the data lives on the
+  chain, the default is to read it from the chain (via Alchemy / Erigon
+  and the cached block payload) — it's auditable (we can replay a
+  block), trust-minimized (no third party), and stays consistent with
+  the rest of the pipeline. Off-chain sources (CoinGecko, Anchorage,
+  Etherscan, etc.) are allowed **with a good reason and explicit
+  approval from the vector team** — e.g., the off-chain feed updates
+  materially faster than the on-chain oracle, or the data only exists
+  off-chain. Write the justification in the PR description so reviewers
+  can see it.
+- **Data pipelines and model pipelines stay separate.** A **data
+  pipeline** writes "what happened on the chain or at an external API"
+  into Postgres as append-only time-series. A **model pipeline** reads
+  that data and writes "what it means" (risk scores, derived metrics,
+  liquidation forecasts) into its own tables. Don't merge the two into
+  a single worker or cronjob — coupling ingest to model output means
+  every model change forces a re-ingest, and every ingest bug
+  corrupts the model surface. Split them across separate entry points
+  (and usually separate PRs).
+
+---
+
+## 6. Architecture in one picture
 
 The repo follows a **hexagonal (ports and adapters)** architecture.
 Dependencies point inward: `domain ← ports ← services ← adapters`, and
@@ -202,7 +266,7 @@ Redis using this key.
 
 ---
 
-## 6. The `cmd/` tree — where binaries live
+## 7. The `cmd/` tree — where binaries live
 
 Each subdirectory under `cmd/` is one `main.go`. They are grouped by
 lifecycle:
@@ -225,7 +289,7 @@ backfiller in `cmd/backfillers/`.
 
 ---
 
-## 7. Data acquisition — per block
+## 8. Data acquisition — per block
 
 This is the hot path: extract something from every new Ethereum (or
 Avalanche / Arbitrum / Base / Optimism / Unichain) block.
@@ -273,7 +337,7 @@ func run(ctx context.Context, args []string) error {
 3. **Add outbound ports/adapters if needed.** A new protocol reader goes
    in `internal/adapters/outbound/<vendor>/`; expose it behind a small
    interface in `internal/ports/outbound/`.
-4. **Add migrations** (see §9) for any new tables.
+4. **Add migrations** (see §10) for any new tables.
 5. **Add k8s manifests** under `k8s/base/<my-worker>/`:
    `deployment.yaml`, `serviceaccount.yaml`, `kustomization.yaml`. Copy
    `k8s/base/oracle-price-worker/` as the template. Wire the new service
@@ -300,14 +364,58 @@ same SQS FIFO queue, same Redis cache lookup by
 `stl:{chainId}:{blockNumber}:{version}:{dataType}`, same Postgres
 writes. Only the language changes.
 
-Put everything under `stl-verify/python/`, mirroring the Go structure
-(Python uses `cli/` for entry points where Go uses `cmd/` — same role,
-more Pythonic name):
+> **No Python SQS worker exists in the repo yet.** If you're the first,
+> you'll be introducing the shared plumbing (SQS/Redis adapters,
+> Dockerfile, Makefile targets) on top of the business logic — budget
+> for it. Put every reusable piece under `app/adapters/…` so the
+> second Python worker is copy-paste.
+>
+> **Tooling:** we use [`uv`](https://docs.astral.sh/uv/) for Python
+> packaging and execution — **not** pip, pip-tools, or poetry. Add
+> deps with `uv add <pkg>`; run anything under the project env with
+> `uv run <cmd>`; refresh the lockfile with `uv sync`.
+
+**Code skeleton** — entry point at `stl-verify/python/cli/workers/<my_worker>/main.py`:
+
+```python
+import asyncio
+import signal
+
+from app.adapters.postgres import open_pool
+from app.adapters.redis import BlockCache           # thin wrapper around redis-py
+from app.adapters.sqs import SQSConsumer            # thin wrapper around aioboto3
+from app.config import load_config
+from app.services.my_worker import MyWorkerService
+
+async def run() -> None:
+    cfg = load_config()                             # env-driven, fail fast on missing vars
+    consumer = SQSConsumer(cfg.queue_url, cfg.aws_region)
+    cache    = BlockCache(cfg.redis_url)
+    pool     = await open_pool(cfg.database_url)
+
+    service = MyWorkerService(consumer, cache, pool, chain_id=cfg.chain_id)
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+
+    try:
+        await service.run_until(stop)               # consume loop + per-message handling
+    finally:
+        await pool.close()
+
+if __name__ == "__main__":
+    asyncio.run(run())
+```
+
+Run it locally with `uv run python -m cli.workers.<my_worker>.main` (from `stl-verify/python/`).
+
+**Directory layout** — mirrors the Go hexagonal structure (Python uses
+`cli/` for entry points where Go uses `cmd/`):
 
 - `stl-verify/python/cli/workers/<my_worker>/main.py` — the **entry
-  point**, analogous to Go's `cmd/workers/<name>/main.go`. Keep it
-  small: parse config + env, wire adapters, start the SQS consume loop,
-  hand off to the graceful-shutdown harness. No business logic here.
+  point** shown above. No business logic here.
 - `stl-verify/python/app/services/<my_worker>/` — business logic for
   one block event. Full unit tests; mock the SQS consumer, the Redis
   reader, the repo, and any contract caller.
@@ -316,31 +424,57 @@ more Pythonic name):
 - `stl-verify/python/app/adapters/{sqs,redis,postgres,onchain,…}/` —
   concrete implementations, one subpackage per vendor.
 
-Use `boto3` (or `aioboto3` if the service is async) for SQS and
-`redis-py` for the cache. Follow the same operational contract as the
-Go workers:
+**Operational contract** (must match Go workers exactly):
 
-- The worker is a long-running process that polls SQS with long-poll
-  receive, processes one message at a time in FIFO order, deletes the
-  message on success, and lets it redrive on failure.
-- Handle `SIGINT` / `SIGTERM` — finish the in-flight message, close the
-  DB pool, exit within ~25s (the equivalent of Go's `lifecycle.Run`).
-- Read block data from Redis using the exact cache-key convention above;
-  do not refetch from Alchemy unless the cache miss rate indicates a
-  real bug.
-- Ship as its own Deployment under `k8s/base/<my-worker>/` with the
-  same shape as `k8s/base/oracle-price-worker/`.
-- Open the same Infrastructure-repo PR (SQS queue, SNS subscription,
-  IAM) — the plumbing outside the worker is language-agnostic.
+- Long-poll SQS receive; process one message at a time in FIFO order;
+  delete on success; let it redrive on failure.
+- Handle `SIGINT` / `SIGTERM` — finish the in-flight message, close
+  the DB pool, exit within ~25s (the Python equivalent of Go's
+  `lifecycle.Run`).
+- Read block data from Redis using the exact cache-key convention
+  above; do not refetch from Alchemy unless cache-miss rate indicates
+  a real bug.
 
-If this is the first Python SQS worker in the repo, factor the
-boilerplate (SQS consume loop, signal handling, graceful drain) into a
-shared harness under `app/adapters/sqs/` so the second one is
-copy-paste — don't inline it into your worker's entrypoint.
+**Adding a new Python per-block worker:**
+
+1. **Create `stl-verify/python/cli/workers/<my_worker>/main.py`** from
+   the skeleton above. Keep it small.
+2. **Create the service** in `stl-verify/python/app/services/<my_worker>/`
+   with full unit tests (mock every adapter).
+3. **Add ports/adapters if needed.** A new protocol reader goes in
+   `app/adapters/<vendor>/`, exposed via a small interface in
+   `app/ports/`. If this is the first Python worker, you'll also
+   create `app/adapters/sqs/` and `app/adapters/redis/`.
+4. **Add dependencies with `uv`** — e.g. `uv add aioboto3 redis` from
+   `stl-verify/python/`. This updates both `pyproject.toml` and
+   `uv.lock` atomically.
+5. **Add migrations** (see §10) for any new tables.
+6. **Add a Dockerfile.** The existing `stl-verify/python/Dockerfile`
+   is FastAPI-specific. First Python worker introduces either a
+   multi-target Dockerfile (build arg picks `cli/workers/<name>`) or
+   a parallel `Dockerfile.worker`. Subsequent workers reuse it.
+   Use the `uv` base image pattern already in the existing Dockerfile
+   (`COPY --from=ghcr.io/astral-sh/uv …`, `uv sync --frozen --no-dev`).
+7. **Add Makefile targets** — `docker-build-<name>`,
+   `docker-release-<name>`, `kind-load-<name>`, `kind-deploy-<name>`,
+   and a `run-<name>` target for local dev (invokes `uv run` under
+   the hood). Follow the pattern of `docker-build-python-api` /
+   `docker-release-python-api` in `stl-verify/Makefile`.
+8. **Add k8s manifests** under `k8s/base/<my-worker>/`
+   (`deployment.yaml`, `serviceaccount.yaml`, `kustomization.yaml`).
+   Copy `k8s/base/oracle-price-worker/` as the template; update image
+   name and any probes. Register in
+   `k8s/overlays/{staging,prod}/kustomization.yaml`.
+9. **Coordinate with infra.** Same SQS queue / SNS subscription / IAM
+   PR as for a Go worker — the plumbing outside the worker is
+   language-agnostic.
+
+> **Tip:** Same as Go workers — split the k8s-manifest and
+> Infrastructure-repo changes into a follow-up PR.
 
 ---
 
-## 8. Data acquisition — on a cron schedule
+## 9. Data acquisition — on a cron schedule
 
 Use this when the data source is **not keyed on block height** — typically
 an external REST API (CoinGecko, Anchorage) or a periodic consistency
@@ -417,47 +551,134 @@ without producing duplicates.
 ### If you're writing the cronjob in Python
 
 **The flow is identical to the Go version** — Temporal is still the
-scheduler, the worker still registers a schedule on startup, and each
-tick still runs one activity. Only the language changes.
+scheduler, the worker registers a schedule on startup, and each tick
+runs one activity. Only the language changes. Same `uv` tooling rules
+as the worker section above.
 
-Put everything under `stl-verify/python/`, mirroring the Go structure
-(Python uses `cli/` for entry points where Go uses `cmd/` — same role,
-more Pythonic name):
+> **No Python Temporal worker exists in the repo yet.** If you're the
+> first, factor the boilerplate (client connect, schedule ensure,
+> worker run) into a shared harness at `app/adapters/temporal/` so the
+> second one is copy-paste.
 
-- `stl-verify/python/cli/cronjobs/<my_cronjob>/main.py` — the **entry
-  point**, analogous to Go's `cmd/cronjobs/<name>/main.go`. Keep it
-  small: parse config, wire adapters, start the Temporal worker,
-  register the schedule. No business logic here.
-- `stl-verify/python/app/services/<my_cronjob>/` — business logic
-  (the body of one tick). Full unit tests, mock external HTTP clients.
-- `stl-verify/python/app/domain/entities/` — pure entities, no
-  dependencies.
+**Code skeleton** — entry point at `stl-verify/python/cli/cronjobs/<my_cronjob>/main.py`.
+Uses the [`temporalio`](https://pypi.org/project/temporalio/) SDK:
+
+```python
+import asyncio
+import os
+from datetime import timedelta
+
+from temporalio.client import (
+    Client, Schedule, ScheduleActionStartWorkflow,
+    ScheduleIntervalSpec, ScheduleSpec,
+)
+from temporalio.service import RPCError
+from temporalio.worker import Worker
+
+from app.config import load_config
+from app.services.my_cronjob import MyCronjobService, tick_workflow
+
+NAME     = "my-cronjob"
+INTERVAL = timedelta(minutes=int(os.getenv("MY_CRONJOB_INTERVAL_MIN", "15")))
+
+async def run() -> None:
+    cfg     = load_config()
+    client  = await Client.connect(cfg.temporal_host, namespace=cfg.temporal_namespace)
+    service = MyCronjobService(cfg)                 # wires DB + HTTP clients
+
+    # Idempotent schedule creation — swallow AlreadyExists on restarts.
+    try:
+        await client.create_schedule(
+            NAME,
+            Schedule(
+                action=ScheduleActionStartWorkflow(
+                    tick_workflow,
+                    id=f"scheduled-{NAME}",
+                    task_queue=NAME,
+                ),
+                spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=INTERVAL)]),
+            ),
+        )
+    except RPCError as e:
+        if "AlreadyExists" not in str(e):
+            raise
+
+    worker = Worker(
+        client,
+        task_queue=NAME,
+        workflows=[tick_workflow],
+        activities=[service.tick],
+    )
+    await worker.run()
+
+if __name__ == "__main__":
+    asyncio.run(run())
+```
+
+Run it locally with `uv run python -m cli.cronjobs.<my_cronjob>.main` (from `stl-verify/python/`).
+
+**Directory layout** (mirrors Go; `cli/` ≈ `cmd/`):
+
+- `stl-verify/python/cli/cronjobs/<my_cronjob>/main.py` — entry point
+  (above). No business logic.
+- `stl-verify/python/app/services/<my_cronjob>/` — business logic,
+  the body of one tick, plus the `tick_workflow` wrapper. Full unit
+  tests; mock external HTTP clients.
+- `stl-verify/python/app/domain/entities/` — pure entities.
 - `stl-verify/python/app/ports/` — interfaces.
-- `stl-verify/python/app/adapters/{postgres,onchain,…}/` — concrete
-  implementations, one subpackage per vendor.
+- `stl-verify/python/app/adapters/{postgres,onchain,temporal,…}/` —
+  concrete implementations, one subpackage per vendor.
 
-For the Temporal worker itself, use the
-[`temporalio`](https://pypi.org/project/temporalio/) SDK and follow the
-same contract as `internal/adapters/outbound/temporal.RunCronjob`:
+**Temporal contract** (must match Go cronjobs exactly):
 
 - Task queue, schedule ID, and workflow ID all derive from the cronjob
-  name.
-- Interval is read from `<NAME>_INTERVAL` env var with a sensible default.
-- Create the schedule on startup; swallow `AlreadyExists`; changing the
-  interval still requires deleting the schedule in Temporal and
+  name (lowercase, hyphenated).
+- Interval read from `<NAME>_INTERVAL` env var with a sensible default
+  — prefer longer, and always overrideable.
+- Create the schedule on startup; swallow `AlreadyExists`; changing
+  the interval still requires deleting the schedule in Temporal and
   restarting the worker.
-- Ship as its own Deployment under `k8s/base/<my-cronjob>/` with the
-  same small resource profile as a Go cronjob.
+- The activity must be **idempotent** — Temporal retries. Guard every
+  write against duplicates.
 
-If this is the first Python Temporal worker in the repo, factor the
-boilerplate into a shared harness (e.g. `app/adapters/temporal/`) so the
-second one is a copy-paste — don't inline it into your cronjob's main.
+**Adding a new Python cronjob:**
+
+1. **Create `stl-verify/python/cli/cronjobs/<my_cronjob>/main.py`**
+   from the skeleton above.
+2. **Create the service** in `stl-verify/python/app/services/<my_cronjob>/`
+   with unit tests (mock HTTP / repo adapters). Put the
+   `tick_workflow` wrapper here or in `app/adapters/temporal/` if it's
+   generic.
+3. **Add ports/adapters** for any new external client.
+4. **Add dependencies with `uv`** — e.g. `uv add temporalio` (and
+   `httpx` if you need a new HTTP client, though it's already in).
+   Run from `stl-verify/python/`; updates `pyproject.toml` and
+   `uv.lock` together.
+5. **Add migrations** (see §10) for any new tables.
+6. **Dockerfile & Makefile targets** — same situation as Python
+   workers; the first Python cronjob introduces the shared plumbing
+   (use the `uv` base image pattern already in `stl-verify/python/Dockerfile`).
+7. **Add k8s manifests** under `k8s/base/<my-cronjob>/`. Copy
+   `k8s/base/offchain-price-indexer/` as the template (small:
+   50m/64Mi, because the work happens inside the activity). Register
+   in `k8s/overlays/{staging,prod}/kustomization.yaml`.
+8. **Infra PR** for any new secrets / IAM + a Temporal namespace entry
+   if needed.
+
+> **Tip:** Same as with workers — split the k8s-manifest and
+> Infrastructure-repo changes into a follow-up PR.
 
 Idempotency and migration rules above still apply.
 
 ---
 
-## 9. Database migrations
+## 10. Database migrations
+
+A **migration** is a single SQL file that makes one versioned change to
+the database schema (create or alter a table, add an index, backfill a
+column, etc.). The migrator tracks which files have already run, by
+checksum, and applies any new ones in order — so "adding a migration"
+is how you roll a schema change out to every environment reproducibly.
 
 Migrations live in `stl-verify/db/migrations/` and are applied
 automatically — by the migrator Job on `make dev-up`, and by the
@@ -496,7 +717,7 @@ ArgoCD PreSync hook in staging/prod.
 
 ---
 
-## 10. Testing
+## 11. Testing
 
 | Command | What it runs | When you need it |
 |---|---|---|
@@ -518,9 +739,28 @@ ArgoCD PreSync hook in staging/prod.
 - For `main.go`, extract a `run(ctx, args) error` function and call it
   from `main()` — then the integration test calls `run` directly.
 
+**Python code uses its own Makefile and `uv`.** We use
+[`uv`](https://docs.astral.sh/uv/) as the Python package manager and
+runner — **not** pip, pip-tools, or poetry. `uv sync` installs deps
+from `uv.lock`; `uv add <pkg>` adds a dep; `uv run <cmd>` runs
+anything under the project env.
+
+Commands for `stl-verify/python/` live in `stl-verify/python/Makefile`
+(each one wraps `uv run`), run from that directory:
+
+| Command | What it runs |
+|---|---|
+| `make test-unit` | Python unit tests (`uv run pytest tests/unit`) |
+| `make test-integration` | Python integration tests (Docker needed) |
+| `make lint` / `make lint-fix` | Ruff check / autofix |
+| `make run` | Start the FastAPI server locally |
+
+The root `stl-verify/Makefile` targets in the table above only cover
+Go code.
+
 ---
 
-## 11. Code conventions
+## 12. Code conventions
 
 Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 [stl-verify/AGENTS.md](./stl-verify/AGENTS.md), which apply to humans too.
@@ -544,7 +784,7 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 
 ---
 
-## 12. Pull request workflow
+## 13. Pull request workflow
 
 1. **Branch off `main`.** Name the branch after the Linear ticket if
    there is one (`VEC-123-short-slug`).
@@ -576,7 +816,7 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 
 ---
 
-## 13. Things that will save you time
+## 14. Things that will save you time
 
 - **Read the Makefile directly** — `stl-verify/Makefile` is the source
   of truth for every workflow and has many more targets than are
@@ -593,7 +833,7 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 
 ---
 
-## 14. Getting help
+## 15. Getting help
 
 - **Code questions / design review:** @archon-research/vector-engineers
   (review is required anyway — ask early).
