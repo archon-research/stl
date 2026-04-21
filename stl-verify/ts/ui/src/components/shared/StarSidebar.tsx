@@ -30,7 +30,7 @@ function StarSkeletonList() {
           key={index}
           className={css({
             height: '16',
-            borderRadius: 'xl',
+            borderRadius: 'md',
             borderWidth: '1px',
             borderStyle: 'solid',
             borderColor: 'border.subtle',
@@ -99,8 +99,8 @@ export function StarSidebar({
             color: 'text.muted',
           })}
         >
-          Stage 4 is complete: shell, theme, shared client wiring, and star
-          navigation are in place. Allocations land next.
+          Explore registered stars, compare live allocations, and inspect
+          receipt-token risk from the focused position below.
         </p>
       </div>
 
@@ -118,7 +118,7 @@ export function StarSidebar({
         {!isLoading && errorMessage ? (
           <div
             className={css({
-              borderRadius: 'xl',
+              borderRadius: 'md',
               borderWidth: '1px',
               borderStyle: 'solid',
               borderColor: 'border.default',
@@ -144,7 +144,7 @@ export function StarSidebar({
               onClick={onRetry}
               className={css({
                 mt: '4',
-                borderRadius: 'full',
+                borderRadius: 'md',
                 borderWidth: '1px',
                 borderStyle: 'solid',
                 borderColor: 'border.default',
@@ -164,7 +164,7 @@ export function StarSidebar({
         {!isLoading && !errorMessage && stars.length === 0 ? (
           <div
             className={css({
-              borderRadius: 'xl',
+              borderRadius: 'md',
               borderWidth: '1px',
               borderStyle: 'dashed',
               borderColor: 'border.default',
@@ -190,7 +190,7 @@ export function StarSidebar({
                   className={css({
                     width: '100%',
                     textAlign: 'left',
-                    borderRadius: 'xl',
+                    borderRadius: 'md',
                     borderWidth: '1px',
                     borderStyle: 'solid',
                     borderColor: isSelected
