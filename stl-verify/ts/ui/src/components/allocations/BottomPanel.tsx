@@ -9,7 +9,6 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import { getReceiptTokens } from '../../lib/api';
-import { isAbortError, toErrorMessage } from '../../lib/errors';
 import {
   type ChainLabelLookup,
   findProtocolMetadata,
@@ -20,6 +19,7 @@ import {
   matchReceiptToken,
   sortReceiptTokens,
 } from '../../lib/dashboard';
+import { isAbortError, toErrorMessage } from '../../lib/errors';
 import { PARAMS, useUrlParam } from '../../lib/url-params';
 import type {
   AllocationPosition,

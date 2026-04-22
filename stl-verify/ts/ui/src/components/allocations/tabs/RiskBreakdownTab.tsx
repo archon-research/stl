@@ -4,7 +4,6 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import { getRiskBreakdown } from '../../../lib/api';
-import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import {
   formatMultiplier,
   formatPercentValue,
@@ -13,6 +12,7 @@ import {
   formatUsdValue,
   parseNumericValue,
 } from '../../../lib/dashboard';
+import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import type {
   ReceiptTokenPosition,
   RiskBreakdown,

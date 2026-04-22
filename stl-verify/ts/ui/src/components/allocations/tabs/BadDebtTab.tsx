@@ -4,7 +4,6 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import { getBadDebt } from '../../../lib/api';
-import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import {
   formatTokenAmount,
   formatRatioPercent,
@@ -12,6 +11,7 @@ import {
   getBadDebtTone,
   parseNumericValue,
 } from '../../../lib/dashboard';
+import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import type { BadDebt, ReceiptTokenPosition } from '../../../types/allocation';
 
 type BadDebtTabProps = {
