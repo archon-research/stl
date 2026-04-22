@@ -31,6 +31,8 @@ pull request.
 
 > If anything here is wrong or unclear, fix it in the same PR as the work
 > that surfaced the problem. Docs rot fast — keep them honest.
+>
+> Stuck on the actual work? Jump to [§15 Getting help](#15-getting-help).
 
 ---
 
@@ -38,7 +40,7 @@ pull request.
 
 | Tool | Why | Install |
 |---|---|---|
-| Go 1.26+ | Every service is Go | <https://go.dev/dl/> |
+| Go 1.26+ | Every shipped service is Go (`experiments/` is scratch and exempt) | <https://go.dev/dl/> |
 | Docker | Local infra (Postgres, Redis, Temporal, LocalStack) | Docker Desktop / Colima |
 | [`kind`](https://kind.sigs.k8s.io/) | Runs a Kubernetes cluster inside Docker — mirrors prod | `brew install kind` |
 | `kubectl` | Talks to the kind cluster | `brew install kubectl` |
@@ -224,6 +226,12 @@ convenience:
 The repo follows a **hexagonal (ports and adapters)** architecture.
 Dependencies point inward: `domain ← ports ← services ← adapters`, and
 `cmd/*` wires concrete adapters into services.
+
+![Architecture overview](docs/live_data_architecture.png)
+
+*(Exported from the team Excalidraw board. The ASCII diagram below is
+the text-searchable canonical — if it drifts from the image, one of
+them is wrong.)*
 
 ```text
                                  ┌─► Redis (block cache, 2d TTL)
@@ -790,7 +798,10 @@ ArgoCD PreSync hook in staging/prod.
 
 - **Services are the unit under test.** Test only the public API; mock
   outbound ports with small handwritten fakes. Use table-driven tests.
-  Services and `main.go` files are expected to approach 100% coverage.
+  Services and `main.go` files should strive for 100% coverage on meaningful
+  code paths. The only exceptions are branches that genuinely can't be
+  exercised (generated code, OS-specific shims, truly unreachable
+  error branches); each exception should be justified in the PR.
 - **Integration tests may only mock things we do not control.** Alchemy
   and other third-party APIs: mock. Our Postgres, our Redis, our SQS:
   use the real thing (via testcontainers) — mocking them has bitten us
@@ -894,12 +905,15 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 
 ## 16. Getting help
 
-- **Code questions / design review:** @archon-research/vector-engineers
-  (review is required anyway — ask early).
+- **Code questions / design review:** `@archon-research/vector-engineers`
+  on GitHub, or [`#proj-verify-beacon`](https://sentinel-0rx1449.slack.com/archives/C0AN04V9NGZ)
+  on Laniakea Slack (review is required anyway — ask early).
 - **Protocol specs:** see `docs/` — `aave_v3_spec.md`, `morpho_spec.md`,
   `sparklend_spec.md`, etc.
 - **Architecture decisions:** `docs/adr/` holds the short record of why
   we chose kind over Minikube, why every row is versioned, and so on.
+- **Anything else / general questions:** [`#proj-verify-beacon`](https://sentinel-0rx1449.slack.com/archives/C0AN04V9NGZ)
+  on Laniakea Slack.
 
 Thanks for contributing — ship data-correct code and we'll all sleep
 better.
