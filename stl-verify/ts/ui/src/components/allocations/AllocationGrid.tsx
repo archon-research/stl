@@ -2,6 +2,7 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import {
+  type ChainLabelLookup,
   formatDateTime,
   formatTokenAmount,
   getAllocationKey,
@@ -9,6 +10,7 @@ import {
   getProtocolLabel,
 } from '../../lib/dashboard';
 import type { AllocationPosition, Star } from '../../types/allocation';
+import type { LocalProtocolRow } from '../../types/local-data';
 
 const INTEGER_FORMAT = new Intl.NumberFormat('en-US');
 
@@ -22,9 +24,11 @@ function formatHash(hash: string): string {
 
 type AllocationGridProps = {
   allocations: AllocationPosition[];
+  chainLabels: ChainLabelLookup;
   errorMessage: string | null;
   filteredAllocations: AllocationPosition[];
   isLoading: boolean;
+  localProtocols: LocalProtocolRow[];
   onRetry: () => void;
   onSelectAllocation: (allocationKey: string) => void;
   selectedAllocationKey: string | null;
@@ -121,9 +125,11 @@ function SkeletonRows() {
 
 export function AllocationGrid({
   allocations,
+  chainLabels,
   errorMessage,
   filteredAllocations,
   isLoading,
+  localProtocols,
   onRetry,
   onSelectAllocation,
   selectedAllocationKey,
@@ -382,7 +388,11 @@ export function AllocationGrid({
                                         color: 'text.muted',
                                       })}
                                     >
-                                      {getProtocolLabel(allocation.name)}
+                                      {getProtocolLabel(
+                                        allocation.name,
+                                        localProtocols,
+                                        allocation.chain_id,
+                                      )}
                                     </span>
                                     <span
                                       className={css({
@@ -390,7 +400,10 @@ export function AllocationGrid({
                                         color: 'text.muted',
                                       })}
                                     >
-                                      {getChainLabel(allocation.chain_id)}
+                                      {getChainLabel(
+                                        allocation.chain_id,
+                                        chainLabels,
+                                      )}
                                     </span>
                                   </div>
                                 </div>

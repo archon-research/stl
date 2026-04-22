@@ -10,6 +10,8 @@ import { flex } from '#styled-system/patterns';
 
 import { getReceiptTokens } from '../../lib/api';
 import {
+  type ChainLabelLookup,
+  findProtocolMetadata,
   formatTokenAmount,
   getAllocationKey,
   getChainLabel,
@@ -23,10 +25,13 @@ import type {
   ReceiptTokenPosition,
   Star,
 } from '../../types/allocation';
+import type { LocalProtocolRow } from '../../types/local-data';
 import { BadDebtTab } from './tabs/BadDebtTab';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 
 type BottomPanelProps = {
+  chainLabels: ChainLabelLookup;
+  localProtocols: LocalProtocolRow[];
   selectedAllocation: AllocationPosition | null;
   selectedStar: Star | null;
 };
@@ -77,6 +82,16 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown request failure.';
 }
 
+function formatAddress(value: string): string {
+  const address = value.startsWith('0x') ? value : `0x${value}`;
+
+  if (address.length <= 18) {
+    return address;
+  }
+
+  return `${address.slice(0, 10)}...${address.slice(-6)}`;
+}
+
 function EmptyPanelState({ body, title }: { body: string; title: string }) {
   return (
     <div
@@ -114,6 +129,8 @@ function EmptyPanelState({ body, title }: { body: string; title: string }) {
 }
 
 export function BottomPanel({
+  chainLabels,
+  localProtocols,
   selectedAllocation,
   selectedStar,
 }: BottomPanelProps) {
@@ -243,6 +260,18 @@ export function BottomPanel({
       (token) => String(token.receipt_token_id) === receiptTokenParam,
     ) ?? null;
 
+  const selectedProtocol = useMemo(
+    () =>
+      selectedAllocation
+        ? findProtocolMetadata(
+            selectedAllocation.name,
+            localProtocols,
+            selectedAllocation.chain_id,
+          )
+        : null,
+    [localProtocols, selectedAllocation],
+  );
+
   return (
     <div
       className={css({
@@ -352,14 +381,19 @@ export function BottomPanel({
               })}
             >
               {selectedAllocation
-                ? `${selectedAllocation.token_symbol ?? 'Unknown'} · ${getProtocolLabel(selectedAllocation.name)}`
+                ? `${selectedAllocation.token_symbol ?? 'Unknown'} · ${getProtocolLabel(selectedAllocation.name, localProtocols, selectedAllocation.chain_id)}`
                 : 'No allocation row selected'}
             </p>
             <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
               {selectedAllocation
-                ? `${formatTokenAmount(selectedAllocation.balance)} ${selectedAllocation.token_symbol ?? ''} · ${getChainLabel(selectedAllocation.chain_id)}`
+                ? `${formatTokenAmount(selectedAllocation.balance)} ${selectedAllocation.token_symbol ?? ''} · ${getChainLabel(selectedAllocation.chain_id, chainLabels)}`
                 : 'Pick a grid row to drive this panel, or choose a receipt token directly.'}
             </p>
+            {selectedProtocol ? (
+              <p className={css({ m: 0, fontSize: 'xs', color: 'text.muted' })}>
+                {`Protocol address ${formatAddress(selectedProtocol.encode)}`}
+              </p>
+            ) : null}
           </div>
         </div>
       </div>

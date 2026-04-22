@@ -2,6 +2,7 @@ import type {
   AllocationPosition,
   ReceiptTokenPosition,
 } from '../types/allocation';
+import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 
 export type FilterOption = {
   value: string;
@@ -10,6 +11,8 @@ export type FilterOption = {
 };
 
 type BadDebtTone = 'green' | 'yellow' | 'red';
+
+export type ChainLabelLookup = ReadonlyMap<number, string>;
 
 const CHAIN_NAMES: Record<number, string> = {
   1: 'Ethereum',
@@ -92,13 +95,86 @@ export function parseNumericValue(
   return Number.isFinite(numeric) ? numeric : null;
 }
 
-export function getChainLabel(chainId: number): string {
-  return CHAIN_NAMES[chainId] ?? `Chain ${chainId}`;
+export function buildChainLabelLookup(
+  chains: LocalChainRow[],
+): ChainLabelLookup {
+  return new Map(chains.map((chain) => [chain.chain_id, chain.name] as const));
 }
 
-export function getProtocolLabel(protocol: string): string {
+function getProtocolMatchScore(
+  protocol: string,
+  localProtocol: LocalProtocolRow,
+  chainId?: number,
+): number {
+  const normalizedProtocol = normalizeLabel(protocol);
+  const normalizedName = normalizeLabel(localProtocol.name);
+  let score = 0;
+
+  if (chainId !== undefined && localProtocol.chain_id === chainId) {
+    score += 3;
+  }
+
+  if (normalizedName === normalizedProtocol) {
+    score += 10;
+  }
+
+  if (
+    normalizedName.includes(normalizedProtocol) ||
+    normalizedProtocol.includes(normalizedName)
+  ) {
+    score += 6;
+  }
+
+  if (
+    (normalizedProtocol === 'spark' && normalizedName === 'sparklend') ||
+    (normalizedProtocol === 'morpho' && normalizedName === 'morphoblue')
+  ) {
+    score += 8;
+  }
+
+  return score;
+}
+
+export function findProtocolMetadata(
+  protocol: string,
+  localProtocols?: LocalProtocolRow[],
+  chainId?: number,
+): LocalProtocolRow | null {
+  if (!localProtocols || localProtocols.length === 0) {
+    return null;
+  }
+
+  const matches = localProtocols
+    .map((localProtocol) => ({
+      localProtocol,
+      score: getProtocolMatchScore(protocol, localProtocol, chainId),
+    }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((left, right) => right.score - left.score);
+
+  return matches[0]?.localProtocol ?? null;
+}
+
+export function getChainLabel(
+  chainId: number,
+  chainLabels?: ChainLabelLookup,
+): string {
+  return (
+    chainLabels?.get(chainId) ?? CHAIN_NAMES[chainId] ?? `Chain ${chainId}`
+  );
+}
+
+export function getProtocolLabel(
+  protocol: string,
+  localProtocols?: LocalProtocolRow[],
+  chainId?: number,
+): string {
   const normalized = normalizeLabel(protocol);
-  return PROTOCOL_LABELS[normalized] ?? titleCase(protocol);
+  return (
+    findProtocolMetadata(protocol, localProtocols, chainId)?.name ??
+    PROTOCOL_LABELS[normalized] ??
+    titleCase(protocol)
+  );
 }
 
 export function getAllocationKey(allocation: AllocationPosition): string {
@@ -112,6 +188,7 @@ export function getAllocationKey(allocation: AllocationPosition): string {
 
 export function buildNetworkOptions(
   allocations: AllocationPosition[],
+  chainLabels?: ChainLabelLookup,
 ): FilterOption[] {
   const counts = new Map<number, number>();
 
@@ -123,13 +200,14 @@ export function buildNetworkOptions(
     .sort((left, right) => left[0] - right[0])
     .map(([chainId, count]) => ({
       count,
-      label: getChainLabel(chainId),
+      label: getChainLabel(chainId, chainLabels),
       value: String(chainId),
     }));
 }
 
 export function buildProtocolOptions(
   allocations: AllocationPosition[],
+  localProtocols?: LocalProtocolRow[],
 ): FilterOption[] {
   const counts = new Map<string, number>();
 
@@ -139,11 +217,13 @@ export function buildProtocolOptions(
 
   return [...counts.entries()]
     .sort((left, right) =>
-      getProtocolLabel(left[0]).localeCompare(getProtocolLabel(right[0])),
+      getProtocolLabel(left[0], localProtocols).localeCompare(
+        getProtocolLabel(right[0], localProtocols),
+      ),
     )
     .map(([protocol, count]) => ({
       count,
-      label: getProtocolLabel(protocol),
+      label: getProtocolLabel(protocol, localProtocols),
       value: protocol,
     }));
 }

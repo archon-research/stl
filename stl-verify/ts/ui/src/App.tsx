@@ -5,14 +5,21 @@ import { AllocationGrid } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
 import { StarSidebar } from './components/shared/StarSidebar';
 import { TopBar } from './components/shared/TopBar';
-import { getAllocations, getStars } from './lib/api';
 import {
+  getAllocations,
+  getLocalChains,
+  getLocalProtocols,
+  getStars,
+} from './lib/api';
+import {
+  buildChainLabelLookup,
   buildNetworkOptions,
   buildProtocolOptions,
   getAllocationKey,
 } from './lib/dashboard';
 import { PARAMS, useUrlParam } from './lib/url-params';
 import type { AllocationPosition, Star } from './types/allocation';
+import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
@@ -35,6 +42,8 @@ function App() {
   >(null);
   const [isAllocationsLoading, setIsAllocationsLoading] = useState(false);
   const [allocationsReloadKey, setAllocationsReloadKey] = useState(0);
+  const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
+  const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
   const [selectedAllocationKey, setSelectedAllocationKey] = useState<
     string | null
   >(null);
@@ -43,6 +52,25 @@ function App() {
   const [selectedProtocol, setSelectedProtocol] = useUrlParam(PARAMS.protocol);
 
   const previousStarIdRef = useRef<string | null>(selectedStarId);
+
+  useEffect(() => {
+    let isActive = true;
+
+    void Promise.all([getLocalChains(), getLocalProtocols()]).then(
+      ([chains, protocols]) => {
+        if (!isActive) {
+          return;
+        }
+
+        setLocalChains(chains);
+        setLocalProtocols(protocols);
+      },
+    );
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -140,14 +168,19 @@ function App() {
     [selectedStarId, stars],
   );
 
+  const chainLabels = useMemo(
+    () => buildChainLabelLookup(localChains),
+    [localChains],
+  );
+
   const networkOptions = useMemo(
-    () => buildNetworkOptions(allocations),
-    [allocations],
+    () => buildNetworkOptions(allocations, chainLabels),
+    [allocations, chainLabels],
   );
 
   const protocolOptions = useMemo(
-    () => buildProtocolOptions(allocations),
-    [allocations],
+    () => buildProtocolOptions(allocations, localProtocols),
+    [allocations, localProtocols],
   );
 
   useEffect(() => {
@@ -246,9 +279,11 @@ function App() {
       main={
         <AllocationGrid
           allocations={allocations}
+          chainLabels={chainLabels}
           errorMessage={allocationsErrorMessage}
           filteredAllocations={filteredAllocations}
           isLoading={isAllocationsLoading}
+          localProtocols={localProtocols}
           onRetry={() => setAllocationsReloadKey((value) => value + 1)}
           onSelectAllocation={setSelectedAllocationKey}
           selectedAllocationKey={selectedAllocationKey}
@@ -257,6 +292,8 @@ function App() {
       }
       bottomPanel={
         <BottomPanel
+          chainLabels={chainLabels}
+          localProtocols={localProtocols}
           selectedAllocation={selectedAllocation}
           selectedStar={selectedStar}
         />

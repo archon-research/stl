@@ -1,5 +1,10 @@
 import { createApiClient } from '@archon-research/http-client-react';
 
+import {
+  localChainRows,
+  localCostRows,
+  localProtocolRows,
+} from '../generated/local-metadata';
 import type { paths } from '../generated/openapi-types';
 import type {
   AllocationsResponse,
@@ -8,6 +13,11 @@ import type {
   RiskBreakdown,
   StarsResponse,
 } from '../types/allocation';
+import type {
+  LocalChainRow,
+  LocalCostRow,
+  LocalProtocolRow,
+} from '../types/local-data';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 const apiClient = createApiClient<paths>(API_BASE_URL);
@@ -58,6 +68,18 @@ async function requestData<TData, TError>(
 
 export function getStars(signal?: AbortSignal): Promise<StarsResponse> {
   return requestData(apiClient.GET('/v1/stars', { signal }), 'GET /v1/stars');
+}
+
+export function getLocalChains(): Promise<LocalChainRow[]> {
+  return Promise.resolve(localChainRows);
+}
+
+export function getLocalProtocols(): Promise<LocalProtocolRow[]> {
+  return Promise.resolve(localProtocolRows);
+}
+
+export function getLocalCosts(): Promise<LocalCostRow[]> {
+  return Promise.resolve(localCostRows);
 }
 
 export function getAllocations(
