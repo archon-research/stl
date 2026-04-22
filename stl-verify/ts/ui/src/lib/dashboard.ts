@@ -10,7 +10,7 @@ export type FilterOption = {
   count: number;
 };
 
-type BadDebtTone = 'green' | 'yellow' | 'red';
+type BadDebtTone = 'green' | 'yellow' | 'red' | 'neutral';
 
 export type ChainLabelLookup = ReadonlyMap<number, string>;
 
@@ -319,7 +319,11 @@ export function formatDateTime(value: string): string {
 export function getBadDebtTone(
   value: number | string | null | undefined,
 ): BadDebtTone {
-  const numeric = parseNumericValue(value) ?? 0;
+  const numeric = parseNumericValue(value);
+
+  if (numeric === null) {
+    return 'neutral';
+  }
 
   if (numeric <= 1_000) {
     return 'green';
@@ -386,7 +390,14 @@ export function matchReceiptToken(
       }
 
       const normalizedProtocol = normalizeLabel(token.protocol_name);
-      if (protocolHints.some((hint) => normalizedProtocol.includes(hint))) {
+      const symbolMatches =
+        underlyingSymbol === allocationSymbol ||
+        receiptSymbol === allocationSymbol;
+      const protocolMatches = protocolHints.some((hint) =>
+        normalizedProtocol.includes(hint),
+      );
+
+      if (protocolMatches) {
         score += 3;
       }
 
@@ -395,9 +406,9 @@ export function matchReceiptToken(
         0.99,
       );
 
-      return { score, token };
+      return { protocolMatches, score, symbolMatches, token };
     })
-    .filter((candidate) => candidate.score >= 4)
+    .filter((candidate) => candidate.symbolMatches && candidate.protocolMatches)
     .sort((left, right) => right.score - left.score);
 
   return candidates[0]?.token ?? null;

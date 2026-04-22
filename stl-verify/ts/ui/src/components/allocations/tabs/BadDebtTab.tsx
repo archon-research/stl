@@ -39,6 +39,12 @@ function getToneStyles(tone: ReturnType<typeof getBadDebtTone>) {
         badgeColor: { _dark: 'yellow.200', base: 'yellow.800' },
         valueColor: { _dark: 'yellow.300', base: 'yellow.800' },
       };
+    case 'neutral':
+      return {
+        badgeBg: { _dark: 'gray.900', base: 'gray.100' },
+        badgeColor: { _dark: 'gray.400', base: 'gray.600' },
+        valueColor: { _dark: 'gray.400', base: 'gray.600' },
+      };
     default:
       return {
         badgeBg: { _dark: 'red.950', base: 'red.50' },
