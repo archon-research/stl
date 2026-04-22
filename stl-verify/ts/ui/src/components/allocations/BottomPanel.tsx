@@ -3,7 +3,13 @@ import {
   Toggle,
   ToggleGroup,
 } from '@archon-research/design-system';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
@@ -291,7 +297,7 @@ export function BottomPanel({
       >
         <ToggleGroup
           value={[activeTab]}
-          onValueChange={(value) => {
+          onValueChange={(value: readonly string[]) => {
             const nextValue = value[0];
 
             if (nextValue === 'risk' || nextValue === 'bad-debt') {
@@ -336,7 +342,7 @@ export function BottomPanel({
             </span>
             <StyledSelect
               value={receiptTokenParam ?? ''}
-              onChange={(event) =>
+              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
                 setReceiptTokenParam(event.target.value || null)
               }
               disabled={

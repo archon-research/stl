@@ -24,8 +24,8 @@
     "lint": "oxlint -c ./.oxlintrc.ts src panda.config.ts vite.config.ts"
   },
   "dependencies": {
-    "@archon-research/http-client-core": "0.0.0",
-    "@archon-research/http-client-react": "0.0.0",
+    "@archon-research/http-client-core": "0.1.0",
+    "@archon-research/http-client-react": "0.1.0",
     "@tanstack/react-query": "^5.99.2",
     "openapi-fetch": "^0.17.0",
     "react": "^18.3.1",
@@ -33,10 +33,10 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@archon-research/design-system": "0.0.0",
-    "@archon-research/oxfmt-config": "0.0.0",
-    "@archon-research/oxlint-config": "0.0.0",
-    "@archon-research/tsconfig": "0.0.0",
+    "@archon-research/design-system": "0.1.0",
+    "@archon-research/oxfmt-config": "0.1.0",
+    "@archon-research/oxlint-config": "0.1.0",
+    "@archon-research/tsconfig": "0.1.0",
     "@pandacss/dev": "^1.9.1",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",

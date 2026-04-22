@@ -1,3 +1,5 @@
+import type { ChangeEvent } from 'react';
+
 import { StyledSelect } from '@archon-research/design-system';
 
 import { css } from '#styled-system/css';
@@ -35,7 +37,9 @@ function FilterField({
       <StyledSelect
         aria-label={ariaLabel}
         value={value ?? ''}
-        onChange={(event) => onChange(event.target.value || null)}
+        onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+          onChange(event.target.value || null)
+        }
         disabled={disabled}
       >
         <option value="">{placeholder}</option>
