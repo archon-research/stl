@@ -291,7 +291,14 @@ export function AllocationGrid({
                           <tr
                             key={allocationKey}
                             aria-selected={isSelected}
+                            tabIndex={0}
                             onClick={() => onSelectAllocation(allocationKey)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                onSelectAllocation(allocationKey);
+                              }
+                            }}
                             className={css({
                               cursor: 'pointer',
                               bg: isSelected
@@ -300,6 +307,7 @@ export function AllocationGrid({
                               transitionDuration: 'fast',
                               transitionProperty: 'background-color',
                               _hover: { bg: 'interactive.hover' },
+                              _focusVisible: { bg: 'interactive.hover' },
                             })}
                           >
                             <td

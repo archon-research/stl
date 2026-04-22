@@ -132,12 +132,16 @@ export function RiskBreakdownTab({
 
     setIsLoading(true);
     setErrorMessage(null);
+    setBreakdown(null);
 
     void getRiskBreakdown(
       selectedReceiptToken.receipt_token_id,
       controller.signal,
     )
       .then((response) => {
+        if (controller.signal.aborted) {
+          return;
+        }
         setBreakdown(response);
       })
       .catch((error: unknown) => {
@@ -145,6 +149,7 @@ export function RiskBreakdownTab({
           return;
         }
 
+        setBreakdown(null);
         setErrorMessage(toErrorMessage(error));
       })
       .finally(() => {
@@ -162,7 +167,7 @@ export function RiskBreakdownTab({
     }
 
     return breakdown.items.reduce(
-      (sum, item) => sum + Number(item.amount_usd),
+      (sum, item) => sum + (parseNumericValue(item.amount_usd) ?? 0),
       0,
     );
   }, [breakdown]);

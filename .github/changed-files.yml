@@ -11,6 +11,7 @@ python:
   - stl-verify/db/migrations/**
   - .github/changed-files.yml
   - .github/workflows/ci.yml
+  - .github/workflows/deploy.yaml
   - .github/workflows/python-ci.yml
 
 ts:
@@ -20,4 +21,5 @@ ts:
   - stl-verify/python/Makefile
   - .github/changed-files.yml
   - .github/workflows/ci.yml
+  - .github/workflows/deploy.yaml
   - .github/workflows/ts-ci.yml

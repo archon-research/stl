@@ -3,7 +3,7 @@ import path from 'node:path';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
-const uikitWorktreePath = '/Users/rohit/Code/stl-ui';
+const uikitWorktreePath = process.env.UIKIT_WORKTREE_PATH;
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -17,7 +17,10 @@ export default defineConfig({
       '/v1': 'http://localhost:8000',
     },
     fs: {
-      allow: [path.resolve(__dirname), uikitWorktreePath],
+      allow: [
+        path.resolve(__dirname),
+        ...(uikitWorktreePath ? [path.resolve(uikitWorktreePath)] : []),
+      ],
     },
   },
   optimizeDeps: {

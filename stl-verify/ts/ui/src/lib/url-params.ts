@@ -64,6 +64,8 @@ export function useUrlParam(
       setValue(getParam(key));
     };
 
+    syncFromLocation();
+
     window.addEventListener('popstate', syncFromLocation);
     window.addEventListener(URL_PARAMS_EVENT, syncFromLocation);
 

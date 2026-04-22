@@ -19,7 +19,7 @@ const CHAIN_NAMES: Record<number, string> = {
   10: 'Optimism',
   137: 'Polygon',
   324: 'zkSync Era',
-  1301: 'Unichain',
+  130: 'Unichain',
   8453: 'Base',
   42161: 'Arbitrum',
   43114: 'Avalanche',

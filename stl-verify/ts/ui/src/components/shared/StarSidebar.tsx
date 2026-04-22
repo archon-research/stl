@@ -142,6 +142,7 @@ export function StarSidebar({
                 <button
                   key={star.id}
                   type="button"
+                  aria-pressed={isSelected}
                   onClick={() => onSelectStar(star.id)}
                   className={css({
                     width: '100%',

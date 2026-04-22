@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
+      NODE_AUTH_TOKEN: ${{ secrets.UIKIT_GH_PACKAGES_READ_TOKEN }}
       UIKIT_GH_PACKAGES_READ_TOKEN: ${{ secrets.UIKIT_GH_PACKAGES_READ_TOKEN }}
 
     defaults:
@@ -47,6 +48,7 @@ jobs:
     timeout-minutes: 15
     needs: lint
     env:
+      NODE_AUTH_TOKEN: ${{ secrets.UIKIT_GH_PACKAGES_READ_TOKEN }}
       UIKIT_GH_PACKAGES_READ_TOKEN: ${{ secrets.UIKIT_GH_PACKAGES_READ_TOKEN }}
 
     defaults:

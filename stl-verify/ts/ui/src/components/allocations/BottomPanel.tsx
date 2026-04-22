@@ -169,11 +169,15 @@ export function BottomPanel({
 
     const controller = new AbortController();
 
+    setReceiptTokens([]);
     setIsLoading(true);
     setErrorMessage(null);
 
     void getReceiptTokens(selectedStar.id, controller.signal)
       .then((response) => {
+        if (controller.signal.aborted) {
+          return;
+        }
         setReceiptTokens(response);
       })
       .catch((error: unknown) => {
@@ -181,6 +185,7 @@ export function BottomPanel({
           return;
         }
 
+        setReceiptTokens([]);
         setErrorMessage(toErrorMessage(error));
       })
       .finally(() => {

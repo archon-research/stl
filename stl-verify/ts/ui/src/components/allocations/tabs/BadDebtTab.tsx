@@ -133,6 +133,7 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
 
     setIsLoading(true);
     setErrorMessage(null);
+    setBadDebt(null);
 
     void getBadDebt(
       selectedReceiptToken.receipt_token_id,
@@ -148,6 +149,7 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
         }
 
         setErrorMessage(toErrorMessage(error));
+        setBadDebt(null);
       })
       .finally(() => {
         if (!controller.signal.aborted) {
