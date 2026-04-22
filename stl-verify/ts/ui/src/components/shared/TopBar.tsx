@@ -1,6 +1,5 @@
-import type { ChangeEvent } from 'react';
-
 import { StyledSelect } from '@archon-research/design-system';
+import type { ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';

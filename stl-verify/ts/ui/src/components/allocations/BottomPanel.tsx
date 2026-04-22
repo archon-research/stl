@@ -3,13 +3,7 @@ import {
   Toggle,
   ToggleGroup,
 } from '@archon-research/design-system';
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ChangeEvent,
-} from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
