@@ -32,7 +32,7 @@ pull request.
 > If anything here is wrong or unclear, fix it in the same PR as the work
 > that surfaced the problem. Docs rot fast — keep them honest.
 >
-> Stuck on the actual work? Jump to [§15 Getting help](#15-getting-help).
+> Stuck on the actual work? Jump to [§16 Getting help](#16-getting-help).
 
 ---
 
