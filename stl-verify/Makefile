@@ -114,10 +114,7 @@ test:
 	@echo "==> Running unit tests..."
 	go test -v ./...
 
-# Run integration tests (requires integration build tag)
-# -p 2: run at most 2 package test binaries in parallel to avoid spinning up
-# too many containers concurrently on CI (13 packages x containers = OOM).
-test-integration:
+test-integration: 
 	@echo "==> Running integration tests..."
 	GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=10m -p 2 ./...
 

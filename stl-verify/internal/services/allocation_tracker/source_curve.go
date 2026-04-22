@@ -7,15 +7,13 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// CurveSource fetches Curve LP positions via three multicall rounds:
-//  1. balanceOf(wallet) → LP shares (stored as ScaledBalance)
-//  2. coins(0..3) → discover which coin index matches AssetAddress
-//  3. calc_withdraw_one_coin(shares, index) → underlying value (stored as Balance)
+// CurveSource fetches Curve LP token balances via balanceOf(proxy).
+// We store the held LP token balance in Balance so the tracked amount matches
+// the on-chain token balance, while ScaledBalance preserves the raw LP shares.
 type CurveSource struct {
 	multicaller outbound.Multicaller
 	poolABI     abi.ABI
@@ -54,140 +52,28 @@ func (s *CurveSource) FetchBalances(
 		block = big.NewInt(blockNumber)
 	}
 
-	// Round 1: balanceOf → LP shares
 	shares, valid1, err := s.fetchShares(ctx, entries, block)
 	if err != nil {
 		return nil, fmt.Errorf("fetch shares: %w", err)
 	}
 
 	results := make(map[EntryKey]*PositionBalance, len(entries))
-
-	// Filter to entries with non-zero shares
-	var withShares []*TokenEntry
 	for _, e := range valid1 {
 		sh := shares[e.Key()]
-		if sh != nil && sh.Sign() > 0 {
-			withShares = append(withShares, e)
-		} else {
+		if sh == nil || sh.Sign() == 0 {
 			results[e.Key()] = &PositionBalance{
 				Balance:       big.NewInt(0),
 				ScaledBalance: big.NewInt(0),
 			}
-		}
-	}
-
-	if len(withShares) == 0 {
-		return results, nil
-	}
-
-	// Round 2: discover coin indices
-	coinIndices, err := s.discoverCoinIndices(ctx, withShares, block)
-	if err != nil {
-		s.logger.Warn("coin index discovery failed, using shares as fallback",
-			"error", err)
-		for _, e := range withShares {
-			sh := shares[e.Key()]
-			results[e.Key()] = &PositionBalance{
-				Balance:       new(big.Int).Set(sh),
-				ScaledBalance: sh,
-			}
-		}
-		return results, nil
-	}
-
-	// Round 3: calc_withdraw_one_coin
-	var toConvert []*TokenEntry
-	for _, e := range withShares {
-		if _, ok := coinIndices[e.Key()]; ok {
-			toConvert = append(toConvert, e)
-		} else {
-			assetHex := "<nil>"
-			if e.AssetAddress != nil {
-				assetHex = e.AssetAddress.Hex()
-			}
-			s.logger.Warn("coin index not found for asset, using shares as fallback",
-				"pool", e.ContractAddress.Hex(),
-				"asset", assetHex)
-			sh := shares[e.Key()]
-			results[e.Key()] = &PositionBalance{
-				Balance:       new(big.Int).Set(sh),
-				ScaledBalance: sh,
-			}
-		}
-	}
-
-	if len(toConvert) == 0 {
-		return results, nil
-	}
-
-	calls := make([]outbound.Call, 0, len(toConvert))
-	var valid3 []*TokenEntry
-	for _, e := range toConvert {
-		idx := coinIndices[e.Key()]
-		data, err := s.poolABI.Pack(
-			"calc_withdraw_one_coin",
-			shares[e.Key()],
-			big.NewInt(int64(idx)),
-		)
-		if err != nil {
-			s.logger.Warn("pack calc_withdraw_one_coin failed",
-				"pool", e.ContractAddress.Hex(),
-				"error", err)
-			sh := shares[e.Key()]
-			results[e.Key()] = &PositionBalance{
-				Balance:       new(big.Int).Set(sh),
-				ScaledBalance: sh,
-			}
 			continue
 		}
-		calls = append(calls, outbound.Call{
-			Target:       e.ContractAddress,
-			AllowFailure: true,
-			CallData:     data,
-		})
-		valid3 = append(valid3, e)
-	}
-
-	mc, err := s.multicaller.Execute(ctx, calls, block)
-	if err != nil {
-		for _, e := range valid3 {
-			sh := shares[e.Key()]
-			results[e.Key()] = &PositionBalance{
-				Balance:       new(big.Int).Set(sh),
-				ScaledBalance: sh,
-			}
-		}
-		s.logger.Warn("calc_withdraw_one_coin multicall failed, using shares as fallback",
-			"error", err)
-		return results, nil
-	}
-
-	for i, e := range valid3 {
-		if i >= len(mc) {
-			break
-		}
-		sh := shares[e.Key()]
-		bal := &PositionBalance{
-			ScaledBalance: sh,
-			Balance:       new(big.Int).Set(sh), // fallback
-		}
-		if mc[i].Success && len(mc[i].ReturnData) > 0 {
-			unpacked, err := s.poolABI.Unpack(
-				"calc_withdraw_one_coin", mc[i].ReturnData,
-			)
-			if err == nil && len(unpacked) > 0 {
-				if v, ok := unpacked[0].(*big.Int); ok {
-					bal.Balance = v
-				}
-			}
-		}
-		results[e.Key()] = bal
-
 		s.logger.Debug("curve position",
 			"pool", e.ContractAddress.Hex(),
-			"shares", sh.String(),
-			"underlying", bal.Balance.String(),
-			"coinIndex", coinIndices[e.Key()])
+			"shares", sh.String())
+		results[e.Key()] = &PositionBalance{
+			Balance:       new(big.Int).Set(sh),
+			ScaledBalance: new(big.Int).Set(sh),
+		}
 	}
 
 	return results, nil
@@ -245,74 +131,4 @@ func (s *CurveSource) fetchShares(
 	}
 
 	return shares, valid, nil
-}
-
-func (s *CurveSource) discoverCoinIndices(
-	ctx context.Context,
-	entries []*TokenEntry,
-	block *big.Int,
-) (map[EntryKey]int, error) {
-	const maxCoins = 4
-
-	calls := make([]outbound.Call, 0, len(entries)*maxCoins)
-	for _, e := range entries {
-		for i := range maxCoins {
-			data, err := s.poolABI.Pack("coins", big.NewInt(int64(i)))
-			if err != nil {
-				calls = append(calls, outbound.Call{
-					Target:       e.ContractAddress,
-					AllowFailure: true,
-					CallData:     []byte{},
-				})
-				continue
-			}
-			calls = append(calls, outbound.Call{
-				Target:       e.ContractAddress,
-				AllowFailure: true,
-				CallData:     data,
-			})
-		}
-	}
-
-	mc, err := s.multicaller.Execute(ctx, calls, block)
-	if err != nil {
-		return nil, fmt.Errorf("coins multicall: %w", err)
-	}
-
-	result := make(map[EntryKey]int)
-	for i, e := range entries {
-		if e.AssetAddress == nil {
-			s.logger.Warn("curve entry missing AssetAddress",
-				"pool", e.ContractAddress.Hex())
-			continue
-		}
-		target := *e.AssetAddress
-		for j := range maxCoins {
-			idx := i*maxCoins + j
-			if idx >= len(mc) {
-				break
-			}
-			if !mc[idx].Success || len(mc[idx].ReturnData) == 0 {
-				continue
-			}
-			unpacked, err := s.poolABI.Unpack("coins", mc[idx].ReturnData)
-			if err != nil || len(unpacked) == 0 {
-				continue
-			}
-			coinAddr, ok := unpacked[0].(common.Address)
-			if !ok {
-				continue
-			}
-			if coinAddr == target {
-				result[e.Key()] = j
-				s.logger.Debug("found coin index",
-					"pool", e.ContractAddress.Hex(),
-					"asset", target.Hex(),
-					"index", j)
-				break
-			}
-		}
-	}
-
-	return result, nil
 }

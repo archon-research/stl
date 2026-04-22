@@ -119,3 +119,15 @@ images:
   - name: python-api
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-python-api
     newTag: "23639951f718db1453be6ae77adea8fbf8a0e21f"
+
+patches:
+  - target:
+      kind: Service
+      name: python-api
+    patch: |
+      - op: add
+        path: /metadata/annotations/tailscale.com~1hostname
+        value: python-api
+      - op: add
+        path: /metadata/annotations/tailscale.com~1tags
+        value: tag:k8s-external
