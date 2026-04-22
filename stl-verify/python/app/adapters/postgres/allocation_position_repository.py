@@ -3,14 +3,14 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.domain.entities.allocation import AllocationPosition, EthAddress, ReceiptTokenPosition, Star
+from app.domain.entities.allocation import AllocationPosition, EthAddress, Prime, ReceiptTokenPosition
 
 
 class PostgresAllocationRepository:
     def __init__(self, conn: AsyncConnection) -> None:
         self._conn = conn
 
-    async def list_stars(self) -> list[Star]:
+    async def list_primes(self) -> list[Prime]:
         result = await self._conn.execute(
             text(
                 """
@@ -23,9 +23,9 @@ class PostgresAllocationRepository:
                 """
             )
         )
-        return [Star(id="0x" + row.address, name=row.name, address="0x" + row.address) for row in result]
+        return [Prime(id="0x" + row.address, name=row.name, address="0x" + row.address) for row in result]
 
-    async def get_star(self, address: EthAddress) -> Star | None:
+    async def get_prime(self, address: EthAddress) -> Prime | None:
         result = await self._conn.execute(
             text("""
                 SELECT p.name, encode(ap.proxy_address, 'hex') AS address
@@ -40,10 +40,10 @@ class PostgresAllocationRepository:
         row = result.fetchone()
         if row is None:
             return None
-        return Star(id="0x" + row.address, name=row.name, address="0x" + row.address)
+        return Prime(id="0x" + row.address, name=row.name, address="0x" + row.address)
 
-    async def list_receipt_token_positions(self, star_id: EthAddress) -> list[ReceiptTokenPosition]:
-        proxy_hex = star_id.hex
+    async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
+        proxy_hex = prime_id.hex
         result = await self._conn.execute(
             text("""
                 WITH latest_positions AS (
@@ -148,12 +148,12 @@ class PostgresAllocationRepository:
                  ap.processing_version DESC
     """)
 
-    async def list_allocations_by_star(
-        self, star_id: EthAddress, block_number: int | None = None
+    async def list_allocations_by_prime(
+        self, prime_id: EthAddress, block_number: int | None = None
     ) -> list[AllocationPosition]:
         result = await self._conn.execute(
             self._ALLOCATIONS_SQL,
-            {"proxy_hex": star_id.hex, "block_number": block_number},
+            {"proxy_hex": prime_id.hex, "block_number": block_number},
         )
         return [
             AllocationPosition(

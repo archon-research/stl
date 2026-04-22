@@ -27,7 +27,7 @@ def _validate_eth_address(value: str) -> EthAddress:
 EthAddressPath = Annotated[str, AfterValidator(_validate_eth_address)]
 
 
-class StarResponse(BaseModel):
+class PrimeResponse(BaseModel):
     id: str
     name: str
     address: str
@@ -66,22 +66,22 @@ async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AsyncIterat
         yield AllocationService(repo)
 
 
-@router.get("/stars", response_model=list[StarResponse])
-async def list_stars(service: AllocationService = Depends(_get_service)):
-    stars = await service.list_stars()
-    return [StarResponse(id=s.id, name=s.name, address=s.address) for s in stars]
+@router.get("/primes", response_model=list[PrimeResponse])
+async def list_primes(service: AllocationService = Depends(_get_service)):
+    primes = await service.list_primes()
+    return [PrimeResponse(id=p.id, name=p.name, address=p.address) for p in primes]
 
 
-@router.get("/stars/{star_id}/receipt-tokens", response_model=list[ReceiptTokenPositionResponse])
+@router.get("/primes/{prime_id}/receipt-tokens", response_model=list[ReceiptTokenPositionResponse])
 async def list_receipt_tokens(
-    star_id: EthAddressPath,
+    prime_id: EthAddressPath,
     service: AllocationService = Depends(_get_service),
 ):
-    star = await service.get_star(star_id)
-    if star is None:
-        raise HTTPException(status_code=404, detail="star not found")
+    prime = await service.get_prime(prime_id)
+    if prime is None:
+        raise HTTPException(status_code=404, detail="prime not found")
 
-    positions = await service.list_receipt_token_positions(star_id)
+    positions = await service.list_receipt_token_positions(prime_id)
 
     result = []
     for p in positions:
@@ -99,11 +99,11 @@ async def list_receipt_tokens(
     return result
 
 
-@router.get("/stars/{star_id}/allocations", response_model=list[AllocationPositionResponse])
+@router.get("/primes/{prime_id}/allocations", response_model=list[AllocationPositionResponse])
 async def list_allocations(
-    star_id: EthAddressPath,
+    prime_id: EthAddressPath,
     block_number: int | None = None,
     service: AllocationService = Depends(_get_service),
 ):
-    positions = await service.list_allocations_by_star(star_id, block_number)
+    positions = await service.list_allocations_by_prime(prime_id, block_number)
     return [AllocationPositionResponse(**dataclasses.asdict(p)) for p in positions]
