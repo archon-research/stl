@@ -53,11 +53,9 @@ jobs:
 
     steps:
       - name: Checkout code
-        if: needs.detect-changes.outputs.go == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Go
-        if: needs.detect-changes.outputs.go == 'true'
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: 'stl-verify/go.mod'
@@ -65,29 +63,21 @@ jobs:
           cache-dependency-path: 'stl-verify/go.sum'
 
       - name: Install tools
-        if: needs.detect-changes.outputs.go == 'true'
         run: make tools
 
       - name: Run lint/static checks
-        if: needs.detect-changes.outputs.go == 'true'
         run: make ci-checks
 
       - name: Run unit tests
-        if: needs.detect-changes.outputs.go == 'true'
         run: make test-race
 
       - name: Check for uncommitted changes
-        if: needs.detect-changes.outputs.go == 'true'
         run: |
           if ! git diff --quiet; then
             echo "::error::CI modified files. Please run 'make fmt tidy' locally and commit the changes."
             git diff --name-only
             exit 1
           fi
-
-      - name: No Go changes
-        if: needs.detect-changes.outputs.go != 'true'
-        run: echo 'No Go changes detected; required check marked successful.'
 
   go-integration:
     name: Integration Tests
@@ -103,11 +93,9 @@ jobs:
 
     steps:
       - name: Checkout code
-        if: needs.detect-changes.outputs.go == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Go
-        if: needs.detect-changes.outputs.go == 'true'
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: 'stl-verify/go.mod'
@@ -115,7 +103,6 @@ jobs:
           cache-dependency-path: 'stl-verify/go.sum'
 
       - name: Pull container images
-        if: needs.detect-changes.outputs.go == 'true'
         run: |
           IMAGES=$(grep -E 'Image[A-Za-z0-9_]+\s*=' internal/testutil/images.go | grep -oP '".*?"' | tr -d '"')
           if [ -z "$IMAGES" ]; then
@@ -127,12 +114,7 @@ jobs:
           done
 
       - name: Run integration tests
-        if: needs.detect-changes.outputs.go == 'true'
         run: make test-integration
-
-      - name: No Go changes
-        if: needs.detect-changes.outputs.go != 'true'
-        run: echo 'No Go changes detected; required check marked successful.'
 
   python-ci:
     needs: detect-changes
@@ -152,7 +134,7 @@ jobs:
       - detect-changes
       - go-ci
       - go-integration
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-changes.outputs.go == 'true' && needs.go-ci.result == 'success' && needs.go-integration.result == 'success'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.go-ci.result == 'success' && needs.go-integration.result == 'success'
     uses: ./.github/workflows/deploy.yaml
     secrets: inherit
     with:
