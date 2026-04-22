@@ -17,17 +17,10 @@ import {
   buildProtocolOptions,
   getAllocationKey,
 } from './lib/dashboard';
+import { isAbortError, toErrorMessage } from './lib/errors';
 import { PARAMS, useUrlParam } from './lib/url-params';
 import type { AllocationPosition, Star } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError';
-}
-
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Unknown request failure.';
-}
 
 function App() {
   const [stars, setStars] = useState<Star[]>([]);

@@ -4,6 +4,7 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import { getBadDebt } from '../../../lib/api';
+import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import {
   formatTokenAmount,
   formatRatioPercent,
@@ -16,14 +17,6 @@ import type { BadDebt, ReceiptTokenPosition } from '../../../types/allocation';
 type BadDebtTabProps = {
   selectedReceiptToken: ReceiptTokenPosition | null;
 };
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError';
-}
-
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Unknown request failure.';
-}
 
 function getToneStyles(tone: ReturnType<typeof getBadDebtTone>) {
   switch (tone) {

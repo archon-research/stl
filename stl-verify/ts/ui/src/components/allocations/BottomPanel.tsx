@@ -9,6 +9,7 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import { getReceiptTokens } from '../../lib/api';
+import { isAbortError, toErrorMessage } from '../../lib/errors';
 import {
   type ChainLabelLookup,
   findProtocolMetadata,
@@ -73,14 +74,6 @@ const toggleStyles = css({
   transitionDuration: 'fast',
   transitionProperty: 'background-color, color, border-color, box-shadow',
 });
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError';
-}
-
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Unknown request failure.';
-}
 
 function formatAddress(value: string): string {
   const address = value.startsWith('0x') ? value : `0x${value}`;
