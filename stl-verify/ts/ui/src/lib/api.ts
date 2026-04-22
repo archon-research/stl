@@ -31,6 +31,10 @@ type ApiResult<TData, TError> = Promise<{
   response: Response;
 }>;
 
+function createAbortError(): DOMException {
+  return new DOMException('Request aborted', 'AbortError');
+}
+
 function toErrorBody(error: unknown): string {
   if (typeof error === 'string') {
     return error;
@@ -66,20 +70,55 @@ async function requestData<TData, TError>(
   return data;
 }
 
+function resolveLocalData<T>(data: T, signal?: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(createAbortError());
+      return;
+    }
+
+    let settled = false;
+
+    const onAbort = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      reject(createAbortError());
+    };
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    queueMicrotask(() => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      resolve(data);
+    });
+  });
+}
+
 export function getStars(signal?: AbortSignal): Promise<StarsResponse> {
   return requestData(apiClient.GET('/v1/stars', { signal }), 'GET /v1/stars');
 }
 
-export function getLocalChains(): Promise<LocalChainRow[]> {
-  return Promise.resolve(localChainRows);
+export function getLocalChains(signal?: AbortSignal): Promise<LocalChainRow[]> {
+  return resolveLocalData(localChainRows, signal);
 }
 
-export function getLocalProtocols(): Promise<LocalProtocolRow[]> {
-  return Promise.resolve(localProtocolRows);
+export function getLocalProtocols(
+  signal?: AbortSignal,
+): Promise<LocalProtocolRow[]> {
+  return resolveLocalData(localProtocolRows, signal);
 }
 
-export function getLocalCosts(): Promise<LocalCostRow[]> {
-  return Promise.resolve(localCostRows);
+export function getLocalCosts(signal?: AbortSignal): Promise<LocalCostRow[]> {
+  return resolveLocalData(localCostRows, signal);
 }
 
 export function getAllocations(

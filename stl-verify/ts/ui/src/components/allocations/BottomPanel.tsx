@@ -139,7 +139,6 @@ export function BottomPanel({
   );
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [reloadKey, setReloadKey] = useState(0);
   const [receiptTokenParam, setReceiptTokenParam] = useUrlParam(
     PARAMS.receiptToken,
   );
@@ -191,7 +190,7 @@ export function BottomPanel({
       });
 
     return () => controller.abort();
-  }, [reloadKey, selectedStar]);
+  }, [selectedStar]);
 
   const sortedReceiptTokens = useMemo(
     () => sortReceiptTokens(receiptTokens),
@@ -276,9 +275,7 @@ export function BottomPanel({
     <div
       className={css({
         display: 'grid',
-        gridTemplateRows: 'auto auto 1fr',
         gap: '4',
-        height: '100%',
         bg: 'surface.default',
         px: { base: '5', md: '6' },
         py: { base: '5', md: '6' },
@@ -323,7 +320,7 @@ export function BottomPanel({
           p: '4',
         })}
       >
-        <div className={flex({ align: 'end', gap: '4', wrap: 'wrap' })}>
+        <div className={flex({ align: 'flex-start', gap: '4', wrap: 'wrap' })}>
           <label
             className={css({ display: 'grid', gap: '1', minWidth: '18rem' })}
           >
@@ -398,7 +395,9 @@ export function BottomPanel({
         </div>
       </div>
 
-      <div className={css({ minHeight: 0, overflow: 'auto' })}>
+      <div
+        className={css({ display: 'grid', gap: '4', alignContent: 'start' })}
+      >
         {!selectedStar ? (
           <EmptyPanelState
             title="Choose a star to inspect risk"
@@ -437,25 +436,6 @@ export function BottomPanel({
             >
               {errorMessage}
             </p>
-            <button
-              type="button"
-              onClick={() => setReloadKey((value) => value + 1)}
-              className={css({
-                mt: '4',
-                borderRadius: 'md',
-                borderStyle: 'solid',
-                borderWidth: '1px',
-                borderColor: 'border.default',
-                bg: 'surface.default',
-                color: 'text.strong',
-                cursor: 'pointer',
-                px: '3.5',
-                py: '2',
-                _hover: { bg: 'interactive.hover' },
-              })}
-            >
-              Retry request
-            </button>
           </div>
         ) : null}
 

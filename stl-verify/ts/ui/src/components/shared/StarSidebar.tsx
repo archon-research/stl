@@ -10,7 +10,6 @@ type StarSidebarProps = {
   selectedStarId: string | null;
   isLoading: boolean;
   errorMessage: string | null;
-  onRetry: () => void;
   onSelectStar: (starId: string) => void;
 };
 
@@ -48,7 +47,6 @@ export function StarSidebar({
   selectedStarId,
   isLoading,
   errorMessage,
-  onRetry,
   onSelectStar,
 }: StarSidebarProps) {
   return (
@@ -116,25 +114,6 @@ export function StarSidebar({
             >
               {errorMessage}
             </p>
-            <button
-              type="button"
-              onClick={onRetry}
-              className={css({
-                mt: '4',
-                borderRadius: 'md',
-                borderWidth: '1px',
-                borderStyle: 'solid',
-                borderColor: 'border.default',
-                bg: 'surface.default',
-                color: 'text.strong',
-                px: '3.5',
-                py: '2',
-                cursor: 'pointer',
-                _hover: { bg: 'interactive.hover' },
-              })}
-            >
-              Retry request
-            </button>
           </div>
         ) : null}
 
@@ -186,46 +165,56 @@ export function StarSidebar({
                     },
                   })}
                 >
-                  <div
-                    className={css({
-                      width: '9',
-                      height: '9',
-                      borderRadius: 'full',
-                      bg: isSelected ? 'interactive.accent' : 'surface.subtle',
-                      color: isSelected ? 'white' : 'text.strong',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontSize: 'xs',
-                      fontWeight: 'semibold',
-                      textTransform: 'uppercase',
-                      flexShrink: 0,
-                    })}
-                  >
-                    {star.name.slice(0, 2)}
+                  <div className={flex({ align: 'center', gap: '3.5' })}>
+                    <div
+                      className={css({
+                        width: '9',
+                        height: '9',
+                        borderRadius: 'full',
+                        bg: isSelected
+                          ? 'interactive.accent'
+                          : 'surface.subtle',
+                        color: isSelected ? 'white' : 'text.strong',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontSize: 'xs',
+                        fontWeight: 'semibold',
+                        textTransform: 'uppercase',
+                        flexShrink: 0,
+                      })}
+                    >
+                      {star.name.slice(0, 2)}
+                    </div>
+                    <div
+                      className={css({
+                        display: 'grid',
+                        gap: '0.5',
+                        minWidth: 0,
+                      })}
+                    >
+                      <p
+                        className={css({
+                          m: 0,
+                          fontSize: 'sm',
+                          fontWeight: 'semibold',
+                          color: 'text.strong',
+                        })}
+                      >
+                        {star.name}
+                      </p>
+                      <p
+                        className={css({
+                          m: 0,
+                          fontSize: 'xs',
+                          letterSpacing: '0.04em',
+                          color: 'text.muted',
+                        })}
+                      >
+                        {formatAddress(star.address)}
+                      </p>
+                    </div>
                   </div>
-                  <p
-                    className={css({
-                      m: 0,
-                      mt: '3',
-                      fontSize: 'sm',
-                      fontWeight: 'semibold',
-                      color: 'text.strong',
-                    })}
-                  >
-                    {star.name}
-                  </p>
-                  <p
-                    className={css({
-                      m: 0,
-                      mt: '1',
-                      fontSize: 'xs',
-                      letterSpacing: '0.04em',
-                      color: 'text.muted',
-                    })}
-                  >
-                    {formatAddress(star.address)}
-                  </p>
                 </button>
               );
             })}
@@ -246,13 +235,10 @@ export function StarSidebar({
         <div
           className={flex({
             align: 'center',
-            justify: 'space-between',
+            justify: 'flex-start',
             gap: '3',
           })}
         >
-          <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
-            Theme preference
-          </span>
           <ThemeToggle />
         </div>
       </div>

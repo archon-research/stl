@@ -29,23 +29,12 @@ type AllocationGridProps = {
   filteredAllocations: AllocationPosition[];
   isLoading: boolean;
   localProtocols: LocalProtocolRow[];
-  onRetry: () => void;
   onSelectAllocation: (allocationKey: string) => void;
   selectedAllocationKey: string | null;
   selectedStar: Star | null;
 };
 
-function SurfaceMessage({
-  actionLabel,
-  body,
-  onAction,
-  title,
-}: {
-  actionLabel?: string;
-  body: string;
-  onAction?: () => void;
-  title: string;
-}) {
+function SurfaceMessage({ body, title }: { body: string; title: string }) {
   return (
     <div
       className={css({
@@ -72,27 +61,6 @@ function SurfaceMessage({
       >
         {body}
       </p>
-      {actionLabel && onAction ? (
-        <button
-          type="button"
-          onClick={onAction}
-          className={css({
-            mt: '4',
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.default',
-            bg: 'surface.subtle',
-            color: 'text.strong',
-            cursor: 'pointer',
-            px: '3.5',
-            py: '2',
-            _hover: { bg: 'interactive.hover' },
-          })}
-        >
-          {actionLabel}
-        </button>
-      ) : null}
     </div>
   );
 }
@@ -130,7 +98,6 @@ export function AllocationGrid({
   filteredAllocations,
   isLoading,
   localProtocols,
-  onRetry,
   onSelectAllocation,
   selectedAllocationKey,
   selectedStar,
@@ -155,7 +122,7 @@ export function AllocationGrid({
           boxShadow: '0 24px 80px rgba(15, 23, 42, 0.08)',
         })}
       >
-        <div className={css({ display: 'grid', gap: '4', maxWidth: '3xl' })}>
+        <div className={css({ display: 'grid', gap: '4' })}>
           <span
             className={css({
               display: 'inline-flex',
@@ -174,40 +141,53 @@ export function AllocationGrid({
           >
             Allocations
           </span>
-          <p
-            className={css({
-              m: 0,
-              fontSize: 'sm',
-              lineHeight: '1.7',
-              color: 'text.default',
+          <div
+            className={flex({
+              align: 'flex-start',
+              justify: 'space-between',
+              gap: '5',
+              wrap: 'wrap',
             })}
           >
-            Live position snapshots for the selected star. Filter by network or
-            protocol above, then focus a row to inspect the matching receipt
-            token in the lower risk panel.
-          </p>
-          <div className={css({ display: 'grid', gap: '1' })}>
-            <h1
-              className={css({
-                m: 0,
-                fontSize: { base: '2xl', md: '3xl' },
-                lineHeight: 'tight',
-                color: 'text.strong',
-              })}
+            <div
+              className={css({ display: 'grid', gap: '1', minWidth: '16rem' })}
             >
-              {selectedStar ? selectedStar.name : 'Select a star'}
-            </h1>
-            {selectedStar ? (
-              <p
+              <h1
                 className={css({
                   m: 0,
-                  fontSize: 'sm',
-                  color: 'text.muted',
+                  fontSize: { base: '2xl', md: '3xl' },
+                  lineHeight: 'tight',
+                  color: 'text.strong',
                 })}
               >
-                {selectedStar.id}
-              </p>
-            ) : null}
+                {selectedStar ? selectedStar.name : 'Select a star'}
+              </h1>
+              {selectedStar ? (
+                <p
+                  className={css({
+                    m: 0,
+                    fontSize: 'sm',
+                    color: 'text.muted',
+                  })}
+                >
+                  {selectedStar.id}
+                </p>
+              ) : null}
+            </div>
+            <p
+              className={css({
+                m: 0,
+                maxWidth: '2xl',
+                flex: '1 1 24rem',
+                fontSize: 'sm',
+                lineHeight: '1.7',
+                color: 'text.default',
+              })}
+            >
+              Live position snapshots for the selected star. Filter by network
+              or protocol above, then focus a row to inspect the matching
+              receipt token in the lower risk panel.
+            </p>
           </div>
         </div>
 
@@ -223,8 +203,6 @@ export function AllocationGrid({
             <SurfaceMessage
               title="Unable to load allocations"
               body={errorMessage}
-              actionLabel="Retry request"
-              onAction={onRetry}
             />
           ) : null}
 

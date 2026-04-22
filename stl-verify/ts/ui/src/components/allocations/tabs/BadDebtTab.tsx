@@ -111,7 +111,6 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
   const [debouncedGapPct, setDebouncedGapPct] = useState(0.25);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [reloadKey, setReloadKey] = useState(0);
   const [sliderValue, setSliderValue] = useState(0.25);
 
   useEffect(() => {
@@ -157,7 +156,7 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
       });
 
     return () => controller.abort();
-  }, [debouncedGapPct, reloadKey, selectedReceiptToken]);
+  }, [debouncedGapPct, selectedReceiptToken]);
 
   const tone = getBadDebtTone(badDebt?.bad_debt_usd);
   const toneStyles = getToneStyles(tone);
@@ -338,25 +337,6 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
           >
             {errorMessage}
           </p>
-          <button
-            type="button"
-            onClick={() => setReloadKey((value) => value + 1)}
-            className={css({
-              mt: '4',
-              borderRadius: 'md',
-              borderStyle: 'solid',
-              borderWidth: '1px',
-              borderColor: 'border.default',
-              bg: 'surface.default',
-              color: 'text.strong',
-              cursor: 'pointer',
-              px: '3.5',
-              py: '2',
-              _hover: { bg: 'interactive.hover' },
-            })}
-          >
-            Retry request
-          </button>
         </div>
       ) : null}
 

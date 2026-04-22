@@ -35,13 +35,11 @@ function App() {
     null,
   );
   const [isStarsLoading, setIsStarsLoading] = useState(true);
-  const [starsReloadKey, setStarsReloadKey] = useState(0);
   const [allocations, setAllocations] = useState<AllocationPosition[]>([]);
   const [allocationsErrorMessage, setAllocationsErrorMessage] = useState<
     string | null
   >(null);
   const [isAllocationsLoading, setIsAllocationsLoading] = useState(false);
-  const [allocationsReloadKey, setAllocationsReloadKey] = useState(0);
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
   const [selectedAllocationKey, setSelectedAllocationKey] = useState<
@@ -54,22 +52,26 @@ function App() {
   const previousStarIdRef = useRef<string | null>(selectedStarId);
 
   useEffect(() => {
-    let isActive = true;
+    const controller = new AbortController();
 
-    void Promise.all([getLocalChains(), getLocalProtocols()]).then(
-      ([chains, protocols]) => {
-        if (!isActive) {
+    void Promise.all([
+      getLocalChains(controller.signal),
+      getLocalProtocols(controller.signal),
+    ])
+      .then(([chains, protocols]) => {
+        setLocalChains(chains);
+        setLocalProtocols(protocols);
+      })
+      .catch((error: unknown) => {
+        if (isAbortError(error)) {
           return;
         }
 
-        setLocalChains(chains);
-        setLocalProtocols(protocols);
-      },
-    );
+        setLocalChains([]);
+        setLocalProtocols([]);
+      });
 
-    return () => {
-      isActive = false;
-    };
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -96,7 +98,7 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [starsReloadKey]);
+  }, []);
 
   useEffect(() => {
     if (isStarsLoading) {
@@ -161,7 +163,7 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [allocationsReloadKey, selectedStarId]);
+  }, [selectedStarId]);
 
   const selectedStar = useMemo(
     () => stars.find((star) => star.id === selectedStarId) ?? null,
@@ -261,7 +263,6 @@ function App() {
           selectedStarId={selectedStarId}
           isLoading={isStarsLoading}
           errorMessage={starsErrorMessage}
-          onRetry={() => setStarsReloadKey((value) => value + 1)}
           onSelectStar={setSelectedStarId}
         />
       }
@@ -284,7 +285,6 @@ function App() {
           filteredAllocations={filteredAllocations}
           isLoading={isAllocationsLoading}
           localProtocols={localProtocols}
-          onRetry={() => setAllocationsReloadKey((value) => value + 1)}
           onSelectAllocation={setSelectedAllocationKey}
           selectedAllocationKey={selectedAllocationKey}
           selectedStar={selectedStar}

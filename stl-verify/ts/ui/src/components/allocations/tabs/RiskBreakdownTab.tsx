@@ -119,7 +119,6 @@ export function RiskBreakdownTab({
   const [breakdown, setBreakdown] = useState<RiskBreakdown | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (!selectedReceiptToken) {
@@ -155,7 +154,7 @@ export function RiskBreakdownTab({
       });
 
     return () => controller.abort();
-  }, [reloadKey, selectedReceiptToken]);
+  }, [selectedReceiptToken]);
 
   const totalUsd = useMemo(() => {
     if (!breakdown) {
@@ -322,25 +321,6 @@ export function RiskBreakdownTab({
           >
             {errorMessage}
           </p>
-          <button
-            type="button"
-            onClick={() => setReloadKey((value) => value + 1)}
-            className={css({
-              mt: '4',
-              borderRadius: 'md',
-              borderStyle: 'solid',
-              borderWidth: '1px',
-              borderColor: 'border.default',
-              bg: 'surface.default',
-              color: 'text.strong',
-              cursor: 'pointer',
-              px: '3.5',
-              py: '2',
-              _hover: { bg: 'interactive.hover' },
-            })}
-          >
-            Retry request
-          </button>
         </div>
       ) : null}
 
