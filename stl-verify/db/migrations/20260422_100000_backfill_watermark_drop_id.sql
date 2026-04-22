@@ -2,6 +2,13 @@
 -- Fixes UPSERT ON CONFLICT (chain_id) which was failing on L2 chains because
 -- the column default `id = 1` collided with the seeded Ethereum row before the
 -- chain_id arbiter was evaluated.
+--
+-- The migrator wraps this file in a single transaction (see
+-- db/migrator/migrator.go applyMigrationWithTx), so the window between
+-- dropping the UNIQUE on chain_id and adding it as PRIMARY KEY is invisible
+-- to concurrent sessions. If that ever changes, reorder the statements so
+-- uniqueness is always enforced. `fk_backfill_watermark_chain` on chain_id
+-- is intentionally retained — the FK is unaffected.
 
 ALTER TABLE backfill_watermark DROP CONSTRAINT backfill_watermark_pkey;
 ALTER TABLE backfill_watermark DROP COLUMN id;

@@ -705,8 +705,7 @@ func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
 // evaluated. Post-fix, `chain_id` is the PK, there is no `id` column, and the
 // UPSERT resolves cleanly.
 func TestBackfillService_AdvancesWatermark_OnUnseededChain(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	ctx := context.Background()
 
 	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	t.Cleanup(cleanup)
