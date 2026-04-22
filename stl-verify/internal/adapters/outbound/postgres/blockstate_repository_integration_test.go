@@ -801,6 +801,39 @@ func TestBackfillWatermark(t *testing.T) {
 			t.Errorf("expected watermark 500, got %d", watermark)
 		}
 	})
+
+	t.Run("returns 0 when no watermark row exists (new chain)", func(t *testing.T) {
+		// Delete the watermark row entirely to simulate a brand new chain
+		// that has never had a watermark set (no row in the table).
+		_, err := blockstatePool.Exec(ctx, `DELETE FROM backfill_watermark WHERE chain_id = $1`, int64(1))
+		if err != nil {
+			t.Fatalf("failed to delete watermark row: %v", err)
+		}
+
+		watermark, err := repo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if watermark != 0 {
+			t.Errorf("expected watermark 0 for missing row, got %d", watermark)
+		}
+	})
+
+	t.Run("set watermark creates row when none exists (upsert)", func(t *testing.T) {
+		// Row was deleted by previous test — SetBackfillWatermark should
+		// create it via upsert, not silently update zero rows.
+		if err := repo.SetBackfillWatermark(ctx, 42); err != nil {
+			t.Fatalf("failed to set watermark on missing row: %v", err)
+		}
+
+		watermark, err := repo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if watermark != 42 {
+			t.Errorf("expected watermark 42 after upsert, got %d", watermark)
+		}
+	})
 }
 
 // TestFindGaps tests gap detection in block sequences.

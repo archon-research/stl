@@ -119,12 +119,7 @@ func (r *AllocationRepository) buildInsertArgs(
 	pos *entity.AllocationPosition,
 	tokenID int64,
 ) (string, []any, error) {
-	balanceDecimals := pos.TokenDecimals
-	if pos.AssetDecimals != nil {
-		balanceDecimals = *pos.AssetDecimals
-	}
-
-	balance := toNumeric(pos.Balance, balanceDecimals)
+	balance := toNumeric(pos.Balance, pos.TokenDecimals)
 	scaled := toNullableNumeric(pos.ScaledBalance, pos.TokenDecimals)
 	txAmount := toNumeric(pos.TxAmount, pos.TokenDecimals)
 

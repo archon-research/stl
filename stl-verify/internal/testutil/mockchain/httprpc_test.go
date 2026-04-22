@@ -224,6 +224,114 @@ func TestHTTPHandler_InvalidBody(t *testing.T) {
 	}
 }
 
+// TestPatchBlockJSON verifies that patchBlockJSON overwrites number/hash/parentHash
+// while preserving all other fields.
+func TestPatchBlockJSON(t *testing.T) {
+	t.Run("patches fields and preserves transactions", func(t *testing.T) {
+		raw := json.RawMessage(`{"number":"0x1","hash":"0xold","parentHash":"0xparent","transactions":["0xtx1","0xtx2"],"gasUsed":"0x100"}`)
+		patched, err := patchBlockJSON(raw, "0xff", "0xnewhash", "0xnewparent")
+		if err != nil {
+			t.Fatalf("patchBlockJSON: %v", err)
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(patched, &obj); err != nil {
+			t.Fatalf("unmarshal patched: %v", err)
+		}
+		if string(obj["number"]) != `"0xff"` {
+			t.Errorf("number = %s, want \"0xff\"", obj["number"])
+		}
+		if string(obj["hash"]) != `"0xnewhash"` {
+			t.Errorf("hash = %s, want \"0xnewhash\"", obj["hash"])
+		}
+		if string(obj["parentHash"]) != `"0xnewparent"` {
+			t.Errorf("parentHash = %s, want \"0xnewparent\"", obj["parentHash"])
+		}
+		if string(obj["transactions"]) != `["0xtx1","0xtx2"]` {
+			t.Errorf("transactions not preserved: %s", obj["transactions"])
+		}
+		if string(obj["gasUsed"]) != `"0x100"` {
+			t.Errorf("gasUsed not preserved: %s", obj["gasUsed"])
+		}
+	})
+
+	t.Run("header-only JSON works", func(t *testing.T) {
+		raw := json.RawMessage(`{"number":"0x1","hash":"0xold","parentHash":"0xparent"}`)
+		patched, err := patchBlockJSON(raw, "0x2", "0xnew", "0xnewparent")
+		if err != nil {
+			t.Fatalf("patchBlockJSON: %v", err)
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(patched, &obj); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if string(obj["number"]) != `"0x2"` {
+			t.Errorf("number = %s, want \"0x2\"", obj["number"])
+		}
+	})
+
+	t.Run("invalid JSON returns error", func(t *testing.T) {
+		_, err := patchBlockJSON(json.RawMessage(`not json`), "0x1", "0x2", "0x3")
+		if err == nil {
+			t.Error("expected error for invalid JSON")
+		}
+	})
+}
+
+// TestHTTPHandler_GetBlockByHash_FullBlock verifies that eth_getBlockByHash returns full
+// block data (with transactions key) from the DataStore, not just the header.
+func TestHTTPHandler_GetBlockByHash_FullBlock(t *testing.T) {
+	h, hashes := newTestHTTPHandler(t)
+	knownHash := hashes[0]
+
+	w := rpcPost(t, h, `{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByHash","params":["`+knownHash+`",true]}`)
+	var resp httpRPCResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var block map[string]json.RawMessage
+	if err := json.Unmarshal(resp.Result, &block); err != nil {
+		t.Fatalf("decode block: %v", err)
+	}
+	if _, ok := block["transactions"]; !ok {
+		t.Error("expected block to contain 'transactions' key")
+	}
+	// Verify the hash was patched to match the derived hash.
+	var hash string
+	if err := json.Unmarshal(block["hash"], &hash); err != nil {
+		t.Fatalf("decode hash: %v", err)
+	}
+	if hash != knownHash {
+		t.Errorf("hash = %q, want %q", hash, knownHash)
+	}
+}
+
+// TestHTTPHandler_GetBlockByNumber_FullBlock verifies that eth_getBlockByNumber returns full
+// block data (with transactions key) from the DataStore, not just the header.
+func TestHTTPHandler_GetBlockByNumber_FullBlock(t *testing.T) {
+	h, hashes := newTestHTTPHandler(t)
+
+	w := rpcPost(t, h, `{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1",true]}`)
+	var resp httpRPCResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var block map[string]json.RawMessage
+	if err := json.Unmarshal(resp.Result, &block); err != nil {
+		t.Fatalf("decode block: %v", err)
+	}
+	if _, ok := block["transactions"]; !ok {
+		t.Error("expected block to contain 'transactions' key")
+	}
+	// Verify the hash was patched to match the derived hash.
+	var hash string
+	if err := json.Unmarshal(block["hash"], &hash); err != nil {
+		t.Fatalf("decode hash: %v", err)
+	}
+	if hash != hashes[0] {
+		t.Errorf("hash = %q, want %q", hash, hashes[0])
+	}
+}
+
 // TestHTTPHandler_DataByHash verifies eth_getBlockReceipts, trace_block, and eth_getBlobSidecars
 // return stored data for a known derived hash and null for an unknown hash.
 func TestHTTPHandler_DataByHash(t *testing.T) {
