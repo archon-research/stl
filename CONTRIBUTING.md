@@ -203,7 +203,7 @@ convenience:
   and the cached block payload) — it's auditable (we can replay a
   block), trust-minimized (no third party), and stays consistent with
   the rest of the pipeline. Off-chain sources (CoinGecko, Anchorage,
-  Etherscan, etc.) are allowed **only ith a good reason and with explicit
+  Etherscan, etc.) are allowed **only with a good reason and with explicit
   approval from the repo maintainers** — e.g., the data only exists
   off-chain. Write the justification in the PR description so that reviewers
   can see it.
