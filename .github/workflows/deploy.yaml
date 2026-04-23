@@ -53,6 +53,8 @@ jobs:
 
       - name: Build and push all images to staging ECR
         working-directory: stl-verify
+        env:
+          UIKIT_GH_PACKAGES_READ_TOKEN: ${{ secrets.UIKIT_GH_PACKAGES_READ_TOKEN }}
         run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha || github.sha }}
 
   update-staging:
