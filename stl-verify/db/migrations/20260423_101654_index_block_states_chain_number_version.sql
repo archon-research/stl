@@ -13,10 +13,18 @@
 -- query to an Index Only Scan per chunk (verified via EXPLAIN on 7.4M real rows:
 -- 2051 ms seq-scan -> 0.059 ms indexed).
 --
--- Note: TimescaleDB 2.25 does not support CONCURRENTLY for non-partial indexes on
--- hypertables (ERROR 0A000). The plain CREATE INDEX is used instead; it acquires
--- ShareLock but this migration runs once during a planned deploy with no concurrent
--- writers (ArgoCD PreSync hook runs before the watcher pod restarts).
+-- Locking: TimescaleDB does not support CREATE INDEX CONCURRENTLY on hypertables
+-- (SQLSTATE 0A000). Plain CREATE INDEX is used here. It holds a hypertable-wide
+-- ShareLock for the duration of the build (~1-5 min on arbitrum), which briefly
+-- blocks watcher INSERTs during the ArgoCD PreSync window. The backfill service
+-- recovers any dropped blocks afterward. One-time cost for a one-time migration.
+--
+-- We deliberately avoid WITH (timescaledb.transaction_per_chunk): it has better
+-- lock behaviour, but a partial failure leaves the parent index marked invalid.
+-- A retry with CREATE INDEX IF NOT EXISTS would see the invalid parent and skip,
+-- leaving the DB permanently broken without manual intervention. Plain CREATE
+-- INDEX is atomic — a failed run rolls back cleanly and a retry is guaranteed
+-- to either succeed or leave the table unchanged. Correctness > lock impact here.
 
 CREATE INDEX IF NOT EXISTS idx_block_states_chain_number_version
     ON block_states (chain_id, number, version DESC);
