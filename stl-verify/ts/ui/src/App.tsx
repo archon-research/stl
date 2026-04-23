@@ -105,7 +105,10 @@ function App() {
       return;
     }
 
-    if (!selectedPrimeId || !primes.some((prime) => prime.id === selectedPrimeId)) {
+    if (
+      !selectedPrimeId ||
+      !primes.some((prime) => prime.id === selectedPrimeId)
+    ) {
       setSelectedPrimeId(primes[0]?.id ?? null);
     }
   }, [isPrimesLoading, selectedPrimeId, setSelectedPrimeId, primes]);
