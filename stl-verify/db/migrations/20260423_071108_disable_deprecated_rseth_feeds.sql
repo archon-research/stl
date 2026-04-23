@@ -1,4 +1,4 @@
--- VEC-152: Delete deprecated rsETH feed rows.
+-- VEC-152: Disable deprecated rsETH feed rows.
 --
 -- Both feeds have been retired provider-side on Ethereum mainnet:
 --   * Chainlink proxy 0x03c68933f7a3F76875C0bc670a58e69294cDFD01:
@@ -12,8 +12,12 @@
 --
 -- Neither has ever successfully produced an onchain_token_price row.
 -- rsETH remains priced by sparklend with no gap.
+--
+-- The rows are disabled (not deleted) so the historical configuration
+-- remains in the table for auditability.
 
-DELETE FROM oracle_asset
+UPDATE oracle_asset
+SET enabled = false
 WHERE token_id IN (SELECT id FROM token WHERE chain_id = 1 AND symbol = 'rsETH')
   AND oracle_id IN (SELECT id FROM oracle WHERE name IN ('chainlink','redstone'))
   AND feed_address IN (
@@ -22,5 +26,5 @@ WHERE token_id IN (SELECT id FROM token WHERE chain_id = 1 AND symbol = 'rsETH')
   );
 
 INSERT INTO migrations (filename)
-VALUES ('20260423_071108_delete_deprecated_rseth_feeds.sql')
+VALUES ('20260423_071108_disable_deprecated_rseth_feeds.sql')
 ON CONFLICT (filename) DO NOTHING;
