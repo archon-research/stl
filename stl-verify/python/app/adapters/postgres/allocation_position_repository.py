@@ -3,7 +3,7 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.domain.entities.allocation import AllocationPosition, EthAddress, Prime, ReceiptTokenPosition
+from app.domain.entities.allocation import EthAddress, Prime, ReceiptTokenPosition
 
 
 class PostgresAllocationRepository:
@@ -25,153 +25,89 @@ class PostgresAllocationRepository:
         )
         return [Prime(id="0x" + row.address, name=row.name, address="0x" + row.address) for row in result]
 
-    async def get_prime(self, address: EthAddress) -> Prime | None:
-        result = await self._conn.execute(
-            text("""
-                SELECT p.name, encode(ap.proxy_address, 'hex') AS address
-                FROM allocation_position ap
-                JOIN prime p ON p.id = ap.prime_id
-                WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-                ORDER BY ap.block_number DESC
-                LIMIT 1
-            """),
-            {"proxy_hex": address.hex},
-        )
-        row = result.fetchone()
-        if row is None:
-            return None
-        return Prime(id="0x" + row.address, name=row.name, address="0x" + row.address)
-
     async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
-        proxy_hex = prime_id.hex
         result = await self._conn.execute(
-            text("""
-                WITH latest_positions AS (
-                    SELECT DISTINCT ON (ap.token_id, ap.proxy_address)
-                        ap.token_id,
-                        ap.balance
-                    FROM allocation_position ap
-                    JOIN prime p ON p.id = ap.prime_id
-                    WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-                    ORDER BY ap.token_id, ap.proxy_address,
-                             ap.block_number DESC, ap.block_version DESC, ap.processing_version DESC, ap.log_index DESC
-                )
-                SELECT DISTINCT ON (receipt_token_id)
-                    receipt_token_id,
-                    symbol,
-                    underlying_symbol,
-                    protocol_name,
-                    balance,
-                    token_address
-                FROM (
-                    SELECT
-                        rt.id                                        AS receipt_token_id,
-                        rt.symbol                                    AS symbol,
-                        ut.symbol                                    AS underlying_symbol,
-                        pr.name                                      AS protocol_name,
-                        lp.balance,
-                        encode(rt.receipt_token_address, 'hex')      AS token_address
-                    FROM latest_positions lp
-                    JOIN token t ON t.id = lp.token_id
-                    JOIN receipt_token rt ON rt.underlying_token_id = t.id
-                    JOIN token ut ON ut.id = rt.underlying_token_id
-                    JOIN protocol pr ON pr.id = rt.protocol_id
-                    WHERE lp.balance > 0
-
-                    UNION ALL
-
-                    SELECT
-                        rt.id                                        AS receipt_token_id,
-                        rt.symbol                                    AS symbol,
-                        ut.symbol                                    AS underlying_symbol,
-                        pr.name                                      AS protocol_name,
-                        lp.balance,
-                        encode(rt.receipt_token_address, 'hex')      AS token_address
-                    FROM latest_positions lp
-                    JOIN token t ON t.id = lp.token_id
-                    JOIN receipt_token rt ON rt.receipt_token_address = t.address
-                    JOIN token ut ON ut.id = rt.underlying_token_id
-                    JOIN protocol pr ON pr.id = rt.protocol_id
-                    WHERE lp.balance > 0
-                ) combined
-                ORDER BY receipt_token_id, balance DESC
-            """),
-            {"proxy_hex": proxy_hex},
+            self._RECEIPT_TOKEN_POSITIONS_SQL,
+            {"proxy_hex": prime_id.hex},
         )
         return [
             ReceiptTokenPosition(
+                chain_id=row.chain_id,
                 receipt_token_id=row.receipt_token_id,
+                receipt_token_address="0x" + row.receipt_token_address,
+                underlying_token_id=row.underlying_token_id,
+                underlying_token_address="0x" + row.underlying_token_address,
                 symbol=row.symbol,
                 underlying_symbol=row.underlying_symbol,
                 protocol_name=row.protocol_name,
                 balance=Decimal(str(row.balance)),
-                token_address="0x" + row.token_address if row.token_address else None,
             )
             for row in result
         ]
 
-    _ALLOCATIONS_SQL = text("""
-        SELECT DISTINCT ON
-        (ap.chain_id, ap.token_id, ap.proxy_address, ap.block_number, ap.tx_hash, ap.log_index, ap.direction)
-            ap.chain_id,
-            p.name,
-            encode(ap.proxy_address, 'hex') AS proxy_address,
-            encode(t.address, 'hex')        AS token_address,
-            t.symbol                        AS token_symbol,
-            t.decimals                      AS token_decimals,
-            ap.balance,
-            ap.scaled_balance,
-            ap.block_number,
-            ap.block_version,
-            encode(ap.tx_hash, 'hex')       AS tx_hash,
-            ap.log_index,
-            ap.tx_amount,
-            ap.direction,
-            ap.created_at
-        FROM allocation_position ap
-        JOIN token t ON t.id = ap.token_id
-        JOIN prime p ON p.id = ap.prime_id
-        WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-          AND ap.block_number = COALESCE(
-              :block_number,
-              (SELECT MAX(block_number) FROM allocation_position
-               WHERE proxy_address = decode(:proxy_hex, 'hex'))
-          )
-        ORDER BY ap.chain_id,
-                 ap.token_id,
-                 ap.proxy_address,
-                 ap.block_number,
-                 ap.tx_hash,
-                 ap.log_index,
-                 ap.direction,
-                 ap.block_version DESC,
-                 ap.processing_version DESC
-    """)
-
-    async def list_allocations_by_prime(
-        self, prime_id: EthAddress, block_number: int | None = None
-    ) -> list[AllocationPosition]:
-        result = await self._conn.execute(
-            self._ALLOCATIONS_SQL,
-            {"proxy_hex": prime_id.hex, "block_number": block_number},
+    # The allocation_position rows are event-oriented, so we first take the
+    # latest row per (token_id, proxy_address) in ``latest_positions``. Each
+    # remaining allocation token is then matched against receipt_token two
+    # ways: by underlying_token_id (position recorded in the underlying) and
+    # by receipt_token_address (position recorded in the receipt token
+    # itself).
+    _RECEIPT_TOKEN_POSITIONS_SQL = text("""
+        WITH latest_positions AS (
+            SELECT DISTINCT ON (ap.token_id, ap.proxy_address)
+                ap.chain_id,
+                ap.token_id,
+                ap.balance
+            FROM allocation_position ap
+            WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+            ORDER BY ap.token_id, ap.proxy_address,
+                     ap.block_number DESC, ap.block_version DESC, ap.processing_version DESC, ap.log_index DESC
         )
-        return [
-            AllocationPosition(
-                chain_id=row.chain_id,
-                name=row.name,
-                proxy_address="0x" + row.proxy_address,
-                token_address="0x" + row.token_address,
-                token_symbol=row.token_symbol,
-                token_decimals=row.token_decimals,
-                balance=row.balance,
-                scaled_balance=row.scaled_balance,
-                block_number=row.block_number,
-                block_version=row.block_version,
-                tx_hash="0x" + row.tx_hash,
-                log_index=row.log_index,
-                tx_amount=row.tx_amount,
-                direction=row.direction,
-                created_at=row.created_at,
-            )
-            for row in result
-        ]
+        SELECT DISTINCT ON (receipt_token_id)
+            chain_id,
+            receipt_token_id,
+            receipt_token_address,
+            underlying_token_id,
+            underlying_token_address,
+            symbol,
+            underlying_symbol,
+            protocol_name,
+            balance
+        FROM (
+            SELECT
+                lp.chain_id                                  AS chain_id,
+                rt.id                                        AS receipt_token_id,
+                encode(rt.receipt_token_address, 'hex')      AS receipt_token_address,
+                ut.id                                        AS underlying_token_id,
+                encode(ut.address, 'hex')                    AS underlying_token_address,
+                rt.symbol                                    AS symbol,
+                ut.symbol                                    AS underlying_symbol,
+                pr.name                                      AS protocol_name,
+                lp.balance
+            FROM latest_positions lp
+            JOIN token t ON t.id = lp.token_id
+            JOIN receipt_token rt ON rt.underlying_token_id = t.id
+            JOIN token ut ON ut.id = rt.underlying_token_id
+            JOIN protocol pr ON pr.id = rt.protocol_id
+            WHERE lp.balance > 0
+
+            UNION ALL
+
+            SELECT
+                lp.chain_id                                  AS chain_id,
+                rt.id                                        AS receipt_token_id,
+                encode(rt.receipt_token_address, 'hex')      AS receipt_token_address,
+                ut.id                                        AS underlying_token_id,
+                encode(ut.address, 'hex')                    AS underlying_token_address,
+                rt.symbol                                    AS symbol,
+                ut.symbol                                    AS underlying_symbol,
+                pr.name                                      AS protocol_name,
+                lp.balance
+            FROM latest_positions lp
+            JOIN token t ON t.id = lp.token_id
+            JOIN receipt_token rt ON rt.receipt_token_address = t.address
+            JOIN token ut ON ut.id = rt.underlying_token_id
+            JOIN protocol pr ON pr.id = rt.protocol_id
+            WHERE lp.balance > 0
+        ) combined
+        ORDER BY receipt_token_id, balance DESC
+    """)

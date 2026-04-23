@@ -19,7 +19,7 @@ import {
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { PARAMS, useUrlParam } from './lib/url-params';
-import type { AllocationPosition, Prime } from './types/allocation';
+import type { Allocation, Prime } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
 
 function App() {
@@ -28,7 +28,7 @@ function App() {
     null,
   );
   const [isPrimesLoading, setIsPrimesLoading] = useState(true);
-  const [allocations, setAllocations] = useState<AllocationPosition[]>([]);
+  const [allocations, setAllocations] = useState<Allocation[]>([]);
   const [allocationsErrorMessage, setAllocationsErrorMessage] = useState<
     string | null
   >(null);
@@ -218,7 +218,8 @@ function App() {
           selectedNetwork === null ||
           String(allocation.chain_id) === selectedNetwork;
         const matchesProtocol =
-          selectedProtocol === null || allocation.name === selectedProtocol;
+          selectedProtocol === null ||
+          allocation.protocol_name === selectedProtocol;
 
         return matchesNetwork && matchesProtocol;
       }),
@@ -288,7 +289,10 @@ function App() {
       }
       bottomPanel={
         <BottomPanel
+          allocations={allocations}
           chainLabels={chainLabels}
+          errorMessage={allocationsErrorMessage}
+          isLoading={isAllocationsLoading}
           localProtocols={localProtocols}
           selectedAllocation={selectedAllocation}
           selectedPrime={selectedPrime}

@@ -38,23 +38,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/v1/primes/{prime_id}/receipt-tokens': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /** List Receipt Tokens */
-    get: operations['list_receipt_tokens_v1_primes__prime_id__receipt_tokens_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   '/v1/ready': {
     parameters: {
       query?: never;
@@ -158,41 +141,26 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
-    /** AllocationPositionResponse */
-    AllocationPositionResponse: {
+    /** AllocationResponse */
+    AllocationResponse: {
       /** Balance */
       balance: string;
-      /** Block Number */
-      block_number: number;
-      /** Block Version */
-      block_version: number;
       /** Chain Id */
       chain_id: number;
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-      /** Direction */
-      direction: string;
-      /** Log Index */
-      log_index: number;
-      /** Name */
-      name: string;
-      /** Proxy Address */
-      proxy_address: string;
-      /** Scaled Balance */
-      scaled_balance: string | null;
-      /** Token Address */
-      token_address: string;
-      /** Token Decimals */
-      token_decimals: number | null;
-      /** Token Symbol */
-      token_symbol: string | null;
-      /** Tx Amount */
-      tx_amount: string;
-      /** Tx Hash */
-      tx_hash: string;
+      /** Protocol Name */
+      protocol_name: string;
+      /** Receipt Token Address */
+      receipt_token_address: string;
+      /** Receipt Token Id */
+      receipt_token_id: number;
+      /** Symbol */
+      symbol: string;
+      /** Underlying Symbol */
+      underlying_symbol: string;
+      /** Underlying Token Address */
+      underlying_token_address: string;
+      /** Underlying Token Id */
+      underlying_token_id: number;
     };
     /** BadDebtResponse */
     BadDebtResponse: {
@@ -216,21 +184,6 @@ export interface components {
       id: string;
       /** Name */
       name: string;
-    };
-    /** ReceiptTokenPositionResponse */
-    ReceiptTokenPositionResponse: {
-      /** Balance */
-      balance: string;
-      /** Protocol Name */
-      protocol_name: string;
-      /** Receipt Token Id */
-      receipt_token_id: number;
-      /** Symbol */
-      symbol: string;
-      /** Token Address */
-      token_address: string | null;
-      /** Underlying Symbol */
-      underlying_symbol: string;
     };
     /** RiskBreakdownItemResponse */
     RiskBreakdownItemResponse: {
@@ -326,39 +279,6 @@ export interface operations {
   };
   list_allocations_v1_primes__prime_id__allocations_get: {
     parameters: {
-      query?: {
-        block_number?: number | null;
-      };
-      header?: never;
-      path: {
-        prime_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['AllocationPositionResponse'][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  list_receipt_tokens_v1_primes__prime_id__receipt_tokens_get: {
-    parameters: {
       query?: never;
       header?: never;
       path: {
@@ -374,7 +294,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ReceiptTokenPositionResponse'][];
+          'application/json': components['schemas']['AllocationResponse'][];
         };
       };
       /** @description Validation Error */

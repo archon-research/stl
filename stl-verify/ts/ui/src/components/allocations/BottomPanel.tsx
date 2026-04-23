@@ -3,37 +3,32 @@ import {
   Toggle,
   ToggleGroup,
 } from '@archon-research/design-system';
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useRef, type ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { getReceiptTokens } from '../../lib/api';
 import {
   type ChainLabelLookup,
   findProtocolMetadata,
   formatTokenAmount,
-  getAllocationKey,
   getChainLabel,
   getProtocolLabel,
-  matchReceiptToken,
-  sortReceiptTokens,
+  sortAllocations,
 } from '../../lib/dashboard';
-import { isAbortError, toErrorMessage } from '../../lib/errors';
 import { PARAMS, useUrlParam } from '../../lib/url-params';
-import type {
-  AllocationPosition,
-  Prime,
-  ReceiptTokenPosition,
-} from '../../types/allocation';
+import type { Allocation, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import { BadDebtTab } from './tabs/BadDebtTab';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 
 type BottomPanelProps = {
+  allocations: Allocation[];
   chainLabels: ChainLabelLookup;
+  errorMessage: string | null;
+  isLoading: boolean;
   localProtocols: LocalProtocolRow[];
-  selectedAllocation: AllocationPosition | null;
+  selectedAllocation: Allocation | null;
   selectedPrime: Prime | null;
 };
 
@@ -122,23 +117,23 @@ function EmptyPanelState({ body, title }: { body: string; title: string }) {
 }
 
 export function BottomPanel({
+  allocations,
   chainLabels,
+  errorMessage,
+  isLoading,
   localProtocols,
   selectedAllocation,
   selectedPrime,
 }: BottomPanelProps) {
-  const [receiptTokens, setReceiptTokens] = useState<ReceiptTokenPosition[]>(
-    [],
-  );
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
   const [receiptTokenParam, setReceiptTokenParam] = useUrlParam(
     PARAMS.receiptToken,
   );
   const [tabParam, setTabParam] = useUrlParam(PARAMS.tab);
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrime?.id ?? null);
-  const previousAllocationKeyRef = useRef<string | null>(null);
+  const previousSelectedAllocationIdRef = useRef<number | null>(
+    selectedAllocation?.receipt_token_id ?? null,
+  );
 
   const activeTab: ActiveTab = tabParam === 'bad-debt' ? 'bad-debt' : 'risk';
 
@@ -152,56 +147,13 @@ export function BottomPanel({
     previousPrimeIdRef.current = primeId;
   }, [selectedPrime?.id, setReceiptTokenParam]);
 
-  useEffect(() => {
-    if (!selectedPrime?.id) {
-      setReceiptTokens([]);
-      setErrorMessage(null);
-      setIsLoading(false);
-      return;
-    }
-
-    const controller = new AbortController();
-
-    setReceiptTokens([]);
-    setIsLoading(true);
-    setErrorMessage(null);
-
-    void getReceiptTokens(selectedPrime.id, controller.signal)
-      .then((response) => {
-        if (controller.signal.aborted) {
-          return;
-        }
-        setReceiptTokens(response);
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
-
-        setReceiptTokens([]);
-        setErrorMessage(toErrorMessage(error));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsLoading(false);
-        }
-      });
-
-    return () => controller.abort();
-  }, [selectedPrime]);
-
-  const sortedReceiptTokens = useMemo(
-    () => sortReceiptTokens(receiptTokens),
-    [receiptTokens],
-  );
-
-  const matchingReceiptToken = useMemo(
-    () => matchReceiptToken(selectedAllocation, sortedReceiptTokens),
-    [selectedAllocation, sortedReceiptTokens],
+  const sortedAllocations = useMemo(
+    () => sortAllocations(allocations),
+    [allocations],
   );
 
   useEffect(() => {
-    if (sortedReceiptTokens.length === 0) {
+    if (sortedAllocations.length === 0) {
       if (receiptTokenParam !== null) {
         setReceiptTokenParam(null);
       }
@@ -210,63 +162,63 @@ export function BottomPanel({
 
     if (
       receiptTokenParam &&
-      sortedReceiptTokens.some(
-        (token) => String(token.receipt_token_id) === receiptTokenParam,
+      sortedAllocations.some(
+        (allocation) =>
+          String(allocation.receipt_token_id) === receiptTokenParam,
       )
     ) {
       return;
     }
 
-    const fallback = matchingReceiptToken ?? sortedReceiptTokens[0];
+    const fallback = selectedAllocation ?? sortedAllocations[0];
     setReceiptTokenParam(String(fallback.receipt_token_id));
   }, [
-    matchingReceiptToken,
-    receiptTokenParam,
-    setReceiptTokenParam,
-    sortedReceiptTokens,
-  ]);
-
-  useEffect(() => {
-    const allocationKey = selectedAllocation
-      ? getAllocationKey(selectedAllocation)
-      : null;
-
-    if (allocationKey === previousAllocationKeyRef.current) {
-      return;
-    }
-
-    previousAllocationKeyRef.current = allocationKey;
-
-    if (!matchingReceiptToken) {
-      return;
-    }
-
-    const nextTokenId = String(matchingReceiptToken.receipt_token_id);
-    if (receiptTokenParam !== nextTokenId) {
-      setReceiptTokenParam(nextTokenId);
-    }
-  }, [
-    matchingReceiptToken,
     receiptTokenParam,
     selectedAllocation,
     setReceiptTokenParam,
+    sortedAllocations,
   ]);
 
-  const selectedReceiptToken =
-    sortedReceiptTokens.find(
-      (token) => String(token.receipt_token_id) === receiptTokenParam,
+  // Sync the URL-backed receipt-token param to the grid's current selection
+  // only when that selection *changes*. The ref guards against clobbering a
+  // manual dropdown pick on unrelated re-renders (e.g. the user changes the
+  // dropdown → receiptTokenParam changes → this effect would otherwise fire
+  // and overwrite the pick back to the grid row's id).
+  useEffect(() => {
+    const currentId = selectedAllocation?.receipt_token_id ?? null;
+
+    if (currentId === previousSelectedAllocationIdRef.current) {
+      return;
+    }
+
+    previousSelectedAllocationIdRef.current = currentId;
+
+    if (currentId === null) {
+      return;
+    }
+
+    const nextTokenId = String(currentId);
+    if (receiptTokenParam !== nextTokenId) {
+      setReceiptTokenParam(nextTokenId);
+    }
+  }, [receiptTokenParam, selectedAllocation, setReceiptTokenParam]);
+
+  const focusedAllocation =
+    sortedAllocations.find(
+      (allocation) =>
+        String(allocation.receipt_token_id) === receiptTokenParam,
     ) ?? null;
 
-  const selectedProtocol = useMemo(
+  const focusedProtocol = useMemo(
     () =>
-      selectedAllocation
+      focusedAllocation
         ? findProtocolMetadata(
-            selectedAllocation.name,
+            focusedAllocation.protocol_name,
             localProtocols,
-            selectedAllocation.chain_id,
+            focusedAllocation.chain_id,
           )
         : null,
-    [localProtocols, selectedAllocation],
+    [focusedAllocation, localProtocols],
   );
 
   return (
@@ -338,16 +290,19 @@ export function BottomPanel({
                 setReceiptTokenParam(event.target.value || null)
               }
               disabled={
-                !selectedPrime || isLoading || sortedReceiptTokens.length === 0
+                !selectedPrime ||
+                isLoading ||
+                errorMessage !== null ||
+                sortedAllocations.length === 0
               }
             >
               <option value="">Choose a receipt token</option>
-              {sortedReceiptTokens.map((token) => (
+              {sortedAllocations.map((allocation) => (
                 <option
-                  key={token.receipt_token_id}
-                  value={token.receipt_token_id}
+                  key={allocation.receipt_token_id}
+                  value={allocation.receipt_token_id}
                 >
-                  {`${token.symbol} · ${token.protocol_name}`}
+                  {`${allocation.symbol} · ${getProtocolLabel(allocation.protocol_name, localProtocols, allocation.chain_id)}`}
                 </option>
               ))}
             </StyledSelect>
@@ -375,18 +330,18 @@ export function BottomPanel({
                 color: 'text.strong',
               })}
             >
-              {selectedAllocation
-                ? `${selectedAllocation.token_symbol ?? 'Unknown'} · ${getProtocolLabel(selectedAllocation.name, localProtocols, selectedAllocation.chain_id)}`
+              {focusedAllocation
+                ? `${focusedAllocation.symbol} · ${getProtocolLabel(focusedAllocation.protocol_name, localProtocols, focusedAllocation.chain_id)}`
                 : 'No allocation row selected'}
             </p>
             <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-              {selectedAllocation
-                ? `${formatTokenAmount(selectedAllocation.balance)} ${selectedAllocation.token_symbol ?? ''} · ${getChainLabel(selectedAllocation.chain_id, chainLabels)}`
+              {focusedAllocation
+                ? `${formatTokenAmount(focusedAllocation.balance)} ${focusedAllocation.symbol} · ${getChainLabel(focusedAllocation.chain_id, chainLabels)}`
                 : 'Pick a grid row to drive this panel, or choose a receipt token directly.'}
             </p>
-            {selectedProtocol ? (
+            {focusedProtocol ? (
               <p className={css({ m: 0, fontSize: 'xs', color: 'text.muted' })}>
-                {`Protocol address ${formatAddress(selectedProtocol.encode)}`}
+                {`Protocol address ${formatAddress(focusedProtocol.encode)}`}
               </p>
             ) : null}
           </div>
@@ -399,69 +354,42 @@ export function BottomPanel({
         {!selectedPrime ? (
           <EmptyPanelState
             title="Choose a prime to inspect risk"
-            body="The lower panel comes alive after a prime is selected and receipt tokens are loaded for it."
+            body="The lower panel comes alive after a prime is selected."
           />
         ) : null}
 
         {selectedPrime && errorMessage ? (
-          <div
-            className={css({
-              borderRadius: 'md',
-              borderStyle: 'solid',
-              borderWidth: '1px',
-              borderColor: 'border.default',
-              bg: 'surface.subtle',
-              p: '4',
-            })}
-          >
-            <p
-              className={css({
-                m: 0,
-                fontSize: 'sm',
-                fontWeight: 'semibold',
-                color: 'text.strong',
-              })}
-            >
-              Unable to load receipt tokens.
-            </p>
-            <p
-              className={css({
-                m: 0,
-                mt: '1.5',
-                fontSize: 'sm',
-                color: 'text.muted',
-              })}
-            >
-              {errorMessage}
-            </p>
-          </div>
+          <EmptyPanelState
+            title="Unable to load allocations"
+            body={errorMessage}
+          />
         ) : null}
 
         {selectedPrime && !errorMessage && isLoading ? (
           <EmptyPanelState
             title="Loading receipt tokens"
-            body="The bottom panel is waiting for the selected prime's receipt token inventory."
+            body="Waiting for the selected prime's receipt token holdings."
           />
         ) : null}
 
         {selectedPrime &&
         !errorMessage &&
         !isLoading &&
-        sortedReceiptTokens.length === 0 ? (
+        sortedAllocations.length === 0 ? (
           <EmptyPanelState
             title="No receipt tokens returned"
-            body="The selected prime did not return any receipt token rows from the API."
+            body="The selected prime did not return any receipt token holdings from the API."
           />
         ) : null}
 
         {selectedPrime &&
         !errorMessage &&
         !isLoading &&
-        sortedReceiptTokens.length > 0 ? (
+        sortedAllocations.length > 0 ? (
           activeTab === 'risk' ? (
-            <RiskBreakdownTab selectedReceiptToken={selectedReceiptToken} />
+            <RiskBreakdownTab selectedReceiptToken={focusedAllocation} />
           ) : (
-            <BadDebtTab selectedReceiptToken={selectedReceiptToken} />
+            <BadDebtTab selectedReceiptToken={focusedAllocation} />
           )
         ) : null}
       </div>

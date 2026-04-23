@@ -3,30 +3,27 @@ import { flex } from '#styled-system/patterns';
 
 import {
   type ChainLabelLookup,
-  formatDateTime,
   formatTokenAmount,
   getAllocationKey,
   getChainLabel,
   getProtocolLabel,
 } from '../../lib/dashboard';
-import type { AllocationPosition, Prime } from '../../types/allocation';
+import type { Allocation, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 
-const INTEGER_FORMAT = new Intl.NumberFormat('en-US');
-
-function formatHash(hash: string): string {
-  if (hash.length <= 14) {
-    return hash;
+function formatAddress(value: string): string {
+  if (value.length <= 14) {
+    return value;
   }
 
-  return `${hash.slice(0, 8)}...${hash.slice(-4)}`;
+  return `${value.slice(0, 8)}...${value.slice(-4)}`;
 }
 
 type AllocationGridProps = {
-  allocations: AllocationPosition[];
+  allocations: Allocation[];
   chainLabels: ChainLabelLookup;
   errorMessage: string | null;
-  filteredAllocations: AllocationPosition[];
+  filteredAllocations: Allocation[];
   isLoading: boolean;
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
@@ -75,7 +72,7 @@ function SkeletonRows() {
         borderBottomColor: 'border.subtle',
       })}
     >
-      {Array.from({ length: 6 }, (_cell, cellIndex) => (
+      {Array.from({ length: 3 }, (_cell, cellIndex) => (
         <td key={cellIndex} className={css({ px: '4', py: '3.5' })}>
           <div
             className={css({
@@ -184,9 +181,9 @@ export function AllocationGrid({
                 color: 'text.default',
               })}
             >
-              Live position snapshots for the selected prime. Filter by network
-              or protocol above, then focus a row to inspect the matching
-              receipt token in the lower risk panel.
+              Current receipt-token holdings for the selected prime. Filter by
+              network or protocol above, then focus a row to inspect its risk in
+              the lower panel.
             </p>
           </div>
         </div>
@@ -242,21 +239,14 @@ export function AllocationGrid({
               <table
                 className={css({
                   width: '100%',
-                  minWidth: '72rem',
+                  minWidth: '48rem',
                   borderCollapse: 'collapse',
                   bg: 'surface.default',
                 })}
               >
                 <thead>
                   <tr className={css({ bg: 'surface.subtle' })}>
-                    {[
-                      'Asset',
-                      'Current Balance',
-                      'Scaled Balance',
-                      'Transaction Amount',
-                      'Block',
-                      'Latest Activity',
-                    ].map((label) => (
+                    {['Asset', 'Underlying', 'Balance'].map((label) => (
                       <th
                         key={label}
                         className={css({
@@ -282,10 +272,6 @@ export function AllocationGrid({
                         const allocationKey = getAllocationKey(allocation);
                         const isSelected =
                           allocationKey === selectedAllocationKey;
-                        const symbol = allocation.token_symbol ?? 'Unknown';
-                        const scaledBalance = allocation.scaled_balance
-                          ? `${formatTokenAmount(allocation.scaled_balance)} ${symbol}`
-                          : 'Not reported';
 
                         return (
                           <tr
@@ -339,29 +325,21 @@ export function AllocationGrid({
                                     flexShrink: 0,
                                   })}
                                 >
-                                  {symbol.slice(0, 2).toUpperCase()}
+                                  {allocation.symbol.slice(0, 2).toUpperCase()}
                                 </div>
                                 <div
                                   className={css({ display: 'grid', gap: '1' })}
                                 >
-                                  <div
-                                    className={flex({
-                                      align: 'center',
-                                      gap: '2',
-                                      wrap: 'wrap',
+                                  <p
+                                    className={css({
+                                      m: 0,
+                                      fontSize: 'sm',
+                                      fontWeight: 'semibold',
+                                      color: 'text.strong',
                                     })}
                                   >
-                                    <p
-                                      className={css({
-                                        m: 0,
-                                        fontSize: 'sm',
-                                        fontWeight: 'semibold',
-                                        color: 'text.strong',
-                                      })}
-                                    >
-                                      {symbol}
-                                    </p>
-                                  </div>
+                                    {allocation.symbol}
+                                  </p>
                                   <div
                                     className={flex({
                                       gap: '1.5',
@@ -375,7 +353,7 @@ export function AllocationGrid({
                                       })}
                                     >
                                       {getProtocolLabel(
-                                        allocation.name,
+                                        allocation.protocol_name,
                                         localProtocols,
                                         allocation.chain_id,
                                       )}
@@ -412,7 +390,7 @@ export function AllocationGrid({
                                   color: 'text.strong',
                                 })}
                               >
-                                {formatTokenAmount(allocation.balance)} {symbol}
+                                {allocation.underlying_symbol}
                               </p>
                               <p
                                 className={css({
@@ -422,7 +400,9 @@ export function AllocationGrid({
                                   color: 'text.muted',
                                 })}
                               >
-                                {allocation.token_address}
+                                {formatAddress(
+                                  allocation.underlying_token_address,
+                                )}
                               </p>
                             </td>
                             <td
@@ -442,7 +422,8 @@ export function AllocationGrid({
                                   color: 'text.strong',
                                 })}
                               >
-                                {scaledBalance}
+                                {formatTokenAmount(allocation.balance)}{' '}
+                                {allocation.symbol}
                               </p>
                               <p
                                 className={css({
@@ -452,110 +433,8 @@ export function AllocationGrid({
                                   color: 'text.muted',
                                 })}
                               >
-                                {allocation.scaled_balance
-                                  ? 'Protocol-reported scaled balance'
-                                  : 'This position does not expose a scaled balance'}
+                                {formatAddress(allocation.receipt_token_address)}
                               </p>
-                            </td>
-                            <td
-                              className={css({
-                                borderBottomWidth: '1px',
-                                borderBottomStyle: 'solid',
-                                borderBottomColor: 'border.subtle',
-                                px: '4',
-                                py: '3.5',
-                              })}
-                            >
-                              <p
-                                className={css({
-                                  m: 0,
-                                  fontSize: 'sm',
-                                  fontWeight: 'semibold',
-                                  color: 'text.strong',
-                                })}
-                              >
-                                {formatTokenAmount(allocation.tx_amount)}{' '}
-                                {symbol}
-                              </p>
-                              <p
-                                className={css({
-                                  m: 0,
-                                  mt: '1',
-                                  fontSize: 'xs',
-                                  color: 'text.muted',
-                                })}
-                              >
-                                {formatHash(allocation.tx_hash)}
-                              </p>
-                            </td>
-                            <td
-                              className={css({
-                                borderBottomWidth: '1px',
-                                borderBottomStyle: 'solid',
-                                borderBottomColor: 'border.subtle',
-                                px: '4',
-                                py: '3.5',
-                              })}
-                            >
-                              <p
-                                className={css({
-                                  m: 0,
-                                  fontSize: 'sm',
-                                  fontWeight: 'semibold',
-                                  color: 'text.strong',
-                                })}
-                              >
-                                #
-                                {INTEGER_FORMAT.format(allocation.block_number)}
-                              </p>
-                              <p
-                                className={css({
-                                  m: 0,
-                                  mt: '1',
-                                  fontSize: 'xs',
-                                  color: 'text.muted',
-                                })}
-                              >
-                                {`log ${allocation.log_index} · v${allocation.block_version}`}
-                              </p>
-                            </td>
-                            <td
-                              className={css({
-                                borderBottomWidth: '1px',
-                                borderBottomStyle: 'solid',
-                                borderBottomColor: 'border.subtle',
-                                px: '4',
-                                py: '3.5',
-                              })}
-                            >
-                              <div
-                                className={css({ display: 'grid', gap: '1' })}
-                              >
-                                <p
-                                  className={css({
-                                    m: 0,
-                                    fontSize: 'sm',
-                                    color: 'text.strong',
-                                  })}
-                                >
-                                  {formatDateTime(allocation.created_at)}
-                                </p>
-                                <span
-                                  className={css({
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    width: 'fit-content',
-                                    borderRadius: 'sm',
-                                    bg: 'surface.subtle',
-                                    color: 'text.muted',
-                                    fontSize: 'xs',
-                                    px: '2.5',
-                                    py: '0.5',
-                                  })}
-                                >
-                                  {allocation.direction}
-                                </span>
-                              </div>
                             </td>
                           </tr>
                         );
