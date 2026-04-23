@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: offchain-price-indexer
-          image: stl-offchain-price-indexer:local
+          image: localhost/stl-offchain-price-indexer:local
           imagePullPolicy: Never
           envFrom:
             - configMapRef:

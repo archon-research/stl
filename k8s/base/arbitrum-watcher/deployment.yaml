@@ -21,12 +21,9 @@ spec:
           # The overlay kustomization.yaml overrides newName + newTag.
           image: arbitrum-watcher
           args: ["--enable-traces=false"]
-          env:
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://localhost:4317"
-            - name: JAEGER_ENDPOINT
-              value: "localhost:4317"
           envFrom:
+            - configMapRef:
+                name: otel-config
             - configMapRef:
                 name: arbitrum-watcher-config
             - secretRef:
@@ -35,10 +32,10 @@ spec:
           resources:
             requests:
               cpu: "100m"
-              memory: "128Mi"
+              memory: "256Mi"
             limits:
               cpu: "100m"
-              memory: "128Mi"
+              memory: "1024Mi"
           livenessProbe:
             exec:
               command: ["/bin/sh", "-c", "pgrep -f watcher"]

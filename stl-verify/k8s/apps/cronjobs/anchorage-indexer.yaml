@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: anchorage-indexer
-          image: stl-anchorage-indexer:local
+          image: localhost/stl-anchorage-indexer:local
           imagePullPolicy: Never
           envFrom:
             - configMapRef:

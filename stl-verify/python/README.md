@@ -8,6 +8,9 @@ FastAPI service for sentinel verify.
 uv sync
 ```
 
+Configuration defaults live in `.env.default`. Optional local overrides go in
+`.env` (same directory), which takes precedence over `.env.default`.
+
 ## Run
 
 Start the local infrastructure first (PostgreSQL, Redis, Jaeger):
@@ -22,6 +25,21 @@ Then start the FastAPI server:
 ```bash
 # From stl-verify/python/
 make run
+```
+
+To test the static UI hosting locally, build the frontend into the FastAPI app
+and then start the server:
+
+```bash
+# From stl-verify/python/
+make run-static
+```
+
+If you only want to refresh the staged frontend assets without starting the
+server:
+
+```bash
+make build-ui-static
 ```
 
 ## Test

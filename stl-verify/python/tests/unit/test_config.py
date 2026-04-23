@@ -27,6 +27,7 @@ class TestAlchemyHttpUrl:
         settings = Settings(alchemy_api_key="test-key-123")
         assert settings.alchemy_http_url == "https://eth-mainnet.g.alchemy.com/v2/test-key-123"
 
-    def test_default_key_produces_url(self):
+    def test_uses_loaded_key_for_url(self):
         settings = Settings()
-        assert "MISSING_KEY" in settings.alchemy_http_url
+        key = settings.alchemy_api_key.get_secret_value()
+        assert settings.alchemy_http_url == f"https://eth-mainnet.g.alchemy.com/v2/{key}"

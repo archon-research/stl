@@ -31,7 +31,7 @@ func setupRedis(t *testing.T, ttl time.Duration) (*BlockCache, func()) {
 		Started:          true,
 	})
 	if err != nil {
-		t.Fatalf("failed to start Redis container: %v", err)
+		testutil.HandleContainerRuntimeError(t, err, "failed to start Redis container")
 	}
 
 	host, err := container.Host(ctx)

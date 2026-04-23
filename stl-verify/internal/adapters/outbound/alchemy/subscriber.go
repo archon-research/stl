@@ -402,7 +402,7 @@ func (s *Subscriber) readLoop(logger *slog.Logger) error {
 					s.telemetry.RecordBlockReceived(s.ctx)
 				}
 			default:
-				logger.Error("channel full, dropping block", "block", blockNum)
+				logger.Warn("channel full, dropping block", "block", blockNum)
 				if s.telemetry != nil {
 					s.telemetry.RecordBlockDropped(s.ctx)
 				}

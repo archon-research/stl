@@ -1,6 +1,7 @@
 # ADR-0001: Local k8s with kind
 
-**Status**: Proposed
+**Status**: Accepted
+**Owner**: angelos.theodosiadis@archonlabs.com
 **Date**: 2026-03-03
 
 ## Context

@@ -16,7 +16,6 @@ type AllocationPosition struct {
 	TokenDecimals  int
 	PrimeID        int64
 	ProxyAddress   common.Address
-	AssetDecimals  *int
 	Balance        *big.Int
 	ScaledBalance  *big.Int
 	BlockNumber    int64
