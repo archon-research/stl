@@ -1,0 +1,75 @@
+name: TypeScript (stl-verify)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  lint:
+    name: Lint (TypeScript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.UIKIT_GH_PACKAGES_READ_TOKEN }}
+      UIKIT_GH_PACKAGES_READ_TOKEN: ${{ secrets.UIKIT_GH_PACKAGES_READ_TOKEN }}
+
+    defaults:
+      run:
+        working-directory: stl-verify/ts
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 24.14.1
+          cache: npm
+          cache-dependency-path: stl-verify/ts/package-lock.json
+          registry-url: https://npm.pkg.github.com
+          scope: '@archon-research'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run workspace lint
+        run: npm run lint
+
+      - name: Run workspace format check
+        run: npm run format:check
+
+  build:
+    name: Build (TypeScript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: lint
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.UIKIT_GH_PACKAGES_READ_TOKEN }}
+      UIKIT_GH_PACKAGES_READ_TOKEN: ${{ secrets.UIKIT_GH_PACKAGES_READ_TOKEN }}
+
+    defaults:
+      run:
+        working-directory: stl-verify/ts
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 24.14.1
+          cache: npm
+          cache-dependency-path: stl-verify/ts/package-lock.json
+          registry-url: https://npm.pkg.github.com
+          scope: '@archon-research'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build workspace
+        run: npm run build

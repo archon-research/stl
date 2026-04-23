@@ -1,0 +1,25 @@
+go:
+  - stl-verify/**
+  - '!stl-verify/python/**'
+  - '!stl-verify/ts/**'
+  - .github/changed-files.yml
+  - .github/workflows/ci.yml
+  - .github/workflows/deploy.yaml
+
+python:
+  - stl-verify/python/**
+  - stl-verify/db/migrations/**
+  - .github/changed-files.yml
+  - .github/workflows/ci.yml
+  - .github/workflows/deploy.yaml
+  - .github/workflows/python-ci.yml
+
+ts:
+  - stl-verify/ts/**
+  - stl-verify/python/app/**
+  - stl-verify/python/scripts/export_openapi_schema.py
+  - stl-verify/python/Makefile
+  - .github/changed-files.yml
+  - .github/workflows/ci.yml
+  - .github/workflows/deploy.yaml
+  - .github/workflows/ts-ci.yml
