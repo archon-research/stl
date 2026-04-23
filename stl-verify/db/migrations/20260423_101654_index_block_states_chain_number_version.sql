@@ -1,4 +1,3 @@
--- migrate: no-transaction
 -- VEC-144: Add non-partial index on (chain_id, number, version DESC) to accelerate
 -- the assign_block_version() BEFORE INSERT trigger.
 --
