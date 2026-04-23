@@ -9,9 +9,9 @@ import type { paths } from '../generated/openapi-types';
 import type {
   AllocationsResponse,
   BadDebt,
+  PrimesResponse,
   ReceiptTokensResponse,
   RiskBreakdown,
-  StarsResponse,
 } from '../types/allocation';
 import type {
   LocalChainRow,
@@ -103,8 +103,8 @@ function resolveLocalData<T>(data: T, signal?: AbortSignal): Promise<T> {
   });
 }
 
-export function getStars(signal?: AbortSignal): Promise<StarsResponse> {
-  return requestData(apiClient.GET('/v1/stars', { signal }), 'GET /v1/stars');
+export function getPrimes(signal?: AbortSignal): Promise<PrimesResponse> {
+  return requestData(apiClient.GET('/v1/primes', { signal }), 'GET /v1/primes');
 }
 
 export function getLocalChains(signal?: AbortSignal): Promise<LocalChainRow[]> {
@@ -122,28 +122,28 @@ export function getLocalCosts(signal?: AbortSignal): Promise<LocalCostRow[]> {
 }
 
 export function getAllocations(
-  starId: string,
+  primeId: string,
   signal?: AbortSignal,
 ): Promise<AllocationsResponse> {
   return requestData(
-    apiClient.GET('/v1/stars/{star_id}/allocations', {
-      params: { path: { star_id: starId } },
+    apiClient.GET('/v1/primes/{prime_id}/allocations', {
+      params: { path: { prime_id: primeId } },
       signal,
     }),
-    'GET /v1/stars/{star_id}/allocations',
+    'GET /v1/primes/{prime_id}/allocations',
   );
 }
 
 export function getReceiptTokens(
-  starId: string,
+  primeId: string,
   signal?: AbortSignal,
 ): Promise<ReceiptTokensResponse> {
   return requestData(
-    apiClient.GET('/v1/stars/{star_id}/receipt-tokens', {
-      params: { path: { star_id: starId } },
+    apiClient.GET('/v1/primes/{prime_id}/receipt-tokens', {
+      params: { path: { prime_id: primeId } },
       signal,
     }),
-    'GET /v1/stars/{star_id}/receipt-tokens',
+    'GET /v1/primes/{prime_id}/receipt-tokens',
   );
 }
 

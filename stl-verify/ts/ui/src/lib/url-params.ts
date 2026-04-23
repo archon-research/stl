@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 const URL_PARAMS_EVENT = 'stl:url-params-change';
 
 export const PARAMS = {
-  star: 'star',
+  prime: 'prime',
   network: 'network',
   protocol: 'protocol',
   tab: 'tab',

@@ -9,7 +9,7 @@ import {
   getChainLabel,
   getProtocolLabel,
 } from '../../lib/dashboard';
-import type { AllocationPosition, Star } from '../../types/allocation';
+import type { AllocationPosition, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 
 const INTEGER_FORMAT = new Intl.NumberFormat('en-US');
@@ -31,7 +31,7 @@ type AllocationGridProps = {
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
   selectedAllocationKey: string | null;
-  selectedStar: Star | null;
+  selectedPrime: Prime | null;
 };
 
 function SurfaceMessage({ body, title }: { body: string; title: string }) {
@@ -100,7 +100,7 @@ export function AllocationGrid({
   localProtocols,
   onSelectAllocation,
   selectedAllocationKey,
-  selectedStar,
+  selectedPrime,
 }: AllocationGridProps) {
   return (
     <div
@@ -160,9 +160,9 @@ export function AllocationGrid({
                   color: 'text.strong',
                 })}
               >
-                {selectedStar ? selectedStar.name : 'Select a star'}
+                {selectedPrime ? selectedPrime.name : 'Select a prime'}
               </h1>
-              {selectedStar ? (
+              {selectedPrime ? (
                 <p
                   className={css({
                     m: 0,
@@ -170,7 +170,7 @@ export function AllocationGrid({
                     color: 'text.muted',
                   })}
                 >
-                  {selectedStar.id}
+                  {selectedPrime.id}
                 </p>
               ) : null}
             </div>
@@ -184,7 +184,7 @@ export function AllocationGrid({
                 color: 'text.default',
               })}
             >
-              Live position snapshots for the selected star. Filter by network
+              Live position snapshots for the selected prime. Filter by network
               or protocol above, then focus a row to inspect the matching
               receipt token in the lower risk panel.
             </p>
@@ -192,31 +192,31 @@ export function AllocationGrid({
         </div>
 
         <div className={css({ mt: '6' })}>
-          {!selectedStar && !isLoading ? (
+          {!selectedPrime && !isLoading ? (
             <SurfaceMessage
-              title="Choose a star to load positions"
-              body="The main grid activates once a star is selected from the sidebar."
+              title="Choose a prime to load positions"
+              body="The main grid activates once a prime is selected from the sidebar."
             />
           ) : null}
 
-          {selectedStar && errorMessage ? (
+          {selectedPrime && errorMessage ? (
             <SurfaceMessage
               title="Unable to load allocations"
               body={errorMessage}
             />
           ) : null}
 
-          {selectedStar &&
+          {selectedPrime &&
           !errorMessage &&
           !isLoading &&
           allocations.length === 0 ? (
             <SurfaceMessage
               title="No allocations returned"
-              body="The selected star did not return any allocation rows from the API."
+              body="The selected prime did not return any allocation rows from the API."
             />
           ) : null}
 
-          {selectedStar &&
+          {selectedPrime &&
           !errorMessage &&
           !isLoading &&
           allocations.length > 0 &&
@@ -227,7 +227,7 @@ export function AllocationGrid({
             />
           ) : null}
 
-          {selectedStar &&
+          {selectedPrime &&
           !errorMessage &&
           (isLoading || filteredAllocations.length > 0) ? (
             <div

@@ -3,13 +3,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { AllocationGrid } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
-import { StarSidebar } from './components/shared/StarSidebar';
+import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
 import {
   getAllocations,
   getLocalChains,
   getLocalProtocols,
-  getStars,
+  getPrimes,
 } from './lib/api';
 import {
   buildChainLabelLookup,
@@ -19,15 +19,15 @@ import {
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { PARAMS, useUrlParam } from './lib/url-params';
-import type { AllocationPosition, Star } from './types/allocation';
+import type { AllocationPosition, Prime } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
 
 function App() {
-  const [stars, setStars] = useState<Star[]>([]);
-  const [starsErrorMessage, setStarsErrorMessage] = useState<string | null>(
+  const [primes, setPrimes] = useState<Prime[]>([]);
+  const [primesErrorMessage, setPrimesErrorMessage] = useState<string | null>(
     null,
   );
-  const [isStarsLoading, setIsStarsLoading] = useState(true);
+  const [isPrimesLoading, setIsPrimesLoading] = useState(true);
   const [allocations, setAllocations] = useState<AllocationPosition[]>([]);
   const [allocationsErrorMessage, setAllocationsErrorMessage] = useState<
     string | null
@@ -38,11 +38,11 @@ function App() {
   const [selectedAllocationKey, setSelectedAllocationKey] = useState<
     string | null
   >(null);
-  const [selectedStarId, setSelectedStarId] = useUrlParam(PARAMS.star);
+  const [selectedPrimeId, setSelectedPrimeId] = useUrlParam(PARAMS.prime);
   const [selectedNetwork, setSelectedNetwork] = useUrlParam(PARAMS.network);
   const [selectedProtocol, setSelectedProtocol] = useUrlParam(PARAMS.protocol);
 
-  const previousStarIdRef = useRef<string | null>(selectedStarId);
+  const previousPrimeIdRef = useRef<string | null>(selectedPrimeId);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -70,23 +70,23 @@ function App() {
   useEffect(() => {
     const controller = new AbortController();
 
-    setIsStarsLoading(true);
-    setStarsErrorMessage(null);
+    setIsPrimesLoading(true);
+    setPrimesErrorMessage(null);
 
-    void getStars(controller.signal)
+    void getPrimes(controller.signal)
       .then((response) => {
-        setStars(response);
+        setPrimes(response);
       })
       .catch((error: unknown) => {
         if (isAbortError(error)) {
           return;
         }
 
-        setStarsErrorMessage(toErrorMessage(error));
+        setPrimesErrorMessage(toErrorMessage(error));
       })
       .finally(() => {
         if (!controller.signal.aborted) {
-          setIsStarsLoading(false);
+          setIsPrimesLoading(false);
         }
       });
 
@@ -94,37 +94,37 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (isStarsLoading) {
+    if (isPrimesLoading) {
       return;
     }
 
-    if (stars.length === 0) {
-      if (selectedStarId !== null) {
-        setSelectedStarId(null);
+    if (primes.length === 0) {
+      if (selectedPrimeId !== null) {
+        setSelectedPrimeId(null);
       }
       return;
     }
 
-    if (!selectedStarId || !stars.some((star) => star.id === selectedStarId)) {
-      setSelectedStarId(stars[0]?.id ?? null);
+    if (!selectedPrimeId || !primes.some((prime) => prime.id === selectedPrimeId)) {
+      setSelectedPrimeId(primes[0]?.id ?? null);
     }
-  }, [isStarsLoading, selectedStarId, setSelectedStarId, stars]);
+  }, [isPrimesLoading, selectedPrimeId, setSelectedPrimeId, primes]);
 
   useEffect(() => {
     if (
-      previousStarIdRef.current !== null &&
-      previousStarIdRef.current !== selectedStarId
+      previousPrimeIdRef.current !== null &&
+      previousPrimeIdRef.current !== selectedPrimeId
     ) {
       setSelectedNetwork(null);
       setSelectedProtocol(null);
       setSelectedAllocationKey(null);
     }
 
-    previousStarIdRef.current = selectedStarId;
-  }, [selectedStarId, setSelectedNetwork, setSelectedProtocol]);
+    previousPrimeIdRef.current = selectedPrimeId;
+  }, [selectedPrimeId, setSelectedNetwork, setSelectedProtocol]);
 
   useEffect(() => {
-    if (!selectedStarId) {
+    if (!selectedPrimeId) {
       setAllocations([]);
       setAllocationsErrorMessage(null);
       setIsAllocationsLoading(false);
@@ -138,7 +138,7 @@ function App() {
     setIsAllocationsLoading(true);
     setAllocationsErrorMessage(null);
 
-    void getAllocations(selectedStarId, controller.signal)
+    void getAllocations(selectedPrimeId, controller.signal)
       .then((response) => {
         setAllocations(response);
       })
@@ -156,11 +156,11 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [selectedStarId]);
+  }, [selectedPrimeId]);
 
-  const selectedStar = useMemo(
-    () => stars.find((star) => star.id === selectedStarId) ?? null,
-    [selectedStarId, stars],
+  const selectedPrime = useMemo(
+    () => primes.find((prime) => prime.id === selectedPrimeId) ?? null,
+    [selectedPrimeId, primes],
   );
 
   const chainLabels = useMemo(
@@ -251,17 +251,17 @@ function App() {
   return (
     <SidebarLayout
       sidebar={
-        <StarSidebar
-          stars={stars}
-          selectedStarId={selectedStarId}
-          isLoading={isStarsLoading}
-          errorMessage={starsErrorMessage}
-          onSelectStar={setSelectedStarId}
+        <PrimeSidebar
+          primes={primes}
+          selectedPrimeId={selectedPrimeId}
+          isLoading={isPrimesLoading}
+          errorMessage={primesErrorMessage}
+          onSelectPrime={setSelectedPrimeId}
         />
       }
       topBar={
         <TopBar
-          hasSelectedStar={selectedStar !== null}
+          hasSelectedPrime={selectedPrime !== null}
           networkOptions={networkOptions}
           onNetworkChange={setSelectedNetwork}
           onProtocolChange={setSelectedProtocol}
@@ -280,7 +280,7 @@ function App() {
           localProtocols={localProtocols}
           onSelectAllocation={setSelectedAllocationKey}
           selectedAllocationKey={selectedAllocationKey}
-          selectedStar={selectedStar}
+          selectedPrime={selectedPrime}
         />
       }
       bottomPanel={
@@ -288,7 +288,7 @@ function App() {
           chainLabels={chainLabels}
           localProtocols={localProtocols}
           selectedAllocation={selectedAllocation}
-          selectedStar={selectedStar}
+          selectedPrime={selectedPrime}
         />
       }
     />
