@@ -433,7 +433,9 @@ export function AllocationGrid({
                                   color: 'text.muted',
                                 })}
                               >
-                                {formatAddress(allocation.receipt_token_address)}
+                                {formatAddress(
+                                  allocation.receipt_token_address,
+                                )}
                               </p>
                             </td>
                           </tr>

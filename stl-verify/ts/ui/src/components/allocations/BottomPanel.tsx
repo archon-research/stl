@@ -205,8 +205,7 @@ export function BottomPanel({
 
   const focusedAllocation =
     sortedAllocations.find(
-      (allocation) =>
-        String(allocation.receipt_token_id) === receiptTokenParam,
+      (allocation) => String(allocation.receipt_token_id) === receiptTokenParam,
     ) ?? null;
 
   const focusedProtocol = useMemo(
