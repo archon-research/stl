@@ -7,10 +7,9 @@ Welcome!
 >   cronjob, backfiller, model, or API endpoint — each has a home.
 > - **Go/Python** for workers / cronjobs / backfillers. **Python** for APIs
 >   and quantitative risk models. Anything else needs prior discussion.
-> - **Prefer on-chain data.** Off-chain feeds (CoinGecko, etc.) need a
->   good reason and vector-team approval.
+> - **On-chain data should come from the chain, not from intermediate sources.** Off-chain feeds (CoinGecko, DefiLlama, etc.) need a good reason and case-by-case approval from the maintainers.
 > - **Keep data pipelines separate from model pipelines** — ingest
->   ≠ compute-meaning.
+>   ≠ compute-meaning. The correct pattern is for data pipelines to write to the data store, and model pipelines to ingest the data needed from that store.
 > - Every timeseries table must be a hypertable + compressed + S3-tiered,
 >   in the same migration that creates it.
 > - **Never modify an applied migration** — write a new one.
@@ -200,19 +199,18 @@ Two rules that apply everywhere in this repo — they override local
 convenience:
 
 - **Prefer on-chain data whenever we can.** If the data lives on the
-  chain, the default is to read it from the chain (via Alchemy / Erigon
+  chain, it should be read from the chain (via Alchemy / Erigon
   and the cached block payload) — it's auditable (we can replay a
   block), trust-minimized (no third party), and stays consistent with
   the rest of the pipeline. Off-chain sources (CoinGecko, Anchorage,
-  Etherscan, etc.) are allowed **with a good reason and explicit
-  approval from the vector team** — e.g., the off-chain feed updates
-  materially faster than the on-chain oracle, or the data only exists
-  off-chain. Write the justification in the PR description so reviewers
+  Etherscan, etc.) are allowed **only ith a good reason and with explicit
+  approval from the repo maintainers** — e.g., the data only exists
+  off-chain. Write the justification in the PR description so that reviewers
   can see it.
 - **Data pipelines and model pipelines stay separate.** A **data
   pipeline** writes "what happened on the chain or at an external API"
   into Postgres as append-only time-series. A **model pipeline** reads
-  that data and writes "what it means" (risk scores, derived metrics,
+  that data from Postgres and writes "what it means" (risk scores, derived metrics,
   liquidation forecasts) into its own tables. Don't merge the two into
   a single worker or cronjob — coupling ingest to model output means
   every model change forces a re-ingest, and every ingest bug
