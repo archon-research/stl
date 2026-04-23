@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.10
 
-# Build UI
-FROM node:22-alpine AS ui-builder
+# Build UI on the native builder architecture — the output is static JS/HTML/CSS,
+# so there's no reason to run npm under QEMU arm64 emulation (which crashes node).
+FROM --platform=$BUILDPLATFORM node:22-alpine AS ui-builder
 
 WORKDIR /ui
 
