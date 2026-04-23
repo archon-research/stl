@@ -1,12 +1,15 @@
+# syntax=docker/dockerfile:1.7
+
 # Build UI
 FROM node:22-alpine AS ui-builder
 
 WORKDIR /ui
 
-COPY ts/package.json ts/package-lock.json ./
+COPY ts/package.json ts/package-lock.json ts/.npmrc ./
 COPY ts/ui/package.json ui/package.json
 
-RUN npm ci
+RUN --mount=type=secret,id=uikit_token,env=UIKIT_GH_PACKAGES_READ_TOKEN \
+    npm ci
 
 COPY ts/ui ui/
 
