@@ -23,9 +23,6 @@ export default defineConfig({
       ],
     },
   },
-  optimizeDeps: {
-    exclude: ['@archon-research/design-system'],
-  },
   build: {
     outDir: 'dist',
     sourcemap: false,
