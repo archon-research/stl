@@ -1803,7 +1803,7 @@ ECR_REPO_PYTHON_API = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-
 # Build Docker image for python-api (ARM64 for Graviton)
 docker-build-python-api:
 ifdef LOCAL
-	docker build \
+	docker buildx build --load \
 		--secret id=uikit_token,env=UIKIT_GH_PACKAGES_READ_TOKEN \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		-t stl-python-api:local -f python/Dockerfile .

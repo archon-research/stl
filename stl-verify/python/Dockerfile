@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.10
 
 # Build UI
 FROM node:22-alpine AS ui-builder
