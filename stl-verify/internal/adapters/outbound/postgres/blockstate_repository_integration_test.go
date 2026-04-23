@@ -5,10 +5,13 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -1740,4 +1743,136 @@ func TestGetMinUnpublishedBlock(t *testing.T) {
 			t.Errorf("expected blockNum=8 (7 is orphaned), got %d", blockNum)
 		}
 	})
+}
+
+// seedBlockStatesAcrossDays bulk-inserts rows for chainID spread across
+// multiple days of created_at, producing multiple TimescaleDB chunks. Uses
+// pgx CopyFrom (binary protocol, minimal round-trips) with
+// session_replication_role=replica to bypass the assign_block_version trigger
+// for the duration of the copy. We want rows to exist to exercise the
+// planner, not to exercise the trigger — the trigger's slowness is exactly
+// what the caller test guards against.
+func seedBlockStatesAcrossDays(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64, rows, days int) {
+	t.Helper()
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire conn: %v", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, "SET session_replication_role = 'replica'"); err != nil {
+		t.Fatalf("disable triggers (session_replication_role): %v", err)
+	}
+	// Restore to origin before releasing so a pooled reuse of this conn sees defaults.
+	defer func() {
+		if _, err := conn.Exec(ctx, "SET session_replication_role = 'origin'"); err != nil {
+			t.Logf("restore session_replication_role: %v", err)
+		}
+	}()
+
+	now := time.Now().UTC()
+	batch := make([][]any, 0, rows)
+	// Block numbers start at 1_000_000 — well below the test's probe number
+	// (1<<40 ≈ 1.1e12), so the probe is guaranteed to miss every seeded row.
+	for i := 0; i < rows; i++ {
+		createdAt := now.Add(-time.Duration(i%days) * 24 * time.Hour)
+		hash := fmt.Sprintf("0x%064x", i)
+		parent := fmt.Sprintf("0x%064x", i-1)
+		batch = append(batch, []any{chainID, int64(i + 1_000_000), hash, parent, int64(0), false, 0, createdAt})
+	}
+
+	copied, err := conn.CopyFrom(ctx,
+		pgx.Identifier{"block_states"},
+		[]string{"chain_id", "number", "hash", "parent_hash", "received_at", "is_orphaned", "version", "created_at"},
+		pgx.CopyFromRows(batch),
+	)
+	if err != nil {
+		t.Fatalf("copy seed rows: %v", err)
+	}
+	if copied != int64(rows) {
+		t.Fatalf("copied %d rows, expected %d", copied, rows)
+	}
+
+	if _, err := pool.Exec(ctx, `ANALYZE block_states`); err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+}
+
+// parseTotalBuffersFromExplain sums every "shared hit=X" and "shared read=Y"
+// occurrence in an EXPLAIN (ANALYZE, BUFFERS) TEXT-format plan. We don't walk
+// nodes — the sum across all "Buffers:" lines is what we care about.
+func parseTotalBuffersFromExplain(plan string) int {
+	// Postgres emits a separate "Planning:" section at the end of EXPLAIN
+	// output with its own buffer accounting. On TimescaleDB hypertables the
+	// planning phase inspects chunk catalog pages (thousands of buffers for
+	// ~100 chunks) and would dwarf the execution cost we actually care about.
+	// Strip it before summing.
+	if idx := strings.Index(plan, "\nPlanning:"); idx >= 0 {
+		plan = plan[:idx]
+	}
+	re := regexp.MustCompile(`shared (?:hit|read)=(\d+)`)
+	total := 0
+	for _, m := range re.FindAllStringSubmatch(plan, -1) {
+		// Regex already restricts m[1] to digits; strconv.Atoi cannot fail.
+		n, _ := strconv.Atoi(m[1])
+		total += n
+	}
+	return total
+}
+
+// TestSaveBlock_TriggerQueryPlanIsEfficient is a regression guard for VEC-144.
+// The assign_block_version() BEFORE INSERT trigger runs
+//
+//	SELECT MAX(version) FROM block_states WHERE chain_id=$1 AND number=$2
+//
+// on every INSERT. If no index matches this predicate, the planner falls back
+// to sequentially scanning every chunk, making a single INSERT take seconds on
+// a multi-million-row hypertable (observed on arbitrum: ~1500 ms, 160k buffer
+// hits). This test asserts the plan stays index-based and touches few pages.
+func TestSaveBlock_TriggerQueryPlanIsEfficient(t *testing.T) {
+	truncateBlockState(t, context.Background())
+	ctx := context.Background()
+
+	const chainID = int64(42161)
+
+	// 50k rows spread across 10 days — enough to split into several chunks and
+	// to tip the planner past the "everything is a seq scan on tiny tables"
+	// regime. Small enough to seed in <5s.
+	seedBlockStatesAcrossDays(t, ctx, blockstatePool, chainID, 50_000, 10)
+
+	const probeNumber = int64(1) << 40 // guaranteed no rows — realistic trigger miss case
+
+	explainRows, err := blockstatePool.Query(ctx, `
+		EXPLAIN (ANALYZE, BUFFERS)
+		SELECT COALESCE(MAX(version), -1) + 1
+		FROM block_states
+		WHERE chain_id = $1 AND number = $2
+	`, chainID, probeNumber)
+	if err != nil {
+		t.Fatalf("EXPLAIN failed: %v", err)
+	}
+	defer explainRows.Close()
+	var planLines []string
+	for explainRows.Next() {
+		var line string
+		if err := explainRows.Scan(&line); err != nil {
+			t.Fatalf("EXPLAIN scan: %v", err)
+		}
+		planLines = append(planLines, line)
+	}
+	if err := explainRows.Err(); err != nil {
+		t.Fatalf("EXPLAIN rows: %v", err)
+	}
+	planText := strings.Join(planLines, "\n")
+
+	if strings.Contains(planText, "Seq Scan") {
+		t.Fatalf("trigger query fell back to a sequential scan — check indexes on block_states.\nplan:\n%s", planText)
+	}
+
+	buffers := parseTotalBuffersFromExplain(planText)
+	const maxBuffers = 200
+	if buffers > maxBuffers {
+		t.Fatalf("trigger query touched %d buffers; expected ≤%d. A matching index on (chain_id, number, version DESC) is required.\nplan:\n%s", buffers, maxBuffers, planText)
+	}
 }
