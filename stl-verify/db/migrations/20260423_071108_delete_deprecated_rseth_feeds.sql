@@ -11,12 +11,10 @@
 --       longer be used."
 --
 -- Neither has ever successfully produced an onchain_token_price row.
--- rsETH remains priced by sparklend (oracle_id=1) with no gap.
---
--- See docs/superpowers/specs/2026-04-22-vec-152-rseth-feed-fix-design.md.
+-- rsETH remains priced by sparklend with no gap.
 
 DELETE FROM oracle_asset
-WHERE token_id = (SELECT id FROM token WHERE chain_id = 1 AND symbol = 'rsETH')
+WHERE token_id IN (SELECT id FROM token WHERE chain_id = 1 AND symbol = 'rsETH')
   AND oracle_id IN (SELECT id FROM oracle WHERE name IN ('chainlink','redstone'))
   AND feed_address IN (
     '\x03c68933f7a3F76875C0bc670a58e69294cDFD01'::BYTEA,
