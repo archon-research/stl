@@ -147,6 +147,29 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "PrimeResponse": {
+        "properties": {
+          "address": {
+            "title": "Address",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "address"
+        ],
+        "title": "PrimeResponse",
+        "type": "object"
+      },
       "ReceiptTokenPositionResponse": {
         "properties": {
           "balance": {
@@ -268,27 +291,76 @@
         "title": "RiskBreakdownResponse",
         "type": "object"
       },
-      "StarResponse": {
+      "ScenarioRrcRequest": {
         "properties": {
-          "address": {
-            "title": "Address",
+          "asset": {
+            "title": "Asset",
             "type": "string"
           },
-          "id": {
-            "title": "Id",
+          "usd_exposure": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Usd Exposure"
+          }
+        },
+        "required": [
+          "asset",
+          "usd_exposure"
+        ],
+        "title": "ScenarioRrcRequest",
+        "type": "object"
+      },
+      "ScenarioRrcResponse": {
+        "properties": {
+          "asset": {
+            "title": "Asset",
             "type": "string"
           },
-          "name": {
-            "title": "Name",
+          "crr_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr Pct",
+            "type": "string"
+          },
+          "rating_id": {
+            "title": "Rating Id",
+            "type": "string"
+          },
+          "rating_version": {
+            "title": "Rating Version",
+            "type": "string"
+          },
+          "rrc_usd": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Rrc Usd",
+            "type": "string"
+          },
+          "source_commit_sha": {
+            "title": "Source Commit Sha",
+            "type": "string"
+          },
+          "usd_exposure": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Usd Exposure",
             "type": "string"
           }
         },
         "required": [
-          "id",
-          "name",
-          "address"
+          "asset",
+          "usd_exposure",
+          "rating_id",
+          "rating_version",
+          "crr_pct",
+          "rrc_usd",
+          "source_commit_sha"
         ],
-        "title": "StarResponse",
+        "title": "ScenarioRrcResponse",
         "type": "object"
       },
       "ValidationError": {
@@ -339,6 +411,130 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/primes": {
+      "get": {
+        "operationId": "list_primes_v1_primes_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PrimeResponse"
+                  },
+                  "title": "Response List Primes V1 Primes Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Primes"
+      }
+    },
+    "/v1/primes/{prime_id}/allocations": {
+      "get": {
+        "operationId": "list_allocations_v1_primes__prime_id__allocations_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "prime_id",
+            "required": true,
+            "schema": {
+              "title": "Prime Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "block_number",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Block Number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AllocationPositionResponse"
+                  },
+                  "title": "Response List Allocations V1 Primes  Prime Id  Allocations Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Allocations"
+      }
+    },
+    "/v1/primes/{prime_id}/receipt-tokens": {
+      "get": {
+        "operationId": "list_receipt_tokens_v1_primes__prime_id__receipt_tokens_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "prime_id",
+            "required": true,
+            "schema": {
+              "title": "Prime Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ReceiptTokenPositionResponse"
+                  },
+                  "title": "Response List Receipt Tokens V1 Primes  Prime Id  Receipt Tokens Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Receipt Tokens"
+      }
+    },
     "/v1/ready": {
       "get": {
         "operationId": "get_ready_v1_ready_get",
@@ -353,6 +549,45 @@
           }
         },
         "summary": "Get Ready"
+      }
+    },
+    "/v1/risk/rrc/scenario": {
+      "post": {
+        "description": "Return SURAF RRC for a hypothetical ``(asset, usd_exposure)`` pair.\n\n``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating\nfor the asset. Pure scenario calculation \u2014 no DB lookup, no position\nstate. Position-level RRC (``GET /risk/{receipt_token_id}/rrc``) is\ndeferred pending a decision on how to derive USD exposure from holdings.",
+        "operationId": "post_rrc_scenario_v1_risk_rrc_scenario_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScenarioRrcRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRrcResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Rrc Scenario"
       }
     },
     "/v1/risk/{receipt_token_id}/bad-debt": {
@@ -450,130 +685,6 @@
           }
         },
         "summary": "Get Risk Breakdown"
-      }
-    },
-    "/v1/stars": {
-      "get": {
-        "operationId": "list_stars_v1_stars_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/StarResponse"
-                  },
-                  "title": "Response List Stars V1 Stars Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Stars"
-      }
-    },
-    "/v1/stars/{star_id}/allocations": {
-      "get": {
-        "operationId": "list_allocations_v1_stars__star_id__allocations_get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "star_id",
-            "required": true,
-            "schema": {
-              "title": "Star Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "block_number",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Block Number"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/AllocationPositionResponse"
-                  },
-                  "title": "Response List Allocations V1 Stars  Star Id  Allocations Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "List Allocations"
-      }
-    },
-    "/v1/stars/{star_id}/receipt-tokens": {
-      "get": {
-        "operationId": "list_receipt_tokens_v1_stars__star_id__receipt_tokens_get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "star_id",
-            "required": true,
-            "schema": {
-              "title": "Star Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/ReceiptTokenPositionResponse"
-                  },
-                  "title": "Response List Receipt Tokens V1 Stars  Star Id  Receipt Tokens Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "List Receipt Tokens"
       }
     },
     "/v1/status": {

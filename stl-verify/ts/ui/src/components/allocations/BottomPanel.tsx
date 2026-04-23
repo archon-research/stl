@@ -23,8 +23,8 @@ import { isAbortError, toErrorMessage } from '../../lib/errors';
 import { PARAMS, useUrlParam } from '../../lib/url-params';
 import type {
   AllocationPosition,
+  Prime,
   ReceiptTokenPosition,
-  Star,
 } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import { BadDebtTab } from './tabs/BadDebtTab';
@@ -34,7 +34,7 @@ type BottomPanelProps = {
   chainLabels: ChainLabelLookup;
   localProtocols: LocalProtocolRow[];
   selectedAllocation: AllocationPosition | null;
-  selectedStar: Star | null;
+  selectedPrime: Prime | null;
 };
 
 type ActiveTab = 'risk' | 'bad-debt';
@@ -125,7 +125,7 @@ export function BottomPanel({
   chainLabels,
   localProtocols,
   selectedAllocation,
-  selectedStar,
+  selectedPrime,
 }: BottomPanelProps) {
   const [receiptTokens, setReceiptTokens] = useState<ReceiptTokenPosition[]>(
     [],
@@ -137,23 +137,23 @@ export function BottomPanel({
   );
   const [tabParam, setTabParam] = useUrlParam(PARAMS.tab);
 
-  const previousStarIdRef = useRef<string | null>(selectedStar?.id ?? null);
+  const previousPrimeIdRef = useRef<string | null>(selectedPrime?.id ?? null);
   const previousAllocationKeyRef = useRef<string | null>(null);
 
   const activeTab: ActiveTab = tabParam === 'bad-debt' ? 'bad-debt' : 'risk';
 
   useEffect(() => {
-    const starId = selectedStar?.id ?? null;
+    const primeId = selectedPrime?.id ?? null;
 
-    if (previousStarIdRef.current && previousStarIdRef.current !== starId) {
+    if (previousPrimeIdRef.current && previousPrimeIdRef.current !== primeId) {
       setReceiptTokenParam(null);
     }
 
-    previousStarIdRef.current = starId;
-  }, [selectedStar?.id, setReceiptTokenParam]);
+    previousPrimeIdRef.current = primeId;
+  }, [selectedPrime?.id, setReceiptTokenParam]);
 
   useEffect(() => {
-    if (!selectedStar?.id) {
+    if (!selectedPrime?.id) {
       setReceiptTokens([]);
       setErrorMessage(null);
       setIsLoading(false);
@@ -166,7 +166,7 @@ export function BottomPanel({
     setIsLoading(true);
     setErrorMessage(null);
 
-    void getReceiptTokens(selectedStar.id, controller.signal)
+    void getReceiptTokens(selectedPrime.id, controller.signal)
       .then((response) => {
         if (controller.signal.aborted) {
           return;
@@ -188,7 +188,7 @@ export function BottomPanel({
       });
 
     return () => controller.abort();
-  }, [selectedStar]);
+  }, [selectedPrime]);
 
   const sortedReceiptTokens = useMemo(
     () => sortReceiptTokens(receiptTokens),
@@ -338,7 +338,7 @@ export function BottomPanel({
                 setReceiptTokenParam(event.target.value || null)
               }
               disabled={
-                !selectedStar || isLoading || sortedReceiptTokens.length === 0
+                !selectedPrime || isLoading || sortedReceiptTokens.length === 0
               }
             >
               <option value="">Choose a receipt token</option>
@@ -396,14 +396,14 @@ export function BottomPanel({
       <div
         className={css({ display: 'grid', gap: '4', alignContent: 'start' })}
       >
-        {!selectedStar ? (
+        {!selectedPrime ? (
           <EmptyPanelState
-            title="Choose a star to inspect risk"
-            body="The lower panel comes alive after a star is selected and receipt tokens are loaded for it."
+            title="Choose a prime to inspect risk"
+            body="The lower panel comes alive after a prime is selected and receipt tokens are loaded for it."
           />
         ) : null}
 
-        {selectedStar && errorMessage ? (
+        {selectedPrime && errorMessage ? (
           <div
             className={css({
               borderRadius: 'md',
@@ -437,24 +437,24 @@ export function BottomPanel({
           </div>
         ) : null}
 
-        {selectedStar && !errorMessage && isLoading ? (
+        {selectedPrime && !errorMessage && isLoading ? (
           <EmptyPanelState
             title="Loading receipt tokens"
-            body="The bottom panel is waiting for the selected star's receipt token inventory."
+            body="The bottom panel is waiting for the selected prime's receipt token inventory."
           />
         ) : null}
 
-        {selectedStar &&
+        {selectedPrime &&
         !errorMessage &&
         !isLoading &&
         sortedReceiptTokens.length === 0 ? (
           <EmptyPanelState
             title="No receipt tokens returned"
-            body="The selected star did not return any receipt token rows from the API."
+            body="The selected prime did not return any receipt token rows from the API."
           />
         ) : null}
 
-        {selectedStar &&
+        {selectedPrime &&
         !errorMessage &&
         !isLoading &&
         sortedReceiptTokens.length > 0 ? (

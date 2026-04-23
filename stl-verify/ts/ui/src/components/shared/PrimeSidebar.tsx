@@ -3,14 +3,14 @@ import { ThemeToggle } from '@archon-research/design-system';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import type { Star } from '../../types/allocation';
+import type { Prime } from '../../types/allocation';
 
-type StarSidebarProps = {
-  stars: Star[];
-  selectedStarId: string | null;
+type PrimeSidebarProps = {
+  primes: Prime[];
+  selectedPrimeId: string | null;
   isLoading: boolean;
   errorMessage: string | null;
-  onSelectStar: (starId: string) => void;
+  onSelectPrime: (primeId: string) => void;
 };
 
 function formatAddress(address: string): string {
@@ -21,7 +21,7 @@ function formatAddress(address: string): string {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
-function StarSkeletonList() {
+function PrimeSkeletonList() {
   return (
     <div className={css({ display: 'grid', gap: '3' })}>
       {Array.from({ length: 6 }, (_, index) => (
@@ -42,13 +42,13 @@ function StarSkeletonList() {
   );
 }
 
-export function StarSidebar({
-  stars,
-  selectedStarId,
+export function PrimeSidebar({
+  primes,
+  selectedPrimeId,
   isLoading,
   errorMessage,
-  onSelectStar,
-}: StarSidebarProps) {
+  onSelectPrime,
+}: PrimeSidebarProps) {
   return (
     <div
       className={css({
@@ -88,7 +88,7 @@ export function StarSidebar({
           py: '4',
         })}
       >
-        {isLoading ? <StarSkeletonList /> : null}
+        {isLoading ? <PrimeSkeletonList /> : null}
 
         {!isLoading && errorMessage ? (
           <div
@@ -102,7 +102,7 @@ export function StarSidebar({
             })}
           >
             <p className={css({ m: 0, fontSize: 'sm', color: 'text.strong' })}>
-              Unable to load stars.
+              Unable to load primes.
             </p>
             <p
               className={css({
@@ -117,7 +117,7 @@ export function StarSidebar({
           </div>
         ) : null}
 
-        {!isLoading && !errorMessage && stars.length === 0 ? (
+        {!isLoading && !errorMessage && primes.length === 0 ? (
           <div
             className={css({
               borderRadius: 'md',
@@ -129,21 +129,21 @@ export function StarSidebar({
             })}
           >
             <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-              No stars were returned by the API.
+              No primes were returned by the API.
             </p>
           </div>
         ) : null}
 
-        {!isLoading && !errorMessage && stars.length > 0 ? (
+        {!isLoading && !errorMessage && primes.length > 0 ? (
           <div className={css({ display: 'grid', gap: '2.5' })}>
-            {stars.map((star) => {
-              const isSelected = star.id === selectedStarId;
+            {primes.map((prime) => {
+              const isSelected = prime.id === selectedPrimeId;
               return (
                 <button
-                  key={star.id}
+                  key={prime.id}
                   type="button"
                   aria-pressed={isSelected}
-                  onClick={() => onSelectStar(star.id)}
+                  onClick={() => onSelectPrime(prime.id)}
                   className={css({
                     width: '100%',
                     textAlign: 'left',
@@ -185,7 +185,7 @@ export function StarSidebar({
                         flexShrink: 0,
                       })}
                     >
-                      {star.name.slice(0, 2)}
+                      {prime.name.slice(0, 2)}
                     </div>
                     <div
                       className={css({
@@ -202,7 +202,7 @@ export function StarSidebar({
                           color: 'text.strong',
                         })}
                       >
-                        {star.name}
+                        {prime.name}
                       </p>
                       <p
                         className={css({
@@ -212,7 +212,7 @@ export function StarSidebar({
                           color: 'text.muted',
                         })}
                       >
-                        {formatAddress(star.address)}
+                        {formatAddress(prime.address)}
                       </p>
                     </div>
                   </div>

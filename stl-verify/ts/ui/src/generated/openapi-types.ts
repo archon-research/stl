@@ -4,6 +4,57 @@
  */
 
 export interface paths {
+  '/v1/primes': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Primes */
+    get: operations['list_primes_v1_primes_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/primes/{prime_id}/allocations': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Allocations */
+    get: operations['list_allocations_v1_primes__prime_id__allocations_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/primes/{prime_id}/receipt-tokens': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Receipt Tokens */
+    get: operations['list_receipt_tokens_v1_primes__prime_id__receipt_tokens_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v1/ready': {
     parameters: {
       query?: never;
@@ -15,6 +66,31 @@ export interface paths {
     get: operations['get_ready_v1_ready_get'];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/risk/rrc/scenario': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Post Rrc Scenario
+     * @description Return SURAF RRC for a hypothetical ``(asset, usd_exposure)`` pair.
+     *
+     *     ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
+     *     for the asset. Pure scenario calculation — no DB lookup, no position
+     *     state. Position-level RRC (``GET /risk/{receipt_token_id}/rrc``) is
+     *     deferred pending a decision on how to derive USD exposure from holdings.
+     */
+    post: operations['post_rrc_scenario_v1_risk_rrc_scenario_post'];
     delete?: never;
     options?: never;
     head?: never;
@@ -53,57 +129,6 @@ export interface paths {
      * @description Return the full risk-enriched collateral breakdown for a receipt token position.
      */
     get: operations['get_risk_breakdown_v1_risk__receipt_token_id__breakdown_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/stars': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /** List Stars */
-    get: operations['list_stars_v1_stars_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/stars/{star_id}/allocations': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /** List Allocations */
-    get: operations['list_allocations_v1_stars__star_id__allocations_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/stars/{star_id}/receipt-tokens': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /** List Receipt Tokens */
-    get: operations['list_receipt_tokens_v1_stars__star_id__receipt_tokens_get'];
     put?: never;
     post?: never;
     delete?: never;
@@ -183,6 +208,15 @@ export interface components {
       /** Detail */
       detail?: components['schemas']['ValidationError'][];
     };
+    /** PrimeResponse */
+    PrimeResponse: {
+      /** Address */
+      address: string;
+      /** Id */
+      id: string;
+      /** Name */
+      name: string;
+    };
     /** ReceiptTokenPositionResponse */
     ReceiptTokenPositionResponse: {
       /** Balance */
@@ -224,14 +258,29 @@ export interface components {
       /** Receipt Token Id */
       receipt_token_id: number;
     };
-    /** StarResponse */
-    StarResponse: {
-      /** Address */
-      address: string;
-      /** Id */
-      id: string;
-      /** Name */
-      name: string;
+    /** ScenarioRrcRequest */
+    ScenarioRrcRequest: {
+      /** Asset */
+      asset: string;
+      /** Usd Exposure */
+      usd_exposure: number | string;
+    };
+    /** ScenarioRrcResponse */
+    ScenarioRrcResponse: {
+      /** Asset */
+      asset: string;
+      /** Crr Pct */
+      crr_pct: string;
+      /** Rating Id */
+      rating_id: string;
+      /** Rating Version */
+      rating_version: string;
+      /** Rrc Usd */
+      rrc_usd: string;
+      /** Source Commit Sha */
+      source_commit_sha: string;
+      /** Usd Exposure */
+      usd_exposure: string;
     };
     /** ValidationError */
     ValidationError: {
@@ -255,6 +304,90 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+  list_primes_v1_primes_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['PrimeResponse'][];
+        };
+      };
+    };
+  };
+  list_allocations_v1_primes__prime_id__allocations_get: {
+    parameters: {
+      query?: {
+        block_number?: number | null;
+      };
+      header?: never;
+      path: {
+        prime_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['AllocationPositionResponse'][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  list_receipt_tokens_v1_primes__prime_id__receipt_tokens_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        prime_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ReceiptTokenPositionResponse'][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
   get_ready_v1_ready_get: {
     parameters: {
       query?: never;
@@ -271,6 +404,39 @@ export interface operations {
         };
         content: {
           'application/json': unknown;
+        };
+      };
+    };
+  };
+  post_rrc_scenario_v1_risk_rrc_scenario_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['ScenarioRrcRequest'];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ScenarioRrcResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
         };
       };
     };
@@ -326,90 +492,6 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['RiskBreakdownResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  list_stars_v1_stars_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['StarResponse'][];
-        };
-      };
-    };
-  };
-  list_allocations_v1_stars__star_id__allocations_get: {
-    parameters: {
-      query?: {
-        block_number?: number | null;
-      };
-      header?: never;
-      path: {
-        star_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['AllocationPositionResponse'][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  list_receipt_tokens_v1_stars__star_id__receipt_tokens_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        star_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ReceiptTokenPositionResponse'][];
         };
       };
       /** @description Validation Error */

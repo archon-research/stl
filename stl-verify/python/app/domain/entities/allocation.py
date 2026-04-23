@@ -38,7 +38,7 @@ class EthAddress:
 
 @dataclass(frozen=True)
 class ReceiptTokenPosition:
-    """A receipt token held by a star, with balance and protocol info."""
+    """A receipt token held by a prime, with balance and protocol info."""
 
     receipt_token_id: int
     symbol: str
@@ -49,7 +49,7 @@ class ReceiptTokenPosition:
 
 
 @dataclass
-class Star:
+class Prime:
     id: str
     name: str
     address: str

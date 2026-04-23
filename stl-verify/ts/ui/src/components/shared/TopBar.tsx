@@ -7,7 +7,7 @@ import { flex } from '#styled-system/patterns';
 import type { FilterOption } from '../../lib/dashboard';
 
 type TopBarProps = {
-  hasSelectedStar: boolean;
+  hasSelectedPrime: boolean;
   networkOptions: FilterOption[];
   onNetworkChange: (value: string | null) => void;
   onProtocolChange: (value: string | null) => void;
@@ -53,7 +53,7 @@ function FilterField({
 }
 
 export function TopBar({
-  hasSelectedStar,
+  hasSelectedPrime,
   networkOptions,
   onNetworkChange,
   onProtocolChange,
@@ -65,7 +65,7 @@ export function TopBar({
     <div className={flex({ align: 'end', gap: '3', wrap: 'wrap' })}>
       <FilterField
         ariaLabel="Filter allocations by network"
-        disabled={!hasSelectedStar || networkOptions.length === 0}
+        disabled={!hasSelectedPrime || networkOptions.length === 0}
         onChange={onNetworkChange}
         options={networkOptions}
         placeholder="All networks"
@@ -73,7 +73,7 @@ export function TopBar({
       />
       <FilterField
         ariaLabel="Filter allocations by protocol"
-        disabled={!hasSelectedStar || protocolOptions.length === 0}
+        disabled={!hasSelectedPrime || protocolOptions.length === 0}
         onChange={onProtocolChange}
         options={protocolOptions}
         placeholder="All protocols"
