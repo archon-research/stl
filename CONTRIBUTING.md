@@ -7,9 +7,14 @@ Welcome!
 >   cronjob, backfiller, model, or API endpoint — each has a home.
 > - **Go/Python** for workers / cronjobs / backfillers. **Python** for APIs
 >   and quantitative risk models. Anything else needs prior discussion.
-> - **On-chain data should come from chain RPC or our cached block payload, not from third-party indexers or other derived/intermediate feeds.** Off-chain feeds (CoinGecko, DefiLlama, etc.) need a good reason and case-by-case approval from the maintainers.
+> - **On-chain data should come from chain RPC or our cached block payload,
+>   not from third-party indexers or other derived/intermediate feeds.**
+>   Off-chain feeds (CoinGecko, DefiLlama, etc.) need a good reason and
+>   case-by-case approval from the maintainers.
 > - **Keep data pipelines separate from model pipelines** — ingest
->   ≠ compute-meaning. The correct pattern is for data pipelines to write to the data store, and model pipelines to ingest the data needed from that store.
+>   ≠ compute-meaning. The correct pattern is for data pipelines to write
+>   to the data store, and model pipelines to ingest the data needed from
+>   that store.
 > - Every timeseries table must be a hypertable + compressed + S3-tiered,
 >   in the same migration that creates it.
 > - **Never modify an applied migration** — write a new one.
