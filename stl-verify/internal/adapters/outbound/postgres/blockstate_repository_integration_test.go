@@ -1747,11 +1747,13 @@ func TestGetMinUnpublishedBlock(t *testing.T) {
 
 // seedBlockStatesAcrossDays bulk-inserts rows for chainID spread across
 // multiple days of created_at, producing multiple TimescaleDB chunks. Uses
-// pgx CopyFrom (binary protocol, minimal round-trips) with
-// session_replication_role=replica to bypass the assign_block_version trigger
-// for the duration of the copy. We want rows to exist to exercise the
-// planner, not to exercise the trigger — the trigger's slowness is exactly
-// what the caller test guards against.
+// pgx CopyFrom (binary protocol, minimal round-trips) inside an explicit
+// transaction with SET LOCAL session_replication_role = 'replica' to bypass
+// the assign_block_version trigger for the duration of the copy. SET LOCAL is
+// auto-reset by Postgres on commit/rollback, so the pooled connection can
+// never leak "triggers disabled" state to the next test that acquires it.
+// We want rows to exist to exercise the planner, not to exercise the trigger
+// — the trigger's slowness is exactly what the caller test guards against.
 func seedBlockStatesAcrossDays(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64, rows, days int) {
 	t.Helper()
 
@@ -1761,15 +1763,22 @@ func seedBlockStatesAcrossDays(t *testing.T, ctx context.Context, pool *pgxpool.
 	}
 	defer conn.Release()
 
-	if _, err := conn.Exec(ctx, "SET session_replication_role = 'replica'"); err != nil {
-		t.Fatalf("disable triggers (session_replication_role): %v", err)
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin seed tx: %v", err)
 	}
-	// Restore to origin before releasing so a pooled reuse of this conn sees defaults.
+	committed := false
 	defer func() {
-		if _, err := conn.Exec(ctx, "SET session_replication_role = 'origin'"); err != nil {
-			t.Logf("restore session_replication_role: %v", err)
+		if !committed {
+			if err := tx.Rollback(ctx); err != nil {
+				t.Logf("rollback seed tx: %v", err)
+			}
 		}
 	}()
+
+	if _, err := tx.Exec(ctx, "SET LOCAL session_replication_role = 'replica'"); err != nil {
+		t.Fatalf("disable triggers (session_replication_role): %v", err)
+	}
 
 	now := time.Now().UTC()
 	batch := make([][]any, 0, rows)
@@ -1782,7 +1791,7 @@ func seedBlockStatesAcrossDays(t *testing.T, ctx context.Context, pool *pgxpool.
 		batch = append(batch, []any{chainID, int64(i + 1_000_000), hash, parent, int64(0), false, 0, createdAt})
 	}
 
-	copied, err := conn.CopyFrom(ctx,
+	copied, err := tx.CopyFrom(ctx,
 		pgx.Identifier{"block_states"},
 		[]string{"chain_id", "number", "hash", "parent_hash", "received_at", "is_orphaned", "version", "created_at"},
 		pgx.CopyFromRows(batch),
@@ -1793,6 +1802,11 @@ func seedBlockStatesAcrossDays(t *testing.T, ctx context.Context, pool *pgxpool.
 	if copied != int64(rows) {
 		t.Fatalf("copied %d rows, expected %d", copied, rows)
 	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit seed tx: %v", err)
+	}
+	committed = true
 
 	if _, err := pool.Exec(ctx, `ANALYZE block_states`); err != nil {
 		t.Fatalf("analyze: %v", err)
