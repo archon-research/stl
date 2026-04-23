@@ -1,15 +1,19 @@
 # syntax=docker/dockerfile:1.10
 
-# Build UI
-FROM node:22-alpine AS ui-builder
+# Build UI on the native builder architecture — the output is static JS/HTML/CSS,
+# so there's no reason to run npm under QEMU arm64 emulation (which crashes node).
+FROM --platform=$BUILDPLATFORM node:24-alpine AS ui-builder
 
 WORKDIR /ui
 
 COPY ts/package.json ts/package-lock.json ts/.npmrc ./
 COPY ts/ui/package.json ui/package.json
 
+# --ignore-scripts skips lifecycle hooks (notably the `prepare` → `panda codegen`
+# in @stl-verify/ui, which needs panda.config.ts that isn't copied yet).
+# `npm run build` below runs `prebuild` → codegen once the source is present.
 RUN --mount=type=secret,id=uikit_token,env=UIKIT_GH_PACKAGES_READ_TOKEN \
-    npm ci
+    npm ci --ignore-scripts
 
 COPY ts/ui ui/
 
