@@ -12,10 +12,10 @@ import {
   parseNumericValue,
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
-import type { BadDebt, ReceiptTokenPosition } from '../../../types/allocation';
+import type { Allocation, BadDebt } from '../../../types/allocation';
 
 type BadDebtTabProps = {
-  selectedReceiptToken: ReceiptTokenPosition | null;
+  selectedReceiptToken: Allocation | null;
 };
 
 function getToneStyles(tone: ReturnType<typeof getBadDebtTone>) {

@@ -10,7 +10,6 @@ import type {
   AllocationsResponse,
   BadDebt,
   PrimesResponse,
-  ReceiptTokensResponse,
   RiskBreakdown,
 } from '../types/allocation';
 import type {
@@ -131,19 +130,6 @@ export function getAllocations(
       signal,
     }),
     'GET /v1/primes/{prime_id}/allocations',
-  );
-}
-
-export function getReceiptTokens(
-  primeId: string,
-  signal?: AbortSignal,
-): Promise<ReceiptTokensResponse> {
-  return requestData(
-    apiClient.GET('/v1/primes/{prime_id}/receipt-tokens', {
-      params: { path: { prime_id: primeId } },
-      signal,
-    }),
-    'GET /v1/primes/{prime_id}/receipt-tokens',
   );
 }
 

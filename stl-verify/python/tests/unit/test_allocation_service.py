@@ -4,7 +4,7 @@ import pytest
 
 from app.domain.entities.allocation import EthAddress, Prime
 from app.services.allocation_service import AllocationService
-from tests.conftest import make_allocation_position
+from tests.conftest import make_receipt_token_position
 
 _VALID_ADDR = EthAddress("0x" + "ab" * 20)
 
@@ -28,38 +28,25 @@ async def test_list_primes_returns_all_primes():
 
 
 @pytest.mark.asyncio
-async def test_list_allocations_by_prime_delegates_to_repository():
+async def test_list_receipt_token_positions_delegates_to_repository():
     repo = AsyncMock()
-    position = make_allocation_position()
-    repo.list_allocations_by_prime.return_value = [position]
+    position = make_receipt_token_position()
+    repo.list_receipt_token_positions.return_value = [position]
     service = AllocationService(repo)
 
-    result = await service.list_allocations_by_prime(_VALID_ADDR)
+    result = await service.list_receipt_token_positions(_VALID_ADDR)
 
     assert result == [position]
-    repo.list_allocations_by_prime.assert_awaited_once_with(_VALID_ADDR, None)
+    repo.list_receipt_token_positions.assert_awaited_once_with(_VALID_ADDR)
 
 
 @pytest.mark.asyncio
-async def test_list_allocations_by_prime_with_block_number_passes_it_to_repository():
+async def test_list_receipt_token_positions_returns_empty_for_unknown_prime():
     repo = AsyncMock()
-    position = make_allocation_position(block_number=1000)
-    repo.list_allocations_by_prime.return_value = [position]
-    service = AllocationService(repo)
-
-    result = await service.list_allocations_by_prime(_VALID_ADDR, block_number=1000)
-
-    assert result == [position]
-    repo.list_allocations_by_prime.assert_awaited_once_with(_VALID_ADDR, 1000)
-
-
-@pytest.mark.asyncio
-async def test_list_allocations_by_prime_returns_empty_for_unknown_prime():
-    repo = AsyncMock()
-    repo.list_allocations_by_prime.return_value = []
+    repo.list_receipt_token_positions.return_value = []
     service = AllocationService(repo)
 
     unknown_addr = EthAddress("0x" + "de" * 20)
-    result = await service.list_allocations_by_prime(unknown_addr)
+    result = await service.list_receipt_token_positions(unknown_addr)
 
     assert result == []
