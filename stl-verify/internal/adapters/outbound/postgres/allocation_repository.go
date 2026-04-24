@@ -49,8 +49,25 @@ func NewAllocationRepository(
 	}
 }
 
+// SavePositions opens its own transaction and delegates to SavePositionsTx.
+// Use SavePositionsTx when you need to coordinate this write with another
+// repository inside one atomic transaction.
 func (r *AllocationRepository) SavePositions(
 	ctx context.Context,
+	positions []*entity.AllocationPosition,
+) error {
+	if len(positions) == 0 {
+		return nil
+	}
+	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		return r.SavePositionsTx(ctx, tx, positions)
+	})
+}
+
+// SavePositionsTx persists positions within an externally managed transaction.
+func (r *AllocationRepository) SavePositionsTx(
+	ctx context.Context,
+	tx pgx.Tx,
 	positions []*entity.AllocationPosition,
 ) error {
 	if len(positions) == 0 {
@@ -63,56 +80,54 @@ func (r *AllocationRepository) SavePositions(
 		}
 	}
 
-	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
-		tokenIDs, err := r.resolveTokenIDs(ctx, tx, positions)
+	tokenIDs, err := r.resolveTokenIDs(ctx, tx, positions)
+	if err != nil {
+		return fmt.Errorf("resolve token IDs: %w", err)
+	}
+
+	for _, pos := range positions {
+		key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
+		if _, ok := tokenIDs[key]; !ok {
+			return fmt.Errorf(
+				"token ID not resolved for chain=%d address=%s",
+				pos.ChainID, pos.TokenAddress.Hex(),
+			)
+		}
+	}
+
+	batch := &pgx.Batch{}
+	for _, pos := range positions {
+		key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
+		tokenID := tokenIDs[key]
+
+		query, args, err := r.buildInsertArgs(pos, tokenID)
 		if err != nil {
-			return fmt.Errorf("resolve token IDs: %w", err)
+			return fmt.Errorf(
+				"build insert for chain=%d address=%s block=%d: %w",
+				pos.ChainID, pos.TokenAddress.Hex(), pos.BlockNumber, err,
+			)
 		}
+		batch.Queue(query, args...)
+	}
 
-		for _, pos := range positions {
-			key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
-			if _, ok := tokenIDs[key]; !ok {
-				return fmt.Errorf(
-					"token ID not resolved for chain=%d address=%s",
-					pos.ChainID, pos.TokenAddress.Hex(),
-				)
-			}
+	results := tx.SendBatch(ctx, batch)
+	for i := range positions {
+		if _, err := results.Exec(); err != nil {
+			_ = results.Close()
+			return fmt.Errorf(
+				"insert position %d (chain=%d address=%s block=%d): %w",
+				i, positions[i].ChainID,
+				positions[i].TokenAddress.Hex(),
+				positions[i].BlockNumber, err,
+			)
 		}
+	}
+	if err := results.Close(); err != nil {
+		return fmt.Errorf("close batch: %w", err)
+	}
 
-		batch := &pgx.Batch{}
-		for _, pos := range positions {
-			key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
-			tokenID := tokenIDs[key]
-
-			query, args, err := r.buildInsertArgs(pos, tokenID)
-			if err != nil {
-				return fmt.Errorf(
-					"build insert for chain=%d address=%s block=%d: %w",
-					pos.ChainID, pos.TokenAddress.Hex(), pos.BlockNumber, err,
-				)
-			}
-			batch.Queue(query, args...)
-		}
-
-		results := tx.SendBatch(ctx, batch)
-		for i := range positions {
-			if _, err := results.Exec(); err != nil {
-				_ = results.Close()
-				return fmt.Errorf(
-					"insert position %d (chain=%d address=%s block=%d): %w",
-					i, positions[i].ChainID,
-					positions[i].TokenAddress.Hex(),
-					positions[i].BlockNumber, err,
-				)
-			}
-		}
-		if err := results.Close(); err != nil {
-			return fmt.Errorf("close batch: %w", err)
-		}
-
-		r.logger.Debug("positions saved", "inserted", len(positions))
-		return nil
-	})
+	r.logger.Debug("positions saved", "inserted", len(positions))
+	return nil
 }
 
 func (r *AllocationRepository) buildInsertArgs(
