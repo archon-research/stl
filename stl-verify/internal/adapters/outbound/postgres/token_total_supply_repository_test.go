@@ -120,4 +120,3 @@ func TestTokenTotalSupply_Validate(t *testing.T) {
 		})
 	}
 }
-
