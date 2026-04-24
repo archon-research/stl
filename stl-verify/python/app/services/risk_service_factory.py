@@ -96,6 +96,13 @@ class RiskServiceFactory:
             breakdown_repo = AaveLikeBackedBreakdownRepository(self._engine, info.protocol_id)
             liq_repo = AaveLikeLiquidationParamsRepository(self._engine, info.protocol_id)
             asset_id = info.underlying_token_id
+            # The receipt-token-address `token` row may not be indexed yet —
+            # warm-up window between receipt_token creation and the first
+            # allocation_position write. Surface as 503 share_data_missing.
+            if info.receipt_token_token_id is None:
+                raise MissingShareError(
+                    f"receipt-token address not indexed yet for receipt_token_id={info.receipt_token_id}"
+                )
             try:
                 wallet = await self._lookup_wallet(info.receipt_token_address, info.chain_id)
             except ValueError as exc:

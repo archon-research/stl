@@ -7,15 +7,21 @@ from app.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Join to `token` on (chain_id, address) so callers can query
-# allocation_position / token_total_supply by token_id.
+# LEFT JOIN to `token` on (chain_id, address) so callers can query
+# allocation_position / token_total_supply by token_id when available. The
+# receipt-token-address `token` row is created lazily — typically when the
+# prime-allocation-indexer first writes an allocation_position for it — so a
+# fresh receipt_token can exist without a matching token row. Returning the
+# receipt-token metadata anyway lets the API distinguish "not indexed yet"
+# (warm-up → 503) from "unknown receipt token" (→ 404), and lets non-Aave
+# branches (e.g. Morpho) resolve without ever needing receipt_token_token_id.
 _RECEIPT_TOKEN_SQL = """
 SELECT rt.id, rt.protocol_id, rt.underlying_token_id, rt.receipt_token_address,
        p.chain_id, p.name AS protocol_name,
        t.id AS receipt_token_token_id
 FROM receipt_token rt
 JOIN protocol p ON p.id = rt.protocol_id
-JOIN token    t ON t.chain_id = p.chain_id AND t.address = rt.receipt_token_address
+LEFT JOIN token t ON t.chain_id = p.chain_id AND t.address = rt.receipt_token_address
 WHERE rt.id = :receipt_token_id
 """
 

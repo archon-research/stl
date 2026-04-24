@@ -27,7 +27,7 @@ class MissingShareError(AllocationShareError):
 # Both sub-queries order by (block_number, block_version, processing_version)
 # DESC so they deterministically pick the newest version of each row.
 # Pair the latest supply with a balance from the same (block_number,
-# block_version) or any strictly earlier block. 
+# block_version) or any strictly earlier block.
 _SHARE_LOOKUP_SQL = """
 WITH latest_supply AS (
     SELECT total_supply, scaled_total_supply,

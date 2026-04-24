@@ -71,6 +71,28 @@ async def test_aave_like_missing_wallet_raises_missing_share_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_aave_like_missing_receipt_token_token_id_raises_missing_share_error() -> None:
+    """Warm-up: receipt_token exists but its address `token` row hasn't been created yet."""
+    engine = MagicMock()
+
+    with (
+        patch("app.services.risk_service_factory.ReceiptTokenRepository") as mock_rt_repo_cls,
+        patch("app.services.risk_service_factory.AaveLikeBackedBreakdownRepository"),
+        patch("app.services.risk_service_factory.AaveLikeLiquidationParamsRepository"),
+    ):
+        info = _make_receipt_token_info("SparkLend")
+        info.receipt_token_token_id = None  # not yet indexed
+
+        mock_rt_repo = AsyncMock()
+        mock_rt_repo.get.return_value = info
+        mock_rt_repo_cls.return_value = mock_rt_repo
+
+        factory = RiskServiceFactory(engine)
+        with pytest.raises(MissingShareError):
+            await factory.create(receipt_token_id=99)
+
+
+@pytest.mark.asyncio
 async def test_morpho_creates_fixed_share_of_one() -> None:
     """Morpho protocols get FixedAllocationShare(1) because the breakdown is already vault-scoped."""
     engine = MagicMock()
@@ -96,6 +118,36 @@ async def test_morpho_creates_fixed_share_of_one() -> None:
     share_port = kwargs["share_port"]
     assert isinstance(share_port, FixedAllocationShare)
     assert await share_port.get_share() == Decimal("1")
+
+
+@pytest.mark.asyncio
+async def test_morpho_resolves_without_receipt_token_token_id() -> None:
+    """Morpho doesn't use receipt_token_token_id, so its absence must not block resolution."""
+    engine = MagicMock()
+
+    with (
+        patch("app.services.risk_service_factory.ReceiptTokenRepository") as mock_rt_repo_cls,
+        patch("app.services.risk_service_factory.MorphoBackedBreakdownRepository") as mock_morpho_cls,
+        patch("app.services.risk_service_factory.MorphoLiquidationParamsRepository"),
+        patch("app.services.risk_service_factory.RiskCalculationService"),
+    ):
+        info = _make_receipt_token_info("morpho_blue")
+        info.receipt_token_token_id = None  # never indexed; Morpho doesn't care
+
+        mock_rt_repo = AsyncMock()
+        mock_rt_repo.get.return_value = info
+        mock_rt_repo_cls.return_value = mock_rt_repo
+
+        mock_morpho_repo = AsyncMock()
+        mock_morpho_repo.resolve_vault_id = AsyncMock(return_value=55)
+        mock_morpho_cls.return_value = mock_morpho_repo
+
+        factory = RiskServiceFactory(engine)
+        result = await factory.create(receipt_token_id=99)
+
+    assert result is not None
+    _, asset_id = result
+    assert asset_id == 55
 
 
 @pytest.mark.asyncio
