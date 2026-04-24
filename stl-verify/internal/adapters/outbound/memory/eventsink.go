@@ -22,11 +22,16 @@ var _ outbound.EventSink = (*EventSink)(nil)
 
 // EventSink is an in-memory implementation of the EventSink port for testing.
 // It stores published events for later inspection. Events are deduplicated by
-// Event.DeduplicationID to match production SNS FIFO semantics — the service
-// layer may legitimately call Publish twice for the same event (e.g. when the
-// retry loop and gap-fill loop race on a recently-saved block), and SNS drops
-// the duplicate server-side. Modeling the same property here keeps tests
-// consistent with production observable behavior.
+// Event.DeduplicationID to model the subset of production SNS FIFO behavior
+// that matters here: the service layer may legitimately call Publish twice
+// for the same event (e.g. when the retry loop and gap-fill loop race on a
+// recently-saved block), and SNS drops the duplicate server-side.
+//
+// Caveat: SNS FIFO's dedup window is 5 minutes; this sink dedups for the
+// lifetime of the instance. A test that deliberately re-emits the same
+// DeduplicationID more than 5 minutes apart would see a re-delivery in
+// production but not here. No such test exists today; if one is introduced,
+// add TTL expiry rather than removing dedup entirely.
 type EventSink struct {
 	mu        sync.RWMutex
 	events    []outbound.Event
