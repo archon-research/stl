@@ -328,7 +328,8 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("token repo: %w", err)
 	}
 	allocRepo := postgres.NewAllocationRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID())
-	pgHandler := at.NewPrimePositionHandler(allocRepo, mc, erc20ABI, primeLookup, logger)
+	supplyRepo := postgres.NewTokenTotalSupplyRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID())
+	pgHandler := at.NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger)
 
 	handler := at.NewMultiHandler(at.NewLogHandler(logger), pgHandler)
 

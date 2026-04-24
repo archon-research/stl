@@ -80,8 +80,8 @@ func TestUniV3Source_FetchBalances_EmptyEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(result) != 0 {
-		t.Errorf("expected empty result, got %d", len(result))
+	if len(result.Balances) != 0 {
+		t.Errorf("expected empty result, got %d", len(result.Balances))
 	}
 }
 
@@ -106,7 +106,7 @@ func TestUniV3Source_FetchBalances_UnknownChain(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// Unknown chain is skipped with a warning, not an error.
-	if len(result) != 0 {
-		t.Errorf("expected empty result for unknown chain, got %d", len(result))
+	if len(result.Balances) != 0 {
+		t.Errorf("expected empty result for unknown chain, got %d", len(result.Balances))
 	}
 }

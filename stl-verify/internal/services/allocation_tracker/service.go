@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
@@ -140,14 +141,16 @@ func (s *Service) processBlock(
 	if len(transfers) > 0 {
 		affected := s.matchTransfers(transfers)
 		if len(affected) > 0 {
-			balances, err := s.registry.FetchAll(ctx, affected, event.BlockNumber)
+			fetch, err := s.registry.FetchAll(ctx, affected, event.BlockNumber)
 			if err != nil {
 				s.logger.Warn("partial balance fetch", "error", err)
 			}
 
-			snapshots := s.buildSnapshots(affected, balances, transfers, event, blockTimestamp)
-			if len(snapshots) > 0 {
-				if err := s.handler.HandleSnapshots(ctx, snapshots); err != nil {
+			snapshots := s.buildSnapshots(affected, fetch.Balances, transfers, event, blockTimestamp)
+			supplies := buildSupplySnapshots(fetch.Supplies, event.ChainID, event.BlockNumber, event.Version, blockTimestamp, "event")
+			batch := &SnapshotBatch{Snapshots: snapshots, Supplies: supplies}
+			if len(snapshots) > 0 || len(supplies) > 0 {
+				if err := s.handler.HandleBatch(ctx, batch); err != nil {
 					return fmt.Errorf("handler: %w", err)
 				}
 			}
@@ -157,6 +160,7 @@ func (s *Service) processBlock(
 				"chain", event.ChainID,
 				"transfers", len(transfers),
 				"snapshots", len(snapshots),
+				"supplies", len(supplies),
 				"duration", time.Since(start))
 		}
 	}
@@ -239,6 +243,38 @@ func (s *Service) buildSnapshots(
 	return snapshots
 }
 
+// buildSupplySnapshots converts per-contract pool supplies read in one multicall
+// into persistable snapshot records. Deduplicated by the map iteration itself
+// (one entry per contract address).
+func buildSupplySnapshots(
+	supplies map[common.Address]*PoolSupply,
+	chainID, blockNumber int64,
+	blockVersion int,
+	blockTimestamp time.Time,
+	source string,
+) []*TokenTotalSupplySnapshot {
+	if len(supplies) == 0 {
+		return nil
+	}
+	out := make([]*TokenTotalSupplySnapshot, 0, len(supplies))
+	for addr, sup := range supplies {
+		if sup == nil || sup.TotalSupply == nil {
+			continue
+		}
+		out = append(out, &TokenTotalSupplySnapshot{
+			ChainID:           chainID,
+			TokenAddress:      addr,
+			TotalSupply:       sup.TotalSupply,
+			ScaledTotalSupply: sup.ScaledTotalSupply,
+			BlockNumber:       blockNumber,
+			BlockVersion:      blockVersion,
+			BlockTimestamp:    blockTimestamp,
+			Source:            source,
+		})
+	}
+	return out
+}
+
 // sweep runs periodic reconciliation to capture balance changes that don't
 // emit Transfer events — e.g. aToken interest accrual, ERC4626 yield compounding,
 // and BUIDL rebases. Without this, positions would drift between transfer-triggered
@@ -246,14 +282,14 @@ func (s *Service) buildSnapshots(
 func (s *Service) sweep(ctx context.Context, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
 	start := time.Now()
 
-	balances, err := s.registry.FetchAll(ctx, s.entries, blockNumber)
+	fetch, err := s.registry.FetchAll(ctx, s.entries, blockNumber)
 	if err != nil {
 		s.logger.Warn("sweep partial failure", "error", err)
 	}
 
 	var snapshots []*PositionSnapshot
 	for _, entry := range s.entries {
-		bal, ok := balances[entry.Key()]
+		bal, ok := fetch.Balances[entry.Key()]
 		if !ok {
 			continue
 		}
@@ -270,17 +306,20 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockVersion int
 		})
 	}
 
-	if len(snapshots) == 0 {
+	supplies := buildSupplySnapshots(fetch.Supplies, s.config.ChainID, blockNumber, blockVersion, blockTimestamp, "sweep")
+
+	if len(snapshots) == 0 && len(supplies) == 0 {
 		return nil
 	}
 
-	if err := s.handler.HandleSnapshots(ctx, snapshots); err != nil {
+	if err := s.handler.HandleBatch(ctx, &SnapshotBatch{Snapshots: snapshots, Supplies: supplies}); err != nil {
 		return fmt.Errorf("sweep handler: %w", err)
 	}
 
 	s.logger.Info("sweep complete",
 		"block", blockNumber,
 		"snapshots", len(snapshots),
+		"supplies", len(supplies),
 		"duration", time.Since(start))
 	return nil
 }

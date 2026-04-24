@@ -79,7 +79,7 @@ func TestERC4626Source_FetchBalances_StoresShareBalance(t *testing.T) {
 		t.Fatalf("expected exactly one multicall round, got %d", mc.CallCount)
 	}
 
-	got := results[entries[0].Key()]
+	got := results.Balances[entries[0].Key()]
 	if got == nil {
 		t.Fatal("expected result for entry")
 	}
@@ -88,6 +88,9 @@ func TestERC4626Source_FetchBalances_StoresShareBalance(t *testing.T) {
 	}
 	if got.ScaledBalance == nil || got.ScaledBalance.Cmp(expectedShares) != 0 {
 		t.Fatalf("scaled balance = %v, want %s", got.ScaledBalance, expectedShares)
+	}
+	if len(results.Supplies) != 0 {
+		t.Fatalf("erc4626 source should not emit supply rows, got %d", len(results.Supplies))
 	}
 }
 
@@ -113,7 +116,7 @@ func TestERC4626Source_FetchBalances_FailedCallStoresZero(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	got := results[entries[0].Key()]
+	got := results.Balances[entries[0].Key()]
 	if got == nil {
 		t.Fatal("expected result for entry")
 	}

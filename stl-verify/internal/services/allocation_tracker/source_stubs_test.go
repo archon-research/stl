@@ -52,8 +52,8 @@ func TestSkipSource_FetchBalances_ReturnsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(result) != 0 {
-		t.Errorf("expected empty map, got %d entries", len(result))
+	if len(result.Balances) != 0 {
+		t.Errorf("expected empty map, got %d entries", len(result.Balances))
 	}
 }
 
@@ -77,8 +77,8 @@ func TestStubSource_FetchBalances_ReturnsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(result) != 0 {
-		t.Errorf("expected empty map, got %d entries", len(result))
+	if len(result.Balances) != 0 {
+		t.Errorf("expected empty map, got %d entries", len(result.Balances))
 	}
 }
 

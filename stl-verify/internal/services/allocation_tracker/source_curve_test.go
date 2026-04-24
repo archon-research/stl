@@ -83,7 +83,7 @@ func TestCurveSource_FetchBalances_StoresLPBalance(t *testing.T) {
 		t.Fatalf("expected exactly one multicall round, got %d", mc.CallCount)
 	}
 
-	got := results[entries[0].Key()]
+	got := results.Balances[entries[0].Key()]
 	if got == nil {
 		t.Fatal("expected result for entry")
 	}
@@ -118,7 +118,7 @@ func TestCurveSource_FetchBalances_FailedCallStoresZero(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	got := results[entries[0].Key()]
+	got := results.Balances[entries[0].Key()]
 	if got == nil {
 		t.Fatal("expected result for entry")
 	}

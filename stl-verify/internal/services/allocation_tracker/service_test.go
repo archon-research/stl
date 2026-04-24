@@ -16,12 +16,12 @@ import (
 // ── Mocks ──
 
 type testHandler struct {
-	snapshots []*PositionSnapshot
-	err       error
+	batches []*SnapshotBatch
+	err     error
 }
 
-func (m *testHandler) HandleSnapshots(ctx context.Context, snapshots []*PositionSnapshot) error {
-	m.snapshots = append(m.snapshots, snapshots...)
+func (m *testHandler) HandleBatch(ctx context.Context, batch *SnapshotBatch) error {
+	m.batches = append(m.batches, batch)
 	return m.err
 }
 

@@ -50,9 +50,10 @@ func (s *ERC4626Source) Supports(tokenType string, protocol string) bool {
 	return tokenType == "erc4626"
 }
 
-func (s *ERC4626Source) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64) (map[EntryKey]*PositionBalance, error) {
+func (s *ERC4626Source) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64) (*FetchResult, error) {
+	result := NewFetchResult()
 	if len(entries) == 0 {
-		return make(map[EntryKey]*PositionBalance), nil
+		return result, nil
 	}
 
 	var block *big.Int
@@ -65,11 +66,10 @@ func (s *ERC4626Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 		return nil, fmt.Errorf("fetch shares: %w", err)
 	}
 
-	results := make(map[EntryKey]*PositionBalance, len(entries))
 	for _, e := range valid1 {
 		sh := shares[e.Key()]
 		if sh == nil || sh.Sign() == 0 {
-			results[e.Key()] = &PositionBalance{
+			result.Balances[e.Key()] = &PositionBalance{
 				Balance:       big.NewInt(0),
 				ScaledBalance: big.NewInt(0),
 			}
@@ -78,13 +78,13 @@ func (s *ERC4626Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 		s.logger.Debug("erc4626 position",
 			"contract", e.ContractAddress.Hex(),
 			"shares", sh.String())
-		results[e.Key()] = &PositionBalance{
+		result.Balances[e.Key()] = &PositionBalance{
 			Balance:       new(big.Int).Set(sh),
 			ScaledBalance: new(big.Int).Set(sh),
 		}
 	}
 
-	return results, nil
+	return result, nil
 }
 
 func (s *ERC4626Source) fetchShares(ctx context.Context, entries []*TokenEntry, block *big.Int) (map[EntryKey]*big.Int, []*TokenEntry, error) {
