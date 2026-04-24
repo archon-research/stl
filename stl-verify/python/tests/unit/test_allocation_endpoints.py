@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
-from app.domain.entities.allocation import EthAddress, Star
+from app.domain.entities.allocation import EthAddress, Prime
 from app.main import app
 from app.services.allocation_service import AllocationService
 from tests.conftest import make_allocation_position
@@ -10,10 +10,10 @@ from tests.conftest import make_allocation_position
 _VALID_ADDR = "0x" + "ab" * 20
 
 
-def _make_service(stars=None, positions=None) -> AllocationService:
+def _make_service(primes=None, positions=None) -> AllocationService:
     service = AsyncMock(spec=AllocationService)
-    service.list_stars.return_value = stars or []
-    service.list_allocations_by_star.return_value = positions or []
+    service.list_primes.return_value = primes or []
+    service.list_allocations_by_prime.return_value = positions or []
     return service
 
 
@@ -24,19 +24,19 @@ def _override_service(service: AllocationService):
     return _dep
 
 
-def test_list_stars_returns_200_with_star_names():
+def test_list_primes_returns_200_with_prime_names():
     from app.api.v1 import allocations
 
     service = _make_service(
-        stars=[
-            Star(id="0xaaa", name="grove", address="0xaaa"),
-            Star(id="0xbbb", name="spark", address="0xbbb"),
+        primes=[
+            Prime(id="0xaaa", name="grove", address="0xaaa"),
+            Prime(id="0xbbb", name="spark", address="0xbbb"),
         ]
     )
     app.dependency_overrides[allocations._get_service] = _override_service(service)
     client = TestClient(app)
 
-    response = client.get("/v1/stars")
+    response = client.get("/v1/primes")
 
     assert response.status_code == 200
     assert response.json() == [
@@ -45,14 +45,14 @@ def test_list_stars_returns_200_with_star_names():
     ]
 
 
-def test_list_stars_returns_empty_list_when_no_stars():
+def test_list_primes_returns_empty_list_when_no_primes():
     from app.api.v1 import allocations
 
-    service = _make_service(stars=[])
+    service = _make_service(primes=[])
     app.dependency_overrides[allocations._get_service] = _override_service(service)
     client = TestClient(app)
 
-    response = client.get("/v1/stars")
+    response = client.get("/v1/primes")
 
     assert response.status_code == 200
     assert response.json() == []
@@ -66,7 +66,7 @@ def test_list_allocations_returns_200_with_positions():
     app.dependency_overrides[allocations._get_service] = _override_service(service)
     client = TestClient(app)
 
-    response = client.get(f"/v1/stars/{_VALID_ADDR}/allocations")
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
 
     assert response.status_code == 200
     data = response.json()
@@ -74,7 +74,7 @@ def test_list_allocations_returns_200_with_positions():
     assert data[0]["name"] == "spark"
     assert data[0]["token_symbol"] == "USDC"
     assert data[0]["direction"] == "in"
-    service.list_allocations_by_star.assert_awaited_once_with(EthAddress(_VALID_ADDR), None)
+    service.list_allocations_by_prime.assert_awaited_once_with(EthAddress(_VALID_ADDR), None)
 
 
 def test_list_allocations_with_block_number_passes_param_to_service():
@@ -85,22 +85,22 @@ def test_list_allocations_with_block_number_passes_param_to_service():
     app.dependency_overrides[allocations._get_service] = _override_service(service)
     client = TestClient(app)
 
-    response = client.get(f"/v1/stars/{_VALID_ADDR}/allocations?block_number=5000")
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?block_number=5000")
 
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 1
     assert data[0]["block_number"] == 5000
-    service.list_allocations_by_star.assert_awaited_once_with(EthAddress(_VALID_ADDR), 5000)
+    service.list_allocations_by_prime.assert_awaited_once_with(EthAddress(_VALID_ADDR), 5000)
 
 
-def test_list_allocations_returns_422_for_invalid_star_id():
+def test_list_allocations_returns_422_for_invalid_prime_id():
     from app.api.v1 import allocations
 
     service = _make_service(positions=[])
     app.dependency_overrides[allocations._get_service] = _override_service(service)
     client = TestClient(app)
 
-    response = client.get("/v1/stars/0xdeadbeef/allocations")
+    response = client.get("/v1/primes/0xdeadbeef/allocations")
 
     assert response.status_code == 422
