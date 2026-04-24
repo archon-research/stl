@@ -21,6 +21,17 @@ async def _seed_data(db_url: str) -> None:
             int,
             await conn.fetchval("SELECT id FROM token WHERE symbol = 'WETH' AND chain_id = 1"),
         )
+        receipt_token_address = bytes.fromhex("59cD1C87501baa753d0B5B5Ab5D8416A45cD71DB")
+        # Insert the receipt-token's own token row — the repository's JOIN to
+        # `token` on (chain_id, address) requires this.
+        await conn.execute(
+            """
+            INSERT INTO token (chain_id, address, symbol, decimals)
+            VALUES (1, $1, 'spWETH', 18)
+            ON CONFLICT (chain_id, address) DO NOTHING
+            """,
+            receipt_token_address,
+        )
         rt_id = cast(
             int,
             await conn.fetchval(
@@ -35,7 +46,7 @@ async def _seed_data(db_url: str) -> None:
                 """,
                 protocol_id,
                 token_id,
-                bytes.fromhex("59cD1C87501baa753d0B5B5Ab5D8416A45cD71DB"),
+                receipt_token_address,
             ),
         )
         await store_test_ids(conn, {"receipt_token_id": rt_id})
@@ -69,6 +80,10 @@ async def test_returns_receipt_token_info(repository, test_ids) -> None:
     assert result.protocol_name == "SparkLend"
     assert result.chain_id == 1
     assert result.receipt_token_id == test_ids["receipt_token_id"]
+    # receipt_token_token_id is populated from the JOIN to token(chain_id, address);
+    # it's the token's numeric id for the receipt token address, not receipt_token.id.
+    assert isinstance(result.receipt_token_token_id, int)
+    assert result.receipt_token_token_id > 0
 
 
 @pytest.mark.asyncio(loop_scope="module")
