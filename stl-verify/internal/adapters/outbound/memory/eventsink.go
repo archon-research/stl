@@ -21,11 +21,17 @@ import (
 var _ outbound.EventSink = (*EventSink)(nil)
 
 // EventSink is an in-memory implementation of the EventSink port for testing.
-// It stores all published events for later inspection.
+// It stores published events for later inspection. Events are deduplicated by
+// Event.DeduplicationID to match production SNS FIFO semantics — the service
+// layer may legitimately call Publish twice for the same event (e.g. when the
+// retry loop and gap-fill loop race on a recently-saved block), and SNS drops
+// the duplicate server-side. Modeling the same property here keeps tests
+// consistent with production observable behavior.
 type EventSink struct {
-	mu     sync.RWMutex
-	events []outbound.Event
-	closed bool
+	mu        sync.RWMutex
+	events    []outbound.Event
+	seenDedup map[string]struct{}
+	closed    bool
 
 	// Callback for test assertions
 	onPublish func(outbound.Event)
@@ -34,11 +40,12 @@ type EventSink struct {
 // NewEventSink creates a new in-memory event sink for testing.
 func NewEventSink() *EventSink {
 	return &EventSink{
-		events: make([]outbound.Event, 0),
+		events:    make([]outbound.Event, 0),
+		seenDedup: make(map[string]struct{}),
 	}
 }
 
-// Publish stores the event in memory.
+// Publish stores the event in memory, deduplicated by Event.DeduplicationID.
 func (s *EventSink) Publish(ctx context.Context, event outbound.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -46,6 +53,12 @@ func (s *EventSink) Publish(ctx context.Context, event outbound.Event) error {
 	if s.closed {
 		return nil
 	}
+
+	dedupID := event.DeduplicationID()
+	if _, seen := s.seenDedup[dedupID]; seen {
+		return nil
+	}
+	s.seenDedup[dedupID] = struct{}{}
 
 	s.events = append(s.events, event)
 
@@ -119,11 +132,12 @@ func (s *EventSink) GetEventsForBlock(blockNumber int64) []outbound.Event {
 	return result
 }
 
-// Clear removes all stored events.
+// Clear removes all stored events and dedup state.
 func (s *EventSink) Clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.events = make([]outbound.Event, 0)
+	s.seenDedup = make(map[string]struct{})
 }
 
 // OnPublish sets a callback to be called when an event is published.
