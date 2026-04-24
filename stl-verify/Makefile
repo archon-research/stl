@@ -355,7 +355,7 @@ dev-up:
 	@echo "==> Waiting for all deployments to roll out..."
 	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
 	if [ -n "$$ALCHEMY_API_KEY" ]; then \
-	  DEPS="mock-blockchain-server watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer temporal-worker python-api $(CRONJOBS)"; \
+	  DEPS="mock-blockchain-server watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer python-api $(CRONJOBS)"; \
 	else \
 	  DEPS="mock-blockchain-server watcher python-api $(CRONJOBS)"; \
 	fi; \
@@ -375,8 +375,8 @@ dev-up:
 	  echo ""; \
 	  echo "    ALCHEMY_API_KEY    — oracle-price-worker, morpho-indexer,"; \
 	  echo "                         sparklend-position-tracker, prime-debt-indexer"; \
-	  echo "    COINGECKO_API_KEY  — temporal-worker"; \
-	  echo "    ETHERSCAN_API_KEY  — temporal-worker (data validation)"; \
+	  echo "    COINGECKO_API_KEY  — offchain-price-indexer"; \
+	  echo "    ETHERSCAN_API_KEY  — watcher-data-validator"; \
 	  echo ""; \
 	  echo "  Once set, run: make kind-secrets && make dev-up-workers"; \
 	  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \
@@ -392,10 +392,10 @@ dev-up-workers:
 	  MISSING="$$MISSING\n    ALCHEMY_API_KEY    — oracle-price-worker, morpho-indexer, sparklend-position-tracker, prime-debt-indexer"; \
 	fi; \
 	if [ -z "$$COINGECKO_API_KEY" ]; then \
-	  MISSING="$$MISSING\n    COINGECKO_API_KEY  — temporal-worker"; \
+	  MISSING="$$MISSING\n    COINGECKO_API_KEY  — offchain-price-indexer"; \
 	fi; \
 	if [ -z "$$ETHERSCAN_API_KEY" ]; then \
-	  MISSING="$$MISSING\n    ETHERSCAN_API_KEY  — temporal-worker (data validation)"; \
+	  MISSING="$$MISSING\n    ETHERSCAN_API_KEY  — watcher-data-validator"; \
 	fi; \
 	if [ -n "$$MISSING" ]; then \
 	  echo "==> Missing API keys:"; \
@@ -408,12 +408,6 @@ dev-up-workers:
 	  $(MAKE) _dev-up-alchemy-workers; \
 	else \
 	  echo "==> Skipping Alchemy workers (no ALCHEMY_API_KEY)"; \
-	fi; \
-	if [ -n "$$COINGECKO_API_KEY" ]; then \
-	  echo "==> Deploying temporal-worker..."; \
-	  $(MAKE) _dev-up-temporal-worker; \
-	else \
-	  echo "==> Skipping temporal-worker (no COINGECKO_API_KEY)"; \
 	fi
 
 _dev-up-alchemy-workers:
@@ -426,12 +420,6 @@ _dev-up-alchemy-workers:
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=120s || \
 	    { echo "ERROR: deployment $$dep not ready after 120s"; exit 1; }; \
 	done
-
-_dev-up-temporal-worker:
-	$(call build-if-needed,stl-temporal-worker:local,docker-build-temporal-worker LOCAL=1)
-	$(MAKE) kind-load-temporal-worker kind-deploy-temporal-worker
-	@kubectl --context=$(KUBE_CONTEXT) rollout status deployment/temporal-worker -n $(KUBE_NS) --timeout=120s || \
-	  { echo "ERROR: deployment temporal-worker not ready after 120s"; exit 1; }
 
 # Start only the database and run migrations (no app services).
 dev-db:
