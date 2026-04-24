@@ -304,3 +304,31 @@ jobs:
           )" \
             --head "$BRANCH" \
             --base main
+
+  notify-staging-failure:
+    name: Notify Staging Deploy Failure
+    if: ${{ always() && (needs.build-push-staging.result == 'failure' || needs.update-staging.result == 'failure') }}
+    needs: [build-push-staging, update-staging]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: archon-research/github-actions/slack-notify-failure@6c81493c5f924b2d57fb84c7f298630037f5f27f # main
+        with:
+          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
+          header: Staging Deploy Failed
+          failed-jobs: |
+            Build & Push Images (Staging)=${{ needs.build-push-staging.result }}
+            Update Staging Image Tags=${{ needs.update-staging.result }}
+
+  notify-prod-failure:
+    name: Notify Prod Deploy Failure
+    if: ${{ always() && (needs.build-push-prod.result == 'failure' || needs.create-prod-pr.result == 'failure') }}
+    needs: [build-push-prod, create-prod-pr]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: archon-research/github-actions/slack-notify-failure@6c81493c5f924b2d57fb84c7f298630037f5f27f # main
+        with:
+          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+          header: Prod Deploy Failed
+          failed-jobs: |
+            Build & Push Images (Prod)=${{ needs.build-push-prod.result }}
+            Create Prod Deploy PR=${{ needs.create-prod-pr.result }}
