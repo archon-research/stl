@@ -21,7 +21,6 @@ class Settings(BaseSettings):
     log_level: str
     log_format: str
     database_url: SecretStr
-    alchemy_api_key: SecretStr
     otel_enabled: bool
     otel_exporter_otlp_endpoint: str
     otel_service_name: str
@@ -30,6 +29,9 @@ class Settings(BaseSettings):
     # Injected as a Docker build arg; see stl-verify/python/Dockerfile.
     # Falls back to "unknown" so local dev and tests don't need it set.
     git_commit: str = "unknown"
+    # Maximum age (in seconds) of a token_total_supply row before the risk API
+    # treats it as stale and returns HTTP 503.
+    allocation_share_max_stale_seconds: int = 1800
 
     @property
     def async_database_url(self) -> str:
@@ -47,11 +49,6 @@ class Settings(BaseSettings):
         query = dict(url.query)
         query.pop("sslmode", None)
         return url.set(query=query).render_as_string(hide_password=False)
-
-    @property
-    def alchemy_http_url(self) -> str:
-        """Construct the Alchemy HTTP URL from the API key."""
-        return f"https://eth-mainnet.g.alchemy.com/v2/{self.alchemy_api_key.get_secret_value()}"
 
 
 @functools.lru_cache

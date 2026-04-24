@@ -1,17 +1,17 @@
 import re
 from decimal import Decimal
 
-import httpx
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.onchain.allocation_share_client import (
-    FixedAllocationShare,
-    OnchainAllocationShareClient,
-)
+from app.adapters.onchain.allocation_share_client import FixedAllocationShare
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLikeLiquidationParamsRepository
+from app.adapters.postgres.allocation_share_repository import (
+    MissingShareError,
+    PostgresAllocationShare,
+)
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
@@ -71,14 +71,18 @@ LIMIT 1
 class RiskServiceFactory:
     """Build a RiskCalculationService from a receipt_token_id."""
 
-    def __init__(self, engine: AsyncEngine, alchemy_url: str, http_client: httpx.AsyncClient) -> None:
+    def __init__(self, engine: AsyncEngine, allocation_share_max_stale_seconds: int = 1800) -> None:
         self._engine = engine
-        self._alchemy_url = alchemy_url
-        self._http_client = http_client
+        self._allocation_share_max_stale_seconds = allocation_share_max_stale_seconds
         self._receipt_token_repo = ReceiptTokenRepository(engine)
 
     async def create(self, receipt_token_id: int) -> tuple[RiskCalculationService, int] | None:
-        """Return (service, backed_asset_id) or None if the receipt token is unknown."""
+        """Return (service, backed_asset_id) or None if the receipt token is unknown.
+
+        Raises :class:`MissingShareError` when the wallet lookup fails — the
+        caller maps this to HTTP 503 so "not yet indexed" stays uniform with
+        the warm-up responses produced by :class:`PostgresAllocationShare`.
+        """
         info = await self._receipt_token_repo.get(receipt_token_id)
         if info is None:
             return None
@@ -92,12 +96,16 @@ class RiskServiceFactory:
             breakdown_repo = AaveLikeBackedBreakdownRepository(self._engine, info.protocol_id)
             liq_repo = AaveLikeLiquidationParamsRepository(self._engine, info.protocol_id)
             asset_id = info.underlying_token_id
-            wallet = await self._lookup_wallet(info.receipt_token_address, info.chain_id)
-            share_port = OnchainAllocationShareClient(
-                receipt_token_address=info.receipt_token_address,
+            try:
+                wallet = await self._lookup_wallet(info.receipt_token_address, info.chain_id)
+            except ValueError as exc:
+                raise MissingShareError(str(exc)) from exc
+            share_port = PostgresAllocationShare(
+                engine=self._engine,
+                chain_id=info.chain_id,
+                token_id=info.receipt_token_token_id,
                 wallet_address=wallet,
-                alchemy_url=self._alchemy_url,
-                http_client=self._http_client,
+                max_stale_seconds=self._allocation_share_max_stale_seconds,
             )
 
         elif normalized in _MORPHO:
