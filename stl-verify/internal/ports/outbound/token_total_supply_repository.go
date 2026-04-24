@@ -11,8 +11,8 @@ import (
 // TokenTotalSupplyRepository persists pool totalSupply / scaledTotalSupply
 // observations that the allocation indexer reads alongside balanceOf.
 type TokenTotalSupplyRepository interface {
-	// SaveSuppliesTx writes supply rows within an externally managed transaction.
-	// Callers coordinate SaveSuppliesTx with AllocationRepository.SavePositionsTx
-	// so both writes land atomically for a given block batch.
-	SaveSuppliesTx(ctx context.Context, tx pgx.Tx, supplies []*entity.TokenTotalSupply) error
+	// SaveSupplies writes supply rows within an externally managed transaction.
+	// Callers coordinate this write with AllocationRepository.SavePositions so
+	// both writes land atomically for a given block batch.
+	SaveSupplies(ctx context.Context, tx pgx.Tx, supplies []*entity.TokenTotalSupply) error
 }

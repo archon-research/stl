@@ -49,23 +49,10 @@ func NewAllocationRepository(
 	}
 }
 
-// SavePositions opens its own transaction and delegates to SavePositionsTx.
-// Use SavePositionsTx when you need to coordinate this write with another
-// repository inside one atomic transaction.
+// SavePositions persists positions within an externally managed transaction.
+// Callers obtain `tx` from a TxManager so this write can be coordinated with
+// other repository writes (e.g. TokenTotalSupplyRepository) atomically.
 func (r *AllocationRepository) SavePositions(
-	ctx context.Context,
-	positions []*entity.AllocationPosition,
-) error {
-	if len(positions) == 0 {
-		return nil
-	}
-	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return r.SavePositionsTx(ctx, tx, positions)
-	})
-}
-
-// SavePositionsTx persists positions within an externally managed transaction.
-func (r *AllocationRepository) SavePositionsTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	positions []*entity.AllocationPosition,

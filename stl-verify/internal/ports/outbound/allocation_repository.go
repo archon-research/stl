@@ -8,10 +8,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
-// AllocationRepository defines the interface for allocation position persistence.
+// AllocationRepository persists allocation positions within an externally
+// managed transaction. Callers obtain `tx` from a TxManager so this write can
+// be coordinated with other repository writes (e.g. TokenTotalSupplyRepository)
+// atomically.
 type AllocationRepository interface {
-	SavePositions(ctx context.Context, positions []*entity.AllocationPosition) error
-	// SavePositionsTx persists positions within an externally managed transaction,
-	// allowing callers to coordinate the write with other repositories in one atomic unit.
-	SavePositionsTx(ctx context.Context, tx pgx.Tx, positions []*entity.AllocationPosition) error
+	SavePositions(ctx context.Context, tx pgx.Tx, positions []*entity.AllocationPosition) error
 }

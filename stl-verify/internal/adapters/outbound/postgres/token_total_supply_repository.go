@@ -45,7 +45,7 @@ func NewTokenTotalSupplyRepository(
 	}
 }
 
-func (r *TokenTotalSupplyRepository) SaveSuppliesTx(
+func (r *TokenTotalSupplyRepository) SaveSupplies(
 	ctx context.Context,
 	tx pgx.Tx,
 	supplies []*entity.TokenTotalSupply,

@@ -105,12 +105,12 @@ func (h *PrimePositionHandler) HandleBatch(
 
 	return h.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if len(positions) > 0 {
-			if err := h.repo.SavePositionsTx(ctx, tx, positions); err != nil {
+			if err := h.repo.SavePositions(ctx, tx, positions); err != nil {
 				return fmt.Errorf("save positions: %w", err)
 			}
 		}
 		if len(supplies) > 0 {
-			if err := h.supplyRepo.SaveSuppliesTx(ctx, tx, supplies); err != nil {
+			if err := h.supplyRepo.SaveSupplies(ctx, tx, supplies); err != nil {
 				return fmt.Errorf("save supplies: %w", err)
 			}
 		}
@@ -207,6 +207,12 @@ func (h *PrimePositionHandler) buildSupplyEntities(
 			BlockVersion:      s.BlockVersion,
 			BlockTimestamp:    s.BlockTimestamp,
 			Source:            s.Source,
+			// Use the observation block as a non-zero floor for the token's
+			// `created_at_block`. The token upsert applies LEAST(existing,
+			// new), so a later allocation_position write with the actual
+			// deploy block self-corrects to the smaller value. Passing 0 here
+			// would permanently pin token.created_at_block to 0.
+			CreatedAtBlock: s.BlockNumber,
 		})
 	}
 	return out, nil

@@ -16,13 +16,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// fakeAllocRepo captures positions passed to SavePositions / SavePositionsTx.
+// fakeAllocRepo captures positions passed to SavePositions.
 type fakeAllocRepo struct {
 	saved []*entity.AllocationPosition
 	err   error
 }
 
-func (r *fakeAllocRepo) SavePositions(_ context.Context, positions []*entity.AllocationPosition) error {
+func (r *fakeAllocRepo) SavePositions(_ context.Context, _ pgx.Tx, positions []*entity.AllocationPosition) error {
 	if r.err != nil {
 		return r.err
 	}
@@ -30,21 +30,13 @@ func (r *fakeAllocRepo) SavePositions(_ context.Context, positions []*entity.All
 	return nil
 }
 
-func (r *fakeAllocRepo) SavePositionsTx(_ context.Context, _ pgx.Tx, positions []*entity.AllocationPosition) error {
-	if r.err != nil {
-		return r.err
-	}
-	r.saved = append(r.saved, positions...)
-	return nil
-}
-
-// fakeSupplyRepo captures supplies passed to SaveSuppliesTx.
+// fakeSupplyRepo captures supplies passed to SaveSupplies.
 type fakeSupplyRepo struct {
 	saved []*entity.TokenTotalSupply
 	err   error
 }
 
-func (r *fakeSupplyRepo) SaveSuppliesTx(_ context.Context, _ pgx.Tx, supplies []*entity.TokenTotalSupply) error {
+func (r *fakeSupplyRepo) SaveSupplies(_ context.Context, _ pgx.Tx, supplies []*entity.TokenTotalSupply) error {
 	if r.err != nil {
 		return r.err
 	}
