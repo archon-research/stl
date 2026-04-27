@@ -278,6 +278,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	sqsServer, _ := testutil.StartMockSQS(t)
 	defer sqsServer.Close()
 
+	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")
@@ -324,6 +325,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	// Enqueue enough block events to trigger at least one sweep
 	enqueueBlockEvents(t, sqsState, 20971520, 5, 1)
 
+	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")
@@ -410,6 +412,7 @@ func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 	sqsServer, _ := testutil.StartMockSQS(t)
 	defer sqsServer.Close()
 
+	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")
@@ -471,6 +474,7 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 
 	enqueueBlockEvents(t, sqsState, 20971520, 5, 1)
 
+	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")
@@ -578,6 +582,7 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	const wantRows = 3
 	enqueueBlockEvents(t, sqsState, 20971520, wantRows+2, 1)
 
+	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")
@@ -642,6 +647,7 @@ func TestRunIntegration_InvalidVatFlag(t *testing.T) {
 	sqsServer, _ := testutil.StartMockSQS(t)
 	defer sqsServer.Close()
 
+	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")

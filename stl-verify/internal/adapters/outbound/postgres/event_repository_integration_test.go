@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -46,7 +47,7 @@ func setupEventTest(t *testing.T) *eventTestFixture {
 
 	truncateEvents(t, ctx)
 
-	repo := NewEventRepository(nil)
+	repo := NewEventRepository(nil, 0)
 
 	fixture := &eventTestFixture{
 		repo: repo,
@@ -67,7 +68,7 @@ func TestSaveEvent_SingleEvent(t *testing.T) {
 	ctx := context.Background()
 
 	eventData := json.RawMessage(`{"user":"0xabc","reserve":"0xdef","amount":"1000000"}`)
-	event, err := entity.NewProtocolEvent(1, fixture.protocolID, 1000, 0, []byte{0x01, 0x02}, 5, []byte{0xaa, 0xbb}, "Borrow", eventData)
+	event, err := entity.NewProtocolEvent(1, fixture.protocolID, 1000, 0, []byte{0x01, 0x02}, 5, []byte{0xaa, 0xbb}, "Borrow", eventData, time.Unix(1700000000, 0).UTC())
 	if err != nil {
 		t.Fatalf("failed to create event: %v", err)
 	}
@@ -137,7 +138,7 @@ func TestSaveEvent_DuplicateIgnored(t *testing.T) {
 	ctx := context.Background()
 
 	eventData := json.RawMessage(`{"user":"0xabc"}`)
-	event, err := entity.NewProtocolEvent(1, fixture.protocolID, 2000, 0, []byte{0x01, 0x02}, 3, []byte{0xaa}, "Supply", eventData)
+	event, err := entity.NewProtocolEvent(1, fixture.protocolID, 2000, 0, []byte{0x01, 0x02}, 3, []byte{0xaa}, "Supply", eventData, time.Unix(1700000000, 0).UTC())
 	if err != nil {
 		t.Fatalf("failed to create event: %v", err)
 	}
@@ -185,11 +186,11 @@ func TestSaveEvent_DifferentBlockVersionsAllowed(t *testing.T) {
 	eventData := json.RawMessage(`{"user":"0xabc"}`)
 
 	// Same block_number, tx_hash, log_index but different block_version (reorg scenario)
-	event0, err := entity.NewProtocolEvent(1, fixture.protocolID, 3000, 0, []byte{0x01, 0x02}, 3, []byte{0xaa}, "Supply", eventData)
+	event0, err := entity.NewProtocolEvent(1, fixture.protocolID, 3000, 0, []byte{0x01, 0x02}, 3, []byte{0xaa}, "Supply", eventData, time.Unix(1700000000, 0).UTC())
 	if err != nil {
 		t.Fatalf("failed to create event v0: %v", err)
 	}
-	event1, err := entity.NewProtocolEvent(1, fixture.protocolID, 3000, 1, []byte{0x01, 0x02}, 3, []byte{0xaa}, "Supply", eventData)
+	event1, err := entity.NewProtocolEvent(1, fixture.protocolID, 3000, 1, []byte{0x01, 0x02}, 3, []byte{0xaa}, "Supply", eventData, time.Unix(1700000000, 0).UTC())
 	if err != nil {
 		t.Fatalf("failed to create event v1: %v", err)
 	}
@@ -235,7 +236,7 @@ func TestSaveEvent_Rollback(t *testing.T) {
 	ctx := context.Background()
 
 	eventData := json.RawMessage(`{"user":"0xabc"}`)
-	event, err := entity.NewProtocolEvent(1, fixture.protocolID, 4000, 0, []byte{0x01, 0x02}, 0, []byte{0xaa}, "Withdraw", eventData)
+	event, err := entity.NewProtocolEvent(1, fixture.protocolID, 4000, 0, []byte{0x01, 0x02}, 0, []byte{0xaa}, "Withdraw", eventData, time.Unix(1700000000, 0).UTC())
 	if err != nil {
 		t.Fatalf("failed to create event: %v", err)
 	}

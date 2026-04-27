@@ -3,6 +3,7 @@ package allocation_tracker
 import (
 	"context"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -41,8 +42,8 @@ func (e *TokenEntry) Key() EntryKey {
 
 // PositionBalance is what a PositionSource returns.
 type PositionBalance struct {
-	Balance       *big.Int // actual value (underlying for erc4626, rebased for atoken)
-	ScaledBalance *big.Int // raw shares (nil if not applicable)
+	Balance       *big.Int // primary tracked balance in the entry's tracked unit (token units for ERC20-like entries; underlying-asset units for pool-style entries like UniV3)
+	ScaledBalance *big.Int // optional auxiliary balance (typically raw shares)
 }
 
 // PositionSnapshot is the final output: entry + balance + trigger context.
@@ -60,6 +61,8 @@ type PositionSnapshot struct {
 	LogIndex  int
 	TxAmount  *big.Int
 	Direction Direction
+
+	BlockTimestamp time.Time // block timestamp for hypertable partition column
 }
 
 // PositionSource knows how to fetch on-chain balances for specific token types.

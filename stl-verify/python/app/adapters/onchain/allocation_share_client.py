@@ -1,10 +1,11 @@
 import asyncio
-import logging
 from decimal import Decimal
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from app.logging import get_logger
+
+logger = get_logger(__name__)
 
 _TOTAL_SUPPLY_SELECTOR = "0x18160ddd"
 _BALANCE_OF_SELECTOR = "0x70a08231"

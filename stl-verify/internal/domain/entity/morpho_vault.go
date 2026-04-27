@@ -35,13 +35,13 @@ func NewMorphoVault(chainID, protocolID int64, address []byte, name, symbol stri
 		VaultVersion:   vaultVersion,
 		CreatedAtBlock: createdAtBlock,
 	}
-	if err := v.validate(); err != nil {
-		return nil, err
+	if err := v.Validate(); err != nil {
+		return nil, fmt.Errorf("NewMorphoVault: %w", err)
 	}
 	return v, nil
 }
 
-func (v *MorphoVault) validate() error {
+func (v *MorphoVault) Validate() error {
 	if v.ChainID <= 0 {
 		return fmt.Errorf("chainID must be positive, got %d", v.ChainID)
 	}

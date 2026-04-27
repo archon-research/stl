@@ -1,7 +1,8 @@
 # Environment files
-.env
-.env.*
-!.env.local
+.env*
+!.env.default
+.envrc
+.direnv/
 
 # Binary
 /blockwatcher
@@ -22,7 +23,6 @@ dist/mock-blockchain-server
 
 # Git worktrees
 .worktrees/
-.env.local
 
 # Claude
 settings.local.json
@@ -35,3 +35,6 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Go
+.gopath/

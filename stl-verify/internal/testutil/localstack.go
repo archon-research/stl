@@ -52,7 +52,7 @@ func StartLocalStack(t *testing.T, ctx context.Context, services string) (testco
 		Started:          true,
 	})
 	if err != nil {
-		t.Fatalf("failed to start localstack: %v", err)
+		HandleContainerRuntimeError(t, err, "failed to start localstack")
 	}
 
 	host, err := container.Host(ctx)

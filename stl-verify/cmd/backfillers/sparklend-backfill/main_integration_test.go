@@ -58,8 +58,9 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 		t.Fatalf("create bucket: %v", err)
 	}
 
-	// Upload gzipped empty receipt lists for each block in the range.
+	// Upload gzipped block + receipt files for each block in the range.
 	for blockNum := int64(fromBlock); blockNum <= toBlock; blockNum++ {
+		uploadBlock(t, ctx, s3Client, bucket, blockNum, 1)
 		uploadReceipts(t, ctx, s3Client, bucket, blockNum, 1, []shared.TransactionReceipt{})
 	}
 
@@ -79,6 +80,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	}))
 	defer rpcServer.Close()
 
+	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -177,12 +179,14 @@ func TestRunIntegration_BorrowEvent(t *testing.T) {
 		},
 	}
 
+	uploadBlock(t, ctx, s3Client, bucket, blockNum, 1)
 	uploadReceipts(t, ctx, s3Client, bucket, blockNum, 1, []shared.TransactionReceipt{receipt})
 
 	// Build ABI-encoded mock RPC responses.
 	rpcServer := buildBorrowMockRPC(t, daiAddress)
 	defer rpcServer.Close()
 
+	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -217,11 +221,13 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
+	uploadBlock(t, ctx, s3Client, bucket, 100, 1)
 	uploadReceipts(t, ctx, s3Client, bucket, 100, 1, []shared.TransactionReceipt{})
 
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer rpcServer.Close()
 
+	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -369,11 +375,13 @@ func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 		},
 	}
 
+	uploadBlock(t, ctx, s3Client, bucket, blockNum, 1)
 	uploadReceipts(t, ctx, s3Client, bucket, blockNum, 1, []shared.TransactionReceipt{receipt})
 
 	rpcServer := buildBorrowWithCollateralMockRPC(t, daiAddress, wethAddress, borrowerAddress)
 	defer rpcServer.Close()
 
+	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -925,6 +933,33 @@ func buildBorrowWithCollateralMockRPC(t *testing.T, daiAddress, wethAddress, bor
 // ---------------------------------------------------------------------------
 // S3 helpers
 // ---------------------------------------------------------------------------
+
+// uploadBlock uploads a minimal gzipped block JSON to S3 with a hex timestamp.
+func uploadBlock(t *testing.T, ctx context.Context, client *s3.Client, bucket string, blockNum int64, version int) {
+	t.Helper()
+
+	key := s3key.Build(blockNum, version, s3key.Block)
+	// Minimal block JSON — only timestamp is needed by readBlockTimestamp.
+	blockJSON := fmt.Sprintf(`{"timestamp":"0x%x"}`, 1700000000+blockNum)
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write([]byte(blockJSON)); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(buf.Bytes()),
+	})
+	if err != nil {
+		t.Fatalf("put block %s: %v", key, err)
+	}
+}
 
 // uploadReceipts serializes receipts to JSON, gzips the result, and uploads
 // the object to S3 at the key computed for blockNum / version.

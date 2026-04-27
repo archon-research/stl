@@ -20,6 +20,8 @@ spec:
           image: prime-debt-indexer
           envFrom:
             - configMapRef:
+                name: otel-config
+            - configMapRef:
                 name: prime-debt-indexer
             - secretRef:
                 # Populated by ExternalSecret — secret name mirrors the service.

@@ -40,6 +40,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
@@ -124,6 +125,11 @@ func run(ctx context.Context, args []string) error {
 	}
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
+
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("registering build: %w", err)
+	}
 
 	// Ethereum RPC
 	httpClient := &http.Client{
@@ -215,7 +221,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("getting deploy block: %w", err)
 	}
-	err = persistVaults(ctx, pool, logger, vaults, cfg.chainID, deployBlock)
+	err = persistVaults(ctx, pool, logger, vaults, cfg.chainID, deployBlock, buildReg.BuildID())
 	if err != nil {
 		return fmt.Errorf("persisting vaults: %w", err)
 	}
@@ -741,18 +747,19 @@ func persistVaults(
 	vaults []confirmedVault,
 	chainID int64,
 	deployBlock int64,
+	buildID buildregistry.BuildID,
 ) error {
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
 		return fmt.Errorf("creating tx manager: %w", err)
 	}
 
-	morphoRepo, err := postgres.NewMorphoRepository(pool, logger)
+	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildID)
 	if err != nil {
 		return fmt.Errorf("creating morpho repository: %w", err)
 	}
 
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildID, 0)
 	if err != nil {
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}

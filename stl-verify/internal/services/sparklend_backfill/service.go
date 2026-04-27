@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -21,7 +22,7 @@ import (
 // ReceiptProcessor processes transaction receipts for a given block.
 // Satisfied by *aavelike_position_tracker.Service.
 type ReceiptProcessor interface {
-	ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []shared.TransactionReceipt) error
+	ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []shared.TransactionReceipt, blockTimestamp time.Time) error
 }
 
 // Config holds configuration for the backfill service.
@@ -236,8 +237,13 @@ func (s *Service) scanVersions(ctx context.Context, fromBlock, toBlock int64) (m
 	return versions, nil
 }
 
-// processBlockFromS3 reads receipts for blockNum from S3 using the given version and processes them.
+// processBlockFromS3 reads block and receipt data for blockNum from S3 using the given version and processes them.
 func (s *Service) processBlockFromS3(ctx context.Context, blockNum int64, version int) error {
+	blockTimestamp, err := s.readBlockTimestamp(ctx, blockNum, version)
+	if err != nil {
+		return fmt.Errorf("reading block timestamp for block %d: %w", blockNum, err)
+	}
+
 	key := s3key.Build(blockNum, version, s3key.Receipts)
 
 	rc, err := s.s3Reader.StreamFile(ctx, s.bucket, key)
@@ -256,9 +262,39 @@ func (s *Service) processBlockFromS3(ctx context.Context, blockNum int64, versio
 		return fmt.Errorf("unmarshalling receipts for block %d: %w", blockNum, err)
 	}
 
-	if err := s.processor.ProcessReceipts(ctx, s.chainID, blockNum, version, receipts); err != nil {
+	if err := s.processor.ProcessReceipts(ctx, s.chainID, blockNum, version, receipts, blockTimestamp); err != nil {
 		return fmt.Errorf("processing receipts for block %d: %w", blockNum, err)
 	}
 
 	return nil
+}
+
+// readBlockTimestamp reads the block data from S3 and extracts the timestamp.
+func (s *Service) readBlockTimestamp(ctx context.Context, blockNum int64, version int) (time.Time, error) {
+	key := s3key.Build(blockNum, version, s3key.Block)
+
+	rc, err := s.s3Reader.StreamFile(ctx, s.bucket, key)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("streaming S3 block file %s: %w", key, err)
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("reading S3 block file %s: %w", key, err)
+	}
+
+	var block struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(data, &block); err != nil {
+		return time.Time{}, fmt.Errorf("unmarshalling block %d: %w", blockNum, err)
+	}
+
+	ts, err := hexutil.ParseInt64(block.Timestamp)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parsing block timestamp %q: %w", block.Timestamp, err)
+	}
+
+	return time.Unix(ts, 0).UTC(), nil
 }

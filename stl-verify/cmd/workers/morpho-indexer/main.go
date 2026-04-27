@@ -18,6 +18,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
@@ -159,30 +160,6 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
-	logger.Info("starting morpho indexer",
-		"queue", cfg.queueURL,
-		"redis", cfg.redisAddr,
-		"chainID", cfg.chainID,
-		"commit", GitCommit)
-
-	// Initialize OpenTelemetry tracing and metrics
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "morpho-indexer",
-		ServiceVersion: GitCommit,
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("initializing telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
-
-	// Service telemetry
-	morphoTelemetry, err := morpho_indexer.NewTelemetry()
-	if err != nil {
-		return fmt.Errorf("creating morpho telemetry: %w", err)
-	}
-
 	// AWS config
 	awsRegion := env.Get("AWS_REGION", "us-east-1")
 	awsOpts := []func(*awsconfig.LoadOptions) error{
@@ -269,6 +246,35 @@ func run(ctx context.Context, args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("registering build: %w", err)
+	}
+
+	logger.Info("starting morpho indexer",
+		"queue", cfg.queueURL,
+		"redis", cfg.redisAddr,
+		"chainID", cfg.chainID,
+		"commit", buildReg.GitHash())
+
+	// Initialize OpenTelemetry tracing and metrics
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "morpho-indexer",
+		ServiceVersion: buildReg.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
+	// Service telemetry
+	morphoTelemetry, err := morpho_indexer.NewTelemetry()
+	if err != nil {
+		return fmt.Errorf("creating morpho telemetry: %w", err)
+	}
+
 	// Repositories
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
@@ -280,7 +286,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating user repository: %w", err)
 	}
 
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}
@@ -290,12 +296,12 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating token repository: %w", err)
 	}
 
-	morphoRepo, err := postgres.NewMorphoRepository(pool, logger)
+	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildReg.BuildID())
 	if err != nil {
 		return fmt.Errorf("creating morpho repository: %w", err)
 	}
 
-	eventRepo := postgres.NewEventRepository(logger)
+	eventRepo := postgres.NewEventRepository(logger, buildReg.BuildID())
 
 	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger)
 	if err != nil {

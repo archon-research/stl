@@ -1,14 +1,14 @@
-import logging
 from decimal import Decimal
 
 from app.domain.entities.backed_breakdown import CollateralContribution
 from app.domain.entities.risk import LiquidationParams, RiskBreakdown, RiskEnrichedCollateral
+from app.logging import get_logger
 from app.ports.allocation_share_port import AllocationSharePort
 from app.ports.backed_breakdown_repository import BackedBreakdownRepository
 from app.ports.liquidation_params_repository import LiquidationParamsRepository
 from app.risk_engine.crypto_lending import gap_sweep
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class RiskCalculationService:

@@ -375,7 +375,7 @@ func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chai
 	if err != nil {
 		return fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 	}
-	if err := s.saveProtocolEvent(ctx, event, chainID, blockNumber, blockVersion, int(logIndex)); err != nil {
+	if err := s.saveProtocolEvent(ctx, event, chainID, blockNumber, blockVersion, int(logIndex), blockTimestamp); err != nil {
 		return fmt.Errorf("saving protocol event: %w", err)
 	}
 
@@ -854,7 +854,7 @@ func (s *Service) saveVaultPositionInTx(ctx context.Context, tx pgx.Tx, user com
 	return s.morphoRepo.SaveVaultPosition(ctx, tx, position)
 }
 
-func (s *Service) saveProtocolEvent(ctx context.Context, event MorphoBlueEvent, chainID, blockNumber int64, blockVersion, logIndex int) error {
+func (s *Service) saveProtocolEvent(ctx context.Context, event MorphoBlueEvent, chainID, blockNumber int64, blockVersion, logIndex int, blockTimestamp time.Time) error {
 	eventJSON, err := event.ToJSON()
 	if err != nil {
 		return fmt.Errorf("serializing event data: %w", err)
@@ -876,6 +876,7 @@ func (s *Service) saveProtocolEvent(ctx context.Context, event MorphoBlueEvent, 
 			MorphoBlueAddress.Bytes(),
 			string(event.Type()),
 			eventJSON,
+			blockTimestamp,
 		)
 		if err != nil {
 			return fmt.Errorf("creating protocol event entity: %w", err)

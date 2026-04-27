@@ -6,10 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.api.deps import get_engine, get_http_client
+from app.api.deps import get_engine, get_http_client, get_suraf_rrc_service
 from app.config import Settings, get_settings
 from app.services.risk_calculation_service import RiskCalculationService
 from app.services.risk_service_factory import RiskServiceFactory
+from app.services.suraf_rrc_service import SurafRrcService
 
 router = APIRouter()
 
@@ -39,6 +40,21 @@ class RiskBreakdownResponse(BaseModel):
     items: list[RiskBreakdownItemResponse]
 
 
+class ScenarioRrcRequest(BaseModel):
+    asset: str
+    usd_exposure: Decimal
+
+
+class ScenarioRrcResponse(BaseModel):
+    asset: str
+    usd_exposure: Decimal
+    rating_id: str
+    rating_version: str
+    crr_pct: Decimal
+    rrc_usd: Decimal
+    source_commit_sha: str
+
+
 async def _resolve(
     receipt_token_id: int,
     engine: AsyncEngine = Depends(get_engine),
@@ -49,7 +65,7 @@ async def _resolve(
 
     Uses ``async with`` + ``yield`` so the DB connection is properly cleaned up.
     """
-    alchemy_url = settings.alchemy_http_url.get_secret_value()
+    alchemy_url = settings.alchemy_http_url
     factory = RiskServiceFactory(engine, alchemy_url=alchemy_url, http_client=http_client)
     try:
         result = await factory.create(receipt_token_id)
@@ -114,3 +130,24 @@ async def get_risk_breakdown(
             for item in breakdown.items
         ],
     )
+
+
+@router.post("/risk/rrc/scenario", response_model=ScenarioRrcResponse)
+async def post_rrc_scenario(
+    body: ScenarioRrcRequest,
+    service: SurafRrcService = Depends(get_suraf_rrc_service),
+) -> ScenarioRrcResponse:
+    """Return SURAF RRC for a hypothetical ``(asset, usd_exposure)`` pair.
+
+    ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
+    for the asset. Pure scenario calculation — no DB lookup, no position
+    state. Position-level RRC (``GET /risk/{receipt_token_id}/rrc``) is
+    deferred pending a decision on how to derive USD exposure from holdings.
+    """
+    if body.usd_exposure <= _ZERO:
+        raise HTTPException(status_code=422, detail="usd_exposure must be positive")
+
+    result = service.compute(body.asset, body.usd_exposure)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"no rating mapped for asset: {body.asset}")
+    return ScenarioRrcResponse(**result.model_dump())

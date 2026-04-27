@@ -1,6 +1,5 @@
 import re
 from dataclasses import dataclass
-from datetime import datetime
 from decimal import Decimal
 
 _ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -38,38 +37,21 @@ class EthAddress:
 
 @dataclass(frozen=True)
 class ReceiptTokenPosition:
-    """A receipt token held by a star, with balance and protocol info."""
+    """A receipt token held by a prime, enriched with its underlying token info."""
 
+    chain_id: int
     receipt_token_id: int
+    receipt_token_address: str
+    underlying_token_id: int
+    underlying_token_address: str
     symbol: str
     underlying_symbol: str
     protocol_name: str
     balance: Decimal
-    token_address: str | None
 
 
-@dataclass
-class Star:
+@dataclass(frozen=True)
+class Prime:
     id: str
     name: str
     address: str
-
-
-@dataclass
-class AllocationPosition:
-    id: int
-    chain_id: int
-    name: str
-    proxy_address: str
-    token_address: str
-    token_symbol: str | None
-    token_decimals: int | None
-    balance: Decimal
-    scaled_balance: Decimal | None
-    block_number: int
-    block_version: int
-    tx_hash: str
-    log_index: int
-    tx_amount: Decimal
-    direction: str
-    created_at: datetime

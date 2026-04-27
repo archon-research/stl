@@ -22,6 +22,7 @@ import (
 
 	vatAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -121,25 +122,6 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
-	logger.Info("starting prime-debt-indexer",
-		"commit", GitCommit,
-		"branch", GitBranch,
-		"buildTime", BuildTime,
-		"chainID", chainID,
-	)
-
-	// OpenTelemetry
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "prime-debt-indexer",
-		ServiceVersion: GitCommit,
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("init telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
-
 	// AWS config
 	awsRegion := env.Get("AWS_REGION", "eu-west-1")
 	awsOpts := []func(*awsconfig.LoadOptions) error{
@@ -180,6 +162,30 @@ func run(ctx context.Context, args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("registering build: %w", err)
+	}
+
+	logger.Info("starting prime-debt-indexer",
+		"commit", buildReg.GitHash(),
+		"branch", GitBranch,
+		"buildTime", BuildTime,
+		"chainID", chainID,
+	)
+
+	// OpenTelemetry
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "prime-debt-indexer",
+		ServiceVersion: buildReg.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("init telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
 	// Ethereum JSON-RPC client
 	ethClient, err := ethclient.DialContext(ctx, *rpcURL)
 	if err != nil {
@@ -209,7 +215,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("tx manager: %w", err)
 	}
-	primeDebtRepo := postgres.NewPrimeDebtRepository(pool, txm, logger)
+	primeDebtRepo := postgres.NewPrimeDebtRepository(pool, txm, logger, buildReg.BuildID())
 
 	// Vault debt service
 	svc, err := prime_debt.NewVaultDebtService(

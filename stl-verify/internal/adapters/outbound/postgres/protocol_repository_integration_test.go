@@ -38,7 +38,7 @@ func TestGetOrCreateProtocol_CreatesNewProtocol(t *testing.T) {
 	truncateProtocol(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewProtocolRepository(protocolPool, nil, 0)
+	repo, err := NewProtocolRepository(protocolPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestGetOrCreateProtocol_IdempotentReturnsSameID(t *testing.T) {
 	truncateProtocol(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewProtocolRepository(protocolPool, nil, 0)
+	repo, err := NewProtocolRepository(protocolPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestGetOrCreateProtocol_CreatedAtBlockUsesLeast(t *testing.T) {
 	truncateProtocol(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewProtocolRepository(protocolPool, nil, 0)
+	repo, err := NewProtocolRepository(protocolPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestGetOrCreateProtocol_ConcurrentRaceReturnsSameID(t *testing.T) {
 	truncateProtocol(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewProtocolRepository(protocolPool, nil, 0)
+	repo, err := NewProtocolRepository(protocolPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}

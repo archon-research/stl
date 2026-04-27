@@ -825,7 +825,7 @@ func startPostgres(t *testing.T, ctx context.Context) (testcontainers.Container,
 		Started:          true,
 	})
 	if err != nil {
-		t.Fatalf("failed to start postgres: %v", err)
+		testutil.HandleContainerRuntimeError(t, err, "failed to start postgres")
 	}
 
 	host, _ := container.Host(ctx)
@@ -862,7 +862,7 @@ func startRedis(t *testing.T, ctx context.Context) (testcontainers.Container, Re
 		Started:          true,
 	})
 	if err != nil {
-		t.Fatalf("failed to start redis: %v", err)
+		testutil.HandleContainerRuntimeError(t, err, "failed to start redis")
 	}
 
 	host, _ := container.Host(ctx)

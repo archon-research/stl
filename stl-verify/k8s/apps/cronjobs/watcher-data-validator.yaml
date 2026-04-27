@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: watcher-data-validator
-          image: stl-watcher-data-validator:local
+          image: localhost/stl-watcher-data-validator:local
           imagePullPolicy: Never
           envFrom:
             - configMapRef:

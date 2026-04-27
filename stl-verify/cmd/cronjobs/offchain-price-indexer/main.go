@@ -12,6 +12,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coingecko"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
@@ -47,7 +48,7 @@ func main() {
 	}
 }
 
-func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
 	chainID, err := chainutil.RequireChainID()
 	if err != nil {
 		return nil, err
@@ -56,6 +57,11 @@ func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner
 	apiKey, err := env.Require("COINGECKO_API_KEY")
 	if err != nil {
 		return nil, err
+	}
+
+	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	if err != nil {
+		return nil, fmt.Errorf("registering build: %w", err)
 	}
 
 	provider, err := coingecko.NewClient(coingecko.ClientConfig{
@@ -67,7 +73,7 @@ func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner
 		return nil, fmt.Errorf("creating coingecko provider: %w", err)
 	}
 
-	priceRepo, err := postgres.NewPriceRepository(deps.Pool, deps.Logger, 0)
+	priceRepo, err := postgres.NewPriceRepository(deps.Pool, deps.Logger, buildReg.BuildID(), 0)
 	if err != nil {
 		return nil, fmt.Errorf("creating price repository: %w", err)
 	}

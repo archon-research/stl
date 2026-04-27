@@ -126,12 +126,19 @@ func NewBackfillService(
 	}, nil
 }
 
-// Start begins the backfill service, periodically checking for and filling gaps.
+// Start begins the backfill service. Two independent goroutines run:
+//
+//   - runGapFillLoop: finds gaps, fills them, advances the watermark.
+//   - runRetryLoop:   retries blocks saved but not fully cache/published.
+//
+// Decoupling retry from gap-fill ensures a large gap backlog does not starve
+// the retry queue (VEC-148).
 func (s *BackfillService) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	s.wg.Add(1)
-	go s.run()
+	s.wg.Add(2)
+	go s.runGapFillLoop()
+	go s.runRetryLoop()
 
 	s.logger.Info("backfill service started", "chainID", s.config.ChainID, "pollInterval", s.config.PollInterval)
 	return nil
@@ -147,19 +154,24 @@ func (s *BackfillService) Stop() error {
 	return nil
 }
 
-// RunOnce performs a single backfill pass - finds gaps and fills them.
-// Useful for testing or one-shot backfill operations.
+// RunOnce performs a single backfill pass then a single retry pass - useful
+// for testing or one-shot backfill operations. Preserves the pre-VEC-148
+// contract of "find gaps → fill → retry" in a single call. Does not mutate
+// s.ctx, so it is safe to call on a service whose Start-spawned loops are
+// running (though that is not a supported pattern).
 func (s *BackfillService) RunOnce(ctx context.Context) error {
-	s.ctx = ctx
-	return s.findAndFillGaps()
+	if err := s.findAndFillGaps(ctx); err != nil {
+		return err
+	}
+	return s.retryIncompletePublishes(ctx)
 }
 
-// run is the main loop that periodically checks for gaps.
-func (s *BackfillService) run() {
+// runGapFillLoop periodically finds and fills gaps, then advances the watermark.
+func (s *BackfillService) runGapFillLoop() {
 	defer s.wg.Done()
 
 	// Run immediately on start
-	if err := s.findAndFillGaps(); err != nil {
+	if err := s.findAndFillGaps(s.ctx); err != nil {
 		s.logger.Warn("initial backfill failed", "error", err)
 	}
 
@@ -171,20 +183,61 @@ func (s *BackfillService) run() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.findAndFillGaps(); err != nil {
+			if err := s.findAndFillGaps(s.ctx); err != nil {
 				s.logger.Warn("backfill pass failed", "error", err)
 			}
 		}
 	}
 }
 
+// runRetryLoop periodically retries blocks whose publish is incomplete.
+// Runs independently of gap-fill so a large backlog never starves retries.
+func (s *BackfillService) runRetryLoop() {
+	defer s.wg.Done()
+
+	// Run immediately on start so a fresh deploy drains stuck blocks within
+	// one poll interval regardless of gap-fill backlog (VEC-148 acceptance).
+	if err := s.retryPass(s.ctx); err != nil {
+		s.logger.Warn("initial retry pass failed", "error", err)
+	}
+
+	ticker := time.NewTicker(s.config.PollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.retryPass(s.ctx); err != nil {
+				s.logger.Warn("retry pass failed", "error", err)
+			}
+		}
+	}
+}
+
+// retryPass runs a single retry pass inside a `backfill.retryPass` span so the
+// retry loop's ticks are distinguishable from gap-fill passes in traces.
+func (s *BackfillService) retryPass(ctx context.Context) error {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "backfill.retryPass",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+	if err := s.retryIncompletePublishes(ctx); err != nil {
+		span.RecordError(err)
+		return err
+	}
+	return nil
+}
+
 // findAndFillGaps queries the state repo for gaps and fills them.
-func (s *BackfillService) findAndFillGaps() error {
+func (s *BackfillService) findAndFillGaps(ctx context.Context) error {
 	start := time.Now()
 
 	// Start span for the backfill pass
 	tracer := otel.Tracer(tracerName)
-	ctx, span := tracer.Start(s.ctx, "backfill.findAndFillGaps",
+	ctx, span := tracer.Start(ctx, "backfill.findAndFillGaps",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer func() {
@@ -254,25 +307,13 @@ func (s *BackfillService) findAndFillGaps() error {
 	}
 
 	if len(gaps) == 0 {
-		// Check for unpublished blocks even when there are no gaps, so operators
-		// can see that blocks exist but need retry (saved but cache/publish failed).
-		hasUnpublishedBlocks := false
-		incomplete, err := s.stateRepo.GetBlocksWithIncompletePublish(ctx, 1)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to check incomplete publishes")
-			return fmt.Errorf("failed to check incomplete publishes: %w", err)
-		}
-		hasUnpublishedBlocks = len(incomplete) > 0
 		s.logger.Debug("no gaps to backfill",
 			"minBlock", minBlock,
-			"maxBlock", maxBlock,
-			"hasUnpublishedBlocks", hasUnpublishedBlocks)
+			"maxBlock", maxBlock)
 		span.SetAttributes(
 			attribute.Int("backfill.gaps_count", 0),
 			attribute.Int64("backfill.min_block", minBlock),
 			attribute.Int64("backfill.max_block", maxBlock),
-			attribute.Bool("backfill.has_unpublished_blocks", hasUnpublishedBlocks),
 		)
 	} else {
 		// Calculate total missing blocks
@@ -307,14 +348,6 @@ func (s *BackfillService) findAndFillGaps() error {
 				// Continue with other gaps
 			}
 		}
-	}
-
-	// Retry blocks that were saved but not fully published (cache/publish failed).
-	// This runs on EVERY pass, not just when gaps exist, because blocks can be
-	// present in the DB (no gap) but have failed cache/publish (block_published=false).
-	if err := s.retryIncompletePublishes(ctx); err != nil {
-		s.logger.Warn("failed to retry incomplete publishes", "error", err)
-		// Continue - this will be retried on the next pass
 	}
 
 	// After filling gaps, advance the watermark to the highest contiguous block.
@@ -938,6 +971,7 @@ func (s *BackfillService) retryBlockPublish(ctx context.Context, block outbound.
 		s.logger.Warn("failed to re-check block publish status", "block", block.Number, "error", err)
 		// Continue with retry on error — worst case is a harmless duplicate publish
 	} else if current != nil && current.BlockPublished {
+		span.SetAttributes(attribute.Bool("backfill.retry_skipped_already_published", true))
 		s.logger.Debug("block already published, skipping retry", "block", block.Number)
 		return nil
 	}
@@ -945,6 +979,22 @@ func (s *BackfillService) retryBlockPublish(ctx context.Context, block outbound.
 	// Fetch block data by hash to ensure we get the exact block we have in DB
 	bd, err := s.client.GetBlockDataByHash(ctx, block.Number, block.Hash, true)
 	if err != nil {
+		// Hash-based fetch failed. The block may have been reorged away after
+		// we saved it. Verify against the canonical chain before concluding
+		// the failure is transient — otherwise a permanently-un-fetchable
+		// hash at the head of the queue starves all blocks behind it
+		// (VEC-146).
+		orphaned, rerr := s.reconcileOrphanedRetry(ctx, block)
+		if rerr != nil {
+			span.RecordError(rerr)
+			s.logger.Warn("retry reconcile failed; will retry later",
+				"block", block.Number,
+				"hash", truncateHash(block.Hash),
+				"error", rerr)
+		}
+		if orphaned {
+			return nil
+		}
 		span.RecordError(err)
 		return fmt.Errorf("failed to fetch block data: %w", err)
 	}
@@ -968,4 +1018,44 @@ func (s *BackfillService) retryBlockPublish(ctx context.Context, block outbound.
 		"hash", truncateHash(block.Hash))
 
 	return nil
+}
+
+// reconcileOrphanedRetry checks whether the stored block was reorged away
+// after we saved it. It queries the canonical chain by number and compares
+// the hash to our stored hash. Returns (true, nil) when the row was orphaned
+// (hash differs — row drops out of the retry set via the NOT is_orphaned
+// filter). Returns (false, err) when verification itself failed — caller
+// should treat the original retry error as transient and try again later.
+// Returns (false, nil) when the canonical chain still matches our hash (the
+// by-hash fetch failure was transient).
+func (s *BackfillService) reconcileOrphanedRetry(ctx context.Context, block outbound.BlockState) (bool, error) {
+	blockJSON, err := s.client.GetBlockByNumber(ctx, block.Number, false)
+	if err != nil {
+		return false, fmt.Errorf("get canonical block %d: %w", block.Number, err)
+	}
+	if blockJSON == nil {
+		// No canonical block at this height. Don't orphan on this alone —
+		// could be chain pruning, RPC inconsistency, or a very recent reorg.
+		return false, nil
+	}
+
+	var header outbound.BlockHeader
+	if err := shared.ParseBlockHeader(blockJSON, &header); err != nil {
+		return false, fmt.Errorf("parse canonical block %d: %w", block.Number, err)
+	}
+
+	if header.Hash == block.Hash {
+		// Canonical chain still has our hash; the by-hash fetch failure was
+		// transient. Leave the block in the retry queue.
+		return false, nil
+	}
+
+	s.logger.Info("orphaned reorged block during retry",
+		"block", block.Number,
+		"storedHash", truncateHash(block.Hash),
+		"canonicalHash", truncateHash(header.Hash))
+	if err := s.stateRepo.MarkBlockOrphaned(ctx, block.Hash); err != nil {
+		return false, fmt.Errorf("mark orphaned: %w", err)
+	}
+	return true, nil
 }

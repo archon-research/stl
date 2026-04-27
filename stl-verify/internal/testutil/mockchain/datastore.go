@@ -277,14 +277,36 @@ func NewFixtureDataStore() *DataStore {
 			Timestamp:  "0x67c00000",
 		}
 
-		headerJSON, err := json.Marshal(header)
+		// Build a full block-like JSON object matching real Ethereum block shape.
+		// LoadFromS3 extracts headers via json.Unmarshal which ignores unknown fields.
+		blockObj := map[string]any{
+			"number":           header.Number,
+			"hash":             header.Hash,
+			"parentHash":       header.ParentHash,
+			"timestamp":        header.Timestamp,
+			"nonce":            "0x0000000000000000",
+			"sha3Uncles":       "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+			"miner":            "0x0000000000000000000000000000000000000000",
+			"stateRoot":        "0x" + strings.Repeat("0", 64),
+			"transactionsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+			"receiptsRoot":     "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+			"logsBloom":        "0x" + strings.Repeat("0", 512),
+			"difficulty":       "0x0",
+			"gasLimit":         "0x1c9c380",
+			"gasUsed":          "0x0",
+			"extraData":        "0x",
+			"baseFeePerGas":    "0x0",
+			"transactions":     []any{},
+			"uncles":           []any{},
+			"withdrawals":      []any{},
+		}
+		blockJSON, err := json.Marshal(blockObj)
 		if err != nil {
-			// Unreachable: json.Marshal cannot fail on a struct with only string fields.
-			panic(fmt.Sprintf("mockchain: marshalling test header: %v", err))
+			panic(fmt.Sprintf("mockchain: marshalling test block: %v", err))
 		}
 
 		ds.AddHeader(header)
-		ds.Add(i, "block", headerJSON)
+		ds.Add(i, "block", blockJSON)
 		ds.Add(i, "receipts", json.RawMessage(`[]`))
 		ds.Add(i, "traces", json.RawMessage(`[]`))
 		ds.Add(i, "blobs", json.RawMessage(`[]`))

@@ -23,7 +23,7 @@ FROM (
       AND usage_as_collateral_enabled = true
       AND liquidation_threshold IS NOT NULL
       AND liquidation_threshold > 0
-    ORDER BY token_id, block_number DESC, block_version DESC
+    ORDER BY token_id, block_number DESC, block_version DESC, processing_version DESC
 ) srd
 """
 

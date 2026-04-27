@@ -40,7 +40,7 @@ WITH morpho_vaults AS (
       JOIN morpho_vault v ON v.id = vs.morpho_vault_id
       JOIN token t ON t.id = v.asset_token_id
       WHERE vs.morpho_vault_id IN (SELECT vault_id FROM morpho_vaults)
-      ORDER BY vs.morpho_vault_id, vs.block_number DESC, vs.block_version DESC
+      ORDER BY vs.morpho_vault_id, vs.block_number DESC, vs.block_version DESC, vs.processing_version DESC
   ),
   vault_market_ids AS (
       SELECT DISTINCT vu.vault_id, mp.morpho_market_id
@@ -63,7 +63,7 @@ WITH morpho_vaults AS (
           FROM morpho_market_position
           WHERE user_id = (SELECT user_id FROM vault_users WHERE vault_id = vmi.vault_id LIMIT 1)
             AND morpho_market_id = vmi.morpho_market_id
-          ORDER BY block_number DESC, block_version DESC
+          ORDER BY block_number DESC, block_version DESC, processing_version DESC
           LIMIT 1
       ) pos ON true
       JOIN morpho_market mm ON mm.id = vmi.morpho_market_id
@@ -80,7 +80,7 @@ WITH morpho_vaults AS (
                      ELSE 0 END as utilization
           FROM morpho_market_state
           WHERE morpho_market_id = ma.morpho_market_id
-          ORDER BY block_number DESC, block_version DESC
+          ORDER BY block_number DESC, block_version DESC, processing_version DESC
           LIMIT 1
       ) ms ON true
   ),

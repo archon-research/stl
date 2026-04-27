@@ -35,13 +35,13 @@ func NewMorphoMarketPosition(userID, morphoMarketID, blockNumber int64, blockVer
 		SupplyAssets:   supplyAssets,
 		BorrowAssets:   borrowAssets,
 	}
-	if err := p.validate(); err != nil {
-		return nil, err
+	if err := p.Validate(); err != nil {
+		return nil, fmt.Errorf("NewMorphoMarketPosition: %w", err)
 	}
 	return p, nil
 }
 
-func (p *MorphoMarketPosition) validate() error {
+func (p *MorphoMarketPosition) Validate() error {
 	if p.UserID <= 0 {
 		return fmt.Errorf("userID must be positive, got %d", p.UserID)
 	}

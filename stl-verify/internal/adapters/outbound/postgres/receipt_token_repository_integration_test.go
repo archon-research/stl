@@ -39,7 +39,7 @@ func truncateReceiptToken(t *testing.T, ctx context.Context) {
 func seedReceiptTokenDeps(t *testing.T, ctx context.Context, chainID int64) (int64, int64) {
 	t.Helper()
 
-	protocolRepo, err := NewProtocolRepository(receiptTokenPool, nil, 0)
+	protocolRepo, err := NewProtocolRepository(receiptTokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}

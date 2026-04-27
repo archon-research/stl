@@ -194,6 +194,118 @@ func TestHandleSnapshots_UniV3LP_UsesAssetMetadata(t *testing.T) {
 	}
 }
 
+func TestHandleSnapshots_ERC4626_PreservesTokenUnits(t *testing.T) {
+	susds := common.HexToAddress("0xa3931d71877c0e7a3148cb7eb4463524fec27fbd")
+	usds := common.HexToAddress("0xdc035d45d973e3ec169d2276ddab16f1e407384f")
+	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+	rawShares, _ := new(big.Int).SetString("1201619730663240195228985093", 10)
+
+	repo := &fakeAllocRepo{}
+	handler := newTestHandler(repo,
+		map[string]int64{"spark": 1},
+		map[common.Address]tokenMeta{
+			susds: {symbol: "sUSDS", decimals: 18},
+			usds:  {symbol: "USDS", decimals: 18},
+		},
+	)
+
+	err := handler.HandleSnapshots(context.Background(), []*PositionSnapshot{
+		{
+			Entry: &TokenEntry{
+				ContractAddress: susds,
+				WalletAddress:   wallet,
+				AssetAddress:    &usds,
+				Star:            "spark",
+				Chain:           "mainnet",
+				TokenType:       "erc4626",
+			},
+			Balance:       new(big.Int).Set(rawShares),
+			ScaledBalance: new(big.Int).Set(rawShares),
+			ChainID:       1,
+			BlockNumber:   100,
+			TxAmount:      big.NewInt(0),
+			Direction:     DirectionSweep,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(repo.saved) != 1 {
+		t.Fatalf("expected 1 saved position, got %d", len(repo.saved))
+	}
+
+	pos := repo.saved[0]
+	if pos.TokenSymbol != "sUSDS" {
+		t.Errorf("symbol = %q, want sUSDS", pos.TokenSymbol)
+	}
+	if pos.TokenDecimals != 18 {
+		t.Errorf("decimals = %d, want 18", pos.TokenDecimals)
+	}
+	if pos.Balance.Cmp(rawShares) != 0 {
+		t.Errorf("balance = %s, want %s", pos.Balance, rawShares)
+	}
+	if pos.ScaledBalance == nil || pos.ScaledBalance.Cmp(rawShares) != 0 {
+		t.Errorf("scaled balance = %v, want %s", pos.ScaledBalance, rawShares)
+	}
+}
+
+func TestHandleSnapshots_Curve_PreservesLPUnits(t *testing.T) {
+	lp := common.HexToAddress("0x00836fe54625be242bcfa286207795405ca4fd10")
+	usdt := common.HexToAddress("0xdac17f958d2ee523a2206206994597c13d831ec7")
+	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+	rawLP, _ := new(big.Int).SetString("48599111101772569976924462", 10)
+
+	repo := &fakeAllocRepo{}
+	handler := newTestHandler(repo,
+		map[string]int64{"spark": 1},
+		map[common.Address]tokenMeta{
+			lp:   {symbol: "sUSDSUSDT", decimals: 18},
+			usdt: {symbol: "USDT", decimals: 6},
+		},
+	)
+
+	err := handler.HandleSnapshots(context.Background(), []*PositionSnapshot{
+		{
+			Entry: &TokenEntry{
+				ContractAddress: lp,
+				WalletAddress:   wallet,
+				AssetAddress:    &usdt,
+				Star:            "spark",
+				Chain:           "mainnet",
+				TokenType:       "curve",
+			},
+			Balance:       new(big.Int).Set(rawLP),
+			ScaledBalance: new(big.Int).Set(rawLP),
+			ChainID:       1,
+			BlockNumber:   100,
+			TxAmount:      big.NewInt(0),
+			Direction:     DirectionSweep,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(repo.saved) != 1 {
+		t.Fatalf("expected 1 saved position, got %d", len(repo.saved))
+	}
+
+	pos := repo.saved[0]
+	if pos.TokenSymbol != "sUSDSUSDT" {
+		t.Errorf("symbol = %q, want sUSDSUSDT", pos.TokenSymbol)
+	}
+	if pos.TokenDecimals != 18 {
+		t.Errorf("decimals = %d, want 18", pos.TokenDecimals)
+	}
+	if pos.Balance.Cmp(rawLP) != 0 {
+		t.Errorf("balance = %s, want %s", pos.Balance, rawLP)
+	}
+	if pos.ScaledBalance == nil || pos.ScaledBalance.Cmp(rawLP) != 0 {
+		t.Errorf("scaled balance = %v, want %s", pos.ScaledBalance, rawLP)
+	}
+}
+
 func TestHandleSnapshots_UniV3Pool_NoAssetAddress_Error(t *testing.T) {
 	pool := common.HexToAddress("0xbafead7c60ea473758ed6c6021505e8bbd7e8e5d")
 	wallet := common.HexToAddress("0x491edfb0b8b608044e227225c715981a30f3a44e")

@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewProtocolEvent(t *testing.T) {
 	validEventData := json.RawMessage(`{"user":"0x1234","amount":"1000"}`)
 	validTxHash := []byte{0x01, 0x02, 0x03}
 	validContractAddr := []byte{0xaa, 0xbb, 0xcc}
+	testCreatedAt := time.Unix(1700000000, 0).UTC()
 
 	tests := []struct {
 		name            string
@@ -209,7 +211,7 @@ func TestNewProtocolEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			event, err := NewProtocolEvent(tt.chainID, tt.protocolID, tt.blockNumber, tt.blockVersion, tt.txHash, tt.logIndex, tt.contractAddress, tt.eventName, tt.eventData)
+			event, err := NewProtocolEvent(tt.chainID, tt.protocolID, tt.blockNumber, tt.blockVersion, tt.txHash, tt.logIndex, tt.contractAddress, tt.eventName, tt.eventData, testCreatedAt)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("NewProtocolEvent() expected error, got nil")

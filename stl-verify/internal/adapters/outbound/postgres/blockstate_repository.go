@@ -583,9 +583,14 @@ func (r *BlockStateRepository) GetMaxBlockNumber(ctx context.Context) (int64, er
 
 // GetBackfillWatermark returns the highest block number that has been verified as gap-free.
 // Blocks at or below this number are guaranteed to have no gaps.
+// Returns 0 if no watermark exists yet (e.g., first run for a new chain).
 func (r *BlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64, error) {
 	var watermark int64
 	err := r.pool.QueryRow(ctx, `SELECT watermark FROM backfill_watermark WHERE chain_id = $1`, r.chainID).Scan(&watermark)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// No watermark exists yet for this chain - return 0 to start from beginning
+		return 0, nil
+	}
 	if err != nil {
 		return 0, fmt.Errorf("failed to get backfill watermark: %w", err)
 	}
@@ -594,8 +599,12 @@ func (r *BlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64,
 
 // SetBackfillWatermark updates the watermark to the given block number.
 // Should only be called after confirming all blocks up to this number exist.
+// Uses UPSERT so the row is auto-created for new chains that have no watermark yet.
 func (r *BlockStateRepository) SetBackfillWatermark(ctx context.Context, watermark int64) error {
-	_, err := r.pool.Exec(ctx, `UPDATE backfill_watermark SET watermark = $1 WHERE chain_id = $2`, watermark, r.chainID)
+	_, err := r.pool.Exec(ctx,
+		`INSERT INTO backfill_watermark (chain_id, watermark) VALUES ($1, $2)
+		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark`,
+		r.chainID, watermark)
 	if err != nil {
 		return fmt.Errorf("failed to set backfill watermark: %w", err)
 	}

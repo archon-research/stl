@@ -1,12 +1,11 @@
-import logging
-
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.entities.receipt_token import ReceiptTokenInfo
+from app.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _RECEIPT_TOKEN_SQL = """
 SELECT rt.id, rt.protocol_id, rt.underlying_token_id, rt.receipt_token_address,

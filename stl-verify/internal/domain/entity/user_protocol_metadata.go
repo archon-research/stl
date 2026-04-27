@@ -18,14 +18,14 @@ func NewUserProtocolMetadata(id, userID, protocolID int64) (*UserProtocolMetadat
 		ProtocolID: protocolID,
 		Metadata:   make(map[string]any),
 	}
-	if err := upm.validate(); err != nil {
-		return nil, err
+	if err := upm.Validate(); err != nil {
+		return nil, fmt.Errorf("NewUserProtocolMetadata: %w", err)
 	}
 	return upm, nil
 }
 
 // validate checks that all fields have valid values.
-func (upm *UserProtocolMetadata) validate() error {
+func (upm *UserProtocolMetadata) Validate() error {
 	if upm.ID <= 0 {
 		return fmt.Errorf("id must be positive, got %d", upm.ID)
 	}

@@ -16,12 +16,9 @@ spec:
       containers:
         - name: morpho-indexer
           image: morpho-indexer
-          env:
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://localhost:4317"
-            - name: JAEGER_ENDPOINT
-              value: "localhost:4317"
           envFrom:
+            - configMapRef:
+                name: otel-config
             - configMapRef:
                 name: morpho-indexer-config
             - secretRef:

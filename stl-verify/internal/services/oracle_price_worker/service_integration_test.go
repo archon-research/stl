@@ -123,7 +123,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000081", "SS1", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 		t.Fatal("no enabled oracle assets found from migration seed data")
 	}
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -541,7 +541,7 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}

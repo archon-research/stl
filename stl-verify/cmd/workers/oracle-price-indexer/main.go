@@ -20,6 +20,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
@@ -114,24 +115,6 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
-	// Initialize OpenTelemetry tracing and metrics
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "oracle-price-worker",
-		ServiceVersion: GitCommit,
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("initializing telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
-
-	// Service telemetry
-	oracleTelemetry, err := oracle_price_worker.NewTelemetry()
-	if err != nil {
-		return fmt.Errorf("creating oracle telemetry: %w", err)
-	}
-
 	logger.Info("starting oracle price worker", "queue", cfg.queueURL, "chainID", cfg.chainID)
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
@@ -162,7 +145,30 @@ func run(ctx context.Context, args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0)
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("registering build: %w", err)
+	}
+
+	// Initialize OpenTelemetry tracing and metrics
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "oracle-price-worker",
+		ServiceVersion: buildReg.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
+	// Service telemetry
+	oracleTelemetry, err := oracle_price_worker.NewTelemetry()
+	if err != nil {
+		return fmt.Errorf("creating oracle telemetry: %w", err)
+	}
+
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
 		return fmt.Errorf("creating repository: %w", err)
 	}

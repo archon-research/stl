@@ -29,14 +29,14 @@ func NewReceiptToken(chainID, protocolID, underlyingTokenID, createdAtBlock int6
 		CreatedAtBlock:      createdAtBlock,
 		Metadata:            make(map[string]any),
 	}
-	if err := rt.validate(); err != nil {
-		return nil, err
+	if err := rt.Validate(); err != nil {
+		return nil, fmt.Errorf("NewReceiptToken: %w", err)
 	}
 	return rt, nil
 }
 
 // validate checks that all fields have valid values.
-func (rt *ReceiptToken) validate() error {
+func (rt *ReceiptToken) Validate() error {
 	if rt.ChainID <= 0 {
 		return fmt.Errorf("chainID must be positive, got %d", rt.ChainID)
 	}
