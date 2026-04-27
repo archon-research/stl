@@ -11,7 +11,7 @@ dependencies = [
     "pydantic-settings",
     "python-dotenv",
     "httpx>=0.28.1",
-    "axis",
+    "axis-synome==0.1.dev188",
     "opentelemetry-sdk>=1.41.0,<2",
     "opentelemetry-instrumentation-fastapi>=0.62b0,<1",
     "opentelemetry-instrumentation-sqlalchemy>=0.62b0,<1",
@@ -19,10 +19,6 @@ dependencies = [
     "pandas>=2.2.0",
     "numpy",
 ]
-
-[tool.uv.sources]
-# TODO: Replace git references with published packages once synome-specs and axis-common are on a private registry.
-axis = { git = "ssh://git@github.com/archon-research/synome.git", subdirectory = "specs", branch = "baekdahl/move-bad-debt-to-specs" }
 
 [project.optional-dependencies]
 dev = [
