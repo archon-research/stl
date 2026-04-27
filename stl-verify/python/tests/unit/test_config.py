@@ -31,9 +31,7 @@ def test_risk_default_gap_pct(monkeypatch: pytest.MonkeyPatch, env_value: str | 
 
 
 @pytest.mark.parametrize("env_value", ["-0.01", "1.01"])
-def test_risk_default_gap_pct_rejects_out_of_bounds_env_values(
-    monkeypatch: pytest.MonkeyPatch, env_value: str
-) -> None:
+def test_risk_default_gap_pct_rejects_out_of_bounds_env_values(monkeypatch: pytest.MonkeyPatch, env_value: str) -> None:
     monkeypatch.setenv("RISK_DEFAULT_GAP_PCT", env_value)
 
     with pytest.raises(ValidationError, match="risk_default_gap_pct"):
