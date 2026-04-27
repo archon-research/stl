@@ -3,11 +3,11 @@ package entity
 import (
 	"fmt"
 	"math/big"
+	"time"
 )
 
 // BorrowerCollateral represents a user's collateral position at a specific block.
 type BorrowerCollateral struct {
-	ID                int64
 	UserID            int64
 	ProtocolID        int64
 	TokenID           int64
@@ -18,12 +18,12 @@ type BorrowerCollateral struct {
 	EventType         EventType // type of event that triggered this position snapshot
 	TxHash            []byte    // transaction hash
 	CollateralEnabled bool      // whether this asset is enabled as collateral
+	CreatedAt         time.Time // block timestamp — deterministic for hypertable dedup
 }
 
 // NewBorrowerCollateral creates a new BorrowerCollateral entity.
-func NewBorrowerCollateral(id, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType EventType, txHash []byte, collateralEnabled bool) (*BorrowerCollateral, error) {
+func NewBorrowerCollateral(userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType EventType, txHash []byte, collateralEnabled bool, createdAt time.Time) (*BorrowerCollateral, error) {
 	bc := &BorrowerCollateral{
-		ID:                id,
 		UserID:            userID,
 		ProtocolID:        protocolID,
 		TokenID:           tokenID,
@@ -34,17 +34,18 @@ func NewBorrowerCollateral(id, userID, protocolID, tokenID, blockNumber int64, b
 		EventType:         eventType,
 		TxHash:            txHash,
 		CollateralEnabled: collateralEnabled,
+		CreatedAt:         createdAt,
 	}
-	if err := bc.validate(); err != nil {
-		return nil, err
+	if err := bc.Validate(); err != nil {
+		return nil, fmt.Errorf("NewBorrowerCollateral: %w", err)
 	}
 	return bc, nil
 }
 
 // validate checks that all fields have valid values.
-func (bc *BorrowerCollateral) validate() error {
-	if bc.ID <= 0 {
-		return fmt.Errorf("id must be positive, got %d", bc.ID)
+func (bc *BorrowerCollateral) Validate() error {
+	if bc.CreatedAt.IsZero() {
+		return fmt.Errorf("createdAt must be set explicitly (block timestamp)")
 	}
 	if bc.UserID <= 0 {
 		return fmt.Errorf("userID must be positive, got %d", bc.UserID)

@@ -29,7 +29,7 @@ func StartRedis(t *testing.T, ctx context.Context) (addr string, cleanup func())
 		Started: true,
 	})
 	if err != nil {
-		t.Fatalf("start Redis container: %v", err)
+		HandleContainerRuntimeError(t, err, "start Redis container")
 	}
 
 	host, err := container.Host(ctx)

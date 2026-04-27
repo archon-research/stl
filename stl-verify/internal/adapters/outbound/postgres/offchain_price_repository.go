@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -21,12 +22,13 @@ var _ outbound.PriceRepository = (*PriceRepository)(nil)
 type PriceRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
+	buildID   buildregistry.BuildID
 	batchSize int
 }
 
 // NewPriceRepository creates a new PostgreSQL Price repository.
 // If batchSize is <= 0, a default batch size of 1000 is used.
-func NewPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (*PriceRepository, error) {
+func NewPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, batchSize int) (*PriceRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -39,6 +41,7 @@ func NewPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) 
 	return &PriceRepository{
 		pool:      pool,
 		logger:    logger,
+		buildID:   buildID,
 		batchSize: batchSize,
 	}, nil
 }
@@ -152,22 +155,22 @@ func (r *PriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx, price
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd)
+		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd, build_id)
 		VALUES `)
 
-	args := make([]any, 0, len(prices)*6)
+	args := make([]any, 0, len(prices)*7)
 	for i, price := range prices {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 6
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6))
+		baseIdx := i * 7
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
 
-		args = append(args, price.TokenID, price.SourceID, price.Timestamp, price.PriceUSD, price.MarketCapUSD, price.VolumeUSD)
+		args = append(args, price.TokenID, price.SourceID, price.Timestamp, price.PriceUSD, price.MarketCapUSD, price.VolumeUSD, int(r.buildID))
 	}
 
-	sb.WriteString(` ON CONFLICT (token_id, source_id, timestamp) DO NOTHING`)
+	sb.WriteString(` ON CONFLICT (token_id, source_id, processing_version, timestamp) DO NOTHING`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
@@ -183,7 +186,7 @@ func (r *PriceRepository) GetLatestPrice(ctx context.Context, tokenID int64) (*e
 		SELECT token_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd
 		FROM offchain_token_price
 		WHERE token_id = $1
-		ORDER BY timestamp DESC
+		ORDER BY timestamp DESC, processing_version DESC
 		LIMIT 1
 	`, tokenID).Scan(
 		&tp.TokenID, &tp.SourceID, &tp.Timestamp, &tp.PriceUSD, &tp.MarketCapUSD, &tp.VolumeUSD,

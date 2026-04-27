@@ -181,7 +181,7 @@ func TestIntegration_FetchCurrentPrices(t *testing.T) {
 	}
 
 	// Create repository
-	repo, err := postgres.NewPriceRepository(pool, nil, 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestIntegration_FetchCurrentPrices_AllEnabledAssets(t *testing.T) {
 		t.Fatalf("failed to create coingecko client: %v", err)
 	}
 
-	repo, err := postgres.NewPriceRepository(pool, nil, 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestIntegration_FetchHistoricalData(t *testing.T) {
 		t.Fatalf("failed to create coingecko client: %v", err)
 	}
 
-	repo, err := postgres.NewPriceRepository(pool, nil, 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
@@ -399,7 +399,7 @@ func TestIntegration_FetchHistoricalData_MultipleAssetsConcurrently(t *testing.T
 		t.Fatalf("failed to create coingecko client: %v", err)
 	}
 
-	repo, err := postgres.NewPriceRepository(pool, nil, 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 		t.Fatalf("failed to create coingecko client: %v", err)
 	}
 
-	repo, err := postgres.NewPriceRepository(pool, nil, 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
@@ -531,7 +531,7 @@ func TestIntegration_NoEnabledAssets(t *testing.T) {
 		t.Fatalf("failed to create coingecko client: %v", err)
 	}
 
-	repo, err := postgres.NewPriceRepository(pool, nil, 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}

@@ -327,6 +327,72 @@ func TestServer_Reorg_BroadcastsAllBlocks(t *testing.T) {
 	}
 }
 
+// TestServer_Reorg_FullBlockData verifies that after a reorg, eth_getBlockByHash returns
+// full block data (with transactions key) for reorg hashes, not just the header.
+func TestServer_Reorg_FullBlockData(t *testing.T) {
+	const depth = 2
+
+	s := NewServer(NewFixtureDataStore(), time.Minute)
+	if err := s.Start(":0"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop() })
+
+	wsURL := fmt.Sprintf("ws://%s", s.Addr().String())
+	conn := dialWS(t, wsURL)
+	doSubscribe(t, conn)
+
+	for range depth + 1 {
+		emitOrFail(t, s.replayer)
+	}
+	readWSHeaders(t, conn, depth+1)
+
+	if err := s.Reorg(depth); err != nil {
+		t.Fatalf("Reorg: %v", err)
+	}
+	reorgHeaders := readWSHeaders(t, conn, depth)
+
+	// Query eth_getBlockByHash for each reorg hash and verify full block data.
+	for i, rh := range reorgHeaders {
+		body := fmt.Sprintf(`{"id":1,"method":"eth_getBlockByHash","params":[%q,true]}`, rh.Hash)
+		raw := serverPost(t, s, body)
+
+		var resp httpRPCResponse
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			t.Fatalf("reorg block %d: unmarshal response: %v", i, err)
+		}
+		if string(resp.Result) == "null" {
+			t.Fatalf("reorg block %d: expected block data, got null", i)
+		}
+
+		var block map[string]json.RawMessage
+		if err := json.Unmarshal(resp.Result, &block); err != nil {
+			t.Fatalf("reorg block %d: unmarshal block: %v", i, err)
+		}
+		if _, ok := block["transactions"]; !ok {
+			t.Errorf("reorg block %d: expected 'transactions' key in full block data", i)
+		}
+
+		// Verify hash matches the reorg hash.
+		var hash string
+		if err := json.Unmarshal(block["hash"], &hash); err != nil {
+			t.Fatalf("reorg block %d: unmarshal hash: %v", i, err)
+		}
+		if hash != rh.Hash {
+			t.Errorf("reorg block %d: hash = %q, want %q", i, hash, rh.Hash)
+		}
+
+		// Verify parentHash matches expected parent.
+		var parentHash string
+		if err := json.Unmarshal(block["parentHash"], &parentHash); err != nil {
+			t.Fatalf("reorg block %d: unmarshal parentHash: %v", i, err)
+		}
+		if parentHash != rh.ParentHash {
+			t.Errorf("reorg block %d: parentHash = %q, want %q", i, parentHash, rh.ParentHash)
+		}
+	}
+}
+
 // TestServer_Reorg_ReplayerContinuesFromTip verifies that after a reorg the replayer
 // emits the next canonical block with the reorg tip as its parent.
 func TestServer_Reorg_ReplayerContinuesFromTip(t *testing.T) {

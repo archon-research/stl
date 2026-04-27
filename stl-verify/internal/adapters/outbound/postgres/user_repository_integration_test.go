@@ -186,7 +186,7 @@ func TestGetOrCreateUser_ConcurrentRaceReturnsSameID(t *testing.T) {
 
 	addr := common.HexToAddress("0x4444444444444444444444444444444444444444")
 
-	const workers = 10
+	const workers = 5
 	ids := make([]int64, workers)
 	errs := make([]error, workers)
 

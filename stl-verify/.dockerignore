@@ -1,0 +1,7 @@
+**/node_modules
+**/dist
+**/dist-ssr
+**/.venv
+**/.venv/**
+**/.pytest_cache
+**/__pycache__

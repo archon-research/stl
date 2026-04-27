@@ -19,6 +19,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
@@ -161,12 +162,6 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
-	logger.Info("starting allocation tracker",
-		"queue", cfg.queueURL,
-		"redis", cfg.redisAddr,
-		"chainID", cfg.chainID,
-		"commit", GitCommit)
-
 	// AWS config
 	awsRegion := env.Get("AWS_REGION", "eu-west-1")
 	awsOpts := []func(*awsconfig.LoadOptions) error{
@@ -297,13 +292,24 @@ func run(ctx context.Context, args []string) error {
 	}
 	logger.Info("PostgreSQL connected")
 
+	buildReg, err := buildregistry.New(ctx, dbPool)
+	if err != nil {
+		return fmt.Errorf("registering build: %w", err)
+	}
+
+	logger.Info("starting allocation tracker",
+		"queue", cfg.queueURL,
+		"redis", cfg.redisAddr,
+		"chainID", cfg.chainID,
+		"commit", buildReg.GitHash())
+
 	txm, err := postgres.NewTxManager(dbPool, logger)
 	if err != nil {
 		return fmt.Errorf("tx manager: %w", err)
 	}
 
 	// Load primes from DB to build star → prime_id lookup
-	primeRepo := postgres.NewPrimeDebtRepository(dbPool, txm, logger)
+	primeRepo := postgres.NewPrimeDebtRepository(dbPool, txm, logger, buildReg.BuildID())
 	primes, err := primeRepo.GetPrimes(ctx)
 	if err != nil {
 		return fmt.Errorf("load primes: %w", err)
@@ -321,7 +327,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("token repo: %w", err)
 	}
-	allocRepo := postgres.NewAllocationRepository(dbPool, txm, tokenRepo, logger)
+	allocRepo := postgres.NewAllocationRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID())
 	pgHandler := at.NewPrimePositionHandler(allocRepo, mc, erc20ABI, primeLookup, logger)
 
 	handler := at.NewMultiHandler(at.NewLogHandler(logger), pgHandler)

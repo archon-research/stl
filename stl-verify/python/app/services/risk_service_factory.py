@@ -1,4 +1,3 @@
-import logging
 import re
 from decimal import Decimal
 
@@ -16,12 +15,13 @@ from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLi
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
+from app.logging import get_logger
 from app.ports.allocation_share_port import AllocationSharePort
 from app.ports.backed_breakdown_repository import BackedBreakdownRepository
 from app.ports.liquidation_params_repository import LiquidationParamsRepository
 from app.services.risk_calculation_service import RiskCalculationService
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa"})
 _MORPHO = frozenset({"morpho_blue"})
@@ -40,7 +40,8 @@ WITH latest_receipt AS (
     FROM allocation_position ap
     JOIN token t ON t.id = ap.token_id AND t.address = :receipt_token_address
     WHERE ap.chain_id = :chain_id
-    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
+    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC,
+             ap.processing_version DESC, ap.log_index DESC
 ),
 latest_underlying AS (
     -- Most-recent balance snapshot per wallet for the underlying token.
@@ -52,7 +53,8 @@ latest_underlying AS (
     JOIN receipt_token rt ON rt.underlying_token_id = t.id
                          AND rt.receipt_token_address = :receipt_token_address
     WHERE ap.chain_id = :chain_id
-    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
+    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC,
+             ap.processing_version DESC, ap.log_index DESC
 )
 SELECT proxy_address, balance
 FROM (

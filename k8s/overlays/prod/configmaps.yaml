@@ -1,6 +1,16 @@
 # ConfigMaps for prod — non-secret environment variables matching ECS parity
 # Sensitive values (Redis, SQS, S3, SNS) are in ExternalSecrets via stl-sentinelprod-infra-config
 ---
+# Shared OpenTelemetry configuration — all services reference this via envFrom.
+# Points to the OTel Collector gateway in the observability namespace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-config
+data:
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
+  JAEGER_ENDPOINT: "otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -245,3 +255,14 @@ data:
   CHAIN_ID: "43114"
   ENVIRONMENT: "sentinelprod"
   DEPLOY_ENV: "prod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: python-api-config
+data:
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+  OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+  OTEL_SERVICE_NAME: "stl-verify-python-api"

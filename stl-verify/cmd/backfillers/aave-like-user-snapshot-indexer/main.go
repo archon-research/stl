@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/aavelike"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -262,6 +264,11 @@ func run(args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("registering build: %w", err)
+	}
+
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
 		return fmt.Errorf("creating tx manager: %w", err)
@@ -272,7 +279,7 @@ func run(args []string) error {
 		return fmt.Errorf("creating user repository: %w", err)
 	}
 
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, 0)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}
@@ -282,12 +289,12 @@ func run(args []string) error {
 		return fmt.Errorf("creating token repository: %w", err)
 	}
 
-	positionRepo, err := postgres.NewPositionRepository(pool, logger, 0)
+	positionRepo, err := postgres.NewPositionRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
 		return fmt.Errorf("creating position repository: %w", err)
 	}
 
-	eventRepo := postgres.NewEventRepository(logger)
+	eventRepo := postgres.NewEventRepository(logger, buildReg.BuildID())
 
 	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger)
 	if err != nil {
@@ -339,6 +346,24 @@ func run(args []string) error {
 		}
 		logger.Info("using latest block number", "block", blockNumber)
 	}
+
+	// Verify the block is finalized to prevent mixed-state data from reorgs
+	finalizedHeader, err := ethClient.HeaderByNumber(ctx, big.NewInt(int64(rpc.FinalizedBlockNumber)))
+	if err != nil {
+		return fmt.Errorf("fetching finalized block: %w", err)
+	}
+	if int64(blockNumber) > finalizedHeader.Number.Int64() {
+		return fmt.Errorf("block %d is not finalized (latest finalized: %d), specify a finalized block number",
+			blockNumber, finalizedHeader.Number.Int64())
+	}
+	logger.Info("block finalization verified", "block", blockNumber, "finalized", finalizedHeader.Number.Int64())
+
+	// Fetch block timestamp for hypertable partition column
+	header, err := ethClient.HeaderByNumber(ctx, big.NewInt(int64(blockNumber)))
+	if err != nil {
+		return fmt.Errorf("fetching block header for timestamp: %w", err)
+	}
+	blockTimestamp := time.Unix(int64(header.Time), 0).UTC()
 
 	// Split users into batches and process concurrently
 	batches := splitIntoBatches(users, cfg.batchSize)
@@ -398,7 +423,7 @@ func run(args []string) error {
 			if len(positions) > 0 {
 				if err := trackerSvc.PersistUserPositionBatch(
 					gCtx, positions, cfg.protocolAddress, cfg.chainID,
-					int64(blockNumber), 0,
+					int64(blockNumber), 0, blockTimestamp,
 				); err != nil {
 					return fmt.Errorf("batch %d DB persist failed: %w", batchIdx+1, err)
 				}

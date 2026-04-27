@@ -23,7 +23,7 @@ WITH user_debts AS (
         FROM borrower b
         JOIN token t ON t.id = b.token_id
         WHERE b.protocol_id = :protocol_id
-        ORDER BY b.user_id, b.token_id, b.block_number DESC, b.block_version DESC
+        ORDER BY b.user_id, b.token_id, b.block_number DESC, b.block_version DESC, b.processing_version DESC
     ) latest
     WHERE debt_amount > 0
 ),
@@ -48,11 +48,11 @@ user_collateral AS (
             FROM sparklend_reserve_data srd
             WHERE srd.token_id = bc.token_id
               AND srd.protocol_id = :protocol_id
-            ORDER BY srd.block_number DESC, srd.block_version DESC
+            ORDER BY srd.block_number DESC, srd.block_version DESC, srd.processing_version DESC
             LIMIT 1
         ) srd ON srd.usage_as_collateral_enabled = true
         WHERE bc.protocol_id = :protocol_id
-        ORDER BY bc.user_id, bc.token_id, bc.block_number DESC, bc.block_version DESC
+        ORDER BY bc.user_id, bc.token_id, bc.block_number DESC, bc.block_version DESC, bc.processing_version DESC
     ) latest
     WHERE collateral_enabled = true
 ),
@@ -65,7 +65,7 @@ token_prices AS (
     FROM onchain_token_price otp
     JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
     WHERE po.protocol_id = :protocol_id
-    ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC
+    ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
 ),
 
 -- Step 4: Target (backed asset) debt per user, only for users who borrowed it.

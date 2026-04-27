@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -969,11 +970,11 @@ func TestService_IsKnownProtocol_FilterLogic(t *testing.T) {
 
 type mockPositionRepository struct {
 	saveBorrowerCalls            []saveBorrowerCall
-	saveBorrowerCollateralsCalls [][]outbound.CollateralRecord
+	saveBorrowerCollateralsCalls [][]*entity.BorrowerCollateral
 
-	SaveBorrowerFn            func(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte) error
-	SaveBorrowerCollateralFn  func(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte, collateralEnabled bool) error
-	SaveBorrowerCollateralsFn func(ctx context.Context, tx pgx.Tx, records []outbound.CollateralRecord) error
+	SaveBorrowerFn            func(ctx context.Context, tx pgx.Tx, b *entity.Borrower) error
+	SaveBorrowerCollateralFn  func(ctx context.Context, tx pgx.Tx, bc *entity.BorrowerCollateral) error
+	SaveBorrowerCollateralsFn func(ctx context.Context, tx pgx.Tx, collaterals []*entity.BorrowerCollateral) error
 }
 
 type saveBorrowerCall struct {
@@ -982,40 +983,40 @@ type saveBorrowerCall struct {
 	EventType string
 }
 
-func (m *mockPositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte) error {
+func (m *mockPositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, b *entity.Borrower) error {
 	m.saveBorrowerCalls = append(m.saveBorrowerCalls, saveBorrowerCall{
-		Amount:    amount,
-		Change:    change,
-		EventType: eventType,
+		Amount:    b.Amount,
+		Change:    b.Change,
+		EventType: string(b.EventType),
 	})
 	if m.SaveBorrowerFn != nil {
-		return m.SaveBorrowerFn(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, eventType, txHash)
+		return m.SaveBorrowerFn(ctx, tx, b)
 	}
 	return nil
 }
 
-func (m *mockPositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, userID, protocolID, tokenID, blockNumber int64, blockVersion int, amount, change *big.Int, eventType string, txHash []byte, collateralEnabled bool) error {
+func (m *mockPositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.Tx, bc *entity.BorrowerCollateral) error {
 	if m.SaveBorrowerCollateralFn != nil {
-		return m.SaveBorrowerCollateralFn(ctx, tx, userID, protocolID, tokenID, blockNumber, blockVersion, amount, change, eventType, txHash, collateralEnabled)
+		return m.SaveBorrowerCollateralFn(ctx, tx, bc)
 	}
 	return nil
 }
 
-func (m *mockPositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, records []outbound.BorrowerRecord) error {
-	for _, rec := range records {
+func (m *mockPositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, borrowers []*entity.Borrower) error {
+	for _, b := range borrowers {
 		m.saveBorrowerCalls = append(m.saveBorrowerCalls, saveBorrowerCall{
-			Amount:    rec.Amount,
-			Change:    rec.Change,
-			EventType: rec.EventType,
+			Amount:    b.Amount,
+			Change:    b.Change,
+			EventType: string(b.EventType),
 		})
 	}
 	return nil
 }
 
-func (m *mockPositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx.Tx, records []outbound.CollateralRecord) error {
-	m.saveBorrowerCollateralsCalls = append(m.saveBorrowerCollateralsCalls, records)
+func (m *mockPositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx.Tx, collaterals []*entity.BorrowerCollateral) error {
+	m.saveBorrowerCollateralsCalls = append(m.saveBorrowerCollateralsCalls, collaterals)
 	if m.SaveBorrowerCollateralsFn != nil {
-		return m.SaveBorrowerCollateralsFn(ctx, tx, records)
+		return m.SaveBorrowerCollateralsFn(ctx, tx, collaterals)
 	}
 	return nil
 }
@@ -1213,7 +1214,7 @@ func TestSaveBorrowerRecord(t *testing.T) {
 					User:      userAddr,
 					Reserve:   tt.reserveAddr,
 					Amount:    tt.eventDelta,
-				}, aavelike.TokenMetadata{Symbol: tt.symbol, Decimals: tt.decimals, Name: tt.tokenName}, debtData, 1, 1, 1, 20000000, 0)
+				}, aavelike.TokenMetadata{Symbol: tt.symbol, Decimals: tt.decimals, Name: tt.tokenName}, debtData, 1, 1, 1, 20000000, 0, time.Unix(1700000000, 0).UTC())
 			})
 
 			if tt.wantErr {
@@ -1308,7 +1309,7 @@ func TestIndexUserPosition(t *testing.T) {
 	positionRepo := &mockPositionRepository{}
 	svc := newPositionSnapshotTestService(t, ethClient, multicaller, positionRepo, chainID, protocolAddress)
 
-	err := svc.IndexUserPosition(context.Background(), userAddress, protocolAddress, chainID, blockNumber, blockVersion)
+	err := svc.IndexUserPosition(context.Background(), userAddress, protocolAddress, chainID, blockNumber, blockVersion, time.Unix(1700000000, 0).UTC())
 	if err != nil {
 		t.Fatalf("IndexUserPosition() failed: %v", err)
 	}
@@ -1317,8 +1318,8 @@ func TestIndexUserPosition(t *testing.T) {
 		t.Fatalf("expected 1 SaveBorrower call, got %d", len(positionRepo.saveBorrowerCalls))
 	}
 	borrowerCall := positionRepo.saveBorrowerCalls[0]
-	if borrowerCall.EventType != "Snapshot" {
-		t.Errorf("SaveBorrower eventType = %q, want %q", borrowerCall.EventType, "Snapshot")
+	if borrowerCall.EventType != string(entity.InternalSnapshot) {
+		t.Errorf("SaveBorrower eventType = %q, want %q", borrowerCall.EventType, entity.InternalSnapshot)
 	}
 	if borrowerCall.Amount.Cmp(debtUSDC) != 0 {
 		t.Errorf("SaveBorrower amount = %s, want %s", borrowerCall.Amount, debtUSDC)
@@ -1334,8 +1335,8 @@ func TestIndexUserPosition(t *testing.T) {
 	if len(collateralRecords) != 1 {
 		t.Fatalf("expected 1 collateral record, got %d", len(collateralRecords))
 	}
-	if collateralRecords[0].EventType != "Snapshot" {
-		t.Errorf("collateral record eventType = %q, want %q", collateralRecords[0].EventType, "Snapshot")
+	if collateralRecords[0].EventType != entity.InternalSnapshot {
+		t.Errorf("collateral record eventType = %q, want %q", collateralRecords[0].EventType, entity.InternalSnapshot)
 	}
 	if collateralRecords[0].Change.Cmp(big.NewInt(0)) != 0 {
 		t.Errorf("collateral record change = %s, want 0", collateralRecords[0].Change)
@@ -1358,7 +1359,7 @@ func TestIndexUserPosition_NoPositions(t *testing.T) {
 	positionRepo := &mockPositionRepository{}
 	svc := newPositionSnapshotTestService(t, ethClient, multicaller, positionRepo, chainID, protocolAddress)
 
-	err := svc.IndexUserPosition(context.Background(), userAddress, protocolAddress, chainID, blockNumber, blockVersion)
+	err := svc.IndexUserPosition(context.Background(), userAddress, protocolAddress, chainID, blockNumber, blockVersion, time.Unix(1700000000, 0).UTC())
 	if err != nil {
 		t.Fatalf("IndexUserPosition() should return nil for no positions, got: %v", err)
 	}
@@ -1416,7 +1417,7 @@ func TestIndexUserPosition_PropagatesExtractionError(t *testing.T) {
 	positionRepo := &mockPositionRepository{}
 	svc := newPositionSnapshotTestService(t, ethClient, multicaller, positionRepo, chainID, protocolAddress)
 
-	err := svc.IndexUserPosition(context.Background(), userAddress, protocolAddress, chainID, blockNumber, blockVersion)
+	err := svc.IndexUserPosition(context.Background(), userAddress, protocolAddress, chainID, blockNumber, blockVersion, time.Unix(1700000000, 0).UTC())
 	if err == nil {
 		t.Fatal("expected IndexUserPosition to fail, got nil")
 	}
@@ -1479,7 +1480,7 @@ func TestSavePositionSnapshot_AllEventTypesFailWhenPositionExtractionFails(t *te
 				User:      userAddress,
 				Reserve:   wethAddress,
 				Amount:    oneETH,
-			}, protocolAddress, chainID, blockNumber, 0)
+			}, protocolAddress, chainID, blockNumber, 0, time.Unix(1700000000, 0).UTC())
 			if err == nil {
 				t.Fatal("expected savePositionSnapshot to fail, got nil")
 			}
@@ -1524,7 +1525,7 @@ func TestSavePositionSnapshot_TokenMetadataFailurePropagatesError(t *testing.T) 
 		User:      userAddress,
 		Reserve:   wethAddress,
 		Amount:    oneETH,
-	}, protocolAddress, chainID, blockNumber, 0)
+	}, protocolAddress, chainID, blockNumber, 0, time.Unix(1700000000, 0).UTC())
 	if err == nil {
 		t.Fatal("expected error when token metadata fetch fails, got nil")
 	}
@@ -1634,6 +1635,7 @@ func TestPersistUserPositionBatch(t *testing.T) {
 				chainID,
 				blockNumber,
 				blockVersion,
+				time.Unix(1700000000, 0).UTC(),
 			)
 
 			if tt.wantErr {

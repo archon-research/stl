@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: oracle-price-worker
-          image: stl-oracle-price-worker:local
+          image: localhost/stl-oracle-price-worker:local
           imagePullPolicy: Never
           envFrom:
             - configMapRef:

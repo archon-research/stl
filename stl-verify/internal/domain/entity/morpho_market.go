@@ -34,13 +34,13 @@ func NewMorphoMarket(chainID, protocolID int64, marketID common.Hash, loanTokenI
 		LLTV:              lltv,
 		CreatedAtBlock:    createdAtBlock,
 	}
-	if err := m.validate(); err != nil {
-		return nil, err
+	if err := m.Validate(); err != nil {
+		return nil, fmt.Errorf("NewMorphoMarket: %w", err)
 	}
 	return m, nil
 }
 
-func (m *MorphoMarket) validate() error {
+func (m *MorphoMarket) Validate() error {
 	if m.ChainID <= 0 {
 		return fmt.Errorf("chainID must be positive, got %d", m.ChainID)
 	}
