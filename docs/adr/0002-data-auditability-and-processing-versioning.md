@@ -3,7 +3,7 @@
 **Status**: Accepted  
 **Proposed**: @simonbojeoutzen  
 **Date**: 2026-04-08  
-**Deciders**: @vector @infrastructure
+**Deciders**: @vector, @infrastructure
 
 ## Context
 
