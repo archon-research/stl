@@ -1,3 +1,5 @@
+import { SkeletonRows, SurfaceMessage } from '@archon-research/design-system';
+
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
@@ -30,63 +32,6 @@ type AllocationGridProps = {
   selectedAllocationKey: string | null;
   selectedPrime: Prime | null;
 };
-
-function SurfaceMessage({ body, title }: { body: string; title: string }) {
-  return (
-    <div
-      className={css({
-        borderRadius: 'md',
-        borderStyle: 'solid',
-        borderWidth: '1px',
-        borderColor: 'border.subtle',
-        bg: 'surface.default',
-        p: '5',
-      })}
-    >
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'sm',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-        })}
-      >
-        {title}
-      </p>
-      <p
-        className={css({ m: 0, mt: '2', fontSize: 'sm', color: 'text.muted' })}
-      >
-        {body}
-      </p>
-    </div>
-  );
-}
-
-function SkeletonRows() {
-  return Array.from({ length: 6 }, (_row, rowIndex) => (
-    <tr
-      key={rowIndex}
-      className={css({
-        borderBottomWidth: '1px',
-        borderBottomStyle: 'solid',
-        borderBottomColor: 'border.subtle',
-      })}
-    >
-      {Array.from({ length: 3 }, (_cell, cellIndex) => (
-        <td key={cellIndex} className={css({ px: '4', py: '3.5' })}>
-          <div
-            className={css({
-              height: cellIndex === 0 ? '12' : '8',
-              borderRadius: 'sm',
-              bg: 'surface.subtle',
-              opacity: 0.85,
-            })}
-          />
-        </td>
-      ))}
-    </tr>
-  ));
-}
 
 export function AllocationGrid({
   allocations,

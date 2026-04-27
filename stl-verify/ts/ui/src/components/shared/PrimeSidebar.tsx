@@ -1,4 +1,8 @@
-import { ThemeToggle } from '@archon-research/design-system';
+import {
+  SkeletonStack,
+  SurfaceMessage,
+  ThemeToggle,
+} from '@archon-research/design-system';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
@@ -19,27 +23,6 @@ function formatAddress(address: string): string {
   }
 
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
-}
-
-function PrimeSkeletonList() {
-  return (
-    <div className={css({ display: 'grid', gap: '3' })}>
-      {Array.from({ length: 6 }, (_, index) => (
-        <div
-          key={index}
-          className={css({
-            height: '16',
-            borderRadius: 'md',
-            borderWidth: '1px',
-            borderStyle: 'solid',
-            borderColor: 'border.subtle',
-            bg: 'surface.subtle',
-            opacity: 0.8,
-          })}
-        />
-      ))}
-    </div>
-  );
 }
 
 export function PrimeSidebar({
@@ -88,50 +71,18 @@ export function PrimeSidebar({
           py: '4',
         })}
       >
-        {isLoading ? <PrimeSkeletonList /> : null}
+        {isLoading ? <SkeletonStack count={6} itemHeight={64} /> : null}
 
         {!isLoading && errorMessage ? (
-          <div
-            className={css({
-              borderRadius: 'md',
-              borderWidth: '1px',
-              borderStyle: 'solid',
-              borderColor: 'border.default',
-              bg: 'surface.subtle',
-              p: '4',
-            })}
-          >
-            <p className={css({ m: 0, fontSize: 'sm', color: 'text.strong' })}>
-              Unable to load primes.
-            </p>
-            <p
-              className={css({
-                m: 0,
-                mt: '2',
-                fontSize: 'sm',
-                color: 'text.muted',
-              })}
-            >
-              {errorMessage}
-            </p>
-          </div>
+          <SurfaceMessage title="Unable to load primes." body={errorMessage} />
         ) : null}
 
         {!isLoading && !errorMessage && primes.length === 0 ? (
-          <div
-            className={css({
-              borderRadius: 'md',
-              borderWidth: '1px',
-              borderStyle: 'dashed',
-              borderColor: 'border.default',
-              bg: 'surface.subtle',
-              p: '4',
-            })}
-          >
-            <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-              No primes were returned by the API.
-            </p>
-          </div>
+          <SurfaceMessage
+            title="No primes returned"
+            body="No primes were returned by the API."
+            tone="dashed"
+          />
         ) : null}
 
         {!isLoading && !errorMessage && primes.length > 0 ? (

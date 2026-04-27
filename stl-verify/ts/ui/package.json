@@ -33,6 +33,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@base-ui/react": "^1.3.0",
     "@archon-research/design-system": "0.1.0",
     "@archon-research/oxfmt-config": "0.1.0",
     "@archon-research/oxlint-config": "0.1.0",

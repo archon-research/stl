@@ -1,4 +1,5 @@
 import {
+  SurfaceMessage,
   StyledSelect,
   Toggle,
   ToggleGroup,
@@ -7,6 +8,7 @@ import { useEffect, useMemo, useRef, type ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
+import { segmentedControl } from '#styled-system/recipes';
 
 import {
   type ChainLabelLookup,
@@ -34,41 +36,9 @@ type BottomPanelProps = {
 
 type ActiveTab = 'risk' | 'bad-debt';
 
-const toggleGroupStyles = css({
-  alignItems: 'center',
-  bg: 'transparent',
-  borderColor: 'border.default',
-  borderRadius: 'sm',
-  borderStyle: 'solid',
-  borderWidth: '1px',
-  display: 'inline-flex',
-  gap: '0.5',
-  p: '0.5',
-});
-
-const toggleStyles = css({
-  '&[data-pressed]': {
-    bg: 'interactive.selected',
-    color: 'text.default',
-  },
-  _hover: {
-    bg: 'interactive.hover',
-    color: 'text.default',
-  },
-  borderRadius: 'xs',
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  color: 'text.muted',
-  cursor: 'pointer',
-  fontSize: 'sm',
-  lineHeight: 'normal',
-  h: '7',
-  px: '3',
-  py: '1',
-  transitionDuration: 'fast',
-  transitionProperty: 'background-color, color, border-color, box-shadow',
-});
+const segmentedControlStyles = segmentedControl();
+const toggleGroupClassName = segmentedControlStyles.group;
+const toggleClassName = `${segmentedControlStyles.item} ${css({ px: '3' })}`;
 
 function formatAddress(value: string): string {
   const address = value.startsWith('0x') ? value : `0x${value}`;
@@ -78,42 +48,6 @@ function formatAddress(value: string): string {
   }
 
   return `${address.slice(0, 10)}...${address.slice(-6)}`;
-}
-
-function EmptyPanelState({ body, title }: { body: string; title: string }) {
-  return (
-    <div
-      className={css({
-        borderRadius: 'md',
-        borderStyle: 'solid',
-        borderWidth: '1px',
-        borderColor: 'border.subtle',
-        bg: 'surface.subtle',
-        p: '4',
-      })}
-    >
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'sm',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-        })}
-      >
-        {title}
-      </p>
-      <p
-        className={css({
-          m: 0,
-          mt: '1.5',
-          fontSize: 'sm',
-          color: 'text.muted',
-        })}
-      >
-        {body}
-      </p>
-    </div>
-  );
 }
 
 export function BottomPanel({
@@ -248,12 +182,12 @@ export function BottomPanel({
             }
           }}
           aria-label="Risk views"
-          className={toggleGroupStyles}
+          className={toggleGroupClassName}
         >
-          <Toggle value="risk" className={toggleStyles}>
+          <Toggle value="risk" className={toggleClassName}>
             Risk breakdown
           </Toggle>
-          <Toggle value="bad-debt" className={toggleStyles}>
+          <Toggle value="bad-debt" className={toggleClassName}>
             Bad debt
           </Toggle>
         </ToggleGroup>
@@ -351,21 +285,21 @@ export function BottomPanel({
         className={css({ display: 'grid', gap: '4', alignContent: 'start' })}
       >
         {!selectedPrime ? (
-          <EmptyPanelState
+          <SurfaceMessage
             title="Choose a prime to inspect risk"
             body="The lower panel comes alive after a prime is selected."
           />
         ) : null}
 
         {selectedPrime && errorMessage ? (
-          <EmptyPanelState
-            title="Unable to load allocations"
+          <SurfaceMessage
+            title="Unable to load receipt tokens."
             body={errorMessage}
           />
         ) : null}
 
         {selectedPrime && !errorMessage && isLoading ? (
-          <EmptyPanelState
+          <SurfaceMessage
             title="Loading receipt tokens"
             body="Waiting for the selected prime's receipt token holdings."
           />
@@ -375,7 +309,7 @@ export function BottomPanel({
         !errorMessage &&
         !isLoading &&
         sortedAllocations.length === 0 ? (
-          <EmptyPanelState
+          <SurfaceMessage
             title="No receipt tokens returned"
             body="The selected prime did not return any receipt token holdings from the API."
           />

@@ -1,6 +1,8 @@
+import { designSystemPreset } from '@archon-research/design-system/panda-preset';
 import { defineConfig } from '@pandacss/dev';
 
 export default defineConfig({
+  presets: ['@pandacss/preset-base', '@pandacss/preset-panda', designSystemPreset],
   preflight: true,
   include: ['./src/**/*.{ts,tsx,js,jsx}'],
   exclude: [],
