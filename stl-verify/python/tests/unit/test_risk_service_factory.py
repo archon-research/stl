@@ -21,6 +21,7 @@ def _make_receipt_token_info(protocol_name: str) -> MagicMock:
 async def test_aave_like_creates_onchain_share_client() -> None:
     """Aave-like protocols get an OnchainAllocationShareClient injected."""
     engine = MagicMock()
+    default_gap_pct = Decimal("0.17")
 
     with (
         patch("app.services.risk_service_factory.ReceiptTokenRepository") as mock_rt_repo_cls,
@@ -32,7 +33,12 @@ async def test_aave_like_creates_onchain_share_client() -> None:
         mock_rt_repo.get.return_value = _make_receipt_token_info("SparkLend")
         mock_rt_repo_cls.return_value = mock_rt_repo
 
-        factory = RiskServiceFactory(engine, alchemy_url="https://fake-alchemy-url", http_client=MagicMock())
+        factory = RiskServiceFactory(
+            engine,
+            alchemy_url="https://fake-alchemy-url",
+            http_client=MagicMock(),
+            default_gap_pct=default_gap_pct,
+        )
         # Patch the wallet lookup to avoid needing a real DB
         factory._lookup_wallet = AsyncMock(return_value=bytes.fromhex("1601843c5e9bc251a3272907010afa41fa18347e"))
 
@@ -40,12 +46,14 @@ async def test_aave_like_creates_onchain_share_client() -> None:
 
     _, kwargs = mock_svc_cls.call_args
     assert isinstance(kwargs["share_port"], OnchainAllocationShareClient)
+    assert kwargs["default_gap_pct"] == default_gap_pct
 
 
 @pytest.mark.asyncio
 async def test_morpho_creates_fixed_share_of_one() -> None:
     """Morpho protocols get FixedAllocationShare(1) because the breakdown is already vault-scoped."""
     engine = MagicMock()
+    default_gap_pct = Decimal("0.23")
 
     with (
         patch("app.services.risk_service_factory.ReceiptTokenRepository") as mock_rt_repo_cls,
@@ -61,13 +69,19 @@ async def test_morpho_creates_fixed_share_of_one() -> None:
         mock_morpho_repo.resolve_vault_id = AsyncMock(return_value=55)
         mock_morpho_cls.return_value = mock_morpho_repo
 
-        factory = RiskServiceFactory(engine, alchemy_url="https://fake-alchemy-url", http_client=MagicMock())
+        factory = RiskServiceFactory(
+            engine,
+            alchemy_url="https://fake-alchemy-url",
+            http_client=MagicMock(),
+            default_gap_pct=default_gap_pct,
+        )
         await factory.create(receipt_token_id=99)
 
     _, kwargs = mock_svc_cls.call_args
     share_port = kwargs["share_port"]
     assert isinstance(share_port, FixedAllocationShare)
     assert await share_port.get_share() == Decimal("1")
+    assert kwargs["default_gap_pct"] == default_gap_pct
 
 
 @pytest.mark.asyncio
@@ -80,7 +94,12 @@ async def test_lookup_wallet_raises_when_no_position_found() -> None:
     mock_conn.execute = AsyncMock(return_value=MagicMock(fetchone=MagicMock(return_value=None)))
     engine.connect.return_value = mock_conn
 
-    factory = RiskServiceFactory(engine, alchemy_url="https://fake-alchemy-url", http_client=MagicMock())
+    factory = RiskServiceFactory(
+        engine,
+        alchemy_url="https://fake-alchemy-url",
+        http_client=MagicMock(),
+        default_gap_pct=Decimal("0.15"),
+    )
     with pytest.raises(ValueError, match="no active allocation position"):
         await factory._lookup_wallet(bytes(20), 1)
 
@@ -97,6 +116,11 @@ async def test_unknown_protocol_raises_value_error() -> None:
         mock_rt_repo.get.return_value = _make_receipt_token_info("unknown_protocol_xyz")
         mock_rt_repo_cls.return_value = mock_rt_repo
 
-        factory = RiskServiceFactory(engine, alchemy_url="https://fake-alchemy-url", http_client=MagicMock())
+        factory = RiskServiceFactory(
+            engine,
+            alchemy_url="https://fake-alchemy-url",
+            http_client=MagicMock(),
+            default_gap_pct=Decimal("0.15"),
+        )
         with pytest.raises(ValueError, match="unsupported protocol"):
             await factory.create(receipt_token_id=99)
