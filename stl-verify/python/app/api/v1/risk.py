@@ -145,14 +145,14 @@ async def post_rrc_scenario(
     """Return SURAF RRC for a hypothetical ``(asset, usd_exposure)`` pair.
 
     ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
-    for the asset. Pure scenario calculation — no DB lookup, no position
-    state. Position-level RRC (``GET /risk/{receipt_token_id}/rrc``) is
-    deferred pending a decision on how to derive USD exposure from holdings.
+    for the asset. This endpoint remains a legacy compatibility shim over the
+    new SURAF model internals: it is still pure scenario calculation with no
+    DB lookup and no position state.
     """
     if body.usd_exposure <= _ZERO:
         raise HTTPException(status_code=422, detail="usd_exposure must be positive")
 
-    result = service.compute(body.asset, body.usd_exposure)
+    result = service.compute_scenario(body.asset, body.usd_exposure)
     if result is None:
         raise HTTPException(status_code=404, detail=f"no rating mapped for asset: {body.asset}")
     return ScenarioRrcResponse(**result.model_dump())

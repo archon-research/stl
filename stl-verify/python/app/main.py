@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.adapters.postgres.risk_position_resolver import PostgresRiskPositionResolver
 from app.api.v1 import allocations, risk, status
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
@@ -106,14 +107,18 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     _check_mapping_refs(asset_to_rating, suraf_ratings)
     logger.info("asset->rating mapping loaded entries=%d", len(asset_to_rating))
 
-    suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings)
-
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(settings.async_database_url, pool_pre_ping=True)
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         app.state.engine = engine
+        app.state.risk_position_resolver = PostgresRiskPositionResolver(engine)
+        app.state.suraf_rrc_service = SurafRrcService(
+            asset_to_rating,
+            suraf_ratings,
+            position_resolver=app.state.risk_position_resolver,
+        )
         instrument_sqlalchemy_engine(engine)
         async with httpx.AsyncClient() as http_client:
             app.state.http_client = http_client
@@ -126,7 +131,6 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     application = FastAPI(title="stl-verify", lifespan=lifespan, docs_url=None)
     application.state.suraf_ratings = suraf_ratings
     application.state.asset_to_rating = asset_to_rating
-    application.state.suraf_rrc_service = suraf_rrc_service
     application.add_middleware(RequestIdMiddleware)
     application.state.tracer_provider = setup_telemetry(application, settings)
     application.include_router(status.router, prefix="/v1")

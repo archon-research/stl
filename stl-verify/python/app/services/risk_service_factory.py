@@ -1,4 +1,4 @@
-import re
+from dataclasses import dataclass
 from decimal import Decimal
 
 import httpx
@@ -15,20 +15,12 @@ from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLi
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
+from app.domain.entities.risk import ResolvedRiskPosition
+from app.domain.risk_protocols import is_aave_like_protocol, is_morpho_protocol, normalize_protocol_name
 from app.logging import get_logger
-from app.ports.allocation_share_port import AllocationSharePort
-from app.ports.backed_breakdown_repository import BackedBreakdownRepository
-from app.ports.liquidation_params_repository import LiquidationParamsRepository
 from app.services.risk_calculation_service import RiskCalculationService
 
 logger = get_logger(__name__)
-
-_AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa"})
-_MORPHO = frozenset({"morpho_blue"})
-
-# Protocol names in the DB may use spaces, hyphens, or mixed case (e.g. "Aave V3", "morpho-blue").
-# Normalise to lowercase underscore-separated before matching against the sets above.
-_NORMALIZE_RE = re.compile(r"[\s\-_]+")
 
 _WALLET_LOOKUP_SQL = """
 WITH latest_receipt AS (
@@ -68,8 +60,14 @@ LIMIT 1
 """
 
 
+@dataclass(frozen=True)
+class GapSweepConstruction:
+    service: RiskCalculationService
+    backed_asset_id: int
+
+
 class RiskServiceFactory:
-    """Build a RiskCalculationService from a receipt_token_id."""
+    """Build gap-sweep calculation services for compatibility and prime-based paths."""
 
     def __init__(
         self,
@@ -85,48 +83,100 @@ class RiskServiceFactory:
         self._receipt_token_repo = ReceiptTokenRepository(engine)
 
     async def create(self, receipt_token_id: int) -> tuple[RiskCalculationService, int] | None:
-        """Return (service, backed_asset_id) or None if the receipt token is unknown."""
+        """Compatibility path: build from a receipt_token_id using wallet lookup."""
         info = await self._receipt_token_repo.get(receipt_token_id)
         if info is None:
             return None
 
-        normalized = _NORMALIZE_RE.sub("_", info.protocol_name.strip().casefold())
-        breakdown_repo: BackedBreakdownRepository
-        liq_repo: LiquidationParamsRepository
-        share_port: AllocationSharePort
-
-        if normalized in _AAVE_LIKE:
-            breakdown_repo = AaveLikeBackedBreakdownRepository(self._engine, info.protocol_id)
-            liq_repo = AaveLikeLiquidationParamsRepository(self._engine, info.protocol_id)
-            asset_id = info.underlying_token_id
+        if is_aave_like_protocol(info.protocol_name):
             wallet = await self._lookup_wallet(info.receipt_token_address, info.chain_id)
-            share_port = OnchainAllocationShareClient(
+            construction = self._build_aave_like(
+                protocol_id=info.protocol_id,
+                underlying_token_id=info.underlying_token_id,
                 receipt_token_address=info.receipt_token_address,
                 wallet_address=wallet,
-                alchemy_url=self._alchemy_url,
-                http_client=self._http_client,
+            )
+            return construction.service, construction.backed_asset_id
+
+        if is_morpho_protocol(info.protocol_name):
+            construction = await self._build_morpho(
+                protocol_id=info.protocol_id,
+                receipt_token_address=info.receipt_token_address,
+                chain_id=info.chain_id,
+                receipt_token_context=str(receipt_token_id),
+            )
+            return construction.service, construction.backed_asset_id
+
+        normalized = normalize_protocol_name(info.protocol_name)
+        raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
+
+    async def create_for_position(self, position: ResolvedRiskPosition) -> GapSweepConstruction:
+        """Prime-based path: build from a fully resolved position."""
+        receipt_token_address = bytes.fromhex(position.receipt_token_address.removeprefix("0x"))
+
+        if is_aave_like_protocol(position.protocol_name):
+            return self._build_aave_like(
+                protocol_id=position.protocol_id,
+                underlying_token_id=position.underlying_token_id,
+                receipt_token_address=receipt_token_address,
+                wallet_address=position.prime_id.bytes,
             )
 
-        elif normalized in _MORPHO:
-            morpho_repo = MorphoBackedBreakdownRepository(self._engine, info.protocol_id)
-            vault_id = await morpho_repo.resolve_vault_id(info.receipt_token_address, info.chain_id)
-            if vault_id is None:
-                raise ValueError(f"morpho vault not found for receipt token {receipt_token_id}")
-            breakdown_repo = morpho_repo
-            liq_repo = MorphoLiquidationParamsRepository(self._engine)
-            asset_id = vault_id
-            share_port = FixedAllocationShare(Decimal("1"))  # Morpho breakdown is already vault-scoped
+        if is_morpho_protocol(position.protocol_name):
+            return await self._build_morpho(
+                protocol_id=position.protocol_id,
+                receipt_token_address=receipt_token_address,
+                chain_id=position.chain_id,
+                receipt_token_context=str(position.receipt_token_id),
+            )
 
-        else:
-            raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
+        normalized = normalize_protocol_name(position.protocol_name)
+        raise ValueError(f"unsupported protocol: {position.protocol_name!r} (normalized: {normalized!r})")
 
+    def _build_aave_like(
+        self,
+        *,
+        protocol_id: int,
+        underlying_token_id: int,
+        receipt_token_address: bytes,
+        wallet_address: bytes,
+    ) -> GapSweepConstruction:
+        breakdown_repo = AaveLikeBackedBreakdownRepository(self._engine, protocol_id)
+        liq_repo = AaveLikeLiquidationParamsRepository(self._engine, protocol_id)
+        share_port = OnchainAllocationShareClient(
+            receipt_token_address=receipt_token_address,
+            wallet_address=wallet_address,
+            alchemy_url=self._alchemy_url,
+            http_client=self._http_client,
+        )
         service = RiskCalculationService(
             breakdown_repo=breakdown_repo,
             liq_params_repo=liq_repo,
             share_port=share_port,
             default_gap_pct=self._default_gap_pct,
         )
-        return service, asset_id
+        return GapSweepConstruction(service=service, backed_asset_id=underlying_token_id)
+
+    async def _build_morpho(
+        self,
+        *,
+        protocol_id: int,
+        receipt_token_address: bytes,
+        chain_id: int,
+        receipt_token_context: str,
+    ) -> GapSweepConstruction:
+        morpho_repo = MorphoBackedBreakdownRepository(self._engine, protocol_id)
+        vault_id = await morpho_repo.resolve_vault_id(receipt_token_address, chain_id)
+        if vault_id is None:
+            raise ValueError(f"morpho vault not found for receipt token {receipt_token_context}")
+
+        service = RiskCalculationService(
+            breakdown_repo=morpho_repo,
+            liq_params_repo=MorphoLiquidationParamsRepository(self._engine),
+            share_port=FixedAllocationShare(Decimal("1")),
+            default_gap_pct=self._default_gap_pct,
+        )
+        return GapSweepConstruction(service=service, backed_asset_id=vault_id)
 
     async def _lookup_wallet(self, receipt_token_address: bytes, chain_id: int) -> bytes:
         """Find the allocator proxy address that currently holds this receipt token."""
