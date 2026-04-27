@@ -1,7 +1,7 @@
 from collections.abc import Iterable
 from decimal import Decimal
 
-from axis.risk_capital.formulas.required_risk_capital import loss_given_default
+from axis_synome.spec.risk_capital.formulas.required_risk_capital import loss_given_default
 
 from app.domain.entities.risk import RiskEnrichedCollateral
 
