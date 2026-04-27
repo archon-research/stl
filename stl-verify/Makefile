@@ -311,7 +311,7 @@ dev-up:
 	$(MAKE) kind-load-mock-blockchain-server
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/mock-blockchain-server.yaml -n $(KUBE_NS)
 	@echo "==> Waiting for mock-blockchain-server to be ready..."
-	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/mock-blockchain-server -n $(KUBE_NS) --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/mock-blockchain-server -n $(KUBE_NS) --timeout=300s
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  Watcher"
@@ -360,8 +360,8 @@ dev-up:
 	  DEPS="mock-blockchain-server watcher python-api $(CRONJOBS)"; \
 	fi; \
 	for dep in $$DEPS; do \
-	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=120s || \
-	    { echo "ERROR: deployment $$dep not ready after 120s"; kubectl --context=$(KUBE_CONTEXT) get pods -n $(KUBE_NS); exit 1; }; \
+	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=300s || \
+	    { echo "ERROR: deployment $$dep not ready after 300s"; kubectl --context=$(KUBE_CONTEXT) get pods -n $(KUBE_NS); exit 1; }; \
 	done
 	@kubectl --context=$(KUBE_CONTEXT) get pods -n $(KUBE_NS)
 	@echo ""
@@ -417,8 +417,8 @@ _dev-up-alchemy-workers:
 	$(call build-if-needed,stl-prime-debt-indexer:local,docker-build-prime-debt-indexer LOCAL=1)
 	$(MAKE) kind-load-workers kind-deploy-workers
 	@for dep in morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer; do \
-	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=120s || \
-	    { echo "ERROR: deployment $$dep not ready after 120s"; exit 1; }; \
+	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=300s || \
+	    { echo "ERROR: deployment $$dep not ready after 300s"; exit 1; }; \
 	done
 
 # Start only the database and run migrations (no app services).
@@ -429,7 +429,7 @@ dev-db:
 	$(MAKE) kind-config kind-secrets
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/timescaledb.yaml -n $(KUBE_NS)
 	@echo "==> Waiting for timescaledb to be ready..."
-	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/timescaledb -n $(KUBE_NS) --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/timescaledb -n $(KUBE_NS) --timeout=300s
 	$(call build-if-needed,stl-migrate:local,docker-build-migrate)
 	$(MAKE) kind-load-migrate kind-migrate
 	@echo "==> Database ready."
@@ -1597,12 +1597,12 @@ kind-infra:
 	# Install CNPG operator (required before any Cluster CR can be applied).
 	kubectl --context=$(KUBE_CONTEXT) apply --server-side --force-conflicts -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.25/releases/cnpg-1.25.0.yaml
 	@echo "==> Waiting for CNPG operator to be ready..."
-	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/cnpg-controller-manager -n cnpg-system --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/cnpg-controller-manager -n cnpg-system --timeout=300s
 	# Apply temporal resources to the temporal namespace (namespace declared in each manifest).
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal-00-namespace.yaml
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal-db.yaml
 	@echo "==> Waiting for temporal-db CNPG cluster to be ready..."
-	kubectl --context=$(KUBE_CONTEXT) wait cluster/temporal-db -n temporal --for=condition=Ready --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) wait cluster/temporal-db -n temporal --for=condition=Ready --timeout=300s
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal.yaml
 	# Apply remaining infra resources to the app namespace.
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/jaeger.yaml       -n $(KUBE_NS)
@@ -1610,9 +1610,9 @@ kind-infra:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/redis.yaml        -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/timescaledb.yaml  -n $(KUBE_NS)
 	@echo "==> Waiting for timescaledb to be ready (may take a moment on first run — image pull)..."
-	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/timescaledb -n $(KUBE_NS) --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/timescaledb -n $(KUBE_NS) --timeout=300s
 	@echo "==> Waiting for localstack to be ready..."
-	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/localstack   -n $(KUBE_NS) --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/localstack   -n $(KUBE_NS) --timeout=300s
 
 kind-config:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/config/configmap.yaml -n $(KUBE_NS)
@@ -1656,7 +1656,7 @@ kind-bootstrap-db:
 	kubectl --context=$(KUBE_CONTEXT) delete job/bootstrap-db --ignore-not-found -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/jobs/bootstrap-db.yaml -n $(KUBE_NS)
 	@echo "==> Waiting for database bootstrap to complete..."
-	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/bootstrap-db -n $(KUBE_NS) --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/bootstrap-db -n $(KUBE_NS) --timeout=300s
 	@echo "==> Bootstrap logs:"
 	kubectl --context=$(KUBE_CONTEXT) logs -l job-name=bootstrap-db -n $(KUBE_NS) || true
 
@@ -1664,7 +1664,7 @@ kind-migrate: kind-bootstrap-db
 	kubectl --context=$(KUBE_CONTEXT) delete job/migrate --ignore-not-found -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/jobs/migrate.yaml -n $(KUBE_NS)
 	@echo "==> Waiting for migration to complete..."
-	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/migrate -n $(KUBE_NS) --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/migrate -n $(KUBE_NS) --timeout=300s
 	@echo "==> Migration logs:"
 	kubectl --context=$(KUBE_CONTEXT) logs -l job-name=migrate -n $(KUBE_NS) || true
 
@@ -2026,7 +2026,7 @@ else
 	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 --region us-east-1 \
 	  sqs purge-queue --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/$(STRESS_TEST_BACKUP_QUEUE) || true
 endif
-	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=available deployment/mock-blockchain-server -n $(KUBE_NS) --timeout=120s
+	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=available deployment/mock-blockchain-server -n $(KUBE_NS) --timeout=300s
 	kubectl --context=$(KUBE_CONTEXT) create configmap k6-scripts --from-file=stress-test/k6/scenarios/ --from-file=stress-test/k6/lib/ -n $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	kubectl --context=$(KUBE_CONTEXT) delete job k6-stress-test -n $(KUBE_NS) --ignore-not-found
 	sed -e 's|$${SCENARIO}|$(or $(SCENARIO),watcher)|g' \
