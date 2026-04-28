@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -91,19 +92,12 @@ func (s *BalanceOfSource) FetchBalances(ctx context.Context, entries []*TokenEnt
 		block = big.NewInt(blockNumber)
 	}
 
-	mc, err := s.multicaller.Execute(ctx, calls, block)
+	mcRes, err := s.multicaller.Execute(ctx, calls, block)
 	if err != nil {
 		return nil, fmt.Errorf("multicall: %w", err)
 	}
 
-	// Initialize balance rows for every entry that we built a balanceOf call for.
-	for i, c := range contexts {
-		if c.kind != kindBalanceOf {
-			continue
-		}
-		_ = i
-		result.Balances[c.entry.Key()] = &PositionBalance{Balance: big.NewInt(0)}
-	}
+	var balanceFailures []string
 
 	// Per-contract supply accumulators. We only emit a supply row when totalSupply
 	// succeeded; scaledTotalSupply is optional and may stay nil on failure.
@@ -115,20 +109,38 @@ func (s *BalanceOfSource) FetchBalances(ctx context.Context, entries []*TokenEnt
 	supplyAcc := make(map[common.Address]*pending)
 
 	for i, c := range contexts {
-		if i >= len(mc) {
-			break
+		var (
+			ok   bool
+			data []byte
+		)
+		if i < len(mcRes) {
+			ok = mcRes[i].Success && len(mcRes[i].ReturnData) > 0
+			data = mcRes[i].ReturnData
 		}
-		ok := mc[i].Success && len(mc[i].ReturnData) > 0
+
 		switch c.kind {
 		case kindBalanceOf:
-			if ok {
-				if v := unpackUint256(s.erc20ABI, "balanceOf", mc[i].ReturnData); v != nil {
-					result.Balances[c.entry.Key()].Balance = v
-				}
+			if !ok {
+				s.logger.Warn("balanceOf failed",
+					"contract", c.entry.ContractAddress.Hex(),
+					"wallet", c.entry.WalletAddress.Hex())
+				// We continue here, but will later return an error if any balanceOf call failed
+				balanceFailures = append(balanceFailures, fmt.Sprintf("%s/%s", c.entry.ContractAddress.Hex(), c.entry.WalletAddress.Hex()))
+				continue
 			}
+			v := unpackUint256(s.erc20ABI, "balanceOf", data)
+			if v == nil {
+				s.logger.Warn("balanceOf decode failed",
+					"contract", c.entry.ContractAddress.Hex(),
+					"wallet", c.entry.WalletAddress.Hex())
+				// We continue here, but will later return an error if any balanceOf call failed
+				balanceFailures = append(balanceFailures, fmt.Sprintf("%s/%s", c.entry.ContractAddress.Hex(), c.entry.WalletAddress.Hex()))
+				continue
+			}
+			result.Balances[c.entry.Key()] = &PositionBalance{Balance: v}
 		case kindScaledBalanceOf:
 			if ok {
-				if v := unpackRawUint256(mc[i].ReturnData); v != nil {
+				if v := unpackRawUint256(data); v != nil {
 					if bal := result.Balances[c.entry.Key()]; bal != nil {
 						bal.ScaledBalance = v
 					}
@@ -145,7 +157,7 @@ func (s *BalanceOfSource) FetchBalances(ctx context.Context, entries []*TokenEnt
 				supplyAcc[c.contract] = p
 			}
 			if ok {
-				if v := unpackRawUint256(mc[i].ReturnData); v != nil {
+				if v := unpackRawUint256(data); v != nil {
 					p.totalSupply = v
 					p.totalSupplyOK = true
 				}
@@ -159,13 +171,17 @@ func (s *BalanceOfSource) FetchBalances(ctx context.Context, entries []*TokenEnt
 				supplyAcc[c.contract] = p
 			}
 			if ok {
-				if v := unpackRawUint256(mc[i].ReturnData); v != nil {
+				if v := unpackRawUint256(data); v != nil {
 					p.scaledTotalSupply = v
 				}
 			} else {
 				s.logger.Warn("scaledTotalSupply failed", "contract", c.contract.Hex())
 			}
 		}
+	}
+
+	if len(balanceFailures) > 0 {
+		return nil, fmt.Errorf("balanceOf call failures: %s", strings.Join(balanceFailures, ", "))
 	}
 
 	for addr, p := range supplyAcc {

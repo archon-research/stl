@@ -143,7 +143,7 @@ func (s *Service) processBlock(
 		if len(affected) > 0 {
 			fetch, err := s.registry.FetchAll(ctx, affected, event.BlockNumber)
 			if err != nil {
-				s.logger.Warn("partial balance fetch", "error", err)
+				return fmt.Errorf("fetch observations for block %d: %w", event.BlockNumber, err)
 			}
 
 			snapshots := s.buildSnapshots(affected, fetch.Balances, transfers, event, blockTimestamp)
@@ -168,10 +168,10 @@ func (s *Service) processBlock(
 	// Periodic sweep
 	s.blocksSinceSweep++
 	if s.blocksSinceSweep >= s.config.SweepEveryNBlocks {
-		s.blocksSinceSweep = 0
 		if err := s.sweep(ctx, event.BlockNumber, event.Version, blockTimestamp); err != nil {
-			s.logger.Error("sweep failed", "error", err)
+			return fmt.Errorf("sweep block %d: %w", event.BlockNumber, err)
 		}
+		s.blocksSinceSweep = 0
 	}
 
 	return nil
@@ -284,7 +284,7 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockVersion int
 
 	fetch, err := s.registry.FetchAll(ctx, s.entries, blockNumber)
 	if err != nil {
-		s.logger.Warn("sweep partial failure", "error", err)
+		return fmt.Errorf("fetch sweep observations for block %d: %w", blockNumber, err)
 	}
 
 	var snapshots []*PositionSnapshot

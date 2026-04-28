@@ -95,7 +95,7 @@ func TestCurveSource_FetchBalances_StoresLPBalance(t *testing.T) {
 	}
 }
 
-func TestCurveSource_FetchBalances_FailedCallStoresZero(t *testing.T) {
+func TestCurveSource_FetchBalances_FailedCallReturnsError(t *testing.T) {
 	curveABI, err := abis.GetCurvePoolABI()
 	if err != nil {
 		t.Fatalf("failed to load curve ABI: %v", err)
@@ -114,18 +114,10 @@ func TestCurveSource_FetchBalances_FailedCallStoresZero(t *testing.T) {
 	}}
 
 	results, err := src.FetchBalances(context.Background(), entries, 100)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for failed balanceOf call")
 	}
-
-	got := results.Balances[entries[0].Key()]
-	if got == nil {
-		t.Fatal("expected result for entry")
-	}
-	if got.Balance.Cmp(big.NewInt(0)) != 0 {
-		t.Fatalf("balance = %s, want 0", got.Balance)
-	}
-	if got.ScaledBalance == nil || got.ScaledBalance.Cmp(big.NewInt(0)) != 0 {
-		t.Fatalf("scaled balance = %v, want 0", got.ScaledBalance)
+	if results != nil {
+		t.Fatal("expected nil results on failed balanceOf call")
 	}
 }

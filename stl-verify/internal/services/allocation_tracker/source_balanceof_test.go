@@ -126,7 +126,7 @@ func TestBalanceOfSource_FetchBalances_Empty(t *testing.T) {
 	}
 }
 
-func TestBalanceOfSource_FetchBalances_FailedCallStoresZero(t *testing.T) {
+func TestBalanceOfSource_FetchBalances_FailedCallReturnsError(t *testing.T) {
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
 		t.Fatalf("failed to load ERC20 ABI: %v", err)
@@ -148,16 +148,11 @@ func TestBalanceOfSource_FetchBalances_FailedCallStoresZero(t *testing.T) {
 	}
 
 	result, err := src.FetchBalances(context.Background(), entries, 100)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for failed balanceOf call")
 	}
-
-	bal, ok := result.Balances[entries[0].Key()]
-	if !ok {
-		t.Fatal("expected result for entry")
-	}
-	if bal.Balance.Cmp(big.NewInt(0)) != 0 {
-		t.Errorf("failed call should produce zero balance, got %s", bal.Balance)
+	if result != nil {
+		t.Fatal("expected nil result on failed balanceOf call")
 	}
 }
 
