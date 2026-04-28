@@ -6,6 +6,7 @@ import { css } from '#styled-system/css';
 
 import { AllocationGrid } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
+import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
@@ -45,6 +46,9 @@ function App() {
   const [selectedAllocationKey, setSelectedAllocationKey] = useState<
     string | null
   >(null);
+  const [isDrawerOpenParam, setIsDrawerOpenParam] = useUrlParam(
+    PARAMS.drawerOpen,
+  );
   const [selectedPrimeId, setSelectedPrimeId] = useUrlParam(PARAMS.prime);
   const [selectedNetwork, setSelectedNetwork] = useUrlParam(PARAMS.network);
   const [selectedProtocol, setSelectedProtocol] = useUrlParam(PARAMS.protocol);
@@ -56,6 +60,7 @@ function App() {
   } = useUrlSyncedTableState(PARAMS.sort, PARAMS.search);
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrimeId);
+  const isDrawerOpen = isDrawerOpenParam === '1';
 
   useEffect(() => {
     const controller = new AbortController();
@@ -134,10 +139,16 @@ function App() {
       setSelectedNetwork(null);
       setSelectedProtocol(null);
       setSelectedAllocationKey(null);
+      setIsDrawerOpenParam(null);
     }
 
     previousPrimeIdRef.current = selectedPrimeId;
-  }, [selectedPrimeId, setSelectedNetwork, setSelectedProtocol]);
+  }, [
+    selectedPrimeId,
+    setIsDrawerOpenParam,
+    setSelectedNetwork,
+    setSelectedProtocol,
+  ]);
 
   useEffect(() => {
     if (!selectedPrimeId) {
@@ -267,6 +278,9 @@ function App() {
       if (selectedAllocationKey !== null) {
         setSelectedAllocationKey(null);
       }
+      if (isDrawerOpen) {
+        setIsDrawerOpenParam(null);
+      }
       return;
     }
 
@@ -280,6 +294,23 @@ function App() {
     }
   }, [filteredAllocations, selectedAllocationKey]);
 
+  useEffect(() => {
+    if (
+      isDrawerOpen &&
+      (!selectedAllocationKey ||
+        !filteredAllocations.some(
+          (allocation) => getAllocationKey(allocation) === selectedAllocationKey,
+        ))
+    ) {
+      setIsDrawerOpenParam(null);
+    }
+  }, [
+    filteredAllocations,
+    isDrawerOpen,
+    selectedAllocationKey,
+    setIsDrawerOpenParam,
+  ]);
+
   const selectedAllocation = useMemo(
     () =>
       filteredAllocations.find(
@@ -291,6 +322,7 @@ function App() {
   return (
     <div
       className={css({
+        position: 'relative',
         '& [aria-label="Resize sidebar"]': {
           right: '0 !important',
         },
@@ -315,9 +347,7 @@ function App() {
             networkOptions={networkOptions}
             onNetworkChange={setSelectedNetwork}
             onProtocolChange={setSelectedProtocol}
-            onSearchChange={setGlobalFilter}
             protocolOptions={protocolOptions}
-            searchValue={globalFilter}
             selectedNetwork={selectedNetwork}
             selectedProtocol={selectedProtocol}
           />
@@ -330,25 +360,35 @@ function App() {
             filteredAllocations={filteredAllocations}
             isLoading={isAllocationsLoading}
             localProtocols={localProtocols}
-            onSelectAllocation={setSelectedAllocationKey}
+            onSelectAllocation={(allocationKey) => {
+              setSelectedAllocationKey(allocationKey);
+              setIsDrawerOpenParam('1');
+            }}
+            onSearchChange={setGlobalFilter}
             onSortingChange={setSorting}
+            searchValue={globalFilter}
             selectedAllocationKey={selectedAllocationKey}
             selectedPrime={selectedPrime}
             sorting={sorting as SortingState}
           />
         }
-        bottomPanel={
-          <BottomPanel
-            allocations={allocations}
-            chainLabels={chainLabels}
-            errorMessage={allocationsErrorMessage}
-            isLoading={isAllocationsLoading}
-            localProtocols={localProtocols}
-            selectedAllocation={selectedAllocation}
-            selectedPrime={selectedPrime}
-          />
-        }
       />
+
+      <RiskDetailDrawer
+        isOpen={isDrawerOpen}
+        onClose={() => setIsDrawerOpenParam(null)}
+        title={selectedAllocation ? selectedAllocation.symbol : 'Risk details'}
+      >
+        <BottomPanel
+          allocations={allocations}
+          chainLabels={chainLabels}
+          errorMessage={allocationsErrorMessage}
+          isLoading={isAllocationsLoading}
+          localProtocols={localProtocols}
+          selectedAllocation={selectedAllocation}
+          selectedPrime={selectedPrime}
+        />
+      </RiskDetailDrawer>
     </div>
   );
 }

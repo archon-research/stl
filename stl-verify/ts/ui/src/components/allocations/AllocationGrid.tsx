@@ -1,10 +1,10 @@
-import { SkeletonRows, SurfaceMessage } from '@archon-research/design-system';
+import { SearchInput, SkeletonRows, SurfaceMessage } from '@archon-research/design-system';
 import {
   flexRender,
   type ColumnDef,
   type SortingState,
 } from '@tanstack/react-table';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
@@ -36,7 +36,9 @@ type AllocationGridProps = {
   isLoading: boolean;
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
+  onSearchChange: (value: string) => void;
   onSortingChange: (sorting: SortingState | ((old: SortingState) => SortingState)) => void;
+  searchValue: string;
   selectedAllocationKey: string | null;
   selectedPrime: Prime | null;
   sorting: SortingState;
@@ -50,11 +52,27 @@ export function AllocationGrid({
   isLoading,
   localProtocols,
   onSelectAllocation,
+  onSearchChange,
   onSortingChange,
+  searchValue,
   selectedAllocationKey,
   selectedPrime,
   sorting,
 }: AllocationGridProps) {
+  const [localSearchValue, setLocalSearchValue] = useState(searchValue);
+
+  useEffect(() => {
+    setLocalSearchValue(searchValue);
+  }, [searchValue]);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      onSearchChange(localSearchValue);
+    }, 300);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [localSearchValue, onSearchChange]);
+
   const columns = useMemo<ColumnDef<Allocation>[]>(
     () => [
       {
@@ -242,7 +260,7 @@ export function AllocationGrid({
           </span>
           <div
             className={flex({
-              align: 'flex-start',
+              align: 'flex-end',
               justify: 'space-between',
               gap: '5',
               wrap: 'wrap',
@@ -273,20 +291,23 @@ export function AllocationGrid({
                 </p>
               ) : null}
             </div>
-            <p
+            <div
               className={css({
-                m: 0,
-                maxWidth: '2xl',
-                flex: '1 1 24rem',
-                fontSize: 'sm',
-                lineHeight: '1.7',
-                color: 'text.default',
+                flex: '0 1 24rem',
+                minWidth: { base: '100%', md: '22rem' },
+                marginLeft: 'auto',
+                alignSelf: 'flex-end',
               })}
             >
-              Current receipt-token holdings for the selected prime. Filter by
-              network or protocol above, then focus a row to inspect its risk in
-              the lower panel.
-            </p>
+              <SearchInput
+                aria-label="Search allocations"
+                autoComplete={false}
+                disabled={!selectedPrime}
+                onValueChange={setLocalSearchValue}
+                placeholder="Search assets, protocols, chains"
+                value={localSearchValue}
+              />
+            </div>
           </div>
         </div>
 

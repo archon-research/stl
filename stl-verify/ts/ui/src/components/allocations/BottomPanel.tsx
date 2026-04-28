@@ -287,7 +287,7 @@ export function BottomPanel({
         {!selectedPrime ? (
           <SurfaceMessage
             title="Choose a prime to inspect risk"
-            body="The lower panel comes alive after a prime is selected."
+            body="The detail drawer becomes available after a prime is selected."
           />
         ) : null}
 
