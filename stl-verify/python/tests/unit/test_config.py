@@ -52,12 +52,11 @@ class TestAsyncDatabaseUrl:
         assert settings.async_database_url == "postgresql+asyncpg://host:5432/db"
 
 
-class TestAlchemyHttpUrl:
-    def test_constructs_url_from_api_key(self):
-        settings = Settings(alchemy_api_key="test-key-123")
-        assert settings.alchemy_http_url == "https://eth-mainnet.g.alchemy.com/v2/test-key-123"
-
-    def test_uses_loaded_key_for_url(self):
+class TestAllocationShareStaleness:
+    def test_default_is_30_minutes(self):
         settings = Settings()
-        key = settings.alchemy_api_key.get_secret_value()
-        assert settings.alchemy_http_url == f"https://eth-mainnet.g.alchemy.com/v2/{key}"
+        assert settings.allocation_share_max_stale_seconds == 1800
+
+    def test_overridable(self):
+        settings = Settings(allocation_share_max_stale_seconds=600)
+        assert settings.allocation_share_max_stale_seconds == 600
