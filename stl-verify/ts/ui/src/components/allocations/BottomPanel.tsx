@@ -160,7 +160,7 @@ export function BottomPanel({
         display: 'grid',
         gap: '4',
         bg: 'surface.default',
-        px: { base: '5', md: '6' },
+        px: { base: '5', md: '7' },
         py: { base: '5', md: '6' },
       })}
     >
@@ -242,7 +242,7 @@ export function BottomPanel({
           </label>
 
           <div
-            className={css({ display: 'grid', gap: '1', minWidth: '16rem' })}
+            className={css({ display: 'grid', gap: '1', minWidth: '18rem' })}
           >
             <p
               className={css({

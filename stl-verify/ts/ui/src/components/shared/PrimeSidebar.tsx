@@ -67,6 +67,10 @@ export function PrimeSidebar({
           flex: '1',
           minHeight: 0,
           overflowY: 'auto',
+          scrollbarWidth: 'none',
+          '&::-webkit-scrollbar': {
+            display: 'none',
+          },
           px: '3',
           py: '4',
         })}

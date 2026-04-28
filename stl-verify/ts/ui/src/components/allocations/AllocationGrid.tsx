@@ -71,7 +71,7 @@ export function AllocationGrid({
               width: 'fit-content',
               alignItems: 'center',
               borderRadius: 'full',
-              bg: 'surface.subtle',
+              bg: { _dark: 'gray.800', base: 'gray.100' },
               px: '3',
               py: '1',
               fontSize: 'xs',
@@ -92,7 +92,7 @@ export function AllocationGrid({
             })}
           >
             <div
-              className={css({ display: 'grid', gap: '1', minWidth: '16rem' })}
+              className={css({ display: 'grid', gap: '1', minWidth: '18rem' })}
             >
               <h1
                 className={css({
