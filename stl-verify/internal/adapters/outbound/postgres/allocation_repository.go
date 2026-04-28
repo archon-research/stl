@@ -1,10 +1,13 @@
 package postgres
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -62,6 +65,26 @@ func (r *AllocationRepository) SavePositions(
 			return fmt.Errorf("position %d: %w", i, err)
 		}
 	}
+
+	// Sort by allocation_position's natural key so the per-row advisory lock
+	// in assign_processing_version_allocation_position is acquired in a
+	// transaction-stable order. TokenAddress is a 1:1 stand-in for token_id
+	// within ChainID — the absolute order doesn't matter, only that every
+	// caller produces the same total order. See ADR-0002 §3.
+	slices.SortFunc(positions, func(a, b *entity.AllocationPosition) int {
+		return cmp.Or(
+			cmp.Compare(a.ChainID, b.ChainID),
+			bytes.Compare(a.TokenAddress.Bytes(), b.TokenAddress.Bytes()),
+			cmp.Compare(a.PrimeID, b.PrimeID),
+			bytes.Compare(a.ProxyAddress.Bytes(), b.ProxyAddress.Bytes()),
+			cmp.Compare(a.BlockNumber, b.BlockNumber),
+			cmp.Compare(a.BlockVersion, b.BlockVersion),
+			cmp.Compare(a.TxHash, b.TxHash),
+			cmp.Compare(a.LogIndex, b.LogIndex),
+			cmp.Compare(a.Direction, b.Direction),
+			a.CreatedAt.Compare(b.CreatedAt),
+		)
+	})
 
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		tokenIDs, err := r.resolveTokenIDs(ctx, tx, positions)

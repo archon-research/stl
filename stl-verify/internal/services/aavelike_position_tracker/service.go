@@ -1,12 +1,14 @@
 package aavelike_position_tracker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -670,6 +672,11 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			}
 		}
 
+		// See sort rationale in persistPositionData below.
+		slices.SortFunc(collaterals, func(a, b aavelike.CollateralData) int {
+			return bytes.Compare(a.Asset.Bytes(), b.Asset.Bytes())
+		})
+
 		collateralEntities := make([]*entity.BorrowerCollateral, 0, len(collaterals))
 		for _, col := range collaterals {
 			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, normalizeTokenSymbol(col.Symbol), col.Decimals, blockNumber)
@@ -730,6 +737,11 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	if err != nil {
 		return fmt.Errorf("failed to extract collateral data for user %s: %w", user.Hex(), err)
 	}
+
+	// See sort rationale in persistPositionData below.
+	slices.SortFunc(collaterals, func(a, b aavelike.CollateralData) int {
+		return bytes.Compare(a.Asset.Bytes(), b.Asset.Bytes())
+	})
 
 	collateralEntities := make([]*entity.BorrowerCollateral, 0, len(collaterals))
 	for _, col := range collaterals {
@@ -801,6 +813,15 @@ func (s *Service) persistPositionData(
 		return fmt.Errorf("failed to get protocol: %w", err)
 	}
 
+	// Sort by token address before iterating so the per-row advisory lock in
+	// assign_processing_version_borrower (and the row lock acquired by
+	// GetOrCreateToken's INSERT ... ON CONFLICT DO UPDATE) are taken in a
+	// transaction-stable order across concurrent callers. Asset is a 1:1
+	// stand-in for token_id within ChainID. See ADR-0002 §3.
+	slices.SortFunc(debts, func(a, b aavelike.DebtData) int {
+		return bytes.Compare(a.Asset.Bytes(), b.Asset.Bytes())
+	})
+
 	for _, d := range debts {
 		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, d.Asset, normalizeTokenSymbol(d.Symbol), d.Decimals, blockNumber)
 		if err != nil {
@@ -822,6 +843,14 @@ func (s *Service) persistPositionData(
 			return fmt.Errorf("failed to save borrower: %w", err)
 		}
 	}
+
+	// SaveBorrowerCollaterals re-sorts the entities by natural key for the bwc
+	// advisory lock, but the GetOrCreateToken row locks below are taken in
+	// slice order — so the slice must also be transaction-stable to avoid
+	// token-table deadlocks under concurrent reprocess+live writers.
+	slices.SortFunc(collaterals, func(a, b aavelike.CollateralData) int {
+		return bytes.Compare(a.Asset.Bytes(), b.Asset.Bytes())
+	})
 
 	collateralEntities := make([]*entity.BorrowerCollateral, 0, len(collaterals))
 	for _, col := range collaterals {

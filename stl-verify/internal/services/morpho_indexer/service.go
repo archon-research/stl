@@ -787,6 +787,17 @@ func (s *Service) ensureMarket(ctx context.Context, tx pgx.Tx, marketID [32]byte
 	return s.morphoRepo.GetOrCreateMarket(ctx, tx, market)
 }
 
+// Contract for the Save* helpers below: every event handler that writes to
+// morpho_market_position MUST first write to morpho_market_state for the same
+// (market_id, block_number, block_version, timestamp), and likewise mvs before
+// mvp. This is what handleLiquidateEvent relies on to safely save two positions
+// in one transaction without caller-side sorting: assign_processing_version_*
+// acquires its mss/mvs advisory lock first, which serializes all concurrent
+// transactions touching that market/vault. The subsequent mmp/mvp locks are
+// therefore acquired by at most one transaction at a time per (market, block,
+// version, timestamp), so their relative order across transactions doesn't
+// matter. See ADR-0002 §3 and VEC-194 PR.
+
 func (s *Service) saveMarketStateSnapshot(ctx context.Context, tx pgx.Tx, morphoMarketID, blockNumber int64, blockVersion int, blockTimestamp time.Time, ms *MarketState, accrueData *accrueInterestData) error {
 	state, err := entity.NewMorphoMarketState(morphoMarketID, blockNumber, blockVersion, blockTimestamp, ms.TotalSupplyAssets, ms.TotalSupplyShares, ms.TotalBorrowAssets, ms.TotalBorrowShares, ms.LastUpdate.Int64(), ms.Fee)
 	if err != nil {
