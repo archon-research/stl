@@ -7,6 +7,7 @@ import {
   useReactTable,
   type ColumnDef,
   type ColumnFiltersState,
+  type OnChangeFn,
   type SortingState,
   type Table,
 } from '@tanstack/react-table';
@@ -29,11 +30,21 @@ export function useDataTable<T>(
   columns: ColumnDef<T>[],
   config: DataTableConfig = {},
 ): Table<T> {
-  const [sorting, setSorting] = React.useState<SortingState>(
+  const [internalSorting, setInternalSorting] = React.useState<SortingState>(
     config.defaultSorting ?? [],
   );
-  const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([]);
-  const [globalFilter, setGlobalFilter] = React.useState('');
+  const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>(
+    [],
+  );
+  const [internalGlobalFilter, setInternalGlobalFilter] = React.useState('');
+
+  const sorting = config.sorting ?? internalSorting;
+  const globalFilter = config.globalFilter ?? internalGlobalFilter;
+
+  const handleSortingChange: OnChangeFn<SortingState> =
+    config.onSortingChange ?? setInternalSorting;
+  const handleGlobalFilterChange =
+    config.onGlobalFilterChange ?? setInternalGlobalFilter;
 
   const table = useReactTable({
     data,
@@ -43,13 +54,15 @@ export function useDataTable<T>(
       columnFilters,
       globalFilter,
     },
-    onSortingChange: setSorting,
+    onSortingChange: handleSortingChange,
     onColumnFiltersChange: setColumnFilters,
-    onGlobalFilterChange: setGlobalFilter,
+    onGlobalFilterChange: handleGlobalFilterChange,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     globalFilterFn: 'includesString',
+    enableSorting: config.enableSorting,
+    enableGlobalFilter: config.enableSearch,
   });
 
   return table;

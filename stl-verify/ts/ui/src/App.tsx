@@ -1,4 +1,5 @@
 import { SidebarLayout } from '@archon-research/design-system';
+import type { SortingState } from '@tanstack/react-table';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
@@ -7,6 +8,8 @@ import { AllocationGrid } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
+import { useUrlSyncedTableState } from './data-table/hooks';
+import { buildRowSearchString, matchesSearchQuery } from './data-table/utils';
 import {
   getAllocations,
   getLocalChains,
@@ -17,7 +20,9 @@ import {
   buildChainLabelLookup,
   buildNetworkOptions,
   buildProtocolOptions,
+  getChainLabel,
   getAllocationKey,
+  getProtocolLabel,
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { PARAMS, useUrlParam } from './lib/url-params';
@@ -43,6 +48,12 @@ function App() {
   const [selectedPrimeId, setSelectedPrimeId] = useUrlParam(PARAMS.prime);
   const [selectedNetwork, setSelectedNetwork] = useUrlParam(PARAMS.network);
   const [selectedProtocol, setSelectedProtocol] = useUrlParam(PARAMS.protocol);
+  const {
+    globalFilter,
+    setGlobalFilter,
+    setSorting,
+    sorting,
+  } = useUrlSyncedTableState(PARAMS.sort, PARAMS.search);
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrimeId);
 
@@ -222,10 +233,33 @@ function App() {
         const matchesProtocol =
           selectedProtocol === null ||
           allocation.protocol_name === selectedProtocol;
+        const matchesGlobalFilter = matchesSearchQuery(
+          buildRowSearchString([
+            allocation.symbol,
+            allocation.underlying_symbol,
+            allocation.protocol_name,
+            getProtocolLabel(
+              allocation.protocol_name,
+              localProtocols,
+              allocation.chain_id,
+            ),
+            getChainLabel(allocation.chain_id, chainLabels),
+            allocation.receipt_token_address,
+            allocation.underlying_token_address,
+          ]),
+          globalFilter,
+        );
 
-        return matchesNetwork && matchesProtocol;
+        return matchesNetwork && matchesProtocol && matchesGlobalFilter;
       }),
-    [allocations, selectedNetwork, selectedProtocol],
+    [
+      allocations,
+      chainLabels,
+      globalFilter,
+      localProtocols,
+      selectedNetwork,
+      selectedProtocol,
+    ],
   );
 
   useEffect(() => {
@@ -281,7 +315,9 @@ function App() {
             networkOptions={networkOptions}
             onNetworkChange={setSelectedNetwork}
             onProtocolChange={setSelectedProtocol}
+            onSearchChange={setGlobalFilter}
             protocolOptions={protocolOptions}
+            searchValue={globalFilter}
             selectedNetwork={selectedNetwork}
             selectedProtocol={selectedProtocol}
           />
@@ -295,8 +331,10 @@ function App() {
             isLoading={isAllocationsLoading}
             localProtocols={localProtocols}
             onSelectAllocation={setSelectedAllocationKey}
+            onSortingChange={setSorting}
             selectedAllocationKey={selectedAllocationKey}
             selectedPrime={selectedPrime}
+            sorting={sorting as SortingState}
           />
         }
         bottomPanel={

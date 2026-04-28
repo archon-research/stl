@@ -3,6 +3,7 @@ import {
   SkeletonRows,
   SkeletonStack,
 } from '@archon-research/design-system';
+import { flexRender } from '@tanstack/react-table';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
@@ -102,15 +103,10 @@ function RiskTable({ items, isLoading }: { items: RiskItem[]; isLoading: boolean
         })}
       >
         <thead>
-          <tr className={css({ bg: 'surface.subtle' })}>
-            {table.getHeaderGroups().map((headerGroup) =>
-              headerGroup.headers.map((header) => {
-                const headerLabel =
-                  typeof header.column.columnDef.header === 'string'
-                    ? header.column.columnDef.header
-                    : typeof header.column.columnDef.header === 'function'
-                    ? (header.column.columnDef.header as any)()
-                    : null;
+          {table.getHeaderGroups().map((headerGroup) => (
+            <tr key={headerGroup.id} className={css({ bg: 'surface.subtle' })}>
+              {headerGroup.headers.map((header) => {
+                const sorted = header.column.getIsSorted();
 
                 return (
                   <th
@@ -126,12 +122,42 @@ function RiskTable({ items, isLoading }: { items: RiskItem[]; isLoading: boolean
                       color: 'text.muted',
                     })}
                   >
-                    {header.isPlaceholder ? null : headerLabel}
+                    {header.isPlaceholder ? null : (
+                      <button
+                        type="button"
+                        onClick={header.column.getToggleSortingHandler()}
+                        className={css({
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '1.5',
+                          border: 'none',
+                          bg: 'transparent',
+                          p: 0,
+                          font: 'inherit',
+                          color: 'inherit',
+                          cursor: 'pointer',
+                        })}
+                      >
+                        <span>
+                          {flexRender(
+                            header.column.columnDef.header,
+                            header.getContext(),
+                          )}
+                        </span>
+                        <span>
+                          {sorted === 'asc'
+                            ? '↑'
+                            : sorted === 'desc'
+                            ? '↓'
+                            : '↕'}
+                        </span>
+                      </button>
+                    )}
                   </th>
                 );
-              }),
-            )}
-          </tr>
+              })}
+            </tr>
+          ))}
         </thead>
         <tbody>
           {isLoading && items.length === 0

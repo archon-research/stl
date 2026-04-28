@@ -1,4 +1,8 @@
-import type { ColumnDef, SortingState } from '@tanstack/react-table';
+import type {
+  ColumnDef,
+  OnChangeFn,
+  SortingState,
+} from '@tanstack/react-table';
 
 /**
  * Shared table configuration for consistent behavior across consumers.
@@ -9,6 +13,14 @@ export interface DataTableConfig {
   enableSearch?: boolean;
   /** Enable column sorting */
   enableSorting?: boolean;
+  /** Controlled sorting state */
+  sorting?: SortingState;
+  /** Controlled global search value */
+  globalFilter?: string;
+  /** Controlled sorting change handler */
+  onSortingChange?: OnChangeFn<SortingState>;
+  /** Controlled global search change handler */
+  onGlobalFilterChange?: (filter: string) => void;
   /** Default sorting state on mount */
   defaultSorting?: SortingState;
   /** Global search debounce time in ms */
@@ -53,6 +65,6 @@ export type TypedColumnDef<T> = ColumnDef<T> & {
 export interface UseUrlSyncedTableReturn {
   sorting: SortingState;
   globalFilter: string;
-  setSorting: (sorting: SortingState) => void;
+  setSorting: OnChangeFn<SortingState>;
   setGlobalFilter: (filter: string) => void;
 }

@@ -1,8 +1,15 @@
 import { SkeletonRows, SurfaceMessage } from '@archon-research/design-system';
+import {
+  flexRender,
+  type ColumnDef,
+  type SortingState,
+} from '@tanstack/react-table';
+import { useMemo } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
+import { useDataTable } from '../../data-table/hooks';
 import {
   type ChainLabelLookup,
   formatTokenAmount,
@@ -29,8 +36,10 @@ type AllocationGridProps = {
   isLoading: boolean;
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
+  onSortingChange: (sorting: SortingState | ((old: SortingState) => SortingState)) => void;
   selectedAllocationKey: string | null;
   selectedPrime: Prime | null;
+  sorting: SortingState;
 };
 
 export function AllocationGrid({
@@ -41,9 +50,157 @@ export function AllocationGrid({
   isLoading,
   localProtocols,
   onSelectAllocation,
+  onSortingChange,
   selectedAllocationKey,
   selectedPrime,
+  sorting,
 }: AllocationGridProps) {
+  const columns = useMemo<ColumnDef<Allocation>[]>(
+    () => [
+      {
+        id: 'symbol',
+        header: 'Asset',
+        accessorFn: (allocation) => allocation.symbol,
+        cell: ({ row }) => {
+          const allocation = row.original;
+          const isSelected =
+            getAllocationKey(allocation) === selectedAllocationKey;
+
+          return (
+            <div className={flex({ align: 'center', gap: '3' })}>
+              <div
+                className={css({
+                  width: '10',
+                  height: '10',
+                  borderRadius: 'full',
+                  bg: isSelected
+                    ? 'interactive.accent'
+                    : 'surface.subtle',
+                  color: isSelected ? 'white' : 'text.strong',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 'xs',
+                  fontWeight: 'semibold',
+                  flexShrink: 0,
+                })}
+              >
+                {allocation.symbol.slice(0, 2).toUpperCase()}
+              </div>
+              <div className={css({ display: 'grid', gap: '1' })}>
+                <p
+                  className={css({
+                    m: 0,
+                    fontSize: 'sm',
+                    fontWeight: 'semibold',
+                    color: 'text.strong',
+                  })}
+                >
+                  {allocation.symbol}
+                </p>
+                <div className={flex({ gap: '1.5', wrap: 'wrap' })}>
+                  <span
+                    className={css({
+                      fontSize: 'xs',
+                      color: 'text.muted',
+                    })}
+                  >
+                    {getProtocolLabel(
+                      allocation.protocol_name,
+                      localProtocols,
+                      allocation.chain_id,
+                    )}
+                  </span>
+                  <span
+                    className={css({
+                      fontSize: 'xs',
+                      color: 'text.muted',
+                    })}
+                  >
+                    {getChainLabel(allocation.chain_id, chainLabels)}
+                  </span>
+                </div>
+              </div>
+            </div>
+          );
+        },
+      },
+      {
+        id: 'underlying_symbol',
+        header: 'Underlying',
+        accessorFn: (allocation) => allocation.underlying_symbol,
+        cell: ({ row }) => {
+          const allocation = row.original;
+
+          return (
+            <div>
+              <p
+                className={css({
+                  m: 0,
+                  fontSize: 'sm',
+                  fontWeight: 'semibold',
+                  color: 'text.strong',
+                })}
+              >
+                {allocation.underlying_symbol}
+              </p>
+              <p
+                className={css({
+                  m: 0,
+                  mt: '1',
+                  fontSize: 'xs',
+                  color: 'text.muted',
+                })}
+              >
+                {formatAddress(allocation.underlying_token_address)}
+              </p>
+            </div>
+          );
+        },
+      },
+      {
+        id: 'balance',
+        header: 'Balance',
+        accessorFn: (allocation) => Number(allocation.balance),
+        cell: ({ row }) => {
+          const allocation = row.original;
+
+          return (
+            <div>
+              <p
+                className={css({
+                  m: 0,
+                  fontSize: 'sm',
+                  fontWeight: 'semibold',
+                  color: 'text.strong',
+                })}
+              >
+                {formatTokenAmount(allocation.balance)} {allocation.symbol}
+              </p>
+              <p
+                className={css({
+                  m: 0,
+                  mt: '1',
+                  fontSize: 'xs',
+                  color: 'text.muted',
+                })}
+              >
+                {formatAddress(allocation.receipt_token_address)}
+              </p>
+            </div>
+          );
+        },
+      },
+    ],
+    [chainLabels, localProtocols, selectedAllocationKey],
+  );
+
+  const table = useDataTable(filteredAllocations, columns, {
+    enableSorting: true,
+    onSortingChange,
+    sorting,
+  });
+
   return (
     <div
       className={css({
@@ -190,31 +347,67 @@ export function AllocationGrid({
                 })}
               >
                 <thead>
-                  <tr className={css({ bg: 'surface.subtle' })}>
-                    {['Asset', 'Underlying', 'Balance'].map((label) => (
-                      <th
-                        key={label}
-                        className={css({
-                          px: '4',
-                          py: '3',
-                          textAlign: 'left',
-                          fontSize: 'xs',
-                          fontWeight: 'semibold',
-                          letterSpacing: '0.08em',
-                          textTransform: 'uppercase',
-                          color: 'text.muted',
-                        })}
-                      >
-                        {label}
-                      </th>
-                    ))}
-                  </tr>
+                  {table.getHeaderGroups().map((headerGroup) => (
+                    <tr key={headerGroup.id} className={css({ bg: 'surface.subtle' })}>
+                      {headerGroup.headers.map((header) => {
+                        const sorted = header.column.getIsSorted();
+
+                        return (
+                          <th
+                            key={header.id}
+                            className={css({
+                              px: '4',
+                              py: '3',
+                              textAlign: 'left',
+                              fontSize: 'xs',
+                              fontWeight: 'semibold',
+                              letterSpacing: '0.08em',
+                              textTransform: 'uppercase',
+                              color: 'text.muted',
+                            })}
+                          >
+                            {header.isPlaceholder ? null : (
+                              <button
+                                type="button"
+                                onClick={header.column.getToggleSortingHandler()}
+                                className={css({
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '1.5',
+                                  border: 'none',
+                                  bg: 'transparent',
+                                  p: 0,
+                                  font: 'inherit',
+                                  color: 'inherit',
+                                  cursor: 'pointer',
+                                })}
+                              >
+                                <span>
+                                  {flexRender(
+                                    header.column.columnDef.header,
+                                    header.getContext(),
+                                  )}
+                                </span>
+                                <span>
+                                  {sorted === 'asc'
+                                    ? '↑'
+                                    : sorted === 'desc'
+                                    ? '↓'
+                                    : '↕'}
+                                </span>
+                              </button>
+                            )}
+                          </th>
+                        );
+                      })}
+                    </tr>
+                  ))}
                 </thead>
                 <tbody>
                   {isLoading
                     ? SkeletonRows()
-                    : filteredAllocations.map((allocation) => {
-                        const allocationKey = getAllocationKey(allocation);
+                    : table.getRowModel().rows.map((row) => {
+                      const allocationKey = getAllocationKey(row.original);
                         const isSelected =
                           allocationKey === selectedAllocationKey;
 
@@ -241,148 +434,23 @@ export function AllocationGrid({
                               _focusVisible: { bg: 'interactive.hover' },
                             })}
                           >
-                            <td
-                              className={css({
-                                borderBottomWidth: '1px',
-                                borderBottomStyle: 'solid',
-                                borderBottomColor: 'border.subtle',
-                                px: '4',
-                                py: '3.5',
-                              })}
-                            >
-                              <div
-                                className={flex({ align: 'center', gap: '3' })}
-                              >
-                                <div
-                                  className={css({
-                                    width: '10',
-                                    height: '10',
-                                    borderRadius: 'full',
-                                    bg: isSelected
-                                      ? 'interactive.accent'
-                                      : 'surface.subtle',
-                                    color: isSelected ? 'white' : 'text.strong',
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    fontSize: 'xs',
-                                    fontWeight: 'semibold',
-                                    flexShrink: 0,
-                                  })}
-                                >
-                                  {allocation.symbol.slice(0, 2).toUpperCase()}
-                                </div>
-                                <div
-                                  className={css({ display: 'grid', gap: '1' })}
-                                >
-                                  <p
-                                    className={css({
-                                      m: 0,
-                                      fontSize: 'sm',
-                                      fontWeight: 'semibold',
-                                      color: 'text.strong',
-                                    })}
-                                  >
-                                    {allocation.symbol}
-                                  </p>
-                                  <div
-                                    className={flex({
-                                      gap: '1.5',
-                                      wrap: 'wrap',
-                                    })}
-                                  >
-                                    <span
-                                      className={css({
-                                        fontSize: 'xs',
-                                        color: 'text.muted',
-                                      })}
-                                    >
-                                      {getProtocolLabel(
-                                        allocation.protocol_name,
-                                        localProtocols,
-                                        allocation.chain_id,
-                                      )}
-                                    </span>
-                                    <span
-                                      className={css({
-                                        fontSize: 'xs',
-                                        color: 'text.muted',
-                                      })}
-                                    >
-                                      {getChainLabel(
-                                        allocation.chain_id,
-                                        chainLabels,
-                                      )}
-                                    </span>
-                                  </div>
-                                </div>
-                              </div>
-                            </td>
-                            <td
-                              className={css({
-                                borderBottomWidth: '1px',
-                                borderBottomStyle: 'solid',
-                                borderBottomColor: 'border.subtle',
-                                px: '4',
-                                py: '3.5',
-                              })}
-                            >
-                              <p
+                            {row.getVisibleCells().map((cell) => (
+                              <td
+                                key={cell.id}
                                 className={css({
-                                  m: 0,
-                                  fontSize: 'sm',
-                                  fontWeight: 'semibold',
-                                  color: 'text.strong',
+                                  borderBottomWidth: '1px',
+                                  borderBottomStyle: 'solid',
+                                  borderBottomColor: 'border.subtle',
+                                  px: '4',
+                                  py: '3.5',
                                 })}
                               >
-                                {allocation.underlying_symbol}
-                              </p>
-                              <p
-                                className={css({
-                                  m: 0,
-                                  mt: '1',
-                                  fontSize: 'xs',
-                                  color: 'text.muted',
-                                })}
-                              >
-                                {formatAddress(
-                                  allocation.underlying_token_address,
+                                {flexRender(
+                                  cell.column.columnDef.cell,
+                                  cell.getContext(),
                                 )}
-                              </p>
-                            </td>
-                            <td
-                              className={css({
-                                borderBottomWidth: '1px',
-                                borderBottomStyle: 'solid',
-                                borderBottomColor: 'border.subtle',
-                                px: '4',
-                                py: '3.5',
-                              })}
-                            >
-                              <p
-                                className={css({
-                                  m: 0,
-                                  fontSize: 'sm',
-                                  fontWeight: 'semibold',
-                                  color: 'text.strong',
-                                })}
-                              >
-                                {formatTokenAmount(allocation.balance)}{' '}
-                                {allocation.symbol}
-                              </p>
-                              <p
-                                className={css({
-                                  m: 0,
-                                  mt: '1',
-                                  fontSize: 'xs',
-                                  color: 'text.muted',
-                                })}
-                              >
-                                {formatAddress(
-                                  allocation.receipt_token_address,
-                                )}
-                              </p>
-                            </td>
+                              </td>
+                            ))}
                           </tr>
                         );
                       })}
