@@ -1,7 +1,8 @@
 import functools
+from decimal import Decimal
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -25,6 +26,7 @@ class Settings(BaseSettings):
     otel_enabled: bool
     otel_exporter_otlp_endpoint: str
     otel_service_name: str
+    risk_default_gap_pct: Decimal = Field(default=Decimal("0.15"), ge=0, le=1)
     suraf_inputs_dir: Path = ENV_DIR / "suraf" / "inputs"
     suraf_mappings_file: Path = ENV_DIR / "suraf" / "mappings" / "asset_to_rating.json"
     # Injected as a Docker build arg; see stl-verify/python/Dockerfile.

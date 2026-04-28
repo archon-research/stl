@@ -71,10 +71,17 @@ LIMIT 1
 class RiskServiceFactory:
     """Build a RiskCalculationService from a receipt_token_id."""
 
-    def __init__(self, engine: AsyncEngine, alchemy_url: str, http_client: httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        alchemy_url: str,
+        http_client: httpx.AsyncClient,
+        default_gap_pct: Decimal,
+    ) -> None:
         self._engine = engine
         self._alchemy_url = alchemy_url
         self._http_client = http_client
+        self._default_gap_pct = default_gap_pct
         self._receipt_token_repo = ReceiptTokenRepository(engine)
 
     async def create(self, receipt_token_id: int) -> tuple[RiskCalculationService, int] | None:
@@ -117,6 +124,7 @@ class RiskServiceFactory:
             breakdown_repo=breakdown_repo,
             liq_params_repo=liq_repo,
             share_port=share_port,
+            default_gap_pct=self._default_gap_pct,
         )
         return service, asset_id
 
