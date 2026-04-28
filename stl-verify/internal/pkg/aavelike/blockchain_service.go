@@ -598,28 +598,44 @@ func (s *BlockchainService) BatchGetTokenMetadata(ctx context.Context, tokens ma
 			continue
 		}
 
-		var decimals int
-		if unpacked, err := s.erc20ABI.Unpack("decimals", results[decimalsIdx].ReturnData); err == nil && len(unpacked) > 0 {
-			if d, ok := unpacked[0].(uint8); ok {
-				decimals = int(d)
-			}
+		// Per VEC-188 PR review: an Unpack error or wrong-typed payload
+		// must also disqualify the token from being cached. A pre-fix
+		// no-op fall-through would persist a zero-valued metadata row in
+		// the cache and poison every subsequent read.
+		decimalsUnpacked, err := s.erc20ABI.Unpack("decimals", results[decimalsIdx].ReturnData)
+		if err != nil || len(decimalsUnpacked) == 0 {
+			incomplete = append(incomplete, token)
+			continue
+		}
+		decimals, ok := decimalsUnpacked[0].(uint8)
+		if !ok {
+			incomplete = append(incomplete, token)
+			continue
 		}
 
-		var symbol string
-		if unpacked, err := s.erc20ABI.Unpack("symbol", results[symbolIdx].ReturnData); err == nil && len(unpacked) > 0 {
-			if v, ok := unpacked[0].(string); ok {
-				symbol = v
-			}
+		symbolUnpacked, err := s.erc20ABI.Unpack("symbol", results[symbolIdx].ReturnData)
+		if err != nil || len(symbolUnpacked) == 0 {
+			incomplete = append(incomplete, token)
+			continue
+		}
+		symbol, ok := symbolUnpacked[0].(string)
+		if !ok {
+			incomplete = append(incomplete, token)
+			continue
 		}
 
-		var name string
-		if unpacked, err := s.erc20ABI.Unpack("name", results[nameIdx].ReturnData); err == nil && len(unpacked) > 0 {
-			if v, ok := unpacked[0].(string); ok {
-				name = v
-			}
+		nameUnpacked, err := s.erc20ABI.Unpack("name", results[nameIdx].ReturnData)
+		if err != nil || len(nameUnpacked) == 0 {
+			incomplete = append(incomplete, token)
+			continue
+		}
+		name, ok := nameUnpacked[0].(string)
+		if !ok {
+			incomplete = append(incomplete, token)
+			continue
 		}
 
-		metadata := TokenMetadata{Symbol: symbol, Decimals: decimals, Name: name}
+		metadata := TokenMetadata{Symbol: symbol, Decimals: int(decimals), Name: name}
 
 		// Token metadata (symbol, decimals, name) is immutable, so a
 		// concurrent cache miss producing duplicate fetches is safe — both
