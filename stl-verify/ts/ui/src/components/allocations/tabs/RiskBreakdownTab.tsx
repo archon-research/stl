@@ -1,3 +1,8 @@
+import {
+  LoadingIndicator,
+  SkeletonRows,
+  SkeletonStack,
+} from '@archon-research/design-system';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
@@ -75,32 +80,6 @@ function SummaryMetric({
       ) : null}
     </div>
   );
-}
-
-function RiskBreakdownSkeleton() {
-  return Array.from({ length: 5 }, (_row, rowIndex) => (
-    <tr
-      key={rowIndex}
-      className={css({
-        borderBottomWidth: '1px',
-        borderBottomStyle: 'solid',
-        borderBottomColor: 'border.subtle',
-      })}
-    >
-      {Array.from({ length: 7 }, (_cell, cellIndex) => (
-        <td key={cellIndex} className={css({ px: '4', py: '3' })}>
-          <div
-            className={css({
-              height: '7',
-              borderRadius: 'sm',
-              bg: 'surface.subtle',
-              opacity: 0.85,
-            })}
-          />
-        </td>
-      ))}
-    </tr>
-  ));
 }
 
 export function RiskBreakdownTab({
@@ -285,6 +264,8 @@ export function RiskBreakdownTab({
         </div>
       </div>
 
+      {isLoading ? <LoadingIndicator message="Loading risk breakdown" /> : null}
+
       {errorMessage ? (
         <div
           className={css({
@@ -353,6 +334,10 @@ export function RiskBreakdownTab({
             value={formatMultiplier(summary.weightedBonus)}
           />
         </div>
+      ) : null}
+
+      {!errorMessage && isLoading && !summary ? (
+        <SkeletonStack count={4} itemHeight={88} />
       ) : null}
 
       {!errorMessage &&
@@ -424,7 +409,7 @@ export function RiskBreakdownTab({
             </thead>
             <tbody>
               {isLoading && !breakdown
-                ? RiskBreakdownSkeleton()
+                ? SkeletonRows({ rows: 5, columns: 7, firstColumnTall: false })
                 : breakdown?.items.map((item) => (
                     <tr
                       key={item.token_id}

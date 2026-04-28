@@ -37,12 +37,19 @@ export function PrimeSidebar({
       className={css({
         display: 'flex',
         flexDirection: 'column',
-        minHeight: '100%',
+        width: '100%',
+        maxWidth: '100%',
+        height: '100%',
+        minHeight: 0,
+        overflow: 'hidden',
+        boxSizing: 'border-box',
         bg: 'surface.default',
       })}
     >
       <div
         className={css({
+          width: '100%',
+          boxSizing: 'border-box',
           px: '5',
           py: '4',
           borderBottomWidth: '1px',
@@ -66,11 +73,14 @@ export function PrimeSidebar({
         className={css({
           flex: '1',
           minHeight: 0,
+          width: '100%',
           overflowY: 'auto',
+          overflowX: 'hidden',
           scrollbarWidth: 'none',
           '&::-webkit-scrollbar': {
             display: 'none',
           },
+          boxSizing: 'border-box',
           px: '3',
           py: '4',
         })}
@@ -101,6 +111,7 @@ export function PrimeSidebar({
                   onClick={() => onSelectPrime(prime.id)}
                   className={css({
                     width: '100%',
+                    boxSizing: 'border-box',
                     textAlign: 'left',
                     borderRadius: 'md',
                     borderWidth: '1px',
@@ -180,6 +191,8 @@ export function PrimeSidebar({
 
       <div
         className={css({
+          width: '100%',
+          boxSizing: 'border-box',
           px: '4',
           py: '3',
           borderTopWidth: '1px',

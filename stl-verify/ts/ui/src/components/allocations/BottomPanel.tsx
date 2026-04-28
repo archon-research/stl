@@ -37,8 +37,8 @@ type BottomPanelProps = {
 type ActiveTab = 'risk' | 'bad-debt';
 
 const segmentedControlStyles = segmentedControl();
-const toggleGroupClassName = segmentedControlStyles.group;
-const toggleClassName = `${segmentedControlStyles.item} ${css({ px: '3' })}`;
+const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.5', gap: '1' })}`;
+const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '8', px: '2.5', fontSize: 'xs' })}`;
 
 function formatAddress(value: string): string {
   const address = value.startsWith('0x') ? value : `0x${value}`;

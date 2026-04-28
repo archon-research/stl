@@ -1,3 +1,6 @@
+import {
+  LoadingIndicator,
+} from '@archon-research/design-system';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
@@ -18,6 +21,32 @@ type BadDebtTabProps = {
   selectedReceiptToken: Allocation | null;
 };
 
+const GAP_TICK_VALUES = Array.from({ length: 21 }, (_, index) =>
+  Number((index * 0.05).toFixed(2)),
+);
+
+const GAP_TICK_LABELS = [0, 0.25, 0.5, 0.75, 1];
+
+function getGapOffset(value: number): string {
+  return `${value * 100}%`;
+}
+
+function getEdgeAlignedTransform(
+  value: number,
+  firstValue: number,
+  lastValue: number,
+): string {
+  if (value === firstValue) {
+    return 'translateX(0)';
+  }
+
+  if (value === lastValue) {
+    return 'translateX(-100%)';
+  }
+
+  return 'translateX(-50%)';
+}
+
 function getToneStyles(tone: ReturnType<typeof getBadDebtTone>) {
   switch (tone) {
     case 'green':
@@ -34,15 +63,15 @@ function getToneStyles(tone: ReturnType<typeof getBadDebtTone>) {
       };
     case 'neutral':
       return {
-        badgeBg: { _dark: 'gray.900', base: 'gray.100' },
-        badgeColor: { _dark: 'gray.400', base: 'gray.600' },
+        badgeBg: { _dark: 'gray.800', base: 'gray.100' },
+        badgeColor: { _dark: 'gray.200', base: 'gray.600' },
         valueColor: { _dark: 'gray.400', base: 'gray.600' },
       };
     default:
       return {
-        badgeBg: { _dark: 'red.950', base: 'red.50' },
-        badgeColor: { _dark: 'red.200', base: 'red.700' },
-        valueColor: { _dark: 'red.300', base: 'red.700' },
+        badgeBg: { _dark: 'red.900', base: 'red.50' },
+        badgeColor: { _dark: 'red.100', base: 'red.700' },
+        valueColor: { _dark: 'red.200', base: 'red.700' },
       };
   }
 }
@@ -175,6 +204,8 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
         return 'Contained';
       case 'yellow':
         return 'Monitor';
+      case 'neutral':
+        return 'Unavailable';
       default:
         return 'Escalating';
     }
@@ -231,12 +262,7 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
             >
               Bad debt model
             </p>
-            <h3 className={css({ m: 0, fontSize: 'lg', color: 'text.strong' })}>
-              {selectedReceiptToken.symbol}
-            </h3>
-            <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-              {selectedReceiptToken.protocol_name} · request gap {requestLabel}
-            </p>
+            {isLoading ? <LoadingIndicator message="Recalculating scenario" /> : null}
           </div>
 
           <span
@@ -272,27 +298,87 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
             </span>
             <div
               className={flex({
-                align: 'center',
+                align: 'flex-start',
                 justify: 'space-between',
                 gap: '3',
                 wrap: 'wrap',
               })}
             >
-              <input
-                id="bad-debt-gap"
-                type="range"
-                min="0.05"
-                max="0.95"
-                step="0.05"
-                value={sliderValue}
-                onChange={(event) => setSliderValue(Number(event.target.value))}
-                className={css({
-                  flex: '1',
-                  minWidth: '16rem',
-                  accentColor: 'interactive.accent',
-                  cursor: 'pointer',
-                })}
-              />
+              <div className={css({ flex: '1', minWidth: '16rem', display: 'grid', gap: '2' })}>
+                <input
+                  id="bad-debt-gap"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={sliderValue}
+                  onChange={(event) => setSliderValue(Number(event.target.value))}
+                  className={css({
+                    width: '100%',
+                    accentColor: 'interactive.accent',
+                    cursor: 'pointer',
+                  })}
+                />
+                <div
+                  aria-hidden="true"
+                  className={css({
+                    position: 'relative',
+                    height: '10',
+                  })}
+                >
+                  {GAP_TICK_VALUES.map((value, index) => (
+                    <span
+                      key={value}
+                      style={{
+                        left: getGapOffset(value),
+                        transform: getEdgeAlignedTransform(
+                          value,
+                          GAP_TICK_VALUES[0],
+                          GAP_TICK_VALUES[GAP_TICK_VALUES.length - 1],
+                        ),
+                      }}
+                      className={css({
+                        position: 'absolute',
+                        top: 0,
+                        width: '1px',
+                        height: index % 2 === 1 ? '2.5' : '1.5',
+                        bg: 'border.default',
+                        opacity: value === sliderValue ? 1 : 0.7,
+                      })}
+                    />
+                  ))}
+                </div>
+                <div
+                  aria-hidden="true"
+                  className={css({
+                    position: 'relative',
+                    height: '6',
+                  })}
+                >
+                  {GAP_TICK_LABELS.map((value) => (
+                    <span
+                      key={value}
+                      style={{
+                        left: getGapOffset(value),
+                        transform: getEdgeAlignedTransform(
+                          value,
+                          GAP_TICK_LABELS[0],
+                          GAP_TICK_LABELS[GAP_TICK_LABELS.length - 1],
+                        ),
+                      }}
+                      className={css({
+                        position: 'absolute',
+                        top: 0,
+                        fontSize: 'xs',
+                        color: 'text.muted',
+                        whiteSpace: 'nowrap',
+                      })}
+                    >
+                      {formatRatioPercent(value, 0)}
+                    </span>
+                  ))}
+                </div>
+              </div>
               <span
                 className={css({
                   fontSize: 'sm',
@@ -347,12 +433,11 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
             display: 'grid',
             gridTemplateColumns: {
               base: '1fr',
-              md: 'repeat(4, minmax(0, 1fr))',
+              md: 'repeat(3, minmax(0, 1fr))',
             },
             gap: '3',
           })}
         >
-          <SummaryMetric label="Requested gap" value={requestLabel} />
           <SummaryMetric
             label="Receipt token balance"
             value={`${formatTokenAmount(selectedReceiptToken.balance)} ${selectedReceiptToken.symbol}`}
@@ -399,26 +484,29 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
               color: toneStyles.valueColor,
             })}
           >
-            {badDebt
-              ? formatUsdValue(badDebt.bad_debt_usd)
-              : isLoading
-                ? 'Loading…'
-                : '—'}
+            {badDebt ? formatUsdValue(badDebt.bad_debt_usd) : isLoading ? '—' : '—'}
           </p>
-          <p
-            className={css({
-              m: 0,
-              mt: '2',
-              fontSize: 'sm',
-              color: 'text.muted',
-            })}
-          >
-            {hasProjectedShortfall
-              ? `At ${requestLabel}, the model projects a shortfall on this receipt token after liquidation.`
-              : `At ${requestLabel}, the model currently shows no bad debt for this receipt token.`}
-          </p>
+          {isLoading && !badDebt ? (
+            <div className={css({ mt: '3' })}>
+              <LoadingIndicator message="Fetching bad debt model" />
+            </div>
+          ) : (
+            <p
+              className={css({
+                m: 0,
+                mt: '2',
+                fontSize: 'sm',
+                color: 'text.muted',
+              })}
+            >
+              {hasProjectedShortfall
+                ? `At ${requestLabel}, the model projects a shortfall after liquidation.`
+                : `At ${requestLabel}, the model currently shows no bad debt.`}
+            </p>
+          )}
         </div>
       ) : null}
+
     </div>
   );
 }

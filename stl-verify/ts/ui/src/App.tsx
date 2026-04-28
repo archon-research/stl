@@ -1,6 +1,8 @@
 import { SidebarLayout } from '@archon-research/design-system';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
+import { css } from '#styled-system/css';
+
 import { AllocationGrid } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
@@ -253,52 +255,63 @@ function App() {
   );
 
   return (
-    <SidebarLayout
-      sidebar={
-        <PrimeSidebar
-          primes={primes}
-          selectedPrimeId={selectedPrimeId}
-          isLoading={isPrimesLoading}
-          errorMessage={primesErrorMessage}
-          onSelectPrime={setSelectedPrimeId}
-        />
-      }
-      topBar={
-        <TopBar
-          hasSelectedPrime={selectedPrime !== null}
-          networkOptions={networkOptions}
-          onNetworkChange={setSelectedNetwork}
-          onProtocolChange={setSelectedProtocol}
-          protocolOptions={protocolOptions}
-          selectedNetwork={selectedNetwork}
-          selectedProtocol={selectedProtocol}
-        />
-      }
-      main={
-        <AllocationGrid
-          allocations={allocations}
-          chainLabels={chainLabels}
-          errorMessage={allocationsErrorMessage}
-          filteredAllocations={filteredAllocations}
-          isLoading={isAllocationsLoading}
-          localProtocols={localProtocols}
-          onSelectAllocation={setSelectedAllocationKey}
-          selectedAllocationKey={selectedAllocationKey}
-          selectedPrime={selectedPrime}
-        />
-      }
-      bottomPanel={
-        <BottomPanel
-          allocations={allocations}
-          chainLabels={chainLabels}
-          errorMessage={allocationsErrorMessage}
-          isLoading={isAllocationsLoading}
-          localProtocols={localProtocols}
-          selectedAllocation={selectedAllocation}
-          selectedPrime={selectedPrime}
-        />
-      }
-    />
+    <div
+      className={css({
+        '& [aria-label="Resize sidebar"]': {
+          right: '0 !important',
+        },
+        '& [aria-label="Resize sidebar"] > [aria-hidden="true"]': {
+          opacity: 0,
+        },
+      })}
+    >
+      <SidebarLayout
+        sidebar={
+          <PrimeSidebar
+            primes={primes}
+            selectedPrimeId={selectedPrimeId}
+            isLoading={isPrimesLoading}
+            errorMessage={primesErrorMessage}
+            onSelectPrime={setSelectedPrimeId}
+          />
+        }
+        topBar={
+          <TopBar
+            hasSelectedPrime={selectedPrime !== null}
+            networkOptions={networkOptions}
+            onNetworkChange={setSelectedNetwork}
+            onProtocolChange={setSelectedProtocol}
+            protocolOptions={protocolOptions}
+            selectedNetwork={selectedNetwork}
+            selectedProtocol={selectedProtocol}
+          />
+        }
+        main={
+          <AllocationGrid
+            allocations={allocations}
+            chainLabels={chainLabels}
+            errorMessage={allocationsErrorMessage}
+            filteredAllocations={filteredAllocations}
+            isLoading={isAllocationsLoading}
+            localProtocols={localProtocols}
+            onSelectAllocation={setSelectedAllocationKey}
+            selectedAllocationKey={selectedAllocationKey}
+            selectedPrime={selectedPrime}
+          />
+        }
+        bottomPanel={
+          <BottomPanel
+            allocations={allocations}
+            chainLabels={chainLabels}
+            errorMessage={allocationsErrorMessage}
+            isLoading={isAllocationsLoading}
+            localProtocols={localProtocols}
+            selectedAllocation={selectedAllocation}
+            selectedPrime={selectedPrime}
+          />
+        }
+      />
+    </div>
   );
 }
 
