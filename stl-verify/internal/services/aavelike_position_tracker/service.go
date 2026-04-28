@@ -1,14 +1,12 @@
 package aavelike_position_tracker
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -662,28 +660,42 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
 
+		// Resolve every token we'll touch in this transaction in one batched
+		// call: collateral tokens plus, for Borrow/Repay events, the reserve
+		// token. Routing them through the same sorted batch keeps token-row
+		// upsert locks and downstream trigger advisory locks in a stable
+		// order across concurrent writers. See ADR-0002 §3.
+		var extras []outbound.TokenInput
 		if eventData.EventType == EventBorrow || eventData.EventType == EventRepay {
-			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, normalizeTokenSymbol(tokenMetadata.Symbol), tokenMetadata.Decimals, blockNumber)
-			if err != nil {
-				return fmt.Errorf("failed to get token: %w", err)
+			extras = []outbound.TokenInput{{
+				ChainID:        chainID,
+				Address:        eventData.Reserve,
+				Symbol:         normalizeTokenSymbol(tokenMetadata.Symbol),
+				Decimals:       tokenMetadata.Decimals,
+				CreatedAtBlock: blockNumber,
+			}}
+		}
+		tokenIDs, err := s.resolvePositionTokens(ctx, tx, chainID, blockNumber, collaterals, nil, extras...)
+		if err != nil {
+			return err
+		}
+
+		if eventData.EventType == EventBorrow || eventData.EventType == EventRepay {
+			tokenID, ok := tokenIDs[eventData.Reserve]
+			if !ok {
+				return fmt.Errorf("missing token ID for reserve %s", eventData.Reserve.Hex())
 			}
 			if err := s.saveBorrowerRecord(ctx, tx, eventData, tokenMetadata, debtData, userID, protocolID, tokenID, blockNumber, blockVersion, blockTimestamp); err != nil {
 				return fmt.Errorf("failed to insert borrower: %w", err)
 			}
 		}
 
-		// See sort rationale in persistPositionData below.
-		slices.SortFunc(collaterals, func(a, b aavelike.CollateralData) int {
-			return bytes.Compare(a.Asset.Bytes(), b.Asset.Bytes())
-		})
-
 		collateralEntities := make([]*entity.BorrowerCollateral, 0, len(collaterals))
 		for _, col := range collaterals {
-			tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, normalizeTokenSymbol(col.Symbol), col.Decimals, blockNumber)
-			if err != nil {
-				return fmt.Errorf("failed to get collateral token %s: %w", col.Asset.Hex(), err)
+			tokenID, ok := tokenIDs[col.Asset]
+			if !ok {
+				return fmt.Errorf("missing token ID for collateral asset %s", col.Asset.Hex())
 			}
-
 			collateralEntities = append(collateralEntities, &entity.BorrowerCollateral{
 				UserID:       userID,
 				ProtocolID:   protocolID,
@@ -738,18 +750,17 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 		return fmt.Errorf("failed to extract collateral data for user %s: %w", user.Hex(), err)
 	}
 
-	// See sort rationale in persistPositionData below.
-	slices.SortFunc(collaterals, func(a, b aavelike.CollateralData) int {
-		return bytes.Compare(a.Asset.Bytes(), b.Asset.Bytes())
-	})
+	tokenIDs, err := s.resolvePositionTokens(ctx, tx, chainID, blockNumber, collaterals, nil)
+	if err != nil {
+		return err
+	}
 
 	collateralEntities := make([]*entity.BorrowerCollateral, 0, len(collaterals))
 	for _, col := range collaterals {
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, normalizeTokenSymbol(col.Symbol), col.Decimals, blockNumber)
-		if err != nil {
-			return fmt.Errorf("failed to get collateral token %s: %w", col.Asset.Hex(), err)
+		tokenID, ok := tokenIDs[col.Asset]
+		if !ok {
+			return fmt.Errorf("missing token ID for collateral asset %s", col.Asset.Hex())
 		}
-
 		collateralEntities = append(collateralEntities, &entity.BorrowerCollateral{
 			UserID:       userID,
 			ProtocolID:   protocolID,
@@ -781,6 +792,12 @@ func (s *Service) extractUserPositionData(ctx context.Context, user common.Addre
 
 // persistPositionData saves a full position snapshot (collaterals + debts) within an
 // existing transaction. Callers are responsible for wrapping this in WithTransaction.
+//
+// All Postgres writes go through batched repository methods
+// (GetOrCreateTokens, SaveBorrowers, SaveBorrowerCollaterals), each of which
+// sorts its inputs by natural key before issuing per-row writes. This is what
+// keeps concurrent cross-build reprocesses from deadlocking on the
+// assign_processing_version_* trigger lock — see ADR-0002 §3.
 func (s *Service) persistPositionData(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -813,21 +830,18 @@ func (s *Service) persistPositionData(
 		return fmt.Errorf("failed to get protocol: %w", err)
 	}
 
-	// Sort by token address before iterating so the per-row advisory lock in
-	// assign_processing_version_borrower (and the row lock acquired by
-	// GetOrCreateToken's INSERT ... ON CONFLICT DO UPDATE) are taken in a
-	// transaction-stable order across concurrent callers. Asset is a 1:1
-	// stand-in for token_id within ChainID. See ADR-0002 §3.
-	slices.SortFunc(debts, func(a, b aavelike.DebtData) int {
-		return bytes.Compare(a.Asset.Bytes(), b.Asset.Bytes())
-	})
+	tokenIDs, err := s.resolvePositionTokens(ctx, tx, chainID, blockNumber, collaterals, debts)
+	if err != nil {
+		return err
+	}
 
+	borrowers := make([]*entity.Borrower, 0, len(debts))
 	for _, d := range debts {
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, d.Asset, normalizeTokenSymbol(d.Symbol), d.Decimals, blockNumber)
-		if err != nil {
-			return fmt.Errorf("failed to get debt token: %w", err)
+		tokenID, ok := tokenIDs[d.Asset]
+		if !ok {
+			return fmt.Errorf("missing token ID for debt asset %s", d.Asset.Hex())
 		}
-		b := &entity.Borrower{
+		borrowers = append(borrowers, &entity.Borrower{
 			UserID:       userID,
 			ProtocolID:   protocolID,
 			TokenID:      tokenID,
@@ -838,27 +852,18 @@ func (s *Service) persistPositionData(
 			EventType:    eventType,
 			TxHash:       txHash,
 			CreatedAt:    blockTimestamp,
-		}
-		if err := s.positionRepo.SaveBorrower(ctx, tx, b); err != nil {
-			return fmt.Errorf("failed to save borrower: %w", err)
-		}
+		})
 	}
-
-	// SaveBorrowerCollaterals re-sorts the entities by natural key for the bwc
-	// advisory lock, but the GetOrCreateToken row locks below are taken in
-	// slice order — so the slice must also be transaction-stable to avoid
-	// token-table deadlocks under concurrent reprocess+live writers.
-	slices.SortFunc(collaterals, func(a, b aavelike.CollateralData) int {
-		return bytes.Compare(a.Asset.Bytes(), b.Asset.Bytes())
-	})
+	if err := s.positionRepo.SaveBorrowers(ctx, tx, borrowers); err != nil {
+		return fmt.Errorf("failed to save borrowers: %w", err)
+	}
 
 	collateralEntities := make([]*entity.BorrowerCollateral, 0, len(collaterals))
 	for _, col := range collaterals {
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, col.Asset, normalizeTokenSymbol(col.Symbol), col.Decimals, blockNumber)
-		if err != nil {
-			return fmt.Errorf("failed to get collateral token %s: %w", col.Asset.Hex(), err)
+		tokenID, ok := tokenIDs[col.Asset]
+		if !ok {
+			return fmt.Errorf("missing token ID for collateral asset %s", col.Asset.Hex())
 		}
-
 		collateralEntities = append(collateralEntities, &entity.BorrowerCollateral{
 			UserID:            userID,
 			ProtocolID:        protocolID,
@@ -867,7 +872,7 @@ func (s *Service) persistPositionData(
 			BlockVersion:      blockVersion,
 			Amount:            col.ActualBalance,
 			Change:            big.NewInt(0),
-			EventType:         entity.EventType(eventType),
+			EventType:         eventType,
 			TxHash:            txHash,
 			CollateralEnabled: col.CollateralEnabled,
 			CreatedAt:         blockTimestamp,
@@ -879,6 +884,62 @@ func (s *Service) persistPositionData(
 	}
 
 	return nil
+}
+
+// resolvePositionTokens upserts every distinct token referenced by a user's
+// collaterals, debts, or extra inputs in a single batched call and returns
+// address→id. GetOrCreateTokens sorts by address internally, so the
+// underlying token-row upsert locks are acquired in a transaction-stable
+// order — required to avoid deadlocks under concurrent reprocess+live
+// writers. See ADR-0002 §3.
+func (s *Service) resolvePositionTokens(
+	ctx context.Context,
+	tx pgx.Tx,
+	chainID, blockNumber int64,
+	collaterals []aavelike.CollateralData,
+	debts []aavelike.DebtData,
+	extras ...outbound.TokenInput,
+) (map[common.Address]int64, error) {
+	inputs := make(map[common.Address]outbound.TokenInput, len(collaterals)+len(debts)+len(extras))
+	for _, c := range collaterals {
+		if _, ok := inputs[c.Asset]; ok {
+			continue
+		}
+		inputs[c.Asset] = outbound.TokenInput{
+			ChainID:        chainID,
+			Address:        c.Asset,
+			Symbol:         normalizeTokenSymbol(c.Symbol),
+			Decimals:       c.Decimals,
+			CreatedAtBlock: blockNumber,
+		}
+	}
+	for _, d := range debts {
+		if _, ok := inputs[d.Asset]; ok {
+			continue
+		}
+		inputs[d.Asset] = outbound.TokenInput{
+			ChainID:        chainID,
+			Address:        d.Asset,
+			Symbol:         normalizeTokenSymbol(d.Symbol),
+			Decimals:       d.Decimals,
+			CreatedAtBlock: blockNumber,
+		}
+	}
+	for _, e := range extras {
+		if _, ok := inputs[e.Address]; ok {
+			continue
+		}
+		inputs[e.Address] = e
+	}
+	slice := make([]outbound.TokenInput, 0, len(inputs))
+	for _, t := range inputs {
+		slice = append(slice, t)
+	}
+	tokenIDs, err := s.tokenRepo.GetOrCreateTokens(ctx, tx, slice)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bulk upsert tokens: %w", err)
+	}
+	return tokenIDs, nil
 }
 
 // IndexUserPosition queries the current on-chain position for a user and persists
