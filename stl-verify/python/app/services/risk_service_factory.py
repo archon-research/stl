@@ -71,9 +71,15 @@ LIMIT 1
 class RiskServiceFactory:
     """Build a RiskCalculationService from a receipt_token_id."""
 
-    def __init__(self, engine: AsyncEngine, allocation_share_max_stale_seconds: int = 1800) -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        allocation_share_max_stale_seconds: int = 1800,
+        default_gap_pct: Decimal = Decimal("0.15"),
+    ) -> None:
         self._engine = engine
         self._allocation_share_max_stale_seconds = allocation_share_max_stale_seconds
+        self._default_gap_pct = default_gap_pct
         self._receipt_token_repo = ReceiptTokenRepository(engine)
 
     async def create(self, receipt_token_id: int) -> tuple[RiskCalculationService, int] | None:
@@ -132,6 +138,7 @@ class RiskServiceFactory:
             breakdown_repo=breakdown_repo,
             liq_params_repo=liq_repo,
             share_port=share_port,
+            default_gap_pct=self._default_gap_pct,
         )
         return service, asset_id
 

@@ -82,6 +82,7 @@ async def _resolve(
     factory = RiskServiceFactory(
         engine,
         allocation_share_max_stale_seconds=settings.allocation_share_max_stale_seconds,
+        default_gap_pct=settings.risk_default_gap_pct,
     )
     try:
         result = await factory.create(receipt_token_id)

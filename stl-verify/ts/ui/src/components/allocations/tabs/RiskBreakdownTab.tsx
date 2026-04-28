@@ -13,13 +13,10 @@ import {
   parseNumericValue,
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
-import type {
-  ReceiptTokenPosition,
-  RiskBreakdown,
-} from '../../../types/allocation';
+import type { Allocation, RiskBreakdown } from '../../../types/allocation';
 
 type RiskBreakdownTabProps = {
-  selectedReceiptToken: ReceiptTokenPosition | null;
+  selectedReceiptToken: Allocation | null;
 };
 
 function SummaryMetric({

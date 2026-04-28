@@ -1,7 +1,4 @@
-import type {
-  AllocationPosition,
-  ReceiptTokenPosition,
-} from '../types/allocation';
+import type { Allocation } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 
 export type FilterOption = {
@@ -28,11 +25,6 @@ const CHAIN_NAMES: Record<number, string> = {
 const PROTOCOL_LABELS: Record<string, string> = {
   grove: 'Grove',
   spark: 'SparkLend',
-};
-
-const PROTOCOL_HINTS: Record<string, string[]> = {
-  grove: ['grove'],
-  spark: ['spark', 'sparklend'],
 };
 
 const COMPACT_NUMBER_FORMAT = new Intl.NumberFormat('en-US', {
@@ -177,17 +169,12 @@ export function getProtocolLabel(
   );
 }
 
-export function getAllocationKey(allocation: AllocationPosition): string {
-  return [
-    allocation.chain_id,
-    allocation.token_address,
-    allocation.tx_hash,
-    allocation.log_index,
-  ].join(':');
+export function getAllocationKey(allocation: Allocation): string {
+  return String(allocation.receipt_token_id);
 }
 
 export function buildNetworkOptions(
-  allocations: AllocationPosition[],
+  allocations: Allocation[],
   chainLabels?: ChainLabelLookup,
 ): FilterOption[] {
   const counts = new Map<number, number>();
@@ -206,13 +193,16 @@ export function buildNetworkOptions(
 }
 
 export function buildProtocolOptions(
-  allocations: AllocationPosition[],
+  allocations: Allocation[],
   localProtocols?: LocalProtocolRow[],
 ): FilterOption[] {
   const counts = new Map<string, number>();
 
   for (const allocation of allocations) {
-    counts.set(allocation.name, (counts.get(allocation.name) ?? 0) + 1);
+    counts.set(
+      allocation.protocol_name,
+      (counts.get(allocation.protocol_name) ?? 0) + 1,
+    );
   }
 
   return [...counts.entries()]
@@ -336,10 +326,8 @@ export function getBadDebtTone(
   return 'red';
 }
 
-export function sortReceiptTokens(
-  receiptTokens: ReceiptTokenPosition[],
-): ReceiptTokenPosition[] {
-  return [...receiptTokens].sort((left, right) => {
+export function sortAllocations(allocations: Allocation[]): Allocation[] {
+  return [...allocations].sort((left, right) => {
     const balanceDelta =
       (parseNumericValue(right.balance) ?? 0) -
       (parseNumericValue(left.balance) ?? 0);
@@ -350,66 +338,4 @@ export function sortReceiptTokens(
 
     return left.symbol.localeCompare(right.symbol);
   });
-}
-
-function getProtocolHints(protocol: string): string[] {
-  const normalized = normalizeLabel(protocol);
-  return PROTOCOL_HINTS[normalized] ?? [normalized];
-}
-
-export function matchReceiptToken(
-  selectedAllocation: AllocationPosition | null,
-  receiptTokens: ReceiptTokenPosition[],
-): ReceiptTokenPosition | null {
-  if (!selectedAllocation || receiptTokens.length === 0) {
-    return null;
-  }
-
-  const allocationSymbol = normalizeLabel(
-    selectedAllocation.token_symbol ?? '',
-  );
-
-  if (allocationSymbol.length === 0) {
-    return null;
-  }
-
-  const protocolHints = getProtocolHints(selectedAllocation.name);
-
-  const candidates = receiptTokens
-    .map((token) => {
-      let score = 0;
-      const underlyingSymbol = normalizeLabel(token.underlying_symbol);
-      const receiptSymbol = normalizeLabel(token.symbol);
-
-      if (underlyingSymbol === allocationSymbol) {
-        score += 4;
-      }
-
-      if (receiptSymbol === allocationSymbol) {
-        score += 2;
-      }
-
-      const normalizedProtocol = normalizeLabel(token.protocol_name);
-      const symbolMatches =
-        underlyingSymbol === allocationSymbol ||
-        receiptSymbol === allocationSymbol;
-      const protocolMatches = protocolHints.some((hint) =>
-        normalizedProtocol.includes(hint),
-      );
-
-      if (protocolMatches) {
-        score += 3;
-      }
-
-      score += Math.min(
-        (parseNumericValue(token.balance) ?? 0) / 1_000_000_000,
-        0.99,
-      );
-
-      return { protocolMatches, score, symbolMatches, token };
-    })
-    .filter((candidate) => candidate.symbolMatches && candidate.protocolMatches)
-    .sort((left, right) => right.score - left.score);
-
-  return candidates[0]?.token ?? null;
 }

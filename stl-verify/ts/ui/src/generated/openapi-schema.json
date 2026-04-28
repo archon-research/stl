@@ -1,112 +1,58 @@
 {
   "components": {
     "schemas": {
-      "AllocationPositionResponse": {
+      "AllocationResponse": {
         "properties": {
           "balance": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Balance",
             "type": "string"
           },
-          "block_number": {
-            "title": "Block Number",
-            "type": "integer"
-          },
-          "block_version": {
-            "title": "Block Version",
-            "type": "integer"
-          },
           "chain_id": {
             "title": "Chain Id",
             "type": "integer"
           },
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
+          "protocol_name": {
+            "title": "Protocol Name",
             "type": "string"
           },
-          "direction": {
-            "title": "Direction",
+          "receipt_token_address": {
+            "title": "Receipt Token Address",
             "type": "string"
           },
-          "log_index": {
-            "title": "Log Index",
+          "receipt_token_id": {
+            "title": "Receipt Token Id",
             "type": "integer"
           },
-          "name": {
-            "title": "Name",
+          "symbol": {
+            "title": "Symbol",
             "type": "string"
           },
-          "proxy_address": {
-            "title": "Proxy Address",
+          "underlying_symbol": {
+            "title": "Underlying Symbol",
             "type": "string"
           },
-          "scaled_balance": {
-            "anyOf": [
-              {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Scaled Balance"
-          },
-          "token_address": {
-            "title": "Token Address",
+          "underlying_token_address": {
+            "title": "Underlying Token Address",
             "type": "string"
           },
-          "token_decimals": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Token Decimals"
-          },
-          "token_symbol": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Token Symbol"
-          },
-          "tx_amount": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Tx Amount",
-            "type": "string"
-          },
-          "tx_hash": {
-            "title": "Tx Hash",
-            "type": "string"
+          "underlying_token_id": {
+            "title": "Underlying Token Id",
+            "type": "integer"
           }
         },
         "required": [
           "chain_id",
-          "name",
-          "proxy_address",
-          "token_address",
-          "token_symbol",
-          "token_decimals",
-          "balance",
-          "scaled_balance",
-          "block_number",
-          "block_version",
-          "tx_hash",
-          "log_index",
-          "tx_amount",
-          "direction",
-          "created_at"
+          "receipt_token_id",
+          "receipt_token_address",
+          "underlying_token_id",
+          "underlying_token_address",
+          "symbol",
+          "underlying_symbol",
+          "protocol_name",
+          "balance"
         ],
-        "title": "AllocationPositionResponse",
+        "title": "AllocationResponse",
         "type": "object"
       },
       "BadDebtResponse": {
@@ -168,52 +114,6 @@
           "address"
         ],
         "title": "PrimeResponse",
-        "type": "object"
-      },
-      "ReceiptTokenPositionResponse": {
-        "properties": {
-          "balance": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Balance",
-            "type": "string"
-          },
-          "protocol_name": {
-            "title": "Protocol Name",
-            "type": "string"
-          },
-          "receipt_token_id": {
-            "title": "Receipt Token Id",
-            "type": "integer"
-          },
-          "symbol": {
-            "title": "Symbol",
-            "type": "string"
-          },
-          "token_address": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Token Address"
-          },
-          "underlying_symbol": {
-            "title": "Underlying Symbol",
-            "type": "string"
-          }
-        },
-        "required": [
-          "receipt_token_id",
-          "symbol",
-          "underlying_symbol",
-          "protocol_name",
-          "balance",
-          "token_address"
-        ],
-        "title": "ReceiptTokenPositionResponse",
         "type": "object"
       },
       "RiskBreakdownItemResponse": {
@@ -445,22 +345,6 @@
               "title": "Prime Id",
               "type": "string"
             }
-          },
-          {
-            "in": "query",
-            "name": "block_number",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Block Number"
-            }
           }
         ],
         "responses": {
@@ -469,7 +353,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/AllocationPositionResponse"
+                    "$ref": "#/components/schemas/AllocationResponse"
                   },
                   "title": "Response List Allocations V1 Primes  Prime Id  Allocations Get",
                   "type": "array"
@@ -490,49 +374,6 @@
           }
         },
         "summary": "List Allocations"
-      }
-    },
-    "/v1/primes/{prime_id}/receipt-tokens": {
-      "get": {
-        "operationId": "list_receipt_tokens_v1_primes__prime_id__receipt_tokens_get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "prime_id",
-            "required": true,
-            "schema": {
-              "title": "Prime Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/ReceiptTokenPositionResponse"
-                  },
-                  "title": "Response List Receipt Tokens V1 Primes  Prime Id  Receipt Tokens Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "List Receipt Tokens"
       }
     },
     "/v1/ready": {
