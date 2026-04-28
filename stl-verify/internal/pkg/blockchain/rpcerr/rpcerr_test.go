@@ -29,6 +29,8 @@ func TestIsEVMRevert(t *testing.T) {
 		{name: "nil error is not a revert", err: nil, wantRevert: false},
 		{name: "geth code 3 execution reverted is a revert", err: &fakeRPCErr{code: 3, msg: "execution reverted"}, wantRevert: true},
 		{name: "alchemy code -32000 with 'execution reverted' message is a revert", err: &fakeRPCErr{code: -32000, msg: "execution reverted: custom reason"}, wantRevert: true},
+		{name: "erigon-style 'Execution reverted' (capital E) is a revert", err: &fakeRPCErr{code: -32000, msg: "Execution reverted"}, wantRevert: true},
+		{name: "nethermind-style 'Execution Reverted' (mixed case) is a revert", err: &fakeRPCErr{code: -32000, msg: "Execution Reverted: panic code 0x11"}, wantRevert: true},
 		{name: "alchemy 429 rate limit is NOT a revert", err: &fakeRPCErr{code: 429, msg: "Your app has exceeded its compute units per second capacity"}, wantRevert: false},
 		{name: "alchemy -32005 limit exceeded is NOT a revert", err: &fakeRPCErr{code: -32005, msg: "Too many requests"}, wantRevert: false},
 		{name: "internal server error is NOT a revert", err: &fakeRPCErr{code: -32603, msg: "internal error"}, wantRevert: false},

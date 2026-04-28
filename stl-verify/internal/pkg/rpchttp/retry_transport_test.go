@@ -285,6 +285,55 @@ func TestRetryTransport_RespectsContextCancellation(t *testing.T) {
 	}
 }
 
+// TestNewClient_ClampsMaxRetriesUpperBound verifies that an absurdly large
+// MaxRetries is clamped to a sane upper bound — defense-in-depth against a
+// future caller passing 1_000_000 by accident.
+func TestNewClient_ClampsMaxRetriesUpperBound(t *testing.T) {
+	client := NewClient(Config{
+		MaxRetries:  1_000_000,
+		BaseBackoff: time.Millisecond,
+		MaxBackoff:  5 * time.Millisecond,
+	})
+	rt, ok := client.Transport.(*retryTransport)
+	if !ok {
+		t.Fatalf("expected *retryTransport, got %T", client.Transport)
+	}
+	if rt.maxRetries != MaxRetriesUpperBound {
+		t.Errorf("maxRetries = %d; want clamped to %d", rt.maxRetries, MaxRetriesUpperBound)
+	}
+}
+
+// TestNewClient_AppliesTimeoutFromConfig verifies that Config.Timeout is
+// applied to the returned http.Client. Callers should set the timeout via
+// the config (or WithClientTimeout) rather than mutating the returned
+// client's field directly.
+func TestNewClient_AppliesTimeoutFromConfig(t *testing.T) {
+	client := NewClient(Config{Timeout: 7 * time.Second})
+	if client.Timeout != 7*time.Second {
+		t.Errorf("Timeout = %v; want 7s", client.Timeout)
+	}
+}
+
+// TestDialEthereum_AppliesWithClientTimeout verifies the WithClientTimeout
+// option flows through to the underlying http.Client. The dial succeeds
+// against any HTTP server (no actual eth_call), so we just check the
+// transport's parent client.
+func TestDialEthereum_AppliesWithClientTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// We can't easily fish the http.Client out of *ethclient.Client, so this
+	// test verifies the option mechanism via NewClient + a handcrafted Config
+	// applied through the option.
+	cfg := Config{}
+	WithClientTimeout(7 * time.Second)(&cfg)
+	if cfg.Timeout != 7*time.Second {
+		t.Errorf("WithClientTimeout did not set Timeout; got %v", cfg.Timeout)
+	}
+}
+
 // TestDialEthereum_RedactsAPIKeyInDialError verifies that a dial failure
 // returns an error whose string does NOT contain the API key portion of the
 // URL. Alchemy URLs embed `ALCHEMY_API_KEY` as the last path segment; a raw

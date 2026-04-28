@@ -277,6 +277,13 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 			// VEC-188: classify the per-prime error. Reverts are the
 			// contract's "no data" signal and legitimately skip. Transport
 			// errors are transient and must surface so the SQS message NACKs.
+			//
+			// Fail-fast asymmetry: returning here on the FIRST transport
+			// error throws away results we already received for primes
+			// later in the slice. With 2 primes today, the wasted work on
+			// SQS retry is at most one extra multicall, so the simpler
+			// return-on-first wins. Revisit this when a 3rd+ prime is
+			// added — same trigger as the all-revert comment below.
 			if !rpcerr.IsEVMRevert(r.Err) {
 				return fmt.Errorf("prime %s: transport error reading debt: %w", prime.Name, r.Err)
 			}

@@ -581,12 +581,22 @@ func (s *BlockchainService) BatchGetTokenMetadata(ctx context.Context, tokens ma
 		return nil, fmt.Errorf("multicall failed: %w", err)
 	}
 
+	// Each token contributes 3 sub-calls (decimals, symbol, name) — keep
+	// the constant near its consumer so a future change adding/removing
+	// sub-calls trips this assertion immediately rather than silently
+	// shifting the slice math below.
+	const subCallsPerToken = 3
+	if len(results) != len(tokensToFetch)*subCallsPerToken {
+		return result, fmt.Errorf("BatchGetTokenMetadata: expected %d results (%d tokens × %d sub-calls), got %d",
+			len(tokensToFetch)*subCallsPerToken, len(tokensToFetch), subCallsPerToken, len(results))
+	}
+
 	var incomplete []common.Address
 	for i := 0; i < len(tokensToFetch); i++ {
 		token := tokensToFetch[i]
-		decimalsIdx := i * 3
-		symbolIdx := i*3 + 1
-		nameIdx := i*3 + 2
+		decimalsIdx := i * subCallsPerToken
+		symbolIdx := i*subCallsPerToken + 1
+		nameIdx := i*subCallsPerToken + 2
 
 		// Per VEC-188: every sub-call for a token must succeed, otherwise we
 		// refuse to cache or surface partial metadata — zero-valued entries

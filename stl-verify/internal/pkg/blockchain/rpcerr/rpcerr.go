@@ -32,16 +32,18 @@ import (
 //
 // Returns true only for signals we recognize as reverts:
 //   - JSON-RPC error code 3 (geth's standard for "execution reverted").
-//   - Any JSON-RPC error whose message contains the case-sensitive substring
-//     "execution reverted" (Alchemy, Infura, and some other providers use
-//     code -32000 with the phrase).
+//   - Any JSON-RPC error whose lower-cased message contains the substring
+//     "execution reverted" — covers geth's lower-case phrasing as well as
+//     Erigon / Nethermind variants that capitalise differently
+//     ("Execution reverted", "Execution Reverted: …").
 //
-// Matching is case-sensitive. Non-geth nodes whose phrasing differs (e.g.
-// capitalised "Execution reverted" from some Erigon/Nethermind builds) are
-// treated as transport errors and retried — a false-negative we accept
-// deliberately. Returns false for every other shape, including non-rpc.Error
-// values: mislabelling a transport error as a revert causes silent data
-// loss, whereas the reverse only causes an extra retry.
+// Returns false for every other shape, including non-rpc.Error values.
+// The classification is deliberately conservative: mislabelling a
+// transport error as a revert causes silent data loss; the reverse only
+// causes an extra retry. Case-insensitive matching is the right default
+// because a persistent contract revert misclassified as transport would
+// loop until DLQ, whereas a one-off transport mis-tagged as revert just
+// records a single false zero for that block.
 func IsEVMRevert(err error) bool {
 	if err == nil {
 		return false
@@ -53,7 +55,7 @@ func IsEVMRevert(err error) bool {
 	if rpcErr.ErrorCode() == 3 {
 		return true
 	}
-	return strings.Contains(rpcErr.Error(), "execution reverted")
+	return strings.Contains(strings.ToLower(rpcErr.Error()), "execution reverted")
 }
 
 // RequireAllSucceeded returns a non-nil error if any result in results has

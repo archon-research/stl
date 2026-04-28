@@ -37,9 +37,15 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
+// MaxRetriesUpperBound caps Config.MaxRetries to a sane value to prevent
+// runaway retry loops if a caller passes an absurdly large number. The cap
+// is generous (100) and only exists as defense-in-depth.
+const MaxRetriesUpperBound = 100
+
 // Config configures a retry-enabled http.Client.
 type Config struct {
 	// MaxRetries caps retries. 0 disables retrying (single attempt).
+	// Values above MaxRetriesUpperBound are clamped down.
 	MaxRetries int
 
 	// BaseBackoff is the initial delay before the first retry.
@@ -47,6 +53,11 @@ type Config struct {
 
 	// MaxBackoff caps the per-retry delay.
 	MaxBackoff time.Duration
+
+	// Timeout, if non-zero, is applied to the returned http.Client.Timeout.
+	// This is the wall-clock budget for the entire request including all
+	// retries. Leave 0 to inherit the http.Client default (no timeout).
+	Timeout time.Duration
 
 	// Transport is the underlying round-tripper. nil → http.DefaultTransport.
 	Transport http.RoundTripper
@@ -56,6 +67,9 @@ type Config struct {
 func NewClient(cfg Config) *http.Client {
 	if cfg.MaxRetries < 0 {
 		cfg.MaxRetries = 0
+	}
+	if cfg.MaxRetries > MaxRetriesUpperBound {
+		cfg.MaxRetries = MaxRetriesUpperBound
 	}
 	if cfg.BaseBackoff <= 0 {
 		cfg.BaseBackoff = 250 * time.Millisecond
@@ -68,6 +82,7 @@ func NewClient(cfg Config) *http.Client {
 		base = http.DefaultTransport
 	}
 	return &http.Client{
+		Timeout: cfg.Timeout,
 		Transport: &retryTransport{
 			base:        base,
 			maxRetries:  cfg.MaxRetries,
@@ -184,6 +199,14 @@ func WithMaxBackoff(d time.Duration) Option {
 // WithTransport overrides the default base RoundTripper.
 func WithTransport(rt http.RoundTripper) Option {
 	return func(c *Config) { c.Transport = rt }
+}
+
+// WithClientTimeout sets the wall-clock budget for the entire request,
+// including all retries. Equivalent to setting http.Client.Timeout. Use
+// this instead of mutating the returned client's Timeout field directly,
+// so callers don't depend on the concrete http.Client return type.
+func WithClientTimeout(d time.Duration) Option {
+	return func(c *Config) { c.Timeout = d }
 }
 
 // DialEthereum dials the given Ethereum JSON-RPC URL with retry protection
