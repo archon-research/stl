@@ -417,7 +417,7 @@ func parseTotalBuffersFromExplain(plan string) int {
 	if idx := strings.Index(plan, "\nPlanning:"); idx >= 0 {
 		plan = plan[:idx]
 	}
-	re := regexp.MustCompile(`shared (?:hit|read)=(\d+)`)
+	re := regexp.MustCompile(`(?:hit|read)=(\d+)`)
 	total := 0
 	for _, m := range re.FindAllStringSubmatch(plan, -1) {
 		n, _ := strconv.Atoi(m[1])
