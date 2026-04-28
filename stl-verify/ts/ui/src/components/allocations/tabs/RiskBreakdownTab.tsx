@@ -7,9 +7,9 @@ import { flexRender } from '@tanstack/react-table';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
-import { flex } from '#styled-system/patterns';
 
 import { useDataTable } from '../../../data-table/hooks';
+import { buildRowSearchString, matchesSearchQuery } from '../../../data-table/utils';
 import { getRiskBreakdown } from '../../../lib/api';
 import {
   formatMultiplier,
@@ -22,12 +22,40 @@ import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import type { Allocation, RiskBreakdown } from '../../../types/allocation';
 
 type RiskBreakdownTabProps = {
+  searchQuery?: string;
   selectedReceiptToken: Allocation | null;
 };
 
 type RiskItem = RiskBreakdown['items'][number];
 
-function RiskTable({ items, isLoading }: { items: RiskItem[]; isLoading: boolean }) {
+function RiskTable({
+  items,
+  isLoading,
+  searchQuery,
+}: {
+  items: RiskItem[];
+  isLoading: boolean;
+  searchQuery: string;
+}) {
+  const filteredItems = useMemo(
+    () =>
+      items.filter((item) =>
+        matchesSearchQuery(
+          buildRowSearchString([
+            item.symbol,
+            item.amount,
+            item.price_usd,
+            item.amount_usd,
+            item.backing_pct,
+            item.liquidation_threshold,
+            item.liquidation_bonus,
+          ]),
+          searchQuery,
+        ),
+      ),
+    [items, searchQuery],
+  );
+
   const columns = useMemo(
     () => [
       {
@@ -81,7 +109,7 @@ function RiskTable({ items, isLoading }: { items: RiskItem[]; isLoading: boolean
     [],
   );
 
-  const table = useDataTable(items, columns, {
+  const table = useDataTable(filteredItems, columns, {
     enableSorting: true,
   });
 
@@ -160,7 +188,7 @@ function RiskTable({ items, isLoading }: { items: RiskItem[]; isLoading: boolean
           ))}
         </thead>
         <tbody>
-          {isLoading && items.length === 0
+          {isLoading && filteredItems.length === 0
             ? SkeletonRows({ rows: 5, columns: 7, firstColumnTall: false })
             : table.getRowModel().rows.map((row) => (
                 <tr
@@ -265,6 +293,7 @@ function SummaryMetric({
 }
 
 export function RiskBreakdownTab({
+  searchQuery = '',
   selectedReceiptToken,
 }: RiskBreakdownTabProps) {
   const [breakdown, setBreakdown] = useState<RiskBreakdown | null>(null);
@@ -385,67 +414,6 @@ export function RiskBreakdownTab({
 
   return (
     <div className={css({ display: 'grid', gap: '4' })}>
-      <div
-        className={flex({
-          align: 'center',
-          justify: 'space-between',
-          gap: '4',
-          wrap: 'wrap',
-        })}
-      >
-        <div className={css({ display: 'grid', gap: '1' })}>
-          <p
-            className={css({
-              m: 0,
-              fontSize: 'xs',
-              textTransform: 'uppercase',
-              letterSpacing: '0.16em',
-              color: 'text.muted',
-            })}
-          >
-            Risk breakdown
-          </p>
-          <h3 className={css({ m: 0, fontSize: 'lg', color: 'text.strong' })}>
-            {selectedReceiptToken.symbol}
-          </h3>
-          <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-            {selectedReceiptToken.protocol_name} · backing total{' '}
-            {formatUsdValue(totalUsd)}
-          </p>
-        </div>
-
-        <div className={flex({ gap: '2', wrap: 'wrap' })}>
-          <span
-            className={css({
-              display: 'inline-flex',
-              alignItems: 'center',
-              borderRadius: 'sm',
-              bg: 'surface.subtle',
-              color: 'text.muted',
-              fontSize: 'xs',
-              px: '3',
-              py: '1.5',
-            })}
-          >
-            {selectedReceiptToken.underlying_symbol}
-          </span>
-          <span
-            className={css({
-              display: 'inline-flex',
-              alignItems: 'center',
-              borderRadius: 'sm',
-              bg: 'surface.subtle',
-              color: 'text.muted',
-              fontSize: 'xs',
-              px: '3',
-              py: '1.5',
-            })}
-          >
-            {breakdown ? `${breakdown.items.length} assets` : 'Loading'}
-          </span>
-        </div>
-      </div>
-
       {isLoading ? <LoadingIndicator message="Loading risk breakdown" /> : null}
 
       {errorMessage ? (
@@ -544,7 +512,11 @@ export function RiskBreakdownTab({
       ) : null}
 
       {!errorMessage && (isLoading || breakdown) ? (
-        <RiskTable items={breakdown?.items ?? []} isLoading={isLoading} />
+        <RiskTable
+          items={breakdown?.items ?? []}
+          isLoading={isLoading}
+          searchQuery={searchQuery}
+        />
       ) : null}
     </div>
   );

@@ -1,10 +1,11 @@
 import {
+  SearchInput,
   SurfaceMessage,
   StyledSelect,
   Toggle,
   ToggleGroup,
 } from '@archon-research/design-system';
-import { useEffect, useMemo, useRef, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
@@ -12,9 +13,6 @@ import { segmentedControl } from '#styled-system/recipes';
 
 import {
   type ChainLabelLookup,
-  findProtocolMetadata,
-  formatTokenAmount,
-  getChainLabel,
   getProtocolLabel,
   sortAllocations,
 } from '../../lib/dashboard';
@@ -40,19 +38,9 @@ const segmentedControlStyles = segmentedControl();
 const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.5', gap: '1' })}`;
 const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '8', px: '2.5', fontSize: 'xs' })}`;
 
-function formatAddress(value: string): string {
-  const address = value.startsWith('0x') ? value : `0x${value}`;
-
-  if (address.length <= 18) {
-    return address;
-  }
-
-  return `${address.slice(0, 10)}...${address.slice(-6)}`;
-}
-
 export function BottomPanel({
   allocations,
-  chainLabels,
+  chainLabels: _chainLabels,
   errorMessage,
   isLoading,
   localProtocols,
@@ -63,6 +51,8 @@ export function BottomPanel({
     PARAMS.receiptToken,
   );
   const [tabParam, setTabParam] = useUrlParam(PARAMS.tab);
+  const [localRiskSearchValue, setLocalRiskSearchValue] = useState('');
+  const [riskSearchValue, setRiskSearchValue] = useState('');
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrime?.id ?? null);
   const previousSelectedAllocationIdRef = useRef<number | null>(
@@ -142,17 +132,24 @@ export function BottomPanel({
       (allocation) => String(allocation.receipt_token_id) === receiptTokenParam,
     ) ?? null;
 
-  const focusedProtocol = useMemo(
-    () =>
-      focusedAllocation
-        ? findProtocolMetadata(
-            focusedAllocation.protocol_name,
-            localProtocols,
-            focusedAllocation.chain_id,
-          )
-        : null,
-    [focusedAllocation, localProtocols],
-  );
+  useEffect(() => {
+    if (activeTab !== 'risk') {
+      setLocalRiskSearchValue('');
+      setRiskSearchValue('');
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setRiskSearchValue(localRiskSearchValue);
+    }, 300);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [activeTab, localRiskSearchValue]);
+
+  useEffect(() => {
+    setLocalRiskSearchValue('');
+    setRiskSearchValue('');
+  }, [receiptTokenParam]);
 
   return (
     <div
@@ -195,90 +192,68 @@ export function BottomPanel({
 
       <div
         className={css({
-          borderRadius: 'md',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'border.subtle',
-          bg: 'surface.subtle',
-          p: '4',
+          display: 'grid',
+          gridTemplateColumns: {
+            base: '1fr',
+            md: 'minmax(16rem, 24rem) minmax(18rem, 1fr)',
+          },
+          gap: '4',
+          alignItems: 'end',
         })}
       >
-        <div className={flex({ align: 'flex-start', gap: '4', wrap: 'wrap' })}>
-          <label
-            className={css({ display: 'grid', gap: '1', minWidth: '18rem' })}
+        <label
+          className={css({
+            display: 'grid',
+            gap: '1',
+          })}
+        >
+          <span
+            className={css({
+              fontSize: 'xs',
+              textTransform: 'uppercase',
+              letterSpacing: '0.14em',
+              color: 'text.muted',
+            })}
           >
-            <span
-              className={css({
-                fontSize: 'xs',
-                textTransform: 'uppercase',
-                letterSpacing: '0.14em',
-                color: 'text.muted',
-              })}
-            >
-              Receipt token
-            </span>
-            <StyledSelect
-              value={receiptTokenParam ?? ''}
-              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                setReceiptTokenParam(event.target.value || null)
-              }
-              disabled={
-                !selectedPrime ||
-                isLoading ||
-                errorMessage !== null ||
-                sortedAllocations.length === 0
-              }
-            >
-              <option value="">Choose a receipt token</option>
-              {sortedAllocations.map((allocation) => (
-                <option
-                  key={allocation.receipt_token_id}
-                  value={allocation.receipt_token_id}
-                >
-                  {`${allocation.symbol} · ${getProtocolLabel(allocation.protocol_name, localProtocols, allocation.chain_id)}`}
-                </option>
-              ))}
-            </StyledSelect>
-          </label>
+            Receipt token
+          </span>
+          <StyledSelect
+            value={receiptTokenParam ?? ''}
+            onChange={(event) => setReceiptTokenParam(event.target.value || null)}
+            disabled={
+              !selectedPrime ||
+              isLoading ||
+              errorMessage !== null ||
+              sortedAllocations.length === 0
+            }
+          >
+            <option value="">Choose a receipt token</option>
+            {sortedAllocations.map((allocation) => (
+              <option
+                key={allocation.receipt_token_id}
+                value={allocation.receipt_token_id}
+              >
+                {`${allocation.symbol} · ${getProtocolLabel(allocation.protocol_name, localProtocols, allocation.chain_id)}`}
+              </option>
+            ))}
+          </StyledSelect>
+        </label>
 
+        {activeTab === 'risk' ? (
           <div
-            className={css({ display: 'grid', gap: '1', minWidth: '18rem' })}
+            className={css({
+              width: '100%',
+            })}
           >
-            <p
-              className={css({
-                m: 0,
-                fontSize: 'xs',
-                textTransform: 'uppercase',
-                letterSpacing: '0.14em',
-                color: 'text.muted',
-              })}
-            >
-              Focused allocation
-            </p>
-            <p
-              className={css({
-                m: 0,
-                fontSize: 'sm',
-                fontWeight: 'semibold',
-                color: 'text.strong',
-              })}
-            >
-              {focusedAllocation
-                ? `${focusedAllocation.symbol} · ${getProtocolLabel(focusedAllocation.protocol_name, localProtocols, focusedAllocation.chain_id)}`
-                : 'No allocation row selected'}
-            </p>
-            <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-              {focusedAllocation
-                ? `${formatTokenAmount(focusedAllocation.balance)} ${focusedAllocation.symbol} · ${getChainLabel(focusedAllocation.chain_id, chainLabels)}`
-                : 'Pick a grid row to drive this panel, or choose a receipt token directly.'}
-            </p>
-            {focusedProtocol ? (
-              <p className={css({ m: 0, fontSize: 'xs', color: 'text.muted' })}>
-                {`Protocol address ${formatAddress(focusedProtocol.encode)}`}
-              </p>
-            ) : null}
+            <SearchInput
+              aria-label="Search risk breakdown"
+              disabled={!focusedAllocation || isLoading || errorMessage !== null}
+              onValueChange={setLocalRiskSearchValue}
+              placeholder="Search backing assets"
+              value={localRiskSearchValue}
+            />
           </div>
-        </div>
+        ) : null}
       </div>
 
       <div
@@ -320,7 +295,10 @@ export function BottomPanel({
         !isLoading &&
         sortedAllocations.length > 0 ? (
           activeTab === 'risk' ? (
-            <RiskBreakdownTab selectedReceiptToken={focusedAllocation} />
+            <RiskBreakdownTab
+              searchQuery={riskSearchValue}
+              selectedReceiptToken={focusedAllocation}
+            />
           ) : (
             <BadDebtTab selectedReceiptToken={focusedAllocation} />
           )

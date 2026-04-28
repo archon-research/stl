@@ -301,7 +301,6 @@ export function AllocationGrid({
             >
               <SearchInput
                 aria-label="Search allocations"
-                autoComplete={false}
                 disabled={!selectedPrime}
                 onValueChange={setLocalSearchValue}
                 placeholder="Search assets, protocols, chains"

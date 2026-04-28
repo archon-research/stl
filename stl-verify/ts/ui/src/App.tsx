@@ -21,6 +21,7 @@ import {
   buildChainLabelLookup,
   buildNetworkOptions,
   buildProtocolOptions,
+  formatTokenAmount,
   getChainLabel,
   getAllocationKey,
   getProtocolLabel,
@@ -375,8 +376,18 @@ function App() {
       />
 
       <RiskDetailDrawer
+        detail={
+          selectedAllocation
+            ? `${formatTokenAmount(selectedAllocation.balance)} ${selectedAllocation.symbol}`
+            : undefined
+        }
         isOpen={isDrawerOpen}
         onClose={() => setIsDrawerOpenParam(null)}
+        subtitle={
+          selectedAllocation
+            ? `${getProtocolLabel(selectedAllocation.protocol_name, localProtocols, selectedAllocation.chain_id)} · ${getChainLabel(selectedAllocation.chain_id, chainLabels)}`
+            : undefined
+        }
         title={selectedAllocation ? selectedAllocation.symbol : 'Risk details'}
       >
         <BottomPanel
