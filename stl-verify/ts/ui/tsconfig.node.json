@@ -2,6 +2,7 @@
   "extends": "@archon-research/tsconfig/node",
   "compilerOptions": {
     "composite": true,
+    "skipLibCheck": true,
     "types": ["node"],
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo"
   },
