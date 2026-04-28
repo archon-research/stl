@@ -7,6 +7,7 @@ yet" (HTTP 503), not "unknown receipt token" (HTTP 404).
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -64,9 +65,11 @@ def seeded_receipt_token_id(async_db_url: str) -> int:
 
 
 @pytest.fixture()
-def client(async_db_url: str):
+def client(async_db_url: str, tmp_path: Path):
     """Return a TestClient wired to the module's isolated database."""
-    test_app = create_app(Settings(database_url=SecretStr(async_db_url)))
+    empty_mapping = tmp_path / "empty_mapping.json"
+    empty_mapping.write_text("{}")
+    test_app = create_app(Settings(database_url=SecretStr(async_db_url), suraf_mappings_file=empty_mapping))
     with TestClient(test_app) as c:
         yield c
 

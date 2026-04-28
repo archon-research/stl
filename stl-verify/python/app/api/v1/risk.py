@@ -45,12 +45,12 @@ class RiskBreakdownResponse(BaseModel):
 
 
 class ScenarioRrcRequest(BaseModel):
-    asset: str
+    receipt_token_id: int
     usd_exposure: Decimal
 
 
 class ScenarioRrcResponse(BaseModel):
-    asset: str
+    receipt_token_id: int
     usd_exposure: Decimal
     rating_id: str
     rating_version: str
@@ -155,17 +155,15 @@ async def post_rrc_scenario(
     body: ScenarioRrcRequest,
     service: SurafRrcService = Depends(get_suraf_rrc_service),
 ) -> ScenarioRrcResponse:
-    """Return SURAF RRC for a hypothetical ``(asset, usd_exposure)`` pair.
+    """Return SURAF RRC for a hypothetical ``(receipt_token_id, usd_exposure)`` pair.
 
     ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
-    for the asset. Pure scenario calculation — no DB lookup, no position
-    state. Position-level RRC (``GET /risk/{receipt_token_id}/rrc``) is
-    deferred pending a decision on how to derive USD exposure from holdings.
+    for the asset. Pure scenario calculation — no position state.
     """
     if body.usd_exposure <= _ZERO:
         raise HTTPException(status_code=422, detail="usd_exposure must be positive")
 
-    result = service.compute(body.asset, body.usd_exposure)
+    result = service.compute(body.receipt_token_id, body.usd_exposure)
     if result is None:
-        raise HTTPException(status_code=404, detail=f"no rating mapped for asset: {body.asset}")
+        raise HTTPException(status_code=404, detail=f"no rating mapped for receipt_token_id: {body.receipt_token_id}")
     return ScenarioRrcResponse(**result.model_dump())
