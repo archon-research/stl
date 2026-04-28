@@ -19,10 +19,12 @@ class RiskCalculationService:
         breakdown_repo: BackedBreakdownRepository,
         liq_params_repo: LiquidationParamsRepository,
         share_port: AllocationSharePort,
+        default_gap_pct: Decimal,
     ) -> None:
         self._breakdown_repo = breakdown_repo
         self._liq_params_repo = liq_params_repo
         self._share_port = share_port
+        self._default_gap_pct = default_gap_pct
 
     async def get_risk_breakdown(self, backed_asset_id: int) -> RiskBreakdown:
         items = await self._build_enriched_items(backed_asset_id)

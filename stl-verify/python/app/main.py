@@ -2,7 +2,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse
@@ -115,13 +114,13 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             await conn.execute(text("SELECT 1"))
         app.state.engine = engine
         instrument_sqlalchemy_engine(engine)
-        async with httpx.AsyncClient() as http_client:
-            app.state.http_client = http_client
-            yield
         try:
-            await engine.dispose()
+            yield
         finally:
-            shutdown_telemetry(app.state.tracer_provider)
+            try:
+                await engine.dispose()
+            finally:
+                shutdown_telemetry(app.state.tracer_provider)
 
     application = FastAPI(title="stl-verify", lifespan=lifespan, docs_url=None)
     application.state.suraf_ratings = suraf_ratings
