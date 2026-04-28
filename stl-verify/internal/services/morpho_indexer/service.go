@@ -339,7 +339,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 					// earlier log — that log's event was never saved. Surfacing
 					// the error forces SQS to redeliver so BOTH logs are retried.
 					if _, seen := discoveryErrs[logAddress]; !seen {
-						discoveryErrs[logAddress] = err
+						discoveryErrs[logAddress] = fmt.Errorf("vault discovery for %s in tx %s: %w", logAddress.Hex(), receipt.TransactionHash, err)
 					}
 				}
 			}

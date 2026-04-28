@@ -141,6 +141,7 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("connecting to RPC: %w", err)
 	}
+	defer rpcClient.Close()
 	ethClient := ethclient.NewClient(rpcClient)
 	logger.Info("Ethereum RPC connected", "url", cfg.rpcURL)
 

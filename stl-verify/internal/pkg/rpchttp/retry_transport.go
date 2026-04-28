@@ -30,6 +30,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -192,7 +193,7 @@ func WithTransport(rt http.RoundTripper) Option {
 //
 // Defaults: MaxRetries=5, BaseBackoff=250ms, MaxBackoff=10s, ±25% jitter.
 // Override via With* options.
-func DialEthereum(ctx context.Context, url string, opts ...Option) (*ethclient.Client, error) {
+func DialEthereum(ctx context.Context, rawURL string, opts ...Option) (*ethclient.Client, error) {
 	cfg := Config{
 		MaxRetries:  5,
 		BaseBackoff: 250 * time.Millisecond,
@@ -201,9 +202,26 @@ func DialEthereum(ctx context.Context, url string, opts ...Option) (*ethclient.C
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	rpcClient, err := rpc.DialOptions(ctx, url, rpc.WithHTTPClient(NewClient(cfg)))
+	rpcClient, err := rpc.DialOptions(ctx, rawURL, rpc.WithHTTPClient(NewClient(cfg)))
 	if err != nil {
-		return nil, fmt.Errorf("rpchttp: dial %s: %w", url, err)
+		return nil, fmt.Errorf("rpchttp: dial %s: %w", redactURL(rawURL), err)
 	}
 	return ethclient.NewClient(rpcClient), nil
+}
+
+// redactURL returns a logging-safe form of rawURL — scheme + host only,
+// stripping the path, query string, and userinfo. Used in dial-error
+// messages to avoid leaking the API key embedded in Alchemy / Infura URLs.
+func redactURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		// Parse failed or URL has no host — return the scheme alone if we
+		// have one, otherwise a generic placeholder. Don't risk echoing
+		// the raw input.
+		if u != nil && u.Scheme != "" {
+			return u.Scheme + "://<redacted>"
+		}
+		return "<redacted>"
+	}
+	return u.Scheme + "://" + u.Host
 }

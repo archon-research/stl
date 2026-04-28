@@ -278,7 +278,8 @@ func failingSourceRegistry(logger *slog.Logger) *SourceRegistry {
 
 // TestSweep_ReturnsErrorOnPartialFailure codifies the VEC-188 invariant for
 // allocation_tracker's sweep path: a partial fetch must NACK the SQS message.
-// FAILS against current code — sweep currently logs `Warn` and returns nil.
+// Pre-VEC-188 this returned nil; the fix is the new `if err != nil` path
+// in `Service.sweep`.
 func TestSweep_ReturnsErrorOnPartialFailure(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -304,10 +305,11 @@ func TestSweep_ReturnsErrorOnPartialFailure(t *testing.T) {
 }
 
 // TestProcessTransfers_ReturnsErrorOnPartialFetchFailure codifies the VEC-188
-// invariant for allocation_tracker's live path. FAILS against current code —
-// processBlock today logs `Warn("partial balance fetch")` and returns nil.
-// We exercise processBlock via the extracted helper `processTransfers` so
-// the test doesn't depend on cache+extractor plumbing that's orthogonal.
+// invariant for allocation_tracker's live path. Pre-VEC-188 processBlock
+// logged `Warn("partial balance fetch")` and returned nil; the fix is the
+// new `if err != nil` path in `Service.processTransfers`. We exercise the
+// helper directly so the test doesn't depend on cache+extractor plumbing
+// that's orthogonal.
 func TestProcessTransfers_ReturnsErrorOnPartialFetchFailure(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

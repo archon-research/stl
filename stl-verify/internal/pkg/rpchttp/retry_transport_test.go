@@ -80,22 +80,44 @@ func TestRetryTransport_RetriesOn5xx(t *testing.T) {
 }
 
 func TestRetryTransport_DoesNotRetry2xxOr4xx(t *testing.T) {
-	var attempts atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts.Add(1)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}`))
-	}))
-	defer srv.Close()
-
-	client := newTestClient(http.DefaultTransport, 5)
-	resp, err := client.Get(srv.URL)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	cases := []struct {
+		name string
+		code int
+		body string
+	}{
+		{
+			name: "2xx with JSON-RPC revert in body",
+			code: http.StatusOK,
+			body: `{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}`,
+		},
+		{
+			name: "4xx (404) is non-retriable",
+			code: http.StatusNotFound,
+			body: ``,
+		},
 	}
-	defer resp.Body.Close()
-	if got := attempts.Load(); got != 1 {
-		t.Errorf("revert must not retry — attempts = %d, want 1", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts.Add(1)
+				w.WriteHeader(tc.code)
+				if tc.body != "" {
+					_, _ = w.Write([]byte(tc.body))
+				}
+			}))
+			defer srv.Close()
+
+			client := newTestClient(http.DefaultTransport, 5)
+			resp, err := client.Get(srv.URL)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			defer resp.Body.Close()
+			if got := attempts.Load(); got != 1 {
+				t.Errorf("status %d must not retry — attempts = %d, want 1", tc.code, got)
+			}
+		})
 	}
 }
 
@@ -224,7 +246,11 @@ func TestRetryTransport_ReplaysBody(t *testing.T) {
 		t.Errorf("status = %d; want 200", resp.StatusCode)
 	}
 	if got := lastBody.Load(); got == nil || !bytes.Equal(*got, payload) {
-		t.Errorf("retry sent mismatched body; got %q, want %q", got, payload)
+		var bodyStr string
+		if got != nil {
+			bodyStr = string(*got)
+		}
+		t.Errorf("retry sent mismatched body; got %q, want %q", bodyStr, payload)
 	}
 }
 
@@ -256,6 +282,26 @@ func TestRetryTransport_RespectsContextCancellation(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("cancel didn't short-circuit retry loop; took %v", elapsed)
+	}
+}
+
+// TestDialEthereum_RedactsAPIKeyInDialError verifies that a dial failure
+// returns an error whose string does NOT contain the API key portion of the
+// URL. Alchemy URLs embed `ALCHEMY_API_KEY` as the last path segment; a raw
+// `%w` wrap of the URL would leak it into stderr / log aggregators.
+//
+// Uses an unsupported scheme to force `rpc.DialOptions` to fail
+// synchronously (HTTP/HTTPS dials are lazy and don't fail at this level).
+func TestDialEthereum_RedactsAPIKeyInDialError(t *testing.T) {
+	const apiKey = "super-secret-alchemy-key-do-not-leak"
+	url := "unsupported-scheme://eth-mainnet.example.com/v2/" + apiKey
+
+	_, err := DialEthereum(context.Background(), url)
+	if err == nil {
+		t.Fatal("expected dial to fail with an unsupported scheme")
+	}
+	if strings.Contains(err.Error(), apiKey) {
+		t.Errorf("error must redact the API key; got %q", err)
 	}
 }
 
