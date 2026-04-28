@@ -28,6 +28,7 @@
     "@archon-research/http-client-core": "0.2.0",
     "@archon-research/http-client-react": "0.2.0",
     "@tanstack/react-query": "^5.99.2",
+    "@tanstack/react-table": "^8.20.0",
     "openapi-fetch": "^0.17.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
