@@ -1,9 +1,11 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -84,6 +86,18 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 	if len(debts) == 0 {
 		return nil
 	}
+
+	// Sort by natural key so the per-row advisory lock in
+	// assign_processing_version_prime_debt is acquired in a transaction-stable
+	// order across concurrent callers. See ADR-0002 §3.
+	slices.SortFunc(debts, func(a, b *entity.PrimeDebt) int {
+		return cmp.Or(
+			cmp.Compare(a.PrimeID, b.PrimeID),
+			cmp.Compare(a.BlockNumber, b.BlockNumber),
+			cmp.Compare(a.BlockVersion, b.BlockVersion),
+			a.SyncedAt.Compare(b.SyncedAt),
+		)
+	})
 
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		const q = `
