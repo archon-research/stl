@@ -1,9 +1,12 @@
 package postgres
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -54,13 +57,17 @@ func (r *TokenTotalSupplyRepository) SaveSupplies(
 		return nil
 	}
 
-	tokenIDs, err := r.resolveTokenIDs(ctx, tx, supplies)
+	// Keep token upserts and trigger advisory-lock acquisition in a stable order
+	// across concurrent transactions to avoid deadlocks on overlapping batches.
+	sortedSupplies := sortSuppliesByNaturalKey(supplies)
+
+	tokenIDs, err := r.resolveTokenIDs(ctx, tx, sortedSupplies)
 	if err != nil {
 		return fmt.Errorf("resolve token IDs: %w", err)
 	}
 
 	batch := &pgx.Batch{}
-	for _, s := range supplies {
+	for _, s := range sortedSupplies {
 		key := tokenCacheKey{ChainID: s.ChainID, Address: s.TokenAddress}
 		tokenID, ok := tokenIDs[key]
 		if !ok {
@@ -74,14 +81,14 @@ func (r *TokenTotalSupplyRepository) SaveSupplies(
 	}
 
 	results := tx.SendBatch(ctx, batch)
-	for i := range supplies {
+	for i := range sortedSupplies {
 		if _, err := results.Exec(); err != nil {
 			_ = results.Close()
 			return fmt.Errorf(
 				"insert supply %d (chain=%d address=%s block=%d): %w",
-				i, supplies[i].ChainID,
-				supplies[i].TokenAddress.Hex(),
-				supplies[i].BlockNumber, err,
+				i, sortedSupplies[i].ChainID,
+				sortedSupplies[i].TokenAddress.Hex(),
+				sortedSupplies[i].BlockNumber, err,
 			)
 		}
 	}
@@ -89,8 +96,22 @@ func (r *TokenTotalSupplyRepository) SaveSupplies(
 		return fmt.Errorf("close batch: %w", err)
 	}
 
-	r.logger.Debug("token total supplies saved", "inserted", len(supplies))
+	r.logger.Debug("token total supplies saved", "inserted", len(sortedSupplies))
 	return nil
+}
+
+func sortSuppliesByNaturalKey(supplies []*entity.TokenTotalSupply) []*entity.TokenTotalSupply {
+	sorted := slices.Clone(supplies)
+	slices.SortFunc(sorted, func(a, b *entity.TokenTotalSupply) int {
+		return cmp.Or(
+			cmp.Compare(a.ChainID, b.ChainID),
+			bytes.Compare(a.TokenAddress.Bytes(), b.TokenAddress.Bytes()),
+			cmp.Compare(a.BlockNumber, b.BlockNumber),
+			cmp.Compare(a.BlockVersion, b.BlockVersion),
+			a.BlockTimestamp.Compare(b.BlockTimestamp),
+		)
+	})
+	return sorted
 }
 
 func (r *TokenTotalSupplyRepository) buildInsertArgs(

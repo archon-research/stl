@@ -84,6 +84,42 @@ func TestTokenTotalSupply_BuildInsertArgs_NilScaledIsNull(t *testing.T) {
 	}
 }
 
+func TestSortSuppliesByNaturalKey(t *testing.T) {
+	t1 := time.Unix(1, 0).UTC()
+	t2 := time.Unix(2, 0).UTC()
+	addr1 := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	addr2 := common.HexToAddress("0x0000000000000000000000000000000000000002")
+
+	in := []*entity.TokenTotalSupply{
+		{ChainID: 2, TokenAddress: addr1, BlockNumber: 1, BlockVersion: 0, BlockTimestamp: t1},
+		{ChainID: 1, TokenAddress: addr2, BlockNumber: 1, BlockVersion: 0, BlockTimestamp: t1},
+		{ChainID: 1, TokenAddress: addr1, BlockNumber: 2, BlockVersion: 0, BlockTimestamp: t1},
+		{ChainID: 1, TokenAddress: addr1, BlockNumber: 2, BlockVersion: 0, BlockTimestamp: t2},
+		{ChainID: 1, TokenAddress: addr1, BlockNumber: 1, BlockVersion: 1, BlockTimestamp: t1},
+		{ChainID: 1, TokenAddress: addr1, BlockNumber: 1, BlockVersion: 0, BlockTimestamp: t1},
+	}
+
+	got := sortSuppliesByNaturalKey(in)
+
+	want := []*entity.TokenTotalSupply{
+		in[5],
+		in[4],
+		in[2],
+		in[3],
+		in[1],
+		in[0],
+	}
+
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sorted[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if in[0].ChainID != 2 {
+		t.Fatal("sortSuppliesByNaturalKey should not mutate input order")
+	}
+}
+
 func TestTokenTotalSupply_Validate(t *testing.T) {
 	cases := []struct {
 		name    string

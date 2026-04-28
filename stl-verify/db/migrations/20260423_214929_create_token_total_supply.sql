@@ -38,6 +38,15 @@ DECLARE
     existing_ver INT;
     max_ver      INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        format('tts|%s|%s|%s|%s|%s',
+            NEW.chain_id,
+            NEW.token_id,
+            NEW.block_number,
+            NEW.block_version,
+            NEW.block_timestamp),
+        0));
+
     SELECT processing_version INTO existing_ver
     FROM token_total_supply
     WHERE chain_id        = NEW.chain_id
