@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 	"sync"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -579,55 +581,62 @@ func (s *BlockchainService) BatchGetTokenMetadata(ctx context.Context, tokens ma
 		return nil, fmt.Errorf("multicall failed: %w", err)
 	}
 
+	var incomplete []common.Address
 	for i := 0; i < len(tokensToFetch); i++ {
 		token := tokensToFetch[i]
 		decimalsIdx := i * 3
 		symbolIdx := i*3 + 1
 		nameIdx := i*3 + 2
 
+		// Per VEC-188: every sub-call for a token must succeed, otherwise we
+		// refuse to cache or surface partial metadata — zero-valued entries
+		// can silently poison the cache for the process lifetime, causing
+		// retries to keep failing until DLQ.
+		tokenResults := results[decimalsIdx : nameIdx+1]
+		if err := rpcerr.RequireAllSucceeded(tokenResults, fmt.Sprintf("BatchGetTokenMetadata(%s)", token.Hex())); err != nil {
+			incomplete = append(incomplete, token)
+			continue
+		}
+
 		var decimals int
-		var symbol, name string
-
-		if results[decimalsIdx].Success && len(results[decimalsIdx].ReturnData) > 0 {
-			unpacked, err := s.erc20ABI.Unpack("decimals", results[decimalsIdx].ReturnData)
-			if err == nil && len(unpacked) > 0 {
-				if d, ok := unpacked[0].(uint8); ok {
-					decimals = int(d)
-				}
+		if unpacked, err := s.erc20ABI.Unpack("decimals", results[decimalsIdx].ReturnData); err == nil && len(unpacked) > 0 {
+			if d, ok := unpacked[0].(uint8); ok {
+				decimals = int(d)
 			}
 		}
 
-		if results[symbolIdx].Success && len(results[symbolIdx].ReturnData) > 0 {
-			unpacked, err := s.erc20ABI.Unpack("symbol", results[symbolIdx].ReturnData)
-			if err == nil && len(unpacked) > 0 {
-				if s, ok := unpacked[0].(string); ok {
-					symbol = s
-				}
+		var symbol string
+		if unpacked, err := s.erc20ABI.Unpack("symbol", results[symbolIdx].ReturnData); err == nil && len(unpacked) > 0 {
+			if v, ok := unpacked[0].(string); ok {
+				symbol = v
 			}
 		}
 
-		if results[nameIdx].Success && len(results[nameIdx].ReturnData) > 0 {
-			unpacked, err := s.erc20ABI.Unpack("name", results[nameIdx].ReturnData)
-			if err == nil && len(unpacked) > 0 {
-				if n, ok := unpacked[0].(string); ok {
-					name = n
-				}
+		var name string
+		if unpacked, err := s.erc20ABI.Unpack("name", results[nameIdx].ReturnData); err == nil && len(unpacked) > 0 {
+			if v, ok := unpacked[0].(string); ok {
+				name = v
 			}
 		}
 
-		metadata := TokenMetadata{
-			Symbol:   symbol,
-			Decimals: decimals,
-			Name:     name,
-		}
+		metadata := TokenMetadata{Symbol: symbol, Decimals: decimals, Name: name}
 
-		// Token metadata (symbol, decimals, name) is immutable, so a concurrent
-		// cache miss producing duplicate fetches is safe — both writes produce
-		// the same value.
+		// Token metadata (symbol, decimals, name) is immutable, so a
+		// concurrent cache miss producing duplicate fetches is safe — both
+		// writes produce the same value.
 		s.mu.Lock()
 		s.metadataCache[token] = metadata
 		s.mu.Unlock()
 		result[token] = metadata
+	}
+
+	if len(incomplete) > 0 {
+		addrs := make([]string, len(incomplete))
+		for i, a := range incomplete {
+			addrs[i] = a.Hex()
+		}
+		return result, fmt.Errorf("token metadata incomplete for %d tokens (sub-call reverts): %s",
+			len(incomplete), strings.Join(addrs, ","))
 	}
 
 	return result, nil

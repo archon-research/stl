@@ -31,6 +31,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/services/aavelike_position_tracker"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -230,23 +231,28 @@ func run(args []string) error {
 		return nil
 	}
 
-	// Create Ethereum client with connection pooling
-	httpClient := &http.Client{
-		Timeout: 120 * time.Second,
-		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			MaxIdleConns:          cfg.concurrency * 2,
-			MaxIdleConnsPerHost:   cfg.concurrency,
-			MaxConnsPerHost:       cfg.concurrency,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
+	// Create Ethereum client with connection pooling. Retry 429/5xx/network
+	// errors via rpchttp so transient RPC failures don't mark blocks bad.
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          cfg.concurrency * 2,
+		MaxIdleConnsPerHost:   cfg.concurrency,
+		MaxConnsPerHost:       cfg.concurrency,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
+	httpClient := rpchttp.NewClient(rpchttp.Config{
+		MaxRetries:  5,
+		BaseBackoff: 250 * time.Millisecond,
+		MaxBackoff:  10 * time.Second,
+		Transport:   transport,
+	})
+	httpClient.Timeout = 120 * time.Second
 
 	rpcClient, err := rpc.DialOptions(ctx, cfg.rpcURL, rpc.WithHTTPClient(httpClient))
 	if err != nil {

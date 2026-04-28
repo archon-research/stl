@@ -114,8 +114,6 @@ func (s *Service) processBlock(
 	ctx context.Context,
 	event outbound.BlockEvent,
 ) error {
-	start := time.Now()
-
 	receiptsJSON, err := s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
 	if err != nil {
 		return fmt.Errorf("fetching receipts from cache: %w", err)
@@ -140,24 +138,9 @@ func (s *Service) processBlock(
 	if len(transfers) > 0 {
 		affected := s.matchTransfers(transfers)
 		if len(affected) > 0 {
-			balances, err := s.registry.FetchAll(ctx, affected, event.BlockNumber)
-			if err != nil {
-				s.logger.Warn("partial balance fetch", "error", err)
+			if err := s.processTransfers(ctx, affected, transfers, event, blockTimestamp); err != nil {
+				return err
 			}
-
-			snapshots := s.buildSnapshots(affected, balances, transfers, event, blockTimestamp)
-			if len(snapshots) > 0 {
-				if err := s.handler.HandleSnapshots(ctx, snapshots); err != nil {
-					return fmt.Errorf("handler: %w", err)
-				}
-			}
-
-			s.logger.Debug("block processed",
-				"block", event.BlockNumber,
-				"chain", event.ChainID,
-				"transfers", len(transfers),
-				"snapshots", len(snapshots),
-				"duration", time.Since(start))
 		}
 	}
 
@@ -166,10 +149,43 @@ func (s *Service) processBlock(
 	if s.blocksSinceSweep >= s.config.SweepEveryNBlocks {
 		s.blocksSinceSweep = 0
 		if err := s.sweep(ctx, event.BlockNumber, event.Version, blockTimestamp); err != nil {
-			s.logger.Error("sweep failed", "error", err)
+			return fmt.Errorf("sweep at block %d: %w", event.BlockNumber, err)
 		}
 	}
 
+	return nil
+}
+
+// processTransfers fetches balances for the affected entries and writes
+// snapshots. Returns a non-nil error on any per-source fetch failure so the
+// source SQS event is not ack'd. See VEC-188.
+func (s *Service) processTransfers(
+	ctx context.Context,
+	affected []*TokenEntry,
+	transfers []*TransferEvent,
+	event outbound.BlockEvent,
+	blockTimestamp time.Time,
+) error {
+	start := time.Now()
+
+	balances, err := s.registry.FetchAll(ctx, affected, event.BlockNumber)
+	if err != nil {
+		return fmt.Errorf("fetching balances at block %d: %w", event.BlockNumber, err)
+	}
+
+	snapshots := s.buildSnapshots(affected, balances, transfers, event, blockTimestamp)
+	if len(snapshots) > 0 {
+		if err := s.handler.HandleSnapshots(ctx, snapshots); err != nil {
+			return fmt.Errorf("handler: %w", err)
+		}
+	}
+
+	s.logger.Debug("block processed",
+		"block", event.BlockNumber,
+		"chain", event.ChainID,
+		"transfers", len(transfers),
+		"snapshots", len(snapshots),
+		"duration", time.Since(start))
 	return nil
 }
 
@@ -248,7 +264,7 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockVersion int
 
 	balances, err := s.registry.FetchAll(ctx, s.entries, blockNumber)
 	if err != nil {
-		s.logger.Warn("sweep partial failure", "error", err)
+		return fmt.Errorf("fetching balances for sweep: %w", err)
 	}
 
 	var snapshots []*PositionSnapshot

@@ -22,6 +22,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -273,7 +274,13 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 
 		r := results[i]
 		if r.Err != nil {
-			s.logger.Warn("failed to read vault debt",
+			// VEC-188: classify the per-prime error. Reverts are the
+			// contract's "no data" signal and legitimately skip. Transport
+			// errors are transient and must surface so the SQS message NACKs.
+			if !rpcerr.IsEVMRevert(r.Err) {
+				return fmt.Errorf("prime %s: transport error reading debt: %w", prime.Name, r.Err)
+			}
+			s.logger.Warn("vault debt call reverted (contract-level); skipping",
 				"prime", prime.Name,
 				"vault", prime.VaultAddress,
 				"error", r.Err,

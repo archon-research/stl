@@ -2,6 +2,7 @@ package allocation_tracker
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
@@ -257,5 +258,84 @@ func TestBuildSnapshots_NoTransferContext(t *testing.T) {
 	}
 	if snapshots[0].TxHash != "" {
 		t.Errorf("expected empty txHash for sweep-style snapshot, got %s", snapshots[0].TxHash)
+	}
+}
+
+// ── VEC-188: partial-fetch propagation ──
+
+// failingSourceRegistry returns a SourceRegistry wired with a single
+// mockSource that matches the "anything" token type and errors on
+// FetchBalances. Shared by the two VEC-188 tests below.
+func failingSourceRegistry(logger *slog.Logger) *SourceRegistry {
+	registry := NewSourceRegistry(logger)
+	registry.Register(&mockSource{
+		name:       "always-fails",
+		tokenTypes: map[string]bool{"anything": true},
+		err:        errors.New("alchemy 429: compute units exceeded"),
+	})
+	return registry
+}
+
+// TestSweep_ReturnsErrorOnPartialFailure codifies the VEC-188 invariant for
+// allocation_tracker's sweep path: a partial fetch must NACK the SQS message.
+// FAILS against current code — sweep currently logs `Warn` and returns nil.
+func TestSweep_ReturnsErrorOnPartialFailure(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	entry := &TokenEntry{
+		ContractAddress: common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		WalletAddress:   common.HexToAddress("0x2222222222222222222222222222222222222222"),
+		TokenType:       "anything",
+	}
+	svc, err := NewService(Config{
+		ChainID:           1,
+		SweepEveryNBlocks: 1000,
+		Logger:            logger,
+	}, nil, nil, failingSourceRegistry(logger), []*TokenEntry{entry}, &testHandler{}, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	err = svc.sweep(ctx, 100, 0, time.Unix(1, 0).UTC())
+	if err == nil {
+		t.Fatal("sweep must return an error on partial fetch failure; got nil")
+	}
+}
+
+// TestProcessTransfers_ReturnsErrorOnPartialFetchFailure codifies the VEC-188
+// invariant for allocation_tracker's live path. FAILS against current code —
+// processBlock today logs `Warn("partial balance fetch")` and returns nil.
+// We exercise processBlock via the extracted helper `processTransfers` so
+// the test doesn't depend on cache+extractor plumbing that's orthogonal.
+func TestProcessTransfers_ReturnsErrorOnPartialFetchFailure(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	entry := &TokenEntry{
+		ContractAddress: common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		WalletAddress:   common.HexToAddress("0x2222222222222222222222222222222222222222"),
+		TokenType:       "anything",
+	}
+	svc, err := NewService(Config{
+		ChainID:           1,
+		SweepEveryNBlocks: 1000,
+		Logger:            logger,
+	}, nil, nil, failingSourceRegistry(logger), []*TokenEntry{entry}, &testHandler{}, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0}
+	transfers := []*TransferEvent{{
+		TokenAddress: entry.ContractAddress,
+		ProxyAddress: entry.WalletAddress,
+		Direction:    DirectionIn,
+	}}
+	affected := []*TokenEntry{entry}
+
+	err = svc.processTransfers(ctx, affected, transfers, event, time.Unix(1, 0).UTC())
+	if err == nil {
+		t.Fatal("processTransfers must return an error on partial fetch failure; got nil")
 	}
 }

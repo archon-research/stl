@@ -14,7 +14,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
@@ -28,6 +27,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
 )
 
@@ -225,7 +225,7 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// Ethereum
-	rawClient, err := ethclient.DialContext(ctx, cfg.alchemyURL)
+	rawClient, err := rpchttp.DialEthereum(ctx, cfg.alchemyURL)
 	if err != nil {
 		return fmt.Errorf("eth dial: %w", err)
 	}

@@ -43,6 +43,7 @@ type fakeSQSConsumer struct {
 	mu       sync.Mutex
 	messages []outbound.SQSMessage
 	served   int
+	deleted  []string
 }
 
 func newFakeSQSConsumer(events []outbound.BlockEvent) *fakeSQSConsumer {
@@ -73,13 +74,33 @@ func (f *fakeSQSConsumer) ReceiveMessages(_ context.Context, maxMessages int) ([
 	return batch, nil
 }
 
-func (f *fakeSQSConsumer) DeleteMessage(_ context.Context, _ string) error {
+func (f *fakeSQSConsumer) DeleteMessage(_ context.Context, receiptHandle string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted = append(f.deleted, receiptHandle)
 	return nil
 }
 
 func (f *fakeSQSConsumer) Close() error {
 	return nil
 }
+
+func (f *fakeSQSConsumer) deleteCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.deleted)
+}
+
+// fakeRPCErr implements go-ethereum's rpc.Error interface
+// (Error() string; ErrorCode() int). Used to synthesize EVM reverts in
+// tests for per-prime error classification.
+type fakeRPCErr struct {
+	code int
+	msg  string
+}
+
+func (e *fakeRPCErr) Error() string  { return e.msg }
+func (e *fakeRPCErr) ErrorCode() int { return e.code }
 
 // fakeVatCaller is a controllable in-memory VatCaller for unit tests.
 type fakeVatCaller struct {
@@ -481,14 +502,21 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 	_ = svc.Stop()
 }
 
-func TestSync_PartialFailure_OtherPrimesStillSaved(t *testing.T) {
+// TestSync_PartialRevert_OtherPrimesStillSaved verifies the
+// AllowFailure-compatible revert path: if one vault's debt call reverts
+// (the contract's "no data this block" answer), that prime is skipped
+// and the remaining primes are still snapshotted. VEC-188 Finding 5
+// narrows this to revert-shaped errors only; transport errors now
+// propagate (covered by TestSyncAll_ErrorsOnTransportFailure).
+func TestSync_PartialRevert_OtherPrimesStillSaved(t *testing.T) {
 	spark := entity.Prime{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")}
 	grove := entity.Prime{ID: 2, Name: "grove", VaultAddress: common.HexToAddress("0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0")}
 
 	caller := newFakeVatCaller()
 	caller.setIlk(spark.VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
 	caller.setIlk(grove.VaultAddress, ilkFrom("ALLOCATOR-GROVE-A"))
-	caller.setDebtError(grove.VaultAddress, errors.New("simulated RPC failure"))
+	// Simulate a contract-level revert (geth code 3) for grove.
+	caller.setDebtError(grove.VaultAddress, &fakeRPCErr{code: 3, msg: "execution reverted"})
 
 	events := makeBlockEvents(testBlockNum, 3)
 	consumer := newFakeSQSConsumer(events)
@@ -516,13 +544,137 @@ func TestSync_PartialFailure_OtherPrimesStillSaved(t *testing.T) {
 		}
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for spark snapshot despite grove failure")
+			t.Fatal("timed out waiting for spark snapshot despite grove revert")
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
 found:
 	cancel()
 	_ = svc.Stop()
+}
+
+// TestSyncAll_ErrorsOnTransportFailure codifies VEC-188 Finding 5: a
+// per-prime transport error (classified by rpcerr.IsEVMRevert as
+// non-revert) must propagate out of syncAll so the SQS message NACKs.
+// A plain non-rpc.Error (e.g. from a network timeout) is not a revert,
+// so no snapshots should be saved and the message should not be deleted.
+func TestSyncAll_ErrorsOnTransportFailure(t *testing.T) {
+	spark := entity.Prime{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")}
+	grove := entity.Prime{ID: 2, Name: "grove", VaultAddress: common.HexToAddress("0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0")}
+
+	caller := newFakeVatCaller()
+	caller.setIlk(spark.VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+	caller.setIlk(grove.VaultAddress, ilkFrom("ALLOCATOR-GROVE-A"))
+	// Plain non-rpc.Error — IsEVMRevert returns false, so syncAll must
+	// surface this as a top-level error, NACKing the SQS message.
+	caller.setDebtError(spark.VaultAddress, errors.New("429 Too Many Requests"))
+
+	events := makeBlockEvents(testBlockNum, 1)
+	consumer := newFakeSQSConsumer(events)
+
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{spark, grove}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	// Give the loop time to process the single message.
+	time.Sleep(300 * time.Millisecond)
+
+	cancel()
+	_ = svc.Stop()
+
+	// No snapshots must be saved — syncAll should have errored out before
+	// writing anything. This is the heart of the bug fix: if ANY per-prime
+	// result is a transport error, the entire sync must fail so the
+	// message is redelivered.
+	if got := repo.savedCount(); got != 0 {
+		t.Errorf("expected 0 saved snapshots on transport failure, got %d", got)
+	}
+
+	// NACK assertion: the message must not have been deleted. handler
+	// returning an error is the NACK signal in sqsutil.ProcessMessages.
+	if got := consumer.deleteCount(); got != 0 {
+		t.Errorf("expected 0 deleted messages (NACK on transport error), got %d", got)
+	}
+}
+
+// TestSyncAll_SkipsOnContractRevert verifies the revert path stays
+// AllowFailure-compatible: an EVM revert (code 3 "execution reverted")
+// is treated as the contract's definitive answer of "no debt this block"
+// — the prime is skipped and syncAll succeeds with the remaining
+// snapshots. The SQS message is deleted (ACK).
+func TestSyncAll_SkipsOnContractRevert(t *testing.T) {
+	spark := entity.Prime{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")}
+	grove := entity.Prime{ID: 2, Name: "grove", VaultAddress: common.HexToAddress("0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0")}
+
+	caller := newFakeVatCaller()
+	caller.setIlk(spark.VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+	caller.setIlk(grove.VaultAddress, ilkFrom("ALLOCATOR-GROVE-A"))
+	// Contract-level revert (geth code 3) — IsEVMRevert returns true,
+	// so syncAll must log+skip and still save the healthy prime.
+	caller.setDebtError(grove.VaultAddress, &fakeRPCErr{code: 3, msg: "execution reverted"})
+
+	events := makeBlockEvents(testBlockNum, 1)
+	consumer := newFakeSQSConsumer(events)
+
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{spark, grove}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		if repo.savedCount() >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for spark snapshot; grove revert should not have blocked save")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	_ = svc.Stop()
+
+	// Spark must have been saved; grove must not have been.
+	snaps := repo.allSaved()
+	var sawSpark, sawGrove bool
+	for _, s := range snaps {
+		if s.PrimeID == spark.ID {
+			sawSpark = true
+		}
+		if s.PrimeID == grove.ID {
+			sawGrove = true
+		}
+	}
+	if !sawSpark {
+		t.Error("expected spark snapshot to be saved on grove revert")
+	}
+	if sawGrove {
+		t.Error("expected grove snapshot to NOT be saved (it reverted)")
+	}
+
+	// ACK assertion: the message must have been deleted (syncAll returned nil).
+	if got := consumer.deleteCount(); got != 1 {
+		t.Errorf("expected 1 deleted message (ACK on revert skip), got %d", got)
+	}
 }
 
 // ---------------------------------------------------------------------------
