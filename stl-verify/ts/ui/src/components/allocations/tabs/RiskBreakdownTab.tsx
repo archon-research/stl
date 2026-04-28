@@ -8,12 +8,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
+import { useDataTable } from '../../../data-table/hooks';
 import { getRiskBreakdown } from '../../../lib/api';
 import {
   formatMultiplier,
   formatPercentValue,
   formatRatioPercent,
-  formatTokenAmount,
   formatUsdValue,
   parseNumericValue,
 } from '../../../lib/dashboard';
@@ -23,6 +23,162 @@ import type { Allocation, RiskBreakdown } from '../../../types/allocation';
 type RiskBreakdownTabProps = {
   selectedReceiptToken: Allocation | null;
 };
+
+type RiskItem = RiskBreakdown['items'][number];
+
+function RiskTable({ items, isLoading }: { items: RiskItem[]; isLoading: boolean }) {
+  const columns = useMemo(
+    () => [
+      {
+        id: 'symbol',
+        header: 'Symbol',
+        accessorKey: 'symbol',
+        cell: (info: any) => info.getValue() as string,
+      },
+      {
+        id: 'amount',
+        header: 'Amount',
+        accessorKey: 'amount',
+        cell: (info: any) => {
+          const value = info.getValue();
+          return typeof value === 'string'
+            ? parseFloat(value).toFixed(2)
+            : (value as number).toFixed(2);
+        },
+      },
+      {
+        id: 'price_usd',
+        header: 'Price USD',
+        accessorKey: 'price_usd',
+        cell: (info: any) => formatUsdValue(info.getValue()),
+      },
+      {
+        id: 'amount_usd',
+        header: 'Amount USD',
+        accessorKey: 'amount_usd',
+        cell: (info: any) => formatUsdValue(info.getValue()),
+      },
+      {
+        id: 'backing_pct',
+        header: 'Backing %',
+        accessorKey: 'backing_pct',
+        cell: (info: any) => formatPercentValue(info.getValue()),
+      },
+      {
+        id: 'lt',
+        header: 'Liquidation Threshold',
+        accessorKey: 'liquidation_threshold',
+        cell: (info: any) => formatRatioPercent(info.getValue()),
+      },
+      {
+        id: 'bonus',
+        header: 'Liquidation Bonus',
+        accessorKey: 'liquidation_bonus',
+        cell: (info: any) => formatMultiplier(info.getValue()),
+      },
+    ],
+    [],
+  );
+
+  const table = useDataTable(items, columns, {
+    enableSorting: true,
+  });
+
+  return (
+    <div
+      className={css({
+        overflowX: 'auto',
+        borderRadius: 'md',
+        borderStyle: 'solid',
+        borderWidth: '1px',
+        borderColor: 'border.subtle',
+      })}
+    >
+      <table
+        className={css({
+          width: '100%',
+          minWidth: '76rem',
+          borderCollapse: 'collapse',
+        })}
+      >
+        <thead>
+          <tr className={css({ bg: 'surface.subtle' })}>
+            {table.getHeaderGroups().map((headerGroup) =>
+              headerGroup.headers.map((header) => {
+                const headerLabel =
+                  typeof header.column.columnDef.header === 'string'
+                    ? header.column.columnDef.header
+                    : typeof header.column.columnDef.header === 'function'
+                    ? (header.column.columnDef.header as any)()
+                    : null;
+
+                return (
+                  <th
+                    key={header.id}
+                    className={css({
+                      px: '4',
+                      py: '3',
+                      textAlign: 'left',
+                      fontSize: 'xs',
+                      fontWeight: 'semibold',
+                      letterSpacing: '0.08em',
+                      textTransform: 'uppercase',
+                      color: 'text.muted',
+                    })}
+                  >
+                    {header.isPlaceholder ? null : headerLabel}
+                  </th>
+                );
+              }),
+            )}
+          </tr>
+        </thead>
+        <tbody>
+          {isLoading && items.length === 0
+            ? SkeletonRows({ rows: 5, columns: 7, firstColumnTall: false })
+            : table.getRowModel().rows.map((row) => (
+                <tr
+                  key={row.original.token_id}
+                  className={css({
+                    borderBottomWidth: '1px',
+                    borderBottomStyle: 'solid',
+                    borderBottomColor: 'border.subtle',
+                  })}
+                >
+                  {row.getVisibleCells().map((cell) => {
+                    const cellContent = cell.column.columnDef.cell
+                        ? (cell.column.columnDef.cell as any)({
+                            ...cell.getContext(),
+                          })
+                      : cell.getValue();
+
+                    return (
+                      <td
+                        key={cell.id}
+                        className={css({
+                          px: '4',
+                          py: '3',
+                        })}
+                      >
+                        <p
+                          className={css({
+                            m: 0,
+                            fontSize: 'sm',
+                            color: 'text.strong',
+                          })}
+                        >
+                            {cellContent as React.ReactNode}
+                        </p>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 function SummaryMetric({
   detail,
@@ -362,146 +518,7 @@ export function RiskBreakdownTab({
       ) : null}
 
       {!errorMessage && (isLoading || breakdown) ? (
-        <div
-          className={css({
-            overflowX: 'auto',
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.subtle',
-          })}
-        >
-          <table
-            className={css({
-              width: '100%',
-              minWidth: '76rem',
-              borderCollapse: 'collapse',
-            })}
-          >
-            <thead>
-              <tr className={css({ bg: 'surface.subtle' })}>
-                {[
-                  'Symbol',
-                  'Amount',
-                  'Price USD',
-                  'Amount USD',
-                  'Backing %',
-                  'Liquidation Threshold',
-                  'Liquidation Bonus',
-                ].map((label) => (
-                  <th
-                    key={label}
-                    className={css({
-                      px: '4',
-                      py: '3',
-                      textAlign: 'left',
-                      fontSize: 'xs',
-                      fontWeight: 'semibold',
-                      letterSpacing: '0.08em',
-                      textTransform: 'uppercase',
-                      color: 'text.muted',
-                    })}
-                  >
-                    {label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {isLoading && !breakdown
-                ? SkeletonRows({ rows: 5, columns: 7, firstColumnTall: false })
-                : breakdown?.items.map((item) => (
-                    <tr
-                      key={item.token_id}
-                      className={css({
-                        borderBottomWidth: '1px',
-                        borderBottomStyle: 'solid',
-                        borderBottomColor: 'border.subtle',
-                      })}
-                    >
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            fontWeight: 'semibold',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {item.symbol}
-                        </p>
-                      </td>
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {formatTokenAmount(item.amount)}
-                        </p>
-                      </td>
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {formatUsdValue(item.price_usd)}
-                        </p>
-                      </td>
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {formatUsdValue(item.amount_usd)}
-                        </p>
-                      </td>
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {formatPercentValue(item.backing_pct)}
-                        </p>
-                      </td>
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {formatRatioPercent(item.liquidation_threshold)}
-                        </p>
-                      </td>
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {formatMultiplier(item.liquidation_bonus)}
-                        </p>
-                      </td>
-                    </tr>
-                  ))}
-            </tbody>
-          </table>
-        </div>
+        <RiskTable items={breakdown?.items ?? []} isLoading={isLoading} />
       ) : null}
     </div>
   );
