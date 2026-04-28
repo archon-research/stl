@@ -1,8 +1,9 @@
 # ADR-0002: Data Auditability and Processing Versioning
 
-**Status**: Accepted
-**Owner**: simon.bojeoutzen@archonlabs.com
-**Date**: 2026-04-08
+**Status**: Accepted  
+**Proposed**: @simonbojeoutzen  
+**Date**: 2026-04-08  
+**Deciders**: @vector, @infrastructure
 
 ## Context
 
