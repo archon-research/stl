@@ -2,7 +2,8 @@ package allocation_tracker
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -12,17 +13,18 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/ethereum/go-ethereum/common"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 )
 
 // ── Mocks ──
 
 type testHandler struct {
-	snapshots []*PositionSnapshot
-	err       error
+	batches []*SnapshotBatch
+	err     error
 }
 
-func (m *testHandler) HandleSnapshots(ctx context.Context, snapshots []*PositionSnapshot) error {
-	m.snapshots = append(m.snapshots, snapshots...)
+func (m *testHandler) HandleBatch(ctx context.Context, batch *SnapshotBatch) error {
+	m.batches = append(m.batches, batch)
 	return m.err
 }
 
@@ -78,6 +80,176 @@ func TestProcessBlock_CacheMiss_ReturnsError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for cache miss, got nil")
+	}
+}
+
+func TestProcessBlock_PartialFetchFailure_ReturnsErrorAndDoesNotPersist(t *testing.T) {
+	cache := testutil.NewMockBlockCache()
+
+	proxy := common.HexToAddress("0xbbbb")
+	contract1 := common.HexToAddress("0x1111")
+	contract2 := common.HexToAddress("0x2222")
+
+	receiptsJSON := mustMarshalReceipts(t, []TransactionReceipt{{
+		Logs: []gethtypes.Log{
+			makeTransferLog(contract1, common.HexToAddress("0xaaaa"), proxy, big.NewInt(1), 0),
+			makeTransferLog(contract2, common.HexToAddress("0xcccc"), proxy, big.NewInt(2), 1),
+		},
+	}})
+	cache.SetReceipts(1, 100, 0, receiptsJSON)
+
+	handler := &testHandler{}
+	registry := NewSourceRegistry(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	registry.Register(&mockSource{
+		name:       "erc20",
+		tokenTypes: map[string]bool{"erc20": true},
+		result: func() *FetchResult {
+			res := NewFetchResult()
+			res.Balances[EntryKey{ContractAddress: contract1, WalletAddress: proxy}] = &PositionBalance{Balance: big.NewInt(100)}
+			return res
+		}(),
+	})
+	registry.Register(&mockSource{
+		name:       "erc4626",
+		tokenTypes: map[string]bool{"erc4626": true},
+		err:        fmt.Errorf("rpc timeout"),
+	})
+
+	svc := &Service{
+		cache:     cache,
+		extractor: NewTransferExtractor([]ProxyConfig{{Address: proxy, Star: "spark", Chain: "mainnet"}}),
+		registry:  registry,
+		handler:   handler,
+		entryLookup: BuildEntryLookup([]*TokenEntry{
+			{ContractAddress: contract1, WalletAddress: proxy, TokenType: "erc20"},
+			{ContractAddress: contract2, WalletAddress: proxy, TokenType: "erc4626"},
+		}),
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockTimestamp: 1700000000})
+	if err == nil {
+		t.Fatal("expected partial fetch failure to be returned")
+	}
+	if len(handler.batches) != 0 {
+		t.Fatalf("HandleBatch should not be called on partial fetch failure, got %d calls", len(handler.batches))
+	}
+}
+
+func TestProcessBlock_SweepFetchFailure_ReturnsError(t *testing.T) {
+	cache := testutil.NewMockBlockCache()
+	cache.SetReceipts(1, 200, 0, mustMarshalReceipts(t, []TransactionReceipt{}))
+
+	entries := []*TokenEntry{{
+		ContractAddress: common.HexToAddress("0x1111"),
+		WalletAddress:   common.HexToAddress("0xbbbb"),
+		TokenType:       "erc20",
+	}}
+	registry := NewSourceRegistry(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	registry.Register(&mockSource{
+		name:       "erc20",
+		tokenTypes: map[string]bool{"erc20": true},
+		err:        fmt.Errorf("alchemy rate limit"),
+	})
+
+	svc := &Service{
+		cache:            cache,
+		extractor:        NewTransferExtractor(nil),
+		registry:         registry,
+		entries:          entries,
+		handler:          &testHandler{},
+		logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		config:           Config{ChainID: 1, SweepEveryNBlocks: 1},
+		blocksSinceSweep: 0,
+	}
+
+	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 200, Version: 0, BlockTimestamp: 1700000000})
+	if err == nil {
+		t.Fatal("expected sweep fetch failure to be returned")
+	}
+}
+
+func TestProcessBlock_FailedSweepDoesNotResetCounter(t *testing.T) {
+	cache := testutil.NewMockBlockCache()
+	cache.SetReceipts(1, 300, 0, mustMarshalReceipts(t, []TransactionReceipt{}))
+
+	entries := []*TokenEntry{{
+		ContractAddress: common.HexToAddress("0x1111"),
+		WalletAddress:   common.HexToAddress("0xbbbb"),
+		TokenType:       "erc20",
+	}}
+	badSource := &mockSource{
+		name:       "erc20",
+		tokenTypes: map[string]bool{"erc20": true},
+		err:        fmt.Errorf("temporary rpc error"),
+	}
+	registry := NewSourceRegistry(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	registry.Register(badSource)
+
+	svc := &Service{
+		cache:            cache,
+		extractor:        NewTransferExtractor(nil),
+		registry:         registry,
+		entries:          entries,
+		handler:          &testHandler{},
+		logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		config:           Config{ChainID: 1, SweepEveryNBlocks: 1},
+		blocksSinceSweep: 0,
+	}
+
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 300, Version: 0, BlockTimestamp: 1700000000}
+	if err := svc.processBlock(context.Background(), event); err == nil {
+		t.Fatal("expected first sweep attempt to fail")
+	}
+	if badSource.called != 1 {
+		t.Fatalf("expected first call to attempt sweep once, got %d", badSource.called)
+	}
+	if svc.blocksSinceSweep != 1 {
+		t.Fatalf("blocksSinceSweep after failed sweep = %d, want 1", svc.blocksSinceSweep)
+	}
+
+	if err := svc.processBlock(context.Background(), event); err == nil {
+		t.Fatal("expected second sweep attempt to fail")
+	}
+	if badSource.called != 2 {
+		t.Fatalf("expected retry to attempt sweep again, got %d calls", badSource.called)
+	}
+}
+
+func TestProcessBlock_SweepHandlerFailure_ReturnsError(t *testing.T) {
+	cache := testutil.NewMockBlockCache()
+	cache.SetReceipts(1, 400, 0, mustMarshalReceipts(t, []TransactionReceipt{}))
+
+	entry := &TokenEntry{
+		ContractAddress: common.HexToAddress("0x1111"),
+		WalletAddress:   common.HexToAddress("0xbbbb"),
+		TokenType:       "erc20",
+	}
+	result := NewFetchResult()
+	result.Balances[entry.Key()] = &PositionBalance{Balance: big.NewInt(123)}
+
+	registry := NewSourceRegistry(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	registry.Register(&mockSource{
+		name:       "erc20",
+		tokenTypes: map[string]bool{"erc20": true},
+		result:     result,
+	})
+
+	handler := &testHandler{err: fmt.Errorf("db unavailable")}
+	svc := &Service{
+		cache:            cache,
+		extractor:        NewTransferExtractor(nil),
+		registry:         registry,
+		entries:          []*TokenEntry{entry},
+		handler:          handler,
+		logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		config:           Config{ChainID: 1, SweepEveryNBlocks: 1},
+		blocksSinceSweep: 0,
+	}
+
+	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 400, Version: 0, BlockTimestamp: 1700000000})
+	if err == nil {
+		t.Fatal("expected sweep handler failure to be returned")
 	}
 }
 
@@ -261,83 +433,11 @@ func TestBuildSnapshots_NoTransferContext(t *testing.T) {
 	}
 }
 
-// ── VEC-188: partial-fetch propagation ──
-
-// failingSourceRegistry returns a SourceRegistry wired with a single
-// mockSource that matches the "anything" token type and errors on
-// FetchBalances. Shared by the two VEC-188 tests below.
-func failingSourceRegistry(logger *slog.Logger) *SourceRegistry {
-	registry := NewSourceRegistry(logger)
-	registry.Register(&mockSource{
-		name:       "always-fails",
-		tokenTypes: map[string]bool{"anything": true},
-		err:        errors.New("alchemy 429: compute units exceeded"),
-	})
-	return registry
-}
-
-// TestSweep_ReturnsErrorOnPartialFailure codifies the VEC-188 invariant for
-// allocation_tracker's sweep path: a partial fetch must NACK the SQS message.
-// Pre-VEC-188 this returned nil; the fix is the new `if err != nil` path
-// in `Service.sweep`.
-func TestSweep_ReturnsErrorOnPartialFailure(t *testing.T) {
-	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	entry := &TokenEntry{
-		ContractAddress: common.HexToAddress("0x1111111111111111111111111111111111111111"),
-		WalletAddress:   common.HexToAddress("0x2222222222222222222222222222222222222222"),
-		TokenType:       "anything",
-	}
-	svc, err := NewService(Config{
-		ChainID:           1,
-		SweepEveryNBlocks: 1000,
-		Logger:            logger,
-	}, nil, nil, failingSourceRegistry(logger), []*TokenEntry{entry}, &testHandler{}, nil)
+func mustMarshalReceipts(t *testing.T, receipts []TransactionReceipt) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(receipts)
 	if err != nil {
-		t.Fatalf("NewService: %v", err)
+		t.Fatalf("marshal receipts: %v", err)
 	}
-
-	err = svc.sweep(ctx, 100, 0, time.Unix(1, 0).UTC())
-	if err == nil {
-		t.Fatal("sweep must return an error on partial fetch failure; got nil")
-	}
-}
-
-// TestProcessTransfers_ReturnsErrorOnPartialFetchFailure codifies the VEC-188
-// invariant for allocation_tracker's live path. Pre-VEC-188 processBlock
-// logged `Warn("partial balance fetch")` and returned nil; the fix is the
-// new `if err != nil` path in `Service.processTransfers`. We exercise the
-// helper directly so the test doesn't depend on cache+extractor plumbing
-// that's orthogonal.
-func TestProcessTransfers_ReturnsErrorOnPartialFetchFailure(t *testing.T) {
-	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	entry := &TokenEntry{
-		ContractAddress: common.HexToAddress("0x1111111111111111111111111111111111111111"),
-		WalletAddress:   common.HexToAddress("0x2222222222222222222222222222222222222222"),
-		TokenType:       "anything",
-	}
-	svc, err := NewService(Config{
-		ChainID:           1,
-		SweepEveryNBlocks: 1000,
-		Logger:            logger,
-	}, nil, nil, failingSourceRegistry(logger), []*TokenEntry{entry}, &testHandler{}, nil)
-	if err != nil {
-		t.Fatalf("NewService: %v", err)
-	}
-
-	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0}
-	transfers := []*TransferEvent{{
-		TokenAddress: entry.ContractAddress,
-		ProxyAddress: entry.WalletAddress,
-		Direction:    DirectionIn,
-	}}
-	affected := []*TokenEntry{entry}
-
-	err = svc.processTransfers(ctx, affected, transfers, event, time.Unix(1, 0).UTC())
-	if err == nil {
-		t.Fatal("processTransfers must return an error on partial fetch failure; got nil")
-	}
+	return data
 }

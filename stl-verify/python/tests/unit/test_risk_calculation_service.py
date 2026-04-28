@@ -72,6 +72,7 @@ def service(
         breakdown_repo=mock_breakdown_repo,
         liq_params_repo=mock_liq_params_repo,
         share_port=mock_share_port,
+        default_gap_pct=Decimal("0.15"),
     )
 
 
@@ -197,6 +198,7 @@ async def test_share_scales_backing_value(
         breakdown_repo=mock_breakdown_repo,
         liq_params_repo=mock_liq_params_repo,
         share_port=mock_share_port,
+        default_gap_pct=Decimal("0.15"),
     )
     breakdown = await svc.get_risk_breakdown(backed_asset_id=42)
 
@@ -220,6 +222,7 @@ async def test_full_share_leaves_backing_value_unchanged(
         breakdown_repo=mock_breakdown_repo,
         liq_params_repo=mock_liq_params_repo,
         share_port=mock_share_port,
+        default_gap_pct=Decimal("0.15"),
     )
     breakdown = await svc.get_risk_breakdown(backed_asset_id=42)
 

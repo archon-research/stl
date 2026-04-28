@@ -1,3 +1,8 @@
+from decimal import Decimal
+
+import pytest
+from pydantic import ValidationError
+
 from app.config import Settings
 
 
@@ -6,6 +11,31 @@ def test_settings_loads_with_defaults():
 
     assert settings.database_url is not None
     assert settings.log_level == "INFO"
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        pytest.param(None, Decimal("0.15"), id="default"),
+        pytest.param("0.22", Decimal("0.22"), id="env-override"),
+    ],
+)
+def test_risk_default_gap_pct(monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: Decimal) -> None:
+    monkeypatch.delenv("RISK_DEFAULT_GAP_PCT", raising=False)
+    if env_value is not None:
+        monkeypatch.setenv("RISK_DEFAULT_GAP_PCT", env_value)
+
+    settings = Settings()
+
+    assert settings.risk_default_gap_pct == expected
+
+
+@pytest.mark.parametrize("env_value", ["-0.01", "1.01"])
+def test_risk_default_gap_pct_rejects_out_of_bounds_env_values(monkeypatch: pytest.MonkeyPatch, env_value: str) -> None:
+    monkeypatch.setenv("RISK_DEFAULT_GAP_PCT", env_value)
+
+    with pytest.raises(ValidationError, match="risk_default_gap_pct"):
+        Settings()
 
 
 class TestAsyncDatabaseUrl:
@@ -22,12 +52,11 @@ class TestAsyncDatabaseUrl:
         assert settings.async_database_url == "postgresql+asyncpg://host:5432/db"
 
 
-class TestAlchemyHttpUrl:
-    def test_constructs_url_from_api_key(self):
-        settings = Settings(alchemy_api_key="test-key-123")
-        assert settings.alchemy_http_url == "https://eth-mainnet.g.alchemy.com/v2/test-key-123"
-
-    def test_uses_loaded_key_for_url(self):
+class TestAllocationShareStaleness:
+    def test_default_is_30_minutes(self):
         settings = Settings()
-        key = settings.alchemy_api_key.get_secret_value()
-        assert settings.alchemy_http_url == f"https://eth-mainnet.g.alchemy.com/v2/{key}"
+        assert settings.allocation_share_max_stale_seconds == 1800
+
+    def test_overridable(self):
+        settings = Settings(allocation_share_max_stale_seconds=600)
+        assert settings.allocation_share_max_stale_seconds == 600

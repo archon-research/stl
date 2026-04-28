@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
@@ -114,6 +115,8 @@ func (s *Service) processBlock(
 	ctx context.Context,
 	event outbound.BlockEvent,
 ) error {
+	start := time.Now()
+
 	receiptsJSON, err := s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
 	if err != nil {
 		return fmt.Errorf("fetching receipts from cache: %w", err)
@@ -134,58 +137,48 @@ func (s *Service) processBlock(
 
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
 
-	// Process transfers if any matched
+	// Process transfers if any matched.
+	// VEC-188 invariant: a partial FetchAll failure here must propagate so
+	// SQS NACKs the message — see TestProcessBlock_PartialFetchFailure_*.
 	if len(transfers) > 0 {
 		affected := s.matchTransfers(transfers)
 		if len(affected) > 0 {
-			if err := s.processTransfers(ctx, affected, transfers, event, blockTimestamp); err != nil {
-				return err
+			fetch, err := s.registry.FetchAll(ctx, affected, event.BlockNumber)
+			if err != nil {
+				return fmt.Errorf("fetch observations for block %d: %w", event.BlockNumber, err)
 			}
+
+			snapshots := s.buildSnapshots(affected, fetch.Balances, transfers, event, blockTimestamp)
+			supplies := buildSupplySnapshots(fetch.Supplies, event.ChainID, event.BlockNumber, event.Version, blockTimestamp, "event")
+			batch := &SnapshotBatch{Snapshots: snapshots, Supplies: supplies}
+			if len(snapshots) > 0 || len(supplies) > 0 {
+				if err := s.handler.HandleBatch(ctx, batch); err != nil {
+					return fmt.Errorf("handler: %w", err)
+				}
+			}
+
+			s.logger.Debug("block processed",
+				"block", event.BlockNumber,
+				"chain", event.ChainID,
+				"transfers", len(transfers),
+				"snapshots", len(snapshots),
+				"supplies", len(supplies),
+				"duration", time.Since(start))
 		}
 	}
 
-	// Periodic sweep
+	// Periodic sweep. VEC-188: a sweep failure must NOT reset the counter
+	// (so the next block retries the sweep) and must propagate so SQS
+	// redelivers — see TestProcessBlock_FailedSweepDoesNotResetCounter and
+	// TestProcessBlock_SweepFetchFailure_ReturnsError.
 	s.blocksSinceSweep++
 	if s.blocksSinceSweep >= s.config.SweepEveryNBlocks {
-		s.blocksSinceSweep = 0
 		if err := s.sweep(ctx, event.BlockNumber, event.Version, blockTimestamp); err != nil {
-			return fmt.Errorf("sweep at block %d: %w", event.BlockNumber, err)
+			return fmt.Errorf("sweep block %d: %w", event.BlockNumber, err)
 		}
+		s.blocksSinceSweep = 0
 	}
 
-	return nil
-}
-
-// processTransfers fetches balances for the affected entries and writes
-// snapshots. Returns a non-nil error on any per-source fetch failure so the
-// source SQS event is not ack'd. See VEC-188.
-func (s *Service) processTransfers(
-	ctx context.Context,
-	affected []*TokenEntry,
-	transfers []*TransferEvent,
-	event outbound.BlockEvent,
-	blockTimestamp time.Time,
-) error {
-	start := time.Now()
-
-	balances, err := s.registry.FetchAll(ctx, affected, event.BlockNumber)
-	if err != nil {
-		return fmt.Errorf("fetching balances at block %d: %w", event.BlockNumber, err)
-	}
-
-	snapshots := s.buildSnapshots(affected, balances, transfers, event, blockTimestamp)
-	if len(snapshots) > 0 {
-		if err := s.handler.HandleSnapshots(ctx, snapshots); err != nil {
-			return fmt.Errorf("handler: %w", err)
-		}
-	}
-
-	s.logger.Debug("block processed",
-		"block", event.BlockNumber,
-		"chain", event.ChainID,
-		"transfers", len(transfers),
-		"snapshots", len(snapshots),
-		"duration", time.Since(start))
 	return nil
 }
 
@@ -255,6 +248,38 @@ func (s *Service) buildSnapshots(
 	return snapshots
 }
 
+// buildSupplySnapshots converts per-contract pool supplies read in one multicall
+// into persistable snapshot records. Deduplicated by the map iteration itself
+// (one entry per contract address).
+func buildSupplySnapshots(
+	supplies map[common.Address]*PoolSupply,
+	chainID, blockNumber int64,
+	blockVersion int,
+	blockTimestamp time.Time,
+	source string,
+) []*TokenTotalSupplySnapshot {
+	if len(supplies) == 0 {
+		return nil
+	}
+	out := make([]*TokenTotalSupplySnapshot, 0, len(supplies))
+	for addr, sup := range supplies {
+		if sup == nil || sup.TotalSupply == nil {
+			continue
+		}
+		out = append(out, &TokenTotalSupplySnapshot{
+			ChainID:           chainID,
+			TokenAddress:      addr,
+			TotalSupply:       sup.TotalSupply,
+			ScaledTotalSupply: sup.ScaledTotalSupply,
+			BlockNumber:       blockNumber,
+			BlockVersion:      blockVersion,
+			BlockTimestamp:    blockTimestamp,
+			Source:            source,
+		})
+	}
+	return out
+}
+
 // sweep runs periodic reconciliation to capture balance changes that don't
 // emit Transfer events — e.g. aToken interest accrual, ERC4626 yield compounding,
 // and BUIDL rebases. Without this, positions would drift between transfer-triggered
@@ -262,14 +287,14 @@ func (s *Service) buildSnapshots(
 func (s *Service) sweep(ctx context.Context, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
 	start := time.Now()
 
-	balances, err := s.registry.FetchAll(ctx, s.entries, blockNumber)
+	fetch, err := s.registry.FetchAll(ctx, s.entries, blockNumber)
 	if err != nil {
-		return fmt.Errorf("fetching balances for sweep: %w", err)
+		return fmt.Errorf("fetch sweep observations for block %d: %w", blockNumber, err)
 	}
 
 	var snapshots []*PositionSnapshot
 	for _, entry := range s.entries {
-		bal, ok := balances[entry.Key()]
+		bal, ok := fetch.Balances[entry.Key()]
 		if !ok {
 			continue
 		}
@@ -286,17 +311,20 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockVersion int
 		})
 	}
 
-	if len(snapshots) == 0 {
+	supplies := buildSupplySnapshots(fetch.Supplies, s.config.ChainID, blockNumber, blockVersion, blockTimestamp, "sweep")
+
+	if len(snapshots) == 0 && len(supplies) == 0 {
 		return nil
 	}
 
-	if err := s.handler.HandleSnapshots(ctx, snapshots); err != nil {
+	if err := s.handler.HandleBatch(ctx, &SnapshotBatch{Snapshots: snapshots, Supplies: supplies}); err != nil {
 		return fmt.Errorf("sweep handler: %w", err)
 	}
 
 	s.logger.Info("sweep complete",
 		"block", blockNumber,
 		"snapshots", len(snapshots),
+		"supplies", len(supplies),
 		"duration", time.Since(start))
 	return nil
 }
