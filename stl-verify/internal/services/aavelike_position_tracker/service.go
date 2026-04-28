@@ -677,7 +677,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 		}
 		tokenIDs, err := s.resolvePositionTokens(ctx, tx, chainID, blockNumber, collaterals, nil, extras...)
 		if err != nil {
-			return err
+			return fmt.Errorf("resolving tokens for position event %s: %w", eventData.EventType, err)
 		}
 
 		if eventData.EventType == EventBorrow || eventData.EventType == EventRepay {
@@ -752,7 +752,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 
 	tokenIDs, err := s.resolvePositionTokens(ctx, tx, chainID, blockNumber, collaterals, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolving tokens for user %s position snapshot: %w", user.Hex(), err)
 	}
 
 	collateralEntities := make([]*entity.BorrowerCollateral, 0, len(collaterals))
@@ -832,7 +832,7 @@ func (s *Service) persistPositionData(
 
 	tokenIDs, err := s.resolvePositionTokens(ctx, tx, chainID, blockNumber, collaterals, debts)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolving tokens for user %s persist snapshot: %w", user.Hex(), err)
 	}
 
 	borrowers := make([]*entity.Borrower, 0, len(debts))

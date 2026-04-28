@@ -13,6 +13,11 @@
 -- Triggers and existing data are unchanged. Lock-key prefixes are unique per table
 -- and mirror ADR-0002's `mms` / `ofp` convention.
 --
+-- Timestamps in the lock-key format() arguments are wrapped in EXTRACT(epoch FROM …)
+-- so the lock key doesn't depend on the session's TimeZone or DateStyle settings.
+-- Without this, two writers using different session settings would hash the same
+-- logical instant to different strings and fail to serialize.
+--
 -- Callers must sort batched rows by natural key before INSERT to keep
 -- per-row lock acquisition order consistent across transactions; see VEC-194 PR.
 
@@ -29,7 +34,7 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
         format('bwr|%s|%s|%s|%s|%s|%s',
             NEW.user_id, NEW.protocol_id, NEW.token_id,
-            NEW.block_number, NEW.block_version, NEW.created_at),
+            NEW.block_number, NEW.block_version, EXTRACT(epoch FROM NEW.created_at)),
         0));
 
     SELECT processing_version INTO existing_ver
@@ -70,7 +75,7 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
         format('bwc|%s|%s|%s|%s|%s|%s',
             NEW.user_id, NEW.protocol_id, NEW.token_id,
-            NEW.block_number, NEW.block_version, NEW.created_at),
+            NEW.block_number, NEW.block_version, EXTRACT(epoch FROM NEW.created_at)),
         0));
 
     SELECT processing_version INTO existing_ver
@@ -148,7 +153,7 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
         format('otp|%s|%s|%s|%s|%s',
             NEW.token_id, NEW.oracle_id,
-            NEW.block_number, NEW.block_version, NEW.timestamp),
+            NEW.block_number, NEW.block_version, EXTRACT(epoch FROM NEW.timestamp)),
         0));
 
     SELECT processing_version INTO existing_ver
@@ -186,7 +191,7 @@ DECLARE
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
         format('mms|%s|%s|%s|%s',
-            NEW.morpho_market_id, NEW.block_number, NEW.block_version, NEW.timestamp),
+            NEW.morpho_market_id, NEW.block_number, NEW.block_version, EXTRACT(epoch FROM NEW.timestamp)),
         0));
 
     SELECT processing_version INTO existing_ver
@@ -223,7 +228,7 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
         format('mmp|%s|%s|%s|%s|%s',
             NEW.user_id, NEW.morpho_market_id,
-            NEW.block_number, NEW.block_version, NEW.timestamp),
+            NEW.block_number, NEW.block_version, EXTRACT(epoch FROM NEW.timestamp)),
         0));
 
     SELECT processing_version INTO existing_ver
@@ -261,7 +266,7 @@ DECLARE
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
         format('mvs|%s|%s|%s|%s',
-            NEW.morpho_vault_id, NEW.block_number, NEW.block_version, NEW.timestamp),
+            NEW.morpho_vault_id, NEW.block_number, NEW.block_version, EXTRACT(epoch FROM NEW.timestamp)),
         0));
 
     SELECT processing_version INTO existing_ver
@@ -298,7 +303,7 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
         format('mvp|%s|%s|%s|%s|%s',
             NEW.user_id, NEW.morpho_vault_id,
-            NEW.block_number, NEW.block_version, NEW.timestamp),
+            NEW.block_number, NEW.block_version, EXTRACT(epoch FROM NEW.timestamp)),
         0));
 
     SELECT processing_version INTO existing_ver
@@ -336,7 +341,7 @@ DECLARE
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
         format('pdb|%s|%s|%s|%s',
-            NEW.prime_id, NEW.block_number, NEW.block_version, NEW.synced_at),
+            NEW.prime_id, NEW.block_number, NEW.block_version, EXTRACT(epoch FROM NEW.synced_at)),
         0));
 
     SELECT processing_version INTO existing_ver
@@ -374,7 +379,7 @@ BEGIN
         format('alp|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s',
             NEW.chain_id, NEW.token_id, NEW.prime_id, NEW.proxy_address,
             NEW.block_number, NEW.block_version,
-            NEW.tx_hash, NEW.log_index, NEW.direction, NEW.created_at),
+            NEW.tx_hash, NEW.log_index, NEW.direction, EXTRACT(epoch FROM NEW.created_at)),
         0));
 
     SELECT processing_version INTO existing_ver
@@ -423,7 +428,7 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
         format('pev|%s|%s|%s|%s|%s|%s',
             NEW.chain_id, NEW.block_number, NEW.block_version,
-            NEW.tx_hash, NEW.log_index, NEW.created_at),
+            NEW.tx_hash, NEW.log_index, EXTRACT(epoch FROM NEW.created_at)),
         0));
 
     SELECT processing_version INTO existing_ver
@@ -468,7 +473,7 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
         format('aps|%s|%s|%s|%s|%s',
             NEW.prime_id, NEW.package_id, NEW.asset_type,
-            NEW.custody_type, NEW.snapshot_time),
+            NEW.custody_type, EXTRACT(epoch FROM NEW.snapshot_time)),
         0));
 
     SELECT processing_version INTO existing_ver
@@ -505,7 +510,7 @@ DECLARE
     max_ver INT;
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
-        format('aop|%s|%s', NEW.operation_id, NEW.created_at),
+        format('aop|%s|%s', NEW.operation_id, EXTRACT(epoch FROM NEW.created_at)),
         0));
 
     SELECT processing_version INTO existing_ver
@@ -536,7 +541,7 @@ DECLARE
     max_ver INT;
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
-        format('ofp|%s|%s|%s', NEW.token_id, NEW.source_id, NEW.timestamp),
+        format('ofp|%s|%s|%s', NEW.token_id, NEW.source_id, EXTRACT(epoch FROM NEW.timestamp)),
         0));
 
     SELECT processing_version INTO existing_ver
