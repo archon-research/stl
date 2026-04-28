@@ -13,20 +13,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// Selectors for the atoken-only extra multicall entries. The ERC20 ABI does not
-// include totalSupply, scaledBalanceOf, or scaledTotalSupply, so we pack calldata
-// directly from selector + argument.
-//
-//	balanceOf(address)        → comes from the ERC20 ABI (packed via abi.Pack).
-//	totalSupply()             → 0x18160ddd
-//	scaledBalanceOf(address)  → 0x1da24f3e
-//	scaledTotalSupply()       → 0xb1bf962d
-var (
-	totalSupplySelector       = []byte{0x18, 0x16, 0x0d, 0xdd}
-	scaledBalanceOfSelector   = []byte{0x1d, 0xa2, 0x4f, 0x3e}
-	scaledTotalSupplySelector = []byte{0xb1, 0xbf, 0x96, 0x2d}
-)
-
 // BalanceOfSource calls balanceOf(proxy) on the contract. For entries whose
 // TokenType is "atoken" it additionally calls scaledBalanceOf(proxy),
 // totalSupply(), and scaledTotalSupply() in the same multicall, and surfaces
@@ -34,15 +20,17 @@ var (
 type BalanceOfSource struct {
 	multicaller    outbound.Multicaller
 	erc20ABI       *abi.ABI
+	atokenReadABI  *abi.ABI
 	logger         *slog.Logger
 	supportedTypes map[string]bool
 }
 
-func NewBalanceOfSource(multicaller outbound.Multicaller, erc20ABI *abi.ABI, logger *slog.Logger) *BalanceOfSource {
+func NewBalanceOfSource(multicaller outbound.Multicaller, erc20ABI *abi.ABI, atokenReadABI *abi.ABI, logger *slog.Logger) *BalanceOfSource {
 	return &BalanceOfSource{
-		multicaller: multicaller,
-		erc20ABI:    erc20ABI,
-		logger:      logger.With("source", "balanceof"),
+		multicaller:   multicaller,
+		erc20ABI:      erc20ABI,
+		atokenReadABI: atokenReadABI,
+		logger:        logger.With("source", "balanceof"),
 		supportedTypes: map[string]bool{
 			"erc20":      true,
 			"atoken":     true,
@@ -140,10 +128,14 @@ func (s *BalanceOfSource) FetchBalances(ctx context.Context, entries []*TokenEnt
 			result.Balances[c.entry.Key()] = &PositionBalance{Balance: v}
 		case kindScaledBalanceOf:
 			if ok {
-				if v := unpackRawUint256(data); v != nil {
+				if v := unpackUint256(s.atokenReadABI, "scaledBalanceOf", data); v != nil {
 					if bal := result.Balances[c.entry.Key()]; bal != nil {
 						bal.ScaledBalance = v
 					}
+				} else {
+					s.logger.Warn("scaledBalanceOf decode failed",
+						"contract", c.entry.ContractAddress.Hex(),
+						"wallet", c.entry.WalletAddress.Hex())
 				}
 			} else {
 				s.logger.Warn("scaledBalanceOf failed",
@@ -157,9 +149,11 @@ func (s *BalanceOfSource) FetchBalances(ctx context.Context, entries []*TokenEnt
 				supplyAcc[c.contract] = p
 			}
 			if ok {
-				if v := unpackRawUint256(data); v != nil {
+				if v := unpackUint256(s.atokenReadABI, "totalSupply", data); v != nil {
 					p.totalSupply = v
 					p.totalSupplyOK = true
+				} else {
+					s.logger.Warn("totalSupply decode failed", "contract", c.contract.Hex())
 				}
 			} else {
 				s.logger.Warn("totalSupply failed", "contract", c.contract.Hex())
@@ -171,8 +165,10 @@ func (s *BalanceOfSource) FetchBalances(ctx context.Context, entries []*TokenEnt
 				supplyAcc[c.contract] = p
 			}
 			if ok {
-				if v := unpackRawUint256(data); v != nil {
+				if v := unpackUint256(s.atokenReadABI, "scaledTotalSupply", data); v != nil {
 					p.scaledTotalSupply = v
+				} else {
+					s.logger.Warn("scaledTotalSupply decode failed", "contract", c.contract.Hex())
 				}
 			} else {
 				s.logger.Warn("scaledTotalSupply failed", "contract", c.contract.Hex())
@@ -218,8 +214,11 @@ func (s *BalanceOfSource) buildCalls(entries []*TokenEntry) ([]outbound.Call, []
 		contexts = append(contexts, callContext{kind: kindBalanceOf, entry: e})
 
 		if e.TokenType == "atoken" {
-			sbData := append([]byte{}, scaledBalanceOfSelector...)
-			sbData = append(sbData, common.LeftPadBytes(e.WalletAddress.Bytes(), 32)...)
+			sbData, err := s.atokenReadABI.Pack("scaledBalanceOf", e.WalletAddress)
+			if err != nil {
+				s.logger.Warn("pack scaledBalanceOf failed", "contract", e.ContractAddress.Hex(), "error", err)
+				continue
+			}
 			calls = append(calls, outbound.Call{Target: e.ContractAddress, AllowFailure: true, CallData: sbData})
 			contexts = append(contexts, callContext{kind: kindScaledBalanceOf, entry: e})
 		}
@@ -236,10 +235,20 @@ func (s *BalanceOfSource) buildCalls(entries []*TokenEntry) ([]outbound.Call, []
 		}
 		seen[e.ContractAddress] = true
 
-		calls = append(calls, outbound.Call{Target: e.ContractAddress, AllowFailure: true, CallData: append([]byte{}, totalSupplySelector...)})
+		totalSupplyData, err := s.atokenReadABI.Pack("totalSupply")
+		if err != nil {
+			s.logger.Warn("pack totalSupply failed", "contract", e.ContractAddress.Hex(), "error", err)
+			continue
+		}
+		calls = append(calls, outbound.Call{Target: e.ContractAddress, AllowFailure: true, CallData: totalSupplyData})
 		contexts = append(contexts, callContext{kind: kindTotalSupply, contract: e.ContractAddress})
 
-		calls = append(calls, outbound.Call{Target: e.ContractAddress, AllowFailure: true, CallData: append([]byte{}, scaledTotalSupplySelector...)})
+		scaledTotalSupplyData, err := s.atokenReadABI.Pack("scaledTotalSupply")
+		if err != nil {
+			s.logger.Warn("pack scaledTotalSupply failed", "contract", e.ContractAddress.Hex(), "error", err)
+			continue
+		}
+		calls = append(calls, outbound.Call{Target: e.ContractAddress, AllowFailure: true, CallData: scaledTotalSupplyData})
 		contexts = append(contexts, callContext{kind: kindScaledTotalSupply, contract: e.ContractAddress})
 	}
 
@@ -257,13 +266,4 @@ func unpackUint256(parsed *abi.ABI, method string, data []byte) *big.Int {
 		return nil
 	}
 	return v
-}
-
-// unpackRawUint256 decodes a 32-byte uint256 from raw calldata returns where
-// we don't have a matching ABI entry (totalSupply / scaledBalanceOf / scaledTotalSupply).
-func unpackRawUint256(data []byte) *big.Int {
-	if len(data) < 32 {
-		return nil
-	}
-	return new(big.Int).SetBytes(data[len(data)-32:])
 }

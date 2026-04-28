@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -15,13 +16,24 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-func TestBalanceOfSource_Supports(t *testing.T) {
+func mustGetBalanceOfABIs(t *testing.T) (erc20ABI, atokenReadABI *abi.ABI) {
+	t.Helper()
+
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
 		t.Fatalf("failed to load ERC20 ABI: %v", err)
 	}
+	atokenReadABI, err = abis.GetATokenReadABI()
+	if err != nil {
+		t.Fatalf("failed to load AToken read ABI: %v", err)
+	}
+	return erc20ABI, atokenReadABI
+}
 
-	src := NewBalanceOfSource(nil, erc20ABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
+func TestBalanceOfSource_Supports(t *testing.T) {
+	erc20ABI, atokenReadABI := mustGetBalanceOfABIs(t)
+
+	src := NewBalanceOfSource(nil, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	tests := []struct {
 		tokenType string
@@ -52,10 +64,7 @@ func TestBalanceOfSource_Supports(t *testing.T) {
 }
 
 func TestBalanceOfSource_FetchBalances(t *testing.T) {
-	erc20ABI, err := abis.GetERC20ABI()
-	if err != nil {
-		t.Fatalf("failed to load ERC20 ABI: %v", err)
-	}
+	erc20ABI, atokenReadABI := mustGetBalanceOfABIs(t)
 
 	contract := common.HexToAddress("0xe7df13b8e3d6740fe17cbe928c7334243d86c92f") // spUSDT
 	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")   // spark proxy
@@ -78,7 +87,7 @@ func TestBalanceOfSource_FetchBalances(t *testing.T) {
 		return []outbound.Result{{Success: true, ReturnData: returnData}}, nil
 	}
 
-	src := NewBalanceOfSource(mc, erc20ABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	entries := []*TokenEntry{
 		{
@@ -110,12 +119,9 @@ func TestBalanceOfSource_FetchBalances(t *testing.T) {
 }
 
 func TestBalanceOfSource_FetchBalances_Empty(t *testing.T) {
-	erc20ABI, err := abis.GetERC20ABI()
-	if err != nil {
-		t.Fatalf("failed to load ERC20 ABI: %v", err)
-	}
+	erc20ABI, atokenReadABI := mustGetBalanceOfABIs(t)
 
-	src := NewBalanceOfSource(nil, erc20ABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	src := NewBalanceOfSource(nil, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	result, err := src.FetchBalances(context.Background(), nil, 0)
 	if err != nil {
@@ -127,17 +133,14 @@ func TestBalanceOfSource_FetchBalances_Empty(t *testing.T) {
 }
 
 func TestBalanceOfSource_FetchBalances_FailedCallReturnsError(t *testing.T) {
-	erc20ABI, err := abis.GetERC20ABI()
-	if err != nil {
-		t.Fatalf("failed to load ERC20 ABI: %v", err)
-	}
+	erc20ABI, atokenReadABI := mustGetBalanceOfABIs(t)
 
 	mc := testutil.NewMockMulticaller()
 	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 		return []outbound.Result{{Success: false, ReturnData: nil}}, nil
 	}
 
-	src := NewBalanceOfSource(mc, erc20ABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	entries := []*TokenEntry{
 		{
@@ -166,10 +169,7 @@ func padUint256(v *big.Int) []byte {
 // totalSupply + scaledTotalSupply pair per unique contract, and that the result
 // populates both the ScaledBalance and the Supplies map.
 func TestBalanceOfSource_FetchBalances_Atoken(t *testing.T) {
-	erc20ABI, err := abis.GetERC20ABI()
-	if err != nil {
-		t.Fatalf("failed to load ERC20 ABI: %v", err)
-	}
+	erc20ABI, atokenReadABI := mustGetBalanceOfABIs(t)
 
 	atoken := common.HexToAddress("0xe7df13b8e3d6740fe17cbe928c7334243d86c92f")
 	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
@@ -202,11 +202,11 @@ func TestBalanceOfSource_FetchBalances_Atoken(t *testing.T) {
 					t.Fatalf("pack balanceOf: %v", err)
 				}
 				results[i] = outbound.Result{Success: true, ReturnData: rd}
-			case bytes.Equal(sel, scaledBalanceOfSelector):
+			case bytes.Equal(sel, atokenReadABI.Methods["scaledBalanceOf"].ID):
 				results[i] = outbound.Result{Success: true, ReturnData: padUint256(scaledBal)}
-			case bytes.Equal(sel, totalSupplySelector):
+			case bytes.Equal(sel, atokenReadABI.Methods["totalSupply"].ID):
 				results[i] = outbound.Result{Success: true, ReturnData: padUint256(totalSupply)}
-			case bytes.Equal(sel, scaledTotalSupplySelector):
+			case bytes.Equal(sel, atokenReadABI.Methods["scaledTotalSupply"].ID):
 				results[i] = outbound.Result{Success: true, ReturnData: padUint256(scaledTotalSupply)}
 			default:
 				t.Fatalf("unexpected selector %x", sel)
@@ -215,7 +215,7 @@ func TestBalanceOfSource_FetchBalances_Atoken(t *testing.T) {
 		return results, nil
 	}
 
-	src := NewBalanceOfSource(mc, erc20ABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	entries := []*TokenEntry{{
 		ContractAddress: atoken,
@@ -259,10 +259,7 @@ func TestBalanceOfSource_FetchBalances_Atoken(t *testing.T) {
 // wallets hold the same atoken contract, exactly one (totalSupply +
 // scaledTotalSupply) pair is added to the multicall.
 func TestBalanceOfSource_FetchBalances_AtokenSupplyDedup(t *testing.T) {
-	erc20ABI, err := abis.GetERC20ABI()
-	if err != nil {
-		t.Fatalf("failed to load ERC20 ABI: %v", err)
-	}
+	erc20ABI, atokenReadABI := mustGetBalanceOfABIs(t)
 
 	atoken := common.HexToAddress("0xe7df13b8e3d6740fe17cbe928c7334243d86c92f")
 	wallet1 := common.HexToAddress("0x1111111111111111111111111111111111111111")
@@ -278,10 +275,10 @@ func TestBalanceOfSource_FetchBalances_AtokenSupplyDedup(t *testing.T) {
 		scaledTotalSupplyCount := 0
 		for _, c := range calls {
 			sel := c.CallData[:4]
-			if bytes.Equal(sel, totalSupplySelector) {
+			if bytes.Equal(sel, atokenReadABI.Methods["totalSupply"].ID) {
 				totalSupplyCount++
 			}
-			if bytes.Equal(sel, scaledTotalSupplySelector) {
+			if bytes.Equal(sel, atokenReadABI.Methods["scaledTotalSupply"].ID) {
 				scaledTotalSupplyCount++
 			}
 		}
@@ -305,7 +302,7 @@ func TestBalanceOfSource_FetchBalances_AtokenSupplyDedup(t *testing.T) {
 		return results, nil
 	}
 
-	src := NewBalanceOfSource(mc, erc20ABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	entries := []*TokenEntry{
 		{ContractAddress: atoken, WalletAddress: wallet1, TokenType: "atoken"},
 		{ContractAddress: atoken, WalletAddress: wallet2, TokenType: "atoken"},
@@ -324,10 +321,7 @@ func TestBalanceOfSource_FetchBalances_AtokenSupplyDedup(t *testing.T) {
 // — but the balance row is still returned so that allocation_position stays
 // consistent.
 func TestBalanceOfSource_TotalSupplyFailureDropsSupply(t *testing.T) {
-	erc20ABI, err := abis.GetERC20ABI()
-	if err != nil {
-		t.Fatalf("failed to load ERC20 ABI: %v", err)
-	}
+	erc20ABI, atokenReadABI := mustGetBalanceOfABIs(t)
 
 	atoken := common.HexToAddress("0xaaaa")
 	wallet := common.HexToAddress("0xbbbb")
@@ -341,7 +335,7 @@ func TestBalanceOfSource_TotalSupplyFailureDropsSupply(t *testing.T) {
 			case bytes.Equal(sel, erc20ABI.Methods["balanceOf"].ID):
 				rd, _ := erc20ABI.Methods["balanceOf"].Outputs.Pack(big.NewInt(100))
 				results[i] = outbound.Result{Success: true, ReturnData: rd}
-			case bytes.Equal(sel, totalSupplySelector):
+			case bytes.Equal(sel, atokenReadABI.Methods["totalSupply"].ID):
 				// Simulate failure for totalSupply only.
 				results[i] = outbound.Result{Success: false}
 			default:
@@ -351,7 +345,7 @@ func TestBalanceOfSource_TotalSupplyFailureDropsSupply(t *testing.T) {
 		return results, nil
 	}
 
-	src := NewBalanceOfSource(mc, erc20ABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	entries := []*TokenEntry{{ContractAddress: atoken, WalletAddress: wallet, TokenType: "atoken"}}
 	got, err := src.FetchBalances(context.Background(), entries, 100)
 	if err != nil {
@@ -368,10 +362,7 @@ func TestBalanceOfSource_TotalSupplyFailureDropsSupply(t *testing.T) {
 // TestBalanceOfSource_ScaledTotalSupplyFailureKeepsRowNil asserts that when only
 // scaledTotalSupply fails, a supply row is still emitted with ScaledTotalSupply=nil.
 func TestBalanceOfSource_ScaledTotalSupplyFailureKeepsRowNil(t *testing.T) {
-	erc20ABI, err := abis.GetERC20ABI()
-	if err != nil {
-		t.Fatalf("failed to load ERC20 ABI: %v", err)
-	}
+	erc20ABI, atokenReadABI := mustGetBalanceOfABIs(t)
 
 	atoken := common.HexToAddress("0xaaaa")
 	wallet := common.HexToAddress("0xbbbb")
@@ -385,7 +376,7 @@ func TestBalanceOfSource_ScaledTotalSupplyFailureKeepsRowNil(t *testing.T) {
 			case bytes.Equal(sel, erc20ABI.Methods["balanceOf"].ID):
 				rd, _ := erc20ABI.Methods["balanceOf"].Outputs.Pack(big.NewInt(100))
 				results[i] = outbound.Result{Success: true, ReturnData: rd}
-			case bytes.Equal(sel, scaledTotalSupplySelector):
+			case bytes.Equal(sel, atokenReadABI.Methods["scaledTotalSupply"].ID):
 				results[i] = outbound.Result{Success: false}
 			default:
 				results[i] = outbound.Result{Success: true, ReturnData: padUint256(big.NewInt(1234))}
@@ -394,7 +385,7 @@ func TestBalanceOfSource_ScaledTotalSupplyFailureKeepsRowNil(t *testing.T) {
 		return results, nil
 	}
 
-	src := NewBalanceOfSource(mc, erc20ABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	entries := []*TokenEntry{{ContractAddress: atoken, WalletAddress: wallet, TokenType: "atoken"}}
 	got, err := src.FetchBalances(context.Background(), entries, 100)
 	if err != nil {
@@ -415,10 +406,7 @@ func TestBalanceOfSource_ScaledTotalSupplyFailureKeepsRowNil(t *testing.T) {
 // TestBalanceOfSource_NoExtraCallsForNonAtoken verifies that erc20 entries do
 // NOT pull scaledBalanceOf or the totalSupply pair.
 func TestBalanceOfSource_NoExtraCallsForNonAtoken(t *testing.T) {
-	erc20ABI, err := abis.GetERC20ABI()
-	if err != nil {
-		t.Fatalf("failed to load ERC20 ABI: %v", err)
-	}
+	erc20ABI, atokenReadABI := mustGetBalanceOfABIs(t)
 
 	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 	wallet := common.HexToAddress("0x1111")
@@ -427,13 +415,13 @@ func TestBalanceOfSource_NoExtraCallsForNonAtoken(t *testing.T) {
 	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 		for _, c := range calls {
 			sel := c.CallData[:4]
-			if bytes.Equal(sel, scaledBalanceOfSelector) {
+			if bytes.Equal(sel, atokenReadABI.Methods["scaledBalanceOf"].ID) {
 				t.Error("scaledBalanceOf should not be called for non-atoken")
 			}
-			if bytes.Equal(sel, totalSupplySelector) {
+			if bytes.Equal(sel, atokenReadABI.Methods["totalSupply"].ID) {
 				t.Error("totalSupply should not be called for non-atoken")
 			}
-			if bytes.Equal(sel, scaledTotalSupplySelector) {
+			if bytes.Equal(sel, atokenReadABI.Methods["scaledTotalSupply"].ID) {
 				t.Error("scaledTotalSupply should not be called for non-atoken")
 			}
 		}
@@ -441,7 +429,7 @@ func TestBalanceOfSource_NoExtraCallsForNonAtoken(t *testing.T) {
 		return []outbound.Result{{Success: true, ReturnData: rd}}, nil
 	}
 
-	src := NewBalanceOfSource(mc, erc20ABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	entries := []*TokenEntry{{ContractAddress: usdc, WalletAddress: wallet, TokenType: "erc20"}}
 	if _, err := src.FetchBalances(context.Background(), entries, 100); err != nil {
 		t.Fatalf("FetchBalances: %v", err)

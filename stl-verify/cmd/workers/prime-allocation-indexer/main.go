@@ -241,6 +241,10 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("erc20 abi: %w", err)
 	}
+	atokenReadABI, err := abis.GetATokenReadABI()
+	if err != nil {
+		return fmt.Errorf("atoken read abi: %w", err)
+	}
 
 	// Build source registry
 	registry := at.NewSourceRegistry(logger)
@@ -249,7 +253,7 @@ func run(ctx context.Context, args []string) error {
 		registry.Register(s)
 	}
 
-	registry.Register(at.NewBalanceOfSource(mc, erc20ABI, logger))
+	registry.Register(at.NewBalanceOfSource(mc, erc20ABI, atokenReadABI, logger))
 
 	erc4626, err := at.NewERC4626Source(mc, logger)
 	if err != nil {
