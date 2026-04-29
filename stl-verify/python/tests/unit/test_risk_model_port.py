@@ -93,7 +93,7 @@ class TestRrcResult:
 
     def test_common_fields(self) -> None:
         assert _SURAF_RESULT.asset_id == 1
-        assert _SURAF_RESULT.prime_id == _PRIME_A
+        assert _SURAF_RESULT.prime_id == str(_PRIME_A)
         assert _SURAF_RESULT.rrc_usd == Decimal("337.00")
 
     def test_suraf_details_fields(self) -> None:

@@ -49,7 +49,8 @@ class CryptoLendingRiskService:
     # ------------------------------------------------------------------
 
     def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool:  # noqa: ARG002
-        """Gap-sweep applies universally; protocol-level filtering is in the factory."""
+        # TODO(VEC-178): Move protocol-level filtering from RiskServiceFactory
+        # into this method so the registry can stay model-agnostic.
         return True
 
     async def compute(
@@ -84,7 +85,7 @@ class CryptoLendingRiskService:
         return gap_pct
 
     # ------------------------------------------------------------------
-    # Legacy public API (used by old endpoints. Will be removed in VEC-183 )
+    # Legacy public API — used by old endpoints, will be removed in VEC-183.
     # ------------------------------------------------------------------
 
     async def get_risk_breakdown(self, backed_asset_id: int) -> RiskBreakdown:

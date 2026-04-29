@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from app.domain.entities.allocation import EthAddress
 
@@ -52,13 +52,24 @@ class RrcResult(BaseModel):
     ``GapSweepDetails``.
     """
 
-    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    model_config = ConfigDict(frozen=True)
 
     asset_id: int
-    prime_id: EthAddress
+    prime_id: str
     rrc_usd: Decimal
     model: ModelName
     details: RrcDetails
+
+    @field_validator("prime_id", mode="before")
+    @classmethod
+    def _coerce_prime_id(cls, v: object) -> str:
+        """Accept an EthAddress or a 0x-prefixed hex string."""
+        if isinstance(v, EthAddress):
+            return str(v)
+        if isinstance(v, str):
+            EthAddress(v)  # validate format; discard instance
+            return v
+        raise ValueError(f"expected EthAddress or hex string, got {type(v).__name__}")
 
     @model_validator(mode="after")
     def _check_model_details_pairing(self) -> "RrcResult":

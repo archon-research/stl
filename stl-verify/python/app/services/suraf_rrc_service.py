@@ -17,6 +17,8 @@ from app.risk_engine.suraf.result import SurafResult
 _HUNDRED = Decimal("100")
 
 
+# TODO(VEC-179): Replace with shared RrcResult from app.domain.entities.risk
+# when SurafRrcService is ported to the RiskModel protocol.
 class RrcResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 

@@ -283,7 +283,7 @@ class TestCompute:
 
         assert isinstance(result, RrcResult)
         assert result.asset_id == ASSET_ID
-        assert result.prime_id == DUMMY_PRIME
+        assert result.prime_id == str(DUMMY_PRIME)
         assert result.model == "gap_sweep"
         assert result.rrc_usd >= Decimal("0")
         assert isinstance(result.details, GapSweepDetails)
