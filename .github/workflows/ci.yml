@@ -83,7 +83,6 @@ jobs:
     name: Integration Tests
     needs:
       - detect-changes
-      - go-ci
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
