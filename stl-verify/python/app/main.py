@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
 from app.adapters.postgres.receipt_token_repository import resolve_receipt_token_mapping
 from app.api.v1 import allocations, risk, status
 from app.config import Settings, get_settings
@@ -119,7 +120,8 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 await conn.execute(text("SELECT 1"))
 
             asset_to_rating = await resolve_receipt_token_mapping(raw_mapping, engine)
-            suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings)
+            allocation_repo = PostgresAllocationRepository(engine)
+            suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings, allocation_repo)
 
             app.state.engine = engine
             app.state.suraf_ratings = suraf_ratings

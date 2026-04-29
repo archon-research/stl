@@ -1,4 +1,3 @@
-from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import Annotated
 
@@ -43,10 +42,8 @@ class AllocationResponse(BaseModel):
     balance: Decimal
 
 
-async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AsyncIterator[AllocationService]:
-    async with engine.connect() as conn:
-        repo = PostgresAllocationRepository(conn)
-        yield AllocationService(repo)
+async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
+    return AllocationService(PostgresAllocationRepository(engine))
 
 
 @router.get("/primes", response_model=list[PrimeResponse])

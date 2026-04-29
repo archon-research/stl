@@ -163,7 +163,7 @@ async def post_rrc_scenario(
     if body.usd_exposure <= _ZERO:
         raise HTTPException(status_code=422, detail="usd_exposure must be positive")
 
-    result = service.compute(body.receipt_token_id, body.usd_exposure)
+    result = service.compute_legacy(body.receipt_token_id, body.usd_exposure)
     if result is None:
         raise HTTPException(status_code=404, detail=f"no rating mapped for receipt_token_id: {body.receipt_token_id}")
     return ScenarioRrcResponse(**result.model_dump())
