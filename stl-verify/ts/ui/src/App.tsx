@@ -1,10 +1,16 @@
 import { SidebarLayout } from '@archon-research/design-system';
+import type { SortingState } from '@tanstack/react-table';
 import { useEffect, useMemo, useRef, useState } from 'react';
+
+import { css } from '#styled-system/css';
 
 import { AllocationGrid } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
+import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
+import { useUrlSyncedTableState } from './data-table/hooks';
+import { buildRowSearchString, matchesSearchQuery } from './data-table/utils';
 import {
   getAllocations,
   getLocalChains,
@@ -15,9 +21,13 @@ import {
   buildChainLabelLookup,
   buildNetworkOptions,
   buildProtocolOptions,
+  formatTokenAmount,
+  getChainLabel,
   getAllocationKey,
+  getProtocolLabel,
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
+import { logging } from './lib/logging';
 import { PARAMS, useUrlParam } from './lib/url-params';
 import type { Allocation, Prime } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
@@ -38,11 +48,17 @@ function App() {
   const [selectedAllocationKey, setSelectedAllocationKey] = useState<
     string | null
   >(null);
+  const [isDrawerOpenParam, setIsDrawerOpenParam] = useUrlParam(
+    PARAMS.drawerOpen,
+  );
   const [selectedPrimeId, setSelectedPrimeId] = useUrlParam(PARAMS.prime);
   const [selectedNetwork, setSelectedNetwork] = useUrlParam(PARAMS.network);
   const [selectedProtocol, setSelectedProtocol] = useUrlParam(PARAMS.protocol);
+  const { globalFilter, setGlobalFilter, setSorting, sorting } =
+    useUrlSyncedTableState(PARAMS.sort, PARAMS.search);
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrimeId);
+  const isDrawerOpen = isDrawerOpenParam === '1';
 
   useEffect(() => {
     const controller = new AbortController();
@@ -60,6 +76,9 @@ function App() {
           return;
         }
 
+        logging.error('Failed to load local metadata (chains/protocols)', {
+          error,
+        });
         setLocalChains([]);
         setLocalProtocols([]);
       });
@@ -82,6 +101,7 @@ function App() {
           return;
         }
 
+        logging.error('Failed to load primes', { error });
         setPrimesErrorMessage(toErrorMessage(error));
       })
       .finally(() => {
@@ -121,10 +141,16 @@ function App() {
       setSelectedNetwork(null);
       setSelectedProtocol(null);
       setSelectedAllocationKey(null);
+      setIsDrawerOpenParam(null);
     }
 
     previousPrimeIdRef.current = selectedPrimeId;
-  }, [selectedPrimeId, setSelectedNetwork, setSelectedProtocol]);
+  }, [
+    selectedPrimeId,
+    setIsDrawerOpenParam,
+    setSelectedNetwork,
+    setSelectedProtocol,
+  ]);
 
   useEffect(() => {
     if (!selectedPrimeId) {
@@ -150,6 +176,10 @@ function App() {
           return;
         }
 
+        logging.error('Failed to load allocations', {
+          error,
+          primeId: selectedPrimeId,
+        });
         setAllocationsErrorMessage(toErrorMessage(error));
       })
       .finally(() => {
@@ -220,16 +250,42 @@ function App() {
         const matchesProtocol =
           selectedProtocol === null ||
           allocation.protocol_name === selectedProtocol;
+        const matchesGlobalFilter = matchesSearchQuery(
+          buildRowSearchString([
+            allocation.symbol,
+            allocation.underlying_symbol,
+            allocation.protocol_name,
+            getProtocolLabel(
+              allocation.protocol_name,
+              localProtocols,
+              allocation.chain_id,
+            ),
+            getChainLabel(allocation.chain_id, chainLabels),
+            allocation.receipt_token_address,
+            allocation.underlying_token_address,
+          ]),
+          globalFilter,
+        );
 
-        return matchesNetwork && matchesProtocol;
+        return matchesNetwork && matchesProtocol && matchesGlobalFilter;
       }),
-    [allocations, selectedNetwork, selectedProtocol],
+    [
+      allocations,
+      chainLabels,
+      globalFilter,
+      localProtocols,
+      selectedNetwork,
+      selectedProtocol,
+    ],
   );
 
   useEffect(() => {
     if (filteredAllocations.length === 0) {
       if (selectedAllocationKey !== null) {
         setSelectedAllocationKey(null);
+      }
+      if (isDrawerOpen) {
+        setIsDrawerOpenParam(null);
       }
       return;
     }
@@ -242,7 +298,38 @@ function App() {
     ) {
       setSelectedAllocationKey(getAllocationKey(filteredAllocations[0]));
     }
-  }, [filteredAllocations, selectedAllocationKey]);
+  }, [
+    filteredAllocations,
+    isDrawerOpen,
+    selectedAllocationKey,
+    setIsDrawerOpenParam,
+  ]);
+
+  useEffect(() => {
+    if (!isDrawerOpen) {
+      return;
+    }
+
+    if (selectedAllocationKey === null && filteredAllocations.length > 0) {
+      return;
+    }
+
+    if (
+      isDrawerOpen &&
+      (!selectedAllocationKey ||
+        !filteredAllocations.some(
+          (allocation) =>
+            getAllocationKey(allocation) === selectedAllocationKey,
+        ))
+    ) {
+      setIsDrawerOpenParam(null);
+    }
+  }, [
+    filteredAllocations,
+    isDrawerOpen,
+    selectedAllocationKey,
+    setIsDrawerOpenParam,
+  ]);
 
   const selectedAllocation = useMemo(
     () =>
@@ -253,52 +340,87 @@ function App() {
   );
 
   return (
-    <SidebarLayout
-      sidebar={
-        <PrimeSidebar
-          primes={primes}
-          selectedPrimeId={selectedPrimeId}
-          isLoading={isPrimesLoading}
-          errorMessage={primesErrorMessage}
-          onSelectPrime={setSelectedPrimeId}
+    <div
+      className={css({
+        position: 'relative',
+        '& [data-sidebar-layout] [role="separator"]': {
+          right: '0 !important',
+        },
+        '& [data-sidebar-layout] [role="separator"] > [aria-hidden="true"]': {
+          opacity: 0,
+        },
+      })}
+    >
+      <div data-sidebar-layout>
+        <SidebarLayout
+          sidebar={
+            <PrimeSidebar
+              primes={primes}
+              selectedPrimeId={selectedPrimeId}
+              isLoading={isPrimesLoading}
+              errorMessage={primesErrorMessage}
+              onSelectPrime={setSelectedPrimeId}
+            />
+          }
+          topBar={
+            <TopBar
+              hasSelectedPrime={selectedPrime !== null}
+              networkOptions={networkOptions}
+              onNetworkChange={setSelectedNetwork}
+              onProtocolChange={setSelectedProtocol}
+              protocolOptions={protocolOptions}
+              selectedNetwork={selectedNetwork}
+              selectedProtocol={selectedProtocol}
+            />
+          }
+          main={
+            <AllocationGrid
+              allocations={allocations}
+              chainLabels={chainLabels}
+              errorMessage={allocationsErrorMessage}
+              filteredAllocations={filteredAllocations}
+              isLoading={isAllocationsLoading}
+              localProtocols={localProtocols}
+              onSelectAllocation={(allocationKey) => {
+                setSelectedAllocationKey(allocationKey);
+                setIsDrawerOpenParam('1');
+              }}
+              onSearchChange={setGlobalFilter}
+              onSortingChange={setSorting}
+              searchValue={globalFilter}
+              selectedAllocationKey={selectedAllocationKey}
+              selectedPrime={selectedPrime}
+              sorting={sorting as SortingState}
+            />
+          }
         />
-      }
-      topBar={
-        <TopBar
-          hasSelectedPrime={selectedPrime !== null}
-          networkOptions={networkOptions}
-          onNetworkChange={setSelectedNetwork}
-          onProtocolChange={setSelectedProtocol}
-          protocolOptions={protocolOptions}
-          selectedNetwork={selectedNetwork}
-          selectedProtocol={selectedProtocol}
-        />
-      }
-      main={
-        <AllocationGrid
-          allocations={allocations}
-          chainLabels={chainLabels}
-          errorMessage={allocationsErrorMessage}
-          filteredAllocations={filteredAllocations}
-          isLoading={isAllocationsLoading}
-          localProtocols={localProtocols}
-          onSelectAllocation={setSelectedAllocationKey}
-          selectedAllocationKey={selectedAllocationKey}
-          selectedPrime={selectedPrime}
-        />
-      }
-      bottomPanel={
+      </div>
+
+      <RiskDetailDrawer
+        detail={
+          selectedAllocation
+            ? `${formatTokenAmount(selectedAllocation.balance)} ${selectedAllocation.symbol}`
+            : undefined
+        }
+        isOpen={isDrawerOpen}
+        onClose={() => setIsDrawerOpenParam(null)}
+        subtitle={
+          selectedAllocation
+            ? `${getProtocolLabel(selectedAllocation.protocol_name, localProtocols, selectedAllocation.chain_id)} · ${getChainLabel(selectedAllocation.chain_id, chainLabels)}`
+            : undefined
+        }
+        title={selectedAllocation ? selectedAllocation.symbol : 'Risk details'}
+      >
         <BottomPanel
           allocations={allocations}
-          chainLabels={chainLabels}
           errorMessage={allocationsErrorMessage}
           isLoading={isAllocationsLoading}
           localProtocols={localProtocols}
           selectedAllocation={selectedAllocation}
           selectedPrime={selectedPrime}
         />
-      }
-    />
+      </RiskDetailDrawer>
+    </div>
   );
 }
 

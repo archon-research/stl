@@ -12,8 +12,7 @@ COPY ts/ui/package.json ui/package.json
 # --ignore-scripts skips lifecycle hooks (notably the `prepare` → `panda codegen`
 # in @stl-verify/ui, which needs panda.config.ts that isn't copied yet).
 # `npm run build` below runs `prebuild` → codegen once the source is present.
-RUN --mount=type=secret,id=uikit_token,env=UIKIT_GH_PACKAGES_READ_TOKEN \
-    npm ci --ignore-scripts
+RUN npm ci --ignore-scripts
 
 COPY ts/ui ui/
 
