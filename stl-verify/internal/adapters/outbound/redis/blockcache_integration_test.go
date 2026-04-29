@@ -30,11 +30,17 @@ func setupRedis(t *testing.T, ttl time.Duration) (*BlockCache, func()) {
 	}
 
 	ctx := context.Background()
+	var pingErr error
 	for i := 0; i < 30; i++ {
-		if err := cache.Ping(ctx); err == nil {
+		pingErr = cache.Ping(ctx)
+		if pingErr == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+	if pingErr != nil {
+		cache.Close()
+		t.Fatalf("redis not ready after retries: %v", pingErr)
 	}
 
 	cleanup := func() {
