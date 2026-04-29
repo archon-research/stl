@@ -91,17 +91,6 @@ func (f *fakeSQSConsumer) deleteCount() int {
 	return len(f.deleted)
 }
 
-// fakeRPCErr implements go-ethereum's rpc.Error interface
-// (Error() string; ErrorCode() int). Used to synthesize EVM reverts in
-// tests for per-prime error classification.
-type fakeRPCErr struct {
-	code int
-	msg  string
-}
-
-func (e *fakeRPCErr) Error() string  { return e.msg }
-func (e *fakeRPCErr) ErrorCode() int { return e.code }
-
 // fakeVatCaller is a controllable in-memory VatCaller for unit tests.
 type fakeVatCaller struct {
 	mu sync.Mutex
@@ -116,9 +105,10 @@ type fakeVatCaller struct {
 	art  *big.Int
 
 	// Per-vault error injection for ReadDebts.
-	debtErrByVault  map[common.Address]error
-	readDebtsErr    error // if set, ReadDebts returns this error (whole batch fails)
-	truncateResults int   // if > 0, return only this many results (to test short result handling)
+	debtErrByVault      map[common.Address]error
+	debtRevertedByVault map[common.Address]bool // if true, ReadDebts marks Reverted on this vault
+	readDebtsErr        error                   // if set, ReadDebts returns this error (whole batch fails)
+	truncateResults     int                     // if > 0, return only this many results (to test short result handling)
 }
 
 func newFakeVatCaller() *fakeVatCaller {
@@ -127,10 +117,11 @@ func newFakeVatCaller() *fakeVatCaller {
 	art1000 := new(big.Int).Mul(big.NewInt(1000), wadVal)
 
 	return &fakeVatCaller{
-		ilkByVault:     make(map[common.Address][32]byte),
-		debtErrByVault: make(map[common.Address]error),
-		rate:           rayVal,
-		art:            art1000,
+		ilkByVault:          make(map[common.Address][32]byte),
+		debtErrByVault:      make(map[common.Address]error),
+		debtRevertedByVault: make(map[common.Address]bool),
+		rate:                rayVal,
+		art:                 art1000,
 	}
 }
 
@@ -144,6 +135,16 @@ func (f *fakeVatCaller) setDebtError(vault common.Address, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.debtErrByVault[vault] = err
+}
+
+// setDebtReverted mirrors the production VatCaller's per-call Success:false
+// path: ReadDebts returns a DebtResult with Reverted=true and no Err. Use
+// this for "contract said no" simulation; use setDebtError for structural
+// failure simulation (ABI decode errors, etc.).
+func (f *fakeVatCaller) setDebtReverted(vault common.Address) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.debtRevertedByVault[vault] = true
 }
 
 func (f *fakeVatCaller) ResolveIlks(_ context.Context, vaults []common.Address, _ *big.Int) (map[common.Address][32]byte, error) {
@@ -180,6 +181,10 @@ func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []entity.DebtQuery,
 	for i, q := range queries {
 		results[i].VaultAddress = q.VaultAddress
 
+		if f.debtRevertedByVault[q.VaultAddress] {
+			results[i].Reverted = true
+			continue
+		}
 		if err, ok := f.debtErrByVault[q.VaultAddress]; ok {
 			results[i].Err = err
 			continue
@@ -505,10 +510,9 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 // TestSync_PartialRevert_OtherPrimesStillSaved verifies the
 // AllowFailure-compatible revert path: if one vault's debt call reverts
 // (the contract's "no data this block" answer), that prime is skipped
-// and the remaining primes are still snapshotted. The classification
-// added in this branch narrows the skip to revert-shaped errors only;
-// transport errors now propagate (covered by
-// TestSyncAll_ErrorsOnTransportFailure).
+// and the remaining primes are still snapshotted. Structural errors
+// from the producer propagate via DebtResult.Err and are covered by
+// TestSyncAll_ErrorsOnStructuralFailure.
 func TestSync_PartialRevert_OtherPrimesStillSaved(t *testing.T) {
 	spark := entity.Prime{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")}
 	grove := entity.Prime{ID: 2, Name: "grove", VaultAddress: common.HexToAddress("0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0")}
@@ -516,8 +520,8 @@ func TestSync_PartialRevert_OtherPrimesStillSaved(t *testing.T) {
 	caller := newFakeVatCaller()
 	caller.setIlk(spark.VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
 	caller.setIlk(grove.VaultAddress, ilkFrom("ALLOCATOR-GROVE-A"))
-	// Simulate a contract-level revert (geth code 3) for grove.
-	caller.setDebtError(grove.VaultAddress, &fakeRPCErr{code: 3, msg: "execution reverted"})
+	// Contract-level revert for grove — DebtResult.Reverted=true.
+	caller.setDebtReverted(grove.VaultAddress)
 
 	events := makeBlockEvents(testBlockNum, 3)
 	consumer := newFakeSQSConsumer(events)
@@ -554,21 +558,79 @@ found:
 	_ = svc.Stop()
 }
 
-// TestSyncAll_ErrorsOnTransportFailure codifies VEC-188 Finding 5: a
-// per-prime transport error (classified by rpcerr.IsEVMRevert as
-// non-revert) must propagate out of syncAll so the SQS message NACKs.
-// A plain non-rpc.Error (e.g. from a network timeout) is not a revert,
-// so no snapshots should be saved and the message should not be deleted.
-func TestSyncAll_ErrorsOnTransportFailure(t *testing.T) {
+// TestSyncAll_ContractRevertFromRealVatCaller_Skipped exercises the exact
+// shape of error the production VatCaller produces for a per-call
+// Success:false: a plain `errors.New("vat.ilks call failed")` with no
+// rpc.Error underneath. The classification at this layer must come from
+// DebtResult.Reverted, not from re-classifying r.Err — otherwise a
+// legitimate contract revert NACKs/DLQs the message. This test is the
+// regression guard for that bug (CodeRabbit P2 on PR #251).
+func TestSyncAll_ContractRevertFromRealVatCaller_Skipped(t *testing.T) {
 	spark := entity.Prime{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")}
 	grove := entity.Prime{ID: 2, Name: "grove", VaultAddress: common.HexToAddress("0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0")}
 
 	caller := newFakeVatCaller()
 	caller.setIlk(spark.VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
 	caller.setIlk(grove.VaultAddress, ilkFrom("ALLOCATOR-GROVE-A"))
-	// Plain non-rpc.Error — IsEVMRevert returns false, so syncAll must
-	// surface this as a top-level error, NACKing the SQS message.
-	caller.setDebtError(spark.VaultAddress, errors.New("429 Too Many Requests"))
+	// Mirror the real VatCaller: per-call revert is signalled via
+	// DebtResult.Reverted, not via r.Err carrying an rpc.Error.
+	caller.setDebtReverted(grove.VaultAddress)
+
+	events := makeBlockEvents(testBlockNum, 3)
+	consumer := newFakeSQSConsumer(events)
+
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{spark, grove}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		snaps := repo.allSaved()
+		for _, s := range snaps {
+			if s.PrimeID == spark.ID {
+				goto savedSpark
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for spark snapshot — grove's revert should have been skipped, not NACKed")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+savedSpark:
+	// grove was reverted — must NOT have been saved
+	for _, s := range repo.allSaved() {
+		if s.PrimeID == grove.ID {
+			t.Errorf("grove had a contract revert; should not be saved")
+		}
+	}
+	cancel()
+	_ = svc.Stop()
+}
+
+// TestSyncAll_ErrorsOnStructuralFailure codifies that a non-revert error
+// from VatCaller (e.g. ABI decode failure, "missing multicall results")
+// must propagate out of syncAll so the SQS message NACKs and an operator
+// can investigate the structural problem.
+func TestSyncAll_ErrorsOnStructuralFailure(t *testing.T) {
+	spark := entity.Prime{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")}
+	grove := entity.Prime{ID: 2, Name: "grove", VaultAddress: common.HexToAddress("0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0")}
+
+	caller := newFakeVatCaller()
+	caller.setIlk(spark.VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+	caller.setIlk(grove.VaultAddress, ilkFrom("ALLOCATOR-GROVE-A"))
+	// Non-revert structural failure surfaced via DebtResult.Err — syncAll
+	// must propagate it as a top-level error, NACKing the SQS message.
+	caller.setDebtError(spark.VaultAddress, errors.New("unpack ilks: ABI mismatch"))
 
 	events := makeBlockEvents(testBlockNum, 1)
 	consumer := newFakeSQSConsumer(events)
@@ -608,10 +670,11 @@ func TestSyncAll_ErrorsOnTransportFailure(t *testing.T) {
 }
 
 // TestSyncAll_SkipsOnContractRevert verifies the revert path stays
-// AllowFailure-compatible: an EVM revert (code 3 "execution reverted")
-// is treated as the contract's definitive answer of "no debt this block"
-// — the prime is skipped and syncAll succeeds with the remaining
-// snapshots. The SQS message is deleted (ACK).
+// AllowFailure-compatible: a per-call Success:false in the underlying
+// multicall surfaces as DebtResult.Reverted=true and is treated as the
+// contract's definitive answer of "no debt this block" — the prime is
+// skipped and syncAll succeeds with the remaining snapshots. The SQS
+// message is deleted (ACK).
 func TestSyncAll_SkipsOnContractRevert(t *testing.T) {
 	spark := entity.Prime{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")}
 	grove := entity.Prime{ID: 2, Name: "grove", VaultAddress: common.HexToAddress("0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0")}
@@ -619,9 +682,9 @@ func TestSyncAll_SkipsOnContractRevert(t *testing.T) {
 	caller := newFakeVatCaller()
 	caller.setIlk(spark.VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
 	caller.setIlk(grove.VaultAddress, ilkFrom("ALLOCATOR-GROVE-A"))
-	// Contract-level revert (geth code 3) — IsEVMRevert returns true,
-	// so syncAll must log+skip and still save the healthy prime.
-	caller.setDebtError(grove.VaultAddress, &fakeRPCErr{code: 3, msg: "execution reverted"})
+	// Contract-level revert for grove — syncAll must log+skip and still
+	// save the healthy prime.
+	caller.setDebtReverted(grove.VaultAddress)
 
 	events := makeBlockEvents(testBlockNum, 1)
 	consumer := newFakeSQSConsumer(events)

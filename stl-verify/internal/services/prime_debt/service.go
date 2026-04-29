@@ -22,7 +22,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -273,27 +272,30 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 		}
 
 		r := results[i]
-		if r.Err != nil {
-			// Classify the per-prime error: reverts are the contract's
-			// "no data" signal and legitimately skip; transport errors
-			// are transient and must surface so the SQS message NACKs.
-			//
-			// Fail-fast asymmetry: returning on the FIRST transport error
-			// throws away results we already received for primes later in
-			// the slice — they'll be re-read on SQS retry. The wasted work
-			// scales linearly with the prime count; at small N the simpler
-			// return-on-first wins, but if this slice ever grows enough
-			// that re-reads become expensive, accumulate-then-return would
-			// be the next form.
-			if !rpcerr.IsEVMRevert(r.Err) {
-				return fmt.Errorf("prime %s: transport error reading debt: %w", prime.Name, r.Err)
-			}
+		// Reverted = the contract returned `Success: false` for at least
+		// one of its per-vault calls. Under AllowFailure: true that's a
+		// legitimate "no debt this block" signal — skip and continue.
+		if r.Reverted {
 			s.logger.Warn("vault debt call reverted (contract-level); skipping",
 				"prime", prime.Name,
 				"vault", prime.VaultAddress,
-				"error", r.Err,
 			)
 			continue
+		}
+		// Err = a non-revert structural failure from the producer (ABI
+		// decode, unexpected type, missing multicall result). Surface it
+		// as a hard error so the SQS message NACKs and an operator can
+		// investigate.
+		//
+		// Fail-fast asymmetry: returning on the FIRST hard error throws
+		// away results we already received for primes later in the slice
+		// — they'll be re-read on SQS retry. The wasted work scales
+		// linearly with the prime count; at small N the simpler
+		// return-on-first wins. If this slice ever grows enough that
+		// re-reads become expensive, accumulate-then-return is the next
+		// form.
+		if r.Err != nil {
+			return fmt.Errorf("prime %s: error reading debt: %w", prime.Name, r.Err)
 		}
 
 		debtWad := entity.ComputeDebtWad(r.Art, r.Rate)
