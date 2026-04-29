@@ -84,6 +84,8 @@ def load_asset_mapping(path: Path) -> list[tuple[int, bytes, str]]:
 
     try:
         raw = json.loads(path.read_text(), object_pairs_hook=_reject_duplicate_json_keys)
+    except MappingError as exc:
+        raise MappingError(f"{exc} ({path})") from exc
     except json.JSONDecodeError as exc:
         raise MappingError(f"asset mapping file is not valid JSON ({path}): {exc}") from exc
 

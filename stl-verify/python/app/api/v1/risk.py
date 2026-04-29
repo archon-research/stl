@@ -158,7 +158,7 @@ async def post_rrc_scenario(
     """Return SURAF RRC for a hypothetical ``(receipt_token_id, usd_exposure)`` pair.
 
     ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
-    for the asset. Pure scenario calculation — no position state.
+    for the receipt token. Pure scenario calculation — no position state.
     """
     if body.usd_exposure <= _ZERO:
         raise HTTPException(status_code=422, detail="usd_exposure must be positive")
