@@ -106,11 +106,15 @@ type retryTransport struct {
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var bodyBytes []byte
 	if req.Body != nil {
-		b, err := io.ReadAll(req.Body)
-		if err != nil {
-			return nil, fmt.Errorf("retryTransport: read request body: %w", err)
+		// Read into memory so we can replay on retry, then close
+		// unconditionally so the body isn't leaked even on read error. Surface
+		// either error (or both, joined) — the project's standard prohibits
+		// silently dropping a Close() return.
+		b, readErr := io.ReadAll(req.Body)
+		closeErr := req.Body.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return nil, fmt.Errorf("retryTransport: handle request body: %w", err)
 		}
-		_ = req.Body.Close()
 		bodyBytes = b
 	}
 
@@ -223,6 +227,12 @@ func DialEthereum(ctx context.Context, rawURL string, opts ...Option) (*ethclien
 		MaxBackoff:  10 * time.Second,
 	}
 	for _, opt := range opts {
+		if opt == nil {
+			// Defense against callers who construct opts dynamically and end
+			// up with a nil entry — invoking it would panic with a less
+			// informative stack than a typed-nil deref.
+			continue
+		}
 		opt(&cfg)
 	}
 	rpcClient, err := rpc.DialOptions(ctx, rawURL, rpc.WithHTTPClient(NewClient(cfg)))

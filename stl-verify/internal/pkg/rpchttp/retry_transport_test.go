@@ -285,6 +285,98 @@ func TestRetryTransport_RespectsContextCancellation(t *testing.T) {
 	}
 }
 
+// errCloseRC is an io.ReadCloser whose Close() returns the configured error.
+// Used to verify retryTransport surfaces request-body Close() errors instead
+// of silently dropping them.
+type errCloseRC struct {
+	*bytes.Reader
+	closeErr error
+	closed   bool
+}
+
+func (e *errCloseRC) Close() error {
+	e.closed = true
+	return e.closeErr
+}
+
+// errReadRC is an io.ReadCloser that errors on Read and tracks whether
+// Close was called. Used to verify retryTransport closes the request body
+// on the read-error path (no resource leak).
+type errReadRC struct {
+	closed bool
+}
+
+func (e *errReadRC) Read([]byte) (int, error) { return 0, errors.New("simulated read failure") }
+func (e *errReadRC) Close() error             { e.closed = true; return nil }
+
+// TestRetryTransport_SurfacesRequestBodyCloseError verifies that when the
+// request body's Close() returns an error after a successful Read, the
+// transport surfaces that error rather than dropping it. CodeRabbit
+// flagged this on PR #251 — the original `_ = req.Body.Close()` violated
+// the project's "never ignore errors" rule.
+func TestRetryTransport_SurfacesRequestBodyCloseError(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	body := &errCloseRC{
+		Reader:   bytes.NewReader([]byte(`{"jsonrpc":"2.0"}`)),
+		closeErr: errors.New("simulated close failure"),
+	}
+	req, err := http.NewRequest("POST", srv.URL, body)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	rt := &retryTransport{
+		base:        http.DefaultTransport,
+		maxRetries:  3,
+		baseBackoff: time.Millisecond,
+		maxBackoff:  5 * time.Millisecond,
+	}
+	_, err = rt.RoundTrip(req)
+	if err == nil {
+		t.Fatal("expected Close() error to be surfaced")
+	}
+	if !strings.Contains(err.Error(), "simulated close failure") {
+		t.Errorf("error %q should reference the underlying close error", err)
+	}
+	if !body.closed {
+		t.Error("body.Close() was never called")
+	}
+	if got := attempts.Load(); got != 0 {
+		t.Errorf("server should NOT be hit when body close fails; attempts = %d", got)
+	}
+}
+
+// TestRetryTransport_ClosesRequestBodyOnReadError verifies that an
+// io.ReadAll failure does not leak the request body — the transport must
+// close it even on the error path.
+func TestRetryTransport_ClosesRequestBodyOnReadError(t *testing.T) {
+	body := &errReadRC{}
+	req, err := http.NewRequest("POST", "http://127.0.0.1:1", body)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	rt := &retryTransport{
+		base:        http.DefaultTransport,
+		maxRetries:  3,
+		baseBackoff: time.Millisecond,
+		maxBackoff:  5 * time.Millisecond,
+	}
+	_, err = rt.RoundTrip(req)
+	if err == nil {
+		t.Fatal("expected read error to surface")
+	}
+	if !body.closed {
+		t.Error("body.Close() was not called on read-error path — resource leak")
+	}
+}
+
 // TestNewClient_ClampsMaxRetriesUpperBound verifies that an absurdly large
 // MaxRetries is clamped to a sane upper bound — defense-in-depth against a
 // future caller passing 1_000_000 by accident.
@@ -331,6 +423,33 @@ func TestDialEthereum_AppliesWithClientTimeout(t *testing.T) {
 	WithClientTimeout(7 * time.Second)(&cfg)
 	if cfg.Timeout != 7*time.Second {
 		t.Errorf("WithClientTimeout did not set Timeout; got %v", cfg.Timeout)
+	}
+}
+
+// TestDialEthereum_SkipsNilOptions verifies that a nil entry in the
+// variadic opts slice is tolerated rather than panicking. This is a
+// defensive guard for callers that construct opts dynamically.
+func TestDialEthereum_SkipsNilOptions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`))
+	}))
+	defer srv.Close()
+
+	// Pass a nil Option in the middle of a real one. Pre-fix this would
+	// panic on the nil call.
+	client, err := DialEthereum(context.Background(), srv.URL,
+		WithMaxRetries(0),
+		nil,
+		WithBaseBackoff(time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("DialEthereum: %v", err)
+	}
+	defer client.Close()
+
+	if _, err := client.BlockNumber(context.Background()); err != nil {
+		t.Errorf("BlockNumber: %v", err)
 	}
 }
 
