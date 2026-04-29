@@ -12,7 +12,7 @@ from app.adapters.postgres.allocation_share_repository import (
 )
 from app.api.deps import get_engine, get_suraf_rrc_service
 from app.config import Settings, get_settings
-from app.services.risk_calculation_service import RiskCalculationService
+from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.risk_service_factory import RiskServiceFactory
 from app.services.suraf_rrc_service import SurafRrcService
 
@@ -74,7 +74,7 @@ async def _resolve(
     receipt_token_id: int,
     engine: AsyncEngine = Depends(get_engine),
     settings: Settings = Depends(get_settings),
-) -> AsyncGenerator[tuple[RiskCalculationService, int], None]:
+) -> AsyncGenerator[tuple[CryptoLendingRiskService, int], None]:
     """Resolve receipt token into a service + backed_asset_id, or raise HTTP errors.
 
     Uses ``async with`` + ``yield`` so the DB connection is properly cleaned up.
@@ -99,7 +99,7 @@ async def _resolve(
 async def get_bad_debt(
     receipt_token_id: int,
     gap_pct: Decimal,
-    resolved: tuple[RiskCalculationService, int] = Depends(_resolve),
+    resolved: tuple[CryptoLendingRiskService, int] = Depends(_resolve),
 ) -> BadDebtResponse:
     """Estimate bad debt for a receipt token position at the given collateral price gap."""
     if not (_ZERO <= gap_pct <= _ONE):
@@ -122,7 +122,7 @@ async def get_bad_debt(
 @router.get("/risk/{receipt_token_id}/breakdown", response_model=RiskBreakdownResponse)
 async def get_risk_breakdown(
     receipt_token_id: int,
-    resolved: tuple[RiskCalculationService, int] = Depends(_resolve),
+    resolved: tuple[CryptoLendingRiskService, int] = Depends(_resolve),
 ) -> RiskBreakdownResponse:
     """Return the full risk-enriched collateral breakdown for a receipt token position."""
     service, asset_id = resolved

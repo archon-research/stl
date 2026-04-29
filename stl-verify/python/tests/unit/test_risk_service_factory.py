@@ -29,7 +29,7 @@ async def test_aave_like_creates_postgres_allocation_share() -> None:
         patch("app.services.risk_service_factory.ReceiptTokenRepository") as mock_rt_repo_cls,
         patch("app.services.risk_service_factory.AaveLikeBackedBreakdownRepository"),
         patch("app.services.risk_service_factory.AaveLikeLiquidationParamsRepository"),
-        patch("app.services.risk_service_factory.RiskCalculationService") as mock_svc_cls,
+        patch("app.services.risk_service_factory.CryptoLendingRiskService") as mock_svc_cls,
     ):
         mock_rt_repo = AsyncMock()
         mock_rt_repo.get.return_value = _make_receipt_token_info("SparkLend")
@@ -105,7 +105,7 @@ async def test_morpho_creates_fixed_share_of_one() -> None:
         patch("app.services.risk_service_factory.ReceiptTokenRepository") as mock_rt_repo_cls,
         patch("app.services.risk_service_factory.MorphoBackedBreakdownRepository") as mock_morpho_cls,
         patch("app.services.risk_service_factory.MorphoLiquidationParamsRepository"),
-        patch("app.services.risk_service_factory.RiskCalculationService") as mock_svc_cls,
+        patch("app.services.risk_service_factory.CryptoLendingRiskService") as mock_svc_cls,
     ):
         mock_rt_repo = AsyncMock()
         mock_rt_repo.get.return_value = _make_receipt_token_info("morpho_blue")
@@ -134,7 +134,7 @@ async def test_morpho_resolves_without_receipt_token_token_id() -> None:
         patch("app.services.risk_service_factory.ReceiptTokenRepository") as mock_rt_repo_cls,
         patch("app.services.risk_service_factory.MorphoBackedBreakdownRepository") as mock_morpho_cls,
         patch("app.services.risk_service_factory.MorphoLiquidationParamsRepository"),
-        patch("app.services.risk_service_factory.RiskCalculationService"),
+        patch("app.services.risk_service_factory.CryptoLendingRiskService"),
     ):
         info = _make_receipt_token_info("morpho_blue")
         info.receipt_token_token_id = None
