@@ -15,6 +15,12 @@ import (
 	"testing"
 	"time"
 
+	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
+	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -22,12 +28,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
-	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
-	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
-	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // =============================================================================
