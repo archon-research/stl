@@ -137,7 +137,9 @@ func (s *Service) processBlock(
 
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
 
-	// Process transfers if any matched
+	// Process transfers if any matched.
+	// VEC-188 invariant: a partial FetchAll failure here must propagate so
+	// SQS NACKs the message — see TestProcessBlock_PartialFetchFailure_*.
 	if len(transfers) > 0 {
 		affected := s.matchTransfers(transfers)
 		if len(affected) > 0 {
@@ -165,7 +167,10 @@ func (s *Service) processBlock(
 		}
 	}
 
-	// Periodic sweep
+	// Periodic sweep. VEC-188: a sweep failure must NOT reset the counter
+	// (so the next block retries the sweep) and must propagate so SQS
+	// redelivers — see TestProcessBlock_FailedSweepDoesNotResetCounter and
+	// TestProcessBlock_SweepFetchFailure_ReturnsError.
 	s.blocksSinceSweep++
 	if s.blocksSinceSweep >= s.config.SweepEveryNBlocks {
 		if err := s.sweep(ctx, event.BlockNumber, event.Version, blockTimestamp); err != nil {

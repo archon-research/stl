@@ -16,7 +16,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -28,6 +27,7 @@ import (
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/services/aavelike_position_tracker"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -199,7 +199,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating cache reader: %w", err)
 	}
 	// Ethereum
-	ethClient, err := ethclient.Dial(cfg.alchemyURL)
+	ethClient, err := rpchttp.DialEthereum(ctx, cfg.alchemyURL)
 	if err != nil {
 		return fmt.Errorf("connecting to Ethereum node: %w", err)
 	}

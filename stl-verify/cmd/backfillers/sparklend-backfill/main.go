@@ -7,12 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -23,6 +20,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/services/aavelike_position_tracker"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_backfill"
@@ -125,25 +123,10 @@ func run(args []string) error {
 		}
 	}()
 
-	// Create Ethereum client with connection pooling scaled to concurrency
-	httpClient := &http.Client{
-		Timeout: 120 * time.Second,
-		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			MaxIdleConns:          cfg.concurrency * 2,
-			MaxIdleConnsPerHost:   cfg.concurrency,
-			MaxConnsPerHost:       cfg.concurrency,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
-	}
-
-	rpcClient, err := rpc.DialOptions(ctx, cfg.rpcURL, rpc.WithHTTPClient(httpClient))
+	// Create Ethereum client with connection pooling scaled to concurrency.
+	// Retry 429/5xx/network errors via rpchttp so transient RPC failures
+	// don't mark blocks bad.
+	rpcClient, err := rpc.DialOptions(ctx, cfg.rpcURL, rpc.WithHTTPClient(rpchttp.NewBackfillerClient(cfg.concurrency)))
 	if err != nil {
 		return fmt.Errorf("connecting to RPC: %w", err)
 	}
