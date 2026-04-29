@@ -2,12 +2,18 @@
 
 Verifies ``create_app`` populates ``app.state.suraf_ratings`` and
 ``app.state.asset_to_rating`` when inputs are valid, and that it raises
-(before acquiring any resources) when any rating package, the mapping
-file, or the mapping-to-ratings references are invalid.
+when any rating package, the mapping file, or the mapping-to-ratings
+references are invalid.
+
+File-based checks (malformed JSON, missing file, unknown rating_id)
+are caught in ``create_app`` before the lifespan starts.  DB-dependent
+checks (unknown receipt token address) are caught in the lifespan when
+the mapping is resolved against the database.
 """
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from pathlib import Path
 
@@ -20,8 +26,13 @@ from app.main import create_app
 from app.risk_engine.mapping import MappingError
 from app.risk_engine.suraf.result import SurafResult
 from app.risk_engine.suraf.validate import SurafValidationError
+from tests.integration.conftest import composite_mapping_key, insert_receipt_token
 
 SAMPLE_PACKAGE = Path(__file__).resolve().parents[1] / "unit" / "risk_engine" / "suraf" / "testdata" / "sample_rating"
+
+# Deterministic test address — used for seeding and mapping.
+_TEST_ADDRESS = bytes.fromhex("Bcca60bB61934080951369a648Fb03DF4F96263C")
+_TEST_CHAIN_ID = 1
 
 
 def _settings(async_db_url: str, suraf_inputs_dir: Path, suraf_mappings_file: Path) -> Settings:
@@ -46,9 +57,12 @@ def _write_mapping(tmp_path: Path, content: str) -> Path:
     return path
 
 
-def test_startup_populates_suraf_ratings(async_db_url: str, tmp_path: Path) -> None:
+def test_startup_populates_suraf_ratings(async_db_url: str, db_url: str, tmp_path: Path) -> None:
+    receipt_token_id = asyncio.run(insert_receipt_token(db_url, _TEST_CHAIN_ID, _TEST_ADDRESS))
+
     inputs_dir = _build_inputs_dir(tmp_path)
-    mapping_file = _write_mapping(tmp_path, '{"aUSDC": "sample_rating"}')
+    key = composite_mapping_key(_TEST_CHAIN_ID, _TEST_ADDRESS)
+    mapping_file = _write_mapping(tmp_path, "{" + f'"{key}": "sample_rating"' + "}")
     app = create_app(_settings(async_db_url, inputs_dir, mapping_file))
 
     with TestClient(app) as client:
@@ -58,8 +72,7 @@ def test_startup_populates_suraf_ratings(async_db_url: str, tmp_path: Path) -> N
         assert set(ratings.keys()) == {"sample_rating"}
         assert isinstance(ratings["sample_rating"], SurafResult)
 
-        # Mapping keys are casefolded at load time for case-insensitive lookup.
-        assert app.state.asset_to_rating == {"ausdc": "sample_rating"}
+        assert app.state.asset_to_rating == {receipt_token_id: "sample_rating"}
 
 
 def test_startup_fails_on_invalid_package(async_db_url: str, tmp_path: Path) -> None:
@@ -88,8 +101,25 @@ def test_startup_fails_when_mapping_file_missing(async_db_url: str, tmp_path: Pa
 
 
 def test_startup_fails_when_mapping_references_unknown_rating(async_db_url: str, tmp_path: Path) -> None:
+    # _check_mapping_refs catches unknown rating_ids before the lifespan
+    # starts — no DB seed needed.
     inputs_dir = _build_inputs_dir(tmp_path)
-    mapping_file = _write_mapping(tmp_path, '{"aUSDC": "does_not_exist"}')
+    key = composite_mapping_key(_TEST_CHAIN_ID, _TEST_ADDRESS)
+    mapping_file = _write_mapping(tmp_path, "{" + f'"{key}": "does_not_exist"' + "}")
 
     with pytest.raises(MappingError, match="does_not_exist"):
         create_app(_settings(async_db_url, inputs_dir, mapping_file))
+
+
+def test_startup_fails_when_mapping_references_unknown_address(async_db_url: str, tmp_path: Path) -> None:
+    inputs_dir = _build_inputs_dir(tmp_path)
+    zero_addr = bytes(20)
+    key = composite_mapping_key(_TEST_CHAIN_ID, zero_addr)
+    mapping_file = _write_mapping(tmp_path, "{" + f'"{key}": "sample_rating"' + "}")
+
+    # DB resolution happens in the lifespan, so the error is raised when
+    # TestClient triggers lifespan startup.
+    app = create_app(_settings(async_db_url, inputs_dir, mapping_file))
+    with pytest.raises(MappingError, match="unknown receipt token"):
+        with TestClient(app):
+            pass
