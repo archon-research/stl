@@ -1,4 +1,4 @@
-import { SearchInput, SurfaceMessage } from '@archon-research/design-system';
+import { SearchInput } from '@archon-research/design-system';
 import {
   type ColumnDef,
   type SortingState,
@@ -8,7 +8,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { Address } from '../shared';
+import { Address, EmptyState, ErrorState } from '../shared';
 import { DataTable, useDataTable } from '../../data-table';
 import {
   type ChainLabelLookup,
@@ -290,16 +290,17 @@ export function AllocationGrid({
 
         <div className={css({ mt: '6' })}>
           {!selectedPrime && !isLoading ? (
-            <SurfaceMessage
+            <EmptyState
               title="Choose a prime to load positions"
-              body="The main grid activates once a prime is selected from the sidebar."
+              description="The main grid activates once a prime is selected from the sidebar."
             />
           ) : null}
 
           {selectedPrime && errorMessage ? (
-            <SurfaceMessage
+            <ErrorState
               title="Unable to load allocations"
-              body={errorMessage}
+              description="An error occurred while fetching allocation data."
+              errorMessage={errorMessage}
             />
           ) : null}
 
@@ -307,9 +308,9 @@ export function AllocationGrid({
           !errorMessage &&
           !isLoading &&
           allocations.length === 0 ? (
-            <SurfaceMessage
+            <EmptyState
               title="No allocations returned"
-              body="The selected prime did not return any allocation rows from the API."
+              description="The selected prime did not return any allocation rows from the API."
             />
           ) : null}
 
@@ -318,9 +319,9 @@ export function AllocationGrid({
           !isLoading &&
           allocations.length > 0 &&
           filteredAllocations.length === 0 ? (
-            <SurfaceMessage
+            <EmptyState
               title="No rows match the active filters"
-              body="Clear one of the filters in the top bar to restore the allocation grid."
+              description="Clear one of the filters in the top bar to restore the allocation grid."
             />
           ) : null}
 

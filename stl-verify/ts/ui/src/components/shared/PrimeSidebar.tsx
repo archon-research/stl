@@ -1,6 +1,5 @@
 import {
   SkeletonStack,
-  SurfaceMessage,
   ThemeToggle,
 } from '@archon-research/design-system';
 
@@ -8,6 +7,7 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import type { Prime } from '../../types/allocation';
+import { EmptyState, ErrorState } from '.';
 
 type PrimeSidebarProps = {
   primes: Prime[];
@@ -88,14 +88,17 @@ export function PrimeSidebar({
         {isLoading ? <SkeletonStack count={6} itemHeight={64} /> : null}
 
         {!isLoading && errorMessage ? (
-          <SurfaceMessage title="Unable to load primes." body={errorMessage} />
+          <ErrorState
+            title="Unable to load primes"
+            description="An error occurred while fetching primes data."
+            errorMessage={errorMessage}
+          />
         ) : null}
 
         {!isLoading && !errorMessage && primes.length === 0 ? (
-          <SurfaceMessage
+          <EmptyState
             title="No primes returned"
-            body="No primes were returned by the API."
-            tone="dashed"
+            description="No primes were returned by the API."
           />
         ) : null}
 

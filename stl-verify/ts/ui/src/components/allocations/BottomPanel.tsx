@@ -1,6 +1,5 @@
 import {
   SearchInput,
-  SurfaceMessage,
   StyledSelect,
   Toggle,
   ToggleGroup,
@@ -18,6 +17,7 @@ import {
 import { PARAMS, useUrlParam } from '../../lib/url-params';
 import type { Allocation, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
+import { EmptyState, ErrorState } from '../shared';
 import { BadDebtTab } from './tabs/BadDebtTab';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 
@@ -257,23 +257,24 @@ export function BottomPanel({
         className={css({ display: 'grid', gap: '4', alignContent: 'start' })}
       >
         {!selectedPrime ? (
-          <SurfaceMessage
+          <EmptyState
             title="Choose a prime to inspect risk"
-            body="The detail drawer becomes available after a prime is selected."
+            description="The detail drawer becomes available after a prime is selected."
           />
         ) : null}
 
         {selectedPrime && errorMessage ? (
-          <SurfaceMessage
-            title="Unable to load receipt tokens."
-            body={errorMessage}
+          <ErrorState
+            title="Unable to load receipt tokens"
+            description="An error occurred while fetching receipt token data."
+            errorMessage={errorMessage}
           />
         ) : null}
 
         {selectedPrime && !errorMessage && isLoading ? (
-          <SurfaceMessage
+          <EmptyState
             title="Loading receipt tokens"
-            body="Waiting for the selected prime's receipt token holdings."
+            description="Waiting for the selected prime's receipt token holdings."
           />
         ) : null}
 
@@ -281,9 +282,9 @@ export function BottomPanel({
         !errorMessage &&
         !isLoading &&
         sortedAllocations.length === 0 ? (
-          <SurfaceMessage
+          <EmptyState
             title="No receipt tokens returned"
-            body="The selected prime did not return any receipt token holdings from the API."
+            description="The selected prime did not return any receipt token holdings from the API."
           />
         ) : null}
 
