@@ -13,6 +13,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/erc20meta"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -682,17 +683,18 @@ func (s *blockchainService) getTokenMetadata(ctx context.Context, tokenAddress c
 // single token. Callers must have already verified that both sub-calls
 // succeeded (Success: true) — this helper only decodes the return data.
 //
-// A symbol() return that does not decode as a string (e.g. bytes32 on MKR-style
-// tokens) is tolerated with an empty Symbol — it's an ABI-shape mismatch, not a
-// revert. decimals() must decode cleanly; a failure here means the contract is
-// not a conformant ERC20 and we surface an error rather than persist 0.
+// symbol() supports both modern (`string`) and legacy (`bytes32`, e.g. MKR)
+// ABIs via erc20meta.DecodeStringOrBytes32; on total decode failure the
+// symbol is left empty rather than failing the whole row, since a missing
+// display symbol doesn't make the rest of the row unusable. decimals()
+// must decode cleanly — a failure here means the contract isn't a
+// conformant ERC20 and we surface an error rather than persist 0.
 func (s *blockchainService) unpackTokenMetadataResults(symbolResult, decimalsResult outbound.Result, token common.Address) (TokenMetadata, error) {
 	md := TokenMetadata{}
 
 	if len(symbolResult.ReturnData) > 0 {
-		symbolUnpacked, err := s.erc20ABI.Unpack("symbol", symbolResult.ReturnData)
-		if err == nil && len(symbolUnpacked) > 0 {
-			md.Symbol, _ = symbolUnpacked[0].(string)
+		if sym, err := erc20meta.DecodeStringOrBytes32(s.erc20ABI, "symbol", symbolResult.ReturnData); err == nil {
+			md.Symbol = sym
 		}
 	}
 

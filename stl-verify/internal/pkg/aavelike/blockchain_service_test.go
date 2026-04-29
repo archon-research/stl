@@ -884,6 +884,78 @@ func TestBatchGetTokenMetadata_DoesNotCacheWhenAnySubCallFails(t *testing.T) {
 	}
 }
 
+// TestBatchGetTokenMetadata_AcceptsBytes32SymbolAndName verifies that
+// legacy ERC20s like MKR — which return `bytes32` for symbol() and name()
+// instead of the modern `string` — are tracked correctly. Pre-fix this
+// caused a regression: every position event touching MKR NACK'd because
+// the strict `string`-only decode failed. Post-fix the bytes32 fallback
+// produces "MKR" / "Maker DAO" and the token row is cached.
+func TestBatchGetTokenMetadata_AcceptsBytes32SymbolAndName(t *testing.T) {
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	mkr := common.HexToAddress("0x9f8F72aA9304c8B593d555F12eF6589cC3A579A2")
+
+	// Build the bytes32-style returns: 32 raw bytes, ASCII left-aligned,
+	// null-padded.
+	bytes32Of := func(s string) []byte {
+		b := make([]byte, 32)
+		copy(b, []byte(s))
+		return b
+	}
+
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i := 0; i < len(calls); i += 3 {
+			// decimals: standard uint8 → 32 bytes ABI-encoded
+			results[i] = outbound.Result{Success: true, ReturnData: packUint8ForTest(t, 18)}
+			// symbol & name: bytes32 (MKR-style), 32 raw bytes
+			results[i+1] = outbound.Result{Success: true, ReturnData: bytes32Of("MKR")}
+			results[i+2] = outbound.Result{Success: true, ReturnData: bytes32Of("Maker DAO")}
+		}
+		return results, nil
+	}
+
+	svc := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		multicallClient: mock,
+		protocolVersion: "sparklend",
+	}
+
+	tokens := map[common.Address]bool{mkr: true}
+
+	result, err := svc.BatchGetTokenMetadata(context.Background(), tokens, big.NewInt(1))
+	if err != nil {
+		t.Fatalf("expected no error for MKR-style bytes32 metadata; got %v", err)
+	}
+
+	md, ok := result[mkr]
+	if !ok {
+		t.Fatal("MKR must be in the result map")
+	}
+	if md.Symbol != "MKR" {
+		t.Errorf("Symbol = %q; want %q", md.Symbol, "MKR")
+	}
+	if md.Name != "Maker DAO" {
+		t.Errorf("Name = %q; want %q", md.Name, "Maker DAO")
+	}
+	if md.Decimals != 18 {
+		t.Errorf("Decimals = %d; want 18", md.Decimals)
+	}
+
+	svc.mu.RLock()
+	cached, cachedOK := svc.metadataCache[mkr]
+	svc.mu.RUnlock()
+	if !cachedOK || cached.Symbol != "MKR" {
+		t.Errorf("MKR must be cached with symbol=MKR; got cached=%v meta=%+v", cachedOK, cached)
+	}
+}
+
 // TestBatchGetTokenMetadata_DoesNotCacheOnUnpackFailure codifies the
 // follow-on VEC-188 invariant flagged in PR review: even when every
 // sub-call reports `Success: true`, an `Unpack` error or wrong-typed

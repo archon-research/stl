@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/erc20meta"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum"
@@ -623,24 +624,15 @@ func (s *BlockchainService) BatchGetTokenMetadata(ctx context.Context, tokens ma
 			continue
 		}
 
-		symbolUnpacked, err := s.erc20ABI.Unpack("symbol", results[symbolIdx].ReturnData)
-		if err != nil || len(symbolUnpacked) == 0 {
+		// Decode symbol/name with the bytes32 fallback so legacy ERC20s
+		// like MKR (which return bytes32 instead of string) are accepted.
+		symbol, err := erc20meta.DecodeStringOrBytes32(s.erc20ABI, "symbol", results[symbolIdx].ReturnData)
+		if err != nil {
 			incomplete = append(incomplete, token)
 			continue
 		}
-		symbol, ok := symbolUnpacked[0].(string)
-		if !ok {
-			incomplete = append(incomplete, token)
-			continue
-		}
-
-		nameUnpacked, err := s.erc20ABI.Unpack("name", results[nameIdx].ReturnData)
-		if err != nil || len(nameUnpacked) == 0 {
-			incomplete = append(incomplete, token)
-			continue
-		}
-		name, ok := nameUnpacked[0].(string)
-		if !ok {
+		name, err := erc20meta.DecodeStringOrBytes32(s.erc20ABI, "name", results[nameIdx].ReturnData)
+		if err != nil {
 			incomplete = append(incomplete, token)
 			continue
 		}
