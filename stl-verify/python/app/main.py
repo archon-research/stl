@@ -2,13 +2,13 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.adapters.postgres.receipt_token_repository import resolve_receipt_token_mapping
 from app.api.v1 import allocations, risk, status
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
@@ -27,8 +27,11 @@ RESERVED_FRONTEND_PREFIXES = ("v1", "docs", "redoc", "openapi.json")
 DOCS_FAVICON_URL = "/assets/archon-32.png"
 
 
-def _check_mapping_refs(mapping: dict[str, str], ratings: dict[str, SurafResult]) -> None:
-    unknown = sorted(set(mapping.values()) - set(ratings))
+def _check_mapping_refs(
+    raw_mapping: list[tuple[int, bytes, str]],
+    ratings: dict[str, SurafResult],
+) -> None:
+    unknown = sorted(set(r_id for _, _, r_id in raw_mapping) - set(ratings))
     if unknown:
         raise MappingError(f"asset mapping references unknown rating_ids: {unknown}")
 
@@ -91,7 +94,9 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
     # Validate risk-engine config before acquiring any resources so a bad
     # configuration fails startup without leaking a telemetry provider or
-    # DB engine.
+    # DB engine.  File-based checks (ratings, mapping shape, rating_id
+    # cross-refs) run here.  DB-dependent resolution (composite key ->
+    # receipt_token_id) runs in the lifespan after the engine is created.
     logger.info(
         "starting stl-verify git_commit=%s suraf_inputs_dir=%s suraf_mappings_file=%s",
         settings.git_commit,
@@ -102,31 +107,34 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
         settings.suraf_inputs_dir,
         source_commit_sha=settings.git_commit,
     )
-    asset_to_rating = load_asset_mapping(settings.suraf_mappings_file)
-    _check_mapping_refs(asset_to_rating, suraf_ratings)
-    logger.info("asset->rating mapping loaded entries=%d", len(asset_to_rating))
-
-    suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings)
+    raw_mapping = load_asset_mapping(settings.suraf_mappings_file)
+    _check_mapping_refs(raw_mapping, suraf_ratings)
+    logger.info("asset->rating mapping loaded entries=%d", len(raw_mapping))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(settings.async_database_url, pool_pre_ping=True)
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        app.state.engine = engine
-        instrument_sqlalchemy_engine(engine)
-        async with httpx.AsyncClient() as http_client:
-            app.state.http_client = http_client
-            yield
         try:
-            await engine.dispose()
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+
+            asset_to_rating = await resolve_receipt_token_mapping(raw_mapping, engine)
+            suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings)
+
+            app.state.engine = engine
+            app.state.suraf_ratings = suraf_ratings
+            app.state.asset_to_rating = asset_to_rating
+            app.state.suraf_rrc_service = suraf_rrc_service
+
+            instrument_sqlalchemy_engine(engine)
+            yield
         finally:
-            shutdown_telemetry(app.state.tracer_provider)
+            try:
+                await engine.dispose()
+            finally:
+                shutdown_telemetry(app.state.tracer_provider)
 
     application = FastAPI(title="stl-verify", lifespan=lifespan, docs_url=None)
-    application.state.suraf_ratings = suraf_ratings
-    application.state.asset_to_rating = asset_to_rating
-    application.state.suraf_rrc_service = suraf_rrc_service
     application.add_middleware(RequestIdMiddleware)
     application.state.tracer_provider = setup_telemetry(application, settings)
     application.include_router(status.router, prefix="/v1")

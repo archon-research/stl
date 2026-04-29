@@ -1,109 +1,158 @@
+import {
+  LoadingIndicator,
+  SkeletonStack,
+} from '@archon-research/design-system';
+import { type CellContext, type ColumnDef } from '@tanstack/react-table';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
-import { flex } from '#styled-system/patterns';
 
+import { DataTable, useDataTable } from '../../../data-table';
+import {
+  buildRowSearchString,
+  matchesSearchQuery,
+} from '../../../data-table/utils';
 import { getRiskBreakdown } from '../../../lib/api';
 import {
   formatMultiplier,
   formatPercentValue,
   formatRatioPercent,
-  formatTokenAmount,
   formatUsdValue,
   parseNumericValue,
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
+import { logging } from '../../../lib/logging';
 import type { Allocation, RiskBreakdown } from '../../../types/allocation';
+import { SummaryMetric } from '../../shared';
 
 type RiskBreakdownTabProps = {
+  searchQuery?: string;
   selectedReceiptToken: Allocation | null;
 };
 
-function SummaryMetric({
-  detail,
-  label,
-  value,
+type RiskItem = RiskBreakdown['items'][number];
+
+function RiskTable({
+  items,
+  isLoading,
+  searchQuery,
 }: {
-  detail?: string;
-  label: string;
-  value: string;
+  items: RiskItem[];
+  isLoading: boolean;
+  searchQuery: string;
 }) {
+  const filteredItems = useMemo(
+    () =>
+      items.filter((item) =>
+        matchesSearchQuery(
+          buildRowSearchString([
+            item.symbol,
+            item.amount,
+            item.price_usd,
+            item.amount_usd,
+            item.backing_pct,
+            item.liquidation_threshold,
+            item.liquidation_bonus,
+          ]),
+          searchQuery,
+        ),
+      ),
+    [items, searchQuery],
+  );
+
+  const columns = useMemo<ColumnDef<RiskItem>[]>(
+    () => [
+      {
+        id: 'symbol',
+        header: 'Symbol',
+        accessorKey: 'symbol',
+        cell: (info: CellContext<RiskItem, unknown>) =>
+          info.getValue() as string,
+      },
+      {
+        id: 'amount',
+        header: 'Amount',
+        accessorKey: 'amount',
+        cell: (info: CellContext<RiskItem, unknown>) => {
+          const value = info.getValue();
+          return typeof value === 'string'
+            ? parseFloat(value).toFixed(2)
+            : (value as number).toFixed(2);
+        },
+      },
+      {
+        id: 'price_usd',
+        header: 'Price USD',
+        accessorKey: 'price_usd',
+        cell: (info: CellContext<RiskItem, unknown>) =>
+          formatUsdValue(info.getValue() as string | number | null | undefined),
+      },
+      {
+        id: 'amount_usd',
+        header: 'Amount USD',
+        accessorKey: 'amount_usd',
+        cell: (info: CellContext<RiskItem, unknown>) =>
+          formatUsdValue(info.getValue() as string | number | null | undefined),
+      },
+      {
+        id: 'backing_pct',
+        header: 'Backing %',
+        accessorKey: 'backing_pct',
+        cell: (info: CellContext<RiskItem, unknown>) =>
+          formatPercentValue(
+            info.getValue() as string | number | null | undefined,
+          ),
+      },
+      {
+        id: 'lt',
+        header: 'Liquidation Threshold',
+        accessorKey: 'liquidation_threshold',
+        cell: (info: CellContext<RiskItem, unknown>) =>
+          formatRatioPercent(
+            info.getValue() as string | number | null | undefined,
+          ),
+      },
+      {
+        id: 'bonus',
+        header: 'Liquidation Bonus',
+        accessorKey: 'liquidation_bonus',
+        cell: (info: CellContext<RiskItem, unknown>) =>
+          formatMultiplier(
+            info.getValue() as string | number | null | undefined,
+          ),
+      },
+    ],
+    [],
+  );
+
+  const table = useDataTable(filteredItems, columns, {
+    enableSorting: true,
+  });
+
   return (
-    <div
-      className={css({
-        borderRadius: 'md',
-        borderStyle: 'solid',
-        borderWidth: '1px',
-        borderColor: 'border.subtle',
-        bg: 'surface.default',
-        p: '3',
-      })}
-    >
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'xs',
-          textTransform: 'uppercase',
-          letterSpacing: '0.12em',
-          color: 'text.muted',
-        })}
-      >
-        {label}
-      </p>
-      <p
-        className={css({
-          m: 0,
-          mt: '2',
-          fontSize: 'lg',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-        })}
-      >
-        {value}
-      </p>
-      {detail ? (
+    <DataTable
+      table={table}
+      isLoading={isLoading}
+      getRowKey={(item) => String(item.token_id)}
+      skeletonConfig={{ rows: 5, columns: 7, firstColumnTall: false }}
+      minWidth="76rem"
+      renderCell={(children) => (
         <p
           className={css({
             m: 0,
-            mt: '1',
-            fontSize: 'xs',
-            color: 'text.muted',
+            fontSize: 'sm',
+            color: 'text.strong',
           })}
         >
-          {detail}
+          {children}
         </p>
-      ) : null}
-    </div>
+      )}
+    />
   );
 }
 
-function RiskBreakdownSkeleton() {
-  return Array.from({ length: 5 }, (_row, rowIndex) => (
-    <tr
-      key={rowIndex}
-      className={css({
-        borderBottomWidth: '1px',
-        borderBottomStyle: 'solid',
-        borderBottomColor: 'border.subtle',
-      })}
-    >
-      {Array.from({ length: 7 }, (_cell, cellIndex) => (
-        <td key={cellIndex} className={css({ px: '4', py: '3' })}>
-          <div
-            className={css({
-              height: '7',
-              borderRadius: 'sm',
-              bg: 'surface.subtle',
-              opacity: 0.85,
-            })}
-          />
-        </td>
-      ))}
-    </tr>
-  ));
-}
-
 export function RiskBreakdownTab({
+  searchQuery = '',
   selectedReceiptToken,
 }: RiskBreakdownTabProps) {
   const [breakdown, setBreakdown] = useState<RiskBreakdown | null>(null);
@@ -139,6 +188,10 @@ export function RiskBreakdownTab({
           return;
         }
 
+        logging.error('Failed to load risk breakdown', {
+          error,
+          receiptTokenId: selectedReceiptToken.receipt_token_id,
+        });
         setBreakdown(null);
         setErrorMessage(toErrorMessage(error));
       })
@@ -224,66 +277,7 @@ export function RiskBreakdownTab({
 
   return (
     <div className={css({ display: 'grid', gap: '4' })}>
-      <div
-        className={flex({
-          align: 'center',
-          justify: 'space-between',
-          gap: '4',
-          wrap: 'wrap',
-        })}
-      >
-        <div className={css({ display: 'grid', gap: '1' })}>
-          <p
-            className={css({
-              m: 0,
-              fontSize: 'xs',
-              textTransform: 'uppercase',
-              letterSpacing: '0.16em',
-              color: 'text.muted',
-            })}
-          >
-            Risk breakdown
-          </p>
-          <h3 className={css({ m: 0, fontSize: 'lg', color: 'text.strong' })}>
-            {selectedReceiptToken.symbol}
-          </h3>
-          <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-            {selectedReceiptToken.protocol_name} · backing total{' '}
-            {formatUsdValue(totalUsd)}
-          </p>
-        </div>
-
-        <div className={flex({ gap: '2', wrap: 'wrap' })}>
-          <span
-            className={css({
-              display: 'inline-flex',
-              alignItems: 'center',
-              borderRadius: 'sm',
-              bg: 'surface.subtle',
-              color: 'text.muted',
-              fontSize: 'xs',
-              px: '3',
-              py: '1.5',
-            })}
-          >
-            {selectedReceiptToken.underlying_symbol}
-          </span>
-          <span
-            className={css({
-              display: 'inline-flex',
-              alignItems: 'center',
-              borderRadius: 'sm',
-              bg: 'surface.subtle',
-              color: 'text.muted',
-              fontSize: 'xs',
-              px: '3',
-              py: '1.5',
-            })}
-          >
-            {breakdown ? `${breakdown.items.length} assets` : 'Loading'}
-          </span>
-        </div>
-      </div>
+      {isLoading ? <LoadingIndicator message="Loading risk breakdown" /> : null}
 
       {errorMessage ? (
         <div
@@ -355,6 +349,10 @@ export function RiskBreakdownTab({
         </div>
       ) : null}
 
+      {!errorMessage && isLoading && !summary ? (
+        <SkeletonStack count={4} itemHeight={88} />
+      ) : null}
+
       {!errorMessage &&
       !isLoading &&
       breakdown &&
@@ -377,146 +375,11 @@ export function RiskBreakdownTab({
       ) : null}
 
       {!errorMessage && (isLoading || breakdown) ? (
-        <div
-          className={css({
-            overflowX: 'auto',
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.subtle',
-          })}
-        >
-          <table
-            className={css({
-              width: '100%',
-              minWidth: '76rem',
-              borderCollapse: 'collapse',
-            })}
-          >
-            <thead>
-              <tr className={css({ bg: 'surface.subtle' })}>
-                {[
-                  'Symbol',
-                  'Amount',
-                  'Price USD',
-                  'Amount USD',
-                  'Backing %',
-                  'Liquidation Threshold',
-                  'Liquidation Bonus',
-                ].map((label) => (
-                  <th
-                    key={label}
-                    className={css({
-                      px: '4',
-                      py: '3',
-                      textAlign: 'left',
-                      fontSize: 'xs',
-                      fontWeight: 'semibold',
-                      letterSpacing: '0.08em',
-                      textTransform: 'uppercase',
-                      color: 'text.muted',
-                    })}
-                  >
-                    {label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {isLoading && !breakdown
-                ? RiskBreakdownSkeleton()
-                : breakdown?.items.map((item) => (
-                    <tr
-                      key={item.token_id}
-                      className={css({
-                        borderBottomWidth: '1px',
-                        borderBottomStyle: 'solid',
-                        borderBottomColor: 'border.subtle',
-                      })}
-                    >
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            fontWeight: 'semibold',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {item.symbol}
-                        </p>
-                      </td>
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {formatTokenAmount(item.amount)}
-                        </p>
-                      </td>
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {formatUsdValue(item.price_usd)}
-                        </p>
-                      </td>
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {formatUsdValue(item.amount_usd)}
-                        </p>
-                      </td>
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {formatPercentValue(item.backing_pct)}
-                        </p>
-                      </td>
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {formatRatioPercent(item.liquidation_threshold)}
-                        </p>
-                      </td>
-                      <td className={css({ px: '4', py: '3' })}>
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            color: 'text.strong',
-                          })}
-                        >
-                          {formatMultiplier(item.liquidation_bonus)}
-                        </p>
-                      </td>
-                    </tr>
-                  ))}
-            </tbody>
-          </table>
-        </div>
+        <RiskTable
+          items={breakdown?.items ?? []}
+          isLoading={isLoading}
+          searchQuery={searchQuery}
+        />
       ) : null}
     </div>
   );

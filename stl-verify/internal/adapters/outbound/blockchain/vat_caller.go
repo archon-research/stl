@@ -152,11 +152,16 @@ func (c *VatCaller) ReadDebts(ctx context.Context, queries []entity.DebtQuery, b
 			continue
 		}
 
-		// Parse rate from ilks(ilk) → [Art, rate, spot, line, dust]
-		if !mcResults[ilksIdx].Success {
-			results[i].Err = fmt.Errorf("vat.ilks call failed")
+		// Per-call Success:false means the contract reverted (post-VEC-188
+		// transport errors are surfaced by Multicaller.Execute's outer
+		// error). Mark as Reverted so the consumer skips-and-continues
+		// without re-classifying a stringly-typed error.
+		if !mcResults[ilksIdx].Success || !mcResults[urnsIdx].Success {
+			results[i].Reverted = true
 			continue
 		}
+
+		// Parse rate from ilks(ilk) → [Art, rate, spot, line, dust]
 		ilksOut, err := c.vatABI.Unpack("ilks", mcResults[ilksIdx].ReturnData)
 		if err != nil {
 			results[i].Err = fmt.Errorf("unpack ilks: %w", err)
@@ -169,10 +174,6 @@ func (c *VatCaller) ReadDebts(ctx context.Context, queries []entity.DebtQuery, b
 		}
 
 		// Parse art from urns(ilk, vault) → [ink, art]
-		if !mcResults[urnsIdx].Success {
-			results[i].Err = fmt.Errorf("vat.urns call failed")
-			continue
-		}
 		urnsOut, err := c.vatABI.Unpack("urns", mcResults[urnsIdx].ReturnData)
 		if err != nil {
 			results[i].Err = fmt.Errorf("unpack urns: %w", err)

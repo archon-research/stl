@@ -21,7 +21,19 @@ async def _seed_data(db_url: str) -> None:
             int,
             await conn.fetchval("SELECT id FROM token WHERE symbol = 'WETH' AND chain_id = 1"),
         )
-        rt_id = cast(
+
+        indexed_receipt_token_address = bytes.fromhex("59cD1C87501baa753d0B5B5Ab5D8416A45cD71DB")
+        # Indexed case: create the receipt-token-address token row too, so the
+        # repository can surface receipt_token_token_id.
+        await conn.execute(
+            """
+            INSERT INTO token (chain_id, address, symbol, decimals)
+            VALUES (1, $1, 'spWETH', 18)
+            ON CONFLICT (chain_id, address) DO NOTHING
+            """,
+            indexed_receipt_token_address,
+        )
+        indexed_rt_id = cast(
             int,
             await conn.fetchval(
                 """
@@ -35,10 +47,38 @@ async def _seed_data(db_url: str) -> None:
                 """,
                 protocol_id,
                 token_id,
-                bytes.fromhex("59cD1C87501baa753d0B5B5Ab5D8416A45cD71DB"),
+                indexed_receipt_token_address,
             ),
         )
-        await store_test_ids(conn, {"receipt_token_id": rt_id})
+
+        missing_token_row_address = bytes.fromhex("5AcD1C87501baa753d0B5B5Ab5D8416A45cD71DC")
+        # Warm-up case: receipt_token exists before the prime-allocation-indexer
+        # has created the receipt-token-address token row.
+        missing_token_row_rt_id = cast(
+            int,
+            await conn.fetchval(
+                """
+                INSERT INTO receipt_token
+                    (protocol_id, underlying_token_id, receipt_token_address, symbol,
+                     created_at_block, chain_id)
+                VALUES ($1, $2, $3, 'spWETH-warmup', 16776402, 1)
+                ON CONFLICT ON CONSTRAINT receipt_token_chain_address_unique
+                    DO UPDATE SET symbol = EXCLUDED.symbol
+                RETURNING id
+                """,
+                protocol_id,
+                token_id,
+                missing_token_row_address,
+            ),
+        )
+
+        await store_test_ids(
+            conn,
+            {
+                "receipt_token_id": indexed_rt_id,
+                "missing_token_row_receipt_token_id": missing_token_row_rt_id,
+            },
+        )
     finally:
         await conn.close()
 
@@ -69,6 +109,20 @@ async def test_returns_receipt_token_info(repository, test_ids) -> None:
     assert result.protocol_name == "SparkLend"
     assert result.chain_id == 1
     assert result.receipt_token_id == test_ids["receipt_token_id"]
+    # receipt_token_token_id is populated from the JOIN to token(chain_id, address);
+    # it's the token's numeric id for the receipt token address, not receipt_token.id.
+    assert isinstance(result.receipt_token_token_id, int)
+    assert result.receipt_token_token_id > 0
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_returns_receipt_token_info_when_receipt_token_address_token_row_is_missing(repository, test_ids) -> None:
+    result = await repository.get(test_ids["missing_token_row_receipt_token_id"])
+    assert result is not None
+    assert result.protocol_name == "SparkLend"
+    assert result.chain_id == 1
+    assert result.receipt_token_id == test_ids["missing_token_row_receipt_token_id"]
+    assert result.receipt_token_token_id is None
 
 
 @pytest.mark.asyncio(loop_scope="module")

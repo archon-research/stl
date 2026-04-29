@@ -1,12 +1,16 @@
 from collections.abc import AsyncGenerator
 from decimal import Decimal
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.api.deps import get_engine, get_http_client, get_suraf_rrc_service
+from app.adapters.postgres.allocation_share_repository import (
+    AllocationShareError,
+    MissingShareError,
+    StaleShareError,
+)
+from app.api.deps import get_engine, get_suraf_rrc_service
 from app.config import Settings, get_settings
 from app.services.risk_calculation_service import RiskCalculationService
 from app.services.risk_service_factory import RiskServiceFactory
@@ -41,12 +45,12 @@ class RiskBreakdownResponse(BaseModel):
 
 
 class ScenarioRrcRequest(BaseModel):
-    asset: str
+    receipt_token_id: int
     usd_exposure: Decimal
 
 
 class ScenarioRrcResponse(BaseModel):
-    asset: str
+    receipt_token_id: int
     usd_exposure: Decimal
     rating_id: str
     rating_version: str
@@ -55,25 +59,35 @@ class ScenarioRrcResponse(BaseModel):
     source_commit_sha: str
 
 
+def _share_error_503(exc: AllocationShareError) -> HTTPException:
+    """Translate an AllocationShareError subtype into a 503 with a distinct code."""
+    if isinstance(exc, StaleShareError):
+        code = "share_data_stale"
+    elif isinstance(exc, MissingShareError):
+        code = "share_data_missing"
+    else:
+        code = "share_data_unavailable"
+    return HTTPException(status_code=503, detail={"code": code, "message": str(exc)})
+
+
 async def _resolve(
     receipt_token_id: int,
     engine: AsyncEngine = Depends(get_engine),
     settings: Settings = Depends(get_settings),
-    http_client: httpx.AsyncClient = Depends(get_http_client),
 ) -> AsyncGenerator[tuple[RiskCalculationService, int], None]:
     """Resolve receipt token into a service + backed_asset_id, or raise HTTP errors.
 
     Uses ``async with`` + ``yield`` so the DB connection is properly cleaned up.
     """
-    alchemy_url = settings.alchemy_http_url
     factory = RiskServiceFactory(
         engine,
-        alchemy_url=alchemy_url,
-        http_client=http_client,
+        allocation_share_max_stale_seconds=settings.allocation_share_max_stale_seconds,
         default_gap_pct=settings.risk_default_gap_pct,
     )
     try:
         result = await factory.create(receipt_token_id)
+    except AllocationShareError as exc:
+        raise _share_error_503(exc) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     if result is None:
@@ -94,9 +108,8 @@ async def get_bad_debt(
     service, asset_id = resolved
     try:
         bad_debt = await service.get_bad_debt(backed_asset_id=asset_id, gap_pct=gap_pct)
-    except IOError as exc:
-        # Transient RPC failure after all retries exhausted.
-        raise HTTPException(status_code=502, detail=f"upstream RPC error: {exc}") from exc
+    except AllocationShareError as exc:
+        raise _share_error_503(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return BadDebtResponse(
@@ -115,8 +128,8 @@ async def get_risk_breakdown(
     service, asset_id = resolved
     try:
         breakdown = await service.get_risk_breakdown(backed_asset_id=asset_id)
-    except IOError as exc:
-        raise HTTPException(status_code=502, detail=f"upstream RPC error: {exc}") from exc
+    except AllocationShareError as exc:
+        raise _share_error_503(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return RiskBreakdownResponse(
@@ -142,17 +155,15 @@ async def post_rrc_scenario(
     body: ScenarioRrcRequest,
     service: SurafRrcService = Depends(get_suraf_rrc_service),
 ) -> ScenarioRrcResponse:
-    """Return SURAF RRC for a hypothetical ``(asset, usd_exposure)`` pair.
+    """Return SURAF RRC for a hypothetical ``(receipt_token_id, usd_exposure)`` pair.
 
     ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
-    for the asset. Pure scenario calculation — no DB lookup, no position
-    state. Position-level RRC (``GET /risk/{receipt_token_id}/rrc``) is
-    deferred pending a decision on how to derive USD exposure from holdings.
+    for the receipt token. Pure scenario calculation — no position state.
     """
     if body.usd_exposure <= _ZERO:
         raise HTTPException(status_code=422, detail="usd_exposure must be positive")
 
-    result = service.compute(body.asset, body.usd_exposure)
+    result = service.compute(body.receipt_token_id, body.usd_exposure)
     if result is None:
-        raise HTTPException(status_code=404, detail=f"no rating mapped for asset: {body.asset}")
+        raise HTTPException(status_code=404, detail=f"no rating mapped for receipt_token_id: {body.receipt_token_id}")
     return ScenarioRrcResponse(**result.model_dump())

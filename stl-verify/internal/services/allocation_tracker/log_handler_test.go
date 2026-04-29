@@ -12,41 +12,52 @@ import (
 
 // mockHandler is a test double for AllocationHandler.
 type mockHandler struct {
-	snapshots []*PositionSnapshot
-	err       error
+	batches []*SnapshotBatch
+	err     error
 }
 
-func (m *mockHandler) HandleSnapshots(ctx context.Context, snapshots []*PositionSnapshot) error {
-	m.snapshots = append(m.snapshots, snapshots...)
+func (m *mockHandler) HandleBatch(ctx context.Context, batch *SnapshotBatch) error {
+	m.batches = append(m.batches, batch)
 	return m.err
 }
 
-func TestLogHandler_HandleSnapshots_Empty(t *testing.T) {
+func TestLogHandler_HandleBatch_Empty(t *testing.T) {
 	h := NewLogHandler(slog.Default())
-	err := h.HandleSnapshots(context.Background(), nil)
+	err := h.HandleBatch(context.Background(), &SnapshotBatch{})
 	if err != nil {
-		t.Errorf("expected nil error for empty snapshots, got %v", err)
+		t.Errorf("expected nil error for empty batch, got %v", err)
 	}
 }
 
-func TestLogHandler_HandleSnapshots_NoError(t *testing.T) {
+func TestLogHandler_HandleBatch_NoError(t *testing.T) {
 	h := NewLogHandler(slog.Default())
 
-	snapshots := []*PositionSnapshot{
-		{
-			Entry: &TokenEntry{
-				ContractAddress: common.HexToAddress("0xaaaa"),
-				Star:            "spark",
-				Chain:           "ethereum",
-				Protocol:        "morpho",
-				TokenType:       "erc4626",
+	batch := &SnapshotBatch{
+		Snapshots: []*PositionSnapshot{
+			{
+				Entry: &TokenEntry{
+					ContractAddress: common.HexToAddress("0xaaaa"),
+					Star:            "spark",
+					Chain:           "ethereum",
+					Protocol:        "morpho",
+					TokenType:       "erc4626",
+				},
+				Balance:     big.NewInt(1000000),
+				BlockNumber: 100,
 			},
-			Balance:     big.NewInt(1000000),
-			BlockNumber: 100,
+		},
+		Supplies: []*TokenTotalSupplySnapshot{
+			{
+				ChainID:      1,
+				TokenAddress: common.HexToAddress("0xaaaa"),
+				TotalSupply:  big.NewInt(2000000),
+				BlockNumber:  100,
+				Source:       "sweep",
+			},
 		},
 	}
 
-	err := h.HandleSnapshots(context.Background(), snapshots)
+	err := h.HandleBatch(context.Background(), batch)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -58,24 +69,26 @@ func TestMultiHandler_FansOut(t *testing.T) {
 
 	multi := NewMultiHandler(h1, h2)
 
-	snapshots := []*PositionSnapshot{
-		{
-			Entry:       &TokenEntry{ContractAddress: common.HexToAddress("0xaaaa")},
-			Balance:     big.NewInt(100),
-			BlockNumber: 50,
+	batch := &SnapshotBatch{
+		Snapshots: []*PositionSnapshot{
+			{
+				Entry:       &TokenEntry{ContractAddress: common.HexToAddress("0xaaaa")},
+				Balance:     big.NewInt(100),
+				BlockNumber: 50,
+			},
 		},
 	}
 
-	err := multi.HandleSnapshots(context.Background(), snapshots)
+	err := multi.HandleBatch(context.Background(), batch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(h1.snapshots) != 1 {
-		t.Errorf("handler1 should receive 1 snapshot, got %d", len(h1.snapshots))
+	if len(h1.batches) != 1 {
+		t.Errorf("handler1 should receive 1 batch, got %d", len(h1.batches))
 	}
-	if len(h2.snapshots) != 1 {
-		t.Errorf("handler2 should receive 1 snapshot, got %d", len(h2.snapshots))
+	if len(h2.batches) != 1 {
+		t.Errorf("handler2 should receive 1 batch, got %d", len(h2.batches))
 	}
 }
 
@@ -86,28 +99,30 @@ func TestMultiHandler_CollectsErrors(t *testing.T) {
 
 	multi := NewMultiHandler(h1, h2, h3)
 
-	snapshots := []*PositionSnapshot{
-		{
-			Entry:       &TokenEntry{ContractAddress: common.HexToAddress("0xaaaa")},
-			Balance:     big.NewInt(100),
-			BlockNumber: 50,
+	batch := &SnapshotBatch{
+		Snapshots: []*PositionSnapshot{
+			{
+				Entry:       &TokenEntry{ContractAddress: common.HexToAddress("0xaaaa")},
+				Balance:     big.NewInt(100),
+				BlockNumber: 50,
+			},
 		},
 	}
 
-	err := multi.HandleSnapshots(context.Background(), snapshots)
+	err := multi.HandleBatch(context.Background(), batch)
 	if err == nil {
 		t.Fatal("expected error when handlers fail")
 	}
 
-	// h2 should still receive snapshots even though h1 failed
-	if len(h2.snapshots) != 1 {
-		t.Errorf("handler2 should still receive snapshots despite h1 failure, got %d", len(h2.snapshots))
+	// h2 should still receive the batch even though h1 failed
+	if len(h2.batches) != 1 {
+		t.Errorf("handler2 should still receive batch despite h1 failure, got %d", len(h2.batches))
 	}
 }
 
 func TestMultiHandler_Empty(t *testing.T) {
 	multi := NewMultiHandler()
-	err := multi.HandleSnapshots(context.Background(), []*PositionSnapshot{})
+	err := multi.HandleBatch(context.Background(), &SnapshotBatch{})
 	if err != nil {
 		t.Errorf("empty MultiHandler should not error: %v", err)
 	}

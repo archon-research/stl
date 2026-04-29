@@ -6,6 +6,7 @@ per test module.  Migrations are applied by the ``module_db`` fixture from
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -193,9 +194,11 @@ def async_db_url(module_db):
 
 
 @pytest.fixture()
-def client(async_db_url: str):
+def client(async_db_url: str, tmp_path: Path):
     """Return a TestClient wired to the testcontainer database."""
-    test_app = create_app(Settings(database_url=SecretStr(async_db_url)))
+    empty_mapping = tmp_path / "empty_mapping.json"
+    empty_mapping.write_text("{}")
+    test_app = create_app(Settings(database_url=SecretStr(async_db_url), suraf_mappings_file=empty_mapping))
     with TestClient(test_app) as c:
         yield c
 

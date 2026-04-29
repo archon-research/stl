@@ -1,9 +1,11 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -66,10 +68,26 @@ func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, b *ent
 
 // SaveBorrowers saves multiple borrower (debt) position records using pgx.Batch.
 // Uses ON CONFLICT DO NOTHING to ensure immutability - existing records are never modified.
+//
+// Borrowers are sorted by natural key before queueing so the per-row advisory
+// lock in assign_processing_version_borrower is acquired in a transaction-stable
+// order across concurrent callers — required to avoid deadlocks when multiple
+// build_ids reprocess overlapping rows. See ADR-0002 §3.
 func (r *PositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, borrowers []*entity.Borrower) error {
 	if len(borrowers) == 0 {
 		return nil
 	}
+
+	slices.SortFunc(borrowers, func(a, b *entity.Borrower) int {
+		return cmp.Or(
+			cmp.Compare(a.UserID, b.UserID),
+			cmp.Compare(a.ProtocolID, b.ProtocolID),
+			cmp.Compare(a.TokenID, b.TokenID),
+			cmp.Compare(a.BlockNumber, b.BlockNumber),
+			cmp.Compare(a.BlockVersion, b.BlockVersion),
+			a.CreatedAt.Compare(b.CreatedAt),
+		)
+	})
 
 	batch := &pgx.Batch{}
 	for _, b := range borrowers {
@@ -121,10 +139,24 @@ func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.
 // SaveBorrowerCollaterals saves multiple borrower collateral position records using pgx.Batch.
 // Uses ON CONFLICT DO NOTHING to ensure immutability - existing records are never modified.
 // Returns nil if collaterals slice is empty.
+//
+// Collaterals are sorted by natural key before queueing for the same reason as
+// SaveBorrowers above. See ADR-0002 §3.
 func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx.Tx, collaterals []*entity.BorrowerCollateral) error {
 	if len(collaterals) == 0 {
 		return nil
 	}
+
+	slices.SortFunc(collaterals, func(a, b *entity.BorrowerCollateral) int {
+		return cmp.Or(
+			cmp.Compare(a.UserID, b.UserID),
+			cmp.Compare(a.ProtocolID, b.ProtocolID),
+			cmp.Compare(a.TokenID, b.TokenID),
+			cmp.Compare(a.BlockNumber, b.BlockNumber),
+			cmp.Compare(a.BlockVersion, b.BlockVersion),
+			a.CreatedAt.Compare(b.CreatedAt),
+		)
+	})
 
 	batch := &pgx.Batch{}
 	for _, bc := range collaterals {
