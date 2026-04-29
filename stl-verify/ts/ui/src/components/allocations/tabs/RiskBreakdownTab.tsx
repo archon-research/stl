@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
+import { SummaryMetric } from '../../shared';
 import { DataTable, useDataTable } from '../../../data-table';
 import { buildRowSearchString, matchesSearchQuery } from '../../../data-table/utils';
 import { getRiskBreakdown } from '../../../lib/api';
@@ -132,64 +133,6 @@ function RiskTable({
         </p>
       )}
     />
-  );
-}
-
-function SummaryMetric({
-  detail,
-  label,
-  value,
-}: {
-  detail?: string;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div
-      className={css({
-        borderRadius: 'md',
-        borderStyle: 'solid',
-        borderWidth: '1px',
-        borderColor: 'border.subtle',
-        bg: 'surface.default',
-        p: '3',
-      })}
-    >
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'xs',
-          textTransform: 'uppercase',
-          letterSpacing: '0.12em',
-          color: 'text.muted',
-        })}
-      >
-        {label}
-      </p>
-      <p
-        className={css({
-          m: 0,
-          mt: '2',
-          fontSize: 'lg',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-        })}
-      >
-        {value}
-      </p>
-      {detail ? (
-        <p
-          className={css({
-            m: 0,
-            mt: '1',
-            fontSize: 'xs',
-            color: 'text.muted',
-          })}
-        >
-          {detail}
-        </p>
-      ) : null}
-    </div>
   );
 }
 

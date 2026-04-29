@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
+import { Address } from '../shared';
 import { DataTable, useDataTable } from '../../data-table';
 import {
   type ChainLabelLookup,
@@ -18,14 +19,6 @@ import {
 } from '../../lib/dashboard';
 import type { Allocation, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
-
-function formatAddress(value: string): string {
-  if (value.length <= 14) {
-    return value;
-  }
-
-  return `${value.slice(0, 8)}...${value.slice(-4)}`;
-}
 
 type AllocationGridProps = {
   allocations: Allocation[];
@@ -165,16 +158,7 @@ export function AllocationGrid({
               >
                 {allocation.underlying_symbol}
               </p>
-              <p
-                className={css({
-                  m: 0,
-                  mt: '1',
-                  fontSize: 'xs',
-                  color: 'text.muted',
-                })}
-              >
-                {formatAddress(allocation.underlying_token_address)}
-              </p>
+              <Address value={allocation.underlying_token_address} />
             </div>
           );
         },
@@ -198,16 +182,7 @@ export function AllocationGrid({
               >
                 {formatTokenAmount(allocation.balance)} {allocation.symbol}
               </p>
-              <p
-                className={css({
-                  m: 0,
-                  mt: '1',
-                  fontSize: 'xs',
-                  color: 'text.muted',
-                })}
-              >
-                {formatAddress(allocation.receipt_token_address)}
-              </p>
+              <Address value={allocation.receipt_token_address} />
             </div>
           );
         },

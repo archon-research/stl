@@ -6,10 +6,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
+import { PercentageSlider, StatusBadge, SummaryMetric } from '../../shared';
 import { getBadDebt } from '../../../lib/api';
 import {
-  formatTokenAmount,
   formatRatioPercent,
+  formatTokenAmount,
   formatUsdValue,
   getBadDebtTone,
   parseNumericValue,
@@ -22,117 +23,25 @@ type BadDebtTabProps = {
   selectedReceiptToken: Allocation | null;
 };
 
-const GAP_TICK_VALUES = Array.from({ length: 21 }, (_, index) =>
-  Number((index * 0.05).toFixed(2)),
-);
-
-const GAP_TICK_LABELS = [0, 0.25, 0.5, 0.75, 1];
-
-function getGapOffset(value: number): string {
-  return `${value * 100}%`;
-}
-
-function getEdgeAlignedTransform(
-  value: number,
-  firstValue: number,
-  lastValue: number,
-): string {
-  if (value === firstValue) {
-    return 'translateX(0)';
-  }
-
-  if (value === lastValue) {
-    return 'translateX(-100%)';
-  }
-
-  return 'translateX(-50%)';
-}
-
 function getToneStyles(tone: ReturnType<typeof getBadDebtTone>) {
   switch (tone) {
     case 'green':
       return {
-        badgeBg: { _dark: 'green.950', base: 'green.50' },
-        badgeColor: { _dark: 'green.200', base: 'green.700' },
         valueColor: { _dark: 'green.300', base: 'green.700' },
       };
     case 'yellow':
       return {
-        badgeBg: { _dark: 'yellow.950', base: 'yellow.50' },
-        badgeColor: { _dark: 'yellow.200', base: 'yellow.800' },
         valueColor: { _dark: 'yellow.300', base: 'yellow.800' },
       };
     case 'neutral':
       return {
-        badgeBg: { _dark: 'gray.800', base: 'gray.100' },
-        badgeColor: { _dark: 'gray.200', base: 'gray.600' },
         valueColor: { _dark: 'gray.400', base: 'gray.600' },
       };
     default:
       return {
-        badgeBg: { _dark: 'red.900', base: 'red.50' },
-        badgeColor: { _dark: 'red.100', base: 'red.700' },
         valueColor: { _dark: 'red.200', base: 'red.700' },
       };
   }
-}
-
-function SummaryMetric({
-  detail,
-  label,
-  value,
-}: {
-  detail?: string;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div
-      className={css({
-        borderRadius: 'md',
-        borderStyle: 'solid',
-        borderWidth: '1px',
-        borderColor: 'border.subtle',
-        bg: 'surface.default',
-        p: '3',
-      })}
-    >
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'xs',
-          textTransform: 'uppercase',
-          letterSpacing: '0.12em',
-          color: 'text.muted',
-        })}
-      >
-        {label}
-      </p>
-      <p
-        className={css({
-          m: 0,
-          mt: '2',
-          fontSize: 'lg',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-        })}
-      >
-        {value}
-      </p>
-      {detail ? (
-        <p
-          className={css({
-            m: 0,
-            mt: '1',
-            fontSize: 'xs',
-            color: 'text.muted',
-          })}
-        >
-          {detail}
-        </p>
-      ) : null}
-    </div>
-  );
 }
 
 export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
@@ -196,7 +105,6 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
 
   const tone = getBadDebtTone(badDebt?.bad_debt_usd);
   const toneStyles = getToneStyles(tone);
-  const sliderLabel = formatRatioPercent(sliderValue, 0);
   const requestLabel = formatRatioPercent(
     badDebt?.gap_pct ?? debouncedGapPct,
     0,
@@ -271,131 +179,16 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
             {isLoading ? <LoadingIndicator message="Recalculating scenario" /> : null}
           </div>
 
-          <span
-            className={css({
-              display: 'inline-flex',
-              alignItems: 'center',
-              borderRadius: 'sm',
-              bg: toneStyles.badgeBg,
-              color: toneStyles.badgeColor,
-              fontSize: 'xs',
-              fontWeight: 'semibold',
-              px: '3',
-              py: '1.5',
-            })}
-          >
-            {statusLabel}
-          </span>
+          <StatusBadge tone={tone} label={statusLabel} />
         </div>
 
         <div className={css({ mt: '5' })}>
-          <label
-            htmlFor="bad-debt-gap"
-            className={css({ display: 'grid', gap: '2' })}
-          >
-            <span
-              className={css({
-                fontSize: 'sm',
-                fontWeight: 'semibold',
-                color: 'text.strong',
-              })}
-            >
-              Gap percentage
-            </span>
-            <div
-              className={flex({
-                align: 'flex-start',
-                justify: 'space-between',
-                gap: '3',
-                wrap: 'wrap',
-              })}
-            >
-              <div className={css({ flex: '1', minWidth: '16rem', display: 'grid', gap: '2' })}>
-                <input
-                  id="bad-debt-gap"
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  value={sliderValue}
-                  onChange={(event) => setSliderValue(Number(event.target.value))}
-                  className={css({
-                    width: '100%',
-                    accentColor: 'interactive.accent',
-                    cursor: 'pointer',
-                  })}
-                />
-                <div
-                  aria-hidden="true"
-                  className={css({
-                    position: 'relative',
-                    height: '10',
-                  })}
-                >
-                  {GAP_TICK_VALUES.map((value, index) => (
-                    <span
-                      key={value}
-                      style={{
-                        left: getGapOffset(value),
-                        transform: getEdgeAlignedTransform(
-                          value,
-                          GAP_TICK_VALUES[0],
-                          GAP_TICK_VALUES[GAP_TICK_VALUES.length - 1],
-                        ),
-                      }}
-                      className={css({
-                        position: 'absolute',
-                        top: 0,
-                        width: '1px',
-                        height: index % 2 === 1 ? '2.5' : '1.5',
-                        bg: 'border.default',
-                        opacity: value === sliderValue ? 1 : 0.7,
-                      })}
-                    />
-                  ))}
-                </div>
-                <div
-                  aria-hidden="true"
-                  className={css({
-                    position: 'relative',
-                    height: '6',
-                  })}
-                >
-                  {GAP_TICK_LABELS.map((value) => (
-                    <span
-                      key={value}
-                      style={{
-                        left: getGapOffset(value),
-                        transform: getEdgeAlignedTransform(
-                          value,
-                          GAP_TICK_LABELS[0],
-                          GAP_TICK_LABELS[GAP_TICK_LABELS.length - 1],
-                        ),
-                      }}
-                      className={css({
-                        position: 'absolute',
-                        top: 0,
-                        fontSize: 'xs',
-                        color: 'text.muted',
-                        whiteSpace: 'nowrap',
-                      })}
-                    >
-                      {formatRatioPercent(value, 0)}
-                    </span>
-                  ))}
-                </div>
-              </div>
-              <span
-                className={css({
-                  fontSize: 'sm',
-                  fontWeight: 'semibold',
-                  color: 'text.strong',
-                })}
-              >
-                {sliderLabel}
-              </span>
-            </div>
-          </label>
+          <PercentageSlider
+            id="bad-debt-gap"
+            label="Gap percentage"
+            value={sliderValue}
+            onChange={setSliderValue}
+          />
         </div>
       </div>
 
