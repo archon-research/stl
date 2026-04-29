@@ -1,12 +1,14 @@
 package morpho_indexer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
 	"strconv"
 	"time"
 
@@ -595,6 +597,21 @@ func (s *Service) handleLiquidateEvent(ctx context.Context, e *LiquidateEvent, c
 		return fmt.Errorf("fetching on-chain state: %w", err)
 	}
 
+	// Save the borrower and liquidator positions in user-address order so the
+	// per-row mmp advisory locks are acquired in a transaction-stable order.
+	// Today the mss lock taken inside saveMarketStateSnapshot serializes all
+	// concurrent transactions on this market, which means mmp ordering between
+	// the two positions can't actually deadlock — but this defensive sort
+	// closes the door on a future refactor that batches events into a shared
+	// transaction or otherwise re-orders the per-event tx scope. See ADR-0002 §3.
+	positions := []userPosition{
+		{borrower, borrowerPos, "borrower"},
+		{liquidator, liquidatorPos, "liquidator"},
+	}
+	slices.SortFunc(positions, func(a, b userPosition) int {
+		return bytes.Compare(a.user.Bytes(), b.user.Bytes())
+	})
+
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		marketID, err := s.ensureMarket(ctx, tx, e.MarketID(), chainID, blockNumber)
 		if err != nil {
@@ -605,12 +622,31 @@ func (s *Service) handleLiquidateEvent(ctx context.Context, e *LiquidateEvent, c
 			return fmt.Errorf("saving market state: %w", err)
 		}
 
-		if err := s.savePositionSnapshot(ctx, tx, borrower, marketID, blockNumber, blockVersion, blockTimestamp, borrowerPos, ms, e.Type(), e.TxHash(), chainID); err != nil {
-			return fmt.Errorf("saving borrower position: %w", err)
+		for _, p := range positions {
+			if err := s.savePositionSnapshot(ctx, tx, p.user, marketID, blockNumber, blockVersion, blockTimestamp, p.pos, ms, e.Type(), e.TxHash(), chainID); err != nil {
+				return fmt.Errorf("saving %s position: %w", p.role, err)
+			}
 		}
-
-		return s.savePositionSnapshot(ctx, tx, liquidator, marketID, blockNumber, blockVersion, blockTimestamp, liquidatorPos, ms, e.Type(), e.TxHash(), chainID)
+		return nil
 	})
+}
+
+// userPosition pairs a user address with their position state and a role
+// label, for ordered per-user mmp/mvp lock acquisition (see
+// handleLiquidateEvent / handleVaultTransfer). The role survives the sort so
+// failures still surface as "saving <borrower|liquidator|sender|receiver>
+// position: ..." regardless of which user got sorted first.
+type userPosition struct {
+	user common.Address
+	pos  *PositionState
+	role string
+}
+
+// userVaultBalance is the vault analogue of userPosition.
+type userVaultBalance struct {
+	user    common.Address
+	balance *big.Int
+	role    string
 }
 
 // handleAccrueInterest handles AccrueInterest events.
@@ -667,20 +703,28 @@ func (s *Service) handleVaultTransfer(ctx context.Context, e *VaultTransferEvent
 			vaultAddress.Hex(), e.From.Hex(), e.To.Hex(), blockNumber, err)
 	}
 
+	// Save sender and receiver vault positions in user-address order so the
+	// per-row mvp advisory locks are acquired in a transaction-stable order;
+	// same defense-in-depth rationale as handleLiquidateEvent. See ADR-0002 §3.
+	balances := make([]userVaultBalance, 0, 2)
+	if hasFrom {
+		balances = append(balances, userVaultBalance{e.From, senderBalance, "sender"})
+	}
+	if hasTo {
+		balances = append(balances, userVaultBalance{e.To, receiverBalance, "receiver"})
+	}
+	slices.SortFunc(balances, func(a, b userVaultBalance) int {
+		return bytes.Compare(a.user.Bytes(), b.user.Bytes())
+	})
+
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if err := s.saveVaultStateSnapshotInTx(ctx, tx, vault.ID, blockNumber, blockVersion, blockTimestamp, vs, nil); err != nil {
 			return fmt.Errorf("saving vault state: %w", err)
 		}
 
-		if hasFrom {
-			if err := s.saveVaultPositionInTx(ctx, tx, e.From, vault.ID, blockNumber, blockVersion, blockTimestamp, senderBalance, vs, e.Type(), e.TxHash(), chainID); err != nil {
-				return fmt.Errorf("saving sender position: %w", err)
-			}
-		}
-
-		if hasTo {
-			if err := s.saveVaultPositionInTx(ctx, tx, e.To, vault.ID, blockNumber, blockVersion, blockTimestamp, receiverBalance, vs, e.Type(), e.TxHash(), chainID); err != nil {
-				return fmt.Errorf("saving receiver position: %w", err)
+		for _, b := range balances {
+			if err := s.saveVaultPositionInTx(ctx, tx, b.user, vault.ID, blockNumber, blockVersion, blockTimestamp, b.balance, vs, e.Type(), e.TxHash(), chainID); err != nil {
+				return fmt.Errorf("saving %s position: %w", b.role, err)
 			}
 		}
 
@@ -793,6 +837,40 @@ func (s *Service) ensureMarket(ctx context.Context, tx pgx.Tx, marketID [32]byte
 
 	return s.morphoRepo.GetOrCreateMarket(ctx, tx, market)
 }
+
+// Contract for the Save* helpers below — read this before adding a new event
+// handler or batching existing ones into a shared transaction.
+//
+// Each event handler today opens its own WithTransaction scope and touches at
+// most one market/vault. That bounds per-tx lock acquisition to:
+//   - 0 or 1 mss + 0..N mmp at a single market_id (handlePositionEvent,
+//     handleLiquidateEvent), or
+//   - 0 or 1 mvs + 0..N mvp at a single vault_id (handleVaultTransfer,
+//     saveVaultEventSnapshot).
+//
+// Two invariants prevent deadlocks under cross-build contention:
+//
+//  1. STATE-FIRST: every handler that writes mmp MUST first write mss for
+//     the same (market_id, block_number, block_version, timestamp), and
+//     likewise mvs before mvp. The state lock then serialises every other
+//     concurrent tx on the same market/vault, so the trailing per-user mmp
+//     /mvp locks can never be held by two txs at once for that (market, …)
+//     tuple.
+//
+//  2. SORTED-USERS: handlers that write more than one mmp/mvp in a single tx
+//     (handleLiquidateEvent: borrower + liquidator; handleVaultTransfer:
+//     sender + receiver) sort their per-user saves by user address before
+//     iterating. That's defence-in-depth: invariant 1 already prevents
+//     deadlock today, but the sort survives a future refactor that loosens
+//     it (e.g. event batching across markets in one tx, or removal of the
+//     state save).
+//
+// If you add a handler that writes mmp/mvp without first writing mss/mvs for
+// the same key, OR that batches multiple markets/vaults into a shared tx,
+// you MUST extend the sort to cover the per-tx lock acquisition order across
+// all keys.
+//
+// See ADR-0002 §3 and VEC-194 PR.
 
 func (s *Service) saveMarketStateSnapshot(ctx context.Context, tx pgx.Tx, morphoMarketID, blockNumber int64, blockVersion int, blockTimestamp time.Time, ms *MarketState, accrueData *accrueInterestData) error {
 	state, err := entity.NewMorphoMarketState(morphoMarketID, blockNumber, blockVersion, blockTimestamp, ms.TotalSupplyAssets, ms.TotalSupplyShares, ms.TotalBorrowAssets, ms.TotalBorrowShares, ms.LastUpdate.Int64(), ms.Fee)

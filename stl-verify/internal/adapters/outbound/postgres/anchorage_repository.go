@@ -1,10 +1,12 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -54,10 +56,26 @@ func NewAnchorageRepository(pool *pgxpool.Pool, txm *TxManager, logger *slog.Log
 // ---------------------------------------------------------------------------
 
 // SaveSnapshots inserts package snapshots in batches within a single transaction.
+//
+// Snapshots are sorted by natural key once (before chunking) so the per-row
+// advisory lock in assign_processing_version_anchorage_package_snapshot is
+// acquired in a transaction-stable order across concurrent callers. Sorting
+// must precede chunking — otherwise the cross-chunk total order breaks. See
+// ADR-0002 §3.
 func (r *AnchorageRepository) SaveSnapshots(ctx context.Context, snapshots []entity.AnchoragePackageSnapshot) error {
 	if len(snapshots) == 0 {
 		return nil
 	}
+
+	slices.SortFunc(snapshots, func(a, b entity.AnchoragePackageSnapshot) int {
+		return cmp.Or(
+			cmp.Compare(a.PrimeID, b.PrimeID),
+			cmp.Compare(a.PackageID, b.PackageID),
+			cmp.Compare(a.AssetType, b.AssetType),
+			cmp.Compare(a.CustodyType, b.CustodyType),
+			a.SnapshotTime.Compare(b.SnapshotTime),
+		)
+	})
 
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		for i := 0; i < len(snapshots); i += snapshotBatchSize {
@@ -129,10 +147,20 @@ func insertSnapshotBatch(ctx context.Context, tx pgx.Tx, batch []entity.Anchorag
 
 // SaveOperations inserts operations in batches within a single transaction.
 // Uses ON CONFLICT to skip duplicates (idempotent).
+//
+// Operations are sorted by natural key once (before chunking); same rationale
+// as SaveSnapshots above. See ADR-0002 §3.
 func (r *AnchorageRepository) SaveOperations(ctx context.Context, operations []entity.AnchorageOperation) error {
 	if len(operations) == 0 {
 		return nil
 	}
+
+	slices.SortFunc(operations, func(a, b entity.AnchorageOperation) int {
+		return cmp.Or(
+			cmp.Compare(a.OperationID, b.OperationID),
+			a.CreatedAt.Compare(b.CreatedAt),
+		)
+	})
 
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		for i := 0; i < len(operations); i += operationBatchSize {
