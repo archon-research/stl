@@ -1,6 +1,5 @@
-import { SearchInput, SkeletonRows, SurfaceMessage } from '@archon-research/design-system';
+import { SearchInput, SurfaceMessage } from '@archon-research/design-system';
 import {
-  flexRender,
   type ColumnDef,
   type SortingState,
 } from '@tanstack/react-table';
@@ -9,7 +8,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { useDataTable } from '../../data-table/hooks';
+import { DataTable, useDataTable } from '../../data-table';
 import {
   type ChainLabelLookup,
   formatTokenAmount,
@@ -353,134 +352,13 @@ export function AllocationGrid({
           {selectedPrime &&
           !errorMessage &&
           (isLoading || filteredAllocations.length > 0) ? (
-            <div
-              className={css({
-                overflowX: 'auto',
-                borderRadius: 'md',
-                borderStyle: 'solid',
-                borderWidth: '1px',
-                borderColor: 'border.subtle',
-              })}
-            >
-              <table
-                className={css({
-                  width: '100%',
-                  minWidth: '48rem',
-                  borderCollapse: 'collapse',
-                  bg: 'surface.default',
-                })}
-              >
-                <thead>
-                  {table.getHeaderGroups().map((headerGroup) => (
-                    <tr key={headerGroup.id} className={css({ bg: 'surface.subtle' })}>
-                      {headerGroup.headers.map((header) => {
-                        const sorted = header.column.getIsSorted();
-
-                        return (
-                          <th
-                            key={header.id}
-                            className={css({
-                              px: '4',
-                              py: '3',
-                              textAlign: 'left',
-                              fontSize: 'xs',
-                              fontWeight: 'semibold',
-                              letterSpacing: '0.08em',
-                              textTransform: 'uppercase',
-                              color: 'text.muted',
-                            })}
-                          >
-                            {header.isPlaceholder ? null : (
-                              <button
-                                type="button"
-                                onClick={header.column.getToggleSortingHandler()}
-                                className={css({
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '1.5',
-                                  border: 'none',
-                                  bg: 'transparent',
-                                  p: 0,
-                                  font: 'inherit',
-                                  color: 'inherit',
-                                  cursor: 'pointer',
-                                })}
-                              >
-                                <span>
-                                  {flexRender(
-                                    header.column.columnDef.header,
-                                    header.getContext(),
-                                  )}
-                                </span>
-                                <span>
-                                  {sorted === 'asc'
-                                    ? '↑'
-                                    : sorted === 'desc'
-                                    ? '↓'
-                                    : '↕'}
-                                </span>
-                              </button>
-                            )}
-                          </th>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </thead>
-                <tbody>
-                  {isLoading
-                    ? SkeletonRows()
-                    : table.getRowModel().rows.map((row) => {
-                      const allocationKey = getAllocationKey(row.original);
-                        const isSelected =
-                          allocationKey === selectedAllocationKey;
-
-                        return (
-                          <tr
-                            key={allocationKey}
-                            aria-selected={isSelected}
-                            tabIndex={0}
-                            onClick={() => onSelectAllocation(allocationKey)}
-                            onKeyDown={(event) => {
-                              if (event.key === 'Enter' || event.key === ' ') {
-                                event.preventDefault();
-                                onSelectAllocation(allocationKey);
-                              }
-                            }}
-                            className={css({
-                              cursor: 'pointer',
-                              bg: isSelected
-                                ? 'interactive.selected'
-                                : 'surface.default',
-                              transitionDuration: 'fast',
-                              transitionProperty: 'background-color',
-                              _hover: { bg: 'interactive.hover' },
-                              _focusVisible: { bg: 'interactive.hover' },
-                            })}
-                          >
-                            {row.getVisibleCells().map((cell) => (
-                              <td
-                                key={cell.id}
-                                className={css({
-                                  borderBottomWidth: '1px',
-                                  borderBottomStyle: 'solid',
-                                  borderBottomColor: 'border.subtle',
-                                  px: '4',
-                                  py: '3.5',
-                                })}
-                              >
-                                {flexRender(
-                                  cell.column.columnDef.cell,
-                                  cell.getContext(),
-                                )}
-                              </td>
-                            ))}
-                          </tr>
-                        );
-                      })}
-                </tbody>
-              </table>
-            </div>
+            <DataTable
+              table={table}
+              isLoading={isLoading}
+              onRowClick={(allocation) => onSelectAllocation(getAllocationKey(allocation))}
+              getRowKey={getAllocationKey}
+              selectedRowKey={selectedAllocationKey}
+            />
           ) : null}
         </div>
       </section>

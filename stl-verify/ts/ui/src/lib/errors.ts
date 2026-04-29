@@ -7,10 +7,10 @@ export function isAbortError(error: unknown): boolean {
 export function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     logging.error('Error details', {
+      type: error.name,
       message: error.message,
       stack: error.stack,
-      name: error.name,
-      ...error,
+      error,
     });
     return error.message;
   }

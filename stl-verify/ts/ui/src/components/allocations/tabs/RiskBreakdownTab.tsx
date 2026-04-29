@@ -1,14 +1,13 @@
 import {
   LoadingIndicator,
-  SkeletonRows,
   SkeletonStack,
 } from '@archon-research/design-system';
-import { flexRender, type CellContext, type ColumnDef } from '@tanstack/react-table';
+import { type CellContext, type ColumnDef } from '@tanstack/react-table';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
-import { useDataTable } from '../../../data-table/hooks';
+import { DataTable, useDataTable } from '../../../data-table';
 import { buildRowSearchString, matchesSearchQuery } from '../../../data-table/utils';
 import { getRiskBreakdown } from '../../../lib/api';
 import {
@@ -80,31 +79,31 @@ function RiskTable({
         id: 'price_usd',
         header: 'Price USD',
         accessorKey: 'price_usd',
-        cell: (info: CellContext<RiskItem, unknown>) => formatUsdValue(info.getValue()),
+        cell: (info: CellContext<RiskItem, unknown>) => formatUsdValue(info.getValue() as string | number | null | undefined),
       },
       {
         id: 'amount_usd',
         header: 'Amount USD',
         accessorKey: 'amount_usd',
-        cell: (info: CellContext<RiskItem, unknown>) => formatUsdValue(info.getValue()),
+        cell: (info: CellContext<RiskItem, unknown>) => formatUsdValue(info.getValue() as string | number | null | undefined),
       },
       {
         id: 'backing_pct',
         header: 'Backing %',
         accessorKey: 'backing_pct',
-        cell: (info: CellContext<RiskItem, unknown>) => formatPercentValue(info.getValue()),
+        cell: (info: CellContext<RiskItem, unknown>) => formatPercentValue(info.getValue() as string | number | null | undefined),
       },
       {
         id: 'lt',
         header: 'Liquidation Threshold',
         accessorKey: 'liquidation_threshold',
-        cell: (info: CellContext<RiskItem, unknown>) => formatRatioPercent(info.getValue()),
+        cell: (info: CellContext<RiskItem, unknown>) => formatRatioPercent(info.getValue() as string | number | null | undefined),
       },
       {
         id: 'bonus',
         header: 'Liquidation Bonus',
         accessorKey: 'liquidation_bonus',
-        cell: (info: CellContext<RiskItem, unknown>) => formatMultiplier(info.getValue()),
+        cell: (info: CellContext<RiskItem, unknown>) => formatMultiplier(info.getValue() as string | number | null | undefined),
       },
     ],
     [],
@@ -115,118 +114,24 @@ function RiskTable({
   });
 
   return (
-    <div
-      className={css({
-        overflowX: 'auto',
-        borderRadius: 'md',
-        borderStyle: 'solid',
-        borderWidth: '1px',
-        borderColor: 'border.subtle',
-      })}
-    >
-      <table
-        className={css({
-          width: '100%',
-          minWidth: '76rem',
-          borderCollapse: 'collapse',
-        })}
-      >
-        <thead>
-          {table.getHeaderGroups().map((headerGroup) => (
-            <tr key={headerGroup.id} className={css({ bg: 'surface.subtle' })}>
-              {headerGroup.headers.map((header) => {
-                const sorted = header.column.getIsSorted();
-
-                return (
-                  <th
-                    key={header.id}
-                    className={css({
-                      px: '4',
-                      py: '3',
-                      textAlign: 'left',
-                      fontSize: 'xs',
-                      fontWeight: 'semibold',
-                      letterSpacing: '0.08em',
-                      textTransform: 'uppercase',
-                      color: 'text.muted',
-                    })}
-                  >
-                    {header.isPlaceholder ? null : (
-                      <button
-                        type="button"
-                        onClick={header.column.getToggleSortingHandler()}
-                        className={css({
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '1.5',
-                          border: 'none',
-                          bg: 'transparent',
-                          p: 0,
-                          font: 'inherit',
-                          color: 'inherit',
-                          cursor: 'pointer',
-                        })}
-                      >
-                        <span>
-                          {flexRender(
-                            header.column.columnDef.header,
-                            header.getContext(),
-                          )}
-                        </span>
-                        <span>
-                          {sorted === 'asc'
-                            ? '↑'
-                            : sorted === 'desc'
-                            ? '↓'
-                            : '↕'}
-                        </span>
-                      </button>
-                    )}
-                  </th>
-                );
-              })}
-            </tr>
-          ))}
-        </thead>
-        <tbody>
-          {isLoading && filteredItems.length === 0
-            ? SkeletonRows({ rows: 5, columns: 7, firstColumnTall: false })
-            : table.getRowModel().rows.map((row) => (
-                <tr
-                  key={row.original.token_id}
-                  className={css({
-                    borderBottomWidth: '1px',
-                    borderBottomStyle: 'solid',
-                    borderBottomColor: 'border.subtle',
-                  })}
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <td
-                      key={cell.id}
-                      className={css({
-                        px: '4',
-                        py: '3',
-                      })}
-                    >
-                      <p
-                        className={css({
-                          m: 0,
-                          fontSize: 'sm',
-                          color: 'text.strong',
-                        })}
-                      >
-                        {flexRender(
-                          cell.column.columnDef.cell,
-                          cell.getContext(),
-                        )}
-                      </p>
-                    </td>
-                  ))}
-                </tr>
-              ))}
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      table={table}
+      isLoading={isLoading}
+      getRowKey={(item) => String(item.token_id)}
+      skeletonConfig={{ rows: 5, columns: 7, firstColumnTall: false }}
+      minWidth="76rem"
+      renderCell={(children) => (
+        <p
+          className={css({
+            m: 0,
+            fontSize: 'sm',
+            color: 'text.strong',
+          })}
+        >
+          {children}
+        </p>
+      )}
+    />
   );
 }
 
