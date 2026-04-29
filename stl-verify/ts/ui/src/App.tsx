@@ -27,6 +27,7 @@ import {
   getProtocolLabel,
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
+import { logging } from './lib/logging';
 import { PARAMS, useUrlParam } from './lib/url-params';
 import type { Allocation, Prime } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
@@ -79,6 +80,7 @@ function App() {
           return;
         }
 
+        logging.error('Failed to load local metadata (chains/protocols)', { error });
         setLocalChains([]);
         setLocalProtocols([]);
       });
@@ -101,6 +103,7 @@ function App() {
           return;
         }
 
+        logging.error('Failed to load primes', { error });
         setPrimesErrorMessage(toErrorMessage(error));
       })
       .finally(() => {
@@ -175,6 +178,7 @@ function App() {
           return;
         }
 
+        logging.error('Failed to load allocations', { error, primeId: selectedPrimeId });
         setAllocationsErrorMessage(toErrorMessage(error));
       })
       .finally(() => {
@@ -392,7 +396,6 @@ function App() {
       >
         <BottomPanel
           allocations={allocations}
-          chainLabels={chainLabels}
           errorMessage={allocationsErrorMessage}
           isLoading={isAllocationsLoading}
           localProtocols={localProtocols}

@@ -12,7 +12,6 @@ import { flex } from '#styled-system/patterns';
 import { segmentedControl } from '#styled-system/recipes';
 
 import {
-  type ChainLabelLookup,
   getProtocolLabel,
   sortAllocations,
 } from '../../lib/dashboard';
@@ -24,7 +23,6 @@ import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 
 type BottomPanelProps = {
   allocations: Allocation[];
-  chainLabels: ChainLabelLookup;
   errorMessage: string | null;
   isLoading: boolean;
   localProtocols: LocalProtocolRow[];
@@ -40,7 +38,6 @@ const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '8', 
 
 export function BottomPanel({
   allocations,
-  chainLabels: _chainLabels,
   errorMessage,
   isLoading,
   localProtocols,

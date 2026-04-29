@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useRef,
   useState,
   type CSSProperties,
   type MouseEvent,
@@ -64,6 +65,9 @@ export function RiskDetailDrawer({
 }: RiskDetailDrawerProps) {
   const [drawerWidth, setDrawerWidth] = useState(readStoredWidth);
   const [dragState, setDragState] = useState<DragState | null>(null);
+  const drawerWidthRef = useRef(drawerWidth);
+
+  drawerWidthRef.current = drawerWidth;
 
   useEffect(() => {
     if (!isOpen) {
@@ -97,7 +101,7 @@ export function RiskDetailDrawer({
     };
 
     const handleMouseUp = () => {
-      window.localStorage.setItem(DRAWER_STORAGE_KEY, String(drawerWidth));
+      window.localStorage.setItem(DRAWER_STORAGE_KEY, String(drawerWidthRef.current));
       setDragState(null);
     };
 
@@ -113,7 +117,7 @@ export function RiskDetailDrawer({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [dragState, drawerWidth]);
+  }, [dragState]);
 
   const drawerStyle: CSSProperties = {
     width: `min(${drawerWidth}px, 100vw)`,
@@ -141,6 +145,7 @@ export function RiskDetailDrawer({
           inset: 0,
           bg: 'rgba(15, 23, 42, 0.28)',
           opacity: isOpen ? 1 : 0,
+          visibility: isOpen ? 'visible' : 'hidden',
           transitionDuration: 'normal',
           transitionProperty: 'opacity',
           zIndex: 30,

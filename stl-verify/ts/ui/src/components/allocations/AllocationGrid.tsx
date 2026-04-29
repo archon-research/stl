@@ -66,12 +66,16 @@ export function AllocationGrid({
   }, [searchValue]);
 
   useEffect(() => {
+    if (localSearchValue === searchValue) {
+      return;
+    }
+
     const timeoutId = window.setTimeout(() => {
       onSearchChange(localSearchValue);
     }, 300);
 
     return () => window.clearTimeout(timeoutId);
-  }, [localSearchValue, onSearchChange]);
+  }, [localSearchValue, onSearchChange, searchValue]);
 
   const columns = useMemo<ColumnDef<Allocation>[]>(
     () => [

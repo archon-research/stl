@@ -3,7 +3,7 @@ import {
   SkeletonRows,
   SkeletonStack,
 } from '@archon-research/design-system';
-import { flexRender } from '@tanstack/react-table';
+import { flexRender, type CellContext, type ColumnDef } from '@tanstack/react-table';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
@@ -19,6 +19,7 @@ import {
   parseNumericValue,
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
+import { logging } from '../../../lib/logging';
 import type { Allocation, RiskBreakdown } from '../../../types/allocation';
 
 type RiskBreakdownTabProps = {
@@ -56,19 +57,19 @@ function RiskTable({
     [items, searchQuery],
   );
 
-  const columns = useMemo(
+  const columns = useMemo<ColumnDef<RiskItem>[]>(
     () => [
       {
         id: 'symbol',
         header: 'Symbol',
         accessorKey: 'symbol',
-        cell: (info: any) => info.getValue() as string,
+        cell: (info: CellContext<RiskItem, unknown>) => info.getValue() as string,
       },
       {
         id: 'amount',
         header: 'Amount',
         accessorKey: 'amount',
-        cell: (info: any) => {
+        cell: (info: CellContext<RiskItem, unknown>) => {
           const value = info.getValue();
           return typeof value === 'string'
             ? parseFloat(value).toFixed(2)
@@ -79,31 +80,31 @@ function RiskTable({
         id: 'price_usd',
         header: 'Price USD',
         accessorKey: 'price_usd',
-        cell: (info: any) => formatUsdValue(info.getValue()),
+        cell: (info: CellContext<RiskItem, unknown>) => formatUsdValue(info.getValue()),
       },
       {
         id: 'amount_usd',
         header: 'Amount USD',
         accessorKey: 'amount_usd',
-        cell: (info: any) => formatUsdValue(info.getValue()),
+        cell: (info: CellContext<RiskItem, unknown>) => formatUsdValue(info.getValue()),
       },
       {
         id: 'backing_pct',
         header: 'Backing %',
         accessorKey: 'backing_pct',
-        cell: (info: any) => formatPercentValue(info.getValue()),
+        cell: (info: CellContext<RiskItem, unknown>) => formatPercentValue(info.getValue()),
       },
       {
         id: 'lt',
         header: 'Liquidation Threshold',
         accessorKey: 'liquidation_threshold',
-        cell: (info: any) => formatRatioPercent(info.getValue()),
+        cell: (info: CellContext<RiskItem, unknown>) => formatRatioPercent(info.getValue()),
       },
       {
         id: 'bonus',
         header: 'Liquidation Bonus',
         accessorKey: 'liquidation_bonus',
-        cell: (info: any) => formatMultiplier(info.getValue()),
+        cell: (info: CellContext<RiskItem, unknown>) => formatMultiplier(info.getValue()),
       },
     ],
     [],
@@ -199,33 +200,28 @@ function RiskTable({
                     borderBottomColor: 'border.subtle',
                   })}
                 >
-                  {row.getVisibleCells().map((cell) => {
-                    const cellContent = cell.column.columnDef.cell
-                        ? (cell.column.columnDef.cell as any)({
-                            ...cell.getContext(),
-                          })
-                      : cell.getValue();
-
-                    return (
-                      <td
-                        key={cell.id}
+                  {row.getVisibleCells().map((cell) => (
+                    <td
+                      key={cell.id}
+                      className={css({
+                        px: '4',
+                        py: '3',
+                      })}
+                    >
+                      <p
                         className={css({
-                          px: '4',
-                          py: '3',
+                          m: 0,
+                          fontSize: 'sm',
+                          color: 'text.strong',
                         })}
                       >
-                        <p
-                          className={css({
-                            m: 0,
-                            fontSize: 'sm',
-                            color: 'text.strong',
-                          })}
-                        >
-                            {cellContent as React.ReactNode}
-                        </p>
-                      </td>
-                    );
-                  })}
+                        {flexRender(
+                          cell.column.columnDef.cell,
+                          cell.getContext(),
+                        )}
+                      </p>
+                    </td>
+                  ))}
                 </tr>
               ))}
         </tbody>
@@ -329,6 +325,10 @@ export function RiskBreakdownTab({
           return;
         }
 
+        logging.error('Failed to load risk breakdown', {
+          error,
+          receiptTokenId: selectedReceiptToken.receipt_token_id,
+        });
         setBreakdown(null);
         setErrorMessage(toErrorMessage(error));
       })

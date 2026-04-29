@@ -15,6 +15,7 @@ import {
   parseNumericValue,
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
+import { logging } from '../../../lib/logging';
 import type { Allocation, BadDebt } from '../../../types/allocation';
 
 type BadDebtTabProps = {
@@ -176,6 +177,11 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
           return;
         }
 
+        logging.error('Failed to load bad debt calculation', {
+          error,
+          receiptTokenId: selectedReceiptToken.receipt_token_id,
+          gapPct: debouncedGapPct,
+        });
         setErrorMessage(toErrorMessage(error));
         setBadDebt(null);
       })
