@@ -109,7 +109,6 @@ func consumerWithSequentialMessages(batches [][]outbound.SQSMessage) *mockConsum
 // ---------------------------------------------------------------------------
 
 func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
-	t.Parallel()
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
@@ -216,7 +215,6 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 }
 
 func TestIntegration_WorkerChangeDetection(t *testing.T) {
-	t.Parallel()
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
@@ -299,7 +297,6 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 }
 
 func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
-	t.Parallel()
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
@@ -382,7 +379,6 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 }
 
 func TestIntegration_WorkerStartStop(t *testing.T) {
-	t.Parallel()
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
@@ -454,7 +450,6 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 }
 
 func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
-	t.Parallel()
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
@@ -532,7 +527,6 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 }
 
 func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
-	t.Parallel()
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 

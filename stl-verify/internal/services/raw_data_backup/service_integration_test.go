@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,8 +115,9 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	infra.SQSClient = sqsClient
 	infra.S3Client = s3Client
 
-	// Create S3 bucket
-	bucketName := "test-raw-data-backup"
+	// Use unique resource names per test to avoid cross-test interference.
+	suffix := sanitizeTestName(t.Name())
+	bucketName := "backup-" + suffix
 	_, err = s3Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String(bucketName),
 	})
@@ -127,7 +129,7 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 
 	// Create SNS topic
 	topicResult, err := snsClient.CreateTopic(ctx, &sns.CreateTopicInput{
-		Name: aws.String("test-blocks"),
+		Name: aws.String("topic-" + suffix),
 	})
 	if err != nil {
 		t.Fatalf("failed to create SNS topic: %v", err)
@@ -137,7 +139,7 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 
 	// Create SQS queue for backup
 	queueResult, err := sqsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
-		QueueName: aws.String("test-backup-queue"),
+		QueueName: aws.String("queue-" + suffix),
 		Attributes: map[string]string{
 			string(sqstypes.QueueAttributeNameVisibilityTimeout): "30",
 		},
@@ -1557,4 +1559,20 @@ func TestIntegration_UnknownChainNoExpectations(t *testing.T) {
 	if len(objects) != 1 {
 		t.Errorf("expected 1 file (block only), got %d: %v", len(objects), objects)
 	}
+}
+
+func sanitizeTestName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	s := b.String()
+	if len(s) > 60 {
+		s = s[:60]
+	}
+	return s
 }

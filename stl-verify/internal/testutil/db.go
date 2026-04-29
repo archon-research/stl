@@ -369,6 +369,23 @@ func SetupTestSchema(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn stri
 	dsn = fmt.Sprintf("%s%ssearch_path=%s,public", baseDSN, separator, schemaName)
 
 	pool = ConnectPool(t, dsn)
+
+	// Pre-create an empty migrations table in the test schema. The migrator
+	// checks public.migrations to decide IF a migrations table exists, but
+	// then reads filenames via the unqualified "SELECT filename FROM migrations"
+	// which resolves through search_path. By placing an empty migrations table
+	// in the test schema (first in search_path), the migrator sees zero applied
+	// migrations and runs them all, creating tables in the test schema.
+	_, err = pool.Exec(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.migrations (
+		id SERIAL PRIMARY KEY,
+		filename TEXT NOT NULL UNIQUE,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		checksum TEXT
+	)`, schemaName))
+	if err != nil {
+		t.Fatalf("create migrations table in %s: %v", schemaName, err)
+	}
+
 	RunMigrations(t, pool)
 
 	cleanup = func() {
