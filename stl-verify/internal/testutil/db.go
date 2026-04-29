@@ -336,3 +336,89 @@ func CleanupSchemaForMain(baseDSN string, schemaPool *pgxpool.Pool, schemaName s
 		log.Printf("warning: could not drop schema %s: %v", schemaName, err)
 	}
 }
+
+// --------------------------------------------------------------------------
+// Per-test schema isolation (for use with shared containers)
+// --------------------------------------------------------------------------
+
+// SetupTestSchema creates an isolated PostgreSQL schema backed by a shared
+// container whose base DSN is passed in. Public-schema migrations are applied
+// once; the test schema gets its own copy of all tables. This is a drop-in
+// replacement for SetupTimescaleDB that reuses an existing container.
+func SetupTestSchema(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn string, cleanup func()) {
+	t.Helper()
+
+	EnsurePublicMigrations(baseDSN)
+
+	schemaName := SanitizeTestName(t.Name())
+	ctx := context.Background()
+
+	// Create the schema using a short-lived base connection.
+	basePool := ConnectPool(t, baseDSN)
+	_, err := basePool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", schemaName))
+	if err != nil {
+		t.Fatalf("create schema %s: %v", schemaName, err)
+	}
+	basePool.Close()
+
+	// Build DSN with search_path scoped to this schema.
+	separator := "?"
+	if strings.Contains(baseDSN, "?") {
+		separator = "&"
+	}
+	dsn = fmt.Sprintf("%s%ssearch_path=%s,public", baseDSN, separator, schemaName)
+
+	pool = ConnectPool(t, dsn)
+
+	// Pre-create an empty migrations table in the test schema. The migrator
+	// checks public.migrations to decide IF a migrations table exists, but
+	// then reads filenames via the unqualified "SELECT filename FROM migrations"
+	// which resolves through search_path. By placing an empty migrations table
+	// in the test schema (first in search_path), the migrator sees zero applied
+	// migrations and runs them all, creating tables in the test schema.
+	_, err = pool.Exec(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.migrations (
+		id SERIAL PRIMARY KEY,
+		filename TEXT NOT NULL UNIQUE,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		checksum TEXT
+	)`, schemaName))
+	if err != nil {
+		t.Fatalf("create migrations table in %s: %v", schemaName, err)
+	}
+
+	RunMigrations(t, pool)
+
+	cleanup = func() {
+		pool.Close()
+		dropCtx := context.Background()
+		dropPool, dropErr := pgxpool.New(dropCtx, baseDSN)
+		if dropErr != nil {
+			return
+		}
+		defer dropPool.Close()
+		_, _ = dropPool.Exec(dropCtx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schemaName))
+	}
+	return pool, dsn, cleanup
+}
+
+// SanitizeTestName converts a test name to a string safe for use as a
+// PostgreSQL identifier, Redis key prefix, or AWS resource name suffix.
+// The result is lowercase alphanumeric + underscores, prefixed with "t_",
+// and truncated to 63 characters (PostgreSQL identifier limit).
+func SanitizeTestName(testName string) string {
+	s := strings.ToLower(testName)
+	var b strings.Builder
+	b.WriteString("t_")
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	result := b.String()
+	if len(result) > 63 {
+		result = result[:63]
+	}
+	return result
+}

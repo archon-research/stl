@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -20,10 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
@@ -32,8 +27,29 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
+var (
+	sharedDSN           string
+	sharedRedisAddr     string
+	sharedLocalStackCfg testutil.LocalStackConfig
+)
+
 func TestMain(m *testing.M) {
-	os.Exit(testutil.RunTestsWithLeakCheck(m))
+	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
+	sharedDSN = dsn
+
+	redisAddr, redisCleanup := testutil.StartRedisForMain()
+	sharedRedisAddr = redisAddr
+
+	lsCfg, lsCleanup := testutil.StartLocalStackForMain("sns,sqs")
+	sharedLocalStackCfg = lsCfg
+
+	code := m.Run()
+
+	lsCleanup()
+	redisCleanup()
+	dbCleanup()
+	code = testutil.CheckGoroutineLeaks(code)
+	os.Exit(code)
 }
 
 // newTestBlockchainClient returns a MockBlockchainClient configured for
@@ -616,8 +632,7 @@ type TestInfrastructure struct {
 	TracesQueueURL   string
 	BlobsQueueURL    string
 
-	containers []testcontainers.Container
-	Cleanup    func()
+	Cleanup func()
 }
 
 func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastructure {
@@ -627,50 +642,21 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	infra := &TestInfrastructure{}
 	var cleanupFuncs []func()
 
-	// Start PostgreSQL
-	postgresContainer, postgresCfg := startPostgres(t, ctx)
-	infra.containers = append(infra.containers, postgresContainer)
-	cleanupFuncs = append(cleanupFuncs, func() {
-		if err := postgresContainer.Terminate(context.Background()); err != nil {
-			logger.Error("failed to terminate postgres container", "error", err)
-		}
-	})
-
-	pool, err := pgxpool.New(ctx, postgresCfg.ConnectionString())
-	if err != nil {
-		t.Fatalf("failed to connect to postgres: %v", err)
-	}
-	cleanupFuncs = append(cleanupFuncs, func() {
-		pool.Close()
-	})
+	// Use shared PostgreSQL container with per-test schema isolation
+	pool, _, schemaCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	cleanupFuncs = append(cleanupFuncs, schemaCleanup)
 	infra.Pool = pool
-
-	// Run migrations
-	_, currentFile, _, _ := runtime.Caller(0)
-	migrationsDir := filepath.Join(filepath.Dir(currentFile), "../../../db/migrations")
-	m := migrator.New(pool, migrationsDir)
-	if err := m.ApplyAll(ctx); err != nil {
-		t.Fatalf("failed to apply migrations: %v", err)
-	}
 
 	blockStateRepo := postgres.NewBlockStateRepository(pool, 1, logger)
 	infra.BlockStateRepo = blockStateRepo
 
-	// Start Redis
-	redisContainer, redisCfg := startRedis(t, ctx)
-	infra.containers = append(infra.containers, redisContainer)
-	cleanupFuncs = append(cleanupFuncs, func() {
-		if err := redisContainer.Terminate(context.Background()); err != nil {
-			logger.Error("failed to terminate redis container", "error", err)
-		}
-	})
-
+	// Use shared Redis container
 	cache, err := rediscache.NewBlockCache(rediscache.Config{
-		Addr:      redisCfg.Addr,
-		Password:  redisCfg.Password,
-		DB:        redisCfg.DB,
+		Addr:      sharedRedisAddr,
+		Password:  "",
+		DB:        0,
 		TTL:       1 * time.Hour,
-		KeyPrefix: "test",
+		KeyPrefix: testutil.SanitizeTestName(t.Name()),
 	}, logger)
 	if err != nil {
 		t.Fatalf("failed to create redis cache: %v", err)
@@ -682,18 +668,9 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	})
 	infra.Cache = cache
 
-	// Start LocalStack
-	localstackContainer, localstackCfg := testutil.StartLocalStack(t, ctx, "sns,sqs")
-	infra.containers = append(infra.containers, localstackContainer)
-	cleanupFuncs = append(cleanupFuncs, func() {
-		if err := localstackContainer.Terminate(context.Background()); err != nil {
-			logger.Error("failed to terminate localstack container", "error", err)
-		}
-	})
-
-	// Create AWS clients
+	// Use shared LocalStack container
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithRegion(localstackCfg.Region),
+		awsconfig.WithRegion(sharedLocalStackCfg.Region),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
 	)
 	if err != nil {
@@ -701,18 +678,20 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	}
 
 	snsClient := sns.NewFromConfig(awsCfg, func(o *sns.Options) {
-		o.BaseEndpoint = aws.String(localstackCfg.Endpoint)
+		o.BaseEndpoint = aws.String(sharedLocalStackCfg.Endpoint)
 	})
 	sqsClient := sqs.NewFromConfig(awsCfg, func(o *sqs.Options) {
-		o.BaseEndpoint = aws.String(localstackCfg.Endpoint)
+		o.BaseEndpoint = aws.String(sharedLocalStackCfg.Endpoint)
 	})
 	infra.SNSClient = snsClient
 	infra.SQSClient = sqsClient
 
-	// Create SNS topics and SQS queues
-	topics := createSNSTopics(t, ctx, snsClient)
-	queues := createSQSQueues(t, ctx, sqsClient)
-	subscribeQueuesToTopics(t, ctx, snsClient, topics, queues)
+	// Create SNS topics and SQS queues with test-unique names to avoid
+	// cross-test interference on the shared LocalStack container.
+	testPrefix := testutil.SanitizeTestName(t.Name())
+	topics := createSNSTopics(t, ctx, snsClient, testPrefix)
+	queues := createSQSQueues(t, ctx, sqsClient, testPrefix)
+	subscribeQueuesToTopics(t, ctx, snsClient, topics, queues, testPrefix)
 
 	infra.BlocksQueueURL = queues["blocks"]
 	infra.ReceiptsQueueURL = queues["receipts"]
@@ -778,107 +757,16 @@ func (infra *TestInfrastructure) WaitForMessage(t *testing.T, queueURL string, t
 }
 
 // =============================================================================
-// Container Setup
+// SNS/SQS Setup
 // =============================================================================
 
-// PostgresTestConfig contains all configuration needed to connect to test Postgres.
-type PostgresTestConfig struct {
-	Host     string
-	Port     string
-	User     string
-	Password string
-	Database string
-	SSLMode  string
-}
-
-// ConnectionString returns the full postgres connection URL.
-func (c PostgresTestConfig) ConnectionString() string {
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
-		c.User, c.Password, c.Host, c.Port, c.Database, c.SSLMode)
-}
-
-func startPostgres(t *testing.T, ctx context.Context) (testcontainers.Container, PostgresTestConfig) {
-	t.Helper()
-
-	config := PostgresTestConfig{
-		User:     "test",
-		Password: "test",
-		Database: "testdb",
-		SSLMode:  "disable",
-	}
-
-	req := testcontainers.ContainerRequest{
-		Image:        testutil.ImageTimescaleDB,
-		ExposedPorts: []string{"5432/tcp"},
-		Env: map[string]string{
-			"POSTGRES_USER":     config.User,
-			"POSTGRES_PASSWORD": config.Password,
-			"POSTGRES_DB":       config.Database,
-		},
-		WaitingFor: wait.ForLog("database system is ready to accept connections").
-			WithOccurrence(2).
-			WithStartupTimeout(60 * time.Second),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		testutil.HandleContainerRuntimeError(t, err, "failed to start postgres")
-	}
-
-	host, _ := container.Host(ctx)
-	port, _ := container.MappedPort(ctx, "5432")
-	config.Host = host
-	config.Port = port.Port()
-
-	return container, config
-}
-
-// RedisTestConfig contains all configuration needed to connect to test Redis.
-type RedisTestConfig struct {
-	Addr     string
-	Password string
-	DB       int
-}
-
-func startRedis(t *testing.T, ctx context.Context) (testcontainers.Container, RedisTestConfig) {
-	t.Helper()
-
-	config := RedisTestConfig{
-		Password: "",
-		DB:       0,
-	}
-
-	req := testcontainers.ContainerRequest{
-		Image:        testutil.ImageRedis,
-		ExposedPorts: []string{"6379/tcp"},
-		WaitingFor:   wait.ForLog("Ready to accept connections").WithStartupTimeout(60 * time.Second),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		testutil.HandleContainerRuntimeError(t, err, "failed to start redis")
-	}
-
-	host, _ := container.Host(ctx)
-	port, _ := container.MappedPort(ctx, "6379")
-	config.Addr = fmt.Sprintf("%s:%s", host, port.Port())
-
-	return container, config
-}
-
-func createSNSTopics(t *testing.T, ctx context.Context, client *sns.Client) map[string]string {
+func createSNSTopics(t *testing.T, ctx context.Context, client *sns.Client, prefix string) map[string]string {
 	t.Helper()
 	topics := make(map[string]string)
 
 	for _, name := range []string{"blocks", "receipts", "traces", "blobs"} {
 		result, err := client.CreateTopic(ctx, &sns.CreateTopicInput{
-			Name: aws.String(fmt.Sprintf("test-%s.fifo", name)),
+			Name: aws.String(fmt.Sprintf("%s-%s.fifo", prefix, name)),
 			Attributes: map[string]string{
 				"FifoTopic":                 "true",
 				"ContentBasedDeduplication": "false",
@@ -893,13 +781,13 @@ func createSNSTopics(t *testing.T, ctx context.Context, client *sns.Client) map[
 	return topics
 }
 
-func createSQSQueues(t *testing.T, ctx context.Context, client *sqs.Client) map[string]string {
+func createSQSQueues(t *testing.T, ctx context.Context, client *sqs.Client, prefix string) map[string]string {
 	t.Helper()
 	queues := make(map[string]string)
 
 	for _, name := range []string{"blocks", "receipts", "traces", "blobs"} {
 		result, err := client.CreateQueue(ctx, &sqs.CreateQueueInput{
-			QueueName: aws.String(fmt.Sprintf("test-%s-queue.fifo", name)),
+			QueueName: aws.String(fmt.Sprintf("%s-%s-queue.fifo", prefix, name)),
 			Attributes: map[string]string{
 				string(sqstypes.QueueAttributeNameVisibilityTimeout): "30",
 				string(sqstypes.QueueAttributeNameFifoQueue):         "true",
@@ -914,13 +802,13 @@ func createSQSQueues(t *testing.T, ctx context.Context, client *sqs.Client) map[
 	return queues
 }
 
-func subscribeQueuesToTopics(t *testing.T, ctx context.Context, snsClient *sns.Client, topics, queues map[string]string) {
+func subscribeQueuesToTopics(t *testing.T, ctx context.Context, snsClient *sns.Client, topics, queues map[string]string, prefix string) {
 	t.Helper()
 
 	for name, topicARN := range topics {
 		queueURL := queues[name]
 		// Get queue ARN from URL (LocalStack pattern for FIFO queues)
-		queueARN := fmt.Sprintf("arn:aws:sqs:us-east-1:000000000000:test-%s-queue.fifo", name)
+		queueARN := fmt.Sprintf("arn:aws:sqs:us-east-1:000000000000:%s-%s-queue.fifo", prefix, name)
 
 		_, err := snsClient.Subscribe(ctx, &sns.SubscribeInput{
 			TopicArn: aws.String(topicARN),

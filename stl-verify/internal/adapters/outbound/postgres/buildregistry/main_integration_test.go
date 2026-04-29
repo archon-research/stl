@@ -1,6 +1,6 @@
 //go:build integration
 
-package oracle_price_worker
+package buildregistry
 
 import (
 	"os"
