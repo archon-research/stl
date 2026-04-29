@@ -1,4 +1,4 @@
 {
-  "aUSDC": "aave_ausdc",
-  "spUSDC": "sparklend_spusdc"
+  "1:0xBcca60bB61934080951369a648Fb03DF4F96263C": "aave_ausdc",
+  "1:0x59cD1C87501baa753d0B5B5Ab5D8416A45cD71DB": "sparklend_spusdc"
 }

@@ -17,6 +17,7 @@ import type {
   LocalCostRow,
   LocalProtocolRow,
 } from '../types/local-data';
+import { logging } from './logging';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 const apiClient = createApiClient<paths>(API_BASE_URL);
@@ -49,7 +50,13 @@ function toErrorBody(error: unknown): string {
 
   try {
     return JSON.stringify(error);
-  } catch {
+  } catch (stringifyError) {
+    logging.error('Failed to stringify error body', {
+      errorType: typeof error,
+      errorConstructor: (error as Record<string, unknown>)?.constructor?.name,
+      errorKeys: error ? Object.keys(error) : [],
+      stringifyError,
+    });
     return 'Unserializable error body.';
   }
 }
@@ -61,9 +68,17 @@ async function requestData<TData, TError>(
   const { data, error, response } = await request;
 
   if (!response.ok || data === undefined) {
-    throw new Error(
-      `${label} failed (${response.status}): ${toErrorBody(error)}`,
-    );
+    const errorMessage = `${label} failed (${response.status}): ${toErrorBody(error)}`;
+
+    logging.error('API request failed', {
+      label,
+      status: response.status,
+      statusText: response.statusText,
+      url: response.url,
+      error,
+    });
+
+    throw new Error(errorMessage);
   }
 
   return data;

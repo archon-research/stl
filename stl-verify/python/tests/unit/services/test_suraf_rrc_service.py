@@ -19,16 +19,16 @@ def _rating(rating_id: str, crr_pct: str, sha: str = "abc123", version: str = "v
 
 
 class TestSurafRrcService:
-    def test_mapped_asset(self) -> None:
+    def test_mapped_receipt_token(self) -> None:
         service = SurafRrcService(
-            asset_to_rating={"ausdc": "aave_ausdc"},
+            asset_to_rating={1: "aave_ausdc"},
             suraf_ratings={"aave_ausdc": _rating("aave_ausdc", "33.7", version="v7")},
         )
 
-        result = service.compute("aUSDC", Decimal("1000"))
+        result = service.compute(1, Decimal("1000"))
 
         assert result is not None
-        assert result.asset == "aUSDC"
+        assert result.receipt_token_id == 1
         assert result.usd_exposure == Decimal("1000")
         assert result.rating_id == "aave_ausdc"
         assert result.rating_version == "v7"
@@ -36,17 +36,17 @@ class TestSurafRrcService:
         assert result.rrc_usd == Decimal("337.0")
         assert result.source_commit_sha == "abc123"
 
-    def test_unmapped_asset_returns_none(self) -> None:
+    def test_unmapped_receipt_token_returns_none(self) -> None:
         service = SurafRrcService(asset_to_rating={}, suraf_ratings={})
-        assert service.compute("WBTC", Decimal("1000")) is None
+        assert service.compute(999, Decimal("1000")) is None
 
     def test_zero_crr(self) -> None:
         service = SurafRrcService(
-            asset_to_rating={"ausdc": "aave_ausdc"},
+            asset_to_rating={1: "aave_ausdc"},
             suraf_ratings={"aave_ausdc": _rating("aave_ausdc", "0")},
         )
 
-        result = service.compute("aUSDC", Decimal("1000"))
+        result = service.compute(1, Decimal("1000"))
 
         assert result is not None
         assert result.rrc_usd == Decimal("0")
@@ -54,19 +54,8 @@ class TestSurafRrcService:
     def test_is_pure(self) -> None:
         """Repeated calls with the same inputs produce identical results."""
         service = SurafRrcService(
-            asset_to_rating={"ausdc": "aave_ausdc"},
+            asset_to_rating={1: "aave_ausdc"},
             suraf_ratings={"aave_ausdc": _rating("aave_ausdc", "25")},
         )
 
-        assert service.compute("aUSDC", Decimal("500")) == service.compute("aUSDC", Decimal("500"))
-
-    def test_case_insensitive_asset_lookup(self) -> None:
-        service = SurafRrcService(
-            asset_to_rating={"ausdc": "aave_ausdc"},
-            suraf_ratings={"aave_ausdc": _rating("aave_ausdc", "50")},
-        )
-
-        for variant in ("aUSDC", "AUSDC", "ausdc", "aUsDc"):
-            result = service.compute(variant, Decimal("100"))
-            assert result is not None
-            assert result.rating_id == "aave_ausdc"
+        assert service.compute(1, Decimal("500")) == service.compute(1, Decimal("500"))
