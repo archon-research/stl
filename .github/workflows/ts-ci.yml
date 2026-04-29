@@ -5,16 +5,12 @@ on:
 
 permissions:
   contents: read
-  packages: read
 
 jobs:
   lint:
     name: Lint (TypeScript)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      NODE_AUTH_TOKEN: ${{ secrets.UIKIT_GH_PACKAGES_READ_TOKEN }}
-      UIKIT_GH_PACKAGES_READ_TOKEN: ${{ secrets.UIKIT_GH_PACKAGES_READ_TOKEN }}
 
     defaults:
       run:
@@ -30,8 +26,6 @@ jobs:
           node-version: 24.14.1
           cache: npm
           cache-dependency-path: stl-verify/ts/package-lock.json
-          registry-url: https://npm.pkg.github.com
-          scope: '@archon-research'
 
       - name: Install dependencies
         run: npm ci
@@ -47,9 +41,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: lint
-    env:
-      NODE_AUTH_TOKEN: ${{ secrets.UIKIT_GH_PACKAGES_READ_TOKEN }}
-      UIKIT_GH_PACKAGES_READ_TOKEN: ${{ secrets.UIKIT_GH_PACKAGES_READ_TOKEN }}
 
     defaults:
       run:
@@ -65,8 +56,6 @@ jobs:
           node-version: 24.14.1
           cache: npm
           cache-dependency-path: stl-verify/ts/package-lock.json
-          registry-url: https://npm.pkg.github.com
-          scope: '@archon-research'
 
       - name: Install dependencies
         run: npm ci
