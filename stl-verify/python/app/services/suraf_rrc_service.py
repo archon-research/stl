@@ -22,7 +22,7 @@ _HUNDRED = Decimal("100")
 class RrcResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    asset: str
+    receipt_token_id: int
     usd_exposure: Decimal
     rating_id: str
     rating_version: str
@@ -34,24 +34,20 @@ class RrcResult(BaseModel):
 class SurafRrcService:
     def __init__(
         self,
-        asset_to_rating: dict[str, str],
+        asset_to_rating: dict[int, str],
         suraf_ratings: dict[str, SurafResult],
     ) -> None:
         self._asset_to_rating = asset_to_rating
         self._suraf_ratings = suraf_ratings
 
-    def compute(self, asset: str, usd_exposure: Decimal) -> RrcResult | None:
-        """Return the RRC for ``asset`` at the given USD exposure, or ``None`` if unmapped.
-
-        Asset lookup is case-insensitive — mapping keys are casefolded at
-        load time (see ``app.risk_engine.mapping``).
-        """
-        rating_id = self._asset_to_rating.get(asset.casefold())
+    def compute(self, receipt_token_id: int, usd_exposure: Decimal) -> RrcResult | None:
+        """Return the RRC for ``receipt_token_id`` at the given USD exposure, or ``None`` if unmapped."""
+        rating_id = self._asset_to_rating.get(receipt_token_id)
         if rating_id is None:
             return None
         rating = self._suraf_ratings[rating_id]
         return RrcResult(
-            asset=asset,
+            receipt_token_id=receipt_token_id,
             usd_exposure=usd_exposure,
             rating_id=rating_id,
             rating_version=rating.version,

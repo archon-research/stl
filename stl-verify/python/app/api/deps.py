@@ -15,8 +15,8 @@ def get_suraf_ratings(request: Request) -> dict[str, SurafResult]:
     return request.app.state.suraf_ratings
 
 
-def get_asset_to_rating(request: Request) -> dict[str, str]:
-    """Extract the asset-key -> rating_id mapping built at startup."""
+def get_asset_to_rating(request: Request) -> dict[int, str]:
+    """Extract the receipt_token_id -> rating_id mapping built at startup."""
     return request.app.state.asset_to_rating
 
 

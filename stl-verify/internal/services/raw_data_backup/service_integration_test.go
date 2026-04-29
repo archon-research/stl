@@ -11,18 +11,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/sns"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
@@ -30,6 +21,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
 // =============================================================================
@@ -60,9 +58,7 @@ type IntegrationTestInfra struct {
 	// Logger
 	Logger *slog.Logger
 
-	// Containers
-	containers []testcontainers.Container
-	Cleanup    func()
+	Cleanup func()
 }
 
 func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestInfra {
@@ -74,22 +70,13 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	}
 	var cleanupFuncs []func()
 
-	// Start Redis
-	redisContainer, redisCfg := startRedis(t, ctx)
-	infra.containers = append(infra.containers, redisContainer)
-	cleanupFuncs = append(cleanupFuncs, func() {
-		// Use background context for cleanup since test context may be canceled
-		if err := redisContainer.Terminate(context.Background()); err != nil {
-			logger.Error("failed to terminate redis container", "error", err)
-		}
-	})
-
+	// Use shared Redis (started in TestMain)
 	cache, err := rediscache.NewBlockCache(rediscache.Config{
-		Addr:      redisCfg.Addr,
-		Password:  redisCfg.Password,
-		DB:        redisCfg.DB,
+		Addr:      sharedRedisAddr,
+		Password:  "",
+		DB:        0,
 		TTL:       1 * time.Hour,
-		KeyPrefix: "integration-test",
+		KeyPrefix: testutil.SanitizeTestName(t.Name()),
 	}, logger)
 	if err != nil {
 		t.Fatalf("failed to create redis cache: %v", err)
@@ -101,15 +88,8 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	})
 	infra.Cache = cache
 
-	// Start LocalStack (with S3, SNS, SQS)
-	localstackContainer, localstackCfg := testutil.StartLocalStack(t, ctx, "sns,sqs,s3")
-	infra.containers = append(infra.containers, localstackContainer)
-	cleanupFuncs = append(cleanupFuncs, func() {
-		// Use background context for cleanup since test context may be canceled
-		if err := localstackContainer.Terminate(context.Background()); err != nil {
-			logger.Error("failed to terminate localstack container", "error", err)
-		}
-	})
+	// Use shared LocalStack (started in TestMain)
+	localstackCfg := sharedLocalStackCfg
 
 	// Create AWS clients
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
@@ -135,8 +115,10 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	infra.SQSClient = sqsClient
 	infra.S3Client = s3Client
 
-	// Create S3 bucket
-	bucketName := "test-raw-data-backup"
+	// Use unique resource names per test to avoid cross-test interference.
+	// S3 bucket names require hyphens (no underscores), so replace them.
+	suffix := strings.ReplaceAll(testutil.SanitizeTestName(t.Name()), "_", "-")
+	bucketName := "backup-" + suffix
 	_, err = s3Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String(bucketName),
 	})
@@ -148,7 +130,7 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 
 	// Create SNS topic
 	topicResult, err := snsClient.CreateTopic(ctx, &sns.CreateTopicInput{
-		Name: aws.String("test-blocks"),
+		Name: aws.String("topic-" + suffix),
 	})
 	if err != nil {
 		t.Fatalf("failed to create SNS topic: %v", err)
@@ -158,7 +140,7 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 
 	// Create SQS queue for backup
 	queueResult, err := sqsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
-		QueueName: aws.String("test-backup-queue"),
+		QueueName: aws.String("queue-" + suffix),
 		Attributes: map[string]string{
 			string(sqstypes.QueueAttributeNameVisibilityTimeout): "30",
 		},
@@ -218,45 +200,6 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	}
 
 	return infra
-}
-
-// =============================================================================
-// Container Setup
-// =============================================================================
-
-type RedisTestConfig struct {
-	Addr     string
-	Password string
-	DB       int
-}
-
-func startRedis(t *testing.T, ctx context.Context) (testcontainers.Container, RedisTestConfig) {
-	t.Helper()
-
-	config := RedisTestConfig{
-		Password: "",
-		DB:       0,
-	}
-
-	req := testcontainers.ContainerRequest{
-		Image:        testutil.ImageRedis,
-		ExposedPorts: []string{"6379/tcp"},
-		WaitingFor:   wait.ForLog("Ready to accept connections").WithStartupTimeout(60 * time.Second),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		testutil.HandleContainerRuntimeError(t, err, "failed to start redis")
-	}
-
-	host, _ := container.Host(ctx)
-	port, _ := container.MappedPort(ctx, "6379")
-	config.Addr = fmt.Sprintf("%s:%s", host, port.Port())
-
-	return container, config
 }
 
 // =============================================================================

@@ -670,6 +670,11 @@ func TestBlockchainService_ParseReserveConfigurationData(t *testing.T) {
 // TestBlockchainService_BatchGetTokenMetadata_ConcurrentAccess verifies that
 // concurrent calls to BatchGetTokenMetadata on a shared BlockchainService do
 // not race on the metadataCache map. Run with -race to detect violations.
+//
+// Post-VEC-188 Finding 4: when every sub-call reverts, BatchGetTokenMetadata
+// returns a non-nil error (listing the incomplete tokens) rather than
+// silently caching zero-valued metadata. Assert the error is non-nil so this
+// test codifies the post-fix invariant rather than the pre-fix bug.
 func TestBlockchainService_BatchGetTokenMetadata_ConcurrentAccess(t *testing.T) {
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
@@ -704,10 +709,328 @@ func TestBlockchainService_BatchGetTokenMetadata_ConcurrentAccess(t *testing.T) 
 			defer wg.Done()
 			tokens := map[common.Address]bool{token: true}
 			_, err := svc.BatchGetTokenMetadata(context.Background(), tokens, big.NewInt(1))
-			if err != nil {
-				t.Errorf("BatchGetTokenMetadata() unexpected error: %v", err)
+			if err == nil {
+				t.Errorf("BatchGetTokenMetadata() expected error when every sub-call reverts, got nil")
 			}
 		}()
 	}
 	wg.Wait()
+}
+
+// packUint8ForTest ABI-encodes a uint8 value (used for ERC20 decimals()
+// return data). Local helper because the aavelike package has no shared
+// test helpers like morpho_indexer's testhelpers_test.go.
+func packUint8ForTest(t *testing.T, v uint8) []byte {
+	t.Helper()
+	ty, err := abi.NewType("uint8", "", nil)
+	if err != nil {
+		t.Fatalf("abi.NewType uint8: %v", err)
+	}
+	data, err := abi.Arguments{{Type: ty}}.Pack(v)
+	if err != nil {
+		t.Fatalf("packing uint8: %v", err)
+	}
+	return data
+}
+
+// packStringForTest ABI-encodes a string value (used for ERC20 symbol() /
+// name() return data).
+func packStringForTest(t *testing.T, s string) []byte {
+	t.Helper()
+	ty, err := abi.NewType("string", "", nil)
+	if err != nil {
+		t.Fatalf("abi.NewType string: %v", err)
+	}
+	data, err := abi.Arguments{{Type: ty}}.Pack(s)
+	if err != nil {
+		t.Fatalf("packing string: %v", err)
+	}
+	return data
+}
+
+// TestBatchGetTokenMetadata_DoesNotCacheWhenAnySubCallFails codifies
+// VEC-188 Finding 4: a partial sub-call failure for a token must NOT leave
+// a zero-valued entry in the cache. Otherwise a stuck message loops until
+// the pod restarts — retries keep hitting the poisoned cache entry and
+// never see the real revert signal.
+//
+// Three tokens are probed: A (all 3 sub-calls succeed), B (decimals()
+// reverts), C (name() reverts). Assertions:
+//   - Token A IS in the returned result map and IS in the metadataCache.
+//   - Tokens B and C are NOT in the returned result map.
+//   - Tokens B and C are NOT in the metadataCache.
+//   - The function returns a non-nil error naming B and C (or at least
+//     referencing the number of incomplete tokens and their addresses).
+//
+// FAILS against unfixed code (which caches zero-valued entries
+// unconditionally and returns nil error).
+func TestBatchGetTokenMetadata_DoesNotCacheWhenAnySubCallFails(t *testing.T) {
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	tokenA := common.HexToAddress("0xaaAAAAaaaAAAAaaAaaAAaaAAaaAaAAAAAaAaaaAA")
+	tokenB := common.HexToAddress("0xbBBBBBbBBbbBBbbbBBBbBbbBBbBBbbBBBBbbbbbB")
+	tokenC := common.HexToAddress("0xcCcCcCCCCccCCCCCCccCcccCCcCCcCCCCCccccCc")
+
+	// Map each token's decimals sub-call target address to the token
+	// identity, so the mock can produce failures per token regardless of
+	// the non-deterministic map iteration order in BatchGetTokenMetadata.
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls)%3 != 0 {
+			t.Errorf("expected call count to be a multiple of 3, got %d", len(calls))
+			return nil, fmt.Errorf("bad call count %d", len(calls))
+		}
+		results := make([]outbound.Result, len(calls))
+		// Every token produces 3 sequential calls: decimals, symbol, name.
+		for i := 0; i < len(calls); i += 3 {
+			// All three sub-calls target the same token (calls[i].Target).
+			token := calls[i].Target
+			switch token {
+			case tokenA:
+				// All three succeed.
+				results[i] = outbound.Result{Success: true, ReturnData: packUint8ForTest(t, 18)}
+				results[i+1] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "AAA")}
+				results[i+2] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "Alpha")}
+			case tokenB:
+				// decimals() reverts.
+				results[i] = outbound.Result{Success: false}
+				results[i+1] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "BBB")}
+				results[i+2] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "Beta")}
+			case tokenC:
+				// name() reverts.
+				results[i] = outbound.Result{Success: true, ReturnData: packUint8ForTest(t, 6)}
+				results[i+1] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "CCC")}
+				results[i+2] = outbound.Result{Success: false}
+			default:
+				t.Errorf("unexpected target token: %s", token.Hex())
+				return nil, fmt.Errorf("unexpected token %s", token.Hex())
+			}
+		}
+		return results, nil
+	}
+
+	svc := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		multicallClient: mock,
+		protocolVersion: "sparklend",
+	}
+
+	tokens := map[common.Address]bool{
+		tokenA: true,
+		tokenB: true,
+		tokenC: true,
+	}
+
+	result, err := svc.BatchGetTokenMetadata(context.Background(), tokens, big.NewInt(1))
+	if err == nil {
+		t.Fatal("expected non-nil error when any sub-call reverts for any token")
+	}
+
+	// Error must reference the incomplete tokens (B and C) so operators
+	// can see which addresses to investigate. The exact wording is
+	// implementation-defined but must include both hex addresses.
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, tokenB.Hex()) {
+		t.Errorf("error message should reference tokenB %s, got: %s", tokenB.Hex(), errMsg)
+	}
+	if !strings.Contains(errMsg, tokenC.Hex()) {
+		t.Errorf("error message should reference tokenC %s, got: %s", tokenC.Hex(), errMsg)
+	}
+
+	// Token A succeeded in full: must be returned AND cached.
+	mdA, okA := result[tokenA]
+	if !okA {
+		t.Fatal("tokenA should be present in result map (all sub-calls succeeded)")
+	}
+	if mdA.Symbol != "AAA" {
+		t.Errorf("tokenA Symbol = %q, want %q", mdA.Symbol, "AAA")
+	}
+	if mdA.Decimals != 18 {
+		t.Errorf("tokenA Decimals = %d, want 18", mdA.Decimals)
+	}
+	if mdA.Name != "Alpha" {
+		t.Errorf("tokenA Name = %q, want %q", mdA.Name, "Alpha")
+	}
+
+	// Tokens B and C had at least one sub-call revert: must NOT appear
+	// in the result map.
+	if _, ok := result[tokenB]; ok {
+		t.Error("tokenB must NOT be in result map (decimals() reverted)")
+	}
+	if _, ok := result[tokenC]; ok {
+		t.Error("tokenC must NOT be in result map (name() reverted)")
+	}
+
+	// Cache must contain A and only A — B and C must not pollute it.
+	svc.mu.RLock()
+	_, cachedA := svc.metadataCache[tokenA]
+	_, cachedB := svc.metadataCache[tokenB]
+	_, cachedC := svc.metadataCache[tokenC]
+	svc.mu.RUnlock()
+
+	if !cachedA {
+		t.Error("tokenA should be cached (all sub-calls succeeded)")
+	}
+	if cachedB {
+		t.Error("tokenB must NOT be cached (decimals() reverted; zero-value entry would poison future retries)")
+	}
+	if cachedC {
+		t.Error("tokenC must NOT be cached (name() reverted; zero-value entry would poison future retries)")
+	}
+}
+
+// TestBatchGetTokenMetadata_AcceptsBytes32SymbolAndName verifies that
+// legacy ERC20s like MKR — which return `bytes32` for symbol() and name()
+// instead of the modern `string` — are tracked correctly. Pre-fix this
+// caused a regression: every position event touching MKR NACK'd because
+// the strict `string`-only decode failed. Post-fix the bytes32 fallback
+// produces "MKR" / "Maker DAO" and the token row is cached.
+func TestBatchGetTokenMetadata_AcceptsBytes32SymbolAndName(t *testing.T) {
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	mkr := common.HexToAddress("0x9f8F72aA9304c8B593d555F12eF6589cC3A579A2")
+
+	// Build the bytes32-style returns: 32 raw bytes, ASCII left-aligned,
+	// null-padded.
+	bytes32Of := func(s string) []byte {
+		b := make([]byte, 32)
+		copy(b, []byte(s))
+		return b
+	}
+
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i := 0; i < len(calls); i += 3 {
+			// decimals: standard uint8 → 32 bytes ABI-encoded
+			results[i] = outbound.Result{Success: true, ReturnData: packUint8ForTest(t, 18)}
+			// symbol & name: bytes32 (MKR-style), 32 raw bytes
+			results[i+1] = outbound.Result{Success: true, ReturnData: bytes32Of("MKR")}
+			results[i+2] = outbound.Result{Success: true, ReturnData: bytes32Of("Maker DAO")}
+		}
+		return results, nil
+	}
+
+	svc := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		multicallClient: mock,
+		protocolVersion: "sparklend",
+	}
+
+	tokens := map[common.Address]bool{mkr: true}
+
+	result, err := svc.BatchGetTokenMetadata(context.Background(), tokens, big.NewInt(1))
+	if err != nil {
+		t.Fatalf("expected no error for MKR-style bytes32 metadata; got %v", err)
+	}
+
+	md, ok := result[mkr]
+	if !ok {
+		t.Fatal("MKR must be in the result map")
+	}
+	if md.Symbol != "MKR" {
+		t.Errorf("Symbol = %q; want %q", md.Symbol, "MKR")
+	}
+	if md.Name != "Maker DAO" {
+		t.Errorf("Name = %q; want %q", md.Name, "Maker DAO")
+	}
+	if md.Decimals != 18 {
+		t.Errorf("Decimals = %d; want 18", md.Decimals)
+	}
+
+	svc.mu.RLock()
+	cached, cachedOK := svc.metadataCache[mkr]
+	svc.mu.RUnlock()
+	if !cachedOK || cached.Symbol != "MKR" {
+		t.Errorf("MKR must be cached with symbol=MKR; got cached=%v meta=%+v", cachedOK, cached)
+	}
+}
+
+// TestBatchGetTokenMetadata_DoesNotCacheOnUnpackFailure codifies the
+// follow-on VEC-188 invariant flagged in PR review: even when every
+// sub-call reports `Success: true`, an `Unpack` error or wrong-typed
+// payload must NOT result in a zero-valued cache entry. A non-standard
+// token returning bytes that don't decode as the expected ABI type would
+// otherwise persist a {Symbol:"", Decimals:0, Name:""} row in the cache
+// and poison every subsequent read for the pod's lifetime.
+//
+// FAILS against pre-fix code (which silently fell through Unpack errors
+// to zero values and cached them).
+func TestBatchGetTokenMetadata_DoesNotCacheOnUnpackFailure(t *testing.T) {
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	tokenA := common.HexToAddress("0xaaAAAAaaaAAAAaaAaaAAaaAAaaAaAAAAAaAaaaAA")
+	tokenBadDecimals := common.HexToAddress("0xbBBBBBbBBbbBBbbbBBBbBbbBBbBBbbBBBBbbbbbB")
+
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i := 0; i < len(calls); i += 3 {
+			token := calls[i].Target
+			switch token {
+			case tokenA:
+				results[i] = outbound.Result{Success: true, ReturnData: packUint8ForTest(t, 18)}
+				results[i+1] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "AAA")}
+				results[i+2] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "Alpha")}
+			case tokenBadDecimals:
+				// decimals() returns "Success: true" but the bytes are
+				// garbage that the ABI decoder cannot unpack as uint8.
+				// This simulates a non-standard / malicious contract
+				// pretending to implement the interface.
+				results[i] = outbound.Result{Success: true, ReturnData: []byte{0x01, 0x02}}
+				results[i+1] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "BAD")}
+				results[i+2] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "Bad Token")}
+			default:
+				return nil, fmt.Errorf("unexpected token %s", token.Hex())
+			}
+		}
+		return results, nil
+	}
+
+	svc := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		multicallClient: mock,
+		protocolVersion: "sparklend",
+	}
+
+	tokens := map[common.Address]bool{
+		tokenA:           true,
+		tokenBadDecimals: true,
+	}
+
+	result, err := svc.BatchGetTokenMetadata(context.Background(), tokens, big.NewInt(1))
+	if err == nil {
+		t.Fatal("expected non-nil error when a sub-call's payload fails to unpack")
+	}
+
+	if _, ok := result[tokenBadDecimals]; ok {
+		t.Error("tokenBadDecimals must NOT be in result map (decimals() didn't unpack)")
+	}
+
+	svc.mu.RLock()
+	_, cachedBad := svc.metadataCache[tokenBadDecimals]
+	svc.mu.RUnlock()
+	if cachedBad {
+		t.Error("tokenBadDecimals must NOT be cached when sub-call payload fails to unpack — would poison future reads")
+	}
+
+	// The good token's metadata is still returned and cached.
+	if md, ok := result[tokenA]; !ok || md.Symbol != "AAA" || md.Decimals != 18 {
+		t.Errorf("tokenA metadata wrong: present=%v meta=%+v", ok, md)
+	}
 }

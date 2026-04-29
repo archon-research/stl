@@ -4,33 +4,17 @@ package buildregistry
 
 import (
 	"context"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func migrationsPath() string {
-	_, filename, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(filename), "..", "..", "..", "..", "..", "db", "migrations")
-}
-
 func setupDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn, cleanup := testutil.StartTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
-
-	pool := testutil.ConnectPool(t, dsn)
-	t.Cleanup(pool.Close)
-
-	m := migrator.New(pool, migrationsPath())
-	if err := m.ApplyAll(context.Background()); err != nil {
-		t.Fatalf("migrations: %v", err)
-	}
 	return pool
 }
 

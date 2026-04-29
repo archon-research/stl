@@ -29,8 +29,24 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
+var (
+	sharedDSN           string
+	sharedLocalStackCfg testutil.LocalStackConfig
+)
+
 func TestMain(m *testing.M) {
-	os.Exit(testutil.RunTestsWithLeakCheck(m))
+	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
+	sharedDSN = dsn
+
+	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
+	sharedLocalStackCfg = lsCfg
+
+	code := m.Run()
+
+	lsCleanup()
+	dbCleanup()
+	code = testutil.CheckGoroutineLeaks(code)
+	os.Exit(code)
 }
 
 // ---------------------------------------------------------------------------
@@ -44,11 +60,10 @@ func TestMain(m *testing.M) {
 func TestRunIntegration_HappyPath(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
+	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 
-	s3Container, s3Cfg := testutil.StartLocalStack(t, ctx, "s3")
-	defer s3Container.Terminate(context.Background())
+	s3Cfg := sharedLocalStackCfg
 	s3Client := testutil.NewS3Client(t, ctx, s3Cfg)
 
 	const bucket = "test-sparklend-backfill"
@@ -119,11 +134,10 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 func TestRunIntegration_BorrowEvent(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
+	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 
-	s3Container, s3Cfg := testutil.StartLocalStack(t, ctx, "s3")
-	defer s3Container.Terminate(context.Background())
+	s3Cfg := sharedLocalStackCfg
 	s3Client := testutil.NewS3Client(t, ctx, s3Cfg)
 
 	// SparkLend's PoolDataProvider is only active from block 16776400 onwards.
@@ -213,8 +227,7 @@ func TestRunIntegration_BorrowEvent(t *testing.T) {
 func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	ctx := context.Background()
 
-	s3Container, s3Cfg := testutil.StartLocalStack(t, ctx, "s3")
-	defer s3Container.Terminate(context.Background())
+	s3Cfg := sharedLocalStackCfg
 	s3Client := testutil.NewS3Client(t, ctx, s3Cfg)
 
 	const bucket = "test-sparklend-backfill-baddb"
@@ -329,11 +342,10 @@ func assertBorrowEventDBState(t *testing.T, ctx context.Context, pool *pgxpool.P
 func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
+	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 
-	s3Container, s3Cfg := testutil.StartLocalStack(t, ctx, "s3")
-	defer s3Container.Terminate(context.Background())
+	s3Cfg := sharedLocalStackCfg
 	s3Client := testutil.NewS3Client(t, ctx, s3Cfg)
 
 	const blockNum = int64(16800000)

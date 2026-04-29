@@ -116,7 +116,7 @@ test:
 
 test-integration: 
 	@echo "==> Running integration tests..."
-	GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=10m -p 2 ./...
+	GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=10m -p 4 ./...
 
 # Run tests with coverage
 cover:
@@ -1792,7 +1792,6 @@ ECR_REPO_PYTHON_API = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-
 docker-build-python-api:
 ifdef LOCAL
 	docker buildx build --load \
-		--secret id=uikit_token,env=UIKIT_GH_PACKAGES_READ_TOKEN \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		-t stl-python-api:local -f python/Dockerfile .
 else
@@ -1801,7 +1800,6 @@ else
 	@echo "    Tag: $(IMAGE_TAG)"
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	docker buildx build --platform linux/arm64 \
-		--secret id=uikit_token,env=UIKIT_GH_PACKAGES_READ_TOKEN \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		-f python/Dockerfile \
 		-t $(ECR_REPO_PYTHON_API):$(IMAGE_TAG) \
@@ -1826,7 +1824,6 @@ _docker-release-python-api-internal:
 	echo "    Tag: $$TAG" && \
 	echo "    Commit: $$COMMIT" && \
 	docker buildx build --platform linux/arm64 \
-		--secret id=uikit_token,env=UIKIT_GH_PACKAGES_READ_TOKEN \
 		--build-arg GIT_COMMIT=$$COMMIT \
 		-f python/Dockerfile \
 		-t $(ECR_REPO_PYTHON_API):$$TAG \
