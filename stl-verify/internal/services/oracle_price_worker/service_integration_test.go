@@ -109,7 +109,8 @@ func consumerWithSequentialMessages(batches [][]outbound.SQSMessage) *mockConsum
 // ---------------------------------------------------------------------------
 
 func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	t.Parallel()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -215,7 +216,8 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 }
 
 func TestIntegration_WorkerChangeDetection(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	t.Parallel()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -297,7 +299,8 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 }
 
 func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	t.Parallel()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -379,7 +382,8 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 }
 
 func TestIntegration_WorkerStartStop(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	t.Parallel()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -450,7 +454,8 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 }
 
 func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	t.Parallel()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -527,7 +532,8 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 }
 
 func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	t.Parallel()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()

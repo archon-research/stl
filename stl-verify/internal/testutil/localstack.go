@@ -3,9 +3,11 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -95,4 +97,57 @@ func NewS3Client(t *testing.T, ctx context.Context, cfg LocalStackConfig) *s3.Cl
 		o.BaseEndpoint = aws.String(cfg.Endpoint)
 		o.UsePathStyle = true // Required for LocalStack
 	})
+}
+
+// StartLocalStackForMain starts a LocalStack container for use in TestMain.
+// On error it calls log.Fatal instead of t.Fatal.
+func StartLocalStackForMain(services string) (cfg LocalStackConfig, cleanup func()) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	cfg.Region = "us-east-1"
+
+	req := testcontainers.ContainerRequest{
+		Image:        ImageLocalStack,
+		ExposedPorts: []string{"4566/tcp"},
+		Env: map[string]string{
+			"SERVICES":               services,
+			"DEBUG":                  "0",
+			"DISABLE_EVENTS":         "1",
+			"SKIP_SSL_CERT_DOWNLOAD": "1",
+		},
+		WaitingFor: wait.ForLog("Ready."),
+	}
+
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+	if err != nil {
+		if IsContainerRuntimeUnavailable(err) {
+			log.Fatalf("container runtime unavailable: %v", err)
+		}
+		log.Fatalf("start LocalStack container: %v", err)
+	}
+
+	host, err := container.Host(ctx)
+	if err != nil {
+		log.Fatalf("get LocalStack host: %v", err)
+	}
+	port, err := container.MappedPort(ctx, "4566")
+	if err != nil {
+		log.Fatalf("get LocalStack port: %v", err)
+	}
+	cfg.Endpoint = fmt.Sprintf("http://%s:%s", host, port.Port())
+
+	// Ensure the container host bypasses the HTTP proxy.
+	if noProxy := os.Getenv("NO_PROXY"); !strings.Contains(noProxy, host) {
+		os.Setenv("NO_PROXY", noProxy+","+host)
+	}
+	if noProxy := os.Getenv("no_proxy"); !strings.Contains(noProxy, host) {
+		os.Setenv("no_proxy", noProxy+","+host)
+	}
+
+	cleanup = func() { _ = container.Terminate(context.Background()) }
+	return cfg, cleanup
 }

@@ -21,9 +21,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
-
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
@@ -60,9 +57,7 @@ type IntegrationTestInfra struct {
 	// Logger
 	Logger *slog.Logger
 
-	// Containers
-	containers []testcontainers.Container
-	Cleanup    func()
+	Cleanup func()
 }
 
 func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestInfra {
@@ -74,20 +69,11 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	}
 	var cleanupFuncs []func()
 
-	// Start Redis
-	redisContainer, redisCfg := startRedis(t, ctx)
-	infra.containers = append(infra.containers, redisContainer)
-	cleanupFuncs = append(cleanupFuncs, func() {
-		// Use background context for cleanup since test context may be canceled
-		if err := redisContainer.Terminate(context.Background()); err != nil {
-			logger.Error("failed to terminate redis container", "error", err)
-		}
-	})
-
+	// Use shared Redis (started in TestMain)
 	cache, err := rediscache.NewBlockCache(rediscache.Config{
-		Addr:      redisCfg.Addr,
-		Password:  redisCfg.Password,
-		DB:        redisCfg.DB,
+		Addr:      sharedRedisAddr,
+		Password:  "",
+		DB:        0,
 		TTL:       1 * time.Hour,
 		KeyPrefix: "integration-test",
 	}, logger)
@@ -101,15 +87,8 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	})
 	infra.Cache = cache
 
-	// Start LocalStack (with S3, SNS, SQS)
-	localstackContainer, localstackCfg := testutil.StartLocalStack(t, ctx, "sns,sqs,s3")
-	infra.containers = append(infra.containers, localstackContainer)
-	cleanupFuncs = append(cleanupFuncs, func() {
-		// Use background context for cleanup since test context may be canceled
-		if err := localstackContainer.Terminate(context.Background()); err != nil {
-			logger.Error("failed to terminate localstack container", "error", err)
-		}
-	})
+	// Use shared LocalStack (started in TestMain)
+	localstackCfg := sharedLocalStackCfg
 
 	// Create AWS clients
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
@@ -218,45 +197,6 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	}
 
 	return infra
-}
-
-// =============================================================================
-// Container Setup
-// =============================================================================
-
-type RedisTestConfig struct {
-	Addr     string
-	Password string
-	DB       int
-}
-
-func startRedis(t *testing.T, ctx context.Context) (testcontainers.Container, RedisTestConfig) {
-	t.Helper()
-
-	config := RedisTestConfig{
-		Password: "",
-		DB:       0,
-	}
-
-	req := testcontainers.ContainerRequest{
-		Image:        testutil.ImageRedis,
-		ExposedPorts: []string{"6379/tcp"},
-		WaitingFor:   wait.ForLog("Ready to accept connections").WithStartupTimeout(60 * time.Second),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		testutil.HandleContainerRuntimeError(t, err, "failed to start redis")
-	}
-
-	host, _ := container.Host(ctx)
-	port, _ := container.MappedPort(ctx, "6379")
-	config.Addr = fmt.Sprintf("%s:%s", host, port.Port())
-
-	return container, config
 }
 
 // =============================================================================

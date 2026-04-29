@@ -6,50 +6,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
-
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// setupRedis creates a Redis container and returns a connected BlockCache.
+// setupRedis returns a BlockCache connected to the shared Redis container.
 func setupRedis(t *testing.T, ttl time.Duration) (*BlockCache, func()) {
 	t.Helper()
-	ctx := context.Background()
-
-	req := testcontainers.ContainerRequest{
-		Image:        testutil.ImageRedis,
-		ExposedPorts: []string{"6379/tcp"},
-		WaitingFor:   wait.ForLog("Ready to accept connections").WithStartupTimeout(60 * time.Second),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		testutil.HandleContainerRuntimeError(t, err, "failed to start Redis container")
-	}
-
-	host, err := container.Host(ctx)
-	if err != nil {
-		t.Fatalf("failed to get container host: %v", err)
-	}
-
-	port, err := container.MappedPort(ctx, "6379")
-	if err != nil {
-		t.Fatalf("failed to get container port: %v", err)
-	}
 
 	cfg := Config{
-		Addr:      fmt.Sprintf("%s:%s", host, port.Port()),
+		Addr:      sharedRedisAddr,
 		Password:  "",
 		DB:        0,
 		TTL:       ttl,
-		KeyPrefix: "test",
+		KeyPrefix: sanitizeTestName(t.Name()),
 	}
 
 	cache, err := NewBlockCache(cfg, nil)
@@ -57,7 +28,7 @@ func setupRedis(t *testing.T, ttl time.Duration) (*BlockCache, func()) {
 		t.Fatalf("failed to create block cache: %v", err)
 	}
 
-	// Wait for connection
+	ctx := context.Background()
 	for i := 0; i < 30; i++ {
 		if err := cache.Ping(ctx); err == nil {
 			break
@@ -67,15 +38,27 @@ func setupRedis(t *testing.T, ttl time.Duration) (*BlockCache, func()) {
 
 	cleanup := func() {
 		cache.Close()
-		container.Terminate(context.Background())
 	}
 
 	return cache, cleanup
 }
 
+func sanitizeTestName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
 // --- Test: Ping ---
 
 func TestPing_Success(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -88,6 +71,7 @@ func TestPing_Success(t *testing.T) {
 // --- Test: SetBlock and GetBlock ---
 
 func TestSetBlock_AndGetBlock_RoundTrip(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -114,6 +98,7 @@ func TestSetBlock_AndGetBlock_RoundTrip(t *testing.T) {
 }
 
 func TestGetBlock_NotFound_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -131,6 +116,7 @@ func TestGetBlock_NotFound_ReturnsNil(t *testing.T) {
 // --- Test: SetReceipts and GetReceipts ---
 
 func TestSetReceipts_AndGetReceipts_RoundTrip(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -157,6 +143,7 @@ func TestSetReceipts_AndGetReceipts_RoundTrip(t *testing.T) {
 }
 
 func TestGetReceipts_NotFound_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -174,6 +161,7 @@ func TestGetReceipts_NotFound_ReturnsNil(t *testing.T) {
 // --- Test: SetTraces and GetTraces ---
 
 func TestSetTraces_AndGetTraces_RoundTrip(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -200,6 +188,7 @@ func TestSetTraces_AndGetTraces_RoundTrip(t *testing.T) {
 }
 
 func TestGetTraces_NotFound_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -217,6 +206,7 @@ func TestGetTraces_NotFound_ReturnsNil(t *testing.T) {
 // --- Test: SetBlobs and GetBlobs ---
 
 func TestSetBlobs_AndGetBlobs_RoundTrip(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -243,6 +233,7 @@ func TestSetBlobs_AndGetBlobs_RoundTrip(t *testing.T) {
 }
 
 func TestGetBlobs_NotFound_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -260,6 +251,7 @@ func TestGetBlobs_NotFound_ReturnsNil(t *testing.T) {
 // --- Test: DeleteBlock ---
 
 func TestDeleteBlock_RemovesAllDataTypes(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -302,6 +294,7 @@ func TestDeleteBlock_RemovesAllDataTypes(t *testing.T) {
 }
 
 func TestDeleteBlock_OnlyDeletesSpecificVersion(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -332,6 +325,7 @@ func TestDeleteBlock_OnlyDeletesSpecificVersion(t *testing.T) {
 }
 
 func TestDeleteBlock_NonExistent_NoError(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -347,6 +341,7 @@ func TestDeleteBlock_NonExistent_NoError(t *testing.T) {
 // --- Test: Version isolation ---
 
 func TestBlockCache_VersionIsolation(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -376,6 +371,7 @@ func TestBlockCache_VersionIsolation(t *testing.T) {
 // --- Test: Chain isolation ---
 
 func TestBlockCache_ChainIsolation(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -405,6 +401,7 @@ func TestBlockCache_ChainIsolation(t *testing.T) {
 // --- Test: Data type isolation ---
 
 func TestBlockCache_DataTypeIsolation(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -486,6 +483,7 @@ func TestBlockCache_TTLExpiration(t *testing.T) {
 // --- Test: Overwrite existing data ---
 
 func TestBlockCache_OverwriteExisting(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -515,6 +513,7 @@ func TestBlockCache_OverwriteExisting(t *testing.T) {
 // --- Test: Large data ---
 
 func TestBlockCache_LargeData(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -549,6 +548,7 @@ func TestBlockCache_LargeData(t *testing.T) {
 // --- Test: Empty data ---
 
 func TestBlockCache_EmptyData(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 
@@ -578,6 +578,7 @@ func TestBlockCache_EmptyData(t *testing.T) {
 // --- Test: Concurrent access ---
 
 func TestBlockCache_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
 	cache, cleanup := setupRedis(t, 24*time.Hour)
 	defer cleanup()
 

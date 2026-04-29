@@ -336,3 +336,69 @@ func CleanupSchemaForMain(baseDSN string, schemaPool *pgxpool.Pool, schemaName s
 		log.Printf("warning: could not drop schema %s: %v", schemaName, err)
 	}
 }
+
+// --------------------------------------------------------------------------
+// Per-test schema isolation (for use with shared containers)
+// --------------------------------------------------------------------------
+
+// SetupTestSchema creates an isolated PostgreSQL schema backed by a shared
+// container whose base DSN is passed in. Public-schema migrations are applied
+// once; the test schema gets its own copy of all tables. This is a drop-in
+// replacement for SetupTimescaleDB that reuses an existing container.
+func SetupTestSchema(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn string, cleanup func()) {
+	t.Helper()
+
+	EnsurePublicMigrations(baseDSN)
+
+	schemaName := sanitizeSchemaName(t.Name())
+	ctx := context.Background()
+
+	// Create the schema using a short-lived base connection.
+	basePool := ConnectPool(t, baseDSN)
+	_, err := basePool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", schemaName))
+	if err != nil {
+		t.Fatalf("create schema %s: %v", schemaName, err)
+	}
+	basePool.Close()
+
+	// Build DSN with search_path scoped to this schema.
+	separator := "?"
+	if strings.Contains(baseDSN, "?") {
+		separator = "&"
+	}
+	dsn = fmt.Sprintf("%s%ssearch_path=%s,public", baseDSN, separator, schemaName)
+
+	pool = ConnectPool(t, dsn)
+	RunMigrations(t, pool)
+
+	cleanup = func() {
+		pool.Close()
+		dropCtx := context.Background()
+		dropPool, dropErr := pgxpool.New(dropCtx, baseDSN)
+		if dropErr != nil {
+			return
+		}
+		defer dropPool.Close()
+		_, _ = dropPool.Exec(dropCtx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schemaName))
+	}
+	return pool, dsn, cleanup
+}
+
+// sanitizeSchemaName converts a test name to a valid PostgreSQL identifier.
+func sanitizeSchemaName(testName string) string {
+	s := strings.ToLower(testName)
+	var b strings.Builder
+	b.WriteString("t_")
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	result := b.String()
+	if len(result) > 63 {
+		result = result[:63]
+	}
+	return result
+}

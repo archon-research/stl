@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,6 +22,19 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+var sharedDSN string
+
+func TestMain(m *testing.M) {
+	dsn, cleanup := testutil.StartTimescaleDBForMain()
+	sharedDSN = dsn
+
+	code := m.Run()
+
+	cleanup()
+	code = testutil.CheckGoroutineLeaks(code)
+	os.Exit(code)
+}
 
 // primeFixture holds test data for a single prime vault.
 type primeFixture struct {
@@ -302,7 +316,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
+	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 
 	if _, err := pool.Exec(ctx, `TRUNCATE prime CASCADE`); err != nil {
@@ -396,7 +410,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
+	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 
 	if _, err := pool.Exec(ctx, `TRUNCATE prime CASCADE`); err != nil {
@@ -437,7 +451,7 @@ func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 func TestRunIntegration_MultipleVaults(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
+	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 
 	const vatAddr = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
@@ -555,7 +569,7 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
+	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 
 	const vatAddr = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
@@ -635,7 +649,7 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 }
 
 func TestRunIntegration_InvalidVatFlag(t *testing.T) {
-	_, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
+	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

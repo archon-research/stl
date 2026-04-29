@@ -21,7 +21,7 @@ import (
 func setupPostgres(t *testing.T) (*postgres.BlockStateRepository, func()) {
 	t.Helper()
 
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	repo := postgres.NewBlockStateRepository(pool, 1, nil)
 	return repo, cleanup
 }
@@ -43,6 +43,8 @@ func saveBlock(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepos
 }
 
 func TestFindGaps_NoGaps(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -64,6 +66,8 @@ func TestFindGaps_NoGaps(t *testing.T) {
 }
 
 func TestFindGaps_SingleGapInMiddle(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -89,6 +93,8 @@ func TestFindGaps_SingleGapInMiddle(t *testing.T) {
 }
 
 func TestFindGaps_MultipleGaps(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -123,6 +129,8 @@ func TestFindGaps_MultipleGaps(t *testing.T) {
 }
 
 func TestFindGaps_GapAtBeginning(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -148,6 +156,8 @@ func TestFindGaps_GapAtBeginning(t *testing.T) {
 }
 
 func TestFindGaps_AlternatingMissing(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -182,6 +192,8 @@ func TestFindGaps_AlternatingMissing(t *testing.T) {
 }
 
 func TestFindGaps_OnlyOneBlock(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -207,6 +219,8 @@ func TestFindGaps_OnlyOneBlock(t *testing.T) {
 }
 
 func TestFindGaps_EmptyTable(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -230,6 +244,8 @@ func TestFindGaps_EmptyTable(t *testing.T) {
 }
 
 func TestFindGaps_IgnoresOrphanedBlocks(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -262,6 +278,8 @@ func TestFindGaps_IgnoresOrphanedBlocks(t *testing.T) {
 }
 
 func TestFindGaps_LargeGap(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -286,6 +304,8 @@ func TestFindGaps_LargeGap(t *testing.T) {
 }
 
 func TestGetMinMaxBlockNumber(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -331,6 +351,8 @@ func TestGetMinMaxBlockNumber(t *testing.T) {
 }
 
 func TestGetMinMaxBlockNumber_IgnoresOrphaned(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -363,6 +385,8 @@ func TestGetMinMaxBlockNumber_IgnoresOrphaned(t *testing.T) {
 }
 
 func TestSaveBlock_ConcurrentVersionRaceCondition(t *testing.T) {
+	t.Parallel()
+
 	// This test demonstrates the TOCTOU (Time-of-Check-Time-of-Use) race condition
 	// when two goroutines try to save blocks at the same height concurrently.
 	//
@@ -480,6 +504,8 @@ func TestSaveBlock_ConcurrentVersionRaceCondition(t *testing.T) {
 }
 
 func TestVerifyChainIntegrity_ValidChain(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -497,6 +523,8 @@ func TestVerifyChainIntegrity_ValidChain(t *testing.T) {
 }
 
 func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -533,6 +561,8 @@ func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
 }
 
 func TestVerifyChainIntegrity_EmptyRange(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -551,6 +581,8 @@ func TestVerifyChainIntegrity_EmptyRange(t *testing.T) {
 }
 
 func TestVerifyChainIntegrity_WithGaps(t *testing.T) {
+	t.Parallel()
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -599,6 +631,8 @@ func (m *integrationMockEventSink) Publish(ctx context.Context, event outbound.E
 func (m *integrationMockEventSink) Close() error { return nil }
 
 func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
+	t.Parallel()
+
 	// 1. Setup
 	// Use the real Postgres repository to confirm the race condition affects the production implementation.
 	pgRepo, cleanup := setupPostgres(t)
@@ -705,9 +739,11 @@ func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
 // evaluated. Post-fix, `chain_id` is the PK, there is no `id` column, and the
 // UPSERT resolves cleanly.
 func TestBackfillService_AdvancesWatermark_OnUnseededChain(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	// Insert a fresh chain that was NOT in the `chain` table when the
