@@ -306,6 +306,14 @@ function App() {
   ]);
 
   useEffect(() => {
+    if (!isDrawerOpen) {
+      return;
+    }
+
+    if (selectedAllocationKey === null && filteredAllocations.length > 0) {
+      return;
+    }
+
     if (
       isDrawerOpen &&
       (!selectedAllocationKey ||
@@ -335,56 +343,58 @@ function App() {
     <div
       className={css({
         position: 'relative',
-        '& [aria-label="Resize sidebar"]': {
+        '& [data-sidebar-layout] [role="separator"]': {
           right: '0 !important',
         },
-        '& [aria-label="Resize sidebar"] > [aria-hidden="true"]': {
+        '& [data-sidebar-layout] [role="separator"] > [aria-hidden="true"]': {
           opacity: 0,
         },
       })}
     >
-      <SidebarLayout
-        sidebar={
-          <PrimeSidebar
-            primes={primes}
-            selectedPrimeId={selectedPrimeId}
-            isLoading={isPrimesLoading}
-            errorMessage={primesErrorMessage}
-            onSelectPrime={setSelectedPrimeId}
-          />
-        }
-        topBar={
-          <TopBar
-            hasSelectedPrime={selectedPrime !== null}
-            networkOptions={networkOptions}
-            onNetworkChange={setSelectedNetwork}
-            onProtocolChange={setSelectedProtocol}
-            protocolOptions={protocolOptions}
-            selectedNetwork={selectedNetwork}
-            selectedProtocol={selectedProtocol}
-          />
-        }
-        main={
-          <AllocationGrid
-            allocations={allocations}
-            chainLabels={chainLabels}
-            errorMessage={allocationsErrorMessage}
-            filteredAllocations={filteredAllocations}
-            isLoading={isAllocationsLoading}
-            localProtocols={localProtocols}
-            onSelectAllocation={(allocationKey) => {
-              setSelectedAllocationKey(allocationKey);
-              setIsDrawerOpenParam('1');
-            }}
-            onSearchChange={setGlobalFilter}
-            onSortingChange={setSorting}
-            searchValue={globalFilter}
-            selectedAllocationKey={selectedAllocationKey}
-            selectedPrime={selectedPrime}
-            sorting={sorting as SortingState}
-          />
-        }
-      />
+      <div data-sidebar-layout>
+        <SidebarLayout
+          sidebar={
+            <PrimeSidebar
+              primes={primes}
+              selectedPrimeId={selectedPrimeId}
+              isLoading={isPrimesLoading}
+              errorMessage={primesErrorMessage}
+              onSelectPrime={setSelectedPrimeId}
+            />
+          }
+          topBar={
+            <TopBar
+              hasSelectedPrime={selectedPrime !== null}
+              networkOptions={networkOptions}
+              onNetworkChange={setSelectedNetwork}
+              onProtocolChange={setSelectedProtocol}
+              protocolOptions={protocolOptions}
+              selectedNetwork={selectedNetwork}
+              selectedProtocol={selectedProtocol}
+            />
+          }
+          main={
+            <AllocationGrid
+              allocations={allocations}
+              chainLabels={chainLabels}
+              errorMessage={allocationsErrorMessage}
+              filteredAllocations={filteredAllocations}
+              isLoading={isAllocationsLoading}
+              localProtocols={localProtocols}
+              onSelectAllocation={(allocationKey) => {
+                setSelectedAllocationKey(allocationKey);
+                setIsDrawerOpenParam('1');
+              }}
+              onSearchChange={setGlobalFilter}
+              onSortingChange={setSorting}
+              searchValue={globalFilter}
+              selectedAllocationKey={selectedAllocationKey}
+              selectedPrime={selectedPrime}
+              sorting={sorting as SortingState}
+            />
+          }
+        />
+      </div>
 
       <RiskDetailDrawer
         detail={

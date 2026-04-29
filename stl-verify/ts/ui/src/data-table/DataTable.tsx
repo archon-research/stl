@@ -57,10 +57,19 @@ export function DataTable<TData>({
             <tr key={headerGroup.id} className={css({ bg: 'surface.subtle' })}>
               {headerGroup.headers.map((header) => {
                 const sorted = header.column.getIsSorted();
+                const canSort = header.column.getCanSort();
+                const ariaSort = canSort
+                  ? sorted === 'asc'
+                    ? 'ascending'
+                    : sorted === 'desc'
+                      ? 'descending'
+                      : 'none'
+                  : undefined;
 
                 return (
                   <th
                     key={header.id}
+                    aria-sort={ariaSort}
                     className={css({
                       px: '4',
                       py: '3',
@@ -73,35 +82,44 @@ export function DataTable<TData>({
                     })}
                   >
                     {header.isPlaceholder ? null : (
-                      <button
-                        type="button"
-                        onClick={header.column.getToggleSortingHandler()}
-                        className={css({
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '1.5',
-                          border: 'none',
-                          bg: 'transparent',
-                          p: 0,
-                          font: 'inherit',
-                          color: 'inherit',
-                          cursor: 'pointer',
-                        })}
-                      >
+                      canSort ? (
+                        <button
+                          type="button"
+                          onClick={header.column.getToggleSortingHandler()}
+                          className={css({
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '1.5',
+                            border: 'none',
+                            bg: 'transparent',
+                            p: 0,
+                            font: 'inherit',
+                            color: 'inherit',
+                            cursor: 'pointer',
+                          })}
+                        >
+                          <span>
+                            {flexRender(
+                              header.column.columnDef.header,
+                              header.getContext(),
+                            )}
+                          </span>
+                          <span>
+                            {sorted === 'asc'
+                              ? '↑'
+                              : sorted === 'desc'
+                                ? '↓'
+                                : '↕'}
+                          </span>
+                        </button>
+                      ) : (
                         <span>
                           {flexRender(
                             header.column.columnDef.header,
                             header.getContext(),
                           )}
                         </span>
-                        <span>
-                          {sorted === 'asc'
-                            ? '↑'
-                            : sorted === 'desc'
-                              ? '↓'
-                              : '↕'}
-                        </span>
-                      </button>
+                      )
                     )}
                   </th>
                 );

@@ -96,7 +96,8 @@ export function useUrlSyncedTableState(
     (newSorting: SortingState | ((old: SortingState) => SortingState)) => {
       const resolvedSorting =
         typeof newSorting === 'function' ? newSorting(sorting) : newSorting;
-      setSortParam(serializeSorting(resolvedSorting));
+      const serializedSorting = serializeSorting(resolvedSorting);
+      setSortParam(serializedSorting || null);
     },
     [sorting, setSortParam],
   );

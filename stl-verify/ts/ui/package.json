@@ -16,7 +16,7 @@
     "prebuild": "npm run codegen:styles",
     "build": "vite build",
     "pretype:check": "npm run codegen:styles",
-    "type:check": "tsc -b",
+    "type:check": "tsgo -b",
     "format": "oxfmt -c ./.oxfmtrc.ts --write \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
     "format:check": "oxfmt -c ./.oxfmtrc.ts --check \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
     "preview": "vite preview",
@@ -36,6 +36,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@typescript/native-preview": "7.0.0-dev.20260429.1",
     "@archon-research/design-system": "0.2.0",
     "@archon-research/oxfmt-config": "0.2.0",
     "@archon-research/oxlint-config": "0.2.0",
