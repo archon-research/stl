@@ -54,6 +54,20 @@ func TestDecodeStringOrBytes32(t *testing.T) {
 			data:    []byte{0x01, 0x02, 0x03},
 			wantErr: true,
 		},
+		{
+			// 0xFF / 0xFE / 0xFD are invalid as a UTF-8 leading byte.
+			// Without sanitization the cast `string(data)` produces a Go
+			// string with invalid UTF-8 — pgx rejects that on downstream
+			// `text` column upserts. Helper must guarantee valid UTF-8.
+			name: "bytes32 with invalid UTF-8 bytes is sanitized to empty",
+			data: append([]byte{0xFF, 0xFE, 0xFD}, make([]byte, 29)...),
+			want: "",
+		},
+		{
+			name: "bytes32 with valid prefix + invalid bytes keeps the prefix",
+			data: append([]byte("MKR"), append([]byte{0xFF, 0xFE}, make([]byte, 27)...)...),
+			want: "MKR",
+		},
 	}
 
 	for _, tt := range tests {
