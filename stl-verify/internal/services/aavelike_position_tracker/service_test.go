@@ -2059,3 +2059,106 @@ func mustUserReserveDataABI(t *testing.T) *abi.ABI {
 func methodIDHex(parsedABI *abi.ABI, method string) string {
 	return hex.EncodeToString(parsedABI.Methods[method].ID)
 }
+
+// --- resolvePositionTokens unit tests ---
+
+// newResolveTokensTestService returns a Service wired with a capturing token
+// repo mock and harmless other deps. The capture function the caller passes in
+// receives the exact []outbound.TokenInput slice that resolvePositionTokens
+// hands to GetOrCreateTokens, in call order.
+func newResolveTokensTestService(capture *[]outbound.TokenInput) *Service {
+	return &Service{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		tokenRepo: &testutil.MockTokenRepository{
+			GetOrCreateTokensFn: func(_ context.Context, _ pgx.Tx, tokens []outbound.TokenInput) (map[common.Address]int64, error) {
+				*capture = append(*capture, tokens...)
+				result := make(map[common.Address]int64, len(tokens))
+				for i, t := range tokens {
+					result[t.Address] = int64(i + 1)
+				}
+				return result, nil
+			},
+		},
+	}
+}
+
+func TestResolvePositionTokens_DedupesAcrossCollateralsDebtsAndExtras(t *testing.T) {
+	tokenA := common.HexToAddress("0xAAaAaAAAaAaAAaAaAaAAaAaaAAAAAAaAAAaaaAaA")
+	tokenB := common.HexToAddress("0xBBbBbBBbbBBBBbBBbBBbBBBBBBBBBBBbBBbbBbbB")
+
+	collaterals := []aavelike.CollateralData{
+		{Asset: tokenA, Symbol: "USDC", Decimals: 6},
+		{Asset: tokenA, Symbol: "USDC", Decimals: 6}, // duplicate
+		{Asset: tokenB, Symbol: "WETH", Decimals: 18},
+	}
+	debts := []aavelike.DebtData{
+		{Asset: tokenA, Symbol: "USDC", Decimals: 6}, // overlaps with collateral
+	}
+	extras := []outbound.TokenInput{
+		{ChainID: 1, Address: tokenB, Symbol: "WETH", Decimals: 18, CreatedAtBlock: 100}, // overlaps with collateral
+	}
+
+	var captured []outbound.TokenInput
+	svc := newResolveTokensTestService(&captured)
+
+	tokenIDs, err := svc.resolvePositionTokens(context.Background(), nil, 1, 100, collaterals, debts, extras...)
+	if err != nil {
+		t.Fatalf("resolvePositionTokens: %v", err)
+	}
+	if len(tokenIDs) != 2 {
+		t.Errorf("returned map size: got %d, want 2 (one per unique address)", len(tokenIDs))
+	}
+	if len(captured) != 2 {
+		t.Fatalf("GetOrCreateTokens received %d inputs, want 2 (deduped); captured: %+v", len(captured), captured)
+	}
+	gotAddrs := map[common.Address]bool{captured[0].Address: true, captured[1].Address: true}
+	if !gotAddrs[tokenA] || !gotAddrs[tokenB] {
+		t.Errorf("captured addresses missing one of {tokenA, tokenB}; got %+v", gotAddrs)
+	}
+}
+
+func TestResolvePositionTokens_IncludesBorrowReserveExtras(t *testing.T) {
+	collateralToken := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	reserveToken := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	collaterals := []aavelike.CollateralData{
+		{Asset: collateralToken, Symbol: "WETH", Decimals: 18},
+	}
+	extras := []outbound.TokenInput{
+		{ChainID: 1, Address: reserveToken, Symbol: "USDC", Decimals: 6, CreatedAtBlock: 100},
+	}
+
+	var captured []outbound.TokenInput
+	svc := newResolveTokensTestService(&captured)
+
+	tokenIDs, err := svc.resolvePositionTokens(context.Background(), nil, 1, 100, collaterals, nil, extras...)
+	if err != nil {
+		t.Fatalf("resolvePositionTokens: %v", err)
+	}
+	if _, ok := tokenIDs[reserveToken]; !ok {
+		t.Errorf("returned map missing reserve token %s", reserveToken.Hex())
+	}
+	gotAddrs := map[common.Address]bool{}
+	for _, c := range captured {
+		gotAddrs[c.Address] = true
+	}
+	if !gotAddrs[collateralToken] || !gotAddrs[reserveToken] {
+		t.Errorf("captured addresses missing one of {collateral, reserve}; got %+v", gotAddrs)
+	}
+}
+
+func TestResolvePositionTokens_EmptyInputs(t *testing.T) {
+	var captured []outbound.TokenInput
+	svc := newResolveTokensTestService(&captured)
+
+	tokenIDs, err := svc.resolvePositionTokens(context.Background(), nil, 1, 100, nil, nil)
+	if err != nil {
+		t.Fatalf("resolvePositionTokens with empty inputs: %v", err)
+	}
+	if len(tokenIDs) != 0 {
+		t.Errorf("returned map should be empty; got %d entries", len(tokenIDs))
+	}
+	if len(captured) != 0 {
+		t.Errorf("GetOrCreateTokens should not see any inputs; got %d", len(captured))
+	}
+}
