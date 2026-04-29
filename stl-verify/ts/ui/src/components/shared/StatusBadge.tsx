@@ -22,8 +22,8 @@ function getToneStyles(tone: BadgeTone) {
       };
     case 'red':
       return {
-        bg: { _dark: 'red.900', base: 'red.50' },
-        color: { _dark: 'red.100', base: 'red.700' },
+        bg: { _dark: 'red.950', base: 'red.100' },
+        color: { _dark: 'red.300', base: 'red.800' },
       };
     case 'neutral':
     default:

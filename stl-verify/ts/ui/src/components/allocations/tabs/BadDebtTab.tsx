@@ -27,19 +27,19 @@ function getToneStyles(tone: ReturnType<typeof getBadDebtTone>) {
   switch (tone) {
     case 'green':
       return {
-        valueColor: { _dark: 'green.300', base: 'green.700' },
+        valueColor: { _dark: 'green.400', base: 'green.600' },
       };
     case 'yellow':
       return {
-        valueColor: { _dark: 'yellow.300', base: 'yellow.800' },
+        valueColor: { _dark: 'yellow.400', base: 'yellow.700' },
       };
     case 'neutral':
       return {
-        valueColor: { _dark: 'gray.400', base: 'gray.600' },
+        valueColor: { _dark: 'gray.400', base: 'gray.700' },
       };
     default:
       return {
-        valueColor: { _dark: 'red.200', base: 'red.700' },
+        valueColor: { _dark: 'red.400', base: 'red.600' },
       };
   }
 }
