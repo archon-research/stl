@@ -350,7 +350,7 @@ func SetupTestSchema(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn stri
 
 	EnsurePublicMigrations(baseDSN)
 
-	schemaName := sanitizeSchemaName(t.Name())
+	schemaName := SanitizeTestName(t.Name())
 	ctx := context.Background()
 
 	// Create the schema using a short-lived base connection.
@@ -401,8 +401,11 @@ func SetupTestSchema(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn stri
 	return pool, dsn, cleanup
 }
 
-// sanitizeSchemaName converts a test name to a valid PostgreSQL identifier.
-func sanitizeSchemaName(testName string) string {
+// SanitizeTestName converts a test name to a string safe for use as a
+// PostgreSQL identifier, Redis key prefix, or AWS resource name suffix.
+// The result is lowercase alphanumeric + underscores, prefixed with "t_",
+// and truncated to 63 characters (PostgreSQL identifier limit).
+func SanitizeTestName(testName string) string {
 	s := strings.ToLower(testName)
 	var b strings.Builder
 	b.WriteString("t_")

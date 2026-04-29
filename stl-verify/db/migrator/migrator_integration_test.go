@@ -5,6 +5,7 @@ package migrator_test
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -37,7 +38,7 @@ func setupPostgres(_ context.Context, t *testing.T) (*pgxpool.Pool, func()) {
 func createTestDatabase(t *testing.T) (dsn string, cleanup func()) {
 	t.Helper()
 
-	dbName := sanitizeName(t.Name())
+	dbName := testutil.SanitizeTestName(t.Name())
 	ctx := context.Background()
 
 	adminPool, err := pgxpool.New(ctx, sharedDSN)
@@ -51,8 +52,13 @@ func createTestDatabase(t *testing.T) (dsn string, cleanup func()) {
 	}
 	adminPool.Close()
 
-	// Build DSN for the new database
-	dsn = strings.Replace(sharedDSN, "/testdb", "/"+dbName, 1)
+	// Build DSN for the new database by replacing the path component.
+	u, err := url.Parse(sharedDSN)
+	if err != nil {
+		t.Fatalf("parse DSN: %v", err)
+	}
+	u.Path = "/" + dbName
+	dsn = u.String()
 
 	// Enable TimescaleDB in the new database
 	tmpPool, err := pgxpool.New(ctx, dsn)
@@ -80,28 +86,10 @@ func createTestDatabase(t *testing.T) (dsn string, cleanup func()) {
 	return dsn, cleanup
 }
 
-func sanitizeName(testName string) string {
-	s := strings.ToLower(testName)
-	var b strings.Builder
-	b.WriteString("t_")
-	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
-			b.WriteRune(r)
-		} else {
-			b.WriteRune('_')
-		}
-	}
-	result := b.String()
-	if len(result) > 63 {
-		result = result[:63]
-	}
-	return result
-}
-
 func createBenchDatabase(b *testing.B) (dsn string, cleanup func()) {
 	b.Helper()
 
-	dbName := sanitizeName(b.Name())
+	dbName := testutil.SanitizeTestName(b.Name())
 	ctx := context.Background()
 
 	adminPool, err := pgxpool.New(ctx, sharedDSN)
@@ -115,7 +103,12 @@ func createBenchDatabase(b *testing.B) (dsn string, cleanup func()) {
 	}
 	adminPool.Close()
 
-	dsn = strings.Replace(sharedDSN, "/testdb", "/"+dbName, 1)
+	u, err := url.Parse(sharedDSN)
+	if err != nil {
+		b.Fatalf("parse DSN: %v", err)
+	}
+	u.Path = "/" + dbName
+	dsn = u.String()
 
 	tmpPool, err := pgxpool.New(ctx, dsn)
 	if err != nil {

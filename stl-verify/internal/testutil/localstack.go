@@ -102,7 +102,7 @@ func NewS3Client(t *testing.T, ctx context.Context, cfg LocalStackConfig) *s3.Cl
 // StartLocalStackForMain starts a LocalStack container for use in TestMain.
 // On error it calls log.Fatal instead of t.Fatal.
 func StartLocalStackForMain(services string) (cfg LocalStackConfig, cleanup func()) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	cfg.Region = "us-east-1"
@@ -142,10 +142,18 @@ func StartLocalStackForMain(services string) (cfg LocalStackConfig, cleanup func
 
 	// Ensure the container host bypasses the HTTP proxy.
 	if noProxy := os.Getenv("NO_PROXY"); !strings.Contains(noProxy, host) {
-		os.Setenv("NO_PROXY", noProxy+","+host)
+		if noProxy == "" {
+			os.Setenv("NO_PROXY", host)
+		} else {
+			os.Setenv("NO_PROXY", noProxy+","+host)
+		}
 	}
 	if noProxy := os.Getenv("no_proxy"); !strings.Contains(noProxy, host) {
-		os.Setenv("no_proxy", noProxy+","+host)
+		if noProxy == "" {
+			os.Setenv("no_proxy", host)
+		} else {
+			os.Setenv("no_proxy", noProxy+","+host)
+		}
 	}
 
 	cleanup = func() { _ = container.Terminate(context.Background()) }

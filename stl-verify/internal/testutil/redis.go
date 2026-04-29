@@ -50,7 +50,7 @@ func StartRedis(t *testing.T, ctx context.Context) (addr string, cleanup func())
 // StartRedisForMain starts a Redis container for use in TestMain.
 // On error it calls log.Fatal instead of t.Fatal.
 func StartRedisForMain() (addr string, cleanup func()) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{

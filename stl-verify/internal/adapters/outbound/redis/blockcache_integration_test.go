@@ -6,9 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // setupRedis returns a BlockCache connected to the shared Redis container.
@@ -20,7 +21,7 @@ func setupRedis(t *testing.T, ttl time.Duration) (*BlockCache, func()) {
 		Password:  "",
 		DB:        0,
 		TTL:       ttl,
-		KeyPrefix: sanitizeTestName(t.Name()),
+		KeyPrefix: testutil.SanitizeTestName(t.Name()),
 	}
 
 	cache, err := NewBlockCache(cfg, nil)
@@ -41,18 +42,6 @@ func setupRedis(t *testing.T, ttl time.Duration) (*BlockCache, func()) {
 	}
 
 	return cache, cleanup
-}
-
-func sanitizeTestName(name string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(name) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
-			b.WriteRune(r)
-		} else {
-			b.WriteRune('_')
-		}
-	}
-	return b.String()
 }
 
 // --- Test: Ping ---

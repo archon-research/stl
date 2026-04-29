@@ -656,7 +656,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 		Password:  "",
 		DB:        0,
 		TTL:       1 * time.Hour,
-		KeyPrefix: "test",
+		KeyPrefix: testutil.SanitizeTestName(t.Name()),
 	}, logger)
 	if err != nil {
 		t.Fatalf("failed to create redis cache: %v", err)
@@ -688,7 +688,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 
 	// Create SNS topics and SQS queues with test-unique names to avoid
 	// cross-test interference on the shared LocalStack container.
-	testPrefix := sanitizeTestName(t.Name())
+	testPrefix := testutil.SanitizeTestName(t.Name())
 	topics := createSNSTopics(t, ctx, snsClient, testPrefix)
 	queues := createSQSQueues(t, ctx, sqsClient, testPrefix)
 	subscribeQueuesToTopics(t, ctx, snsClient, topics, queues, testPrefix)
@@ -823,25 +823,6 @@ func subscribeQueuesToTopics(t *testing.T, ctx context.Context, snsClient *sns.C
 		}
 		t.Logf("Subscribed queue %s to topic %s", queueURL, topicARN)
 	}
-}
-
-// sanitizeTestName converts a test name to a string safe for use in AWS
-// resource names (alphanumeric, hyphens, and underscores only).
-func sanitizeTestName(name string) string {
-	var b []byte
-	for i := range len(name) {
-		c := name[i]
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' {
-			b = append(b, c)
-		} else {
-			b = append(b, '_')
-		}
-	}
-	s := string(b)
-	if len(s) > 40 {
-		s = s[:40]
-	}
-	return s
 }
 
 // =============================================================================
