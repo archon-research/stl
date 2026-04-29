@@ -290,8 +290,10 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 	}()
 
 	var errs []error
-	// Track transient vault discovery failures separately so we can discard
-	// them if a later log for the same address succeeds.
+	// Track the FIRST transient vault discovery failure per address.
+	// VEC-188: a later success for the same address must NOT wipe an earlier
+	// failure — the earlier log's event was never persisted, so we must
+	// surface the error and let SQS redeliver so both logs are retried.
 	discoveryErrs := make(map[common.Address]error)
 	morphoBlueAddr := MorphoBlueAddress
 
@@ -334,12 +336,17 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 					s.logger.Debug("not a MetaMorpho vault", "address", logAddress.Hex(), "reason", err)
 				} else {
 					s.logger.Warn("vault discovery failed (will retry)", "address", logAddress.Hex(), "error", err)
-					discoveryErrs[logAddress] = err
+					// VEC-188: keep the first failure. A later success for the
+					// same vault address does NOT retroactively process the
+					// earlier log — that log's event was never saved. Surfacing
+					// the error forces SQS to redeliver so BOTH logs are retried.
+					if _, seen := discoveryErrs[logAddress]; !seen {
+						discoveryErrs[logAddress] = fmt.Errorf("vault discovery for %s in tx %s: %w", logAddress.Hex(), receipt.TransactionHash, err)
+					}
 				}
-			} else {
-				// Discovery succeeded — discard any earlier transient failure for this address.
-				delete(discoveryErrs, logAddress)
 			}
+			// Intentionally no delete(discoveryErrs, logAddress) on success:
+			// a later success doesn't undo the earlier log's loss.
 		}
 	}
 
