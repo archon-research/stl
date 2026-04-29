@@ -13,6 +13,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -622,6 +623,12 @@ func (s *blockchainService) fetchVaultDetails(ctx context.Context, vaultAddress 
 }
 
 // getTokenMetadata fetches token symbol and decimals via ERC20 calls.
+//
+// Post-VEC-188: any sub-call revert (Success: false) surfaces as an error so
+// callers do not silently persist zero-valued metadata (empty Symbol, 0
+// Decimals) into the token table. A non-string symbol() return (e.g. MKR-style
+// bytes32) is still tolerated with an empty Symbol — that's an unpack concern,
+// not a revert.
 func (s *blockchainService) getTokenMetadata(ctx context.Context, tokenAddress common.Address, blockNumber int64) (retMD TokenMetadata, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getTokenMetadata",
 		attribute.String("token.address", tokenAddress.Hex()))
@@ -655,25 +662,51 @@ func (s *blockchainService) getTokenMetadata(ctx context.Context, tokenAddress c
 		return TokenMetadata{}, fmt.Errorf("multicall token metadata: %w", err)
 	}
 
+	if len(results) != 2 {
+		return TokenMetadata{}, fmt.Errorf("getTokenMetadata(%s): expected 2 results, got %d", tokenAddress.Hex(), len(results))
+	}
+	if err := rpcerr.RequireAllSucceeded(results, fmt.Sprintf("getTokenMetadata(%s)", tokenAddress.Hex())); err != nil {
+		return TokenMetadata{}, err
+	}
+
+	md, err := s.unpackTokenMetadataResults(results[0], results[1], tokenAddress)
+	if err != nil {
+		return TokenMetadata{}, err
+	}
+
+	s.metadataCache[tokenAddress] = md
+	return md, nil
+}
+
+// unpackTokenMetadataResults unpacks symbol() and decimals() results for a
+// single token. Callers must have already verified that both sub-calls
+// succeeded (Success: true) — this helper only decodes the return data.
+//
+// A symbol() return that does not decode as a string (e.g. bytes32 on MKR-style
+// tokens) is tolerated with an empty Symbol — it's an ABI-shape mismatch, not a
+// revert. decimals() must decode cleanly; a failure here means the contract is
+// not a conformant ERC20 and we surface an error rather than persist 0.
+func (s *blockchainService) unpackTokenMetadataResults(symbolResult, decimalsResult outbound.Result, token common.Address) (TokenMetadata, error) {
 	md := TokenMetadata{}
 
-	if len(results) > 0 && results[0].Success && len(results[0].ReturnData) > 0 {
-		symbolUnpacked, err := s.erc20ABI.Unpack("symbol", results[0].ReturnData)
+	if len(symbolResult.ReturnData) > 0 {
+		symbolUnpacked, err := s.erc20ABI.Unpack("symbol", symbolResult.ReturnData)
 		if err == nil && len(symbolUnpacked) > 0 {
 			md.Symbol, _ = symbolUnpacked[0].(string)
 		}
 	}
 
-	if len(results) > 1 && results[1].Success && len(results[1].ReturnData) > 0 {
-		decimalsUnpacked, err := s.erc20ABI.Unpack("decimals", results[1].ReturnData)
-		if err == nil && len(decimalsUnpacked) > 0 {
-			md.Decimals = intFromAny(decimalsUnpacked[0])
-		}
+	if len(decimalsResult.ReturnData) == 0 {
+		return TokenMetadata{}, fmt.Errorf("decimals() returned no data for token %s", token.Hex())
 	}
-
-	if md.Symbol != "" {
-		s.metadataCache[tokenAddress] = md
+	decimalsUnpacked, err := s.erc20ABI.Unpack("decimals", decimalsResult.ReturnData)
+	if err != nil {
+		return TokenMetadata{}, fmt.Errorf("unpacking decimals() for token %s: %w", token.Hex(), err)
 	}
+	if len(decimalsUnpacked) == 0 {
+		return TokenMetadata{}, fmt.Errorf("decimals() returned no values for token %s", token.Hex())
+	}
+	md.Decimals = intFromAny(decimalsUnpacked[0])
 
 	return md, nil
 }
@@ -739,40 +772,24 @@ func (s *blockchainService) getTokenPairMetadata(ctx context.Context, tokenA, to
 		return TokenMetadata{}, TokenMetadata{}, fmt.Errorf("multicall token pair metadata: %w", err)
 	}
 
-	mdA := TokenMetadata{}
-	mdB := TokenMetadata{}
-
-	if len(results) > 0 && results[0].Success && len(results[0].ReturnData) > 0 {
-		symbolUnpacked, err := s.erc20ABI.Unpack("symbol", results[0].ReturnData)
-		if err == nil && len(symbolUnpacked) > 0 {
-			mdA.Symbol, _ = symbolUnpacked[0].(string)
-		}
+	if len(results) != 4 {
+		return TokenMetadata{}, TokenMetadata{}, fmt.Errorf("getTokenPairMetadata(%s,%s): expected 4 results, got %d", tokenA.Hex(), tokenB.Hex(), len(results))
 	}
-	if len(results) > 1 && results[1].Success && len(results[1].ReturnData) > 0 {
-		decimalsUnpacked, err := s.erc20ABI.Unpack("decimals", results[1].ReturnData)
-		if err == nil && len(decimalsUnpacked) > 0 {
-			mdA.Decimals = intFromAny(decimalsUnpacked[0])
-		}
-	}
-	if len(results) > 2 && results[2].Success && len(results[2].ReturnData) > 0 {
-		symbolUnpacked, err := s.erc20ABI.Unpack("symbol", results[2].ReturnData)
-		if err == nil && len(symbolUnpacked) > 0 {
-			mdB.Symbol, _ = symbolUnpacked[0].(string)
-		}
-	}
-	if len(results) > 3 && results[3].Success && len(results[3].ReturnData) > 0 {
-		decimalsUnpacked, err := s.erc20ABI.Unpack("decimals", results[3].ReturnData)
-		if err == nil && len(decimalsUnpacked) > 0 {
-			mdB.Decimals = intFromAny(decimalsUnpacked[0])
-		}
+	if err := rpcerr.RequireAllSucceeded(results, fmt.Sprintf("getTokenPairMetadata(%s,%s)", tokenA.Hex(), tokenB.Hex())); err != nil {
+		return TokenMetadata{}, TokenMetadata{}, err
 	}
 
-	if mdA.Symbol != "" {
-		s.metadataCache[tokenA] = mdA
+	mdA, err := s.unpackTokenMetadataResults(results[0], results[1], tokenA)
+	if err != nil {
+		return TokenMetadata{}, TokenMetadata{}, err
 	}
-	if mdB.Symbol != "" {
-		s.metadataCache[tokenB] = mdB
+	mdB, err := s.unpackTokenMetadataResults(results[2], results[3], tokenB)
+	if err != nil {
+		return TokenMetadata{}, TokenMetadata{}, err
 	}
+
+	s.metadataCache[tokenA] = mdA
+	s.metadataCache[tokenB] = mdB
 
 	return mdA, mdB, nil
 }
