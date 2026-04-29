@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,7 +116,8 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	infra.S3Client = s3Client
 
 	// Use unique resource names per test to avoid cross-test interference.
-	suffix := testutil.SanitizeTestName(t.Name())
+	// S3 bucket names require hyphens (no underscores), so replace them.
+	suffix := strings.ReplaceAll(testutil.SanitizeTestName(t.Name()), "_", "-")
 	bucketName := "backup-" + suffix
 	_, err = s3Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String(bucketName),
