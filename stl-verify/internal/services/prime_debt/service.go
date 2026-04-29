@@ -274,16 +274,17 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 
 		r := results[i]
 		if r.Err != nil {
-			// VEC-188: classify the per-prime error. Reverts are the
-			// contract's "no data" signal and legitimately skip. Transport
-			// errors are transient and must surface so the SQS message NACKs.
+			// Classify the per-prime error: reverts are the contract's
+			// "no data" signal and legitimately skip; transport errors
+			// are transient and must surface so the SQS message NACKs.
 			//
-			// Fail-fast asymmetry: returning here on the FIRST transport
-			// error throws away results we already received for primes
-			// later in the slice. With 2 primes today, the wasted work on
-			// SQS retry is at most one extra multicall, so the simpler
-			// return-on-first wins. Revisit this when a 3rd+ prime is
-			// added — same trigger as the all-revert comment below.
+			// Fail-fast asymmetry: returning on the FIRST transport error
+			// throws away results we already received for primes later in
+			// the slice — they'll be re-read on SQS retry. The wasted work
+			// scales linearly with the prime count; at small N the simpler
+			// return-on-first wins, but if this slice ever grows enough
+			// that re-reads become expensive, accumulate-then-return would
+			// be the next form.
 			if !rpcerr.IsEVMRevert(r.Err) {
 				return fmt.Errorf("prime %s: transport error reading debt: %w", prime.Name, r.Err)
 			}
@@ -317,12 +318,10 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 	// Asymmetry vs the per-prime classification above: a single prime
 	// reverting is treated as legitimate "no debt this block" (skip +
 	// continue). But if EVERY prime reverts we treat it as a hard error
-	// rather than ACK silently. With only 2 primes today, simultaneous
-	// legitimate reverts are implausible — an all-empty result is more
-	// likely a misconfiguration (wrong vault addresses) than a real
-	// "no data" answer. Prefer the loud DLQ over a silent ACK. Revisit
-	// this when a 3rd+ prime is added and the all-revert case becomes
-	// plausible. See VEC-188 PR review discussion.
+	// rather than ACK silently — an all-empty result is far more likely a
+	// misconfiguration (wrong vault addresses, ABI drift, full provider
+	// outage) than a real coordinated "no data" answer across independent
+	// vaults. Prefer the loud DLQ over a silent ACK.
 	if len(snapshots) == 0 {
 		return fmt.Errorf("all vault reads failed, skipping db write")
 	}

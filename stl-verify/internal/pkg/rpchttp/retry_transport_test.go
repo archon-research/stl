@@ -377,6 +377,52 @@ func TestRetryTransport_ClosesRequestBodyOnReadError(t *testing.T) {
 	}
 }
 
+// TestNewBackfillerClient_HasPooledTransportAndTimeoutAndRetries verifies
+// the helper bundles all three ingredients backfillers depend on:
+// (1) a connection-pooled http.Transport, (2) a 120s client timeout, and
+// (3) the standard retry policy. Keeps the four backfillers from drifting
+// apart.
+func TestNewBackfillerClient_HasPooledTransportAndTimeoutAndRetries(t *testing.T) {
+	client := NewBackfillerClient(8)
+
+	if client.Timeout != 120*time.Second {
+		t.Errorf("Timeout = %v; want 120s", client.Timeout)
+	}
+
+	rt, ok := client.Transport.(*retryTransport)
+	if !ok {
+		t.Fatalf("expected *retryTransport, got %T", client.Transport)
+	}
+	if rt.maxRetries != 5 {
+		t.Errorf("maxRetries = %d; want 5", rt.maxRetries)
+	}
+
+	pool, ok := rt.base.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport as base, got %T", rt.base)
+	}
+	if pool.MaxConnsPerHost != 8 {
+		t.Errorf("MaxConnsPerHost = %d; want 8 (matches concurrency)", pool.MaxConnsPerHost)
+	}
+	if pool.MaxIdleConnsPerHost != 8 {
+		t.Errorf("MaxIdleConnsPerHost = %d; want 8", pool.MaxIdleConnsPerHost)
+	}
+	if pool.MaxIdleConns != 16 {
+		t.Errorf("MaxIdleConns = %d; want 16 (2× concurrency)", pool.MaxIdleConns)
+	}
+}
+
+// TestNewBackfillerClient_ClampsConcurrencyBelowOne ensures a zero or
+// negative concurrency doesn't produce a useless connection pool.
+func TestNewBackfillerClient_ClampsConcurrencyBelowOne(t *testing.T) {
+	client := NewBackfillerClient(0)
+	rt := client.Transport.(*retryTransport)
+	pool := rt.base.(*http.Transport)
+	if pool.MaxConnsPerHost != 1 {
+		t.Errorf("zero concurrency must clamp to 1; got MaxConnsPerHost = %d", pool.MaxConnsPerHost)
+	}
+}
+
 // TestNewClient_ClampsMaxRetriesUpperBound verifies that an absurdly large
 // MaxRetries is clamped to a sane upper bound — defense-in-depth against a
 // future caller passing 1_000_000 by accident.

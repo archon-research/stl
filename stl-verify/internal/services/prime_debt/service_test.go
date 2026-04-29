@@ -505,9 +505,10 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 // TestSync_PartialRevert_OtherPrimesStillSaved verifies the
 // AllowFailure-compatible revert path: if one vault's debt call reverts
 // (the contract's "no data this block" answer), that prime is skipped
-// and the remaining primes are still snapshotted. VEC-188 Finding 5
-// narrows this to revert-shaped errors only; transport errors now
-// propagate (covered by TestSyncAll_ErrorsOnTransportFailure).
+// and the remaining primes are still snapshotted. The classification
+// added in this branch narrows the skip to revert-shaped errors only;
+// transport errors now propagate (covered by
+// TestSyncAll_ErrorsOnTransportFailure).
 func TestSync_PartialRevert_OtherPrimesStillSaved(t *testing.T) {
 	spark := entity.Prime{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")}
 	grove := entity.Prime{ID: 2, Name: "grove", VaultAddress: common.HexToAddress("0xD5Bf3F08Ac13f4A2e2b1A70741d5c94E2b4Eb6E0")}

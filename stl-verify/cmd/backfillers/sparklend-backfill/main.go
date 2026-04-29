@@ -7,12 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -129,28 +126,7 @@ func run(args []string) error {
 	// Create Ethereum client with connection pooling scaled to concurrency.
 	// Retry 429/5xx/network errors via rpchttp so transient RPC failures
 	// don't mark blocks bad.
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		MaxIdleConns:          cfg.concurrency * 2,
-		MaxIdleConnsPerHost:   cfg.concurrency,
-		MaxConnsPerHost:       cfg.concurrency,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
-	httpClient := rpchttp.NewClient(rpchttp.Config{
-		MaxRetries:  5,
-		BaseBackoff: 250 * time.Millisecond,
-		MaxBackoff:  10 * time.Second,
-		Transport:   transport,
-	})
-	httpClient.Timeout = 120 * time.Second
-
-	rpcClient, err := rpc.DialOptions(ctx, cfg.rpcURL, rpc.WithHTTPClient(httpClient))
+	rpcClient, err := rpc.DialOptions(ctx, cfg.rpcURL, rpc.WithHTTPClient(rpchttp.NewBackfillerClient(cfg.concurrency)))
 	if err != nil {
 		return fmt.Errorf("connecting to RPC: %w", err)
 	}

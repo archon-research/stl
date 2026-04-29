@@ -133,28 +133,10 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// Ethereum RPC. Retry 429/5xx/network errors via rpchttp so transient
-	// RPC failures don't mark blocks bad.
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		MaxIdleConns:          20,
-		MaxIdleConnsPerHost:   10,
-		MaxConnsPerHost:       10,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
-	httpClient := rpchttp.NewClient(rpchttp.Config{
-		MaxRetries:  5,
-		BaseBackoff: 250 * time.Millisecond,
-		MaxBackoff:  10 * time.Second,
-		Transport:   transport,
-	})
-	httpClient.Timeout = 120 * time.Second
-	rpcClient, err := rpc.DialOptions(ctx, cfg.rpcURL, rpc.WithHTTPClient(httpClient))
+	// RPC failures don't mark blocks bad. RPC-side concurrency is
+	// deliberately decoupled from cfg.goroutines (which sizes the S3
+	// reader pool above) — 10 is the historical RPC budget here.
+	rpcClient, err := rpc.DialOptions(ctx, cfg.rpcURL, rpc.WithHTTPClient(rpchttp.NewBackfillerClient(10)))
 	if err != nil {
 		return fmt.Errorf("connecting to RPC: %w", err)
 	}

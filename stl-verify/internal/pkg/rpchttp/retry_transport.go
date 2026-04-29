@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -38,9 +39,11 @@ import (
 )
 
 // MaxRetriesUpperBound caps Config.MaxRetries to a sane value to prevent
-// runaway retry loops if a caller passes an absurdly large number. The cap
-// is generous (100) and only exists as defense-in-depth.
-const MaxRetriesUpperBound = 100
+// runaway retry loops if a caller passes an absurdly large number. With
+// the default 250ms / 10s backoff, even 20 retries can already burn ~3
+// minutes of wall time per request — anything higher than that is almost
+// certainly a typo. Defense-in-depth, not a soft target.
+const MaxRetriesUpperBound = 20
 
 // Config configures a retry-enabled http.Client.
 type Config struct {
@@ -61,6 +64,43 @@ type Config struct {
 
 	// Transport is the underlying round-tripper. nil → http.DefaultTransport.
 	Transport http.RoundTripper
+}
+
+// NewBackfillerClient returns an *http.Client tuned for high-throughput
+// backfiller workloads — pooled HTTP/1.1 connections sized to concurrency,
+// 120s wall-clock timeout per request, and the standard rpchttp retry
+// transport (5 retries, 250ms→10s backoff with jitter).
+//
+// concurrency is the worker's parallel-request budget; the underlying
+// http.Transport's per-host connection pool is sized to match it (with
+// 2× idle headroom). Pass at least 1.
+//
+// All four backfillers in cmd/backfillers/ use this — keep new backfillers
+// on the same path so transport tuning lives in one place.
+func NewBackfillerClient(concurrency int) *http.Client {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          concurrency * 2,
+		MaxIdleConnsPerHost:   concurrency,
+		MaxConnsPerHost:       concurrency,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	return NewClient(Config{
+		MaxRetries:  5,
+		BaseBackoff: 250 * time.Millisecond,
+		MaxBackoff:  10 * time.Second,
+		Timeout:     120 * time.Second,
+		Transport:   transport,
+	})
 }
 
 // NewClient returns an *http.Client that retries 429/5xx/network errors.
@@ -244,7 +284,7 @@ func DialEthereum(ctx context.Context, rawURL string, opts ...Option) (*ethclien
 
 // redactURL returns a logging-safe form of rawURL — scheme + host only,
 // stripping the path, query string, and userinfo. Used in dial-error
-// messages to avoid leaking the API key embedded in Alchemy / Infura URLs.
+// messages to avoid leaking the API key embedded in RPC provider URLs.
 func redactURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Host == "" {
