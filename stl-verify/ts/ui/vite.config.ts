@@ -1,5 +1,6 @@
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
+
 import { resolveAppEnv } from '#env';
 
 // https://vitejs.dev/config/

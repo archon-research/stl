@@ -54,12 +54,8 @@ function App() {
   const [selectedPrimeId, setSelectedPrimeId] = useUrlParam(PARAMS.prime);
   const [selectedNetwork, setSelectedNetwork] = useUrlParam(PARAMS.network);
   const [selectedProtocol, setSelectedProtocol] = useUrlParam(PARAMS.protocol);
-  const {
-    globalFilter,
-    setGlobalFilter,
-    setSorting,
-    sorting,
-  } = useUrlSyncedTableState(PARAMS.sort, PARAMS.search);
+  const { globalFilter, setGlobalFilter, setSorting, sorting } =
+    useUrlSyncedTableState(PARAMS.sort, PARAMS.search);
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrimeId);
   const isDrawerOpen = isDrawerOpenParam === '1';
@@ -80,7 +76,9 @@ function App() {
           return;
         }
 
-        logging.error('Failed to load local metadata (chains/protocols)', { error });
+        logging.error('Failed to load local metadata (chains/protocols)', {
+          error,
+        });
         setLocalChains([]);
         setLocalProtocols([]);
       });
@@ -178,7 +176,10 @@ function App() {
           return;
         }
 
-        logging.error('Failed to load allocations', { error, primeId: selectedPrimeId });
+        logging.error('Failed to load allocations', {
+          error,
+          primeId: selectedPrimeId,
+        });
         setAllocationsErrorMessage(toErrorMessage(error));
       })
       .finally(() => {
@@ -297,14 +298,20 @@ function App() {
     ) {
       setSelectedAllocationKey(getAllocationKey(filteredAllocations[0]));
     }
-  }, [filteredAllocations, selectedAllocationKey]);
+  }, [
+    filteredAllocations,
+    isDrawerOpen,
+    selectedAllocationKey,
+    setIsDrawerOpenParam,
+  ]);
 
   useEffect(() => {
     if (
       isDrawerOpen &&
       (!selectedAllocationKey ||
         !filteredAllocations.some(
-          (allocation) => getAllocationKey(allocation) === selectedAllocationKey,
+          (allocation) =>
+            getAllocationKey(allocation) === selectedAllocationKey,
         ))
     ) {
       setIsDrawerOpenParam(null);

@@ -1,13 +1,10 @@
-import {
-  SkeletonStack,
-  ThemeToggle,
-} from '@archon-research/design-system';
+import { SkeletonStack, ThemeToggle } from '@archon-research/design-system';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import type { Prime } from '../../types/allocation';
 import { EmptyState, ErrorState } from '.';
+import type { Prime } from '../../types/allocation';
 
 type PrimeSidebarProps = {
   primes: Prime[];

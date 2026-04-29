@@ -101,7 +101,10 @@ export function RiskDetailDrawer({
     };
 
     const handleMouseUp = () => {
-      window.localStorage.setItem(DRAWER_STORAGE_KEY, String(drawerWidthRef.current));
+      window.localStorage.setItem(
+        DRAWER_STORAGE_KEY,
+        String(drawerWidthRef.current),
+      );
       setDragState(null);
     };
 
@@ -138,12 +141,16 @@ export function RiskDetailDrawer({
         pointerEvents: isOpen ? 'auto' : 'none',
       })}
     >
-      <div
+      <button
+        type="button"
+        aria-label="Close risk detail drawer"
         onClick={onClose}
         className={css({
           position: 'fixed',
           inset: 0,
           bg: 'rgba(15, 23, 42, 0.28)',
+          border: 'none',
+          p: 0,
           opacity: isOpen ? 1 : 0,
           visibility: isOpen ? 'visible' : 'hidden',
           transitionDuration: 'normal',
@@ -209,7 +216,13 @@ export function RiskDetailDrawer({
             borderBottomColor: 'border.subtle',
           })}
         >
-          <div className={flex({ align: 'center', justify: 'space-between', gap: '3' })}>
+          <div
+            className={flex({
+              align: 'center',
+              justify: 'space-between',
+              gap: '3',
+            })}
+          >
             <div>
               <p
                 className={css({

@@ -7,9 +7,11 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
-import { SummaryMetric } from '../../shared';
 import { DataTable, useDataTable } from '../../../data-table';
-import { buildRowSearchString, matchesSearchQuery } from '../../../data-table/utils';
+import {
+  buildRowSearchString,
+  matchesSearchQuery,
+} from '../../../data-table/utils';
 import { getRiskBreakdown } from '../../../lib/api';
 import {
   formatMultiplier,
@@ -21,6 +23,7 @@ import {
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type { Allocation, RiskBreakdown } from '../../../types/allocation';
+import { SummaryMetric } from '../../shared';
 
 type RiskBreakdownTabProps = {
   searchQuery?: string;
@@ -63,7 +66,8 @@ function RiskTable({
         id: 'symbol',
         header: 'Symbol',
         accessorKey: 'symbol',
-        cell: (info: CellContext<RiskItem, unknown>) => info.getValue() as string,
+        cell: (info: CellContext<RiskItem, unknown>) =>
+          info.getValue() as string,
       },
       {
         id: 'amount',
@@ -80,31 +84,42 @@ function RiskTable({
         id: 'price_usd',
         header: 'Price USD',
         accessorKey: 'price_usd',
-        cell: (info: CellContext<RiskItem, unknown>) => formatUsdValue(info.getValue() as string | number | null | undefined),
+        cell: (info: CellContext<RiskItem, unknown>) =>
+          formatUsdValue(info.getValue() as string | number | null | undefined),
       },
       {
         id: 'amount_usd',
         header: 'Amount USD',
         accessorKey: 'amount_usd',
-        cell: (info: CellContext<RiskItem, unknown>) => formatUsdValue(info.getValue() as string | number | null | undefined),
+        cell: (info: CellContext<RiskItem, unknown>) =>
+          formatUsdValue(info.getValue() as string | number | null | undefined),
       },
       {
         id: 'backing_pct',
         header: 'Backing %',
         accessorKey: 'backing_pct',
-        cell: (info: CellContext<RiskItem, unknown>) => formatPercentValue(info.getValue() as string | number | null | undefined),
+        cell: (info: CellContext<RiskItem, unknown>) =>
+          formatPercentValue(
+            info.getValue() as string | number | null | undefined,
+          ),
       },
       {
         id: 'lt',
         header: 'Liquidation Threshold',
         accessorKey: 'liquidation_threshold',
-        cell: (info: CellContext<RiskItem, unknown>) => formatRatioPercent(info.getValue() as string | number | null | undefined),
+        cell: (info: CellContext<RiskItem, unknown>) =>
+          formatRatioPercent(
+            info.getValue() as string | number | null | undefined,
+          ),
       },
       {
         id: 'bonus',
         header: 'Liquidation Bonus',
         accessorKey: 'liquidation_bonus',
-        cell: (info: CellContext<RiskItem, unknown>) => formatMultiplier(info.getValue() as string | number | null | undefined),
+        cell: (info: CellContext<RiskItem, unknown>) =>
+          formatMultiplier(
+            info.getValue() as string | number | null | undefined,
+          ),
       },
     ],
     [],

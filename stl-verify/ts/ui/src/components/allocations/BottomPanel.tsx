@@ -10,10 +10,7 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 import { segmentedControl } from '#styled-system/recipes';
 
-import {
-  getProtocolLabel,
-  sortAllocations,
-} from '../../lib/dashboard';
+import { getProtocolLabel, sortAllocations } from '../../lib/dashboard';
 import { PARAMS, useUrlParam } from '../../lib/url-params';
 import type { Allocation, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
@@ -216,7 +213,9 @@ export function BottomPanel({
           </span>
           <StyledSelect
             value={receiptTokenParam ?? ''}
-            onChange={(event) => setReceiptTokenParam(event.target.value || null)}
+            onChange={(event) =>
+              setReceiptTokenParam(event.target.value || null)
+            }
             disabled={
               !selectedPrime ||
               isLoading ||
@@ -244,7 +243,9 @@ export function BottomPanel({
           >
             <SearchInput
               aria-label="Search risk breakdown"
-              disabled={!focusedAllocation || isLoading || errorMessage !== null}
+              disabled={
+                !focusedAllocation || isLoading || errorMessage !== null
+              }
               onValueChange={setLocalRiskSearchValue}
               placeholder="Search backing assets"
               value={localRiskSearchValue}

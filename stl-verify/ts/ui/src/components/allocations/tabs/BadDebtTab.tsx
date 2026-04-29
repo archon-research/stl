@@ -1,12 +1,9 @@
-import {
-  LoadingIndicator,
-} from '@archon-research/design-system';
+import { LoadingIndicator } from '@archon-research/design-system';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { PercentageSlider, StatusBadge, SummaryMetric } from '../../shared';
 import { getBadDebt } from '../../../lib/api';
 import {
   formatRatioPercent,
@@ -18,6 +15,7 @@ import {
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type { Allocation, BadDebt } from '../../../types/allocation';
+import { PercentageSlider, StatusBadge, SummaryMetric } from '../../shared';
 
 type BadDebtTabProps = {
   selectedReceiptToken: Allocation | null;
@@ -176,7 +174,9 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
             >
               Bad debt model
             </p>
-            {isLoading ? <LoadingIndicator message="Recalculating scenario" /> : null}
+            {isLoading ? (
+              <LoadingIndicator message="Recalculating scenario" />
+            ) : null}
           </div>
 
           <StatusBadge tone={tone} label={statusLabel} />
@@ -283,7 +283,11 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
               color: toneStyles.valueColor,
             })}
           >
-            {badDebt ? formatUsdValue(badDebt.bad_debt_usd) : isLoading ? '—' : '—'}
+            {badDebt
+              ? formatUsdValue(badDebt.bad_debt_usd)
+              : isLoading
+                ? '—'
+                : '—'}
           </p>
           {isLoading && !badDebt ? (
             <div className={css({ mt: '3' })}>
@@ -305,7 +309,6 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
           )}
         </div>
       ) : null}
-
     </div>
   );
 }

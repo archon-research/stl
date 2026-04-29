@@ -1,14 +1,10 @@
 import { SearchInput } from '@archon-research/design-system';
-import {
-  type ColumnDef,
-  type SortingState,
-} from '@tanstack/react-table';
+import { type ColumnDef, type SortingState } from '@tanstack/react-table';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { Address, EmptyState, ErrorState } from '../shared';
 import { DataTable, useDataTable } from '../../data-table';
 import {
   type ChainLabelLookup,
@@ -19,6 +15,7 @@ import {
 } from '../../lib/dashboard';
 import type { Allocation, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
+import { Address, EmptyState, ErrorState } from '../shared';
 
 type AllocationGridProps = {
   allocations: Allocation[];
@@ -29,7 +26,9 @@ type AllocationGridProps = {
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
   onSearchChange: (value: string) => void;
-  onSortingChange: (sorting: SortingState | ((old: SortingState) => SortingState)) => void;
+  onSortingChange: (
+    sorting: SortingState | ((old: SortingState) => SortingState),
+  ) => void;
   searchValue: string;
   selectedAllocationKey: string | null;
   selectedPrime: Prime | null;
@@ -87,9 +86,7 @@ export function AllocationGrid({
                   width: '10',
                   height: '10',
                   borderRadius: 'full',
-                  bg: isSelected
-                    ? 'interactive.accent'
-                    : 'surface.subtle',
+                  bg: isSelected ? 'interactive.accent' : 'surface.subtle',
                   color: isSelected ? 'white' : 'text.strong',
                   display: 'inline-flex',
                   alignItems: 'center',
@@ -331,7 +328,9 @@ export function AllocationGrid({
             <DataTable
               table={table}
               isLoading={isLoading}
-              onRowClick={(allocation) => onSelectAllocation(getAllocationKey(allocation))}
+              onRowClick={(allocation) =>
+                onSelectAllocation(getAllocationKey(allocation))
+              }
               getRowKey={getAllocationKey}
               selectedRowKey={selectedAllocationKey}
             />

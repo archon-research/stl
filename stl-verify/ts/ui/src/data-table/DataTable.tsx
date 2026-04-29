@@ -113,8 +113,11 @@ export function DataTable<TData>({
           {isLoading && table.getRowModel().rows.length === 0
             ? SkeletonRows(skeletonConfig)
             : table.getRowModel().rows.map((row) => {
-                const rowKey = getRowKey ? getRowKey(row.original) : String(row.id);
-                const isSelected = selectedRowKey !== undefined && rowKey === selectedRowKey;
+                const rowKey = getRowKey
+                  ? getRowKey(row.original)
+                  : String(row.id);
+                const isSelected =
+                  selectedRowKey !== undefined && rowKey === selectedRowKey;
                 const isClickable = onRowClick !== undefined;
 
                 return (
@@ -123,9 +126,7 @@ export function DataTable<TData>({
                     aria-selected={isSelected || undefined}
                     tabIndex={isClickable ? 0 : undefined}
                     onClick={
-                      isClickable
-                        ? () => onRowClick(row.original)
-                        : undefined
+                      isClickable ? () => onRowClick(row.original) : undefined
                     }
                     onKeyDown={
                       isClickable
@@ -144,8 +145,12 @@ export function DataTable<TData>({
                         : 'surface.default',
                       transitionDuration: 'fast',
                       transitionProperty: 'background-color',
-                      _hover: isClickable ? { bg: 'interactive.hover' } : undefined,
-                      _focusVisible: isClickable ? { bg: 'interactive.hover' } : undefined,
+                      _hover: isClickable
+                        ? { bg: 'interactive.hover' }
+                        : undefined,
+                      _focusVisible: isClickable
+                        ? { bg: 'interactive.hover' }
+                        : undefined,
                     })}
                   >
                     {row.getVisibleCells().map((cell) => (
@@ -159,19 +164,17 @@ export function DataTable<TData>({
                           py: '3.5',
                         })}
                       >
-                        {renderCell ? (
-                          renderCell(
-                            flexRender(
+                        {renderCell
+                          ? renderCell(
+                              flexRender(
+                                cell.column.columnDef.cell,
+                                cell.getContext(),
+                              ),
+                            )
+                          : flexRender(
                               cell.column.columnDef.cell,
                               cell.getContext(),
-                            ),
-                          )
-                        ) : (
-                          flexRender(
-                            cell.column.columnDef.cell,
-                            cell.getContext(),
-                          )
-                        )}
+                            )}
                       </td>
                     ))}
                   </tr>

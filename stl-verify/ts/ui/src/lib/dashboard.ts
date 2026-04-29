@@ -87,7 +87,10 @@ export function parseNumericValue(
 
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
-    logging.warn(`Failed to parse numeric value: "${value}"`, context ? { context } : undefined);
+    logging.warn(
+      `Failed to parse numeric value: "${value}"`,
+      context ? { context } : undefined,
+    );
     return null;
   }
 

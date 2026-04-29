@@ -1,5 +1,3 @@
-import * as React from 'react';
-
 import {
   getCoreRowModel,
   getFilteredRowModel,
@@ -11,11 +9,16 @@ import {
   type SortingState,
   type Table,
 } from '@tanstack/react-table';
+import * as React from 'react';
 import { useCallback, useMemo } from 'react';
 
-import { deserializeSorting, serializeSorting, validateSortingState } from './utils';
-import type { DataTableConfig, UseUrlSyncedTableReturn } from './types';
 import { useUrlParam } from '../lib/url-params';
+import type { DataTableConfig, UseUrlSyncedTableReturn } from './types';
+import {
+  deserializeSorting,
+  serializeSorting,
+  validateSortingState,
+} from './utils';
 
 /**
  * Hook to create a TanStack React Table instance with all standard features.
