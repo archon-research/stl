@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.logging import get_logger
+from app.risk_engine.mapping import MappingError
 
 logger = get_logger(__name__)
 
@@ -53,3 +54,32 @@ class ReceiptTokenRepository:
             protocol_name=row.protocol_name,
             receipt_token_token_id=row.receipt_token_token_id,
         )
+
+
+async def resolve_receipt_token_mapping(
+    raw_mapping: list[tuple[int, bytes, str]],
+    engine: AsyncEngine,
+) -> dict[int, str]:
+    """Resolve ``(chain_id, address, rating_id)`` tuples to ``{receipt_token_id: rating_id}``.
+
+    Raises ``MappingError`` if any ``(chain_id, address)`` pair is not
+    found in the ``receipt_token`` table.
+    """
+    if not raw_mapping:
+        return {}
+
+    resolved: dict[int, str] = {}
+    async with engine.connect() as conn:
+        for chain_id, address, rating_id in raw_mapping:
+            row = await conn.execute(
+                text("SELECT id FROM receipt_token WHERE chain_id = :chain_id AND receipt_token_address = :address"),
+                {"chain_id": chain_id, "address": address},
+            )
+            receipt_token_id = row.scalar_one_or_none()
+            if receipt_token_id is None:
+                addr_hex = "0x" + address.hex()
+                raise MappingError(
+                    f"asset mapping references unknown receipt token: chain_id={chain_id} address={addr_hex}"
+                )
+            resolved[receipt_token_id] = rating_id
+    return resolved
