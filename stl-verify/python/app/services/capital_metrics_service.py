@@ -3,7 +3,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from app.domain.entities.allocation import EthAddress, Prime
+from app.domain.entities.allocation import EthAddress
 from app.domain.entities.capital_metrics import CapitalMetrics
 from app.ports.allocation_repository import AllocationRepository
 

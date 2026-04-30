@@ -53,7 +53,7 @@ class UnitsFormatter:
             value = Decimal(value)
 
         # Scale by decimals if raw value (for onchain amounts)
-        scaled = value / (10 ** decimals) if value > 10 else value
+        scaled = value / (10**decimals) if value > 10 else value
         formatted = "{:,.4f}".format(scaled).rstrip("0").rstrip(".")
 
         return f"{formatted} {symbol}".strip() if symbol else formatted
@@ -113,7 +113,7 @@ class UnitsFormatter:
 
         delta = current - prior
         if unit == "%":
-            pct_delta = (delta / prior) * 100 if prior != 0 else Decimal(0)
+            pct_delta = (delta / prior) * 100
             sign = "+" if pct_delta >= 0 else ""
             return f"{sign}{pct_delta:.2f}%"
         elif unit == "$":

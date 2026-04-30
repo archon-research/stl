@@ -9,9 +9,8 @@ from app.adapters.postgres.allocation_position_repository import PostgresAllocat
 from app.api.deps import get_engine
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
-from app.domain.entities.capital_metrics import CapitalMetrics
-from app.services.allocation_service import AllocationService
 from app.services.allocation_category_service import AllocationCategoryService
+from app.services.allocation_service import AllocationService
 from app.services.capital_metrics_service import CapitalMetricsService
 from app.services.data_provenance_service import DataProvenanceService
 
@@ -48,7 +47,6 @@ class AllocationResponse(BaseModel):
     protocol_name: str
     balance: Decimal
     category: AllocationCategory  # New: allocation type (allocation/pol/psm3/asset)
-
 
 
 class CapitalMetricsResponse(BaseModel):
@@ -102,7 +100,7 @@ async def list_allocations(
 ):
     positions = await service.list_receipt_token_positions(prime_id)
     category_service = AllocationCategoryService()
-    
+
     return [
         AllocationResponse(
             chain_id=p.chain_id,
@@ -118,7 +116,6 @@ async def list_allocations(
         )
         for p in positions
     ]
-
 
 
 @router.get("/primes/{prime_id}/capital-metrics", response_model=CapitalMetricsResponse | None)
@@ -141,7 +138,7 @@ async def get_capital_metrics(
         repo = PostgresAllocationRepository(conn)
         service = CapitalMetricsService(repo)
         metrics = await service.get_capital_metrics(prime_id)
-        
+
         if not metrics:
             return None
 

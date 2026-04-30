@@ -49,7 +49,6 @@ class DataProvenanceService:
 
     def get_methodology_panel_text(self) -> str:
         """Return Markdown text for UI methodology/transparency panel."""
-        internal = [s for s in self._sources if "internal" in s.role.lower()]
         external = [s for s in self._sources if "internal" not in s.role.lower()]
 
         lines = [
@@ -68,15 +67,17 @@ class DataProvenanceService:
             caveat_note = f" — {source.caveat}" if source.caveat else ""
             lines.append(f"- **{source.name}** ({source.access_model.value}): {source.role}{caveat_note}")
 
-        lines.extend([
-            "",
-            "## Data Quality Notes",
-            "- Prices may lag 5–10 minutes depending on oracle update frequency",
-            "- Risk calculations are updated on each new block (Ethereum mainnet only)",
-            "- Activity/event feed includes only Sparklend and Aave events; Morpho coverage pending",
-            "",
-            "**Last Updated**: See timestamp in each data response",
-        ])
+        lines.extend(
+            [
+                "",
+                "## Data Quality Notes",
+                "- Prices may lag 5–10 minutes depending on oracle update frequency",
+                "- Risk calculations are updated on each new block (Ethereum mainnet only)",
+                "- Activity/event feed includes only Sparklend and Aave events; Morpho coverage pending",
+                "",
+                "**Last Updated**: See timestamp in each data response",
+            ]
+        )
 
         return "\n".join(lines)
 
