@@ -1296,21 +1296,22 @@ From the indexed events and snapshots, we can calculate comprehensive protocol m
 
 **Purpose:** Understand what collateral assets "back" a lender's supply position by analyzing the borrower side of the market.
 
-**Use Case:** A lender wants to know the risk composition of their supply position - what types of collateral would be liquidated to repay their supplied assets in case of borrower defaults.
+**Use Case:** A lender wants to know the risk composition of their supply position — the composition of collateral that "belongs to" their supplied asset specifically, weighted by each borrower's share of total debt for that asset.
 
 **Methodology:**
+
+Each borrower of Asset A contributes to the backing profile in proportion to their share of total Asset A debt. Their full collateral composition is used as-is — whether or not they also hold other debts.
 
 For a lender who has supplied Asset A:
 
 1. **Identify all borrowers** of Asset A
-2. **For each borrower**:
-   - Calculate what portion of their collateral backs Asset A specifically
-   - Allocation ratio = (Borrower's Asset A debt) / (Borrower's total debt)
-   - Asset A-allocated collateral = Allocation ratio × Borrower's total collateral
-3. **Sum up** all Asset A-allocated collateral across all borrowers to get total backing
-4. **Calculate percentages** of each collateral type from the total backing (will sum to 100%)
+2. **For each borrower**, compute weight = (their Asset A debt) / (total Asset A debt)
+3. **Multiply** each borrower's collateral composition by their weight
+4. **Sum** across all borrowers
 
-**Basic Example (Single Borrow Type):**
+**Key property:** The dollar total of the position backing always equals Total Asset A Debt. This is because each borrower contributes exactly their Asset A debt amount, distributed across their collateral proportionally.
+
+**Example:**
 
 ```
 Market State:
@@ -1319,184 +1320,104 @@ Market State:
 - Alice is a lender with 10,000 USDC supplied (100% of supply)
 
 Borrowers:
-- Bob borrows 4,000 USDC (50% of total borrowed)
+- Bob borrows 4,000 USDC
   - Collateral: $6,000 ETH + $2,000 WBTC = $8,000 total
   - Collateral composition: 75% ETH, 25% WBTC
 
-- Carol borrows 4,000 USDC (50% of total borrowed)
+- Carol borrows 4,000 USDC
   - Collateral: $8,000 sDAI = $8,000 total
   - Collateral composition: 100% sDAI
 
-Alice's Position Backing Calculation:
-- Bob's contribution: 50% × (75% ETH, 25% WBTC) = 37.5% ETH, 12.5% WBTC
-- Carol's contribution: 50% × (100% sDAI) = 50% sDAI
+Step 1: Compute each borrower's weight
+- Bob's weight: $4,000 / $8,000 total USDC debt = 50%
+- Carol's weight: $4,000 / $8,000 total USDC debt = 50%
 
+Step 2: Multiply each borrower's collateral composition by their weight
+- Bob's contribution:  50% × 75% ETH  = 37.5% ETH
+                       50% × 25% WBTC = 12.5% WBTC
+- Carol's contribution: 50% × 100% sDAI = 50% sDAI
+
+Step 3: Sum across all borrowers
 Alice's USDC position is backed by:
-- 37.5% ETH
-- 12.5% WBTC
-- 50.0% sDAI
+- ETH:  37.5% ($3,000)
+- WBTC: 12.5% ($1,000)
+- sDAI: 50.0% ($4,000)
+- Total = $8,000 = Total USDC Borrowed ✓
 ```
 
-**Advanced Example (Multiple Borrow Types):**
-
-When borrowers have multiple borrow positions, their collateral must be allocated proportionally across all their debts:
-
-```
-Market State (USDC lending):
-- Total USDC Borrowed: 8,000 USDC
-- Alice supplies 10,000 USDC
-
-Borrowers:
-- Bob borrows 4,000 USDC
-  - Also borrows 2,000 sDAI
-  - Total borrows: $6,000 ($4,000 USDC + $2,000 sDAI)
-  - Collateral: $6,000 ETH + $3,000 wstETH = $9,000 total
-
-- Carol borrows 4,000 USDC
-  - Also borrows 4,000 sDAI
-  - Total borrows: $8,000 ($4,000 USDC + $4,000 sDAI)
-  - Collateral: $10,000 wstETH = $10,000 total
-
-Step 1: Calculate USDC-allocated collateral per borrower
-(What portion of each borrower's collateral backs their USDC borrow)
-
-Bob's USDC-allocated collateral:
-- Allocation ratio: $4,000 USDC / $6,000 total borrows = 66.67%
-- ETH backing USDC: 66.67% × $6,000 ETH = $4,000 ETH
-- wstETH backing USDC: 66.67% × $3,000 wstETH = $2,000 wstETH
-
-Carol's USDC-allocated collateral:
-- Allocation ratio: $4,000 USDC / $8,000 total borrows = 50%
-- wstETH backing USDC: 50% × $10,000 wstETH = $5,000 wstETH
-
-Step 2: Sum total collateral backing USDC market
-Total USDC backing:
-- $4,000 ETH (from Bob)
-- $2,000 wstETH (from Bob)
-- $5,000 wstETH (from Carol)
-- Total = $11,000 of collateral backing $8,000 borrowed
-
-Step 3: Calculate backing composition as percentages
-Alice's USDC position is backed by:
-- ETH: $4,000 / $11,000 = 36.36%
-- wstETH: ($2,000 + $5,000) / $11,000 = 63.64%
-- Total = 100% ✓
-```
+**Note:** When borrowers have multiple borrow positions, the methodology is unchanged — each borrower's full collateral composition is used regardless of their other debts.
 
 **Implementation:**
 
 ```typescript
 async function calculatePositionBacking(
   suppliedAsset: string,
-  blockNumber: bigint
+  blockNumber: number
 ) {
   // 1. Get all borrowers of this asset at this block
   const borrowers = await getBorrowersOfAsset(suppliedAsset, blockNumber);
-  
-  // Map to accumulate total collateral backing this asset
-  const totalBackingByAsset: Map<string, bigint> = new Map();
-  let totalBackingUSD = 0n;
-  
-  // 2. For each borrower
+
+  // 2. Collect each borrower's target-asset debt and collateral composition
+  let totalTargetDebtUSD = 0;
+  const borrowerData: Array<{
+    targetDebtUSD: number;
+    collateralComposition: Map<string, number>; // asset -> fraction (0..1)
+  }> = [];
+
   for (const borrower of borrowers) {
-    // Get their full position data
     const positions = await getUserReservesData(borrower.address, blockNumber);
-    
-    // Calculate their total borrows value (across all assets)
-    let totalBorrowsUSD = 0n;
+
+    const targetDebt = positions.find(p => p.asset === suppliedAsset);
+    const targetDebtUSD = targetDebt ? targetDebt.currentVariableDebtUSD : 0;
+    totalTargetDebtUSD += targetDebtUSD;
+
+    let totalCollateralUSD = 0;
+    const collateralAmounts: Map<string, number> = new Map();
+
     for (const position of positions) {
-      if (position.currentVariableDebt > 0) {
-        const borrowValueUSD = 
-          (position.currentVariableDebt * position.priceUSD) / 10n ** position.decimals;
-        totalBorrowsUSD += borrowValueUSD;
+      if (position.usageAsCollateralEnabled && position.currentATokenBalanceUSD > 0) {
+        collateralAmounts.set(position.asset, position.currentATokenBalanceUSD);
+        totalCollateralUSD += position.currentATokenBalanceUSD;
       }
     }
-    
-    // Get their borrow of the specific asset we're analyzing
-    const borrowOfTargetAsset = positions.find(p => p.asset === suppliedAsset)?.currentVariableDebt || 0n;
-    const borrowOfTargetAssetUSD = (borrowOfTargetAsset * assetPrice) / 10n ** assetDecimals;
-    
-    // Calculate allocation ratio: what % of their collateral backs this asset
-    const allocationRatio = (borrowOfTargetAssetUSD * PRECISION) / totalBorrowsUSD;
-    
-    // Allocate their collateral proportionally
-    for (const position of positions) {
-      if (position.usageAsCollateralEnabled && position.currentATokenBalance > 0) {
-        const collateralValueUSD = 
-          (position.currentATokenBalance * position.priceUSD) / 10n ** position.decimals;
-        
-        // This much of their collateral backs the target asset
-        const allocatedCollateralUSD = (collateralValueUSD * allocationRatio) / PRECISION;
-        
-        // Add to total backing
-        const current = totalBackingByAsset.get(position.asset) || 0n;
-        totalBackingByAsset.set(position.asset, current + allocatedCollateralUSD);
-        totalBackingUSD += allocatedCollateralUSD;
-      }
+
+    const collateralComposition: Map<string, number> = new Map();
+    for (const [asset, amountUSD] of collateralAmounts) {
+      collateralComposition.set(asset, amountUSD / totalCollateralUSD);
+    }
+
+    borrowerData.push({ targetDebtUSD, collateralComposition });
+  }
+
+  // 3. Weight each borrower's composition by their share of total target-asset debt
+  const backingComposition: Map<string, number> = new Map();
+
+  for (const { targetDebtUSD, collateralComposition } of borrowerData) {
+    const weight = targetDebtUSD / totalTargetDebtUSD;
+
+    for (const [collateralAsset, fraction] of collateralComposition) {
+      const current = backingComposition.get(collateralAsset) || 0;
+      backingComposition.set(collateralAsset, current + weight * fraction);
     }
   }
-  
-  // 3. Convert to percentages (basis points for precision)
-  const backingCompositionBps: Map<string, number> = new Map();
-  
-  for (const [collateralAsset, collateralUSD] of totalBackingByAsset) {
-    const bps = Number((collateralUSD * 10000n) / totalBackingUSD);
-    backingCompositionBps.set(collateralAsset, bps);
+
+  // 4. Convert to absolute USD amounts (total always equals total target-asset debt)
+  const backingByAsset: Map<string, number> = new Map();
+  for (const [asset, fraction] of backingComposition) {
+    backingByAsset.set(asset, totalTargetDebtUSD * fraction);
   }
-  
+
   return {
-    backingByAsset: totalBackingByAsset,        // Absolute USD amounts
-    backingCompositionBps: backingCompositionBps, // Percentages (basis points)
-    totalBackingUSD: totalBackingUSD            // Total collateral backing
+    backingByAsset,                        // Absolute USD amounts per collateral type
+    backingComposition,                    // Fractions (0..1) per collateral type
+    totalBackingUSD: totalTargetDebtUSD,   // Always equals total target-asset debt
   };
 }
 ```
 
-**Important Limitations:**
+**Limitations:**
 
-**1. Methodology Choice:**
-This is one approach to position backing analysis. Other methodologies might:
-- Weight by liquidation risk rather than borrow amounts
-- Consider time-to-liquidation based on health factors
-- Account for correlation between supplied asset and collateral assets
-
-**2. Inaccurate Picture with Mixed Collateral Types:**
-
-The methodology treats all collateral equally, but borrowers often have heterogeneous collateral with vastly different liquidation probabilities:
-
-```
-Example - Misleading Backing with Mixed Collateral:
-- Bob borrows 10,000 USDC
-- Collateral: $15,000 sDAI (stablecoin) + $15,000 wstETH (volatile)
-- Total collateral: $30,000
-- Health Factor: 2.55 (very healthy)
-
-Position Backing Calculation says:
-- 50% backed by sDAI
-- 50% backed by wstETH
-
-Issue: This is misleading because of correlation effects:
-- sDAI and USDC are highly correlated (both ~$1)
-- Even if wstETH crashes 50% (to $7,500), Bob won't be liquidated
-  - Remaining collateral: $15,000 sDAI + $7,500 wstETH = $22,500
-  - Health Factor: ~1.91 (still healthy)
-- wstETH would need to drop ~85% before liquidation becomes possible
-- The sDAI acts as a "buffer" preventing liquidation
-
-Reality: The wstETH collateral is unlikely to ever flow to USDC suppliers 
-because the correlated sDAI prevents liquidation under most scenarios.
-
-In contrast:
-- Alice borrows 10,000 USDC
-- Collateral: $15,000 wstETH (no stablecoin buffer)
-- Health Factor: 1.28
-
-This position has real liquidation risk. If wstETH drops ~20%, Alice gets 
-liquidated and the wstETH collateral flows to USDC suppliers.
-
-The position backing calculation treats both as "backed by wstETH",
-but Bob's wstETH backing is illusory while Alice's is real.
-```
+This methodology has known limitations — it treats all collateral equally regardless of liquidation risk, does not account for correlation between supplied and collateral assets, and does not consider health factor proximity. See [backing_breakdown_reference.md](backing_breakdown_reference.md) for a discussion of trade-offs and possible extensions.
 
 ---
 
