@@ -97,11 +97,11 @@ class SurafRrcService:
             try:
                 usd_exposure = raw if isinstance(raw, Decimal) else Decimal(str(raw))
             except Exception as exc:
-                raise ValueError(f"usd_exposure must be a positive finite decimal, got {raw!r}") from exc
+                raise ValueError(f"invalid usd_exposure: expected a positive finite number, got {raw!r}") from exc
             if not usd_exposure.is_finite():
-                raise ValueError(f"usd_exposure must be finite, got {usd_exposure}")
+                raise ValueError(f"invalid usd_exposure: expected a positive finite number, got {usd_exposure}")
             if usd_exposure <= Decimal("0"):
-                raise ValueError(f"usd_exposure must be positive, got {usd_exposure}")
+                raise ValueError(f"invalid usd_exposure: expected a positive finite number, got {usd_exposure}")
             return usd_exposure
 
         return await self._allocation_repo.get_usd_exposure(asset_id, prime_id)

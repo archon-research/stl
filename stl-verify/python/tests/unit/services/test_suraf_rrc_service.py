@@ -216,7 +216,7 @@ class TestRiskModelCompute:
         assert result.rrc_usd == expected_rrc
 
     async def test_compute_rejects_non_numeric_usd_exposure(self) -> None:
-        with pytest.raises(ValueError, match="usd_exposure must be a positive finite decimal"):
+        with pytest.raises(ValueError, match="invalid usd_exposure"):
             await _service().compute(1, DUMMY_PRIME, overrides={"usd_exposure": {"bad": True}})
 
     @pytest.mark.parametrize(
