@@ -24,12 +24,6 @@ _MORPHO = frozenset({"morpho_blue"})
 _SUPPORTED_PROTOCOLS = _AAVE_LIKE | _MORPHO
 _NORMALIZE_RE = re.compile(r"[\s\-_]+")
 
-_SUPPORTED_ASSET_IDS_SQL = """
-SELECT rt.id AS receipt_token_id, p.name AS protocol_name
-FROM receipt_token rt
-JOIN protocol p ON p.id = rt.protocol_id
-"""
-
 _WALLET_LOOKUP_SQL = """
 WITH latest_receipt AS (
     -- Most-recent balance snapshot per wallet for the receipt token itself.
@@ -91,18 +85,9 @@ class PostgresCryptoLendingReader:
 
     async def list_supported_asset_ids(self) -> set[int]:
         """Return every receipt_token_id whose protocol is supported by crypto lending."""
-        try:
-            async with self._engine.connect() as conn:
-                result = await conn.execute(text(_SUPPORTED_ASSET_IDS_SQL))
-                rows = result.fetchall()
-        except SQLAlchemyError:
-            logger.exception("crypto_lending_reader: DB error loading supported asset ids")
-            raise
-
+        rows = await self._receipt_token_repo.list_protocol_pairs()
         return {
-            int(row.receipt_token_id)
-            for row in rows
-            if _normalize_protocol_name(row.protocol_name) in _SUPPORTED_PROTOCOLS
+            row.receipt_token_id for row in rows if _normalize_protocol_name(row.protocol_name) in _SUPPORTED_PROTOCOLS
         }
 
     async def get_receipt_token(self, receipt_token_id: int) -> ReceiptTokenInfo | None:

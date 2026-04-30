@@ -1,6 +1,5 @@
 from dataclasses import replace
 from decimal import Decimal
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -9,7 +8,7 @@ from app.adapters.postgres.allocation_share_repository import MissingShareError
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown
-from app.domain.entities.receipt_token import ReceiptTokenInfo
+from app.domain.entities.receipt_token import ReceiptTokenInfo, ReceiptTokenProtocolPair
 from app.domain.entities.risk import LiquidationParams
 
 DUMMY_PRIME = EthAddress("0x" + "ab" * 20)
@@ -103,25 +102,18 @@ def reader(
 @pytest.mark.asyncio
 async def test_list_supported_asset_ids_filters_supported_protocols(
     reader: PostgresCryptoLendingReader,
-    engine: MagicMock,
+    receipt_token_repo: MagicMock,
 ) -> None:
-    conn = AsyncMock()
-    conn.__aenter__ = AsyncMock(return_value=conn)
-    conn.__aexit__ = AsyncMock(return_value=False)
-    conn.execute = AsyncMock(
-        return_value=MagicMock(
-            fetchall=MagicMock(
-                return_value=[
-                    SimpleNamespace(receipt_token_id=1, protocol_name="Aave V3"),
-                    SimpleNamespace(receipt_token_id=2, protocol_name="morpho-blue"),
-                    SimpleNamespace(receipt_token_id=3, protocol_name="Unsupported"),
-                ]
-            )
-        )
+    receipt_token_repo.list_protocol_pairs = AsyncMock(
+        return_value=[
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3"),
+            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="morpho-blue"),
+            ReceiptTokenProtocolPair(receipt_token_id=3, protocol_name="Unsupported"),
+        ]
     )
-    engine.connect.return_value = conn
 
     assert await reader.list_supported_asset_ids() == {1, 2}
+    receipt_token_repo.list_protocol_pairs.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
