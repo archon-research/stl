@@ -9,6 +9,7 @@ import { DataTable, useDataTable } from '../../data-table';
 import {
   type ChainLabelLookup,
   formatTokenAmount,
+  formatUsdValue,
   getAllocationKey,
   getChainLabel,
   getProtocolLabel,
@@ -90,6 +91,8 @@ export function AllocationGrid({
   selectedPrime,
   sorting,
 }: AllocationGridProps) {
+  type AllocationWithAmountUsd = Allocation & { amount_usd?: string | number | null };
+
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
 
   useEffect(() => {
@@ -195,7 +198,15 @@ export function AllocationGrid({
               >
                 {allocation.underlying_symbol}
               </p>
-              <Address value={allocation.underlying_token_address} />
+              <Address
+                value={allocation.underlying_token_address}
+                truncate={false}
+                className={css({
+                  fontFamily: 'mono',
+                  fontSize: 'xs',
+                  color: 'text.muted',
+                })}
+              />
             </div>
           );
         },
@@ -205,7 +216,8 @@ export function AllocationGrid({
         header: 'Balance',
         accessorFn: (allocation) => Number(allocation.balance),
         cell: ({ row }) => {
-          const allocation = row.original;
+          const allocation = row.original as AllocationWithAmountUsd;
+          const amountUsd = allocation.amount_usd;
 
           return (
             <div>
@@ -217,9 +229,19 @@ export function AllocationGrid({
                   color: 'text.strong',
                 })}
               >
-                {formatTokenAmount(allocation.balance)} {allocation.symbol}
+                {amountUsd !== undefined && amountUsd !== null
+                  ? formatUsdValue(amountUsd)
+                  : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
               </p>
-              <Address value={allocation.receipt_token_address} />
+              <Address
+                value={allocation.receipt_token_address}
+                truncate={false}
+                className={css({
+                  fontFamily: 'mono',
+                  fontSize: 'xs',
+                  color: 'text.muted',
+                })}
+              />
             </div>
           );
         },

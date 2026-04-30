@@ -22,6 +22,7 @@ import {
   buildNetworkOptions,
   buildProtocolOptions,
   formatTokenAmount,
+  formatUsdValue,
   getChainLabel,
   getAllocationKey,
   getProtocolLabel,
@@ -399,7 +400,7 @@ function App() {
       <RiskDetailDrawer
         detail={
           selectedAllocation
-            ? `${formatTokenAmount(selectedAllocation.balance)} ${selectedAllocation.symbol}`
+            ? `${formatTokenAmount(selectedAllocation.balance)} ${selectedAllocation.symbol} · ${formatUsdValue((selectedAllocation as Allocation & { amount_usd?: string | number | null }).amount_usd ?? null)}`
             : undefined
         }
         isOpen={isDrawerOpen}

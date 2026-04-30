@@ -147,7 +147,7 @@ function ActivityEventRow({ event }: { event: AllocationActivity }) {
         </div>
         <div className={flex({ gap: '2', align: 'center' })}>
           <span className={css({ fontSize: 'xs', color: 'text.default' })}>
-            {formatTokenAmount(event.tx_amount)}
+            {formatTokenAmount(event.tx_amount)} {event.token_symbol ?? ''}
           </span>
           <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>•</span>
           <span className={css({ fontSize: 'xs', color: 'text.default' })}>

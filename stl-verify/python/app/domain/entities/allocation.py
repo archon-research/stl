@@ -48,6 +48,7 @@ class ReceiptTokenPosition:
     underlying_symbol: str
     protocol_name: str
     balance: Decimal
+    amount_usd: Decimal | None = None
 
 
 @dataclass(frozen=True)

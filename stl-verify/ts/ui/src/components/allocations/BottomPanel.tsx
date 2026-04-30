@@ -32,8 +32,8 @@ type BottomPanelProps = {
 type ActiveTab = 'risk' | 'bad-debt' | 'activity';
 
 const segmentedControlStyles = segmentedControl();
-const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.5', gap: '1' })}`;
-const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '8', px: '2.5', fontSize: 'xs' })}`;
+const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.25', gap: '0.5' })}`;
+const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '7', px: '2', fontSize: 'xs' })}`;
 
 export function BottomPanel({
   allocations,
@@ -98,10 +98,6 @@ export function BottomPanel({
     }
   }, [categoryFilter, categoryParam]);
 
-  useEffect(() => {
-    setCategoryParam(categoryFilter || null);
-  }, [categoryFilter, setCategoryParam]);
-
   const sortedAllocations = useMemo(
     () => sortAllocations(allocations),
     [allocations],
@@ -123,6 +119,13 @@ export function BottomPanel({
       return;
     }
 
+    if (filteredAllocations.length === 0) {
+      if (receiptTokenParam !== null) {
+        setReceiptTokenParam(null);
+      }
+      return;
+    }
+
     if (
       receiptTokenParam &&
       filteredAllocations.some(
@@ -133,8 +136,19 @@ export function BottomPanel({
       return;
     }
 
-    const fallback = selectedAllocation ?? filteredAllocations[0];
-    setReceiptTokenParam(String(fallback.receipt_token_id));
+    const selectedInFiltered =
+      selectedAllocation &&
+      filteredAllocations.some(
+        (allocation) =>
+          allocation.receipt_token_id === selectedAllocation.receipt_token_id,
+      )
+        ? selectedAllocation
+        : null;
+
+    const fallback = selectedInFiltered ?? filteredAllocations[0];
+    if (fallback) {
+      setReceiptTokenParam(String(fallback.receipt_token_id));
+    }
   }, [
     receiptTokenParam,
     selectedAllocation,
@@ -214,8 +228,8 @@ export function BottomPanel({
       <div
         className={flex({
           align: 'center',
-          justify: 'flex-end',
-          gap: '4',
+          justify: 'flex-start',
+          gap: '2',
           wrap: 'wrap',
         })}
       >
@@ -276,9 +290,12 @@ export function BottomPanel({
           </span>
           <StyledSelect
             value={categoryFilter}
-            onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-              setCategoryFilter((event.target.value as AllocationCategory) || '')
-            }
+            onChange={(event: ChangeEvent<HTMLSelectElement>) => {
+              const nextCategory =
+                (event.target.value as AllocationCategory) || '';
+              setCategoryFilter(nextCategory);
+              setCategoryParam(nextCategory || null);
+            }}
             disabled={
               !selectedPrime ||
               isLoading ||

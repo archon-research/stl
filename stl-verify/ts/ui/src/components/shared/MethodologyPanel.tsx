@@ -2,6 +2,7 @@ import {
   SkeletonStack,
 } from '@archon-research/design-system';
 import { ChevronDown, ChevronUp } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import { useEffect, useState } from 'react';
 
 import { css } from '#styled-system/css';
@@ -16,40 +17,6 @@ type MethodologyPanelProps = {
   isOpen: boolean;
   onToggle: () => void;
 };
-
-function MarkdownRenderer({ content }: { content: string }) {
-  // Simple markdown renderer for basic formatting
-  // Converts **bold**, _italic_, and newlines to HTML
-  const lines = content.split('\n');
-  const elements = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    let line = lines[i];
-
-    // Convert **text** to bold
-    line = line.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-
-    // Convert _text_ to italic
-    line = line.replace(/_(.+?)_/g, '<em>$1</em>');
-
-    if (line.trim()) {
-      elements.push(
-        <p
-          key={i}
-          className={css({
-            fontSize: 'sm',
-            color: 'text.default',
-            mb: '2',
-            lineHeight: '1.6',
-          })}
-          dangerouslySetInnerHTML={{ __html: line }}
-        />,
-      );
-    }
-  }
-
-  return <div>{elements}</div>;
-}
 
 export function MethodologyPanel({
   isOpen,
@@ -169,9 +136,35 @@ export function MethodologyPanel({
                   >
                     Methodology
                   </h3>
-                  <MarkdownRenderer
-                    content={dataSources.methodology_markdown}
-                  />
+                  <div
+                    className={css({
+                      fontSize: 'sm',
+                      color: 'text.default',
+                      lineHeight: '1.7',
+                      '& p': { mb: '2' },
+                      '& ul, & ol': { pl: '5', mb: '2' },
+                      '& li': { mb: '1' },
+                      '& h1, & h2, & h3, & h4': {
+                        mt: '3',
+                        mb: '2',
+                        fontWeight: 'semibold',
+                        color: 'text.strong',
+                      },
+                      '& code': {
+                        fontFamily: 'mono',
+                        fontSize: 'xs',
+                        bg: 'surface.subtle',
+                        px: '1',
+                        borderRadius: 'sm',
+                      },
+                      '& a': {
+                        color: 'interactive.accent',
+                        textDecoration: 'underline',
+                      },
+                    })}
+                  >
+                    <ReactMarkdown>{dataSources.methodology_markdown}</ReactMarkdown>
+                  </div>
                 </div>
               )}
 

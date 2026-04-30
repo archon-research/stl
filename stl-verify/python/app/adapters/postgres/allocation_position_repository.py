@@ -45,6 +45,7 @@ class PostgresAllocationRepository:
                     underlying_symbol=row.underlying_symbol,
                     protocol_name=row.protocol_name,
                     balance=Decimal(str(row.balance)),
+                    amount_usd=Decimal(str(row.amount_usd)) if row.amount_usd is not None else None,
                 )
                 for row in result
             ]
@@ -141,17 +142,25 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
         ORDER BY ap.token_id, ap.proxy_address,
                  ap.block_number DESC, ap.block_version DESC, ap.processing_version DESC, ap.log_index DESC
+    ),
+    latest_prices AS (
+        SELECT DISTINCT ON (otp.token_id)
+            otp.token_id,
+            otp.price_usd
+        FROM onchain_token_price otp
+        ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
     )
     SELECT DISTINCT ON (receipt_token_id)
-        chain_id,
-        receipt_token_id,
-        receipt_token_address,
-        underlying_token_id,
-        underlying_token_address,
-        symbol,
-        underlying_symbol,
-        protocol_name,
-        balance
+        combined.chain_id,
+        combined.receipt_token_id,
+        combined.receipt_token_address,
+        combined.underlying_token_id,
+        combined.underlying_token_address,
+        combined.symbol,
+        combined.underlying_symbol,
+        combined.protocol_name,
+        combined.balance,
+        (combined.balance * lp.price_usd) AS amount_usd
     FROM (
         SELECT
             lp.chain_id                                  AS chain_id,
@@ -189,6 +198,7 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         JOIN protocol pr ON pr.id = rt.protocol_id
         WHERE lp.balance > 0
     ) combined
+    LEFT JOIN latest_prices lp ON lp.token_id = combined.underlying_token_id
     ORDER BY receipt_token_id, balance DESC
 """)
 
