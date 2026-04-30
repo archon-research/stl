@@ -219,6 +219,10 @@ class TestRiskModelCompute:
         with pytest.raises(ValueError, match="invalid usd_exposure"):
             await _service().compute(1, DUMMY_PRIME, overrides={"usd_exposure": {"bad": True}})
 
+    async def test_compute_rejects_explicit_none_usd_exposure(self) -> None:
+        with pytest.raises(ValueError, match="invalid usd_exposure"):
+            await _service().compute(1, DUMMY_PRIME, overrides={"usd_exposure": None})
+
     @pytest.mark.parametrize(
         "non_finite",
         [float("nan"), "NaN", float("inf"), "Infinity", float("-inf"), "-Infinity"],

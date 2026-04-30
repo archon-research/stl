@@ -92,8 +92,10 @@ class SurafRrcService:
         if unknown:
             raise ValueError(f"unknown override keys: {sorted(unknown)}")
 
-        raw = overrides.get("usd_exposure")
-        if raw is not None:
+        if "usd_exposure" in overrides:
+            raw = overrides["usd_exposure"]
+            if raw is None:
+                raise ValueError("invalid usd_exposure: expected a positive finite number, got None")
             try:
                 usd_exposure = raw if isinstance(raw, Decimal) else Decimal(str(raw))
             except Exception as exc:
