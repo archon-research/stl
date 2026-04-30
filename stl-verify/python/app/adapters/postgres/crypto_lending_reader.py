@@ -1,0 +1,214 @@
+import re
+from decimal import Decimal
+
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
+from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLikeLiquidationParamsRepository
+from app.adapters.postgres.allocation_share_repository import MissingShareError, PostgresAllocationShare
+from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
+from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
+from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
+from app.domain.entities.allocation import EthAddress
+from app.domain.entities.backed_breakdown import BackedBreakdown
+from app.domain.entities.receipt_token import ReceiptTokenInfo
+from app.domain.entities.risk import LiquidationParams
+from app.logging import get_logger
+
+logger = get_logger(__name__)
+
+_AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa"})
+_MORPHO = frozenset({"morpho_blue"})
+_SUPPORTED_PROTOCOLS = _AAVE_LIKE | _MORPHO
+_NORMALIZE_RE = re.compile(r"[\s\-_]+")
+
+_SUPPORTED_ASSET_IDS_SQL = """
+SELECT rt.id AS receipt_token_id, p.name AS protocol_name
+FROM receipt_token rt
+JOIN protocol p ON p.id = rt.protocol_id
+"""
+
+_WALLET_LOOKUP_SQL = """
+WITH latest_receipt AS (
+    -- Most-recent balance snapshot per wallet for the receipt token itself.
+    -- DISTINCT ON ensures we read the current state, not a historical peak.
+    SELECT DISTINCT ON (ap.proxy_address)
+        ap.proxy_address,
+        ap.balance
+    FROM allocation_position ap
+    JOIN token t ON t.id = ap.token_id AND t.address = :receipt_token_address
+    WHERE ap.chain_id = :chain_id
+    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC,
+             ap.processing_version DESC, ap.log_index DESC
+),
+latest_underlying AS (
+    -- Most-recent balance snapshot per wallet for the underlying token.
+    SELECT DISTINCT ON (ap.proxy_address)
+        ap.proxy_address,
+        ap.balance
+    FROM allocation_position ap
+    JOIN token t ON t.id = ap.token_id
+    JOIN receipt_token rt ON rt.underlying_token_id = t.id
+                         AND rt.receipt_token_address = :receipt_token_address
+    WHERE ap.chain_id = :chain_id
+    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC,
+             ap.processing_version DESC, ap.log_index DESC
+)
+SELECT proxy_address, balance
+FROM (
+    SELECT proxy_address, balance FROM latest_receipt
+    UNION ALL
+    SELECT proxy_address, balance FROM latest_underlying
+) combined
+WHERE balance > 0
+ORDER BY balance DESC
+LIMIT 1
+"""
+
+
+class PostgresCryptoLendingReader:
+    """Postgres-backed facade for loading crypto-lending risk inputs."""
+
+    def __init__(
+        self,
+        receipt_token_repo: ReceiptTokenRepository,
+        aave_breakdown_repo: AaveLikeBackedBreakdownRepository,
+        morpho_breakdown_repo: MorphoBackedBreakdownRepository,
+        aave_liq_repo: AaveLikeLiquidationParamsRepository,
+        morpho_liq_repo: MorphoLiquidationParamsRepository,
+        engine: AsyncEngine,
+        allocation_share_max_stale_seconds: int = 1800,
+    ) -> None:
+        self._receipt_token_repo = receipt_token_repo
+        self._aave_breakdown_repo = aave_breakdown_repo
+        self._morpho_breakdown_repo = morpho_breakdown_repo
+        self._aave_liq_repo = aave_liq_repo
+        self._morpho_liq_repo = morpho_liq_repo
+        self._engine = engine
+        self._allocation_share_max_stale_seconds = allocation_share_max_stale_seconds
+
+    async def list_supported_asset_ids(self) -> set[int]:
+        """Return every receipt_token_id whose protocol is supported by crypto lending."""
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(text(_SUPPORTED_ASSET_IDS_SQL))
+                rows = result.fetchall()
+        except SQLAlchemyError:
+            logger.exception("crypto_lending_reader: DB error loading supported asset ids")
+            raise
+
+        return {
+            int(row.receipt_token_id)
+            for row in rows
+            if _normalize_protocol_name(row.protocol_name) in _SUPPORTED_PROTOCOLS
+        }
+
+    async def get_receipt_token(self, receipt_token_id: int) -> ReceiptTokenInfo | None:
+        return await self._receipt_token_repo.get(receipt_token_id)
+
+    async def get_breakdown(self, info: ReceiptTokenInfo) -> BackedBreakdown:
+        normalized = _normalize_protocol_name(info.protocol_name)
+
+        if normalized in _AAVE_LIKE:
+            return await self._aave_breakdown_repo.get_backed_breakdown(info.protocol_id, info.underlying_token_id)
+
+        if normalized in _MORPHO:
+            backed_asset_id = await self._morpho_breakdown_repo.resolve_vault_id(
+                info.receipt_token_address, info.chain_id
+            )
+            if backed_asset_id is None:
+                raise ValueError(f"morpho vault not found for receipt token {info.receipt_token_id}")
+            return await self._morpho_breakdown_repo.get_backed_breakdown(backed_asset_id)
+
+        raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
+
+    async def get_liquidation_params(
+        self,
+        info: ReceiptTokenInfo,
+        backed_asset_id: int,
+        token_ids: list[int],
+    ) -> dict[int, LiquidationParams]:
+        normalized = _normalize_protocol_name(info.protocol_name)
+
+        if normalized in _AAVE_LIKE:
+            return await self._aave_liq_repo.get_params(info.protocol_id, token_ids)
+
+        if normalized in _MORPHO:
+            return await self._morpho_liq_repo.get_params(backed_asset_id, token_ids)
+
+        raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
+
+    async def get_share(self, info: ReceiptTokenInfo, prime_id: EthAddress) -> Decimal:
+        normalized = _normalize_protocol_name(info.protocol_name)
+
+        if normalized in _MORPHO:
+            return Decimal("1")
+
+        token_id = self._require_receipt_token_token_id(info)
+        return await self._load_share(
+            chain_id=info.chain_id,
+            token_id=token_id,
+            wallet_address=bytes.fromhex(prime_id.hex),
+        )
+
+    async def get_legacy_share(self, info: ReceiptTokenInfo) -> Decimal:
+        normalized = _normalize_protocol_name(info.protocol_name)
+
+        if normalized in _MORPHO:
+            return Decimal("1")
+
+        token_id = self._require_receipt_token_token_id(info)
+        try:
+            wallet_address = await self._lookup_wallet(info.receipt_token_address, info.chain_id)
+        except ValueError as exc:
+            raise MissingShareError(str(exc)) from exc
+        return await self._load_share(
+            chain_id=info.chain_id,
+            token_id=token_id,
+            wallet_address=wallet_address,
+        )
+
+    def _require_receipt_token_token_id(self, info: ReceiptTokenInfo) -> int:
+        if info.receipt_token_token_id is None:
+            raise MissingShareError(
+                f"receipt-token address not indexed yet for receipt_token_id={info.receipt_token_id}"
+            )
+        return info.receipt_token_token_id
+
+    async def _load_share(self, chain_id: int, token_id: int, wallet_address: bytes) -> Decimal:
+        share_port = PostgresAllocationShare(
+            engine=self._engine,
+            chain_id=chain_id,
+            token_id=token_id,
+            wallet_address=wallet_address,
+            max_stale_seconds=self._allocation_share_max_stale_seconds,
+        )
+        return await share_port.get_share()
+
+    async def _lookup_wallet(self, receipt_token_address: bytes, chain_id: int) -> bytes:
+        """Find the allocator proxy address that currently holds this receipt token."""
+        token_hex = receipt_token_address.hex()
+        try:
+            async with self._engine.connect() as conn:
+                await conn.exec_driver_sql("SET LOCAL statement_timeout = '5s'")
+                result = await conn.execute(
+                    text(_WALLET_LOOKUP_SQL),
+                    {"receipt_token_address": receipt_token_address, "chain_id": chain_id},
+                )
+                row = result.fetchone()
+        except SQLAlchemyError:
+            logger.exception(
+                "crypto_lending_reader: DB error looking up wallet for receipt_token=%s chain_id=%d",
+                token_hex,
+                chain_id,
+            )
+            raise
+        if row is None:
+            raise ValueError(f"no active allocation position found for receipt token {token_hex}")
+        return bytes(row.proxy_address)
+
+
+def _normalize_protocol_name(protocol_name: str) -> str:
+    return _NORMALIZE_RE.sub("_", protocol_name.strip().casefold())

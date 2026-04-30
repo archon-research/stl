@@ -1,19 +1,15 @@
-from collections.abc import AsyncGenerator
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_share_repository import (
     AllocationShareError,
     MissingShareError,
     StaleShareError,
 )
-from app.api.deps import get_engine, get_suraf_rrc_service
-from app.config import Settings, get_settings
+from app.api.deps import get_crypto_lending_risk_service, get_suraf_rrc_service
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
-from app.services.risk_service_factory import RiskServiceFactory
 from app.services.suraf_rrc_service import SurafRrcService
 
 router = APIRouter()
@@ -70,48 +66,24 @@ def _share_error_503(exc: AllocationShareError) -> HTTPException:
     return HTTPException(status_code=503, detail={"code": code, "message": str(exc)})
 
 
-async def _resolve(
-    receipt_token_id: int,
-    engine: AsyncEngine = Depends(get_engine),
-    settings: Settings = Depends(get_settings),
-) -> AsyncGenerator[tuple[CryptoLendingRiskService, int], None]:
-    """Resolve receipt token into a service + backed_asset_id, or raise HTTP errors.
-
-    Uses ``async with`` + ``yield`` so the DB connection is properly cleaned up.
-    """
-    factory = RiskServiceFactory(
-        engine,
-        allocation_share_max_stale_seconds=settings.allocation_share_max_stale_seconds,
-        default_gap_pct=settings.risk_default_gap_pct,
-    )
-    try:
-        result = await factory.create(receipt_token_id)
-    except AllocationShareError as exc:
-        raise _share_error_503(exc) from exc
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    if result is None:
-        raise HTTPException(404, "receipt token not found")
-    yield result
-
-
 @router.get("/risk/{receipt_token_id}/bad-debt", response_model=BadDebtResponse)
 async def get_bad_debt(
     receipt_token_id: int,
     gap_pct: Decimal,
-    resolved: tuple[CryptoLendingRiskService, int] = Depends(_resolve),
+    service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
 ) -> BadDebtResponse:
     """Estimate bad debt for a receipt token position at the given collateral price gap."""
     if not (_ZERO <= gap_pct <= _ONE):
         raise HTTPException(status_code=422, detail="gap_pct must be between 0 and 1")
 
-    service, asset_id = resolved
     try:
-        bad_debt = await service.get_bad_debt(backed_asset_id=asset_id, gap_pct=gap_pct)
+        bad_debt = await service.get_bad_debt_legacy(receipt_token_id, gap_pct)
     except AllocationShareError as exc:
         raise _share_error_503(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if bad_debt is None:
+        raise HTTPException(404, "receipt token not found")
     return BadDebtResponse(
         receipt_token_id=receipt_token_id,
         gap_pct=gap_pct,
@@ -122,16 +94,17 @@ async def get_bad_debt(
 @router.get("/risk/{receipt_token_id}/breakdown", response_model=RiskBreakdownResponse)
 async def get_risk_breakdown(
     receipt_token_id: int,
-    resolved: tuple[CryptoLendingRiskService, int] = Depends(_resolve),
+    service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
 ) -> RiskBreakdownResponse:
     """Return the full risk-enriched collateral breakdown for a receipt token position."""
-    service, asset_id = resolved
     try:
-        breakdown = await service.get_risk_breakdown(backed_asset_id=asset_id)
+        breakdown = await service.get_risk_breakdown_legacy(receipt_token_id)
     except AllocationShareError as exc:
         raise _share_error_503(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if breakdown is None:
+        raise HTTPException(404, "receipt token not found")
     return RiskBreakdownResponse(
         receipt_token_id=receipt_token_id,
         items=[
