@@ -28,10 +28,6 @@ func TestGetInt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.set {
 				t.Setenv(key, tc.value)
-			} else {
-				// t.Setenv with no value still sets it; ensure unset by skipping.
-				// The Go test runner gives each subtest a fresh env via t.Setenv,
-				// but for the "unset" case we just don't call Setenv.
 			}
 
 			got, err := GetInt(key, tc.def)
