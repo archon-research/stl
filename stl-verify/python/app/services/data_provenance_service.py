@@ -49,7 +49,7 @@ class DataProvenanceService:
 
     def get_methodology_panel_text(self) -> str:
         """Return Markdown text for UI methodology/transparency panel."""
-        external = [s for s in self._sources if "internal" not in s.role.lower()]
+        oracle_sources = [s for s in self._sources if "oracle" in s.role.lower() or "price" in s.role.lower()]
 
         lines = [
             "# Data Sources & Methodology",
@@ -59,13 +59,12 @@ class DataProvenanceService:
             "- Risk calculations using Spark lending protocol parameters",
             "- Oracle prices from Chainlink and Pyth networks",
             "",
-            "## Sources & Attribution",
+            "## Price Oracles",
             "",
         ]
 
-        for source in external:
-            caveat_note = f" — {source.caveat}" if source.caveat else ""
-            lines.append(f"- **{source.name}** ({source.access_model.value}): {source.role}{caveat_note}")
+        for source in oracle_sources:
+            lines.append(f"- **{source.name}** ({source.access_model.value}): {source.role}")
 
         lines.extend(
             [
@@ -83,94 +82,27 @@ class DataProvenanceService:
 
     @staticmethod
     def _default_sources() -> list[DataSource]:
-        """Default registry of known data sources."""
+        """Registry of data sources used by STL."""
         return [
             # STL Internal
             DataSource(
                 name="STL Allocation Index",
-                host="localhost:8000 (internal)",
-                access_model=SourceAccessModel.OPEN,
+                host="localhost:8000",
+                access_model=SourceAccessModel.CLOSED,
                 role="Internal allocation snapshots, price feeds, risk calculations",
-            ),
-            # Observatory (Block Analitica)
-            DataSource(
-                name="Observatory",
-                host="observatory.data.blockanalitica.com",
-                access_model=SourceAccessModel.PUBLIC,
-                role="Prime aggregates, allocation datasets, risk metrics (comparator reference)",
-                caveat="Proprietary backend; data may differ from STL due to model assumptions",
-            ),
-            # Spark Data Layer
-            DataSource(
-                name="Spark Liquidity Layer",
-                host="spark2-api.blockanalitica.com",
-                access_model=SourceAccessModel.PUBLIC,
-                role="Spark SLL AUM, assets, allocation activity (comparator reference)",
-                caveat="Published by Block Analitica; includes forward projections",
-            ),
-            # Stablewatch
-            DataSource(
-                name="Stablewatch",
-                host="stablewatch-slc-frontend-git-allocationwatch-stablewatch.vercel.app",
-                access_model=SourceAccessModel.PUBLIC,
-                role="Allocation watch UI and methodology links (comparator reference)",
-                caveat="Methodology links include Dune dashboards (public, Dune free/paid tiers)",
-            ),
-            # SkyEco
-            DataSource(
-                name="SkyEco",
-                host="skyeco-finacial.vercel.app",
-                access_model=SourceAccessModel.PUBLIC,
-                role="Prime capital stack, risk data (comparator reference)",
-                caveat="Published by BA Labs; uses proprietary models",
-            ),
-            # Icons CDN
-            DataSource(
-                name="Icons CDN",
-                host="icons.blockanalitica.com",
-                access_model=SourceAccessModel.PUBLIC,
-                role="Protocol and network logos (shared asset CDN across comparators)",
-                caveat="License unclear; used across multiple apps",
-                attribution_required=True,
+                caveat="Internal-only backend",
             ),
             # On-chain Oracles
             DataSource(
                 name="Chainlink Price Feeds",
                 host="onchain (mainnet)",
                 access_model=SourceAccessModel.OPEN,
-                role="Token prices from oracle contracts",
+                role="Token oracle prices from onchain contracts",
             ),
             DataSource(
                 name="Pyth Network",
                 host="onchain + API",
                 access_model=SourceAccessModel.OPEN,
-                role="Multi-chain token prices and confidence intervals",
-            ),
-            # Public Explorers
-            DataSource(
-                name="Etherscan",
-                host="etherscan.io",
-                access_model=SourceAccessModel.PUBLIC,
-                role="Address and transaction drill-down links",
-            ),
-            # Token Metadata
-            DataSource(
-                name="Trust Wallet Assets",
-                host="github.com/trustwallet/assets",
-                access_model=SourceAccessModel.OPEN,
-                role="Token logos and metadata",
-            ),
-            DataSource(
-                name="CoinGecko",
-                host="api.coingecko.com",
-                access_model=SourceAccessModel.PUBLIC,
-                role="Token metadata and price fallback",
-                caveat="Free tier rate-limited; paid tiers available",
-            ),
-            DataSource(
-                name="DefiLlama",
-                host="api.llama.fi",
-                access_model=SourceAccessModel.PUBLIC,
-                role="DeFi token prices and metadata",
+                role="Multi-chain token oracle prices and confidence intervals",
             ),
         ]

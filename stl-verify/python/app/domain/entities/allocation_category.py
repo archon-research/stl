@@ -23,7 +23,11 @@ class AllocationCategoryMapping:
     priority: int = 100  # Higher priority rules evaluated first; default 100
 
     def matches(self, protocol_name: str, token_symbol: str) -> bool:
-        """Check if this rule matches the given protocol and token."""
-        protocol_match = self.protocol_name.lower() == protocol_name.lower()
+        """Check if this rule matches the given protocol and token.
+
+        Protocol matching uses substring containment so a rule for "Aave" matches
+        protocol names like "aave_v3" or "aave v2" without requiring an exact string.
+        """
+        protocol_match = self.protocol_name.lower() in protocol_name.lower()
         token_match = self.token_symbol is None or self.token_symbol.lower() == token_symbol.lower()
         return protocol_match and token_match

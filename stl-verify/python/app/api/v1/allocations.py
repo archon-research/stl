@@ -1,7 +1,7 @@
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import AfterValidator, BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -87,6 +87,10 @@ async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationS
     return AllocationService(PostgresAllocationRepository(engine))
 
 
+async def _get_capital_metrics_service(engine: AsyncEngine = Depends(get_engine)) -> CapitalMetricsService:
+    return CapitalMetricsService(PostgresAllocationRepository(engine))
+
+
 @router.get("/primes", response_model=list[PrimeResponse])
 async def list_primes(service: AllocationService = Depends(_get_service)):
     primes = await service.list_primes()
@@ -118,10 +122,10 @@ async def list_allocations(
     ]
 
 
-@router.get("/primes/{prime_id}/capital-metrics", response_model=CapitalMetricsResponse | None)
+@router.get("/primes/{prime_id}/capital-metrics", response_model=CapitalMetricsResponse)
 async def get_capital_metrics(
     prime_id: EthAddressPath,
-    engine: AsyncEngine = Depends(get_engine),
+    service: CapitalMetricsService = Depends(_get_capital_metrics_service),
 ):
     """Retrieve capital metrics for a prime.
 
@@ -134,27 +138,23 @@ async def get_capital_metrics(
     - is_validated: Whether reconciled against external benchmark
     - validation_note: Any caveats or pending work on this endpoint
     """
-    async with engine.connect() as conn:
-        repo = PostgresAllocationRepository(conn)
-        service = CapitalMetricsService(repo)
-        metrics = await service.get_capital_metrics(prime_id)
+    metrics = await service.get_capital_metrics(prime_id)
+    if not metrics:
+        raise HTTPException(status_code=404, detail="Prime not found")
 
-        if not metrics:
-            return None
-
-        return CapitalMetricsResponse(
-            prime_id=metrics.prime_id,
-            prime_name=metrics.prime_name,
-            risk_capital=metrics.risk_capital,
-            capital_buffer=metrics.capital_buffer,
-            first_loss_capital=metrics.first_loss_capital,
-            total_capital=metrics.total_capital,
-            risk_to_capital_ratio=metrics.risk_to_capital_ratio,
-            timestamp=metrics.timestamp.isoformat(),
-            benchmark_source=metrics.benchmark_source,
-            is_validated=metrics.is_validated,
-            validation_note=metrics.validation_note,
-        )
+    return CapitalMetricsResponse(
+        prime_id=metrics.prime_id,
+        prime_name=metrics.prime_name,
+        risk_capital=metrics.risk_capital,
+        capital_buffer=metrics.capital_buffer,
+        first_loss_capital=metrics.first_loss_capital,
+        total_capital=metrics.total_capital,
+        risk_to_capital_ratio=metrics.risk_to_capital_ratio,
+        timestamp=metrics.timestamp.isoformat(),
+        benchmark_source=metrics.benchmark_source,
+        is_validated=metrics.is_validated,
+        validation_note=metrics.validation_note,
+    )
 
 
 @router.get("/data-sources", response_model=DataSourcesResponse)

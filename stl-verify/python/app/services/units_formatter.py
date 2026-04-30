@@ -19,7 +19,7 @@ class UnitsFormatter:
         if not isinstance(value, Decimal):
             value = Decimal(value)
 
-        formatted = "{:,.2f}".format(value)
+        formatted = "{:,.{precision}f}".format(value, precision=precision)
         return f"${formatted}"
 
     @staticmethod
@@ -40,20 +40,30 @@ class UnitsFormatter:
         return f"{formatted}%"
 
     @staticmethod
-    def format_token_amount(value: Decimal | float, symbol: str = "", decimals: int = 18) -> str:
+    def format_token_amount(
+        value: Decimal | float,
+        symbol: str = "",
+        decimals: int = 18,
+        is_raw: bool = False,
+    ) -> str:
         """Format token amount with optional symbol suffix.
 
+        Args:
+            value: Token amount, either human-readable or raw on-chain units.
+            symbol: Optional token symbol suffix.
+            decimals: Token decimals used when `is_raw=True`.
+            is_raw: Whether `value` is a raw on-chain integer amount.
+
         Examples:
-            format_token_amount(1.5, "ETH") -> "1.50 ETH"
-            format_token_amount(123456789, decimals=6) -> "123.46" (assuming 6 decimals)
+            format_token_amount(1.5, "ETH") -> "1.5 ETH"
+            format_token_amount(1500000, decimals=6, is_raw=True) -> "1.5 USDC"
         """
         if isinstance(value, float):
             value = Decimal(str(value))
         if not isinstance(value, Decimal):
             value = Decimal(value)
 
-        # Scale by decimals if raw value (for onchain amounts)
-        scaled = value / (10**decimals) if value > 10 else value
+        scaled = value / (Decimal(10) ** decimals) if is_raw else value
         formatted = "{:,.4f}".format(scaled).rstrip("0").rstrip(".")
 
         return f"{formatted} {symbol}".strip() if symbol else formatted
@@ -117,8 +127,8 @@ class UnitsFormatter:
             sign = "+" if pct_delta >= 0 else ""
             return f"{sign}{pct_delta:.2f}%"
         elif unit == "$":
-            sign = "+" if delta >= 0 else ""
-            formatted = "{:,.2f}".format(delta)
+            sign = "+" if delta >= 0 else "-"
+            formatted = "{:,.2f}".format(abs(delta))
             return f"{sign}${formatted}"
         elif unit == "x":
             ratio_delta = delta
