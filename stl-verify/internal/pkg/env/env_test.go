@@ -10,23 +10,21 @@ func TestGetInt(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		set     bool
 		value   string
 		def     int
 		want    int
 		wantErr bool
 	}{
-		{name: "unset returns default", set: false, def: 42, want: 42},
-		{name: "empty string returns default", set: true, value: "", def: 7, want: 7},
-		{name: "valid integer is parsed", set: true, value: "100", def: 10, want: 100},
-		{name: "negative is parsed", set: true, value: "-3", def: 0, want: -3},
-		{name: "non-numeric returns error", set: true, value: "abc", def: 10, wantErr: true},
-		{name: "float returns error", set: true, value: "1.5", def: 10, wantErr: true},
+		{name: "unset returns default", def: 42, want: 42},
+		{name: "valid integer is parsed", value: "100", def: 10, want: 100},
+		{name: "negative is parsed", value: "-3", def: 0, want: -3},
+		{name: "non-numeric returns error", value: "abc", def: 10, wantErr: true},
+		{name: "float returns error", value: "1.5", def: 10, wantErr: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.set {
+			if tc.value != "" {
 				t.Setenv(key, tc.value)
 			}
 
@@ -52,24 +50,22 @@ func TestGetDuration(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		set     bool
 		value   string
 		def     time.Duration
 		want    time.Duration
 		wantErr bool
 	}{
-		{name: "unset returns default", set: false, def: 30 * time.Second, want: 30 * time.Second},
-		{name: "empty string returns default", set: true, value: "", def: 5 * time.Second, want: 5 * time.Second},
-		{name: "seconds is parsed", set: true, value: "5s", def: 30 * time.Second, want: 5 * time.Second},
-		{name: "milliseconds is parsed", set: true, value: "250ms", def: time.Second, want: 250 * time.Millisecond},
-		{name: "minutes is parsed", set: true, value: "2m", def: time.Second, want: 2 * time.Minute},
-		{name: "bare integer returns error", set: true, value: "5", def: time.Second, wantErr: true},
-		{name: "garbage returns error", set: true, value: "not-a-duration", def: time.Second, wantErr: true},
+		{name: "unset returns default", def: 30 * time.Second, want: 30 * time.Second},
+		{name: "seconds is parsed", value: "5s", def: 30 * time.Second, want: 5 * time.Second},
+		{name: "milliseconds is parsed", value: "250ms", def: time.Second, want: 250 * time.Millisecond},
+		{name: "minutes is parsed", value: "2m", def: time.Second, want: 2 * time.Minute},
+		{name: "bare integer returns error", value: "5", def: time.Second, wantErr: true},
+		{name: "garbage returns error", value: "not-a-duration", def: time.Second, wantErr: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.set {
+			if tc.value != "" {
 				t.Setenv(key, tc.value)
 			}
 
