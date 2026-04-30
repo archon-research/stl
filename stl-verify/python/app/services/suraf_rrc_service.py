@@ -92,8 +92,14 @@ class SurafRrcService:
         if unknown:
             raise ValueError(f"unknown override keys: {sorted(unknown)}")
 
-        usd_exposure = overrides.get("usd_exposure")
-        if usd_exposure is not None:
+        raw = overrides.get("usd_exposure")
+        if raw is not None:
+            try:
+                usd_exposure = raw if isinstance(raw, Decimal) else Decimal(str(raw))
+            except Exception as exc:
+                raise ValueError(f"usd_exposure must be a positive finite decimal, got {raw!r}") from exc
+            if not usd_exposure.is_finite():
+                raise ValueError(f"usd_exposure must be finite, got {usd_exposure}")
             if usd_exposure <= Decimal("0"):
                 raise ValueError(f"usd_exposure must be positive, got {usd_exposure}")
             return usd_exposure
@@ -105,7 +111,10 @@ class SurafRrcService:
         rating_id = self._asset_to_rating.get(asset_id)
         if rating_id is None:
             raise ValueError(f"no rating mapped for asset_id={asset_id}")
-        return rating_id, self._suraf_ratings[rating_id]
+        rating = self._suraf_ratings.get(rating_id)
+        if rating is None:
+            raise ValueError(f"rating_id={rating_id!r} not found in suraf_ratings (asset_id={asset_id})")
+        return rating_id, rating
 
     # ------------------------------------------------------------------
     # Legacy API — used by old /risk/rrc/scenario endpoint, will be removed in VEC-183.
@@ -116,7 +125,11 @@ class SurafRrcService:
         rating_id = self._asset_to_rating.get(receipt_token_id)
         if rating_id is None:
             return None
-        rating = self._suraf_ratings[rating_id]
+        rating = self._suraf_ratings.get(rating_id)
+        if rating is None:
+            raise ValueError(
+                f"rating_id={rating_id!r} not found in suraf_ratings (receipt_token_id={receipt_token_id})"
+            )
         return LegacyRrcResult(
             receipt_token_id=receipt_token_id,
             usd_exposure=usd_exposure,

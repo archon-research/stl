@@ -200,3 +200,48 @@ class TestRiskModelCompute:
 
         with pytest.raises(ValueError, match="no position found"):
             await svc.compute(1, DUMMY_PRIME, overrides={})
+
+    @pytest.mark.parametrize(
+        "raw_value, expected_rrc",
+        [
+            (1000, Decimal("337.0")),
+            (1000.0, Decimal("337.0")),
+            ("1000", Decimal("337.0")),
+        ],
+        ids=["int", "float", "string"],
+    )
+    async def test_compute_coerces_usd_exposure_to_decimal(self, raw_value: object, expected_rrc: Decimal) -> None:
+        """usd_exposure override is coerced to Decimal from int, float, or string."""
+        result = await _service().compute(1, DUMMY_PRIME, overrides={"usd_exposure": raw_value})
+        assert result.rrc_usd == expected_rrc
+
+    async def test_compute_rejects_non_numeric_usd_exposure(self) -> None:
+        with pytest.raises(ValueError, match="usd_exposure must be a positive finite decimal"):
+            await _service().compute(1, DUMMY_PRIME, overrides={"usd_exposure": {"bad": True}})
+
+    @pytest.mark.parametrize(
+        "non_finite",
+        [float("nan"), "NaN", float("inf"), "Infinity", float("-inf"), "-Infinity"],
+        ids=["float-nan", "str-nan", "float-inf", "str-inf", "float-neg-inf", "str-neg-inf"],
+    )
+    async def test_compute_rejects_non_finite_usd_exposure(self, non_finite: object) -> None:
+        with pytest.raises(ValueError):
+            await _service().compute(1, DUMMY_PRIME, overrides={"usd_exposure": non_finite})
+
+    async def test_compute_missing_suraf_rating_raises_value_error(self) -> None:
+        """If asset_to_rating maps to a rating_id not in suraf_ratings, raise ValueError (not KeyError)."""
+        svc = _service(
+            asset_to_rating={1: "nonexistent_rating"},
+            suraf_ratings={},
+        )
+        with pytest.raises(ValueError, match="not found in suraf_ratings"):
+            await svc.compute(1, DUMMY_PRIME, overrides={"usd_exposure": Decimal("1000")})
+
+    def test_compute_legacy_missing_rating_raises_value_error(self) -> None:
+        """Legacy path also raises ValueError (not KeyError) on config mismatch."""
+        svc = _service(
+            asset_to_rating={1: "nonexistent_rating"},
+            suraf_ratings={},
+        )
+        with pytest.raises(ValueError, match="not found in suraf_ratings"):
+            svc.compute_legacy(1, Decimal("1000"))
