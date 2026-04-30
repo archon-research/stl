@@ -305,14 +305,17 @@ func main() {
 	var backfillService *backfill_gaps.BackfillService
 	enableBackfill := env.Get("ENABLE_BACKFILL", "false") == "true"
 	if enableBackfill {
-		backfillConfig := backfill_gaps.BackfillConfig{
-			ChainID:      chainID,
-			BatchSize:    10,
-			PollInterval: 30 * time.Second,
-			EnableTraces: *enableTraces,
-			EnableBlobs:  *enableBlobs,
-			Logger:       logger,
+		backfillConfig, err := loadBackfillConfig(chainID, *enableTraces, *enableBlobs, logger)
+		if err != nil {
+			logger.Error("invalid backfill config", "error", err)
+			os.Exit(1)
 		}
+
+		logger.Info("backfill config",
+			"chainID", backfillConfig.ChainID,
+			"batchSize", backfillConfig.BatchSize,
+			"pollInterval", backfillConfig.PollInterval,
+		)
 
 		backfillService, err = backfill_gaps.NewBackfillService(
 			backfillConfig,
@@ -391,4 +394,25 @@ func requireEnv(key string) string {
 		os.Exit(1)
 	}
 	return value
+}
+
+// loadBackfillConfig reads the env-driven backfill knobs. Defaults preserve the
+// historic 10 blocks / 30s behaviour for any chain that doesn't override them.
+func loadBackfillConfig(chainID int64, enableTraces, enableBlobs bool, logger *slog.Logger) (backfill_gaps.BackfillConfig, error) {
+	batchSize, err := env.GetInt("BACKFILL_BATCH_SIZE", 10)
+	if err != nil {
+		return backfill_gaps.BackfillConfig{}, err
+	}
+	pollInterval, err := env.GetDuration("BACKFILL_POLL_INTERVAL", 30*time.Second)
+	if err != nil {
+		return backfill_gaps.BackfillConfig{}, err
+	}
+	return backfill_gaps.BackfillConfig{
+		ChainID:      chainID,
+		BatchSize:    batchSize,
+		PollInterval: pollInterval,
+		EnableTraces: enableTraces,
+		EnableBlobs:  enableBlobs,
+		Logger:       logger,
+	}, nil
 }

@@ -200,6 +200,10 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelstaging"
   ENABLE_BACKFILL: "true"
+  # Arbitrum produces ~4 blocks/s; the 10/30s defaults can't keep up with live,
+  # let alone drain a backlog. 100 blocks every 5s = ~20 blk/s, ~5x live.
+  BACKFILL_BATCH_SIZE: "100"
+  BACKFILL_POLL_INTERVAL: "5s"
 ---
 apiVersion: v1
 kind: ConfigMap
