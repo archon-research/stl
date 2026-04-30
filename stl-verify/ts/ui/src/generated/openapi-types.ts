@@ -4,445 +4,670 @@
  */
 
 export interface paths {
-  '/v1/primes': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/allocations/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Allocation Activity */
+        get: operations["list_allocation_activity_v1_allocations_activity_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** List Primes */
-    get: operations['list_primes_v1_primes_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/primes/{prime_id}/allocations': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/data-sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Data Sources */
+        get: operations["get_data_sources_v1_data_sources_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** List Allocations */
-    get: operations['list_allocations_v1_primes__prime_id__allocations_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/ready': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/primes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Primes */
+        get: operations["list_primes_v1_primes_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** Get Ready */
-    get: operations['get_ready_v1_ready_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/risk/rrc/scenario': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/primes/{prime_id}/allocations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Allocations */
+        get: operations["list_allocations_v1_primes__prime_id__allocations_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Post Rrc Scenario
-     * @description Return SURAF RRC for a hypothetical ``(asset, usd_exposure)`` pair.
-     *
-     *     ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
-     *     for the asset. Pure scenario calculation — no DB lookup, no position
-     *     state. Position-level RRC (``GET /risk/{receipt_token_id}/rrc``) is
-     *     deferred pending a decision on how to derive USD exposure from holdings.
-     */
-    post: operations['post_rrc_scenario_v1_risk_rrc_scenario_post'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/risk/{receipt_token_id}/bad-debt': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/primes/{prime_id}/capital-metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Capital Metrics */
+        get: operations["get_capital_metrics_v1_primes__prime_id__capital_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get Bad Debt
-     * @description Estimate bad debt for a receipt token position at the given collateral price gap.
-     */
-    get: operations['get_bad_debt_v1_risk__receipt_token_id__bad_debt_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/risk/{receipt_token_id}/breakdown': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Ready */
+        get: operations["get_ready_v1_ready_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get Risk Breakdown
-     * @description Return the full risk-enriched collateral breakdown for a receipt token position.
-     */
-    get: operations['get_risk_breakdown_v1_risk__receipt_token_id__breakdown_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/status': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/risk/rrc/scenario": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Rrc Scenario
+         * @description Return SURAF RRC for a hypothetical ``(asset, usd_exposure)`` pair.
+         *
+         *     ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
+         *     for the asset. Pure scenario calculation — no DB lookup, no position
+         *     state. Position-level RRC (``GET /risk/{receipt_token_id}/rrc``) is
+         *     deferred pending a decision on how to derive USD exposure from holdings.
+         */
+        post: operations["post_rrc_scenario_v1_risk_rrc_scenario_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** Get Status */
-    get: operations['get_status_v1_status_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
+    "/v1/risk/{receipt_token_id}/bad-debt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Bad Debt
+         * @description Estimate bad debt for a receipt token position at the given collateral price gap.
+         */
+        get: operations["get_bad_debt_v1_risk__receipt_token_id__bad_debt_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/risk/{receipt_token_id}/breakdown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Risk Breakdown
+         * @description Return the full risk-enriched collateral breakdown for a receipt token position.
+         */
+        get: operations["get_risk_breakdown_v1_risk__receipt_token_id__breakdown_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Status */
+        get: operations["get_status_v1_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
-  schemas: {
-    /** AllocationResponse */
-    AllocationResponse: {
-      /** Balance */
-      balance: string;
-      /** Chain Id */
-      chain_id: number;
-      /** Protocol Name */
-      protocol_name: string;
-      /** Receipt Token Address */
-      receipt_token_address: string;
-      /** Receipt Token Id */
-      receipt_token_id: number;
-      /** Symbol */
-      symbol: string;
-      /** Underlying Symbol */
-      underlying_symbol: string;
-      /** Underlying Token Address */
-      underlying_token_address: string;
-      /** Underlying Token Id */
-      underlying_token_id: number;
+    schemas: {
+        /**
+         * AllocationCategory
+         * @enum {string}
+         */
+        AllocationCategoryEnum: "allocation" | "pol" | "psm3" | "asset";
+        /** AllocationResponse */
+        AllocationResponse: {
+            /** Balance */
+            balance: string;
+            category: components["schemas"]["AllocationCategoryEnum"];
+            /** Chain Id */
+            chain_id: number;
+            /** Protocol Name */
+            protocol_name: string;
+            /** Receipt Token Address */
+            receipt_token_address: string;
+            /** Receipt Token Id */
+            receipt_token_id: number;
+            /** Symbol */
+            symbol: string;
+            /** Underlying Symbol */
+            underlying_symbol: string;
+            /** Underlying Token Address */
+            underlying_token_address: string;
+            /** Underlying Token Id */
+            underlying_token_id: number;
+        };
+        /** AllocationActivityResponse */
+        AllocationActivityResponse: {
+            /** Action Type */
+            action_type: string;
+            /** Balance */
+            balance: string;
+            /** Block Number */
+            block_number: number;
+            /** Block Version */
+            block_version: number;
+            /** Chain Id */
+            chain_id: number;
+            /** Created At */
+            created_at: string;
+            /** Log Index */
+            log_index: number;
+            /** Prime Id */
+            prime_id: string;
+            /** Prime Name */
+            prime_name: string;
+            /** Protocol Name */
+            protocol_name?: string | null;
+            /** Token Id */
+            token_id: number;
+            /** Token Symbol */
+            token_symbol?: string | null;
+            /** Tx Amount */
+            tx_amount: string;
+            /** Tx Hash */
+            tx_hash: string;
+        };
+        /** CapitalMetricsResponse */
+        CapitalMetricsResponse: {
+            /** Benchmark Source */
+            benchmark_source?: string | null;
+            /** Capital Buffer */
+            capital_buffer: string;
+            /** First Loss Capital */
+            first_loss_capital: string;
+            /** Is Validated */
+            is_validated: boolean;
+            /** Prime Id */
+            prime_id: string;
+            /** Prime Name */
+            prime_name: string;
+            /** Risk Capital */
+            risk_capital: string;
+            /** Risk To Capital Ratio */
+            risk_to_capital_ratio: string;
+            /** Timestamp */
+            timestamp: string;
+            /** Total Capital */
+            total_capital: string;
+            /** Validation Note */
+            validation_note?: string | null;
+        };
+        /** DataSourceResponse */
+        DataSourceResponse: {
+            /** Access Model */
+            access_model: string;
+            /** Attribution Required */
+            attribution_required: boolean;
+            /** Caveat */
+            caveat?: string | null;
+            /** Host */
+            host: string;
+            /** Name */
+            name: string;
+            /** Role */
+            role: string;
+        };
+        /** DataSourcesResponse */
+        DataSourcesResponse: {
+            /** Methodology Markdown */
+            methodology_markdown: string;
+            /** Sources */
+            sources: components["schemas"]["DataSourceResponse"][];
+        };
+        /** BadDebtResponse */
+        BadDebtResponse: {
+            /** Bad Debt Usd */
+            bad_debt_usd: string;
+            /** Gap Pct */
+            gap_pct: string;
+            /** Receipt Token Id */
+            receipt_token_id: number;
+        };
+        /** HTTPValidationError */
+        HTTPValidationError: {
+            /** Detail */
+            detail?: components["schemas"]["ValidationError"][];
+        };
+        /** PrimeResponse */
+        PrimeResponse: {
+            /** Address */
+            address: string;
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+        };
+        /** RiskBreakdownItemResponse */
+        RiskBreakdownItemResponse: {
+            /** Amount */
+            amount: string;
+            /** Amount Usd */
+            amount_usd: string;
+            /** Backing Pct */
+            backing_pct: string;
+            /** Liquidation Bonus */
+            liquidation_bonus: string;
+            /** Liquidation Threshold */
+            liquidation_threshold: string;
+            /** Price Usd */
+            price_usd: string;
+            /** Symbol */
+            symbol: string;
+            /** Token Id */
+            token_id: number;
+        };
+        /** RiskBreakdownResponse */
+        RiskBreakdownResponse: {
+            /** Items */
+            items: components["schemas"]["RiskBreakdownItemResponse"][];
+            /** Receipt Token Id */
+            receipt_token_id: number;
+        };
+        /** ScenarioRrcRequest */
+        ScenarioRrcRequest: {
+            /** Asset */
+            asset: string;
+            /** Usd Exposure */
+            usd_exposure: number | string;
+        };
+        /** ScenarioRrcResponse */
+        ScenarioRrcResponse: {
+            /** Asset */
+            asset: string;
+            /** Crr Pct */
+            crr_pct: string;
+            /** Rating Id */
+            rating_id: string;
+            /** Rating Version */
+            rating_version: string;
+            /** Rrc Usd */
+            rrc_usd: string;
+            /** Source Commit Sha */
+            source_commit_sha: string;
+            /** Usd Exposure */
+            usd_exposure: string;
+        };
+        /** ValidationError */
+        ValidationError: {
+            /** Context */
+            ctx?: Record<string, never>;
+            /** Input */
+            input?: unknown;
+            /** Location */
+            loc: (string | number)[];
+            /** Message */
+            msg: string;
+            /** Error Type */
+            type: string;
+        };
     };
-    /** BadDebtResponse */
-    BadDebtResponse: {
-      /** Bad Debt Usd */
-      bad_debt_usd: string;
-      /** Gap Pct */
-      gap_pct: string;
-      /** Receipt Token Id */
-      receipt_token_id: number;
-    };
-    /** HTTPValidationError */
-    HTTPValidationError: {
-      /** Detail */
-      detail?: components['schemas']['ValidationError'][];
-    };
-    /** PrimeResponse */
-    PrimeResponse: {
-      /** Address */
-      address: string;
-      /** Id */
-      id: string;
-      /** Name */
-      name: string;
-    };
-    /** RiskBreakdownItemResponse */
-    RiskBreakdownItemResponse: {
-      /** Amount */
-      amount: string;
-      /** Amount Usd */
-      amount_usd: string;
-      /** Backing Pct */
-      backing_pct: string;
-      /** Liquidation Bonus */
-      liquidation_bonus: string;
-      /** Liquidation Threshold */
-      liquidation_threshold: string;
-      /** Price Usd */
-      price_usd: string;
-      /** Symbol */
-      symbol: string;
-      /** Token Id */
-      token_id: number;
-    };
-    /** RiskBreakdownResponse */
-    RiskBreakdownResponse: {
-      /** Items */
-      items: components['schemas']['RiskBreakdownItemResponse'][];
-      /** Receipt Token Id */
-      receipt_token_id: number;
-    };
-    /** ScenarioRrcRequest */
-    ScenarioRrcRequest: {
-      /** Asset */
-      asset: string;
-      /** Usd Exposure */
-      usd_exposure: number | string;
-    };
-    /** ScenarioRrcResponse */
-    ScenarioRrcResponse: {
-      /** Asset */
-      asset: string;
-      /** Crr Pct */
-      crr_pct: string;
-      /** Rating Id */
-      rating_id: string;
-      /** Rating Version */
-      rating_version: string;
-      /** Rrc Usd */
-      rrc_usd: string;
-      /** Source Commit Sha */
-      source_commit_sha: string;
-      /** Usd Exposure */
-      usd_exposure: string;
-    };
-    /** ValidationError */
-    ValidationError: {
-      /** Context */
-      ctx?: Record<string, never>;
-      /** Input */
-      input?: unknown;
-      /** Location */
-      loc: (string | number)[];
-      /** Message */
-      msg: string;
-      /** Error Type */
-      type: string;
-    };
-  };
-  responses: never;
-  parameters: never;
-  requestBodies: never;
-  headers: never;
-  pathItems: never;
+    responses: never;
+    parameters: never;
+    requestBodies: never;
+    headers: never;
+    pathItems: never;
 }
 export type $defs = Record<string, never>;
 export interface operations {
-  list_primes_v1_primes_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    list_allocation_activity_v1_allocations_activity_get: {
+        parameters: {
+            query?: {
+                prime_id?: string | null;
+                chain_id?: number | null;
+                protocol_name?: string | null;
+                action_type?: string | null;
+                token_symbol?: string | null;
+                tx_hash?: string | null;
+                from_timestamp?: string | null;
+                to_timestamp?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AllocationActivityResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    get_data_sources_v1_data_sources_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['PrimeResponse'][];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataSourcesResponse"];
+                };
+            };
         };
-      };
     };
-  };
-  list_allocations_v1_primes__prime_id__allocations_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        prime_id: string;
-      };
-      cookie?: never;
+    list_primes_v1_primes_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrimeResponse"][];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    list_allocations_v1_primes__prime_id__allocations_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                prime_id: string;
+            };
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['AllocationResponse'][];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AllocationResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
     };
-  };
-  get_ready_v1_ready_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    get_capital_metrics_v1_primes__prime_id__capital_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                prime_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CapitalMetricsResponse"] | null;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    get_ready_v1_ready_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-        content: {
-          'application/json': unknown;
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
         };
-      };
     };
-  };
-  post_rrc_scenario_v1_risk_rrc_scenario_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    post_rrc_scenario_v1_risk_rrc_scenario_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScenarioRrcRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScenarioRrcResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['ScenarioRrcRequest'];
-      };
+    get_bad_debt_v1_risk__receipt_token_id__bad_debt_get: {
+        parameters: {
+            query: {
+                gap_pct: number | string;
+            };
+            header?: never;
+            path: {
+                receipt_token_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BadDebtResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    get_risk_breakdown_v1_risk__receipt_token_id__breakdown_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                receipt_token_id: number;
+            };
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['ScenarioRrcResponse'];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RiskBreakdownResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
     };
-  };
-  get_bad_debt_v1_risk__receipt_token_id__bad_debt_get: {
-    parameters: {
-      query: {
-        gap_pct: number | string;
-      };
-      header?: never;
-      path: {
-        receipt_token_id: number;
-      };
-      cookie?: never;
+    get_status_v1_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['BadDebtResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_risk_breakdown_v1_risk__receipt_token_id__breakdown_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        receipt_token_id: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['RiskBreakdownResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_status_v1_status_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': unknown;
-        };
-      };
-    };
-  };
 }

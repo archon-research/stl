@@ -306,6 +306,47 @@ export function formatMultiplier(
   return `${numeric.toFixed(3)}x`;
 }
 
+export function formatDeltaSign(
+  value: number | string | null | undefined,
+): string {
+  const numeric = parseNumericValue(value);
+
+  if (numeric === null) {
+    return '—';
+  }
+
+  const sign = numeric >= 0 ? '+' : '−';
+  const formattedAmount =
+    Math.abs(numeric) >= 1_000_000
+      ? COMPACT_NUMBER_FORMAT.format(Math.abs(numeric))
+      : TOKEN_NUMBER_FORMAT.format(Math.abs(numeric));
+
+  return `${sign}${formattedAmount}`;
+}
+
+export function formatFreshnessLabel(isoTimestamp: string): string {
+  try {
+    const date = new Date(isoTimestamp);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 60) {
+      return `${diffMins}m ago`;
+    } else if (diffHours < 24) {
+      return `${diffHours}h ago`;
+    } else if (diffDays < 7) {
+      return `${diffDays}d ago`;
+    }
+
+    return date.toLocaleDateString();
+  } catch {
+    return isoTimestamp;
+  }
+}
+
 export function formatDateTime(value: string): string {
   const date = new Date(value);
 

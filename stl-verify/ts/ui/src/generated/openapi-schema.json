@@ -1,12 +1,20 @@
 {
   "components": {
     "schemas": {
+      "AllocationCategoryEnum": {
+        "enum": ["allocation", "pol", "psm3", "asset"],
+        "title": "AllocationCategory",
+        "type": "string"
+      },
       "AllocationResponse": {
         "properties": {
           "balance": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Balance",
             "type": "string"
+          },
+          "category": {
+            "$ref": "#/components/schemas/AllocationCategoryEnum"
           },
           "chain_id": {
             "title": "Chain Id",
@@ -50,9 +58,212 @@
           "symbol",
           "underlying_symbol",
           "protocol_name",
-          "balance"
+          "balance",
+          "category"
         ],
         "title": "AllocationResponse",
+        "type": "object"
+      },
+      "AllocationActivityResponse": {
+        "properties": {
+          "action_type": {
+            "title": "Action Type",
+            "type": "string"
+          },
+          "balance": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Balance",
+            "type": "string"
+          },
+          "block_number": {
+            "title": "Block Number",
+            "type": "integer"
+          },
+          "block_version": {
+            "title": "Block Version",
+            "type": "integer"
+          },
+          "chain_id": {
+            "title": "Chain Id",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "log_index": {
+            "title": "Log Index",
+            "type": "integer"
+          },
+          "prime_id": {
+            "title": "Prime Id",
+            "type": "string"
+          },
+          "prime_name": {
+            "title": "Prime Name",
+            "type": "string"
+          },
+          "protocol_name": {
+            "title": "Protocol Name",
+            "type": ["string", "null"]
+          },
+          "token_id": {
+            "title": "Token Id",
+            "type": "integer"
+          },
+          "token_symbol": {
+            "title": "Token Symbol",
+            "type": ["string", "null"]
+          },
+          "tx_amount": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Tx Amount",
+            "type": "string"
+          },
+          "tx_hash": {
+            "title": "Tx Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chain_id",
+          "prime_id",
+          "prime_name",
+          "token_id",
+          "action_type",
+          "tx_amount",
+          "balance",
+          "tx_hash",
+          "log_index",
+          "block_number",
+          "block_version",
+          "created_at"
+        ],
+        "title": "AllocationActivityResponse",
+        "type": "object"
+      },
+      "CapitalMetricsResponse": {
+        "properties": {
+          "benchmark_source": {
+            "title": "Benchmark Source",
+            "type": ["string", "null"]
+          },
+          "capital_buffer": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Capital Buffer",
+            "type": "string"
+          },
+          "first_loss_capital": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "First Loss Capital",
+            "type": "string"
+          },
+          "is_validated": {
+            "title": "Is Validated",
+            "type": "boolean"
+          },
+          "prime_id": {
+            "title": "Prime Id",
+            "type": "string"
+          },
+          "prime_name": {
+            "title": "Prime Name",
+            "type": "string"
+          },
+          "risk_capital": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Risk Capital",
+            "type": "string"
+          },
+          "risk_to_capital_ratio": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Risk To Capital Ratio",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "total_capital": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Capital",
+            "type": "string"
+          },
+          "validation_note": {
+            "title": "Validation Note",
+            "type": ["string", "null"]
+          }
+        },
+        "required": [
+          "prime_id",
+          "prime_name",
+          "risk_capital",
+          "capital_buffer",
+          "first_loss_capital",
+          "total_capital",
+          "risk_to_capital_ratio",
+          "timestamp",
+          "is_validated"
+        ],
+        "title": "CapitalMetricsResponse",
+        "type": "object"
+      },
+      "DataSourceResponse": {
+        "properties": {
+          "access_model": {
+            "title": "Access Model",
+            "type": "string"
+          },
+          "attribution_required": {
+            "title": "Attribution Required",
+            "type": "boolean"
+          },
+          "caveat": {
+            "title": "Caveat",
+            "type": ["string", "null"]
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "host",
+          "access_model",
+          "role",
+          "attribution_required"
+        ],
+        "title": "DataSourceResponse",
+        "type": "object"
+      },
+      "DataSourcesResponse": {
+        "properties": {
+          "methodology_markdown": {
+            "title": "Methodology Markdown",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/DataSourceResponse"
+            },
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sources",
+          "methodology_markdown"
+        ],
+        "title": "DataSourcesResponse",
         "type": "object"
       },
       "BadDebtResponse": {
@@ -311,6 +522,142 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/allocations/activity": {
+      "get": {
+        "operationId": "list_allocation_activity_v1_allocations_activity_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "prime_id",
+            "required": false,
+            "schema": {
+              "title": "Prime Id",
+              "type": ["string", "null"]
+            }
+          },
+          {
+            "in": "query",
+            "name": "chain_id",
+            "required": false,
+            "schema": {
+              "title": "Chain Id",
+              "type": ["integer", "null"]
+            }
+          },
+          {
+            "in": "query",
+            "name": "protocol_name",
+            "required": false,
+            "schema": {
+              "title": "Protocol Name",
+              "type": ["string", "null"]
+            }
+          },
+          {
+            "in": "query",
+            "name": "action_type",
+            "required": false,
+            "schema": {
+              "title": "Action Type",
+              "type": ["string", "null"]
+            }
+          },
+          {
+            "in": "query",
+            "name": "token_symbol",
+            "required": false,
+            "schema": {
+              "title": "Token Symbol",
+              "type": ["string", "null"]
+            }
+          },
+          {
+            "in": "query",
+            "name": "tx_hash",
+            "required": false,
+            "schema": {
+              "title": "Tx Hash",
+              "type": ["string", "null"]
+            }
+          },
+          {
+            "in": "query",
+            "name": "from_timestamp",
+            "required": false,
+            "schema": {
+              "title": "From Timestamp",
+              "type": ["string", "null"],
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to_timestamp",
+            "required": false,
+            "schema": {
+              "title": "To Timestamp",
+              "type": ["string", "null"],
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "title": "Limit",
+              "type": "integer",
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AllocationActivityResponse"
+                  },
+                  "title": "Response List Allocation Activity",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Allocation Activity"
+      }
+    },
+    "/v1/data-sources": {
+      "get": {
+        "operationId": "get_data_sources_v1_data_sources_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataSourcesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Data Sources"
+      }
+    },
     "/v1/primes": {
       "get": {
         "operationId": "list_primes_v1_primes_get",
@@ -374,6 +721,52 @@
           }
         },
         "summary": "List Allocations"
+      }
+    },
+    "/v1/primes/{prime_id}/capital-metrics": {
+      "get": {
+        "operationId": "get_capital_metrics_v1_primes__prime_id__capital_metrics_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "prime_id",
+            "required": true,
+            "schema": {
+              "title": "Prime Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/CapitalMetricsResponse"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Capital Metrics"
       }
     },
     "/v1/ready": {

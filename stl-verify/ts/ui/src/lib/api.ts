@@ -7,8 +7,11 @@ import {
 } from '../generated/local-metadata';
 import type { paths } from '../generated/openapi-types';
 import type {
+  AllocationActivityResponse,
   AllocationsResponse,
   BadDebt,
+  CapitalMetricsResponse,
+  DataSourcesResponse,
   PrimesResponse,
   RiskBreakdown,
 } from '../types/allocation';
@@ -175,5 +178,50 @@ export function getBadDebt(
       signal,
     }),
     'GET /v1/risk/{receipt_token_id}/bad-debt',
+  );
+}
+
+export function getAllocationActivity(
+  filters?: {
+    prime_id?: string;
+    chain_id?: number;
+    protocol_name?: string;
+    action_type?: string;
+    token_symbol?: string;
+    tx_hash?: string;
+    from_timestamp?: string;
+    to_timestamp?: string;
+    limit?: number;
+  },
+  signal?: AbortSignal,
+): Promise<AllocationActivityResponse> {
+  return requestData(
+    apiClient.GET('/v1/allocations/activity', {
+      params: { query: filters },
+      signal,
+    }),
+    'GET /v1/allocations/activity',
+  );
+}
+
+export function getCapitalMetrics(
+  primeId: string,
+  signal?: AbortSignal,
+): Promise<CapitalMetricsResponse | null> {
+  return requestData(
+    apiClient.GET('/v1/primes/{prime_id}/capital-metrics', {
+      params: { path: { prime_id: primeId } },
+      signal,
+    }),
+    'GET /v1/primes/{prime_id}/capital-metrics',
+  );
+}
+
+export function getDataSources(
+  signal?: AbortSignal,
+): Promise<DataSourcesResponse> {
+  return requestData(
+    apiClient.GET('/v1/data-sources', { signal }),
+    'GET /v1/data-sources',
   );
 }

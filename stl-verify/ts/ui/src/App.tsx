@@ -414,6 +414,7 @@ function App() {
         <BottomPanel
           allocations={allocations}
           errorMessage={allocationsErrorMessage}
+          isDrawerOpen={isDrawerOpen}
           isLoading={isAllocationsLoading}
           localProtocols={localProtocols}
           selectedAllocation={selectedAllocation}

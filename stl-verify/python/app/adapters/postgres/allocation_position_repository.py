@@ -115,7 +115,7 @@ class PostgresAllocationRepository:
                 action_type=row.action_type,
                 tx_amount=Decimal(str(row.tx_amount)),
                 balance=Decimal(str(row.balance)),
-                tx_hash="0x" + row.tx_hash,
+                tx_hash=("0x" + row.tx_hash) if row.tx_hash else "0x",
                 log_index=row.log_index,
                 block_number=row.block_number,
                 block_version=row.block_version,
@@ -318,14 +318,21 @@ LEFT JOIN LATERAL (
     ORDER BY match_priority
     LIMIT 1
 ) AS protocol_match ON TRUE
-WHERE (:prime_hex IS NULL OR ap.proxy_address = decode(:prime_hex, 'hex'))
-  AND (:chain_id IS NULL OR ap.chain_id = :chain_id)
-  AND (:protocol_name IS NULL OR LOWER(COALESCE(protocol_match.protocol_name, '')) LIKE '%' || LOWER(:protocol_name) || '%')
-  AND (:action_type IS NULL OR ap.direction = :action_type)
-  AND (:token_symbol IS NULL OR LOWER(COALESCE(t.symbol, '')) LIKE '%' || LOWER(:token_symbol) || '%')
-  AND (:tx_hash IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(:tx_hash))
-  AND (:from_timestamp IS NULL OR ap.created_at >= :from_timestamp)
-  AND (:to_timestamp IS NULL OR ap.created_at <= :to_timestamp)
+WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
+    AND ap.direction IS NOT NULL
+    AND ap.tx_amount IS NOT NULL
+    AND ap.balance IS NOT NULL
+    AND ap.log_index IS NOT NULL
+    AND ap.block_number IS NOT NULL
+    AND ap.block_version IS NOT NULL
+    AND ap.created_at IS NOT NULL
+    AND (CAST(:chain_id AS INTEGER) IS NULL OR ap.chain_id = CAST(:chain_id AS INTEGER))
+    AND (CAST(:protocol_name AS TEXT) IS NULL OR LOWER(COALESCE(protocol_match.protocol_name, '')) LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%')
+    AND (CAST(:action_type AS TEXT) IS NULL OR LOWER(COALESCE(ap.direction::text, '')) = LOWER(CAST(:action_type AS TEXT)))
+    AND (CAST(:token_symbol AS TEXT) IS NULL OR LOWER(COALESCE(t.symbol, '')) LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%')
+    AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
+    AND (CAST(:from_timestamp AS TIMESTAMP) IS NULL OR ap.created_at >= CAST(:from_timestamp AS TIMESTAMP))
+    AND (CAST(:to_timestamp AS TIMESTAMP) IS NULL OR ap.created_at <= CAST(:to_timestamp AS TIMESTAMP))
 ORDER BY ap.created_at DESC, ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
 LIMIT :limit
 """)

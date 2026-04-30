@@ -13,7 +13,7 @@ import {
   getChainLabel,
   getProtocolLabel,
 } from '../../lib/dashboard';
-import type { Allocation, Prime } from '../../types/allocation';
+import type { Allocation, AllocationCategory, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import { Address, EmptyState, ErrorState } from '../shared';
 
@@ -34,6 +34,46 @@ type AllocationGridProps = {
   selectedPrime: Prime | null;
   sorting: SortingState;
 };
+
+function getCategoryColor(category: AllocationCategory | undefined): string {
+  switch (category) {
+    case 'allocation':
+      return 'bg.success';
+    case 'pol':
+      return 'bg.warning';
+    case 'psm3':
+      return 'bg.interactive';
+    case 'asset':
+      return 'bg.info';
+    default:
+      return 'bg.subtle';
+  }
+}
+
+function getCategoryTextColor(category: AllocationCategory | undefined): string {
+  switch (category) {
+    case 'allocation':
+      return 'text.success';
+    case 'pol':
+      return 'text.warning';
+    case 'psm3':
+      return 'text.interactive';
+    case 'asset':
+      return 'text.info';
+    default:
+      return 'text.default';
+  }
+}
+
+function getCategoryLabel(category: AllocationCategory | undefined): string {
+  const labels: Record<AllocationCategory, string> = {
+    allocation: 'Allocation',
+    pol: 'Protocol Owned Liquidity',
+    psm3: 'PSM3',
+    asset: 'Asset',
+  };
+  return category ? labels[category] : 'Unknown';
+}
 
 export function AllocationGrid({
   allocations,
@@ -180,6 +220,35 @@ export function AllocationGrid({
                 {formatTokenAmount(allocation.balance)} {allocation.symbol}
               </p>
               <Address value={allocation.receipt_token_address} />
+            </div>
+          );
+        },
+      },
+      {
+        id: 'category',
+        header: 'Category',
+        accessorFn: (allocation) => allocation.category,
+        cell: ({ row }) => {
+          const allocation = row.original;
+          const category = allocation.category;
+          const categoryBg = getCategoryColor(category);
+          const categoryText = getCategoryTextColor(category);
+
+          return (
+            <div
+              className={css({
+                display: 'inline-flex',
+                alignItems: 'center',
+                px: '2',
+                py: '1',
+                borderRadius: 'md',
+                fontSize: 'xs',
+                fontWeight: 'semibold',
+                bg: categoryBg,
+                color: categoryText,
+              })}
+            >
+              {getCategoryLabel(category)}
             </div>
           );
         },
