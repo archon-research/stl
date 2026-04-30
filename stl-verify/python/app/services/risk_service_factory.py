@@ -19,7 +19,7 @@ from app.logging import get_logger
 from app.ports.allocation_share_port import AllocationSharePort
 from app.ports.backed_breakdown_repository import BackedBreakdownRepository
 from app.ports.liquidation_params_repository import LiquidationParamsRepository
-from app.services.risk_calculation_service import RiskCalculationService
+from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 
 logger = get_logger(__name__)
 
@@ -69,7 +69,7 @@ LIMIT 1
 
 
 class RiskServiceFactory:
-    """Build a RiskCalculationService from a receipt_token_id."""
+    """Build a CryptoLendingRiskService from a receipt_token_id."""
 
     def __init__(
         self,
@@ -82,7 +82,7 @@ class RiskServiceFactory:
         self._default_gap_pct = default_gap_pct
         self._receipt_token_repo = ReceiptTokenRepository(engine)
 
-    async def create(self, receipt_token_id: int) -> tuple[RiskCalculationService, int] | None:
+    async def create(self, receipt_token_id: int) -> tuple[CryptoLendingRiskService, int] | None:
         """Return (service, backed_asset_id) or None if the receipt token is unknown.
 
         Raises :class:`MissingShareError` when the wallet lookup fails — the
@@ -134,7 +134,7 @@ class RiskServiceFactory:
         else:
             raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
 
-        service = RiskCalculationService(
+        service = CryptoLendingRiskService(
             breakdown_repo=breakdown_repo,
             liq_params_repo=liq_repo,
             share_port=share_port,
