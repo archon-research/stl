@@ -282,6 +282,20 @@ class TestLegacyMethods:
             await service.get_bad_debt_legacy(RECEIPT_TOKEN_ID, Decimal("0.15"))
 
     @pytest.mark.asyncio
+    async def test_get_bad_debt_legacy_validates_share_before_empty_breakdown(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        reader.get_breakdown.return_value = _breakdown((), backed_asset_id=UNDERLYING_TOKEN_ID)
+        reader.get_legacy_share.side_effect = MissingShareError("share missing")
+
+        with pytest.raises(MissingShareError, match="share missing"):
+            await service.get_bad_debt_legacy(RECEIPT_TOKEN_ID, Decimal("0.15"))
+
+        reader.get_breakdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_get_risk_breakdown_legacy_returns_enriched_items(
         self,
         service: CryptoLendingRiskService,

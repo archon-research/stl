@@ -145,6 +145,8 @@ class PostgresCryptoLendingReader:
 
         if normalized in _MORPHO:
             return Decimal("1")
+        if normalized not in _AAVE_LIKE:
+            raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
 
         token_id = self._require_receipt_token_token_id(info)
         return await self._load_share(
@@ -158,6 +160,8 @@ class PostgresCryptoLendingReader:
 
         if normalized in _MORPHO:
             return Decimal("1")
+        if normalized not in _AAVE_LIKE:
+            raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
 
         token_id = self._require_receipt_token_token_id(info)
         try:

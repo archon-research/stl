@@ -139,10 +139,11 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 engine=engine,
                 allocation_share_max_stale_seconds=settings.allocation_share_max_stale_seconds,
             )
+            supported_crypto_lending_asset_ids = await crypto_lending_reader.list_supported_asset_ids()
             crypto_lending_risk_service = CryptoLendingRiskService(
                 reader=crypto_lending_reader,
                 default_gap_pct=settings.risk_default_gap_pct,
-                supported_asset_ids=await crypto_lending_reader.list_supported_asset_ids(),  # Q: do we need to call this dynamically if new assets become supported as the app runs
+                supported_asset_ids=supported_crypto_lending_asset_ids,
             )
             model_registry = ModelRegistry([suraf_rrc_service, crypto_lending_risk_service])
 

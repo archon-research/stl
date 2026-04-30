@@ -41,7 +41,7 @@ class CryptoLendingRiskService:
     # ------------------------------------------------------------------
 
     def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool:  # noqa: ARG002
-        return asset_id in self._supported_asset_ids  # maybe this should just call reader.list_supproted...
+        return asset_id in self._supported_asset_ids
 
     async def compute(
         self,
@@ -121,13 +121,20 @@ class CryptoLendingRiskService:
         info: ReceiptTokenInfo,
         prime_id: EthAddress | None,
     ) -> tuple[int, list[RiskEnrichedCollateral]]:
+        # Legacy endpoints must validate share availability before returning an
+        # empty breakdown so warm-up windows still surface as
+        # ``503 share_data_missing`` instead of ``200``.
+        if prime_id is None:
+            share = await self._reader.get_legacy_share(info)
+        else:
+            share = None
+
         breakdown = await self._reader.get_breakdown(info)
         if not breakdown.items:
             return breakdown.backed_asset_id, []
 
-        if prime_id is None:
-            share = await self._reader.get_legacy_share(info)
-        else:
+        if share is None:
+            assert prime_id is not None
             share = await self._reader.get_share(info, prime_id)
 
         token_ids = [item.token_id for item in breakdown.items]
