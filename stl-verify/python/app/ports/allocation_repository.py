@@ -2,11 +2,25 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
-from app.domain.entities.allocation import EthAddress, Prime, ReceiptTokenPosition
+from app.domain.entities.allocation import (
+    ChainMetadata,
+    EthAddress,
+    Prime,
+    ProtocolMetadata,
+    ReceiptTokenPosition,
+)
 from app.domain.entities.allocation_activity import AllocationActivityEvent
 
 
 class AllocationRepository(Protocol):
+    async def list_chains(self) -> list[ChainMetadata]:
+        """Return chain metadata used by the UI."""
+        ...
+
+    async def list_protocols(self) -> list[ProtocolMetadata]:
+        """Return protocol metadata used by the UI."""
+        ...
+
     async def list_primes(self) -> list[Prime]:
         """Return all distinct primes."""
         ...

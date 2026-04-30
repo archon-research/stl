@@ -58,3 +58,17 @@ class Prime:
     id: str
     name: str
     address: str
+
+
+@dataclass(frozen=True)
+class ChainMetadata:
+    chain_id: int
+    name: str
+
+
+@dataclass(frozen=True)
+class ProtocolMetadata:
+    id: int
+    chain_id: int
+    encode: str
+    name: str

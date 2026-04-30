@@ -4,13 +4,56 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.domain.entities.allocation import EthAddress, Prime, ReceiptTokenPosition
+from app.domain.entities.allocation import (
+    ChainMetadata,
+    EthAddress,
+    Prime,
+    ProtocolMetadata,
+    ReceiptTokenPosition,
+)
 from app.domain.entities.allocation_activity import AllocationActivityEvent
 
 
 class PostgresAllocationRepository:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
+
+    async def list_chains(self) -> list[ChainMetadata]:
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    """
+                    SELECT chain_id, name
+                    FROM chain
+                    ORDER BY chain_id ASC
+                    """
+                )
+            )
+
+        return [ChainMetadata(chain_id=row.chain_id, name=row.name) for row in result]
+
+    async def list_protocols(self) -> list[ProtocolMetadata]:
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    """
+                    SELECT id, chain_id, encode(address, 'hex') AS encode, name
+                    FROM protocol
+                    WHERE name IS NOT NULL
+                    ORDER BY chain_id ASC, name ASC
+                    """
+                )
+            )
+
+        return [
+            ProtocolMetadata(
+                id=row.id,
+                chain_id=row.chain_id,
+                encode=row.encode,
+                name=row.name,
+            )
+            for row in result
+        ]
 
     async def list_primes(self) -> list[Prime]:
         async with self._engine.connect() as conn:

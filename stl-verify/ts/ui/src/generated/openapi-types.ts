@@ -11,8 +11,39 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Allocation Activity */
+        /**
+         * List Allocation Activity
+         * @description Retrieve allocation activity events with optional URL filters.
+         *
+         *     Query parameters:
+         *     - prime_id: Filter by prime address (0x-prefixed Ethereum address)
+         *     - chain_id: Filter by chain ID
+         *     - protocol_name: Filter by protocol name (case-insensitive substring)
+         *     - action_type: Filter by action type (`in`, `out`, `sweep`)
+         *     - token_symbol: Filter by token symbol (case-insensitive substring)
+         *     - tx_hash: Filter by transaction hash (0x-prefixed)
+         *     - from_timestamp: Inclusive lower timestamp bound (ISO-8601)
+         *     - to_timestamp: Inclusive upper timestamp bound (ISO-8601)
+         *     - limit: Max results (default 100, max 1000)
+         */
         get: operations["list_allocation_activity_v1_allocations_activity_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/chains": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Chains */
+        get: operations["list_chains_v1_chains_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -28,7 +59,14 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Data Sources */
+        /**
+         * Get Data Sources
+         * @description Retrieve data sources and methodology for transparency.
+         *
+         *     Returns:
+         *     - sources: List of data sources used across the platform
+         *     - methodology_markdown: Formatted methodology/transparency text for UI panels
+         */
         get: operations["get_data_sources_v1_data_sources_get"];
         put?: never;
         post?: never;
@@ -79,8 +117,37 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Capital Metrics */
+        /**
+         * Get Capital Metrics
+         * @description Retrieve capital metrics for a prime.
+         *
+         *     Responds with:
+         *     - risk_capital: Total risk-bearing capital
+         *     - capital_buffer: Baseline protective capital
+         *     - first_loss_capital: Prime-owned first-loss layer
+         *     - total_capital: Sum of capital tiers
+         *     - risk_to_capital_ratio: Risk / Capital (use for alert thresholds, e.g., >1.0)
+         *     - is_validated: Whether reconciled against external benchmark
+         *     - validation_note: Any caveats or pending work on this endpoint
+         */
         get: operations["get_capital_metrics_v1_primes__prime_id__capital_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/protocols": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Protocols */
+        get: operations["list_protocols_v1_protocols_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -117,12 +184,10 @@ export interface paths {
         put?: never;
         /**
          * Post Rrc Scenario
-         * @description Return SURAF RRC for a hypothetical ``(asset, usd_exposure)`` pair.
+         * @description Return SURAF RRC for a hypothetical ``(receipt_token_id, usd_exposure)`` pair.
          *
          *     ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
-         *     for the asset. Pure scenario calculation — no DB lookup, no position
-         *     state. Position-level RRC (``GET /risk/{receipt_token_id}/rrc``) is
-         *     deferred pending a decision on how to derive USD exposure from holdings.
+         *     for the receipt token. Pure scenario calculation — no position state.
          */
         post: operations["post_rrc_scenario_v1_risk_rrc_scenario_post"];
         delete?: never;
@@ -193,33 +258,9 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
-         * AllocationCategory
-         * @enum {string}
+         * AllocationActivityResponse
+         * @description Allocation activity event record for timeline feeds.
          */
-        AllocationCategoryEnum: "allocation" | "pol" | "psm3" | "asset";
-        /** AllocationResponse */
-        AllocationResponse: {
-            /** Balance */
-            balance: string;
-            category: components["schemas"]["AllocationCategoryEnum"];
-            /** Chain Id */
-            chain_id: number;
-            /** Protocol Name */
-            protocol_name: string;
-            /** Receipt Token Address */
-            receipt_token_address: string;
-            /** Receipt Token Id */
-            receipt_token_id: number;
-            /** Symbol */
-            symbol: string;
-            /** Underlying Symbol */
-            underlying_symbol: string;
-            /** Underlying Token Address */
-            underlying_token_address: string;
-            /** Underlying Token Id */
-            underlying_token_id: number;
-        };
-        /** AllocationActivityResponse */
         AllocationActivityResponse: {
             /** Action Type */
             action_type: string;
@@ -240,17 +281,64 @@ export interface components {
             /** Prime Name */
             prime_name: string;
             /** Protocol Name */
-            protocol_name?: string | null;
+            protocol_name: string | null;
             /** Token Id */
             token_id: number;
             /** Token Symbol */
-            token_symbol?: string | null;
+            token_symbol: string | null;
             /** Tx Amount */
             tx_amount: string;
             /** Tx Hash */
             tx_hash: string;
         };
-        /** CapitalMetricsResponse */
+        /**
+         * AllocationCategory
+         * @description Classification of allocation position types across primes.
+         * @enum {string}
+         */
+        AllocationCategory: "allocation" | "pol" | "psm3" | "asset";
+        /**
+         * AllocationResponse
+         * @description Enriched allocation response with category and metadata.
+         */
+        AllocationResponse: {
+            /** Amount Usd */
+            amount_usd?: string | null;
+            /** Balance */
+            balance: string;
+            category: components["schemas"]["AllocationCategory"];
+            /** Chain Id */
+            chain_id: number;
+            /** Latest Activity At */
+            latest_activity_at?: string | null;
+            /** Protocol Name */
+            protocol_name: string;
+            /** Receipt Token Address */
+            receipt_token_address: string;
+            /** Receipt Token Id */
+            receipt_token_id: number;
+            /** Symbol */
+            symbol: string;
+            /** Underlying Symbol */
+            underlying_symbol: string;
+            /** Underlying Token Address */
+            underlying_token_address: string;
+            /** Underlying Token Id */
+            underlying_token_id: number;
+        };
+        /** BadDebtResponse */
+        BadDebtResponse: {
+            /** Bad Debt Usd */
+            bad_debt_usd: string;
+            /** Gap Pct */
+            gap_pct: string;
+            /** Receipt Token Id */
+            receipt_token_id: number;
+        };
+        /**
+         * CapitalMetricsResponse
+         * @description Prime-level capital metrics for risk and alert management.
+         */
         CapitalMetricsResponse: {
             /** Benchmark Source */
             benchmark_source?: string | null;
@@ -258,7 +346,10 @@ export interface components {
             capital_buffer: string;
             /** First Loss Capital */
             first_loss_capital: string;
-            /** Is Validated */
+            /**
+             * Is Validated
+             * @default false
+             */
             is_validated: boolean;
             /** Prime Id */
             prime_id: string;
@@ -275,11 +366,24 @@ export interface components {
             /** Validation Note */
             validation_note?: string | null;
         };
-        /** DataSourceResponse */
+        /** ChainResponse */
+        ChainResponse: {
+            /** Chain Id */
+            chain_id: number;
+            /** Name */
+            name: string;
+        };
+        /**
+         * DataSourceResponse
+         * @description Data source metadata for transparency panel.
+         */
         DataSourceResponse: {
             /** Access Model */
             access_model: string;
-            /** Attribution Required */
+            /**
+             * Attribution Required
+             * @default false
+             */
             attribution_required: boolean;
             /** Caveat */
             caveat?: string | null;
@@ -290,21 +394,15 @@ export interface components {
             /** Role */
             role: string;
         };
-        /** DataSourcesResponse */
+        /**
+         * DataSourcesResponse
+         * @description Aggregated data sources for methodology transparency.
+         */
         DataSourcesResponse: {
             /** Methodology Markdown */
             methodology_markdown: string;
             /** Sources */
             sources: components["schemas"]["DataSourceResponse"][];
-        };
-        /** BadDebtResponse */
-        BadDebtResponse: {
-            /** Bad Debt Usd */
-            bad_debt_usd: string;
-            /** Gap Pct */
-            gap_pct: string;
-            /** Receipt Token Id */
-            receipt_token_id: number;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -317,6 +415,17 @@ export interface components {
             address: string;
             /** Id */
             id: string;
+            /** Name */
+            name: string;
+        };
+        /** ProtocolResponse */
+        ProtocolResponse: {
+            /** Chain Id */
+            chain_id: number;
+            /** Encode */
+            encode: string;
+            /** Id */
+            id: number;
             /** Name */
             name: string;
         };
@@ -348,21 +457,21 @@ export interface components {
         };
         /** ScenarioRrcRequest */
         ScenarioRrcRequest: {
-            /** Asset */
-            asset: string;
+            /** Receipt Token Id */
+            receipt_token_id: number;
             /** Usd Exposure */
             usd_exposure: number | string;
         };
         /** ScenarioRrcResponse */
         ScenarioRrcResponse: {
-            /** Asset */
-            asset: string;
             /** Crr Pct */
             crr_pct: string;
             /** Rating Id */
             rating_id: string;
             /** Rating Version */
             rating_version: string;
+            /** Receipt Token Id */
+            receipt_token_id: number;
             /** Rrc Usd */
             rrc_usd: string;
             /** Source Commit Sha */
@@ -427,6 +536,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_chains_v1_chains_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChainResponse"][];
                 };
             };
         };
@@ -529,6 +658,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_protocols_v1_protocols_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProtocolResponse"][];
                 };
             };
         };

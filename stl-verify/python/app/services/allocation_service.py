@@ -1,7 +1,13 @@
 from datetime import datetime
 from decimal import Decimal
 
-from app.domain.entities.allocation import EthAddress, Prime, ReceiptTokenPosition
+from app.domain.entities.allocation import (
+    ChainMetadata,
+    EthAddress,
+    Prime,
+    ProtocolMetadata,
+    ReceiptTokenPosition,
+)
 from app.domain.entities.allocation_activity import AllocationActivityEvent
 from app.ports.allocation_repository import AllocationRepository
 
@@ -9,6 +15,12 @@ from app.ports.allocation_repository import AllocationRepository
 class AllocationService:
     def __init__(self, repository: AllocationRepository) -> None:
         self._repository = repository
+
+    async def list_chains(self) -> list[ChainMetadata]:
+        return await self._repository.list_chains()
+
+    async def list_protocols(self) -> list[ProtocolMetadata]:
+        return await self._repository.list_protocols()
 
     async def list_primes(self) -> list[Prime]:
         return await self._repository.list_primes()

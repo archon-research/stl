@@ -6,7 +6,7 @@ export type AllocationActivity = components['schemas']['AllocationActivityRespon
 export type CapitalMetrics = components['schemas']['CapitalMetricsResponse'];
 export type DataSources = components['schemas']['DataSourcesResponse'];
 export type DataSource = components['schemas']['DataSourceResponse'];
-export type AllocationCategory = components['schemas']['AllocationCategoryEnum'];
+export type AllocationCategory = components['schemas']['AllocationCategory'];
 
 export type RiskBreakdown = components['schemas']['RiskBreakdownResponse'];
 export type BadDebt = components['schemas']['BadDebtResponse'];

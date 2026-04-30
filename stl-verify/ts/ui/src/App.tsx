@@ -13,9 +13,9 @@ import { useUrlSyncedTableState } from './data-table/hooks';
 import { buildRowSearchString, matchesSearchQuery } from './data-table/utils';
 import {
   getAllocations,
-  getLocalChains,
-  getLocalProtocols,
+  getChains,
   getPrimes,
+  getProtocols,
 } from './lib/api';
 import {
   buildChainLabelLookup,
@@ -65,8 +65,8 @@ function App() {
     const controller = new AbortController();
 
     void Promise.all([
-      getLocalChains(controller.signal),
-      getLocalProtocols(controller.signal),
+      getChains(controller.signal),
+      getProtocols(controller.signal),
     ])
       .then(([chains, protocols]) => {
         setLocalChains(chains);

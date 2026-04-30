@@ -34,6 +34,18 @@ class PrimeResponse(BaseModel):
     address: str
 
 
+class ChainResponse(BaseModel):
+    chain_id: int
+    name: str
+
+
+class ProtocolResponse(BaseModel):
+    id: int
+    chain_id: int
+    encode: str
+    name: str
+
+
 class AllocationResponse(BaseModel):
     """Enriched allocation response with category and metadata."""
 
@@ -98,6 +110,26 @@ async def _get_capital_metrics_service(engine: AsyncEngine = Depends(get_engine)
 async def list_primes(service: AllocationService = Depends(_get_service)):
     primes = await service.list_primes()
     return [PrimeResponse(id=p.id, name=p.name, address=p.address) for p in primes]
+
+
+@router.get("/chains", response_model=list[ChainResponse])
+async def list_chains(service: AllocationService = Depends(_get_service)):
+    chains = await service.list_chains()
+    return [ChainResponse(chain_id=chain.chain_id, name=chain.name) for chain in chains]
+
+
+@router.get("/protocols", response_model=list[ProtocolResponse])
+async def list_protocols(service: AllocationService = Depends(_get_service)):
+    protocols = await service.list_protocols()
+    return [
+        ProtocolResponse(
+            id=protocol.id,
+            chain_id=protocol.chain_id,
+            encode=protocol.encode,
+            name=protocol.name,
+        )
+        for protocol in protocols
+    ]
 
 
 @router.get("/primes/{prime_id}/allocations", response_model=list[AllocationResponse])

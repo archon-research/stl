@@ -1,10 +1,5 @@
 import { createApiClient } from '@archon-research/http-client-react';
 
-import {
-  localChainRows,
-  localCostRows,
-  localProtocolRows,
-} from '../generated/local-metadata';
 import type { paths } from '../generated/openapi-types';
 import type {
   AllocationActivityResponse,
@@ -15,11 +10,7 @@ import type {
   PrimesResponse,
   RiskBreakdown,
 } from '../types/allocation';
-import type {
-  LocalChainRow,
-  LocalCostRow,
-  LocalProtocolRow,
-} from '../types/local-data';
+import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 import { logging } from './logging';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
@@ -33,10 +24,6 @@ type ApiResult<TData, TError> = Promise<{
   error?: TError;
   response: Response;
 }>;
-
-function createAbortError(): DOMException {
-  return new DOMException('Request aborted', 'AbortError');
-}
 
 function toErrorBody(error: unknown): string {
   if (typeof error === 'string') {
@@ -87,55 +74,16 @@ async function requestData<TData, TError>(
   return data;
 }
 
-function resolveLocalData<T>(data: T, signal?: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(createAbortError());
-      return;
-    }
-
-    let settled = false;
-
-    const onAbort = () => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      signal?.removeEventListener('abort', onAbort);
-      reject(createAbortError());
-    };
-
-    signal?.addEventListener('abort', onAbort, { once: true });
-
-    queueMicrotask(() => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      signal?.removeEventListener('abort', onAbort);
-      resolve(data);
-    });
-  });
-}
-
 export function getPrimes(signal?: AbortSignal): Promise<PrimesResponse> {
   return requestData(apiClient.GET('/v1/primes', { signal }), 'GET /v1/primes');
 }
 
-export function getLocalChains(signal?: AbortSignal): Promise<LocalChainRow[]> {
-  return resolveLocalData(localChainRows, signal);
+export function getChains(signal?: AbortSignal): Promise<LocalChainRow[]> {
+  return requestData(apiClient.GET('/v1/chains', { signal }), 'GET /v1/chains');
 }
 
-export function getLocalProtocols(
-  signal?: AbortSignal,
-): Promise<LocalProtocolRow[]> {
-  return resolveLocalData(localProtocolRows, signal);
-}
-
-export function getLocalCosts(signal?: AbortSignal): Promise<LocalCostRow[]> {
-  return resolveLocalData(localCostRows, signal);
+export function getProtocols(signal?: AbortSignal): Promise<LocalProtocolRow[]> {
+  return requestData(apiClient.GET('/v1/protocols', { signal }), 'GET /v1/protocols');
 }
 
 export function getAllocations(

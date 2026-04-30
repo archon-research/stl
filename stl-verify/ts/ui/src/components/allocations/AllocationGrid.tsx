@@ -442,7 +442,7 @@ export function AllocationGrid({
               <SummaryMetric
                 label="Total allocation"
                 value={formatUsdValue(summary.totalUsd)}
-                detail={`${summary.allocationCount} filtered allocations`}
+                detail={`${summary.allocationCount} allocations`}
               />
               <SummaryMetric
                 label="Largest position"
@@ -460,7 +460,6 @@ export function AllocationGrid({
               <SummaryMetric
                 label="Allocations"
                 value={String(summary.allocationCount)}
-                detail="Reflects current top-bar filters"
               />
               <SummaryMetric
                 label="Latest activity"
