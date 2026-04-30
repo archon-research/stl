@@ -1,9 +1,11 @@
+from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.entities.allocation import EthAddress, Prime, ReceiptTokenPosition
+from app.domain.entities.allocation_activity import AllocationActivityEvent
 
 
 class PostgresAllocationRepository:
@@ -62,6 +64,65 @@ class PostgresAllocationRepository:
         balance = Decimal(str(row.balance))
         price_usd = Decimal(str(row.price_usd))
         return balance * price_usd
+
+    async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
+        """Return total priced USD exposure across all current receipt-token positions."""
+        async with self._engine.connect() as conn:
+            result = await conn.execute(_TOTAL_USD_EXPOSURE_SQL, {"proxy_hex": prime_id.hex})
+            row = result.fetchone()
+
+        if row is None or row.total_usd_exposure is None:
+            return Decimal("0")
+
+        return Decimal(str(row.total_usd_exposure))
+
+    async def list_allocation_activity(
+        self,
+        *,
+        prime_id: EthAddress | None = None,
+        chain_id: int | None = None,
+        protocol_name: str | None = None,
+        action_type: str | None = None,
+        token_symbol: str | None = None,
+        tx_hash: str | None = None,
+        from_timestamp: datetime | None = None,
+        to_timestamp: datetime | None = None,
+        limit: int = 100,
+    ) -> list[AllocationActivityEvent]:
+        params = {
+            "prime_hex": prime_id.hex if prime_id else None,
+            "chain_id": chain_id,
+            "protocol_name": protocol_name,
+            "action_type": action_type,
+            "token_symbol": token_symbol,
+            "tx_hash": tx_hash.removeprefix("0x") if tx_hash else None,
+            "from_timestamp": from_timestamp,
+            "to_timestamp": to_timestamp,
+            "limit": min(max(limit, 1), 1000),
+        }
+
+        async with self._engine.connect() as conn:
+            result = await conn.execute(_ALLOCATION_ACTIVITY_SQL, params)
+
+        return [
+            AllocationActivityEvent(
+                chain_id=row.chain_id,
+                prime_id="0x" + row.prime_address,
+                prime_name=row.prime_name,
+                protocol_name=row.protocol_name,
+                token_id=row.token_id,
+                token_symbol=row.token_symbol,
+                action_type=row.action_type,
+                tx_amount=Decimal(str(row.tx_amount)),
+                balance=Decimal(str(row.balance)),
+                tx_hash="0x" + row.tx_hash,
+                log_index=row.log_index,
+                block_number=row.block_number,
+                block_version=row.block_version,
+                created_at=row.created_at,
+            )
+            for row in result
+        ]
 
 
 # The allocation_position rows are event-oriented, so we first take the
@@ -164,4 +225,107 @@ latest_price AS (
 SELECT lb.balance, lp.price_usd
 FROM latest_balance lb
 CROSS JOIN latest_price lp
+""")
+
+
+_TOTAL_USD_EXPOSURE_SQL = text("""
+WITH latest_positions AS (
+    SELECT DISTINCT ON (ap.token_id, ap.proxy_address)
+        ap.chain_id,
+        ap.token_id,
+        ap.balance
+    FROM allocation_position ap
+    WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+    ORDER BY ap.token_id, ap.proxy_address,
+             ap.block_number DESC, ap.block_version DESC, ap.processing_version DESC, ap.log_index DESC
+),
+receipt_positions AS (
+    SELECT DISTINCT ON (receipt_token_id)
+        receipt_token_id,
+        underlying_token_id,
+        balance
+    FROM (
+        SELECT
+            rt.id AS receipt_token_id,
+            rt.underlying_token_id,
+            lp.balance
+        FROM latest_positions lp
+        JOIN token t ON t.id = lp.token_id
+        JOIN receipt_token rt ON rt.underlying_token_id = t.id
+        JOIN protocol pr ON pr.id = rt.protocol_id AND pr.chain_id = lp.chain_id
+        WHERE lp.balance > 0
+
+        UNION ALL
+
+        SELECT
+            rt.id AS receipt_token_id,
+            rt.underlying_token_id,
+            lp.balance
+        FROM latest_positions lp
+        JOIN token t ON t.id = lp.token_id
+        JOIN receipt_token rt ON rt.receipt_token_address = t.address
+        JOIN protocol pr ON pr.id = rt.protocol_id AND pr.chain_id = lp.chain_id
+        WHERE lp.balance > 0
+    ) combined
+    ORDER BY receipt_token_id, balance DESC
+),
+latest_prices AS (
+    SELECT DISTINCT ON (otp.token_id)
+        otp.token_id,
+        otp.price_usd
+    FROM onchain_token_price otp
+    ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+)
+SELECT COALESCE(SUM(rp.balance * lp.price_usd), 0) AS total_usd_exposure
+FROM receipt_positions rp
+LEFT JOIN latest_prices lp ON lp.token_id = rp.underlying_token_id
+""")
+
+
+_ALLOCATION_ACTIVITY_SQL = text("""
+SELECT
+    ap.chain_id,
+    encode(ap.proxy_address, 'hex') AS prime_address,
+    p.name AS prime_name,
+    protocol_match.protocol_name,
+    ap.token_id,
+    t.symbol AS token_symbol,
+    ap.direction AS action_type,
+    ap.tx_amount,
+    ap.balance,
+    encode(ap.tx_hash, 'hex') AS tx_hash,
+    ap.log_index,
+    ap.block_number,
+    ap.block_version,
+    ap.created_at
+FROM allocation_position ap
+JOIN prime p ON p.id = ap.prime_id
+JOIN token t ON t.id = ap.token_id
+LEFT JOIN LATERAL (
+    SELECT pr.name AS protocol_name, 1 AS match_priority
+    FROM receipt_token rt
+    JOIN protocol pr ON pr.id = rt.protocol_id
+    WHERE pr.chain_id = ap.chain_id
+      AND rt.receipt_token_address = t.address
+
+    UNION ALL
+
+    SELECT pr.name AS protocol_name, 2 AS match_priority
+    FROM receipt_token rt
+    JOIN protocol pr ON pr.id = rt.protocol_id
+    WHERE pr.chain_id = ap.chain_id
+      AND rt.underlying_token_id = t.id
+    ORDER BY match_priority
+    LIMIT 1
+) AS protocol_match ON TRUE
+WHERE (:prime_hex IS NULL OR ap.proxy_address = decode(:prime_hex, 'hex'))
+  AND (:chain_id IS NULL OR ap.chain_id = :chain_id)
+  AND (:protocol_name IS NULL OR LOWER(COALESCE(protocol_match.protocol_name, '')) LIKE '%' || LOWER(:protocol_name) || '%')
+  AND (:action_type IS NULL OR ap.direction = :action_type)
+  AND (:token_symbol IS NULL OR LOWER(COALESCE(t.symbol, '')) LIKE '%' || LOWER(:token_symbol) || '%')
+  AND (:tx_hash IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(:tx_hash))
+  AND (:from_timestamp IS NULL OR ap.created_at >= :from_timestamp)
+  AND (:to_timestamp IS NULL OR ap.created_at <= :to_timestamp)
+ORDER BY ap.created_at DESC, ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
+LIMIT :limit
 """)

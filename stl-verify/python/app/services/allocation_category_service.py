@@ -1,18 +1,19 @@
 """Service for classification and management of allocation categories."""
 
 from app.domain.entities.allocation_category import AllocationCategory, AllocationCategoryMapping
+from app.services.allocation_category_config import default_allocation_category_rules
 
 
 class AllocationCategoryService:
     """Determines allocation category based on protocol and token metadata.
 
-    Uses rule-based matching with priority tiers. Initially populated with
-    sentinelwatch-inspired heuristics; can be extended with a config table later.
+    Uses rule-based matching with priority tiers from a config module. The config
+    can be replaced by a database-backed mapping table without changing callers.
     """
 
-    def __init__(self) -> None:
-        """Initialize with default category rules."""
-        self._rules = self._default_rules()
+    def __init__(self, rules: list[AllocationCategoryMapping] | None = None) -> None:
+        """Initialize with provided rules or default config rules."""
+        self._rules = rules if rules is not None else default_allocation_category_rules()
 
     def classify(self, protocol_name: str, token_symbol: str) -> AllocationCategory:
         """Classify allocation as one of: ALLOCATION, POL, PSM3, ASSET.
@@ -33,29 +34,6 @@ class AllocationCategoryService:
 
         return AllocationCategory.ALLOCATION
 
-    @staticmethod
-    def _default_rules() -> list[AllocationCategoryMapping]:
-        """Default classification rules based on sentinelwatch patterns.
-
-        Rules follow Spark/Aave/Morpho conventions:
-        - PSM3: Spark PSM3 protocol allocations
-        - POL: Aave governance token or special liquidity positions
-        - ASSET: Non-strategy holdings (e.g., staked tokens, treasury)
-        - ALLOCATION: Default for all other positions
-        """
-        return [
-            # PSM3: Spark PSM3 positions
-            AllocationCategoryMapping("SparkPSM3", None, AllocationCategory.PSM3, priority=200),
-            AllocationCategoryMapping("Spark PSM3", None, AllocationCategory.PSM3, priority=200),
-            # POL: Aave governance liquidity and protocol-owned positions
-            AllocationCategoryMapping("Aave", "AAVE", AllocationCategory.POL, priority=150),
-            AllocationCategoryMapping("Aave", None, AllocationCategory.ALLOCATION, priority=100),
-            # ASSET: Treasury or staking positions (commonly in audit/governance roles)
-            AllocationCategoryMapping("Lido", "stETH", AllocationCategory.ASSET, priority=120),
-            AllocationCategoryMapping("Curve", None, AllocationCategory.ALLOCATION, priority=100),
-            # Morpho standard allocations (default to ALLOCATION)
-            AllocationCategoryMapping("Morpho", None, AllocationCategory.ALLOCATION, priority=100),
-        ]
 
     def get_category_label(self, category: AllocationCategory) -> str:
         """Return user-friendly display label for category."""

@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
@@ -64,6 +65,25 @@ class CapitalMetricsResponse(BaseModel):
     validation_note: str | None = None
 
 
+class AllocationActivityResponse(BaseModel):
+    """Allocation activity event record for timeline feeds."""
+
+    chain_id: int
+    prime_id: str
+    prime_name: str
+    protocol_name: str | None
+    token_id: int
+    token_symbol: str | None
+    action_type: str
+    tx_amount: Decimal
+    balance: Decimal
+    tx_hash: str
+    log_index: int
+    block_number: int
+    block_version: int
+    created_at: str
+
+
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
     return AllocationService(PostgresAllocationRepository(engine))
 
@@ -100,6 +120,74 @@ async def list_allocations(
             category=category_service.classify(p.protocol_name, p.symbol),
         )
         for p in positions
+    ]
+
+
+@router.get("/primes/{prime_id}/capital-metrics", response_model=CapitalMetricsResponse)
+@router.get("/allocations/activity", response_model=list[AllocationActivityResponse])
+async def list_allocation_activity(
+    prime_id: str | None = None,
+    chain_id: int | None = None,
+    protocol_name: str | None = None,
+    action_type: str | None = None,
+    token_symbol: str | None = None,
+    tx_hash: str | None = None,
+    from_timestamp: datetime | None = None,
+    to_timestamp: datetime | None = None,
+    limit: int = 100,
+    service: AllocationService = Depends(_get_service),
+):
+    """Retrieve allocation activity events with optional URL filters.
+
+    Query parameters:
+    - prime_id: Filter by prime address (0x-prefixed Ethereum address)
+    - chain_id: Filter by chain ID
+    - protocol_name: Filter by protocol name (case-insensitive substring)
+    - action_type: Filter by action type (`in`, `out`, `sweep`)
+    - token_symbol: Filter by token symbol (case-insensitive substring)
+    - tx_hash: Filter by transaction hash (0x-prefixed)
+    - from_timestamp: Inclusive lower timestamp bound (ISO-8601)
+    - to_timestamp: Inclusive upper timestamp bound (ISO-8601)
+    - limit: Max results (default 100, max 1000)
+    """
+    if prime_id is None:
+        parsed_prime_id = None
+    else:
+        try:
+            parsed_prime_id = EthAddress(prime_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    events = await service.list_allocation_activity(
+        prime_id=parsed_prime_id,
+        chain_id=chain_id,
+        protocol_name=protocol_name,
+        action_type=action_type,
+        token_symbol=token_symbol,
+        tx_hash=tx_hash,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        limit=limit,
+    )
+
+    return [
+        AllocationActivityResponse(
+            chain_id=e.chain_id,
+            prime_id=e.prime_id,
+            prime_name=e.prime_name,
+            protocol_name=e.protocol_name,
+            token_id=e.token_id,
+            token_symbol=e.token_symbol,
+            action_type=e.action_type,
+            tx_amount=e.tx_amount,
+            balance=e.balance,
+            tx_hash=e.tx_hash,
+            log_index=e.log_index,
+            block_number=e.block_number,
+            block_version=e.block_version,
+            created_at=e.created_at.isoformat(),
+        )
+        for e in events
     ]
 
 
