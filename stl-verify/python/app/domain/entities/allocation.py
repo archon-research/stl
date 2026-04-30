@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 _ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -49,6 +50,7 @@ class ReceiptTokenPosition:
     protocol_name: str
     balance: Decimal
     amount_usd: Decimal | None = None
+    latest_activity_at: datetime | None = None
 
 
 @dataclass(frozen=True)

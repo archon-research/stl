@@ -46,6 +46,7 @@ class PostgresAllocationRepository:
                     protocol_name=row.protocol_name,
                     balance=Decimal(str(row.balance)),
                     amount_usd=Decimal(str(row.amount_usd)) if row.amount_usd is not None else None,
+                    latest_activity_at=row.latest_activity_at,
                 )
                 for row in result
             ]
@@ -149,6 +150,33 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
             otp.price_usd
         FROM onchain_token_price otp
         ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+    ),
+    latest_activity AS (
+        SELECT DISTINCT ON (receipt_token_id)
+            receipt_token_id,
+            created_at AS latest_activity_at
+        FROM (
+            SELECT
+                rt.id AS receipt_token_id,
+                ap.created_at
+            FROM allocation_position ap
+            JOIN token t ON t.id = ap.token_id
+            JOIN receipt_token rt ON rt.underlying_token_id = t.id
+            JOIN protocol pr ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
+            WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+
+            UNION ALL
+
+            SELECT
+                rt.id AS receipt_token_id,
+                ap.created_at
+            FROM allocation_position ap
+            JOIN token t ON t.id = ap.token_id
+            JOIN receipt_token rt ON rt.receipt_token_address = t.address
+            JOIN protocol pr ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
+            WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+        ) activity_events
+        ORDER BY receipt_token_id, created_at DESC
     )
     SELECT DISTINCT ON (receipt_token_id)
         combined.chain_id,
@@ -160,7 +188,8 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         combined.underlying_symbol,
         combined.protocol_name,
         combined.balance,
-        (combined.balance * lp.price_usd) AS amount_usd
+        (combined.balance * lp.price_usd) AS amount_usd,
+        la.latest_activity_at
     FROM (
         SELECT
             lp.chain_id                                  AS chain_id,
@@ -199,6 +228,7 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         WHERE lp.balance > 0
     ) combined
     LEFT JOIN latest_prices lp ON lp.token_id = combined.underlying_token_id
+    LEFT JOIN latest_activity la ON la.receipt_token_id = combined.receipt_token_id
     ORDER BY receipt_token_id, balance DESC
 """)
 

@@ -47,6 +47,7 @@ class AllocationResponse(BaseModel):
     protocol_name: str
     balance: Decimal
     amount_usd: Decimal | None = None
+    latest_activity_at: str | None = None
     category: AllocationCategory  # New: allocation type (allocation/pol/psm3/asset)
 
 
@@ -119,6 +120,7 @@ async def list_allocations(
             protocol_name=p.protocol_name,
             balance=p.balance,
             amount_usd=p.amount_usd,
+            latest_activity_at=p.latest_activity_at.isoformat() if p.latest_activity_at else None,
             category=category_service.classify(p.protocol_name, p.symbol),
         )
         for p in positions

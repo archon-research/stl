@@ -8,15 +8,18 @@ import { flex } from '#styled-system/patterns';
 import { DataTable, useDataTable } from '../../data-table';
 import {
   type ChainLabelLookup,
+  formatDateTime,
+  formatFreshnessLabel,
   formatTokenAmount,
   formatUsdValue,
   getAllocationKey,
   getChainLabel,
   getProtocolLabel,
+  parseNumericValue,
 } from '../../lib/dashboard';
 import type { Allocation, AllocationCategory, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
-import { Address, EmptyState, ErrorState } from '../shared';
+import { Address, EmptyState, ErrorState, SummaryMetric } from '../shared';
 
 type AllocationGridProps = {
   allocations: Allocation[];
@@ -91,7 +94,10 @@ export function AllocationGrid({
   selectedPrime,
   sorting,
 }: AllocationGridProps) {
-  type AllocationWithAmountUsd = Allocation & { amount_usd?: string | number | null };
+  type AllocationWithMetrics = Allocation & {
+    amount_usd?: string | number | null;
+    latest_activity_at?: string | null;
+  };
 
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
 
@@ -110,6 +116,55 @@ export function AllocationGrid({
 
     return () => window.clearTimeout(timeoutId);
   }, [localSearchValue, onSearchChange, searchValue]);
+
+  const summary = useMemo(() => {
+    if (filteredAllocations.length === 0) {
+      return null;
+    }
+
+    const allocationsWithMetrics = filteredAllocations as AllocationWithMetrics[];
+    const totalUsd = allocationsWithMetrics.reduce(
+      (sum, allocation) => sum + (parseNumericValue(allocation.amount_usd) ?? 0),
+      0,
+    );
+
+    const largestAllocation = allocationsWithMetrics.reduce<AllocationWithMetrics | null>(
+      (largest, allocation) => {
+        if (!largest) {
+          return allocation;
+        }
+
+        const largestUsd = parseNumericValue(largest.amount_usd) ?? 0;
+        const nextUsd = parseNumericValue(allocation.amount_usd) ?? 0;
+        return nextUsd > largestUsd ? allocation : largest;
+      },
+      null,
+    );
+
+    const latestActivityAt = allocationsWithMetrics.reduce<string | null>(
+      (latest, allocation) => {
+        if (!allocation.latest_activity_at) {
+          return latest;
+        }
+
+        if (!latest) {
+          return allocation.latest_activity_at;
+        }
+
+        return new Date(allocation.latest_activity_at) > new Date(latest)
+          ? allocation.latest_activity_at
+          : latest;
+      },
+      null,
+    );
+
+    return {
+      allocationCount: filteredAllocations.length,
+      largestAllocation,
+      latestActivityAt,
+      totalUsd,
+    };
+  }, [filteredAllocations]);
 
   const columns = useMemo<ColumnDef<Allocation>[]>(
     () => [
@@ -216,7 +271,7 @@ export function AllocationGrid({
         header: 'Balance',
         accessorFn: (allocation) => Number(allocation.balance),
         cell: ({ row }) => {
-          const allocation = row.original as AllocationWithAmountUsd;
+          const allocation = row.original as AllocationWithMetrics;
           const amountUsd = allocation.amount_usd;
 
           return (
@@ -242,6 +297,55 @@ export function AllocationGrid({
                   color: 'text.muted',
                 })}
               />
+            </div>
+          );
+        },
+      },
+      {
+        id: 'latest_activity_at',
+        header: 'Latest activity',
+        accessorFn: (allocation) => {
+          const latestActivityAt = (allocation as AllocationWithMetrics).latest_activity_at;
+          return latestActivityAt ? new Date(latestActivityAt).getTime() : 0;
+        },
+        cell: ({ row }) => {
+          const allocation = row.original as AllocationWithMetrics;
+
+          if (!allocation.latest_activity_at) {
+            return (
+              <p
+                className={css({
+                  m: 0,
+                  fontSize: 'sm',
+                  color: 'text.muted',
+                })}
+              >
+                —
+              </p>
+            );
+          }
+
+          return (
+            <div>
+              <p
+                className={css({
+                  m: 0,
+                  fontSize: 'sm',
+                  fontWeight: 'semibold',
+                  color: 'text.strong',
+                })}
+              >
+                {formatFreshnessLabel(allocation.latest_activity_at)}
+              </p>
+              <p
+                className={css({
+                  m: 0,
+                  fontSize: 'xs',
+                  color: 'text.muted',
+                })}
+              >
+                {formatDateTime(allocation.latest_activity_at)}
+              </p>
             </div>
           );
         },
@@ -324,6 +428,55 @@ export function AllocationGrid({
           >
             Allocations
           </span>
+          {summary ? (
+            <div
+              className={css({
+                display: 'grid',
+                gridTemplateColumns: {
+                  base: '1fr',
+                  md: 'repeat(4, minmax(0, 1fr))',
+                },
+                gap: '3',
+              })}
+            >
+              <SummaryMetric
+                label="Total allocation"
+                value={formatUsdValue(summary.totalUsd)}
+                detail={`${summary.allocationCount} filtered allocations`}
+              />
+              <SummaryMetric
+                label="Largest position"
+                value={
+                  summary.largestAllocation
+                    ? summary.largestAllocation.symbol
+                    : '—'
+                }
+                detail={
+                  summary.largestAllocation
+                    ? formatUsdValue(summary.largestAllocation.amount_usd)
+                    : undefined
+                }
+              />
+              <SummaryMetric
+                label="Allocations"
+                value={String(summary.allocationCount)}
+                detail="Reflects current top-bar filters"
+              />
+              <SummaryMetric
+                label="Latest activity"
+                value={
+                  summary.latestActivityAt
+                    ? formatFreshnessLabel(summary.latestActivityAt)
+                    : '—'
+                }
+                detail={
+                  summary.latestActivityAt
+                    ? formatDateTime(summary.latestActivityAt)
+                    : 'No indexed activity'
+                }
+              />
+            </div>
+          ) : null}
           <div
             className={flex({
               align: 'flex-end',
