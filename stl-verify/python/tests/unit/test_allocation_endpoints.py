@@ -81,6 +81,7 @@ def test_list_allocations_returns_200_with_enriched_holdings():
             "underlying_symbol": "USDC",
             "protocol_name": "aave_v3",
             "balance": "100.0",
+            "category": "allocation",
         }
     ]
     service.list_receipt_token_positions.assert_awaited_once_with(EthAddress(_VALID_ADDR))
