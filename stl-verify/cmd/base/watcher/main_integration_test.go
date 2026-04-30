@@ -691,7 +691,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	testPrefix := testutil.SanitizeTestName(t.Name())
 	topics := createSNSTopics(t, ctx, snsClient, testPrefix)
 	queues := createSQSQueues(t, ctx, sqsClient, testPrefix)
-	subscribeQueuesToTopics(t, ctx, snsClient, topics, queues, testPrefix)
+	subscribeQueuesToTopics(t, ctx, snsClient, sqsClient, topics, queues)
 
 	infra.BlocksQueueURL = queues["blocks"]
 	infra.ReceiptsQueueURL = queues["receipts"]
@@ -786,8 +786,16 @@ func createSQSQueues(t *testing.T, ctx context.Context, client *sqs.Client, pref
 	queues := make(map[string]string)
 
 	for _, name := range []string{"blocks", "receipts", "traces", "blobs"} {
+		// AWS SQS queue names are limited to 80 characters.
+		const maxQueueNameLen = 80
+		suffix := fmt.Sprintf("-%s-queue.fifo", name)
+		safePrefix := prefix
+		if len(safePrefix)+len(suffix) > maxQueueNameLen {
+			safePrefix = safePrefix[:maxQueueNameLen-len(suffix)]
+		}
+
 		result, err := client.CreateQueue(ctx, &sqs.CreateQueueInput{
-			QueueName: aws.String(fmt.Sprintf("%s-%s-queue.fifo", prefix, name)),
+			QueueName: aws.String(safePrefix + suffix),
 			Attributes: map[string]string{
 				string(sqstypes.QueueAttributeNameVisibilityTimeout): "30",
 				string(sqstypes.QueueAttributeNameFifoQueue):         "true",
@@ -802,15 +810,23 @@ func createSQSQueues(t *testing.T, ctx context.Context, client *sqs.Client, pref
 	return queues
 }
 
-func subscribeQueuesToTopics(t *testing.T, ctx context.Context, snsClient *sns.Client, topics, queues map[string]string, prefix string) {
+func subscribeQueuesToTopics(t *testing.T, ctx context.Context, snsClient *sns.Client, sqsClient *sqs.Client, topics, queues map[string]string) {
 	t.Helper()
 
 	for name, topicARN := range topics {
 		queueURL := queues[name]
-		// Get queue ARN from URL (LocalStack pattern for FIFO queues)
-		queueARN := fmt.Sprintf("arn:aws:sqs:us-east-1:000000000000:%s-%s-queue.fifo", prefix, name)
 
-		_, err := snsClient.Subscribe(ctx, &sns.SubscribeInput{
+		// Resolve the actual queue ARN via the API instead of hardcoding region/account.
+		attrs, err := sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+			QueueUrl:       aws.String(queueURL),
+			AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameQueueArn},
+		})
+		if err != nil {
+			t.Fatalf("failed to get queue ARN for %s: %v", name, err)
+		}
+		queueARN := attrs.Attributes[string(sqstypes.QueueAttributeNameQueueArn)]
+
+		_, err = snsClient.Subscribe(ctx, &sns.SubscribeInput{
 			TopicArn: aws.String(topicARN),
 			Protocol: aws.String("sqs"),
 			Endpoint: aws.String(queueARN),
