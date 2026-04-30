@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
@@ -853,7 +854,11 @@ func (c *Client) call(ctx context.Context, req jsonRPCRequest) (*jsonRPCResponse
 		}
 
 		if rpcResp.Error != nil {
-			return fmt.Errorf("RPC error: %s", rpcResp.Error.Message)
+			msg := fmt.Sprintf("RPC error: %s", rpcResp.Error.Message)
+			if rpcutil.IsUnfinalizedError(fmt.Errorf("%s", rpcResp.Error.Message)) {
+				return &nonRetryableError{err: fmt.Errorf("%s", msg)}
+			}
+			return fmt.Errorf("%s", msg)
 		}
 
 		return nil

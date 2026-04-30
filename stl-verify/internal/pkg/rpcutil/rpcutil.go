@@ -4,6 +4,7 @@ package rpcutil
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 // Request represents a JSON-RPC 2.0 request.
@@ -31,4 +32,13 @@ func WriteError(w http.ResponseWriter, id json.RawMessage, code int, message str
 		"id":      id,
 		"error":   json.RawMessage(errJSON),
 	})
+}
+
+// IsUnfinalizedError returns true if the error is due to querying unfinalized block data.
+// This is expected near chain tip, especially on chains with fast block times.
+func IsUnfinalizedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "unfinalized data")
 }
