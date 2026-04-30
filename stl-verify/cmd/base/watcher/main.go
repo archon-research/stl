@@ -398,14 +398,22 @@ func requireEnv(key string) string {
 
 // loadBackfillConfig reads the env-driven backfill knobs. Defaults preserve the
 // historic 10 blocks / 30s behaviour for any chain that doesn't override them.
+// Non-positive values are rejected: time.NewTicker panics on d <= 0, and a
+// negative BatchSize would feed back into SQL LIMIT and gap-fill arithmetic.
 func loadBackfillConfig(chainID int64, enableTraces, enableBlobs bool, logger *slog.Logger) (backfill_gaps.BackfillConfig, error) {
 	batchSize, err := env.GetInt("BACKFILL_BATCH_SIZE", 10)
 	if err != nil {
 		return backfill_gaps.BackfillConfig{}, err
 	}
+	if batchSize <= 0 {
+		return backfill_gaps.BackfillConfig{}, fmt.Errorf("BACKFILL_BATCH_SIZE must be > 0, got %d", batchSize)
+	}
 	pollInterval, err := env.GetDuration("BACKFILL_POLL_INTERVAL", 30*time.Second)
 	if err != nil {
 		return backfill_gaps.BackfillConfig{}, err
+	}
+	if pollInterval <= 0 {
+		return backfill_gaps.BackfillConfig{}, fmt.Errorf("BACKFILL_POLL_INTERVAL must be > 0, got %s", pollInterval)
 	}
 	return backfill_gaps.BackfillConfig{
 		ChainID:      chainID,
