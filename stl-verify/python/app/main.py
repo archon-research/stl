@@ -15,7 +15,7 @@ from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBacke
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
-from app.api.v1 import allocations, risk, status
+from app.api.v1 import allocations, data_sources, risk, status
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
 from app.middleware.request_id import RequestIdMiddleware
@@ -171,6 +171,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     application.state.tracer_provider = setup_telemetry(application, settings)
     application.include_router(status.router, prefix="/v1")
     application.include_router(allocations.router, prefix="/v1")
+    application.include_router(data_sources.router, prefix="/v1")
     application.include_router(risk.router, prefix="/v1")
     configure_docs(application)
     configure_static_hosting(application, static_dir or DEFAULT_STATIC_DIR)
