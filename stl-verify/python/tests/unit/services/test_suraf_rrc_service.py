@@ -108,7 +108,7 @@ def _service(
 
 class TestModelAttribute:
     def test_model_is_suraf(self) -> None:
-        assert _service().model == "suraf"
+        assert _service().risk_model == "suraf"
 
 
 class TestAppliesTo:
@@ -132,12 +132,14 @@ class TestRiskModelCompute:
         assert isinstance(result, RrcResult)
         assert result.asset_id == 1
         assert result.prime_id == str(DUMMY_PRIME)
-        assert result.model == "suraf"
+        assert result.risk_model == "suraf"
         assert result.rrc_usd == Decimal("337.0")
         assert isinstance(result.details, SurafDetails)
         assert result.details.rating_id == "aave_ausdc"
         assert result.details.rating_version == "v7"
         assert result.details.crr_pct == Decimal("33.7")
+        assert result.details.unadjusted_crr_pct == Decimal("33.7")
+        assert result.details.penalty_pp == Decimal("0")
         assert result.details.source_commit_sha == "abc123"
 
     async def test_compute_zero_crr_returns_zero_rrc(self) -> None:

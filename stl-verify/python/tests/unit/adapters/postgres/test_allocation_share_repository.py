@@ -6,10 +6,9 @@ import pytest
 
 from app.adapters.postgres.allocation_share_repository import (
     _SHARE_LOOKUP_SQL,
-    MissingShareError,
     PostgresAllocationShare,
-    StaleShareError,
 )
+from app.domain.exceptions import MissingShareError, StaleShareError
 
 _WALLET = bytes.fromhex("1601843c5e9bc251a3272907010afa41fa18347e")
 

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLikeLiquidationParamsRepository
-from app.adapters.postgres.allocation_share_repository import MissingShareError, PostgresAllocationShare
+from app.adapters.postgres.allocation_share_repository import PostgresAllocationShare
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
@@ -15,6 +15,7 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import LiquidationParams
+from app.domain.exceptions import MissingShareError
 from app.logging import get_logger
 
 logger = get_logger(__name__)

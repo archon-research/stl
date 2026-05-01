@@ -9,18 +9,31 @@ across requests.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.risk import RrcResult, SurafDetails
+from app.domain.exceptions import InvalidOverrideError
 from app.ports.allocation_repository import AllocationRepository
 from app.risk_engine.suraf.result import SurafResult
 
 _HUNDRED = Decimal("100")
+# Quantize RRC to USD cents at the service boundary so clients get a
+# bounded-precision number instead of the 25+ significant digits that
+# fall out of unconstrained Decimal arithmetic.
+_USD_CENT = Decimal("0.01")
 _ALLOWED_OVERRIDES = frozenset({"usd_exposure"})
+# Sanity ceiling on overridden exposure: above this bound a request is more
+# likely to be malformed (or a CPU-burn attack via a multi-million-digit
+# Decimal string) than a legitimate scenario. 1e15 USD ≈ a quadrillion.
+_USD_EXPOSURE_MAX = Decimal("1e15")
+# Reject pathological input strings *before* `Decimal(str(raw))` — parsing a
+# multi-megabyte numeric literal is the actual CPU-burn vector; the bound
+# check above only fires after parse.
+_DECIMAL_STR_MAX_LEN = 64
 
 
 # Legacy result type — used by old /risk/rrc/scenario endpoint until VEC-183.
@@ -43,7 +56,7 @@ class SurafRrcService:
     be used by the unified risk-model registry.
     """
 
-    model: str = "suraf"
+    risk_model: str = "suraf"
 
     def __init__(
         self,
@@ -72,16 +85,18 @@ class SurafRrcService:
         """Compute the RRC for the given asset and prime via SURAF."""
         usd_exposure = await self._resolve_usd_exposure(asset_id, prime_id, overrides)
         rating_id, rating = self._lookup_rating(asset_id)
-        rrc_usd = usd_exposure * rating.crr_pct / _HUNDRED
+        rrc_usd = (usd_exposure * rating.crr_pct / _HUNDRED).quantize(_USD_CENT, rounding=ROUND_HALF_EVEN)
         return RrcResult(
             asset_id=asset_id,
             prime_id=prime_id,
             rrc_usd=rrc_usd,
-            model="suraf",
+            risk_model="suraf",
             details=SurafDetails(
                 rating_id=rating_id,
                 rating_version=rating.version,
                 crr_pct=rating.crr_pct,
+                unadjusted_crr_pct=rating.unadjusted_crr_pct,
+                penalty_pp=rating.penalty_pp,
                 source_commit_sha=rating.source_commit_sha,
             ),
         )
@@ -90,20 +105,32 @@ class SurafRrcService:
         """Extract usd_exposure from overrides, or derive from position."""
         unknown = set(overrides) - _ALLOWED_OVERRIDES
         if unknown:
-            raise ValueError(f"unknown override keys: {sorted(unknown)}")
+            raise InvalidOverrideError(f"unknown override keys: {sorted(unknown)}")
 
         if "usd_exposure" in overrides:
             raw = overrides["usd_exposure"]
             if raw is None:
-                raise ValueError("invalid usd_exposure: expected a positive finite number, got None")
+                raise InvalidOverrideError("invalid usd_exposure: expected a positive finite number, got None")
+            if isinstance(raw, str) and len(raw) > _DECIMAL_STR_MAX_LEN:
+                raise InvalidOverrideError(
+                    f"invalid usd_exposure: input string too long ({len(raw)} > {_DECIMAL_STR_MAX_LEN})"
+                )
             try:
                 usd_exposure = raw if isinstance(raw, Decimal) else Decimal(str(raw))
             except Exception as exc:
-                raise ValueError(f"invalid usd_exposure: expected a positive finite number, got {raw!r}") from exc
+                raise InvalidOverrideError(
+                    f"invalid usd_exposure: expected a positive finite number, got {raw!r}"
+                ) from exc
             if not usd_exposure.is_finite():
-                raise ValueError(f"invalid usd_exposure: expected a positive finite number, got {usd_exposure}")
+                raise InvalidOverrideError(
+                    f"invalid usd_exposure: expected a positive finite number, got {usd_exposure}"
+                )
             if usd_exposure <= Decimal("0"):
-                raise ValueError(f"invalid usd_exposure: expected a positive finite number, got {usd_exposure}")
+                raise InvalidOverrideError(
+                    f"invalid usd_exposure: expected a positive finite number, got {usd_exposure}"
+                )
+            if usd_exposure > _USD_EXPOSURE_MAX:
+                raise InvalidOverrideError(f"usd_exposure must be <= {_USD_EXPOSURE_MAX:E}, got {usd_exposure}")
             return usd_exposure
 
         return await self._allocation_repo.get_usd_exposure(asset_id, prime_id)

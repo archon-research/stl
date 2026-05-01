@@ -130,8 +130,9 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             allocation_repo = PostgresAllocationRepository(engine)
             suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings, allocation_repo)
 
+            receipt_token_repo = ReceiptTokenRepository(engine)
             crypto_lending_reader = PostgresCryptoLendingReader(
-                receipt_token_repo=ReceiptTokenRepository(engine),
+                receipt_token_repo=receipt_token_repo,
                 aave_breakdown_repo=AaveLikeBackedBreakdownRepository(engine),
                 morpho_breakdown_repo=MorphoBackedBreakdownRepository(engine),
                 aave_liq_repo=AaveLikeLiquidationParamsRepository(engine),
@@ -157,6 +158,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             app.state.suraf_rrc_service = suraf_rrc_service
             app.state.crypto_lending_risk_service = crypto_lending_risk_service
             app.state.model_registry = model_registry
+            app.state.receipt_token_lookup = receipt_token_repo
 
             instrument_sqlalchemy_engine(engine)
             yield

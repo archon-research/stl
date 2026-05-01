@@ -1,5 +1,5 @@
 from collections.abc import Collection, Mapping
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
 
 from app.domain.entities.allocation import EthAddress
@@ -12,6 +12,7 @@ from app.domain.entities.risk import (
     RiskEnrichedCollateral,
     RrcResult,
 )
+from app.domain.exceptions import InvalidOverrideError
 from app.logging import get_logger
 from app.ports.crypto_lending_reader import CryptoLendingReader
 from app.risk_engine.crypto_lending import gap_sweep
@@ -19,12 +20,19 @@ from app.risk_engine.crypto_lending import gap_sweep
 logger = get_logger(__name__)
 
 _ALLOWED_OVERRIDES = frozenset({"gap_pct"})
+# Reject pathological input strings *before* `Decimal(str(raw))` — parsing a
+# multi-megabyte numeric literal is a CPU-burn vector even though the value
+# would later fail the [0, 1] range check.
+_DECIMAL_STR_MAX_LEN = 64
+# Quantize RRC to USD cents at the service boundary so clients get a
+# bounded-precision number instead of float-noise tails from gap_sweep math.
+_USD_CENT = Decimal("0.01")
 
 
 class CryptoLendingRiskService:
     """RiskModel for crypto-lending assets using the gap-sweep stress."""
 
-    model: str = "gap_sweep"
+    risk_model: str = "gap_sweep"
 
     def __init__(
         self,
@@ -56,25 +64,43 @@ class CryptoLendingRiskService:
         gap_pct = self._resolve_gap_pct(overrides)
         items = await self._load_enriched_items(receipt_token_id=asset_id, prime_id=prime_id)
         raw = gap_sweep.total_bad_debt(items, gap_pct)
-        rrc_usd = abs(raw)
+        rrc_usd = abs(raw).quantize(_USD_CENT, rounding=ROUND_HALF_EVEN)
         return RrcResult(
             asset_id=asset_id,
             prime_id=prime_id,
             rrc_usd=rrc_usd,
-            model="gap_sweep",
-            details=GapSweepDetails(gap_pct=gap_pct, bad_debt_usd=rrc_usd),
+            risk_model="gap_sweep",
+            details=GapSweepDetails(gap_pct=gap_pct, loss_usd=rrc_usd),
         )
 
     def _resolve_gap_pct(self, overrides: Mapping[str, Any]) -> Decimal:
-        """Extract and validate gap_pct from overrides, falling back to the default."""
+        """Extract and validate gap_pct from overrides, falling back to the default.
+
+        ``gap_pct`` is a price-drop fraction on collateral, ``0`` ≤ gap ≤ ``1``.
+        Coerces from any numeric or string input via ``Decimal(str(raw))``
+        because JSON deserialisation hands us ``str``/``int``/``float`` and a
+        bare ``Decimal <= str`` comparison would raise ``TypeError`` → 500.
+        """
         unknown = set(overrides) - _ALLOWED_OVERRIDES
         if unknown:
-            raise ValueError(f"unknown override keys: {sorted(unknown)}")
+            raise InvalidOverrideError(f"unknown override keys: {sorted(unknown)}")
 
-        gap_pct: Decimal = overrides.get("gap_pct", self._default_gap_pct)
+        if "gap_pct" not in overrides:
+            return self._default_gap_pct
 
+        raw = overrides["gap_pct"]
+        if raw is None:
+            raise InvalidOverrideError("invalid gap_pct: expected a finite number in [0, 1], got None")
+        if isinstance(raw, str) and len(raw) > _DECIMAL_STR_MAX_LEN:
+            raise InvalidOverrideError(f"invalid gap_pct: input string too long ({len(raw)} > {_DECIMAL_STR_MAX_LEN})")
+        try:
+            gap_pct = raw if isinstance(raw, Decimal) else Decimal(str(raw))
+        except Exception as exc:
+            raise InvalidOverrideError(f"invalid gap_pct: expected a finite number in [0, 1], got {raw!r}") from exc
+        if not gap_pct.is_finite():
+            raise InvalidOverrideError(f"invalid gap_pct: expected a finite number in [0, 1], got {gap_pct}")
         if not (Decimal("0") <= gap_pct <= Decimal("1")):
-            raise ValueError(f"gap_pct must be in [0, 1], got {gap_pct}")
+            raise InvalidOverrideError(f"gap_pct must be in [0, 1], got {gap_pct}")
 
         return gap_pct
 

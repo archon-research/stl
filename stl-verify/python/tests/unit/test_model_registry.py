@@ -9,24 +9,26 @@ _PRIME_B = EthAddress("0x" + "bb" * 20)
 
 
 class FakeRiskModel:
-    def __init__(self, model: str, supported: set[tuple[int, EthAddress]]) -> None:
-        self.model = model
+    def __init__(self, risk_model: str, supported: set[tuple[int, EthAddress]]) -> None:
+        self.risk_model = risk_model
         self._supported = supported
 
     def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool:
         return (asset_id, prime_id) in self._supported
 
     async def compute(self, asset_id: int, prime_id: EthAddress, overrides: dict) -> RrcResult:  # noqa: ARG002
-        if self.model == "suraf":
+        if self.risk_model == "suraf":
             return RrcResult(
                 asset_id=asset_id,
                 prime_id=prime_id,
                 rrc_usd=Decimal("100"),
-                model="suraf",
+                risk_model="suraf",
                 details=SurafDetails(
                     rating_id="rating",
                     rating_version="v1",
                     crr_pct=Decimal("10"),
+                    unadjusted_crr_pct=Decimal("10"),
+                    penalty_pp=Decimal("0"),
                     source_commit_sha="abc123",
                 ),
             )
@@ -34,8 +36,8 @@ class FakeRiskModel:
             asset_id=asset_id,
             prime_id=prime_id,
             rrc_usd=Decimal("200"),
-            model="gap_sweep",
-            details=GapSweepDetails(gap_pct=Decimal("0.15"), bad_debt_usd=Decimal("200")),
+            risk_model="gap_sweep",
+            details=GapSweepDetails(gap_pct=Decimal("0.15"), loss_usd=Decimal("200")),
         )
 
 

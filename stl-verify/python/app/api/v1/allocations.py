@@ -1,11 +1,11 @@
 from decimal import Decimal
-from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import AfterValidator, BaseModel
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
+from app.api._validators import EthAddressParam
 from app.api.deps import get_engine
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
@@ -14,17 +14,6 @@ from app.services.allocation_service import AllocationService
 from app.services.capital_metrics_service import CapitalMetricsService
 
 router = APIRouter()
-
-
-def _validate_eth_address(value: str) -> EthAddress:
-    """Convert a raw path string to an EthAddress.
-
-    Raises ValueError on malformed input, which FastAPI surfaces as HTTP 422.
-    """
-    return EthAddress(value)
-
-
-EthAddressPath = Annotated[str, AfterValidator(_validate_eth_address)]
 
 
 class PrimeResponse(BaseModel):
@@ -80,10 +69,10 @@ async def list_primes(service: AllocationService = Depends(_get_service)):
 
 @router.get("/primes/{prime_id}/allocations", response_model=list[AllocationResponse])
 async def list_allocations(
-    prime_id: EthAddressPath,
+    prime_id: EthAddressParam,
     service: AllocationService = Depends(_get_service),
 ):
-    positions = await service.list_receipt_token_positions(prime_id)
+    positions = await service.list_receipt_token_positions(EthAddress(prime_id))
     category_service = AllocationCategoryService()
 
     return [
@@ -105,7 +94,7 @@ async def list_allocations(
 
 @router.get("/primes/{prime_id}/capital-metrics", response_model=CapitalMetricsResponse)
 async def get_capital_metrics(
-    prime_id: EthAddressPath,
+    prime_id: EthAddressParam,
     service: CapitalMetricsService = Depends(_get_capital_metrics_service),
 ):
     """Retrieve capital metrics for a prime.
@@ -119,7 +108,7 @@ async def get_capital_metrics(
     - is_validated: Whether reconciled against external benchmark
     - validation_note: Any caveats or pending work on this endpoint
     """
-    metrics = await service.get_capital_metrics(prime_id)
+    metrics = await service.get_capital_metrics(EthAddress(prime_id))
     if not metrics:
         raise HTTPException(status_code=404, detail="Prime not found")
 

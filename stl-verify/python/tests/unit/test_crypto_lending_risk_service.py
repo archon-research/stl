@@ -3,11 +3,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.adapters.postgres.allocation_share_repository import MissingShareError
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import GapSweepDetails, LiquidationParams, RiskBreakdown, RrcResult
+from app.domain.exceptions import MissingShareError
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 
 DUMMY_PRIME = EthAddress("0x" + "ab" * 20)
@@ -86,7 +86,7 @@ def service(reader: MagicMock) -> CryptoLendingRiskService:
 
 class TestModelAttribute:
     def test_model_attribute_is_gap_sweep(self, service: CryptoLendingRiskService) -> None:
-        assert service.model == "gap_sweep"
+        assert service.risk_model == "gap_sweep"
 
 
 class TestAppliesTo:
@@ -121,11 +121,11 @@ class TestCompute:
         assert isinstance(result, RrcResult)
         assert result.asset_id == RECEIPT_TOKEN_ID
         assert result.prime_id == str(DUMMY_PRIME)
-        assert result.model == "gap_sweep"
+        assert result.risk_model == "gap_sweep"
         assert result.rrc_usd >= Decimal("0")
         assert isinstance(result.details, GapSweepDetails)
         assert result.details.gap_pct == Decimal("0.15")
-        assert result.details.bad_debt_usd == result.rrc_usd
+        assert result.details.loss_usd == result.rrc_usd
         reader.get_receipt_token.assert_awaited_once_with(RECEIPT_TOKEN_ID)
         reader.get_breakdown.assert_awaited_once_with(info)
         reader.get_liquidation_params.assert_awaited_once_with(info, UNDERLYING_TOKEN_ID, [10])

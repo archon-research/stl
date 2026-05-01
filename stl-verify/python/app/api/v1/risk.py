@@ -1,15 +1,27 @@
 from decimal import Decimal
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
-from app.adapters.postgres.allocation_share_repository import (
+from app.api._validators import EthAddressParam
+from app.api.deps import (
+    get_crypto_lending_risk_service,
+    get_model_registry,
+    get_receipt_token_lookup,
+    get_suraf_rrc_service,
+)
+from app.domain.entities.allocation import EthAddress
+from app.domain.entities.risk import RrcResult
+from app.domain.exceptions import (
     AllocationShareError,
+    InvalidOverrideError,
     MissingShareError,
     StaleShareError,
 )
-from app.api.deps import get_crypto_lending_risk_service, get_suraf_rrc_service
+from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
+from app.services.model_registry import ModelRegistry
 from app.services.suraf_rrc_service import SurafRrcService
 
 router = APIRouter()
@@ -140,3 +152,126 @@ async def post_rrc_scenario(
     if result is None:
         raise HTTPException(status_code=404, detail=f"no rating mapped for receipt_token_id: {body.receipt_token_id}")
     return ScenarioRrcResponse(**result.model_dump())
+
+
+# ---------------------------------------------------------------------------
+# Unified /v1/risk/rrc — registry-dispatched, multi-model
+# ---------------------------------------------------------------------------
+
+
+class RrcRequest(BaseModel):
+    """POST /v1/risk/rrc body — overrides keyed by model name."""
+
+    asset_id: int = Field(ge=1)
+    prime_id: EthAddressParam
+    overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class RrcEnvelope(BaseModel):
+    """Response wrapper carrying one RrcResult per applicable model.
+
+    On-chain identifiers (``chain_id``, ``receipt_token_address``) are echoed
+    so consumers can resolve the surrogate ``asset_id`` without a second call.
+
+    **Important:** ``results`` may contain multiple entries (when more than
+    one model applies). The values are *not* additive — SURAF capital and
+    gap-sweep expected-loss overlap economically. Pick the model relevant to
+    the consumer's question; do not sum.
+    """
+
+    asset_id: int
+    chain_id: int
+    receipt_token_address: str
+    prime_id: str
+    results: list[RrcResult]
+
+
+@router.get("/risk/rrc", response_model=RrcEnvelope)
+async def get_rrc(
+    asset_id: Annotated[int, Query(ge=1)],
+    prime_id: EthAddressParam,
+    registry: ModelRegistry = Depends(get_model_registry),
+    receipt_token_lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
+) -> RrcEnvelope:
+    """Compute RRC at default stress for every model that applies to ``(asset_id, prime_id)``.
+
+    Errors:
+    - 404 if ``asset_id`` is not a known receipt token, or no models apply.
+    - 422 if ``prime_id`` is malformed or ``asset_id`` < 1.
+    - 503 with ``share_data_missing`` / ``share_data_stale`` codes if the
+      share-data lookup fails.
+    """
+    return await _compute_envelope(
+        asset_id, EthAddress(prime_id), overrides={}, registry=registry, lookup=receipt_token_lookup
+    )
+
+
+@router.post("/risk/rrc", response_model=RrcEnvelope)
+async def post_rrc(
+    body: RrcRequest,
+    registry: ModelRegistry = Depends(get_model_registry),
+    receipt_token_lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
+) -> RrcEnvelope:
+    """Compute RRC with per-model scenario overrides for every applicable model.
+
+    Errors:
+    - 404 if ``asset_id`` is not a known receipt token, or no models apply.
+    - 422 if ``prime_id``/``asset_id`` invalid, an unknown override model key
+      is present, or any model rejects its overrides.
+    - 503 with ``share_data_missing`` / ``share_data_stale`` codes if the
+      share-data lookup fails.
+    """
+    return await _compute_envelope(
+        body.asset_id,
+        EthAddress(body.prime_id),
+        overrides=body.overrides,
+        registry=registry,
+        lookup=receipt_token_lookup,
+    )
+
+
+async def _compute_envelope(
+    asset_id: int,
+    prime_id: EthAddress,
+    overrides: dict[str, dict[str, Any]],
+    registry: ModelRegistry,
+    lookup: ReceiptTokenLookup,
+) -> RrcEnvelope:
+    unknown_models = set(overrides) - registry.risk_model_names
+    if unknown_models:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown override model keys: {sorted(unknown_models)}",
+        )
+
+    info = await lookup.get(asset_id)
+    if info is None:
+        raise HTTPException(status_code=404, detail=f"unknown asset_id={asset_id}")
+
+    applicable = registry.applicable(asset_id, prime_id)
+    if not applicable:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no risk models apply for asset_id={asset_id}, prime_id={prime_id}",
+        )
+
+    results: list[RrcResult] = []
+    for m in applicable:
+        try:
+            result = await m.compute(asset_id, prime_id, overrides.get(m.risk_model, {}))
+        except AllocationShareError as exc:
+            raise _share_error_503(exc) from exc
+        except InvalidOverrideError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # Bare ValueError (invariant breach — e.g. registry returned an
+        # asset the service rejects) is intentionally NOT caught: it
+        # surfaces as 500 so the bug is loud rather than masked as 422.
+        results.append(result)
+
+    return RrcEnvelope(
+        asset_id=asset_id,
+        chain_id=info.chain_id,
+        receipt_token_address=info.receipt_token_address_hex,
+        prime_id=str(prime_id),
+        results=results,
+    )
