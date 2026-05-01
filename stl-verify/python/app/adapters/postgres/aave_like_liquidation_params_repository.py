@@ -31,18 +31,17 @@ FROM (
 class AaveLikeLiquidationParamsRepository:
     """Liquidation params adapter for Aave-like protocols."""
 
-    def __init__(self, engine: AsyncEngine, protocol_id: int) -> None:
+    def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
-        self._protocol_id = protocol_id
 
-    async def get_params(self, backed_asset_id: int, token_ids: list[int]) -> dict[int, LiquidationParams]:
+    async def get_params(self, protocol_id: int, token_ids: list[int]) -> dict[int, LiquidationParams]:
         if not token_ids:
             return {}
 
         async with self._engine.connect() as conn:
             result = await conn.execute(
                 text(_SQL),
-                {"protocol_id": self._protocol_id, "token_ids": token_ids},
+                {"protocol_id": protocol_id, "token_ids": token_ids},
             )
             rows = result.fetchall()
 

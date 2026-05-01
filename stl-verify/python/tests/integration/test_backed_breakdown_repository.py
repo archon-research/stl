@@ -13,9 +13,9 @@ from tests.integration.conftest import insert_token, insert_user, store_test_ids
 
 
 class ProtocolScopedBackedBreakdownRepository(Protocol):
-    """Spec contract: protocol selection happens before repository invocation."""
+    """Spec contract for the Aave-like backed breakdown repository."""
 
-    async def get_backed_breakdown(self, backed_asset_id: int) -> BackedBreakdown: ...
+    async def get_backed_breakdown(self, protocol_id: int, backed_asset_id: int) -> BackedBreakdown: ...
 
 
 # ---------------------------------------------------------------------------
@@ -327,13 +327,13 @@ async def test_ids(db_url: str, _seed_data: None) -> dict[str, int]:
 async def repository(
     async_db_url: str, _seed_data: None, test_ids: dict[str, int]
 ) -> AsyncIterator[ProtocolScopedBackedBreakdownRepository]:
-    """Create a repository already bound to the protocol under test."""
+    """Create the Aave-like backed breakdown repository."""
     engine = create_async_engine(async_db_url)
     try:
         repository_class = cast(Any, AaveLikeBackedBreakdownRepository)
         yield cast(
             ProtocolScopedBackedBreakdownRepository,
-            repository_class(engine, protocol_id=test_ids["protocol_id"]),
+            repository_class(engine),
         )
     finally:
         await engine.dispose()
@@ -366,7 +366,7 @@ async def test_single_borrower_full_attribution(
       cbBTC = $16,666.67              = $16,666.67  (46.2963%)
       Grand total = $36,000 = total spUSDS debt with collateral
     """
-    result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
+    result = await repository.get_backed_breakdown(test_ids["protocol_id"], test_ids["sp_usds_id"])
 
     assert result.backed_asset_id == test_ids["sp_usds_id"]
     assert len(result.items) == 2
@@ -388,7 +388,9 @@ async def test_no_borrowers_returns_empty(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
     """A token nobody has borrowed returns an empty breakdown."""
-    result = await repository.get_backed_breakdown(test_ids["weth_id"])  # nobody borrows WETH in test data
+    result = await repository.get_backed_breakdown(
+        test_ids["protocol_id"], test_ids["weth_id"]
+    )  # nobody borrows WETH in test data
 
     assert result.items == ()
 
@@ -398,7 +400,23 @@ async def test_nonexistent_debt_token_returns_empty(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
     """Protocol is repository-bound, so only the target debt token remains as input."""
-    result = await repository.get_backed_breakdown(99999)
+    result = await repository.get_backed_breakdown(test_ids["protocol_id"], 99999)
+
+    assert result.items == ()
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_wrong_protocol_id_returns_empty(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """Regression guard: the query must filter by ``protocol_id``.
+
+    Seed data above only populates SparkLend. Querying a real, seeded debt
+    token but with a different ``protocol_id`` must return an empty breakdown.
+    If the SQL silently ignored the parameter the SparkLend rows would still
+    come back, which would attribute one protocol's collateral to another.
+    """
+    result = await repository.get_backed_breakdown(999_999, test_ids["sp_usds_id"])
 
     assert result.items == ()
 
@@ -415,7 +433,7 @@ async def test_latest_debt_snapshot_used_not_summed(
     With incorrect SUM, user 2's spUSDS ratio = 10,000 / 14,000 = 71.4% (not 60%),
     making user 2's attributed WETH = 5 × 0.714 = 3.57, so WETH total ≠ 13.
     """
-    result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
+    result = await repository.get_backed_breakdown(test_ids["protocol_id"], test_ids["sp_usds_id"])
     by_symbol = {item.symbol: item for item in result.items}
     # With incorrect SUM: User 1 has 50,000 spUSDS, User 2 has 10,000.
     # WETH backing would be (20000/45000)×50000 + 10000 = $32,222.22, not $19,333.33.
@@ -433,7 +451,7 @@ async def test_disabled_collateral_not_attributed(
     User 3 would contribute (16000/16000)×5000 = $5,000 to WETH backing,
     making WETH total = $19,333.33 + $5,000 = $24,333.33, not $19,333.33.
     """
-    result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
+    result = await repository.get_backed_breakdown(test_ids["protocol_id"], test_ids["sp_usds_id"])
     by_symbol = {item.symbol: item for item in result.items}
     assert by_symbol["WETH"].backing_value == Decimal("19333.33")
 
@@ -452,7 +470,7 @@ async def test_zero_price_collateral_does_not_cause_division_by_zero(
     not appear in the result (it contributes nothing in USD terms).
     The existing users' attribution should be unchanged.
     """
-    result = await repository.get_backed_breakdown(test_ids["sp_usds_id"])
+    result = await repository.get_backed_breakdown(test_ids["protocol_id"], test_ids["sp_usds_id"])
 
     by_symbol = {item.symbol: item for item in result.items}
 

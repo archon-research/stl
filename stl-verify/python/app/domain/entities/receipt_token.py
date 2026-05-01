@@ -2,6 +2,14 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class ReceiptTokenProtocolPair:
+    """Minimal receipt-token metadata paired with its protocol name."""
+
+    receipt_token_id: int
+    protocol_name: str
+
+
+@dataclass(frozen=True)
 class ReceiptTokenInfo:
     """Resolved receipt token with protocol routing info."""
 
