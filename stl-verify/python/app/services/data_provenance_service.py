@@ -34,7 +34,7 @@ class DataProvenanceService:
 
     def get_sources(self) -> list[DataSource]:
         """Return all registered data sources."""
-        return self._sources
+        return self._sources.copy()
 
     def get_source_by_host(self, host: str) -> Optional[DataSource]:
         """Look up source metadata by host domain."""
