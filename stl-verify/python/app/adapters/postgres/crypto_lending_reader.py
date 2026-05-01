@@ -49,15 +49,23 @@ latest_underlying AS (
     WHERE ap.chain_id = :chain_id
     ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC,
              ap.processing_version DESC, ap.log_index DESC
+),
+candidates AS (
+    -- Prefer wallets that explicitly hold the receipt token. Fall back to a
+    -- wallet holding the underlying only when no receipt-token holder exists.
+    SELECT proxy_address, balance, 0 AS source_rank
+    FROM latest_receipt
+    WHERE balance > 0
+
+    UNION ALL
+
+    SELECT proxy_address, balance, 1 AS source_rank
+    FROM latest_underlying
+    WHERE balance > 0
 )
 SELECT proxy_address, balance
-FROM (
-    SELECT proxy_address, balance FROM latest_receipt
-    UNION ALL
-    SELECT proxy_address, balance FROM latest_underlying
-) combined
-WHERE balance > 0
-ORDER BY balance DESC
+FROM candidates
+ORDER BY source_rank ASC, balance DESC
 LIMIT 1
 """
 
@@ -128,9 +136,7 @@ class PostgresCryptoLendingReader:
     async def get_share(self, info: ReceiptTokenInfo, prime_id: EthAddress) -> Decimal:
         normalized = _normalize_protocol_name(info.protocol_name)
 
-        if normalized in _MORPHO:
-            return Decimal("1")
-        if normalized not in _AAVE_LIKE:
+        if normalized not in _AAVE_LIKE and normalized not in _MORPHO:
             raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
 
         token_id = self._require_receipt_token_token_id(info)
@@ -144,6 +150,9 @@ class PostgresCryptoLendingReader:
         normalized = _normalize_protocol_name(info.protocol_name)
 
         if normalized in _MORPHO:
+            # Legacy endpoints are asset-level (no prime_id), so preserve the
+            # pre-existing vault-level Morpho semantics until VEC-183 deletes
+            # them. The prime-aware RiskModel path uses ``get_share()`` above.
             return Decimal("1")
         if normalized not in _AAVE_LIKE:
             raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
@@ -177,7 +186,13 @@ class PostgresCryptoLendingReader:
         return await share_port.get_share()
 
     async def _lookup_wallet(self, receipt_token_address: bytes, chain_id: int) -> bytes:
-        """Find the allocator proxy address that currently holds this receipt token."""
+        """Find the wallet used for legacy share resolution.
+
+        Legacy endpoints do not provide a ``prime_id``, so for Aave-like
+        assets we infer a wallet by preferring the largest current holder of
+        the receipt token itself and falling back to the underlying token only
+        if no receipt-token holder exists.
+        """
         token_hex = receipt_token_address.hex()
         try:
             async with self._engine.connect() as conn:

@@ -224,16 +224,45 @@ async def test_get_share_uses_prime_wallet_for_supply_share(
 
 
 @pytest.mark.asyncio
-async def test_get_share_returns_one_for_morpho(reader: PostgresCryptoLendingReader) -> None:
-    assert await reader.get_share(_morpho_info(), DUMMY_PRIME) == Decimal("1")
+async def test_get_share_uses_prime_wallet_for_morpho_supply_share(
+    reader: PostgresCryptoLendingReader,
+    engine: MagicMock,
+) -> None:
+    info = replace(_morpho_info(), receipt_token_token_id=888)
+
+    with patch("app.adapters.postgres.crypto_lending_reader.PostgresAllocationShare") as mock_share_cls:
+        mock_share = AsyncMock()
+        mock_share.get_share.return_value = Decimal("0.4")
+        mock_share_cls.return_value = mock_share
+
+        result = await reader.get_share(info, DUMMY_PRIME)
+
+    mock_share_cls.assert_called_once_with(
+        engine=engine,
+        chain_id=1,
+        token_id=888,
+        wallet_address=bytes.fromhex(DUMMY_PRIME.hex),
+        max_stale_seconds=600,
+    )
+    mock_share.get_share.assert_awaited_once_with()
+    assert result == Decimal("0.4")
 
 
 @pytest.mark.asyncio
-async def test_get_share_raises_when_aave_like_receipt_token_token_id_missing(
+@pytest.mark.parametrize(
+    "info",
+    [
+        replace(_aave_like_info(), receipt_token_token_id=None),
+        _morpho_info(),
+    ],
+    ids=["aave-like-missing-token-id", "morpho-missing-token-id"],
+)
+async def test_get_share_raises_when_receipt_token_token_id_missing(
     reader: PostgresCryptoLendingReader,
+    info: ReceiptTokenInfo,
 ) -> None:
     with pytest.raises(MissingShareError, match="not indexed yet"):
-        await reader.get_share(replace(_aave_like_info(), receipt_token_token_id=None), DUMMY_PRIME)
+        await reader.get_share(info, DUMMY_PRIME)
 
 
 @pytest.mark.asyncio

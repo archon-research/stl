@@ -139,6 +139,10 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 engine=engine,
                 allocation_share_max_stale_seconds=settings.allocation_share_max_stale_seconds,
             )
+            # Snapshot supported crypto-lending assets at startup. New
+            # receipt tokens added after startup require a restart to appear
+            # in applies_to(), which matches other startup-loaded state such
+            # as the SURAF asset mapping.
             supported_crypto_lending_asset_ids = await crypto_lending_reader.list_supported_asset_ids()
             crypto_lending_risk_service = CryptoLendingRiskService(
                 reader=crypto_lending_reader,

@@ -134,7 +134,8 @@ class CryptoLendingRiskService:
             return breakdown.backed_asset_id, []
 
         if share is None:
-            assert prime_id is not None
+            if prime_id is None:
+                raise ValueError("prime_id is required for non-legacy share resolution")
             share = await self._reader.get_share(info, prime_id)
 
         token_ids = [item.token_id for item in breakdown.items]

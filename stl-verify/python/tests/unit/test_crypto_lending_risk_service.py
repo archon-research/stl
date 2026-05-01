@@ -168,6 +168,29 @@ class TestCompute:
         reader.get_share.assert_awaited_once_with(info, DUMMY_PRIME)
 
     @pytest.mark.asyncio
+    async def test_compute_morpho_prime_share_scales_rrc(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        info = _morpho_info()
+        reader.get_receipt_token.return_value = info
+        reader.get_breakdown.return_value = _breakdown(
+            (_contrib(11, "USDC", "5000", "1"),),
+            backed_asset_id=MORPHO_VAULT_ID,
+        )
+        reader.get_liquidation_params.return_value = {11: _params(11, "0.86", "1.03")}
+        reader.get_share.return_value = Decimal("1")
+        full_share_result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+
+        reader.get_share.reset_mock()
+        reader.get_share.return_value = Decimal("0.25")
+        quarter_share_result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+
+        reader.get_share.assert_awaited_once_with(info, DUMMY_PRIME)
+        assert quarter_share_result.rrc_usd < full_share_result.rrc_usd
+
+    @pytest.mark.asyncio
     async def test_compute_rejects_unsupported_asset(self, service: CryptoLendingRiskService) -> None:
         with pytest.raises(ValueError, match="unsupported asset_id"):
             await service.compute(RECEIPT_TOKEN_ID + 1, DUMMY_PRIME, overrides={})
