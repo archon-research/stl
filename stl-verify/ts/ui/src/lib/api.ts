@@ -5,15 +5,21 @@ import type {
   AllocationActivityResponse,
   AllocationsResponse,
   BadDebt,
-  CapitalMetricsResponse,
   DataSourcesResponse,
   PrimesResponse,
   RiskBreakdown,
 } from '../types/allocation';
-import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
+import type {
+  LocalChainRow,
+  LocalProtocolRow,
+  StarRiskCapitalResponse,
+  StarRiskCapitalRow,
+} from '../types/local-data';
 import { logging } from './logging';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
+const STAR_RISK_CAPITAL_URL =
+  'https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/';
 const apiClient = createApiClient<paths>(API_BASE_URL);
 
 type BadDebtQuery =
@@ -152,17 +158,21 @@ export function getAllocationActivity(
   );
 }
 
-export function getCapitalMetrics(
-  primeId: string,
+export async function getStarRiskCapitalRequirements(
   signal?: AbortSignal,
-): Promise<CapitalMetricsResponse | null> {
-  return requestData(
-    apiClient.GET('/v1/primes/{prime_id}/capital-metrics', {
-      params: { path: { prime_id: primeId } },
-      signal,
-    }),
-    'GET /v1/primes/{prime_id}/capital-metrics',
-  );
+): Promise<StarRiskCapitalRow[]> {
+  const response = await fetch(STAR_RISK_CAPITAL_URL, {
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `GET ${STAR_RISK_CAPITAL_URL} failed (${response.status})`,
+    );
+  }
+
+  const payload = (await response.json()) as StarRiskCapitalResponse;
+  return payload.data?.results ?? [];
 }
 
 export function getDataSources(

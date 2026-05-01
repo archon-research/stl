@@ -159,7 +159,6 @@ async def list_allocations(
     ]
 
 
-@router.get("/primes/{prime_id}/capital-metrics", response_model=CapitalMetricsResponse)
 @router.get("/allocations/activity", response_model=list[AllocationActivityResponse])
 async def list_allocation_activity(
     prime_id: str | None = None,

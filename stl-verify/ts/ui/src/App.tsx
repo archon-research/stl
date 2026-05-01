@@ -13,10 +13,10 @@ import { useUrlSyncedTableState } from './data-table/hooks';
 import { buildRowSearchString, matchesSearchQuery } from './data-table/utils';
 import {
   getAllocations,
-  getCapitalMetrics,
   getChains,
   getPrimes,
   getProtocols,
+  getStarRiskCapitalRequirements,
 } from './lib/api';
 import {
   buildChainLabelLookup,
@@ -32,7 +32,40 @@ import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
 import { PARAMS, useUrlParam } from './lib/url-params';
 import type { Allocation, CapitalMetrics, Prime } from './types/allocation';
-import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
+import type { LocalChainRow, LocalProtocolRow, StarRiskCapitalRow } from './types/local-data';
+
+function toPositiveDifference(total: string, current: string): string {
+  const totalNum = Number(total);
+  const currentNum = Number(current);
+
+  if (!Number.isFinite(totalNum) || !Number.isFinite(currentNum)) {
+    return '0';
+  }
+
+  return String(Math.max(totalNum - currentNum, 0));
+}
+
+function mapRiskCapitalRowToMetrics(
+  row: StarRiskCapitalRow,
+  primeId: string,
+  primeName: string,
+): CapitalMetrics {
+  return {
+    prime_id: primeId,
+    prime_name: primeName,
+    risk_capital: row.exposure,
+    total_capital: row.total_rc,
+    first_loss_capital: row.financial_rrc,
+    capital_buffer: toPositiveDifference(row.total_rc, row.financial_rrc),
+    risk_to_capital_ratio: row.risk_tolerance_ratio,
+    timestamp: new Date().toISOString(),
+    benchmark_source:
+      'https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/',
+    is_validated: false,
+    validation_note:
+      'Sourced from Star Agents Risk Capital & Requirements Monitor.',
+  };
+}
 
 function App() {
   const [primes, setPrimes] = useState<Prime[]>([]);
@@ -202,16 +235,37 @@ function App() {
 
     const controller = new AbortController();
 
-    void getCapitalMetrics(selectedPrimeId, controller.signal)
-      .then((metrics) => {
-        setCapitalMetrics(metrics);
+    const selectedPrime = primes.find((prime) => prime.id === selectedPrimeId);
+    if (!selectedPrime) {
+      setCapitalMetrics(null);
+      return () => controller.abort();
+    }
+
+    void getStarRiskCapitalRequirements(controller.signal)
+      .then((rows) => {
+        const selectedRow = rows.find(
+          (row) => row.star.trim().toLowerCase() === selectedPrime.name.trim().toLowerCase(),
+        );
+
+        if (!selectedRow) {
+          setCapitalMetrics(null);
+          return;
+        }
+
+        setCapitalMetrics(
+          mapRiskCapitalRowToMetrics(
+            selectedRow,
+            selectedPrime.id,
+            selectedPrime.name,
+          ),
+        );
       })
       .catch((error: unknown) => {
         if (isAbortError(error)) {
           return;
         }
 
-        logging.error('Failed to load capital metrics', {
+        logging.error('Failed to load Star risk capital metrics', {
           error,
           primeId: selectedPrimeId,
         });
@@ -219,7 +273,7 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [selectedPrimeId]);
+  }, [selectedPrimeId, primes]);
 
   const selectedPrime = useMemo(
     () => primes.find((prime) => prime.id === selectedPrimeId) ?? null,

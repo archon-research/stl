@@ -72,4 +72,10 @@ class DataProvenanceService:
                 access_model=SourceAccessModel.OPEN,
                 role="Multi-chain token oracle prices and confidence intervals",
             ),
+            DataSource(
+                name="Star Agents Risk Capital & Requirements Monitor",
+                host="https://info.skyeco.com/required-risk-capital",
+                access_model=SourceAccessModel.PUBLIC,
+                role="Risk capital requirements and monitor metrics by star",
+            ),
         ]
