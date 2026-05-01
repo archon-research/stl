@@ -12,7 +12,6 @@ from app.domain.entities.allocation_category import AllocationCategory
 from app.services.allocation_category_service import AllocationCategoryService
 from app.services.allocation_service import AllocationService
 from app.services.capital_metrics_service import CapitalMetricsService
-from app.services.data_provenance_service import DataProvenanceService
 
 router = APIRouter()
 
@@ -63,24 +62,6 @@ class CapitalMetricsResponse(BaseModel):
     benchmark_source: str | None = None
     is_validated: bool = False
     validation_note: str | None = None
-
-
-class DataSourceResponse(BaseModel):
-    """Data source metadata for transparency panel."""
-
-    name: str
-    host: str
-    access_model: str  # open|public|closed
-    role: str
-    caveat: str | None = None
-    attribution_required: bool = False
-
-
-class DataSourcesResponse(BaseModel):
-    """Aggregated data sources for methodology transparency."""
-
-    sources: list[DataSourceResponse]
-    methodology_markdown: str
 
 
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
@@ -157,29 +138,4 @@ async def get_capital_metrics(
     )
 
 
-@router.get("/data-sources", response_model=DataSourcesResponse)
-async def get_data_sources():
-    """Retrieve data sources and methodology for transparency.
 
-    Returns:
-    - sources: List of data sources used across the platform
-    - methodology_markdown: Formatted methodology/transparency text for UI panels
-    """
-    service = DataProvenanceService()
-    sources = service.get_sources()
-    methodology = service.get_methodology_panel_text()
-
-    return DataSourcesResponse(
-        sources=[
-            DataSourceResponse(
-                name=s.name,
-                host=s.host,
-                access_model=s.access_model.value,
-                role=s.role,
-                caveat=s.caveat,
-                attribution_required=s.attribution_required,
-            )
-            for s in sources
-        ],
-        methodology_markdown=methodology,
-    )

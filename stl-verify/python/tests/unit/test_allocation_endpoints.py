@@ -170,7 +170,7 @@ def test_get_capital_metrics_returns_404_for_unknown_prime():
 # --- data-sources endpoint ---
 
 
-def test_get_data_sources_returns_200_with_sources_and_methodology():
+def test_get_data_sources_returns_200_with_sources():
     client = TestClient(app)
 
     response = client.get("/v1/data-sources")
@@ -178,7 +178,5 @@ def test_get_data_sources_returns_200_with_sources_and_methodology():
     assert response.status_code == 200
     data = response.json()
     assert "sources" in data
-    assert "methodology_markdown" in data
     assert isinstance(data["sources"], list)
     assert len(data["sources"]) > 0
-    assert isinstance(data["methodology_markdown"], str)

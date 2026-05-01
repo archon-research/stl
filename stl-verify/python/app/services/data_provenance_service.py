@@ -17,8 +17,8 @@ class SourceAccessModel(str, Enum):
 class DataSource:
     """Metadata for a data source or API host."""
 
-    name: str  # Display name (e.g., "Observatory")
-    host: str  # Domain/host (e.g., "observatory.data.blockanalitica.com")
+    name: str  # Display name (e.g., "STL Allocation Index")
+    host: str  # Domain/host (e.g., "stl.archonapi.com")
     access_model: SourceAccessModel
     role: str  # What data does it provide (e.g., "prime allocations", "protocol icons")
     caveat: Optional[str] = None  # License/usage restrictions or data quality notes
@@ -46,39 +46,6 @@ class DataProvenanceService:
     def get_sources_by_role(self, role: str) -> list[DataSource]:
         """Get all sources providing a particular role/data type."""
         return [s for s in self._sources if role.lower() in s.role.lower()]
-
-    def get_methodology_panel_text(self) -> str:
-        """Return Markdown text for UI methodology/transparency panel."""
-        oracle_sources = [s for s in self._sources if "oracle" in s.role.lower() or "price" in s.role.lower()]
-
-        lines = [
-            "# Data Sources & Methodology",
-            "",
-            "## Internal Data (STL)",
-            "- Onchain allocation positions from Ethereum mainnet",
-            "- Risk calculations using Spark lending protocol parameters",
-            "- Oracle prices from Chainlink and Pyth networks",
-            "",
-            "## Price Oracles",
-            "",
-        ]
-
-        for source in oracle_sources:
-            lines.append(f"- **{source.name}** ({source.access_model.value}): {source.role}")
-
-        lines.extend(
-            [
-                "",
-                "## Data Quality Notes",
-                "- Prices may lag 5–10 minutes depending on oracle update frequency",
-                "- Risk calculations are updated on each new block (Ethereum mainnet only)",
-                "- Activity/event feed includes only Sparklend and Aave events; Morpho coverage pending",
-                "",
-                "**Last Updated**: See timestamp in each data response",
-            ]
-        )
-
-        return "\n".join(lines)
 
     @staticmethod
     def _default_sources() -> list[DataSource]:
